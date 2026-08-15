@@ -70,6 +70,7 @@ fn main() -> Int64                                                       @67
   return                                                                 @82
     int 0 : Int64                                                        @82
   release r : Release Owned__Ring__release exit=block                    @72
+  release last : Release Owned__Ring__release exit=return                @81
   release last : Release Owned__Ring__release exit=block                 @81
 
 fn ringOf(label: String, n: Int64) -> Ring                               @48

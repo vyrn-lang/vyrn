@@ -101,3 +101,17 @@ fn option_lowers_to_its_blessed_dump() {
 fn ownedcontainer_lowers_to_its_blessed_dump() {
     check("examples/ownedcontainer.vyrn", "ownedcontainer.lowered");
 }
+
+/// The fourth, added by M4's second phase, for the reason the third exists one
+/// exit kind over: `ownedcontainer.vyrn` reaches a block exit and a `return`
+/// and nothing else, so `break`, `continue`, `?` and the temporary a construct
+/// owns would ship with no blessed line. This one reaches all six, and the
+/// handover is in it as an ABSENCE — `overHandover` has a `kept` step and no
+/// `exit=scrutinee` line, because an arm took the payload.
+#[test]
+fn releaseacrossexit_lowers_to_its_blessed_dump() {
+    check(
+        "examples/releaseacrossexit.vyrn",
+        "releaseacrossexit.lowered",
+    );
+}

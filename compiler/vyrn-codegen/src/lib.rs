@@ -23,6 +23,9 @@ use std::fmt::Write;
 
 use vyrn_frontend::ast::*;
 use vyrn_frontend::own::DropKind;
+/// RFC-0101 M4's exit vocabulary, shared with `vyrn-lower` and the other two
+/// engines so the placement and the walks are compared without a translation.
+use vyrn_frontend::own::Exit as ExitKind;
 use vyrn_frontend::types::INT32;
 
 /// LLVM IR for the region/arena runtime (see the preamble comment in `emit`).
@@ -4306,6 +4309,7 @@ impl<'a> Gen<'a> {
         // gate see the difference instead of missing the block entirely.
         vyrn_frontend::own::trace::note(
             vyrn_frontend::own::trace::Site::Native,
+            ExitKind::Block,
             block as *const Block as usize,
             if self.terminated {
                 Vec::new()
@@ -4322,6 +4326,24 @@ impl<'a> Gen<'a> {
         Ok(())
     }
 
+    /// RFC-0101 M4's shadow, second phase: the release a construct runs on its
+    /// OWN temporary — the row `own` keys by the `match`, the `if let` or the
+    /// `for in` rather than by a binding. Outside the `terminated` test for the
+    /// reason `gen_block`'s note is: a construct an arm returned out of emits
+    /// nothing here, and recording that as an empty walk is what lets the gate
+    /// see the difference instead of missing the construct entirely.
+    fn note_temp(&self, at: usize, drops: &[(String, DropKind, usize)]) {
+        vyrn_frontend::own::trace::note(
+            vyrn_frontend::own::trace::Site::Native,
+            ExitKind::Scrutinee,
+            at,
+            match self.terminated {
+                true => Vec::new(),
+                false => drops.iter().rev().map(|(_, _, b)| *b).collect(),
+            },
+        );
+    }
+
     /// Free every owned heap temporary currently in scope (innermost block
     /// first), without popping the drop frames — used before an early `return`.
     /// The frames stay in place so the unwinding `gen_block`s see `terminated`
@@ -4331,14 +4353,8 @@ impl<'a> Gen<'a> {
     /// exit and a `return` (or a `?` propagation) can leave a region the same way
     /// it leaves a block. `__vyrn_region_pop` and not `__vyrn_region_exit`: see
     /// [`REGION_RUNTIME`] for why the returned value forbids the free.
-    fn emit_all_drops(&mut self) {
-        let frames: Vec<Vec<(String, DropKind, usize)>> =
-            self.drop_stack.iter().rev().cloned().collect();
-        for frame in frames {
-            for (slot, kind, _) in frame.iter().rev() {
-                self.emit_drop(slot, kind);
-            }
-        }
+    fn emit_all_drops(&mut self, exit: ExitKind, at: usize) {
+        self.emit_drops_above(0, exit, at);
         for _ in 0..self.region_depth {
             self.emit("call void @__vyrn_region_pop()".into());
         }
@@ -4349,9 +4365,22 @@ impl<'a> Gen<'a> {
     /// (RFC-0060). The frames stay in place so the unwinding `gen_block`s see
     /// `terminated` and skip their own fall-through frees (no double free), just
     /// like `emit_all_drops` does for `return`.
-    fn emit_drops_above(&mut self, boundary: usize) {
+    fn emit_drops_above(&mut self, boundary: usize, exit: ExitKind, at: usize) {
         let frames: Vec<Vec<(String, DropKind, usize)>> =
             self.drop_stack[boundary..].iter().rev().cloned().collect();
+        // RFC-0101 M4's shadow, second phase: the sequence this engine walks at
+        // an EARLY exit, keyed by the node the exit is at, so one gate can
+        // assert it against the other two and against the placement.
+        vyrn_frontend::own::trace::note(
+            vyrn_frontend::own::trace::Site::Native,
+            exit,
+            at,
+            frames
+                .iter()
+                .flat_map(|f| f.iter().rev())
+                .map(|(_, _, b)| *b)
+                .collect(),
+        );
         for frame in frames {
             for (slot, kind, _) in frame.iter().rev() {
                 self.emit_drop(slot, kind);
@@ -4362,8 +4391,8 @@ impl<'a> Gen<'a> {
     /// The full `break`/`continue` scope cleanup for the innermost loop: drop the
     /// body's owned temporaries, then exit every region opened inside the body
     /// (RFC-0060). Emits nothing structural — the caller adds the branch.
-    fn emit_loop_exit_cleanup(&mut self, ctx: &LoopCtx) {
-        self.emit_drops_above(ctx.drop_boundary);
+    fn emit_loop_exit_cleanup(&mut self, ctx: &LoopCtx, exit: ExitKind, at: usize) {
+        self.emit_drops_above(ctx.drop_boundary, exit, at);
         for _ in ctx.region_depth..self.region_depth {
             self.emit("call void @__vyrn_region_exit()".into());
         }
@@ -5000,12 +5029,12 @@ impl<'a> Gen<'a> {
                         // Free in-scope owned temporaries before leaving (the
                         // return value never aliases one — droppable bindings by
                         // definition do not escape).
-                        self.emit_all_drops();
+                        self.emit_all_drops(ExitKind::Return, stmt as *const Stmt as usize);
                         self.emit_modify_copyout();
                         self.emit_term(format!("ret {ll} {v}"));
                     }
                     None => {
-                        self.emit_all_drops();
+                        self.emit_all_drops(ExitKind::Return, stmt as *const Stmt as usize);
                         self.emit_modify_copyout();
                         self.emit_term("ret void".into());
                     }
@@ -5063,12 +5092,13 @@ impl<'a> Gen<'a> {
                 // onto a drop frame of its own, which is what makes the release
                 // survive a `return` out of the arm — `emit_all_drops` walks the
                 // frames, and this one is on the stack for the whole statement.
-                let scrut_drop = self.droppable.get(&(stmt as *const Stmt as usize)).cloned();
+                let key = stmt as *const Stmt as usize;
+                let scrut_drop = self.droppable.get(&key).cloned();
                 self.drop_stack.push(Vec::new());
                 if let Some(kind) = scrut_drop {
                     let slot = self.fresh_alloca(&self.llt(&sr).clone());
                     self.emit(format!("store {} {sv}, ptr {slot}", self.llt(&sr)));
-                    self.drop_stack.last_mut().unwrap().push((slot, kind, 0));
+                    self.drop_stack.last_mut().unwrap().push((slot, kind, key));
                 }
                 let then_l = self.fresh_label("il.then");
                 let end_l = self.fresh_label("il.end");
@@ -5104,6 +5134,7 @@ impl<'a> Gen<'a> {
                 // through `emit_all_drops` and left `terminated` set, so nothing
                 // is freed twice — the same rule `gen_block` follows.
                 let drops = self.drop_stack.pop().unwrap();
+                self.note_temp(key, &drops);
                 if !self.terminated {
                     for (slot, kind, _) in drops.iter().rev() {
                         self.emit_drop(slot, kind);
@@ -5147,7 +5178,7 @@ impl<'a> Gen<'a> {
                     .last()
                     .cloned()
                     .ok_or("`break` outside a loop reached codegen")?;
-                self.emit_loop_exit_cleanup(&ctx);
+                self.emit_loop_exit_cleanup(&ctx, ExitKind::Break, stmt as *const Stmt as usize);
                 self.emit_term(format!("br label %{}", ctx.break_label));
                 Ok(())
             }
@@ -5157,7 +5188,7 @@ impl<'a> Gen<'a> {
                     .last()
                     .cloned()
                     .ok_or("`continue` outside a loop reached codegen")?;
-                self.emit_loop_exit_cleanup(&ctx);
+                self.emit_loop_exit_cleanup(&ctx, ExitKind::Continue, stmt as *const Stmt as usize);
                 self.emit_term(format!("br label %{}", ctx.continue_label));
                 Ok(())
             }
@@ -5205,13 +5236,14 @@ impl<'a> Gen<'a> {
                 // The frame is pushed BEFORE the loop's, so `drop_boundary`
                 // sits above it and `break`/`continue` leave it alone — both
                 // land on code that runs the fall-through release below.
-                let iter_drop = self.droppable.get(&(stmt as *const Stmt as usize)).cloned();
+                let key = stmt as *const Stmt as usize;
+                let iter_drop = self.droppable.get(&key).cloned();
                 self.drop_stack.push(Vec::new());
                 if let Some(kind) = iter_drop {
                     let ty = self.llt(&resolved).clone();
                     let slot = self.fresh_alloca(&ty);
                     self.emit(format!("store {ty} {av}, ptr {slot}"));
-                    self.drop_stack.last_mut().unwrap().push((slot, kind, 0));
+                    self.drop_stack.last_mut().unwrap().push((slot, kind, key));
                 }
                 // Iterating a String yields each byte as an Int (loaded as i8 and
                 // zero-extended); arrays load their element type directly.
@@ -5330,6 +5362,7 @@ impl<'a> Gen<'a> {
                 // already ran it through `emit_all_drops`; this label is still
                 // reached from the condition, so the normal exit runs it once.
                 let drops = self.drop_stack.pop().unwrap();
+                self.note_temp(key, &drops);
                 if !self.terminated {
                     for (slot, kind, _) in drops.iter().rev() {
                         self.emit_drop(slot, kind);
@@ -5593,7 +5626,7 @@ impl<'a> Gen<'a> {
                 else_branch,
                 ..
             } => self.gen_if_expr(cond, then_branch, else_branch.as_deref()),
-            Expr::Try { expr, .. } => self.gen_try(expr),
+            Expr::Try { expr: operand, .. } => self.gen_try(operand, expr as *const Expr as usize),
             Expr::StructLit { name, fields, .. } => self.gen_struct_lit(name, fields),
             Expr::Field { expr, field, .. } => {
                 let (v, ety) = self.gen_expr(expr)?;
@@ -6035,10 +6068,11 @@ impl<'a> Gen<'a> {
             let ll = self.llt(&self.resolve(&sty)).clone();
             let slot = self.fresh_alloca(&ll);
             self.emit(format!("store {ll} {sv}, ptr {slot}"));
-            self.drop_stack.last_mut().unwrap().push((slot, kind, 0));
+            self.drop_stack.last_mut().unwrap().push((slot, kind, key));
         }
         let r = self.gen_match_body(&sv, &sty, arms);
         let drops = self.drop_stack.pop().unwrap();
+        self.note_temp(key, &drops);
         if !self.terminated {
             for (slot, kind, _) in drops.iter().rev() {
                 self.emit_drop(slot, kind);
@@ -6762,10 +6796,10 @@ impl<'a> Gen<'a> {
 
     /// Lower `expr?`: on `None`/`Err` (tag 0) return the aggregate as the
     /// function's result; otherwise continue with the unwrapped i64 payload.
-    fn gen_try(&mut self, expr: &Expr) -> Result<(String, Type), String> {
+    fn gen_try(&mut self, expr: &Expr, at: usize) -> Result<(String, Type), String> {
         let (agg, aty) = self.gen_expr(expr)?;
         if !matches!(self.resolve(&aty), Type::Option(_) | Type::Result(..)) {
-            return self.gen_try_fallible(&agg, &aty);
+            return self.gen_try_fallible(&agg, &aty, at);
         }
         // The type unwrapped on the success path.
         let ok_ty = match self.resolve(&aty) {
@@ -6784,7 +6818,7 @@ impl<'a> Gen<'a> {
         // Free in-scope owned temporaries before the early return, exactly as
         // `return` does (the propagated aggregate never aliases one — a value
         // that escapes into it is not droppable by definition).
-        self.emit_all_drops();
+        self.emit_all_drops(ExitKind::Try, at);
         self.emit_modify_copyout();
         self.emit_term(format!("ret {{ i1, i64, i64 }} {agg}"));
 
@@ -6812,7 +6846,12 @@ impl<'a> Gen<'a> {
     /// is `declare`d, not registered on `drop_stack`, so the propagated aggregate
     /// is not freed out from under the `ret` (`gen_match_arm` binds payloads the
     /// same way for the same reason).
-    fn gen_try_fallible(&mut self, agg: &str, aty: &Type) -> Result<(String, Type), String> {
+    fn gen_try_fallible(
+        &mut self,
+        agg: &str,
+        aty: &Type,
+        at: usize,
+    ) -> Result<(String, Type), String> {
         let concrete = vyrn_frontend::types::substitute(aty, self.subst);
         let key = vyrn_frontend::types::type_key(&concrete)
             .ok_or_else(|| format!("`?` cannot dispatch on {aty:?}"))?;
@@ -6830,7 +6869,7 @@ impl<'a> Gen<'a> {
         self.emit_term(format!("br i1 {ok}, label %{ok_l}, label %{prop_l}"));
 
         self.emit_label(&prop_l);
-        self.emit_all_drops();
+        self.emit_all_drops(ExitKind::Try, at);
         self.emit_modify_copyout();
         self.emit_term(format!("ret {} {agg}", self.llt(aty)));
 

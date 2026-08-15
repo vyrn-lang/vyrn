@@ -65,6 +65,11 @@ pub fn render(lowered: &Lowered, source: &str) -> String {
         for rel in &inst.releases {
             let exit = match rel.exit {
                 crate::Exit::Block => "block",
+                crate::Exit::Scrutinee => "scrutinee",
+                crate::Exit::Break => "break",
+                crate::Exit::Continue => "continue",
+                crate::Exit::Return => "return",
+                crate::Exit::Try => "try",
             };
             pos(
                 &mut out,

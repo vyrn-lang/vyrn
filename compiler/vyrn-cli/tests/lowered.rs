@@ -355,18 +355,25 @@ enum InstRule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum RelRule {
     /// The block already returned, so the compiled backend emits no
-    /// fall-through walk at all — the early exit paid, mid-block. That is a
-    /// different exit kind, and [A9] moves it in the phase after this one.
+    /// fall-through walk at all — the early exit paid, mid-block, and its own
+    /// walk is a separate row of this table.
     Terminated,
     /// The interpreter acts on 2 of `own`'s 7 kinds (§1.4): a `String` or an
     /// array buffer is reclaimed by the host when the process ends, so it runs
     /// no step for one. What it DOES run is the two that a program can observe —
     /// a declared `release`, and the walk that reaches one.
     HostReclaims,
+    /// A frame entry with no node behind it: the cursor a `for x in stream`
+    /// owns (RFC-0075 M2b). It is not a row of `own`'s map — no `Stmt::Let` and
+    /// no construct carries it, because the stream's producer is closed by the
+    /// loop that made it rather than by a reclamation rule — so the form has
+    /// nothing to place and both compiled backends still walk it. The rule
+    /// names it rather than filtering it, so the gate sees that it is there.
+    StreamCursor,
 }
 
-/// Which rule, if any, explains one engine's block-exit sequence against the
-/// placement the lowering computed. `None` means the gate fails.
+/// Which rule, if any, explains one engine's release walk against the placement
+/// the lowering computed. `None` means the gate fails.
 ///
 /// Every rule here is a SUBSEQUENCE test, which is the point: an engine may run
 /// fewer steps than the form places, for a reason it can name, and it may never
@@ -377,6 +384,11 @@ fn rel_rule(
     kind_of: &HashMap<usize, vyrn_frontend::own::DropKind>,
 ) -> Option<RelRule> {
     use vyrn_frontend::own::DropKind;
+    // The one step the form cannot place, taken out first so it does not read as
+    // a reordering of the ones it can.
+    let anon = got.contains(&0);
+    let got: Vec<usize> = got.iter().copied().filter(|b| *b != 0).collect();
+    let got = got.as_slice();
     // Order first, and unconditionally: whatever an engine skips, what it does
     // run is in the order the form placed it. This is the invariant three files
     // assert separately, asserted once.
@@ -384,9 +396,12 @@ fn rel_rule(
     if !got.iter().all(|g| w.any(|x| x == g)) {
         return None;
     }
+    if anon && got.len() == want.len() {
+        return Some(RelRule::StreamCursor);
+    }
     if got.is_empty() && !want.is_empty() {
         // A block that already returned emits no fall-through walk — the early
-        // exit paid, mid-block, and that exit kind is the phase after this one.
+        // exit paid, mid-block, and that walk is its own row here.
         return Some(RelRule::Terminated);
     }
     // The interpreter runs the two kinds a program can OBSERVE and leaves the
@@ -404,10 +419,42 @@ fn rel_rule(
     {
         return Some(RelRule::HostReclaims);
     }
+    if anon {
+        return Some(RelRule::StreamCursor);
+    }
     if got.is_empty() {
         return Some(RelRule::Terminated);
     }
     None
+}
+
+/// The placement, as a consumer reads it: every step the form put at one exit,
+/// keyed by the node that exit is AT.
+///
+/// This is the keying RFC-0101 M4's second phase chose, and the reason is this
+/// function: an engine standing at a `break` has the `Stmt::Break` in hand and
+/// nothing else, and a reader that had to re-derive `LoopCtx::drop_boundary` to
+/// find its steps would be the fourth copy of the thing being deleted.
+fn placement(
+    lowered: &vyrn_lower::Lowered,
+) -> (
+    HashMap<(vyrn_frontend::own::Exit, usize), Vec<usize>>,
+    HashMap<usize, vyrn_frontend::own::DropKind>,
+) {
+    let mut placed: HashMap<(vyrn_frontend::own::Exit, usize), Vec<usize>> = HashMap::new();
+    let mut kind_of: HashMap<usize, vyrn_frontend::own::DropKind> = HashMap::new();
+    for inst in &lowered.instances {
+        for rel in &inst.releases {
+            // A generic body has one AST and many instances, so the sequence at
+            // one exit is the same under every instantiation; it is held once.
+            let seq = placed.entry((rel.exit, rel.site)).or_default();
+            if !seq.contains(&rel.binding) {
+                seq.push(rel.binding);
+            }
+            kind_of.insert(rel.binding, rel.kind.clone());
+        }
+    }
+    (placed, kind_of)
 }
 
 /// Which rule, if any, explains `a` against `b`. `None` means the gate fails.
@@ -533,67 +580,117 @@ fn defaulted(a: &Type, b: &Type) -> bool {
 
 /// The third engine's half of M4's shadow, and it needs a different shape.
 ///
-/// The interpreter's block-exit walk is not a static one: it happens when the
-/// block RUNS, so reading it means running programs, and running the corpus
-/// in-process is a different test from this file's. Three fixtures instead, each
-/// the smallest program that puts one question to the walk: does it release the
+/// The interpreter's release walk is not a static one: it happens when the
+/// program RUNS, so reading it means running programs, and running the corpus
+/// in-process is a different test from this file's. Fixtures instead, each the
+/// smallest program that puts one exit kind to the walk: does it release the
 /// same bindings the lowering placed, in the same order, and is everything it
 /// skips a kind the host reclaims (§1.4 — the interpreter acts on 2 of `own`'s
 /// 7).
+///
+/// The last column of the table is the exit kind the fixture EXISTS for, and it
+/// is asserted to have actually been reached. A fixture whose shape stopped
+/// producing the walk it was written for would otherwise pass by comparing
+/// nothing, which is the failure mode a gate is for.
 #[test]
 fn the_interpreter_releases_what_the_lowering_placed_in_the_order_it_placed_it() {
+    use vyrn_frontend::own::Exit;
     const OWNED: &str = "protocol Owned {\n    fn release(consume self)\n}\n\
                          type Ring = {\n    label: String\n}\n\
                          impl Owned for Ring {\n    fn release(consume self) {\n        \
-                         print(self.label)\n    }\n}\n\n";
-    // Every binding is inside an `if`, and that is not decoration. A function
-    // body ends in `return`, which is an EARLY exit in all three engines — the
-    // fall-through walk this phase moves never runs on it. (It is why the corpus
-    // gate names 1,039 `Terminated` exits, and why the exit kinds after this one
-    // are where a `main` gets covered.)
+                         print(self.label)\n    }\n}\n\
+                         fn ring(l: String) -> Ring {\n    \
+                         return Ring { label: l.copy() }\n}\n\
+                         fn maybe() -> Option<Ring> {\n    return Some(ring(\"s\"))\n}\n\
+                         fn none() -> Option<Int64> {\n    return None\n}\n\n";
+    // The block exit's own fixtures keep every binding inside an `if`, and that
+    // is not decoration: a function body ends in `return`, which is an EARLY
+    // exit in all three engines, so `main`'s own block never runs a fall-through
+    // walk. (It is why the corpus gate names its `Terminated` exits.)
     //
     // A declared owner between two `String`s: the two buffers are host-reclaimed
     // and the `Ring` is not, so the interpreter runs one of three placed steps.
     let mixed = format!(
         "{OWNED}fn main() -> Int64 {{\n    if true {{\n        let s = \"a\" + \"b\"\n        \
-         let r = Ring {{ label: \"x\".copy() }}\n        let t = \"c\" + \"d\"\n        \
+         let r = ring(\"x\")\n        let t = \"c\" + \"d\"\n        \
          print(s + t)\n    }}\n    return 0\n}}\n"
     );
     // Two owners, so the ORDER is what the fixture is about: newest first.
     let two = format!(
         "{OWNED}fn main() -> Int64 {{\n    if true {{\n        \
-         let a = Ring {{ label: \"a\".copy() }}\n        \
-         let b = Ring {{ label: \"b\".copy() }}\n        print(\"in\")\n    }}\n    \
+         let a = ring(\"a\")\n        let b = ring(\"b\")\n        print(\"in\")\n    }}\n    \
          return 0\n}}\n"
     );
     // A nested block, so "innermost frame first" is asserted too.
     let nested = format!(
         "{OWNED}fn main() -> Int64 {{\n    if true {{\n        \
-         let a = Ring {{ label: \"a\".copy() }}\n        if true {{\n            \
-         let b = Ring {{ label: \"b\".copy() }}\n            print(\"in\")\n        }}\n    }}\n    \
+         let a = ring(\"a\")\n        if true {{\n            \
+         let b = ring(\"b\")\n            print(\"in\")\n        }}\n    }}\n    \
          return 0\n}}\n"
     );
+    // `return` out of two frames at once: the walk is one sequence across both,
+    // innermost first, and this engine produces it one frame at a time.
+    let ret = format!(
+        "{OWNED}fn f() -> Int64 {{\n    let outer = ring(\"o\")\n    if true {{\n        \
+         let inner = ring(\"i\")\n        return 1\n    }}\n    return 0\n}}\n\
+         fn main() -> Int64 {{\n    return f() - 1\n}}\n"
+    );
+    // `break` reaches the loop body's frames and stops there — the binding above
+    // the loop is not on the walk, which is the boundary index asserted.
+    let brk = format!(
+        "{OWNED}fn f() -> Int64 {{\n    let outer = ring(\"o\")\n    let mut i = 0\n    \
+         while i < 3 {{\n        let inLoop = ring(\"l\")\n        break\n    }}\n    \
+         return 0\n}}\n\
+         fn main() -> Int64 {{\n    return f()\n}}\n"
+    );
+    // `continue`, which runs the same frames once per turn.
+    let cont = format!(
+        "{OWNED}fn f() -> Int64 {{\n    let mut i = 0\n    while i < 2 {{\n        \
+         let inLoop = ring(\"l\")\n        i = i + 1\n        continue\n    }}\n    \
+         return 0\n}}\n\
+         fn main() -> Int64 {{\n    return f()\n}}\n"
+    );
+    // A propagating `?`, which is a function exit and pays what one pays. This
+    // is the walk RFC-0101 M4's step 0 found the interpreter was not running at
+    // all, and `examples/releaseacrosstry.vyrn` is its parity pin.
+    let tri = format!(
+        "{OWNED}fn f() -> Option<Int64> {{\n    let r = ring(\"t\")\n    \
+         let v = none()?\n    return Some(v)\n}}\n\
+         fn main() -> Int64 {{\n    let a = f()\n    return 0\n}}\n"
+    );
+    // The temporary a `match` owns, and the handover beside it: the first has a
+    // step because no arm took the scrutinee, the second has none because an arm
+    // did and the binding it flowed into is the one owner there is.
+    let scrut = format!(
+        "{OWNED}fn f() -> Int64 {{\n    let n = match maybe() {{\n        \
+         Some(r) => 1,\n        None => 0\n    }}\n    return n\n}}\n\
+         fn main() -> Int64 {{\n    return f() - 1\n}}\n"
+    );
+    let handover = format!(
+        "{OWNED}fn f() -> Int64 {{\n    if true {{\n        \
+         let kept = match maybe() {{\n            Some(r) => r,\n            \
+         None => ring(\"f\")\n        }}\n        print(\"held\")\n    }}\n    \
+         return 0\n}}\n\
+         fn main() -> Int64 {{\n    return f()\n}}\n"
+    );
 
-    for (what, src) in [("mixed", &mixed), ("two", &two), ("nested", &nested)] {
+    for (what, src, reaches) in [
+        ("mixed", &mixed, Exit::Block),
+        ("two", &two, Exit::Block),
+        ("nested", &nested, Exit::Block),
+        ("return", &ret, Exit::Return),
+        ("break", &brk, Exit::Break),
+        ("continue", &cont, Exit::Continue),
+        ("try", &tri, Exit::Try),
+        ("scrutinee", &scrut, Exit::Scrutinee),
+        ("handover", &handover, Exit::Block),
+    ] {
         let mut program = vyrn_frontend::check(src).expect("the fixture checks");
         let diags = vyrn_frontend::check_and_synthesize(&mut program);
         assert!(diags.is_empty(), "{what}: {diags:?}");
 
         let lowered = vyrn_lower::lower(&program);
-        let mut placed: HashMap<usize, Vec<usize>> = HashMap::new();
-        let mut kind_of: HashMap<usize, vyrn_frontend::own::DropKind> = HashMap::new();
-        for inst in &lowered.instances {
-            for rel in &inst.releases {
-                placed
-                    .entry(rel.block as *const vyrn_frontend::ast::Block as usize)
-                    .or_default()
-                    .push(rel.binding as *const vyrn_frontend::ast::Stmt as usize);
-                kind_of.insert(
-                    rel.binding as *const vyrn_frontend::ast::Stmt as usize,
-                    rel.kind.clone(),
-                );
-            }
-        }
+        let (placed, kind_of) = placement(&lowered);
         assert!(!placed.is_empty(), "{what}: the lowering placed nothing");
 
         vyrn_frontend::own::trace::start();
@@ -602,23 +699,30 @@ fn the_interpreter_releases_what_the_lowering_placed_in_the_order_it_placed_it()
         assert_eq!(code, Ok(0), "{what}");
         assert!(!exits.is_empty(), "{what}: the interpreter walked no exit");
 
+        let mut reached = false;
         let mut checked = 0;
         for e in &exits {
-            let want = placed.get(&e.block).cloned().unwrap_or_default();
+            let want = placed.get(&(e.exit, e.at)).cloned().unwrap_or_default();
+            reached |= e.exit == reaches && !e.bindings.is_empty();
+            checked += 1;
             if want == e.bindings {
-                checked += 1;
                 continue;
             }
             assert_eq!(
                 rel_rule(&want, &e.bindings, &kind_of),
                 Some(RelRule::HostReclaims),
-                "{what}: the interpreter released {:?} where the lowering placed \
-                 {want:?}, and no rule explains it",
-                e.bindings
+                "{what}: the interpreter released {:?} at a {:?} exit, where the \
+                 lowering placed {want:?}, and no rule explains it",
+                e.bindings,
+                e.exit
             );
-            checked += 1;
         }
         assert!(checked > 0, "{what}: nothing was compared");
+        assert!(
+            reached,
+            "{what}: the fixture is written for {reaches:?} and no release ran at \
+             one — it would be asserting about a walk that never happened"
+        );
     }
 }
 
@@ -659,7 +763,13 @@ fn gate() {
     let mut cross: HashMap<(Site, Site, &'static str, String, String), (usize, String)> =
         HashMap::new();
     let mut rules: std::collections::BTreeMap<Rule, usize> = Default::default();
-    let mut rel_rules: std::collections::BTreeMap<RelRule, usize> = Default::default();
+    let mut rel_rules: std::collections::BTreeMap<(vyrn_frontend::own::Exit, RelRule), usize> =
+        Default::default();
+    // …and the agreements on the same axis, because "52,676 sequences equal" is
+    // one number over six exit kinds and a phase that moved five of them has to
+    // show which.
+    let mut rel_kinds: std::collections::BTreeMap<vyrn_frontend::own::Exit, usize> =
+        Default::default();
     // Block exits where an engine's sequence equalled the lowering's placement,
     // and the ones no rule explains: (site, example, the two sequences).
     let mut rel_agreed = 0usize;
@@ -755,25 +865,15 @@ fn gate() {
             lowering.insert(inst_key(&inst.func.name, &inst.type_args, &decls));
         }
 
-        // RFC-0101 M4's placement, and what each compiled backend walks — one
-        // block exit at a time, keyed by the block's node address. A generic
-        // body has one AST and many instances, so the sequence for a block is
-        // the same under every instantiation; the map holds it once and the
-        // comparison below asserts every occurrence against it.
-        let mut placed: HashMap<usize, Vec<usize>> = HashMap::new();
-        let mut kind_of: HashMap<usize, vyrn_frontend::own::DropKind> = HashMap::new();
+        // RFC-0101 M4's placement, keyed by the node each exit is AT — a block
+        // for a fall-through, the construct for the temporary it owns, and the
+        // `break` / `continue` / `return` / `?` for an early one.
+        let (placed, kind_of) = placement(&lowered);
         for inst in &lowered.instances {
             for rel in &inst.releases {
-                let id = rel.block as *const vyrn_frontend::ast::Block as usize;
-                let b = rel.binding as *const vyrn_frontend::ast::Stmt as usize;
-                let seq = placed.entry(id).or_default();
-                if !seq.contains(&b) {
-                    seq.push(b);
-                    if lowered.lambda_bodies.contains(&id) {
-                        rel_lambda += 1;
-                    }
+                if lowered.lambda_bodies.contains(&rel.site) {
+                    rel_lambda += 1;
                 }
-                kind_of.insert(b, rel.kind.clone());
             }
         }
 
@@ -799,32 +899,38 @@ fn gate() {
             continue;
         }
 
-        // M4's shadow gate: the placement against what each engine walks. One
-        // assertion where §1.4 counts three files asserting "innermost frame
-        // first, newest binding first" separately, and none of them checking
-        // that the three descriptions are one order.
-        let mut seen: std::collections::HashSet<(vyrn_frontend::own::trace::Site, usize, String)> =
-            Default::default();
+        // M4's shadow gate: the placement against what each engine walks, at
+        // every exit kind. One assertion where §1.4 counts three files asserting
+        // "innermost frame first, newest binding first" separately, and none of
+        // them checking that the three descriptions are one order.
+        let mut seen: std::collections::HashSet<(
+            vyrn_frontend::own::trace::Site,
+            vyrn_frontend::own::Exit,
+            usize,
+            String,
+        )> = Default::default();
         for e in &exits {
-            let want = placed.get(&e.block).cloned().unwrap_or_default();
+            let want = placed.get(&(e.exit, e.at)).cloned().unwrap_or_default();
             if want == e.bindings {
                 rel_agreed += 1;
+                *rel_kinds.entry(e.exit).or_insert(0) += 1;
                 continue;
             }
-            // One class per (engine, block, sequence): a generic body is walked
+            // One class per (engine, exit, sequence): a generic body is walked
             // once per instantiation and would otherwise be counted that often.
-            if !seen.insert((e.site, e.block, format!("{:?}", e.bindings))) {
+            if !seen.insert((e.site, e.exit, e.at, format!("{:?}", e.bindings))) {
                 continue;
             }
             if let Some(r) = rel_rule(&want, &e.bindings, &kind_of) {
-                *rel_rules.entry(r).or_insert(0) += 1;
+                *rel_rules.entry((e.exit, r)).or_insert(0) += 1;
                 continue;
             }
             rel_bad.push(format!(
-                "  {name}: {:?} released {} bindings at one block exit, the \
+                "  {name}: {:?} released {} bindings at one {:?} exit, the \
                  lowering placed {}",
                 e.site,
                 e.bindings.len(),
+                e.exit,
                 want.len()
             ));
         }
@@ -1004,9 +1110,9 @@ fn gate() {
     );
 
     eprintln!(
-        "  RFC-0101 M4 block exits: {rel_agreed} sequences equalled the \
-         lowering's placement exactly, {rel_lambda} steps placed inside a lambda \
-         body, and every other one is named: {rel_rules:?}"
+        "  RFC-0101 M4 exits: {rel_agreed} release walks equalled the lowering's \
+         placement exactly ({rel_kinds:?}), {rel_lambda} steps placed inside a \
+         lambda body, and every other one is named: {rel_rules:?}"
     );
 
     let mut top: Vec<_> = residue.into_iter().collect();

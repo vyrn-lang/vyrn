@@ -173,6 +173,20 @@ use std::io::Write as _;
 
 use crate::ast::*;
 
+/// Name the exit an unwinding release walk is paying for — RFC-0101 M4's second
+/// phase, and the one thing the release trace asks of this engine that it does
+/// not ask of the compiled ones.
+///
+/// Both backends emit an early exit's walk AT the site, with the node in hand.
+/// Here the walk happens as `Flow::Break` or `Ctrl::Return` propagates outward
+/// through `Interp::block`, and neither signal carries a node — so the statement
+/// that raised it leaves the site behind and each unwinding frame reads it.
+/// Recording only: off unless a gate asked, and nothing the engine does depends
+/// on it.
+fn leaving<T>(exit: crate::own::trace::Exit, at: &T) {
+    crate::own::trace::leaving(exit, at as *const T as usize);
+}
+
 /// An injected fixed value for a host-boundary extern (RFC-0043): the decimal
 /// `Int64` in env var `key`, or `None` when unset/empty/unparsable. The parity
 /// harness sets `VYRN_FIXED_TIME`/`VYRN_FIXED_SEED` so time/random examples are
@@ -2757,6 +2771,10 @@ impl<'a> Interp<'a> {
                 // does (RFC-0060: break/continue drop what a normal iteration
                 // end would). The signal then propagates to the enclosing loop.
                 Ok(flow @ (Flow::Return(_) | Flow::Break | Flow::Continue)) => {
+                    // The signal carries no node, so the site is the one the
+                    // statement that RAISED it left behind — RFC-0101 M4's
+                    // second phase, and the only thing the trace asks of this
+                    // engine that the compiled ones do not need.
                     self.run_drops(None, &drops, scope)?;
                     scope.pop();
                     return Ok(flow);
@@ -2823,10 +2841,16 @@ impl<'a> Interp<'a> {
     /// load. A name with no slot left is skipped rather than released as `Unit`.
     fn run_drops(
         &self,
-        blk: Option<usize>,
+        at: Option<usize>,
         drops: &[(&str, Option<Val>, Option<String>, usize)],
         scope: &[Frame],
     ) -> Result<(), Ctrl> {
+        // `Some(block)` is the fall-through exit and is its own walk. `None` is
+        // a frame being LEFT by a signal, and its steps join the walk that
+        // signal opened — the place is taken BEFORE any release runs, because a
+        // release is ordinary Vyrn and the callee's own block exits land in the
+        // log between this frame and the next one out.
+        let slot = at.is_none().then(crate::own::trace::joining);
         // RFC-0101 M4's shadow: the sequence this engine walks, made readable so
         // one gate can assert it against the other two and against the placement
         // `vyrn_lower` computes. Built only while the trace is on, and a drop
@@ -2840,7 +2864,7 @@ impl<'a> Interp<'a> {
                     None => continue,
                 },
             };
-            if blk.is_some() && crate::own::trace::on() {
+            if crate::own::trace::on() {
                 walked.push(*binding);
             }
             match release {
@@ -2852,10 +2876,85 @@ impl<'a> Interp<'a> {
                 None => self.release_nested(&v)?,
             }
         }
-        if let Some(blk) = blk {
-            crate::own::trace::note(crate::own::trace::Site::Interp, blk, walked);
+        match (at, slot) {
+            (Some(blk), _) => crate::own::trace::note(
+                crate::own::trace::Site::Interp,
+                crate::own::trace::Exit::Block,
+                blk,
+                walked,
+            ),
+            (None, Some(slot)) => crate::own::trace::joined(slot, walked),
+            (None, None) => {}
         }
         Ok(())
+    }
+
+    /// Release the temporary a CONSTRUCT owns, once it is done with it —
+    /// RFC-0101 M4's second phase, step 0.
+    ///
+    /// `own`'s `droppable` map has four kinds of row. Three of them are keyed by
+    /// a construct rather than by a binding: a `match`'s scrutinee (keyed by the
+    /// match expression), an `if let`'s (Phase 10a) and a `for`-in's iterable
+    /// (RFC-0092 M5), each a value nothing named and nothing else can reclaim.
+    /// Both compiled backends put each of those on a release frame of its own,
+    /// so it runs at the construct's fall-through and on every early exit out of
+    /// an arm. **This engine acted on one of the four**, and RFC-0101 §1.4
+    /// recorded that as a documented difference — which is right for a buffer
+    /// the host reclaims and wrong for a declared `release`, which is ordinary
+    /// Vyrn and can print. `examples/releaseacrossexit.vyrn` is the program that
+    /// made it visible: three lines the two compiled backends printed and this
+    /// one did not, on a shape anybody could write, and the corpus had never
+    /// reached it. It is the same defect the `?` path was one phase earlier.
+    ///
+    /// A row exists only where nothing took the value — an arm that hands its
+    /// payload out marks the row and the binding the payload flowed into is the
+    /// one owner there is — so the handover needs no case here: it is the
+    /// ABSENCE of a row.
+    /// `unwound` says whether the construct is being LEFT by a signal rather
+    /// than finishing: a `return` out of an arm reclaims this temporary as one
+    /// step of the function's whole walk, and both compiled backends emit it
+    /// exactly there, because the frame is one of the frames `emit_all_drops`
+    /// crosses. Falling through is its own exit and its own step.
+    fn release_temp<T>(
+        &self,
+        key: usize,
+        sv: &Val,
+        unwound: bool,
+        r: Result<T, Ctrl>,
+    ) -> Result<T, Ctrl> {
+        // A trap reclaims nothing in either compiled backend, so it reclaims
+        // nothing here. Every other way out — falling through, `break`,
+        // `return`, a propagating `?` — pays, which is the rule `Interp::block`
+        // already applies to a `let`.
+        if matches!(r, Err(Ctrl::Err(_))) {
+            return r;
+        }
+        let slot = unwound.then(crate::own::trace::joining);
+        let mut walked = Vec::new();
+        match self.droppable.get(&key) {
+            Some(crate::own::DropKind::Release(f)) => {
+                walked.push(key);
+                self.call(f, std::slice::from_ref(sv))?;
+            }
+            // RFC-0092 M4: the temporary declares no release and what it HOLDS
+            // may. A program with no `impl Owned` has nothing the walk could
+            // find, so it is not made — the same gate `Interp::block` uses.
+            Some(crate::own::DropKind::Deep(_)) if self.has_owned => {
+                walked.push(key);
+                self.release_nested(sv)?
+            }
+            _ => {}
+        }
+        match slot {
+            Some(slot) => crate::own::trace::joined(slot, walked),
+            None => crate::own::trace::note(
+                crate::own::trace::Site::Interp,
+                crate::own::trace::Exit::Scrutinee,
+                key,
+                walked,
+            ),
+        }
+        r
     }
 
     /// Call every declared `release` (RFC-0086 M1) that a value reaching the end
@@ -3669,6 +3768,9 @@ impl<'a> Interp<'a> {
                     Some(e) => self.expr(e, scope)?,
                     None => Val::Unit,
                 };
+                // After the value, because the value may hold a `?` whose own
+                // exit is the one the frames below are then paying for.
+                leaving(crate::own::trace::Exit::Return, stmt);
                 Ok(Flow::Return(v))
             }
             Stmt::IfLet {
@@ -3681,7 +3783,7 @@ impl<'a> Interp<'a> {
                 // Evaluate the scrutinee ONCE (no double-eval), test the pattern,
                 // and run the matching arm with the binders in scope (RFC-0060).
                 let sv = self.expr(scrutinee, scope)?;
-                match Self::match_pattern(pattern, &sv) {
+                let flow = match Self::match_pattern(pattern, &sv) {
                     Some(binds) => {
                         scope.push(Frame::default());
                         for (n, v) in binds {
@@ -3695,7 +3797,9 @@ impl<'a> Interp<'a> {
                         Some(eb) => self.block(eb, scope),
                         None => Ok(Flow::Normal),
                     },
-                }
+                };
+                let unwound = !matches!(flow, Ok(Flow::Normal));
+                self.release_temp(stmt as *const Stmt as usize, &sv, unwound, flow)
             }
             Stmt::If {
                 cond,
@@ -3711,8 +3815,14 @@ impl<'a> Interp<'a> {
                     Ok(Flow::Normal)
                 }
             }
-            Stmt::Break { .. } => Ok(Flow::Break),
-            Stmt::Continue { .. } => Ok(Flow::Continue),
+            Stmt::Break { .. } => {
+                leaving(crate::own::trace::Exit::Break, stmt);
+                Ok(Flow::Break)
+            }
+            Stmt::Continue { .. } => {
+                leaving(crate::own::trace::Exit::Continue, stmt);
+                Ok(Flow::Continue)
+            }
             Stmt::While { cond, body, .. } => {
                 while self.as_bool(self.expr(cond, scope)?)? {
                     match self.block(body, scope)? {
@@ -3749,7 +3859,8 @@ impl<'a> Interp<'a> {
                 // once per iteration and the loop OWNS the stream, so leaving by
                 // any route — falling off the end, `break`, `return` — releases it
                 // on the way out, which is the same guarantee M1 gave a buffer.
-                let items = match self.expr(iter, scope)? {
+                let iv = self.expr(iter, scope)?;
+                let items = match iv.clone() {
                     Val::Stream(s) => return self.for_stream(*s, var, body, scope),
                     Val::Array(items) => items,
                     // Iterating a String yields each byte as an Int.
@@ -3761,6 +3872,12 @@ impl<'a> Interp<'a> {
                         .into(),
                     other => return Err(format!("`for` expected an array, found {other:?}").into()),
                 };
+                // Every way out of the loop, in one value, so the iterable's own
+                // release below runs on all of them — which is what both
+                // compiled backends buy by putting it on a release frame BELOW
+                // the loop's boundary, where `break` cannot reach it and the
+                // whole-function walk can.
+                let mut out = Ok(Flow::Normal);
                 for item in items.iter() {
                     // Fresh frame per iteration holding the loop variable; the
                     // body's own inner frame nests inside it.
@@ -3771,13 +3888,24 @@ impl<'a> Interp<'a> {
                         .insert(var.clone(), Slot::untyped(item.clone()));
                     let flow = self.block(body, scope);
                     scope.pop();
-                    match flow? {
-                        Flow::Return(v) => return Ok(Flow::Return(v)),
-                        Flow::Break => break,
-                        Flow::Continue | Flow::Normal => {}
+                    match flow {
+                        Ok(Flow::Return(v)) => {
+                            out = Ok(Flow::Return(v));
+                            break;
+                        }
+                        Ok(Flow::Break) => break,
+                        Ok(Flow::Continue | Flow::Normal) => {}
+                        Err(e) => {
+                            out = Err(e);
+                            break;
+                        }
                     }
                 }
-                Ok(Flow::Normal)
+                // A `break` was CAUGHT here, so the statement is falling through
+                // and the snapshot's release is its own exit; a `return` or a
+                // propagating `?` is still leaving.
+                let unwound = !matches!(out, Ok(Flow::Normal));
+                self.release_temp(stmt as *const Stmt as usize, &iv, unwound, out)
             }
             Stmt::Drop { name, .. } => {
                 // A reference is released — its slot's generation bumps, so any
@@ -5549,7 +5677,8 @@ impl<'a> Interp<'a> {
                 scrutinee, arms, ..
             } => {
                 let sv = self.expr(scrutinee, scope)?;
-                self.eval_match(sv, arms, scope)
+                let r = self.eval_match(sv.clone(), arms, scope);
+                self.release_temp(expr as *const Expr as usize, &sv, r.is_err(), r)
             }
             // `if` as an expression (RFC-0030): evaluate the condition, then ONLY
             // the taken branch (laziness identical to statement-`if`/match). The
@@ -5570,13 +5699,23 @@ impl<'a> Interp<'a> {
                         .into())
                 }
             }
-            Expr::Try { expr, .. } => {
-                let v = self.expr(expr, scope)?;
+            Expr::Try { expr: operand, .. } => {
+                let v = self.expr(operand, scope)?;
+                // A propagating `?` is a function exit, and the frames it
+                // unwinds are paying for THIS node — RFC-0101 M4 step 0 is why
+                // they are paid at all, and this names what they are paid for.
+                // At each raise rather than once above, because the `Fallible`
+                // path below calls user code first and a `return` inside that
+                // callee would otherwise be the last site left behind.
+                let prop = |v| {
+                    leaving(crate::own::trace::Exit::Try, expr);
+                    Err(Ctrl::Return(v))
+                };
                 match v {
                     Val::Option(Some(inner)) => Ok(*inner),
-                    Val::Option(None) => Err(Ctrl::Return(Val::Option(None))),
+                    Val::Option(None) => prop(Val::Option(None)),
                     Val::Result(true, inner) => Ok(*inner),
-                    Val::Result(false, e) => Err(Ctrl::Return(Val::Result(false, e))),
+                    Val::Result(false, e) => prop(Val::Result(false, e)),
                     // Anything else goes through `Fallible` (RFC-0080 M3). The
                     // checker has already confirmed the impl exists and that the
                     // enclosing function returns the same type, so the failing
@@ -5593,7 +5732,7 @@ impl<'a> Interp<'a> {
                             self.call(&ask("isSuccess"), &[other.clone()])?,
                             Val::Bool(true)
                         ) {
-                            return Err(Ctrl::Return(other));
+                            return prop(other);
                         }
                         self.call(&ask("success"), &[other])
                     }

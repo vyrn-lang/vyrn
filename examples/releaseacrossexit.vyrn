@@ -1,0 +1,147 @@
+// The step-0 prediction of RFC-0101 M4's second phase, written before anything
+// else in it — the same method the `?` prediction used one phase earlier.
+//
+// Three shapes were predicted to diverge, for the same reason the `?` path did:
+// the interpreter acts on ONE of `own`'s four row kinds (§1.4). It has a
+// pending-drop entry for a `Stmt::Let` and none for the three temporaries a
+// construct owns — an `if let`'s scrutinee, a `for`-in's iterable, and a
+// `match`'s scrutinee — while both compiled backends put each of those on a
+// release frame of its own. A declared `release` is ordinary Vyrn and can
+// print, so if the engines really disagree here, the disagreement is
+// observable and the corpus has simply never reached it.
+//
+// They did. All three printed a `release` line in the two compiled backends and
+// none in the interpreter, on shapes anybody could write. This file is the pin.
+//
+// The early exits are the other half: `break` and `continue` cross the frames a
+// loop body opened, and `return` crosses every frame in the function. Those
+// three engines agree today; the lines are here so a reordering shows up as a
+// diff rather than as nothing.
+
+/// A type that owns heap and can say how to give it back (RFC-0086 M1).
+protocol Owned {
+    fn release(consume self)
+}
+
+type Ring = {
+    label: String
+}
+
+impl Owned for Ring {
+    fn release(consume self) {
+        print("release " + self.label)
+    }
+}
+
+fn ringOf(label: String) -> Ring {
+    return Ring { label: label.copy() }
+}
+
+fn maybeRing(yes: Bool) -> Option<Ring> {
+    if yes {
+        return Some(ringOf("scrutinee"))
+    }
+    return None
+}
+
+/// A `match` over a TEMPORARY nothing named. No arm hands the payload out, so
+/// `own` gives the match expression itself the reclamation row and the
+/// construct is the scrutinee's last owner.
+fn overMatch() -> Int64 {
+    let n = match maybeRing(true) {
+        Some(r) => 1,
+        None => 0
+    }
+    return n
+}
+
+/// The handover: an arm moves the payload into a binding, so the row is marked
+/// and the binding is the one owner there is. The `release` still runs — once,
+/// at the `let`'s block exit rather than at the match.
+fn overHandover() -> Int64 {
+    let kept = match maybeRing(true) {
+        Some(r) => r,
+        None => ringOf("fallback")
+    }
+    print("held")
+    return 1
+}
+
+/// The same temporary one construct over: `if let` has had the row since
+/// Phase 10a.
+fn overIfLet() -> Int64 {
+    if let Some(r) = maybeRing(true) {
+        print("bound")
+    }
+    return 2
+}
+
+fn ringList() -> Array<Ring> {
+    let mut xs: Array<Ring> = []
+    xs.push(ringOf("elem"))
+    return xs
+}
+
+/// The third temporary a construct owns: a `for`-in's iterable. RFC-0092 M5
+/// gave it the same row an `if let`'s scrutinee has.
+fn overForIn() -> Int64 {
+    for r in ringList() {
+        print("seen")
+    }
+    return 6
+}
+
+/// `break` out of a loop, past an owner the body opened. All three engines run
+/// the body frame's releases on this edge (RFC-0060).
+fn overBreak() -> Int64 {
+    let mut i = 0
+    while i < 3 {
+        let inLoop = ringOf("break")
+        if i == 0 {
+            break
+        }
+        i = i + 1
+    }
+    return 3
+}
+
+/// `continue` is the same edge with a different target, and it runs once per
+/// turn, so a walk that skips a frame prints two lines instead of three.
+fn overContinue() -> Int64 {
+    let mut i = 0
+    while i < 3 {
+        let inLoop = ringOf("continue")
+        i = i + 1
+        continue
+    }
+    return 4
+}
+
+/// `return` out of two nested frames, which is the control: it has always run
+/// the whole walk in all three engines.
+fn overReturn() -> Int64 {
+    let outer = ringOf("outer")
+    if true {
+        let inner = ringOf("inner")
+        return 5
+    }
+    return 0
+}
+
+fn main() -> Int64 {
+    let a = overMatch()
+    print("after match")
+    let b = overHandover()
+    print("after handover")
+    let c = overIfLet()
+    print("after iflet")
+    let g = overForIn()
+    print("after forin")
+    let d = overBreak()
+    print("after break")
+    let e = overContinue()
+    print("after continue")
+    let f = overReturn()
+    print("after return")
+    return 0
+}

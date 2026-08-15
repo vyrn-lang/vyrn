@@ -1,0 +1,186 @@
+; vyrn lowered v1 — examples/releaseacrossexit.vyrn
+
+fn Owned__Ring__release(self: Ring) -> Unit                              @31
+  do                                                                     @32
+    call print : Unit                                                    @32
+      binary Add : String                                                @32
+        str "release " : String                                          @32
+        field .label : String                                            @32
+          var self : Ring                                                @32
+
+fn main() -> Int64                                                       @131
+  let a : Int64                                                          @132
+    call overMatch : Int64                                               @132
+  do                                                                     @133
+    call print : Unit                                                    @133
+      str "after match" : String                                         @133
+  let b : Int64                                                          @134
+    call overHandover : Int64                                            @134
+  do                                                                     @135
+    call print : Unit                                                    @135
+      str "after handover" : String                                      @135
+  let c : Int64                                                          @136
+    call overIfLet : Int64                                               @136
+  do                                                                     @137
+    call print : Unit                                                    @137
+      str "after iflet" : String                                         @137
+  let g : Int64                                                          @138
+    call overForIn : Int64                                               @138
+  do                                                                     @139
+    call print : Unit                                                    @139
+      str "after forin" : String                                         @139
+  let d : Int64                                                          @140
+    call overBreak : Int64                                               @140
+  do                                                                     @141
+    call print : Unit                                                    @141
+      str "after break" : String                                         @141
+  let e : Int64                                                          @142
+    call overContinue : Int64                                            @142
+  do                                                                     @143
+    call print : Unit                                                    @143
+      str "after continue" : String                                      @143
+  let f : Int64                                                          @144
+    call overReturn : Int64                                              @144
+  do                                                                     @145
+    call print : Unit                                                    @145
+      str "after return" : String                                        @145
+  return                                                                 @146
+    int 0 : Int64                                                        @146
+
+fn maybeRing(yes: Bool) -> Option<Ring>                                  @40
+  if                                                                     @41
+    var yes : Bool                                                       @41
+    return                                                               @42
+      call Some : Option<Ring>                                           @42
+        call ringOf : Ring                                               @42
+          str "scrutinee" : String                                       @42
+  return                                                                 @44
+    var None : Option<Int64> => Option<Ring>                             @44
+
+fn overBreak() -> Int64                                                  @96
+  let mut i : Int64                                                      @97
+    int 0 : Int64                                                        @97
+  while                                                                  @98
+    binary Lt : Bool                                                     @98
+      var i : Int64                                                      @98
+      int 3 : Int64                                                      @98
+    let inLoop : Ring                                                    @99
+      call ringOf : Ring                                                 @99
+        str "break" : String                                             @99
+    if                                                                   @100
+      binary Eq : Bool                                                   @100
+        var i : Int64                                                    @100
+        int 0 : Int64                                                    @100
+      break                                                              @101
+    assign i                                                             @103
+      binary Add : Int64                                                 @103
+        var i : Int64                                                    @103
+        int 1 : Int64                                                    @103
+  return                                                                 @105
+    int 3 : Int64                                                        @105
+  release inLoop : Release Owned__Ring__release exit=break               @99
+  release inLoop : Release Owned__Ring__release exit=block               @99
+
+fn overContinue() -> Int64                                               @110
+  let mut i : Int64                                                      @111
+    int 0 : Int64                                                        @111
+  while                                                                  @112
+    binary Lt : Bool                                                     @112
+      var i : Int64                                                      @112
+      int 3 : Int64                                                      @112
+    let inLoop : Ring                                                    @113
+      call ringOf : Ring                                                 @113
+        str "continue" : String                                          @113
+    assign i                                                             @114
+      binary Add : Int64                                                 @114
+        var i : Int64                                                    @114
+        int 1 : Int64                                                    @114
+    continue                                                             @115
+  return                                                                 @117
+    int 4 : Int64                                                        @117
+  release inLoop : Release Owned__Ring__release exit=continue            @113
+  release inLoop : Release Owned__Ring__release exit=block               @113
+
+fn overForIn() -> Int64                                                  @87
+  for r                                                                  @88
+    call ringList : Array<Ring>                                          @88
+    do                                                                   @89
+      call print : Unit                                                  @89
+        str "seen" : String                                              @89
+  return                                                                 @91
+    int 6 : Int64                                                        @91
+  release @forin : Deep<Array<Ring>> exit=scrutinee                      @88
+
+fn overHandover() -> Int64                                               @61
+  let kept : Ring                                                        @62
+    match : Ring                                                         @62
+      call maybeRing : Option<Ring>                                      @62
+        bool true : Bool                                                 @62
+      var r : Ring                                                       @63
+      call ringOf : Ring                                                 @64
+        str "fallback" : String                                          @62
+  do                                                                     @66
+    call print : Unit                                                    @66
+      str "held" : String                                                @66
+  return                                                                 @67
+    int 1 : Int64                                                        @67
+  release kept : Release Owned__Ring__release exit=return                @62
+  release kept : Release Owned__Ring__release exit=block                 @62
+
+fn overIfLet() -> Int64                                                  @72
+  iflet                                                                  @73
+    call maybeRing : Option<Ring>                                        @73
+      bool true : Bool                                                   @73
+    do                                                                   @74
+      call print : Unit                                                  @74
+        str "bound" : String                                             @74
+  return                                                                 @76
+    int 2 : Int64                                                        @76
+  release @iflet : Deep<Option<Ring>> exit=scrutinee                     @73
+
+fn overMatch() -> Int64                                                  @50
+  let n : Int64                                                          @51
+    match : Int64                                                        @51
+      call maybeRing : Option<Ring>                                      @51
+        bool true : Bool                                                 @51
+      int 1 : Int64                                                      @51
+      int 0 : Int64                                                      @51
+  return                                                                 @55
+    var n : Int64                                                        @55
+  release @match : Deep<Option<Ring>> exit=scrutinee                     @51
+
+fn overReturn() -> Int64                                                 @122
+  let outer : Ring                                                       @123
+    call ringOf : Ring                                                   @123
+      str "outer" : String                                               @123
+  if                                                                     @124
+    bool true : Bool                                                     @124
+    let inner : Ring                                                     @125
+      call ringOf : Ring                                                 @125
+        str "inner" : String                                             @125
+    return                                                               @126
+      int 5 : Int64                                                      @126
+  return                                                                 @128
+    int 0 : Int64                                                        @128
+  release inner : Release Owned__Ring__release exit=return               @125
+  release outer : Release Owned__Ring__release exit=return               @123
+  release inner : Release Owned__Ring__release exit=block                @125
+  release outer : Release Owned__Ring__release exit=return               @123
+  release outer : Release Owned__Ring__release exit=block                @123
+
+fn ringList() -> Array<Ring>                                             @79
+  let mut xs : Array<Ring>                                               @80
+    array : Array<Int64> => Array<Ring>                                  @80
+  assign xs                                                              @81
+    call @push : Array<Ring>                                             @81
+      var xs : Array<Ring>                                               @81
+      call ringOf : Ring                                                 @81
+        str "elem" : String                                              @81
+  return                                                                 @82
+    var xs : Array<Ring>                                                 @82
+
+fn ringOf(label: String) -> Ring                                         @36
+  return                                                                 @37
+    record Ring : Ring                                                   @37
+      call @copy : String                                                @37
+        var label : String                                               @37

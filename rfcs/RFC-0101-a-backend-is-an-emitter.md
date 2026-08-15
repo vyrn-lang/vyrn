@@ -14,6 +14,16 @@
   sentence: the per-block frames exist for the EARLY exits, so deleting the
   fall-through walk deletes three lines per engine and leaves everything that
   holds it up — the −900 is an all-exit-kinds deletion, not a per-exit-kind one.
+  **M4's second phase then placed the other five exits, and its own step 0 found
+  a second undeclared divergence — three times the size of the first.** §1.4 says
+  the interpreter acts on "1 of 4 row kinds", and nobody had written that as a
+  program: a `match`'s scrutinee, an `if let`'s and a `for`-in's iterable are
+  temporaries a CONSTRUCT owns, both compiled backends release each of them, and
+  this engine released none. `examples/releaseacrossexit.vyrn` is the pin. With
+  all six exit kinds placed the gate holds **78,371 walks**, `Terminated` 1,048
+  and `StreamCursor` 6 are the only named differences, and the deletion
+  preconditions are checked off in §3 M4 — every kind placed, every engine gated,
+  and `ImplicitDispatch` waiting on a CONSUMER rather than on a placement.
   M3's shadow half landed — the form
   carries the type PAIR of [A16], and 21,154 of M1's 22,321 disagreements were the
   two engines answering different questions. Its delete half did not, and §3 M3
@@ -1498,10 +1508,11 @@ is no third mechanism left to invent below it, and no further preparation this
 milestone can do. **The −1,200 is re-parented onto M4**, and M4 should be read as
 carrying both its own −900 and this one.
 
-**M4 — release placement. THE FIRST PHASE IS IMPLEMENTED: its step-0 prediction
-found a live parity defect, the block-exit placement and its three-engine gate
-landed, and the delete half turned out not to be a per-exit-kind deletion. The
-records are below.** The lowering emits ordered `Release` steps at the
+**M4 — release placement. BOTH PHASES ARE IMPLEMENTED: each one's step 0 found a
+live parity defect the corpus had never reached, the placement now covers every
+exit kind a body has and one gate holds all three engines to it — 78,371 walks —
+and the delete half is a single all-kinds deletion the next phase can now make.
+The records are below.** The lowering emits ordered `Release` steps at the
 exits `own` computes, and the backends encode them. The three scope-frame stacks,
 the three break/continue boundary indices, `emit_drop` (180), `rel_at` (239),
 `deep_release` (149) and `rel_for`'s re-derivation of a kind the shared analysis
@@ -1701,6 +1712,185 @@ emitter. The one extra row on this side is
 `examples/releaseacrosstry.vyrn`, which `main` does not have. Full parity is
 green, `reproducible.rs` is green, and the blessed dumps moved by one file:
 `ownedcontainer.lowered`, added deliberately.
+
+### M4 second phase — the other five exits. THE PLACEMENT AND ITS GATE LANDED FOR EVERY EXIT KIND A BODY HAS, AND ITS OWN STEP 0 FOUND A SECOND UNDECLARED DIVERGENCE — THIS ONE IN THREE CONSTRUCTS AT ONCE
+
+[A9]'s order is "block exit first, then `break` / `continue` / `return`, then `?`
+and match-arm handover". This phase is the second and third of those together,
+because they are one assertion: an early exit crosses the frames a `match`, an
+`if let` and a `for in` open, so a gate that holds `break` and not the scrutinee
+is a gate with a hole exactly where #166 lived.
+
+| PR | What | Changed lines | Files |
+|---|---|---|---|
+| M4b | step 0's fix and its pin; the placement at all six exits; the three engines' walks keyed by the exit node; the gate; a fourth blessed dump | 1,116 | 9 + an example + a snapshot |
+
+**It misses §3.0's budget and this paragraph is where it says so** (§3's rule;
+RFC-0094 M1 is the precedent, and phase 1 ran 947). 1,116 changed compiler lines
+across 9 files — 858 added and 258 removed — plus a 144-line corpus example and a
+186-line generated snapshot, which are not compiler code and are counted apart.
+250 of the 1,116 are the gate and its fixtures and about 200 more are doc
+comments. **It could not be split further without a stack, and that is a
+finding rather than an excuse**: the placement, the three engines' hooks and the
+one gate that compares them are a single assertion, and any cut through them
+leaves one half that gates nothing and another half that does not compile. The
+one clean seam — step 0 alone — would have to be merged BEFORE the rest and then
+conflict with it in `interp.rs`, which is the stacked shape delivery forbids.
+
+### M4 second phase, step 0 — the prediction was right again, and this time in three places
+
+Phase 1's step 0 found the `?` path. §1.4's other sentence is that the
+interpreter "acts on 2 of 7 `DropKind`s **and 1 of 4 row kinds**", and the second
+half had never been written as a program. `own`'s map has four kinds of row: a
+`Stmt::Let`, and three temporaries a CONSTRUCT owns — a `match`'s scrutinee, an
+`if let`'s (Phase 10a), a `for`-in's iterable (RFC-0092 M5). Both compiled
+backends put each of those on a release frame of its own. This engine had a
+pending-drop entry for the first and none for the other three.
+
+`examples/releaseacrossexit.vyrn` is the program that asks. Nine shapes, and
+three of them printed different output:
+
+| shape | `vyrn run` | native and wasm |
+|---|---|---|
+| `match` over a temporary | — | `release scrutinee` |
+| `if let` over a temporary | — | `release scrutinee` |
+| `for` over a temporary array | — | `release elem` |
+| `break`, `continue`, `return`, the handover | identical | identical |
+
+**The two compiled backends agree with each other byte for byte and the
+interpreter drops three lines**, which is the same verdict phase 1 reached and
+for the same reason: a declared `release` is ordinary Vyrn, it can print, and
+"the host reclaims" is right for a buffer and wrong for a user's own code.
+`Interp::release_temp` is the fix — the construct runs `own`'s row on its own
+temporary once it is done with it, on every way out except a trap, which is the
+rule `Interp::block` already applied to a `let`. The example is in the corpus, so
+all three engines are pinned on it.
+
+Two things this find is worth stating.
+
+1. **It is bigger than phase 1's**, which was one path in one construct. This is
+   three constructs, and the shape a `match` arm hands its payload out of is
+   exactly the one #166 was — the defect the bug ledger ranks most expensive.
+2. **The method transferred exactly.** Both finds came from reading §1.4's own
+   prose against the three walks and writing the program the prose predicts.
+   Neither needed the milestone's machinery; both were found before the shadow PR
+   was written. That is the argument for [A9]'s split, made twice.
+
+### What landed, and what the gate holds now
+
+`vyrn_frontend::own::Exit` is the exit vocabulary — `Block`, `Scrutinee`,
+`Break`, `Continue`, `Return`, `Try` — and it lives in `own` rather than in
+`vyrn-lower` because all three engines report against it and the interpreter
+cannot import that crate. One enum, no translation table between the placement
+and the walks it is compared to.
+
+**The keying is the node the exit is AT, and it was chosen for the reader the
+deletion phase will be.** `Release::site` is a `Block` for a fall-through, the
+`match` / `if let` / `for in` for the temporary a construct owns, and the
+`Stmt::Break` / `Continue` / `Return` or the `Expr::Try` for an early one. An
+engine standing at any of those has the node in hand, so it can ask for its steps
+without re-deriving a boundary index — which is what `LoopCtx::drop_boundary`,
+`Fn_::loops`'s third field and `Flow::Break` propagation are three spellings of.
+The lowering keeps one frame stack and one loop-boundary stack, which is the one
+model of what `Gen::drop_stack`, `Fn_::releases` and the interpreter's per-block
+`Vec` each keep privately.
+
+**Measured over the corpus: 52,676 → 78,371 release walks equal the placement
+exactly, and every remaining one is named.**
+
+| exit kind | walks held | named |
+|---|---|---|
+| `Block` | 52,949 | `Terminated` 1,048 |
+| `Return` | 20,787 | `StreamCursor` 6 |
+| `Scrutinee` | 3,853 | — |
+| `Break` | 582 | — |
+| `Continue` | 16 | — |
+| `Try` | 184 | — |
+
+`StreamCursor` is the one step the form cannot place: the cursor a
+`for x in pull()` owns is not a row of `own`'s map at all — no `Stmt::Let` and no
+construct carries it, because RFC-0075 M2b closes a stream's producer from the
+loop that made it rather than from a reclamation rule — so both compiled backends
+walk a frame entry the placement has nothing for. The rule names it rather than
+filtering it.
+
+The interpreter's half is nine fixtures rather than the corpus, for phase 1's
+reason (its walk happens when a program RUNS), and each one now declares the exit
+kind it exists for and asserts that kind was actually reached. A fixture whose
+shape stopped producing the walk it was written for would otherwise pass by
+comparing nothing.
+
+**Both directions were checked by breaking them**, phase 1's method: reversing
+the frame order makes the corpus gate report 30 classes across both compiled
+backends and the fixture print
+`the interpreter released [a, b] where the lowering placed [b, a]`; replacing the
+loop boundary with `0` makes it report
+`Native released 1 bindings at one Break exit, the lowering placed 8`.
+
+### Four places this phase's brief did not survive contact with the code
+
+1. **The `0` in phase 1's trace was four things, and three of them had a node all
+   along.** Phase 1 recorded a frame entry with no `let` behind it as `0` and
+   listed "a match scrutinee temporary, a `for`-in iterable, a stream cursor".
+   Three of those are `own` rows keyed by the construct, so they are placeable and
+   are placed; only the stream cursor is genuinely nameless. The rule budget the
+   brief expected for anonymous frames turned out to be one rule firing six
+   times.
+2. **One record per frame does not concatenate, and a fixture found it in the
+   first run.** The trace was written to emit one record per frame and let the
+   reader join consecutive records under one key — which is right for a compiled
+   backend, which emits the whole walk at once, and wrong for this engine: a
+   release is ordinary Vyrn, so running one emits the CALLEE's own block exits
+   into the log between two frames of the walk being recorded. `trace::joining`
+   is the fix — a frame reserves its place before it releases anything, and the
+   frame outside it appends to the same reservation. The reader is then trivial
+   and the model of the walk stays in the engine that has one.
+3. **The interpreter's walk has no node to attribute itself to.** `Flow::Break`
+   and `Ctrl::Return` carry no AST, so the statement that raises the signal leaves
+   the site behind (`own::trace::leaving`) and each unwinding frame reads it. It
+   is recording only, off unless a gate asked, and it is the one thing the trace
+   needs from this engine that it does not need from the other two. `Expr::Try`
+   sets it at each raise rather than once above them, because the `Fallible` path
+   calls user code first and a `return` inside that callee would otherwise be the
+   last site left behind.
+4. **A lambda's frames are not its enclosing body's.** Both compiled backends
+   lower a lifted lambda under a shell that owns no release rows, so a `return` or
+   a `?` inside one unwinds its own frames. The lowering sets the stacks aside for
+   a lambda block body. The corpus still places zero steps inside one — phase 1's
+   finding 5, unchanged — so this is a correctness argument rather than a measured
+   difference.
+
+### The deletion preconditions, checked off or named
+
+Phase 1 priced the −900 as an all-exit-kinds deletion, so this phase ends with
+the checklist the next one reads rather than with a ledger entry.
+
+| precondition | state |
+|---|---|
+| every exit kind placed | **yes** — `Block`, `Scrutinee`, `Break`, `Continue`, `Return`, `Try`. There is no seventh: the six are every place either compiled backend calls a release walk from. |
+| every engine gated at every kind | **yes** for the two compiled ones, over the corpus. **Fixtures** for the interpreter, one per kind, each asserting its kind was reached. |
+| the placement reachable without a boundary index | **yes** — `Release::site` is the node the exit is at, and `vyrn-cli/tests/lowered.rs`'s `placement()` is the reader written against it. |
+| `ImplicitDispatch` receivers reachable from the placement | **not yet, and the remaining half is exactly what §3 M2 said it was.** The steps exist and carry `own`'s kind substituted for the instance; what does not exist is a CONSUMER. A worklist entry can only come from a step a backend is reading, and while both backends still derive their own releases the receiver is still an `Expr::Var` built at an emit site. It closes with the consumption. |
+| the residue a `DropKind::Deep` leaves | **open, and unchanged from phase 1's finding 4.** `own` records a declared type's base record shape, so the shape keeps the DECLARATION's parameters; the walk stops silently at a `Param` field. The lint that caught it stays dropped. Both backends read the same half-answer the same way, so it is not a difference between engines — but a deletion that makes a backend read the step instead of deriving it inherits the question rather than answering it. |
+
+**So the next phase can delete**, and what it deletes is the whole of it at once:
+the three scope-frame stacks, the three boundary indices, `emit_drop`, `rel_at`,
+`deep_release`, and the fall-through walks that phase 1 measured at three lines
+per engine on their own. The deletion this phase banks toward the −2,100 is
+**zero**, and this paragraph is where it says so (§3's rule).
+
+**Byte identity.** Every hook this phase adds is behind `own::trace::on()`, off
+outside the gate, and nothing in either emitter's decision path changed —
+`emit_all_drops` is `emit_drops_above(0)` plus the region pops now, which is the
+same walk it always was. All 162 examples `main` has, both backends, `emit-ir`
+and `emit-wat` compared against it: **290 identical, 0 different, 34 pairs where
+both sides emit nothing** (an expected check failure, a generator needing a
+cache). `rest.vyrn` matched, run from `examples/` with a relative filename, for
+the reason phase 1 records. Full parity is green, `reproducible.rs` is green, and
+the blessed dumps moved by one line in `ownedcontainer.lowered` — the `return`
+step at `main`'s exit, which is the placement rendered — plus a fourth file,
+`releaseacrossexit.lowered`, added deliberately because
+`ownedcontainer.vyrn` reaches a block exit and a `return` and nothing else.
 
 **M5 — traps and the boundary ladder.** One trap table in `vyrn-lower`, below all
 three engines, holding the 20 wordings and their conditions. `coerce`'s ladder is
