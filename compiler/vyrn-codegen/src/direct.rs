@@ -40,6 +40,9 @@ use std::rc::Rc;
 
 use vyrn_frontend::ast::*;
 use vyrn_frontend::own::DropKind;
+/// RFC-0101 M4's exit vocabulary, shared with `vyrn-lower` and the other two
+/// engines so the placement and the walks are compared without a translation.
+use vyrn_frontend::own::Exit as ExitKind;
 use vyrn_frontend::types as ftypes;
 use vyrn_frontend::types::INT32;
 
@@ -2099,18 +2102,13 @@ impl<'p> Fn_<'_, 'p> {
         // same frames before its branch, so this runs after a branch only in code
         // wasm has already marked unreachable.
         let boundary = self.releases.len() - 1;
-        // RFC-0101 M4's shadow: this engine's block-exit sequence, made readable
-        // so one gate can assert it against the other two.
-        vyrn_frontend::own::trace::note(
-            vyrn_frontend::own::trace::Site::Wasm,
+        self.emit_releases_above(
+            m,
+            b,
+            boundary,
+            ExitKind::Block,
             blk as *const Block as usize,
-            self.releases[boundary]
-                .iter()
-                .rev()
-                .map(|(_, _, i)| *i)
-                .collect(),
-        );
-        self.emit_releases_above(m, b, boundary)?;
+        )?;
         self.releases.pop();
         self.scope.truncate(mark);
         Ok(())
@@ -2127,9 +2125,26 @@ impl<'p> Fn_<'_, 'p> {
         m: &mut Module,
         b: &mut Frame,
         boundary: usize,
+        exit: ExitKind,
+        at: usize,
     ) -> Result<(), String> {
         let frames: Vec<Vec<(Place, Rel, usize)>> =
             self.releases[boundary..].iter().rev().cloned().collect();
+        // RFC-0101 M4's shadow: the sequence this engine walks at one exit, made
+        // readable so one gate can assert it against the other two and against
+        // the placement. Every exit kind goes through this one function, which
+        // is why one hook covers them all here and the textual backend needs
+        // three.
+        vyrn_frontend::own::trace::note(
+            vyrn_frontend::own::trace::Site::Wasm,
+            exit,
+            at,
+            frames
+                .iter()
+                .flat_map(|f| f.iter().rev())
+                .map(|(_, _, i)| *i)
+                .collect(),
+        );
         for frame in frames {
             for (p, k, _) in frame.into_iter().rev() {
                 self.emit_rel(m, b, p, &k, 0)?;
@@ -3211,7 +3226,7 @@ impl<'p> Fn_<'_, 'p> {
                 // disturb it — M2d's note that a value may sit under a block.
                 // Ownership analysis has un-tracked anything the return escapes, so
                 // this cannot release what is being handed back.
-                self.emit_releases_above(m, b, 0)?;
+                self.emit_releases_above(m, b, 0, ExitKind::Return, s as *const Stmt as usize)?;
                 // And every region scope, for the same reason the interpreter
                 // decrements its counter on this path: a `return` out of a region
                 // leaves it. It POPS rather than frees, because a returned
@@ -3271,7 +3286,8 @@ impl<'p> Fn_<'_, 'p> {
                 // statement.
                 self.releases.push(Vec::new());
                 let scrut_boundary = self.releases.len() - 1;
-                if self.drops.contains_key(&(s as *const Stmt as usize)) {
+                let key = s as *const Stmt as usize;
+                if self.drops.contains_key(&key) {
                     if let Some(r) = self.rel_for(&st, *line)? {
                         // A slot of its own, and it has to be one. `expr` left the
                         // aggregate wherever it built it, and the arm can build
@@ -3295,7 +3311,7 @@ impl<'p> Fn_<'_, 'p> {
                         self.releases
                             .last_mut()
                             .unwrap()
-                            .push((Place::Slot(own), r, 0));
+                            .push((Place::Slot(own), r, key));
                     }
                 }
                 self.tag_test(b, addr, &sum, pattern, *line)?;
@@ -3323,7 +3339,7 @@ impl<'p> Fn_<'_, 'p> {
                 // The fall-through release, after both arms have rejoined. An arm
                 // that returned already ran it and branched, so this copy lands in
                 // code wasm has marked unreachable — the same rule `block` follows.
-                self.emit_releases_above(m, b, scrut_boundary)?;
+                self.emit_releases_above(m, b, scrut_boundary, ExitKind::Scrutinee, key)?;
                 self.releases.pop();
             }
             Stmt::While { cond, body, line } => {
@@ -3393,7 +3409,8 @@ impl<'p> Fn_<'_, 'p> {
                 // `continue` leave it to the fall-through below.
                 self.releases.push(Vec::new());
                 let iter_boundary = self.releases.len() - 1;
-                if self.drops.contains_key(&(s as *const Stmt as usize)) {
+                let key = s as *const Stmt as usize;
+                if self.drops.contains_key(&key) {
                     if let Some(r) = self.rel_for(&it, *line)? {
                         // `expr` leaves one I32 — an aggregate's address or a
                         // String's pointer — and `walk` wants it back, so it is
@@ -3423,7 +3440,7 @@ impl<'p> Fn_<'_, 'p> {
                             }
                             _ => return unsupported("a `for` over a Unit value", *line),
                         }
-                        self.releases.last_mut().unwrap().push((place, r, 0));
+                        self.releases.last_mut().unwrap().push((place, r, key));
                         b.ins(&Instruction::LocalGet(src));
                     }
                 }
@@ -3491,7 +3508,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::End);
                 // The fall-through release (RFC-0092 M5), after every exit path
                 // has rejoined. A body that returned already ran it and branched.
-                self.emit_releases_above(m, b, iter_boundary)?;
+                self.emit_releases_above(m, b, iter_boundary, ExitKind::Scrutinee, key)?;
                 self.releases.pop();
             }
             Stmt::IndexSet {
@@ -3575,7 +3592,13 @@ impl<'p> Fn_<'_, 'p> {
                     .loops
                     .last()
                     .ok_or_else(|| gap("`break` outside a loop", *line))?;
-                self.emit_releases_above(m, b, boundary)?;
+                self.emit_releases_above(
+                    m,
+                    b,
+                    boundary,
+                    ExitKind::Break,
+                    s as *const Stmt as usize,
+                )?;
                 self.exit_regions_above(b, regions, true);
                 let d = self.br_to(brk);
                 b.ins(&Instruction::Br(d));
@@ -3585,7 +3608,13 @@ impl<'p> Fn_<'_, 'p> {
                     .loops
                     .last()
                     .ok_or_else(|| gap("`continue` outside a loop", *line))?;
-                self.emit_releases_above(m, b, boundary)?;
+                self.emit_releases_above(
+                    m,
+                    b,
+                    boundary,
+                    ExitKind::Continue,
+                    s as *const Stmt as usize,
+                )?;
                 self.exit_regions_above(b, regions, true);
                 let d = self.br_to(cont);
                 b.ins(&Instruction::Br(d));
@@ -4502,7 +4531,10 @@ impl<'p> Fn_<'_, 'p> {
                 arms,
                 line,
             } => self.match_expr(m, b, e as *const Expr as usize, scrutinee, arms, *line)?,
-            Expr::Try { expr, line } => self.try_(m, b, expr, *line)?,
+            Expr::Try {
+                expr: operand,
+                line,
+            } => self.try_(m, b, operand, *line, e as *const Expr as usize)?,
             Expr::TryConstruct { name, args, line } => {
                 self.try_construct(m, b, name, args, *line)?
             }
@@ -10727,7 +10759,7 @@ impl<'p> Fn_<'_, 'p> {
                 self.releases
                     .last_mut()
                     .unwrap()
-                    .push((Place::Slot(own), r, 0));
+                    .push((Place::Slot(own), r, key));
             }
         }
         // The arms' common type — [`Fn_::match_ty`], the same answer `peek` gives a
@@ -10786,7 +10818,7 @@ impl<'p> Fn_<'_, 'p> {
         // The fall-through release, after the arms have rejoined and before the
         // aggregate result's address is pushed. A scalar result is already on
         // the stack here and the release is stack-neutral, so it sits under it.
-        self.emit_releases_above(m, b, scrut_boundary)?;
+        self.emit_releases_above(m, b, scrut_boundary, ExitKind::Scrutinee, key)?;
         self.releases.pop();
         if let Some((off, _)) = dest {
             b.slot(off);
@@ -10818,6 +10850,7 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         e: &Expr,
         line: usize,
+        at: usize,
     ) -> Result<Type, String> {
         let st = self.expr(m, b, e)?;
         // The success pattern's binder name is unread — `tag_test` and
@@ -10827,7 +10860,7 @@ impl<'p> Fn_<'_, 'p> {
             Some(Sum::Opt(t)) => (Sum::Opt(t.clone()), t, Pattern::Some(String::new())),
             Some(Sum::Res(t, err)) => (Sum::Res(t.clone(), err), t, Pattern::Ok(String::new())),
             // Anything else asks `Fallible` (RFC-0080 M3) instead of the tag.
-            _ => return self.try_fallible(m, b, &st, line),
+            _ => return self.try_fallible(m, b, &st, line, at),
         };
         let Repr::Agg(sl) = self.cx.repr(&st, line)? else {
             return unsupported("`?` on a non-aggregate sum", line);
@@ -10867,7 +10900,7 @@ impl<'p> Fn_<'_, 'p> {
         // raised, and the 65th such call aborted where the interpreter kept
         // going. The value is already copied through `dest`, so neither of these
         // can disturb it — the same reason the `return` arm does them here.
-        self.emit_releases_above(m, b, 0)?;
+        self.emit_releases_above(m, b, 0, ExitKind::Try, at)?;
         self.exit_regions_above(b, 0, false);
         b.ins(&Instruction::Br(self.depth));
         self.depth -= 1;
@@ -10907,6 +10940,7 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         st: &Type,
         line: usize,
+        at: usize,
     ) -> Result<Type, String> {
         let key = ftypes::type_key(&self.cx.sub(st))
             .ok_or_else(|| gap(&format!("`?` dispatched on `{st}`"), line))?;
@@ -10962,7 +10996,7 @@ impl<'p> Fn_<'_, 'p> {
             dst_mem: 0,
         });
         // The same two unwinds `?` owes as `return`-minus-the-keyword.
-        self.emit_releases_above(m, b, 0)?;
+        self.emit_releases_above(m, b, 0, ExitKind::Try, at)?;
         self.exit_regions_above(b, 0, false);
         b.ins(&Instruction::Br(self.depth));
         self.depth -= 1;

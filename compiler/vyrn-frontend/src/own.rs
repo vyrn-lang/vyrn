@@ -64,6 +64,8 @@ use crate::movecheck::{Gone, LetOwnership};
 /// Off by default, thread-local, and every hook records a step the engine was
 /// about to take anyway. Nothing here decides anything.
 pub mod trace {
+    pub use super::Exit;
+
     /// Which engine walked the step.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum Site {
@@ -72,41 +74,65 @@ pub mod trace {
         Wasm,
     }
 
-    /// One block's fall-through exit, as one engine ran or emitted it.
+    /// One exit's release walk, as one engine ran or emitted it.
     ///
-    /// The whole exit rather than one record per release, because the thing being
+    /// The whole walk rather than one record per release, because the thing being
     /// gated is the SEQUENCE: an exit that releases nothing is a fact too, and a
-    /// per-release trace cannot tell it apart from a block the engine never
+    /// per-release trace cannot tell it apart from an exit the engine never
     /// reached.
+    ///
+    /// **One record per exit, however many frames it crosses.** A compiled
+    /// backend walks every frame above a boundary index in one call. The
+    /// interpreter's walk happens as a signal propagates outward through
+    /// `Interp::block`, one frame at a time, so each frame [`joining`]s the walk
+    /// the signal opened and appends to it. Concatenating in emission order
+    /// instead does NOT work, and the fixture that found it out is worth the
+    /// sentence: a release is ordinary Vyrn, so running one emits the callee's
+    /// own block exits BETWEEN two frames of the walk being recorded.
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct Exit {
+    pub struct Walk {
         pub site: Site,
-        /// The `Block`'s node address.
-        pub block: usize,
-        /// The `Stmt::Let`s released, in the order the engine releases them. A
-        /// `0` is a frame entry with no `let` behind it — a match scrutinee
-        /// temporary, a `for`-in iterable, a stream cursor — recorded rather
-        /// than filtered, so the gate sees that it is there.
+        /// Which exit kind this walk belongs to.
+        pub exit: Exit,
+        /// The node the exit is AT: the `Block` for a fall-through exit, the
+        /// `match` / `if let` / `for in` for a construct's own temporary, and the
+        /// `Stmt::Break` / `Continue` / `Return` or `Expr::Try` for an early one.
+        /// It is the key a consumer looks the placed steps up by, so nothing
+        /// downstream re-derives a boundary index.
+        pub at: usize,
+        /// The bindings released, in the order the engine releases them. A `0` is
+        /// a frame entry with no node behind it — the cursor a `for x in stream`
+        /// owns is the only one left — recorded rather than filtered, so the gate
+        /// sees that it is there.
         pub bindings: Vec<usize>,
     }
 
     thread_local! {
         static ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-        static EXITS: std::cell::RefCell<Vec<Exit>> = const {
+        static WALKS: std::cell::RefCell<Vec<Walk>> = const {
             std::cell::RefCell::new(Vec::new())
         };
+        static LEAVING: std::cell::Cell<(Exit, usize)> =
+            const { std::cell::Cell::new((Exit::Block, 0)) };
+        /// Where the walk the current signal is unwinding lives, or `NONE`.
+        static OPEN: std::cell::Cell<usize> = const { std::cell::Cell::new(NONE) };
     }
+
+    /// No walk is open — a `usize` rather than an `Option` so the cell is `Copy`
+    /// and the hot path is a compare.
+    const NONE: usize = usize::MAX;
 
     /// Start recording on this thread, discarding anything already collected.
     pub fn start() {
-        EXITS.with(|s| s.borrow_mut().clear());
+        WALKS.with(|s| s.borrow_mut().clear());
+        OPEN.with(|c| c.set(NONE));
         ON.with(|o| o.set(true));
     }
 
     /// Stop recording and take what was collected.
-    pub fn take() -> Vec<Exit> {
+    pub fn take() -> Vec<Walk> {
         ON.with(|o| o.set(false));
-        EXITS.with(|s| std::mem::take(&mut *s.borrow_mut()))
+        WALKS.with(|s| std::mem::take(&mut *s.borrow_mut()))
     }
 
     pub fn on() -> bool {
@@ -120,23 +146,106 @@ pub mod trace {
     /// that thread. The recording is per thread on purpose — two tests in one
     /// binary run in parallel and a global would interleave them — so the thread
     /// that made the stack hands the rows back to the one that asked.
-    pub fn adopt(rows: Vec<Exit>) {
-        EXITS.with(|s| s.borrow_mut().extend(rows));
+    pub fn adopt(rows: Vec<Walk>) {
+        WALKS.with(|s| s.borrow_mut().extend(rows));
     }
 
-    /// Note one block's fall-through exit.
-    pub fn note(site: Site, block: usize, bindings: Vec<usize>) {
+    /// Name the exit an unwinding walk belongs to, at the point the SIGNAL is
+    /// made.
+    ///
+    /// Both compiled backends emit an early exit's walk at the site, with the
+    /// node in hand. The interpreter's walk happens as `Flow::Break` or
+    /// `Ctrl::Return` propagates outward, and neither signal carries a node — so
+    /// the site is left here by the statement that raised it, and each unwinding
+    /// frame reads it. Recording only; nothing the engine does depends on it.
+    pub fn leaving(exit: Exit, at: usize) {
+        if on() {
+            LEAVING.with(|c| c.set((exit, at)));
+            OPEN.with(|c| c.set(NONE));
+        }
+    }
+
+    /// Reserve this frame's place in the walk the current signal is unwinding.
+    ///
+    /// Called at the frame's ENTRY, before any release runs, and that is the
+    /// whole trick: a release is ordinary Vyrn, so running one pushes the
+    /// callee's own block exits into the log between this frame and the next.
+    /// A place reserved first survives them.
+    pub fn joining() -> usize {
+        if !on() {
+            return NONE;
+        }
+        let open = OPEN.with(|c| c.get());
+        if open != NONE {
+            return open;
+        }
+        let (exit, at) = LEAVING.with(|c| c.get());
+        WALKS.with(|s| {
+            let mut v = s.borrow_mut();
+            v.push(Walk {
+                site: Site::Interp,
+                exit,
+                at,
+                bindings: Vec::new(),
+            });
+            let idx = v.len() - 1;
+            OPEN.with(|c| c.set(idx));
+            idx
+        })
+    }
+
+    /// Add what one frame released to the place it reserved.
+    pub fn joined(slot: usize, bindings: Vec<usize>) {
+        if slot == NONE {
+            return;
+        }
+        WALKS.with(|s| s.borrow_mut()[slot].bindings.extend(bindings));
+        // The next frame out belongs to the SAME walk, whatever a release
+        // running under this one did to the cell.
+        OPEN.with(|c| c.set(slot));
+    }
+
+    /// Note one frame's worth of one exit's release walk.
+    pub fn note(site: Site, exit: Exit, at: usize, bindings: Vec<usize>) {
         if !on() {
             return;
         }
-        EXITS.with(|s| {
-            s.borrow_mut().push(Exit {
+        WALKS.with(|s| {
+            s.borrow_mut().push(Walk {
                 site,
-                block,
+                exit,
+                at,
                 bindings,
             })
         });
     }
+}
+
+/// Which exit runs a release step — RFC-0101 §2.1 item 3 and [A9]'s axis.
+///
+/// It lives here rather than in `vyrn-lower` because all three engines report
+/// against it and the interpreter cannot import that crate. One vocabulary: the
+/// form places a step under one of these, each engine reports the walk it runs
+/// under the same one, and the gate compares them without a translation table
+/// in the middle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Exit {
+    /// The fall-through end of a block.
+    Block,
+    /// The temporary a `match`, `if let` or `for in` OWNS, released where `own`
+    /// says the construct is its last owner. The row is keyed by the construct,
+    /// and it exists only where no arm handed the payload out — the handover is
+    /// the absence of a step, not a step of its own.
+    Scrutinee,
+    /// `break` — every frame the innermost loop's body opened.
+    Break,
+    /// `continue` — the same frames as [`Exit::Break`], a different target.
+    Continue,
+    /// `return` — every frame the function has open.
+    Return,
+    /// A propagating `?`, which is a function exit and pays what one pays. The
+    /// interpreter did not, until RFC-0101 M4's step 0 measured it.
+    Try,
 }
 
 /// How a droppable binding is reclaimed at block exit.
