@@ -4190,6 +4190,7 @@ impl<'p> Fn_<'_, 'p> {
         if crate::observe::on() {
             crate::observe::record(
                 crate::observe::Site::Wasm,
+                crate::observe::kind_of(e),
                 e as *const Expr as usize,
                 &self.cx.subst,
                 &t,
@@ -4792,6 +4793,7 @@ impl<'p> Fn_<'_, 'p> {
         if crate::observe::on() {
             crate::observe::record(
                 crate::observe::Site::Peek,
+                crate::observe::kind_of(e),
                 e as *const Expr as usize,
                 &self.cx.subst,
                 &t,

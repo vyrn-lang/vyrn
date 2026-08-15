@@ -51,6 +51,19 @@
 //! compared here for the first time. See [`Tally::synthesized`] for what is left
 //! and why a ceiling rather than a zero.
 //!
+//! **The desugar-once milestone shares what is expanded rather than borrowing
+//! what already exists.** A `place at` projection is inlined AT its access site,
+//! so the nodes an engine walks there are nodes no one wrote: each engine built
+//! its own copy, at its own addresses, after the lowering had run. They are one
+//! tree now ([`vyrn_frontend::project::Memo`], opened per program below), the
+//! lowering walks it too, and the rows it writes for those nodes carry no type —
+//! the checker has no answer at a node it never saw, and inventing one here
+//! would be the sixth copy of a derivation RFC-0101 exists to remove. So this
+//! run moves answers out of [`Tally::synthesized`] and into
+//! [`Tally::unrecorded`]: 4,605 → 3,484 and 526 → 4,707. That is the milestone's
+//! honest half — the form now HOLDS the desugared nodes, and typing them is the
+//! next PR.
+//!
 //! **M2 added a second comparison over the same run: the instance LISTS.** Each
 //! backend runs its own monomorphization worklist and nothing outside a backend
 //! could see either, so "the lowering builds what the backends build" was a
@@ -223,6 +236,11 @@ struct Tally {
     cross_differed: usize,
     /// Backend answers whose node the checker never typed (see
     /// `Instance::untyped`) — a hole in the recording, counted not hidden.
+    ///
+    /// 526 → 4,707 with the desugar-once milestone, and the rise is the point:
+    /// those are the expansion nodes, which the form holds now and the checker
+    /// never saw. A row with no type is a place a type can go; no row at all is
+    /// not.
     unrecorded: usize,
     /// Backend answers about a node the lowering DID record, under an
     /// instantiation it did not build. This is the residue a worklist can close,
@@ -247,6 +265,16 @@ struct Tally {
     /// left
     /// is AST no backend has anything to borrow: a lifted lambda's synthesized
     /// block and the desugars both backends build on the stack.
+    ///
+    /// **The desugar-once milestone took the second half of that sentence and
+    /// found it was a third of what was left.** A `place` projection is
+    /// expanded once now — `project::Memo`, opened around this compile — and
+    /// the lowering walks the same tree the two backends do, so those nodes are
+    /// the form's. 4,605 → 3,294..3,484. The rest is not a desugar and never
+    /// was: `Wasm/var` alone is 1,458 of it, and it is the receiver a backend
+    /// builds on the stack to reach an implicitly dispatched `release`,
+    /// `size` or `success` — the `ImplicitDispatch` class M2 already named, and
+    /// M4's to close.
     synthesized: usize,
     /// Instantiations one backend emitted that the lowering's worklist does not
     /// have. This is M2's gate and it is zero.
@@ -424,6 +452,12 @@ fn every_backend_type_equals_the_recorded_one() {
 
 fn gate() {
     let mut t = Tally::default();
+    // The residue, by the engine that answered and the kind of expression —
+    // the axis RFC-0101 §3 M2c classified by hand and this milestone re-measured
+    // against. It is reported, never asserted: the raw count is not reproducible
+    // (see [`Tally::synthesized`]), and the shape is what the next milestone is
+    // briefed from.
+    let mut residue: std::collections::BTreeMap<String, usize> = Default::default();
     // (site, expression kind, recorded, backend) -> (count, first sighting)
     let mut disagreements: HashMap<(Site, &'static str, String, String), (usize, String)> =
         HashMap::new();
@@ -449,6 +483,12 @@ fn gate() {
             continue;
         };
 
+        // One expansion per access site, shared by the lowering and both
+        // backends for as long as this program is the one being compiled
+        // (RFC-0101's desugar-once milestone). Without it each engine expands
+        // for itself and the three walks land on three sets of addresses, which
+        // is what `Tally::synthesized` counted.
+        let _memo = vyrn_frontend::project::Memo::open();
         let decls = decl_map(&program);
         let lowered = vyrn_lower::lower(&program);
         for problem in vyrn_lower::lint(&lowered) {
@@ -593,12 +633,13 @@ fn gate() {
         // Half one: the two compiled backends against EACH OTHER. This is the
         // sentence RFC-0101 §1.1 says nothing checks — "the two copies agree" —
         // and it needs no interpretation to gate.
-        let mut per_node: HashMap<(usize, String), Vec<(Site, Type)>> = HashMap::new();
+        let mut per_node: HashMap<(usize, String), Vec<(Site, Type, &'static str)>> =
+            HashMap::new();
         for row in &rows {
             per_node
                 .entry((row.node, subst_key(&row.subst)))
                 .or_default()
-                .push((row.site, row.ty.clone()));
+                .push((row.site, row.ty.clone(), row.kind));
         }
         for (key, answers) in &per_node {
             // Only nodes the lowering recorded. A backend also types AST it
@@ -611,13 +652,16 @@ fn gate() {
                     t.uninstantiated += 1;
                 } else {
                     t.synthesized += 1;
+                    for (site, _, kind) in answers {
+                        *residue.entry(format!("{site:?}/{kind}")).or_insert(0) += 1;
+                    }
                 }
                 continue;
             };
-            let Some((_, first)) = answers.first() else {
+            let Some((_, first, _)) = answers.first() else {
                 continue;
             };
-            for (site, ty) in answers.iter().skip(1) {
+            for (site, ty, _) in answers.iter().skip(1) {
                 if ty == first {
                     continue;
                 }
@@ -701,6 +745,11 @@ fn gate() {
         inst_rules,
     );
 
+    let mut top: Vec<_> = residue.into_iter().collect();
+    top.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    top.truncate(8);
+    eprintln!("  the residue, by engine and expression kind: {top:?}");
+
     let mut report = String::new();
     if !missing.is_empty() {
         let lines: Vec<String> = missing
@@ -779,21 +828,27 @@ fn gate() {
         t.uninstantiated
     );
 
-    // M2c's gate. A backend answer about AST the backend built itself can never
-    // read a recorded type, so this number is what M3's delete half is blocked
-    // by, and a ceiling is the only shape it can have: the raw count is not
-    // reproducible run to run (a synthesized node's address is a freed temporary
-    // the allocator hands out again, so two of them collide — or do not — per
-    // run), and M2 measured that spread at about ±200 on 9,500. So the ceiling is
-    // set well above the 4,547 this milestone leaves and well below the 9,505 it
-    // started from: a backend that goes back to cloning a callee before it lowers
-    // a specialization fails here.
+    // M2c's gate, lowered by the desugar-once milestone. A backend answer about
+    // AST the backend built itself can never read a recorded type, so this
+    // number is what M3's delete half is blocked by, and a ceiling is the only
+    // shape it can have: the raw count is not reproducible run to run (a
+    // synthesized node's address is a freed temporary the allocator hands out
+    // again, so two of them collide — or do not — per run), and M2 measured that
+    // spread at about ±200 on 9,500.
+    //
+    // 9,505 -> 4,547 (M2c, by borrowing the callee's block) -> 3,294..3,484 here,
+    // by expanding a `place` projection ONCE for all three walks. The ceiling is
+    // just above the highest of the runs measured: a backend that goes back to
+    // expanding for itself, or to cloning a callee before it lowers it, fails
+    // here. What the number is now is NOT mostly desugars — see the residue line
+    // the run prints, which is `var`, `field` and `call` under both engines: the
+    // receivers a backend synthesizes to reach an implicitly dispatched
+    // `release`, `size` or `success`, and the body of a lifted lambda. The first
+    // class is M4's (the release steps move into the form); the second is the
+    // milestone that moves lambda lifting.
     assert!(
-        t.synthesized < 6_000,
-        "{} backend answers are about AST no instantiation of the program holds. \
-         RFC-0101 M2c brought that to 4,547 by borrowing the callee's own block \
-         instead of cloning it; a number back near 9,500 means a body is being \
-         copied before it is lowered again",
+        t.synthesized < 4_000,
+        "{} backend answers are about AST no instantiation of the program holds.          The desugar-once milestone brought that to 3,484 by expanding each          `place` projection once and handing the same nodes to the lowering and          to both backends; a number back near 4,600 means an engine is expanding          for itself again",
         t.synthesized
     );
 
