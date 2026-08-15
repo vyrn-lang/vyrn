@@ -814,6 +814,16 @@ pub mod observe {
         ON.with(|o| o.get())
     }
 
+    /// The expression kind a row is reported under — and for a variable, the
+    /// NAME too.
+    ///
+    /// RFC-0101 M5 measured the residue by hand-editing this function, because
+    /// `var` as one bucket said "the release receiver is the bulk" and the name
+    /// said it is a tenth. A measurement that needs an edit to repeat is a
+    /// measurement the next milestone will not repeat, so the name is here
+    /// permanently. It is interned rather than owned: [`Row`] holds a
+    /// `&'static str`, the pool is bounded by the distinct variable names in one
+    /// corpus, and nothing calls this unless [`on`] — the gate — is recording.
     pub fn kind_of(e: &vyrn_frontend::ast::Expr) -> &'static str {
         use vyrn_frontend::ast::Expr as E;
         match e {
@@ -822,7 +832,7 @@ pub mod observe {
             E::Float(_) => "float",
             E::Bool(_) => "bool",
             E::Str(_) => "str",
-            E::Var { .. } => "var",
+            E::Var { name, .. } => intern(format!("var[{name}]")),
             E::Unary { .. } => "unary",
             E::Binary { .. } => "binary",
             E::Call { name, .. } => {
@@ -844,6 +854,24 @@ pub mod observe {
             E::Lambda { .. } => "lambda",
             E::Consume { .. } => "consume",
         }
+    }
+
+    /// One `&'static str` per distinct string, so a `kind` can carry a name and
+    /// a [`Row`] can still be `Copy`-cheap.
+    fn intern(s: String) -> &'static str {
+        use std::collections::HashSet;
+        use std::sync::{Mutex, OnceLock};
+        static POOL: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+        let mut pool = POOL
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .unwrap();
+        if let Some(hit) = pool.get(s.as_str()) {
+            return hit;
+        }
+        let leaked: &'static str = Box::leak(s.into_boxed_str());
+        pool.insert(leaked);
+        leaked
     }
 
     pub(crate) fn record(
@@ -4925,10 +4953,10 @@ impl<'a> Gen<'a> {
                 // and the lowering below is unchanged.
                 // A user container's store is its own statement group, lowered
                 // by the statements this backend already has.
-                if let Some(stmts) =
+                if let Some(blk) =
                     vyrn_frontend::project::store_index(self.impls, name, index, value, &aty)?
                 {
-                    return self.gen_block(&Block { stmts });
+                    return self.gen_block(blk);
                 }
                 let bad_l = self.fresh_label("set.oob");
                 let ok_l = self.fresh_label("set.ok");

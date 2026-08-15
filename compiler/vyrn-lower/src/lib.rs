@@ -627,9 +627,22 @@ fn stmt<'a>(s: &'a Stmt, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
         Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => {
             expr(value, d, chain, w);
         }
-        Stmt::IndexSet { index, value, .. } => {
+        Stmt::IndexSet {
+            name, index, value, ..
+        } => {
             expr(index, d, chain, w);
             expr(value, d, chain, w);
+            // …and the expansion, for a receiver with a user `place atSet` —
+            // the writing half of the projection the `@at` arm below walks.
+            // The receiver here is a NAME, so the lowering cannot ask for the
+            // expansion by type the way that arm does; it reads the one the
+            // checker already built and shared
+            // ([`vyrn_frontend::project::stored`]).
+            if let Some(blk) = vyrn_frontend::project::stored(name, index, value) {
+                for s in &blk.stmts {
+                    stmt(s, d, chain, w);
+                }
+            }
         }
         Stmt::Return { value, .. } => {
             if let Some(v) = value {

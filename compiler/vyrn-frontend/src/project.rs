@@ -215,6 +215,13 @@ thread_local! {
     > = const { std::cell::RefCell::new(None) };
     static MEMO: std::cell::RefCell<Option<HashMap<(usize, String, String), Expansion>>> =
         const { std::cell::RefCell::new(None) };
+    /// The store half, keyed by the INDEX node rather than by the receiver:
+    /// `a[i] = v` has no receiver node — [`store_index`] synthesizes one, and a
+    /// stack temporary's address is not an identity. See [`stored`].
+    #[allow(clippy::type_complexity)]
+    static STORES: std::cell::RefCell<
+        Option<HashMap<usize, (String, Expr, Expr, &'static Block)>>,
+    > = const { std::cell::RefCell::new(None) };
 }
 
 /// Share every desugar built while this value is alive.
@@ -237,6 +244,7 @@ impl Memo {
     pub fn open() -> Self {
         MEMO.with(|m| *m.borrow_mut() = Some(HashMap::new()));
         LOOPS.with(|m| *m.borrow_mut() = Some(HashMap::new()));
+        STORES.with(|m| *m.borrow_mut() = Some(HashMap::new()));
         Memo(())
     }
 }
@@ -245,6 +253,7 @@ impl Drop for Memo {
     fn drop(&mut self) {
         MEMO.with(|m| *m.borrow_mut() = None);
         LOOPS.with(|m| *m.borrow_mut() = None);
+        STORES.with(|m| *m.borrow_mut() = None);
     }
 }
 
@@ -296,7 +305,10 @@ pub fn store_index(
     index: &Expr,
     value: &Expr,
     aty: &Type,
-) -> Result<Option<Vec<Stmt>>, String> {
+) -> Result<Option<&'static Block>, String> {
+    if let Some(b) = stored(name, index, value) {
+        return Ok(Some(b));
+    }
     let line = index.line();
     let recv = Expr::Var {
         name: name.to_string(),
@@ -320,7 +332,34 @@ pub fn store_index(
     };
     let mut out = p.prologue.clone();
     out.extend(store);
-    Ok(Some(out))
+    let blk: &'static Block = Box::leak(Box::new(Block { stmts: out }));
+    STORES.with(|m| {
+        if let Some(m) = m.borrow_mut().as_mut() {
+            m.insert(
+                index as *const Expr as usize,
+                (name.to_string(), index.clone(), value.clone(), blk),
+            );
+        }
+    });
+    Ok(Some(blk))
+}
+
+/// The shared expansion of a store site, for a reader that has the statement
+/// but not the receiver's TYPE — which is the lowering.
+///
+/// [`store_index`] needs `aty` to find the `place atSet` at all; the lowering
+/// stands at a `Stmt::IndexSet` whose receiver is a NAME and has no scope of
+/// binding types to resolve it in. So the anchor is the index node — a node of
+/// the program, alive for the whole compile — and the verification is the whole
+/// site: the same receiver name, the same index, the same value. Address reuse
+/// answering from a dead key is the failure [`memo`] guards against, and this
+/// guards against it the same way.
+pub fn stored(name: &str, index: &Expr, value: &Expr) -> Option<&'static Block> {
+    STORES.with(|m| {
+        let m = m.borrow();
+        let (n, i, v, blk) = m.as_ref()?.get(&(index as *const Expr as usize))?;
+        (n == name && i == index && v == value).then_some(*blk)
+    })
 }
 
 /// Inline `f` at an access site whose receiver is `recv` and whose arguments
