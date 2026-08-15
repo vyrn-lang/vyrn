@@ -500,10 +500,7 @@ mod tests {
     fn a_program_too_deep_stops_with_the_limit_every_engine_shares() {
         let src = "fn down(n: Int64) -> Int64 {\n    if n <= 0 { return 0 }\n    return down(n - 1)\n}\nfn main() -> Int64 {\n    return down(5000)\n}\n";
         let json = run_json(src, b"", 0);
-        assert!(
-            json.contains(&vyrn_frontend::trap::call_depth()),
-            "{json}"
-        );
+        assert!(json.contains(&vyrn_frontend::trap::call_depth()), "{json}");
     }
 
     #[test]
