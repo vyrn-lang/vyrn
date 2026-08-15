@@ -2037,6 +2037,11 @@ re-parented onto **M5**, with the count and the exact address recorded here so
 the next milestone does not have to find it again. The M2 gate's rule stays
 until then.
 
+**M5 closed it, and the address was exact.** One field on `DropKind::Release`, one
+solve in the lowering, `ImplicitDispatch` 24 → 0, and the rule is gone. See §3 M5's
+first phase — including the one correction this paragraph needs: all 24 were
+`release`, and none was the `size` a `for` reaches through `impl Iterate`.
+
 ### M3's −1,200 — the receivers did not fall, and the count is the same 3,218
 
 M3's blocker was "a backend cannot read a type at a node it builds DURING its own
@@ -2047,6 +2052,11 @@ does not remove those receivers**, for the reason above: a `Rel::Call` / a
 `peek`'s 501 off-program answers are unchanged, `peek` and its family stay, and
 **M3's −1,200 is re-parented onto M5 with `ImplicitDispatch`** — they are one
 change, and this phase's contribution is to have measured that they are.
+
+**They are not one change, and M5 measured that instead.** Split by variable NAME
+rather than by expression kind, the release receiver is **26 of `peek`'s 501** and
+324 of the corpus's 3,243. The other nine tenths are ordinary program bindings
+inside trees a backend rebuilds. §3 M5's first phase has the table.
 
 ### What retired
 
@@ -2105,12 +2115,114 @@ step at `main`'s exit, which is the placement rendered — plus a fourth file,
 `releaseacrossexit.lowered`, added deliberately because
 `ownedcontainer.vyrn` reaches a block exit and a `return` and nothing else.
 
-**M5 — traps and the boundary ladder.** One trap table in `vyrn-lower`, below all
-three engines, holding the 20 wordings and their conditions. `coerce`'s ladder is
-decided in the lowering; the three engines keep only their leaves. The interpreter
-stops re-spelling `IO_MESSAGES`. Gate: the count of trap literals outside the table
-is **zero**, and a test asserts it — the same shape as the reserved-name gate
-RFC-0094 M2 landed.
+**M5 — traps, resolved dispatch, and the boundary ladder.** One trap table below
+all three engines, holding the 20 wordings and their conditions. `coerce`'s ladder
+is decided in the lowering; the three engines keep only their leaves. The
+interpreter stops re-spelling `IO_MESSAGES`. Gate: the count of trap literals
+outside the table is **zero**, and a test asserts it — the same shape as the
+reserved-name gate RFC-0094 M2 landed. M4 also re-parented two things here: the
+`ImplicitDispatch` class and M3's −1,200.
+
+### M5 first phase — the receiver type. `ImplicitDispatch` IS ZERO AND ITS RULE HAS RETIRED; AND THE MEASUREMENT THAT COMES WITH IT SAYS M3's −1,200 WAS RE-PARENTED ONTO A CLASS TEN TIMES SMALLER THAN THE PROSE SAID
+
+| PR | What | Changed lines | Files |
+|---|---|---|---|
+| M5a | `DropKind::Release` carries the receiver type; the lowering solves the instance from the step; `solve_param` moves below both backends; the `ImplicitDispatch` rule retires; this text | 524 | 8 + this file |
+
+**The diagnosis M4d wrote was exact and the fix is one field.** `own::release_kind`
+answered `Release(name)` — a flattened method name and no receiver — so a placed
+step said WHICH method and not WHICH INSTANCE, and a generic
+`impl<T> Owned for Slots<T>` has one body per element type. Both backends already
+carried the type beside the name at their emit sites (`Rel::Call(f, ty)`,
+`Gen::call_release(v, ty)`); nothing above a backend did. `DropKind::Release` is
+`(String, Type)` now — the type `release_kind` was ASKED about, unresolved, which
+is exactly what both emitters already pass — and `vyrn_lower::dispatched` solves
+the callee's parameters from it and puts the instance on the worklist beside the
+calls the source writes.
+
+**Measured: `ImplicitDispatch` 24 → 0, and every one of the 24 was the same
+shape.** Listed before the fix, they are `Owned__Slots__release<…>` in twelve
+corpus programs, two per program because two backends emit it — `<Int64>`,
+`<String>`, `<{ name: String, age: Int64 }>`, the generational-index record, the
+linked-list node. **Not one was the `size` a `for x in s` reaches through
+`impl Iterate`**, which §3 M2 and M4's own ledger both named beside the release as
+if the class were mixed. It never was: the corpus's `for`-in dispatch is either
+concrete or already on the worklist, and the class was `release`, whole. The
+lowering's instance count is 5,359 → 5,371, `missing` stays 0, and the rule is
+deleted rather than left to fire zero times (§3 M2's precedent, applied to itself a
+second time).
+
+**One thing this cannot reach, said here rather than left to be found.** A generic
+declared release reached only from INSIDE a `DropKind::Deep` walk — an
+`Array<Slots<Int64>>` — is not a step; it is a call the ENCODER makes while walking
+a type through a target layout, and §2.3 keeps that walk in the backend. The corpus
+has none. One would now fail the gate as a missing instantiation rather than hide
+under a rule, which is the failure this file prefers, and it is written into
+`vyrn_lower::dispatched`'s own doc comment.
+
+### The measurement that re-prices M3, and it is not the one M4 handed over
+
+M4d re-parented M3's −1,200 here on the sentence that the 3,218 off-program answers
+are "every one the receiver a backend constructs on the stack to reach an
+implicitly dispatched `release`, `size` or `success`, plus the 532 answers inside a
+lifted lambda's body". **That sentence is a tenth right, and the way to find out was
+to print the variable's NAME.** The gate classifies the residue by engine and
+expression kind; `var` was one bucket. Split by name, over the corpus, before this
+phase:
+
+| residue bucket | count | what it is |
+|---|---|---|
+| `Wasm/var[@rel]` + `Peek/var[@rel]` | **324** | the release receiver — the class M4d named |
+| `Wasm/field` + `Native/field` | 676 | — |
+| `Wasm/binary` + `Native/binary` | 652 | — |
+| `Wasm/var[value]`, `[self]`, `[x]`, `[cur]`, `[s]`, `[nums]`, `[cells]`, `[f]`, `[v]`, `[n]`, `[None]` … | ~700 | ordinary program bindings, in trees a backend REBUILT |
+| `var[@a0]`, `var[@c0]`, `var[json$arg]` | 132 | argument and capture temporaries |
+| `int`, `str`, `call`, `consume`, `record` | ~1,100 | — |
+
+**3,243 total, and `@rel` is 324 of it.** So the release receiver is **10%** of what
+M3's delete half is blocked on, not the bulk, and removing it would not have moved
+`peek` toward deletable: `peek`'s own off-program answers are 501, of which `@rel`
+is **26**. The other 475 are `Peek/int` 193, `Peek/field` 102, `Peek/call` 50 and
+named program variables — nodes inside trees the backends rebuild for reasons that
+have nothing to do with dispatch (RFC-0023 specialization shells, lifted lambda
+bodies, the method-call and interpolation desugars `direct.rs` builds at eleven
+further `Expr::Var` sites).
+
+**So this phase deliberately did NOT make the backends stop building the `@rel`
+receiver**, and the reason is a price against a benefit rather than an unsolved
+problem. The benefit is 324 rows and no deletion. The price is a second entry point
+into `gen_call` / `Fn_::call` — 500-odd lines apiece whose whole interface is
+`&[Expr]` — taken through the two functions with the highest byte-identity risk in
+the compiler, for a class that closes nothing. The receiver type is on the step now,
+so a future phase that has a reason can do it in an afternoon; there is no reason
+today.
+
+**M3's −1,200 is therefore re-parented a fourth time, and this is the first
+milestone to say where it actually lives.** It is not dispatch. It is that both
+compiled backends synthesize AST during their walk at more than a dozen sites, and
+a recorded type cannot reach a node that does not exist until the emitter builds
+it. M2d closed the projection desugars by SHARING the expansion; the remaining
+sites are the same shape and the same remedy — share the tree, do not re-derive the
+type — and that is a milestone of its own with the residue table above as its
+ledger. **The −1,200 is not M5's**, and pretending otherwise for a fourth time
+would be the gate-moving §3 forbids.
+
+**Byte identity.** All 163 examples, both backends, `emit-ir` and `emit-wat` hashed
+against `main` from `examples/` with a relative filename: **326 of 326 identical,
+raw** (34 of the 326 are pairs where both sides emit nothing — an expected check
+failure, a generator needing a cache — and they are identical too). Nothing in
+either emitter's decision path changed: the second member of `Release` is read by
+the lowering and by nobody else, `solve_param` moved verbatim, and
+`vyrn emit-lowered` still renders a step as `Release {name}` so the blessed dumps
+are unmoved. Full parity green (40 tests, `--ignored`), workspace green (67 suites),
+`vyrn-lsp` green, `cargo fmt --check` clean.
+
+**The gate, and the verdict.** M5's stated gates are `ImplicitDispatch` → 0 and the
+trap-literal count → 0. **The first is met.** This phase is 524 changed lines across
+8 files — 290 added and 234 removed, a net of +56 — against §3.0's ≤ 800 / ≤ 15, and
+about 180 of both halves are `solve_param` moving from `vyrn-codegen` into
+`vyrn_frontend::types` so the lowering can use the one matcher rather than write a
+second (§1.1's shape, avoided rather than added to).
 
 **M6 — the interpreter runs the lowered form.** For everything M1–M5 moved, the
 three engines stop holding three answers, and every place the interpreter still

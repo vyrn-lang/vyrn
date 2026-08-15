@@ -96,7 +96,7 @@ fn kind_text(k: &vyrn_frontend::own::DropKind) -> String {
         K::FreeMap => "FreeMap".into(),
         K::CloseStream => "CloseStream".into(),
         K::Deep(t) => format!("Deep<{t}>"),
-        K::Release(f) => format!("Release {f}"),
+        K::Release(f, _) => format!("Release {f}"),
     }
 }
 

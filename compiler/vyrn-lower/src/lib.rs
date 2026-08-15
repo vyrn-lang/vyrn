@@ -441,13 +441,19 @@ fn build<'a>(
                     kind: DropKind::Deep(substitute(t, &flat)),
                     ..r.clone()
                 },
+                DropKind::Release(f, t) => Release {
+                    kind: DropKind::Release(f.clone(), substitute(t, &flat)),
+                    ..r.clone()
+                },
                 _ => r.clone(),
             })
             .collect();
 
+        let mut calls = std::mem::take(&mut w.calls);
+        calls.extend(dispatched(&releases, &by_name));
         follow(
             &func.name,
-            std::mem::take(&mut w.calls),
+            calls,
             &by_name,
             &decls,
             &mut seen,
@@ -471,6 +477,52 @@ fn build<'a>(
         unresolved,
         lambda_bodies,
     }
+}
+
+/// The calls the LANGUAGE writes at this body's exits — RFC-0101 M5.
+///
+/// A placed [`Release`] whose kind is [`DropKind::Release`] IS a call: the
+/// source never writes it, the release walk places it, and a flattened
+/// `impl<T> Owned for Slots<T>` is a generic function, so which body it reaches
+/// depends on the receiver. That is the whole of the `ImplicitDispatch` class
+/// M2 named and M4 measured at 24 — every one of them an
+/// `Owned__Slots__release<…>` a backend emitted and no worklist above a backend
+/// could see. The step carries the receiver type now, so the parameters are
+/// solved here from the same rule a written call is solved by
+/// ([`vyrn_frontend::types::solve_param`], one matcher, moved below the
+/// backends for this), and the instance comes from the step rather than from a
+/// guess about where a release happens.
+///
+/// **What it does not reach**, stated rather than left to be found: a generic
+/// declared release reached only from INSIDE a [`DropKind::Deep`] walk — an
+/// `Array<Slots<Int64>>` — is a call this cannot see, because the walk over a
+/// type's places is the encoder's and §2.3 keeps the encoder in the backend.
+/// The corpus has none; one would fail the gate as a missing instantiation
+/// rather than hide under a rule, which is the failure this file prefers.
+fn dispatched<'f>(
+    releases: &[Release],
+    by_name: &HashMap<&str, &'f Function>,
+) -> Vec<(&'f str, HashMap<String, Type>)> {
+    let mut out = Vec::new();
+    for r in releases {
+        let DropKind::Release(f, recv) = &r.kind else {
+            continue;
+        };
+        let Some(target) = by_name.get(f.as_str()) else {
+            continue;
+        };
+        if target.type_params.is_empty() {
+            // Not generic: a root of the worklist already, like every other
+            // non-generic function.
+            continue;
+        }
+        let mut solved: HashMap<String, Type> = HashMap::new();
+        if let Some(p) = target.params.first() {
+            vyrn_frontend::types::solve_param(&p.ty, recv, &mut solved);
+        }
+        out.push((target.name.as_str(), solved));
+    }
+    out
 }
 
 /// Turn the generic calls one body made into instantiations on the worklist.
