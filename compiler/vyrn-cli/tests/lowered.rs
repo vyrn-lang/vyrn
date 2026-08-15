@@ -25,6 +25,18 @@
 //! existing classes are a measured description of what M3 has to reconcile
 //! rather than an assumption it can delete against.
 //!
+//! **M3 amended what "the recorded type" means, and 21,154 of those 22,321
+//! differences were the wrong question ([A16]).** A node carries a PAIR: the
+//! type the value HAS when the node's code has run, and the type it must END UP
+//! as. `1` under an `Int32` destination has an `Int64` and ends up an `Int32`,
+//! and the coercion between them is `coerce`'s whole job. A backend derives the
+//! first; the checker answers the second. So the assertion here is now
+//! **membership**: a backend's answer equals one member of the pair, or a rule
+//! explains why not. What is left is 1,167, and its largest class is
+//! [`Rule::LessSpecific`] — the native backend's own substitution keeping a type
+//! parameter the recorded answer does not have, which is the class M3's delete
+//! half removes rather than reconciles.
+//!
 //! It runs in-process rather than through `vyrn`, because the thing being
 //! compared never reaches a process boundary: both backends' answers come out of
 //! `vyrn_codegen::observe`, a sink that records what each emitter was about to
@@ -162,9 +174,14 @@ enum Rule {
     /// name at a different point, and `types::resolve` is the referee.
     SameAfterResolve,
     /// One side wrote its DEFAULT where nothing constrained the position: the
-    /// literal `1` under an `Int32` destination, the element type of `[]`, the
-    /// unused side of a `Result`. The value is coerced immediately afterwards,
-    /// which is why no program has ever noticed.
+    /// element type of `[]`, the unused side of a `Result`. The value is coerced
+    /// immediately afterwards, which is why no program has ever noticed.
+    ///
+    /// This was 21,148 before the form carried the pair and it is 2,114 after:
+    /// almost all of it was a backend answering the has-type at a node whose
+    /// destination the checker had already applied, which is a different
+    /// question and not a difference. What is left is a position the form's
+    /// has-derivation does not settle — a `match` arm's, a wasm local's.
     DefaultedPosition,
     /// A heap array against a fixed-size one, or a `SmallArray`: the literal's
     /// own type against the type it is stored as.
@@ -188,7 +205,10 @@ struct Tally {
     rows: usize,
     /// Backend answers compared against a recorded type.
     compared: usize,
-    /// …of which this many did not equal it.
+    /// …of which this many answered the OTHER member of the pair: the type the
+    /// value HAS, where the recorded one is the type it must END UP as ([A16]).
+    answered_has: usize,
+    /// …and this many equalled neither member.
     differed: usize,
     /// Answers where the two backends did not agree with EACH OTHER.
     cross_differed: usize,
@@ -437,7 +457,8 @@ fn gate() {
 
         // (node address, instantiation) -> the recorded type, and the node
         // itself so a disagreement can say what kind of expression it was.
-        let mut recorded: HashMap<(usize, String), (Option<Type>, &Expr)> = HashMap::new();
+        let mut recorded: HashMap<(usize, String), (Option<Type>, Option<Type>, &Expr)> =
+            HashMap::new();
         // Every node address the lowering recorded, under ANY instantiation —
         // which is what separates "a body the lowering walked, at a substitution
         // it did not build" from "AST that is not in the program".
@@ -452,7 +473,10 @@ fn gate() {
             );
             for row in &inst.rows {
                 if let Node::Expr(e) = row.node {
-                    recorded.insert((row.node.id(), key.clone()), (row.ty.clone(), e));
+                    recorded.insert(
+                        (row.node.id(), key.clone()),
+                        (row.ty.clone(), row.has.clone(), e),
+                    );
                     walked.insert(row.node.id());
                 }
             }
@@ -461,7 +485,10 @@ fn gate() {
         // synthesized function under no substitution at all.
         for row in &lowered.globals {
             if let Node::Expr(e) = row.node {
-                recorded.insert((row.node.id(), String::new()), (row.ty.clone(), e));
+                recorded.insert(
+                    (row.node.id(), String::new()),
+                    (row.ty.clone(), row.has.clone(), e),
+                );
                 walked.insert(row.node.id());
             }
         }
@@ -562,7 +589,7 @@ fn gate() {
             // method call — and those live in temporaries whose addresses are
             // reused, so two of them can collide on one key. A node of the
             // PROGRAM is alive for the whole compile and cannot be aliased.
-            let Some((_, node)) = recorded.get(key) else {
+            let Some((_, _, node)) = recorded.get(key) else {
                 if walked.contains(&key.0) {
                     t.uninstantiated += 1;
                 } else {
@@ -598,7 +625,7 @@ fn gate() {
 
         // Half two: each backend answer against the recorded one.
         for row in rows {
-            let Some((rec, node)) = recorded.get(&(row.node, subst_key(&row.subst))) else {
+            let Some((rec, has, node)) = recorded.get(&(row.node, subst_key(&row.subst))) else {
                 continue;
             };
             let Some(rec) = rec else {
@@ -607,6 +634,15 @@ fn gate() {
             };
             t.compared += 1;
             if *rec == row.ty {
+                continue;
+            }
+            // [A16]: the form carries a PAIR — what the value has and what it
+            // must end up as — and a backend answering the other member is not a
+            // disagreement, it is the other question. This is the assertion M3
+            // exists to make: a backend's answer is one member of the pair, or a
+            // rule below says why not.
+            if has.as_ref() == Some(&row.ty) {
+                t.answered_has += 1;
                 continue;
             }
             t.differed += 1;
@@ -623,8 +659,8 @@ fn gate() {
 
     eprintln!(
         "RFC-0101 M1/M2 corpus gate: {} examples ({} did not link), {} instances, \
-         {} rows\n  compared {} backend answers, {} of which differed from the \
-         recorded type and {} of which differed between the two backends\n  \
+         {} rows\n  compared {} backend answers: {} answered the pair's has-type, \
+         {} equalled neither member, and {} differed between the two backends\n  \
          {} nodes the checker never typed, {} answers under an instantiation the \
          lowering does not build, {} about AST no instantiation of the program \
          holds, {} calls the worklist stopped following\n  \
@@ -635,6 +671,7 @@ fn gate() {
         t.instances,
         t.rows,
         t.compared,
+        t.answered_has,
         t.differed,
         t.cross_differed,
         t.unrecorded,
@@ -732,6 +769,14 @@ fn gate() {
         t.compared > 10_000,
         "only {} backend answers were compared — the gate stopped seeing the corpus",
         t.compared
+    );
+    // …and the same floor for the pair's second member. The has-type is 21,154
+    // of the corpus's answers; a change that quietly stopped deriving it would
+    // otherwise read as green, with every one of those falling back to a rule.
+    assert!(
+        t.answered_has > 10_000,
+        "only {} backend answers matched the pair's has-type — the form stopped          carrying it",
+        t.answered_has
     );
     // …and the same floor for the instance comparison, so a hook that stops
     // firing reads as green instead of as a missing list.
