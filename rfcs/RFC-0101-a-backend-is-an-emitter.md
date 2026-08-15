@@ -1001,8 +1001,10 @@ RFC-0094's precedent. Why, and what has to happen first, is below.
 
 **[A10] And the size of that convention change is 16 functions, not ~300.**
 `Result<(String, Type), String>` is returned by **16 functions** and the spelling
-appears **40 times** (33 at `main`), in a file with 400 `fn`s; §1.2 records where
-the wrong number came from. So M3 is smaller than advertised on the signature
+appears **40 times**, in a file with 400 `fn`s; §1.2 records where the wrong
+number came from. Re-measured at M3: the exact return spelling is **33** and
+`(String, Type)` anywhere in `lib.rs` is **44**, so the axis is right and the
+figure has drifted by a few sites since `dd3a9fe`. So M3 is smaller than advertised on the signature
 axis and larger on the other one: `peek`'s **49 call sites**, verified exactly,
 are the work.
 
