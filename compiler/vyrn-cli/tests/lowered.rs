@@ -42,6 +42,15 @@
 //! `vyrn_codegen::observe`, a sink that records what each emitter was about to
 //! return anyway.
 //!
+//! **M2c halved the residue this gate reports.** 9,505 of the answers above were
+//! about AST no instantiation of the program holds, and the attribution — a
+//! backend clones the callee before it lowers a specialization — turned out to
+//! name a clone that bought nothing. The direct backend borrows the program's
+//! own block for a generic instance and for an RFC-0023 specialization now, so
+//! about 5,000 of those answers land on nodes the lowering recorded and are
+//! compared here for the first time. See [`Tally::synthesized`] for what is left
+//! and why a ceiling rather than a zero.
+//!
 //! **M2 added a second comparison over the same run: the instance LISTS.** Each
 //! backend runs its own monomorphization worklist and nothing outside a backend
 //! could see either, so "the lowering builds what the backends build" was a
@@ -227,9 +236,17 @@ struct Tally {
     /// inside an instantiation M1 does not build". M2 measured the split and it
     /// is 9,355 to 7: almost none of it is a missing instantiation. A backend
     /// clones the AST before it lowers a specialization, so the addresses are
-    /// the clone's and no worklist can make them match. It goes to zero when the
-    /// specialized BODY comes from the lowering, not when the LIST does —
-    /// recorded in RFC-0101 §3 M2.
+    /// the clone's and no worklist can make them match.
+    ///
+    /// **M2c halved it by deleting the clone rather than by moving the body.**
+    /// The direct backend deep-copied the callee for every generic instantiation
+    /// and every RFC-0023 specialization; it borrows the program's own block for
+    /// both now, so those answers land on nodes the lowering recorded. 9,505 →
+    /// 4,547 (4,530 on the next run — see the ceiling below for why the count
+    /// drifts), and that ceiling is what stops the clone coming back. What is
+    /// left
+    /// is AST no backend has anything to borrow: a lifted lambda's synthesized
+    /// block and the desugars both backends build on the stack.
     synthesized: usize,
     /// Instantiations one backend emitted that the lowering's worklist does not
     /// have. This is M2's gate and it is zero.
@@ -760,6 +777,24 @@ fn gate() {
         "{} backend answers are about a node the lowering recorded, under an \
          instantiation it did not build",
         t.uninstantiated
+    );
+
+    // M2c's gate. A backend answer about AST the backend built itself can never
+    // read a recorded type, so this number is what M3's delete half is blocked
+    // by, and a ceiling is the only shape it can have: the raw count is not
+    // reproducible run to run (a synthesized node's address is a freed temporary
+    // the allocator hands out again, so two of them collide — or do not — per
+    // run), and M2 measured that spread at about ±200 on 9,500. So the ceiling is
+    // set well above the 4,547 this milestone leaves and well below the 9,505 it
+    // started from: a backend that goes back to cloning a callee before it lowers
+    // a specialization fails here.
+    assert!(
+        t.synthesized < 6_000,
+        "{} backend answers are about AST no instantiation of the program holds. \
+         RFC-0101 M2c brought that to 4,547 by borrowing the callee's own block \
+         instead of cloning it; a number back near 9,500 means a body is being \
+         copied before it is lowered again",
+        t.synthesized
     );
 
     // A gate that compares nothing passes trivially. This is the floor the run

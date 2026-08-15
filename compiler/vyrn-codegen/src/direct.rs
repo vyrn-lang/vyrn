@@ -336,8 +336,8 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // Three kinds of function define nothing, and are skipped exactly as the
     // textual driver skips them (`lib.rs`, step 1). Lowering an unspecializable
     // shell would fail the whole build over a function nothing calls.
-    let mut generics: HashMap<String, Function> = HashMap::new();
-    let mut higher_order: HashMap<String, Function> = HashMap::new();
+    let mut generics: HashMap<String, &Function> = HashMap::new();
+    let mut higher_order: HashMap<String, &Function> = HashMap::new();
     let mut user: Vec<&Function> = Vec::new();
     for f in &program.functions {
         // An `extern` is an import (declared above); a `gen fn` (RFC-0021) runs
@@ -351,11 +351,11 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         // has no first-order definition to emit — a `fn` parameter is not a value
         // in the lowered code at all.
         if f.params.iter().any(|p| matches!(p.ty, Type::Fn(..))) {
-            higher_order.insert(f.name.clone(), f.clone());
+            higher_order.insert(f.name.clone(), f);
             continue;
         }
         if !f.type_params.is_empty() {
-            generics.insert(f.name.clone(), f.clone());
+            generics.insert(f.name.clone(), f);
             continue;
         }
         user.push(f);
@@ -524,7 +524,11 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
                 Key::Lambda(..) => {}
             }
             cx.subst = p.subst.clone();
-            let body = lower_body(&mut m, &p.f, &p.sig, &cx, p.binds.clone())?;
+            // The callee's OWN block for a generic instance and an RFC-0023
+            // specialization; the synthesized one inside the shell for a lifted
+            // lambda, which is the one kind with nothing to borrow.
+            let stmts = p.body.unwrap_or(&p.f.body);
+            let body = lower_body(&mut m, &p.f, stmts, &p.sig, &cx, p.binds.clone())?;
             cx.subst = HashMap::new();
             m.fill(p.sig.index, body);
             cx.mono.borrow_mut().done += 1;
@@ -838,12 +842,28 @@ enum Key {
 /// One body discovered while another was being emitted, with the function index
 /// it was promised.
 #[derive(Clone)]
-struct Pending {
+struct Pending<'a> {
     key: Key,
-    /// The body to lower. An `Rc` rather than a clone per drain turn, because
-    /// [`Key::Lambda`] keys on a node address inside it and a fresh deep clone
-    /// every turn would move the addresses of anything nested.
+    /// The SHELL: the name, the line and the signature this body is lowered
+    /// under. It carries no statements for a [`Key::Generic`] or a [`Key::Ho`] —
+    /// those walk [`Pending::body`], which is the program's own — and it carries
+    /// the synthesized block for a [`Key::Lambda`]. An `Rc` rather than a clone
+    /// per drain turn, because [`Key::Lambda`] keys on a node address inside it
+    /// and a fresh deep clone every turn would move the addresses of anything
+    /// nested.
     f: Rc<Function>,
+    /// The statements to walk, borrowed from the checked program (RFC-0101 §6.1:
+    /// the form borrows, and so does this).
+    ///
+    /// This used to be a deep clone of the callee, made once per instantiation,
+    /// and the clone was the whole reason RFC-0101 M3's delete half could not
+    /// land: a backend walking a copy of the AST asks about nodes the program
+    /// does not have, so no recorded type can reach them. 9,505 answers were
+    /// about such nodes and this closes the two kinds that have a body to
+    /// borrow. `None` is the third, a lifted lambda: its block is synthesized
+    /// from a `|x| e` literal, and nothing to borrow exists until the lowering
+    /// owns it.
+    body: Option<&'a Block>,
     sig: Sig,
     /// The monomorphization the body is lowered under; empty for a lifted lambda
     /// outside any generic.
@@ -877,8 +897,8 @@ struct Pending {
 /// — which makes "they feed each other" a property of appending to the list you
 /// are reading rather than an alternation to get right.
 #[derive(Default)]
-struct Mono {
-    insts: Vec<Pending>,
+struct Mono<'a> {
+    insts: Vec<Pending<'a>>,
     done: usize,
 }
 
@@ -982,7 +1002,7 @@ fn store_index(
     Ok(Some(out))
 }
 
-struct Cx {
+struct Cx<'a> {
     types: HashMap<String, TypeDecl>,
     /// Every `impl` block, for `place` projection lookup (RFC-0091 M2). A
     /// projection is not a function, so `sigs` cannot answer for it.
@@ -999,19 +1019,19 @@ struct Cx {
     variants: HashMap<String, Vec<(String, u64, Vec<Type>)>>,
     /// Generic functions by name. They have no index and no body of their own —
     /// only specializations do — so a call to one is a discovery.
-    generics: HashMap<String, Function>,
+    generics: HashMap<String, &'a Function>,
     /// Functions with a `fn`-typed parameter (RFC-0023). Like a generic they have
     /// no index and no body of their own — only specializations do — so a call to
     /// one is a discovery, and the shell is skipped exactly as the textual driver
     /// skips it.
-    higher_order: HashMap<String, Function>,
+    higher_order: HashMap<String, &'a Function>,
     /// Protocol method name → its protocol (RFC-0002 §5). A bounded generic is
     /// what protocols are for, so `x.show()` inside one has to resolve.
     protocol_methods: HashMap<String, String>,
     /// The monomorphization whose body is being lowered; empty for an ordinary
     /// function.
     subst: HashMap<String, Type>,
-    mono: RefCell<Mono>,
+    mono: RefCell<Mono<'a>>,
     /// RFC-0037's variant registry, module-global so a tag means the same thing in
     /// every body that builds one.
     fnvals: RefCell<Vec<FnVal>>,
@@ -1074,7 +1094,7 @@ struct Cx {
     log_fd: Option<u32>,
 }
 
-impl Cx {
+impl<'a> Cx<'a> {
     /// Substitute the monomorphization this lowering is inside.
     ///
     /// The chokepoint, and the point of having one: [`Cx::resolve`], [`Cx::ll`],
@@ -1126,6 +1146,7 @@ impl Cx {
         m: &mut Module,
         key: Key,
         f: Rc<Function>,
+        body: Option<&'a Block>,
         subst: HashMap<String, Type>,
         binds: HashMap<String, FnBinding>,
     ) -> Result<Sig, String> {
@@ -1142,6 +1163,7 @@ impl Cx {
         mono.insts.push(Pending {
             key,
             f,
+            body,
             sig: sig.clone(),
             subst,
             binds,
@@ -1153,20 +1175,24 @@ impl Cx {
     fn instantiate(
         &self,
         m: &mut Module,
-        f: &Function,
+        f: &'a Function,
         type_args: Vec<Type>,
         subst: HashMap<String, Type>,
     ) -> Result<Sig, String> {
-        let mut sf = f.clone();
-        sf.type_params.clear();
-        for p in &mut sf.params {
-            p.ty = ftypes::substitute(&p.ty, &subst);
+        let mut sf = shell_of(f);
+        for p in &f.params {
+            sf.params.push(Param {
+                name: p.name.clone(),
+                capability: p.capability,
+                ty: ftypes::substitute(&p.ty, &subst),
+            });
         }
         sf.ret = ftypes::substitute(&f.ret, &subst);
         self.enqueue(
             m,
             Key::Generic(f.name.clone(), type_args),
             Rc::new(sf),
+            Some(&f.body),
             subst,
             HashMap::new(),
         )
@@ -1430,9 +1456,25 @@ fn f_shell(line: usize) -> Function {
     }
 }
 
+/// The declaration a specialization is lowered under, with no statements in it.
+///
+/// A specialization differs from its callee in its SIGNATURE — the type
+/// parameters are gone, a `fn`-typed parameter has become the captures its
+/// target needs — and never in its body. So the shell carries the difference and
+/// [`Pending::body`] points at the callee's own block, which is the block the
+/// checker typed and `vyrn-lower` recorded. Cloning it instead is what made
+/// 9,505 backend answers unreachable from any recorded type (RFC-0101 §3 M2).
+fn shell_of(f: &Function) -> Function {
+    Function {
+        name: f.name.clone(),
+        line: f.line,
+        ..f_shell(f.line)
+    }
+}
+
 /// One function being lowered.
-struct Fn_<'a> {
-    cx: &'a Cx,
+struct Fn_<'a, 'p> {
+    cx: &'a Cx<'p>,
     /// Name → where it lives and what it is. A scope stack rather than a map per
     /// block: shadowing pushes, and leaving a block truncates.
     scope: Vec<(String, Place, Type)>,
@@ -1502,7 +1544,7 @@ struct Fn_<'a> {
 /// A lowering context with nothing in scope and nothing to return to: what the
 /// globals initializer is, and what typing an initializer outside any function
 /// needs. Module state itself is still visible, because it lives in [`Cx`].
-fn top_level<'a>(cx: &'a Cx) -> Fn_<'a> {
+fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
     Fn_ {
         cx,
         scope: Vec::new(),
@@ -1536,7 +1578,7 @@ fn top_level<'a>(cx: &'a Cx) -> Fn_<'a> {
 ///
 /// No wrapping `block`, because there is no `return` to route: an initializer is
 /// an expression.
-fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx) -> Result<Frame, String> {
+fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<Frame, String> {
     let mut b = Frame::new(0, &[], 0);
     let mut f = top_level(cx);
     for g in &program.globals {
@@ -1572,20 +1614,26 @@ fn lower_fn(
     m: &mut Module,
     f: &Function,
     sig: &Sig,
-    cx: &Cx,
+    cx: &Cx<'_>,
     binds: HashMap<String, FnBinding>,
 ) -> Result<(), String> {
-    let body = lower_body(m, f, sig, cx, binds)?;
-    m.fill(sig.index, body);
+    let frame = lower_body(m, f, &f.body, sig, cx, binds)?;
+    m.fill(sig.index, frame);
     Ok(())
 }
 
 /// The body itself, before it is installed at the index reserved for it.
+///
+/// `f` is the DECLARATION — the name, the line and the signature — and `body` is
+/// the statements. They are two arguments because a specialization's signature is
+/// synthesized and its statements are the callee's own, borrowed rather than
+/// cloned (see [`Pending::body`]).
 fn lower_body(
     m: &mut Module,
     f: &Function,
+    body: &Block,
     sig: &Sig,
-    cx: &Cx,
+    cx: &Cx<'_>,
     binds: HashMap<String, FnBinding>,
 ) -> Result<Frame, String> {
     let sig = sig.clone();
@@ -1613,7 +1661,7 @@ fn lower_body(
         rel_holes: Vec::new(),
         expect: Vec::new(),
         fn_binds: binds,
-        append_ok: crate::append_candidates(&f.body),
+        append_ok: crate::append_candidates(body),
         str_append: HashMap::new(),
     };
 
@@ -1695,7 +1743,7 @@ fn lower_body(
         Repr::Scalar(v) => BlockType::Result(*v),
         _ => BlockType::Empty,
     }));
-    cx_fn.block(m, &mut b, &f.body)?;
+    cx_fn.block(m, &mut b, body)?;
     // A lowering that reaches an argument node outside [`Fn_::call`] would leave
     // its local here. Nothing in the corpus does; if anything ever did, the local
     // is simply never read, which is a leak rather than a free of a value still
@@ -1786,7 +1834,7 @@ fn frame_fits(b: &Frame, name: &str, line: usize) -> Result<(), String> {
 /// Take one call frame, or trap. Inline for the reason `region_enter` is: it is
 /// a dozen instructions, and a helper would be another index in a table whose
 /// numbering is load-bearing.
-fn call_depth_enter(b: &mut Frame, cx: &Cx) {
+fn call_depth_enter(b: &mut Frame, cx: &Cx<'_>) {
     let (at, msg, trap) = (cx.rt.call_depth, cx.rt.msg_calldepth, cx.rt.trap);
     b.ins(&Instruction::I32Const(at as i32))
         .ins(&Instruction::I32Load(word()))
@@ -1801,7 +1849,7 @@ fn call_depth_enter(b: &mut Frame, cx: &Cx) {
     call_depth_bump(b, cx, 1);
 }
 
-fn call_depth_bump(b: &mut Frame, cx: &Cx, by: i32) {
+fn call_depth_bump(b: &mut Frame, cx: &Cx<'_>, by: i32) {
     let at = cx.rt.call_depth;
     b.ins(&Instruction::I32Const(at as i32))
         .ins(&Instruction::I32Const(at as i32))
@@ -1835,7 +1883,7 @@ fn call_depth_bump(b: &mut Frame, cx: &Cx, by: i32) {
 /// lambdas over one String already build two blocks holding one pointer, so a
 /// deep copy would need a deep release to match and the release would then free
 /// that pointer twice. The two stay mirrors, both shallow.
-fn lower_fnval_copy(cx: &Cx) -> Result<Frame, String> {
+fn lower_fnval_copy(cx: &Cx<'_>) -> Result<Frame, String> {
     let mut b = Frame::new(2, &[], 0);
     let f = top_level(cx);
     let (tag, pay) = (0u32, 1u32);
@@ -1871,7 +1919,12 @@ fn lower_fnval_copy(cx: &Cx) -> Result<Frame, String> {
     Ok(b)
 }
 
-fn lower_dispatcher(m: &mut Module, cx: &Cx, sig_ty: &Type, dsig: &Sig) -> Result<Frame, String> {
+fn lower_dispatcher(
+    m: &mut Module,
+    cx: &Cx<'_>,
+    sig_ty: &Type,
+    dsig: &Sig,
+) -> Result<Frame, String> {
     let Type::Fn(ptys, ret) = sig_ty else {
         return unsupported("a dispatcher for a non-function type", 0);
     };
@@ -2025,7 +2078,7 @@ fn lower_dispatcher(m: &mut Module, cx: &Cx, sig_ty: &Type, dsig: &Sig) -> Resul
     Ok(b)
 }
 
-impl Fn_<'_> {
+impl<'p> Fn_<'_, 'p> {
     /// Scratch local `n` of type `t`, taken on first use.
     ///
     /// Reusable because every use is a set immediately followed by the reads
@@ -5191,14 +5244,14 @@ impl Fn_<'_> {
                 // (RFC-0023): the same three solving passes the emitting path runs,
                 // minus the lifting and the index.
                 _ if self.cx.higher_order.contains_key(name) => {
-                    let f = self.cx.higher_order[name].clone();
-                    self.peek_ho(&f, args, line)?
+                    let f = self.cx.higher_order[name];
+                    self.peek_ho(f, args, line)?
                 }
                 // A generic call in a branch: the same solve the emitting path
                 // does, so the join's destination is sized for the type the arm
                 // will actually produce.
                 _ if self.cx.generics.contains_key(name) => {
-                    let f = self.cx.generics[name].clone();
+                    let f = self.cx.generics[name];
                     let declared: Vec<Type> = f.params.iter().map(|p| p.ty.clone()).collect();
                     let actual = self.arg_types(&declared, args, line)?;
                     let (subst, _) = crate::solve_type_args(&f.type_params, &declared, &actual);
@@ -7003,16 +7056,16 @@ impl Fn_<'_> {
         // function-value argument to a direct-call target, specialize the callee
         // per those targets, and call the specialization with the captures
         // appended. The shell itself was never emitted.
-        if let Some(f) = self.cx.higher_order.get(name).cloned() {
+        if let Some(f) = self.cx.higher_order.get(name).copied() {
             if f.params.len() != args.len() {
                 return unsupported(&format!("the call `{name}` at this arity"), line);
             }
-            return self.ho_call(m, b, &f, args, line);
+            return self.ho_call(m, b, f, args, line);
         }
         // A generic callee: solve its type arguments, discover the specialization
         // (which is what hands out its function index), then call it like any
         // other function.
-        if let Some(f) = self.cx.generics.get(name).cloned() {
+        if let Some(f) = self.cx.generics.get(name).copied() {
             if f.params.len() != args.len() {
                 return unsupported(&format!("the call `{name}` at this arity"), line);
             }
@@ -7400,7 +7453,7 @@ impl Fn_<'_> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        f: &Function,
+        f: &'p Function,
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
@@ -7487,9 +7540,7 @@ impl Fn_<'_> {
         // be an expression that prints or traps (a stored value read from a
         // place). Collecting the captures at the end evaluated that expression
         // after every ordinary argument, which the other two engines do not do.
-        let mut sf = f.clone();
-        sf.type_params.clear();
-        sf.type_bounds.clear();
+        let mut sf = shell_of(f);
         let mut params: Vec<Param> = Vec::new();
         let mut call_args: Vec<Expr> = Vec::new();
         let mut binds: HashMap<String, FnBinding> = HashMap::new();
@@ -7535,6 +7586,7 @@ impl Fn_<'_> {
             m,
             Key::Ho(f.name.clone(), type_args, targets),
             Rc::new(sf),
+            Some(&f.body),
             subst,
             binds,
         )?;
@@ -7931,9 +7983,14 @@ impl Fn_<'_> {
             .collect();
         under.sort_by(|a, b| a.0.cmp(&b.0));
         let key = Key::Lambda(at as *const Expr as usize, shape, under);
-        let sig = self
-            .cx
-            .enqueue(m, key, Rc::new(sf), self.cx.subst.clone(), HashMap::new())?;
+        let sig = self.cx.enqueue(
+            m,
+            key,
+            Rc::new(sf),
+            None,
+            self.cx.subst.clone(),
+            HashMap::new(),
+        )?;
         let srcs = cap_names
             .iter()
             .map(|n| Expr::Var {
@@ -8393,7 +8450,7 @@ struct Walk {
     byte: bool,
 }
 
-impl Fn_<'_> {
+impl<'p> Fn_<'_, 'p> {
     fn layout_of(&self, ty: &Type, line: usize) -> Result<Layout, String> {
         layout::of_ll(&self.cx.ll(ty))
             .map_err(|e| gap(&format!("the layout of `{ty}` ({e})"), line))
@@ -9807,7 +9864,7 @@ fn float_into_word(b: &mut Frame, v: ValType) {
 
 // ---- RFC-0089 M1b: `x.copy()` ---------------------------------------------
 
-impl Fn_<'_> {
+impl<'p> Fn_<'_, 'p> {
     /// Whether a value of `ty` transitively owns heap — the frontend's own
     /// predicate, so this backend copies exactly what the textual one does.
     fn owns_heap(&self, ty: &Type) -> bool {
@@ -11154,7 +11211,7 @@ impl Fn_<'_> {
 /// the new ones. That is the opposite of [`Walk`], and deliberately so: an
 /// `Array` is snapshotted to match a `for` that grows what it walks, and a Map has
 /// no iteration form at all (`m.keys()` hands out a copy).
-impl Fn_<'_> {
+impl<'p> Fn_<'_, 'p> {
     /// The value type a map literal builds, and the map type it produces.
     ///
     /// The position decides, not the first entry: `["k": [[5], [6, 7]]]` in a
@@ -11657,7 +11714,7 @@ impl Fn_<'_> {
 /// branch lives in [`Fn_::walk`] and nothing downstream knows there are two
 /// states. Only the four operations that MUTATE the header (`push`, `pop`,
 /// `swapRemove`, `toArray`) need their own arms, and only `push` needs the spill.
-impl Fn_<'_> {
+impl<'p> Fn_<'_, 'p> {
     /// `(len, cap, base)` of the SmallArray whose header is at `hdr`.
     ///
     /// `base` is the inline field's address while `cap == N`, else `data`. This is
@@ -15968,7 +16025,7 @@ mod tests {
         }
     }
 
-    fn cx() -> Cx {
+    fn cx() -> Cx<'static> {
         Cx {
             arg_drops: std::collections::HashSet::new(),
             types: HashMap::new(),

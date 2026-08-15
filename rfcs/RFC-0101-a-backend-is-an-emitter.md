@@ -1,13 +1,19 @@
 # RFC-0101 — A Backend Is an Emitter
 
-- **Status:** **M1 implemented; M2 and M3 each half implemented and each failing
-  its own line gate**; M4–M6 proposed. M3's shadow half landed — the form carries
-  the type PAIR of [A16], and 21,154 of M1's 22,321 disagreements were the two
-  engines answering different questions. Its delete half did not, and §3 M3
+- **Status:** **M1 implemented; M2, M2c and M3 each half implemented and each
+  failing its own line gate**; M4–M6 proposed. M3's shadow half landed — the form
+  carries the type PAIR of [A16], and 21,154 of M1's 22,321 disagreements were the
+  two engines answering different questions. Its delete half did not, and §3 M3
   records why in one sentence: a backend clones the AST before it lowers a
   specialization, so 9,187 of the answers are about nodes the program does not
   have, and no recorded type can reach them. The −1,200 is re-parented onto the
-  milestone that moves the bodies. §3 M2 records what landed, what did not, and the
+  milestone that moves the bodies. **M2c then measured that sentence and it was
+  half true**: the native backend never cloned, the direct one cloned twice and
+  read neither copy, and borrowing the callee's own block took the residue from
+  9,505 to 4,547 with the emitted bytes unchanged. What is left is `vyrn_frontend`'s
+  own desugars run at lowering time — `project::inline` above all — so M3's delete
+  half now waits on §2.1's own words, "and the sugar gone", rather than on
+  monomorphization. §3 M2 records what landed, what did not, and the
   measurement that says why: M1's residue was attributed to a missing worklist
   and is 9,355-to-7 a missing *body* — a backend clones the AST before it lowers
   a specialization, so no list a lowering hands over can close it. M2 landed the
@@ -988,6 +994,105 @@ behind `observe::on()`, off outside the corpus gate, and nothing in either
 emitter's decision path changed. Symbols keep the readable mangle and #165's
 structural hash, untouched. Full parity is green at both PRs.
 
+**M2c — the backends consume the body. PARTIALLY IMPLEMENTED, AND THE MILESTONE
+ITS BRIEF DESCRIBED IS NOT THE ONE THE CODE NEEDED.**
+
+M2 and M3 both ended at the same sentence: a backend `clone()`s the AST before it
+lowers a specialization, so 9,505 backend answers are about nodes the program
+does not have and no recorded type can reach them. The remedy both priced was
+**moving RFC-0023's specialization and RFC-0037's lambda lifting into the
+lowering**, so that a backend consumes a list of bodies rather than a list of
+names.
+
+**Measured first, that price is mostly for a clone that bought nothing.** The
+9,505 split by engine as 3,483 native, 8,533 wasm and 2,162 `peek` (an answer may
+be counted by more than one engine). The native backend was never the problem: it
+walks `funcs[name].body` for a generic instantiation, `callee.body` for an
+RFC-0023 specialization, and the literal's own `LambdaBody` for a lifted lambda —
+the program's nodes in all three. The direct backend deep-copied a `Function`
+**twice** for each of the first two: once into `Cx::generics` / `Cx::higher_order`
+at startup, and again in `Cx::instantiate` per instantiation. Nothing read the
+copy. A specialization differs from its callee in its SIGNATURE — the type
+parameters are gone, a `fn`-typed parameter has become the captures its target
+needs — and never in its body, and `Cx::sub` already substitutes every type the
+body asks about.
+
+| PR | What | Changed lines | Files |
+|---|---|---|---|
+| M2c | the direct backend borrows the callee's block instead of copying it; the residue gets a ceiling; this text | 328 | 3 |
+
+**What landed.** `Pending` carries the shell and a `body: Option<&'a Block>`
+borrowed from the checked program. `Cx` gained the program's lifetime, so
+`generics` and `higher_order` hold `&'a Function` and the two `.cloned()` calls at
+the call sites became `.copied()`. **9,505 → 4,547**, and about 5,000 backend
+answers are compared against a recorded type for the first time. Two classes of
+disagreement grew because of it and both were already named — `LessSpecific`
+676 → 1,525 and `SameAfterResolve` 356 → 597 — which is the shadow-PR shape: the
+answers were always there, and nothing could see them.
+
+**Emitted output is byte-identical, and the index order specifically.** All 161
+examples, both backends, `emit-wat` and `emit-ir` hashed against `main`: zero
+differences. The wasm function index is handed out by `Module::reserve_func` at
+discovery, and discovery order is unchanged because nothing about *when* a body
+is enqueued moved — only what the entry points at. The WAT is where a renumbering
+would show, and it does not.
+
+**What did not land, and the measurement that says why.** The remaining 4,547 is
+AST a backend has nothing to borrow, and it is **not** mostly lambda bodies:
+lowering every lifted lambda in the whole corpus records **532** answers. The
+residue was classified by expression kind, and the two engines' distributions are
+the same shape to within a few per cent:
+
+| Kind | native | wasm | `peek` |
+|---|---|---|---|
+| `Var` | 1,184 | 1,917 | 412 |
+| `Field` | 858 | 934 | 388 |
+| `Binary` | 647 | 689 | 1 |
+| `Int` | 249 | 428 | 267 |
+| `Call` / `@call` | 329 | 547 | 56 |
+
+**Two backends do not accidentally synthesize the same tree, and these are not
+backend AST at all — they are `vyrn_frontend`'s own desugars, run at lowering
+time.** `project::inline` (`project.rs:224`) clones a `place at` / `place atSet`
+body per index site, renames its bindings and substitutes the receiver; the
+method-call rewrite builds a receiver `Var`; the interpolation desugar builds a
+`Binary` spine. Every one is shared code, called from both emitters, producing a
+tree the checker never saw and the lowering never recorded.
+
+So **the −1,200 stays re-parented, and it is now parented onto something §2.1
+already promised.** The form is "the checked program with the answers written on
+it **and the sugar gone**", and the sugar is not gone — it is expanded twice, once
+per emitter, after the lowering has run. `peek` and `static_ty` can read a
+recorded type at every node of a generic instance and of an RFC-0023
+specialization today; what they cannot read is a desugared node. M3's delete half
+therefore needs the desugars to run ONCE, before `lower`, over the program the
+lowering records — which is a milestone of its own and is a smaller and better
+defined one than "the lowering owns specialization and lambda lifting" was.
+
+Borrowing cannot reach that class, and the reason is worth writing down so nobody
+tries: an `Expr` a backend builds during the walk cannot outlive the walk, so
+threading the program's lifetime through `Fn_`'s methods stops at the first
+desugar site. The choice is to desugar before lowering, or to give the
+synthesized nodes an arena. The first is the design; the second is a workaround
+for not having done the first.
+
+**The gate, and the verdict.** This milestone's gate was net negative. **It is
+328 changed lines across 3 files — 266 added and 62 removed, a net of +204 — so
+it does not meet it, and this paragraph is where it says so** (§3's rule;
+RFC-0094 M1 is the precedent, and the bar there was moved rather than recorded).
+Most of the addition is prose: 117 lines are this text and about 50 more are the
+doc comments recording why a body is borrowed and the ceiling that stops it being
+copied again. The code is a net deletion — two `Function` deep copies per
+instantiation and two more per higher-order call site — and the milestone that
+was supposed to carry the −1,200 still has not.
+
+**§6.1 gets its number from the other direction.** The question was owned or
+borrowed, and M1 answered "borrow, during the migration" with an owned cost of
+1.71×. M2c is the first milestone to spend that answer rather than defer it: the
+9,505 → 4,547 was bought by making a backend borrow what it had been owning, at a
+memory cost of **zero** — the copies deleted here were pure waste, so the saving
+is 1.0× rather than a trade. The 256 MiB threshold is untouched and unreached.
+
 **M3 — the backends read types. THE SHADOW HALF IS IMPLEMENTED; THE DELETE HALF
 IS NOT, AND M3 FAILS ITS OWN LINE GATE.**
 
@@ -1089,6 +1194,13 @@ discovery — `direct.rs:857` says the order IS the numbering** — and `lib.rs`
 lifted. 158 lines across the two files mention the mechanism by name. Moving it
 is a milestone with its own PR pairs and its own byte-identity risk, not the
 second half of this one.
+
+**M2c attempted it and found the price wrong.** Half of the 9,187 needed no move
+at all — the direct backend was copying a body it then substituted nothing into —
+and `Pending` now borrows the callee's block. The half that is left is
+**desugared** AST rather than specialized AST, and the lifted lambda, which this
+paragraph named as the second mechanism, is **532 answers over the whole corpus**.
+§3 M2c has the classification and the reason borrowing stops where it does.
 
 **The gate, and the verdict.** M3's gate was −1,200 lines across the two
 backends. **M3a is 444 changed lines and deletes nothing, so M3 misses its gate
