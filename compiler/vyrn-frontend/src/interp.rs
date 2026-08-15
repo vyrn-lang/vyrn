@@ -775,12 +775,12 @@ impl From<&str> for Ctrl {
 /// implying a stronger one.
 fn reserve_str(s: &mut String, more: usize) -> Result<(), Ctrl> {
     s.try_reserve(more)
-        .map_err(|_| Ctrl::Err("out of memory".into()))
+        .map_err(|_| Ctrl::Err(crate::trap::OUT_OF_MEMORY.into()))
 }
 
 fn reserve_vec<T>(v: &mut Vec<T>, more: usize) -> Result<(), Ctrl> {
     v.try_reserve(more)
-        .map_err(|_| Ctrl::Err("out of memory".into()))
+        .map_err(|_| Ctrl::Err(crate::trap::OUT_OF_MEMORY.into()))
 }
 
 /// `a + b` for strings, allocated once and fallibly.
@@ -951,7 +951,7 @@ fn i32_lane(v: Val) -> Result<i32, Ctrl> {
 /// never touched.
 fn vec_oob(i: i64, span: i64) -> String {
     let k = if i < 0 { i } else { i + span - 1 };
-    format!("array index {k} out of bounds")
+    crate::trap::array_index(k)
 }
 
 /// Convert a numeric value to `target` (Int / sized IntN / Float / Float32),
@@ -1935,9 +1935,12 @@ pub fn gen_module_interface_lit(
         format!("{path}.vyrn")
     };
     let resolved = gen_scoped_path(importer_dir, allowed, &spec)?;
-    let source = resolver
-        .read(&resolved)
-        .map_err(|e| format!("moduleInterface cannot read `{path}`: {e}"))?;
+    let source = resolver.read(&resolved).map_err(|e| {
+        format!(
+            "moduleInterface {}: {e}",
+            crate::trap::io_at("readerr", &path)
+        )
+    })?;
     reads.push((resolved.clone(), Some(source.clone().into_bytes())));
 
     // Follow the reflected module's imports to build the reachable type closure
@@ -2382,8 +2385,8 @@ impl<'a> Interp<'a> {
                 if content.as_bytes().contains(&0) {
                     return Ok(Val::Result(
                         false,
-                        Box::new(Val::Str(std::rc::Rc::new(format!(
-                            "`{path}` contains a NUL byte"
+                        Box::new(Val::Str(std::rc::Rc::new(crate::trap::io_at(
+                            "nulerr", &path,
                         )))),
                     ));
                 }
@@ -2398,7 +2401,9 @@ impl<'a> Interp<'a> {
                 g.reads.borrow_mut().push((resolved, None));
                 Ok(Val::Result(
                     false,
-                    Box::new(Val::Str(std::rc::Rc::new(format!("cannot read `{path}`")))),
+                    Box::new(Val::Str(std::rc::Rc::new(crate::trap::io_at(
+                        "readerr", &path,
+                    )))),
                 ))
             }
         }
@@ -2434,7 +2439,9 @@ impl<'a> Interp<'a> {
                 g.reads.borrow_mut().push((format!("{resolved}/"), None));
                 Ok(Val::Result(
                     false,
-                    Box::new(Val::Str(std::rc::Rc::new(format!("cannot list `{path}`")))),
+                    Box::new(Val::Str(std::rc::Rc::new(crate::trap::io_at(
+                        "listerr", &path,
+                    )))),
                 ))
             }
         }
@@ -2651,7 +2658,7 @@ impl<'a> Interp<'a> {
         if counted {
             let d = self.call_depth.get() + 1;
             if d > CALL_DEPTH_LIMIT {
-                return Err(Ctrl::Err(format!("call depth exceeds {CALL_DEPTH_LIMIT}")));
+                return Err(Ctrl::Err(crate::trap::call_depth()));
             }
             self.call_depth.set(d);
         }
@@ -2727,7 +2734,7 @@ impl<'a> Interp<'a> {
     /// validated value is just its base value (zero overhead).
     fn construct(&self, decl: &TypeDecl, v: Val) -> Result<Val, Ctrl> {
         if !self.validates(decl, &v)? {
-            return Err(format!("validation failed for `{}`", decl.name).into());
+            return Err(crate::trap::validation(&decl.name, false).into());
         }
         Ok(v)
     }
@@ -3734,7 +3741,7 @@ impl<'a> Interp<'a> {
                     }) = frame.get_mut(name)
                     {
                         if idx < 0 || idx as usize >= items.len() {
-                            return Err(format!("array index {idx} out of bounds").into());
+                            return Err(crate::trap::array_index(idx).into());
                         }
                         std::rc::Rc::make_mut(items)[idx as usize] = v;
                         return Ok(Flow::Normal);
@@ -3746,7 +3753,7 @@ impl<'a> Interp<'a> {
                 }) = self.globals.borrow_mut().get_mut(name)
                 {
                     if idx < 0 || idx as usize >= items.len() {
-                        return Err(format!("array index {idx} out of bounds").into());
+                        return Err(crate::trap::array_index(idx).into());
                     }
                     std::rc::Rc::make_mut(items)[idx as usize] = v;
                     return Ok(Flow::Normal);
@@ -3944,7 +3951,7 @@ impl<'a> Interp<'a> {
                 // one past [`REGION_MAX`] traps there, so trap here with the same
                 // message (interp == native, incl. traps).
                 if self.region_depth.get() >= REGION_MAX as usize {
-                    return Err(format!("region nesting exceeds {REGION_MAX}").into());
+                    return Err(crate::trap::region_depth().into());
                 }
                 self.region_depth.set(self.region_depth.get() + 1);
                 let r = self.block(body, scope);
@@ -4211,7 +4218,7 @@ impl<'a> Interp<'a> {
                     Val::Array(elems) => elems
                         .get(i as usize)
                         .cloned()
-                        .ok_or_else(|| Ctrl::from(format!("array index {i} out of bounds"))),
+                        .ok_or_else(|| Ctrl::from(crate::trap::array_index(i))),
                     Val::Str(st) => st
                         .as_bytes()
                         .get(i as usize)
@@ -4220,7 +4227,7 @@ impl<'a> Interp<'a> {
                             bits: 8,
                             signed: false,
                         })
-                        .ok_or_else(|| Ctrl::from(format!("string index {i} out of bounds"))),
+                        .ok_or_else(|| Ctrl::from(crate::trap::string_index(i))),
                     _ => unreachable!("guarded above"),
                 }
             }
@@ -4414,7 +4421,7 @@ impl<'a> Interp<'a> {
                         }) = frame.get_mut(&recv)
                         {
                             if idx < 0 || idx as usize >= items.len() {
-                                return Err(format!("array index {idx} out of bounds").into());
+                                return Err(crate::trap::array_index(idx).into());
                             }
                             return Ok(std::rc::Rc::make_mut(items).swap_remove(idx as usize));
                         }
@@ -4425,7 +4432,7 @@ impl<'a> Interp<'a> {
                     }) = self.globals.borrow_mut().get_mut(&recv)
                     {
                         if idx < 0 || idx as usize >= items.len() {
-                            return Err(format!("array index {idx} out of bounds").into());
+                            return Err(crate::trap::array_index(idx).into());
                         }
                         return Ok(std::rc::Rc::make_mut(items).swap_remove(idx as usize));
                     }
@@ -5078,8 +5085,8 @@ impl<'a> Interp<'a> {
                                 if bytes.contains(&0) {
                                     return Ok(Val::Result(
                                         false,
-                                        Box::new(Val::Str(std::rc::Rc::new(format!(
-                                            "`{path}` contains a NUL byte"
+                                        Box::new(Val::Str(std::rc::Rc::new(crate::trap::io_at(
+                                            "nulerr", &path,
                                         )))),
                                     ));
                                 }
@@ -5090,16 +5097,16 @@ impl<'a> Interp<'a> {
                                     )),
                                     Err(_) => Ok(Val::Result(
                                         false,
-                                        Box::new(Val::Str(std::rc::Rc::new(format!(
-                                            "`{path}` is not valid UTF-8"
+                                        Box::new(Val::Str(std::rc::Rc::new(crate::trap::io_at(
+                                            "utf8err", &path,
                                         )))),
                                     )),
                                 }
                             }
                             Err(_) => Ok(Val::Result(
                                 false,
-                                Box::new(Val::Str(std::rc::Rc::new(format!(
-                                    "cannot read `{path}`"
+                                Box::new(Val::Str(std::rc::Rc::new(crate::trap::io_at(
+                                    "readerr", &path,
                                 )))),
                             )),
                         }
@@ -5133,8 +5140,8 @@ impl<'a> Interp<'a> {
                             }
                             Err(_) => Ok(Val::Result(
                                 false,
-                                Box::new(Val::Str(std::rc::Rc::new(format!(
-                                    "cannot list `{path}`"
+                                Box::new(Val::Str(std::rc::Rc::new(crate::trap::io_at(
+                                    "listerr", &path,
                                 )))),
                             )),
                         }
@@ -5170,8 +5177,8 @@ impl<'a> Interp<'a> {
                             Ok(()) => Ok(Val::Result(true, Box::new(Val::Bool(true)))),
                             Err(_) => Ok(Val::Result(
                                 false,
-                                Box::new(Val::Str(std::rc::Rc::new(format!(
-                                    "cannot write `{path}`"
+                                Box::new(Val::Str(std::rc::Rc::new(crate::trap::io_at(
+                                    "writeerr", &path,
                                 )))),
                             )),
                         }
@@ -5198,9 +5205,9 @@ impl<'a> Interp<'a> {
                             Ok(()) => Ok(Val::Result(true, Box::new(Val::Bool(true)))),
                             Err(e) => {
                                 let msg = if is_cross_device(&e) {
-                                    format!("cannot rename `{to}` across devices")
+                                    crate::trap::io_at("xdeverr", &to)
                                 } else {
-                                    format!("cannot write `{to}`")
+                                    crate::trap::io_at("writeerr", &to)
                                 };
                                 Ok(Val::Result(
                                     false,
@@ -5229,8 +5236,8 @@ impl<'a> Interp<'a> {
                             Ok(()) => Ok(Val::Result(true, Box::new(Val::Bool(true)))),
                             Err(_) => Ok(Val::Result(
                                 false,
-                                Box::new(Val::Str(std::rc::Rc::new(format!(
-                                    "cannot write `{path}`"
+                                Box::new(Val::Str(std::rc::Rc::new(crate::trap::io_at(
+                                    "writeerr", &path,
                                 )))),
                             )),
                         }
@@ -5260,8 +5267,8 @@ impl<'a> Interp<'a> {
                             )),
                             Err(_) => Ok(Val::Result(
                                 false,
-                                Box::new(Val::Str(std::rc::Rc::new(format!(
-                                    "cannot read `{path}`"
+                                Box::new(Val::Str(std::rc::Rc::new(crate::trap::io_at(
+                                    "readerr", &path,
                                 )))),
                             )),
                         }
@@ -5286,7 +5293,7 @@ impl<'a> Interp<'a> {
                                 return Ok(Val::Result(
                                     false,
                                     Box::new(Val::Str(std::rc::Rc::new(
-                                        "bytes contain a NUL byte".to_string(),
+                                        crate::trap::io("bnul").to_string(),
                                     ))),
                                 ));
                             }
@@ -5297,7 +5304,7 @@ impl<'a> Interp<'a> {
                                 Err(_) => Ok(Val::Result(
                                     false,
                                     Box::new(Val::Str(std::rc::Rc::new(
-                                        "bytes are not valid UTF-8".to_string(),
+                                        crate::trap::io("butf8").to_string(),
                                     ))),
                                 )),
                             }
@@ -5422,7 +5429,7 @@ impl<'a> Interp<'a> {
                         (Val::Array(elems), Val::Int(i)) => elems
                             .get(*i as usize)
                             .cloned()
-                            .ok_or_else(|| format!("array index {i} out of bounds").into()),
+                            .ok_or_else(|| crate::trap::array_index(i).into()),
                         // `s[i]` on a String is the byte at index `i` as a
                         // `UInt8` (bounds-checked) — same value shape as an
                         // element of `bytes(s)` (RFC-0022).
@@ -5434,7 +5441,7 @@ impl<'a> Interp<'a> {
                                 bits: 8,
                                 signed: false,
                             })
-                            .ok_or_else(|| format!("string index {i} out of bounds").into()),
+                            .ok_or_else(|| crate::trap::string_index(i).into()),
                         // `m[k]` on a Map (RFC-0028) → `Option<V>`.
                         (Val::Map(pairs), Val::Str(k)) => Ok(Val::Option(
                             pairs
@@ -5759,10 +5766,7 @@ impl<'a> Interp<'a> {
                         match self.expr(pred, &mut env)? {
                             Val::Bool(true) => {}
                             Val::Bool(false) => {
-                                return Err(format!(
-                                    "validation failed: `{name}` violates its `where` clause"
-                                )
-                                .into())
+                                return Err(crate::trap::validation(name, true).into())
                             }
                             other => {
                                 return Err(format!(
@@ -6165,10 +6169,10 @@ impl<'a> Interp<'a> {
                 Mul => mk(x.wrapping_mul(y)),
                 Div => {
                     if y == 0 {
-                        return Err("division by zero".into());
+                        return Err(crate::trap::DIV_ZERO.into());
                     }
                     if signed && x == min_n && y == -1 {
-                        return Err("integer overflow in division".into());
+                        return Err(crate::trap::DIV_OVERFLOW.into());
                     }
                     mk(if signed {
                         x.wrapping_div(y)
@@ -6178,7 +6182,7 @@ impl<'a> Interp<'a> {
                 }
                 Rem => {
                     if y == 0 {
-                        return Err("remainder by zero".into());
+                        return Err(crate::trap::REM_ZERO.into());
                     }
                     // `MIN % -1 == 0` (RFC-0060): NO trap, unlike `MIN / -1`.
                     // `wrapping_rem` yields 0 there; raw `%` would panic.
@@ -6219,13 +6223,13 @@ impl<'a> Interp<'a> {
                 BitXor => mk(x ^ y),
                 Shl => {
                     if y < 0 || y >= i64::from(bits) {
-                        return Err("shift amount out of range".into());
+                        return Err(crate::trap::SHIFT_RANGE.into());
                     }
                     mk(x.wrapping_shl(y as u32))
                 }
                 Shr => {
                     if y < 0 || y >= i64::from(bits) {
-                        return Err("shift amount out of range".into());
+                        return Err(crate::trap::SHIFT_RANGE.into());
                     }
                     // Signed `>>` is arithmetic (sign-extends); unsigned is
                     // logical (zero-fills). `x`/`y` are already width-wrapped:
@@ -6250,16 +6254,16 @@ impl<'a> Interp<'a> {
                 Mul => Val::Int(a.wrapping_mul(b)),
                 Div => {
                     if b == 0 {
-                        return Err("division by zero".into());
+                        return Err(crate::trap::DIV_ZERO.into());
                     }
                     if a == i64::MIN && b == -1 {
-                        return Err("integer overflow in division".into());
+                        return Err(crate::trap::DIV_OVERFLOW.into());
                     }
                     Val::Int(a / b)
                 }
                 Rem => {
                     if b == 0 {
-                        return Err("remainder by zero".into());
+                        return Err(crate::trap::REM_ZERO.into());
                     }
                     // `MIN % -1 == 0` (RFC-0060): NO trap, unlike `MIN / -1`.
                     // `wrapping_rem` yields 0 there; raw `%` would panic on overflow.
@@ -6278,13 +6282,13 @@ impl<'a> Interp<'a> {
                 BitXor => Val::Int(a ^ b),
                 Shl => {
                     if b < 0 || b >= 64 {
-                        return Err("shift amount out of range".into());
+                        return Err(crate::trap::SHIFT_RANGE.into());
                     }
                     Val::Int(a.wrapping_shl(b as u32))
                 }
                 Shr => {
                     if b < 0 || b >= 64 {
-                        return Err("shift amount out of range".into());
+                        return Err(crate::trap::SHIFT_RANGE.into());
                     }
                     Val::Int(a >> b)
                 }
@@ -6463,11 +6467,7 @@ impl<'a> Interp<'a> {
                         self.validates(decl, &v)?
                     };
                     if !holds {
-                        let msg = if matches!(decl.base, Type::Record(_)) {
-                            format!("validation failed: `{n}` violates its `where` clause")
-                        } else {
-                            format!("validation failed for `{n}`")
-                        };
+                        let msg = crate::trap::validation_of(decl);
                         return Err(msg.into());
                     }
                 }
@@ -6815,7 +6815,7 @@ impl<'a> Interp<'a> {
     }
 
     fn no_boxed_stream() -> Ctrl {
-        Ctrl::Err("no stream in this box".into())
+        Ctrl::Err(crate::trap::NO_STREAM.into())
     }
 
     /// One element from a stream, advancing it (RFC-0075 M2b). `None` ends the

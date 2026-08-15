@@ -2115,13 +2115,13 @@ step at `main`'s exit, which is the placement rendered — plus a fourth file,
 `releaseacrossexit.lowered`, added deliberately because
 `ownedcontainer.vyrn` reaches a block exit and a `return` and nothing else.
 
-**M5 — traps, resolved dispatch, and the boundary ladder.** One trap table below
-all three engines, holding the 20 wordings and their conditions. `coerce`'s ladder
-is decided in the lowering; the three engines keep only their leaves. The
-interpreter stops re-spelling `IO_MESSAGES`. Gate: the count of trap literals
-outside the table is **zero**, and a test asserts it — the same shape as the
-reserved-name gate RFC-0094 M2 landed. M4 also re-parented two things here: the
-`ImplicitDispatch` class and M3's −1,200.
+**M5 — traps and the boundary ladder.** One trap table below all three engines,
+holding the 20 wordings and their conditions — in `vyrn-frontend` rather than in
+`vyrn-lower`, which is the record below and the answer to §6.4. `coerce`'s ladder is
+decided in the lowering; the three engines keep only their leaves. The interpreter
+stops re-spelling `IO_MESSAGES`. Gate: the count of trap literals outside the table
+is **zero**, and a test asserts it — the same shape as the reserved-name gate
+RFC-0094 M2 landed.
 
 ### M5 first phase — the receiver type. `ImplicitDispatch` IS ZERO AND ITS RULE HAS RETIRED; AND THE MEASUREMENT THAT COMES WITH IT SAYS M3's −1,200 WAS RE-PARENTED ONTO A CLASS TEN TIMES SMALLER THAN THE PROSE SAID
 
@@ -2224,6 +2224,105 @@ about 180 of both halves are `solve_param` moving from `vyrn-codegen` into
 `vyrn_frontend::types` so the lowering can use the one matcher rather than write a
 second (§1.1's shape, avoided rather than added to).
 
+### M5, the trap table — THE COUNT OF TRAP LITERALS OUTSIDE THE TABLE IS ZERO AND A TEST ASSERTS IT; THE TABLE IS IN `vyrn-frontend` RATHER THAN `vyrn-lower`, WHICH ANSWERS §6.4; AND THE GATE FOUND FIVE COPIES §1.3'S CENSUS HAD MISSED
+
+| PR | What | Changed lines | Files |
+|---|---|---|---|
+| M5b | `vyrn_frontend::trap`; all three engines and the C shim read it; `vyrn-cli/tests/traps.rs` asserts nobody re-spells it; this text | 915 | 15 + this file |
+
+**Where it went, and §6.4 is answered by the placement rather than by an
+argument.** Open question 6.4 asked whether `vyrn-lower` should be a module of
+`vyrn-frontend` instead of a crate, and said "M5 is when this has to be settled:
+the trap table is the first thing the interpreter must import, and
+`vyrn-frontend` cannot depend on `vyrn-lower` while `vyrn-lower` depends on the
+checker." **The table does not have to be in `vyrn-lower` for that sentence to
+bite.** It has to be in the crate all three engines can read, which is
+`vyrn-frontend` — the same seam M4c used when it moved the release placement into
+`own` for the same reason, and stated in the same words. So `vyrn-lower` stays a
+crate, 6.4 keeps its answer from M1 (a crate boundary is what stops the lowering
+reaching a backend by accident), and the question is closed rather than deferred
+again.
+
+**What moved.** `vyrn_frontend::trap` holds every wording a running program can
+die with, in three shapes because there are three: fixed (`DIV_ZERO` and seven
+neighbours); split around a runtime value (`ARRAY_INDEX`, and every `IO` entry,
+whose `%s` is a path) — the pair is the primitive because the direct wasm backend
+has no `snprintf` and concatenates; and filled by a compile-time constant
+(`call_depth`, `region_depth`). `line(msg)` is the framing a compiled runtime adds
+and the CLI adds for the interpreter, so an engine chooses HOW to say a trap and
+never WHAT. `IO_MESSAGES` / `io_message` / `io_message_parts` are re-exports from
+`vyrn-codegen` now, under their old names, so no backend call site moved.
+
+**Two deletions came free, and both were a second copy of a message.**
+
+- **The native prelude hand-counted its array lengths.** `@.trap.div0` was
+  `[25 x i8]` written beside `"error: division by zero\0A\00"` written beside the
+  same sentence in `direct.rs` and in `interp.rs`. `llvm_str` already measures
+  what it escapes, so `trap_global(name, msg)` writes both and the count is
+  derived. Five globals stop carrying a number a reviewer had to check by hand.
+- **The C shim's `out of memory` was a fourth spelling at three sites**, and it
+  could not be otherwise: C cannot import a Rust constant. `RUNTIME_SHIM` is
+  `RUNTIME_SHIM_TEMPLATE` with a `$OOM` hole and `runtime_shim()` fills it. That
+  also fixes something nobody had noticed: the shim's object cache keys on the
+  shim's own bytes, so a reworded trap now invalidates the cached object instead
+  of being silently linked out of it.
+
+**The gate, and what it found.** `vyrn-cli/tests/traps.rs` reads its needles OUT
+of the table — a wording added to `trap.rs` tomorrow is gated the day it lands,
+and a list in the test would have been a twenty-first copy — and scans every
+`.rs` file under a `src/` of the workspace, `vyrn-lsp`, `vyrn-genwasm` and
+`vyrn-play` included. **It is zero, and it was not zero when it was first run:
+it named nine sites, and five of them were real.**
+
+| what it found | verdict |
+|---|---|
+| `vyrn-cli/src/remote.rs:42`, `vyrn-lsp/src/main.rs:229` | two more copies of `` cannot list `%s` ``, in two resolvers §1.3's census never looked at. Fixed. |
+| `vyrn-frontend/src/interp.rs:1940` | `` moduleInterface cannot read `{path}`: {e} `` — a generator diagnostic that had re-spelled the I/O payload inside itself. It composes now (`format!("moduleInterface {}: {e}", io_at("readerr", …))`), byte for byte the same string. |
+| `vyrn-frontend/src/codec.rs:417` and `loader.rs:45,111` | a third `validation_message` and two more `cannot list`, found by the census that preceded the gate. Fixed. |
+| `checker.rs:3312`, `interp.rs:3594` etc. — `array index must be an Int64` | **not a trap**, and the needle was wrong rather than the code. A split wording needs BOTH halves before it is that wording; a prefix alone opens a compile-time diagnostic about a program. |
+| two `ir.contains("error: …")` in `lib.rs` | test assertions the scanner had failed to skip, because it counted braces and `lib.rs` holds LLVM function bodies as string constants. It ends a `#[cfg(test)]` module at the next bare `}` in column zero instead — the one thing that survives this workspace's files. |
+
+**Test literals stay, deliberately.** A test asserting
+`run(src).unwrap_err() == "array index 5 out of bounds"` is the independent check
+ON the table; reading the wording out of `trap` there would assert that a value
+equals itself, which is the mistake M4d's own retirement notes name. Comments stay
+too — a comment quoting a wording is documentation of the contract, and forbidding
+it would delete the sentences that explain the table. The gate was verified by
+breaking it: one planted `format!("array index {} out of bounds", 1)` in
+`direct.rs` fails the run and names the line.
+
+**Byte identity.** All 163 examples, both backends, `emit-ir` and `emit-wat`
+against `main`: **326 of 326 identical, raw.** That is the tightest check this
+phase could have: the LLVM prelude's trap globals are IN the emitted text, escapes
+and array lengths included, so a single wrong byte in the escaping rewrite would
+show. Full parity green (40 tests, `--ignored`) — which is the other half, because
+parity compares stderr and stderr is what this phase must not move. Workspace
+green (68 suites), `vyrn-lsp` green, `vyrn-play` checks, `cargo fmt --check` clean.
+
+**The gate, and the verdict.** M5's trap gate — the count of trap literals
+outside the table is zero, test-asserted — **is met**. **This phase is over
+§3.0's budget and this paragraph is where it says so** (§3's rule; RFC-0094 M1 is
+the precedent): this phase is 425 changed lines across 13 existing files plus two
+new ones, `trap.rs` (260) and `traps.rs` (230), for **915 across 15 files** against
+≤ 800 / ≤ 15. It has no clean seam: a table nothing reads gates nothing, and a gate
+with no table does not compile, so cutting it would need a stack, which delivery
+forbids. About 300 of the 915 is doc comment and this text.
+
+### What M5 did not do, and the measurement that prices it
+
+**`coerce` did not move, and the reason is a size rather than a blocker.** M5 asks
+for the boundary ladder's decisions to be decided in the lowering with the three
+engines keeping their leaves — §1.5's 505 lines across `interp.rs:6226` (161),
+`lib.rs:2364` (146) and `direct.rs:3784` (198). Its input already exists: M3's
+`(has, ty)` pair on every row IS the question `coerce(has → needs)` answers, and §3
+M3's finding 2 already records that the pair's has-type is "a decision M5
+inherits". What is missing is not information; it is a phase. `coerce` runs at
+every value boundary in every program, so a plan-in-the-form is a change to the
+one function whose output every single example depends on, and it belongs beside
+the trap table the way M4's four phases belonged beside each other rather than
+inside one PR. **It is not started, it is not blocked, and this paragraph is the
+gate saying so rather than the bar moving.**
+
 **M6 — the interpreter runs the lowered form.** For everything M1–M5 moved, the
 three engines stop holding three answers, and every place the interpreter still
 does something else becomes a **declared** difference with a name — the `?` path
@@ -2318,9 +2417,10 @@ Stated briefly, because none of it is a reason to do M1.
 
 ## 6. Open questions
 
-Five were asked. Two are now answered — 6.1 by the migration and 6.5 by rustc —
-and both keep their question here rather than disappearing into the design, so a
-reader can see what was decided and against what.
+Five were asked. Four are now answered — 6.1 by the migration, 6.3 and 6.4 by
+milestones, 6.5 by rustc — and each keeps its question here rather than
+disappearing into the design, so a reader can see what was decided and against
+what. 6.2 is the one still open.
 
 ### 6.1 Does `Lowered` own or borrow? **Answered: borrow, during the migration — and M1 measured what the other one costs.**
 
@@ -2358,15 +2458,21 @@ deviation 6). Note the comptime sandbox is a fourth consumer of the
 form, by both routes: a `gen fn` runs through `interp::generate` or, since
 RFC-0076, through compiled wasm, and both routes are Vyrn programs.
 
-### 6.4 Can `vyrn-lower` be a module of `vyrn-frontend` instead of a crate? **Open, and M1 shipped the crate.**
+### 6.4 Can `vyrn-lower` be a module of `vyrn-frontend` instead of a crate? **Answered by M5: it stays a crate, because the trap table went below it rather than into it.**
 
 Lazier, and it puts the trap table where the interpreter can already reach it.
 The argument for a crate is only that `vyrn-frontend` is already 13,526 lines of
 checker; that is not much of an argument. M1 shipped the crate because a crate
 boundary is what stopped the lowering from reaching a backend by accident, and
-because moving a module later is a rename. **M5 is when this has to be settled**:
-the trap table is the first thing the interpreter must import, and `vyrn-frontend`
-cannot depend on `vyrn-lower` while `vyrn-lower` depends on the checker.
+because moving a module later is a rename. **M5 settled it, and not the way the
+question expected**: the trap table is the first thing the interpreter must
+import, and `vyrn-frontend` cannot depend on `vyrn-lower` while `vyrn-lower`
+depends on the checker — so the table went into `vyrn_frontend::trap`, which is
+the crate all three engines already read. Nothing had to merge. That is the same
+seam M4c used for the release placement (`own`), and using it twice is what makes
+it a rule rather than a workaround: **what three engines share lives in the crate
+three engines depend on, and the form is what reads it.** The crate boundary keeps
+the argument M1 shipped it for.
 
 ### 6.5 Does the form need a stable text rendering? **Answered: no. Print, do not parse. Unstable text, blessed snapshots.**
 

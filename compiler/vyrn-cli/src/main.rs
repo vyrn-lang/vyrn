@@ -53,7 +53,7 @@ use std::process::{Command, ExitCode};
 // and the excluded `vyrn-genwasm` can see (RFC-0076 M4). The wasi-sysroot and
 // builtins lookups are still there, but this driver no longer needs them: after
 // RFC-0077 M5 nothing here compiles C for wasm — the generator engine does.
-use vyrn_codegen::toolchain::{extern_trap_stubs, find_clang, RUNTIME_SHIM};
+use vyrn_codegen::toolchain::{extern_trap_stubs, find_clang, runtime_shim};
 
 /// RFC-0076: generators compiled to wasm instead of interpreted. Behind a
 /// feature so the default build keeps its zero external dependencies.
@@ -3202,7 +3202,7 @@ fn bench_native(
         eprintln!("error: cannot write {}: {e}", ll_path.display());
         return (ExitCode::FAILURE, None);
     }
-    let mut shim = RUNTIME_SHIM.to_string();
+    let mut shim = runtime_shim();
     shim.push_str(&extern_trap_stubs(&program));
     if let Err(e) = std::fs::write(&shim_path, &shim) {
         eprintln!("error: cannot write {}: {e}", shim_path.display());
@@ -4659,7 +4659,7 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
     // canonical "not available on this target" message and exiting — the same
     // wording the interpreter traps with. On wasm an `extern` resolves to the host
     // page's `vyrn` import namespace, which the direct backend declares itself.
-    let shim = RUNTIME_SHIM.to_string() + &extern_trap_stubs(&program);
+    let shim = runtime_shim() + &extern_trap_stubs(&program);
     let shim_path = PathBuf::from(&out_path).with_extension("shim.c");
     if let Err(e) = std::fs::write(&shim_path, &shim) {
         eprintln!("error: cannot write {}: {e}", shim_path.display());

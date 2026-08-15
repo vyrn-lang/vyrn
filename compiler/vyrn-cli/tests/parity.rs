@@ -4488,7 +4488,7 @@ fn main() -> Int64 {
     // chosen here — it is the one `__vyrn_alloc_check` already prints for the same
     // failure on native.
     assert!(
-        vyrn_codegen::toolchain::RUNTIME_SHIM.contains("\"error: out of memory\\n\""),
+        vyrn_codegen::toolchain::runtime_shim().contains("\"error: out of memory\\n\""),
         "the native shim no longer prints what this asserts"
     );
 }
@@ -4613,7 +4613,7 @@ fn main() -> Int64 {
     );
     // Same single-sourcing as the pin above: the wording is the native shim's.
     assert!(
-        vyrn_codegen::toolchain::RUNTIME_SHIM.contains("\"error: out of memory\\n\""),
+        vyrn_codegen::toolchain::runtime_shim().contains("\"error: out of memory\\n\""),
         "the native shim no longer prints what this asserts"
     );
 }

@@ -412,14 +412,7 @@ pub fn missing_message(field: &str) -> String {
 /// boundaries (see `interp::coerce` / codegen `emit`), only accumulated as an
 /// Issue instead of trapping.
 pub fn validate_message(decl: &TypeDecl) -> String {
-    if matches!(decl.base, Type::Record(_)) {
-        format!(
-            "validation failed: `{}` violates its `where` clause",
-            decl.name
-        )
-    } else {
-        format!("validation failed for `{}`", decl.name)
-    }
+    crate::trap::validation_of(decl)
 }
 
 /// Extend a dotted/indexed path with a record field.

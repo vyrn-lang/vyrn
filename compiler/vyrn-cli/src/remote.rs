@@ -39,7 +39,7 @@ pub use vyrn_frontend::manifest::{
 /// List the entry names directly under `dir` (generation-time `listDir`,
 /// RFC-0021), sorted for determinism.
 pub fn list_dir(dir: &str) -> Result<Vec<String>, String> {
-    let entries = std::fs::read_dir(dir).map_err(|_| format!("cannot list `{dir}`"))?;
+    let entries = std::fs::read_dir(dir).map_err(|_| vyrn_frontend::trap::io_at("listerr", dir))?;
     let mut names: Vec<String> = entries
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())

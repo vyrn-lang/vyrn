@@ -91,7 +91,9 @@ use vyrn_frontend::types::INT32;
 /// and a path that does not reach a `ret` (a trap) ends the process.
 fn call_depth_runtime() -> String {
     let limit = vyrn_frontend::interp::CALL_DEPTH_LIMIT;
-    let (msg, len) = llvm_str(&format!("error: call depth exceeds {limit}\n"));
+    let (msg, len) = llvm_str(&vyrn_frontend::trap::line(
+        &vyrn_frontend::trap::call_depth(),
+    ));
     format!(
         "\
 @__vyrn_call_depth = thread_local global i64 0
@@ -135,7 +137,9 @@ entry:
 /// fills them, the way [`call_depth_runtime`] already builds its own number in.
 fn region_runtime() -> String {
     let n = vyrn_frontend::interp::REGION_MAX;
-    let (msg, len) = llvm_str(&format!("error: region nesting exceeds {n}\n"));
+    let (msg, len) = llvm_str(&vyrn_frontend::trap::line(
+        &vyrn_frontend::trap::region_depth(),
+    ));
     REGION_RUNTIME
         .replace("$NEST", &n.to_string())
         .replace("$TRAPLEN", &len.to_string())
@@ -254,7 +258,7 @@ done:
 /// read out of freed memory. That check is the whole reason the magic exists:
 /// an address is an ordinary `Int64` a program can spell.
 const STREAM_RUNTIME: &str = "\
-@.fmt.nob = private unnamed_addr constant [30 x i8] c\"error: no stream in this box\\0A\\00\"
+$NOBOX
 
 define void @__vyrn_stream_nobox() {
 entry:
@@ -608,49 +612,11 @@ pub(crate) fn extern_symbol(name: &str) -> String {
 /// WASI clocks/random, so no `vyrn` host page is needed. Returns the shim symbol
 /// for the recognized Vyrn extern name. Matched by name (like the I/O builtins);
 /// these `host*` names are reserved.
-/// The RFC-0014 I/O error wording, canonical Vyrn strings and NEVER OS text, so
-/// every backend produces byte-identical `Err` payloads. `%s` is the path.
-///
-/// One list because parity compares these bytes. The textual emitter interns them
-/// as `@.io.<name>` globals and renders them with `__vyrn_snprintf`; the direct
-/// wasm backend has no `snprintf` (RFC-0077 M2j) and splits each format on its
-/// `%s` instead — so a message reworded here changes both, and neither can hold a
-/// private copy that drifts.
-pub const IO_MESSAGES: &[(&str, &str)] = &[
-    ("readerr", "cannot read `%s`"),
-    ("writeerr", "cannot write `%s`"),
-    ("utf8err", "`%s` is not valid UTF-8"),
-    // `listDir` (RFC-0021), reachable from a compiled module only on the
-    // generator-host path (RFC-0076 M2) — the wording still lives here, with the
-    // rest, rather than in the shim that renders it.
-    ("listerr", "cannot list `%s`"),
-    ("nulerr", "`%s` contains a NUL byte"),
-    // RFC-0044: a cross-device (`EXDEV`) rename — surfaced distinctly instead of
-    // silently degrading to copy. Ordinary not-found/permission rename failures
-    // reuse `writeerr` (rewriting the destination).
-    ("xdeverr", "cannot rename `%s` across devices"),
-    // Byte-bridge errors (M2, no path): fixed payloads for `stringFromBytes`.
-    ("bnul", "bytes contain a NUL byte"),
-    ("butf8", "bytes are not valid UTF-8"),
-];
-
-/// One [`IO_MESSAGES`] entry by name. Panics on an unknown key, because every
-/// caller names a literal and a typo is a wrong payload rather than a miss.
-pub fn io_message(name: &str) -> &'static str {
-    IO_MESSAGES
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, m)| *m)
-        .unwrap_or_else(|| panic!("no I/O message named `{name}`"))
-}
-
-/// The two halves of an [`io_message`] around its `%s`, for a backend that
-/// concatenates rather than formatting.
-pub fn io_message_parts(name: &str) -> (&'static str, &'static str) {
-    io_message(name)
-        .split_once("%s")
-        .unwrap_or_else(|| panic!("`{name}` has no `%s`"))
-}
+/// The RFC-0014 I/O wording, and the two readers a backend needs — the list
+/// itself is [`vyrn_frontend::trap::IO`], below all three engines (RFC-0101 M5).
+/// It was here, which meant the interpreter could not read it and re-spelled all
+/// eight at thirteen sites.
+pub use vyrn_frontend::trap::{io as io_message, io_parts as io_message_parts, IO as IO_MESSAGES};
 
 pub fn host_boundary_extern(name: &str) -> Option<&'static str> {
     match name {
@@ -1335,14 +1301,20 @@ pub fn emit(program: &Program) -> Result<String, String> {
     }
     // Index traps carry the offending index (fprintf'd to stderr), matching
     // the interpreter's `error: array index {i} out of bounds` byte-for-byte.
-    out.push_str(
-        "@.trap.aoob = private unnamed_addr constant [39 x i8] \
-         c\"error: array index %lld out of bounds\\0A\\00\"\n",
-    );
-    out.push_str(
-        "@.trap.soob = private unnamed_addr constant [40 x i8] \
-         c\"error: string index %lld out of bounds\\0A\\00\"\n",
-    );
+    out.push_str(&trap_global(
+        "@.trap.aoob",
+        &vyrn_frontend::trap::line(&vyrn_frontend::trap::around(
+            vyrn_frontend::trap::ARRAY_INDEX,
+            "%lld",
+        )),
+    ));
+    out.push_str(&trap_global(
+        "@.trap.soob",
+        &vyrn_frontend::trap::line(&vyrn_frontend::trap::around(
+            vyrn_frontend::trap::STRING_INDEX,
+            "%lld",
+        )),
+    ));
     // (`@.trap.sliceoob` and `@.trap.slicesplit` were here. RFC-0079 M3 made
     // `slice` return its failure instead of ending the process, so the catalogue
     // SHRANK by two rows rather than growing — which is the trade RFC-0078's
@@ -1366,10 +1338,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // this arm whether or not the program mounts a live route, and refusing at
     // compile time would make every REST projection unbuildable to serve a
     // feature it does not use. So it is a runtime trap on the path nothing takes.
-    out.push_str(&{
-        let (escaped, len) = llvm_str(SERVE_STREAM_TRAP);
-        format!("@.trap.serve = private unnamed_addr constant [{len} x i8] c\"{escaped}\"\n\n")
-    });
+    out.push_str(&{ trap_global("@.trap.serve", &serve_stream_trap()) + "\n" });
 
     // ---- the trap tail, once (RFC-0090 phase 8d) ------------------------
     // Every trap and every `panic` used to emit three calls INLINE at its site:
@@ -1431,7 +1400,16 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str(&region_runtime());
     out.push_str(&call_depth_runtime());
 
-    out.push_str(STREAM_RUNTIME);
+    out.push_str(
+        &STREAM_RUNTIME.replace(
+            "$NOBOX",
+            trap_global(
+                "@.fmt.nob",
+                &vyrn_frontend::trap::line(vyrn_frontend::trap::NO_STREAM),
+            )
+            .trim_end(),
+        ),
+    );
     out.push_str(STRING_RUNTIME);
     // The UTF-8 validator DFA table, then the validator. (The base64 alphabet
     // table went with the codecs -- RFC-0078 M4c; `std/codecs` builds it from a
@@ -1479,31 +1457,32 @@ pub fn emit(program: &Program) -> Result<String, String> {
         if t.predicate.is_none() {
             continue;
         }
-        let (escaped, len) = llvm_str(&validation_message(t));
-        out.push_str(&format!(
-            "@.trap.verr.{} = private unnamed_addr constant [{len} x i8] c\"{escaped}\"\n",
-            t.name
+        out.push_str(&trap_global(
+            &format!("@.trap.verr.{}", t.name),
+            &validation_message(t),
         ));
     }
     // Division trap messages — byte-identical to the interpreter's errors as
     // rendered by the CLI (`error: {msg}` on stderr, exit 1).
-    out.push_str(
-        "@.trap.div0 = private unnamed_addr constant [25 x i8] c\"error: division by zero\\0A\\00\"\n",
-    );
-    out.push_str(
-        "@.trap.rem0 = private unnamed_addr constant [26 x i8] c\"error: remainder by zero\\0A\\00\"\n",
-    );
-    out.push_str(
-        "@.trap.divovf = private unnamed_addr constant [37 x i8] \
-         c\"error: integer overflow in division\\0A\\00\"\n",
-    );
+    out.push_str(&trap_global(
+        "@.trap.div0",
+        &vyrn_frontend::trap::line(vyrn_frontend::trap::DIV_ZERO),
+    ));
+    out.push_str(&trap_global(
+        "@.trap.rem0",
+        &vyrn_frontend::trap::line(vyrn_frontend::trap::REM_ZERO),
+    ));
+    out.push_str(&trap_global(
+        "@.trap.divovf",
+        &vyrn_frontend::trap::line(vyrn_frontend::trap::DIV_OVERFLOW),
+    ));
     // Shift-amount-out-of-range trap (RFC-0045): a shift by `>= bitwidth` (or a
     // negative amount) traps with this canonical wording, byte-identical to the
     // interpreter's `shift amount out of range` as the CLI renders it.
-    out.push_str(
-        "@.trap.shift = private unnamed_addr constant [34 x i8] \
-         c\"error: shift amount out of range\\0A\\00\"\n",
-    );
+    out.push_str(&trap_global(
+        "@.trap.shift",
+        &vyrn_frontend::trap::line(vyrn_frontend::trap::SHIFT_RANGE),
+    ));
     // (`@.fmt.nan`\`@.str.nan` — the literal `NaN` this build selected on an
     // `fcmp uno` because UCRT's `%f` says `-nan(ind)` — went with RFC-0081 M2.
     // `f64Str` spells the three non-finite words itself, in Vyrn, once.)
@@ -2014,10 +1993,12 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // anywhere in the module) is complete. Every call inside them is direct;
     // the defensive default arm needs its message global exactly once.
     if !fnval_dispatch.is_empty() {
-        let (escaped, len) = llvm_str("error: internal: invalid function value\n");
-        out.push_str(&format!(
-            "@.fnval.bad = private unnamed_addr constant [{len} x i8] c\"{escaped}\"\n\n"
-        ));
+        out.push_str(
+            &(trap_global(
+                "@.fnval.bad",
+                &vyrn_frontend::trap::line(vyrn_frontend::trap::BAD_FN_VALUE),
+            ) + "\n"),
+        );
         let mut dgen = Gen::new(
             &ret_types,
             &param_types,
@@ -11671,8 +11652,9 @@ fn pattern_binding(p: &Pattern) -> Option<&str> {
 /// The wording both compiling backends print for `serveStream` (RFC-0074 M3a).
 /// One constant so the two engines cannot drift, which is the rule every trap
 /// message in this project follows.
-pub(crate) const SERVE_STREAM_TRAP: &str =
-    "error: serveStream: a compiled build has no accept loop — a live route needs `vyrn serve`\n";
+pub(crate) fn serve_stream_trap() -> String {
+    vyrn_frontend::trap::line(vyrn_frontend::trap::SERVE_STREAM)
+}
 
 /// A static `String` value in the data segment: the `{ i64 len, i64 cap }` header
 /// (RFC-0089 M1a) followed by the NUL-terminated bytes. `cap` is [`STR_STATIC`],
@@ -11692,6 +11674,19 @@ fn static_str_global(name: &str, s: &str) -> String {
 fn static_str_ptr(name: &str, s: &str) -> String {
     let len = s.len() + 1;
     format!("getelementptr inbounds ({{ i64, i64, [{len} x i8] }}, ptr {name}, i64 0, i32 2)")
+}
+
+/// One `@.trap.*` / `@.fmt.*` global holding a wording from
+/// [`vyrn_frontend::trap`] — RFC-0101 M5.
+///
+/// The array length used to be hand-counted beside each literal (`[25 x i8]`
+/// against `"error: division by zero\0A\00"`), which is the second copy of the
+/// message: a reworded trap needed the number recounted, and nothing checked it.
+/// `llvm_str` already measures what it escapes, so this takes the wording and
+/// writes both.
+fn trap_global(name: &str, msg: &str) -> String {
+    let (escaped, len) = llvm_str(msg);
+    format!("{name} = private unnamed_addr constant [{len} x i8] c\"{escaped}\"\n")
 }
 
 fn llvm_str(s: &str) -> (String, usize) {
@@ -12895,14 +12890,7 @@ pub(crate) fn validation_required<'t>(
 /// Byte-identical across interp, native and wasm — parity compares stderr — so
 /// it is built here rather than spelled at each of the places that trap.
 pub(crate) fn validation_message(decl: &TypeDecl) -> String {
-    if matches!(decl.base, Type::Record(_)) {
-        format!(
-            "error: validation failed: `{}` violates its `where` clause\n",
-            decl.name
-        )
-    } else {
-        format!("error: validation failed for `{}`\n", decl.name)
-    }
+    vyrn_frontend::trap::line(&vyrn_frontend::trap::validation_of(decl))
 }
 
 /// What a `where` predicate has in scope, re-exported from the frontend.

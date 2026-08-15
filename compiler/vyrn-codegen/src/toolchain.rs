@@ -15,7 +15,14 @@ use std::process::Command;
 /// linkable symbol, so the emitted IR calls these two functions instead. The
 /// shim is compiled by clang next to the IR on every target — MSVC, glibc,
 /// and wasi-libc alike.
-pub const RUNTIME_SHIM: &str = r#"
+///
+/// `$OOM` is a hole rather than a literal: the C source cannot import a Rust
+/// constant, so the one trap this file prints was a fourth spelling of
+/// [`vyrn_frontend::trap::OUT_OF_MEMORY`] (three of them, in fact — three call
+/// sites). [`runtime_shim`] fills it, and its result is what the shim cache
+/// hashes, so a reworded trap invalidates the cached object rather than being
+/// silently linked out of it.
+pub const RUNTIME_SHIM_TEMPLATE: &str = r#"
 /* MSVC's UCRT deprecates fopen in favor of fopen_s; the portable spelling is
    intentional (glibc and wasi-libc have no fopen_s), so silence the advisory. */
 #define _CRT_SECURE_NO_WARNINGS
@@ -88,21 +95,21 @@ long long __vyrn_col_at(const unsigned char* d, long long len, long long off) {
    could wrap to a tiny allocation - a buffer overflow, not an error. */
 static void* __vyrn_alloc_check(void* p, unsigned long long n) {
     if (p == NULL && n > 0) {
-        fputs("error: out of memory\n", stderr);
+        fputs($OOM, stderr);
         exit(1);
     }
     return p;
 }
 void* __vyrn_malloc(unsigned long long n) {
     if (n > (unsigned long long)(size_t)-1) {
-        fputs("error: out of memory\n", stderr);
+        fputs($OOM, stderr);
         exit(1);
     }
     return __vyrn_alloc_check(malloc((size_t)n), n);
 }
 void* __vyrn_realloc(void* p, unsigned long long n) {
     if (n > (unsigned long long)(size_t)-1) {
-        fputs("error: out of memory\n", stderr);
+        fputs($OOM, stderr);
         exit(1);
     }
     return __vyrn_alloc_check(realloc(p, (size_t)n), n);
@@ -693,6 +700,18 @@ int main(int argc, char** argv) {
 ///
 /// The declared `(void)` signature is intentional: the stub never returns (it
 /// `exit`s), so the caller's argument/return registers are never observed.
+/// [`RUNTIME_SHIM_TEMPLATE`] with its one trap wording filled in from
+/// [`vyrn_frontend::trap`] — RFC-0101 M5.
+pub fn runtime_shim() -> String {
+    RUNTIME_SHIM_TEMPLATE.replace(
+        "$OOM",
+        &format!(
+            "{:?}",
+            vyrn_frontend::trap::line(vyrn_frontend::trap::OUT_OF_MEMORY)
+        ),
+    )
+}
+
 pub fn extern_trap_stubs(program: &vyrn_frontend::ast::Program) -> String {
     let mut s = String::new();
     for f in program
@@ -888,7 +907,7 @@ pub fn shim_wasm() -> Option<PathBuf> {
     // and the shim source hash is what decides them.
     let key = format!(
         "shim-{}-{}.wasm",
-        vyrn_frontend::hash::sha256_hex(RUNTIME_SHIM.as_bytes()),
+        vyrn_frontend::hash::sha256_hex(runtime_shim().as_bytes()),
         crate::wasm::SHIM_BASE,
     );
     let dir = shim_cache_dir();
@@ -908,7 +927,7 @@ pub fn shim_wasm() -> Option<PathBuf> {
     };
     std::fs::create_dir_all(&dir).ok()?;
     let src = dir.join(format!("{key}.c"));
-    std::fs::write(&src, RUNTIME_SHIM).ok()?;
+    std::fs::write(&src, runtime_shim()).ok()?;
     // Per-process, then renamed: the LSP and a build share this directory, and a
     // reader must never see half a module.
     let tmp = dir.join(format!("{key}.{}.tmp", std::process::id()));
