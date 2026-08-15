@@ -1513,6 +1513,52 @@ can print (`interp.rs:2776`). So a program that carries a declaring type across 
 corpus never reaches it, or it does and parity is not looking. M4 writes that
 program before it writes anything else.
 
+### M4 step 0 — the prediction was right, and the sacred invariant had a hole
+
+**The three engines printed different output, and the corpus had never reached
+it.** `examples/releaseacrosstry.vyrn` is the program the paragraph above asked
+for: a `Ring` with `impl Owned` whose `release` prints, bound by a `let`, and a
+`?` that fails past it. Four shapes — over `Option`, over `Result`, two frames
+deep, and an explicit `return` as the control.
+
+| engine | output |
+|---|---|
+| `vyrn run` | `after option / after result / after nested / release return / after return` |
+| native | `release option / after option / release result / after result / release inner / release outer / after nested / release return / after return` |
+| wasm | identical to native, byte for byte |
+
+**The two compiled backends agree with each other and the interpreter drops four
+lines**, so the fix direction was never in doubt: the interpreter runs what the
+backends run. `Expr::Try` propagates as `Ctrl::Return` through the error channel,
+and `Interp::block`'s `Err` arm returned without touching the frame's pending
+drops, while a `return` statement — `Flow::Return` — has always run them. The
+fix is that arm asking which signal it is holding: a `Ctrl::Return` is a function
+exit and runs the drops; a `Ctrl::Err` is a trap, and neither backend reclaims
+anything on the way out of a trap. **Nine lines of code and a paragraph saying
+why.**
+
+Three things this find is worth stating plainly.
+
+1. **It is a defect in the invariant this whole RFC calls the best thing the
+   project has built**, and it survived because parity is a corpus and a corpus
+   is a sample. §2.4 already said a shared form "does not make three engines
+   identical, it makes their differences declared instead of accidental" — this
+   was an *undeclared* one, documented nowhere, reachable by a program anybody
+   could write.
+2. **§1.4's own description of it was too generous.** It records the `?` skip as
+   "documented as intentional — the host reclaims", and that reading is right for
+   a buffer and wrong for a declared `release`, which is ordinary Vyrn and can
+   print, allocate or fail. The distinction the code was making was between
+   observable and unobservable reclamation, and it had put a user's own code on
+   the wrong side of it.
+3. **A shadow milestone found it before its own shadow PR was written**, which is
+   the argument for M4 splitting the way [A9] says: the prediction came out of
+   reading three walks side by side, and that reading is the milestone.
+
+`examples/releaseacrosstry.vyrn` is in the corpus, so the three engines are
+pinned on it now — stdout, stderr and exit code, byte for byte, in the gate that
+missed it. Full parity is green with it: 40 tests, 161 examples, no divergence.
+
 **M5 — traps and the boundary ladder.** One trap table in `vyrn-lower`, below all
 three engines, holding the 20 wordings and their conditions. `coerce`'s ladder is
 decided in the lowering; the three engines keep only their leaves. The interpreter
