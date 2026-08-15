@@ -248,6 +248,49 @@ pub enum Exit {
     Try,
 }
 
+/// One reclamation the LANGUAGE runs, PLACED rather than asked for — RFC-0101
+/// §2.1 item 3.
+///
+/// [`Ownership::droppable`] answers "is this binding droppable, and nominally
+/// how", keyed by node address, and until M4's deletion phase every engine then
+/// decided for itself where the answer applies and in what order. rustc's
+/// `MirPhase` names the difference: an unelaborated drop is a QUESTION and an
+/// elaborated one is an INSTRUCTION. This is the instruction — a place, a kind
+/// and an exit, in the order it runs.
+///
+/// **It lives here rather than in `vyrn-lower`, and that is M4's one deviation
+/// from the RFC's own text.** §2.1 puts the steps in the lowered form and M4's
+/// consumption phase then has three readers, one of which is the interpreter —
+/// which is in this crate and cannot import `vyrn-lower`. The placement is not
+/// per-instance anyway: `site`, `binding`, `exit` and the order are properties of
+/// a body and `own`'s map, and the only instance-dependent part is the type a
+/// [`DropKind::Deep`] walks, which every engine already substitutes at its own
+/// emit site. So the placement is computed once here, `vyrn_lower::Instance`
+/// carries the substituted view of it, and one order serves all three engines.
+#[derive(Debug, Clone)]
+pub struct Release {
+    /// The node the exit is AT, by node address — the identity `own` and
+    /// `movecheck` key on already (RFC-0101 §2.5).
+    ///
+    /// A `Block` for a fall-through exit; the `match` / `if let` / `for in` for
+    /// the temporary a construct owns; the `Stmt::Break` / `Continue` / `Return`
+    /// or the `Expr::Try` for an early one. An engine standing at any of those
+    /// has the node in hand, so it asks for its steps without re-deriving a
+    /// boundary index — which is what `LoopCtx::drop_boundary`, `Fn_::loops`'s
+    /// third field and `Flow::Break` propagation were three spellings of.
+    pub site: usize,
+    /// The node that owns the value — `own`'s own key. A `Stmt::Let` for a
+    /// binding; the construct itself for the temporary it owns.
+    pub binding: usize,
+    /// The binding's name, so a dump reads as the source does.
+    pub name: String,
+    /// This map's own answer, unsubstituted. See [`Release`] on why the
+    /// substitution is the reader's.
+    pub kind: DropKind,
+    pub exit: Exit,
+    pub line: u32,
+}
+
 /// How a droppable binding is reclaimed at block exit.
 ///
 /// Not `Copy`: [`DropKind::Release`] carries the name of the method the type
@@ -1080,6 +1123,7 @@ pub struct BindingNote {
 }
 
 /// Whole-program ownership facts.
+#[derive(Default)]
 pub struct Ownership {
     /// Functions whose return value transfers heap ownership to the caller,
     /// with the kind of value returned.
@@ -1114,6 +1158,13 @@ pub struct Ownership {
     /// [`Ownership::arg_drops`] hands back; the rest are here so the census's
     /// own table can be re-derived from the compiler instead of from a harness.
     pub arg_temps: Vec<crate::movecheck::ArgTemp>,
+    /// Per function: [`droppable`](Ownership::droppable)'s rows PLACED — every
+    /// step, at the exit that runs it, in the order it runs (RFC-0101 M4).
+    ///
+    /// Grouped by [`Release::site`], which is the node the exit is at. This is
+    /// the one order that used to be asserted separately by `Gen::drop_stack`,
+    /// `Fn_::releases` and the interpreter's per-block `Vec`.
+    pub releases: HashMap<String, Vec<Release>>,
 }
 
 impl Ownership {
@@ -1156,8 +1207,10 @@ pub fn analyze(program: &Program) -> Ownership {
     let mut droppable = HashMap::new();
     let mut holes = HashMap::new();
     let mut notes = HashMap::new();
+    let mut releases = HashMap::new();
     let mut emit = |name: String, body: &Block| {
         let r = emit_body(body, &lets, &proto);
+        releases.insert(name.clone(), place_body(body, &r.droppable));
         droppable.insert(name.clone(), r.droppable);
         holes.insert(name.clone(), r.holes);
         notes.insert(name, r.notes);
@@ -1189,6 +1242,342 @@ pub fn analyze(program: &Program) -> Ownership {
         notes,
         proto,
         arg_temps: facts.arg_temps,
+        releases,
+    }
+}
+
+/// The placement as a consumer reads it: `(exit, the node the exit is AT)` maps
+/// to the bindings released there, in the order they run.
+///
+/// One reader for three engines. An engine standing at an exit has the node in
+/// hand, looks its steps up, and maps each binding to whatever it releases a
+/// value WITH — an alloca name, a wasm place, a scope entry. What it never does
+/// again is decide the order, or derive a boundary index to find where its own
+/// frames stop.
+pub fn placed(steps: &[Release]) -> HashMap<(Exit, usize), Vec<usize>> {
+    let mut out: HashMap<(Exit, usize), Vec<usize>> = HashMap::new();
+    for r in steps {
+        out.entry((r.exit, r.site)).or_default().push(r.binding);
+    }
+    out
+}
+
+// ---- the placement --------------------------------------------------------
+//
+// RFC-0101 M4. `emit_body` above answers WHETHER a binding is droppable and
+// nominally HOW; this answers WHERE and IN WHAT ORDER, once, for every engine.
+//
+// It is a second walk over the same body rather than a field on `Emit`, because
+// the two ask different questions of different shapes: `Emit` is a dataflow over
+// `movecheck`'s facts and this is a stack discipline over source order. Fusing
+// them would put a frame stack inside a fixpoint for no reader's benefit.
+
+/// A value on a live frame: what [`Emit`] said about it, before an exit says
+/// where.
+struct Live {
+    binding: usize,
+    name: String,
+    kind: DropKind,
+    line: u32,
+}
+
+/// The live frames and the loop boundaries — the one model of what
+/// `Gen::drop_stack`, `Fn_::releases` and the interpreter's per-block `Vec` each
+/// used to keep privately.
+struct Place<'a> {
+    droppable: &'a HashMap<usize, DropKind>,
+    out: Vec<Release>,
+    /// Innermost last. An exit's steps are these frames, from a boundary
+    /// outward.
+    frames: Vec<Vec<Live>>,
+    /// One entry per enclosing loop: the frame index its body starts at, which
+    /// is where `break` and `continue` unwind to. Below it sits the frame a
+    /// `for`-in's iterable is on, which is why neither edge reaches that one.
+    loops: Vec<usize>,
+}
+
+/// Place one body's steps.
+///
+/// **It walks the program's own nodes and no expansion.** A `place at`
+/// projection and a `for` over a user container are inlined at their access site
+/// (RFC-0101 M2d), and the inline is a CLONE: no node in it is a key of
+/// `droppable`, so no step can be placed inside one. Skipping them is what lets
+/// the placement live here, in the crate the interpreter can reach, instead of
+/// needing the checker's recorded types to expand a projection.
+fn place_body(body: &Block, droppable: &HashMap<usize, DropKind>) -> Vec<Release> {
+    let mut p = Place {
+        droppable,
+        out: Vec::new(),
+        frames: Vec::new(),
+        loops: Vec::new(),
+    };
+    p.block(body);
+    p.out
+}
+
+impl Place<'_> {
+    /// Put a value this map calls droppable on the innermost live frame.
+    ///
+    /// `key` is `own`'s own key: the `Stmt::Let` for a binding, the construct
+    /// itself for the temporary it owns. A value with no row is not on a frame.
+    fn track(&mut self, key: usize, name: &str, line: u32) {
+        let Some(kind) = self.droppable.get(&key) else {
+            return;
+        };
+        if let Some(f) = self.frames.last_mut() {
+            f.push(Live {
+                binding: key,
+                name: name.to_string(),
+                line,
+                kind: kind.clone(),
+            });
+        }
+    }
+
+    /// Place the steps one exit runs: every frame from `from` outward, innermost
+    /// frame first and newest binding first inside each.
+    ///
+    /// That order is the whole of what three engines used to assert separately.
+    /// It is derived here from source order and this map, and nowhere else.
+    fn place(&mut self, from: usize, exit: Exit, site: usize) {
+        let steps: Vec<Release> = self.frames[from..]
+            .iter()
+            .rev()
+            .flat_map(|f| f.iter().rev())
+            .map(|l| Release {
+                site,
+                binding: l.binding,
+                name: l.name.clone(),
+                kind: l.kind.clone(),
+                exit,
+                line: l.line,
+            })
+            .collect();
+        self.out.extend(steps);
+    }
+
+    fn block(&mut self, b: &Block) {
+        self.frames.push(Vec::new());
+        let here = self.frames.len() - 1;
+        for s in &b.stmts {
+            self.stmt(s);
+        }
+        // After the statements, so a nested block's exit steps precede its
+        // parent's — "innermost frame first" written as the order they are in.
+        self.place(here, Exit::Block, b as *const Block as usize);
+        self.frames.pop();
+    }
+
+    /// A construct that owns a TEMPORARY runs its body inside a frame of its own
+    /// and releases it when the construct is done — the shape `Stmt::IfLet` has
+    /// had since Phase 10a, `Stmt::ForIn` since RFC-0092 M5 and `Expr::Match`
+    /// since `movecheck` gave a match's scrutinee a row.
+    ///
+    /// The frame is pushed AFTER the scrutinee is walked and BEFORE any loop
+    /// boundary, which is what both compiled backends do and what makes the two
+    /// facts true: an early exit out of an arm reclaims it, and a `break` does
+    /// not.
+    fn owned_temp(&mut self, key: usize, name: &str, line: u32, body: impl FnOnce(&mut Self)) {
+        self.frames.push(Vec::new());
+        let here = self.frames.len() - 1;
+        // The construct's own word, because the value has no name to print: it
+        // is a temporary, which is why `own` keys its row by the construct.
+        self.track(key, name, line);
+        body(self);
+        self.place(here, Exit::Scrutinee, key);
+        self.frames.pop();
+    }
+
+    fn stmt(&mut self, s: &Stmt) {
+        let line = stmt_line(s) as u32;
+        match s {
+            Stmt::Let { name, value, .. } => {
+                self.expr(value);
+                // On the frame AFTER its value is walked, because the value may
+                // itself leave the function — `let a = f()?` reclaims what was
+                // live before `a`, and `a` is not one of them.
+                self.track(id(s), name, line);
+            }
+            Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => self.expr(value),
+            Stmt::IndexSet { index, value, .. } => {
+                self.expr(index);
+                self.expr(value);
+            }
+            // A function exit: every frame the body has open, innermost first.
+            // The value is walked first because it runs first, and because it
+            // may hold a `?` of its own — a function exit from further in.
+            Stmt::Return { value, .. } => {
+                if let Some(v) = value {
+                    self.expr(v);
+                }
+                self.place(0, Exit::Return, id(s));
+            }
+            // The loop edges: every frame the innermost loop's body opened, and
+            // no more.
+            Stmt::Break { .. } => {
+                self.place(self.loops.last().copied().unwrap_or(0), Exit::Break, id(s))
+            }
+            Stmt::Continue { .. } => self.place(
+                self.loops.last().copied().unwrap_or(0),
+                Exit::Continue,
+                id(s),
+            ),
+            Stmt::Drop { .. } => {}
+            Stmt::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
+                self.expr(cond);
+                self.block(then_block);
+                if let Some(e) = else_block {
+                    self.block(e);
+                }
+            }
+            Stmt::IfLet {
+                scrutinee,
+                then_block,
+                else_block,
+                ..
+            } => {
+                self.expr(scrutinee);
+                self.owned_temp(id(s), "@iflet", line, |p| {
+                    p.block(then_block);
+                    if let Some(e) = else_block {
+                        p.block(e);
+                    }
+                });
+            }
+            Stmt::While { cond, body, .. } => {
+                self.expr(cond);
+                self.loops.push(self.frames.len());
+                self.block(body);
+                self.loops.pop();
+            }
+            Stmt::ForIn { iter, body, .. } => {
+                self.expr(iter);
+                self.owned_temp(id(s), "@forin", line, |p| {
+                    // The boundary sits ABOVE the iterable's frame, so `break`
+                    // and `continue` leave the snapshot alone and land on the
+                    // code that releases it at the statement's own exit.
+                    p.loops.push(p.frames.len());
+                    p.block(body);
+                    p.loops.pop();
+                });
+            }
+            Stmt::Expr(e) => self.expr(e),
+            Stmt::Region { body, .. } => self.block(body),
+        }
+    }
+
+    fn expr(&mut self, e: &Expr) {
+        match e {
+            Expr::Int(_)
+            | Expr::Byte(_)
+            | Expr::Float(_)
+            | Expr::Bool(_)
+            | Expr::Str(_)
+            | Expr::Var { .. } => {}
+            Expr::Unary { expr: inner, .. } | Expr::Field { expr: inner, .. } => self.expr(inner),
+            // A propagating `?` is a function exit and pays what one pays — the
+            // sentence RFC-0101 M4's step 0 wrote nine lines of interpreter for.
+            // The steps are placed unconditionally: an engine reaches them only
+            // on the failing branch, which is a target fact about where the code
+            // goes rather than a decision about what runs.
+            Expr::Try { expr: inner, .. } => {
+                self.expr(inner);
+                self.place(0, Exit::Try, e as *const Expr as usize);
+            }
+            Expr::Consume { place, .. } => self.expr(place),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expr(lhs);
+                self.expr(rhs);
+            }
+            Expr::Call { args, .. }
+            | Expr::TryConstruct { args, .. }
+            | Expr::Spawn { args, .. } => {
+                for a in args {
+                    self.expr(a);
+                }
+            }
+            // The scrutinee's own frame, and the handover: `movecheck` marks the
+            // row when an arm hands the payload out, so a match that gives its
+            // value away has NO step here and the binding the payload flowed
+            // into is the one owner there is. The handover is the absence.
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                self.expr(scrutinee);
+                let key = e as *const Expr as usize;
+                self.owned_temp(key, "@match", e.line() as u32, |p| {
+                    for arm in arms {
+                        p.expr(&arm.body);
+                    }
+                });
+            }
+            Expr::IfExpr {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.expr(cond);
+                self.expr(then_branch);
+                if let Some(b) = else_branch {
+                    self.expr(b);
+                }
+            }
+            Expr::StructLit { fields, .. } => {
+                for (_, v) in fields {
+                    self.expr(v);
+                }
+            }
+            Expr::ArrayLit { elems, .. } => {
+                for el in elems {
+                    self.expr(el);
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.expr(k);
+                    self.expr(v);
+                }
+            }
+            Expr::Lambda { body, .. } => match body {
+                LambdaBody::Expr(b) => self.expr(b),
+                LambdaBody::Block(b) => {
+                    // A lambda is its own function in both backends — it lowers
+                    // under a shell that owns no release rows — so a `return` or
+                    // a `?` inside one unwinds ITS frames and not the enclosing
+                    // body's. The frames are set aside rather than shared.
+                    let frames = std::mem::take(&mut self.frames);
+                    let loops = std::mem::take(&mut self.loops);
+                    self.block(b);
+                    self.frames = frames;
+                    self.loops = loops;
+                }
+            },
+        }
+    }
+}
+
+fn stmt_line(s: &Stmt) -> usize {
+    match s {
+        Stmt::Let { line, .. }
+        | Stmt::Assign { line, .. }
+        | Stmt::SetField { line, .. }
+        | Stmt::IndexSet { line, .. }
+        | Stmt::Return { line, .. }
+        | Stmt::Break { line }
+        | Stmt::Continue { line }
+        | Stmt::If { line, .. }
+        | Stmt::IfLet { line, .. }
+        | Stmt::While { line, .. }
+        | Stmt::ForIn { line, .. }
+        | Stmt::Drop { line, .. }
+        | Stmt::Region { line, .. } => *line,
+        Stmt::Expr(e) => e.line(),
     }
 }
 

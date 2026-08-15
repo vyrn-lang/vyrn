@@ -1873,6 +1873,50 @@ the checklist the next one reads rather than with a ledger entry.
 | `ImplicitDispatch` receivers reachable from the placement | **not yet, and the remaining half is exactly what §3 M2 said it was.** The steps exist and carry `own`'s kind substituted for the instance; what does not exist is a CONSUMER. A worklist entry can only come from a step a backend is reading, and while both backends still derive their own releases the receiver is still an `Expr::Var` built at an emit site. It closes with the consumption. |
 | the residue a `DropKind::Deep` leaves | **open, and unchanged from phase 1's finding 4.** `own` records a declared type's base record shape, so the shape keeps the DECLARATION's parameters; the walk stops silently at a `Param` field. The lint that caught it stays dropped. Both backends read the same half-answer the same way, so it is not a difference between engines — but a deletion that makes a backend read the step instead of deriving it inherits the question rather than answering it. |
 
+### M4 third phase — one placement, three readers. THE PLACEMENT MOVES BELOW EVERY ENGINE, AND WHERE IT MOVED TO IS THIS PHASE'S ONE DEVIATION FROM THE RFC
+
+| PR | What | Changed lines | Files |
+|---|---|---|---|
+| M4c | the placement moves from `vyrn-lower` into `vyrn_frontend::own`; the form carries the substituted view; this text | 702 | 2 + this file |
+
+**§2.1 item 3 puts the release steps in the lowered form, and the deletion phase
+cannot read them there.** The consumer list is three engines and one of them is
+the interpreter, which is in `vyrn-frontend` and cannot import `vyrn-lower` —
+the same sentence phase 2 wrote when it put `own::Exit` in `own` rather than in
+the form. The placement is not per-instance anyway: `site`, `binding`, `exit`
+and the ORDER are properties of a body and of `own`'s own map, and the only
+instance-dependent part is the type a `DropKind::Deep` walks, which every engine
+already substitutes at its own emit site.
+
+So `own::place_body` computes it, `Ownership::releases` carries it, and
+`Instance::releases` is the substituted VIEW — `Release` and `Exit` are both
+`own`'s vocabulary now, re-exported by `vyrn-lower` so the form's readers see no
+change. `own::placed(steps)` is the one reader all three engines call: it groups
+by `(exit, the node the exit is at)`, which is what makes a consumer a lookup
+rather than a fourth derivation of a boundary index.
+
+**The gate is the proof the move is exact**: the same corpus, the same three
+engines, the same **78,371 walks equal**, `Terminated` 1,048 and `StreamCursor`
+6 unchanged, and the two blessed dumps that render a `release` line unmoved.
+
+**One place this phase's brief did not survive contact with the code.** The
+lowering's placement walked the DESUGARS — `project::site`'s expansion at an
+`@at` access site, and `project::iterate_loop`'s loop — and `own` cannot: it has
+no recorded types, so it cannot ask which `place at` a receiver reaches. It does
+not need to. An expansion is a clone, so no node in it is a key of `droppable`,
+and no step has ever been placed inside one. The placement walks the program's
+own nodes, and the counter above is unchanged by dropping the expansions, which
+is the measurement rather than the argument.
+
+**The gate, and the verdict.** This phase adds 389 lines to `own` and takes 259
+out of `vyrn-lower` against 54 added there — **702 changed lines across 2
+compiler files**, a net of +184 that is a MOVE and not a deletion, and it banks
+**zero** toward the −900 (§3's rule). The move is not free: `own`'s copy carries
+the doc comments that say why the placement lives below three engines rather
+than inside one, which is about 130 of the 389.
+What it buys is the precondition the ledger below is measured against: a
+placement every engine can read.
+
 **So the next phase can delete**, and what it deletes is the whole of it at once:
 the three scope-frame stacks, the three boundary indices, `emit_drop`, `rel_at`,
 `deep_release`, and the fall-through walks that phase 1 measured at three lines
