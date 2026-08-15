@@ -42,7 +42,7 @@ pub trait ModuleResolver {
     /// generation-time `listDir` (RFC-0021); ordinary module loading never calls
     /// it.
     fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
-        Err(format!("cannot list `{resolved}`"))
+        Err(crate::trap::io_at("listerr", resolved))
     }
     /// Fetch a cached generator output by content-address key (RFC-0021). The
     /// frontend stays filesystem-free: the CLI/LSP back this with
@@ -108,7 +108,7 @@ impl ModuleResolver for MapResolver {
             }
         }
         if !any_under {
-            return Err(format!("cannot list `{resolved}`"));
+            return Err(crate::trap::io_at("listerr", resolved));
         }
         Ok(names.into_iter().collect())
     }
@@ -5546,7 +5546,7 @@ mod gen_tests {
             if any {
                 Ok(names.into_iter().collect())
             } else {
-                Err(format!("cannot list `{resolved}`"))
+                Err(crate::trap::io_at("listerr", resolved))
             }
         }
         fn gen_cache_get(&self, key: &str) -> Option<String> {

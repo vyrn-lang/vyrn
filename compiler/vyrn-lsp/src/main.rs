@@ -226,7 +226,7 @@ impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
     /// generator's inputs are local files, so this is a plain read-only listing.
     fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
         let entries =
-            std::fs::read_dir(resolved).map_err(|_| format!("cannot list `{resolved}`"))?;
+            std::fs::read_dir(resolved).map_err(|_| vyrn_frontend::trap::io_at("listerr", resolved))?;
         let mut names: Vec<String> = entries
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())

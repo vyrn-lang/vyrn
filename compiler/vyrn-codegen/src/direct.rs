@@ -2086,7 +2086,10 @@ fn lower_dispatcher(
     // Unreachable by construction — a tag only ever comes from a registered
     // construction — so this is the defensive arm, with the wording the textual
     // backend's `@.fnval.bad` carries.
-    let msg = cx.rt.intern(m, "error: internal: invalid function value\n");
+    let msg = cx.rt.intern(
+        m,
+        &vyrn_frontend::trap::line(vyrn_frontend::trap::BAD_FN_VALUE),
+    );
     b.ins(&Instruction::I32Const(msg as i32));
     b.ins(&Instruction::Call(cx.rt.trap));
     b.ins(&Instruction::Unreachable);
@@ -6215,7 +6218,7 @@ impl<'p> Fn_<'_, 'p> {
             // mounts a live route. The argument is not emitted — the producer it
             // names has nobody to pull it here.
             "serveStream" => {
-                let msg = self.cx.rt.intern(m, crate::SERVE_STREAM_TRAP);
+                let msg = self.cx.rt.intern(m, &crate::serve_stream_trap());
                 b.ins(&Instruction::I32Const(msg as i32))
                     .ins(&Instruction::Call(self.cx.rt.trap));
                 b.ins(&Instruction::Unreachable);
@@ -8644,7 +8647,10 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Eqz);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        let msg = self.cx.rt.intern(m, "error: no stream in this box\n");
+        let msg = self.cx.rt.intern(
+            m,
+            &vyrn_frontend::trap::line(vyrn_frontend::trap::NO_STREAM),
+        );
         b.ins(&Instruction::I32Const(msg as i32));
         b.ins(&Instruction::Call(self.cx.rt.trap));
         self.depth -= 1;
@@ -8655,7 +8661,10 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64Ne);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        let msg = self.cx.rt.intern(m, "error: no stream in this box\n");
+        let msg = self.cx.rt.intern(
+            m,
+            &vyrn_frontend::trap::line(vyrn_frontend::trap::NO_STREAM),
+        );
         b.ins(&Instruction::I32Const(msg as i32));
         b.ins(&Instruction::Call(self.cx.rt.trap));
         self.depth -= 1;
@@ -12746,31 +12755,51 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     let nl = rt.intern(m, "\n");
     let t = rt.intern(m, "true");
     let f = rt.intern(m, "false");
-    rt.msg_div0 = rt.intern(m, "error: division by zero\n");
-    rt.msg_rem0 = rt.intern(m, "error: remainder by zero\n");
-    rt.msg_divovf = rt.intern(m, "error: integer overflow in division\n");
-    rt.msg_shift = rt.intern(m, "error: shift amount out of range\n");
+    rt.msg_div0 = rt.intern(m, &vyrn_frontend::trap::line(vyrn_frontend::trap::DIV_ZERO));
+    rt.msg_rem0 = rt.intern(m, &vyrn_frontend::trap::line(vyrn_frontend::trap::REM_ZERO));
+    rt.msg_divovf = rt.intern(
+        m,
+        &vyrn_frontend::trap::line(vyrn_frontend::trap::DIV_OVERFLOW),
+    );
+    rt.msg_shift = rt.intern(
+        m,
+        &vyrn_frontend::trap::line(vyrn_frontend::trap::SHIFT_RANGE),
+    );
     // (The three spellings `{:.6}` gives a non-finite double were interned here
     // for `float_str`. `std/num`'s `f64Str` builds them out of bytes, in Vyrn —
     // RFC-0081 M2.)
     // The bounds message has the offending index in the MIDDLE, so it is three
     // pieces rather than one interned string — see `trap_idx` below.
-    rt.msg_aoob = rt.intern(m, "error: array index ");
-    rt.msg_soob = rt.intern(m, "error: string index ");
-    rt.msg_oob_end = rt.intern(m, " out of bounds\n");
+    rt.msg_aoob = rt.intern(
+        m,
+        &format!(
+            "{}{}",
+            vyrn_frontend::trap::PREFIX,
+            vyrn_frontend::trap::ARRAY_INDEX.0
+        ),
+    );
+    rt.msg_soob = rt.intern(
+        m,
+        &format!(
+            "{}{}",
+            vyrn_frontend::trap::PREFIX,
+            vyrn_frontend::trap::STRING_INDEX.0
+        ),
+    );
+    rt.msg_oob_end = rt.intern(m, &format!("{}\n", vyrn_frontend::trap::ARRAY_INDEX.1));
     // RFC-0004 §4. The 64 is the LLVM prelude's fixed region stack, and the
     // interpreter traps at the same depth with the same words precisely so the
     // three engines agree about it.
-    rt.msg_region = rt.intern(m, &format!("error: region nesting exceeds {REGION_MAX}\n"));
+    rt.msg_region = rt.intern(
+        m,
+        &vyrn_frontend::trap::line(&vyrn_frontend::trap::region_depth()),
+    );
     rt.region_sp = m.reserve(4, 4);
     // Audit A5.3. Interned from the constant, so the number in the message and
     // the number the prologue compares against cannot drift apart.
     rt.msg_calldepth = rt.intern(
         m,
-        &format!(
-            "error: call depth exceeds {}\n",
-            vyrn_frontend::interp::CALL_DEPTH_LIMIT
-        ),
+        &vyrn_frontend::trap::line(&vyrn_frontend::trap::call_depth()),
     );
     rt.call_depth = m.reserve(4, 4);
     rt.region_vec = m.reserve(4 * REGION_MAX, 4);
@@ -12882,7 +12911,10 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     let (p, end, cls, h) = (2, 3, 4, 5);
     let (want, shift, sub, sz) = (6, 7, 8, 9);
     let trap = rt.trap;
-    let oom = rt.intern(m, "error: out of memory\n");
+    let oom = rt.intern(
+        m,
+        &vyrn_frontend::trap::line(vyrn_frontend::trap::OUT_OF_MEMORY),
+    );
     // One head per class, indexed by the class directly — the three below
     // `MIN_CLASS` are unreachable and cost twelve bytes, against a subtraction at
     // both ends. In reserved memory rather than in globals for M2f's reason:

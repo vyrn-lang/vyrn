@@ -18,7 +18,7 @@
 //! Needs no toolchain: both halves are strings this crate already contains.
 
 use std::collections::BTreeMap;
-use vyrn_codegen::toolchain::RUNTIME_SHIM;
+use vyrn_codegen::toolchain::runtime_shim;
 use vyrn_codegen::wasm::{Sig, ValType};
 
 /// The libc entry points the emitter calls directly. wasi-libc is the ground
@@ -100,7 +100,8 @@ fn c_param_type(p: &str) -> String {
 /// function are followed by `;` or `)`, never `{`.
 fn shim_definitions() -> BTreeMap<String, Sig> {
     let mut out = BTreeMap::new();
-    for line in RUNTIME_SHIM.lines() {
+    let shim = runtime_shim();
+    for line in shim.lines() {
         let t = line.trim();
         if t.starts_with("static")
             || t.starts_with("extern")
