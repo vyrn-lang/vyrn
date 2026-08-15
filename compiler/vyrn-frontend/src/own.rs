@@ -45,36 +45,27 @@ use std::collections::HashMap;
 use crate::ast::*;
 use crate::movecheck::{Gone, LetOwnership};
 
-/// What each engine actually releases at a scope exit, made readable — RFC-0101
-/// M4's shadow.
+/// What the INTERPRETER actually releases at a scope exit, made readable —
+/// RFC-0101 M4.
 ///
-/// "Innermost frame first, newest binding first" is asserted independently in
-/// three files today: `Gen::drop_stack`, `Fn_::releases` and the interpreter's
-/// per-block `Vec`. Nothing checks that the three assertions describe one order,
-/// because nothing outside an engine can see the sequence any of them walks.
-/// This makes all three readable, so `vyrn-cli/tests/lowered.rs` can assert
-/// them against the placement `vyrn_lower` computes — one assertion where there
-/// were three.
+/// **It used to have three sites and now it has one, which is the deletion phase
+/// visible from outside.** The shadow phases made all three engines report their
+/// sequence so one gate could assert it against the placement. Both compiled
+/// backends READ that placement now, so comparing what they emit against it is
+/// comparing a value with itself. This engine still derives its own order, for
+/// the reason RFC-0101 §3 M4's ledger records, so it is still the one that needs
+/// gating — against `vyrn-cli/tests/lowered.rs`'s fixtures, because its walk
+/// happens when a block RUNS.
 ///
-/// It lives here, in the file that DECIDES what is droppable, because it is the
-/// only place all three engines can already reach: the interpreter is in this
-/// crate and cannot import `vyrn_codegen::observe`, which is where the type sink
-/// of M1 lives.
+/// It lives here, in the file that DECIDES what is droppable, because the
+/// interpreter is in this crate and cannot import `vyrn_codegen::observe`.
 ///
 /// Off by default, thread-local, and every hook records a step the engine was
 /// about to take anyway. Nothing here decides anything.
 pub mod trace {
     pub use super::Exit;
 
-    /// Which engine walked the step.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub enum Site {
-        Interp,
-        Native,
-        Wasm,
-    }
-
-    /// One exit's release walk, as one engine ran or emitted it.
+    /// One exit's release walk, as the interpreter ran it.
     ///
     /// The whole walk rather than one record per release, because the thing being
     /// gated is the SEQUENCE: an exit that releases nothing is a fact too, and a
@@ -91,7 +82,6 @@ pub mod trace {
     /// own block exits BETWEEN two frames of the walk being recorded.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct Walk {
-        pub site: Site,
         /// Which exit kind this walk belongs to.
         pub exit: Exit,
         /// The node the exit is AT: the `Block` for a fall-through exit, the
@@ -100,10 +90,7 @@ pub mod trace {
         /// It is the key a consumer looks the placed steps up by, so nothing
         /// downstream re-derives a boundary index.
         pub at: usize,
-        /// The bindings released, in the order the engine releases them. A `0` is
-        /// a frame entry with no node behind it — the cursor a `for x in stream`
-        /// owns is the only one left — recorded rather than filtered, so the gate
-        /// sees that it is there.
+        /// The bindings released, in the order the engine releases them.
         pub bindings: Vec<usize>,
     }
 
@@ -183,7 +170,6 @@ pub mod trace {
         WALKS.with(|s| {
             let mut v = s.borrow_mut();
             v.push(Walk {
-                site: Site::Interp,
                 exit,
                 at,
                 bindings: Vec::new(),
@@ -206,18 +192,11 @@ pub mod trace {
     }
 
     /// Note one frame's worth of one exit's release walk.
-    pub fn note(site: Site, exit: Exit, at: usize, bindings: Vec<usize>) {
+    pub fn note(exit: Exit, at: usize, bindings: Vec<usize>) {
         if !on() {
             return;
         }
-        WALKS.with(|s| {
-            s.borrow_mut().push(Walk {
-                site,
-                exit,
-                at,
-                bindings,
-            })
-        });
+        WALKS.with(|s| s.borrow_mut().push(Walk { exit, at, bindings }));
     }
 }
 
