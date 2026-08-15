@@ -4038,45 +4038,6 @@ impl<'a> Gen<'a> {
         slot
     }
 
-    /// The statements a store lowers as, after `place atSet` has had its say
-    /// (RFC-0091 M2, finished in M3).
-    ///
-    /// `None` is the seeded row: it yields `@slot(a, i)` — this binding's own
-    /// element — so the identity inline keeps the ORIGINAL nodes and the
-    /// lowering below is unchanged. `Some` is a user container, whose store
-    /// becomes the projection's prologue and the move-out/mutate/move-back group
-    /// [`vyrn_frontend::project::store_stmts`] builds.
-    fn store_index(
-        &self,
-        name: &str,
-        index: &Expr,
-        value: &Expr,
-        aty: &Type,
-    ) -> Result<Option<Vec<Stmt>>, String> {
-        let line = index.line();
-        let Some(f) = vyrn_frontend::project::for_site(self.impls, Some(aty), "atSet") else {
-            return Ok(None);
-        };
-        let recv = Expr::Var {
-            name: name.to_string(),
-            line,
-        };
-        let p = vyrn_frontend::project::inline(f, &recv, std::slice::from_ref(index), line)?;
-        if p.is_identity(&recv, std::slice::from_ref(index)) {
-            return Ok(None);
-        }
-        let Some(store) = vyrn_frontend::project::store_stmts(&p.place, value, line) else {
-            return Err(format!(
-                "line {line}: `{name}[..] = v` goes through a `place atSet` that yields \
-                 something with no address — a call result or a temporary. A projection \
-                 yields a place: a binding, a field of one, or an element of one"
-            ));
-        };
-        let mut out = p.prologue;
-        out.extend(store);
-        Ok(Some(out))
-    }
-
     /// The static type of an index receiver, where this emitter can name one
     /// without generating code for it (RFC-0091 M2).
     ///
@@ -4850,7 +4811,9 @@ impl<'a> Gen<'a> {
                 // and the lowering below is unchanged.
                 // A user container's store is its own statement group, lowered
                 // by the statements this backend already has.
-                if let Some(stmts) = self.store_index(name, index, value, &aty)? {
+                if let Some(stmts) =
+                    vyrn_frontend::project::store_index(self.impls, name, index, value, &aty)?
+                {
                     return self.gen_block(&Block { stmts });
                 }
                 let bad_l = self.fresh_label("set.oob");
@@ -10107,15 +10070,19 @@ impl<'a> Gen<'a> {
         if name == vyrn_frontend::project::AT && args.len() == 2 {
             let line = args[0].line();
             let recv = self.static_ty(&args[0]);
-            let Some(f) = vyrn_frontend::project::for_site(self.impls, recv.as_ref(), "at") else {
-                return Err(format!("line {line}: no `place at` for this receiver"));
-            };
-            let p = vyrn_frontend::project::inline(f, &args[0], &args[1..], line)?;
-            // The identity inline lowers the ORIGINAL nodes; see
-            // `Projection::is_identity` for why the copies are not equivalent.
-            if p.is_identity(&args[0], &args[1..]) {
+            // `None` is the seeded row, and the element lowering below reads the
+            // ORIGINAL nodes; `project::site` is where that is decided, once.
+            let Some(p) = vyrn_frontend::project::site(
+                self.impls,
+                recv.as_ref(),
+                "at",
+                &args[0],
+                &args[1..],
+                line,
+            )?
+            else {
                 return self.gen_call(vyrn_frontend::project::ELEM, args);
-            }
+            };
             for s in &p.prologue {
                 self.gen_stmt(s)?;
             }

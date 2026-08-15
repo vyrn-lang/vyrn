@@ -963,45 +963,6 @@ struct FnBinding {
     cap_srcs: Vec<String>,
 }
 
-/// The statements a store lowers as, after `place atSet` has had its say
-/// (RFC-0091 M2, finished in M3).
-///
-/// `None` is the seeded row: it yields `@slot(a, i)` — this binding's own
-/// element — so the identity inline keeps the ORIGINAL nodes and the lowering
-/// is unchanged. `Some` is a user container, whose store becomes the
-/// projection's prologue and the move-out/mutate/move-back group
-/// [`vyrn_frontend::project::store_stmts`] builds.
-fn store_index(
-    impls: &[vyrn_frontend::ast::ImplBlock],
-    name: &str,
-    index: &Expr,
-    value: &Expr,
-    aty: &Type,
-) -> Result<Option<Vec<Stmt>>, String> {
-    let line = index.line();
-    let Some(f) = vyrn_frontend::project::for_site(impls, Some(aty), "atSet") else {
-        return Ok(None);
-    };
-    let recv = Expr::Var {
-        name: name.to_string(),
-        line,
-    };
-    let p = vyrn_frontend::project::inline(f, &recv, std::slice::from_ref(index), line)?;
-    if p.is_identity(&recv, std::slice::from_ref(index)) {
-        return Ok(None);
-    }
-    let Some(store) = vyrn_frontend::project::store_stmts(&p.place, value, line) else {
-        return Err(format!(
-            "line {line}: `{name}[..] = v` goes through a `place atSet` that yields \
-             something with no address — a call result or a temporary. A projection \
-             yields a place: a binding, a field of one, or an element of one"
-        ));
-    };
-    let mut out = p.prologue;
-    out.extend(store);
-    Ok(Some(out))
-}
-
 struct Cx<'a> {
     types: HashMap<String, TypeDecl>,
     /// Every `impl` block, for `place` projection lookup (RFC-0091 M2). A
@@ -3528,7 +3489,9 @@ impl<'p> Fn_<'_, 'p> {
                 // the seeded row yields this binding's own element.
                 // A user container's store is its own statement group, lowered
                 // by the statements this backend already has.
-                if let Some(stmts) = store_index(&self.cx.impls, name, index, value, &ty)? {
+                if let Some(stmts) =
+                    vyrn_frontend::project::store_index(&self.cx.impls, name, index, value, &ty)?
+                {
                     return self.block(m, b, &Block { stmts });
                 }
                 place
@@ -9591,13 +9554,19 @@ impl<'p> Fn_<'_, 'p> {
         } else {
             None
         };
-        let Some(f) = vyrn_frontend::project::for_site(&self.cx.impls, recv.as_ref(), "at") else {
-            return unsupported("indexing a receiver with no `place at`", line);
-        };
-        let p = vyrn_frontend::project::inline(f, &args[0], &args[1..], line)?;
-        if p.is_identity(&args[0], &args[1..]) {
+        // `None` is the seeded row, whose expansion is the identity: `Fn_::at`
+        // below reads the ORIGINAL nodes. `project::site` decides that once.
+        let Some(p) = vyrn_frontend::project::site(
+            &self.cx.impls,
+            recv.as_ref(),
+            "at",
+            &args[0],
+            &args[1..],
+            line,
+        )?
+        else {
             return self.at(m, b, args, line);
-        }
+        };
         for s in &p.prologue {
             self.stmt(m, b, s)?;
         }
