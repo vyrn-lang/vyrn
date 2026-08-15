@@ -115,8 +115,9 @@ pub struct Row<'a> {
     pub node: Node<'a>,
     /// The type the checker gave this expression, substituted for the
     /// instantiation this body is. `None` for a statement row, and for an
-    /// expression the checker never routed through `Checker::expr` — see
-    /// [`Instance::untyped`].
+    /// expression the checker never routed through `Checker::expr` — 78 over
+    /// the whole corpus since M3b, and `vyrn-cli/tests/lowered.rs` names the
+    /// class they all belong to.
     ///
     /// This is the type the value must END UP as: the destination the checker
     /// validated the node against. See [`Row::has`] for the other half.
@@ -167,17 +168,6 @@ impl Instance<'_> {
     /// The module this instance's function was declared in; `""` for the root.
     pub fn module(&self) -> &str {
         self.func.module.as_deref().unwrap_or("")
-    }
-
-    /// Expression rows the checker never typed — a hole, counted rather than
-    /// hidden. Every one is an expression that reaches an engine without going
-    /// through `Checker::expr` (a lambda parameter bound by `check_fn_arg`, an
-    /// argument a builtin types itself).
-    pub fn untyped(&self) -> usize {
-        self.rows
-            .iter()
-            .filter(|r| matches!(r.node, Node::Expr(_)) && r.ty.is_none())
-            .count()
     }
 }
 
@@ -285,17 +275,6 @@ struct Walk<'a, 'r> {
     /// The lowering asks [`vyrn_frontend::project::site`] for them, and so do
     /// both backends — one expansion, one set of addresses, one row each.
     impls: &'a [vyrn_frontend::ast::ImplBlock],
-    /// Inside an expansion, where the checker has no answer to read.
-    ///
-    /// It is not enough to look one up and find nothing: `checker::record`
-    /// keys by node address, and it types AST that does not outlive the check
-    /// — `prelude::all()`'s rows, a schema's synthesized predicate. Those
-    /// addresses are freed, the allocator hands them out again for an
-    /// expansion's own nodes, and a lookup then answers with a dead node's
-    /// type. Measured, on the first run of this walk: 192 classes of
-    /// disagreement, `Float32` recorded at a `Handle<Person>`. An expansion
-    /// node has no checker answer by construction, so it asks for none.
-    in_desugar: bool,
     rows: Vec<Row<'a>>,
     /// `(callee, its solved type arguments by name)`, already concrete.
     calls: Vec<(&'r str, HashMap<String, Type>)>,
@@ -348,7 +327,6 @@ fn build<'a>(program: &'a Program, recorded: &checker::Recorded) -> Lowered<'a> 
     let mut gw = Walk {
         recorded,
         impls: &program.impls,
-        in_desugar: false,
         rows: Vec::new(),
         calls: Vec::new(),
     };
@@ -379,7 +357,6 @@ fn build<'a>(program: &'a Program, recorded: &checker::Recorded) -> Lowered<'a> 
         let mut w = Walk {
             recorded,
             impls: &program.impls,
-            in_desugar: false,
             rows: Vec::new(),
             calls: Vec::new(),
         };
@@ -560,9 +537,7 @@ fn stmt<'a>(s: &'a Stmt, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
             // engines walk is `place nth` inlined per turn around a COPY of the
             // body above. Same expansion, same nodes, one walk each.
             if let Some(blk) = iterate(var, iter, body, chain, w) {
-                w.in_desugar = true;
                 block(blk, d, chain, w);
-                w.in_desugar = false;
             }
         }
         Stmt::Expr(e) => {
@@ -583,10 +558,7 @@ fn stmt<'a>(s: &'a Stmt, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
 
 fn expr<'a>(e: &'a Expr, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) -> usize {
     let key = e as *const Expr as usize;
-    let ty = match w.in_desugar {
-        true => None,
-        false => w.recorded.node_types.get(&key).map(|t| apply(t, chain)),
-    };
+    let ty = w.recorded.node_types.get(&key).map(|t| apply(t, chain));
     let here = w.rows.len();
     w.rows.push(Row {
         depth,
@@ -597,10 +569,7 @@ fn expr<'a>(e: &'a Expr, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) ->
     });
     // A generic call solves its callee's parameters, and the answer governs the
     // subtree it was solved from — see [`Chain`].
-    let pushed = match (!w.in_desugar)
-        .then(|| w.recorded.node_substs.get(&key))
-        .flatten()
-    {
+    let pushed = match w.recorded.node_substs.get(&key) {
         Some((callee, args)) => {
             let solved: HashMap<String, Type> = args
                 .iter()
@@ -802,12 +771,10 @@ fn desugar<'a>(e: &'a Expr, args: &'a [Expr], depth: u16, chain: &mut Chain, w: 
     else {
         return;
     };
-    w.in_desugar = true;
     for s in &p.prologue {
         stmt(s, depth, chain, w);
     }
     expr(&p.place, depth, chain, w);
-    w.in_desugar = false;
 }
 
 /// The loop a `for x in c` over a user container expands to, if it does.
@@ -897,10 +864,11 @@ pub fn lint(l: &Lowered) -> Vec<String> {
             for t in [&r.ty, &r.has].into_iter().flatten() {
                 if matches!(t, Type::Err) {
                     bad.push(format!(
-                        "{} @{}: an expression is typed `<type error>`, and a \
+                        "{} @{}: the {} is typed `<type error>`, and a \
                          program that reaches lowering has none",
                         i.spelling(),
-                        r.line
+                        r.line,
+                        r.node.kind()
                     ));
                 }
                 if mentions_param(t) {

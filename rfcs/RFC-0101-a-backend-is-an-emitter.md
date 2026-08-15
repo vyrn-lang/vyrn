@@ -19,7 +19,12 @@
   `size`. That class is M4's and was already named. The desugar-once move also
   found that "the sugar gone" cannot mean gone from the tree — a projection's
   prologue runs mid-expression, and hoisting it is a different program — so the
-  form holds the expansion instead, with no type on it yet. §3 M2 records what
+  form holds the expansion instead, with no type on it yet. **M3b then put the
+  types on it, from the one pass that holds the caller's scope**: the checker
+  types each expansion where it is inlined, `unrecorded` goes 4,707 → 78, and
+  the blocker's third and last address is the one M2 named — 3,218 answers about
+  AST a backend builds DURING its own walk, which is `ImplicitDispatch` whole.
+  The −1,200 is re-parented onto M4. §3 M2 records what
   landed, what did not, and the
   measurement that says why: M1's residue was attributed to a missing worklist
   and is 9,355-to-7 a missing *body* — a backend clones the AST before it lowers
@@ -1266,8 +1271,9 @@ general: **any future consumer that looks a node up in `Recorded` by an address
 it did not get from the program can be answered by a corpse.** It is written
 here because the next milestone is exactly such a consumer.
 
-**M3 — the backends read types. THE SHADOW HALF IS IMPLEMENTED; THE DELETE HALF
-IS NOT, AND M3 FAILS ITS OWN LINE GATE.**
+**M3 — the backends read types. THE SHADOW HALF IS IMPLEMENTED TWICE OVER; THE
+DELETE HALF IS NOT, AND M3 FAILS ITS OWN LINE GATE TWICE. The third measurement
+of the blocker is the last one this milestone can make: it is M4's class, whole.**
 
 M3 asked for `peek` (510), its four satellites, `static_ty`, both `expect`
 stacks, both copies of `expected_fn_sig` / `fn_arg_param_types` /
@@ -1289,6 +1295,7 @@ are the work.
 | PR | What | Changed lines | Files |
 |---|---|---|---|
 | M3a | [A16]: the form carries the type pair, the gate asserts membership, this text | 444 | 5 |
+| M3b | the checker types the expansion, in the caller's scope; the ceiling drops; this text | 151 + this text | 3 + this file |
 
 **What landed: the pair, and the gate's five rules collapsing into it.**
 
@@ -1385,17 +1392,98 @@ blocker than the one above and has a named route: the projection's own body IS
 checked (`checker.rs:1191`), so the types exist and want carrying across the
 inline. §3 M2d has the numbers and the two remaining sources.
 
-**The gate, and the verdict.** M3's gate was −1,200 lines across the two
-backends. **M3a is 444 changed lines and deletes nothing, so M3 misses its gate
-by the whole of it, and this paragraph is where it says so.** Nothing on the
-deletion list moved: `peek`, `peek_arm`, `peek_ho`, `gen_peek`, `match_ty`,
-`join`, `static_ty`, both `expect` stacks, both copies of `expected_fn_sig` /
-`fn_arg_param_types` / `resolve_fn_arg`, `declared::type_of`, `solve_param`'s
-backend call sites and the `(String, Type)` convention are all still there, and
-each is still there for the same reason: a backend cannot read a type at a node
-the program does not have. **The −1,200 is not withdrawn — it is re-parented**
-onto the milestone that moves the bodies, which is where the deletion becomes
-possible rather than merely large.
+### M3b — the checker types the expansion, and the blocker moves a third time
+
+The route above was "carry the projection body's recorded types across the
+inline". **It is the wrong route, and measuring why is worth more than the map
+it would have needed.** A projection body is checked ONCE, with its impl head's
+parameters still open: `place at` on `Slots<T>` yields a `T`, and a backend
+cannot use a `T` — carrying that answer onto the expansion would trip the form's
+own lint at every generic container in the corpus. The types the expansion needs
+are the CALLER's, and only one pass holds the caller's scope.
+
+So the checker types the expansion, where it is inlined, in the scope the access
+site is in — `Checker::record_desugar`, ten lines, called at the `@at` site and
+at `for x in c`. Two things make it sound, and both were already true:
+
+- **An expansion is leaked** (`project::memo`, `project::iterate_loop`), so its
+  addresses are immortal. That is what answers M2d's corpse hazard *for this
+  consumer*: a stale `Recorded` entry left by a freed node — `prelude::all()`'s
+  rows, a schema's predicate — is OVERWRITTEN the moment the expansion is typed
+  at that address, and no later allocation can take it back. The hazard stands
+  for any consumer that looks up an address it did not get from a live tree.
+- **The diagnostics, the scope and `PENDING_SUBST` all stay inside the call.** An
+  expansion cannot fail in a way the source did not already fail; the prologue's
+  bindings belong to the access site's block, not to the checker's model of it;
+  and the pending substitution is the slot the recording wrapper reads AFTER
+  `expr_inner` returns, so an expansion's last generic call would otherwise be
+  recorded against the access site's own node.
+
+| counter | M2d | M3b |
+|---|---|---|
+| `unrecorded` — a row the form holds and has no type for | 4,707 | **78** |
+| `synthesized` — an answer about AST the form does not hold | 3,264 | 3,218 |
+| `compared` — answers checked against a recorded type | 575,942 | 580,577 |
+| `ImplicitDispatch` instantiations | 26 | 24 |
+
+**Three things this milestone's brief did not survive contact with.**
+
+1. **The lexer's rule is not the checker's rule.** `project::iterate_loop` starts
+   its cursor at `Expr::Int(-1)`, a node the parser cannot produce — source `-1`
+   is a `Neg` over `1` — and the checker refuses a negative literal because "the
+   lexer parses literals up to u64::MAX by wrapping into the i64 bit pattern".
+   Typing an expansion is the first time that arm ever saw a node the lexer did
+   not make. The alternative was to change the loop's shape, which changes the
+   emitted bytes; the rule is now conditioned on the one flag that says nobody
+   wrote this.
+2. **494 of the 4,707 were not desugars at all.** They are the `@panicAt` site
+   literal the loader stamps (census U5), deliberately "never checked against
+   anything a user could get wrong" — and never typed either, while both
+   compiled backends type it. One `self.expr` on the second argument.
+3. **The 78 that remain are one class, and it is not a recording gap.** A `Var`
+   the checker resolves by NAME rather than by node, because the position must be
+   a binding: the receiver of `xs.pop()` and `xs.swapRemove(i)`, and the place
+   temporaries `parser::place_receiver` hoists (`s.free[]`). Closing it changes
+   what a mutating builtin accepts.
+
+**Byte identity.** All 161 examples, both backends, `emit-ir` and `emit-wat`
+hashed against `main`: **321 of 322 identical raw**, and the one difference is
+`rest.vyrn`'s generated symbol map embedding the worktree's absolute path — the
+same string on both sides but for the directory the checkout is in. No counter
+renumbered: `project::inline`'s tag counter advances only where an expansion is
+BUILT, and `vyrn emit-ir` runs no lowering and no recording, so the sequence a
+build sees is the one it saw before. Full parity is green.
+
+**The gate, and the verdict, and the ledger.** M3's gate was −1,200 lines across
+the two backends. **M3b is 151 changed lines and deletes nothing on that list, so
+M3 still misses its gate by the whole of it, and this paragraph is where it says
+so for the second time** (§3's rule; RFC-0094 M1 is the precedent). Every target,
+and why it did not go:
+
+| target | verdict | why |
+|---|---|---|
+| `peek` (510) + `peek_inner` | **kept** | it answers 52,182 questions from nodes the form holds and **501 from nodes it does not**. A `peek` that must still answer 501 cannot be deleted, and a lookup added beside it is the second type mechanism §1.2 exists to remove. |
+| `peek_arm`, `peek_ho`, `gen_peek`, `match_ty`, `join` | **kept** | satellites of `peek`; none is reachable without it. |
+| `static_ty` (34), the native `expect` stack | **kept** | same sentence on the native side: 1,678 of its answers are about AST it built during its own walk. |
+| the wasm `expect` stack | **kept** | 2,985. |
+| both `expected_fn_sig` / `fn_arg_param_types` / `resolve_fn_arg` | **kept** | measured, and they are NOT the duplicate pair §1.1 counts them as: each reads its own backend's structures (`fn_bindings`/`param_types` against `fn_binds`/`cx.sigs`). Merging them is a signature change, not a dedup, and it is not what "read the recorded type" buys. |
+| `declared::type_of` | **kept** | it runs in `vyrn-frontend`, for `own` and `movecheck`, before the lowering exists; there is no recorded answer for it to read. |
+| `solve_param`'s backend call sites | **kept** | 10 in `direct.rs`. Each one solves the callee's parameters at a call the backend is emitting, and the recorded solution is on the call node — but reading it is the same reader the rows above are waiting for. |
+| the `(String, Type)` convention in `lib.rs` | **kept** | re-measured at M3b: the exact return spelling is **33** and `(String, Type)` anywhere in `lib.rs` is **44** ([A10] again). Dropping the `Type` half means the caller reads it from somewhere, which is the row above. |
+
+**And the blocker has a third and final address, which is a milestone that
+already exists.** It was "a backend cannot read a type at a node the program does
+not have" (M3a), then "at a node the form holds but has not typed" (M2d). It is
+now: **a backend cannot read a type at a node it builds DURING its own walk**,
+and there are 3,218 of those. The residue names them — `Wasm/var` 1,457,
+`Native/var` 589, `Wasm/field` 365 — and every one is the receiver a backend
+constructs on the stack to reach an implicitly dispatched `release`, `size` or
+`success`, plus the 532 answers inside a lifted lambda's body. **That is M4's
+class, named by M2 and unchanged since**: M4 puts the release steps in the form,
+so the receiver is a step rather than an `Expr::Var` built at an emit site. There
+is no third mechanism left to invent below it, and no further preparation this
+milestone can do. **The −1,200 is re-parented onto M4**, and M4 should be read as
+carrying both its own −900 and this one.
 
 **M4 — release placement.** The lowering emits ordered `Release` steps at the
 exits `own` computes, and the backends encode them. The three scope-frame stacks,
