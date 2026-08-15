@@ -1428,6 +1428,8 @@ pub fn check(program: &Program) -> Result<(), String> {
 thread_local! {
     /// Cheap enough to test per expression node; the sink behind it is not.
     static RECORDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Inside [`Checker::record_desugar`] — typing AST the lexer never made.
+    static DESUGARING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static RECORD: RefCell<Recorded> = RefCell::new(Recorded::new());
     /// The substitution the innermost generic call just solved, handed to the
     /// [`Checker::expr`] wrapper that knows the call node's address. `call` does
@@ -1474,6 +1476,12 @@ pub fn record(program: &Program) -> Recorded {
 
 fn recording() -> bool {
     RECORDING.with(|c| c.get())
+}
+
+/// Is the checker inside an expansion — AST nobody wrote and the lexer never
+/// made? One literal rule depends on the answer; see [`Expr::Int`]'s arm.
+fn desugaring() -> bool {
+    DESUGARING.with(|c| c.get())
 }
 
 /// Hand the solved type arguments to the [`Checker::expr`] wrapper above.
@@ -3012,6 +3020,39 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Type AST nobody wrote, recording its answers and nothing else — RFC-0101
+    /// M3.
+    ///
+    /// A `place` projection is inlined AT its access site, and a `for` over a
+    /// user container becomes a `while` around a copy of its body. Three engines
+    /// walk those nodes; the checker never saw them, so 4,707 of the answers the
+    /// corpus gate compares had no recorded type to be compared against.
+    ///
+    /// They can be typed here, and only here, because `project` expands each
+    /// site ONCE and leaks the tree ([`crate::project::Memo`]): a leaked node is
+    /// immortal, so its address is a key nothing else can be handed later. And
+    /// checking it in the CALLER's scope is what makes the answer concrete —
+    /// `place at` on `Slots<T>` is checked once with `T` open, and a backend
+    /// cannot use a `T`.
+    ///
+    /// Three things stay inside this call. The diagnostics: an expansion cannot
+    /// fail in a way the source did not already fail, and a diagnostic naming a
+    /// line the user did not write is worse than none. The scope: the prologue's
+    /// bindings belong to the access site's block, not to the checker's model of
+    /// it. And [`PENDING_SUBST`]: it is the slot the recording wrapper reads
+    /// AFTER `expr_inner` returns, so an expansion's last generic call would
+    /// otherwise be recorded against the access site's own node.
+    fn record_desugar(&self, scope: &Scope, run: impl FnOnce(&Self, &mut Scope)) {
+        let mark = self.errors.borrow().len();
+        let saved = PENDING_SUBST.with(|s| s.borrow_mut().take());
+        let was = DESUGARING.with(|c| c.replace(true));
+        let mut sc = scope.clone();
+        run(self, &mut sc);
+        DESUGARING.with(|c| c.set(was));
+        PENDING_SUBST.with(|s| *s.borrow_mut() = saved);
+        self.errors.borrow_mut().truncate(mark);
+    }
+
     fn block(&self, block: &Block, ret: &Type, scope: &mut Scope) -> bool {
         scope.push(HashMap::new());
         let mut always_returns = false;
@@ -3461,6 +3502,29 @@ impl<'a> Checker<'a> {
                 self.block(body, ret, scope);
                 self.in_loop.replace(prev);
                 scope.pop();
+                // A `for` over a user container is a desugar too, one level up:
+                // the loop three engines walk is `place nth` inlined per turn
+                // around a COPY of the body above. Type that copy — see
+                // [`Self::record_desugar`].
+                if recording() {
+                    if let Some(blk) = crate::types::iterate_impl(self.impl_blocks, &ity).and_then(
+                        |(size_fn, nth)| {
+                            crate::project::iterate_loop(
+                                &size_fn,
+                                nth,
+                                var,
+                                iter,
+                                body,
+                                iter.line(),
+                            )
+                            .ok()
+                        },
+                    ) {
+                        self.record_desugar(scope, |c, sc| {
+                            c.block(blk, ret, sc);
+                        });
+                    }
+                }
                 // A `for` may run zero times, so it never guarantees a return.
                 Ok(false)
             }
@@ -3746,7 +3810,13 @@ impl<'a> Checker<'a> {
                     }
                 }
                 _ => {
-                    if *n < 0 {
+                    // …unless nobody wrote it. The wrap named above is a fact
+                    // about the LEXER, and an expansion's nodes never went
+                    // through one: `project::iterate_loop` starts its cursor at
+                    // `Expr::Int(-1)`, which the parser cannot produce (source
+                    // `-1` is a `Neg` over `1`) and which every engine reads as
+                    // minus one. See [`Checker::record_desugar`].
+                    if *n < 0 && !desugaring() {
                         Err(cerr!(
                             0,
                             "integer literal {} exceeds Int64's maximum \
@@ -5861,6 +5931,14 @@ impl<'a> Checker<'a> {
             if t != Type::Str {
                 return Err(cerr!(line, "`panic` needs a String, found {t}"));
             }
+            // The stamped site is a literal the loader wrote, so this cannot
+            // fail and there is nothing to report. It is typed anyway: a node
+            // with no recorded answer is a node no backend can read one from
+            // (RFC-0101 §2.1 item 2), and both compiled backends type this one
+            // — 494 of the corpus gate's 572 untyped answers were this literal.
+            if want == 2 {
+                let _ = self.expr(&args[1], scope, Some(&Type::Str), fn_ret);
+            }
             return Ok(Type::Never);
         }
 
@@ -6549,6 +6627,29 @@ impl<'a> Checker<'a> {
             // receiver. Lowering inlines the body; the type is the declaration.
             if name == crate::project::AT {
                 if let Some(t) = self.place_result(&at, "at", args, scope, fn_ret, line)? {
+                    // …and the nodes the site LOWERS through, which are the
+                    // projection's body inlined here. See [`record_desugar`].
+                    if recording() {
+                        if let Ok(Some(p)) = crate::project::site(
+                            self.impl_blocks,
+                            Some(&at),
+                            "at",
+                            &args[0],
+                            &args[1..],
+                            line,
+                        ) {
+                            let ret = fn_ret.cloned().unwrap_or(Type::Unit);
+                            self.record_desugar(scope, |c, sc| {
+                                sc.push(HashMap::new());
+                                for s in &p.prologue {
+                                    if c.stmt(s, &ret, sc).is_err() {
+                                        return;
+                                    }
+                                }
+                                let _ = c.expr(&p.place, sc, None, fn_ret);
+                            });
+                        }
+                    }
                     return Ok(t);
                 }
             }

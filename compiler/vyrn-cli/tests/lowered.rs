@@ -56,13 +56,16 @@
 //! so the nodes an engine walks there are nodes no one wrote: each engine built
 //! its own copy, at its own addresses, after the lowering had run. They are one
 //! tree now ([`vyrn_frontend::project::Memo`], opened per program below), the
-//! lowering walks it too, and the rows it writes for those nodes carry no type —
-//! the checker has no answer at a node it never saw, and inventing one here
-//! would be the sixth copy of a derivation RFC-0101 exists to remove. So this
-//! run moves answers out of [`Tally::synthesized`] and into
-//! [`Tally::unrecorded`]: 4,605 → 3,484 and 526 → 4,707. That is the milestone's
-//! honest half — the form now HOLDS the desugared nodes, and typing them is the
-//! next PR.
+//! lowering walks it too, and it moved 4,605 → 3,484 out of
+//! [`Tally::synthesized`] and 526 → 4,707 into [`Tally::unrecorded`] — the form
+//! HOLDING a node it had no answer for.
+//!
+//! **M3b types them, and the typing is the checker's own.** An expansion is
+//! leaked, so its addresses are immortal and can be a key; and it is checked in
+//! the CALLER's scope, which is the only place the answer is concrete —
+//! `place at` on `Slots<T>` is checked once with `T` open, and no backend can
+//! use a `T`. [`Tally::unrecorded`] is **4,707 → 78**, and the 78 are one named
+//! class.
 //!
 //! **M2 added a second comparison over the same run: the instance LISTS.** Each
 //! backend runs its own monomorphization worklist and nothing outside a backend
@@ -234,13 +237,23 @@ struct Tally {
     differed: usize,
     /// Answers where the two backends did not agree with EACH OTHER.
     cross_differed: usize,
-    /// Backend answers whose node the checker never typed (see
-    /// `Instance::untyped`) — a hole in the recording, counted not hidden.
+    /// Backend answers whose node the checker never typed — a hole in the
+    /// recording, counted not hidden.
     ///
-    /// 526 → 4,707 with the desugar-once milestone, and the rise is the point:
-    /// those are the expansion nodes, which the form holds now and the checker
-    /// never saw. A row with no type is a place a type can go; no row at all is
+    /// 526 → 4,707 with the desugar-once milestone, and the rise was the point:
+    /// those are the expansion nodes, which the form holds and the checker had
+    /// not seen. A row with no type is a place a type can go; no row at all is
     /// not.
+    ///
+    /// **M3b put the types in, and it is 78.** The checker types each expansion
+    /// where it is inlined (`Checker::record_desugar`) and the loader's stamped
+    /// `panic` site — 494 of the old count — is typed too. The 78 that remain
+    /// are one class, printed by the run: a `Var` the checker resolves by NAME
+    /// rather than by node, because the position must be a binding — the
+    /// receiver of `xs.pop()` / `xs.swapRemove(i)`, and the place temporaries
+    /// `parser::place_receiver` hoists (`s.free[]`). Closing it means the
+    /// checker routing those through `Checker::expr`, which is a change to what
+    /// a mutating builtin accepts and not a recording fix.
     unrecorded: usize,
     /// Backend answers about a node the lowering DID record, under an
     /// instantiation it did not build. This is the residue a worklist can close,
@@ -275,6 +288,13 @@ struct Tally {
     /// builds on the stack to reach an implicitly dispatched `release`,
     /// `size` or `success` — the `ImplicitDispatch` class M2 already named, and
     /// M4's to close.
+    ///
+    /// **M3b measured what that class costs the deletion, per engine.** Of the
+    /// answers about a node the form holds, 264,908 native / 263,487 wasm /
+    /// 52,182 `peek` are compared here; 1,678 / 2,985 / **501** are not. The
+    /// 501 is the number M3's delete half is priced on: a `peek` that must
+    /// still answer 501 questions cannot be deleted, and a lookup added beside
+    /// it is the second type mechanism RFC-0101 §1.2 exists to remove.
     synthesized: usize,
     /// Instantiations one backend emitted that the lowering's worklist does not
     /// have. This is M2's gate and it is zero.
@@ -458,6 +478,11 @@ fn gate() {
     // (see [`Tally::synthesized`]), and the shape is what the next milestone is
     // briefed from.
     let mut residue: std::collections::BTreeMap<String, usize> = Default::default();
+    // …and the rows the form HOLDS and has no type for, on the same axis. This
+    // is the half M3 moved: the checker types an expansion now, so what is left
+    // here is a node class the checker itself never routes through
+    // `Checker::expr`.
+    let mut untyped: std::collections::BTreeMap<String, usize> = Default::default();
     // (site, expression kind, recorded, backend) -> (count, first sighting)
     let mut disagreements: HashMap<(Site, &'static str, String, String), (usize, String)> =
         HashMap::new();
@@ -691,6 +716,9 @@ fn gate() {
             };
             let Some(rec) = rec else {
                 t.unrecorded += 1;
+                *untyped
+                    .entry(format!("{:?}/{}", row.site, kind(node)))
+                    .or_insert(0) += 1;
                 continue;
             };
             t.compared += 1;
@@ -749,6 +777,10 @@ fn gate() {
     top.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     top.truncate(8);
     eprintln!("  the residue, by engine and expression kind: {top:?}");
+    let mut untop: Vec<_> = untyped.into_iter().collect();
+    untop.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    untop.truncate(8);
+    eprintln!("  the rows with no type, by engine and expression kind: {untop:?}");
 
     let mut report = String::new();
     if !missing.is_empty() {
@@ -847,8 +879,8 @@ fn gate() {
     // class is M4's (the release steps move into the form); the second is the
     // milestone that moves lambda lifting.
     assert!(
-        t.synthesized < 4_000,
-        "{} backend answers are about AST no instantiation of the program holds.          The desugar-once milestone brought that to 3,484 by expanding each          `place` projection once and handing the same nodes to the lowering and          to both backends; a number back near 4,600 means an engine is expanding          for itself again",
+        t.synthesized < 3_500,
+        "{} backend answers are about AST no instantiation of the program holds.          The desugar-once milestone brought that to 3,484 by expanding each          `place` projection once and handing the same nodes to the lowering and          to both backends, and M3 to 3,218 by typing those nodes; a number back          near 4,600 means an engine is expanding for itself again",
         t.synthesized
     );
 
