@@ -2877,12 +2877,7 @@ impl<'a> Interp<'a> {
             }
         }
         match (at, slot) {
-            (Some(blk), _) => crate::own::trace::note(
-                crate::own::trace::Site::Interp,
-                crate::own::trace::Exit::Block,
-                blk,
-                walked,
-            ),
+            (Some(blk), _) => crate::own::trace::note(crate::own::trace::Exit::Block, blk, walked),
             (None, Some(slot)) => crate::own::trace::joined(slot, walked),
             (None, None) => {}
         }
@@ -2947,12 +2942,7 @@ impl<'a> Interp<'a> {
         }
         match slot {
             Some(slot) => crate::own::trace::joined(slot, walked),
-            None => crate::own::trace::note(
-                crate::own::trace::Site::Interp,
-                crate::own::trace::Exit::Scrutinee,
-                key,
-                walked,
-            ),
+            None => crate::own::trace::note(crate::own::trace::Exit::Scrutinee, key, walked),
         }
         r
     }

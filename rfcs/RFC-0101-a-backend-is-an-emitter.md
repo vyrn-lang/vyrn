@@ -21,9 +21,20 @@
   temporaries a CONSTRUCT owns, both compiled backends release each of them, and
   this engine released none. `examples/releaseacrossexit.vyrn` is the pin. With
   all six exit kinds placed the gate holds **78,371 walks**, `Terminated` 1,048
-  and `StreamCursor` 6 are the only named differences, and the deletion
-  preconditions are checked off in §3 M4 — every kind placed, every engine gated,
-  and `ImplicitDispatch` waiting on a CONSUMER rather than on a placement.
+  and `StreamCursor` 6 are the only named differences.
+  **M4's deletion phase then landed and MISSED ITS OWN GATE BY 935.** Both
+  compiled backends read the placed steps at every exit, the frame stacks, the
+  boundary indices and the exit-walk trio are gone, every emitted byte is
+  identical — and the three engines are **+35**, not −900. The measurement is
+  the finding: §1.4 priced `emit_drop` (180), `rel_at` (239) and `deep_release`
+  (149) as placement and all three are the ENCODER §2.3 keeps in a backend, so
+  568 of the −900 were never available; what consumption deletes is the frame
+  stack and the boundary index, about 150 lines per compiled backend, and the
+  interpreter has neither. `ImplicitDispatch` is still 24, and this phase can say
+  why in one sentence — `own::release_kind` throws the receiver TYPE away, so a
+  step carries a method name a backend cannot solve a generic symbol from. It,
+  and M3's −1,200 with it, are re-parented onto M5. §3 M4 has the ledger, entry
+  by entry.
   M3's shadow half landed — the form
   carries the type PAIR of [A16], and 21,154 of M1's 22,321 disagreements were the
   two engines answering different questions. Its delete half did not, and §3 M3
@@ -1922,6 +1933,164 @@ the three scope-frame stacks, the three boundary indices, `emit_drop`, `rel_at`,
 `deep_release`, and the fall-through walks that phase 1 measured at three lines
 per engine on their own. The deletion this phase banks toward the −2,100 is
 **zero**, and this paragraph is where it says so (§3's rule).
+
+### M4 fourth phase — the deletion. THE TWO COMPILED BACKENDS CONSUME THE PLACEMENT AT EVERY EXIT AND EMIT BYTE-IDENTICAL CODE, AND THE −900 IS MISSED BY 935 BECAUSE THE THING THAT DIES IS SMALLER THAN §1.4 PRICED IT AND HALF OF WHAT §1.4 NAMED IS THE ENCODER §2.3 KEEPS
+
+| PR | What | Changed lines | Files |
+|---|---|---|---|
+| M4d | both compiled backends read the placed steps; the frame stacks, the boundary indices and the exit-walk trio go; the trace's site axis and the corpus half of the release gate retire; this text | 819 | 5 + this file |
+
+**What landed.** `Gen::drop_stack` and `Fn_::releases` — a stack of scope frames
+each — are a flat `HashMap<binding, …>` in each backend, and every exit is
+`emit_releases(exit, at)`: look the node's steps up in `own::placed`, map each
+binding to the alloca or the wasm place it lives in, emit. `emit_all_drops`,
+`emit_drops_above` and `emit_loop_exit_cleanup` were three functions walking
+frames from an index; the first and third are now one line of region balancing
+each over the one reader, and the second is gone. `emit_releases_above` is gone
+the same way. `LoopCtx::drop_boundary` and `Fn_::loops`' third field are gone:
+a `break` reads the steps the placement put at that `break`.
+
+**Byte identity.** All 163 examples, both backends, `emit-ir` and `emit-wat`
+hashed against `main`: **326 of 326 identical, raw.** That is the claim this
+phase had to make and the only one that matters — the placement was proven equal
+to the derivations over 78,371 walks, so consumption is a change of READER and
+not of decision, and a single differing byte would have meant the proof was
+wrong. It caught one real error in this phase and the error is worth the line:
+the first version emitted a stream cursor at every exit rather than only at a
+function exit, and six stream examples grew four `__vyrn_stream_close` calls
+each. Full parity is green (40 tests, `--ignored`), `reproducible.rs`,
+`memory.rs`, `limits.rs` and `genwasm.rs` green, blessed dumps unmoved.
+
+### The gate, and the verdict
+
+**M4's gate is at least −900 across the three engines. Measured, the three
+engines are +35: native +24 (+173/−149), wasm +21 (+137/−116), interpreter −10
+(+2/−12). The gate is missed by 935 and this paragraph is where it says so** (§3's rule; RFC-0094 M1 is the
+precedent, and the bar there was moved rather than recorded). Outside the
+engines this PR is −109 in the corpus gate, and M4c's move is −205 in
+`vyrn-lower` against +389 in `own`, for a two-PR net of +110 in compiler code.
+**819 changed compiler lines across 5 files here, against §3.0's ≤ 800 and
+≤ 15** — over by 19, plus 166 lines of this text, and said rather than rounded
+down. It could not be cut further without a half that gates nothing: the two
+backends' consumption, the trace's retirement and the gate's are one assertion,
+because a backend that stops reporting and a gate that still asserts against its
+report do not compile together.
+
+**The number is not a shortfall in the work. It is a measurement that says
+§1.4's price list was reading the wrong half of each file**, and the ledger
+below is the evidence. Three findings inside it.
+
+1. **The three largest line counts §1.4 and this milestone's own text name —
+   `emit_drop` (180), `rel_at` (239), `deep_release` (149) — are the ENCODER,
+   and §2.3 puts the encoder in the backend on purpose.** `emit_drop(slot,
+   kind)` loads an aggregate out of an alloca and writes the LLVM that frees its
+   buffers; `rel_at` walks a type through wasm layout offsets. Neither decides
+   anything. They were counted as placement because they sit in the same
+   paragraph as it, and a milestone priced from a paragraph rather than from a
+   call graph prices the wrong thing. **568 of the −900 were never available.**
+2. **What consumption actually deletes is the frame stack, the boundary index
+   and the walk that reads them, and that is about 150 lines per compiled
+   backend rather than 450.** It is replaced by a reader of about 40 lines plus
+   the doc comment that says what it replaced, so the net per backend is a
+   small positive. Phase 1 predicted the shape of this ("deleting the
+   fall-through walk deletes three lines per engine") and predicted the total
+   would come from doing every exit kind at once; doing every exit kind at once
+   is what this phase did, and the total is still small.
+3. **The interpreter has none of what M4 deletes.** Its pending-drop list is a
+   `Vec` local to `Interp::block`, so there is no scope-frame stack; `Flow`
+   propagation IS the unwinding, so there is no boundary index; and there is no
+   exit-walk trio, because each frame runs its own list as the signal passes
+   through it. §1.4 prices this engine at ~190 lines of which `release_nested`
+   (82) is the by-VALUE encoder — the interpreter's `rel_at`. The −10 here is
+   the trace's site axis; the rest is a kept-with-reason below.
+
+### The ledger — every target M4 named
+
+| target | verdict |
+|---|---|
+| the three scope-frame stacks | **two deleted.** `Gen::drop_stack` → `HashMap<usize, DropSlot>`; `Fn_::releases` → `HashMap<usize, RelSlot>`. The interpreter's is a block-local `Vec` and is **kept**: it is not a stack, and the values in it are read out of a scope frame by name, which is this engine's representation of a place. |
+| the three break/continue boundary indices | **two deleted** — `LoopCtx::drop_boundary` and `Fn_::loops`' third field are gone. The third, `Flow::Break` propagation's cleanup role, is **kept**: it is not an index, it is the interpreter's unwinding itself. |
+| `emit_all_drops` / `emit_drops_above` / `emit_loop_exit_cleanup` | **one deleted, two shrunk to their non-release half.** `emit_drops_above` is gone; the other two are the region-stack balancing over one call to `emit_releases`. Net −30. |
+| `emit_releases_above` | **deleted**, replaced by `emit_releases`. Net −5. |
+| `emit_drop` (180) | **kept — it is the encoder.** It writes `load`/`call @free`/`call @__vyrn_str_free` and the deep walk's prologue. §2.3 lists representation and the emitted runtime as the backend's. |
+| `rel_at` (239), `deep_release` (149) | **kept, same sentence.** Both are a walk of a TYPE through a target layout. `rel_at` reads `Rel::Buffers`' byte offsets, which §1.4's phase-1 correction already ruled backend-side. |
+| `rel_for`'s re-derivation of a kind | **kept, and phase 1's correction is why.** It has two consumers outside the release path (`store_bufs`, `rel_at`'s array arm), and the `Rel` it builds carries layout offsets. The registration site still calls it; the ORDER it used to feed is the placement's now. The measured deletion available is ~60 lines behind a store-path refactor with its own byte risk — phase 1 measured it and left it, and this phase matches that judgement rather than beating it. |
+| `direct.rs`'s parallel five-variant kind enum (`Rel`) | **kept**, for the row above. |
+| the interpreter's equivalents (`run_drops`, `release_nested`) | **kept.** `release_nested` is the by-value encoder. `run_drops` is 30 lines of which the reverse iteration is one; consuming the order there means looking each binding's value up by name across the scope frames being popped, which is what the `frozen` mechanism exists to disambiguate — a rewrite of the unwinding, with real byte risk, for a deletion of one line. **This is the phase's one deliberate non-consumption, and it is a declared difference in §2.4's sense: the engine that still derives its own order is the one the gate still watches.** |
+| the eleven "the other engine does it this way" comments | **five gone, one narrowed, five kept and each names a real difference.** Gone: `interp.rs:2089` and `:2776` (the order is `own`'s now, so there is nothing to mirror), `lib.rs:2049` / `direct.rs:1436` / `interp.rs:2718`'s three separate assertions of "innermost frame first, newest binding first" — the invariant is the order the steps are in. Narrowed: `direct.rs:2986`'s "the textual backend reads the same map with the same key" now also reads the same ORDER. Kept, each a target fact: `lib.rs:4441` (a store leaves three kinds alone), `direct.rs:2699` (`store_bufs` is exact on one side and blunt on the other), `direct.rs:1494` (both `expect` stacks), and the two on the emitted trap wordings, which are M5's. |
+
+### `ImplicitDispatch` — the count did not move, and this phase can say why in one sentence
+
+Phase 2 said the class "closes with the consumption, not with the placement",
+and the consumption has landed. **It is still 24.** The reasoning was that a
+worklist entry could come from a step a backend is reading — and a step carries
+`own`'s `DropKind`, which for `DropKind::Release(f)` is a flattened method NAME
+and no receiver type. The backend still parks the receiver under a reserved name
+(`REL_RECV`, `@rel`) and goes through the ordinary call path, because that path
+is what solves a generic `impl Owned for Slots<T>`'s parameters from the
+receiver, mangles the symbol and queues the instance. **The missing half is not
+a consumer; it is that `own::release_kind` throws the receiver type away.**
+Closing it means `DropKind::Release` carrying the type it was decided for, which
+is a change to `own`'s vocabulary and touches `vyrn why --memory` and the LSP
+hover that print it. It is §2.1 item 5's job — resolved dispatch — and it is
+re-parented onto **M5**, with the count and the exact address recorded here so
+the next milestone does not have to find it again. The M2 gate's rule stays
+until then.
+
+### M3's −1,200 — the receivers did not fall, and the count is the same 3,218
+
+M3's blocker was "a backend cannot read a type at a node it builds DURING its own
+walk", and it named the release receiver as the bulk of the 3,218. **Consumption
+does not remove those receivers**, for the reason above: a `Rel::Call` / a
+`DropKind::Release` still reaches its function through a synthesized
+`Expr::Var`, because that is how a generic release's symbol gets solved. So
+`peek`'s 501 off-program answers are unchanged, `peek` and its family stay, and
+**M3's −1,200 is re-parented onto M5 with `ImplicitDispatch`** — they are one
+change, and this phase's contribution is to have measured that they are.
+
+### What retired
+
+- **The trace's site axis.** `own::trace::Site` is gone and `note` lost its
+  first argument: both compiled backends stopped reporting, because asserting a
+  walk that IS the placement against the placement is asserting a value equals
+  itself. What is left records one engine — the one that still derives.
+- **The corpus half of the release gate** (`vyrn-cli/tests/lowered.rs`, −109):
+  `RelRule::Terminated` and `RelRule::StreamCursor` are unreachable from the
+  interpreter and went with it; `HostReclaims` and `rel_rule`'s subsequence test
+  stay for the fixtures. The `rel_agreed > 1_000` floor went with the counter it
+  guarded.
+- The interpreter's nine fixtures stay, one per exit kind, each asserting its
+  kind was reached.
+
+### Three places this phase's brief did not survive contact with the code
+
+1. **The `StreamCursor` is not just a named difference — it is a step a consumer
+   has to splice, and its position is frame structure.** The placement has
+   nothing for the cursor a `for x in pull()` owns, and phase 2 recorded that as
+   6 named walks. A consumer cannot ignore it: dropping it leaks the producer,
+   and appending it changes the order. Both backends keep a `cursors` stack with
+   the registration count each was opened at, and a step registered before the
+   cursor is a frame outside the loop, so the cursor runs first. **Only a
+   function exit reaches one** — a `break` leaves through the loop's own release
+   — which is one `match` on the exit kind and is what byte identity caught when
+   it was missing. Roughly 20 lines per backend that exist because `own` has no
+   row for the cursor.
+2. **A flat map answers `slot_owns` / `place_owns` better than the frames did,
+   and the doc comment already said so.** Both asked "does this function release
+   this slot" by scanning every live frame; `lib.rs:4606` describes that as "the
+   `droppable` fact read as a property of the slot rather than of the block,
+   which is what RFC-0087 §4 asked for". A map over the whole body is that
+   property. Byte identity over the corpus confirms the widening changes nothing:
+   a slot from a sibling block that has already exited is not in scope to be
+   stored into.
+3. **A placed step whose binding a backend never registered is silently skipped,
+   and nothing gates it.** `emit_releases` looks each binding up and `continue`s
+   on a miss, which is a leak rather than a wrong free — the rule every release
+   path in both backends already follows. The corpus has none (byte identity
+   would show one as a missing `free`), but the shadow gate that would have
+   caught it is the one this phase retired. The honest statement is that the
+   guard is byte identity plus `memory.rs`, and that a future engine adding an
+   exit kind gets no warning from the form.
 
 **Byte identity.** Every hook this phase adds is behind `own::trace::on()`, off
 outside the gate, and nothing in either emitter's decision path changed —

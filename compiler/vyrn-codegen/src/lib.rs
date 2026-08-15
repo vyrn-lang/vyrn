@@ -1703,7 +1703,6 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // Whole-program ownership: which functions return owned heap values, and
     // which `let` bindings each function must free at block exit (RFC-0004 §4).
     let ownership = vyrn_frontend::own::analyze(program);
-    let droppable_map = &ownership.droppable;
     // RFC-0093 M2: the places a `consume` took out of each droppable `let`,
     // flattened across functions. The key is the `let`'s node address, which is
     // unique in the program, so one map answers for every body — the same
@@ -1749,7 +1748,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &str_globals,
             &empty_subst,
             &funcs,
-            droppable_map,
+            &ownership,
             holes_map,
             owned_proto,
             &regex_globals,
@@ -1867,7 +1866,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &str_globals,
             &empty_subst,
             &funcs,
-            droppable_map,
+            &ownership,
             holes_map,
             owned_proto,
             &regex_globals,
@@ -1919,7 +1918,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 &str_globals,
                 &subst,
                 &funcs,
-                droppable_map,
+                &ownership,
                 holes_map,
                 owned_proto,
                 &regex_globals,
@@ -1981,7 +1980,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 &str_globals,
                 &inst.subst,
                 &funcs,
-                droppable_map,
+                &ownership,
                 holes_map,
                 owned_proto,
                 &regex_globals,
@@ -2027,7 +2026,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &str_globals,
             &empty_subst,
             &funcs,
-            droppable_map,
+            &ownership,
             holes_map,
             owned_proto,
             &regex_globals,
@@ -2057,7 +2056,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &str_globals,
             &empty_subst,
             &funcs,
-            droppable_map,
+            &ownership,
             holes_map,
             owned_proto,
             &regex_globals,
@@ -2081,7 +2080,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &str_globals,
             &empty_subst,
             &funcs,
-            droppable_map,
+            &ownership,
             holes_map,
             owned_proto,
             &regex_globals,
@@ -2138,9 +2137,9 @@ pub fn emit(program: &Program) -> Result<String, String> {
 }
 
 /// One active loop's `break`/`continue` targets (RFC-0060). Captured when a
-/// loop body begins emitting; a `break`/`continue` inside reclaims every scope
-/// pushed since (drops for `drop_stack[drop_boundary..]`, plus a `region_exit`
-/// for each region opened past `region_depth`) before branching.
+/// loop body begins emitting; a `break`/`continue` inside emits the releases the
+/// placement put at that `break` (RFC-0101 M4) plus a `region_exit` for each
+/// region opened past `region_depth`, before branching.
 #[derive(Clone)]
 struct LoopCtx {
     /// Label to branch to on `break` (the loop's exit block).
@@ -2148,13 +2147,23 @@ struct LoopCtx {
     /// Label to branch to on `continue` (the condition test, or a `for`'s latch
     /// block that steps the index then re-tests).
     continue_label: String,
-    /// `drop_stack` depth at loop-body entry: frames at/above this index are the
-    /// body's own scopes, reclaimed on break/continue.
-    drop_boundary: usize,
     /// `region_depth` at loop-body entry: regions opened past this are exited on
     /// break/continue (the interpreter decrements its region depth on the same
     /// paths, so native must too — keeping the fixed region stack balanced).
     region_depth: usize,
+}
+
+/// What one owned binding is released with, in the backend's own vocabulary —
+/// RFC-0101 §2.3's half of the split. The placement says which of these runs at
+/// which exit and in what order; this says what running one emits.
+#[derive(Clone)]
+struct DropSlot {
+    slot: String,
+    kind: DropKind,
+    /// Registration order. Under a stack discipline the live bindings come off
+    /// in reverse of it, which is the one thing a stream cursor's position still
+    /// needs (see [`Gen::cursors`]).
+    seq: u32,
 }
 
 /// Per-function code generator.
@@ -2195,8 +2204,11 @@ struct Gen<'a> {
     /// Identities of `let`s whose heap binding is reclaimed at block exit (and
     /// how), for the function currently being emitted (from `vyrn_frontend::own`).
     droppable: HashMap<usize, DropKind>,
-    /// Per-function droppable maps for the whole program (looked up per emit).
-    droppable_map: &'a HashMap<String, HashMap<usize, DropKind>>,
+    /// The whole program's ownership answers, looked up per emit.
+    ownership: &'a vyrn_frontend::own::Ownership,
+    /// RFC-0101 M4: the release steps placed at every exit of the function being
+    /// emitted, keyed by the node the exit is AT. Read, never derived.
+    placed: HashMap<(vyrn_frontend::own::Exit, usize), Vec<usize>>,
     /// RFC-0093 M2: per `let` node, the places a `consume` took out of it. The
     /// release walk skips them, because the take already gave them away.
     holes_map: &'a HashMap<usize, Vec<String>>,
@@ -2214,13 +2226,32 @@ struct Gen<'a> {
     /// Every `impl` block, for `place` projection lookup (RFC-0091 M2). A
     /// projection is not a function, so `funcs` cannot answer for it.
     impls: &'a [vyrn_frontend::ast::ImplBlock],
-    /// Per-block stack of (slot register, kind, binding node) to reclaim when
-    /// the block exits. The third field is the `Stmt::Let`'s node address —
-    /// `own`'s own key for the binding, and what RFC-0101 M4's shadow trace
-    /// reports so that one gate can assert this engine's order against the
-    /// other two. It is `0` for a frame entry with no `let` behind it: a match
-    /// scrutinee temporary, a `for`-in iterable, a stream cursor.
-    drop_stack: Vec<Vec<(String, DropKind, usize)>>,
+    /// What each owned binding of this function is released WITH, keyed by
+    /// `own`'s own key — the `Stmt::Let`'s node address, or the construct's for
+    /// a temporary it owns. `seq` is the order it was registered in.
+    ///
+    /// **RFC-0101 M4: this is a lookup table, not a plan.** Until the deletion
+    /// phase it was `Vec<Vec<(String, DropKind, usize)>>` — a stack of scope
+    /// frames this engine pushed, popped and walked from a boundary index, which
+    /// is the same stack the direct backend and the interpreter each kept
+    /// privately and the same order all three asserted separately. The order is
+    /// [`vyrn_frontend::own::Ownership::releases`]' now, read at the exit; what
+    /// is left here is the half §2.3 leaves in a backend, which is the alloca a
+    /// value lives in and the shape it is reclaimed by.
+    drop_slots: HashMap<usize, DropSlot>,
+    /// Registrations so far, which is what a [`DropSlot::seq`] counts.
+    drop_seq: u32,
+    /// The stream cursors a `for x in pull()` opened, innermost last, with the
+    /// registration count each was opened at.
+    ///
+    /// **The one step the placement has nothing for** (RFC-0101 M4's phase-2
+    /// gate names it `StreamCursor`, 6 walks over the corpus): the cursor is not
+    /// a row of `own`'s map, because RFC-0075 M2b closes a stream's producer
+    /// from the loop that made it rather than from a reclamation rule. Its
+    /// POSITION in a mixed walk is still frame structure, so it is kept — a step
+    /// registered before the cursor is a frame outside the loop, so the cursor
+    /// runs first.
+    cursors: Vec<(String, u32)>,
     /// The argument expressions whose value this frame releases after the call
     /// they belong to — `own`'s answer, keyed by node address the way
     /// `droppable` is keyed by the `Stmt::Let`'s.
@@ -2368,7 +2399,7 @@ impl<'a> Gen<'a> {
         str_globals: &'a HashMap<String, String>,
         subst: &'a HashMap<String, Type>,
         funcs: &'a HashMap<String, &'a Function>,
-        droppable_map: &'a HashMap<String, HashMap<usize, DropKind>>,
+        ownership: &'a vyrn_frontend::own::Ownership,
         holes_map: &'a HashMap<usize, Vec<String>>,
         owned: &'a vyrn_frontend::own::Owned,
         regex_globals: &'a HashMap<String, (String, String, u32)>,
@@ -2398,13 +2429,16 @@ impl<'a> Gen<'a> {
             instantiations: Vec::new(),
             region_depth: 0,
             droppable: HashMap::new(),
-            droppable_map,
+            ownership,
+            placed: HashMap::new(),
             holes_map,
             hole_slots: HashMap::new(),
             rel_holes: Vec::new(),
             owned,
             impls,
-            drop_stack: Vec::new(),
+            drop_slots: HashMap::new(),
+            drop_seq: 0,
+            cursors: Vec::new(),
             loop_ctx: Vec::new(),
             log_level: DEFAULT_LOG_LEVEL,
             log_sink: LogSink::Stderr,
@@ -4148,6 +4182,27 @@ impl<'a> Gen<'a> {
             .map(|(_, _, t)| t.clone())
     }
 
+    /// Take `own`'s two answers for the body about to be emitted: WHAT each
+    /// binding is, and WHERE and IN WHAT ORDER each exit releases them.
+    fn begin_body(&mut self, name: &str) {
+        self.droppable = self
+            .ownership
+            .droppable
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        // RFC-0101 M4: the order this body releases in, decided once in
+        // `own::place_body` and read here. What used to stand in its place was a
+        // stack of scope frames and a boundary index per loop.
+        self.placed = match self.ownership.releases.get(name) {
+            Some(steps) => vyrn_frontend::own::placed(steps),
+            None => HashMap::new(),
+        };
+        self.drop_slots.clear();
+        self.drop_seq = 0;
+        self.cursors.clear();
+    }
+
     fn lookup(&self, name: &str) -> Option<(String, Type)> {
         for frame in self.scope.iter().rev() {
             for (n, slot, ty) in frame.iter().rev() {
@@ -4166,7 +4221,7 @@ impl<'a> Gen<'a> {
         self.fn_ret = f.ret.clone();
         self.cur_fn_name = f.name.clone();
         self.lambda_counter = 0;
-        self.droppable = self.droppable_map.get(&f.name).cloned().unwrap_or_default();
+        self.begin_body(&f.name);
         // Slot names repeat across functions, and a stale hole would make a walk
         // skip a place this body owns (RFC-0093 M2). A stale skip only ever
         // leaks, but the clear costs one line.
@@ -4291,7 +4346,6 @@ impl<'a> Gen<'a> {
 
     fn gen_block(&mut self, block: &Block) -> Result<(), String> {
         self.scope.push(Vec::new());
-        self.drop_stack.push(Vec::new());
         for stmt in &block.stmts {
             if self.terminated {
                 break; // remaining statements are unreachable
@@ -4301,98 +4355,92 @@ impl<'a> Gen<'a> {
         // Reclaim this block's owned heap temporaries on the fall-through exit.
         // If the block already returned, these are skipped (that path leaks —
         // safe, never a double-free), matching the `region` early-exit rule.
-        let drops = self.drop_stack.pop().unwrap();
-        // RFC-0101 M4's shadow: this engine's block-exit sequence, made readable
-        // so one gate can assert it against the other two. Outside the
-        // `terminated` test on purpose — a block that already returned emits
-        // NOTHING here, and recording that as an empty exit is what lets the
-        // gate see the difference instead of missing the block entirely.
-        vyrn_frontend::own::trace::note(
-            vyrn_frontend::own::trace::Site::Native,
-            ExitKind::Block,
-            block as *const Block as usize,
-            if self.terminated {
-                Vec::new()
-            } else {
-                drops.iter().rev().map(|(_, _, b)| *b).collect()
-            },
-        );
         if !self.terminated {
-            for (slot, kind, _) in drops.iter().rev() {
-                self.emit_drop(slot, kind);
-            }
+            self.emit_releases(ExitKind::Block, block as *const Block as usize);
         }
         self.scope.pop();
         Ok(())
     }
 
-    /// RFC-0101 M4's shadow, second phase: the release a construct runs on its
-    /// OWN temporary — the row `own` keys by the `match`, the `if let` or the
-    /// `for in` rather than by a binding. Outside the `terminated` test for the
-    /// reason `gen_block`'s note is: a construct an arm returned out of emits
-    /// nothing here, and recording that as an empty walk is what lets the gate
-    /// see the difference instead of missing the construct entirely.
-    fn note_temp(&self, at: usize, drops: &[(String, DropKind, usize)]) {
-        vyrn_frontend::own::trace::note(
-            vyrn_frontend::own::trace::Site::Native,
-            ExitKind::Scrutinee,
-            at,
-            match self.terminated {
-                true => Vec::new(),
-                false => drops.iter().rev().map(|(_, _, b)| *b).collect(),
-            },
-        );
+    /// Emit the releases the lowering PLACED at one exit — RFC-0101 M4.
+    ///
+    /// **This function is the whole of the consumption, and what it replaced is
+    /// the milestone.** There used to be three: `emit_all_drops` for a `return`,
+    /// `emit_drops_above(boundary)` for the drop half of a `break`, and
+    /// `emit_loop_exit_cleanup` to pair that with the region exits — each
+    /// walking a stack of scope frames from an index this engine derived for
+    /// itself, and each asserting the same "innermost frame first, newest
+    /// binding first" the direct backend and the interpreter asserted separately
+    /// (§1.4). The order is `own::place_body`'s now. This is a lookup and an
+    /// encode.
+    ///
+    /// Nothing is popped, and that is still what makes an early exit safe: the
+    /// unwinding `gen_block`s see `terminated` and skip their own fall-through
+    /// releases, so nothing is freed twice.
+    fn emit_releases(&mut self, exit: ExitKind, at: usize) {
+        let steps = self.placed.get(&(exit, at)).cloned().unwrap_or_default();
+        // The cursor a `for x in pull()` owns is not a row of `own`'s map
+        // (RFC-0075 M2b closes a producer from the loop that made it), so the
+        // placement has nothing for it and this engine still holds where it
+        // sits. A step registered BEFORE the cursor is a frame outside the loop,
+        // so the cursor runs first.
+        //
+        // Only a FUNCTION exit reaches one. A cursor sits on the loop-variable
+        // frame, which no block exit and no construct's own exit is, and which a
+        // `break`/`continue` never crosses because the loop it belongs to is the
+        // one being left.
+        let mut cursors = match exit {
+            ExitKind::Return | ExitKind::Try => self.cursors.clone(),
+            _ => Vec::new(),
+        };
+        let mut run: Vec<(String, Option<DropKind>)> = Vec::new();
+        for b in steps {
+            let Some(d) = self.drop_slots.get(&b) else {
+                continue;
+            };
+            let (slot, kind, seq) = (d.slot.clone(), d.kind.clone(), d.seq);
+            while cursors.last().is_some_and(|(_, at)| *at > seq) {
+                run.push((cursors.pop().unwrap().0, None));
+            }
+            run.push((slot, Some(kind)));
+        }
+        for (slot, _) in cursors.into_iter().rev() {
+            run.push((slot, None));
+        }
+        for (slot, kind) in run {
+            match kind {
+                Some(k) => self.emit_drop(&slot, &k),
+                None => self.emit_drop(&slot, &DropKind::CloseStream),
+            }
+        }
     }
 
-    /// Free every owned heap temporary currently in scope (innermost block
-    /// first), without popping the drop frames — used before an early `return`.
-    /// The frames stay in place so the unwinding `gen_block`s see `terminated`
-    /// and skip their own fall-through frees, so nothing is freed twice.
+    /// Say what one owned binding is released WITH. The placement already said
+    /// where and in what order.
+    fn register_drop(&mut self, key: usize, slot: String, kind: DropKind) {
+        let seq = self.drop_seq;
+        self.drop_seq += 1;
+        self.drop_slots.insert(key, DropSlot { slot, kind, seq });
+    }
+
+    /// A function exit: the placed releases, then the region stack balanced.
     ///
-    /// Also balances the region stack, because every caller of this is a function
-    /// exit and a `return` (or a `?` propagation) can leave a region the same way
-    /// it leaves a block. `__vyrn_region_pop` and not `__vyrn_region_exit`: see
-    /// [`REGION_RUNTIME`] for why the returned value forbids the free.
+    /// Every caller is a function exit, and a `return` (or a `?` propagation)
+    /// can leave a region the same way it leaves a block.
+    /// `__vyrn_region_pop` and not `__vyrn_region_exit`: see [`REGION_RUNTIME`]
+    /// for why the returned value forbids the free.
     fn emit_all_drops(&mut self, exit: ExitKind, at: usize) {
-        self.emit_drops_above(0, exit, at);
+        self.emit_releases(exit, at);
         for _ in 0..self.region_depth {
             self.emit("call void @__vyrn_region_pop()".into());
         }
     }
 
-    /// Reclaim the innermost `drop_stack[boundary..]` frames (innermost first)
-    /// WITHOUT popping them — the drop half of a `break`/`continue` exit
-    /// (RFC-0060). The frames stay in place so the unwinding `gen_block`s see
-    /// `terminated` and skip their own fall-through frees (no double free), just
-    /// like `emit_all_drops` does for `return`.
-    fn emit_drops_above(&mut self, boundary: usize, exit: ExitKind, at: usize) {
-        let frames: Vec<Vec<(String, DropKind, usize)>> =
-            self.drop_stack[boundary..].iter().rev().cloned().collect();
-        // RFC-0101 M4's shadow, second phase: the sequence this engine walks at
-        // an EARLY exit, keyed by the node the exit is at, so one gate can
-        // assert it against the other two and against the placement.
-        vyrn_frontend::own::trace::note(
-            vyrn_frontend::own::trace::Site::Native,
-            exit,
-            at,
-            frames
-                .iter()
-                .flat_map(|f| f.iter().rev())
-                .map(|(_, _, b)| *b)
-                .collect(),
-        );
-        for frame in frames {
-            for (slot, kind, _) in frame.iter().rev() {
-                self.emit_drop(slot, kind);
-            }
-        }
-    }
-
-    /// The full `break`/`continue` scope cleanup for the innermost loop: drop the
-    /// body's owned temporaries, then exit every region opened inside the body
-    /// (RFC-0060). Emits nothing structural — the caller adds the branch.
+    /// A `break`/`continue` exit: the placed releases, then every region opened
+    /// inside the loop body exited (RFC-0060). Emits nothing structural — the
+    /// caller adds the branch.
     fn emit_loop_exit_cleanup(&mut self, ctx: &LoopCtx, exit: ExitKind, at: usize) {
-        self.emit_drops_above(ctx.drop_boundary, exit, at);
+        self.emit_releases(exit, at);
         for _ in ctx.region_depth..self.region_depth {
             self.emit("call void @__vyrn_region_exit()".into());
         }
@@ -4608,7 +4656,7 @@ impl<'a> Gen<'a> {
     /// released: the arena owns what was allocated there.
     fn slot_owns(&self, slot: &str) -> bool {
         self.region_depth == 0
-            && (slot.starts_with('@') || self.drop_stack.iter().flatten().any(|(s, ..)| s == slot))
+            && (slot.starts_with('@') || self.drop_slots.values().any(|d| d.slot == slot))
     }
 
     /// The heap buffers the value in `slot` holds right now, loaded so a store may
@@ -4775,7 +4823,7 @@ impl<'a> Gen<'a> {
                     if let Some(h) = self.holes_map.get(&key) {
                         self.hole_slots.insert(slot.clone(), h.clone());
                     }
-                    self.drop_stack.last_mut().unwrap().push((slot, kind, key));
+                    self.register_drop(key, slot, kind);
                 }
                 Ok(())
             }
@@ -5094,11 +5142,10 @@ impl<'a> Gen<'a> {
                 // frames, and this one is on the stack for the whole statement.
                 let key = stmt as *const Stmt as usize;
                 let scrut_drop = self.droppable.get(&key).cloned();
-                self.drop_stack.push(Vec::new());
                 if let Some(kind) = scrut_drop {
                     let slot = self.fresh_alloca(&self.llt(&sr).clone());
                     self.emit(format!("store {} {sv}, ptr {slot}", self.llt(&sr)));
-                    self.drop_stack.last_mut().unwrap().push((slot, kind, key));
+                    self.register_drop(key, slot, kind);
                 }
                 let then_l = self.fresh_label("il.then");
                 let end_l = self.fresh_label("il.end");
@@ -5133,12 +5180,8 @@ impl<'a> Gen<'a> {
                 // The fall-through release. An arm that returned already ran it
                 // through `emit_all_drops` and left `terminated` set, so nothing
                 // is freed twice — the same rule `gen_block` follows.
-                let drops = self.drop_stack.pop().unwrap();
-                self.note_temp(key, &drops);
                 if !self.terminated {
-                    for (slot, kind, _) in drops.iter().rev() {
-                        self.emit_drop(slot, kind);
-                    }
+                    self.emit_releases(ExitKind::Scrutinee, key);
                 }
                 Ok(())
             }
@@ -5156,7 +5199,6 @@ impl<'a> Gen<'a> {
                 self.loop_ctx.push(LoopCtx {
                     break_label: end_l.clone(),
                     continue_label: cond_l.clone(),
-                    drop_boundary: self.drop_stack.len(),
                     region_depth: self.region_depth,
                 });
                 self.gen_block(body)?;
@@ -5238,12 +5280,11 @@ impl<'a> Gen<'a> {
                 // land on code that runs the fall-through release below.
                 let key = stmt as *const Stmt as usize;
                 let iter_drop = self.droppable.get(&key).cloned();
-                self.drop_stack.push(Vec::new());
                 if let Some(kind) = iter_drop {
                     let ty = self.llt(&resolved).clone();
                     let slot = self.fresh_alloca(&ty);
                     self.emit(format!("store {ty} {av}, ptr {slot}"));
-                    self.drop_stack.last_mut().unwrap().push((slot, kind, key));
+                    self.register_drop(key, slot, kind);
                 }
                 // Iterating a String yields each byte as an Int (loaded as i8 and
                 // zero-extended); arrays load their element type directly.
@@ -5326,22 +5367,15 @@ impl<'a> Gen<'a> {
                 // element is a borrow, not an owned allocation, so its drop frame
                 // stays empty.
                 self.scope.push(Vec::new());
-                self.drop_stack.push(Vec::new());
                 let vslot = self.declare(var, &elem);
                 self.emit(format!("store {ell} {ev}, ptr {vslot}"));
-                // The loop-var frame is already on the stack; `drop_boundary` is
-                // the body's own frame (pushed next by `gen_block`), so a
-                // break/continue drops the body scopes but not the borrowed
-                // (empty) loop-var frame.
                 self.loop_ctx.push(LoopCtx {
                     break_label: end_l.clone(),
                     continue_label: latch_l.clone(),
-                    drop_boundary: self.drop_stack.len(),
                     region_depth: self.region_depth,
                 });
                 self.gen_block(body)?;
                 self.loop_ctx.pop();
-                self.drop_stack.pop();
                 self.scope.pop();
                 if !self.terminated {
                     self.emit_term(format!("br label %{latch_l}"));
@@ -5361,12 +5395,8 @@ impl<'a> Gen<'a> {
                 // The fall-through release (RFC-0092 M5). A body that returned
                 // already ran it through `emit_all_drops`; this label is still
                 // reached from the condition, so the normal exit runs it once.
-                let drops = self.drop_stack.pop().unwrap();
-                self.note_temp(key, &drops);
                 if !self.terminated {
-                    for (slot, kind, _) in drops.iter().rev() {
-                        self.emit_drop(slot, kind);
-                    }
+                    self.emit_releases(ExitKind::Scrutinee, key);
                 }
                 Ok(())
             }
@@ -6063,20 +6093,15 @@ impl<'a> Gen<'a> {
     ) -> Result<(String, Type), String> {
         let (sv, sty) = self.gen_expr(scrutinee)?;
         let scrut_drop = self.droppable.get(&key).cloned();
-        self.drop_stack.push(Vec::new());
         if let Some(kind) = scrut_drop {
             let ll = self.llt(&self.resolve(&sty)).clone();
             let slot = self.fresh_alloca(&ll);
             self.emit(format!("store {ll} {sv}, ptr {slot}"));
-            self.drop_stack.last_mut().unwrap().push((slot, kind, key));
+            self.register_drop(key, slot, kind);
         }
         let r = self.gen_match_body(&sv, &sty, arms);
-        let drops = self.drop_stack.pop().unwrap();
-        self.note_temp(key, &drops);
         if !self.terminated {
-            for (slot, kind, _) in drops.iter().rev() {
-                self.emit_drop(slot, kind);
-            }
+            self.emit_releases(ExitKind::Scrutinee, key);
         }
         r
     }
@@ -6487,22 +6512,18 @@ impl<'a> Gen<'a> {
         let staged = self.fresh_tmp();
         self.emit(format!("{staged} = load {ell}, ptr {stage}"));
         self.scope.push(Vec::new());
-        self.drop_stack.push(Vec::new());
-        self.drop_stack
-            .last_mut()
-            .unwrap()
-            .push((sslot.clone(), DropKind::CloseStream, 0));
+        // The one entry the placement has nothing for — see [`Gen::cursors`].
+        self.cursors.push((sslot.clone(), self.drop_seq));
         let vslot = self.declare(var, elem);
         self.emit(format!("store {ell} {staged}, ptr {vslot}"));
         self.loop_ctx.push(LoopCtx {
             break_label: end_l.clone(),
             continue_label: latch_l.clone(),
-            drop_boundary: self.drop_stack.len(),
             region_depth: self.region_depth,
         });
         self.gen_block(body)?;
         self.loop_ctx.pop();
-        self.drop_stack.pop();
+        self.cursors.pop();
         self.scope.pop();
         if !self.terminated {
             self.emit_term(format!("br label %{latch_l}"));
@@ -7955,7 +7976,12 @@ impl<'a> Gen<'a> {
         let saved_ret = self.fn_ret.clone();
         let saved_tmp = self.tmp;
         let saved_label = self.label;
-        let saved_drop = std::mem::take(&mut self.drop_stack);
+        let saved_drop = std::mem::take(&mut self.drop_slots);
+        let saved_cursors = std::mem::take(&mut self.cursors);
+        // A lifted lambda is a different function: it owns no release rows here
+        // (the shell that lowers it has none), so it must not read the enclosing
+        // body's placement either.
+        let saved_placed = std::mem::take(&mut self.placed);
         let saved_droppable = std::mem::take(&mut self.droppable);
         let saved_modify = std::mem::take(&mut self.modify_copyout);
         let saved_bindings = std::mem::take(&mut self.fn_bindings);
@@ -8039,7 +8065,9 @@ impl<'a> Gen<'a> {
         self.fn_ret = saved_ret;
         self.tmp = saved_tmp;
         self.label = saved_label;
-        self.drop_stack = saved_drop;
+        self.drop_slots = saved_drop;
+        self.cursors = saved_cursors;
+        self.placed = saved_placed;
         self.droppable = saved_droppable;
         self.modify_copyout = saved_modify;
         self.fn_bindings = saved_bindings;
@@ -8601,11 +8629,7 @@ impl<'a> Gen<'a> {
         let callee: &Function = self.funcs[inst.name.as_str()];
         self.cur_fn_name = inst.name.clone();
         self.lambda_counter = 0;
-        self.droppable = self
-            .droppable_map
-            .get(&inst.name)
-            .cloned()
-            .unwrap_or_default();
+        self.begin_body(&inst.name);
         self.hole_slots.clear();
         self.append_ok = append_candidates(&callee.body);
         self.str_append.clear();

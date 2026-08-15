@@ -392,6 +392,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         // (`rfcs/census-call-arguments.md`), taken before `ownership` is moved
         // from.
         arg_drops: ownership.arg_drops(),
+        releases: ownership.releases,
         droppable: ownership.droppable,
         // RFC-0093 M2, flattened across functions: the key is the `let`'s node
         // address, which is unique in the program.
@@ -1033,6 +1034,10 @@ struct Cx<'a> {
     /// — but the map's membership is `own`'s answer and stays authoritative about
     /// WHICH `let`s own their value.
     droppable: HashMap<String, HashMap<usize, DropKind>>,
+    /// Per function: [`droppable`](Cx::droppable)'s rows PLACED — every step, at
+    /// the exit that runs it, in the order it runs (RFC-0101 M4). One order for
+    /// three engines, read at the exit instead of derived from a frame stack.
+    releases: HashMap<String, Vec<vyrn_frontend::own::Release>>,
     /// Per `let` node, the places a `consume` took out of it (RFC-0093 M2). The
     /// release walk skips them: the take already gave them an owner.
     holes: HashMap<usize, Vec<String>>,
@@ -1339,6 +1344,19 @@ fn stream_step_sig(elem: &Type) -> Type {
     )
 }
 
+/// What one owned binding is released with, in the backend's own vocabulary —
+/// RFC-0101 §2.3's half of the split. The placement says which of these runs at
+/// which exit and in what order; this says what running one emits.
+#[derive(Clone)]
+struct RelSlot {
+    place: Place,
+    rel: Rel,
+    /// Registration order. Under a stack discipline the live bindings come off
+    /// in reverse of it, which is the one thing a stream cursor's position still
+    /// needs (see [`Fn_::cursors`]).
+    seq: u32,
+}
+
 /// What a release frame entry reclaims (RFC-0075 M2b added the second one,
 /// RFC-0077 M6 the last two).
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1445,13 +1463,15 @@ struct Fn_<'a, 'p> {
     /// wasm blocks open between here and the function's outermost one. A
     /// `return` is `br depth`.
     depth: u32,
-    /// (break target, continue target, release boundary, region depth) per
-    /// enclosing loop. The first two are the depth each was opened at, so `br`
-    /// distance is `depth - opened - 1`; the third is how many release frames were
-    /// open when the loop started, which is what a `break` has to unwind to; the
-    /// fourth is the same question for `region` blocks, which are the other kind of
-    /// scope an exit edge has to close (RFC-0004 §4).
-    loops: Vec<(u32, u32, usize, u32)>,
+    /// (break target, continue target, region depth) per enclosing loop. The
+    /// first two are the depth each was opened at, so `br` distance is
+    /// `depth - opened - 1`; the third is how many `region` blocks were open
+    /// when the loop started, which an exit edge has to close (RFC-0004 §4).
+    ///
+    /// **The release boundary that used to be the third field is gone**
+    /// (RFC-0101 M4): a `break` reads the steps the placement put at that
+    /// `break`, so no engine derives an index into its own frames any more.
+    loops: Vec<(u32, u32, u32)>,
     ret: Repr,
     ret_ty: Type,
     /// The wasm local holding the hidden aggregate-return pointer, if any.
@@ -1460,18 +1480,35 @@ struct Fn_<'a, 'p> {
     /// followed by the reads that consume it, so one pair suffices however
     /// deeply expressions nest.
     scratch: HashMap<(ValType, u8), u32>,
-    /// This function's releasable bindings, one frame per open block, released on
-    /// the block's exit — innermost first, newest first, the order the textual
-    /// backend's `drop_stack` uses. A `Ref` releases its cell; a `Stream`
-    /// (RFC-0075 M2b) releases the cursor cell it owns IF it holds a producer
-    /// rather than a buffer, which is a runtime tag rather than a static fact.
-    /// Per-block stack of (place, kind, binding node) to release when the block
-    /// exits. The third field is the `Stmt::Let`'s node address — `own`'s own
-    /// key for the binding, and what RFC-0101 M4's shadow trace reports so that
-    /// one gate can assert this engine's order against the other two. It is `0`
-    /// for an entry with no `let` behind it: a match scrutinee temporary, a
-    /// `for`-in iterable, a stream cursor.
-    releases: Vec<Vec<(Place, Rel, usize)>>,
+    /// What each owned binding of this function is released WITH, keyed by
+    /// `own`'s own key — the `Stmt::Let`'s node address, or the construct's for
+    /// a temporary it owns. `seq` is the order it was registered in.
+    ///
+    /// **RFC-0101 M4: this is a lookup table, not a plan.** Until the deletion
+    /// phase it was one frame per open block, walked from a boundary index —
+    /// the same stack the textual backend and the interpreter each kept
+    /// privately, each asserting "innermost first, newest first" separately
+    /// (§1.4). The order is [`vyrn_frontend::own::Ownership::releases`]' now.
+    /// What is left here is the half §2.3 leaves in a backend: the place a value
+    /// lives in and the [`Rel`] that says which instructions reclaim it —
+    /// `Rel::Buffers` carries LAYOUT OFFSETS, which is target vocabulary.
+    rel_slots: HashMap<usize, RelSlot>,
+    /// Registrations so far, which is what a [`RelSlot::seq`] counts.
+    rel_seq: u32,
+    /// RFC-0101 M4: the release steps placed at every exit of this body, keyed
+    /// by the node the exit is AT. Read, never derived.
+    placed: HashMap<(ExitKind, usize), Vec<usize>>,
+    /// The stream cursors a `for x in pull()` opened, innermost last, with the
+    /// registration count each was opened at.
+    ///
+    /// **The one step the placement has nothing for** (RFC-0101 M4's phase-2
+    /// gate names it `StreamCursor`): the cursor is not a row of `own`'s map,
+    /// because RFC-0075 M2b closes a stream's producer from the loop that made
+    /// it rather than from a reclamation rule. Only a function exit reaches one
+    /// — a `break` leaves through the loop's own release — and its POSITION in
+    /// such a walk is still frame structure, so a step registered before the
+    /// cursor is a frame outside the loop and the cursor runs first.
+    cursors: Vec<(Place, Type, u32)>,
     /// Lexical `region` nesting depth within this body, so an exit edge knows how
     /// many arena scopes it is leaving. The runtime counter is dynamic (a callee's
     /// region nests inside its caller's); this is only the part one body can see,
@@ -1524,7 +1561,10 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         ret_ty: Type::Unit,
         dest: None,
         scratch: HashMap::new(),
-        releases: Vec::new(),
+        rel_slots: HashMap::new(),
+        rel_seq: 0,
+        placed: HashMap::new(),
+        cursors: Vec::new(),
         region_depth: 0,
         drops: HashMap::new(),
         arg_frees: Vec::new(),
@@ -1624,7 +1664,16 @@ fn lower_body(
         ret_ty: sig.ret_ty.clone(),
         dest,
         scratch: HashMap::new(),
-        releases: Vec::new(),
+        rel_slots: HashMap::new(),
+        rel_seq: 0,
+        // RFC-0101 M4: the order this body releases in, decided once in
+        // `own::place_body` and read here.
+        placed: cx
+            .releases
+            .get(&f.name)
+            .map(|steps| vyrn_frontend::own::placed(steps))
+            .unwrap_or_default(),
+        cursors: Vec::new(),
         region_depth: 0,
         drops: cx.droppable.get(&f.name).cloned().unwrap_or_default(),
         arg_frees: Vec::new(),
@@ -2094,63 +2143,68 @@ impl<'p> Fn_<'_, 'p> {
 
     fn block(&mut self, m: &mut Module, b: &mut Frame, blk: &Block) -> Result<(), String> {
         let mark = self.scope.len();
-        self.releases.push(Vec::new());
         for s in &blk.stmts {
             self.stmt(m, b, s)?;
         }
         // The fall-through exit. An early `return`/`break`/`continue` releases the
         // same frames before its branch, so this runs after a branch only in code
         // wasm has already marked unreachable.
-        let boundary = self.releases.len() - 1;
-        self.emit_releases_above(
-            m,
-            b,
-            boundary,
-            ExitKind::Block,
-            blk as *const Block as usize,
-        )?;
-        self.releases.pop();
+        self.emit_releases(m, b, ExitKind::Block, blk as *const Block as usize)?;
         self.scope.truncate(mark);
         Ok(())
     }
 
-    /// Release every cell owned by `self.releases[boundary..]`, innermost frame
-    /// first and newest binding first, WITHOUT popping the frames.
+    /// Emit the releases the lowering PLACED at one exit — RFC-0101 M4.
     ///
-    /// Not popping is what makes an early exit safe: the frames stay so the
+    /// **This is the whole of the consumption.** What it replaced was a walk
+    /// over `self.releases[boundary..]`, from an index this engine derived for
+    /// itself, asserting an order the other two engines asserted separately
+    /// (§1.4). The order is `own::place_body`'s now; this is a lookup and an
+    /// encode.
+    ///
+    /// Nothing is popped, and that is still what makes an early exit safe: the
     /// enclosing [`Fn_::block`] still emits its own copy, which lands after the
     /// branch and is therefore unreachable rather than a second release.
-    fn emit_releases_above(
+    fn emit_releases(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        boundary: usize,
         exit: ExitKind,
         at: usize,
     ) -> Result<(), String> {
-        let frames: Vec<Vec<(Place, Rel, usize)>> =
-            self.releases[boundary..].iter().rev().cloned().collect();
-        // RFC-0101 M4's shadow: the sequence this engine walks at one exit, made
-        // readable so one gate can assert it against the other two and against
-        // the placement. Every exit kind goes through this one function, which
-        // is why one hook covers them all here and the textual backend needs
-        // three.
-        vyrn_frontend::own::trace::note(
-            vyrn_frontend::own::trace::Site::Wasm,
-            exit,
-            at,
-            frames
-                .iter()
-                .flat_map(|f| f.iter().rev())
-                .map(|(_, _, i)| *i)
-                .collect(),
-        );
-        for frame in frames {
-            for (p, k, _) in frame.into_iter().rev() {
-                self.emit_rel(m, b, p, &k, 0)?;
+        let steps = self.placed.get(&(exit, at)).cloned().unwrap_or_default();
+        // Only a function exit reaches a stream cursor — see [`Fn_::cursors`].
+        let mut cursors = match exit {
+            ExitKind::Return | ExitKind::Try => self.cursors.clone(),
+            _ => Vec::new(),
+        };
+        let mut run: Vec<(Place, Rel)> = Vec::new();
+        for step in steps {
+            let Some(r) = self.rel_slots.get(&step) else {
+                continue;
+            };
+            let (place, rel, seq) = (r.place, r.rel.clone(), r.seq);
+            while cursors.last().is_some_and(|(_, _, at)| *at > seq) {
+                let (p, elem, _) = cursors.pop().unwrap();
+                run.push((p, Rel::Stream(elem)));
             }
+            run.push((place, rel));
+        }
+        for (p, elem, _) in cursors.into_iter().rev() {
+            run.push((p, Rel::Stream(elem)));
+        }
+        for (p, k) in run {
+            self.emit_rel(m, b, p, &k, 0)?;
         }
         Ok(())
+    }
+
+    /// Say what one owned binding is released WITH. The placement already said
+    /// where and in what order.
+    fn register_rel(&mut self, key: usize, place: Place, rel: Rel) {
+        let seq = self.rel_seq;
+        self.rel_seq += 1;
+        self.rel_slots.insert(key, RelSlot { place, rel, seq });
     }
 
     /// Reclaim one binding, whichever of the four shapes it is.
@@ -2776,8 +2830,7 @@ impl<'p> Fn_<'_, 'p> {
     /// refusing the whole snapshot, on both sides at once.
     fn place_owns(&self, p: Place) -> bool {
         self.region_depth == 0
-            && (matches!(p, Place::Static(_))
-                || self.releases.iter().flatten().any(|(q, ..)| *q == p))
+            && (matches!(p, Place::Static(_)) || self.rel_slots.values().any(|r| r.place == p))
     }
 
     /// The address of `p` plus `off`, in a fresh local. A wasm local holding an
@@ -3072,10 +3125,7 @@ impl<'p> Fn_<'_, 'p> {
                         {
                             *holes = h.clone();
                         }
-                        self.releases
-                            .last_mut()
-                            .expect("a `let` outside any block")
-                            .push((place, r, s as *const Stmt as usize));
+                        self.register_rel(s as *const Stmt as usize, place, r);
                     }
                 }
             }
@@ -3226,7 +3276,7 @@ impl<'p> Fn_<'_, 'p> {
                 // disturb it — M2d's note that a value may sit under a block.
                 // Ownership analysis has un-tracked anything the return escapes, so
                 // this cannot release what is being handed back.
-                self.emit_releases_above(m, b, 0, ExitKind::Return, s as *const Stmt as usize)?;
+                self.emit_releases(m, b, ExitKind::Return, s as *const Stmt as usize)?;
                 // And every region scope, for the same reason the interpreter
                 // decrements its counter on this path: a `return` out of a region
                 // leaves it. It POPS rather than frees, because a returned
@@ -3284,8 +3334,6 @@ impl<'p> Fn_<'_, 'p> {
                 // the release survive a `return` out of the arm — an early exit
                 // walks the frames, and this one is on the stack for the whole
                 // statement.
-                self.releases.push(Vec::new());
-                let scrut_boundary = self.releases.len() - 1;
                 let key = s as *const Stmt as usize;
                 if self.drops.contains_key(&key) {
                     if let Some(r) = self.rel_for(&st, *line)? {
@@ -3308,10 +3356,7 @@ impl<'p> Fn_<'_, 'p> {
                             src_mem: 0,
                             dst_mem: 0,
                         });
-                        self.releases
-                            .last_mut()
-                            .unwrap()
-                            .push((Place::Slot(own), r, key));
+                        self.register_rel(key, Place::Slot(own), r);
                     }
                 }
                 self.tag_test(b, addr, &sum, pattern, *line)?;
@@ -3339,8 +3384,7 @@ impl<'p> Fn_<'_, 'p> {
                 // The fall-through release, after both arms have rejoined. An arm
                 // that returned already ran it and branched, so this copy lands in
                 // code wasm has marked unreachable — the same rule `block` follows.
-                self.emit_releases_above(m, b, scrut_boundary, ExitKind::Scrutinee, key)?;
-                self.releases.pop();
+                self.emit_releases(m, b, ExitKind::Scrutinee, key)?;
             }
             Stmt::While { cond, body, line } => {
                 // `block { loop { br_if 1 (!cond); body; br 0 } }` — the block is
@@ -3356,8 +3400,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I32Eqz);
                 let out = self.br_to(brk);
                 b.ins(&Instruction::BrIf(out));
-                self.loops
-                    .push((brk, cont, self.releases.len(), self.region_depth));
+                self.loops.push((brk, cont, self.region_depth));
                 self.block(m, b, body)?;
                 self.loops.pop();
                 let back = self.br_to(cont);
@@ -3407,8 +3450,6 @@ impl<'p> Fn_<'_, 'p> {
                 // what makes the release survive a `return` out of the body, and
                 // it is pushed BEFORE the loop's boundary so `break` and
                 // `continue` leave it to the fall-through below.
-                self.releases.push(Vec::new());
-                let iter_boundary = self.releases.len() - 1;
                 let key = s as *const Stmt as usize;
                 if self.drops.contains_key(&key) {
                     if let Some(r) = self.rel_for(&it, *line)? {
@@ -3440,7 +3481,7 @@ impl<'p> Fn_<'_, 'p> {
                             }
                             _ => return unsupported("a `for` over a Unit value", *line),
                         }
-                        self.releases.last_mut().unwrap().push((place, r, key));
+                        self.register_rel(key, place, r);
                         b.ins(&Instruction::LocalGet(src));
                     }
                 }
@@ -3488,8 +3529,7 @@ impl<'p> Fn_<'_, 'p> {
                 let cont = self.depth;
                 b.ins(&Instruction::Block(BlockType::Empty));
                 self.depth += 1;
-                self.loops
-                    .push((brk, cont, self.releases.len(), self.region_depth));
+                self.loops.push((brk, cont, self.region_depth));
                 self.block(m, b, body)?;
                 self.loops.pop();
                 self.depth -= 1;
@@ -3508,8 +3548,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::End);
                 // The fall-through release (RFC-0092 M5), after every exit path
                 // has rejoined. A body that returned already ran it and branched.
-                self.emit_releases_above(m, b, iter_boundary, ExitKind::Scrutinee, key)?;
-                self.releases.pop();
+                self.emit_releases(m, b, ExitKind::Scrutinee, key)?;
             }
             Stmt::IndexSet {
                 name,
@@ -3588,33 +3627,21 @@ impl<'p> Fn_<'_, 'p> {
                 self.free_snap(b, snap.as_slice());
             }
             Stmt::Break { line } => {
-                let &(brk, _, boundary, regions) = self
+                let &(brk, _, regions) = self
                     .loops
                     .last()
                     .ok_or_else(|| gap("`break` outside a loop", *line))?;
-                self.emit_releases_above(
-                    m,
-                    b,
-                    boundary,
-                    ExitKind::Break,
-                    s as *const Stmt as usize,
-                )?;
+                self.emit_releases(m, b, ExitKind::Break, s as *const Stmt as usize)?;
                 self.exit_regions_above(b, regions, true);
                 let d = self.br_to(brk);
                 b.ins(&Instruction::Br(d));
             }
             Stmt::Continue { line } => {
-                let &(_, cont, boundary, regions) = self
+                let &(_, cont, regions) = self
                     .loops
                     .last()
                     .ok_or_else(|| gap("`continue` outside a loop", *line))?;
-                self.emit_releases_above(
-                    m,
-                    b,
-                    boundary,
-                    ExitKind::Continue,
-                    s as *const Stmt as usize,
-                )?;
+                self.emit_releases(m, b, ExitKind::Continue, s as *const Stmt as usize)?;
                 self.exit_regions_above(b, regions, true);
                 let d = self.br_to(cont);
                 b.ins(&Instruction::Br(d));
@@ -9080,23 +9107,20 @@ impl<'p> Fn_<'_, 'p> {
 
         let mark = self.scope.len();
         self.scope.push((var.to_string(), place, elem.clone()));
-        // The stream's own release frame, so a `break` or an early `return` out
-        // of the body leaves through it — `emit_releases_above` walks it.
-        self.releases
-            .push(vec![(Place::Local(s), Rel::Stream(elem.clone()), 0)]);
+        // The one entry the placement has nothing for — see [`Fn_::cursors`].
+        // A `break` leaves the loop through `fend`, which releases it, so only
+        // an early `return` or `?` reaches this one.
+        self.cursors
+            .push((Place::Local(s), elem.clone(), self.rel_seq));
         let cont = self.depth;
         b.ins(&Instruction::Block(BlockType::Empty));
         self.depth += 1;
-        // The boundary sits ABOVE the stream's frame: a `break` leaves the loop
-        // through `fend`, which releases it, so releasing it here as well would
-        // be twice. An early `return` releases from 0 and so does include it.
-        self.loops
-            .push((brk, cont, self.releases.len(), self.region_depth));
+        self.loops.push((brk, cont, self.region_depth));
         self.block(m, b, body)?;
         self.loops.pop();
         self.depth -= 1;
         b.ins(&Instruction::End);
-        self.releases.pop();
+        self.cursors.pop();
         self.scope.truncate(mark);
 
         let back = self.br_to(top);
@@ -10744,8 +10768,7 @@ impl<'p> Fn_<'_, 'p> {
         // A frame of its own, and a slot of its own, for the two reasons the
         // `if let` states: an arm that returns walks the frames, and an arm may
         // build over the scratch the scrutinee was left in.
-        self.releases.push(Vec::new());
-        let scrut_boundary = self.releases.len() - 1;
+
         if self.drops.contains_key(&key) {
             if let Some(r) = self.rel_for(&st, line)? {
                 let own = b.alloc(sl.size, sl.align);
@@ -10756,10 +10779,7 @@ impl<'p> Fn_<'_, 'p> {
                     src_mem: 0,
                     dst_mem: 0,
                 });
-                self.releases
-                    .last_mut()
-                    .unwrap()
-                    .push((Place::Slot(own), r, key));
+                self.register_rel(key, Place::Slot(own), r);
             }
         }
         // The arms' common type — [`Fn_::match_ty`], the same answer `peek` gives a
@@ -10818,8 +10838,8 @@ impl<'p> Fn_<'_, 'p> {
         // The fall-through release, after the arms have rejoined and before the
         // aggregate result's address is pushed. A scalar result is already on
         // the stack here and the release is stack-neutral, so it sits under it.
-        self.emit_releases_above(m, b, scrut_boundary, ExitKind::Scrutinee, key)?;
-        self.releases.pop();
+        self.emit_releases(m, b, ExitKind::Scrutinee, key)?;
+
         if let Some((off, _)) = dest {
             b.slot(off);
         }
@@ -10900,7 +10920,7 @@ impl<'p> Fn_<'_, 'p> {
         // raised, and the 65th such call aborted where the interpreter kept
         // going. The value is already copied through `dest`, so neither of these
         // can disturb it — the same reason the `return` arm does them here.
-        self.emit_releases_above(m, b, 0, ExitKind::Try, at)?;
+        self.emit_releases(m, b, ExitKind::Try, at)?;
         self.exit_regions_above(b, 0, false);
         b.ins(&Instruction::Br(self.depth));
         self.depth -= 1;
@@ -10996,7 +11016,7 @@ impl<'p> Fn_<'_, 'p> {
             dst_mem: 0,
         });
         // The same two unwinds `?` owes as `return`-minus-the-keyword.
-        self.emit_releases_above(m, b, 0, ExitKind::Try, at)?;
+        self.emit_releases(m, b, ExitKind::Try, at)?;
         self.exit_regions_above(b, 0, false);
         b.ins(&Instruction::Br(self.depth));
         self.depth -= 1;
@@ -16069,6 +16089,7 @@ mod tests {
             gappend: HashMap::new(),
             externs: HashMap::new(),
             droppable: HashMap::new(),
+            releases: HashMap::new(),
             // RFC-0008's defaults, which are `Program`'s: nothing here logs.
             log_level: DEFAULT_LOG_LEVEL,
             log_sink: LogSink::Stderr,

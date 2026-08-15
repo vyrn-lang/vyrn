@@ -67,17 +67,18 @@
 //! use a `T`. [`Tally::unrecorded`] is **4,707 → 78**, and the 78 are one named
 //! class.
 //!
-//! **M4 adds a third comparison, and it is a SEQUENCE rather than an answer.**
-//! "Innermost frame first, newest binding first" is asserted independently in
-//! three files (§1.4) and nothing has ever checked that the three assertions
-//! describe one order, because nothing outside an engine could see the sequence
-//! any of them walks. All three report it now
-//! (`vyrn_frontend::own::trace`, off by default), the lowering PLACES it, and
-//! the assertion here is that they are the same list in the same order — with
-//! every difference named on [`RelRule`], the way [`Rule`] names the type ones.
-//! The interpreter's half is [`the_interpreter_releases_what_the_lowering_placed_in_the_order_it_placed_it`],
-//! and it needs fixtures rather than the corpus because its walk happens when a
-//! block RUNS.
+//! **M4's third comparison was a SEQUENCE rather than an answer, and the half of
+//! it that gated the two compiled backends has retired.** "Innermost frame
+//! first, newest binding first" was asserted independently in three files
+//! (§1.4); the shadow phases made all three engines report the sequence they
+//! walk and gated it against the placement, over 78,371 walks. Both compiled
+//! backends READ that placement now (`own::Ownership::releases`), so asserting
+//! their walk against it is asserting a value equals itself, and the gate that
+//! did it went with the derivation it was watching. What is left is
+//! [`the_interpreter_releases_what_the_lowering_placed_in_the_order_it_placed_it`]
+//! — the engine that still derives its own order is the one that still needs
+//! gating, and it needs fixtures rather than the corpus because its walk happens
+//! when a block RUNS.
 //!
 //! **M2 added a second comparison over the same run: the instance LISTS.** Each
 //! backend runs its own monomorphization worklist and nothing outside a backend
@@ -345,85 +346,51 @@ enum InstRule {
     ImplicitDispatch,
 }
 
-/// Why an engine's block-exit release sequence differs from the placement the
-/// lowering computed — RFC-0101 M4's shadow, first phase.
+/// Why the interpreter's release sequence differs from the placement both
+/// compiled backends now read — RFC-0101 M4.
 ///
-/// "Innermost frame first, newest binding first" is asserted independently in
-/// three files (§1.4). This is the one assertion that replaces the three, and it
-/// keeps [`Rule`]'s discipline: a difference that fits a rule is a fact recorded
-/// here, and one that fits none fails the run.
+/// Two of the three rules retired with the compiled backends' derivations:
+/// `Terminated` was a block that had already returned, and `StreamCursor` was
+/// the one frame entry the placement has nothing for. Neither is reachable from
+/// this engine. What is left is the difference §1.4 recorded and §2.4 calls a
+/// DECLARED one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum RelRule {
-    /// The block already returned, so the compiled backend emits no
-    /// fall-through walk at all — the early exit paid, mid-block, and its own
-    /// walk is a separate row of this table.
-    Terminated,
     /// The interpreter acts on 2 of `own`'s 7 kinds (§1.4): a `String` or an
     /// array buffer is reclaimed by the host when the process ends, so it runs
     /// no step for one. What it DOES run is the two that a program can observe —
     /// a declared `release`, and the walk that reaches one.
     HostReclaims,
-    /// A frame entry with no node behind it: the cursor a `for x in stream`
-    /// owns (RFC-0075 M2b). It is not a row of `own`'s map — no `Stmt::Let` and
-    /// no construct carries it, because the stream's producer is closed by the
-    /// loop that made it rather than by a reclamation rule — so the form has
-    /// nothing to place and both compiled backends still walk it. The rule
-    /// names it rather than filtering it, so the gate sees that it is there.
-    StreamCursor,
 }
 
-/// Which rule, if any, explains one engine's release walk against the placement
-/// the lowering computed. `None` means the gate fails.
+/// Which rule, if any, explains the interpreter's release walk against the
+/// placement. `None` means the gate fails.
 ///
-/// Every rule here is a SUBSEQUENCE test, which is the point: an engine may run
-/// fewer steps than the form places, for a reason it can name, and it may never
-/// run them in a different order. A reordering fits no rule and fails.
+/// It is a SUBSEQUENCE test, which is the point: this engine may run fewer steps
+/// than the form places, for a reason it can name, and it may never run them in
+/// a different order. A reordering fits no rule and fails.
 fn rel_rule(
     want: &[usize],
     got: &[usize],
     kind_of: &HashMap<usize, vyrn_frontend::own::DropKind>,
 ) -> Option<RelRule> {
     use vyrn_frontend::own::DropKind;
-    // The one step the form cannot place, taken out first so it does not read as
-    // a reordering of the ones it can.
-    let anon = got.contains(&0);
-    let got: Vec<usize> = got.iter().copied().filter(|b| *b != 0).collect();
-    let got = got.as_slice();
-    // Order first, and unconditionally: whatever an engine skips, what it does
-    // run is in the order the form placed it. This is the invariant three files
-    // assert separately, asserted once.
+    // Order first, and unconditionally: whatever the engine skips, what it does
+    // run is in the order the form placed it.
     let mut w = want.iter();
     if !got.iter().all(|g| w.any(|x| x == g)) {
         return None;
     }
-    if anon && got.len() == want.len() {
-        return Some(RelRule::StreamCursor);
-    }
-    if got.is_empty() && !want.is_empty() {
-        // A block that already returned emits no fall-through walk — the early
-        // exit paid, mid-block, and that walk is its own row here.
-        return Some(RelRule::Terminated);
-    }
-    // The interpreter runs the two kinds a program can OBSERVE and leaves the
-    // five the host reclaims (§1.4). Anything it skipped has to be one of those
-    // five, or it is a placement difference rather than a documented one.
     let skipped: Vec<&DropKind> = want
         .iter()
         .filter(|b| !got.contains(b))
         .filter_map(|b| kind_of.get(b))
         .collect();
-    if !skipped.is_empty()
-        && skipped
-            .iter()
-            .all(|k| !matches!(k, DropKind::Release(_) | DropKind::Deep(_)))
+    if skipped
+        .iter()
+        .all(|k| !matches!(k, DropKind::Release(_) | DropKind::Deep(_)))
     {
         return Some(RelRule::HostReclaims);
-    }
-    if anon {
-        return Some(RelRule::StreamCursor);
-    }
-    if got.is_empty() {
-        return Some(RelRule::Terminated);
     }
     None
 }
@@ -763,18 +730,11 @@ fn gate() {
     let mut cross: HashMap<(Site, Site, &'static str, String, String), (usize, String)> =
         HashMap::new();
     let mut rules: std::collections::BTreeMap<Rule, usize> = Default::default();
-    let mut rel_rules: std::collections::BTreeMap<(vyrn_frontend::own::Exit, RelRule), usize> =
-        Default::default();
-    // …and the agreements on the same axis, because "52,676 sequences equal" is
-    // one number over six exit kinds and a phase that moved five of them has to
-    // show which.
-    let mut rel_kinds: std::collections::BTreeMap<vyrn_frontend::own::Exit, usize> =
-        Default::default();
-    // Block exits where an engine's sequence equalled the lowering's placement,
-    // and the ones no rule explains: (site, example, the two sequences).
-    let mut rel_agreed = 0usize;
+    // RFC-0101 M4's phase-1 finding, still counted because it is the one fact
+    // about the placement no engine reports: the corpus places no release step
+    // inside a lambda body, so the shell both backends lower one under owns
+    // nothing it has to unwind.
     let mut rel_lambda = 0usize;
-    let mut rel_bad: Vec<String> = Vec::new();
     let mut inst_rules: std::collections::BTreeMap<InstRule, usize> = Default::default();
     // An instantiation a backend emitted and the lowering's worklist does not
     // have: (site, spelled instance) -> example.
@@ -865,10 +825,6 @@ fn gate() {
             lowering.insert(inst_key(&inst.func.name, &inst.type_args, &decls));
         }
 
-        // RFC-0101 M4's placement, keyed by the node each exit is AT — a block
-        // for a fall-through, the construct for the temporary it owns, and the
-        // `break` / `continue` / `return` / `?` for an early one.
-        let (placed, kind_of) = placement(&lowered);
         for inst in &lowered.instances {
             for rel in &inst.releases {
                 if lowered.lambda_bodies.contains(&rel.site) {
@@ -878,9 +834,7 @@ fn gate() {
         }
 
         observe::start();
-        vyrn_frontend::own::trace::start();
         let native = vyrn_codegen::emit(&program);
-        let mut exits = vyrn_frontend::own::trace::take();
         let mut rows = observe::take();
         let mut insts = observe::take_insts();
         if native.is_err() {
@@ -890,49 +844,11 @@ fn gate() {
             continue;
         }
         observe::start();
-        vyrn_frontend::own::trace::start();
         let wasm = vyrn_codegen::direct::compile(&program);
-        exits.extend(vyrn_frontend::own::trace::take());
         rows.extend(observe::take());
         insts.extend(observe::take_insts());
         if wasm.is_err() {
             continue;
-        }
-
-        // M4's shadow gate: the placement against what each engine walks, at
-        // every exit kind. One assertion where §1.4 counts three files asserting
-        // "innermost frame first, newest binding first" separately, and none of
-        // them checking that the three descriptions are one order.
-        let mut seen: std::collections::HashSet<(
-            vyrn_frontend::own::trace::Site,
-            vyrn_frontend::own::Exit,
-            usize,
-            String,
-        )> = Default::default();
-        for e in &exits {
-            let want = placed.get(&(e.exit, e.at)).cloned().unwrap_or_default();
-            if want == e.bindings {
-                rel_agreed += 1;
-                *rel_kinds.entry(e.exit).or_insert(0) += 1;
-                continue;
-            }
-            // One class per (engine, exit, sequence): a generic body is walked
-            // once per instantiation and would otherwise be counted that often.
-            if !seen.insert((e.site, e.exit, e.at, format!("{:?}", e.bindings))) {
-                continue;
-            }
-            if let Some(r) = rel_rule(&want, &e.bindings, &kind_of) {
-                *rel_rules.entry((e.exit, r)).or_insert(0) += 1;
-                continue;
-            }
-            rel_bad.push(format!(
-                "  {name}: {:?} released {} bindings at one {:?} exit, the \
-                 lowering placed {}",
-                e.site,
-                e.bindings.len(),
-                e.exit,
-                want.len()
-            ));
         }
 
         // Half zero, and RFC-0101 M2's own gate: the lowering's worklist against
@@ -1109,11 +1025,7 @@ fn gate() {
         inst_rules,
     );
 
-    eprintln!(
-        "  RFC-0101 M4 exits: {rel_agreed} release walks equalled the lowering's \
-         placement exactly ({rel_kinds:?}), {rel_lambda} steps placed inside a \
-         lambda body, and every other one is named: {rel_rules:?}"
-    );
+    eprintln!("  RFC-0101 M4: {rel_lambda} release steps placed inside a lambda body");
 
     let mut top: Vec<_> = residue.into_iter().collect();
     top.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
@@ -1181,20 +1093,6 @@ fn gate() {
             lines.join("\n")
         ));
     }
-    if !rel_bad.is_empty() {
-        rel_bad.sort();
-        rel_bad.dedup();
-        rel_bad.truncate(40);
-        report.push_str(&format!(
-            "an engine's block-exit release sequence is not the one the lowering \
-             placed, at {} classes:\n{}\n\nnote: the ORDER is the invariant — \
-             `own` says which bindings and this form says when. An engine may \
-             run fewer steps for a reason named on `RelRule`; it may never run \
-             them in a different order.\n",
-            rel_bad.len(),
-            rel_bad.join("\n")
-        ));
-    }
     if !lint_failures.is_empty() {
         lint_failures.sort();
         lint_failures.dedup();
@@ -1255,13 +1153,6 @@ fn gate() {
         t.answered_has > 10_000,
         "only {} backend answers matched the pair's has-type — the form stopped          carrying it",
         t.answered_has
-    );
-    // …and the same floor for the release placement, so a trace that stops
-    // firing reads as green instead of as an empty comparison.
-    assert!(
-        rel_agreed > 1_000,
-        "only {rel_agreed} block exits matched the lowering's placement — the \
-         release trace stopped seeing the corpus"
     );
     // …and the same floor for the instance comparison, so a hook that stops
     // firing reads as green instead of as a missing list.
