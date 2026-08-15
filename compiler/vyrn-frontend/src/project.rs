@@ -65,34 +65,6 @@ pub struct Projection {
     pub place: Expr,
 }
 
-impl Projection {
-    /// Is this inline the identity — an empty prologue yielding [`ELEM`] of the
-    /// very expressions the access site was written with?
-    ///
-    /// The seeded row always is, and an engine that sees `true` lowers the
-    /// ORIGINAL nodes rather than these substituted copies. That is what makes
-    /// "a builtin container costs nothing" a fact about the code rather than a
-    /// measurement: the identical path is taken, not merely reached.
-    ///
-    /// It also keeps the node ADDRESSES. This compiler keys two side tables by
-    /// them — the elided `get`/`set` generation checks and the lambda
-    /// monomorphization keys — because Phase 4a found a `(line, name)` key
-    /// cannot identify a statement. A clone has an address of its own, so an
-    /// inlined body loses whatever was recorded against the original. Both
-    /// misses are conservative today (one extra check, one duplicated
-    /// instance), so this is a cost, not a bug; a projection body carrying
-    /// either shape is worth measuring before it ships.
-    pub fn is_identity(&self, recv: &Expr, args: &[Expr]) -> bool {
-        self.prologue.is_empty()
-            && match &self.place {
-                Expr::Call { name, args: pa, .. } if name == ELEM && pa.len() == args.len() + 1 => {
-                    pa[0] == *recv && pa[1..] == *args
-                }
-                _ => false,
-            }
-    }
-}
-
 /// Does `ty` index through the seeded row rather than through a user `impl`?
 ///
 /// `pub` because it is the early-out on the hottest path in the checker: every
@@ -169,40 +141,79 @@ pub fn lookup_impl_by_key<'a>(
     None
 }
 
-/// The seeded projection named `method`, for a builtin container.
+/// The expansion an access site lowers through, or `None` when the site keeps
+/// its own nodes.
 ///
-/// The rows moved to [`crate::prelude`] with RFC-0094 M1's, because they are the
-/// same kind of thing — a declaration the compiler seeds because no source can
-/// write its body — and two tables of seeded declarations is the shape that RFC
-/// exists to remove.
-pub fn seeded(method: &str) -> Option<&'static Function> {
-    crate::prelude::all().iter().find(|f| f.name == method)
-}
-
-/// The projection an access site resolves to: a user `impl`'s, or the seeded
-/// row for a builtin container. `None` means the receiver cannot be indexed,
-/// and the caller keeps its own diagnostic.
-pub fn resolve<'a>(impls: &'a [ImplBlock], ty: &Type, method: &str) -> Option<&'a Function> {
-    if is_builtin_container(ty) {
-        return seeded(method);
-    }
-    lookup_in(impls, ty, method)
-}
-
-/// The projection an access site lowers through, given whatever static type the
-/// engine could work out for the receiver.
+/// **`None` is the seeded row**, which is every builtin container and every
+/// receiver whose type the caller could not name. Its body is
+/// `yield @slot(self, i)`, so inlining it substitutes the site's own receiver
+/// and index back into an [`ELEM`] of themselves: the expansion is the
+/// identity, and every engine then lowers the ORIGINAL nodes rather than the
+/// copies. Both compiling backends used to build that expansion in order to
+/// discover they did not need it — 20,205 clone-rename-substitute rounds over
+/// the corpus, all discarded. The interpreter never did; this is its shape,
+/// shared.
 ///
-/// A receiver whose type the engine cannot name takes the seeded row, which is
-/// what every builtin container takes: it yields [`ELEM`] and the engine's own
-/// element lowering answers from there. That is also the pre-RFC-0091 behaviour
-/// for such a receiver, so nothing regressed on the way in.
-pub fn for_site<'a>(
-    impls: &'a [ImplBlock],
+/// Answering from the LOOKUP also keeps the node ADDRESSES, and this compiler
+/// keys side tables by them — `own`'s rows, the elided `get`/`set` generation
+/// checks, the lambda monomorphization keys, and since RFC-0101 the lowering's
+/// own answers. A copy has an address of its own and loses whatever was
+/// recorded against the original.
+pub fn site(
+    impls: &[ImplBlock],
     recv: Option<&Type>,
     method: &str,
-) -> Option<&'a Function> {
-    recv.and_then(|t| lookup_in(impls, t, method))
-        .or_else(|| seeded(method))
+    recv_expr: &Expr,
+    args: &[Expr],
+    line: usize,
+) -> Result<Option<Projection>, String> {
+    let Some(f) = recv.and_then(|t| lookup_in(impls, t, method)) else {
+        return Ok(None);
+    };
+    inline(f, recv_expr, args, line).map(Some)
+}
+
+/// The statements `a[i] = v` lowers as, after `place atSet` has had its say
+/// (RFC-0091 M2, finished in M3).
+///
+/// `None` is [`site`]'s `None`: the seeded row, whose store the caller's own
+/// element path writes. `Some` is a user container, whose store becomes the
+/// projection's prologue and the move-out/mutate/move-back group
+/// [`store_stmts`] builds.
+///
+/// One function because it was two, byte for byte, in `lib.rs` and
+/// `direct.rs` — the shape RFC-0101 §1.1 counts, down to the refusal's wording.
+pub fn store_index(
+    impls: &[ImplBlock],
+    name: &str,
+    index: &Expr,
+    value: &Expr,
+    aty: &Type,
+) -> Result<Option<Vec<Stmt>>, String> {
+    let line = index.line();
+    let recv = Expr::Var {
+        name: name.to_string(),
+        line,
+    };
+    let Some(p) = site(
+        impls,
+        Some(aty),
+        "atSet",
+        &recv,
+        std::slice::from_ref(index),
+        line,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(store) = store_stmts(&p.place, value, line) else {
+        return Err(format!(
+            "line {line}: `{name}[..] = v` goes through a `place atSet` that yields              something with no address — a call result or a temporary. A projection              yields a place: a binding, a field of one, or an element of one"
+        ));
+    };
+    let mut out = p.prologue;
+    out.extend(store);
+    Ok(Some(out))
 }
 
 /// Inline `f` at an access site whose receiver is `recv` and whose arguments
@@ -935,25 +946,33 @@ mod tests {
         assert_eq!(args[1], idx, "the index substituted in place");
     }
 
+    /// The load-bearing half of [`site`]: a builtin container has no user
+    /// projection, so the site keeps its own nodes and no copy is ever built.
+    /// It used to answer this by inlining the seeded row and comparing the
+    /// result to what it already had, 20,205 times over the corpus.
     #[test]
-    fn the_seeded_row_yields_the_primitive() {
-        let f = seeded("at").unwrap();
-        let pr = inline(
-            f,
-            &Expr::Var {
-                name: "a".into(),
-                line: 3,
-            },
-            &[Expr::Int(2)],
-            3,
-        )
-        .unwrap();
-        assert!(pr.prologue.is_empty());
-        let Expr::Call { name, args, .. } = &pr.place else {
-            panic!("expected @slot")
+    fn a_builtin_container_expands_to_nothing() {
+        let recv = Expr::Var {
+            name: "a".into(),
+            line: 3,
         };
-        assert_eq!(name, ELEM);
-        assert_eq!(args.len(), 2);
+        let args = [Expr::Int(2)];
+        for ty in [
+            Type::Array(Box::new(Type::Int)),
+            Type::Str,
+            Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
+        ] {
+            for method in ["at", "atSet"] {
+                assert!(
+                    site(&[], Some(&ty), method, &recv, &args, 3)
+                        .unwrap()
+                        .is_none(),
+                    "{ty} took an expansion at `{method}`"
+                );
+            }
+        }
+        // …and so does a receiver no engine could name.
+        assert!(site(&[], None, "at", &recv, &args, 3).unwrap().is_none());
     }
 
     /// RFC-0091 M3. The increment is the loop body's FIRST statement, which is
