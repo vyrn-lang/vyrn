@@ -1,0 +1,13 @@
+/// RFC-0103 M0 — the clock capability (RFC-0043). Fixed by the harness env
+/// (`VYRN_FIXED_TIME`) so the three legs are comparable.
+
+import { now, monotonic, toMillis, formatIso } from "std/time"
+
+fn main() -> Int64 {
+    let t = now()
+    print("now: \{toMillis(t)}")
+    print("iso: \{formatIso(t)}")
+    let a = monotonic()
+    print("monotonic non-negative: \{a >= 0}")
+    return 0
+}

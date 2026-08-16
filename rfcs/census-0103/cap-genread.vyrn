@@ -1,0 +1,11 @@
+/// RFC-0103 M0 — the GENERATION-time reads (RFC-0021/0076): `moduleInterface`,
+/// `contractOf`, `lex`, and `readFile`/`readFileBytes`/`listDir` inside a
+/// `gen fn`. They reach the compiler's filesystem, never the artifact's, so they
+/// are not a target capability at all — the checker refuses one outside a
+/// generation on every target identically.
+
+fn main() -> Int64 {
+    let m = moduleInterface("std/time")
+    print("interface: \{m.name}")
+    return 0
+}

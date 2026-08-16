@@ -1,0 +1,9 @@
+/// RFC-0103 M0 — `serveStream` (RFC-0074 M3a): the handoff of a producer to a
+/// serving host's accept loop. `vyrn serve` is the interpreter, so a compiled
+/// binary has no loop to hand it to.
+
+fn main() -> Int64 {
+    let frames: Array<String> = ["data: one\n\n"]
+    serveStream(fromArray(frames))
+    return 0
+}

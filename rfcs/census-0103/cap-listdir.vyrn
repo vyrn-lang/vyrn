@@ -1,0 +1,10 @@
+/// RFC-0103 M0 — `listDir` (RFC-0021). A directory read that only the
+/// interpreter and the generation host lower.
+
+fn main() -> Int64 {
+    print(match listDir(".") {
+            Ok(names) => "listDir: \{names.length} entr(y|ies)",
+            Err(why) => "listDir: \{why}",
+        })
+    return 0
+}

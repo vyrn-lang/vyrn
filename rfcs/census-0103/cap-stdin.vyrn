@@ -1,0 +1,9 @@
+/// RFC-0103 M0 — the `stdin` capability. `readLine()` is `None` at EOF.
+
+fn main() -> Int64 {
+    print(match readLine() {
+            Some(l) => "readLine: \{l}",
+            None => "readLine: None",
+        })
+    return 0
+}

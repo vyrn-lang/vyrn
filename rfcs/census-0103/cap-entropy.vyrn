@@ -1,0 +1,12 @@
+/// RFC-0103 M0 — the entropy capability (RFC-0043). Fixed by the harness env
+/// (`VYRN_FIXED_SEED`) so the three legs are comparable.
+
+import { randomSeed, seededRng, nextInt } from "std/random"
+
+fn main() -> Int64 {
+    let s = randomSeed()
+    print("seed: \{s}")
+    let d = nextInt(seededRng(s))
+    print("draw: \{d.value}")
+    return 0
+}

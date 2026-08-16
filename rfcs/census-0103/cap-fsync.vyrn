@@ -1,0 +1,13 @@
+/// RFC-0103 M0 — `fsyncFile` alone (RFC-0044), because it is the one `fs`
+/// builtin whose answer differs from the rest of its class: the RFC-0077 direct
+/// backend, which `--target wasm` now uses unconditionally, has no lowering for
+/// it, so a program calling it does not BUILD for wasm at all.
+
+fn main() -> Int64 {
+    let done = writeFile("cap-fsync.tmp", "x")
+    print(match fsyncFile("cap-fsync.tmp") {
+            Ok(ok) => "fsyncFile: ok",
+            Err(why) => "fsyncFile: \{why}",
+        })
+    return 0
+}

@@ -1,0 +1,12 @@
+/// RFC-0103 M0 — the OTHER half of `extern` (RFC-0012 M2): an EXPORT. It has a
+/// body, so it is an ordinary function on every target; only the wasm module
+/// additionally names it at its edge.
+
+export extern fn twice(n: Int64) -> Int64 {
+    return n * 2
+}
+
+fn main() -> Int64 {
+    print("twice(21) = \{twice(21)}")
+    return 0
+}

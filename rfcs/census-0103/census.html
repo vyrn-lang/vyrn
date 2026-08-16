@@ -1,0 +1,51 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>RFC-0103 M0 — capability census, browser leg</title>
+<h1>RFC-0103 M0 — the browser leg</h1>
+<p>Every <code>cap-*.wasm</code> built by <code>vyrn build --target wasm</code>, run
+in-page through <code>web/wasi-min.js</code> — the same binary the wasi leg runs
+under wasmtime. Build them first:</p>
+<pre>cd rfcs/census-0103
+for f in cap-*.vyrn; do vyrn build $f --target wasm -o ${f%.vyrn}.wasm; done
+python -m http.server 8123   # from the repo root, then open /rfcs/census-0103/census.html</pre>
+<pre id="out">running…</pre>
+<script type="module">
+import { runVyrn } from "../../web/wasi-min.js";
+
+// One program per capability. `cap-fsync` and `cap-listdir` are absent on
+// purpose: neither BUILDS to wasm, so there is no module for a page to load.
+const programs = [
+  ["cap-fs", {}],
+  ["cap-stdin", {}],
+  ["cap-args", {}],
+  ["cap-stdio", {}],
+  ["cap-logfile", {}],
+  ["cap-clock", {}],
+  ["cap-entropy", {}],
+  ["cap-externexport", {}],
+  ["cap-serve", {}],
+  ["cap-spawn", {}],
+  // The extern row, both ways: with the host hook the page IS the missing half;
+  // without it the shim refuses by name before the module instantiates.
+  ["cap-extern", { extern: { jsAdd: (a, b) => a + b } }],
+  ["cap-extern", {}],
+];
+
+const out = document.getElementById("out");
+let text = "";
+for (const [name, hooks] of programs) {
+  text += `################ ${name}${hooks.extern ? " (extern hook supplied)" : ""}\n`;
+  try {
+    const bytes = await (await fetch(`./${name}.wasm`)).arrayBuffer();
+    const r = await runVyrn(bytes, hooks);
+    if (r.stdout) text += r.stdout;
+    if (r.stderr) text += r.stderr;
+    text += `[exit ${r.exitCode}]\n`;
+  } catch (e) {
+    text += `[threw] ${e.message}\n`;
+  }
+  out.textContent = text;
+}
+text += "== done ==\n";
+out.textContent = text;
+</script>

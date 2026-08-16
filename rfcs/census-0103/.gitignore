@@ -1,0 +1,9 @@
+# Build products of the census runs (RFC-0103 M0). The programs and the page
+# are the record; the binaries and the files they write are not.
+*.wasm
+*.exe
+*.ll
+*.shim.c
+*.log
+*.tmp
+*.tmp.*
