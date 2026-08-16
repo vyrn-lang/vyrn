@@ -68,9 +68,12 @@ browser a filesystem by editing JSON.
 }
 ```
 
-- `target` is one of `native`, `wasi`, `browser`. The first two exist today as
-  build targets; `browser` is today spelled "wasm plus wasi-min.js" and gets a
-  name.
+- `target` is one of `native`, `wasi`, `browser`. It is a CAPABILITY
+  declaration, not a build-target selection: there are two build targets,
+  `native` and `wasm`, and `wasi` and `browser` pick the same built artifact —
+  the identical bytes, under hosts that answer the WASI imports differently
+  (M0's [finding 1](#what-the-census-contradicts-in-this-rfcs-own-design)).
+  `browser` is today spelled "wasm plus wasi-min.js" and gets a name.
 - The existing manifest keys are sugar and stay: `main` and `server` are
   native artifacts, `client` is a browser artifact. A project that writes only
   those keys is already using artifacts and never sees the new spelling.
@@ -303,6 +306,80 @@ Five findings, each recorded because it changes something written above.
 `server` / `client` mapped onto it as sugar. Gate: every existing example and
 test builds unchanged; `examples/shelf` and `examples/bin` gain explicit
 artifact maps and behave identically.
+
+### M1 — as landed
+
+**Gate: met.** Every existing example and test builds unchanged, and `shelf`
+and `bin` declare their artifacts explicitly with byte-identical `vyrn check`
+output before and after.
+
+**What landed.** `vyrn_frontend::artifacts` reads the map off the PARSED
+manifest and hands back `Option<Vec<Artifact>>` — `{ name, entry, target }`,
+the entry joined onto the same canonical project base an audience entry point
+is joined onto, so `client` names one file to both rules. `Manifest.artifacts`
+carries it. Nothing consumes it yet: M1 parses and exposes, and the floor is
+M2's.
+
+`None` is the whole compatibility story, as it is for `audience`: a manifest
+with no `artifacts` map and no entry-point key declares nothing. Opt-in stays
+absolute.
+
+**The sugar, as implemented.** `main` and `server` each yield a native
+artifact, `client` a browser one, each named by its own key. Sugar and an
+explicit map coexist, which is what lets a project write its artifacts out in
+full without deleting the keys `vyrn dev` and `vyrn serve` read:
+
+- An explicit artifact whose NAME matches a sugar key and agrees with it
+  (same entry, same target) is that one artifact, not two — accepted.
+- One that disagrees is refused, quoting both readings:
+  `` artifact `client` in …/vyrn.json disagrees with the `client` key: `…/client/other.vyrn` (browser) against `…/client/boot.vyrn` (browser) ``.
+- A name written twice inside `artifacts` is refused whether or not the two
+  agree (`` artifact `app` is declared twice in …/vyrn.json ``): one name, one
+  declaration, and which of two JSON keys wins is otherwise whichever the
+  reader happened to keep.
+
+  The brief asked for that refusal and the milestone found it was already
+  there: `parse_json` refuses a repeated key outright
+  (`` `app` is defined twice at offset 129 ``), so no manifest on disk reaches
+  this check. It is kept for the documents the JSON reader did not build, and
+  its test asserts the parser's refusal first — where the rule actually lives.
+
+Structural validation only — `entry` a string, `target` one of the three, the
+unknown one naming all three back. Whether the entry FILE exists is not asked:
+that is the closure walk, and it is M2's.
+
+A manifest that contradicts itself this way travels the channel an unparseable
+manifest already travels (`find` returns `Err`, the CLI prints it and stops),
+for the reason RFC-0010's reader states: a rule that cannot be read is not the
+empty rule.
+
+**The gate, measured.**
+
+| evidence | result |
+|---|---|
+| `cargo test --release` (workspace) | 1712 passed, 0 failed, 69 ignored |
+| `cargo test` (`vyrn-lsp`, the excluded crate that reads manifests) | 83 passed, 0 failed, 4 ignored |
+| `cargo fmt --check` (workspace + `vyrn-lsp`, `vyrn-genwasm`, `vyrn-play`) | clean |
+| `vyrn check` on `shelf` and `bin`, both entries each, main's binary against the old manifests vs this branch's against the new ones | `ok` / exit 0, all four, diff empty |
+
+The examples gained the map their keys already implied:
+
+```json
+"artifacts": {
+  "server": { "entry": "server.vyrn", "target": "native" },
+  "client": { "entry": "client/boot.vyrn", "target": "browser" }
+}
+```
+
+which is the coexistence rule's own test: both projects now say the same thing
+twice, and are required to be read as saying it once.
+
+One existing test changed, and it is named here rather than left in the diff:
+`vyrn-cli` `von::from_json_prints_a_manifest_as_von` converts
+`examples/shelf/vyrn.json` to VON and compares the whole document, so the four
+new lines are in its expectation. No behavior changed — the conversion is
+generic over the JSON it is given — but the gate says "unchanged", and this
+file did change.
 
 **M2 — the floor check.** Requirement inference per module, closure per
 artifact, the subset test, the chain diagnostic. Gate: a new example that

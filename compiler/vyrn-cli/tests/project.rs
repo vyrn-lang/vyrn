@@ -117,6 +117,52 @@ fn no_file_and_no_manifest_is_a_clear_error() {
     assert!(err.contains("no input file"), "{err}");
 }
 
+/// RFC-0103 M1: an artifact whose `target` is not one of the three capability
+/// sets fails naming the artifact, the file and the three values — on the same
+/// channel an unreadable manifest already uses, so it arrives before anything
+/// is compiled. A silent fallback would build for a target nobody declared.
+#[test]
+fn an_unknown_artifact_target_names_the_artifact_and_the_valid_ones() {
+    let dir = scratch("artifacts");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("src/main.vyrn"),
+        "fn main() -> Int64 { print(1) return 0 }\n",
+    )
+    .unwrap();
+    let manifest = |artifacts: &str| {
+        std::fs::write(
+            dir.join("vyrn.json"),
+            format!(r#"{{"name":"t","main":"src/main.vyrn","artifacts":{artifacts}}}"#),
+        )
+        .unwrap()
+    };
+
+    manifest(r#"{"app":{"entry":"src/main.vyrn","target":"wasm"}}"#);
+    let out = vyrn().current_dir(&dir).arg("run").output().unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    for want in [
+        "artifact `app`",
+        "wasm",
+        "vyrn.json",
+        "native, wasi, browser",
+    ] {
+        assert!(err.contains(want), "missing {want:?} in: {err}");
+    }
+
+    // …and a manifest that writes out what its `main` key already says runs
+    // exactly as it did before the key was written out.
+    manifest(r#"{"main":{"entry":"src/main.vyrn","target":"native"}}"#);
+    let run = vyrn().current_dir(&dir).arg("run").output().unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "1");
+}
+
 /// A misspelled `nativeTarget` must fail naming the key and the file, before
 /// the compile and before clang is even looked for — so this runs in the
 /// default suite. A silent fall back to the default would ship a binary built
