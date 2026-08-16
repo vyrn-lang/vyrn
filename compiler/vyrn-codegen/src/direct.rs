@@ -4079,9 +4079,11 @@ impl<'p> Fn_<'_, 'p> {
         // value to reconcile and no validation to owe — the polymorphic stack
         // after `unreachable` satisfies `to` on its own.
         if matches!(from, Type::Never) {
+            crate::observe::note_rung(crate::observe::Site::Wasm, from, to, crate::Rung::Never);
             return Ok(());
         }
         if let Some(decl) = crate::validation_required(from, to, &self.cx.types).cloned() {
+            crate::observe::note_rung(crate::observe::Site::Wasm, from, to, crate::Rung::Validate);
             // The value has to be in the base's representation before the
             // predicate reads it. The recursion terminates because a base is one
             // step nearer a builtin than the name it backs.
@@ -4106,6 +4108,7 @@ impl<'p> Fn_<'_, 'p> {
             Num::of(&self.cx.resolve(from)),
             Num::of(&self.cx.resolve(to)),
         ) {
+            crate::observe::note_rung(crate::observe::Site::Wasm, from, to, crate::Rung::Resize);
             match (f == t, f.wide(), t.wide()) {
                 (true, ..) => {}
                 (_, false, true) => widen(b, f),
@@ -4141,6 +4144,12 @@ impl<'p> Fn_<'_, 'p> {
         };
         match (Num::of(&fr), flt(&fr), Num::of(&tr), flt(&tr)) {
             (Some(f), _, _, Some(wide)) => {
+                crate::observe::note_rung(
+                    crate::observe::Site::Wasm,
+                    from,
+                    to,
+                    crate::Rung::FloatCross,
+                );
                 widen(b, f);
                 b.ins(match (wide, f.signed) {
                     (true, true) => &Instruction::F64ConvertI64S,
@@ -4151,6 +4160,12 @@ impl<'p> Fn_<'_, 'p> {
                 return Ok(());
             }
             (_, Some(wide), Some(t), _) => {
+                crate::observe::note_rung(
+                    crate::observe::Site::Wasm,
+                    from,
+                    to,
+                    crate::Rung::FloatCross,
+                );
                 b.ins(match (wide, t.signed) {
                     (true, true) => &Instruction::I64TruncSatF64S,
                     (true, false) => &Instruction::I64TruncSatF64U,
@@ -4164,6 +4179,12 @@ impl<'p> Fn_<'_, 'p> {
                 return Ok(());
             }
             (_, Some(f), _, Some(t)) if f != t => {
+                crate::observe::note_rung(
+                    crate::observe::Site::Wasm,
+                    from,
+                    to,
+                    crate::Rung::FloatCross,
+                );
                 b.ins(if f {
                     &Instruction::F32DemoteF64
                 } else {
@@ -4174,6 +4195,7 @@ impl<'p> Fn_<'_, 'p> {
             _ => {}
         }
         if self.cx.ll(from) == self.cx.ll(to) {
+            crate::observe::note_rung(crate::observe::Site::Wasm, from, to, crate::Rung::Identity);
             return Ok(());
         }
         // A literal is a fixed `[N x T]`; an `Array<T>` slot wants the growable
@@ -4184,6 +4206,12 @@ impl<'p> Fn_<'_, 'p> {
             (self.cx.resolve(from), self.cx.resolve(to))
         {
             if self.cx.ll(&inner) == self.cx.ll(&el) {
+                crate::observe::note_rung(
+                    crate::observe::Site::Wasm,
+                    from,
+                    to,
+                    crate::Rung::Heapify,
+                );
                 return self.heapify(b, &inner, n, to, line);
             }
         }
@@ -4194,6 +4222,12 @@ impl<'p> Fn_<'_, 'p> {
             (self.cx.resolve(from), self.cx.resolve(to))
         {
             if self.cx.ll(&inner) == self.cx.ll(&el) && len <= n {
+                crate::observe::note_rung(
+                    crate::observe::Site::Wasm,
+                    from,
+                    to,
+                    crate::Rung::Inline,
+                );
                 return self.sa_from_fixed(b, &inner, len, to, n, line);
             }
         }
@@ -4201,9 +4235,16 @@ impl<'p> Fn_<'_, 'p> {
         // one. A rebuild rather than a prefix, because the two field orders need
         // not agree — the shapes are the same length only by coincidence.
         let (got, want) = (from, to);
+        // THE END OF THE LADDER, and it is not the other one's: the textual
+        // emitter falls through to identity where this one refuses
+        // (RFC-0101 §1.5). A pair the plan does not refuse arriving here is a
+        // program that compiles on one target only, which is what the corpus
+        // gate's terminal rule is for.
         let (Some(from), Some(to)) = (self.cx.fields(got), self.cx.fields(want)) else {
+            crate::observe::note_rung(crate::observe::Site::Wasm, got, want, crate::Rung::Refuse);
             return unsupported(&format!("a conversion from `{got}` to `{want}`"), line);
         };
+        crate::observe::note_rung(crate::observe::Site::Wasm, got, want, crate::Rung::Rebuild);
         let src = self.scratch(b, ValType::I32, 0);
         b.ins(&Instruction::LocalSet(src));
         let l = self.cx.repr(want, line)?;
