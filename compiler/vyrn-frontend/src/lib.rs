@@ -10,6 +10,7 @@
 //! capabilities) are specified but NOT yet implemented here — this is the
 //! skeleton they will hang from.
 
+pub mod artifacts;
 pub mod ast;
 pub mod audience;
 pub mod checker;

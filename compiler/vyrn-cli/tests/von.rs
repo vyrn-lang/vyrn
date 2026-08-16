@@ -181,6 +181,10 @@ fn from_json_prints_a_manifest_as_von() {
          server: \"server.vyrn\",\n    \
          client: \"client/boot.vyrn\",\n    \
          public: \"public\",\n    \
+         artifacts: [\n        \
+         \"server\": [\"entry\": \"server.vyrn\", \"target\": \"native\"],\n        \
+         \"client\": [\"entry\": \"client/boot.vyrn\", \"target\": \"browser\"],\n    \
+         ],\n    \
          audience: [\n        \
          \"server\": [\"server\"],\n        \
          \"client\": [\"client\"],\n        \

@@ -3,5 +3,9 @@
   "server": "server.vyrn",
   "client": "client/boot.vyrn",
   "public": "public",
+  "artifacts": {
+    "server": { "entry": "server.vyrn", "target": "native" },
+    "client": { "entry": "client/boot.vyrn", "target": "browser" }
+  },
   "audience": { "server": ["server"], "client": ["client"], "universal": ["app", "shared"] }
 }

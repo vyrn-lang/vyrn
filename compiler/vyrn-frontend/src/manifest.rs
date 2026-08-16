@@ -102,6 +102,11 @@ pub struct Manifest {
     /// manifest has no `audience` key — which leaves every module universal and
     /// every import legal, exactly as before this key existed.
     pub audience: Option<crate::audience::AudienceMap>,
+    /// RFC-0103 M1: what this project builds — the `artifacts` map, plus the
+    /// `main` / `server` / `client` keys that are sugar for it — or `None` when
+    /// the manifest declares neither, which is the same absolute opt-in
+    /// `audience` has. Nothing checks it yet; M2 is the floor.
+    pub artifacts: Option<Vec<crate::artifacts::Artifact>>,
     /// The `nativeTarget` key, unvalidated. Kept as written so a diagnostic can
     /// quote it back and name the file.
     pub native_target: Option<String>,
@@ -125,7 +130,7 @@ pub fn find(start: &Path) -> Result<Option<Manifest>, String> {
             let doc = crate::schema::parse_json(&text)
                 .map_err(|e| format!("{} is not valid JSON: {e}", candidate.display()))?;
             let slash_dir = dir.to_string_lossy().replace('\\', "/");
-            return Ok(Some(from_doc(doc, slash_dir)));
+            return from_doc(doc, slash_dir).map(Some);
         }
         match dir.parent() {
             Some(p) => dir = p.to_path_buf(),
@@ -137,7 +142,12 @@ pub fn find(start: &Path) -> Result<Option<Manifest>, String> {
 /// A [`Manifest`] from an already-parsed document rooted at `slash_dir`. Split
 /// out so the rules read off a manifest can be tested without a file, and so
 /// there is exactly one place that decides how the audience base is formed.
-fn from_doc(doc: Json, slash_dir: String) -> Manifest {
+///
+/// `Err` is a manifest that declares something contradictory — today only
+/// RFC-0103's artifacts. It travels the same channel as an unparseable manifest
+/// because it has the same meaning: this project declares a rule and it cannot
+/// be read, which is not the empty rule.
+fn from_doc(doc: Json, slash_dir: String) -> Result<Manifest, String> {
     let str_key = |k: &str| match doc.get(k) {
         Some(Json::Str(s)) => Some(s.clone()),
         _ => None,
@@ -165,14 +175,19 @@ fn from_doc(doc: Json, slash_dir: String) -> Manifest {
     .unwrap_or_else(|| slash_dir.clone());
     let audience =
         crate::audience::from_manifest(&doc, &audience_base).map(|m| m.with_realpath(real_path));
-    Manifest {
+    // Artifact entry points are joined onto the same canonical base as audience
+    // entry points, because they are the same paths: `client` names one file,
+    // and the two rules must not read it as two.
+    let artifacts = crate::artifacts::from_manifest(&doc, &audience_base)?;
+    Ok(Manifest {
         main: str_key("main"),
         native_target: str_key("nativeTarget"),
         dependencies,
         audience,
+        artifacts,
         dir: slash_dir,
         doc,
-    }
+    })
 }
 
 /// The parsed `vyrn.json` governing `dir`, for the readers that want one key out
@@ -486,6 +501,7 @@ mod tests {
 
         let canon = real_path(&d.to_string_lossy().replace('\\', "/")).unwrap();
         let m = from_doc(doc, format!("{canon}/server/.."))
+            .unwrap()
             .audience
             .unwrap();
 
@@ -497,5 +513,42 @@ mod tests {
         );
         let key = format!("{canon}/server/store.vyrn");
         assert_eq!(audience_of(&key, &m).audience, Audience::Server);
+    }
+
+    /// RFC-0103 M1: an artifact's entry point is the same path an audience entry
+    /// point is, so it hangs off the same canonical base — and a manifest that
+    /// contradicts itself about one stops the read, on the channel an
+    /// unparseable manifest already travels.
+    #[test]
+    fn artifacts_hang_off_the_same_base_and_a_contradiction_stops_the_read() {
+        let d = tmp("artifacts-base");
+        let canon = real_path(&d.to_string_lossy().replace('\\', "/")).unwrap();
+        let parse = |src: &str| crate::schema::parse_json(src).unwrap();
+
+        let m = from_doc(
+            parse(
+                r#"{"client":"client/boot.vyrn",
+                    "artifacts":{"api":{"entry":"server/main.vyrn","target":"native"}}}"#,
+            ),
+            format!("{canon}/server/.."),
+        )
+        .unwrap();
+        let a = m.artifacts.unwrap();
+        assert_eq!(a[0].entry, format!("{canon}/client/boot.vyrn"));
+        assert_eq!(a[1].entry, format!("{canon}/server/main.vyrn"));
+
+        // A manifest with neither declares nothing, exactly as with `audience`.
+        assert!(from_doc(parse(r#"{"name":"x"}"#), canon.clone())
+            .unwrap()
+            .artifacts
+            .is_none());
+
+        let e = from_doc(
+            parse(r#"{"artifacts":{"app":{"entry":"x.vyrn","target":"wasm"}}}"#),
+            canon,
+        )
+        .err()
+        .expect("a target nobody can build for is not a manifest this reads");
+        assert!(e.contains("unknown target `wasm`"), "{e}");
     }
 }
