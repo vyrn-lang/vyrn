@@ -2808,9 +2808,10 @@ why M2c could borrow a generic callee's block (it comes from `&'a Function`, off
 the worklist) and could not borrow this one.
 
 **The brief's remedy — thread the program's lifetime back through the walk — was
-tried and measured, and it costs more than it buys.** 34 signatures take the
-lifetime cleanly; then 13 sites stop compiling, and every one of them is a tree
-the emitter builds ON PURPOSE: the receiver it parks to reach an implicitly
+tried and measured, and it costs more than it buys.** The signatures take it
+mechanically — the compiler names each one, and each round of naming ends — and
+then **13 sites stop compiling, every one of them a tree the emitter builds ON
+PURPOSE**: the receiver it parks to reach an implicitly
 dispatched `release`, the capture-source lists an RFC-0023 call assembles, the
 `toJson`/`fromJson`/`schemaOf` rewrites. Making those satisfy the program's
 lifetime means leaking each of them — an unbounded leak in the LSP, which
