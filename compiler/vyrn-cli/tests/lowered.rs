@@ -341,6 +341,16 @@ struct Tally {
     /// [`InstRule`].
     extra: usize,
     unresolved: usize,
+    /// RFC-0101 §1.5's shadow: boundary crossings that took the rung the plan
+    /// places, and the ones that took another with no rule to explain it.
+    rungs_planned: usize,
+    rungs_unruled: usize,
+    /// …and of those, the ones at the END of the ladder: a pair the plan refuses
+    /// that an engine walked past anyway. This is the difference §1.5 says is
+    /// the cheapest to gate and the most expensive to miss — the two ladders end
+    /// differently, so a pair one of them does not handle is a compile error on
+    /// exactly one target, or a reinterpretation of bits on the other.
+    rungs_terminal: usize,
 }
 
 /// Why the lowering's instance list and a backend's differ.
@@ -367,6 +377,74 @@ enum InstRule {
 // solves the instance from it, so the class is empty and the rule goes rather
 // than firing zero times — §3 M2's own precedent, applied to itself for the
 // second time.
+
+/// Why an engine's boundary ladder took a rung the plan does not place —
+/// RFC-0101 §1.5's shadow.
+///
+/// Same discipline as [`Rule`]: a difference that fits a rule is a fact this
+/// file records, and one that fits none fails the run. **Every rule here is
+/// about ORDER, or about a rung one ladder does not have** — which is what M6's
+/// second phase predicted from reading the two ladders against each other, and
+/// it is why the plan does not try to be both of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum RungRule {
+    /// The textual ladder's resize rung is guarded by the TARGET being a sized
+    /// integer rather than by the pair differing, so `Int16 -> Int16` takes it
+    /// and emits nothing. A rung that does no work is not a decision about the
+    /// value; the plan places [`Rung::Identity`] there.
+    SizedTargetRung,
+    /// The direct ladder's numeric rung answers for EVERY integer pair, equal or
+    /// not — and it must, because it has to come before that ladder's shape
+    /// shortcut: `llt` prints `i8` for `Int8` and `UInt8` alike, so a shortcut
+    /// reached first would swallow the one pair whose bits genuinely move. This
+    /// is §1.5's order difference, and the reason is written at the rung.
+    NumericBeforeShape,
+    /// The direct ladder has no function-value rung at all: the structural
+    /// spelling and every named alias share the `{ i64, i64 }` shape, so its
+    /// shape shortcut answers first. The textual one re-tags explicitly.
+    FnByShape,
+    /// A type PARAMETER still spelled `T` on one side. The direct ladder
+    /// substitutes before its first rung (§1.5's first row) and the textual one
+    /// does not, so a pair like `String -> T` matches no guard there and falls
+    /// off the end.
+    ///
+    /// **It is a spelling, not a hole, and two programs say so.** A value can
+    /// only reach a `T` position if the checker solved `T` to its type: an
+    /// `Int64` flowing into a `T` the receiver fixed at a refined `Age` is
+    /// rejected — "type parameter `T` is both Age and Int64" — with a bare
+    /// generic and with an associated type alike. So `from` and `to` here are
+    /// one type under two spellings, the identity is right, and the validation
+    /// the textual ladder would appear to be skipping is one the checker has
+    /// already made unreachable. Both programs were written and both came back
+    /// green (RFC-0101 §3 M6's third phase).
+    ParamSpelling,
+}
+
+/// Which rule, if any, explains `took` where the plan places `planned`. `None`
+/// means the gate fails.
+///
+/// The pair is an argument because one rule is about the TYPES rather than the
+/// rungs: a `Refuse` the textual ladder walked past is a spelling when a type
+/// parameter is involved and a program that compiles on one target only when it
+/// is not.
+fn rung_rule(
+    site: Site,
+    from: &Type,
+    to: &Type,
+    planned: vyrn_codegen::Rung,
+    took: vyrn_codegen::Rung,
+) -> Option<RungRule> {
+    use vyrn_codegen::Rung as R;
+    match (site, planned, took) {
+        (Site::Native, R::Identity, R::Resize) => Some(RungRule::SizedTargetRung),
+        (Site::Wasm, R::Identity, R::Resize) => Some(RungRule::NumericBeforeShape),
+        (Site::Wasm, R::FnRetag, R::Identity) => Some(RungRule::FnByShape),
+        (Site::Native, R::Refuse, R::Identity) if mentions_param(from) || mentions_param(to) => {
+            Some(RungRule::ParamSpelling)
+        }
+        _ => None,
+    }
+}
 
 /// Why the interpreter's release sequence differs from the placement both
 /// compiled backends now read — RFC-0101 M4.
@@ -759,6 +837,18 @@ fn gate() {
     // nothing it has to unwind.
     let mut rel_lambda = 0usize;
     let mut inst_rules: std::collections::BTreeMap<InstRule, usize> = Default::default();
+    // RFC-0101 §1.5's shadow: (engine, planned rung, rung taken) -> count, and
+    // the ones no rule explains.
+    let mut ladder: std::collections::BTreeMap<
+        (Site, vyrn_codegen::Rung, vyrn_codegen::Rung),
+        usize,
+    > = Default::default();
+    let mut rung_rules: std::collections::BTreeMap<RungRule, usize> = Default::default();
+    #[allow(clippy::type_complexity)]
+    let mut unruled: std::collections::BTreeMap<
+        (Site, vyrn_codegen::Rung, vyrn_codegen::Rung),
+        std::collections::BTreeSet<String>,
+    > = Default::default();
     // An instantiation a backend emitted and the lowering's worklist does not
     // have: (site, spelled instance) -> example.
     let mut missing: std::collections::BTreeMap<(Site, String), String> = Default::default();
@@ -860,6 +950,7 @@ fn gate() {
         let native = vyrn_codegen::emit(&program);
         let mut rows = observe::take();
         let mut insts = observe::take_insts();
+        let mut crossings = observe::take_crossings();
         if native.is_err() {
             // A program the native backend refuses is not a program this gate
             // can compare; the wasm column would be answering about a different
@@ -870,8 +961,35 @@ fn gate() {
         let wasm = vyrn_codegen::direct::compile(&program);
         rows.extend(observe::take());
         insts.extend(observe::take_insts());
+        crossings.extend(observe::take_crossings());
         if wasm.is_err() {
             continue;
+        }
+
+        // RFC-0101 §1.5's shadow: every boundary crossing either engine made,
+        // against the plan. The pair is the key — the two ladders reach `coerce`
+        // from different call sites, so there is no node they both stand at.
+        for c in &crossings {
+            let planned = vyrn_codegen::coerce_plan(&c.from, &c.to, &decls);
+            *ladder.entry((c.site, planned, c.rung)).or_insert(0) += 1;
+            if planned == c.rung {
+                t.rungs_planned += 1;
+                continue;
+            }
+            match rung_rule(c.site, &c.from, &c.to, planned, c.rung) {
+                Some(r) => *rung_rules.entry(r).or_insert(0) += 1,
+                None => {
+                    t.rungs_unruled += 1;
+                    if planned == vyrn_codegen::Rung::Refuse || c.rung == vyrn_codegen::Rung::Refuse
+                    {
+                        t.rungs_terminal += 1;
+                    }
+                    unruled
+                        .entry((c.site, planned, c.rung))
+                        .or_default()
+                        .insert(format!("`{}` -> `{}` ({name})", c.from, c.to));
+                }
+            }
         }
 
         // Half zero, and RFC-0101 M2's own gate: the lowering's worklist against
@@ -1048,6 +1166,25 @@ fn gate() {
 
     eprintln!("  RFC-0101 M4: {rel_lambda} release steps placed inside a lambda body");
     eprintln!(
+        "  RFC-0101 §1.5: {} boundary crossings took the planned rung, {} took another          by a named rule {:?}, {} by none ({} of them terminal)",
+        t.rungs_planned,
+        rung_rules.values().sum::<usize>(),
+        rung_rules,
+        t.rungs_unruled,
+        t.rungs_terminal
+    );
+    for ((site, planned, took), n) in &ladder {
+        eprintln!("    ladder {site:?}: plan {planned:?}, took {took:?} x{n}");
+    }
+    for (k, ex) in &unruled {
+        let mut it = ex.iter();
+        eprintln!(
+            "    UNRULED {k:?} {} distinct pairs: {:?}",
+            ex.len(),
+            it.by_ref().take(12).collect::<Vec<_>>()
+        );
+    }
+    eprintln!(
         "  RFC-0101 M6: of {} off-program answers, {} were given inside a lifted          lambda's cloned body and {} inside a cloned `where` predicate",
         t.synthesized, t.in_lambda, t.in_predicate
     );
@@ -1182,6 +1319,31 @@ fn gate() {
         t.synthesized
     );
 
+    // RFC-0101 §1.5's shadow, and the TERMINAL rung first, because it is the one
+    // difference that is a program compiling on one target only: the textual
+    // ladder falls through to identity where the direct one refuses. A pair the
+    // plan refuses and an engine walked past is either a type parameter's
+    // spelling (`RungRule::ParamSpelling`, with the two programs that prove it)
+    // or a hole, and nothing else in this repository asks.
+    assert_eq!(
+        t.rungs_terminal, 0,
+        "{} boundary crossings are at the end of one ladder and not the other, with          no rule to explain them — see the UNRULED lines above",
+        t.rungs_terminal
+    );
+    // …and then the rest of the ladder. Every crossing takes the planned rung or
+    // one of the four named differences, all of which are ORDER (§1.5).
+    assert_eq!(
+        t.rungs_unruled, 0,
+        "{} boundary crossings took a rung the plan does not place and no rule          explains — see the UNRULED lines above",
+        t.rungs_unruled
+    );
+    // The floor under both: a shadow that observes nothing asserts nothing.
+    assert!(
+        t.rungs_planned > 10_000,
+        "only {} boundary crossings took the planned rung — the ladder shadow stopped          seeing the corpus",
+        t.rungs_planned
+    );
+
     // A gate that compares nothing passes trivially. This is the floor the run
     // above cleared by two orders of magnitude; it exists so a refactor that
     // quietly stops recording fails here rather than passing.
@@ -1207,4 +1369,97 @@ fn gate() {
         t.instances,
         t.extra
     );
+}
+
+/// RFC-0101 §1.5's shadow, broken on purpose — in both directions, which is
+/// what M4's placement gate established a gate has to do before it is worth
+/// anything.
+///
+/// The corpus run above is green, and a green run over four rules proves the
+/// rules FIRE; it does not prove they are narrow. These are the cases that must
+/// still fail, and each one is a real difference wearing a rule's shape.
+#[test]
+fn the_ladder_rules_refuse_what_they_are_not_about() {
+    use vyrn_codegen::Rung as R;
+    let t = Type::Named("T".into());
+    let p = Type::Param("T".into());
+    let s = Type::Str;
+
+    // THE TERMINAL RUNG, and the reason it is gated first: the textual ladder
+    // walking past a pair the plan refuses is a spelling ONLY where a type
+    // parameter is in it. The same walk-past between two concrete types is a
+    // value reinterpreted on one target and a compile error on the other, and
+    // it has no rule.
+    assert_eq!(
+        rung_rule(Site::Native, &s, &p, R::Refuse, R::Identity),
+        Some(RungRule::ParamSpelling)
+    );
+    assert_eq!(
+        rung_rule(Site::Native, &s, &t, R::Refuse, R::Identity),
+        None,
+        "a refused pair with no type parameter in it is the hole, not a spelling"
+    );
+    // …and in the other direction: the DIRECT ladder refusing is its declared
+    // end, but the textual one reaching `Refuse` would mean it grew an end it
+    // does not have.
+    assert_eq!(
+        rung_rule(Site::Native, &s, &t, R::Identity, R::Refuse),
+        None
+    );
+
+    // Every other rule is about ONE engine's ladder, so the same pair of rungs
+    // at the other engine is a real difference. Swapping the site must not be
+    // explained.
+    assert_eq!(
+        rung_rule(Site::Wasm, &s, &t, R::FnRetag, R::Identity),
+        Some(RungRule::FnByShape)
+    );
+    assert_eq!(
+        rung_rule(Site::Native, &s, &t, R::FnRetag, R::Identity),
+        None,
+        "the textual ladder HAS a function rung; skipping it is not the shape shortcut"
+    );
+    assert_eq!(
+        rung_rule(Site::Native, &s, &t, R::Identity, R::Resize),
+        Some(RungRule::SizedTargetRung)
+    );
+    assert_eq!(
+        rung_rule(Site::Wasm, &s, &t, R::Identity, R::Resize),
+        Some(RungRule::NumericBeforeShape)
+    );
+    // A rung nothing explains, at either engine.
+    assert_eq!(rung_rule(Site::Wasm, &s, &t, R::Heapify, R::Identity), None);
+    assert_eq!(
+        rung_rule(Site::Native, &s, &t, R::Validate, R::Identity),
+        None,
+        "a validation skipped is the defect class this whole gate exists for"
+    );
+}
+
+/// The plan itself, at the pairs the corpus does not reach — the ends of the
+/// ladder, which is where the two engines disagree.
+#[test]
+fn the_plan_places_the_rungs_the_two_ladders_were_read_at() {
+    use vyrn_codegen::Rung as R;
+    let decls: HashMap<String, TypeDecl> = HashMap::new();
+    let plan = |a: &Type, b: &Type| vyrn_codegen::coerce_plan(a, b, &decls);
+    let i8t = Type::IntN {
+        bits: 8,
+        signed: true,
+    };
+    let u8t = Type::IntN {
+        bits: 8,
+        signed: false,
+    };
+    // The one place the ORDER is observable: two integer spellings with one
+    // shape. A plan that put its shape shortcut first would answer `Identity`
+    // here and lose the only pair whose bits move.
+    assert_eq!(plan(&i8t, &u8t), R::Resize);
+    assert_eq!(plan(&i8t, &i8t), R::Identity);
+    assert_eq!(plan(&Type::Int, &Type::Float), R::FloatCross);
+    assert_eq!(plan(&Type::Never, &Type::Str), R::Never);
+    // The END: nothing in the ladder reconciles these, and the two engines
+    // disagree about what that means.
+    assert_eq!(plan(&Type::Str, &Type::Int), R::Refuse);
+    assert_eq!(plan(&Type::Str, &Type::Param("T".into())), R::Refuse);
 }

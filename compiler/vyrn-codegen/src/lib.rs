@@ -798,12 +798,15 @@ pub mod observe {
         static CTX: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
         static ROWS: std::cell::RefCell<Vec<Row>> = const { std::cell::RefCell::new(Vec::new()) };
         static INSTS: std::cell::RefCell<Vec<Inst>> = const { std::cell::RefCell::new(Vec::new()) };
+        static CROSSINGS: std::cell::RefCell<Vec<Crossing>> =
+            const { std::cell::RefCell::new(Vec::new()) };
     }
 
     /// Start recording on this thread, discarding anything already collected.
     pub fn start() {
         ROWS.with(|r| r.borrow_mut().clear());
         INSTS.with(|r| r.borrow_mut().clear());
+        CROSSINGS.with(|r| r.borrow_mut().clear());
         ON.with(|o| o.set(true));
     }
 
@@ -817,6 +820,43 @@ pub mod observe {
     /// what stops the recording.
     pub fn take_insts() -> Vec<Inst> {
         INSTS.with(|r| std::mem::take(&mut *r.borrow_mut()))
+    }
+
+    /// One boundary crossing an engine actually made: the pair, and the rung it
+    /// took (RFC-0101 §1.5's shadow).
+    ///
+    /// The PAIR is the identity, not a node: the two ladders reach `coerce` from
+    /// different call sites, so there is no node they both stand at, and §1.5's
+    /// whole claim is about the pair.
+    #[derive(Debug, Clone)]
+    pub struct Crossing {
+        pub site: Site,
+        pub from: Type,
+        pub to: Type,
+        pub rung: crate::Rung,
+    }
+
+    /// Record the rung an engine took. Every `return` path of a `coerce` calls
+    /// this exactly once, so a rung that stops being reachable stops being
+    /// recorded — which is what the corpus gate's floor is for.
+    pub(crate) fn note_rung(site: Site, from: &Type, to: &Type, rung: crate::Rung) {
+        if !on() {
+            return;
+        }
+        CROSSINGS.with(|r| {
+            r.borrow_mut().push(Crossing {
+                site,
+                from: from.clone(),
+                to: to.clone(),
+                rung,
+            })
+        });
+    }
+
+    /// The crossings recorded since [`start`]. Read after [`take`], like
+    /// [`take_insts`].
+    pub fn take_crossings() -> Vec<Crossing> {
+        CROSSINGS.with(|r| std::mem::take(&mut *r.borrow_mut()))
     }
 
     pub(crate) fn note_inst(site: Site, name: &str, args: &[Type]) {
@@ -2614,6 +2654,7 @@ impl<'a> Gen<'a> {
         // validation here would emit a live-looking check over a value that does
         // not exist. `poison` is valid at `to` as it stands.
         if matches!(from, Type::Never) {
+            crate::observe::note_rung(observe::Site::Native, from, to, Rung::Never);
             return Ok((op, to.clone()));
         }
         // AUTOMATIC VALIDATION: a value flowing into a predicated named type
@@ -2622,6 +2663,7 @@ impl<'a> Gen<'a> {
         // Whether that is required is [`validation_required`]'s call, not this
         // site's, because the direct wasm backend has to reach the same verdict.
         if let Some(decl) = validation_required(from, to, self.types).cloned() {
+            crate::observe::note_rung(observe::Site::Native, from, to, Rung::Validate);
             let (v, _) = self.coerce(op, from, &decl.base)?;
             self.emit_validation(&decl, &v)?;
             return Ok((v, to.clone()));
@@ -2632,6 +2674,7 @@ impl<'a> Gen<'a> {
         // and bare function names — were constructed AS the slot's signature by
         // the expected-type stack, so no reshaping can be needed here.)
         if matches!(self.resolve(to), Type::Fn(..)) && matches!(self.resolve(from), Type::Fn(..)) {
+            crate::observe::note_rung(observe::Site::Native, from, to, Rung::FnRetag);
             return Ok((op, to.clone()));
         }
         // NOTE: there is deliberately no Option/Result payload reshape here.
@@ -2653,6 +2696,7 @@ impl<'a> Gen<'a> {
             (&self.resolve(from), &self.resolve(to))
         {
             if fi != ti && fnn == tn {
+                crate::observe::note_rung(observe::Site::Native, from, to, Rung::Elementwise);
                 let fell = self.llt(fi);
                 let from_ll = format!("[{fnn} x {fell}]");
                 let tell = self.llt(ti);
@@ -2689,6 +2733,7 @@ impl<'a> Gen<'a> {
                 // (`fn(..) -> ..`) flowing into an `Array<AliasFn>`, where the
                 // element type is the closure value and `ti` is the fn-type alias.
                 if fi == ti || self.llt(fi) == self.llt(ti) {
+                    crate::observe::note_rung(observe::Site::Native, from, to, Rung::Heapify);
                     let inner = (**fi).clone();
                     let (triple, _) = self.array_n_to_heap(&op, &inner, &rf)?;
                     return Ok((triple, to.clone()));
@@ -2698,6 +2743,7 @@ impl<'a> Gen<'a> {
             // into a `SmallArray<T, N>` slot (RFC-0056): lift the elements into
             // the inline buffer (the checker proved `len <= N`).
             if let (Type::ArrayN(_, len), Type::SmallArray(ti, n)) = (&rf, &rt) {
+                crate::observe::note_rung(observe::Site::Native, from, to, Rung::Inline);
                 let inner = (**ti).clone();
                 let (sa, _) = self.array_n_to_smallarray(&op, &inner, *len, *n)?;
                 return Ok((sa, to.clone()));
@@ -2706,6 +2752,7 @@ impl<'a> Gen<'a> {
         // A plain integer flowing into a sized-integer slot truncates to `iN`
         // (matching the interpreter's `wrap_intn`). Same-width is a no-op.
         if let Type::IntN { bits, .. } = self.resolve(to) {
+            crate::observe::note_rung(observe::Site::Native, from, to, Rung::Resize);
             let fll = self.llt(from);
             let tll = format!("i{bits}");
             if fll != tll && matches!(self.resolve(from), Type::Int | Type::IntN { .. }) {
@@ -2720,14 +2767,17 @@ impl<'a> Gen<'a> {
         // A default `double` literal flowing into a `Float32` slot rounds to single
         // precision (`fptrunc`), matching the interpreter's `as f32`.
         if self.resolve(to) == Type::Float32 && self.resolve(from) == Type::Float {
+            crate::observe::note_rung(observe::Site::Native, from, to, Rung::FloatCross);
             let t = self.fresh_tmp();
             self.emit(format!("{t} = fptrunc double {op} to float"));
             return Ok((t, to.clone()));
         }
         if let (Some(ff), Some(tf)) = (self.record_fields(from), self.record_fields(to)) {
             if ff == tf {
+                crate::observe::note_rung(observe::Site::Native, from, to, Rung::Identity);
                 return Ok((op, to.clone()));
             }
+            crate::observe::note_rung(observe::Site::Native, from, to, Rung::Rebuild);
             let from_ll = self.llt(from);
             let to_ll = self.llt(to);
             let mut cur = "undef".to_string();
@@ -2751,6 +2801,13 @@ impl<'a> Gen<'a> {
             }
             return Ok((cur, to.clone()));
         }
+        // THE END OF THE LADDER, and it is not the end of the other one: the
+        // direct backend refuses an unhandled pair (RFC-0101 §1.5). A pair that
+        // reaches here is one this emitter reinterprets — the bits as they are,
+        // under a new name — so the corpus gate holds every one of them to the
+        // plan's [`Rung::Identity`], and a pair the plan REFUSES landing here is
+        // a program that compiles on one target only.
+        crate::observe::note_rung(observe::Site::Native, from, to, Rung::Identity);
         Ok((op, to.clone()))
     }
 
@@ -12945,6 +13002,116 @@ pub(crate) fn validation_required<'t>(
         return None;
     }
     types.get(n).filter(|d| d.predicate.is_some())
+}
+
+/// One rung of the boundary ladder — RFC-0101 §1.5's shadow.
+///
+/// A `coerce` is where a value crosses into a declared type, and each engine
+/// writes the decision as a ladder of guarded rungs: 146 lines in the textual
+/// emitter, 198 in the direct one, and §1.5 measured them as ONE decision until
+/// M6's second phase read them against each other and found two — the same first
+/// two rungs, differently ordered middles, one rung each the other lacks, and
+/// opposite ends. This is the vocabulary that lets a gate say which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Rung {
+    /// A `Never` (RFC-0079) reaching a boundary: the `panic` already left, so
+    /// there is no value to reconcile.
+    Never,
+    /// A refined named type: coerce into the base, then run its `where`
+    /// predicate. The base crossing is a rung of its own, at its own pair.
+    Validate,
+    /// A function value between `fn`-typed spellings: a re-tag, no instruction.
+    FnRetag,
+    /// A fixed array whose ELEMENT type changes: element by element, so each
+    /// element crosses its own boundary (and validates, if it has one).
+    Elementwise,
+    /// A fixed array into the growable `{ptr,len,cap}` triple.
+    Heapify,
+    /// A fixed array into a `SmallArray`'s inline buffer.
+    Inline,
+    /// An integer resize: truncate, extend, or renormalise.
+    Resize,
+    /// Across the int/float line, or between the two float widths.
+    FloatCross,
+    /// A record used as a differently shaped record: rebuilt field by field.
+    Rebuild,
+    /// The bits are already right.
+    Identity,
+    /// No rung handles this pair.
+    Refuse,
+}
+
+/// The rung a value crossing from `from` into `to` takes — the PLAN both
+/// compiled backends are held to (RFC-0101 §1.5).
+///
+/// **Two engines, not three** (§2.4 row 4): the interpreter's `coerce` takes a
+/// value and a target and has no `from` at all, so it cannot be held to a plan
+/// keyed on a pair until it runs the form.
+///
+/// **The order is this function's, and it is where the rules come from.** The
+/// two ladders agree on the first two rungs and order their middles differently;
+/// a middle rung's guard is disjoint from the others', so the order is
+/// observable at exactly one place — an integer pair whose two spellings share
+/// one LLVM shape (`i8` for `Int8` and `UInt8` alike), which is why the resize
+/// comes before [`Rung::Identity`] here and in the direct backend. Every
+/// remaining difference is one engine taking a rung the other does not have; the
+/// corpus gate names each one as a rule rather than hiding it in a plan that
+/// splits the difference.
+///
+/// It is beside [`validation_required`] and [`llt_of`] rather than in
+/// `vyrn-lower` because it is made OF them: this is where the two shared
+/// codegen decisions already live, and a plan keyed on a pair needs no site.
+pub fn coerce_plan(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) -> Rung {
+    let (rf, rt) = (
+        vyrn_frontend::types::resolve(from, types),
+        vyrn_frontend::types::resolve(to, types),
+    );
+    // `Int` and `Int64` are one type, and `IntN` carries its own width and
+    // signedness — so "the same integer" is a comparison of resolved spellings,
+    // and a pair that IS the same integer needs no rung at all.
+    let num = |t: &Type| matches!(t, Type::Int | Type::IntN { .. });
+    let flt = |t: &Type| matches!(t, Type::Float | Type::Float32);
+    if matches!(from, Type::Never) {
+        return Rung::Never;
+    }
+    if validation_required(from, to, types).is_some() {
+        return Rung::Validate;
+    }
+    if num(&rf) && num(&rt) && rf != rt {
+        return Rung::Resize;
+    }
+    if (flt(&rf) || flt(&rt)) && (num(&rf) || num(&rt) || flt(&rf) && flt(&rt)) && rf != rt {
+        return Rung::FloatCross;
+    }
+    if matches!(rf, Type::Fn(..)) && matches!(rt, Type::Fn(..)) {
+        return Rung::FnRetag;
+    }
+    match (&rf, &rt) {
+        (Type::ArrayN(fi, fnn), Type::ArrayN(ti, tn)) if fi != ti && fnn == tn => {
+            return Rung::Elementwise
+        }
+        (Type::ArrayN(fi, _), Type::Array(ti))
+            if fi == ti || llt_of(fi, types) == llt_of(ti, types) =>
+        {
+            return Rung::Heapify
+        }
+        (Type::ArrayN(fi, len), Type::SmallArray(ti, n))
+            if llt_of(fi, types) == llt_of(ti, types) && len <= n =>
+        {
+            return Rung::Inline
+        }
+        _ => {}
+    }
+    if llt_of(from, types) == llt_of(to, types) {
+        return Rung::Identity;
+    }
+    match (
+        vyrn_frontend::types::record_fields(&rf, types),
+        vyrn_frontend::types::record_fields(&rt, types),
+    ) {
+        (Some(_), Some(_)) => Rung::Rebuild,
+        _ => Rung::Refuse,
+    }
 }
 
 /// The message a `where` violation prints. A record base gets the cross-field
