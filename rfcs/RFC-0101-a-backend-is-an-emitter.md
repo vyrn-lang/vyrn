@@ -2873,6 +2873,8 @@ are stable.
    "not a predicate" from "a COPY of a predicate" was to ask the engine rather
    than the addresses.
 
+### M6 third phase — the two clones are deleted; the record for the whole phase, with its numbers and its findings, is in the PR that carries the `coerce` shadow.
+
 ---
 
 ## 4. What it unlocks

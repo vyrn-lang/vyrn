@@ -269,6 +269,25 @@ pub struct Lowered<'a> {
     /// [`Why::PastTheLimit`] — the bound refusing an instantiation, which is the
     /// bound working rather than a hole.
     pub unresolved: Vec<Unresolved>,
+    /// Every refined type's `where` predicate, typed once (RFC-0101 M6).
+    ///
+    /// A predicate is neither a function nor a module-state initializer — it is
+    /// a fact about a TYPE — and every engine walks it at every value boundary
+    /// that type crosses. It is here because it is the last thing the form did
+    /// not hold that a backend still had to type for itself: 1,043 of the
+    /// corpus's off-program backend answers were inside a predicate, which is
+    /// the largest single class of them (RFC-0101 §1.5).
+    ///
+    /// Outside every instantiation, like [`Lowered::globals`], and for a
+    /// stronger reason: a predicate lives on a declaration, which has no type
+    /// parameters to substitute. A reader keyed by `(node, instantiation)` looks
+    /// one up under the EMPTY substitution whatever body the boundary is in.
+    ///
+    /// The calls a predicate makes are deliberately NOT followed into the
+    /// worklist. Nothing walked a predicate before this, so following them would
+    /// add instances the two backends' own worklists do not have — a difference
+    /// this milestone would be inventing rather than recording.
+    pub predicates: Vec<Row<'a>>,
     /// Every `Block` that is a lambda's body, by node address.
     ///
     /// A structural fact about the program, not a target one. It is here because
@@ -293,7 +312,9 @@ impl<'a> Lowered<'a> {
     }
 
     pub fn rows(&self) -> usize {
-        self.instances.iter().map(|i| i.rows.len()).sum::<usize>() + self.globals.len()
+        self.instances.iter().map(|i| i.rows.len()).sum::<usize>()
+            + self.globals.len()
+            + self.predicates.len()
     }
 }
 
@@ -406,6 +427,16 @@ fn build<'a>(
         expr(&g.init, 0, &mut chain, &mut gw);
     }
     let globals = gw.rows;
+    // The third root, and the one with no worklist attached: a `where`
+    // predicate — see [`Lowered::predicates`].
+    let mut pw = Walk::new(recorded, &program.impls);
+    for d in &program.type_decls {
+        if let Some(p) = &d.predicate {
+            let mut chain: Chain = vec![HashMap::new()];
+            expr(p, 0, &mut chain, &mut pw);
+        }
+    }
+    let predicates = pw.rows;
     follow(
         "<module state>",
         std::mem::take(&mut gw.calls),
@@ -474,6 +505,7 @@ fn build<'a>(
     Lowered {
         instances,
         globals,
+        predicates,
         unresolved,
         lambda_bodies,
     }

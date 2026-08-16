@@ -1395,3 +1395,146 @@ impl Expr {
         }
     }
 }
+
+/// Every lambda literal the program holds, by node address (RFC-0101 M6).
+///
+/// A backend walks a body through a recursion that has erased the program's
+/// lifetime: at a lambda literal it has the node but not a borrow a worklist can
+/// hold, so the direct wasm backend COPIED the body to put one there — 532 of
+/// the corpus's off-program backend answers, because no recorded type can reach
+/// a node the program does not hold. This gives the borrow back. A hit needs no
+/// verification, which is what separates it from `project::Memo`'s keys: the
+/// program outlives every walk over it, so nothing else can be living at one of
+/// its addresses.
+///
+/// Function bodies and module-state initializers — what the backends lower. A
+/// literal inside a leaked desugar is not here, and a caller that misses keeps
+/// whatever it did before.
+pub fn lambdas(p: &Program) -> std::collections::HashMap<usize, &LambdaBody> {
+    let mut out = std::collections::HashMap::new();
+    for f in &p.functions {
+        lambdas_block(&f.body, &mut out);
+    }
+    for g in &p.globals {
+        lambdas_expr(&g.init, &mut out);
+    }
+    out
+}
+
+fn lambdas_block<'a>(b: &'a Block, out: &mut std::collections::HashMap<usize, &'a LambdaBody>) {
+    for s in &b.stmts {
+        lambdas_stmt(s, out);
+    }
+}
+
+fn lambdas_stmt<'a>(s: &'a Stmt, out: &mut std::collections::HashMap<usize, &'a LambdaBody>) {
+    match s {
+        Stmt::Let { value, .. }
+        | Stmt::Assign { value, .. }
+        | Stmt::SetField { value, .. }
+        | Stmt::Expr(value) => lambdas_expr(value, out),
+        Stmt::IndexSet { index, value, .. } => {
+            lambdas_expr(index, out);
+            lambdas_expr(value, out);
+        }
+        Stmt::Return { value, .. } => {
+            if let Some(e) = value {
+                lambdas_expr(e, out);
+            }
+        }
+        Stmt::If {
+            cond: scrutinee,
+            then_block,
+            else_block,
+            ..
+        }
+        | Stmt::IfLet {
+            scrutinee,
+            then_block,
+            else_block,
+            ..
+        } => {
+            lambdas_expr(scrutinee, out);
+            lambdas_block(then_block, out);
+            if let Some(eb) = else_block {
+                lambdas_block(eb, out);
+            }
+        }
+        Stmt::While {
+            cond: e, body: bl, ..
+        }
+        | Stmt::ForIn {
+            iter: e, body: bl, ..
+        } => {
+            lambdas_expr(e, out);
+            lambdas_block(bl, out);
+        }
+        Stmt::Region { body, .. } => lambdas_block(body, out),
+        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop { .. } => {}
+    }
+}
+
+fn lambdas_expr<'a>(e: &'a Expr, out: &mut std::collections::HashMap<usize, &'a LambdaBody>) {
+    match e {
+        Expr::Lambda { body, .. } => {
+            out.insert(e as *const Expr as usize, body);
+            match body {
+                LambdaBody::Expr(inner) => lambdas_expr(inner, out),
+                LambdaBody::Block(b) => lambdas_block(b, out),
+            }
+        }
+        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
+            lambdas_expr(expr, out)
+        }
+        Expr::Consume { place, .. } => lambdas_expr(place, out),
+        Expr::Binary { lhs, rhs, .. } => {
+            lambdas_expr(lhs, out);
+            lambdas_expr(rhs, out);
+        }
+        Expr::Call { args, .. }
+        | Expr::TryConstruct { args, .. }
+        | Expr::Spawn { args, .. }
+        | Expr::ArrayLit { elems: args, .. } => {
+            for a in args {
+                lambdas_expr(a, out);
+            }
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            lambdas_expr(scrutinee, out);
+            for a in arms {
+                lambdas_expr(&a.body, out);
+            }
+        }
+        Expr::IfExpr {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            lambdas_expr(cond, out);
+            lambdas_expr(then_branch, out);
+            if let Some(eb) = else_branch {
+                lambdas_expr(eb, out);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for (_, v) in fields {
+                lambdas_expr(v, out);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                lambdas_expr(k, out);
+                lambdas_expr(v, out);
+            }
+        }
+        Expr::Int(_)
+        | Expr::Byte(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::Str(_)
+        | Expr::Var { .. } => {}
+    }
+}

@@ -1791,6 +1791,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &arg_drops,
+            &program.type_decls,
         );
         gi.log_level = program.log_level;
         gi.log_sink = program.log_sink.clone();
@@ -1909,6 +1910,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &arg_drops,
+            &program.type_decls,
         );
         gen.log_level = program.log_level;
         gen.log_sink = program.log_sink.clone();
@@ -1961,6 +1963,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 &regex_globals,
                 &program.impls,
                 &arg_drops,
+                &program.type_decls,
             );
             gen.log_level = program.log_level;
             gen.log_sink = program.log_sink.clone();
@@ -2023,6 +2026,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 &regex_globals,
                 &program.impls,
                 &arg_drops,
+                &program.type_decls,
             );
             gen.log_level = program.log_level;
             gen.log_sink = program.log_sink.clone();
@@ -2071,6 +2075,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &arg_drops,
+            &program.type_decls,
         );
         dgen.protocol_methods = protocol_methods.clone();
         dgen.globals = globals_map.clone();
@@ -2101,6 +2106,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &arg_drops,
+            &program.type_decls,
         );
         cgen.fnval_variants = fnval_registry.clone();
         cgen.emit_fnval_copy(&mut out);
@@ -2125,6 +2131,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &arg_drops,
+            &program.type_decls,
         );
         cgen.protocol_methods = protocol_methods.clone();
         cgen.globals = globals_map.clone();
@@ -2227,6 +2234,17 @@ struct Gen<'a> {
     modify_copyout: Vec<(String, String, String)>,
     /// Validated-type + record declarations, for construction, resolution, layout.
     types: &'a HashMap<String, TypeDecl>,
+    /// The program's OWN type declarations, for the one thing the map above
+    /// cannot answer: a `where` predicate's node ADDRESS (RFC-0101 M6's third
+    /// phase).
+    ///
+    /// `types` is `decl_map`'s copy, made once per engine, and this emitter then
+    /// copied the predicate out of it again at every validation site. What the
+    /// copying costs is not the copy: no recorded type can reach a node the
+    /// program does not hold, so 1,043 of the corpus's off-program backend
+    /// answers were inside one (RFC-0101 §1.5). Read from here, the predicate is
+    /// the same tree the checker typed and the other two engines walk.
+    decls: &'a [TypeDecl],
     /// Enum variant name -> (tag index, enum name), for construction.
     variants: &'a HashMap<String, (i64, String)>,
     /// String literal content -> module global name.
@@ -2444,6 +2462,7 @@ impl<'a> Gen<'a> {
         regex_globals: &'a HashMap<String, (String, String, u32)>,
         impls: &'a [vyrn_frontend::ast::ImplBlock],
         arg_drops: &'a std::collections::HashSet<usize>,
+        decls: &'a [TypeDecl],
     ) -> Self {
         Gen {
             arg_drops,
@@ -2461,6 +2480,7 @@ impl<'a> Gen<'a> {
             param_caps,
             modify_copyout: Vec::new(),
             types,
+            decls,
             variants,
             str_globals,
             subst,
@@ -5960,7 +5980,7 @@ impl<'a> Gen<'a> {
         }
         let (v, _) = self.gen_expr(arg)?;
         let base_ll = self.llt(&decl.base);
-        let pred_i1 = match &decl.predicate {
+        let pred_i1 = match self.predicate(&decl)? {
             None => "true".to_string(),
             Some(pred) => {
                 self.scope.push(Vec::new());
@@ -6096,7 +6116,7 @@ impl<'a> Gen<'a> {
         // construction, an all-constant literal is validated by the checker and
         // needs no runtime check.
         if let Some(decl) = self.types.get(name).cloned() {
-            if let Some(pred) = &decl.predicate {
+            if let Some(pred) = self.predicate(&decl)? {
                 let all_const = fields
                     .iter()
                     .all(|(_, e)| vyrn_frontend::consteval::eval(e, &HashMap::new()).is_some());
@@ -11658,13 +11678,37 @@ impl<'a> Gen<'a> {
         Ok(())
     }
 
+    /// The program's OWN `where` predicate node for `decl` — see [`Gen::decls`].
+    ///
+    /// `Ok(None)` is a type with no refinement. Every `decl` that reaches this
+    /// emitter was cloned out of [`Gen::types`], which is `decl_map`'s copy of
+    /// this list, so a decl that HAS a predicate and is not in the list is a
+    /// decl the program does not hold — a refusal rather than a silently
+    /// skipped validation.
+    fn predicate(&self, decl: &TypeDecl) -> Result<Option<&'a Expr>, String> {
+        if decl.predicate.is_none() {
+            return Ok(None);
+        }
+        self.decls
+            .iter()
+            .find(|d| d.name == decl.name && d.base == decl.base)
+            .and_then(|d| d.predicate.as_ref())
+            .map(Some)
+            .ok_or_else(|| {
+                format!(
+                    "a `where` clause on `{}`, which is not one of the program's own                      type declarations",
+                    decl.name
+                )
+            })
+    }
+
     /// Lower a refined type's `where` predicate to an `i1` (true = holds),
     /// binding the value under check as [`predicate_binds`] says to. This is the
     /// ONE place a predicate is lowered to LLVM — the trap path
     /// (`emit_validation`) and the JSON decode `validate` path (RFC-0018) both
     /// derive from it, so the two never drift.
     fn emit_predicate_cond(&mut self, decl: &TypeDecl, v: &str) -> Result<String, String> {
-        let pred = decl.predicate.clone().expect("predicate present");
+        let pred = self.predicate(decl)?.expect("predicate present");
         let rec_ll = self.llt(&decl.base);
         self.scope.push(Vec::new());
         for (name, ty, field) in predicate_binds(decl) {
@@ -11681,7 +11725,7 @@ impl<'a> Gen<'a> {
             self.emit(format!("store {ll} {val}, ptr {slot}"));
         }
         let was = crate::observe::set_ctx("pred");
-        let cond = self.gen_expr(&pred);
+        let cond = self.gen_expr(pred);
         crate::observe::set_ctx(was);
         let (cond, _) = cond?;
         self.scope.pop();
@@ -13153,6 +13197,7 @@ mod tests {
             &rg,
             &[],
             &ad,
+            &[],
         );
         let rec = |fs: &[Type]| {
             Type::Record(
