@@ -1,0 +1,10 @@
+/// RFC-0103 M0 — the logging FILE sink (RFC-0008). A `logging` declaration is
+/// the one place a program reaches the filesystem without naming a builtin.
+
+logging { level: info, sink: file("cap-logfile.tmp.log") }
+
+fn main() -> Int64 {
+    logger("census").info("into the file sink")
+    print("done")
+    return 0
+}

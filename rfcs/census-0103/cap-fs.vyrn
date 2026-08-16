@@ -1,0 +1,32 @@
+/// RFC-0103 M0 — the `fs` capability, one program.
+///
+/// Every filesystem builtin the language has EXCEPT `fsyncFile`, in one run:
+/// write, read, read as bytes, rename, and `std/storage`'s atomic write over
+/// the first two. Paths are relative, so the wasi leg needs `wasmtime --dir .`.
+///
+/// `fsyncFile` is `cap-fsync.vyrn`, on its own, because the census found it does
+/// not BUILD for wasm at all — see that file.
+
+import { writeAtomic } from "std/storage"
+
+fn show(label: String, r: Result<Bool, String>) {
+    print(match r {
+            Ok(done) => "\{label}: ok",
+            Err(why) => "\{label}: \{why}",
+        })
+}
+
+fn main() -> Int64 {
+    show("writeFile", writeFile("cap-fs.tmp", "hello"))
+    print(match readFile("cap-fs.tmp") {
+            Ok(s) => "readFile: \{s}",
+            Err(why) => "readFile: \{why}",
+        })
+    print(match readFileBytes("cap-fs.tmp") {
+            Ok(b) => "readFileBytes: \{b.length} byte(s)",
+            Err(why) => "readFileBytes: \{why}",
+        })
+    show("renameFile", renameFile("cap-fs.tmp", "cap-fs2.tmp"))
+    show("writeAtomic", writeAtomic("cap-fs3.tmp", "atomic"))
+    return 0
+}

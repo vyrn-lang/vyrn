@@ -1,0 +1,14 @@
+/// RFC-0103 M0 — `spawn` (RFC-0025/0095). It reaches an operating-system thread
+/// on native and reaches nothing on wasm (the direct backend runs the callee
+/// eagerly, in argument order), and the checker proves isolation for all three
+/// engines, so the OBSERVABLE answer is the same everywhere.
+
+fn double(n: Int64) -> Int64 {
+    return n * 2
+}
+
+fn main() -> Int64 {
+    let t = spawn double(21)
+    print("spawn/join: \{t.join()}")
+    return 0
+}

@@ -1,0 +1,10 @@
+/// RFC-0103 M0 — the `stdout` / `stderr` capabilities. `print` is stdout;
+/// leveled logging (RFC-0008) defaults to stderr.
+
+logging { level: info, sink: stderr }
+
+fn main() -> Int64 {
+    print("stdout: hello")
+    logger("census").info("stderr: hello")
+    return 0
+}

@@ -1,0 +1,10 @@
+/// RFC-0103 M0 — the `args` capability.
+
+fn main() -> Int64 {
+    let a = args()
+    print("args: \{a.length}")
+    for x in a {
+        print("  \{x}")
+    }
+    return 0
+}

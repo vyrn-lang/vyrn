@@ -1,0 +1,9 @@
+/// RFC-0103 M0 — the `extern` capability (RFC-0012): a host import. Native has
+/// no host to call, so this is the row the floor may turn into a compile error.
+
+extern fn jsAdd(a: Int64, b: Int64) -> Int64
+
+fn main() -> Int64 {
+    print("jsAdd(2,3) = \{jsAdd(2, 3)}")
+    return 0
+}
