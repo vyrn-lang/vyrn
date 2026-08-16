@@ -334,6 +334,16 @@ struct Tally {
     /// named this clone; M6's second phase found it by measuring the class it
     /// expected to be the lambda's and finding the class was not there.
     in_predicate: usize,
+    /// …and this many of the off-program answers were `peek`'s — the second
+    /// expression typer the direct backend runs, and the number M3's delete half
+    /// was priced on.
+    ///
+    /// It is the class RFC-0101 §2.3 leaves in the backend on purpose (the type
+    /// of a release receiver, of a dispatched call the emitter builds at an emit
+    /// site, and of the operands built beside them), so it has a FLOOR as well
+    /// as a ceiling: 299 while the lambda and predicate clones were live, 109
+    /// once both were measured, 110 once both were deleted.
+    peek_off: usize,
     /// Instantiations one backend emitted that the lowering's worklist does not
     /// have. This is M2's gate and it is zero.
     missing: usize,
@@ -841,6 +851,30 @@ fn gate() {
                 walked.insert(row.node.id());
             }
         }
+        // …and the `where` predicates, which are under no substitution for a
+        // stronger reason: a predicate lives on a declaration and a declaration
+        // has no type parameters. Every engine walks the same one at every
+        // boundary the type crosses, INSIDE whatever body that boundary is in,
+        // so an answer about one is looked up with the instantiation dropped.
+        let mut predicate_nodes: std::collections::HashSet<usize> = Default::default();
+        for row in &lowered.predicates {
+            if let Node::Expr(e) = row.node {
+                recorded.insert(
+                    (row.node.id(), String::new()),
+                    (row.ty.clone(), row.has.clone(), e),
+                );
+                walked.insert(row.node.id());
+                predicate_nodes.insert(row.node.id());
+            }
+        }
+        // The key an answer about `node` under `subst` is recorded at.
+        let at = |node: usize, subst: &str| {
+            if predicate_nodes.contains(&node) {
+                (node, String::new())
+            } else {
+                (node, subst.to_string())
+            }
+        };
 
         // What the lowering says this program instantiates.
         let mut lowering: std::collections::BTreeSet<String> = Default::default();
@@ -920,7 +954,7 @@ fn gate() {
             HashMap::new();
         for row in &rows {
             per_node
-                .entry((row.node, subst_key(&row.subst)))
+                .entry(at(row.node, &subst_key(&row.subst)))
                 .or_default()
                 .push((row.site, row.ty.clone(), row.kind, row.ctx));
         }
@@ -940,6 +974,9 @@ fn gate() {
                             "lambda" => t.in_lambda += 1,
                             "pred" => t.in_predicate += 1,
                             _ => {}
+                        }
+                        if *site == Site::Peek {
+                            t.peek_off += 1;
                         }
                         // The `~` half is RFC-0101 M6's second phase: which
                         // CLONE the answer was given inside. Both are engine
@@ -984,7 +1021,7 @@ fn gate() {
 
         // Half two: each backend answer against the recorded one.
         for row in rows {
-            let Some((rec, has, node)) = recorded.get(&(row.node, subst_key(&row.subst))) else {
+            let Some((rec, has, node)) = recorded.get(&at(row.node, &subst_key(&row.subst))) else {
                 continue;
             };
             let Some(rec) = rec else {
@@ -1047,11 +1084,6 @@ fn gate() {
     );
 
     eprintln!("  RFC-0101 M4: {rel_lambda} release steps placed inside a lambda body");
-    eprintln!(
-        "  RFC-0101 M6: of {} off-program answers, {} were given inside a lifted          lambda's cloned body and {} inside a cloned `where` predicate",
-        t.synthesized, t.in_lambda, t.in_predicate
-    );
-
     let mut top: Vec<_> = residue.into_iter().collect();
     top.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     let mut per_site: std::collections::BTreeMap<String, usize> = Default::default();
@@ -1165,21 +1197,47 @@ fn gate() {
     //
     // 9,505 -> 4,547 (M2c, by borrowing the callee's block) -> 3,294..3,484
     // (desugar-once, by expanding a `place at` projection ONCE for all three
-    // walks) -> 1,955 here, by sharing and typing the WRITING half as well:
-    // `a[i] = v` expands a `place atSet`, and that expansion was built by each
-    // backend for itself because its receiver is a name rather than a node.
+    // walks) -> 1,955 (by sharing and typing the WRITING half as well) -> 1,052
+    // here, by deleting the last two clones: the direct backend walks a lambda
+    // literal's own body instead of a copy of it, and both backends read a
+    // `where` predicate off the program instead of out of `decl_map`'s copy.
     // The ceiling is just above the highest of the runs measured: a backend
     // that goes back to expanding for itself, or to cloning a callee before it
-    // lowers it, fails here. What is LEFT is named on the residue lines the run
-    // prints — the receivers a backend parks under a reserved name to reach its
-    // own call path (`@rel`, `@try`, `@a0`, `@c0`), a validation predicate's
-    // `value` (which lives on a type declaration, not in any body), and the
-    // body of a lifted lambda, which is the milestone that moves lambda
-    // lifting.
+    // lowers it, fails here.
     assert!(
-        t.synthesized < 2_100,
-        "{} backend answers are about AST no instantiation of the program holds.          RFC-0101 M6 brought that to 1,955 by sharing and typing the `place atSet`          expansion; a number back near 3,300 means the store half is being          expanded per engine again, and one near 4,600 means the read half is too",
+        t.synthesized < 1_200,
+        "{} backend answers are about AST no instantiation of the program holds.          RFC-0101 M6 brought that to 1,052 by deleting the lambda and predicate          clones; a number near 2,000 means one of them is back, near 3,300 that a          `place atSet` is expanded per engine again, and near 4,600 that the read          half is too",
         t.synthesized
+    );
+
+    // The two clones, at zero, which is a stronger gate than a ceiling and the
+    // reason the ceiling above could move. Each engine marks the rows it gives
+    // inside a tree it COPIED; a copy's addresses are not the program's, so a
+    // clone that comes back lands here rather than in a number that drifts.
+    assert_eq!(
+        t.in_lambda, 0,
+        "{} backend answers were given inside a COPY of a lambda's body. The direct          backend queues the literal's own nodes (`Cx::lambdas`); a copy means it is          synthesizing a body again",
+        t.in_lambda
+    );
+    assert_eq!(
+        t.in_predicate, 0,
+        "{} backend answers were given inside a COPY of a `where` predicate. Both          backends read the program's own predicate node; a copy means one of them is          walking `decl_map`'s again",
+        t.in_predicate
+    );
+
+    // …and the FLOOR, which is the other half of the same sentence. `peek`'s
+    // share of the residue is the class RFC-0101 §2.3 assigns to the backend on
+    // purpose: the type of a release receiver or of a dispatched call the
+    // emitter builds at an emit site, which is a fact about a wasm local rather
+    // than about a program. It was 299 while two clones were live and 109 once
+    // both were measured away; it is not waiting for a mechanism, and a
+    // milestone that drives it toward zero is moving a decision INTO the form
+    // that §2.3 puts in the backend. Both bounds fail loudly rather than one:
+    // a rise means a new engine-built tree, a fall means §2.3 moved.
+    assert!(
+        (90..=150).contains(&t.peek_off),
+        "`peek` answered {} questions about AST no instantiation holds. RFC-0101 M6          measured this class at 109-110 and §2.3 owns every one of them; outside          90..150 the class has changed and the RFC's §2.3 leaves need re-reading",
+        t.peek_off
     );
 
     // A gate that compares nothing passes trivially. This is the floor the run

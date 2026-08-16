@@ -372,6 +372,8 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     let ownership = vyrn_frontend::own::analyze(program);
     let mut cx = Cx {
         types,
+        decls: &program.type_decls,
+        lambdas: vyrn_frontend::ast::lambdas(program),
         impls: program.impls.clone(),
         sigs: HashMap::new(),
         rt,
@@ -528,19 +530,17 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
                 Key::Lambda(..) => {}
             }
             cx.subst = p.subst.clone();
-            // The callee's OWN block for a generic instance and an RFC-0023
-            // specialization; the synthesized one inside the shell for a lifted
-            // lambda, which is the one kind with nothing to borrow.
-            let stmts = p.body.unwrap_or(&p.f.body);
-            // RFC-0101 M6's second phase: the one body in this backend that is
-            // still a clone is the lifted lambda's, so the answers given while
-            // walking one are off-program by construction. The flag is what
-            // turns that sentence into a count.
-            let was = crate::observe::set_ctx(match p.key {
-                Key::Lambda(..) => "lambda",
+            // RFC-0101 M6's second phase: the one body in this backend that
+            // was still a clone is the lifted lambda's, so the answers given
+            // while walking one were off-program by construction. The third
+            // phase gave the borrow back ([`Cx::lambdas`]), so the mark is on
+            // what is left rather than on the KIND: a shell is a clone, and a
+            // lambda whose literal the program holds is not.
+            let was = crate::observe::set_ctx(match p.body {
+                Body::Shell => "lambda",
                 _ => "",
             });
-            let body = lower_body(&mut m, &p.f, stmts, &p.sig, &cx, p.binds.clone());
+            let body = lower_body(&mut m, &p.f, p.body, &p.sig, &cx, p.binds.clone());
             crate::observe::set_ctx(was);
             let body = body?;
             cx.subst = HashMap::new();
@@ -853,6 +853,29 @@ enum Key {
     Lambda(usize, Vec<Type>, Vec<(String, Type)>),
 }
 
+/// What a queued body's statements ARE.
+///
+/// Every one of them is the program's own AST, which is the whole point: a
+/// backend walking a copy asks about nodes no recorded type can reach
+/// (RFC-0101 §1.2). [`Body::Shell`] is the one exception left and it is not
+/// reachable from any program — see its note.
+#[derive(Clone, Copy)]
+enum Body<'a> {
+    /// A block the program holds: a generic instance's callee, an RFC-0023
+    /// specialization's, or a `|x| { .. }` literal's own body.
+    Block(&'a Block),
+    /// A `|x| e` literal's expression. The block form's `return e` is a
+    /// STATEMENT, and writing one here would mean owning a copy of `e` — which
+    /// is exactly the clone this milestone deleted — so the value and the branch
+    /// are emitted directly (see [`Fn_::lambda_value`]).
+    Value(&'a Expr),
+    /// The shell's own statements: a lifted lambda whose literal is not one of
+    /// the program's nodes, so [`Cx::lambdas`] cannot hand back a borrow of it
+    /// and the synthesized block is all there is to walk. A literal inside a
+    /// leaked desugar is the only way to get one, and the corpus reaches none.
+    Shell,
+}
+
 /// One body discovered while another was being emitted, with the function index
 /// it was promised.
 #[derive(Clone)]
@@ -873,11 +896,8 @@ struct Pending<'a> {
     /// and the clone was the whole reason RFC-0101 M3's delete half could not
     /// land: a backend walking a copy of the AST asks about nodes the program
     /// does not have, so no recorded type can reach them. 9,505 answers were
-    /// about such nodes and this closes the two kinds that have a body to
-    /// borrow. `None` is the third, a lifted lambda: its block is synthesized
-    /// from a `|x| e` literal, and nothing to borrow exists until the lowering
-    /// owns it.
-    body: Option<&'a Block>,
+    /// about such nodes.
+    body: Body<'a>,
     sig: Sig,
     /// The monomorphization the body is lowered under; empty for a lifted lambda
     /// outside any generic.
@@ -979,6 +999,31 @@ struct FnBinding {
 
 struct Cx<'a> {
     types: HashMap<String, TypeDecl>,
+    /// The program's OWN type declarations, for the one thing the map above
+    /// cannot answer: a `where` predicate's node ADDRESS (RFC-0101 M6's third
+    /// phase).
+    ///
+    /// `types` is `decl_map`'s copy, made once per engine, and every validation
+    /// site copied the predicate out of it again. What the copying costs is not
+    /// the copy: no recorded type can reach a node the program does not hold, so
+    /// 1,043 of the corpus's off-program backend answers were inside one
+    /// (RFC-0101 §1.5). Read from here, the predicate is the same tree the
+    /// checker typed and the other two engines walk.
+    decls: &'a [TypeDecl],
+    /// Every lambda literal the PROGRAM holds, by node address (RFC-0101 M6's
+    /// third phase).
+    ///
+    /// [`Fn_::lift_lambda`] is handed the literal by a walk that has erased its
+    /// lifetime, so it could not park the literal's own body on the worklist and
+    /// cloned it instead — 532 of the corpus's off-program answers, because a
+    /// backend walking a copy asks about nodes no recorded type can reach. This
+    /// gives the borrow back: one walk over the program indexes every literal,
+    /// and an address that hits IS the program's node, since the program outlives
+    /// every walk and nothing else can be living at one of its addresses.
+    ///
+    /// A miss is a literal inside a tree the program does not hold — a leaked
+    /// desugar — and the caller keeps its clone for that.
+    lambdas: HashMap<usize, &'a LambdaBody>,
     /// Every `impl` block, for `place` projection lookup (RFC-0091 M2). A
     /// projection is not a function, so `sigs` cannot answer for it.
     impls: Vec<vyrn_frontend::ast::ImplBlock>,
@@ -1105,6 +1150,40 @@ impl<'a> Cx<'a> {
         ftypes::resolve(&self.sub(ty), &self.types)
     }
 
+    /// `decl`'s `where` predicate as the PROGRAM holds it — see [`Cx::decls`].
+    ///
+    /// `Ok(None)` is a type with no refinement. Every `decl` that reaches this
+    /// backend was cloned out of [`Cx::types`], which is `decl_map`'s copy of
+    /// this list, so a decl that HAS a predicate and is not in the list is a
+    /// decl the program does not hold — a refusal rather than a silently skipped
+    /// validation.
+    fn predicate(&self, decl: &TypeDecl, line: usize) -> Result<Option<&'a Expr>, String> {
+        if decl.predicate.is_none() {
+            return Ok(None);
+        }
+        match self
+            .decls
+            .iter()
+            .find(|d| d.name == decl.name && d.base == decl.base)
+            .and_then(|d| d.predicate.as_ref())
+        {
+            Some(p) => Ok(Some(p)),
+            None => unsupported(
+                &format!(
+                    "a `where` clause on `{}`, which is not one of the program's own                      type declarations",
+                    decl.name
+                ),
+                line,
+            ),
+        }
+    }
+
+    /// The PROGRAM's own body for a lambda literal at this address, or `None`
+    /// for a literal the program does not hold — see [`Cx::lambdas`].
+    fn lambda(&self, at: &Expr) -> Option<&'a LambdaBody> {
+        self.lambdas.get(&(at as *const Expr as usize)).copied()
+    }
+
     /// Whether a narrow scalar load of `ty` has to sign-extend — [`load_of`]'s
     /// second argument, kept here so it comes off the same type the shape does
     /// rather than being decided at the load.
@@ -1125,7 +1204,7 @@ impl<'a> Cx<'a> {
         m: &mut Module,
         key: Key,
         f: Rc<Function>,
-        body: Option<&'a Block>,
+        body: Body<'a>,
         subst: HashMap<String, Type>,
         binds: HashMap<String, FnBinding>,
     ) -> Result<Sig, String> {
@@ -1171,7 +1250,7 @@ impl<'a> Cx<'a> {
             m,
             Key::Generic(f.name.clone(), type_args),
             Rc::new(sf),
-            Some(&f.body),
+            Body::Block(&f.body),
             subst,
             HashMap::new(),
         )
@@ -1637,7 +1716,7 @@ fn lower_fn(
     cx: &Cx<'_>,
     binds: HashMap<String, FnBinding>,
 ) -> Result<(), String> {
-    let frame = lower_body(m, f, &f.body, sig, cx, binds)?;
+    let frame = lower_body(m, f, Body::Block(&f.body), sig, cx, binds)?;
     m.fill(sig.index, frame);
     Ok(())
 }
@@ -1651,11 +1730,17 @@ fn lower_fn(
 fn lower_body(
     m: &mut Module,
     f: &Function,
-    body: &Block,
+    body: Body<'_>,
     sig: &Sig,
     cx: &Cx<'_>,
     binds: HashMap<String, FnBinding>,
 ) -> Result<Frame, String> {
+    // A `|x| e` literal has no statements to walk at all; everything else does.
+    let stmts = match body {
+        Body::Block(b) => Some(b),
+        Body::Shell => Some(&f.body),
+        Body::Value(_) => None,
+    };
     let sig = sig.clone();
     let (params, _results) = cx.wasm_sig(&sig, f.line)?;
     let dest = sig.ret.agg().map(|_| 0u32);
@@ -1690,7 +1775,10 @@ fn lower_body(
         rel_holes: Vec::new(),
         expect: Vec::new(),
         fn_binds: binds,
-        append_ok: crate::append_candidates(body),
+        // A lambda's bare expression cannot qualify a name: the whitelist is
+        // grown by `x = x + ..`, which is a STATEMENT, and there is one
+        // expression here.
+        append_ok: stmts.map(crate::append_candidates).unwrap_or_default(),
         str_append: HashMap::new(),
     };
 
@@ -1772,7 +1860,13 @@ fn lower_body(
         Repr::Scalar(v) => BlockType::Result(*v),
         _ => BlockType::Empty,
     }));
-    cx_fn.block(m, &mut b, body)?;
+    match stmts {
+        Some(blk) => cx_fn.block(m, &mut b, blk)?,
+        None => match body {
+            Body::Value(e) => cx_fn.lambda_value(m, &mut b, e)?,
+            _ => unreachable!("only a lambda's expression has no statements"),
+        },
+    }
     // A lowering that reaches an argument node outside [`Fn_::call`] would leave
     // its local here. Nothing in the corpus does; if anything ever did, the local
     // is simply never read, which is a leak rather than a free of a value still
@@ -2152,6 +2246,76 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(l));
         str_hdr(b);
         b.ins(&Instruction::Call(self.cx.rt.free));
+    }
+
+    /// The VALUE half of a `return`: the expression, coerced to the DECLARED
+    /// return type, written through `dest` when the function returns an
+    /// aggregate. The unwinding half stays at the statement, which is the only
+    /// place that has a node to look a placement up by.
+    ///
+    /// Split out because a `|x| e` lambda returns `e` without there being a
+    /// `Stmt::Return` anywhere to say so — writing one would mean owning a copy
+    /// of `e` (see [`Body::Value`]).
+    fn ret_value(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        e: &Expr,
+        line: usize,
+    ) -> Result<(), String> {
+        match self.ret.clone() {
+            Repr::Scalar(_) => {
+                let want = self.ret_ty.clone();
+                self.expr_as(m, b, e, &want)?;
+            }
+            Repr::Agg(l) => {
+                // Destination-first, at the function's own boundary: the
+                // caller's slot address is already in `dest`.
+                b.ins(&Instruction::LocalGet(self.dest.unwrap()));
+                let want = self.ret_ty.clone();
+                self.expr_as(m, b, e, &want)?;
+                b.ins(&Instruction::I32Const(l.size as i32));
+                b.ins(&Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
+            }
+            Repr::Unit => {
+                return unsupported("a return whose value does not match the signature", line);
+            }
+        }
+        Ok(())
+    }
+
+    /// A `|x| e` literal's whole body: the `return e` the block form writes by
+    /// hand, emitted without a statement to write it with (RFC-0101 M6).
+    ///
+    /// A Unit-returning signature is the exception, and not a cosmetic one:
+    /// `each(xs, |x| print(x))` has an expression body whose value the signature
+    /// does not carry, so it is a statement rather than a return. The textual
+    /// emitter reaches the same split by testing `llt(ret) == "void"`.
+    ///
+    /// What [`Stmt::Return`]'s arm does between the value and the branch is
+    /// nothing here, twice over: `own` places no release step inside a lambda
+    /// body (M4's phase-1 finding, still counted by the corpus gate) and the
+    /// shell has no name in [`Cx::releases`] to look one up under; and a body
+    /// starts outside every region.
+    fn lambda_value(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<(), String> {
+        if matches!(self.ret, Repr::Unit) {
+            // A call for its effect leaves its result on the stack; drop it, or
+            // the block's type will not check — [`Stmt::Expr`]'s arm.
+            if !matches!(
+                self.cx.repr(&self.expr(m, b, e)?, Expr::line(e))?,
+                Repr::Unit
+            ) {
+                b.ins(&Instruction::Drop);
+            }
+            return Ok(());
+        }
+        self.ret_value(m, b, e, Expr::line(e))?;
+        self.exit_regions_above(b, 0, false);
+        b.ins(&Instruction::Br(self.depth));
+        Ok(())
     }
 
     fn block(&mut self, m: &mut Module, b: &mut Frame, blk: &Block) -> Result<(), String> {
@@ -3259,25 +3423,10 @@ impl<'p> Fn_<'_, 'p> {
                 self.free_snap(b, snap.as_slice());
             }
             Stmt::Return { value, line } => {
-                match (value, self.ret.clone()) {
-                    (Some(e), Repr::Scalar(_)) => {
-                        let want = self.ret_ty.clone();
-                        self.expr_as(m, b, e, &want)?;
-                    }
-                    (Some(e), Repr::Agg(l)) => {
-                        // Destination-first, at the function's own boundary: the
-                        // caller's slot address is already in `dest`.
-                        b.ins(&Instruction::LocalGet(self.dest.unwrap()));
-                        let want = self.ret_ty.clone();
-                        self.expr_as(m, b, e, &want)?;
-                        b.ins(&Instruction::I32Const(l.size as i32));
-                        b.ins(&Instruction::MemoryCopy {
-                            src_mem: 0,
-                            dst_mem: 0,
-                        });
-                    }
-                    (None, Repr::Unit) => {}
-                    _ => {
+                match value {
+                    Some(e) => self.ret_value(m, b, e, *line)?,
+                    None if matches!(self.ret, Repr::Unit) => {}
+                    None => {
                         return unsupported(
                             "a return whose value does not match the signature",
                             *line,
@@ -4168,7 +4317,7 @@ impl<'p> Fn_<'_, 'p> {
         decl: &TypeDecl,
         line: usize,
     ) -> Result<Option<u32>, String> {
-        let Some(pred) = decl.predicate.clone() else {
+        let Some(pred) = self.cx.predicate(decl, line)? else {
             return Ok(None);
         };
         let binds = crate::predicate_binds(decl);
@@ -4239,7 +4388,7 @@ impl<'p> Fn_<'_, 'p> {
             }
         };
         let was = crate::observe::set_ctx("pred");
-        let cond = self.expr(m, b, &pred);
+        let cond = self.expr(m, b, pred);
         crate::observe::set_ctx(was);
         let cond = cond?;
         self.scope.truncate(mark);
@@ -7643,7 +7792,7 @@ impl<'p> Fn_<'_, 'p> {
             m,
             Key::Ho(f.name.clone(), type_args, targets),
             Rc::new(sf),
-            Some(&f.body),
+            Body::Block(&f.body),
             subst,
             binds,
         )?;
@@ -7990,23 +8139,20 @@ impl<'p> Fn_<'_, 'p> {
             cap_tys.push(self.cx.sub(&t));
         }
         let ret = self.lambda_ret(params, body, ptys, expected_ret, line)?;
-        // `LambdaBody::Expr` is a `return` of that expression — the same thing the
-        // block form writes by hand, so there is one body shape to lower. A
-        // Unit-returning signature is the exception and not a cosmetic one: `each(xs,
-        // |x| print(x))` has an expression body whose value the signature does not
-        // carry, so it is a statement rather than a return. The textual emitter
-        // reaches the same split by testing `llt(ret) == "void"`.
-        let block = match body {
-            LambdaBody::Block(b) => b.clone(),
-            LambdaBody::Expr(e) if self.cx.repr(&ret, line)? == Repr::Unit => Block {
-                stmts: vec![Stmt::Expr((**e).clone())],
-            },
-            LambdaBody::Expr(e) => Block {
-                stmts: vec![Stmt::Return {
-                    value: Some((**e).clone()),
-                    line,
-                }],
-            },
+        // The literal's OWN nodes, which is the whole of RFC-0101 M6's third
+        // phase. This used to be `b.clone()` and `(**e).clone()`: a deep copy of
+        // the body, made so the worklist had something to hold, and every answer
+        // given while walking one was about a node the program does not have.
+        // The textual emitter never copied — `emit_lifted_lambda` walks the
+        // literal's own `LambdaBody`, and capture prepending is a fact about the
+        // SIGNATURE, which is `sf.params` below either way.
+        //
+        // A literal the program does not hold keeps the copy, and the shell
+        // carries it exactly as before.
+        let queued = match self.cx.lambda(at) {
+            Some(LambdaBody::Block(b)) => Body::Block(b),
+            Some(LambdaBody::Expr(e)) => Body::Value(e),
+            None => Body::Shell,
         };
         let mut sf = f_shell(line);
         sf.params = cap_names
@@ -8024,7 +8170,25 @@ impl<'p> Fn_<'_, 'p> {
             }))
             .collect();
         sf.ret = ret.clone();
-        sf.body = block;
+        if let Body::Shell = queued {
+            // `LambdaBody::Expr` is a `return` of that expression — the same
+            // thing the block form writes by hand — and a Unit-returning
+            // signature makes it a statement instead. [`Fn_::lambda_value`] is
+            // the same split, made where the body is lowered rather than by
+            // building a statement to hold the copy.
+            sf.body = match body {
+                LambdaBody::Block(b) => b.clone(),
+                LambdaBody::Expr(e) if self.cx.repr(&ret, line)? == Repr::Unit => Block {
+                    stmts: vec![Stmt::Expr((**e).clone())],
+                },
+                LambdaBody::Expr(e) => Block {
+                    stmts: vec![Stmt::Return {
+                        value: Some((**e).clone()),
+                        line,
+                    }],
+                },
+            };
+        }
         // The key: the literal's node address, the concrete shape, AND the
         // substitution the body is under. One literal inside a generic body lifts a
         // distinct copy per instantiation, and the shape alone does not say so when
@@ -8044,7 +8208,7 @@ impl<'p> Fn_<'_, 'p> {
             m,
             key,
             Rc::new(sf),
-            None,
+            queued,
             self.cx.subst.clone(),
             HashMap::new(),
         )?;
@@ -16116,6 +16280,8 @@ mod tests {
         Cx {
             arg_drops: std::collections::HashSet::new(),
             types: HashMap::new(),
+            decls: &[],
+            lambdas: HashMap::new(),
             impls: Vec::new(),
             sigs: HashMap::new(),
             gen: None,
