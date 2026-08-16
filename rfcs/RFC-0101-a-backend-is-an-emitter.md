@@ -1,118 +1,35 @@
 # RFC-0101 — A Backend Is an Emitter
 
-- **Status:** **M1 implemented; M2, M2c, M2d, M3 and M4's first phase each half
-  implemented and each failing its own line gate; M5 implemented but for its
-  `coerce` half; M6's first two phases implemented.** **M6's second phase turned
-  the desugar sharing on in a released compiler — and turning it on was a defect
-  fix, not an optimisation: `vyrn emit-lowered` had been printing types read off
-  DEAD nodes since M2d, because the checker `vyrn_lower::lower` runs and the
-  lowering's own walk each expanded a projection for themselves and the second
-  one looked the first one's freed addresses up in `Recorded`. That is the corpse
-  hazard M2d wrote down, in the consumer M2d said would be exactly such a
-  consumer, in the half nobody checked. 10 of 163 dumps change, 1,354 lines, and
-  `projection.lowered` is a fifth blessed snapshot. Emitted output is 326 of 326
-  identical because a released `vyrn build` runs ONE expander after the load, and
-  the phase says so rather than claiming three-way sharing it does not have. It
-  also paid M6a's owed attribution — of `peek`'s 299 off-program answers, **68
-  are inside `Fn_::lift_lambda`'s clone, 122 are inside a cloned `where`
-  predicate, and 109 are neither** — where the predicate clone is a class this
-  file had never named and is twice the lambda's. **M3's −1,200 is CLOSED as
-  permanently unmet rather than re-parented a fifth time**, and the terminal
-  reason is §2.3: after every sharing move still available, `peek` answers 109
-  questions about the backend's own locals, and a form that could hold a fact
-  about a wasm local would be the opposite of this RFC.** **M6's first phase shared the
-  WRITING half of a projection** — `a[i] = v` expands a `place atSet` whose
-  receiver is a name rather than a node, so its memo was keyed on a stack
-  temporary and every engine built its own tree — and the off-program residue
-  fell 3,266 → 1,955, `peek`'s share 501 → 299, with 326 of 326 emitted files
-  byte-identical. It also read M5's eleven-site ledger one site at a time and
-  **found ten sites of a different shape than the count implied**: each is a
-  one-node `Expr::Var` naming a value the backend parked in its own locals table,
-  which §2.3 keeps in a backend. So M3's −1,200 is not re-parented a fifth time;
-  it has an address, `Fn_::lift_lambda`'s cloned body, and §3 M6 states what is
-  still owed before that phase can start. §2.4 now carries **the list** of every
-  declared difference, which is the promise that section has been making since
-  [A2]. **M4's step 0
-  is this arc's first real defect find, and it is in the invariant the RFC calls
-  the best thing the project has built**: the milestone predicted that a declared
-  `release` carried across a `?` would print in the two backends and not in the
-  interpreter, the program was written, and the three engines printed different
-  output. The corpus had never reached it. The fix is nine lines — a propagating
-  `?` is a function exit and pays what one pays — and `examples/releaseacrosstry.vyrn`
-  is the pin. M4's first phase then placed the block-exit releases in the form and
-  gated all three engines' sequences against them: **52,676 sequences equal, every
-  other one named.** Its delete half did not land, and §3 M4 records why in one
-  sentence: the per-block frames exist for the EARLY exits, so deleting the
-  fall-through walk deletes three lines per engine and leaves everything that
-  holds it up — the −900 is an all-exit-kinds deletion, not a per-exit-kind one.
-  **M4's second phase then placed the other five exits, and its own step 0 found
-  a second undeclared divergence — three times the size of the first.** §1.4 says
-  the interpreter acts on "1 of 4 row kinds", and nobody had written that as a
-  program: a `match`'s scrutinee, an `if let`'s and a `for`-in's iterable are
-  temporaries a CONSTRUCT owns, both compiled backends release each of them, and
-  this engine released none. `examples/releaseacrossexit.vyrn` is the pin. With
-  all six exit kinds placed the gate holds **78,371 walks**, `Terminated` 1,048
-  and `StreamCursor` 6 are the only named differences.
-  **M4's deletion phase then landed and MISSED ITS OWN GATE BY 935.** Both
-  compiled backends read the placed steps at every exit, the frame stacks, the
-  boundary indices and the exit-walk trio are gone, every emitted byte is
-  identical — and the three engines are **+35**, not −900. The measurement is
-  the finding: §1.4 priced `emit_drop` (180), `rel_at` (239) and `deep_release`
-  (149) as placement and all three are the ENCODER §2.3 keeps in a backend, so
-  568 of the −900 were never available; what consumption deletes is the frame
-  stack and the boundary index, about 150 lines per compiled backend, and the
-  interpreter has neither. `ImplicitDispatch` is still 24, and this phase can say
-  why in one sentence — `own::release_kind` throws the receiver TYPE away, so a
-  step carries a method name a backend cannot solve a generic symbol from. It,
-  and M3's −1,200 with it, are re-parented onto M5. §3 M4 has the ledger, entry
-  by entry.
-  M3's shadow half landed — the form
-  carries the type PAIR of [A16], and 21,154 of M1's 22,321 disagreements were the
-  two engines answering different questions. Its delete half did not, and §3 M3
-  records why in one sentence: a backend clones the AST before it lowers a
-  specialization, so 9,187 of the answers are about nodes the program does not
-  have, and no recorded type can reach them. The −1,200 is re-parented onto the
-  milestone that moves the bodies. **M2c then measured that sentence and it was
-  half true**: the native backend never cloned, the direct one cloned twice and
-  read neither copy, and borrowing the callee's own block took the residue from
-  9,505 to 4,547 with the emitted bytes unchanged. It named what was left as
-  `vyrn_frontend`'s own desugars — `project::inline` above all — and **M2d then
-  expanded each of those exactly once, for all three walks, and measured that
-  attribution to be a third right**: 4,547 to 3,294..3,484, and everything that
-  remains halved rather than vanished, because the other source is the receiver a
-  backend builds on the stack to reach an implicitly dispatched `release` or
-  `size`. That class is M4's and was already named. The desugar-once move also
-  found that "the sugar gone" cannot mean gone from the tree — a projection's
-  prologue runs mid-expression, and hoisting it is a different program — so the
-  form holds the expansion instead, with no type on it yet. **M3b then put the
-  types on it, from the one pass that holds the caller's scope**: the checker
-  types each expansion where it is inlined, `unrecorded` goes 4,707 → 78, and
-  the blocker's third and last address is the one M2 named — 3,218 answers about
-  AST a backend builds DURING its own walk, which is `ImplicitDispatch` whole.
-  The −1,200 is re-parented onto M4. §3 M2 records what
-  landed, what did not, and the
-  measurement that says why: M1's residue was attributed to a missing worklist
-  and is 9,355-to-7 a missing *body* — a backend clones the AST before it lowers
-  a specialization, so no list a lowering hands over can close it. M2 landed the
-  gate that proves the lists match and the deletion of `vyrn check`'s
-  whole-backend round trip; the two backend worklists stay.
-  M1 landed as four stacked pull
-  requests (§3 M1 records each one's changed-line count and every place the
-  design did not survive contact with the code). Its headline result is that
-  **M1's own assertion is false**: the two compiled backends do not agree about
-  the static type of an expression, and neither agrees with the checker. 22,283
-  of 570,960 typed expression answers differ from the checker's, 3,383 differ
-  between the two backends, and every one is coerced away immediately afterwards,
-  which is why the parity suite has never seen any of it. The five reasons are
-  named in §3 M1 and gated. The rest of the measurements below are real and were
-  taken at `dd3a9fe`; the design of M2–M6 is not implemented. **Amended from
-  `docs/research/lowering-design.md`**, which checked this RFC against eight
-  compilers and against the code. Four of its claims died to measurement and are
-  recorded where they stood, not deleted: the precedent this RFC cited for a
-  monomorphized shared form does the opposite (§2.1 item 1), the parity claim
-  was larger than the evidence (§2.4), the `(String, Type)` convention is 16
-  functions and not ~300 (§1.2 and §3 M3), and §2.1 item 6 promised a column
-  the AST does not carry. The design holds. None of the corrections reverses it.
+- **Status:** **Implemented.** Six milestones and twenty-two pull requests — M0's,
+  plus the twenty-one the milestone tables below count line by line — and the
+  arc ends where §2.3 and §2.4 say it should rather than at zero: the checker's
+  answers are recorded and both backends read them, the release ORDER is decided
+  once in `own` and consumed at every exit by both compiled engines, every trap
+  wording is below all three, the projection expansions (reading and writing
+  halves) are expanded once for all three walks, generic and lambda bodies are
+  borrowed rather than copied, `where` predicates are the program's own tree, and
+  the boundary ladder has a plan with a corpus gate over both compiled engines.
+  What is left in a backend is what §2.3 puts there — representation, locals,
+  encoding, the ABI — and what an engine deliberately does not run is §2.4's
+  five-row list, which is a promise kept rather than a debt.
+  **Eight of this RFC's claims died to measurement and each is recorded where it
+  stood:** M1's own assertion — that three engines agree about the type of an
+  expression — is false, and 22,283 of 570,960 answers say so (§3 M1); §1.4
+  priced 568 lines of encoder as placement, so M4's deletion is +35 and not −900
+  (§3 M4); M3's −1,200 is permanently unmet, because after every sharing move
+  `peek` still answers 109 questions about the backend's own locals (§3 M6b);
+  §1.5's "one decision, 505 lines" is two ladders that agree on two rungs and end
+  opposite ways (§3 M6b), and its "validation is already shared" is true of the
+  order and false of the tree (§3 M6c); §2.4's first draft promised parity would
+  hold "by construction" and Miri refuses it (§2.4 [A2]); §6.1's borrow question
+  and §6.4's crate question were both answered by measurement rather than by
+  design; and the census's §1.1 asked for node ids the AST already had (§2.5).
+  **Four defects were found by writing a prediction as a program**, which is the
+  method this file recommends and reports either way: a `release` skipped across
+  `?`, three construct-owned temporaries the interpreter never released, a dead
+  node's type printed by a released `vyrn emit-lowered`, and a call-argument
+  temporary the wasm backend leaked inside every lambda body. Two predictions
+  came back green and are written up too (§3 M6b, §3 M6d).
 - **Depends on:** RFC-0077 (the direct wasm backend — the second compiled engine,
   and the reason the duplication is now three-way), RFC-0086 (the compiler asks
   the type — "no second list"), RFC-0091 / RFC-0092 / RFC-0093 (the ownership
@@ -367,7 +284,8 @@ measured which.** The two compiled ladders take a type PAIR; the interpreter's
 takes a value and a target and has no `from` at all, because it walks an untyped
 `Val`. So the 505 is 344 lines of one decision and 161 of a different one, and a
 shared plan can serve two engines before M6 and three after it. §2.4's list row 4
-is where that lives.
+is where that lives, and M6's third phase is where the plan and its gate landed —
+four named differences, all of them ORDER, and zero the rules do not explain.
 
 **And the 344 is not one decision either — M6's second phase read the two
 compiled ladders rung by rung before writing a shadow over them.** They agree on
@@ -715,7 +633,7 @@ whole of what the paragraph above promises.
 | 1 | interp | runs 2 of `own`'s 7 `DropKind`s | a `String` or an array buffer is reclaimed by the host at exit; the two it runs are the two a program can observe — a declared `release` and the walk that reaches one | `RelRule::HostReclaims` in `vyrn-cli/tests/lowered.rs`, a **subsequence** test: this engine may run fewer steps, never a different order |
 | 2 | interp | derives its own release ORDER rather than reading the placement | `run_drops` looks a binding's value up by name across the frames being popped, which is what `frozen` disambiguates; consuming the placement there is a rewrite of the unwinding for a deletion of one line (M4d's ledger) | the same gate, plus the nine per-exit-kind fixtures |
 | 3 | interp | never reaches `RelRule::Terminated` or `RelRule::StreamCursor` | a stream cursor is frame structure both compiled backends splice and this engine has no frame to splice it into (M4d, finding 1) | both rules were deleted rather than left to fire zero times |
-| 4 | interp | reconciles a boundary from the VALUE, not from a type pair | `Interp::coerce(v, ty)` has no `from` argument at all: it matches on the target type and the runtime `Val`. The two compiled backends match on `(from, to)`. §1.5 priced one ladder across three engines and it is two ladders — a shared plan can serve two of the three, and the third can consume one only once it runs the form, which is this milestone | measured in M6's first phase; nothing gates it yet, because there is nothing shared for it to disagree with |
+| 4 | interp | reconciles a boundary from the VALUE, not from a type pair | `Interp::coerce(v, ty)` has no `from` argument at all: it matches on the target type and the runtime `Val`. The two compiled backends match on `(from, to)`. §1.5 priced one ladder across three engines and it is two ladders — a shared plan can serve two of the three, and the third can consume one only once it runs the form, which is this milestone | measured in M6's first phase; the two compiled ladders are gated against `coerce_plan` by the corpus gate since M6's third phase, and this engine is the one of the three the plan cannot serve until it runs the form |
 | 5 | interp | does not monomorphize | it substitutes at the call and walks the one generic body; §2.1 item 1 chose Zig's instantiation for the engines that EMIT | the instance-list half of the corpus gate compares the lowering against the two backends only |
 
 **Two things are deliberately NOT on this list.** The `?` path — §1.4 recorded it
@@ -2873,7 +2791,176 @@ are stable.
    "not a predicate" from "a COPY of a predicate" was to ask the engine rather
    than the addresses.
 
-### M6 third phase — the two clones are deleted; the record for the whole phase, with its numbers and its findings, is in the PR that carries the `coerce` shadow.
+### M6 third phase — BOTH CLONES ARE DELETED AND THE OFF-PROGRAM RESIDUE IS 1,052, OF WHICH `peek`'s 110 IS THE §2.3 CLASS AND HAS A FLOOR NOW AS WELL AS A CEILING. THE `coerce` SHADOW IS BUILT AND GREEN: FOUR NAMED RULES, ALL OF THEM ORDER, AND THE TERMINAL RUNG GATED FIRST. AND THE LAMBDA CLONE WAS HIDING A DEFECT NOBODY HAD PRICED — THE WASM BACKEND NEVER FREED A CALL-ARGUMENT TEMPORARY INSIDE A LAMBDA BODY, BECAUSE `own`'s ANSWER IS KEYED BY NODE ADDRESS AND IT WAS WALKING A COPY
+
+| PR | What | Changed lines | Files |
+|---|---|---|---|
+| M6c | the direct backend queues the literal's own nodes; both backends read the program's own `where` predicate; `vyrn-lower` records it; the counters | 616 | 5 + a pointer line here |
+| M6d | `Rung` and `coerce_plan`; both ladders say which rung they took; the corpus gate, its four rules, its breakage tests; this text | 463 | 3 + this file |
+
+#### Piece 1 — the lambda clone, and the leak under it
+
+`Fn_::lift_lambda` copied the body (`b.clone()` and `(**e).clone()`) so the
+worklist had something to hold. **The obstacle was never the clone; it was the
+lifetime.** `Fn_::expr` walks `&Expr` with the program's lifetime erased, so at a
+literal the backend has the node and no borrow a `Pending` can keep — which is
+why M2c could borrow a generic callee's block (it comes from `&'a Function`, off
+the worklist) and could not borrow this one.
+
+**The brief's remedy — thread the program's lifetime back through the walk — was
+tried and measured, and it costs more than it buys.** 34 signatures take the
+lifetime cleanly; then 13 sites stop compiling, and every one of them is a tree
+the emitter builds ON PURPOSE: the receiver it parks to reach an implicitly
+dispatched `release`, the capture-source lists an RFC-0023 call assembles, the
+`toJson`/`fromJson`/`schemaOf` rewrites. Making those satisfy the program's
+lifetime means leaking each of them — an unbounded leak in the LSP, which
+compiles a generator per keystroke — to delete a bounded one. **`ast::lambdas` is
+the borrow without the leak**: one walk over the program indexes every literal by
+address, and a hit IS the program's node, because the program outlives every walk
+over it and nothing else can be living at one of its addresses. No verification,
+which is what separates this key from `project::Memo`'s.
+
+`Pending::body` is a `Body` now — `Block`, `Value`, or `Shell` — and the
+`LambdaBody::Expr` half needs no owned wrapper at all: `Fn_::lambda_value` emits
+the value and the branch that `Stmt::Return`'s arm emits, without a statement
+built to hold a copy of `e`. `Shell` is what is left for a literal the program
+does not hold, and the corpus reaches none.
+
+**What it found is a wasm-only leak, and the byte difference is that fix.**
+`own` marks every call-argument temporary the caller reclaims, keyed by NODE
+ADDRESS; a backend walking a copy of a lambda's body finds no key, so
+`each(xs, |n| print("plain: \{n}"))` allocated an interpolated `String` per call
+and freed none of it. The textual emitter has always freed it — it walks the
+literal's own nodes — and `examples/fnvalstore.vyrn`'s native IR is unchanged.
+**`memory.rs` did not catch it because it is not a corpus test**: it runs its own
+fixtures, and none of them has a lambda that allocates. That is the third defect
+this arc's clones were hiding, and the second one that only a change of ADDRESS
+could expose.
+
+#### Piece 2 — the `where` predicate, and where the count actually moves
+
+`types::decl_map` copies every `TypeDecl` per engine and each validation site
+copied the predicate again. Both backends read the program's own node now
+(`Cx::decls`, `Gen::decls`), by name and verified by the base, refusing rather
+than silently skipping if the decl is not the program's.
+
+**And that alone moves nothing, which is the finding.** Sharing the tree makes
+the addresses the program's; it does not make them the FORM's, and the residue
+counts answers about nodes no instantiation of the program holds. The 1,043 only
+die because `vyrn-lower` records each predicate's types — a third root beside the
+instances and the module-state initializers, and the one with no worklist
+attached: a predicate's calls are deliberately not followed, because nothing
+walked a predicate before this and following them would invent instances the two
+backends' own worklists do not have.
+
+**A predicate is outside every instantiation, and the gate had to be told.** It
+lives on a declaration, which has no type parameters, so an answer about one is
+looked up with the instantiation dropped. Without that rule the 1,043 would have
+moved from `synthesized` to `uninstantiated` and the milestone would have
+reported a win it had not made.
+
+#### Measured
+
+| | before | after |
+|---|---|---|
+| `Tally::synthesized` (off-program answers) | 1,955 | **1,043–1,052** |
+| …inside `lift_lambda`'s clone | 532 | **0**, asserted |
+| …inside a cloned `where` predicate | 1,043 | **0**, asserted |
+| `peek`'s share | 299 | **110** |
+| `Tally::compared` | 588,793 | 589,839 |
+| `unrecorded` | 78 | 78 |
+
+**The two clone counters are asserted at ZERO rather than bounded by a ceiling,
+and that is a stronger gate than the number it replaces.** Each engine marks the
+rows it gives inside a tree it copied; a copy's addresses are not the program's,
+so a clone that comes back lands in a counter that must be zero rather than in
+one that drifts by ±200 a run. The ceiling on the total falls 2,100 → 1,200.
+
+**And `peek`'s 110 gets a FLOOR.** §2.3 assigns every one of them to the backend
+on purpose — the type of a release receiver, of a dispatched call the emitter
+builds at an emit site, and of the operands built beside them — so both bounds
+fail loudly: a rise means a new engine-built tree, a fall means §2.3 moved and
+this file needs re-reading. M6b closed M3's gate with this number; it is pinned
+now rather than remembered.
+
+#### Piece 3 — the `coerce` shadow, and the four rules are all ORDER
+
+`Rung` and `coerce_plan` are the vocabulary and the plan; every `return` path of
+both ladders says which rung it took; the corpus gate holds 204,539 crossings to
+the plan. **The plan is beside `validation_required` and `llt_of` rather than in
+`vyrn-lower`, because it is made OF them** — a deviation from this phase's brief,
+and the same shape as M5's answer to §6.4: a shared decision goes where its
+inputs already are, and a plan keyed on a pair needs no site.
+
+| | count | the rule |
+|---|---|---|
+| took the planned rung | 126,367 | — |
+| `Wasm`: plan `Identity`, took `Resize` | 75,420 | `NumericBeforeShape`. Its numeric rung answers for EVERY integer pair, equal or not, and it must: `llt` prints `i8` for `Int8` and `UInt8` alike, so a shape shortcut reached first would swallow the one pair whose bits genuinely move. **This is §1.5's order difference, and it is the only place the order is observable at all** — every other middle rung's guard is disjoint from the others'. |
+| `Native`: plan `Identity`, took `Resize` | 2,474 | `SizedTargetRung`. Its resize rung is guarded by the TARGET being a sized integer rather than by the pair differing, so `Int16 → Int16` takes it and emits nothing. |
+| `Wasm`: plan `FnRetag`, took `Identity` | 224 | `FnByShape`. It has no function rung: the structural spelling and every named alias share `{ i64, i64 }`, so the shape shortcut answers first. |
+| `Native`: plan `Refuse`, took `Identity` | 54 | `ParamSpelling` — below. |
+| no rule | **0** | |
+
+**The terminal rung is gated first and separately, because it is the one
+difference that is a program compiling on one target only.** The two ladders end
+opposite ways: the textual one reinterprets the bits under a new name, the direct
+one refuses. Every pair that reaches the textual one's end in the corpus has a
+type PARAMETER on one side (`String → T`, `P → { id: Int64, name: String }`,
+`T → CursorCell`) — the direct ladder substitutes before its first rung and the
+textual one does not.
+
+**That looked like the third live parity hole, and two programs say it is not.**
+If a value could flow into a `T` the receiver had fixed at a refined type, the
+textual backend would skip the validation the direct one runs — a trap on one
+target only. It cannot: the checker rejects it, with a bare generic
+(`firstOr(ages, n)` where `ages: Array<Age>` and `n: Int64`) and with an
+associated type (`Option<Age>.valueOr(n)`) alike, both refused as "type parameter
+`T` is both Age and Int64". So `from` and `to` at those 54 crossings are one type
+under two spellings, and the identity is right. **The prediction was written as
+programs and came back green, and it is recorded rather than dropped** — the M4
+step-0 method, now 3 defects found in 5 predictions, which is what a method looks
+like when it is reported either way.
+
+**The gate is broken on purpose in both directions.** `rung_rule` is a pure
+function and the tests hold it to its own edges: a refused pair with NO type
+parameter has no rule (that is the hole, and nothing else in the repository asks
+about it); the textual ladder skipping its own function rung is not the direct
+one's shape shortcut; a validation skipped is never a rule. A green run over four
+rules proves the rules FIRE — these prove they are narrow.
+
+#### Byte identity
+
+**325 of 326 identical, raw**, both backends, `emit-ir` and `emit-wat` over all
+163 examples against `main`, run from `examples/` with a relative filename. The
+one difference is `fnvalstore.vyrn`'s `emit-wat` and it is the leak fix above:
+four instructions per lambda-body argument temporary, freeing what the textual
+backend has always freed. Piece 3 adds no instruction anywhere — every
+`note_rung` is behind the same thread-local the type rows are behind.
+
+#### Four places this phase's brief did not survive contact with the code
+
+1. **"Pieces 1–2 are mechanical by prior measurement." They were not, and the
+   reason is the same for both.** M6b priced the lambda at "about M2d-b's price"
+   from the textual backend's proof that no copy is needed. What the price
+   actually is: a lifetime the walk has erased, whose restoration is measured
+   above at 34 signatures and 13 deliberate leaks. And the predicate's price is
+   not the sharing at all — it is the RECORDING, in a crate the brief did not
+   name.
+2. **"Share the checked predicate the way projections are shared" — the
+   projection precedent is the wrong one.** A projection is leaked and memoized
+   because it does not exist until an engine builds it. A predicate already
+   exists, in the program, at a stable address; nothing needs leaking, and the
+   memo/corpse hazard the brief warned about does not arise. What was needed
+   instead was a reader in `vyrn-lower` and a lookup rule in the gate.
+3. **"The lowering computes each coercion site's rung sequence."** It computes a
+   rung, not a sequence, and it computes it from the pair rather than at a site:
+   each ladder takes exactly one rung and recurses, so a "sequence" is one rung
+   per pair with the nested crossings recorded as their own. And the plan lives
+   below neither engine but beside the two decisions it is made of.
+4. **"Look hard at the identity fall-through; if they diverge that is the
+   headline."** They do not, and the headline came from the piece the brief
+   called mechanical: the wasm backend was leaking every call-argument temporary
+   inside a lambda body, and only a change of ADDRESS could show it.
 
 ---
 
