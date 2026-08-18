@@ -141,6 +141,7 @@ fn load_context(
             opts.aliases = m.dependencies.into_iter().collect();
             opts.alias_base = m.dir.clone();
             opts.audience = m.audience;
+            opts.artifacts = m.artifacts;
             m.dir
         }),
         Err(e) => {

@@ -326,7 +326,7 @@ fn declared_audience_of(path: &str, map: &AudienceMap) -> Verdict {
 /// relative to the manifest while a module key may be spelled relative to the
 /// working directory, so a suffix match on a full component boundary is the
 /// honest comparison — the same allowance [`relative_to`] makes.
-fn same_path(a: &str, b: &str) -> bool {
+pub(crate) fn same_path(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
@@ -433,7 +433,7 @@ fn classify(segment: &str, map: &AudienceMap) -> Option<Audience> {
 /// component). A relative key against an absolute base is therefore not "outside
 /// the project" — it is the same project, spelled from inside it — so it is
 /// taken as already project-relative rather than silently losing its audience.
-fn relative_to(path: &str, base: &str) -> Option<String> {
+pub(crate) fn relative_to(path: &str, base: &str) -> Option<String> {
     if base.is_empty() {
         return Some(path.trim_start_matches('/').to_string());
     }

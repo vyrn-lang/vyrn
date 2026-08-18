@@ -1,7 +1,8 @@
 # RFC-0103 — A Target Is a Capability Set
 
-- **Status:** **Proposed.** No implementation. Milestones below; a milestone
-  that fails its gate says so in this file.
+- **Status:** **Proposed.** M0, M1 and M2 landed — the census, the manifest
+  map, and the floor check itself. M3 and M4 are open. A milestone that fails
+  its gate says so in this file.
 - **Depends on:** RFC-0072 (audience — kept, and demoted to what it is),
   RFC-0071 (module contracts and roles, untouched), RFC-0014 (input I/O — the
   builtins the floor watches), RFC-0043 (time/random), RFC-0044 (storage),
@@ -385,6 +386,158 @@ file did change.
 artifact, the subset test, the chain diagnostic. Gate: a new example that
 deliberately leaks (`client → shared → server file-reader`) is rejected with
 the full chain; all existing examples stay green; parity suite untouched.
+
+### M2 — as landed
+
+**Gate: met.** `examples/leak` is refused with the whole chain, every existing
+example stays green, and the parity suite is untouched — 40 passed, including
+`wasm_only_examples_trap_identically`, the test the extern decision was supposed
+to cost.
+
+#### The vocabulary, normative
+
+Four capabilities, and nothing else is tracked:
+
+| capability | carried by |
+|---|---|
+| `fs` | `readFile`, `readFileBytes`, `writeFile`, `renameFile`, `fsyncFile`, and the `logging { sink: file("…") }` DECLARATION |
+| `stdin` | `readLine` |
+| `args` | `args` |
+| `extern` | an `extern fn` IMPORT declaration (not the call, not `export extern fn`) |
+
+M0's table has more rows than this, and the ones it has that this does not are
+absent for two opposite reasons. `stdout` / `stderr`, the clock, entropy and
+threads are UNIVERSAL — every target answers yes, so a row for them would refuse
+nothing and say nothing. `listDir` and `serveStream` are the other end (finding
+5's second option, taken): no compiled target has them, so they stay outside the
+floor and keep the refusals they already have — a missing lowering for `listDir`,
+a runtime trap for `serveStream`. A capability set indexed by three targets
+cannot say "every artifact lacks this", and inventing a fourth answer to say it
+buys one diagnostic that two mechanisms already give.
+
+The target sets are Rust constants in `vyrn_frontend::floor::capabilities`.
+Nothing in `vyrn.json` reads them, writes them, or can argue with them — that is
+the whole difference between this and the fence:
+
+| target | has |
+|---|---|
+| `native` | `fs`, `stdin`, `args` |
+| `wasi` | `fs`, `stdin`, `args` |
+| `browser` | `extern` |
+
+`wasi` and `browser` are the identical bytes under two hosts (finding 1), and
+this table is where the two differ: a WASI host answers `path_open`, `fd_read`
+and `args_get`; a page answers `NOENT`, EOF and an empty list, and IS the `vyrn`
+import namespace an `extern` needs.
+
+#### The findings, resolved
+
+- **Finding 3 — `extern` under wasi fails at instantiation.** Taken as the shape
+  of the whole check, not just of its `extern` row. A module carries a capability
+  because the carrier is WRITTEN in it, never because a branch reaches it, and
+  `extern` is carried by the DECLARATION for exactly the reason the census found:
+  a program that never calls the import still cannot start.
+- **Finding 4 — one `fs` reach fails silently.** `logging { sink: file(..) }` is
+  a carrier, quoted in the diagnostic as the declaration it is
+  (`` `logging { sink: file("app.log") }` needs `fs` ``) with line 0, because the
+  AST keeps no line for it. It is the one capability in the vocabulary carried by
+  something other than a call, and §2's "the union of the capabilities its calls
+  carry" is corrected here rather than left to be re-derived.
+- **Finding 5 — two capabilities no compiled target has.** Second option, above.
+
+#### `fsyncFile` is `fs`, not a fifth row
+
+M0 split it out because its answer differs: the direct backend has no lowering
+for it, so `--target wasm` is refused outright. That is a missing lowering — a
+filed regression against the wasm backend — and not a second capability. The
+floor names the capability; the backend keeps its own refusal, and a `wasi`
+artifact that calls `fsyncFile` passes the floor and is then refused by the
+emitter, which is the correct division of labour between a capability rule and a
+lowering gap.
+
+#### The extern decision, as implemented, and what it actually cost
+
+The floor refuses `extern` off the browser, and refuses it ONLY for a root that
+IS a declared artifact's entry. A file no artifact names has no target, so it has
+no floor, whatever sits above it in the directory tree. That single narrowing is
+what the census's "one real cost" turned out not to cost:
+`examples/externdemo.vyrn` declares no artifact, so it still builds natively and
+still traps with the interpreter's wording, byte for byte. All three tests the
+census listed as the real work pass untouched. The three generated-extern clients
+are browser artifacts, and the browser has `extern`.
+
+**One cost the census did not count, and it is a genuine catch.**
+`vyrn-cli` `derived::a_name_declared_identically_in_two_modules_is_not_a_collision`
+drove the `client(..)` generator from `server.vyrn` — the manifest's NATIVE
+artifact — purely to assert type dedup. `client(..)` emits the `vyrnRpcCall`
+extern; `rpcInProcess(..)` is the flavor a native root is supposed to use. So the
+program under test would have trapped at its first stub call, and the floor said
+so at check time:
+
+```
+generated by client("./server/api") at …/server.vyrn:24:0: artifact `server`
+(native) cannot include `generated by client("./server/api") at …/server.vyrn`:
+it imports a host function
+  note: server.vyrn → generated by client("./server/api") at …/server.vyrn
+   = `vyrnRpcCall` needs `extern`; target `native` has no host to import from
+```
+
+The test now drives the same generator from `client/boot.vyrn`, the manifest's
+browser artifact, and asserts the same dedup. The count in M0 was four examples
+and three tests; it was four examples and four tests, and the fourth is the only
+one that was a program the language would have refused to run.
+
+**And one the census got wrong in the other direction.** `std/time` and
+`std/random` declare `hostNowMillis`, `hostMonotonicNanos` and `hostRandomSeed`
+as `extern fn`, and they are not host imports at all: the C runtime shim
+implements all three on EVERY target, which is what keeps a clock example a
+three-way parity citizen. Reading `extern fn` as one thing would have put an
+`extern` requirement into every native server that logs a timestamp. `extern fn`
+is two things and only one is a capability, so the three names moved out of
+`vyrn-codegen` into `vyrn_frontend::trap::HOST_EXTERNS` — the frontend has to be
+able to tell an import from a shim call, and a second copy of the list is the
+drift that file exists to end.
+
+#### Where it runs, and the diagnostic
+
+`vyrn_frontend::floor::objection` runs at the end of the loader's link, beside
+the audience check, so `check`, `build`, `run` and the LSP all get it. Last in
+the link, so the closure it walks is everything the artifact links — the modules
+the source imports AND the runtime modules a builtin's desugar injected. The
+chain is breadth-first from the entry, so the reported path is the SHORTEST one
+that reaches the offending module.
+
+The gate's own message, unedited:
+
+```
+examples/leak/server/db.vyrn:6:0: artifact `app` (browser) cannot include `server/db.vyrn`: it reaches the filesystem
+  note: client/boot.vyrn → shared/format.vyrn → server/db.vyrn
+   = `readFile` needs `fs`; target `browser` has no filesystem
+   = call it through the wire instead: connect("../server/db")
+```
+
+The remedy names the module actually reached, spelled as the module that imports
+it would spell it — RFC-0072's fixed `client("./server/api")` is replaced for
+this one crossing. The fence's own remedy and `vyrn why --capability` are M3.
+
+`examples/leak` is a project, not a file, so the parity corpus never sees it —
+that loop reads `examples/*.vyrn` and `examples/<subdir>/server.vyrn`, and this
+project's native entry is `server/main.vyrn`. `EXPECTED_CHECK_FAILURE` is a list
+of single files and a project does not fit it, so the gate's assertion lives in
+`compiler/vyrn-cli/tests/floor.rs` instead, which is where the rest of the
+milestone's integration tests are.
+
+#### The gate, measured
+
+| evidence | result |
+|---|---|
+| `cargo test --release` (workspace) | 1725 passed, 0 failed, 69 ignored |
+| `cargo test` (`vyrn-lsp`) | 83 passed, 0 failed, 4 ignored |
+| `cargo test -p vyrn-cli --release --test parity -- --ignored` | 40 passed, 0 failed |
+| `cargo fmt --check` (workspace + `vyrn-lsp`, `vyrn-genwasm`, `vyrn-play`) | clean |
+| `vyrn check` on `fullstack`, `shelf`, `bin` (both entries each) and `externdemo.vyrn` | `ok` / exit 0, all seven |
+| `vyrn check examples/leak/client/boot.vyrn` | refused, chain above, exit 1 |
+| `vyrn check examples/leak/server/main.vyrn` | `ok` — one module, two artifacts, two answers |
 
 **M3 — the remedy and the reframe.** `remedy()` replaced by the concrete
 crossing; RFC-0072's document amended to the fence claim (accidental class,

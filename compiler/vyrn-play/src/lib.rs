@@ -230,6 +230,7 @@ fn load(
         aliases: Default::default(),
         alias_base: String::new(),
         audience: None,
+        artifacts: None,
     };
     let resolver = MapResolver(
         std_modules::STD

@@ -616,6 +616,7 @@ fn load_options(root: &str) -> vyrn_frontend::loader::LoadOptions {
         opts.aliases = m.dependencies.into_iter().collect();
         opts.alias_base = m.dir;
         opts.audience = m.audience;
+        opts.artifacts = m.artifacts;
     }
     opts
 }
