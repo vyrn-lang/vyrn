@@ -4,6 +4,10 @@
   section below. The line above said `Draft` for long enough that a reader
   auditing what remained believed M3, M4 and M5 were unstarted — a status line
   nobody updates is worse than none, because it is read.
+- **Amended by:** RFC-0103 M3, in two places marked below — the secrecy claim
+  made for this rule (audience is a FENCE: it prevents the accidental import
+  class, not secrets) and the fixed path its remedy named. RFC-0103's floor is
+  the layer under this one, and it is the layer nobody can relabel.
 - **Depends on:** RFC-0071 (module contracts — `Api` is the contract this RFC
   attaches), RFC-0019 / `std/rpc` (the generators this RFC re-points),
   RFC-0027 (`import * as ns`), RFC-0069 (universal pages, the payload protocol)
@@ -95,18 +99,38 @@ error: `app/routes/index.vyx` is universal and cannot import
  4 | import * as store from "../../server/store"
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = audience `server` is declared by vyrn.json:audience.server
-   = call it through `client("./server/api")` instead
+   = call it through `connect("../../server/store")` instead
 ```
+
+*[Amended by RFC-0103 M3.] The remedy used to read
+`client("./server/api")` for every rejection — a fixed path most projects do
+not contain, so the advice named a file the reader could not open. It now
+spells the module the edge actually reached, from the module that imports it,
+which is the same line RFC-0103's floor ends with.*
 
 Legal edges: `server → shared`, `client → shared`, `app → shared`,
 `server → app` (SSR renders pages). Illegal: anything → `server` from a
 non-server module, anything → `client` from a non-client module.
 
 This is the improvement over the prior art. Nuxt's split is a bundler
-convention, so a server import reaching a component is a build-time surprise at
-best and a leaked secret at worst. Leptos's split is driven by Cargo feature
-flags, so a misconfigured feature breaks it. Here it is a checker rule with a
-diagnostic, decided before anything is bundled.
+convention, so a server import reaching a component is a build-time surprise.
+Leptos's split is driven by Cargo feature flags, so a misconfigured feature
+breaks it. Here it is a checker rule with a diagnostic, decided before anything
+is bundled.
+
+*[Amended by RFC-0103 M3.] The sentence above used to end "a build-time
+surprise at best and **a leaked secret at worst**", which claimed for this rule
+a guarantee it does not have. Audience prevents the ACCIDENTAL class — a
+universal file importing a helper that imports a config module, five hops the
+author never saw. It prevents no secret. The compiler does not know what a
+secret is: a key pasted as a string literal into a client module is invisible
+to every checker ever built, and a label is configuration — `server/` means
+server-only because `vyrn.json` says so, and whoever edits `vyrn.json` can say
+otherwise. That makes audience a FENCE: a declared boundary with a checked
+conformance, which is exactly Gradle's guarantee and the most any declared
+boundary gives. RFC-0103 adds the layer under it — the floor, where a target is
+a capability set nobody can relabel, because a browser page has no filesystem
+and no edit to `vyrn.json` can give it one.*
 
 `vyrn why <file>` prints the audience, the segment that decided it, and every
 import chain that reaches the file — so "what is bundled where" is a command,

@@ -471,14 +471,26 @@ pub fn widens(importer: Audience, imported: Audience) -> bool {
     }
 }
 
-/// The advice line a rejected import ends with — what to do instead.
-pub fn remedy(imported: Audience) -> &'static str {
+/// The advice line a rejected import ends with — what to do instead, for THIS
+/// edge.
+///
+/// RFC-0103 M3: it used to be three fixed strings, and the server one named
+/// `client("./server/api")` — a path most projects do not contain, so the
+/// remedy sent the reader to a file that is not there. Both live remedies now
+/// name the module the edge actually reached: the server crossing through
+/// [`crate::floor::crossing`], the same line the floor's own diagnostic ends
+/// with, and the client one through the module it is asking you to split.
+pub fn remedy(imported: Audience, importer: &str, module: &str, map: &AudienceMap) -> String {
     match imported {
-        Audience::Server => "call it through `client(\"./server/api\")` instead",
-        Audience::Client => {
-            "move the shared part into a universal module (`shared/`) and import that instead"
-        }
-        Audience::Universal => "",
+        Audience::Server => format!(
+            "call it through `{}` instead",
+            crate::floor::crossing(importer, module)
+        ),
+        Audience::Client => format!(
+            "move the shared part of `{}` into a universal module and import that instead",
+            display_path(module, map)
+        ),
+        Audience::Universal => String::new(),
     }
 }
 

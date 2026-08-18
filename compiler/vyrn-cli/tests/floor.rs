@@ -1,5 +1,6 @@
-//! Integration tests for RFC-0103 M2 — the floor, driven through the real `vyrn`
-//! binary over real project trees.
+//! Integration tests for RFC-0103's floor — M2's check and M3's
+//! `vyrn why --capability`, driven through the real `vyrn` binary over real
+//! project trees.
 //!
 //! The floor's claim is that a target is a capability set and nobody can relabel
 //! it, so every test here runs `vyrn check` and asserts on the text a user would
@@ -171,6 +172,118 @@ fn the_target_decides_and_the_manifest_cannot_argue() {
         "{err}"
     );
     assert!(err.contains("it imports a host function"), "{err}");
+}
+
+/// RFC-0103 M3 — the capability axis of `vyrn why`. The floor's refusal shows
+/// the SHORTEST chain; this shows every one, because deleting a hop off the
+/// shortest path removes nothing while a second path still reaches the module.
+///
+/// Driven over the committed leak example, both artifacts, both spellings of the
+/// argument: the entry's path and the artifact's name.
+#[test]
+fn why_capability_names_the_artifact_and_every_chain() {
+    let leak = repo_dir("examples/leak");
+    let why = |args: &[&str], cwd: &Path| -> (i32, String) {
+        let out = vyrn()
+            .arg("why")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("run why");
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).to_string()
+                + &String::from_utf8_lossy(&out.stderr),
+        )
+    };
+
+    // By path, and by name from inside the project — the same artifact.
+    for arg in ["client/boot.vyrn", "app"] {
+        let (code, text) = why(&["--capability", "fs", arg], &leak);
+        assert_eq!(code, 0, "{text}");
+        assert!(
+            text.contains("artifact: `app` (browser) — target `browser` has no filesystem"),
+            "{text}"
+        );
+        assert!(text.contains("`readFile` needs `fs`"), "{text}");
+        assert!(
+            text.contains("client/boot.vyrn -> shared/format.vyrn -> server/db.vyrn"),
+            "{text}"
+        );
+    }
+
+    // The same module, reached by the artifact that HAS a filesystem: the report
+    // still answers, because "where does it come from" is not "is it refused".
+    let (code, text) = why(&["--capability", "fs", "api"], &leak);
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("target `native` has `fs`"), "{text}");
+    assert!(
+        text.contains("server/main.vyrn -> shared/format.vyrn -> server/db.vyrn"),
+        "{text}"
+    );
+
+    // A closure that never touches the capability answers in one line.
+    let (code, text) = why(&["--capability", "stdin", "app"], &leak);
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains("nothing in artifact `app`'s closure needs `stdin`"),
+        "{text}"
+    );
+
+    // The vocabulary is closed, and a refusal names all four.
+    let (code, text) = why(&["--capability", "sockets", "app"], &leak);
+    assert_eq!(code, 2, "{text}");
+    assert!(text.contains("unknown capability `sockets`"), "{text}");
+    assert!(text.contains("fs, stdin, args, extern"), "{text}");
+
+    // An argument that names no artifact says which ones exist.
+    let (code, text) = why(&["--capability", "fs", "nope"], &leak);
+    assert_eq!(code, 2, "{text}");
+    assert!(text.contains("declared: api, app"), "{text}");
+}
+
+/// EVERY chain, not the shortest one. Two routes reach the same reader, and a
+/// report that showed one would have the author delete a hop and find the
+/// capability still there.
+#[test]
+fn why_capability_shows_more_than_one_route() {
+    let dir = scratch("routes");
+    write(&dir, "server/db.vyrn", SERVER);
+    write(
+        &dir,
+        "shared/format.vyrn",
+        "import { read } from \"../server/db\"\n\
+         export fn titled() -> String {\n    return read()\n}\n",
+    );
+    write(
+        &dir,
+        "client/boot.vyrn",
+        "import { titled } from \"../shared/format\"\n\
+         import { read } from \"../server/db\"\n\
+         fn main() -> Int64 {\n    print(titled())\n    print(read())\n    return 0\n}\n",
+    );
+    write(
+        &dir,
+        "vyrn.json",
+        "{ \"name\": \"p\", \"artifacts\": { \
+          \"app\": { \"entry\": \"client/boot.vyrn\", \"target\": \"browser\" } } }\n",
+    );
+    let out = vyrn()
+        .arg("why")
+        .args(["--capability", "fs", "app"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(
+        text.contains("client/boot.vyrn -> shared/format.vyrn -> server/db.vyrn"),
+        "{text}"
+    );
+    assert!(
+        text.contains("client/boot.vyrn -> server/db.vyrn"),
+        "{text}"
+    );
 }
 
 /// RFC-0043's host-boundary externs are not host imports — the C runtime shim

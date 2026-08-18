@@ -1,8 +1,9 @@
 # RFC-0103 — A Target Is a Capability Set
 
-- **Status:** **Proposed.** M0, M1 and M2 landed — the census, the manifest
-  map, and the floor check itself. M3 and M4 are open. A milestone that fails
-  its gate says so in this file.
+- **Status:** **Proposed.** M0, M1, M2 and M3 landed — the census, the manifest
+  map, the floor check itself, and the remedy, the reframe and the capability
+  axis of `vyrn why`. M4 is open. A milestone that fails its gate says so in
+  this file.
 - **Depends on:** RFC-0072 (audience — kept, and demoted to what it is),
   RFC-0071 (module contracts and roles, untouched), RFC-0014 (input I/O — the
   builtins the floor watches), RFC-0043 (time/random), RFC-0044 (storage),
@@ -544,6 +545,151 @@ crossing; RFC-0072's document amended to the fence claim (accidental class,
 not secrets); `vyrn why` learns the capability axis: `vyrn why --capability fs
 <artifact>` prints every chain that pulls `fs` in. Gate: no diagnostic in the
 tree names a path the project does not contain.
+
+### M3 — as landed
+
+**Gate: met.** No diagnostic in the tree names a path the project does not
+contain. Every remedy the compiler can print is an interpolation now, and there
+are three of them:
+
+```
+$ grep -rn 'call it through\|move the shared part' compiler/*/src/
+compiler/vyrn-frontend/src/audience.rs:486:            "call it through `{}` instead",
+compiler/vyrn-frontend/src/audience.rs:490:            "move the shared part of `{}` into a universal module and import that instead",
+compiler/vyrn-frontend/src/floor.rs:318:            "\n   = call it through the wire instead: {}",
+```
+
+`server/api` still appears sixteen times under `compiler/*/src/` and every one
+is a doc comment, a test fixture or a generated-source constant — no diagnostic
+among them. The two that are about this change say what was deleted
+(`audience.rs:478`, `floor.rs:344`).
+
+#### The remedy, concrete
+
+`audience::remedy` was three `&'static str`s; it now takes the edge. Both live
+arms name the module the edge actually reached:
+
+```
+error: `app/routes/index.vyrn` is universal and cannot import `server/store.vyrn`,
+       which is server-only
+  note: audience `server` is declared by vyrn.json:audience.server — call it through
+        `connect("../../server/store")` instead; the importer's own audience comes
+        from path segment `app` (vyrn.json audience.universal)
+```
+
+```
+error: `server/store.vyrn` is server-only and cannot import `client/boot.vyrn`,
+       which is client-only
+  note: audience `client` is declared by vyrn.json:audience.client — move the shared
+        part of `client/boot.vyrn` into a universal module and import that instead;
+        the importer's own audience comes from path segment `server`
+        (vyrn.json audience.server)
+```
+
+The server arm and M2's floor line are the same function.
+`vyrn_frontend::floor::crossing(importer, module)` is the one place that spells
+a crossing, over M2's `spec_from`, and the fence and the floor both call it.
+That is what makes the gate a property rather than a coincidence: there is no
+second place where a path could be written down.
+
+The client arm keeps its advice and drops its hint. `(`shared/`)` was a
+parenthesised guess at a directory the project may not have; the module it names
+instead is one the reader can open.
+
+#### RFC-0072, amended
+
+Two tagged amendments in `rfcs/RFC-0072-audience-and-derived-rpc.md`, plus an
+**Amended by** line in its header. The claim:
+
+> before: This is the improvement over the prior art. Nuxt's split is a bundler
+> convention, so a server import reaching a component is a build-time surprise
+> at best and **a leaked secret at worst**.
+
+> after: … so a server import reaching a component is a build-time surprise.
+
+with a note under it saying what audience does prevent (the accidental class),
+why it can prevent nothing else (the compiler does not know what a secret is; a
+label is configuration), that this makes it a fence with Gradle's guarantee, and
+that RFC-0103 is the floor beneath it. The document's diagnostic sketch:
+
+> before: `   = call it through `client("./server/api")` instead`
+
+> after: `   = call it through `connect("../../server/store")` instead`
+
+— the concrete crossing for that sketch's own edge, which is what the checker
+now prints for it.
+
+Nothing else in the document was rewritten. Its `server/ … never in the client
+bundle` table is a statement about import edges, which is what the fence checks
+and what it still delivers.
+
+#### `vyrn why --capability`
+
+The floor's refusal shows ONE chain, the shortest, because a refusal is read in
+a hurry. `vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact-name>`
+answers the other question — where does the capability come from at all — with
+EVERY chain, because deleting a hop off the shortest path removes nothing while
+a second path still reaches the module.
+
+```
+$ cd examples/leak && vyrn why --capability fs app
+N:/lang/examples/leak/client/boot.vyrn
+  artifact: `app` (browser) — target `browser` has no filesystem
+  `readFile` needs `fs` — server/db.vyrn:6
+    client/boot.vyrn -> shared/format.vyrn -> server/db.vyrn
+
+$ vyrn why --capability fs api
+N:/lang/examples/leak/server/main.vyrn
+  artifact: `api` (native) — target `native` has `fs`
+  `readFile` needs `fs` — server/db.vyrn:6
+    server/main.vyrn -> shared/format.vyrn -> server/db.vyrn
+
+$ vyrn why --capability stdin app
+N:/lang/examples/leak/client/boot.vyrn
+  artifact: `app` (browser) — target `browser` has no stdin
+  nothing in artifact `app`'s closure needs `stdin`
+
+$ vyrn why --capability sockets app
+error: unknown capability `sockets` (expected one of: fs, stdin, args, extern)
+
+$ vyrn why --capability fs nope
+error: `nope` is neither an artifact entry point nor an artifact name in
+       …/examples/leak/vyrn.json (declared: api, app)
+```
+
+Four decisions worth writing down:
+
+- **It answers for an artifact that HAS the capability too.** `api` is native
+  and a native binary may read files; the question was where `fs` enters the
+  closure, and refusing to answer it for the artifact that is allowed to would
+  make the command a second copy of the check rather than a way to see the
+  graph.
+- **The argument resolves the way the floor resolves a root**: a path through
+  `ArtifactMap::artifact_for` (file identity first, so two spellings of one file
+  are one artifact), else a name in the manifest's map. The refusal lists the
+  names that do exist.
+- **It reads the sources, not a build** — the same reading `vyrn why <file>`
+  does, through the same `project_imports`. The artifact you are asking about
+  may well be the one that does not compile.
+- **The vocabulary and the carriers both come from `vyrn_frontend::floor`**, the
+  module the loader enforces with: `Capability::parse` against `CAPABILITIES`,
+  and `floor::carried` per module. The report cannot drift from the check
+  because it is the check's own reading.
+
+Chain enumeration is bounded at 24 chains and depth 12, the bounds
+`import_chains` already carries — a report that hangs is worse than one that
+stops.
+
+#### The gate, measured
+
+| evidence | result |
+|---|---|
+| `cargo test --release` (workspace) | 1727 passed, 0 failed, 69 ignored |
+| `cargo test` (`vyrn-lsp`) | 83 passed, 0 failed, 4 ignored |
+| `cargo build --target wasm32-unknown-unknown` (`vyrn-play`), `cargo test` (`vyrn-genwasm`) | both COMPILE; genwasm 1 passed, 0 failed |
+| `cargo test -p vyrn-cli --release --test parity -- --ignored --test-threads=1` | 40 passed, 0 failed |
+| `cargo fmt --check` (workspace + `vyrn-lsp`, `vyrn-genwasm`, `vyrn-play`) | clean |
+| the grep above | three remedies, three interpolations, no path |
 
 **M4 — dogfood.** The fullstack example (`shelf`) declares both artifacts and
 compiles with the floor on; one commit in its history introduces a leak and

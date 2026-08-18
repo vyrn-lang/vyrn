@@ -114,8 +114,12 @@ fn a_universal_page_importing_a_server_module_is_an_error_naming_both_files() {
         err.contains("declared by vyrn.json:audience.server"),
         "{err}"
     );
-    // And what to do instead.
-    assert!(err.contains("client(\"./server/api\")"), "{err}");
+    // And what to do instead — the CONCRETE crossing (RFC-0103 M3). The remedy
+    // used to name a fixed `./server/api` that this project does not contain;
+    // it now spells the module the edge actually reached, from the module that
+    // actually imports it.
+    assert!(err.contains("connect(\"../../server/store\")"), "{err}");
+    assert!(!err.contains("server/api"), "{err}");
 }
 
 /// Absent and unreadable are different states, and the difference is the whole
@@ -247,6 +251,13 @@ fn a_server_module_may_not_reach_a_client_one() {
     assert!(err.contains("`server/store.vyrn` is server-only"), "{err}");
     assert!(
         err.contains("`client/boot.vyrn`, which is client-only"),
+        "{err}"
+    );
+    // The other direction's remedy names the module too (RFC-0103 M3): the
+    // advice is still "split it", but the thing to split is a file the reader
+    // can open rather than a parenthesised `(shared/)` hint.
+    assert!(
+        err.contains("move the shared part of `client/boot.vyrn` into a universal module"),
         "{err}"
     );
 }

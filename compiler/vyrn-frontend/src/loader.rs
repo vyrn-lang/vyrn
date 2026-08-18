@@ -504,7 +504,7 @@ fn audience_objection(
         "audience `{}` is declared by vyrn.json:{} — {}; the importer's own audience comes from {}",
         to.audience,
         to.audience.key(),
-        audience::remedy(to.audience),
+        audience::remedy(to.audience, importer, imported, map),
         from.because()
     ));
     Some(d)
