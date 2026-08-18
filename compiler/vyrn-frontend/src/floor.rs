@@ -222,22 +222,29 @@ pub fn carried(program: &mut Program) -> Vec<Carried> {
     out
 }
 
+/// What the floor decides on: `(module key, resolved import targets, what that
+/// module carries)` per module a load linked.
+///
+/// Named because two commands walk it. [`objection`] refuses over it at the end
+/// of a load, and `vyrn why --capability` reports over the same triples through
+/// [`crate::loader::capability_graph`] — M3 claimed the report could not drift
+/// from the check, and M4 found that true of the vocabulary and false of the
+/// GRAPH, because the report read the project's files while the check read the
+/// load. A generated module is on nobody's disk.
+pub type Graph = Vec<(String, Vec<String>, Vec<Carried>)>;
+
 /// The floor's objection, if any, to building `root` as the artifact that
 /// declares it.
 ///
-/// `modules` is the load's own graph — `(module key, resolved import targets,
-/// what that module carries)` — and `root` is the key the load started from.
+/// `modules` is the load's own [`Graph`] and `root` is the key the load started
+/// from.
 /// `None` whenever this root is nobody's declared entry point, which is every
 /// project that has not opted in and every file inside one that is not an entry.
 ///
 /// The chain is breadth-first from the entry, so the reported path is the
 /// SHORTEST one that reaches the offending module: the author never saw hop
 /// three, and showing them the longest way round would not help.
-pub fn objection(
-    modules: &[(String, Vec<String>, Vec<Carried>)],
-    root: &str,
-    map: &ArtifactMap,
-) -> Option<Diagnostic> {
+pub fn objection(modules: &Graph, root: &str, map: &ArtifactMap) -> Option<Diagnostic> {
     let artifact = map.artifact_for(root)?;
     let has = capabilities(artifact.target);
 

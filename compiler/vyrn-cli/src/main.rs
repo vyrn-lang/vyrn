@@ -1331,10 +1331,20 @@ fn why_audience(file: &str) -> ExitCode {
 /// at all?" — and it answers with EVERY chain, because deleting a hop off the
 /// shortest path removes nothing if a second path also reaches the module.
 ///
-/// It reads the sources, not a build, exactly as `vyrn why` does: the artifact
-/// you are asking about may well be the one that does not compile. Both the
-/// vocabulary and what carries it come from `vyrn_frontend::floor`, the module
-/// the loader enforces with, so the report cannot drift from the check.
+/// It walks the LINKED graph — `loader::capability_graph`, the same triples the
+/// check refuses over. M3 read the project's files instead, so that the command
+/// could answer for an artifact that does not compile, and M4 found the price:
+/// a generated module is produced by the loader and is on nobody's disk, so
+/// `shelf`'s client carried the `vyrnRpcCall` `extern` through its rpc stub, the
+/// floor said so, and the report said `nothing … needs 'extern'`. That is the
+/// one class of capability nobody can find by reading their own source, so the
+/// graph is now the load's and the vocabulary, the carriers and the closure all
+/// come from one place.
+///
+/// The load runs with the fence and the floor DISARMED. Both are refusals over
+/// this graph rather than facts about it, and leaving them armed would leave the
+/// command unable to answer for the tree anyone actually asks about — the one
+/// that was just refused.
 ///
 /// It REPORTS; it does not gate. Exit 0 whenever it could answer, 2 when it
 /// could not — an unknown capability, or an argument that names no artifact.
@@ -1382,8 +1392,6 @@ fn why_capability(cap: &str, name: &str) -> ExitCode {
         return ExitCode::from(2);
     };
 
-    let app_dir = PathBuf::from(&map.base);
-    let edges = project_imports(&app_dir);
     println!("{}", artifact.entry);
     let has = floor::capabilities(artifact.target).contains(&cap);
     println!(
@@ -1398,47 +1406,67 @@ fn why_capability(cap: &str, name: &str) -> ExitCode {
         }
     );
 
-    // What each module carries, from the same `floor::carried` the check calls.
-    let mut carriers: Vec<(String, vyrn_frontend::floor::Carried)> = Vec::new();
-    for (file, source) in project_sources(&app_dir) {
-        let body = if file.ends_with(".vyx") {
-            vyx_script_body(&source).unwrap_or_default()
-        } else {
-            source
-        };
-        let Ok(tokens) = vyrn_frontend::lexer::lex(&body) else {
-            continue;
-        };
-        let (mut program, _) = vyrn_frontend::parser::parse_accum(tokens);
-        let key = real_path(&file).unwrap_or(file);
-        for c in floor::carried(&mut program) {
-            if c.cap == cap
-                && !carriers
-                    .iter()
-                    .any(|(k, o)| *k == key && o.carrier == c.carrier)
-            {
-                carriers.push((key.clone(), c));
-            }
+    // The load's own graph, with both policies disarmed: a report about the
+    // refused tree is the only report anyone wants.
+    let mut opts = load_options(&artifact.entry);
+    opts.audience = None;
+    opts.artifacts = None;
+    let source = match std::fs::read_to_string(&artifact.entry) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {e}", artifact.entry);
+            return ExitCode::from(2);
         }
-    }
+    };
+    let (graph, root_key) =
+        match vyrn_frontend::loader::capability_graph(&source, &artifact.entry, &opts, &FsResolver)
+        {
+            Ok(g) => g,
+            Err(diags) => {
+                eprintln!("error: cannot link artifact `{}`", artifact.name);
+                for d in diags.iter().take(3) {
+                    eprintln!(
+                        "  {}: {}",
+                        d.file.as_deref().unwrap_or(&artifact.entry),
+                        d.message
+                    );
+                }
+                return ExitCode::from(2);
+            }
+        };
+    let edges: Vec<(String, String)> = graph
+        .iter()
+        .flat_map(|(k, imports, _)| imports.iter().map(|t| (k.clone(), t.clone())))
+        .collect();
 
     let mut found = false;
-    for (module, c) in &carriers {
-        let chains = chains_from(&artifact.entry, module, &edges);
-        if chains.is_empty() {
-            continue;
-        }
-        found = true;
-        println!(
-            "  `{}` needs `{}` — {}:{}",
-            c.carrier,
-            cap.name(),
-            rel_to(module, &map.base),
-            c.line
-        );
-        for chain in chains {
-            let pretty: Vec<String> = chain.iter().map(|p| rel_to(p, &map.base)).collect();
-            println!("    {}", pretty.join(" -> "));
+    let mut seen: Vec<(&str, &str)> = Vec::new();
+    for (module, _, carried) in &graph {
+        for c in carried.iter().filter(|c| c.cap == cap) {
+            let key = (module.as_str(), c.carrier.as_str());
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
+            found = true;
+            println!(
+                "  `{}` needs `{}` — {}:{}",
+                c.carrier,
+                cap.name(),
+                map.display_path(module),
+                c.line
+            );
+            // Every module in the graph is in the closure by construction. One
+            // the loader injected has no importer, and the floor's own rule for
+            // its chain is the entry and it.
+            let mut chains = chains_from(&root_key, module, &edges);
+            if chains.is_empty() && module != &root_key {
+                chains = vec![vec![root_key.clone(), module.clone()]];
+            }
+            for chain in chains {
+                let pretty: Vec<String> = chain.iter().map(|p| map.display_path(p)).collect();
+                println!("    {}", pretty.join(" -> "));
+            }
         }
     }
     if !found {
