@@ -884,6 +884,16 @@ than fixed, because M4 is the milestone that runs the thing and this file is
 where a milestone says what it found. The fix belongs where `spec_from` can see
 the project base.
 
+*[Amended: fixed after M4.] It needed no project base. `spec_from` counts `..`
+between the two keys with no shared-first-segment requirement, because two keys
+from ONE load are relative to one working directory — which is the same fact
+that made the old fallback wrong. Both invocations above now print
+`connect("../server/db")`, and so does the absolute one. The fallback that
+remains is for a pair with nothing to count between: a generated banner, a
+remote key or a `std/` module is a key rather than a path, and an absolute path
+beside a relative one — or beside another absolute path on a different Windows
+drive — shares no root.*
+
 M4 found no defect in the floor's own decision. The check accepted what should
 be accepted and refused what should be refused, on an application, with the
 fence live beside it — and both flaws it did surface are in how the result is
