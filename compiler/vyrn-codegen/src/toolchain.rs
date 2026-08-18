@@ -760,11 +760,30 @@ pub fn tools_wasi_sysroot_from(start: &Path) -> Option<std::path::PathBuf> {
     None
 }
 
-/// Auto-discovered wasi sysroot for the running exe (see
-/// [`tools_wasi_sysroot_from`]); `None` when no `tools/` convention applies.
-pub fn discovered_wasi_sysroot() -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    tools_wasi_sysroot_from(exe.parent()?)
+/// A variable naming a path, honoured only when the path is there — step 1 of
+/// the order for every tool.
+fn env_path(var: &str) -> Option<PathBuf> {
+    std::env::var(var)
+        .map(PathBuf::from)
+        .ok()
+        .filter(|p| p.exists())
+}
+
+/// Step 2 of the order for any tool: the unpacked `~/.vyrn/tools/<sha>/` a pin
+/// resolves to, or `Ok(None)` when the `vyrn.json` governing `start` pins no
+/// such tool. A pin that cannot be resolved is `Err`, never a fall-through.
+///
+/// The pin is the project's, so it is read the way every other manifest rule is
+/// read: by walking up from `start` to the `vyrn.json` that governs it.
+fn pinned_tool_dir(start: &Path, tool: &str) -> Result<Option<PathBuf>, String> {
+    let Some(m) = vyrn_frontend::manifest::find(start)? else {
+        return Ok(None);
+    };
+    let Some((_, version)) = m.toolchain.iter().find(|(n, _)| n == tool) else {
+        return Ok(None);
+    };
+    let lock = vyrn_frontend::manifest::Lock::in_project(&m.dir)?;
+    vyrn_frontend::toolpin::pinned_tool(Some(&m.dir), &lock, tool, version).map(Some)
 }
 
 /// A wasmtime executable to run a module with, and WHY that one — the discovery
@@ -781,31 +800,90 @@ pub fn discovered_wasi_sysroot() -> Option<std::path::PathBuf> {
 /// `Ok(None)` is "nothing pinned and nothing found", which stays a SKIP: nothing
 /// here needs wasmtime to BUILD, only to check its own output.
 pub fn wasmtime_from(start: &Path) -> Result<Option<(PathBuf, &'static str)>, String> {
-    if let Some(p) = std::env::var("VYRN_WASMTIME")
-        .map(PathBuf::from)
-        .ok()
-        .filter(|p| p.exists())
-    {
+    if let Some(p) = env_path("VYRN_WASMTIME") {
         return Ok(Some((p, "override: environment")));
     }
-    // The pin is the project's, so it is read the way every other manifest rule
-    // is read: by walking up from `start` to the `vyrn.json` that governs it.
-    if let Some(m) = vyrn_frontend::manifest::find(start)? {
-        if let Some((_, version)) = m.toolchain.iter().find(|(n, _)| n == "wasmtime") {
-            let lock = vyrn_frontend::manifest::Lock::in_project(&m.dir)?;
-            let dir =
-                vyrn_frontend::toolpin::pinned_tool(Some(&m.dir), &lock, "wasmtime", version)?;
-            let exe = vyrn_frontend::toolpin::tool_binary(&dir, "wasmtime").ok_or_else(|| {
-                format!(
-                    "the pinned wasmtime {version} archive unpacked to {} with no wasmtime \
-                     binary in it",
-                    dir.display()
-                )
-            })?;
-            return Ok(Some((exe, "pinned")));
-        }
+    if let Some(dir) = pinned_tool_dir(start, "wasmtime")? {
+        let exe = vyrn_frontend::toolpin::tool_binary(&dir, "wasmtime")
+            .ok_or_else(|| unpacked_without("wasmtime", &dir, "a wasmtime binary"))?;
+        return Ok(Some((exe, "pinned")));
     }
     Ok(discovered_wasmtime_from(start).map(|p| (p, "discovered: tools/")))
+}
+
+/// The refusal for a pinned archive that resolved, unpacked, and turned out not
+/// to hold what the tool is for. It is an `Err` rather than a fall-through for
+/// the same reason every other pin failure is.
+fn unpacked_without(tool: &str, dir: &Path, what: &str) -> String {
+    format!(
+        "the pinned {tool} archive unpacked to {} with no {what} in it",
+        dir.display()
+    )
+}
+
+/// A wasi sysroot directory, and WHY that one — [`wasmtime_from`]'s order, for
+/// the tool `--sysroot=` points at (RFC-0102 M2).
+///
+/// The pinned answer is the directory a consumer actually points clang at, not
+/// the `<sha>` above it: `wasi-sysroot-25.0.tar.gz` unpacks to a version-named
+/// directory, and `include/` is the marker that finds it either way.
+pub fn wasi_sysroot_from(start: &Path) -> Result<Option<(PathBuf, &'static str)>, String> {
+    if let Some(p) = env_path("WASI_SYSROOT") {
+        return Ok(Some((p, "override: environment")));
+    }
+    if let Some(dir) = pinned_tool_dir(start, "wasi-sysroot")? {
+        let root = vyrn_frontend::toolpin::tool_root(&dir, "include")
+            .ok_or_else(|| unpacked_without("wasi-sysroot", &dir, "`include` directory"))?;
+        return Ok(Some((root, "pinned")));
+    }
+    Ok(tools_wasi_sysroot_from(start).map(|p| (p, "discovered: tools/")))
+}
+
+/// `libclang_rt.builtins-wasm32.a`, and WHY that one — the same order again.
+///
+/// Step 3 is the one place this tool differs: with no pin the archive is found
+/// *next to* the sysroot, which is the wasi-sdk release layout the `tools/`
+/// convention reproduces, so the sysroot already chosen is what the walk starts
+/// from.
+pub fn wasi_builtins_from(
+    start: &Path,
+    sysroot: &Path,
+) -> Result<Option<(PathBuf, &'static str)>, String> {
+    if let Some(p) = env_path("WASI_BUILTINS") {
+        // A link line needs the `.a`, but the variable is named for the tool and
+        // the tool ships as a directory, so both spellings arrive: CI exports the
+        // file, and a developer who exports the unpacked directory used to get
+        // `wasm-ld: is a directory` from clang. Same two levels as the pin.
+        let lib = p
+            .is_dir()
+            .then(|| vyrn_frontend::toolpin::tool_file(&p, BUILTINS_A))
+            .flatten()
+            .unwrap_or(p);
+        return Ok(Some((lib, "override: environment")));
+    }
+    if let Some(dir) = pinned_tool_dir(start, "wasi-builtins")? {
+        let lib = vyrn_frontend::toolpin::tool_file(&dir, BUILTINS_A)
+            .ok_or_else(|| unpacked_without("wasi-builtins", &dir, BUILTINS_A))?;
+        return Ok(Some((lib, "pinned")));
+    }
+    Ok(builtins_near_sysroot(sysroot).map(|p| (p, "discovered: tools/")))
+}
+
+/// [`wasi_sysroot_from`]'s answer for callers that only want the path; panics on
+/// an unresolvable pin, for the reason [`find_wasmtime_from`] does.
+pub fn find_wasi_sysroot_from(start: &Path) -> Option<PathBuf> {
+    match wasi_sysroot_from(start) {
+        Ok(found) => found.map(|(p, _)| p),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+/// [`wasi_builtins_from`]'s answer for callers that only want the path.
+pub fn find_wasi_builtins_from(start: &Path, sysroot: &Path) -> Option<PathBuf> {
+    match wasi_builtins_from(start, sysroot) {
+        Ok(found) => found.map(|(p, _)| p),
+        Err(e) => panic!("{e}"),
+    }
 }
 
 /// [`wasmtime_from`]'s answer for the callers that only want the path.
@@ -875,6 +953,11 @@ pub fn require_tools(what: &str, var: &str, found: Option<PathBuf>) -> Option<Pa
     found
 }
 
+/// The one file the builtins archive exists to deliver, named once: the pinned
+/// resolver looks for it inside an unpacked blob and the `tools/` walk looks for
+/// it beside a sysroot, and two spellings would be two answers.
+pub const BUILTINS_A: &str = "libclang_rt.builtins-wasm32.a";
+
 /// `libclang_rt.builtins-wasm32.a` from a `libclang_rt.builtins-wasm32-wasi-*`
 /// directory next to the sysroot (the wasi-sdk release-artifact layout),
 /// version-agnostic and deterministic (sorted).
@@ -883,7 +966,7 @@ pub fn builtins_near_sysroot(sysroot: &Path) -> Option<std::path::PathBuf> {
     let mut hits: Vec<std::path::PathBuf> = std::fs::read_dir(parent)
         .ok()?
         .flatten()
-        .map(|e| e.path().join("libclang_rt.builtins-wasm32.a"))
+        .map(|e| e.path().join(BUILTINS_A))
         .filter(|p| {
             p.exists()
                 && p.parent()
@@ -959,14 +1042,14 @@ pub fn shim_wasm() -> Option<PathBuf> {
     }
 
     let clang = find_clang()?;
-    let sysroot = match std::env::var("WASI_SYSROOT") {
-        Ok(s) if Path::new(&s).exists() => PathBuf::from(s),
-        _ => discovered_wasi_sysroot()?,
-    };
-    let builtins = match std::env::var("WASI_BUILTINS") {
-        Ok(b) if Path::new(&b).exists() => PathBuf::from(b),
-        _ => builtins_near_sysroot(&sysroot)?,
-    };
+    // The pin is a project's, and this function is given no project: the running
+    // executable is what step 3 already walked up from, so the pin is read from
+    // the same place. Steps 1 and 3 are byte-identical to what this did before
+    // RFC-0102 M2.
+    let exe = std::env::current_exe().ok()?;
+    let start = exe.parent()?;
+    let sysroot = find_wasi_sysroot_from(start)?;
+    let builtins = find_wasi_builtins_from(start, &sysroot)?;
     std::fs::create_dir_all(&dir).ok()?;
     let src = dir.join(format!("{key}.c"));
     std::fs::write(&src, runtime_shim()).ok()?;

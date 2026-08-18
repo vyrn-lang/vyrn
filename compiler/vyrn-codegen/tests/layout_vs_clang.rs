@@ -183,15 +183,9 @@ fn clang_agrees_with_the_layout_engine_on_wasm32() {
         require_tools(
             "a wasi sysroot",
             "WASI_SYSROOT",
-            std::env::var("WASI_SYSROOT")
-                .map(PathBuf::from)
-                .ok()
-                .filter(|p| p.exists())
-                .or_else(|| {
-                    vyrn_codegen::toolchain::tools_wasi_sysroot_from(Path::new(env!(
-                        "CARGO_MANIFEST_DIR"
-                    )))
-                }),
+            // `$WASI_SYSROOT`, then the pin, then the `tools/` walk — RFC-0102
+            // M2's order, and the same one `find_wasmtime` above takes.
+            vyrn_codegen::toolchain::find_wasi_sysroot_from(Path::new(env!("CARGO_MANIFEST_DIR"))),
         ),
         find_wasmtime(),
     ) else {
@@ -215,7 +209,10 @@ fn clang_agrees_with_the_layout_engine_on_wasm32() {
         .arg(format!("--sysroot={}", sysroot.display()));
     // The builtins archive, when the dev tree has it — `vyrn build` requires it,
     // but a `printf`-only program links without it on a full wasi-sdk.
-    if let Some(b) = vyrn_codegen::toolchain::builtins_near_sysroot(&sysroot) {
+    if let Some(b) = vyrn_codegen::toolchain::find_wasi_builtins_from(
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &sysroot,
+    ) {
         cmd.arg("-nodefaultlibs").arg(&b).arg("-lc");
     }
     let out = cmd.output().expect("run clang");

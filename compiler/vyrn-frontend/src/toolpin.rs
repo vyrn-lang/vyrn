@@ -233,27 +233,49 @@ pub fn pinned_tool(
     }
 }
 
+/// `name` at the top of an unpacked tool directory or one level in — a release
+/// archive puts its payload inside a version-named directory, and which one is
+/// not this resolver's business. Sorted, so several unpacked side by side pick
+/// deterministically.
+fn at_top_or_one_in(dir: &Path, name: &str) -> Option<PathBuf> {
+    let direct = dir.join(name);
+    if direct.exists() {
+        return Some(direct);
+    }
+    let mut hits: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path().join(name))
+        .filter(|p| p.exists())
+        .collect();
+    hits.sort();
+    hits.into_iter().next()
+}
+
 /// The first file named `what` (or `what.exe`) at the top of an unpacked tool
-/// directory or one level in — a release archive puts its binary inside a
-/// version-named directory, and which one is not this resolver's business.
+/// directory or one level in.
 pub fn tool_binary(dir: &Path, what: &str) -> Option<PathBuf> {
     let exe = if cfg!(windows) {
         format!("{what}.exe")
     } else {
         what.to_string()
     };
-    let direct = dir.join(&exe);
-    if direct.is_file() {
-        return Some(direct);
-    }
-    let mut hits: Vec<PathBuf> = std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path().join(&exe))
-        .filter(|p| p.is_file())
-        .collect();
-    hits.sort();
-    hits.into_iter().next()
+    at_top_or_one_in(dir, &exe).filter(|p| p.is_file())
+}
+
+/// The first file named exactly `name`, same two levels. A library archive is
+/// not an executable and gets no `.exe`.
+pub fn tool_file(dir: &Path, name: &str) -> Option<PathBuf> {
+    at_top_or_one_in(dir, name).filter(|p| p.is_file())
+}
+
+/// The directory a consumer actually points at, found by a `marker` it must
+/// contain: `~/.vyrn/tools/<sha>/wasi-sysroot-25.0` rather than the `<sha>`
+/// above it, because `--sysroot=` wants the tree with `include/` in it.
+pub fn tool_root(dir: &Path, marker: &str) -> Option<PathBuf> {
+    at_top_or_one_in(dir, marker)?
+        .parent()
+        .map(|p| p.to_path_buf())
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-//! RFC-0102 M1: the discovery order, end to end, with no network.
+//! RFC-0102 M1 and M2: the discovery order, end to end, with no network.
 //!
 //! A fabricated archive is hashed, dropped into the content-addressed cache the
 //! way a fetch would leave it, and named by a `tool:` line in a `vyrn.lock`. The
@@ -8,10 +8,15 @@
 //!
 //! One `#[test]`, deliberately: the order's first step is an environment
 //! variable, and two tests disagreeing about `VYRN_WASMTIME` in one process is
-//! the flake that would follow from splitting it.
+//! the flake that would follow from splitting it. M2's two tools joined the same
+//! test for the same reason, one variable each.
+//!
+//! Nothing here has a host-only branch that skips the check: `wasi-sysroot` and
+//! `wasi-builtins` are pinned `/any`, so the pinned path below executes on all
+//! four platforms.
 
 use std::path::{Path, PathBuf};
-use vyrn_codegen::toolchain::wasmtime_from;
+use vyrn_codegen::toolchain::{wasi_builtins_from, wasi_sysroot_from, wasmtime_from, BUILTINS_A};
 use vyrn_frontend::manifest::{cache_dir, write_blob};
 use vyrn_frontend::toolpin::{host_platform, tool_spec, tools_dir};
 
@@ -26,26 +31,52 @@ fn slash(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
 
-/// A `.tar` holding `wasmtime-v<ver>-<platform>/wasmtime[.exe]`, the shape a
-/// release archive has. Built with `tar` because unpacking uses `tar`, and an
-/// archive this repository cannot produce is not evidence about one it fetches.
-fn fake_release(version: &str) -> Vec<u8> {
-    let stage = tmp("stage");
-    let inner = stage.join(format!("wasmtime-v{version}-{}", host_platform()));
-    std::fs::create_dir_all(&inner).unwrap();
-    let exe = if cfg!(windows) {
-        "wasmtime.exe"
-    } else {
-        "wasmtime"
-    };
-    std::fs::write(inner.join(exe), b"not really a runtime").unwrap();
-    let archive = stage.join("release.tar");
+/// A `.tar` holding `files`, each with `content` in it — the shape a release
+/// archive has, payload inside one version-named directory. Built with `tar`
+/// because unpacking uses `tar`, and an archive this repository cannot produce is
+/// not evidence about one it fetches.
+fn fake_archive(tag: &str, files: &[String], content: &[u8]) -> Vec<u8> {
+    let stage = tmp(tag);
+    for f in files {
+        let p = stage.join(f);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, content).unwrap();
+    }
+    // Beside the staging directory, not inside it: `tar -C stage .` would
+    // otherwise archive the archive it is writing.
+    let archive = std::env::temp_dir().join(format!("vyrn-toolpin-{tag}.tar"));
     let st = std::process::Command::new("tar")
         .args(["-cf", &slash(&archive), "-C", &slash(&stage), "."])
         .status()
         .expect("tar is on PATH (Windows 10+, every Linux userland, macOS)");
     assert!(st.success(), "tar -cf failed");
     std::fs::read(&archive).unwrap()
+}
+
+/// Hash a fabricated archive and leave it where a fetch would: the
+/// content-addressed cache, plus the `tool:` line naming it.
+fn seed(lock: &mut String, name: &str, version: &str, platform: &str, bytes: &[u8]) -> String {
+    let sha = vyrn_frontend::hash::sha256_hex(bytes);
+    write_blob(&cache_dir(), &sha, bytes).unwrap();
+    lock.push_str(&format!(
+        "{}\thttps://example.invalid/{name}-{version}\t{sha}\n",
+        tool_spec(name, version, platform)
+    ));
+    sha
+}
+
+/// A `wasmtime-v<ver>-<platform>/wasmtime[.exe]` release archive.
+fn fake_release(version: &str) -> Vec<u8> {
+    let exe = if cfg!(windows) {
+        "wasmtime.exe"
+    } else {
+        "wasmtime"
+    };
+    fake_archive(
+        "stage",
+        &[format!("wasmtime-v{version}-{}/{exe}", host_platform())],
+        b"not really a runtime",
+    )
 }
 
 #[test]
@@ -141,5 +172,146 @@ fn the_pin_resolves_offline_and_the_order_is_env_then_pin_then_walk() {
     match saved {
         Some(v) => std::env::set_var("VYRN_WASMTIME", v),
         None => std::env::remove_var("VYRN_WASMTIME"),
+    }
+
+    sysroot_and_builtins();
+}
+
+/// RFC-0102 M2: the same order, for the two `/any` tools, and the answer each
+/// consumer actually needs — a DIRECTORY to point `--sysroot=` at, and the `.a`
+/// FILE the link line names.
+///
+/// Called from the one `#[test]` rather than being a second: `cargo test` runs
+/// tests in threads of one process, and `set_var` beside another thread's
+/// `getenv` — `cache_dir()` reads `HOME` on every resolve — is a race whether or
+/// not the two agree about which variable they are setting.
+fn sysroot_and_builtins() {
+    // CI's codegen step exports both; the pin steps have to be measured without
+    // them, and the last step puts them back.
+    let saved = [
+        std::env::var("WASI_SYSROOT").ok(),
+        std::env::var("WASI_BUILTINS").ok(),
+    ];
+    std::env::remove_var("WASI_SYSROOT");
+    std::env::remove_var("WASI_BUILTINS");
+
+    let project = tmp("wasi");
+    std::fs::write(
+        project.join("vyrn.json"),
+        r#"{"toolchain":{"wasi-sysroot":"9.9.9","wasi-builtins":"9.9.9"}}"#,
+    )
+    .unwrap();
+    let mut lock = String::new();
+    // `/any`, because both are wasm32 TARGET libraries: the same file on every
+    // host, and one lock line that every platform reads.
+    let sys_sha = seed(
+        &mut lock,
+        "wasi-sysroot",
+        "9.9.9",
+        "any",
+        &fake_archive(
+            "sysroot",
+            &[
+                "wasi-sysroot-9.9.9/include/stdio.h".into(),
+                "wasi-sysroot-9.9.9/lib/wasm32-wasip1/libc.a".into(),
+            ],
+            b"not really a sysroot",
+        ),
+    );
+    seed(
+        &mut lock,
+        "wasi-builtins",
+        "9.9.9",
+        "any",
+        &fake_archive(
+            "builtins",
+            &[format!(
+                "libclang_rt.builtins-wasm32-wasi-9.9.9/{BUILTINS_A}"
+            )],
+            b"not really an archive",
+        ),
+    );
+    std::fs::write(project.join("vyrn.lock"), &lock).unwrap();
+
+    let (sysroot, why) = wasi_sysroot_from(&project).unwrap().unwrap();
+    assert_eq!(why, "pinned");
+    // The directory a consumer points clang at, one level INSIDE the blob's
+    // `<sha>` — the unpacked-layout answer.
+    assert!(
+        slash(&sysroot).starts_with(&slash(&tools_dir().join(&sys_sha))),
+        "{}",
+        sysroot.display()
+    );
+    assert_eq!(sysroot.file_name().unwrap(), "wasi-sysroot-9.9.9");
+    assert!(sysroot.join("include").is_dir(), "{}", sysroot.display());
+
+    let (builtins, why) = wasi_builtins_from(&project, &sysroot).unwrap().unwrap();
+    assert_eq!(why, "pinned");
+    assert!(builtins.is_file(), "{}", builtins.display());
+    assert_eq!(builtins.file_name().unwrap(), BUILTINS_A);
+    // And it came from its OWN blob, not from beside the sysroot: two pins, two
+    // hashes, and `builtins_near_sysroot` is step 3 only.
+    assert!(!slash(&builtins).starts_with(&slash(&tools_dir().join(&sys_sha))));
+
+    // --- a pin that cannot be resolved FAILS, and names its escape hatch ------
+    let uncached = tmp("wasi-uncached");
+    std::fs::write(
+        uncached.join("vyrn.json"),
+        r#"{"toolchain":{"wasi-sysroot":"8.8.8","wasi-builtins":"8.8.8"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        uncached.join("vyrn.lock"),
+        format!(
+            "{}\thttps://example.invalid/s\t{}\n",
+            tool_spec("wasi-sysroot", "8.8.8", "any"),
+            "c".repeat(64)
+        ),
+    )
+    .unwrap();
+    let e = wasi_sysroot_from(&uncached).unwrap_err();
+    assert!(e.contains("not cached"), "{e}");
+    assert!(e.contains(&"c".repeat(64)), "{e}");
+    assert!(e.contains("`vyrn update wasi-sysroot`"), "{e}");
+    assert!(e.contains("$WASI_SYSROOT"), "{e}");
+    // The builtins are pinned with no lock line at all: the other refusal.
+    let e = wasi_builtins_from(&uncached, &sysroot).unwrap_err();
+    assert!(e.contains("wasi-builtins 8.8.8 is pinned"), "{e}");
+    assert!(e.contains("no entry for any"), "{e}");
+    assert!(e.contains("Pinned platforms: none."), "{e}");
+    assert!(e.contains("$WASI_BUILTINS"), "{e}");
+
+    // --- no pin: the `tools/` walk, exactly as before this key existed -------
+    let unpinned = tmp("wasi-unpinned");
+    std::fs::write(unpinned.join("vyrn.json"), r#"{"main":"src/main.vyrn"}"#).unwrap();
+    assert!(wasi_sysroot_from(&unpinned).unwrap().is_none());
+    assert!(wasi_builtins_from(&unpinned, &sysroot).unwrap().is_none());
+
+    // --- step 1: the environment override beats the pin, and beats a refusal --
+    std::env::set_var("WASI_SYSROOT", &sysroot);
+    std::env::set_var("WASI_BUILTINS", &builtins);
+    for dir in [&project, &uncached, &unpinned] {
+        assert_eq!(
+            wasi_sysroot_from(dir).unwrap().unwrap(),
+            (sysroot.clone(), "override: environment")
+        );
+        assert_eq!(
+            wasi_builtins_from(dir, &sysroot).unwrap().unwrap(),
+            (builtins.clone(), "override: environment")
+        );
+    }
+    // Both spellings of the override reach the same `.a`: CI exports the file,
+    // and the directory the tool unpacks to is what a developer has in hand.
+    std::env::set_var("WASI_BUILTINS", builtins.parent().unwrap());
+    assert_eq!(
+        wasi_builtins_from(&unpinned, &sysroot).unwrap().unwrap(),
+        (builtins.clone(), "override: environment")
+    );
+
+    for (var, v) in ["WASI_SYSROOT", "WASI_BUILTINS"].iter().zip(saved) {
+        match v {
+            Some(v) => std::env::set_var(var, v),
+            None => std::env::remove_var(var),
+        }
     }
 }
