@@ -57,5 +57,18 @@ fn main() -> Int64 {
             Ok(s) => "read back: \{s}",
             Err(e) => "error: \{e}",
         })
+
+    // fsyncFile is RFC-0044's opt-in durability step, left out of writeAtomic
+    // because fsync-on-every-save is a latency cost most apps do not want. It
+    // creates nothing and truncates nothing, so the example stays re-runnable; a
+    // path that is not there is the same canonical write error on every engine.
+    print(match fsyncFile("data/raw.store.json") {
+            Ok(done) => "fsynced: \{done}",
+            Err(e) => "error: \{e}",
+        })
+    print(match fsyncFile("data/missing.store.json") {
+            Ok(done) => "fsynced missing: \{done}",
+            Err(e) => "fsync missing: \{e}",
+        })
     return 0
 }

@@ -85,10 +85,10 @@ fn too_big(what: &str, bytes: u64, line: usize) -> String {
 /// standalone instantiation walker for the same reason.
 ///
 /// M2p is the other end of it: [`wasm::Module::sweep`] drops what no export
-/// reaches AFTER the bodies exist, so the thirteen here cost a program only what
+/// reaches AFTER the bodies exist, so the fourteen here cost a program only what
 /// it calls (`fib.wasm` imports two). Which is why `path_rename` could be added at
 /// all — M2o refused it as a thirteenth UNCONDITIONAL import, renumbering every
-/// module in the corpus.
+/// module in the corpus — and `fd_sync` joins on the same terms.
 ///
 /// The set is implemented twice over: wasmtime provides all of preview1, and
 /// `web/wasi-min.js` implements exactly these for the browser — with RFC-0014's
@@ -102,6 +102,7 @@ struct Wasi {
     proc_exit: u32,
     path_open: u32,
     path_rename: u32,
+    fd_sync: u32,
     fd_prestat_get: u32,
     args_sizes_get: u32,
     args_get: u32,
@@ -127,6 +128,7 @@ fn wasi_imports(m: &mut Module) -> Wasi {
             &[I32],
         ),
         path_rename: im("path_rename", &[I32, I32, I32, I32, I32, I32], &[I32]),
+        fd_sync: im("fd_sync", &[I32], &[I32]),
         fd_prestat_get: im("fd_prestat_get", &[I32, I32], &[I32]),
         args_sizes_get: im("args_sizes_get", &[I32, I32], &[I32]),
         args_get: im("args_get", &[I32, I32], &[I32]),
@@ -6744,16 +6746,21 @@ impl<'p> Fn_<'_, 'p> {
                 b.slot(off);
                 return Ok(ty);
             }
-            "readFile" | "readFileBytes" if args.len() == 1 => {
-                let ty = io_builtin_ty(name, 1).expect("both readers are I/O builtins");
+            // One path in, a `Result<_, String>` out through a destination slot.
+            // RFC-0044's `fsyncFile` is the same shape as the two readers and
+            // differs only in the runtime function — which is exactly why it was
+            // missed: it reads as a writer, so the arm it belonged in was the one
+            // keyed on TWO arguments.
+            "readFile" | "readFileBytes" | "fsyncFile" if args.len() == 1 => {
+                let ty = io_builtin_ty(name, 1).expect("all three are I/O builtins");
                 let l = self.layout_of(&ty, line)?;
                 self.expr_as(m, b, &args[0], &Type::Str)?;
                 let off = b.alloc(l.size, l.align);
                 b.slot(off);
-                let f = if name == "readFile" {
-                    self.cx.rt.read_file
-                } else {
-                    self.cx.rt.read_file_bytes
+                let f = match name {
+                    "readFile" => self.cx.rt.read_file,
+                    "readFileBytes" => self.cx.rt.read_file_bytes,
+                    _ => self.cx.rt.fsync_file,
                 };
                 b.ins(&Instruction::Call(f));
                 b.slot(off);
@@ -12672,6 +12679,7 @@ struct Rt {
     read_file_bytes: u32,
     write_file: u32,
     rename_file: u32,
+    fsync_file: u32,
     /// `listDir` (RFC-0021), on the generator path ONLY — the language gives it no
     /// runtime lowering at all, so the slot is handed out only when there is a
     /// `vyrn_gen.read` to serve it (RFC-0076 M7). An `Option` rather than an index
@@ -12832,6 +12840,7 @@ impl Rt {
             read_file_bytes: slot("read_file_bytes"),
             write_file: slot("write_file"),
             rename_file: slot("rename_file"),
+            fsync_file: slot("fsync_file"),
             list_dir: gen_host.then(|| slot("list_dir")),
             map_find: slot("map_find"),
             regex_run: slot("regex_run"),
@@ -14556,6 +14565,9 @@ fn clamp_off(b: &mut Frame) {
 /// exactly like a missing file, i.e. a canonical `Err` for the wrong reason.
 const RIGHT_FD_READ: i64 = 1 << 1;
 const RIGHT_FD_WRITE: i64 = 1 << 6;
+/// `right::fd_sync`, asked for beside the write right by `fsync_file`: a
+/// descriptor opened without it may refuse the sync with `ENOTCAPABLE`.
+const RIGHT_FD_SYNC: i64 = 1 << 4;
 const OFLAGS_CREAT_TRUNC: i32 = 1 | 8;
 /// `lookupflags`: follow a symlink, which is what `fopen` does.
 const LOOKUP_SYMLINK_FOLLOW: i32 = 1;
@@ -15809,6 +15821,73 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
         },
     );
 
+    // fsync_file(path, dest) — RFC-0044's durability step, as a
+    // `Result<Bool, String>` whose `Ok` is `true`.
+    //
+    // Open, sync, close: the same three steps `__vyrn_fsync_file` takes in
+    // `toolchain.rs` and `OpenOptions::write(true).open(..).sync_all()` takes in
+    // the interpreter. The open asks for WRITE (not READ) and passes no oflags, so
+    // a missing file is NOT created and an existing one is NOT truncated — the
+    // `"rb+"` the C shim opens with.
+    //
+    // Both failures are `@.io.writeerr` about the path, which is what the other two
+    // engines answer: fsync is a durability step of writing, so it has no wording
+    // of its own.
+    let fd_sync = wasi.fd_sync;
+    rt.next_is(m, rt.fsync_file);
+    m.func(
+        &[ValType::I32, ValType::I32],
+        &[],
+        &[ValType::I32, ValType::I32, ValType::I32],
+        0,
+        |b| {
+            let (fd, emsg, st) = (3, 4, 5); // params 0..1, the frame base 2, then ours
+            b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
+                .ins(&Instruction::Block(BlockType::Empty)) // 0: err
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I64Const(RIGHT_FD_WRITE | RIGHT_FD_SYNC))
+                .ins(&Instruction::Call(open_at))
+                .ins(&Instruction::LocalTee(fd))
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32LtS)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(writepre as i32))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(writepost as i32))
+                .ins(&Instruction::Call(err3))
+                .ins(&Instruction::LocalSet(emsg))
+                .ins(&Instruction::Br(1))
+                .ins(&Instruction::End)
+                // The close joins the sync, as it does in `write_file`: the fd is
+                // closed on every path, and a sync that only fails at the close
+                // failed.
+                .ins(&Instruction::LocalGet(fd))
+                .ins(&Instruction::Call(fd_sync))
+                .ins(&Instruction::LocalSet(st))
+                .ins(&Instruction::LocalGet(fd))
+                .ins(&Instruction::Call(fd_close))
+                .ins(&Instruction::LocalGet(st))
+                .ins(&Instruction::I32Or)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(writepre as i32))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(writepost as i32))
+                .ins(&Instruction::Call(err3))
+                .ins(&Instruction::LocalSet(emsg))
+                .ins(&Instruction::Br(1))
+                .ins(&Instruction::End);
+            // `Ok(true)`: a `Bool` payload is the word zero-extended, which is what
+            // `sum2_write_to` does with a local — so the `1` needs one.
+            b.ins(&Instruction::I32Const(1))
+                .ins(&Instruction::LocalSet(st));
+            sum2_write_to(b, 1, &sum2, 1, Some(st));
+            b.ins(&Instruction::Br(1)).ins(&Instruction::End); // err
+            sum2_write_to(b, 1, &sum2, 0, Some(emsg));
+            b.ins(&Instruction::End); // fin
+        },
+    );
+
     // list_dir(path, dest) — `listDir` as a `Result<Array<String>, String>`, on the
     // generator path only (RFC-0021 gives it no runtime meaning at all, and an
     // ordinary build still refuses it by name).
@@ -16256,6 +16335,7 @@ fn io_builtin_ty(name: &str, argc: usize) -> Option<Type> {
             bits: 8,
             signed: false,
         }))),
+        ("fsyncFile", 1) => str_err(Type::Bool),
         ("writeFile", 2) | ("renameFile", 2) => str_err(Type::Bool),
         _ => return None,
     })
