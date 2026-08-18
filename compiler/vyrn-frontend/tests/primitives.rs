@@ -562,9 +562,10 @@ fn the_census_is_the_code() {
 /// [`the_census_is_the_code`] pins the INTERPRETER against the census.
 /// `direct.rs` is the only wasm backend since RFC-0077 M5, and it had no such
 /// pin at all — so the census had to find its gaps by reading, and found five.
-/// One (`alen`) went with the verb forms; the other four are below with the
-/// reason each is allowed to be missing. A fifth appearing here is a program
-/// that runs on three engines and refuses on the fourth.
+/// One (`alen`) went with the verb forms and one (`fsyncFile`) was lowered; the
+/// other three are below with the reason each is allowed to be missing. A fourth
+/// appearing here is a program that runs on three engines and refuses on the
+/// fourth.
 ///
 /// The scan is a substring, not a parse: a name is covered if the backend
 /// mentions it as a literal, or through the Rust constant it is spelled with.
@@ -586,16 +587,12 @@ fn the_direct_backend_carries_the_census_too() {
             "blackBox",
             "RFC-0055: `vyrn bench` times through the interpreter",
         ),
-        // Not explained by a test path, and the census said so. It has ZERO
-        // callers in `std/` and `examples/` — one doc mention in
-        // `std/storage.vyrn` and one interpreter unit test — so no parity
-        // program ever asked the wasm column for it, and the absence stayed
-        // invisible. The same shape as `alen`, one step short of it: `alen` had
-        // a replacement and was deleted, `fsyncFile` has none and is a gap.
-        (
-            "fsyncFile",
-            "RFC-0044: no corpus caller, so no parity run reaches it",
-        ),
+        // `fsyncFile` stood here, the one row not explained by a test path: it
+        // had ZERO callers in `std/` and `examples/`, so no parity program ever
+        // asked the wasm column for it and the absence stayed invisible. It is
+        // lowered now (`fsync_file`, one `fd_sync` between an open and a close),
+        // and `examples/storage.vyrn` calls it — so the invisibility is fixed at
+        // both ends and this row is gone.
     ];
     // The names a backend spells with a Rust constant rather than a literal.
     let alias = |n: &str| match n {

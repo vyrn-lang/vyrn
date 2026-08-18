@@ -98,7 +98,7 @@ result, and every cell in it was produced by an execution recorded under
 | capability | carried by (today) | native | wasi | browser |
 |---|---|---|---|---|
 | `fs` | `readFile`, `readFileBytes`, `writeFile`, `renameFile`, `std/storage`'s `writeAtomic` | yes | yes | **no** — the canonical `Err` payloads (`` cannot read `p` ``, `` cannot write `p` ``), exit 0 |
-| `fs` durability | `fsyncFile` | yes | **no — the build is refused**: `` direct backend: no lowering for the call `fsyncFile` `` | **no** — same refusal, same artifact |
+| `fs` durability | `fsyncFile` | yes | yes | **no** — the canonical `Err` (`` cannot write `p` ``), exit 0, exactly as the `fs` row above |
 | `fs` listing | `listDir` | **no — the build is refused** (interpreter / generation only) | **no** — same refusal | **no** — same refusal |
 | `fs` through a declaration | `logging { sink: file("…") }` | yes | yes | **no, and silently**: the line is dropped, nothing is printed, exit 0 |
 | `stdin` | `readLine` | yes | yes | **no** — EOF, so `None` |
@@ -110,6 +110,17 @@ result, and every cell in it was produced by an execution recorded under
 | `extern` export | `export extern fn` (RFC-0012 M2) | yes — it has a body, so it is an ordinary function | yes | yes, and additionally callable from the page after `_start` |
 | serving | `serveStream` (RFC-0074 M3a) | **no** — runtime trap: `` serveStream: a compiled build has no accept loop — a live route needs `vyrn serve` `` | **no** — the same trap | **no** — the same trap |
 | threads | `spawn` / `t.join()` | yes — a real operating-system thread | yes, with no thread: the direct backend runs the callee eagerly at the spawn point | yes, the same eager schedule |
+
+[Amended after M0 — the `fs durability` row only. Its `wasi` and `browser` cells
+read "the build is refused" when M0 ran, which is the regression M0 filed. The
+direct backend lowers `fsyncFile` now — one `fd_sync` between the `open_at` and
+the `fd_close`, the shape `writeFile` already had — so both cells were re-run
+against a module that exists: `fsyncFile: ok` under `wasmtime --dir .`,
+byte-identical to the interpreter and native legs, and
+`` fsyncFile: cannot write `cap-fsync.tmp` `` in-page through `web/wasi-min.js`
+(`census.html` loads `cap-fsync.wasm` now, having had no module to load before).
+`examples/storage.vyrn` calls `fsyncFile`, so the parity corpus holds the row
+instead of the census having to re-read it. Every other cell is M0's.]
 
 Two things the census found are **not** capabilities and are recorded here so a
 later reader does not go looking for them in the table:
@@ -282,9 +293,11 @@ Five findings, each recorded because it changes something written above.
    yes/yes/no. The census splits it into four rows with four different answers,
    and two of them are already **compile errors on a compiling backend**:
    `fsyncFile` has no lowering in the direct backend that `--target wasm` now
-   uses unconditionally, and `listDir` has none in either. The language already
-   refuses a capability at compile time in two places, which is precedent M2 can
-   point at rather than novelty M2 has to argue for.
+   uses unconditionally, and `listDir` has none in either. [`fsyncFile` is
+   lowered now — see the amendment under §2's table — so of the two only
+   `listDir` still refuses; the finding stands on `listDir` alone.] The
+   language already refuses a capability at compile time in two places, which is
+   precedent M2 can point at rather than novelty M2 has to argue for.
 
 3. **`extern` under wasi fails at instantiation, not at the call.** The
    provisional cell said "host-dependent", which is true and too weak. Under
@@ -453,13 +466,18 @@ import namespace an `extern` needs.
 
 #### `fsyncFile` is `fs`, not a fifth row
 
-M0 split it out because its answer differs: the direct backend has no lowering
-for it, so `--target wasm` is refused outright. That is a missing lowering — a
+M0 split it out because its answer differs: the direct backend had no lowering
+for it, so `--target wasm` was refused outright. That is a missing lowering — a
 filed regression against the wasm backend — and not a second capability. The
 floor names the capability; the backend keeps its own refusal, and a `wasi`
 artifact that calls `fsyncFile` passes the floor and is then refused by the
 emitter, which is the correct division of labour between a capability rule and a
 lowering gap.
+
+The prediction came due. The lowering landed, the refusal went away, and the
+floor did not change by one line: `fsyncFile` was already the `fs` row's fifth
+name in `floor.rs`, and every capability test kept passing. A capability rule
+that had been written against the gap would have had to be unwritten here.
 
 #### The extern decision, as implemented, and what it actually cost
 

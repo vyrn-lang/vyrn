@@ -12,10 +12,13 @@ python -m http.server 8123   # from the repo root, then open /rfcs/census-0103/c
 <script type="module">
 import { runVyrn } from "../../web/wasi-min.js";
 
-// One program per capability. `cap-fsync` and `cap-listdir` are absent on
-// purpose: neither BUILDS to wasm, so there is no module for a page to load.
+// One program per capability. `cap-listdir` is absent on purpose: it does not
+// BUILD to wasm, so there is no module for a page to load. `cap-fsync` was
+// absent for the same reason and is here now — the direct backend lowers
+// `fsyncFile` (`fd_sync` between an open and a close), so the page has a module.
 const programs = [
   ["cap-fs", {}],
+  ["cap-fsync", {}],
   ["cap-stdin", {}],
   ["cap-args", {}],
   ["cap-stdio", {}],
