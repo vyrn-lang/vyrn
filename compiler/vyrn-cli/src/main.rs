@@ -2856,8 +2856,58 @@ fn add(rest: &[String], _offline: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `vyrn update [alias]` — re-resolve floating refs (all remote deps, or just
-/// one alias) and rewrite their pins.
+/// Fetch every published artifact of one pinned tool and record it in the lock
+/// as `tool:<name>@<version>/<platform> ⇥ url ⇥ sha256` (RFC-0102 M1).
+///
+/// The fetch is the one remote modules already take — `curl -sL --fail`, hash,
+/// `write_blob` — so a tool blob lands in `~/.vyrn/cache/sha256` beside every
+/// other pinned byte and `vyrn vendor` picks it up with no new rule.
+///
+/// Every platform, not just this one: the hash of an artifact is a fact about
+/// the artifact, and a machine that can reach the network can record it for a
+/// machine that cannot. A platform whose artifact does not exist upstream is
+/// reported and skipped rather than fatal — a tool that never shipped an arm64
+/// build must not stop the three platforms it did ship.
+fn update_tool(name: &str, version: &str, lock: &mut remote::Lock) -> Result<(), String> {
+    use vyrn_frontend::toolpin;
+    // A version bump must not leave the old version's lines behind: they would
+    // read as pins nothing points at, and `vyrn vendor` would keep copying them.
+    lock.entries
+        .retain(|k, _| !k.starts_with(&format!("tool:{name}@")));
+    lock.dirty = true;
+    let mut pinned = 0;
+    for platform in toolpin::tool_platforms(name) {
+        let url = toolpin::tool_url(name, version, platform)?;
+        println!("fetching {name} {version} for {platform}");
+        let bytes = match remote::fetch(&url) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("  no artifact for {platform}: {e}");
+                continue;
+            }
+        };
+        let sha = remote::sha256_hex(&bytes);
+        remote::write_blob(&remote::cache_dir(), &sha, &bytes)?;
+        lock.entries.insert(
+            toolpin::tool_spec(name, version, platform),
+            (url, sha.clone()),
+        );
+        println!("  pinned {platform} {sha}");
+        pinned += 1;
+    }
+    if pinned == 0 {
+        return Err(format!(
+            "{name} {version} has no published artifact for any of {} — check the version",
+            toolpin::tool_platforms(name).join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// `vyrn update [alias|tool]` — re-resolve floating refs (all remote deps, or
+/// just one alias) and rewrite their pins; and, for a name in the manifest's
+/// `toolchain`, fetch every platform's published artifact and pin it too
+/// (RFC-0102 M1).
 fn update(alias: Option<&str>) -> ExitCode {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let Some(manifest) = nearest_manifest(&cwd) else {
@@ -2866,6 +2916,12 @@ fn update(alias: Option<&str>) -> ExitCode {
     };
     let (lock_path, project_dir) = lock_home(&format!("{}/vyrn.json", manifest.dir));
     let mut lock = load_lock(lock_path);
+    let tools: Vec<(String, String)> = manifest
+        .toolchain
+        .iter()
+        .filter(|(name, _)| alias.is_none_or(|a| a == name))
+        .cloned()
+        .collect();
     let targets: Vec<(String, String)> = manifest
         .dependencies
         .iter()
@@ -2881,9 +2937,28 @@ fn update(alias: Option<&str>) -> ExitCode {
             (n.clone(), s)
         })
         .collect();
-    if targets.is_empty() {
+    if targets.is_empty() && tools.is_empty() {
+        // A tool the table knows, asked for by name, with nothing in the
+        // manifest to resolve it: "nothing to update" would read as "already up
+        // to date" for what is really a missing declaration.
+        if let Some(a) = alias.filter(|a| vyrn_frontend::toolpin::KNOWN_TOOLS.contains(a)) {
+            eprintln!(
+                "error: vyrn.json declares no `toolchain.{a}` — add it, then run \
+                 `vyrn update {a}` to pin it"
+            );
+            return ExitCode::FAILURE;
+        }
         eprintln!("nothing to update");
         return ExitCode::SUCCESS;
+    }
+    // The tools first, and every platform of each: the lock a team shares is the
+    // lock CI reads, and a lock that only covers the machine that wrote it makes
+    // every other machine take the refusal.
+    for (name, version) in &tools {
+        if let Err(e) = update_tool(name, version, &mut lock) {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
     }
     for (name, spec) in &targets {
         lock.entries.remove(spec);

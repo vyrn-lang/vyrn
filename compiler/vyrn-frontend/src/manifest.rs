@@ -98,6 +98,12 @@ pub struct Manifest {
     pub doc: Json,
     pub main: Option<String>,
     pub dependencies: Vec<(String, String)>,
+    /// RFC-0102 M1: the `toolchain` object — tool name to version string —
+    /// empty when the manifest declares none, which leaves every tool
+    /// discovered exactly as before this key existed. A tool is a dependency,
+    /// so this is read beside `dependencies` and resolved through the same
+    /// lock, the same content-addressed cache and the same `--offline`.
+    pub toolchain: Vec<(String, String)>,
     /// RFC-0072 M1: the declared audience vocabulary, or `None` when the
     /// manifest has no `audience` key — which leaves every module universal and
     /// every import legal, exactly as before this key existed.
@@ -154,16 +160,29 @@ fn from_doc(doc: Json, slash_dir: String) -> Result<Manifest, String> {
         Some(Json::Str(s)) => Some(s.clone()),
         _ => None,
     };
-    let dependencies = match doc.get("dependencies") {
-        Some(Json::Obj(entries)) => entries
-            .iter()
-            .filter_map(|(k, v)| match v {
-                Json::Str(s) => Some((k.clone(), s.clone())),
-                _ => None,
-            })
-            .collect(),
-        _ => Vec::new(),
+    let str_map = |k: &str| -> Vec<(String, String)> {
+        match doc.get(k) {
+            Some(Json::Obj(entries)) => entries
+                .iter()
+                .filter_map(|(k, v)| match v {
+                    Json::Str(s) => Some((k.clone(), s.clone())),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
     };
+    let dependencies = str_map("dependencies");
+    // A tool name the table cannot resolve is refused where it is WRITTEN, not
+    // where it is looked up: a typo that silently declared nothing would leave
+    // the build on PATH with a `toolchain` key in the file saying otherwise,
+    // which is the silent fallback RFC-0102 exists to forbid.
+    let toolchain = str_map("toolchain");
+    for (name, _) in &toolchain {
+        if !crate::toolpin::KNOWN_TOOLS.contains(&name.as_str()) {
+            return Err(crate::toolpin::unknown_tool(name));
+        }
+    }
     // The audience map decides on file identity, so its base is the project
     // directory as the FILESYSTEM names it — an empty walk-up result is the
     // working directory, not the root of everything. The base is canonicalized
@@ -186,6 +205,7 @@ fn from_doc(doc: Json, slash_dir: String) -> Result<Manifest, String> {
         main: str_key("main"),
         native_target: str_key("nativeTarget"),
         dependencies,
+        toolchain,
         audience,
         artifacts,
         dir: slash_dir,
@@ -340,7 +360,12 @@ pub fn gen_cache_put(key: &str, value: &str) {
 ///
 /// `None` is "no copy here, look elsewhere"; `Some(Err)` is "a copy is here and
 /// it is not the pinned content", which is never a reason to keep looking.
-fn read_blob(dir: &Path, sha: &str) -> Option<Result<String, String>> {
+///
+/// The hash check lives HERE, in the bytes core, rather than in the UTF-8
+/// wrapper below: a pinned toolchain archive (RFC-0102) is a tarball, and
+/// "a tampered cache fails loudly" has to stay a property of the cache rather
+/// than of whichever caller happened to want text.
+fn read_blob_bytes(dir: &Path, sha: &str) -> Option<Result<Vec<u8>, String>> {
     let path = dir.join(sha);
     let bytes = std::fs::read(&path).ok()?;
     if crate::hash::sha256_hex(&bytes) != sha {
@@ -350,7 +375,15 @@ fn read_blob(dir: &Path, sha: &str) -> Option<Result<String, String>> {
             path.display()
         )));
     }
-    Some(String::from_utf8(bytes).map_err(|_| "cached module is not UTF-8".to_string()))
+    Some(Ok(bytes))
+}
+
+/// The UTF-8 wrapper the module readers keep using. It sits one level above the
+/// bytes core rather than beside it, because the core's two call sites are the
+/// two halves of [`pinned_blob_bytes`]' lookup and wrapping it twice would be
+/// two answers about what a cached module is.
+fn as_module_text(bytes: Vec<u8>) -> Result<String, String> {
+    String::from_utf8(bytes).map_err(|_| "cached module is not UTF-8".to_string())
 }
 
 /// The pinned content of `sha`, from this project's vendor directory or the user
@@ -361,12 +394,18 @@ fn read_blob(dir: &Path, sha: &str) -> Option<Result<String, String>> {
 /// here, so "a tampered cache fails loudly" is a property of the cache rather
 /// than of whichever program happened to open it.
 pub fn pinned_blob(project_dir: Option<&str>, sha: &str) -> Option<Result<String, String>> {
+    Some(pinned_blob_bytes(project_dir, sha)?.and_then(as_module_text))
+}
+
+/// [`pinned_blob`] without the UTF-8 requirement: a pinned toolchain archive is
+/// not text (RFC-0102). Same lookup, same verification.
+pub fn pinned_blob_bytes(project_dir: Option<&str>, sha: &str) -> Option<Result<Vec<u8>, String>> {
     if let Some(dir) = project_dir {
-        if let Some(r) = read_blob(&vendor_dir(dir), sha) {
+        if let Some(r) = read_blob_bytes(&vendor_dir(dir), sha) {
             return Some(r);
         }
     }
-    read_blob(&cache_dir(), sha)
+    read_blob_bytes(&cache_dir(), sha)
 }
 
 pub fn write_blob(dir: &Path, sha: &str, bytes: &[u8]) -> Result<(), String> {
@@ -469,17 +508,29 @@ mod tests {
         let d = tmp("blob-tamper");
         let sha = crate::hash::sha256_hex(b"the reviewed module");
         std::fs::write(d.join(&sha), b"something else entirely").unwrap();
-        let r = read_blob(&d, &sha).expect("a copy is there");
+        let r = read_blob_bytes(&d, &sha).expect("a copy is there");
         let e = r.unwrap_err();
         assert!(e.contains("does not match its recorded sha256"), "{e}");
     }
 
+    /// The split RFC-0102 M1 needed: the core returns bytes (a pinned toolchain
+    /// archive is a tarball), and text is what the module readers ask of it.
     #[test]
-    fn a_good_blob_reads_back() {
+    fn a_good_blob_reads_back_as_bytes_and_as_text() {
         let d = tmp("blob-good");
         let sha = crate::hash::sha256_hex(b"fn main() {}");
         std::fs::write(d.join(&sha), b"fn main() {}").unwrap();
-        assert_eq!(read_blob(&d, &sha).unwrap().unwrap(), "fn main() {}");
+        let bytes = read_blob_bytes(&d, &sha).unwrap().unwrap();
+        assert_eq!(bytes, b"fn main() {}");
+        assert_eq!(as_module_text(bytes).unwrap(), "fn main() {}");
+
+        // Not-UTF-8 is the wrapper's verdict, never the core's: the same bytes
+        // read fine, and only the text reader refuses them.
+        let sha = crate::hash::sha256_hex(&[0xff, 0xfe]);
+        std::fs::write(d.join(&sha), [0xff, 0xfe]).unwrap();
+        let bytes = read_blob_bytes(&d, &sha).unwrap().unwrap();
+        assert_eq!(bytes, vec![0xff, 0xfe]);
+        assert!(as_module_text(bytes).unwrap_err().contains("not UTF-8"));
     }
 
     // --- the manifest: one canonicalization, at one point in the sequence ----
@@ -550,10 +601,35 @@ mod tests {
 
         let e = from_doc(
             parse(r#"{"artifacts":{"app":{"entry":"x.vyrn","target":"wasm"}}}"#),
-            canon,
+            canon.clone(),
         )
         .err()
         .expect("a target nobody can build for is not a manifest this reads");
         assert!(e.contains("unknown target `wasm`"), "{e}");
+
+        // RFC-0102 M1: a tool nothing can resolve is the same kind of
+        // contradiction, on the same channel — a `toolchain` key that declared
+        // nothing would leave the build on PATH with the file saying otherwise.
+        let m = from_doc(
+            parse(r#"{"toolchain":{"wasmtime":"46.0.1","wasi-sysroot":"25.0"}}"#),
+            canon.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            m.toolchain,
+            vec![
+                ("wasmtime".to_string(), "46.0.1".to_string()),
+                ("wasi-sysroot".to_string(), "25.0".to_string())
+            ]
+        );
+        assert!(from_doc(parse(r#"{"main":"m.vyrn"}"#), canon.clone())
+            .unwrap()
+            .toolchain
+            .is_empty());
+        let e = from_doc(parse(r#"{"toolchain":{"wasmtimee":"46.0.1"}}"#), canon)
+            .err()
+            .expect("a tool the table cannot resolve is not a manifest this reads");
+        assert!(e.contains("unknown tool `wasmtimee`"), "{e}");
+        assert!(e.contains("wasmtime, wasi-sysroot, wasi-builtins"), "{e}");
     }
 }

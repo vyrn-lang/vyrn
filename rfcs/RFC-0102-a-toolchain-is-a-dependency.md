@@ -1,6 +1,8 @@
 # RFC-0102 — A Toolchain Is a Dependency
 
-- **Status:** **Proposed.** No implementation. The document is the deliverable.
+- **Status:** **M1 landed** (the pin, `wasmtime` only). M2–M4 proposed. See
+  "M1 — as landed" under Milestones for what shipped, what it is called, and
+  where the implementation corrected this document.
 - **Depends on:** RFC-0010 M4 (reproducible remote imports — `vyrn.lock`, the
   content-addressed cache under `~/.vyrn`, `vyrn add/update/vendor`, `--offline`),
   RFC-0021 (the generator cache, keyed on its recorded inputs), RFC-0077 M5 (the
@@ -468,6 +470,112 @@ somewhere more useful.
   `read_blob` split to bytes; fetch, verify, unpack to `~/.vyrn/tools/<sha>/`;
   the three-entry table; the honest platform refusal. `wasmtime` only, because it
   is the tool with four versions and the one every parity run needs.
+### M1 — as landed
+
+`compiler/vyrn-frontend/src/toolpin.rs` is the new file: the table, the platform
+vocabulary, the lock specifier, the unpack, and the resolver. It sits in the
+frontend beside `manifest.rs` for the reason `manifest.rs` is there at all — the
+editor reads a pin too, and a second reader of a pin is a second answer about
+what is pinned. `vyrn-cli` is a **binary** crate, so a resolver living there
+would be unreachable from `vyrn-codegen`, which is where discovery already is.
+
+**The manifest key.** `Manifest.toolchain: Vec<(String, String)>`, read beside
+`dependencies` from the same parse. Empty when the key is absent, which is what
+keeps a project with no pin byte-identical to before.
+
+A tool name the table does not know is refused where it is **written**, not
+where it is looked up — `from_doc` returns `Err`, on the channel an unparseable
+manifest already travels:
+
+```text
+unknown tool `wasmtimee` in vyrn.json's `toolchain` — the tools vyrn can pin are
+wasmtime, wasi-sysroot, wasi-builtins
+```
+
+That is a correction to this document, which put the refusal in the resolver. A
+typo that declared nothing would leave the build on PATH with a `toolchain` key
+in the file saying otherwise — the silent fallback the RFC exists to forbid,
+arriving through the spelling rather than through the lookup.
+
+**The lock lines**, as written by `vyrn update wasmtime` and read by `Lock::load`
+with no format change:
+
+```text
+tool:wasmtime@46.0.1/aarch64-linux	https://github.com/bytecodealliance/wasmtime/releases/download/v46.0.1/wasmtime-v46.0.1-aarch64-linux.tar.xz	071c4def…
+tool:wasmtime@46.0.1/aarch64-macos	https://…/wasmtime-v46.0.1-aarch64-macos.tar.xz	acee50be…
+tool:wasmtime@46.0.1/x86_64-linux	https://…/wasmtime-v46.0.1-x86_64-linux.tar.xz	9ae0b17e…
+tool:wasmtime@46.0.1/x86_64-windows	https://…/wasmtime-v46.0.1-x86_64-windows.zip	99f03806…
+```
+
+**Which platforms were recorded, and how.** All four, in one `vyrn update
+wasmtime` run against the real GitHub release: the command fetches every platform
+`tool_platforms` names, hashes each, and writes the blobs into
+`~/.vyrn/cache/sha256`. A hash is a fact about an artifact, so a machine that can
+reach the network records it for a machine that cannot — which is the only way
+the lock CI reads can be the lock a developer wrote. A platform whose asset does
+not exist upstream is reported and skipped; all four exist for wasmtime 46.0.1.
+The four hashes above are that run's output, verified end to end: the Windows zip
+unpacked through `tar` to `~/.vyrn/tools/99f03806…/wasmtime-v46.0.1-x86_64-windows/wasmtime.exe`,
+which reports `wasmtime 46.0.1 (823d1b8f2 2026-06-24)`.
+
+**`read_blob`, as split.** `read_blob_bytes` is the core and keeps the hash
+check; the UTF-8 step is `as_module_text`, applied by `pinned_blob` one level
+**above** the core rather than beside it. This document expected a wrapper at the
+same level; the core's only two call sites turned out to be the two halves of
+`pinned_blob`'s vendor-then-cache lookup, so wrapping it there would have been
+two answers about what a cached module is. `pinned_blob_bytes` is the new public
+reader, and `pinned_blob` is `pinned_blob_bytes` plus the UTF-8 step.
+
+**The discovery order**, in `vyrn-codegen`'s new `wasmtime_from`, which returns
+the path **and why it was chosen** (`"override: environment"`, `"pinned"`,
+`"discovered: tools/"`):
+
+1. `$VYRN_WASMTIME`, when it names a file that exists.
+2. The pin: `toolchain.wasmtime` in the `vyrn.json` governing the directory
+   asked about, resolved through `vyrn.lock` to a hash and through vendor, then
+   cache, to `~/.vyrn/tools/<sha>/`. A pin that cannot be resolved is `Err`.
+3. The `tools/` walk, only when no pin exists.
+
+The reason is *returned*, not printed: the report this RFC designs is `vyrn deps`'
+`toolchain:` section, and that is M3. `find_wasmtime_from` keeps its
+`Option<PathBuf>` signature for the four existing call sites and **panics** on
+`Err`, for the reason `require_tools` panics — a run that silently skips the
+checks a tool exists for is a green run that proves nothing.
+
+The two refusals, verbatim:
+
+```text
+wasmtime 46.0.1 is pinned, and vyrn.lock has no entry for aarch64-windows.
+  Pinned platforms: aarch64-macos, x86_64-linux.
+  Add one with `vyrn update wasmtime`, or point $VYRN_WASMTIME at a binary you trust.
+```
+
+```text
+wasmtime 46.0.1 is pinned for x86_64-windows (sha256 99f0…) but not cached — run
+`vyrn update wasmtime` online, `vyrn vendor`, or drop any copy of the archive with
+that hash into C:/Users/…/.vyrn/cache/sha256
+```
+
+Both are message bodies; the `error: ` prefix in this document's model is the
+caller's, as it is for every other string the frontend hands back. The covered
+platforms print sorted, because the lock is a sorted map.
+
+**Scope, honestly.** Only `wasmtime` is *consumed* through the pin at M1; the
+table's three entries all produce URLs (the wasi-sdk two are `/any`, and their
+URL shape is tested), but nothing resolves them yet — `shim_wasm` and
+`layout_vs_clang` still read `$WASI_SYSROOT` / the `tools/` walk. That is M2.
+This repository still has no root `vyrn.json`, so nothing in it is pinned yet:
+that is M4, and until then every gate below ran through steps 1 and 3 of the
+order exactly as it did before.
+
+**Gates.** Full workspace `cargo test --release`: 1736 passed, 0 failed. Parity
+(`-p vyrn-cli --release --test parity -- --ignored --test-threads=1`) with
+`$VYRN_WASMTIME`, `$WASI_SYSROOT`, `$WASI_BUILTINS` and `VYRN_REQUIRE_TOOLS=1`:
+40 passed, 0 failed — the env overrides still win, which is step 1 of the order
+being exercised by every parity run. `vyrn-lsp`: 76 passed, 0 failed.
+`vyrn-genwasm` and `vyrn-play` (`--target wasm32-unknown-unknown`): compile.
+`cargo fmt --check` on the workspace and all three excluded crates: clean.
+
 - **M2 — the sysroot and the builtins.** The other two table entries, `/any`
   platform. `shim_wasm` and `layout_vs_clang` resolve through the pin.
 - **M3 — the report and the clang key.** `vyrn deps` grows its toolchain
