@@ -767,20 +767,62 @@ pub fn discovered_wasi_sysroot() -> Option<std::path::PathBuf> {
     tools_wasi_sysroot_from(exe.parent()?)
 }
 
-/// A wasmtime executable to run a module with: `$VYRN_WASMTIME`, else the first
-/// `tools/wasmtime-*` directory found walking up from `start`.
+/// A wasmtime executable to run a module with, and WHY that one — the discovery
+/// order RFC-0102 M1 defines:
 ///
-/// The same lookup the parity harness does, in the crate both it and RFC-0077's
-/// tests can see — nothing here needs wasmtime to BUILD, only to check its own
-/// output, so a machine without it skips loudly rather than failing.
-pub fn find_wasmtime_from(start: &Path) -> Option<PathBuf> {
+///   1. `$VYRN_WASMTIME`, the explicit escape hatch, which reports itself.
+///   2. The pin: `toolchain.wasmtime` in `vyrn.json`, resolved through
+///      `vyrn.lock` to a hash and through vendor/cache to an unpacked directory.
+///      A pinned tool that cannot be resolved is `Err` — never a fall-through to
+///      PATH, because the whole value of a pin is that its absence is loud.
+///   3. The `tools/` walk, ONLY when the project declares no pin, so a clone of
+///      a project that never pinned anything behaves exactly as it did.
+///
+/// `Ok(None)` is "nothing pinned and nothing found", which stays a SKIP: nothing
+/// here needs wasmtime to BUILD, only to check its own output.
+pub fn wasmtime_from(start: &Path) -> Result<Option<(PathBuf, &'static str)>, String> {
     if let Some(p) = std::env::var("VYRN_WASMTIME")
         .map(PathBuf::from)
         .ok()
         .filter(|p| p.exists())
     {
-        return Some(p);
+        return Ok(Some((p, "override: environment")));
     }
+    // The pin is the project's, so it is read the way every other manifest rule
+    // is read: by walking up from `start` to the `vyrn.json` that governs it.
+    if let Some(m) = vyrn_frontend::manifest::find(start)? {
+        if let Some((_, version)) = m.toolchain.iter().find(|(n, _)| n == "wasmtime") {
+            let lock = vyrn_frontend::manifest::Lock::in_project(&m.dir)?;
+            let dir =
+                vyrn_frontend::toolpin::pinned_tool(Some(&m.dir), &lock, "wasmtime", version)?;
+            let exe = vyrn_frontend::toolpin::tool_binary(&dir, "wasmtime").ok_or_else(|| {
+                format!(
+                    "the pinned wasmtime {version} archive unpacked to {} with no wasmtime \
+                     binary in it",
+                    dir.display()
+                )
+            })?;
+            return Ok(Some((exe, "pinned")));
+        }
+    }
+    Ok(discovered_wasmtime_from(start).map(|p| (p, "discovered: tools/")))
+}
+
+/// [`wasmtime_from`]'s answer for the callers that only want the path.
+///
+/// A pin that cannot be resolved panics rather than reading as "not installed",
+/// for the reason [`require_tools`] panics: a run that silently skips the checks
+/// a tool exists for is a green run that proves nothing.
+pub fn find_wasmtime_from(start: &Path) -> Option<PathBuf> {
+    match wasmtime_from(start) {
+        Ok(found) => found.map(|(p, _)| p),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+/// The dev-tree wasmtime: the first `tools/wasmtime-*/wasmtime` found walking up
+/// from `start`. Step 3 of the order — consulted only when nothing is pinned.
+fn discovered_wasmtime_from(start: &Path) -> Option<PathBuf> {
     let exe = if cfg!(windows) {
         "wasmtime.exe"
     } else {
