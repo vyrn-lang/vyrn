@@ -1,9 +1,14 @@
 # RFC-0103 — A Target Is a Capability Set
 
-- **Status:** **Proposed.** M0, M1, M2 and M3 landed — the census, the manifest
-  map, the floor check itself, and the remedy, the reframe and the capability
-  axis of `vyrn why`. M4 is open. A milestone that fails its gate says so in
-  this file.
+- **Status:** **Implemented.** Five milestones and five pull requests, and the
+  arc ends where §2 says it should: a target is a capability set nobody can
+  relabel, the census filled every cell by running a program rather than by
+  reading a comment, the floor walks each artifact's closure and prints the
+  chain the author could not see, both fence arms and the floor spell one
+  crossing, `vyrn why` learned the capability axis, and M4 ran the whole thing
+  against `shelf` — where it accepted, refused, and surfaced two defects in how
+  a result is spelled and none in what it decides. A milestone that fails its
+  gate says so in this file.
 - **Depends on:** RFC-0072 (audience — kept, and demoted to what it is),
   RFC-0071 (module contracts and roles, untouched), RFC-0014 (input I/O — the
   builtins the floor watches), RFC-0043 (time/random), RFC-0044 (storage),
@@ -695,3 +700,183 @@ stops.
 compiles with the floor on; one commit in its history introduces a leak and
 shows the rejection. Gate: the leak commit's error message pasted into this
 file, unedited.
+
+### M4 — as landed
+
+**Gate: met.** The leak commit's error is below, unedited, and the branch tip
+checks clean. Two commits:
+
+| commit | subject |
+|---|---|
+| `125e661` | a deliberate leak: a tag snapshot under `shared/` puts a filesystem read two hops from a browser entry nobody edited (RFC-0103 M4) |
+| `c09f359` | the leak removed: the branch tip is green and the refusal stays in the history where the milestone asked for it (RFC-0103 M4) |
+
+No compiler code was touched. This milestone runs M2's check and M3's report
+against a real application and writes down what they say.
+
+#### The leak, and the gate
+
+`shared/snapshot.vyrn` is new and reads `.shelf-tags` with `readFile` — a tag
+line beside the store, so a cold page can show the tag filter before the first
+`books/browse` completes. `shared/util.vyrn`, which `client/boot.vyrn` already
+imports for `splitTrim`, gains one import of it and one helper over it.
+`client/boot.vyrn` is NOT touched by the leak commit: the browser entry's author
+never wrote `readFile`, never named a server directory, and cannot see hop
+three. That is the whole diagnostic's reason to exist, and it is what a real
+change of this shape looks like — the leaking edit is four lines in a helper.
+
+```
+$ cd examples/shelf && vyrn check client/boot.vyrn
+shared/snapshot.vyrn:11:0: artifact `client` (browser) cannot include `shared/snapshot.vyrn`: it reaches the filesystem
+  note: client/boot.vyrn → shared/util.vyrn → shared/snapshot.vyrn
+   = `readFile` needs `fs`; target `browser` has no filesystem
+   = call it through the wire instead: connect("./snapshot")
+```
+
+`vyrn check server.vyrn` is `ok` in the same tree. One project, two artifacts,
+two answers, in an application rather than in a fixture built to be refused.
+
+`vyrn why --capability fs client` in the leaking tree finds the same chain from
+the other direction (the branch was checked out in a worktree, so the absolute
+prefix each `why` prints below is rewritten to the repository's own; nothing
+else in any output on this page is touched):
+
+```
+N:/lang/examples/shelf/client/boot.vyrn
+  artifact: `client` (browser) — target `browser` has no filesystem
+  `readFile` needs `fs` — shared/snapshot.vyrn:11
+    client/boot.vyrn -> shared/util.vyrn -> shared/snapshot.vyrn
+```
+
+#### The floor on `shelf`, before the leak
+
+`examples/shelf/vyrn.json` has declared both artifacts explicitly since M1, so
+the floor is armed for both entries. Both check clean, and all eight
+`vyrn why --capability` answers say the same thing: `shelf` carries none of the
+four capabilities in any module on disk.
+
+```
+$ vyrn why --capability fs server
+N:/lang/examples/shelf/server.vyrn
+  artifact: `server` (native) — target `native` has `fs`
+  nothing in artifact `server`'s closure needs `fs`
+
+$ vyrn why --capability fs client
+N:/lang/examples/shelf/client/boot.vyrn
+  artifact: `client` (browser) — target `browser` has no filesystem
+  nothing in artifact `client`'s closure needs `fs`
+
+$ vyrn why --capability extern server
+N:/lang/examples/shelf/server.vyrn
+  artifact: `server` (native) — target `native` has no host to import from
+  nothing in artifact `server`'s closure needs `extern`
+
+$ vyrn why --capability extern client
+N:/lang/examples/shelf/client/boot.vyrn
+  artifact: `client` (browser) — target `browser` has `extern`
+  nothing in artifact `client`'s closure needs `extern`
+```
+
+`stdin` and `args` answer "nothing … needs" for both artifacts too.
+
+#### What the dogfood surfaced
+
+Four things, three of them corrections to what this document or its milestone
+brief assumed.
+
+**1. `shelf` never touches the filesystem.** The milestone was written expecting
+the server artifact to carry `fs` through `std/storage`. It does not: the shelf
+store is module state — three seed books in an `Array<Book>` — and nothing in
+the project imports `std/storage` or names an I/O builtin. `examples/bin` is the
+persistent dogfood app; `shelf` is the fullstack one. So the floor's answer for
+the shipped `shelf` is "no capability required anywhere", which is the least
+interesting true answer and had to be measured to be known.
+
+**2. `vyrn why --capability` cannot see a generated module, and the check can.**
+The report reads the project's SOURCES through `project_imports` /
+`project_sources` (an M3 decision, made so the command answers for an artifact
+that does not compile). Generated modules are produced by the loader, so they
+are not on disk and never enter the report's graph. `shelf`'s client imports
+`client("../server/api")`, whose generated module declares the `vyrnRpcCall`
+`extern` — the very import M0 counted and M2 priced — and the report says
+`nothing in artifact 'client's closure needs 'extern'`.
+
+The check itself is not fooled. Retargeting that entry to `native` for one run
+(dropping the `client` sugar key so the explicit artifact is the only reading of
+the file) produces:
+
+```
+generated by client("../server/api") at client/boot.vyrn:37:0: artifact `app2` (native) cannot include `generated by client("../server/api") at client/boot.vyrn`: it imports a host function
+  note: client/boot.vyrn → generated by client("../server/api") at client/boot.vyrn
+   = `vyrnRpcCall` needs `extern`; target `native` has no host to import from
+```
+
+So the gate M3 claimed — "the report cannot drift from the check because it is
+the check's own reading" — is true of the VOCABULARY and the CARRIERS, and false
+of the GRAPH. `floor::carried` is shared; the module set is not. The report
+under-reports exactly the capability whose carriers are written by generators
+rather than by authors, which is the one class of leak nobody can find by
+reading their own source. Filed, not fixed here.
+
+**3. The fence answers first, so a leak into `server/` never reaches the
+floor.** The brief asked for a chain shaped `client → shared → server module`.
+In `shelf` that shape cannot produce a floor diagnostic, because `shelf` also
+declares an `audience` map and the audience check runs per import EDGE during
+the link while the floor runs on the finished graph. Putting the same
+`readFile` helper in `server/snapshot.vyrn` and importing it from
+`shared/util.vyrn` gives:
+
+```
+shared/util.vyrn:6:0: `shared/util.vyrn` is universal and cannot import `server/snapshot.vyrn`, which is server-only
+  note: audience `server` is declared by vyrn.json:audience.server — call it through `connect("server/snapshot")` instead; the importer's own audience comes from path segment `shared` (vyrn.json audience.universal)
+```
+
+This is the correct outcome and worth stating plainly: where both layers are
+declared, the fence catches the labelled crossings first and the floor is what
+remains underneath. `examples/leak` declares no `audience` key, which is why it
+demonstrates the floor alone. The leak that lands here is therefore in a place
+the fence permits — `shared/` is universal by the project's own manifest, and a
+tag-snapshot reader is a plausible thing to put there. Nothing about that path
+is mislabelled. The file is still unreadable in a browser, and only the floor
+says so. That is the RFC's thesis with the labels all correct.
+
+**4. A remedy's spelling depends on the working directory `vyrn` was run
+from — M3's gate is narrower than it claimed.** `floor::spec_from` compares two
+module keys segment by segment and falls back to the module key itself when the
+two share no FIRST segment. Module keys are as relative as the path the CLI was
+handed (`audience::relative_to` says so), so the fallback fires whenever the
+command is run from inside the project and the two files sit in different
+top-level directories. M2's own example shows it:
+
+```
+$ cd examples/leak && vyrn check client/boot.vyrn
+   = call it through the wire instead: connect("server/db")
+
+$ cd .. && vyrn check leak/client/boot.vyrn
+   = call it through the wire instead: connect("../server/db")
+```
+
+The second is right. The first names `shared/server/db` to a reader of
+`shared/format.vyrn`, which is a module the project does not have — the exact
+failure M3's gate was written to end, surviving in the one invocation a
+developer is most likely to make. It is a real defect and it is recorded rather
+than fixed, because M4 is the milestone that runs the thing and this file is
+where a milestone says what it found. The fix belongs where `spec_from` can see
+the project base.
+
+M4 found no defect in the floor's own decision. The check accepted what should
+be accepted and refused what should be refused, on an application, with the
+fence live beside it — and both flaws it did surface are in how the result is
+SPELLED, not in what it decides.
+
+#### The gate, measured
+
+| evidence | result |
+|---|---|
+| `vyrn check` at the leak commit (`examples/shelf/client/boot.vyrn`) | refused, the message above, exit 1 |
+| `vyrn check` at the leak commit (`examples/shelf/server.vyrn`) | `ok`, exit 0 |
+| `vyrn check` at the branch tip, both `shelf` entries | `ok` / exit 0, both |
+| `vyrn test examples/shelf/client/boot.vyrn` at the tip | 3 passed, 0 failed |
+| `cargo test --release` (workspace) | 1727 passed, 0 failed, 69 ignored — unchanged from M3 |
+| `cargo fmt --check` (workspace + `vyrn-lsp`, `vyrn-genwasm`, `vyrn-play`) | clean |
+| `vyrn fmt --check` on both files the leak commit touched | clean |
