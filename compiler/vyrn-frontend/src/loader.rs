@@ -771,6 +771,46 @@ pub fn last_module_hashes() -> HashMap<String, String> {
     MODULE_HASHES.with(|m| m.borrow().clone())
 }
 
+/// The floor's [`crate::floor::Graph`] for a linked load — every module the
+/// artifact contains, INCLUDING the ones no resolver could read: a generator's
+/// output (RFC-0021) and the runtime modules a builtin's desugar injects
+/// (RFC-0078).
+fn floor_graph(modules: &mut [Module]) -> crate::floor::Graph {
+    modules
+        .iter_mut()
+        .map(|m| {
+            (
+                m.key.clone(),
+                m.import_targets.clone(),
+                crate::floor::carried(&mut m.program),
+            )
+        })
+        .collect()
+}
+
+/// The floor's graph and the load's root key — what `vyrn why --capability`
+/// reports over.
+///
+/// The same function the check walks ([`floor_graph`]), so the report cannot
+/// under-report a capability that a GENERATED module carries: an rpc or connect
+/// client stub declares the `vyrnRpcCall` `extern` that no author wrote and no
+/// reading of the project's own files can find (RFC-0103 M4 finding 2).
+///
+/// The two policies that refuse over this graph are the caller's to arm. A
+/// report has to be able to answer for the tree you are asking about, which is
+/// usually the one that was just refused, so `vyrn why` clears `opts.audience`
+/// and `opts.artifacts` and gets the graph instead of the objection.
+pub fn capability_graph(
+    root_source: &str,
+    root_path: &str,
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+) -> Result<(crate::floor::Graph, String), Vec<Diagnostic>> {
+    let (mut modules, root_key, _, _) =
+        load_modules(root_source, root_path, opts, resolver).map_err(|(d, _)| d)?;
+    Ok((floor_graph(&mut modules), root_key))
+}
+
 fn graph_of(modules: &[Module]) -> ModuleGraph {
     modules
         .iter()
@@ -1362,16 +1402,7 @@ fn load_modules(
     // per-edge one (audience's shape), because the question is what the program
     // NEEDS, and no single import edge knows that.
     if let Some(map) = &opts.artifacts {
-        let graph: Vec<(String, Vec<String>, Vec<crate::floor::Carried>)> = modules
-            .iter_mut()
-            .map(|m| {
-                (
-                    m.key.clone(),
-                    m.import_targets.clone(),
-                    crate::floor::carried(&mut m.program),
-                )
-            })
-            .collect();
+        let graph = floor_graph(&mut modules);
         if let Some(mut d) = crate::floor::objection(&graph, &root_key, map) {
             if d.file.as_deref() == Some(root_key.as_str()) {
                 d.file = None;
