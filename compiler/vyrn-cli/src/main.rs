@@ -31,7 +31,10 @@
 //!                                        one `.md` per module + `index.md` (default `docs/api/`).
 //!                                        `--std` documents the std library; `--verify` exits 1 on drift.
 //!   vyrn new     <name>                 Scaffold a project (vyrn.json + src/main.vyrn).
-//!   vyrn deps                           Print the resolved module graph.
+//!   vyrn deps                           Print the resolved module graph, then a `toolchain:`
+//!                                        section: one row per tool (clang, wasmtime, wasi-sysroot,
+//!                                        wasi-builtins) with the path that would be used, its
+//!                                        version, and why that path was chosen (RFC-0102 M3).
 //!   vyrn why     --contract <file>      Print the contract governing a module (RFC-0071)
 //!   vyrn fix     [file.vyrn]            Apply the `.copy()` fixes the move diagnostics name.
 //!   vyrn why     --memory <file>        Print what is reclaimed, and why not (RFC-0087 U1)
@@ -54,8 +57,9 @@ use std::process::{Command, ExitCode};
 
 // The C shim and clang discovery live in `vyrn-codegen`, which both this driver
 // and the excluded `vyrn-genwasm` can see (RFC-0076 M4). The wasi-sysroot and
-// builtins lookups are still there, but this driver no longer needs them: after
-// RFC-0077 M5 nothing here compiles C for wasm — the generator engine does.
+// builtins lookups are still there, but this driver no longer needs them to
+// BUILD: after RFC-0077 M5 nothing here compiles C for wasm — the generator
+// engine does. `vyrn deps` reads all four to REPORT them (RFC-0102 M3).
 use vyrn_codegen::toolchain::{extern_trap_stubs, find_clang, runtime_shim};
 
 /// RFC-0076: generators compiled to wasm instead of interpreted. Behind a
@@ -1721,7 +1725,135 @@ fn vyx_script_body(text: &str) -> Option<String> {
     Some(text[start..end].to_string())
 }
 
-/// `vyrn deps` — print the resolved module graph of the project's main.
+/// One `toolchain:` row: the tool, the path that would be used, its version,
+/// and why that path was chosen.
+type ToolRow = (String, String, String, String);
+
+/// A row for a tool resolved by one of `vyrn-codegen`'s `*_from` resolvers,
+/// which answer with the path AND the reason (RFC-0102 M1/M2).
+///
+/// The version column is the pin for a pinned tool, because that is where the
+/// version is written down, and `unknown` otherwise: an override and a `tools/`
+/// walk both name a path nobody declared a version for, and running each tool to
+/// ask would spend four spawns on a report. clang is the exception, and it is
+/// the exception because its probe was already being run and thrown away.
+fn tool_row(
+    name: &str,
+    found: Result<Option<(std::path::PathBuf, &'static str)>, String>,
+    pin: Option<&str>,
+    consulted: &str,
+) -> ToolRow {
+    let unknown = || vyrn_codegen::toolchain::UNKNOWN_VERSION.to_string();
+    match found {
+        Ok(Some((path, why))) => {
+            let version = match why {
+                "pinned" => pin
+                    .unwrap_or(vyrn_codegen::toolchain::UNKNOWN_VERSION)
+                    .into(),
+                _ => unknown(),
+            };
+            (name.into(), show_path(&path), version, why.into())
+        }
+        Ok(None) => (
+            name.into(),
+            "not found".into(),
+            unknown(),
+            format!("not found: {consulted}"),
+        ),
+        // A pin that cannot be resolved is a refusal everywhere else, and a
+        // report that omitted it would be the silent fallback this RFC exists to
+        // forbid. It prints, with the refusal's own words on one line.
+        Err(e) => (
+            name.into(),
+            "unresolved".into(),
+            pin.unwrap_or(vyrn_codegen::toolchain::UNKNOWN_VERSION)
+                .into(),
+            format!(
+                "pinned, unresolved: {}",
+                e.split_whitespace().collect::<Vec<_>>().join(" ")
+            ),
+        ),
+    }
+}
+
+/// A path as this repository writes paths: forward slashes, on every host.
+fn show_path(p: &Path) -> String {
+    p.to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .replace('\\', "/")
+}
+
+/// The `toolchain:` section of `vyrn deps` (RFC-0102 M3): one row per tool, with
+/// the path that would be used, its version, and WHY that path was chosen.
+///
+/// This is the report the RFC designs, and it lives under `vyrn deps` rather
+/// than under a `vyrn doctor` because the RFC's whole thesis is that a tool is
+/// one of the things a build depends on — a second command would contradict the
+/// title. The third column is the one that matters: an override prints as an
+/// override, so a machine that disagrees with CI says which line it disagreed
+/// on.
+///
+/// Nothing here touches the network: a pin resolves through vendor and the
+/// content-addressed cache, and an unresolved one prints as unresolved.
+fn print_toolchain(start: &Path) {
+    let pins = nearest_manifest(start)
+        .map(|m| m.toolchain)
+        .unwrap_or_default();
+    let pin = |tool: &str| {
+        pins.iter()
+            .find(|(n, _)| n == tool)
+            .map(|(_, v)| v.to_string())
+    };
+    let mut rows: Vec<ToolRow> = Vec::new();
+    // clang is discovered, never pinned — RFC-0102 says why — so it is the one
+    // row whose version is a probe rather than a declaration.
+    rows.push(match vyrn_codegen::toolchain::clang_from() {
+        Some((path, version, why)) => ("clang".into(), show_path(&path), version, why.into()),
+        None => tool_row("clang", Ok(None), None, "$CLANG, PATH"),
+    });
+    rows.push(tool_row(
+        "wasmtime",
+        vyrn_codegen::toolchain::wasmtime_from(start),
+        pin("wasmtime").as_deref(),
+        "$VYRN_WASMTIME, tools/",
+    ));
+    let sysroot = vyrn_codegen::toolchain::wasi_sysroot_from(start);
+    let sysroot_path = match &sysroot {
+        Ok(Some((p, _))) => p.clone(),
+        _ => PathBuf::new(),
+    };
+    rows.push(tool_row(
+        "wasi-sysroot",
+        sysroot,
+        pin("wasi-sysroot").as_deref(),
+        "$WASI_SYSROOT, tools/",
+    ));
+    rows.push(tool_row(
+        "wasi-builtins",
+        vyrn_codegen::toolchain::wasi_builtins_from(start, &sysroot_path),
+        pin("wasi-builtins").as_deref(),
+        "$WASI_BUILTINS, beside the sysroot",
+    ));
+
+    // The name and path columns are padded; the version column is not. A clang
+    // version line runs past a hundred characters on an upstream build, and
+    // padding every other row out to it would spend a screen of spaces to align
+    // one parenthesis.
+    let width = |col: fn(&ToolRow) -> &String| {
+        rows.iter()
+            .map(|r| col(r).chars().count())
+            .max()
+            .unwrap_or(0)
+    };
+    let (w0, w1) = (width(|r| &r.0), width(|r| &r.1));
+    println!("toolchain:");
+    for (name, path, version, why) in &rows {
+        println!("  {name:w0$}  {path:w1$}  {version}  ({why})");
+    }
+}
+
+/// `vyrn deps` — print the resolved module graph of the project's main, then the
+/// toolchain that would build it (RFC-0102 M3).
 fn deps() -> ExitCode {
     let Some(main) = manifest_main() else {
         eprintln!("error: no vyrn.json with a `main` found upward from here");
@@ -1744,6 +1876,7 @@ fn deps() -> ExitCode {
                     println!("  -> {i}");
                 }
             }
+            print_toolchain(Path::new(&root_key).parent().unwrap_or(Path::new(".")));
             ExitCode::SUCCESS
         }
         Err(diags) => {

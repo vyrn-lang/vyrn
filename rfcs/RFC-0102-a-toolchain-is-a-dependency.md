@@ -1,8 +1,9 @@
 # RFC-0102 — A Toolchain Is a Dependency
 
-- **Status:** **M2 landed** (the pin, all three tools). M3–M4 proposed. See
-  "M1 — as landed" and "M2 — as landed" under Milestones for what shipped, what
-  it is called, and where the implementation corrected this document.
+- **Status:** **M3 landed** (the pin, all three tools; the report and the clang
+  key). M4 proposed. See "M1 — as landed", "M2 — as landed" and "M3 — as landed"
+  under Milestones for what shipped, what it is called, and where the
+  implementation corrected this document.
 - **Depends on:** RFC-0010 M4 (reproducible remote imports — `vyrn.lock`, the
   content-addressed cache under `~/.vyrn`, `vyrn add/update/vendor`, `--offline`),
   RFC-0021 (the generator cache, keyed on its recorded inputs), RFC-0077 M5 (the
@@ -677,6 +678,137 @@ x86_64-linux branch failed CI for lacking.
 - **M3 — the report and the clang key.** `vyrn deps` grows its toolchain
   section; `find_clang` captures its version; that version joins the shim cache
   key.
+### M3 — as landed
+
+**The version, captured.** `clang_from` is `wasmtime_from`'s shape for the one
+tool this RFC does not pin: it answers with the path, the version and **why that
+path** — `"override: environment"` for `$CLANG`, `"discovered: PATH"`, and
+`"discovered: C:\Program Files\LLVM\bin\clang.exe"` for the Windows last resort,
+which is one literal spelled once (a `windows_clang!` macro), because a reason
+that disagrees with the path it explains is worse than no reason. `find_clang` is
+now `clang_from().map(|(p, _, _)| p)` and its four call sites are unchanged.
+
+The version is **the first line of `clang --version`, trimmed** — whatever the
+vendor prints. Apple, Ubuntu and upstream word that line differently, and this
+document's model row (`clang 22.1.0`) would have been this repository inventing
+a version number for a compiler it did not build. What the gate machine reports
+is `clang version 22.1.0 (https://github.com/llvm/llvm-project 4434dabb…)`, and
+that whole string is what the column and the key carry.
+
+`clang_from` is **memoized** for the process. That is not a new cost avoided, it
+is an old one removed: `find_clang` spawned `clang --version` on *every* call
+before M3, and it is now spawned once. The memo is what makes reading the
+compiler before the shim cache lookup free.
+
+**The cache key**, Exhibit 5 closed:
+
+```text
+shim-<sha256(shim source)>-<SHIM_BASE>-clang<sha256(version line)[..16]>.wasm
+```
+
+The compiler enters as a hash of the version line rather than as the line,
+because a key is a **filename** and a clang version line carries spaces,
+parentheses and a URL. That is a correction to this document's wording ("that
+string joins the cache key"): the string decides the key, and sixteen hex digits
+of it are what is spelled. `shim_key_clang_component` is public so a check can
+assert the key CONTAINS the compiler rather than merely that it changed.
+
+One behaviour did change, and it is stated rather than buried: **`shim_wasm`
+reads clang before it consults the cache**, so a machine with no clang and a
+warm shim cache now gets `None` where it used to get the cached module. That is
+the point of the exhibit — a cached artifact that cannot be attributed to any
+compiler is the stale answer the key exists to prevent — and every other path is
+identical: no clang has always meant no shim compile, and `find_clang() == None`
+still DECLINEs in the direct backend exactly as `direct.rs:276` describes.
+
+**The report.** `vyrn deps` prints the module graph, then:
+
+```text
+toolchain:
+  clang          clang      clang version 22.1.0 (https://github.com/llvm/llvm-project 4434dabb69916856b824f68a64b029c67175e532)  (discovered: PATH)
+  wasmtime       not found  unknown  (not found: $VYRN_WASMTIME, tools/)
+  wasi-sysroot   not found  unknown  (not found: $WASI_SYSROOT, tools/)
+  wasi-builtins  not found  unknown  (not found: $WASI_BUILTINS, beside the sysroot)
+```
+
+That is a project with **no** `toolchain` key, which is every project in this
+repository today: the walk and PATH are still answers, and a tool that resolves
+to nothing prints the chain that was consulted rather than being omitted. The
+same project pinning `"wasmtime": "46.0.1"`, with the lock line M1 recorded and
+the blob in the content-addressed cache:
+
+```text
+toolchain:
+  clang          clang                                                                                                                                     clang version 22.1.0 (https://github.com/llvm/llvm-project 4434dabb69916856b824f68a64b029c67175e532)  (discovered: PATH)
+  wasmtime       C:/Users/demko/.vyrn/tools/99f038066b16cb3aaf63c1d282a9d7ba7befafbadf7aa8827cc4c712d96bc31a/wasmtime-v46.0.1-x86_64-windows/wasmtime.exe  46.0.1  (pinned)
+  wasi-sysroot   not found                                                                                                                                 unknown  (not found: $WASI_SYSROOT, tools/)
+  wasi-builtins  not found                                                                                                                                 unknown  (not found: $WASI_BUILTINS, beside the sysroot)
+```
+
+And that same pinned project with `$VYRN_WASMTIME` set over the pin — the line a
+machine that disagrees with CI points at:
+
+```text
+toolchain:
+  clang          clang                                                       clang version 22.1.0 (https://github.com/llvm/llvm-project 4434dabb69916856b824f68a64b029c67175e532)  (discovered: PATH)
+  wasmtime       N:/lang/tools/wasmtime-v46.0.1-x86_64-windows/wasmtime.exe  unknown  (override: environment)
+  wasi-sysroot   not found                                                   unknown  (not found: $WASI_SYSROOT, tools/)
+  wasi-builtins  not found                                                   unknown  (not found: $WASI_BUILTINS, beside the sysroot)
+```
+
+**Three corrections to the model block**, all visible above:
+
+1. The path column prints the **path**, not the variable name. This document's
+   model shows `$WASI_SYSROOT`, which says which step answered and hides which
+   file it answered with. The reason column already says the step, so printing
+   the variable twice would cost the one fact the row exists to carry.
+2. The version column is **not padded**. A clang version line runs past a
+   hundred characters, and aligning every other row to it spends a screen of
+   spaces on one parenthesis. Name and path are padded; the version is not.
+3. A pin that cannot be resolved prints as a row, not as an error: path
+   `unresolved`, the pinned version, and `(pinned, unresolved: <the refusal, on
+   one line>)`. A report that omitted it would be the silent fallback this RFC
+   exists to forbid, arriving through the reporter.
+
+The version column is the pin for a pinned tool — the manifest is where a
+version is written down — and `unknown` for an override or a walk, which is what
+this document's model already showed. clang is the exception because its probe
+was already being run and thrown away; running the other three to ask would
+spend four spawns on a report.
+
+**What `vyrn deps` still needs, and does not have.** It requires a manifest with
+a `main`, and **no example project in this repository declares one** — they
+declare `artifacts`, or the `server`/`client` sugar RFC-0103 M1 made of them. So
+the "no toolchain key" output above is a scaffolded project, not
+`examples/shelf`. Teaching `deps` to take an artifact entry is a separate change
+and is not made here; the toolchain section is unaffected by it either way.
+
+**Gates.** Full workspace `cargo test --release`: 1737 passed, 0 failed. Parity
+(`-p vyrn-cli --release --test parity -- --ignored --test-threads=1`) with
+`$VYRN_WASMTIME`, `$WASI_SYSROOT`, `$WASI_BUILTINS` and `VYRN_REQUIRE_TOOLS=1`:
+40 passed, 0 failed. The codegen ignored tier (`-p vyrn-codegen -- --ignored`)
+with the same four variables, run with `~/.vyrn/cache/shim` **deleted first** so
+the compile was real: 9 passed, 0 failed (`layout_vs_clang` 1, `shim_link` 2,
+`wasm_runs` 5, plus one unrelated corpus check), and the cache came back holding
+exactly
+
+```text
+shim-fcebe7fa226239cb3bcbd3034de06d01021dc6a84573894965fdf3d15c9162ac-33554432-clanged0eb075dbe2df0a.wasm
+```
+
+— the compiler component present in the name of the module `shim_link`
+instantiated. `vyrn-lsp`: 76 passed, 0 failed. `vyrn-genwasm` and `vyrn-play`
+(`--target wasm32-unknown-unknown`): compile. `cargo fmt --check` on the
+workspace and all three excluded crates: clean.
+
+The new checks follow M2's rule. The clang half joins `toolchain_pin.rs`'s single
+`#[test]` because `$CLANG` is step 1 there too, and a second test setting it
+beside the first is the same `set_var` race. The `vyrn deps` half is in
+`vyrn-cli/tests/project.rs`, where every case runs `vyrn` as a **child** process,
+so the override is set on the child and no thread in this process reads a
+variable another wrote. Neither has a host-only branch: a machine with clang and
+one without both get an assertion, and the key component is a pure function of a
+string.
 - **M4 — CI consumes the pin.** Delete `ci.yml:236-243`, `:251`, `:277-284` and
   `common/mod.rs:266`. Cache `~/.vyrn/tools` on the lock's hash. The acceptance
   test is a version bump: one edit to `vyrn.json`, one `vyrn update`, and no

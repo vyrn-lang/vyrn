@@ -85,6 +85,103 @@ fn bare_specifiers_resolve_through_the_manifest() {
     assert!(text.contains("-> "), "{text}");
 }
 
+/// RFC-0102 M3: the `toolchain:` section — a row per tool, with the path that
+/// would be used, its version, and WHY that path was chosen.
+///
+/// Every case runs `vyrn` as a CHILD process, so the environment override is set
+/// on the child rather than on this one: `set_var` beside another test thread's
+/// `getenv` is the race M2's codegen checks avoid by living in one `#[test]`.
+///
+/// No host-only branch: a machine with clang and one without both print a clang
+/// row, and what is asserted is the shape of the report, not which tools this
+/// runner happens to have.
+#[test]
+fn deps_reports_the_toolchain_and_why() {
+    let dir = scratch("toolchain");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("vyrn.json"),
+        r#"{"name": "t", "main": "src/main.vyrn"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.vyrn"),
+        "fn main() -> Int64 { return 0 }\n",
+    )
+    .unwrap();
+
+    // (a) No `toolchain` key: every row is a discovery, and the report says so.
+    // `VYRN_WASMTIME` is removed from the CHILD because CI exports it for the
+    // jobs that need a runtime, and step 1 would otherwise answer every case.
+    let out = vyrn()
+        .current_dir(&dir)
+        .env_remove("VYRN_WASMTIME")
+        .arg("deps")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("toolchain:"), "{text}");
+    for tool in ["clang", "wasmtime", "wasi-sysroot", "wasi-builtins"] {
+        assert!(
+            text.lines().any(|l| l.trim_start().starts_with(tool)),
+            "no row for {tool}: {text}"
+        );
+    }
+    // Nothing is pinned here, so no row may claim to be.
+    assert!(!text.contains("(pinned)"), "{text}");
+
+    // (b) A pin whose bytes are not cached: the row prints the refusal rather
+    // than being omitted, and `deps` still answers.
+    std::fs::write(
+        dir.join("vyrn.json"),
+        r#"{"name": "t", "main": "src/main.vyrn", "toolchain": {"wasmtime": "46.0.1"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("vyrn.lock"),
+        format!(
+            "tool:wasmtime@46.0.1/x86_64-linux\thttps://example.invalid/w\t{}\n",
+            "d".repeat(64)
+        ),
+    )
+    .unwrap();
+    let out = vyrn()
+        .current_dir(&dir)
+        .env_remove("VYRN_WASMTIME")
+        .arg("deps")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    let row = row_for(&text, "wasmtime");
+    assert!(row.contains("unresolved"), "{row}");
+    assert!(row.contains("46.0.1"), "{row}");
+
+    // (c) The environment override beats the pin, and prints AS an override —
+    // the line a machine that disagrees with CI points at.
+    let hatch = PathBuf::from(env!("CARGO_BIN_EXE_vyrn"));
+    let out = vyrn()
+        .current_dir(&dir)
+        .env("VYRN_WASMTIME", &hatch)
+        .arg("deps")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    let row = row_for(&text, "wasmtime");
+    assert!(row.contains("(override: environment)"), "{row}");
+    assert!(!row.contains("(pinned)"), "{row}");
+}
+
+/// The `toolchain:` row for one tool, for a check that wants the whole line.
+fn row_for(text: &str, tool: &str) -> String {
+    text.lines()
+        .find(|l| l.trim_start().starts_with(tool))
+        .unwrap_or_else(|| panic!("no {tool} row in:\n{text}"))
+        .to_string()
+}
+
 #[test]
 fn unknown_bare_specifier_names_the_manifest_fix() {
     let dir = scratch("unknown");

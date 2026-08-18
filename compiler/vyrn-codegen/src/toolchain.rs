@@ -979,30 +979,86 @@ pub fn builtins_near_sysroot(sysroot: &Path) -> Option<std::path::PathBuf> {
     hits.into_iter().next()
 }
 
+/// The Windows last resort, spelled once: the path and the reason that names it
+/// are the same string, because a reason that disagrees with the path it
+/// explains is worse than no reason at all.
+macro_rules! windows_clang {
+    () => {
+        r"C:\Program Files\LLVM\bin\clang.exe"
+    };
+}
+
 /// Locate a clang executable: `$CLANG`, then PATH, then the default Windows
 /// install location.
 pub fn find_clang() -> Option<PathBuf> {
+    clang_from().map(|(p, _, _)| p)
+}
+
+/// The clang a build will run, the version it reports, and WHY that one —
+/// [`wasmtime_from`]'s shape for the one tool RFC-0102 does not pin.
+///
+/// clang stays discovered because a native clang links against the host's libc,
+/// linker and system libraries: there is no portable tarball that produces a
+/// working native binary everywhere, and a pin that failed at LINK time instead
+/// of at resolve time would be worse than no pin. So it is recorded rather than
+/// pinned — the version is captured, it enters [`shim_wasm`]'s cache key, and
+/// `vyrn deps` prints all three columns.
+///
+/// Memoized for the process: `--version` is a spawn, this is called on the shim
+/// cache's hit path, and the answer cannot change under a running compiler. It
+/// is also strictly cheaper than what it replaces, which spawned the same probe
+/// on every call.
+pub fn clang_from() -> Option<(PathBuf, String, &'static str)> {
+    static FOUND: std::sync::OnceLock<Option<(PathBuf, String, &'static str)>> =
+        std::sync::OnceLock::new();
+    FOUND.get_or_init(discover_clang).clone()
+}
+
+/// The first line of `clang --version`, trimmed, or `unknown` when the probe
+/// says nothing. Whatever the vendor prints is the version: Apple, Ubuntu and
+/// upstream all word that line differently, and normalizing it here would be
+/// this repository inventing a version number for a compiler it did not build.
+fn clang_version(exe: &Path) -> String {
+    Command::new(exe)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| first_line(&o.stdout))
+        .unwrap_or_else(|| UNKNOWN_VERSION.to_string())
+}
+
+/// What a version column says when nothing knows the answer. One spelling, used
+/// by the probe here and by `vyrn deps` for every tool that reports no version.
+pub const UNKNOWN_VERSION: &str = "unknown";
+
+fn first_line(out: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(out);
+    let line = text.lines().next()?.trim().to_string();
+    (!line.is_empty()).then_some(line)
+}
+
+fn discover_clang() -> Option<(PathBuf, String, &'static str)> {
     if let Ok(c) = std::env::var("CLANG") {
         let p = PathBuf::from(c);
         if p.exists() {
-            return Some(p);
+            let v = clang_version(&p);
+            return Some((p, v, "override: environment"));
         }
     }
-    // Trust PATH: if `clang --version` runs, use the bare name.
-    if Command::new("clang")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        return Some(PathBuf::from("clang"));
+    // Trust PATH: if `clang --version` runs, use the bare name. The output was
+    // thrown away until RFC-0102 M3; only the pipe is new.
+    if let Ok(out) = Command::new("clang").arg("--version").output() {
+        if out.status.success() {
+            let v = first_line(&out.stdout).unwrap_or_else(|| UNKNOWN_VERSION.to_string());
+            return Some((PathBuf::from("clang"), v, "discovered: PATH"));
+        }
     }
     if cfg!(windows) {
-        let default = PathBuf::from(r"C:\Program Files\LLVM\bin\clang.exe");
+        let default = PathBuf::from(windows_clang!());
         if default.exists() {
-            return Some(default);
+            let v = clang_version(&default);
+            return Some((default, v, concat!("discovered: ", windows_clang!())));
         }
     }
     None
@@ -1019,29 +1075,56 @@ pub fn find_clang() -> Option<PathBuf> {
 /// a memory map that can disagree with itself. `vyrn-genwasm` adds the cranelift
 /// half on top and keeps its own artifact cache for that.
 ///
-/// Cached on disk keyed by the shim source and the base address, because it is
+/// Cached on disk keyed by the shim source, the base address and the compiler
+/// (see [`shim_key`]), because it is
 /// byte-identical for every consumer and costs ~600 ms to produce. `None` is
 /// always "no split build available", never an error: a missing toolchain, or a
 /// shim that will not compile, means the caller falls back to the shape it had.
 /// The `gen_host` variant is gone with RFC-0076 M7: the generation engine emits
 /// its own module through the direct backend, so nothing links this shim against
 /// the `vyrn_gen` namespace and nothing defines `-DVYRN_GEN_HOST`.
-pub fn shim_wasm() -> Option<PathBuf> {
-    // Keyed on what was compiled and where it was told to put it. Not on the
-    // compiler build: unlike a cranelift artifact these are plain wasm bytes,
-    // and the shim source hash is what decides them.
-    let key = format!(
-        "shim-{}-{}.wasm",
+/// The shim's cache-key filename: the shim source, the base address it is told
+/// to put its frames at, and the compiler that turns the first into a module at
+/// the second.
+///
+/// The compiler is there because RFC-0102 Exhibit 5 says a cache key that omits
+/// an input is a cache that serves a stale answer: upgrade clang, and before M3
+/// the key still hit and the build linked a shim the new compiler never saw.
+///
+/// It enters as a hash of the version line rather than as the line, because a
+/// key is a FILENAME and a clang version line carries spaces, parentheses and —
+/// on upstream builds — a URL. Sixteen hex digits of it, which is what the
+/// module cache already spends on a source hash.
+fn shim_key(clang_version: &str) -> String {
+    format!(
+        "shim-{}-{}-{}.wasm",
         vyrn_frontend::hash::sha256_hex(runtime_shim().as_bytes()),
         crate::wasm::SHIM_BASE,
-    );
+        shim_key_clang_component(clang_version),
+    )
+}
+
+/// The component [`shim_key`] gives a clang version, exposed so a check can say
+/// the key CONTAINS the compiler rather than just that it changed.
+pub fn shim_key_clang_component(clang_version: &str) -> String {
+    format!(
+        "clang{}",
+        &vyrn_frontend::hash::sha256_hex(clang_version.as_bytes())[..16]
+    )
+}
+
+pub fn shim_wasm() -> Option<PathBuf> {
+    // The compiler is read BEFORE the cache is consulted, because it is part of
+    // the key (RFC-0102 M3, Exhibit 5). It costs nothing new: the probe is
+    // memoized, and a miss needs clang anyway.
+    let (clang, version, _) = clang_from()?;
+    let key = shim_key(&version);
     let dir = shim_cache_dir();
     let out = dir.join(&key);
     if out.exists() {
         return Some(out);
     }
 
-    let clang = find_clang()?;
     // The pin is a project's, and this function is given no project: the running
     // executable is what step 3 already walked up from, so the pin is read from
     // the same place. Steps 1 and 3 are byte-identical to what this did before
