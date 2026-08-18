@@ -3,7 +3,6 @@
 /// (the old `hasPrefix`/`dropPrefix`/`trim`/`sliceOf` helpers are gone).
 
 import { split, trim } from "std/strings"
-import { snapshotTags } from "./snapshot"
 
 /// Split `s` on the separator `sep`, each part trimmed of ASCII whitespace and
 /// empty parts dropped. `"fiction, web ,"` with sep `","` -> ["fiction", "web"].
@@ -16,10 +15,4 @@ export fn splitTrim(s: String, sep: String) -> Array<String> {
         }
     }
     return parts
-}
-
-/// The tags this shelf has already seen, read from the snapshot line. Both
-/// sides parse a tag list the same way, so the reader lives beside the parser.
-export fn recentTags() -> Array<String> {
-    return splitTrim(snapshotTags(".shelf-tags"), ",")
 }
