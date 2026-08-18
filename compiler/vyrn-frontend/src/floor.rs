@@ -43,6 +43,10 @@ pub enum Capability {
     Extern,
 }
 
+/// The whole vocabulary, for the diagnostic that has to name it back. One list,
+/// so a refusal cannot drift from [`Capability::parse`].
+pub const CAPABILITIES: &str = "fs, stdin, args, extern";
+
 impl Capability {
     /// How the manifest-facing vocabulary spells it.
     pub fn name(self) -> &'static str {
@@ -52,6 +56,18 @@ impl Capability {
             Capability::Args => "args",
             Capability::Extern => "extern",
         }
+    }
+
+    /// The capability `s` names, or `None`. The inverse of [`Capability::name`],
+    /// and the reading `vyrn why --capability` does of its argument.
+    pub fn parse(s: &str) -> Option<Capability> {
+        Some(match s {
+            "fs" => Capability::Fs,
+            "stdin" => Capability::Stdin,
+            "args" => Capability::Args,
+            "extern" => Capability::Extern,
+            _ => return None,
+        })
     }
 
     /// What a module that carries it DOES, for the first line of the diagnostic.
@@ -68,8 +84,9 @@ impl Capability {
         }
     }
 
-    /// What the target has none of, for the "= …" line.
-    fn absence(self) -> &'static str {
+    /// What the target has none of, for the "= …" line — and for
+    /// `vyrn why --capability`, which asks the same question at the shell.
+    pub fn absence(self) -> &'static str {
         match self {
             Capability::Fs => "no filesystem",
             Capability::Stdin => "no stdin",
@@ -292,15 +309,14 @@ fn refusal(
         artifact.target,
         c.cap.absence()
     );
-    // The one remedy that exists today. RFC-0072's `remedy()` names a fixed path
-    // for every rejection; this names the module that was actually reached, as
-    // the module that imports it would spell it. The rest — the fence's remedy,
-    // `vyrn why --capability` — is M3.
+    // The one remedy that exists today, and M3 made it the only spelling of one:
+    // the fence quotes the same [`crossing`], so no diagnostic in the tree names
+    // a path the project does not contain.
     if c.cap == Capability::Fs && artifact.target == Target::Browser {
         let importer = chain[chain.len().saturating_sub(2)];
         note.push_str(&format!(
-            "\n   = call it through the wire instead: connect(\"{}\")",
-            spec_from(importer, module)
+            "\n   = call it through the wire instead: {}",
+            crossing(importer, module)
         ));
     }
     let mut d = Diagnostic::error(
@@ -318,6 +334,19 @@ fn refusal(
     d.file = Some(module.to_string());
     d.note = Some(note);
     d
+}
+
+/// The concrete crossing: the call `importer` writes to reach `module` through
+/// the wire instead of importing it.
+///
+/// One function because there is one rule. The floor's diagnostic and
+/// RFC-0072's fence both end with this line, and the fence used to end with a
+/// FIXED path (`client("./server/api")`) that named a module most projects do
+/// not have — the remedy pointed at a file the reader could not open. Every
+/// remedy in the tree now spells a module the project contains, because it is
+/// spelled from the module that actually imports it.
+pub fn crossing(importer: &str, module: &str) -> String {
+    format!("connect(\"{}\")", spec_from(importer, module))
 }
 
 /// How `importer` would spell an import of `module`: a relative specifier, no

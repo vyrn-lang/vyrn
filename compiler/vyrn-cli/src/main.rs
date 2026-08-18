@@ -35,6 +35,9 @@
 //!   vyrn why     --contract <file>      Print the contract governing a module (RFC-0071)
 //!   vyrn fix     [file.vyrn]            Apply the `.copy()` fixes the move diagnostics name.
 //!   vyrn why     --memory <file>        Print what is reclaimed, and why not (RFC-0087 U1)
+//!   vyrn why     --capability <cap> <artifact>
+//!                                        Print every import chain that pulls a capability
+//!                                        into an artifact's closure (RFC-0103 M3).
 //!                                        and every export's status against it.
 //!
 //! `--deny-warnings` (or `VYRN_DENY_WARNINGS=1`) turns any load warning into a
@@ -60,7 +63,7 @@ use vyrn_codegen::toolchain::{extern_trap_stubs, find_clang, runtime_shim};
 mod remote;
 
 const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
-       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
+       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact-name>   (every import chain that pulls that capability into the artifact's closure)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
        vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps\n       vyrn --version   (also -V)";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
@@ -668,11 +671,12 @@ fn scaffold(name: &str) -> ExitCode {
 /// asks; the CLI only prints. Exits 1 when the file is in no role — "no contract
 /// governs this" is a real answer, but not the one you asked for.
 fn why_cmd(args: &[String]) -> ExitCode {
-    const USAGE: &str =
-        "usage: vyrn why <file> | vyrn why --contract <file> | vyrn why --memory <file>";
+    const USAGE: &str = "usage: vyrn why <file> | vyrn why --contract <file> | \
+         vyrn why --memory <file> | vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact-name>";
     let mut file: Option<String> = None;
     let mut contract = false;
     let mut memory = false;
+    let mut capability: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -683,6 +687,18 @@ fn why_cmd(args: &[String]) -> ExitCode {
             "--memory" => {
                 memory = true;
                 i += 1;
+            }
+            "--capability" => {
+                let Some(cap) = args.get(i + 1) else {
+                    eprintln!(
+                        "error: `--capability` needs a capability (one of: {})",
+                        vyrn_frontend::floor::CAPABILITIES
+                    );
+                    eprintln!("{USAGE}");
+                    return ExitCode::from(2);
+                };
+                capability = Some(cap.clone());
+                i += 2;
             }
             other if !other.starts_with('-') => {
                 file = Some(other.to_string());
@@ -699,6 +715,9 @@ fn why_cmd(args: &[String]) -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
+    if let Some(cap) = capability {
+        return why_capability(&cap, &file);
+    }
     if memory {
         return why_memory(&file);
     }
@@ -1302,6 +1321,171 @@ fn why_audience(file: &str) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+/// `vyrn why --capability <cap> <entry-or-artifact-name>` (RFC-0103 M3) — every
+/// import chain that pulls a capability into one artifact's closure.
+///
+/// The floor's refusal shows ONE chain, the shortest, because a refusal has to
+/// be read in a hurry. This is the other question — "where does `fs` come from
+/// at all?" — and it answers with EVERY chain, because deleting a hop off the
+/// shortest path removes nothing if a second path also reaches the module.
+///
+/// It reads the sources, not a build, exactly as `vyrn why` does: the artifact
+/// you are asking about may well be the one that does not compile. Both the
+/// vocabulary and what carries it come from `vyrn_frontend::floor`, the module
+/// the loader enforces with, so the report cannot drift from the check.
+///
+/// It REPORTS; it does not gate. Exit 0 whenever it could answer, 2 when it
+/// could not — an unknown capability, or an argument that names no artifact.
+fn why_capability(cap: &str, name: &str) -> ExitCode {
+    use vyrn_frontend::floor::{self, Capability};
+    let Some(cap) = Capability::parse(cap) else {
+        eprintln!(
+            "error: unknown capability `{cap}` (expected one of: {})",
+            floor::CAPABILITIES
+        );
+        return ExitCode::from(2);
+    };
+    // The argument is an artifact ENTRY's path or an artifact's NAME, resolved
+    // the way the floor resolves a root: file identity first, so two spellings
+    // of one file name one artifact.
+    let path = real_path(name);
+    let start = path
+        .as_deref()
+        .and_then(|p| Path::new(p).parent().map(|d| d.to_path_buf()))
+        .or_else(|| std::env::current_dir().ok());
+    let manifest = start.as_deref().and_then(nearest_manifest);
+    let Some(manifest) = manifest else {
+        eprintln!("error: no vyrn.json found upward from `{name}`");
+        return ExitCode::from(2);
+    };
+    let Some(map) = manifest.artifacts.as_ref() else {
+        eprintln!(
+            "error: {}/vyrn.json declares no artifacts, so nothing in this project has a target",
+            manifest.dir
+        );
+        return ExitCode::from(2);
+    };
+    let artifact = path
+        .as_deref()
+        .and_then(|p| map.artifact_for(p))
+        .or_else(|| map.list.iter().find(|a| a.name == name));
+    let Some(artifact) = artifact else {
+        let declared: Vec<&str> = map.list.iter().map(|a| a.name.as_str()).collect();
+        eprintln!(
+            "error: `{name}` is neither an artifact entry point nor an artifact name in \
+             {}/vyrn.json (declared: {})",
+            manifest.dir,
+            declared.join(", ")
+        );
+        return ExitCode::from(2);
+    };
+
+    let app_dir = PathBuf::from(&map.base);
+    let edges = project_imports(&app_dir);
+    println!("{}", artifact.entry);
+    let has = floor::capabilities(artifact.target).contains(&cap);
+    println!(
+        "  artifact: `{}` ({}) — target `{}` {}",
+        artifact.name,
+        artifact.target,
+        artifact.target,
+        if has {
+            format!("has `{}`", cap.name())
+        } else {
+            format!("has {}", cap.absence())
+        }
+    );
+
+    // What each module carries, from the same `floor::carried` the check calls.
+    let mut carriers: Vec<(String, vyrn_frontend::floor::Carried)> = Vec::new();
+    for (file, source) in project_sources(&app_dir) {
+        let body = if file.ends_with(".vyx") {
+            vyx_script_body(&source).unwrap_or_default()
+        } else {
+            source
+        };
+        let Ok(tokens) = vyrn_frontend::lexer::lex(&body) else {
+            continue;
+        };
+        let (mut program, _) = vyrn_frontend::parser::parse_accum(tokens);
+        let key = real_path(&file).unwrap_or(file);
+        for c in floor::carried(&mut program) {
+            if c.cap == cap
+                && !carriers
+                    .iter()
+                    .any(|(k, o)| *k == key && o.carrier == c.carrier)
+            {
+                carriers.push((key.clone(), c));
+            }
+        }
+    }
+
+    let mut found = false;
+    for (module, c) in &carriers {
+        let chains = chains_from(&artifact.entry, module, &edges);
+        if chains.is_empty() {
+            continue;
+        }
+        found = true;
+        println!(
+            "  `{}` needs `{}` — {}:{}",
+            c.carrier,
+            cap.name(),
+            rel_to(module, &map.base),
+            c.line
+        );
+        for chain in chains {
+            let pretty: Vec<String> = chain.iter().map(|p| rel_to(p, &map.base)).collect();
+            println!("    {}", pretty.join(" -> "));
+        }
+    }
+    if !found {
+        println!(
+            "  nothing in artifact `{}`'s closure needs `{}`",
+            artifact.name,
+            cap.name()
+        );
+    }
+    ExitCode::SUCCESS
+}
+
+/// Every simple path forward from `entry` to `target` in the import graph, the
+/// entry first. Empty when `target` is not in the artifact's closure at all.
+///
+/// Bounded the way [`import_chains`] is bounded, and for the same reason: an
+/// exhaustive enumeration of an interesting graph does not return, and a report
+/// that hangs is worse than one that stops at two dozen answers.
+fn chains_from(entry: &str, target: &str, edges: &[(String, String)]) -> Vec<Vec<String>> {
+    const MAX_CHAINS: usize = 24;
+    const MAX_DEPTH: usize = 12;
+    fn walk(
+        node: &str,
+        target: &str,
+        edges: &[(String, String)],
+        seen: &mut Vec<String>,
+        out: &mut Vec<Vec<String>>,
+    ) {
+        if out.len() >= MAX_CHAINS || seen.len() > MAX_DEPTH {
+            return;
+        }
+        if node == target {
+            out.push(seen.clone());
+            return;
+        }
+        for (from, to) in edges {
+            if from != node || seen.iter().any(|s| s == to) {
+                continue;
+            }
+            seen.push(to.clone());
+            walk(to, target, edges, seen, out);
+            seen.pop();
+        }
+    }
+    let mut out = Vec::new();
+    walk(entry, target, edges, &mut vec![entry.to_string()], &mut out);
+    out
 }
 
 /// `path` relative to `base`, for printing.
