@@ -16,7 +16,10 @@
 //! four platforms.
 
 use std::path::{Path, PathBuf};
-use vyrn_codegen::toolchain::{wasi_builtins_from, wasi_sysroot_from, wasmtime_from, BUILTINS_A};
+use vyrn_codegen::toolchain::{
+    clang_from, shim_key_clang_component, wasi_builtins_from, wasi_sysroot_from, wasmtime_from,
+    BUILTINS_A,
+};
 use vyrn_frontend::manifest::{cache_dir, write_blob};
 use vyrn_frontend::toolpin::{host_platform, tool_spec, tools_dir};
 
@@ -175,6 +178,52 @@ fn the_pin_resolves_offline_and_the_order_is_env_then_pin_then_walk() {
     }
 
     sysroot_and_builtins();
+    clang_is_recorded_not_pinned();
+}
+
+/// RFC-0102 M3: the one tool that is discovered rather than pinned still has to
+/// say what it is — the version, the path, and why that path.
+///
+/// Called from the one `#[test]` for the reason [`sysroot_and_builtins`] is:
+/// `$CLANG` is step 1 here too, and a second test setting it beside this one is
+/// the same race.
+///
+/// No host-only branch: a machine with clang and one without both get an
+/// assertion, and the key component is a pure function of a string.
+fn clang_is_recorded_not_pinned() {
+    // The key component IS the version: two versions, two keys, and the same
+    // version twice is the same key — which is what makes the cache hit correct
+    // and the upgrade a miss (Exhibit 5).
+    let a = shim_key_clang_component("clang version 22.1.0");
+    let b = shim_key_clang_component("clang version 23.0.0");
+    assert_ne!(a, b, "a clang upgrade has to change the key");
+    assert_eq!(a, shim_key_clang_component("clang version 22.1.0"));
+    assert!(a.starts_with("clang"), "{a}");
+
+    match clang_from() {
+        Some((path, version, why)) => {
+            assert!(!version.is_empty());
+            // Whatever the vendor prints, trimmed to its first line: Apple,
+            // Ubuntu and upstream word it differently and none is normalized.
+            assert_eq!(version, version.trim());
+            assert!(!version.contains('\n'), "{version}");
+            assert!(
+                version.contains("clang") || version == "unknown",
+                "the probe reports its own first line: {version}"
+            );
+            assert!(
+                why.starts_with("discovered: ") || why == "override: environment",
+                "{why}"
+            );
+            assert!(!path.as_os_str().is_empty());
+            // The path this reports is the path `find_clang` runs.
+            assert_eq!(Some(path), vyrn_codegen::toolchain::find_clang());
+        }
+        // A machine with no clang is a machine where the shim does not compile,
+        // and that is unchanged: `shim_wasm` answers `None`, as it did when the
+        // key had no compiler in it.
+        None => assert!(vyrn_codegen::toolchain::find_clang().is_none()),
+    }
 }
 
 /// RFC-0102 M2: the same order, for the two `/any` tools, and the answer each

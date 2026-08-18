@@ -46,6 +46,16 @@ fn tools() -> Option<(PathBuf, PathBuf)> {
         "WASI_SYSROOT/WASI_BUILTINS",
         vyrn_codegen::toolchain::shim_wasm(),
     )?;
+    // RFC-0102 M3, Exhibit 5: the compiler that produced this module is IN the
+    // name it is cached under, so a clang upgrade is a miss instead of a stale
+    // hit. Checked on the real artifact, because the key is only a fact about
+    // the cache once something has been written there under it.
+    let (_, version, _) = vyrn_codegen::toolchain::clang_from().expect("the shim compiled with it");
+    let key = shim.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        key.contains(&vyrn_codegen::toolchain::shim_key_clang_component(&version)),
+        "the shim cache key omits the compiler: {key}"
+    );
     Some((wasmtime, shim))
 }
 
