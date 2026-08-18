@@ -282,8 +282,6 @@ jobs:
 
           Verify a manual download against `SHA256SUMS`.
 
-          `vyrn run`, `vyrn check`, `vyrn test` and `vyrn build --target wasm`
-          need nothing beyond this archive. `vyrn build` (native) needs `clang`
-          on `PATH`.
+          `vyrn run`, `vyrn check`, `vyrn test` and `vyrn build --target wasm` need nothing beyond this archive. `vyrn build` (native) needs `clang` on `PATH`.
           EOF
           gh release create "$tag" $flags --title "$tag" --notes-file notes.md dist/*
