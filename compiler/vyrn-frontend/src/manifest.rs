@@ -525,6 +525,7 @@ mod tests {
     #[test]
     fn artifacts_hang_off_the_same_base_and_a_contradiction_stops_the_read() {
         let d = tmp("artifacts-base");
+        std::fs::create_dir_all(d.join("server")).unwrap();
         let canon = real_path(&d.to_string_lossy().replace('\\', "/")).unwrap();
         let parse = |src: &str| crate::schema::parse_json(src).unwrap();
 
