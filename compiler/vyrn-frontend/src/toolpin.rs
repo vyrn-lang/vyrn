@@ -225,9 +225,10 @@ pub fn pinned_tool(
         Some(Err(e)) => Err(e),
         None => Err(format!(
             "{name} {version} is pinned for {platform} (sha256 {sha}) but not cached — \
-             run `vyrn update {name}` online, `vyrn vendor`, or drop any copy of the \
-             archive with that hash into {}",
-            slash(&cache_dir())
+             run `vyrn update {name}` online, `vyrn vendor`, drop any copy of the \
+             archive with that hash into {}, or point ${} at a binary you trust",
+            slash(&cache_dir()),
+            tool_env_var(name)
         )),
     }
 }
@@ -388,5 +389,8 @@ mod tests {
         assert!(e.contains(&sha), "{e}");
         assert!(e.contains("not cached"), "{e}");
         assert!(e.contains("`vyrn update wasmtime`"), "{e}");
+        // Both refusals name the escape hatch: the integration test asserts it
+        // outside its platform branch, and x86_64-linux is where that bit.
+        assert!(e.contains("$VYRN_WASMTIME"), "{e}");
     }
 }
