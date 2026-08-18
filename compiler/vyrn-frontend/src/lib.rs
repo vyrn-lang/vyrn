@@ -20,6 +20,7 @@ pub mod contracts;
 pub mod declared;
 pub mod diagnostics;
 pub mod finite;
+pub mod floor;
 pub mod fmt;
 pub mod hash;
 pub mod interp;

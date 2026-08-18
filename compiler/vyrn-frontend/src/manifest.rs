@@ -105,8 +105,10 @@ pub struct Manifest {
     /// RFC-0103 M1: what this project builds — the `artifacts` map, plus the
     /// `main` / `server` / `client` keys that are sugar for it — or `None` when
     /// the manifest declares neither, which is the same absolute opt-in
-    /// `audience` has. Nothing checks it yet; M2 is the floor.
-    pub artifacts: Option<Vec<crate::artifacts::Artifact>>,
+    /// `audience` has. M2's floor reads it: the map carries the project base and
+    /// the identity function, because an artifact entry and an audience entry
+    /// are the same paths and one file must not be two.
+    pub artifacts: Option<crate::artifacts::ArtifactMap>,
     /// The `nativeTarget` key, unvalidated. Kept as written so a diagnostic can
     /// quote it back and name the file.
     pub native_target: Option<String>,
@@ -178,7 +180,8 @@ fn from_doc(doc: Json, slash_dir: String) -> Result<Manifest, String> {
     // Artifact entry points are joined onto the same canonical base as audience
     // entry points, because they are the same paths: `client` names one file,
     // and the two rules must not read it as two.
-    let artifacts = crate::artifacts::from_manifest(&doc, &audience_base)?;
+    let artifacts =
+        crate::artifacts::from_manifest(&doc, &audience_base)?.map(|m| m.with_realpath(real_path));
     Ok(Manifest {
         main: str_key("main"),
         native_target: str_key("nativeTarget"),
@@ -534,8 +537,9 @@ mod tests {
         )
         .unwrap();
         let a = m.artifacts.unwrap();
-        assert_eq!(a[0].entry, format!("{canon}/client/boot.vyrn"));
-        assert_eq!(a[1].entry, format!("{canon}/server/main.vyrn"));
+        assert_eq!(a.base, canon, "the base is what the filesystem calls it");
+        assert_eq!(a.list[0].entry, format!("{canon}/client/boot.vyrn"));
+        assert_eq!(a.list[1].entry, format!("{canon}/server/main.vyrn"));
 
         // A manifest with neither declares nothing, exactly as with `audience`.
         assert!(from_doc(parse(r#"{"name":"x"}"#), canon.clone())

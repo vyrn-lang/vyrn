@@ -1,0 +1,12 @@
+/// The native artifact's entry point — `artifacts.api`, target `native`.
+///
+/// It reaches the SAME module the client does, through the same helper, and it
+/// compiles: a machine that runs a binary has a filesystem. One module, two
+/// artifacts, two answers — which is the whole claim of RFC-0103. The target is
+/// not a label somebody chose; it is where the code runs.
+import { titleOf } from "../shared/format"
+
+fn main() -> Int64 {
+    print(titleOf("data/note.txt"))
+    return 0
+}

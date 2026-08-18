@@ -542,6 +542,12 @@ fn one_type_name_with_two_shapes_fails_the_build_naming_both_files() {
 /// "identical" is structural: the two modules below differ in spacing and in a doc
 /// comment, and the shared `Id` comes through an import rather than a
 /// declaration.
+///
+/// The root is the CLIENT one, because `client(..)` emits the `vyrnRpcCall`
+/// extern and RFC-0103's floor refuses a host import in a native artifact. This
+/// test used to drive the client generator from `server.vyrn` — the manifest's
+/// native artifact — which is a program that would have trapped at its first
+/// stub call. The floor says so at check time now.
 #[test]
 fn a_name_declared_identically_in_two_modules_is_not_a_collision() {
     let dir = scratch("typeshare");
@@ -563,12 +569,12 @@ fn a_name_declared_identically_in_two_modules_is_not_a_collision() {
     );
     write(
         &dir,
-        "server.vyrn",
-        "import { client } from \"std/rpc\"\nimport { pastesCreate, notesCreate } from client(\"./server/api\")\nfn main() -> Int64 { return 0 }\n",
+        "client/boot.vyrn",
+        "import { client } from \"std/rpc\"\nimport { pastesCreate, notesCreate } from client(\"../server/api\")\nfn main() -> Int64 { return 0 }\n",
     );
     let out = vyrn()
         .arg("emit-gen")
-        .arg(dir.join("server.vyrn"))
+        .arg(dir.join("client/boot.vyrn"))
         .output()
         .unwrap();
     let err = String::from_utf8_lossy(&out.stderr);

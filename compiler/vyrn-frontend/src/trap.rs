@@ -198,6 +198,35 @@ pub const IO: &[(&str, &str)] = &[
     ("butf8", "bytes are not valid UTF-8"),
 ];
 
+/// RFC-0043's host-boundary externs: `(Vyrn extern name, C shim symbol)`.
+///
+/// These are NOT ordinary RFC-0012 externs. An RFC-0012 `extern fn` is a HOST
+/// import — it lowers to an import from the wasm `vyrn` namespace, traps on
+/// native, and never instantiates under a wasi host that does not supply it.
+/// These three are implemented by the C runtime shim on EVERY target (native
+/// `timespec_get`/CSPRNG, wasi `clock_time_get`/`random_get` via wasi-libc,
+/// both honoring `VYRN_FIXED_TIME`/`VYRN_FIXED_SEED`), which is what keeps a
+/// clock or random example a full three-way parity citizen.
+///
+/// The list is here rather than in `vyrn-codegen` because the frontend needs it
+/// too: RFC-0103's floor asks whether a module imports a host function, and the
+/// answer for `std/time` is no. A second copy of the three names in the frontend
+/// would be exactly the drift this file exists to end.
+pub const HOST_EXTERNS: &[(&str, &str)] = &[
+    ("hostNowMillis", "__vyrn_now_millis"),
+    ("hostMonotonicNanos", "__vyrn_monotonic_nanos"),
+    ("hostRandomSeed", "__vyrn_random_seed"),
+];
+
+/// The shim symbol for a [`HOST_EXTERNS`] name, or `None` for an ordinary
+/// RFC-0012 extern (which is a host import and lowers as one).
+pub fn host_boundary_extern(name: &str) -> Option<&'static str> {
+    HOST_EXTERNS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, sym)| *sym)
+}
+
 /// One [`IO`] entry by name. Panics on an unknown key, because every caller
 /// names a literal and a typo is a wrong payload rather than a miss.
 pub fn io(name: &str) -> &'static str {

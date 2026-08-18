@@ -1,0 +1,10 @@
+/// The store. It reads a file, and that is the whole of what makes it
+/// server-side — no path segment says so here, because this project declares no
+/// `audience` key. RFC-0103's floor is the layer under the fence: it reads the
+/// capability, not the label.
+export fn loadNote(path: String) -> String {
+    return match readFile(path) {
+        Ok(text) => text,
+        Err(e) => e,
+    }
+}

@@ -1,0 +1,527 @@
+//! RFC-0103 M2 — the floor: what an artifact's target can reach.
+//!
+//! An artifact is an entry point and a target ([`crate::artifacts`]), and a
+//! target is a CAPABILITY SET — a fact about where the code runs. A browser page
+//! has no filesystem. No edit to `vyrn.json` can give it one, which is what
+//! separates this rule from RFC-0072's audience fence: the fence is a declared
+//! boundary and can be relabelled by whoever declares it; the floor cannot.
+//!
+//! ```text
+//! requirement(closure(entry)) ⊆ capabilities(target)
+//! ```
+//!
+//! **Presence, not reachability.** A module REQUIRES `fs` because a call to
+//! `readFile` is written in it, not because that call runs. The check must not
+//! depend on control flow, and M0's census found the shipped runtime already
+//! behaves this way: under wasmtime an `extern` import fails at INSTANTIATION,
+//! so a program that never reaches the call still cannot start.
+//!
+//! **The vocabulary is four capabilities** — [`Capability::Fs`],
+//! [`Capability::Stdin`], [`Capability::Args`], [`Capability::Extern`]. The
+//! universal reaches of M0's table (stdout/stderr, the clock, entropy, threads)
+//! are not tracked at all: every target answers yes, so a row for them would say
+//! nothing. `listDir` and `serveStream` are not tracked either, and for the
+//! opposite reason — M0's finding 5 — no compiled target has them, so they keep
+//! the refusals they already have (a missing lowering, a runtime trap) rather
+//! than becoming a per-target row that is `no` three times.
+
+use crate::artifacts::{Artifact, ArtifactMap, Target};
+use crate::ast::{LogSink, Program};
+use crate::diagnostics::Diagnostic;
+
+/// A way out of the program that some target lacks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Capability {
+    /// The filesystem: `readFile`, `readFileBytes`, `writeFile`, `renameFile`,
+    /// `fsyncFile`, and the `logging { sink: file(..) }` declaration.
+    Fs,
+    /// Standard input: `readLine`.
+    Stdin,
+    /// The command line: `args`.
+    Args,
+    /// A host function imported by name: an `extern fn` DECLARATION.
+    Extern,
+}
+
+impl Capability {
+    /// How the manifest-facing vocabulary spells it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Capability::Fs => "fs",
+            Capability::Stdin => "stdin",
+            Capability::Args => "args",
+            Capability::Extern => "extern",
+        }
+    }
+
+    /// What a module that carries it DOES, for the first line of the diagnostic.
+    ///
+    /// Per capability rather than per carrier, and deliberately not §3's
+    /// illustrative "it reads files": a `writeFile` is not a reader, and one
+    /// phrase that covers both beats two that are each half right.
+    fn does(self) -> &'static str {
+        match self {
+            Capability::Fs => "it reaches the filesystem",
+            Capability::Stdin => "it reads stdin",
+            Capability::Args => "it reads the command line",
+            Capability::Extern => "it imports a host function",
+        }
+    }
+
+    /// What the target has none of, for the "= …" line.
+    fn absence(self) -> &'static str {
+        match self {
+            Capability::Fs => "no filesystem",
+            Capability::Stdin => "no stdin",
+            Capability::Args => "no command line",
+            Capability::Extern => "no host to import from",
+        }
+    }
+}
+
+/// The capabilities a target HAS. Rust constants, not configuration: this is the
+/// floor, and nothing in `vyrn.json` may alter it.
+///
+/// `wasi` and `browser` are the identical bytes under two hosts (M0's finding
+/// 1), and this is where the two differ: a WASI host answers `path_open`,
+/// `fd_read` and `args_get`; a page answers `NOENT`, EOF and an empty list, and
+/// IS the `vyrn` import namespace an `extern` needs.
+pub fn capabilities(target: Target) -> &'static [Capability] {
+    match target {
+        Target::Native | Target::Wasi => &[Capability::Fs, Capability::Stdin, Capability::Args],
+        Target::Browser => &[Capability::Extern],
+    }
+}
+
+/// One capability a module carries, and what carries it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Carried {
+    pub cap: Capability,
+    /// The builtin, the `extern fn`'s name, or the declaration — what the
+    /// diagnostic quotes.
+    pub carrier: String,
+    /// 1-based line of the carrier, or `0` for a declaration the AST keeps no
+    /// line for (the `logging` block).
+    pub line: usize,
+}
+
+/// `(builtin, capability)` — the calls that reach out of the program.
+///
+/// `fsyncFile` is in the `fs` row rather than a row of its own. M0 split it out
+/// because it behaves differently (the direct backend has no lowering for it, so
+/// a wasm build is refused outright), but that is a missing lowering — a filed
+/// regression — and not a second capability. The floor names the capability;
+/// the backend keeps its own refusal.
+const CALLS: &[(&str, Capability)] = &[
+    ("readFile", Capability::Fs),
+    ("readFileBytes", Capability::Fs),
+    ("writeFile", Capability::Fs),
+    ("renameFile", Capability::Fs),
+    ("fsyncFile", Capability::Fs),
+    ("readLine", Capability::Stdin),
+    ("args", Capability::Args),
+];
+
+/// Every capability `program` carries, in a stable order.
+///
+/// The `&mut` is the walker's, not this function's: [`crate::project::walk_block`]
+/// is the one exhaustive expression walk in the frontend, and reusing it is worth
+/// more than a second walk that goes stale the next time the AST grows an arm.
+/// Nothing here changes a node.
+///
+/// What is NOT scanned is as load-bearing as what is: a `gen fn` body runs at
+/// GENERATION time against the compiler's filesystem and is never compiled into
+/// the artifact (the checker already fences it), and `test` / `bench` blocks are
+/// separate `Program` fields that no build walks. A shipped binary contains
+/// neither, so neither can make one need a capability.
+pub fn carried(program: &mut Program) -> Vec<Carried> {
+    fn visit(e: &mut crate::ast::Expr, out: &mut Vec<Carried>) {
+        let crate::ast::Expr::Call { name, line, .. } = e else {
+            return;
+        };
+        if let Some((_, cap)) = CALLS.iter().find(|(n, _)| n == name) {
+            out.push(Carried {
+                cap: *cap,
+                carrier: name.clone(),
+                line: *line,
+            });
+        }
+    }
+
+    let mut out: Vec<Carried> = Vec::new();
+
+    // An `extern fn` IMPORT is carried by the DECLARATION, not by the call:
+    // under wasmtime the module with an unanswered import never instantiates, so
+    // a program that never calls it still cannot start (M0's finding 3). An
+    // `export extern fn` carries nothing — it has a body and is an ordinary
+    // function that is additionally callable from a page.
+    //
+    // RFC-0043's host-boundary externs carry nothing either, and M0's census
+    // missed it: `hostNowMillis` and its two neighbours are not host imports at
+    // all — the C runtime shim implements them on every target, which is why
+    // `std/time` is in every native server's closure and a clock example is a
+    // three-way parity citizen. `extern fn` is two things, and only one of them
+    // is a capability.
+    for f in &program.functions {
+        if f.is_extern && crate::trap::host_boundary_extern(&f.name).is_none() {
+            out.push(Carried {
+                cap: Capability::Extern,
+                carrier: f.name.clone(),
+                line: f.line,
+            });
+        }
+    }
+
+    // The one capability carried by a DECLARATION (M0's finding 4). It is here
+    // because it is the one `fs` reach that degrades SILENTLY in a page: the
+    // line vanishes, nothing is printed, the exit code is 0.
+    if let LogSink::File(path) = &program.log_sink {
+        out.push(Carried {
+            cap: Capability::Fs,
+            carrier: format!("logging {{ sink: file(\"{path}\") }}"),
+            line: 0,
+        });
+    }
+
+    for f in &mut program.functions {
+        if f.is_gen {
+            continue;
+        }
+        crate::project::walk_block(&mut f.body, &mut |e| visit(e, &mut out));
+    }
+    for im in &mut program.impls {
+        for m in im.methods.iter_mut().chain(im.places.iter_mut()) {
+            crate::project::walk_block(&mut m.body, &mut |e| visit(e, &mut out));
+        }
+    }
+    for g in &mut program.globals {
+        crate::project::walk_bare(&mut g.init, &mut |e| visit(e, &mut out));
+    }
+    for t in &mut program.type_decls {
+        if let Some(p) = &mut t.predicate {
+            crate::project::walk_bare(p, &mut |e| visit(e, &mut out));
+        }
+    }
+    out
+}
+
+/// The floor's objection, if any, to building `root` as the artifact that
+/// declares it.
+///
+/// `modules` is the load's own graph — `(module key, resolved import targets,
+/// what that module carries)` — and `root` is the key the load started from.
+/// `None` whenever this root is nobody's declared entry point, which is every
+/// project that has not opted in and every file inside one that is not an entry.
+///
+/// The chain is breadth-first from the entry, so the reported path is the
+/// SHORTEST one that reaches the offending module: the author never saw hop
+/// three, and showing them the longest way round would not help.
+pub fn objection(
+    modules: &[(String, Vec<String>, Vec<Carried>)],
+    root: &str,
+    map: &ArtifactMap,
+) -> Option<Diagnostic> {
+    let artifact = map.artifact_for(root)?;
+    let has = capabilities(artifact.target);
+
+    // Breadth-first from the root, recording each module's first parent.
+    let mut parent: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    let mut order: Vec<&str> = vec![root];
+    let mut seen: std::collections::HashSet<&str> = [root].into_iter().collect();
+    let mut i = 0;
+    while i < order.len() {
+        let key = order[i];
+        i += 1;
+        let Some((_, imports, _)) = modules.iter().find(|(k, _, _)| k == key) else {
+            continue;
+        };
+        for t in imports {
+            if seen.insert(t) {
+                parent.insert(t, key);
+                order.push(t);
+            }
+        }
+    }
+    // Everything else the load linked — the runtime modules a builtin's desugar
+    // injects (RFC-0078) enter with no importer, and they are in the artifact
+    // just the same. Their chain is the root and them.
+    for (k, _, _) in modules {
+        if seen.insert(k) {
+            order.push(k);
+        }
+    }
+
+    for key in order {
+        let Some((_, _, carried)) = modules.iter().find(|(k, _, _)| k == key) else {
+            continue;
+        };
+        let Some(c) = carried.iter().find(|c| !has.contains(&c.cap)) else {
+            continue;
+        };
+        return Some(refusal(artifact, key, c, &parent, map));
+    }
+    None
+}
+
+/// The diagnostic RFC-0103 §3 specifies: what was refused, the chain that
+/// reaches it, why, and — for the one crossing that has an answer today — what
+/// to write instead.
+fn refusal(
+    artifact: &Artifact,
+    module: &str,
+    c: &Carried,
+    parent: &std::collections::HashMap<&str, &str>,
+    map: &ArtifactMap,
+) -> Diagnostic {
+    // The chain, entry first. A module the loader injected has no parent, so its
+    // chain is the entry and it.
+    let mut chain: Vec<&str> = vec![module];
+    while let Some(p) = parent.get(chain[0]) {
+        chain.insert(0, p);
+    }
+    if chain[0] != artifact.entry && !crate::audience::same_path(chain[0], &artifact.entry) {
+        chain.insert(0, &artifact.entry);
+    }
+    let shown: Vec<String> = chain.iter().map(|k| map.display_path(k)).collect();
+
+    let mut note = format!(
+        "{}\n   = `{}` needs `{}`; target `{}` has {}",
+        shown.join(" → "),
+        c.carrier,
+        c.cap.name(),
+        artifact.target,
+        c.cap.absence()
+    );
+    // The one remedy that exists today. RFC-0072's `remedy()` names a fixed path
+    // for every rejection; this names the module that was actually reached, as
+    // the module that imports it would spell it. The rest — the fence's remedy,
+    // `vyrn why --capability` — is M3.
+    if c.cap == Capability::Fs && artifact.target == Target::Browser {
+        let importer = chain[chain.len().saturating_sub(2)];
+        note.push_str(&format!(
+            "\n   = call it through the wire instead: connect(\"{}\")",
+            spec_from(importer, module)
+        ));
+    }
+    let mut d = Diagnostic::error(
+        c.line,
+        0,
+        "floor",
+        format!(
+            "artifact `{}` ({}) cannot include `{}`: {}",
+            artifact.name,
+            artifact.target,
+            map.display_path(module),
+            c.cap.does()
+        ),
+    );
+    d.file = Some(module.to_string());
+    d.note = Some(note);
+    d
+}
+
+/// How `importer` would spell an import of `module`: a relative specifier, no
+/// extension. Falls back to the module key when the two share no directory —
+/// a generated banner, a remote key, a module outside the project.
+fn spec_from(importer: &str, module: &str) -> String {
+    let strip = |s: &str| s.trim_end_matches(".vyrn").to_string();
+    let (from, to): (Vec<&str>, Vec<&str>) =
+        (importer.split('/').collect(), module.split('/').collect());
+    if from.len() < 2 || to.len() < 2 || from[0] != to[0] {
+        return strip(module);
+    }
+    let shared = from
+        .iter()
+        .zip(&to)
+        .take_while(|(a, b)| a == b)
+        .count()
+        .min(from.len() - 1);
+    let up = from.len() - 1 - shared;
+    let mut out = String::new();
+    for _ in 0..up {
+        out.push_str("../");
+    }
+    if up == 0 {
+        out.push_str("./");
+    }
+    out.push_str(&to[shared..].join("/"));
+    strip(&out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn program(src: &str) -> Program {
+        crate::parser::parse(crate::lexer::lex(src).expect("lexes")).expect("parses")
+    }
+
+    fn caps(src: &str) -> Vec<(Capability, String)> {
+        carried(&mut program(src))
+            .into_iter()
+            .map(|c| (c.cap, c.carrier))
+            .collect()
+    }
+
+    #[test]
+    fn every_carrier_in_the_vocabulary() {
+        assert_eq!(
+            caps("fn f() -> Int64 {\n    match readFile(\"a\") { Ok(s) => 0, Err(e) => 1 }\n}"),
+            vec![(Capability::Fs, "readFile".into())]
+        );
+        for (src, want) in [
+            ("writeFile(\"a\", \"b\")", Capability::Fs),
+            ("readFileBytes(\"a\")", Capability::Fs),
+            ("renameFile(\"a\", \"b\")", Capability::Fs),
+            ("fsyncFile(\"a\")", Capability::Fs),
+            ("readLine()", Capability::Stdin),
+            ("args()", Capability::Args),
+        ] {
+            let src = format!("fn f() -> Int64 {{\n    let x = {src}\n    return 0\n}}");
+            assert_eq!(caps(&src).first().map(|c| c.0), Some(want), "{src}");
+        }
+    }
+
+    /// M0's finding 4: the one capability carried by a DECLARATION, and the one
+    /// `fs` reach that degrades silently in a page.
+    #[test]
+    fn the_logging_file_sink_is_a_carrier() {
+        let c = caps("logging { sink: file(\"app.log\") }\nfn main() -> Int64 {\n    return 0\n}");
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].0, Capability::Fs);
+        assert!(c[0].1.contains("app.log"), "{:?}", c[0].1);
+        // A sink that is not a file reaches nothing.
+        assert!(caps("logging { sink: stdout }\nfn main() -> Int64 {\n    return 0\n}").is_empty());
+    }
+
+    /// The DECLARATION carries `extern`, not the call: an unanswered import
+    /// stops instantiation before any line runs. An `export extern fn` has a
+    /// body and carries nothing.
+    #[test]
+    fn an_extern_import_is_carried_by_its_declaration() {
+        assert_eq!(
+            caps("extern fn jsAdd(a: Int64, b: Int64) -> Int64\nfn main() -> Int64 {\n    return 0\n}"),
+            vec![(Capability::Extern, "jsAdd".into())]
+        );
+        assert!(caps(
+            "export extern fn twice(a: Int64) -> Int64 {\n    return a + a\n}\n\
+             fn main() -> Int64 {\n    return 0\n}"
+        )
+        .is_empty());
+    }
+
+    /// A `gen fn` runs at generation time against the COMPILER's filesystem and
+    /// is never compiled into the artifact; `test` blocks are never built at all.
+    #[test]
+    fn generation_and_test_bodies_are_not_in_the_artifact() {
+        assert!(caps(
+            "gen fn mod(p: String) -> String {\n    match readFile(p) { Ok(s) => s, Err(e) => e }\n}"
+        )
+        .is_empty());
+        assert!(caps(
+            "fn main() -> Int64 {\n    return 0\n}\n\
+             test \"reads\" {\n    let x = readLine()\n}"
+        )
+        .is_empty());
+    }
+
+    fn map(target: Target) -> ArtifactMap {
+        ArtifactMap {
+            list: vec![Artifact {
+                name: "app".into(),
+                entry: "/p/client/boot.vyrn".into(),
+                target,
+            }],
+            base: "/p".into(),
+            realpath: None,
+        }
+    }
+
+    fn graph(
+        caps: &[(&str, &[&str], &[(Capability, &str)])],
+    ) -> Vec<(String, Vec<String>, Vec<Carried>)> {
+        caps.iter()
+            .map(|(k, imports, carried)| {
+                (
+                    k.to_string(),
+                    imports.iter().map(|s| s.to_string()).collect(),
+                    carried
+                        .iter()
+                        .map(|(cap, carrier)| Carried {
+                            cap: *cap,
+                            carrier: carrier.to_string(),
+                            line: 7,
+                        })
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// The union over the import closure, and the chain the author never saw.
+    #[test]
+    fn the_closure_is_the_requirement_and_the_chain_is_the_diagnostic() {
+        let g = graph(&[
+            ("/p/client/boot.vyrn", &["/p/shared/format.vyrn"], &[]),
+            ("/p/shared/format.vyrn", &["/p/server/db.vyrn"], &[]),
+            ("/p/server/db.vyrn", &[], &[(Capability::Fs, "readFile")]),
+        ]);
+        let d = objection(&g, "/p/client/boot.vyrn", &map(Target::Browser)).expect("refused");
+        assert_eq!(
+            d.message,
+            "artifact `app` (browser) cannot include `server/db.vyrn`: it reaches the filesystem"
+        );
+        let note = d.note.unwrap();
+        assert!(
+            note.starts_with("client/boot.vyrn → shared/format.vyrn → server/db.vyrn"),
+            "{note}"
+        );
+        assert!(
+            note.contains("`readFile` needs `fs`; target `browser` has no filesystem"),
+            "{note}"
+        );
+        assert!(note.contains("connect(\"../server/db\")"), "{note}");
+        assert_eq!(d.file.as_deref(), Some("/p/server/db.vyrn"));
+        assert_eq!(d.line, 7);
+
+        // The same tree under a target that HAS a filesystem is fine.
+        assert!(objection(&g, "/p/client/boot.vyrn", &map(Target::Native)).is_none());
+    }
+
+    /// Per target, per capability — the subset test, stated as a table.
+    #[test]
+    fn each_target_refuses_exactly_what_it_lacks() {
+        for (target, refused) in [
+            (Target::Native, vec![Capability::Extern]),
+            (Target::Wasi, vec![Capability::Extern]),
+            (
+                Target::Browser,
+                vec![Capability::Fs, Capability::Stdin, Capability::Args],
+            ),
+        ] {
+            for cap in [
+                Capability::Fs,
+                Capability::Stdin,
+                Capability::Args,
+                Capability::Extern,
+            ] {
+                let g = graph(&[("/p/client/boot.vyrn", &[], &[(cap, "x")])]);
+                let got = objection(&g, "/p/client/boot.vyrn", &map(target)).is_some();
+                assert_eq!(got, refused.contains(&cap), "{target} / {}", cap.name());
+            }
+        }
+    }
+
+    /// A root no artifact names gets no floor, whatever it carries. That is what
+    /// leaves `examples/externdemo.vyrn` — built natively and asserted on by the
+    /// parity suite — exactly as it was.
+    #[test]
+    fn a_root_that_is_no_artifacts_entry_gets_no_floor() {
+        let g = graph(&[(
+            "/p/examples/externdemo.vyrn",
+            &[],
+            &[(Capability::Extern, "jsAdd")],
+        )]);
+        assert!(objection(&g, "/p/examples/externdemo.vyrn", &map(Target::Native)).is_none());
+    }
+}

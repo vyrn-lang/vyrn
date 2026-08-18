@@ -456,6 +456,12 @@ pub struct LoadOptions {
     /// every module universal, no import rejected — which is what makes this
     /// opt-in per project and unable to break anything that compiles today.
     pub audience: Option<crate::audience::AudienceMap>,
+    /// RFC-0103 M2: the artifacts this project declares, or `None` when the
+    /// manifest declares none. The floor ([`crate::floor`]) runs when the root
+    /// being loaded IS one artifact's entry point, and never otherwise — the
+    /// same absolute opt-in `audience` has, one step narrower: a file inside a
+    /// project that declares artifacts is not itself checked unless it is one.
+    pub artifacts: Option<crate::artifacts::ArtifactMap>,
 }
 
 /// RFC-0072 M1: the objection, if any, to `importer` importing `imported`.
@@ -1347,6 +1353,33 @@ fn load_modules(
         // references along with everything else.)
         if let Some(m) = modules.iter_mut().find(|m| m.key == target) {
             m.injected = Some(rt.prefix);
+        }
+    }
+
+    // RFC-0103 M2: the floor. Last, so the closure it walks is everything the
+    // artifact links — the modules the source imports AND the runtime modules a
+    // builtin's desugar just injected. It is a whole-artifact rule rather than a
+    // per-edge one (audience's shape), because the question is what the program
+    // NEEDS, and no single import edge knows that.
+    if let Some(map) = &opts.artifacts {
+        let graph: Vec<(String, Vec<String>, Vec<crate::floor::Carried>)> = modules
+            .iter_mut()
+            .map(|m| {
+                (
+                    m.key.clone(),
+                    m.import_targets.clone(),
+                    crate::floor::carried(&mut m.program),
+                )
+            })
+            .collect();
+        if let Some(mut d) = crate::floor::objection(&graph, &root_key, map) {
+            if d.file.as_deref() == Some(root_key.as_str()) {
+                d.file = None;
+            }
+            if !origins.is_empty() {
+                origins.remap(&mut d);
+            }
+            return Err((vec![d], origins));
         }
     }
 

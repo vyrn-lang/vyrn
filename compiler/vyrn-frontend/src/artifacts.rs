@@ -22,8 +22,10 @@
 //!
 //! Opt-in is absolute, as it is for [`crate::audience`]: no `artifacts` map and
 //! no entry-point key gets [`None`], which is the signal that this project
-//! declares nothing to check. M1 parses and exposes; nothing checks yet.
+//! declares nothing to check. M1 parsed and exposed; [`crate::floor`] is the M2
+//! rule that reads it.
 
+use crate::audience::RealPath;
 use crate::schema::Json;
 
 /// Where an artifact runs — the capability set it gets, in the vocabulary the
@@ -75,6 +77,79 @@ pub struct Artifact {
     pub target: Target,
 }
 
+/// What a project builds, and the two things the floor needs to decide on it:
+/// the directory the entries hang off, and the consumer's reading of file
+/// IDENTITY. Exactly the shape [`crate::audience::AudienceMap`] has, for exactly
+/// the same reason — an artifact entry point and an audience entry point are the
+/// same paths, and one file must not be two.
+#[derive(Debug, Clone, Default)]
+pub struct ArtifactMap {
+    /// The declared artifacts, sugar first, in manifest order.
+    pub list: Vec<Artifact>,
+    /// The project directory as a slash path. Empty means "no base" — every
+    /// path is inside it, which is what the in-process tests want.
+    pub base: String,
+    /// The consumer's file-identity function ([`crate::manifest::real_path`] in
+    /// both real ones), or `None` when paths are compared as written.
+    pub realpath: Option<RealPath>,
+}
+
+/// Two maps are equal when they DECLARE the same thing; `realpath` is the
+/// consumer's reading of the disk, not part of the declaration.
+impl PartialEq for ArtifactMap {
+    fn eq(&self, other: &Self) -> bool {
+        self.list == other.list && self.base == other.base
+    }
+}
+
+impl Eq for ArtifactMap {}
+
+impl ArtifactMap {
+    /// This map, deciding on file identity as `f` reports it. The base and every
+    /// entry are put into the form a module key will be, or nothing matches.
+    pub fn with_realpath(mut self, f: RealPath) -> Self {
+        self.base = f(&self.base).unwrap_or(self.base);
+        for a in self.list.iter_mut() {
+            a.entry = f(&a.entry).unwrap_or_else(|| a.entry.clone());
+        }
+        self.realpath = Some(f);
+        self
+    }
+
+    /// `path` as file identity: what the filesystem calls it, or the path itself
+    /// when nothing on disk answers to it (a generated module's banner, a remote
+    /// key, an in-memory test module).
+    fn identity(&self, path: &str) -> String {
+        match self.realpath {
+            Some(f) => f(path).unwrap_or_else(|| path.to_string()),
+            None => path.to_string(),
+        }
+    }
+
+    /// The artifact whose ENTRY is `root`, or `None` when this root is nobody's
+    /// entry point.
+    ///
+    /// That `None` is the whole blast radius of the floor. A file that no
+    /// artifact names gets no capability check even with a manifest above it —
+    /// `examples/externdemo.vyrn` is built natively by the parity suite and is
+    /// not an entry, so the census's "one real cost" of refusing `extern` off
+    /// the browser is not paid by it.
+    pub fn artifact_for(&self, root: &str) -> Option<&Artifact> {
+        let root = self.identity(root);
+        self.list
+            .iter()
+            .find(|a| crate::audience::same_path(&a.entry, &root))
+    }
+
+    /// `path` as a reader of the project would type it — relative to the project
+    /// directory when it is inside one, else unchanged. A generated module's
+    /// banner is left alone: it already names the call site that produced it.
+    pub fn display_path(&self, path: &str) -> String {
+        let path = self.identity(path);
+        crate::audience::relative_to(&path, &self.base).unwrap_or(path)
+    }
+}
+
 /// The artifacts a manifest declares — the `artifacts` map plus the entry-point
 /// keys that are sugar for it — or `None` when it declares neither.
 ///
@@ -86,7 +161,7 @@ pub struct Artifact {
 /// The `Err` arm is a manifest that declares artifacts and says something
 /// contradictory about them. It is NOT the floor check (that is M2): nothing
 /// here asks whether an entry file exists, only whether the declaration is one.
-pub fn from_manifest(doc: &Json, base: &str) -> Result<Option<Vec<Artifact>>, String> {
+pub fn from_manifest(doc: &Json, base: &str) -> Result<Option<ArtifactMap>, String> {
     let base = base.replace('\\', "/").trim_end_matches('/').to_string();
     let at = format!("{base}/vyrn.json");
     let entry_path = |rel: &str| -> String {
@@ -99,6 +174,11 @@ pub fn from_manifest(doc: &Json, base: &str) -> Result<Option<Vec<Artifact>>, St
 
     // The sugar. `main` and `server` are programs built for the machine that
     // runs them; `client` is the half that reaches a browser.
+    let map = |list: Vec<Artifact>| ArtifactMap {
+        list,
+        base: base.clone(),
+        realpath: None,
+    };
     let mut out: Vec<Artifact> = Vec::new();
     for (key, target) in [
         ("main", Target::Native),
@@ -120,7 +200,7 @@ pub fn from_manifest(doc: &Json, base: &str) -> Result<Option<Vec<Artifact>>, St
     let sugar = out.len();
     let declared = match doc.get("artifacts") {
         None => {
-            return Ok(if out.is_empty() { None } else { Some(out) });
+            return Ok(if out.is_empty() { None } else { Some(map(out)) });
         }
         Some(Json::Obj(entries)) => entries,
         Some(_) => return Err(format!("`artifacts` in {at} is not an object")),
@@ -176,24 +256,43 @@ pub fn from_manifest(doc: &Json, base: &str) -> Result<Option<Vec<Artifact>>, St
         }
         out.push(artifact);
     }
-    Ok(Some(out))
+    Ok(Some(map(out)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn from_text(json: &str, base: &str) -> Result<Option<Vec<Artifact>>, String> {
+    fn from_text(json: &str, base: &str) -> Result<Option<ArtifactMap>, String> {
         from_manifest(&crate::schema::parse_json(json).unwrap(), base)
     }
 
     fn ok(json: &str) -> Vec<Artifact> {
-        from_text(json, "/p").unwrap().unwrap()
+        from_text(json, "/p").unwrap().unwrap().list
     }
 
     #[test]
     fn no_artifacts_and_no_entry_keys_is_no_map() {
         assert_eq!(from_text(r#"{"name":"x"}"#, "/p").unwrap(), None);
+    }
+
+    /// The floor fires for a declared entry point and for nothing else — the
+    /// answer to "does this root have a target?" is this lookup, and a file no
+    /// artifact names has none.
+    #[test]
+    fn only_a_declared_entry_point_has_an_artifact() {
+        let m = from_text(
+            r#"{"artifacts":{"app":{"entry":"client/boot.vyrn","target":"browser"}}}"#,
+            "/p",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(m.artifact_for("/p/client/boot.vyrn").unwrap().name, "app");
+        // The same file, spelled from inside the project.
+        assert_eq!(m.artifact_for("client/boot.vyrn").unwrap().name, "app");
+        assert!(m.artifact_for("/p/client/other.vyrn").is_none());
+        assert!(m.artifact_for("/p/examples/externdemo.vyrn").is_none());
+        assert_eq!(m.display_path("/p/server/db.vyrn"), "server/db.vyrn");
     }
 
     #[test]

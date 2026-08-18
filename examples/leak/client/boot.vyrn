@@ -1,0 +1,15 @@
+/// The browser artifact's entry point — `artifacts.app`, target `browser`.
+///
+/// It imports a formatting helper and nothing else. The author of this file
+/// never wrote `readFile`, never named `server/`, and cannot see hop three; the
+/// page would simply have printed nothing where a note should be. `vyrn check`
+/// refuses it instead, and prints the chain.
+import { titleOf } from "../shared/format"
+
+export extern fn vyrnView() -> String {
+    return titleOf("data/note.txt")
+}
+
+fn main() -> Int64 {
+    return 0
+}

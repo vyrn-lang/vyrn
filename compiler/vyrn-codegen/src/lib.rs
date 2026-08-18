@@ -602,30 +602,18 @@ pub(crate) fn extern_symbol(name: &str) -> String {
     format!("__vyrn_extern_{name}")
 }
 
-/// The host-boundary externs of RFC-0043 (time / randomness). Unlike ordinary
-/// RFC-0012 externs — which lower to imports from the `vyrn` wasm namespace and
-/// trap on native — these three are implemented by the C runtime shim on EVERY
-/// target (native `timespec_get`/CSPRNG, wasi `clock_time_get`/`random_get` via
-/// wasi-libc, honoring `VYRN_FIXED_TIME`/`VYRN_FIXED_SEED`). So they call a real
-/// shim symbol at each use site instead of a host import, which keeps a
-/// clock/random example a full three-way parity citizen: wasmtime supplies the
-/// WASI clocks/random, so no `vyrn` host page is needed. Returns the shim symbol
-/// for the recognized Vyrn extern name. Matched by name (like the I/O builtins);
-/// these `host*` names are reserved.
 /// The RFC-0014 I/O wording, and the two readers a backend needs — the list
 /// itself is [`vyrn_frontend::trap::IO`], below all three engines (RFC-0101 M5).
 /// It was here, which meant the interpreter could not read it and re-spelled all
 /// eight at thirteen sites.
 pub use vyrn_frontend::trap::{io as io_message, io_parts as io_message_parts, IO as IO_MESSAGES};
 
-pub fn host_boundary_extern(name: &str) -> Option<&'static str> {
-    match name {
-        "hostNowMillis" => Some("__vyrn_now_millis"),
-        "hostMonotonicNanos" => Some("__vyrn_monotonic_nanos"),
-        "hostRandomSeed" => Some("__vyrn_random_seed"),
-        _ => None,
-    }
-}
+/// The host-boundary externs of RFC-0043 (time / randomness), which lower to a
+/// real shim symbol at each use site rather than to a host import. The table
+/// moved to [`vyrn_frontend::trap::HOST_EXTERNS`] when RFC-0103's floor needed
+/// to read it: the frontend must be able to tell a host IMPORT from a shim call,
+/// and a second copy of the three names is the drift that file exists to end.
+pub use vyrn_frontend::trap::host_boundary_extern;
 
 /// The extern (JS-boundary) ABI value type for one primitive, per the RFC-0012
 /// table: `Int64`/`i64`, sized ints ≤32-bit widen to `i32`, `Bool` is `i32`,
