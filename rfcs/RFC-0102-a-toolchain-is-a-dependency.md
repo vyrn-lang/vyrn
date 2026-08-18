@@ -1,8 +1,8 @@
 # RFC-0102 — A Toolchain Is a Dependency
 
-- **Status:** **M1 landed** (the pin, `wasmtime` only). M2–M4 proposed. See
-  "M1 — as landed" under Milestones for what shipped, what it is called, and
-  where the implementation corrected this document.
+- **Status:** **M2 landed** (the pin, all three tools). M3–M4 proposed. See
+  "M1 — as landed" and "M2 — as landed" under Milestones for what shipped, what
+  it is called, and where the implementation corrected this document.
 - **Depends on:** RFC-0010 M4 (reproducible remote imports — `vyrn.lock`, the
   content-addressed cache under `~/.vyrn`, `vyrn add/update/vendor`, `--offline`),
   RFC-0021 (the generator cache, keyed on its recorded inputs), RFC-0077 M5 (the
@@ -578,6 +578,102 @@ being exercised by every parity run. `vyrn-lsp`: 76 passed, 0 failed.
 
 - **M2 — the sysroot and the builtins.** The other two table entries, `/any`
   platform. `shim_wasm` and `layout_vs_clang` resolve through the pin.
+### M2 — as landed
+
+Two resolvers beside `wasmtime_from`, in the same file and in the same three
+steps: `wasi_sysroot_from` and `wasi_builtins_from`, each returning the path
+**and why it was chosen**, each with a `find_*` wrapper that panics on an
+unresolvable pin for the reason `find_wasmtime_from` does. The three now share
+`pinned_tool_dir`, which is step 2 for any tool — find the `vyrn.json` governing
+a directory, read `toolchain.<name>`, resolve through `vyrn.lock` to a hash and
+through vendor, then cache, to `~/.vyrn/tools/<sha>/`. `wasmtime_from` lost its
+inline copy of that to gain it.
+
+**The real runs.** One `vyrn update` each, against the real wasi-sdk 25 release,
+in a project declaring both keys. Each pinned one line, because both artifacts
+are `/any`:
+
+```text
+tool:wasi-builtins@25.0/any	https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/libclang_rt.builtins-wasm32-wasi-25.0.tar.gz	13aca55665321200b9659b292615adf5110ace9e891ab94511badd970553ca18
+tool:wasi-sysroot@25.0/any	https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sysroot-25.0.tar.gz	d09c62c18efcddffe4b2fdd8c5830109cc8e36130cdbc9acdc0bd1b204c942bb
+```
+
+`update_tool` needed no change for either: `tool_platforms` already answered
+`["any"]`, and `vyrn update wasi-builtins` left the sysroot's line alone because
+the retain is keyed on `tool:<name>@`.
+
+Then both were *consumed* through the pin, with `$WASI_SYSROOT` and
+`$WASI_BUILTINS` unset and that lock at the worktree root:
+`layout_vs_clang` compiled its C program against the unpacked sysroot and linked
+the unpacked archive — *126 numbers over 34 shapes agree with clang* — and
+`shim_wasm`, with its disk cache emptied first so the compile was real, produced
+the module `shim_link` instantiates: *33 boundary signatures instantiated against
+the module that defines them*.
+
+**The unpacked layout, which is a correction.** The brief for this milestone
+expected one shape, "a directory containing `wasi-sysroot-25.0/` or similar", and
+the two artifacts do not agree with each other:
+
+```text
+~/.vyrn/tools/d09c62c1…/wasi-sysroot-25.0/{include,lib,share,VERSION}
+~/.vyrn/tools/13aca556…/libclang_rt.builtins-wasm32.a
+```
+
+The sysroot nests one version-named level down; the builtins archive has no
+directory at all. So the answer is not a per-tool layout table, it is
+`tool_binary`'s existing rule generalized — *at the top of the unpacked
+directory, or one level in, sorted* — now `at_top_or_one_in`, with three public
+faces: `tool_binary` (a file, plus `.exe` on Windows), `tool_file` (a file,
+exact name), and `tool_root` (the **directory** holding a marker, which is what
+`--sysroot=` wants: `include/` finds `wasi-sysroot-25.0` whether or not the
+archive nested it).
+
+**`$WASI_BUILTINS` had two spellings, and step 1 is what found it.** Before M2,
+`layout_vs_clang` never read the variable: it read `$WASI_SYSROOT` and then went
+to `builtins_near_sysroot`, so the `WASI_BUILTINS` line CI exports for that step
+was doing nothing there. Making the variable step 1 for real surfaced the
+disagreement — CI exports the `.a` **file**, while what the release artifact
+unpacks to, and what `.gitignore`'s `tools/` convention holds, is a **directory**
+— and an exported directory reaches clang as `wasm-ld: error: … is a directory`.
+The override now accepts both: a value that names a directory is resolved to the
+`.a` inside it by the same two-level rule the pin uses. A value that names a file
+is unchanged, which is CI's case.
+
+That has one visible consequence and it is stated rather than buried: on CI,
+`layout_vs_clang` will now link `-nodefaultlibs <builtins> -lc` where it
+previously linked without them, because `builtins_near_sysroot` cannot find that
+archive in `~/wasm-tools` (it looks one directory down, and the artifact unpacks
+flat). That is the link line `vyrn build` and `shim_wasm` use, and it is verified
+here with both spellings of the variable.
+
+**The sort hazard.** Unchanged where nothing is pinned, and gone where something
+is. `tools_wasi_sysroot_from`'s lexicographic sort is step 3, so a project with a
+`toolchain.wasi-sysroot` key never reaches it and never picks 24 over 25. A
+project without one still does, and **this repository is still one of them** —
+there is no root `vyrn.json` until M4, so the hazard is live here today. M2
+removes the hazard for pinned projects; it does not fix the walk, which is what
+"removes rather than fixes" meant.
+
+**Gates.** Full workspace `cargo test --release`: 1736 passed, 0 failed. Parity
+(`-p vyrn-cli --release --test parity -- --ignored --test-threads=1`) with
+`$VYRN_WASMTIME`, `$WASI_SYSROOT`, `$WASI_BUILTINS` and `VYRN_REQUIRE_TOOLS=1`:
+40 passed, 0 failed. The codegen ignored tier (`-p vyrn-codegen -- --ignored`)
+with the same four variables, run **twice** — once with `$WASI_BUILTINS` naming
+the directory and once naming the `.a`, because that is the difference this
+milestone found: 8 passed, 0 failed both times (`layout_vs_clang` 1, `shim_link`
+2, `wasm_runs` 5). `vyrn-lsp`: 76 passed, 0 failed. `vyrn-genwasm` and
+`vyrn-play` (`--target wasm32-unknown-unknown`): compile. `cargo fmt --check` on
+the workspace and all three excluded crates: clean.
+
+The new checks are in `toolchain_pin.rs`, seeded the M1 way — fabricated
+archives, hashed into the cache, named by a `tool:` line, no network. They are
+called from the one `#[test]` rather than being a second one: `cargo test` runs
+tests in threads of one process, and `set_var` beside another thread's `getenv`
+is a race whether or not the two agree about which variable they are setting. And
+the pinned path has **no host-only branch** — both tools pin `/any`, so every
+assertion in it executes on all four platforms, which is the shape M1's
+x86_64-linux branch failed CI for lacking.
+
 - **M3 — the report and the clang key.** `vyrn deps` grows its toolchain
   section; `find_clang` captures its version; that version joins the shim cache
   key.
