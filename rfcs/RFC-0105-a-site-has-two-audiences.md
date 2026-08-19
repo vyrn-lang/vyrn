@@ -1,7 +1,7 @@
 # RFC-0105 — A Site Has Two Audiences
 
-- **Status:** **M1 implemented.** M2–M4 proposed. Milestones below; a milestone
-  that fails its gate says so in this file.
+- **Status:** **M1 and M2 implemented.** M3–M4 proposed. Milestones below; a
+  milestone that fails its gate says so in this file.
 - **Depends on:** the shipped site (`site/` — routes, `export.vyrn`, the
   document-relative URL rule), RFC-0026/0069 (std/ui and pages), RFC-0104 M3
   (the chart that will live on `/compare` and the backstage).
@@ -154,10 +154,107 @@ plus one representative record in Vyrn. And a backstage page publishes no
 `.data.json` payload: the section loads no script, so nothing would ever fetch
 one, and it would have been a second copy of every rendered record.
 
-**M2 — the explorer split.** Search and the import graph move to `/docs`;
-`/explore` becomes the package explorer as specified. Gate: no module list is
-rendered on two pages; the search still works without script; every package
-page's import line compiles when pasted.
+**M2 — the explorer split.** *Implemented.* Search and the import graph move to
+`/docs`; `/explore` becomes the package explorer as specified. Gate: no module
+list is rendered on two pages; the search still works without script; every
+package page's import line compiles when pasted.
+
+### M2 — as landed
+
+**What moved.** The search field, the module rows that ARE its index, and the
+import graph are on `/docs`, in the reference's own voice and inside its own
+sections. The reference's list did not gain a copy of the explorer's: the list
+that was already there grew the two attributes the filter reads (`data-q`, the
+lowercased haystack; `data-e`, the export names) and the finder above it.
+`site/app/explore.vyrn` is `site/app/stdgraph.vyrn` now — same contents, and it
+lost the name of the page it no longer serves — and `widgets.js` reads
+`data-search-*` where it read `data-explore-*`, because a hook named after the
+page it is not on is a hook somebody follows to the wrong file.
+
+**The package model.** A package is a unit somebody could depend on. Two kinds
+exist in this repository, and each answers the same four card questions from its
+own source (`site/app/packages.vyrn`):
+
+| | `std` — a module | `project` — a directory in `examples/` with a `vyrn.json` |
+|---|---|---|
+| Name | `std/json` | `examples/shelf` |
+| Summary | the reference's own, read off the module's `///` header | the first SENTENCE of its first entry module's `///` header |
+| What it gives | its exports, with signatures | the artifacts the manifest declares: name, entry, target |
+| What it needs | the `std/` modules its `import` lines name | the `std/` modules any file under it imports |
+| What you copy | `import { … } from "std/json"`, every export named | the manifest itself |
+| Where it links | its reference page, and its source | its directory in the repository |
+
+The artifact rule is the compiler's, not a second reading of it:
+`compiler/vyrn-frontend/src/artifacts.rs` says `main` and `server` name native
+artifacts and `client` a browser one, and the `artifacts` map spells the same
+thing out — so `examples/shelf`, which writes both spellings of the same two
+entry points, declares two artifacts and not four.
+
+**What a remote package would add, and where.** `github:owner/repo@tag` fits the
+`Package` record with two more fields and no new shape: the version an import
+pins and the sha256 `vyrn.lock` records (RFC-0010 M4). Neither is declared and no
+page renders a slot waiting for one — a cell nothing fills is a dead cell on
+every card. The comment on `packages.vyrn` says exactly this, and `/explore`'s
+third section says it to a reader in prose rather than as an empty row.
+
+**Where the import-line gate lives.** `site/test/importline.test.mjs`, run by the
+same `node --test "site/test/*.test.mjs"` line the base-path suite already uses.
+It takes the `data-import` attribute off every package page in the EXPORTED
+tree, writes each line into a program of its own, and runs `vyrn check` on it —
+eight at a time, 0.3 s for all thirty-seven. Two reasons it is not in
+`site/export.vyrn`: that program cannot start another one, and M1's timing lesson
+says a walk of thirty-seven compiler runs does not belong beside gates that walk
+`sitePaths()` six to ten times. What the export DOES check is the contract the
+node test depends on: every module page carries the line as an attribute as well
+as in the box, both from one `importLine`, and no project page carries an empty
+one.
+
+Gate: met, in three parts.
+
+- **No module list on two pages.** Proven by construction and by a test rather
+  than by promise. `/docs` renders `apiModules()`; `/explore` renders
+  `packages()`; neither page renders the other's. The test that holds it
+  (`export.vyrn`, "one module list, and the pages that do not render it") checks
+  where each row LEADS: every module row on the reference opens that module's
+  reference page and no row on the explorer index does, and every card on the
+  explorer opens that package's page and no row on the reference does. It also
+  checks that the search input and the row list exist once, on `/docs`.
+- **The search works without script.** The rows carry their own haystack, so
+  there is nothing to fetch and nothing to run: with no script the reader gets
+  every module, its first line, its export count and a link. Verified by reading
+  the exported html — 37 `data-q` and 37 `data-e` attributes on `docs.html`, one
+  per module, asserted by the same test.
+- **Every import line compiles.** 37 lines, 37 programs, `vyrn check` on each,
+  green — and shown red once on purpose, by putting a name `std/json` does not
+  export into the emitted attribute: `` `std/json.vyrn` does not define
+  `notAnExport` ``. A gate nobody has seen fail is a gate nobody has tested.
+
+Three things this milestone found or conceded, in the place they happened:
+
+- **A std module and a package share a name, and that is the fact rather than a
+  duplication.** The gate sentence says "no module list is rendered on two
+  pages", and the 34 module NAMES do appear on both — because a module is a
+  package. What is not rendered twice is the list: not its source, not its
+  shape, not its destination, and not the search over it. The test above is
+  written as the strongest form of that claim that is true.
+- **A project has no summary anywhere in the repository.** `std/` modules carry
+  a `///` header the reference already renders; `examples/shelf` carries one on
+  its server root, describing the module rather than the application. The first
+  sentence of it is what the card shows, because the alternative was four
+  sentences written here, which would be four sentences to keep true. It reads
+  as what it is: a sentence about the entry point.
+- **`vyrn fmt` cannot format a `.vyx` template.** It says so and skips, which it
+  did before this milestone. The four templates M2 touched are formatted by hand
+  to the house shape; the six `.vyrn` files are `fmt --check` clean.
+
+Two numbers, since M1 left the export at a minute and a quarter: it now takes
+**74 s** and publishes **5.6 MB**, against **68 s** and **5.2 MB** for the same
+tree on the same machine without this milestone. The 41 package pages are 457 KB
+of html and six seconds, and they are in `sitePaths()` rather than in a list of
+their own — a package page is a few kilobytes rendered from a lookup, not 25 KB
+of markdown, so the reason M1 moved the record pages out does not apply to
+these. One run of each, on one machine, which is enough to say what changed and
+what did not.
 
 **M3 — the editors page.** `/editors` in the consumer navigation. Gate: every
 feature row on the page names the code in `editor/` that implements it; no

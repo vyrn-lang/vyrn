@@ -665,7 +665,8 @@ function tabsWidget(root, opts = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// The explorer's search.
+// The reference's search (RFC-0105 M2: it was the explorer's, and moved with the
+// module list to /docs).
 //
 // The rows ARE the index. Each one carries its own lowercased haystack in
 // `data-q` and its export names in `data-e`, both written by the export, so
@@ -699,10 +700,10 @@ function exportHits(row, names) {
   return box;
 }
 
-function exploreSearch() {
-  const input = $("[data-explore-input]");
-  const list = $("[data-explore-list]");
-  const count = $("[data-explore-count]");
+function moduleSearch() {
+  const input = $("[data-search-input]");
+  const list = $("[data-search-list]");
+  const count = $("[data-search-count]");
   if (!input || !list) return;
   const rows = $$("li", list);
   const total = rows.length;
@@ -741,7 +742,8 @@ function exploreSearch() {
 }
 
 // ---------------------------------------------------------------------------
-// The explorer's graph. Vyrn laid every node and every wire out at build time;
+// The reference's import graph. Vyrn laid every node and every wire out at build
+// time;
 // this lights up one module's own imports and importers, on hover AND on focus,
 // because the nodes are links and a keyboard reaches them.
 // ---------------------------------------------------------------------------
@@ -925,7 +927,7 @@ function boot() {
   for (const el of $$('[data-widget="strip"]')) stripWidget(el);
   for (const el of $$("[data-tabs]")) tabsWidget(el);
   for (const el of $$("[data-install]")) installPicker(el);
-  exploreSearch();
+  moduleSearch();
   for (const el of $$('[data-widget="play"]')) mountPlay(el);
   for (const el of $$("svg.graph")) graphWidget(el);
   // One hero at a time. `boot` runs again after every soft navigation, and a

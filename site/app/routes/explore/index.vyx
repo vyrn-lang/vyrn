@@ -1,0 +1,91 @@
+<script>
+// GET /explore — the package explorer: every unit a program can depend on, one
+// card each (RFC-0105 M2).
+//
+// This page used to be a second view of the standard library: a search field
+// over the module list and the import graph. Both were things the REFERENCE
+// should carry, and they carry it now — `/docs` has the search and the graph,
+// and this page renders nothing off the reference's list. What it renders is
+// `packages()`, which is a different set (the projects are in it), a different
+// shape (a package's cost, not a module's prose) and a different destination
+// (every card opens that package's own page, never the reference's).
+//
+// No script. The cards are 38 rows of static markup and the page needs no
+// filter to be read; the search that exists is on the reference, where the 400
+// exports are.
+import { Head } from "std/ui"
+import { pageHead } from "../../nav"
+import { Package, packages, projectSlugs } from "../../packages"
+import { apiModules } from "../../docs"
+
+export fn head() -> Head {
+    return pageHead("Explore the packages — Vyrn")
+}
+
+/// How many standard library packages there are.
+fn stdCount() -> Int64 {
+    return apiModules().length
+}
+
+/// `1 export`, `44 exports`, `2 artifacts` — the count and the noun the kind
+/// uses for it. A module's unit is what it exports; a project's is what it
+/// builds.
+fn unitLabel(p: Package) -> String {
+    let one = if p.kind == "std" { "export" } else { "artifact" }
+    return if p.exports == 1 { "1 " + one } else { p.exports.toString() + " " + one + "s" }
+}
+
+/// The same rule for the dependency count, which every kind states the same way.
+fn depLabel(p: Package) -> String {
+    if p.deps == 0 {
+        return "no dependencies"
+    }
+    return if p.deps == 1 { "1 dependency" } else { p.deps.toString() + " dependencies" }
+}
+</script>
+
+<template>
+<main class="page">
+    <aside class="rail">
+        <a href="#packages"><span class="n">01</span>packages</a>
+        <a href="#kinds"><span class="n">02</span>what a package is</a>
+        <a href="#remote"><span class="n">03</span>from elsewhere</a>
+    </aside>
+
+    <section class="hero">
+        <p class="eyebrow">Explore</p>
+        <h1 class="display">{{ packages().length }} packages</h1>
+        <p class="lede">Everything in this repository a program can depend on: {{ stdCount() }} standard library modules and {{ projectSlugs().length }} example projects. Each card carries what it costs to take one on, and each page carries the line you copy to take it.</p>
+    </section>
+
+    <section class="band" id="packages">
+        <p class="eyebrow">01 — the index</p>
+        <h2>One card per package</h2>
+        <p>The two numbers are what a reader weighs a dependency by: what it gives you, and what it drags in. Both are read off the source while this page is built — the exports by the compiler's own lexer, the dependencies from the <code>import</code> lines themselves.</p>
+        <ul class="pkgs">
+            <li v-for="p in packages()" :key="p.slug" :data-kind="p.kind">
+                <a :href="p.href">{{ p.name }}</a>
+                <span class="kindpill">{{ p.kind }}</span>
+                <span class="note" v-html="p.summary"></span>
+                <span class="nums">{{ unitLabel(p) }} · {{ depLabel(p) }}</span>
+            </li>
+        </ul>
+        <p class="cap">Read off <code>std/</code> and <code>examples/</code> while this page was built. A module added to either is a card here on the next build.</p>
+    </section>
+
+    <section class="band" id="kinds">
+        <p class="eyebrow">02 — what a package is</p>
+        <h2>Two kinds, one namespace</h2>
+        <p>A <strong>module</strong> is one file in <code>std/</code>. Its exports are what you can name in an <code>import</code>, and its page carries that line with every one of them in it — compiled as its own program by the site's own tests, so the line on the page is a line that builds.</p>
+        <p>A <strong>project</strong> is a directory under <code>examples/</code> with a <code>vyrn.json</code>. You do not import an application, so its page carries the manifest instead: what it builds, from which entry point, and where each artifact runs. Its dependencies are the standard library modules its files import.</p>
+        <p>Prose about a module lives in <a href="/docs.html">the reference</a>, which is generated from the same declarations. A package page links there rather than restating it.</p>
+    </section>
+
+    <section class="band" id="remote">
+        <p class="eyebrow">03 — from elsewhere</p>
+        <h2>A package from another repository</h2>
+        <p>Vyrn imports remote modules by URL — <code>github:owner/repo</code> and <code>gist:</code> and <code>https:</code> — pinned by sha256 in <code>vyrn.lock</code> and cached under <code>~/.vyrn</code>. Nothing published here is remote yet, so nothing here pretends to be: a remote package would add the version an import pins and the hash the lock records, and those two rows will appear when a package has them to show.</p>
+        <p>The four commands are on <a href="/docs.html#cli">the reference</a>: <code>vyrn add</code>, <code>vyrn update</code>, <code>vyrn vendor</code> and <code>vyrn deps</code>.</p>
+    </section>
+</main>
+</template>

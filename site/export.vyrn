@@ -18,19 +18,21 @@
 ///     vyrn run site/export.vyrn out
 ///
 /// The output directory must exist, and so must `<out>/docs/std`, which holds
-/// one page per standard library module. RFC-0014 has `readFile`, `writeFile`
-/// and `listDir` and no way to CREATE a directory, so the caller makes them:
+/// one page per standard library module, and `<out>/explore`, which holds one
+/// page per package. RFC-0014 has `readFile`, `writeFile` and `listDir` and no
+/// way to CREATE a directory, so the caller makes them:
 ///
-///     mkdir -p out/docs/std
+///     mkdir -p out/docs/std out/explore
 ///
 /// Every other route publishes flat, for the same reason (see `app/nav.vyrn`).
 import { pages } from "std/ui"
-import { route, rootPath, philosophyPath, comparePath, installPath, releasesPath, docsPath, explorePath, guidePath, playPath, backstagePath, hrefDocsStd, hrefGuide, hrefBackstageRfcs } from pages("./app/routes")
+import { route, rootPath, philosophyPath, comparePath, installPath, releasesPath, docsPath, explorePath, guidePath, playPath, backstagePath, hrefDocsStd, hrefGuide, hrefBackstageRfcs, hrefExplore } from pages("./app/routes")
 import { published, navRows, hrefOf, upTo } from "./app/nav"
 import { rfcPages, rfcSlug } from "./app/backstage"
 import { apiModules, apiEntries, apiHref } from "./app/docs"
 import { chapterSlugs, chapterHref } from "./app/guide"
-import { exploreRows } from "./app/explore"
+import { searchRows } from "./app/stdgraph"
+import { packages, packageHref, importLine } from "./app/packages"
 import { substring, indexOf, split, replace } from "std/strings"
 import { startsWith } from "std/strpred"
 
@@ -45,6 +47,11 @@ fn sitePaths() -> Array<String> {
     let mut out: Array<String> = [rootPath(), philosophyPath(), comparePath(), installPath(), releasesPath(), docsPath(), guidePath(), explorePath(), playPath()]
     for m in apiModules() {
         out.push(hrefDocsStd(m.name))
+    }
+    // One page per package, from the same list the cards are rendered from
+    // (RFC-0105 M2).
+    for p in packages() {
+        out.push(hrefExplore(p.slug))
     }
     // The book's chapters come from the book itself, in reading order.
     for slug in chapterSlugs() {
@@ -100,8 +107,9 @@ fn payloadName(name: String) -> String {
 
 /// The navigation row a path belongs under, or "" for a path under none.
 ///
-/// A reference page — `/docs/std/json` — belongs under Docs, and a chapter —
-/// `/guide/values` — under Guide. Those are the two rows that own a subtree.
+/// A reference page — `/docs/std/json` — belongs under Docs, a chapter —
+/// `/guide/values` — under Guide, and a package page under Explore. Those are
+/// the three rows that own a subtree.
 fn currentNav(path: String) -> String {
     let here = hrefOf(path)
     for row in navRows() {
@@ -114,6 +122,9 @@ fn currentNav(path: String) -> String {
     }
     if startsWith(path, "/guide/") {
         return hrefOf("/guide")
+    }
+    if startsWith(path, "/explore/") {
+        return hrefOf("/explore")
     }
     return ""
 }
@@ -677,13 +688,13 @@ test "every playground link carries base64url and nothing else" {
     assert(links > 20)
 }
 
-test "every export the explorer offers has an anchor on the page it points at" {
-    // The explorer's rows carry their export names, and the script builds a link
+test "every export the search offers has an anchor on the page it points at" {
+    // The search rows carry their export names, and the script builds a link
     // to `/docs/std/<m>.html#e-<name>` from them. That link is assembled in the
     // browser, so this is where it is checked: every name in every row is an
     // anchor the reference page actually carries.
     let mut names = 0
-    for row in exploreRows() {
+    for row in searchRows() {
         let html = route(documentRequest(hrefDocsStd(row.name))).body
         for name in row.exports {
             assert(has(html, "id=\"e-\{name}\""))
@@ -691,6 +702,76 @@ test "every export the explorer offers has an anchor on the page it points at" {
         }
     }
     assert(names > 300)
+}
+
+test "the explorer publishes one page per package, and an unknown name is a 404" {
+    let all = packages()
+    assert(all.length > 30)
+    for p in all {
+        assertEq(packageHref(p.slug), "/" + published(hrefExplore(p.slug)))
+        assertEq(route(documentRequest(hrefExplore(p.slug))).status, 200)
+    }
+    assertEq(route(documentRequest("/explore/nope")).status, 404)
+    assertEq(currentNav("/explore/json"), "/explore.html")
+    assertEq(currentNav("/explore"), "/explore.html")
+}
+
+test "every standard library package page carries the import line, in the markup" {
+    // The line a reader copies is also an attribute, because a gate cannot read
+    // a highlighted code box and a reader cannot copy an attribute. Both come
+    // from the same `importLine`, so the two cannot disagree.
+    //
+    // The COMPILING of those lines is `site/test/importline.test.mjs`: it takes
+    // this attribute out of the exported html, writes each line into a program
+    // of its own, and runs `vyrn check`. It lives there because this program
+    // cannot start another one, and it is the gate RFC-0105 M2 asks for.
+    let mut lines = 0
+    for p in packages() {
+        let html = route(documentRequest(hrefExplore(p.slug))).body
+        if p.kind == "std" {
+            let line = importLine(p.slug)
+            assert(startsWith(line, "import { "))
+            assert(has(html, "data-import=\"" + escapedQuotes(line) + "\""))
+            lines = lines + 1
+        } else {
+            // A project has no import line, and no empty attribute where one
+            // would be.
+            assertEq(importLine(p.slug), "")
+            assert(!has(html, "data-import="))
+        }
+    }
+    assertEq(lines, apiModules().length)
+}
+
+/// `s` with its quotes as `std/html` writes them into an attribute value.
+fn escapedQuotes(s: String) -> String {
+    return replace(s, "\"", "&quot;")
+}
+
+test "one module list, and the pages that do not render it" {
+    // RFC-0105 M2's gate, checked by construction rather than promised. The
+    // reference renders `apiModules()` and nothing else does; the explorer
+    // renders `packages()` and nothing else does. The proof that they are not
+    // two copies of one list is where each row LEADS: every module row on the
+    // reference opens that module's reference page, and no row on the explorer
+    // index does.
+    let docs = route(documentRequest(docsPath())).body
+    let explore = route(documentRequest(explorePath())).body
+    for m in apiModules() {
+        assert(has(docs, "href=\"/docs/std/\{m.name}.html\""))
+        assert(!has(explore, "href=\"/docs/std/\{m.name}.html\""))
+        assert(has(explore, "href=\"/explore/\{m.name}.html\""))
+        assert(!has(docs, "href=\"/explore/\{m.name}.html\""))
+    }
+    // And the search index is the reference's list: one input, one list, on one
+    // page.
+    assert(has(docs, "data-search-list"))
+    assert(!has(explore, "data-search-list"))
+    assertEq(countOf(docs, "data-search-input"), 1)
+    // Every row carries its own haystack, which is what makes the filter a class
+    // on a row and not a fetch.
+    assertEq(countOf(docs, " data-q=\""), apiModules().length)
+    assertEq(countOf(docs, " data-e=\""), apiModules().length)
 }
 
 test "the book publishes one page per chapter, and an unknown chapter is a 404" {

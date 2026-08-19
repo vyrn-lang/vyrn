@@ -11,10 +11,25 @@
 // record and the compiler notes were two of them, and both were development
 // reading on a consumer page (RFC-0105 M1). The record is a section of its own
 // now, reached from the footer.
+//
+// THE SEARCH AND THE GRAPH ARE HERE (RFC-0105 M2). They were `/explore`, which
+// was a second view of this same list and answered no question this page could
+// not. The module list below IS the search index: each row carries its own
+// lowercased haystack in `data-q` and its export names in `data-e`, so there is
+// no fetch, no index file, and a reader with no script still gets every module,
+// its first line and a link. `widgets.js` filters the rows and builds a link per
+// matching export with `createElement` — never by assembling markup out of what
+// was typed. The graph's geometry is computed in Vyrn while this page is built
+// (`site/app/stdgraph.vyrn`), and the script only lights up one module's wires.
+//
+// There is one module list on this site and it is this one. `/explore` renders
+// packages — a different set, a different shape, and every card goes to that
+// package's own page.
 import { Head } from "std/ui"
 import { pageHead } from "../../nav"
 import { exampleCount, blob } from "../../repo"
 import { ApiModule, apiModules, apiHref } from "../../docs"
+import { SearchRow, GraphNode, GraphEdge, searchRows, graphNodes, graphEdges, graphViewBox, graphWidth, edgeCount, leafCount } from "../../stdgraph"
 
 /// One place to read next, outside this site.
 type Link = { href: String, name: String, what: String }
@@ -50,6 +65,12 @@ fn links() -> Array<Link> {
 /// say, the sentence carries an ON-SITE link, in the sentence, as a link looks.
 type Command = { name: String, what: String }
 
+/// The width the graph needs, as a style. Below it the drawing scrolls inside
+/// its own box; the page never scrolls sideways.
+fn graphStyle() -> String {
+    return "min-width:" + graphWidth().toString() + "px"
+}
+
 fn commands() -> Array<Command> {
     return [
         Command { name: "vyrn run | check | build | test | bench", what: "Run, type-check, compile, and run the tests and benchmarks written in the file. <a href=\"/install.html#check\">Five of them, on day one.</a>" },
@@ -67,9 +88,10 @@ fn commands() -> Array<Command> {
 <main class="page">
     <aside class="rail">
         <a href="#std"><span class="n">01</span>std</a>
-        <a href="#cli"><span class="n">02</span>cli</a>
-        <a href="#read"><span class="n">03</span>read</a>
-        <a href="#soon"><span class="n">04</span>later</a>
+        <a href="#graph"><span class="n">02</span>graph</a>
+        <a href="#cli"><span class="n">03</span>cli</a>
+        <a href="#read"><span class="n">04</span>read</a>
+        <a href="#soon"><span class="n">05</span>later</a>
     </aside>
         <section class="hero">
             <p class="eyebrow">Docs</p>
@@ -81,18 +103,48 @@ fn commands() -> Array<Command> {
             <p class="eyebrow">01 — the standard library</p>
             <h2>{{ apiModules().length }} modules, written in Vyrn</h2>
             <p>Not one of them is a compiler feature. RPC, UI, i18n, OpenAPI and GraphQL are libraries built on compile-time generators, and <code>vyrn emit-gen</code> prints the source each one produces.</p>
-            <ul class="modlist">
-                <li v-for="m in apiModules()" :key="m.name">
-                    <a :href="apiHref(m.name)">std/{{ m.name }}</a>
-                    <span class="count">{{ m.count }}</span>
-                    <span class="note" v-html="m.summary"></span>
+            <div class="finder" data-search>
+                <label class="eyebrow" for="std-q">Search modules and exports</label>
+                <input id="std-q" type="search" autocomplete="off" spellcheck="false" placeholder="parse, Map, schema, byteLength" data-search-input/>
+                <p class="cap" data-search-count aria-live="polite">{{ searchRows().length }} modules</p>
+            </div>
+            <ul class="modlist" data-search-list>
+                <li v-for="r in searchRows()" :key="r.name" :data-q="r.q" :data-e="r.e" :data-m="r.name">
+                    <a :href="r.href">std/{{ r.name }}</a>
+                    <span class="count">{{ r.count }}</span>
+                    <span class="note" v-html="r.summary"></span>
                 </li>
             </ul>
-            <p class="cap">Listed from std/ while this page was built. The count is how many things the module exports.</p>
+            <p class="cap">Listed from std/ while this page was built. The count is how many things the module exports. Type a module name, an export name or a word from a module's first line and the list narrows; with no script it is the same list, whole.</p>
+        </section>
+
+        <section class="band" id="graph">
+            <p class="eyebrow">02 — the graph</p>
+            <h2>{{ edgeCount() }} imports between {{ searchRows().length }} modules</h2>
+            <p>Every wire is an <code>import</code> line in the source. A module sits one column to the right of everything it imports, so dependencies are on the left and the modules that need them are on the right. {{ leafCount() }} modules import nothing else in <code>std/</code>.</p>
+            <div class="plate">
+                <div class="plate-head">
+                    <span class="pill">Built</span>
+                    <span class="eyebrow">point at a module to light its imports</span>
+                </div>
+                <div class="stage scroller">
+                    <svg class="graph" :viewBox="graphViewBox()" :style="graphStyle()" role="img" aria-label="The import graph of the standard library. Every module is a link; the list above carries the same modules as text.">
+                        <path class="wire" v-for="e in graphEdges()" :key="e.id" :d="e.d" :data-from="e.from" :data-to="e.to"/>
+                        <g class="node" v-for="n in graphNodes()" :key="n.name" :data-m="n.name" :data-uses="n.uses" :data-usedby="n.usedBy">
+                            <a :href="n.href">
+                                <rect :x="n.hx" :y="n.hy" :width="n.w" height="18" class="hit"/>
+                                <circle :cx="n.x" :cy="n.y" r="3"/>
+                                <text :x="n.tx" :y="n.ty">{{ n.name }}</text>
+                            </a>
+                        </g>
+                    </svg>
+                </div>
+                <p class="cap">Read from the <code>import</code> lines of <code>std/*.vyrn</code> by the compiler's own lexer while this page was built. An import written inside a code quote is a string, and is not a wire.</p>
+            </div>
         </section>
 
         <section class="band" id="cli">
-            <p class="eyebrow">02 — the driver</p>
+            <p class="eyebrow">03 — the driver</p>
             <h2>What <code>vyrn</code> does</h2>
             <div class="scroller">
             <table>
@@ -110,7 +162,7 @@ fn commands() -> Array<Command> {
         </section>
 
         <section class="band" id="read">
-            <p class="eyebrow">03 — read</p>
+            <p class="eyebrow">04 — read</p>
             <h2>Three places this site does not host</h2>
             <p>{{ exampleCount() }} example programs live in the repository, and a link is honest when it points at something that is genuinely there and not here.</p>
             <ul class="plain">
@@ -122,10 +174,10 @@ fn commands() -> Array<Command> {
         </section>
 
         <section class="band" id="soon">
-            <p class="eyebrow">04 — the other two ways in</p>
-            <h2>A book, and a search field</h2>
+            <p class="eyebrow">05 — the other two ways in</p>
+            <h2>A book, and a registry</h2>
             <p><a href="/guide.html">The guide</a> teaches the language in order: thirteen chapters, from the first program to a web application. Every code block in it is a program this site compiled and ran while the page was built, so nothing in the book is an illustration.</p>
-            <p><a href="/explore.html">The explorer</a> is the other way in. {{ exportCount() }} exports is more than a reader should have to scan, so the name is typed instead — and the same page draws the import graph of <code>std/</code>, read from the source on every build.</p>
+            <p><a href="/explore.html">The packages</a> are the other way in. This page answers what a module does; that one answers what it costs to depend on it — the exports and dependencies of every standard library module and every example project, with the line you copy to use it.</p>
         </section>
 </main>
 </template>
