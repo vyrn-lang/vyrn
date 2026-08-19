@@ -32,7 +32,7 @@ export type SearchRow = { name: String, href: String, summary: String, count: In
 
 /// One node of the graph: where it sits, what it is called, and the two lists
 /// the highlight needs.
-export type GraphNode = { name: String, href: String, x: String, y: String, tx: String, ty: String, hx: String, hy: String, w: String, uses: String, usedBy: String }
+export type GraphNode = { name: String, href: String, x: String, y: String, tx: String, ty: String, hx: String, hy: String, w: String, uses: String, usedBy: String, label: String }
 
 /// One wire: the path, and the two modules it joins.
 export type GraphEdge = { id: String, d: String, from: String, to: String }
@@ -217,9 +217,35 @@ export fn graphNodes() -> Array<GraphNode> {
                 w: (labelWidth(m.name) + 20).toString(),
                 uses: joinWith(depUses(m.name), " "),
                 usedBy: joinWith(depUsedBy(m.name), " "),
+                label: nodeLabel(m.name),
             })
     }
     return out
+}
+
+/// What a keyboard reader hears on one node (RFC-0105 M4).
+///
+/// Every node is a link, so every node is a tab stop, and a tab stop whose only
+/// name is a two-word module name says nothing about the picture it is in. The
+/// name carries what the highlight SHOWS when the same node is pointed at: how
+/// many modules it imports and how many import it. The two counts are the reason
+/// the graph exists, and they are the part a reader who cannot see the wires
+/// otherwise loses.
+fn nodeLabel(name: String) -> String {
+    let uses = depUses(name).length
+    let usedBy = depUsedBy(name).length
+    return "std/" + name + ", imports " + countWord(uses) + ", imported by " + countWord(usedBy)
+}
+
+/// `1 module` / `4 modules` / `no modules` — the plural, in a sentence.
+fn countWord(n: Int64) -> String {
+    if n == 0 {
+        return "no modules"
+    }
+    if n == 1 {
+        return "1 module"
+    }
+    return n.toString() + " modules"
 }
 
 /// The wire from `from` to the module it imports.

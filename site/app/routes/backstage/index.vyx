@@ -61,7 +61,18 @@ fn checks() -> Array<Check> {
                 </div>
                 <div class="stage">
                     <svg class="chart" :viewBox='"0 0 " + rfcStripWidth() + " " + rfcStripHeight()' role="img" aria-label="One cell per design record, in order">
-                        <a v-for="c in rfcCells()" :key="c.id" :href="c.href">
+                        <!-- `tabindex="-1"`, and the opposite call from the
+                             import graph on `/docs` (RFC-0105 M4). Both are SVGs
+                             full of links; the difference is whether the same
+                             information is anywhere else on the page. The graph
+                             says who imports whom and nothing else does, so its
+                             nodes are named and keyboard-reachable. These 105
+                             cells are the index table twenty lines below, record
+                             for record — leaving them in the tab order puts 105
+                             duplicate stops in front of it. The strip stays a
+                             `role="img"` with a text alternative, which is what
+                             it is. -->
+                        <a v-for="c in rfcCells()" :key="c.id" :href="c.href" tabindex="-1">
                             <title>{{ c.title }}</title>
                             <rect class="cell" :x="c.x" :y="c.y" width="18" height="18" :data-tone="c.tone" fill="currentColor" :fill-opacity="c.tone"/>
                         </a>

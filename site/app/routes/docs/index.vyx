@@ -128,10 +128,17 @@ fn commands() -> Array<Command> {
                     <span class="eyebrow">point at a module to light its imports</span>
                 </div>
                 <div class="stage scroller">
-                    <svg class="graph" :viewBox="graphViewBox()" :style="graphStyle()" role="img" aria-label="The import graph of the standard library. Every module is a link; the list above carries the same modules as text.">
+                    <!-- `role="group"` and not `role="img"` (RFC-0105 M4). Every
+                         node is a link, so every node is a tab stop; under
+                         `role="img"` those thirty-seven stops were present in
+                         the tab order and absent from the accessibility tree,
+                         which is the worst of both. The graph is a group of
+                         links now, and each link's name carries the two counts
+                         the highlight draws. -->
+                    <svg class="graph" :viewBox="graphViewBox()" :style="graphStyle()" role="group" aria-label="The import graph of the standard library. Every module is a link, named with what it imports and what imports it.">
                         <path class="wire" v-for="e in graphEdges()" :key="e.id" :d="e.d" :data-from="e.from" :data-to="e.to"/>
                         <g class="node" v-for="n in graphNodes()" :key="n.name" :data-m="n.name" :data-uses="n.uses" :data-usedby="n.usedBy">
-                            <a :href="n.href">
+                            <a :href="n.href" :aria-label="n.label">
                                 <rect :x="n.hx" :y="n.hy" :width="n.w" height="18" class="hit"/>
                                 <circle :cx="n.x" :cy="n.y" r="3"/>
                                 <text :x="n.tx" :y="n.ty">{{ n.name }}</text>

@@ -945,7 +945,31 @@ function boot() {
 
 boot();
 
+/// Where the reader is after a soft navigation (RFC-0105 M4).
+///
+/// The defect, measured: `vyrn-nav.js` swaps `<main>` and scrolls to the top,
+/// and the link that was clicked went with the old `<main>`. Focus fell to
+/// `<body>`, so the next Tab started at the masthead again — a keyboard reader
+/// who followed a link from the middle of a reference page landed nowhere and
+/// had to walk the whole shell back, and a screen reader was told nothing at all
+/// because no document load happened.
+///
+/// Both halves are fixed here rather than in `vyrn-nav.js`: the shell this site
+/// wears is this site's business, and the navigator is shared with two other
+/// applications. `#main` is the anchor the skip link already lands on — a box
+/// with no size, `tabindex="-1"`, sitting immediately before the content — so
+/// the next Tab is the first link of the page that just arrived, which is what
+/// a real navigation does.
+function landed() {
+  boot();
+  const main = document.getElementById("main");
+  if (main) main.focus({ preventScroll: true });
+  // The title is what a browser reads out on a real navigation, and this is the
+  // navigation that never had one.
+  announce(document.title);
+}
+
 // Soft navigation replaces the page body, so every widget on the new page needs
 // booting again. `vyrn-nav.js` announces that it has swapped the DOM.
-document.addEventListener("vyrn:nav-end", boot);
+document.addEventListener("vyrn:nav-end", landed);
 import("./vyrn-nav.js").catch(() => {}); // a hard navigation is a fine fallback

@@ -26,11 +26,11 @@
   --cyan: oklch(0.7221 0.1214 214.54);
   --bright: oklch(0.8442 0.1241 204.81);
   --danger: oklch(0.5568 0.2078 25.33);
-  --amber: oklch(0.6186 0.1447 70.08);
+  --amber: oklch(0.52 0.1447 70.08);
 
   --n0: oklch(0.18 0.004 60);
   --n1: oklch(0.42 0.004 60);
-  --n2: oklch(0.65 0.004 60);
+  --n2: oklch(0.53 0.004 60);
   --n3: oklch(0.92 0.003 60);
   --n4: oklch(0.975 0.002 60);
 
@@ -42,6 +42,18 @@
   --hair: color-mix(in oklab, var(--n0) 10%, transparent);
   --accent: var(--navy);
   --field: 18, 50, 88;
+
+  /* Syntax colour, and the two ownership lanes. Tokens rather than literals on
+   * the rules below, for one reason: a palette that lives in one block can be
+   * MEASURED, and `site/test/contrast.test.mjs` measures it. A colour written
+   * on a `.s` rule two hundred lines down is a colour nothing checks. */
+  --syn-kw: oklch(0.46 0.0959 223.03);
+  --syn-str: oklch(0.44 0.11 150);
+  --syn-com: var(--n1);
+  --syn-type: var(--navy);
+  --syn-num: var(--amber);
+  --lane-a: var(--teal);
+  --lane-b: var(--amber);
   /* How much accent an inline code chip carries. Two numbers, because the two
    * themes are not symmetric: the light accent is a dark navy, so one share of
    * it over warm paper is a heavy step, while the dark accent is a bright cyan
@@ -104,11 +116,31 @@
   scrollbar-color: var(--n2) transparent;
 }
 
+/* THE DARK PALETTE, and the two selectors that apply it (RFC-0105 M4).
+ *
+ * The explicit choice beats the system in BOTH directions, which takes two
+ * rules and not one:
+ *
+ *   - a reader who has chosen dark gets it on a system set to light, through
+ *     `[data-theme="dark"]`;
+ *   - a reader who has chosen light gets it on a system set to dark, because
+ *     the media block below is GUARDED by `:not([data-theme="light"])` and so
+ *     matches nothing on that document;
+ *   - a reader who has chosen nothing — the default, and the only state a
+ *     browser with no script can be in — follows `prefers-color-scheme`.
+ *
+ * The block is written twice because a selector list cannot hold a media query,
+ * and the two copies are held identical by a test rather than by care:
+ * `site/test/contrast.test.mjs`, "the explicit dark choice and the system dark
+ * default carry the same tokens". Every dark value in the sheet is in here —
+ * nothing further down the file redefines a colour per theme, so there is one
+ * place to read the palette and one place to measure it.
+ */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --n0: oklch(0.97 0.002 60);
     --n1: oklch(0.72 0.004 60);
-    --n2: oklch(0.5 0.004 60);
+    --n2: oklch(0.62 0.004 60);
     --n3: oklch(0.24 0.005 60);
     --n4: oklch(0.155 0.005 60);
     --rule: color-mix(in oklab, var(--n0) 22%, transparent);
@@ -118,8 +150,43 @@
     --danger: oklch(0.72 0.17 25.33);
     --amber: oklch(0.8 0.15 70.08);
     --field: 79, 227, 242;
+    --syn-kw: var(--cyan);
+    --syn-str: oklch(0.78 0.1 150);
+    --syn-com: var(--n1);
+    --syn-type: var(--bright);
+    --syn-num: var(--amber);
+    --lane-a: var(--cyan);
+    --lane-b: var(--amber);
+    color-scheme: dark;
   }
 }
+
+:root[data-theme="dark"] {
+  --n0: oklch(0.97 0.002 60);
+  --n1: oklch(0.72 0.004 60);
+  --n2: oklch(0.62 0.004 60);
+  --n3: oklch(0.24 0.005 60);
+  --n4: oklch(0.155 0.005 60);
+  --rule: color-mix(in oklab, var(--n0) 22%, transparent);
+  --hair: color-mix(in oklab, var(--n0) 12%, transparent);
+  --accent: var(--bright);
+  --code-wash: 12%;
+  --danger: oklch(0.72 0.17 25.33);
+  --amber: oklch(0.8 0.15 70.08);
+  --field: 79, 227, 242;
+  --syn-kw: var(--cyan);
+  --syn-str: oklch(0.78 0.1 150);
+  --syn-com: var(--n1);
+  --syn-type: var(--bright);
+  --syn-num: var(--amber);
+  --lane-a: var(--cyan);
+  --lane-b: var(--amber);
+  color-scheme: dark;
+}
+
+/* An explicit light choice narrows `color-scheme` too, so a form control and a
+ * scrollbar follow the page rather than the system. */
+:root[data-theme="light"] { color-scheme: light; }
 
 * { box-sizing: border-box; }
 
@@ -343,6 +410,45 @@ h1 code, h2 code, h3 code, h4 code {
   color: var(--accent);
 }
 
+/* THE THEME CONTROL (RFC-0105 M4).
+ *
+ * Hidden until `theme.js` has run and marked the document. Without script the
+ * three buttons would render, take focus, and do nothing — worse than an absent
+ * control, because it claims a choice the page cannot honour. With no script
+ * `prefers-color-scheme` decides and the page says nothing about it, which is
+ * what it did before this milestone.
+ *
+ * `.slot` is the consumer layout's `v-html` host. It has no box, so the group
+ * below is the masthead's own flex item in both mastheads — the backstage builds
+ * its masthead as one string and has no host element. */
+.theme { display: none; }
+.masthead .slot { display: contents; }
+[data-js] .theme {
+  display: flex;
+  margin-left: auto;
+  gap: 0;
+  align-self: center;
+  border: 1px solid var(--rule);
+}
+.theme button {
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  padding: 6px var(--s1);
+  cursor: pointer;
+}
+.theme button + button { border-left: 1px solid var(--rule); }
+.theme button:hover { color: var(--ink); }
+/* Which state is on. `aria-pressed` is the state itself, so the rule reads it
+ * rather than a class somebody has to remember to keep in step with it. */
+.theme button[aria-pressed="true"] {
+  color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 12%, transparent);
+}
+
 .nav { display: flex; gap: var(--s3); flex-wrap: wrap; }
 .nav a { text-decoration: none; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; }
 .nav a:hover { color: var(--ink); }
@@ -522,16 +628,11 @@ pre.code {
 }
 .plate pre.code { margin: 0; border: 0; background: transparent; }
 
-.k { color: var(--teal); }
-.s { color: oklch(0.5 0.09 150); }
-.c { color: var(--n2); font-style: italic; }
-.t { color: var(--navy); font-weight: 600; }
-.n { color: var(--amber); }
-@media (prefers-color-scheme: dark) {
-  .k { color: var(--cyan); }
-  .s { color: oklch(0.78 0.1 150); }
-  .t { color: var(--bright); }
-}
+.k { color: var(--syn-kw); }
+.s { color: var(--syn-str); }
+.c { color: var(--syn-com); font-style: italic; }
+.t { color: var(--syn-type); font-weight: 600; }
+.n { color: var(--syn-num); }
 
 /* Numbered source rows. Every code plate that has anything to point AT uses
  * these rather than a bare `<pre>`: a line number is what a diagnostic, a
@@ -569,8 +670,8 @@ pre.code {
 /* Ownership lanes: one lane per binding, drawn on exactly the lines that
  * binding is alive. A lane that starts or ends on a row is inset, and capped,
  * so the eye can see where it begins and where the memory goes back. */
-:root { --lane-a: var(--teal); --lane-b: var(--amber); }
-@media (prefers-color-scheme: dark) { :root { --lane-a: var(--cyan); } }
+/* `--lane-a` and `--lane-b` are palette tokens like every other colour on this
+ * sheet, declared at the top with the rest of them. */
 
 .lines .lanes { flex: none; display: flex; gap: 6px; width: 32px; padding: 0 var(--s2) 0 4px; }
 /* Name the columns. Three-pixel bars in a gutter mean nothing until something
@@ -827,6 +928,29 @@ svg.chart a .cell:hover { fill-opacity: 1 !important; }
   .staged > * { opacity: 1; transform: none; }
 }
 
+/* -------------------------------------------------------------------------
+   Forced colours (RFC-0105 M4)
+
+   A reader in a forced-colours mode gets the system's palette, and every
+   `background` and `color` on this sheet is replaced. Most of the site is fine
+   with that — it is hairlines, type and structure, and the navigation marker is
+   an underline rather than a colour. Three things said something in colour ALONE
+   and say it here in a way that survives.
+   ------------------------------------------------------------------------- */
+@media (forced-colors: active) {
+  /* Which theme is chosen. The wash and the accent are both forced away, so the
+   * pressed button is marked by a box the reader can see instead. A theme
+   * control is nearly pointless under forced colours, and it stays because the
+   * setting persists and applies to every other display the reader opens. */
+  .theme button[aria-pressed="true"] { outline: 2px solid; outline-offset: -4px; }
+  /* The playhead, and the row a control just changed. Both are a background
+   * wash on a code row, and both become the row's own left edge. */
+  .lines .cl.on, .lines .cl.changed { outline: 1px solid; outline-offset: -1px; }
+  /* A pill states its own word, so it needs no colour — but `live` and `warn`
+   * differ only by one, and a border keeps the shape. */
+  .pill { border: 1px solid; }
+}
+
 
 
 /* -------------------------------------------------------------------------
@@ -986,6 +1110,12 @@ svg.graph circle { fill: var(--accent); fill-opacity: 0.55; }
 svg.graph text { font-family: var(--mono); font-size: 11px; fill: var(--muted); }
 svg.graph .hit { fill: transparent; }
 svg.graph a { text-decoration: none; }
+/* A node is a link, so a keyboard reaches it, so it has to SHOW that it has been
+ * reached. The sheet's own focus ring does not draw on an SVG `<a>` in every
+ * engine; the hit rectangle each node already carries does, and it is the box
+ * the reader is pointing at anyway (RFC-0105 M4). */
+svg.graph a:focus { outline: none; }
+svg.graph a:focus-visible .hit { stroke: var(--accent); stroke-width: 2; }
 
 /* One module lit: its own wires, its name, and the names at the other end of
  * those wires. The rest recedes rather than disappears, so the shape of the

@@ -19,8 +19,8 @@
 /// is the same bytes through a slower door.
 import { substring, split, trim, lines, padStart } from "std/strings"
 import { startsWith } from "std/strpred"
-import { Head, noHead, withTitle, withMeta, withStylesheet } from "std/ui"
-import { hrefOf } from "./nav"
+import { Head, noHead, withTitle, withMeta, withStylesheet, withScript } from "std/ui"
+import { hrefOf, themeControl } from "./nav"
 
 /// One record, as the index states it.
 export type IndexRow = { number: Int64, file: String, title: String, status: String }
@@ -169,7 +169,11 @@ export fn backstageHead(title: String) -> Head {
     let titled = withTitle(noHead(), title)
     let sized = withMeta(titled, "viewport", "width=device-width, initial-scale=1")
     let described = withMeta(sized, "description", "The Vyrn design record: every decision in the language, with the argument that produced it.")
-    return withStylesheet(described, "/style.css")
+    // The one script this section loads, and it loads it for the same reason the
+    // consumer layout does: a theme applied after the first paint is a flash
+    // (RFC-0105 M4). The backstage runs no widgets and no soft navigation; the
+    // theme is not a widget, it is the page's colours.
+    return withScript(withStylesheet(described, "/style.css"), "/theme.js")
 }
 
 /// What goes inside the backstage masthead, marked for the page it is on.
@@ -178,7 +182,7 @@ export fn backstageHead(title: String) -> Head {
 /// sheet and a wrapper around it would take its place there. What it holds is
 /// written once here: two pages, one navigation.
 export fn backstageNav(current: String) -> String {
-    return "<a href=\"" + hrefOf("/") + "\" class=\"wordmark\" data-nav=\"hard\">vyrn</a><span class=\"pill\">backstage</span><nav class=\"nav\">" + navLink(hrefOf(backstageIndexPath()), "The record", current == "record") + "</nav>"
+    return "<a href=\"" + hrefOf("/") + "\" class=\"wordmark\" data-nav=\"hard\">vyrn</a><span class=\"pill\">backstage</span><nav class=\"nav\" aria-label=\"Backstage\">" + navLink(hrefOf(backstageIndexPath()), "The record", current == "record") + "</nav>" + themeControl()
 }
 
 /// One backstage navigation link, marked when it is the page being read.

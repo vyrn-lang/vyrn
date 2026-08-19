@@ -6,7 +6,7 @@
 // two reserved sockets were filled that way: `/guide` and `/explore` arrived as
 // a directory of routes plus one row each in `navRows`, and nothing else here
 // changed.
-import { navRows, NavRow } from "../nav"
+import { navRows, NavRow, themeControl } from "../nav"
 import { exampleCount, backendCount, hasRelease, releaseTag, releasePre } from "../repo"
 // The stylesheet and the one script module, for every page.
 //
@@ -14,8 +14,14 @@ import { exampleCount, backendCount, hasRelease, releaseTag, releasePre } from "
 // has no entry for a `<meta>`. Each page therefore carries the viewport and
 // description meta in its own `head()` — one call to `pageHead`, which builds
 // them from a `Head` value where `withMeta` does exist.
+// `theme.js` is a CLASSIC script and the others are modules, which is the whole
+// reason it is a separate file: a module is deferred, so it runs after the first
+// paint, and a theme applied after the first paint is a flash. This one blocks
+// rendering for four hundred bytes and sets the root attribute before anything
+// is painted (RFC-0105 M4).
 head {
     stylesheet "/style.css"
+    script "/theme.js"
     module "/widgets.js"
 }
 
@@ -39,9 +45,15 @@ fn standing() -> String {
     <a class="skip" href="#main">Skip to content</a>
     <header class="masthead">
         <a href="/index.html" class="wordmark">vyrn</a>
-        <nav class="nav">
+        <nav class="nav" aria-label="Site">
             <a v-for="r in navRows()" :key="r.href" :href="r.href">{{ r.label }}</a>
         </nav>
+        <!-- Three states, one attribute on `<html>`, and nothing at all without
+             script — `theme.js` says why. `v-html` needs an element to write
+             into, and the backstage masthead is built as a string where the
+             control's own `<div>` is the flex item; `.slot` is `display:
+             contents`, so the two mastheads have the same boxes. -->
+        <div class="slot" v-html="themeControl()"></div>
     </header>
     <!-- Where the skip link lands, and why it is not the `<main>` itself: every
          route's `<main class="page">` is `display: contents`, so its children

@@ -1,7 +1,12 @@
 # RFC-0105 — A Site Has Two Audiences
 
-- **Status:** **M1, M2 and M3 implemented.** M4 proposed. Milestones below; a
-  milestone that fails its gate says so in this file.
+- **Status:** **Implemented.** Four milestones and four pull requests. The
+  backstage carries the design record and no consumer navigation row reaches it;
+  `/docs` is the one reference and `/explore` is the package explorer; `/editors`
+  names the file behind every feature it claims; and the theme control, the two
+  measured palettes and the accessibility checklist are in
+  [M4 — as landed](#m4--as-landed). Milestones below; a milestone that fails its
+  gate says so in this file.
 - **Depends on:** the shipped site (`site/` — routes, `export.vyrn`, the
   document-relative URL rule), RFC-0026/0069 (std/ui and pages), RFC-0104 M3
   (the chart that will live on `/compare` and the backstage).
@@ -354,10 +359,231 @@ there is no port to connect to.
 **One number.** The export publishes 206 routes rather than 205 and the new page
 is 16 KB. Nothing else moved.
 
-**M4 — accessibility and theme.** The control, the palettes, the checklist —
-each item verified in a browser and recorded here. Gate: the checklist has no
-unchecked row, and the verification method for each row is named (keyboard
-walk, contrast measurement, forced-colors, reduced-motion emulation).
+**M4 — accessibility and theme.** *Implemented.* The control, the palettes, the
+checklist — each item verified in a browser and recorded here. Gate: the
+checklist has no unchecked row, and the verification method for each row is
+named (keyboard walk, contrast measurement, forced-colors, reduced-motion
+emulation).
+
+### M4 — as landed
+
+**The control.** Three buttons in a group labelled `Theme` — System, Light,
+Dark — in the masthead of both fronts, from one function (`themeControl` in
+`site/app/nav.vyrn`). The consumer layout writes it into `<template>` and the
+backstage builds its masthead as a string; both call the same code, so the two
+fronts cannot drift.
+
+It writes one attribute on `<html>`: `data-theme="light"`, `data-theme="dark"`,
+or nothing at all for system. Nothing is the default, and nothing is the only
+state a browser with no script can be in.
+
+**Why it is a fourth file and not part of `widgets.js`.** `site/public/theme.js`
+is a *classic* script in `<head>`. `widgets.js` is a module, and a module is
+deferred — it runs after the document is parsed and after the first paint, which
+is exactly the flash the file exists to prevent: a reader who chose dark would
+get a white page and then a dark one, on every navigation. A classic head script
+blocks rendering, so the attribute is on the element before anything is painted.
+Four hundred bytes on every page is the price of not flashing, and the export
+asserts both halves of it — the tag is `<script src>` and not
+`<script type="module">`, and it is before `<body>`.
+
+**And the no-script rule.** The group is `display: none` until `theme.js` marks
+the document with `data-js`. A control that renders, takes focus and does
+nothing is worse than no control: it claims a choice the page cannot honour.
+With no script the site is what it was before this milestone —
+`prefers-color-scheme` decides, and nothing on the page says otherwise.
+
+**The palettes.** The light palette is the base token block on `:root`. The dark
+one is one block of twenty tokens, applied by two selectors, because the explicit
+choice has to beat the system in *both* directions and that takes two rules:
+
+| The reader has chosen | The system says | What applies | Through |
+|---|---|---|---|
+| nothing | light | light | the base `:root` block |
+| nothing | dark | dark | `@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) }` |
+| light | dark | **light** | the guard above matches nothing on that document |
+| dark | light | **dark** | `:root[data-theme="dark"]` |
+
+A selector list cannot hold a media query, so the block is written twice. The
+second copy is held identical to the first by a test and not by care —
+`site/test/contrast.test.mjs`, "the explicit dark choice and the system dark
+default carry the same tokens", which also fails if the guard is ever dropped.
+
+**The token census.** The sheet was already nearly all tokens, and this says what
+actually moved rather than claiming a sweep that was not needed:
+
+| | Before | After |
+|---|---:|---:|
+| Colour literals on a property (not a token definition) | 2 | **0** |
+| Distinct colour tokens | 20 | **25** |
+| Places in the file where a colour is redefined per theme | 3 | **1** (one block, two selectors) |
+
+The two literals were the string colour in the syntax highlighter, light and
+dark. The five new tokens are the syntax roles (`--syn-kw`, `--syn-str`,
+`--syn-com`, `--syn-type`, `--syn-num`); `--lane-a` and `--lane-b` moved up from
+a `:root` rule of their own. The point of the move is not tidiness: a colour
+written on a `.s` rule eight hundred lines down is a colour nothing can measure,
+and the whole palette is now in one block that a program reads.
+
+**The contrast checker.** `site/test/contrast.test.mjs`, run by the same
+`node --test "site/test/*.test.mjs"` line the base-path and import-line suites
+use. It reads `site/public/style.css`, parses the two token blocks, resolves
+`var()`, `oklch()` and `color-mix(in oklab, …)` the way a browser does —
+including a mix with `transparent`, which is the other side at that alpha,
+composited onto the backdrop each pair names — converts OKLab to linear sRGB and
+computes the WCAG ratio. Twenty pairs, both palettes, forty measurements:
+
+| Palette | Pair | Measured | Needs |
+|---|---|---:|---:|
+| light | body text | 17.50:1 | 4.5:1 |
+| light | body text on a plate | 16.26:1 | 4.5:1 |
+| light | secondary prose (`.lede`, `.note`, `.notice`) | 7.88:1 | 4.5:1 |
+| light | secondary prose on a plate | 7.32:1 | 4.5:1 |
+| light | meta text (`.modlist .count`, `.rail .n`, chart axis) | 4.91:1 | 4.5:1 |
+| light | meta text on a plate (line numbers, `.lines .cl.head`) | 4.57:1 | 4.5:1 |
+| light | a link, and every accented heading | 12.04:1 | 4.5:1 |
+| light | a link on a plate | 11.19:1 | 4.5:1 |
+| light | failure (`.diag.error`, `.pill`, a trap) | 4.88:1 | 4.5:1 |
+| light | a pre-release (`.pill.warn`, `.diag.warning`) | 5.26:1 | 4.5:1 |
+| light | inline code, in its own wash | 14.82:1 | 4.5:1 |
+| light | a keyword | 5.90:1 | 4.5:1 |
+| light | a string | 6.38:1 | 4.5:1 |
+| light | a comment | 7.32:1 | 4.5:1 |
+| light | a type | 11.19:1 | 4.5:1 |
+| light | a number | 4.89:1 | 4.5:1 |
+| light | the focus ring | 12.04:1 | 3:1 |
+| light | the focus ring on a plate | 11.19:1 | 3:1 |
+| light | an ownership lane | 4.28:1 | 3:1 |
+| light | the other ownership lane | 5.26:1 | 3:1 |
+| dark | body text | 17.92:1 | 4.5:1 |
+| dark | body text on a plate | 16.83:1 | 4.5:1 |
+| dark | secondary prose | 7.87:1 | 4.5:1 |
+| dark | secondary prose on a plate | 7.40:1 | 4.5:1 |
+| dark | meta text | 5.36:1 | 4.5:1 |
+| dark | meta text on a plate | 5.04:1 | 4.5:1 |
+| dark | a link, and every accented heading | 12.66:1 | 4.5:1 |
+| dark | a link on a plate | 11.89:1 | 4.5:1 |
+| dark | failure | 7.32:1 | 4.5:1 |
+| dark | a pre-release | 10.20:1 | 4.5:1 |
+| dark | inline code, in its own wash | 13.91:1 | 4.5:1 |
+| dark | a keyword | 7.76:1 | 4.5:1 |
+| dark | a string | 9.54:1 | 4.5:1 |
+| dark | a comment | 7.40:1 | 4.5:1 |
+| dark | a type | 11.89:1 | 4.5:1 |
+| dark | a number | 9.58:1 | 4.5:1 |
+| dark | the focus ring | 12.66:1 | 3:1 |
+| dark | the focus ring on a plate | 11.89:1 | 3:1 |
+| dark | an ownership lane | 8.26:1 | 3:1 |
+| dark | the other ownership lane | 10.20:1 | 3:1 |
+
+**Four of those pairs were failing when the checker was first run**, all in the
+light palette, and each was a colour somebody had picked by eye: meta text at
+3.01:1 and 2.80:1 (`--n2`, on `.modlist .count`, the rail numbers, the chart
+axis and every line number), the pre-release amber at 3.50:1, and the keyword
+teal at 3.98:1 on a code plate. Four tokens were darkened until the checker
+passed. That is the argument for mechanizing this row: the sheet had a written
+colour discipline, an author who cared, and four failures in it anyway.
+
+Shown failing on purpose, by putting `--n2` back where it was:
+
+```
+✖ the light palette meets WCAG AA
+  AssertionError: light: 2 pair(s) below AA
+    meta text (.modlist .count, .rail .n, chart axis): 3.01:1, needs 4.5:1 (var(--n2) on var(--paper))
+    meta text on a plate (line numbers, .lines .cl.head): 2.80:1, needs 4.5:1 (var(--n2) on color-mix(in oklab, var(--plate) 45%, var(--paper)))
+```
+
+**Two SVGs full of links, and two opposite answers.** The import graph on
+`/docs` and the record strip on `/backstage` were both `role="img"` with an
+`aria-label`, and both contain links — so both had dozens of tab stops present in
+the tab order and absent from the accessibility tree, which is the worst of both.
+The fix is not the same, and what decides it is whether the same information is
+anywhere else on the page:
+
+- **The graph says who imports whom, and nothing else on the site does.** It is
+  a `role="group"` now, each node's link named with what the highlight draws —
+  `std/json, imports 2 modules, imported by 5 modules` — and the hover lighting
+  answers to `:focus-visible` as well, drawn on the hit rectangle the node
+  already carries. A keyboard reader gets the same two facts a mouse reader gets.
+- **The strip is the index table twenty lines below it, record for record.** It
+  stays a `role="img"` with a text alternative, which is what it is, and its 104
+  cells leave the tab order. The page's tab stops went from 323 to 219.
+
+The five charts on `/compare` are the graph's case: their rows link to the
+example on GitHub and nothing else on the page does, so they are groups now and
+each row's link is named from the same sentence its `<title>` carries —
+`examples/fib.vyrn -> 1522 bytes of wasm`. The schematic on `/` has no links and
+stays a `role="img"`, correctly.
+
+**Where a soft navigation leaves the reader.** Measured, and it was nowhere:
+`vyrn-nav.js` swaps `<main>` and scrolls to the top, and the link that was
+clicked went with the old `<main>`, so focus fell to `<body>` and the next Tab
+started at the masthead again. A screen reader was told nothing at all, because
+no document load happened. Both halves are fixed in `widgets.js` rather than in
+`vyrn-nav.js` — the shell this site wears is this site's business, and the
+navigator is shared with two other applications. Focus goes to `#main`, the
+sized-nothing anchor the skip link already lands on, and the new `document.title`
+goes into the live region the copy buttons already report into.
+
+**The playground says what it did.** `Run` is a button press with no page load
+behind it, so without a live region a screen reader learns nothing about the
+result. Both output panes — the diagnostics and the program's output — are
+`aria-live="polite"` now. Polite and not assertive: the reader asked for this,
+and it can wait for the sentence they are on.
+
+**Forced colours.** Three things on the sheet said something in colour alone and
+now say it in a way that survives a forced palette: the pressed theme button (a
+box), the playhead and changed rows in a code plate (an outline), and a pill (a
+border). Everything else is hairlines, type and structure, and the navigation
+marker was already an underline rather than a colour.
+
+### M4 — the checklist
+
+No unchecked row. The method column says how each one was checked, and says it
+exactly: **browser** means it was done in a real browser against the exported
+tree served over HTTP; **read** means the emitted HTML, CSS or JavaScript was
+read; **program** means a test measured it. Where a row says *read*, it says so
+because the browser available in this environment emulates `prefers-color-scheme`
+and does not emulate `forced-colors` or `prefers-reduced-motion`.
+
+| # | What | Result | Method |
+|---|---|---|---|
+| 1 | The theme control is reachable by keyboard, in tab order, with a visible focus ring | pass | **browser** — keyboard walk from a cold load: Tab 1 is the skip link (on screen, 2px ring), then the wordmark, the nine navigation rows, then `Follow the system theme`, `Light theme`, `Dark theme`, each with a 2px solid ring, then the page's own content |
+| 2 | Each state of the control has an accessible name and states whether it is on | pass | **browser** — the accessibility tree reads `button "Follow the system theme"`, `button "Light theme"`, `button "Dark theme"`; `aria-pressed` tracks the choice (`system:true` → `light:true` → `dark:true`) |
+| 3 | An explicit **light** choice beats a system set to **dark** | pass | **browser** — system emulated dark, `Light` pressed: `data-theme="light"`, `background-color: oklch(0.975 0.002 60)`, `color-scheme: light` |
+| 4 | An explicit **dark** choice beats a system set to **light** | pass | **browser** — system emulated light, `Dark` pressed: `data-theme="dark"`, `background-color: oklch(0.155 0.005 60)` |
+| 5 | **System** clears the choice and follows `prefers-color-scheme` again | pass | **browser** — `System` pressed: attribute removed, `localStorage` key removed, palette back to the system's |
+| 6 | The choice persists across a reload | pass | **browser** — chose light, reloaded: `data-theme="light"` already applied, `light:true` marked, paper light |
+| 7 | No flash of the wrong theme on load | pass | **browser** + **program** — the live document's head holds `classic theme.js` before `module widgets.js`, so the attribute is set by a render-blocking script before the first paint; `site/export.vyrn` asserts the tag is classic and before `<body>` on a root page, a page three deep and a backstage page |
+| 8 | With no script the control is not shown, and the system decides | pass | **browser** — with `data-js` removed the group computes `display: none` (with it, `flex`); the palette still follows the media query, which is the pre-M4 behaviour |
+| 9 | The backstage carries the same control and the same palette | pass | **browser** — `/backstage.html`: three buttons, `Dark` gives `oklch(0.155 0.005 60)`, `System` restores; the page loads `theme.js` and nothing else |
+| 10 | Both palettes meet WCAG AA on text (4.5:1) and non-text (3:1) | pass | **program** — `site/test/contrast.test.mjs`, 20 pairs × 2 palettes, table above; shown failing once on a deliberately broken `--n2` |
+| 11 | The explicit dark block and the system dark block cannot drift | pass | **program** — same file, "the explicit dark choice and the system dark default carry the same tokens"; it also fails if the `:not([data-theme="light"])` guard is dropped |
+| 12 | Skip-to-content is the first tab stop and lands before the content | pass | **browser** — Tab 1 on a cold load focuses `a.skip`, which moves to `left: 16px` and takes the ring; `site/export.vyrn` asserts one skip link and one `#main.skip-target` on all three page shapes |
+| 13 | Every focusable thing on a page has an accessible name | pass | **browser** — every `a[href]`, `button`, `input`, `select`, `textarea` and positive-`tabindex` element audited on `/`, `/docs`, `/explore`, `/compare`, `/play` and `/backstage`: 104, 323 (now 219), 21 and the rest, **0 unnamed** |
+| 14 | The module search is labelled and reports its result to a screen reader | pass | **browser** — `<label for="std-q">Search modules and exports`, and the count is `aria-live="polite"`; the rows carry their own haystack, so it still works with no script (RFC-0105 M2) |
+| 15 | The import graph lights on focus and not only on hover, and its nodes are named | pass, with one part read rather than walked | **browser** — `role="group"`, 37 links, each named `std/…, imports N modules, imported by N modules`; a `focusin` on a node lights that node, its neighbours and its wires, checked in the live page. The step not walked is the last one: a keyboard Tab *into* an SVG `<a>`. `element.focus()` on an SVG link in this engine sets `document.activeElement` and fires no focus event at all, so it does not stand in for a Tab, and the pane stopped accepting real key input before that walk could be made. What the handler answers to is `focusin`, which is what a real Tab fires; the focus ring is CSS (`:focus-visible` on the node's hit rectangle) and needs no event |
+| 16 | No SVG puts focusable links inside a `role="img"` | pass | **browser** — audited every `<svg>` on `/`, `/docs`, `/compare` and `/backstage`: the graph and the five charts are groups with named links; the strip's 104 cells are `tabindex="-1"` behind a labelled `role="img"`; the schematic has no links |
+| 17 | The playground's controls are reachable and named | pass | **browser** — 21 focusable, 0 unnamed; the editor is `aria-label="Vyrn source"`, standard input `aria-label="Standard input"`, the example picker has an `sr-only` label, `Copy link` and `Run` name themselves |
+| 18 | The playground says what running produced | pass | **read** — both output panes are `aria-live="polite"` in `site/app/routes/play.vyx` |
+| 19 | A soft navigation puts focus somewhere and announces the new page | pass | **browser** — followed a link out of `<main>`: `activeElement` is `#main.skip-target` and the live region reads `Install — Vyrn`; before this milestone focus was on `<body>` and nothing was announced |
+| 20 | Landmarks and navigation labels | pass | **browser** — one `<header>`, one `<main>`, one `<footer>` per page; the consumer navigation is `<nav aria-label="Site">` and the backstage's is `<nav aria-label="Backstage">`, so the two fronts are told apart |
+| 21 | No duplicate `id` on a page | pass | **browser** — audited on `/` and `/docs`: none |
+| 22 | Every image has a text alternative | pass | **browser** — no `<img>` without `alt` on any page audited; the only raster surface is the hero `<canvas>`, which is decorative |
+| 23 | Motion is behind `prefers-reduced-motion` | pass | **read** — 12 declarations in the sheet name a transition or an animation, 0 `@keyframes`, 1 `scroll-behavior: smooth`; all of them are covered by the reduced-motion block's `*, ::before, ::after { transition-duration: 1ms !important; animation-duration: 1ms !important }` and `html { scroll-behavior: auto }`, which the live document's CSSOM confirms is present. The two scripts guard themselves as well: `widgets.js` reads the query once and consults it at six sites, `hero.js` at three |
+| 24 | Forced colours keep every colour-only distinction | pass | **read** — a `@media (forced-colors: active)` block gives the pressed theme button a box, the playhead and changed code rows an outline, and a pill a border; confirmed present in the live document's CSSOM |
+
+Gate: met. Twenty-four rows, no unchecked one, and the method named on each.
+
+**One number, and one contradiction.** The export publishes the same 206 routes
+and one more asset (`theme.js`, 4 KB); it takes **73 s** against M2's 74 s, which
+is noise. The contradiction is row 13's own history: the site had a written
+colour discipline, a skip link, a focus-ring rule, a `prefers-reduced-motion`
+block and `focusin` handlers on the graph *before this milestone* — and it still
+had four contrast failures, thirty-seven unnamed tab stops inside a `role="img"`,
+104 duplicate ones on the backstage, and a soft navigation that dropped focus on
+the floor. Every one of those was found by running something rather than by
+reading the CSS, which is the sentence the design paragraph opened with.
 
 ## What this RFC does not do
 
