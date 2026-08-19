@@ -69,27 +69,36 @@ re-parsing).
    - Trigger completion (Ctrl+Space, or type a prefix) → top-level functions,
      types, and variants.
 
-The server path defaults to
-`${workspaceFolder}/compiler/vyrn-lsp/target/debug/vyrn-lsp(.exe)`. Override
-with the `vyrn.serverPath` setting for a release/bundled build.
+`extension.js` resolves the server in this order, first hit wins:
+
+1. the `vyrn.serverPath` setting;
+2. `vyrn-lsp` on `PATH`, or beside the `vyrn` that is on `PATH` (symlinks
+   resolved) — the release archive carries the server next to the driver and the
+   install scripts keep them together, so an installed toolchain is one;
+3. `<repo>/compiler/vyrn-lsp/target/debug/vyrn-lsp(.exe)` — the **debug** build,
+   which is what the F5 development host above uses.
+
+## Install it from a release
+
+Every release publishes `vyrn-vscode-<version>.vsix`. It is **one file for every
+platform**: the extension is JavaScript, and the only half with an architecture
+is the server, which ships in the per-platform archive instead.
+
+```
+code --install-extension vyrn-vscode-<version>.vsix
+```
 
 ## Package a .vsix
 
-`npm run package` (from `editor/vscode`) builds the server in **release** mode,
-copies the binary into `./server/`, and produces a platform-tagged
-`vyrn-<target>-<version>.vsix` (e.g. `vyrn-win32-x64-0.1.0.vsix`) that bundles
-the server — so the installed extension works with no Rust toolchain. `@vscode/vsce` is the only dev dependency (`npm install` once first). Install the
-result with:
+`npm install` once, then `npm run package` (from `editor/vscode`) produces the
+same file the release does — `npx @vscode/vsce@3.9.2`, pinned in the `package`
+script so the release workflow and a contributor run the identical packager. No
+server is bundled and no `--target` is passed; the result is platform-neutral.
 
-```
-code --install-extension vyrn-win32-x64-0.1.0.vsix
-```
-
-`extension.js` resolves the server as: the `vyrn.serverPath` setting, else the
-bundled `./server/vyrn-lsp(.exe)`, else the dev build at
-`<repo>/compiler/vyrn-lsp/target/debug/vyrn-lsp(.exe)`. A bundled binary makes
-the `.vsix` host-specific (the `--target` flag tags it accordingly); rebuild on
-each target platform you want to ship.
+The version inside `package.json` must equal the release tag without its leading
+`v` (the release workflow refuses to publish otherwise). `vsce` and
+`code --install-extension` both accept a semver pre-release identifier, so the
+mapping is identity: tag `v0.1.0-alpha.2`, `"version": "0.1.0-alpha.2"`.
 
 ## Layout
 
@@ -100,7 +109,6 @@ editor/vscode/
   vyrn.tmLanguage.json      TextMate grammar
   snippets/vyrn.json        snippets (fn, main, type, protocol, impl, match, import, logging, test)
   language-configuration.json
-  server/vyrn-lsp.exe       bundled language server (deployed release build)
   node_modules/             vscode-languageclient (gitignored)
 ```
 

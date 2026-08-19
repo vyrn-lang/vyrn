@@ -38,7 +38,7 @@ export fn head() -> Head {
         <p class="eyebrow">Editors</p>
         <h1 class="display">One extension, one server</h1>
         <p class="lede">VS Code support ships in this repository: a client of about five hundred lines of plain JavaScript, and <code>vyrn-lsp</code>, which answers every question about the language by calling the same compiler front end <code>vyrn check</code> calls. That is the whole of it — there is no second analyzer to disagree with the first, and an error in your editor is the error your build will print.</p>
-        <p class="notice">It is not on a marketplace yet. What exists is the source, a packaging script that puts the server inside the <code>.vsix</code>, and the launch configuration this repository opens with — all three are below.</p>
+        <p class="notice">It is not on a marketplace yet. Every release publishes the extension as a single <code>.vsix</code> — one file for every platform, because the extension is JavaScript and the only half with an architecture is the server, which ships in the platform archive beside <code>vyrn</code>.</p>
     </section>
 
     <section class="band" id="features">
@@ -65,8 +65,8 @@ export fn head() -> Head {
 
     <section class="band" id="get">
         <p class="eyebrow">03 — how to get it</p>
-        <h2>Build it, then install it</h2>
-        <p>The extension lives in <code>{{ extensionDir() }}</code> and the server in <code>{{ serverDir() }}</code>, which is excluded from the main workspace and built on its own. Two paths: package it and install the file, or run it from source in a development host.</p>
+        <h2>Install the toolchain, then the .vsix</h2>
+        <p>The extension lives in <code>{{ extensionDir() }}</code> and the server in <code>{{ serverDir() }}</code>, which is excluded from the main workspace and built on its own. Both are published: the server inside every platform archive, the extension as one <code>.vsix</code> asset. Building from source is still here, and it is now the path for working on the extension rather than for using it.</p>
         <ul class="plain">
             <li v-for="s in steps()" :key="s.title">
                 <strong>{{ s.title }}</strong>
@@ -77,7 +77,7 @@ export fn head() -> Head {
                 <span class="note" v-html="s.what"></span>
             </li>
         </ul>
-        <p class="notice">Two settings, both optional. <code>vyrn.serverPath</code> points at a server binary somewhere else, which is what a release build you did not package needs. <code>vyrn.path</code> points at the compiler the run lenses invoke; left empty they take the release build beside your checkout, then the debug build, then <code>cargo run</code>.</p>
+        <p class="notice">Two settings, both optional. <code>vyrn.serverPath</code> points at a server binary somewhere else; left empty the extension takes <code>vyrn-lsp</code> off <code>PATH</code>, then the one beside the <code>vyrn</code> that is on <code>PATH</code>, then the repository's own debug build. <code>vyrn.path</code> points at the compiler the run lenses invoke; left empty they take the release build beside your checkout, then the debug build, then <code>cargo run</code>.</p>
         <p class="cap">Modules resolve from <code>vyrn.json</code>. Remote imports are pinned in <code>vyrn.lock</code> and cached by sha256 under <code>~/.vyrn</code> — the editor reads that cache and never writes to it, so nothing in your editor can fetch code.</p>
     </section>
 

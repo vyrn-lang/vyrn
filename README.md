@@ -170,8 +170,11 @@ vyrn new <name> | add <specifier> | update | vendor | deps
   `https:`) are pinned in `vyrn.lock` and cached by sha256 under `~/.vyrn`.
   `--offline` refuses to fetch.
 - `vyrn-lsp` is a synchronous language server: diagnostics, hover,
-  go-to-definition and completion, across linked files. The VS Code extension
-  is in [`editor/vscode/`](editor/vscode/).
+  go-to-definition and completion, across linked files. It ships beside `vyrn`
+  in every release archive. The VS Code extension is in
+  [`editor/vscode/`](editor/vscode/) and every release publishes it as one
+  platform-neutral `vyrn-vscode-<version>.vsix`:
+  `code --install-extension vyrn-vscode-<version>.vsix`.
 
 ## Getting started
 

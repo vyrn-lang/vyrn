@@ -129,10 +129,15 @@ jobs:
       - name: Workspace tests
         working-directory: compiler
         run: cargo test --quiet
-      - name: Browser runtime tests (web/)
+      - name: Browser runtime tests (web/) and the extension's own
         # The zero-dependency JavaScript beside the compiler gets the same gate.
         # node:test is in the runner's Node already, so this adds no install.
-        run: node --test "web/test/*.test.mjs"
+        #
+        # `editor/vscode/test/` needs no install either: `extension.js` requires
+        # `vscode-languageclient` inside `activate()`, so the module loads with
+        # nothing in `node_modules`, and the test imports the real
+        # server-resolution helpers rather than a copy of them.
+        run: node --test "web/test/*.test.mjs" "editor/vscode/test/*.test.mjs"
       - name: LSP tests (excluded crate)
         working-directory: compiler
         run: cargo test --quiet --manifest-path vyrn-lsp/Cargo.toml

@@ -614,6 +614,57 @@ there is no port to connect to.
 **One number.** The export publishes 206 routes rather than 205 and the new page
 is 16 KB. Nothing else moved.
 
+[Amended after M3. The page's install section said the honest thing at the time —
+build the extension yourself — and it is not the honest thing any more: a release
+now publishes the extension. Three decisions and one dead hypothesis.
+
+**One `.vsix` for every platform, and the server ships in the archives.** The
+extension is plain JavaScript with one runtime dependency; the only half of the
+editor story with an architecture is `vyrn-lsp`, and the release archives are
+per-platform already. So `release.yml` builds `vyrn-lsp` on each matrix leg
+(`--manifest-path vyrn-lsp/Cargo.toml --locked` — it is an excluded crate with
+its own lockfile, which was already current) and stages it beside `vyrn`, a
+single `vsix` job on one Linux runner packages `vyrn-vscode-<version>.vsix`, and
+both kinds of asset are listed in `SHA256SUMS`. The previous packaging script,
+which built a release server and copied it inside a `--target`-tagged `.vsix`,
+is deleted: one artifact shape, produced by `npm run package` and by the
+workflow with the same command.
+
+**The resolution order, in `editor/vscode/extension.js`.** The `vyrn.serverPath`
+setting; then `vyrn-lsp` on `PATH`, or beside the `vyrn` that is on `PATH`
+(`realpathSync`, so a shim or symlink into `~/.vyrn/bin` resolves to the real
+directory); then the repository's debug build, which is what F5 uses. The
+install scripts move `vyrn-lsp` into `$DIR/bin` next to `vyrn`, and
+`install-test.sh` / `install-test.ps1` now assert it lands there — so the
+extension's second rung is a checked fact rather than a hope about what an
+archive contains. A miss names all three ways to get a server instead of naming
+only the `cargo build`.
+
+**The version rule is identity, and the transform that was designed for it was
+not needed.** The brief assumed `vsce` refuses a semver pre-release identifier
+and asked for a documented mapping (`0.1.0-alpha.2` to `0.1.2`). Measured
+instead of assumed: `@vscode/vsce@3.9.2 package` packaged
+`"version": "0.1.0-alpha.2"` without a complaint, and `code
+--install-extension` installed the file it produced. So there is no transform —
+`editor/vscode/package.json` carries the tag verbatim minus its `v`, and the
+`vsix` job refuses a mismatch with the same wording the crate check uses. A
+mapping would have been a rule to remember, invented to satisfy a constraint
+that does not exist.
+
+**The one third-party tool.** `vsce` is the official packager and there is no
+second way to write a `.vsix`. It is pinned by exact version in the `package`
+script of `editor/vscode/package.json` — one spelling, shared by the workflow
+and by a contributor — and it runs before the checksums, so its output is
+covered by `SHA256SUMS` like every other asset. The `@vscode/vsce`
+devDependency is gone with the packaging script, which takes 3,847 lines out of
+`package-lock.json` and leaves the extension with exactly one dependency.
+
+**The smoke step got the other half.** `vyrn` was run before publication and
+`vyrn-lsp` was not. It is now: one `initialize` request, framed with its
+`Content-Length` header, piped into the binary out of the unpacked archive, and
+the reply must contain `"capabilities"`. The server exits 0 at EOF, so a whole
+session is one line of `printf`.]
+
 **M4 — accessibility and theme.** *Implemented.* The control, the palettes, the
 checklist — each item verified in a browser and recorded here. Gate: the
 checklist has no unchecked row, and the verification method for each row is

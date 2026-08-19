@@ -2,7 +2,7 @@
   "name": "vyrn",
   "displayName": "Vyrn",
   "description": "Language support for Vyrn: syntax highlighting + diagnostics via the vyrn-lsp server.",
-  "version": "0.1.0",
+  "version": "0.1.0-alpha.2",
   "publisher": "vyrn-lang",
   "license": "MIT",
   "icon": "icons/vyrn.png",
@@ -11,7 +11,7 @@
   "activationEvents": ["onLanguage:vyrn", "onLanguage:vyx"],
   "main": "./extension.js",
   "scripts": {
-    "package": "node scripts/make-vsix.mjs"
+    "package": "npx --yes @vscode/vsce@3.9.2 package --allow-missing-repository --no-update-package-json"
   },
   "contributes": {
     "languages": [
@@ -114,7 +114,7 @@
         "vyrn.serverPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the vyrn-lsp server binary. Defaults to ${workspaceFolder}/compiler/vyrn-lsp/target/debug/vyrn-lsp (or .exe). Leave empty for the dev default."
+          "description": "Path to the vyrn-lsp server binary. When empty, resolves vyrn-lsp from PATH (or from beside the vyrn on PATH — the release archive ships both), then the repository's own debug build at compiler/vyrn-lsp/target/debug/vyrn-lsp(.exe)."
         },
         "vyrn.path": {
           "type": "string",
@@ -126,8 +126,5 @@
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
-  },
-  "devDependencies": {
-    "@vscode/vsce": "^3.6.0"
   }
 }

@@ -46,6 +46,8 @@ stage="$tmp/stage"
 mkdir -p "$stage/std" "$stage/web"
 printf '#!/bin/sh\necho vyrn-stub\n' > "$stage/vyrn"
 chmod +x "$stage/vyrn"
+printf '#!/bin/sh\necho vyrn-lsp-stub\n' > "$stage/vyrn-lsp"
+chmod +x "$stage/vyrn-lsp"
 printf 'export fn x() -> Int64 { return 0 }\n' > "$stage/std/strings.vyrn"
 printf '// browser runtime\n' > "$stage/web/vyrn-dom.js"
 printf '%s\n' "$tag" > "$stage/VERSION"
@@ -99,6 +101,9 @@ printf '%s\n' "$out" | grep -q 'sha256 ok' || fail "no checksum line:\n$out"
 # find them; an installer that puts them anywhere else ships a broken tree.
 [ -f "$dir/std/strings.vyrn" ] || fail "std/ is not beside bin/"
 [ -f "$dir/web/vyrn-dom.js" ] || fail "web/ is not beside bin/"
+# The language server lands beside the driver, which is the whole reason the VS
+# Code extension can find it without a setting.
+[ -x "$dir/bin/vyrn-lsp" ] || fail "no server at \$DIR/bin/vyrn-lsp"
 [ "$(cat "$dir/VERSION")" = "$tag" ] || fail "VERSION does not carry the tag"
 echo "ok: installs, and the tree is shaped the way vyrn walks up for it"
 

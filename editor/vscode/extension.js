@@ -10,11 +10,14 @@
 
 const path = require("path");
 const fs = require("fs");
-const { LanguageClient, TransportKind } = require("vscode-languageclient");
 
 /** @param {import("vscode").ExtensionContext} context */
 function activate(context) {
   const vsc = require("vscode");
+  // Required here rather than at the top so this file loads outside VS Code
+  // with nothing installed — which is what lets `test/resolve.test.mjs` import
+  // the real server-resolution helpers instead of a copy of them.
+  const { LanguageClient, TransportKind } = require("vscode-languageclient");
 
   // Shared handle to the started language client, so the CodeLens provider can
   // query the server's `vyrn/isDevEntry` predicate (RFC-0064) for the
@@ -28,23 +31,30 @@ function activate(context) {
   // `lspState.client` and simply stays hidden until the server is up.
   registerRun(context, vsc, lspState);
 
+  // Where the language server comes from, first hit wins:
+  //   1. the `vyrn.serverPath` setting;
+  //   2. `vyrn-lsp` from the installed toolchain — on PATH, or beside the
+  //      `vyrn` that is on PATH (release archives carry both, RFC-0105 M3);
+  //   3. the repository's own debug build, which is what F5 uses.
   const cfg = vsc.workspace.getConfiguration("vyrn");
   let serverPath = cfg.get("serverPath", "");
 
   if (!serverPath) {
-    const exe = process.platform === "win32" ? "vyrn-lsp.exe" : "vyrn-lsp";
-    // Resolve relative to the EXTENSION's own location, not the workspace
-    // folder — the workspace may be empty (e.g. a single .vyrn file opened
-    // directly), in which case `workspaceFolders[0]` is undefined and a
-    // relative path would fail to spawn (ENOENT).
-    //
-    // 1. A server bundled inside the extension at ./server/<exe> — the .vsix
-    //    ships this (see scripts/make-vsix.mjs), so the installed extension
-    //    works with no Rust toolchain or build step.
-    const bundled = path.join(context.extensionPath, "server", exe);
-    // 2. Dev fallback: the extension lives at <repo>/editor/vscode, so the
+    const win = process.platform === "win32";
+    const exe = win ? "vyrn-lsp.exe" : "vyrn-lsp";
+    const driver = win ? "vyrn.exe" : "vyrn";
+    // 2. The server that came with the toolchain. `vyrn-lsp` ships in the same
+    //    release archive as `vyrn` and lands in the same directory, so an
+    //    install.sh / install.ps1 user already has it: take it off PATH
+    //    directly, or from beside the `vyrn` that is on PATH (a shim or a
+    //    symlink into ~/.vyrn/bin resolves through `realpathSync`).
+    const installed = onPath(exe) || beside(onPath(driver), exe);
+    // 3. Dev fallback: the extension lives at <repo>/editor/vscode, so the
     //    freshly-built dev server is two levels up, then into
-    //    compiler/vyrn-lsp/target/debug.
+    //    compiler/vyrn-lsp/target/debug. Resolved relative to the EXTENSION's
+    //    own location, not the workspace folder — the workspace may be empty
+    //    (a single .vyrn file opened directly), in which case
+    //    `workspaceFolders[0]` is undefined and a relative path fails to spawn.
     const dev = path.join(
       context.extensionPath,
       "..",
@@ -55,16 +65,17 @@ function activate(context) {
       "debug",
       exe
     );
-    serverPath = fs.existsSync(bundled) ? bundled : dev;
+    serverPath = installed || dev;
   }
 
-  // A missing server is a setup problem, not a crash. Tell the user how to
-  // build it and bail out cleanly instead of taking down the host.
+  // A missing server is a setup problem, not a crash. Name every way to get one
+  // and bail out cleanly instead of taking down the host.
   if (!fs.existsSync(serverPath)) {
     vsc.window.showWarningMessage(
-      `Vyrn: language server not found at "${serverPath}". Build it with: ` +
-        `cargo build --manifest-path compiler/vyrn-lsp/Cargo.toml ` +
-        `(or set the "vyrn.serverPath" setting).`
+      `Vyrn: language server not found (looked for "${serverPath}"). ` +
+        `Either install the toolchain (the release archive carries vyrn-lsp beside vyrn), ` +
+        `or build it with: cargo build --manifest-path compiler/vyrn-lsp/Cargo.toml, ` +
+        `or point the "vyrn.serverPath" setting at a binary you already have.`
     );
     return;
   }
@@ -312,6 +323,44 @@ function unescapeTestName(s) {
 }
 
 /**
+ * The first executable named `exe` on PATH, with symlinks and shims resolved to
+ * the real file — so "what is beside it" means what is beside the binary, not
+ * what is beside the link. Null if PATH has none. No dependency: `which` is a
+ * loop over `process.env.PATH`, and this needs no PATHEXT search because every
+ * caller passes the full file name including `.exe`.
+ *
+ * @param {string} exe
+ * @returns {string | null}
+ */
+function onPath(exe) {
+  const dirs = (process.env.PATH || "").split(path.delimiter);
+  for (const dir of dirs) {
+    if (!dir) continue;
+    const candidate = path.join(dir, exe);
+    try {
+      if (fs.existsSync(candidate)) return fs.realpathSync(candidate);
+    } catch (_e) {
+      // An unreadable PATH entry is not this extension's problem: keep looking.
+    }
+  }
+  return null;
+}
+
+/**
+ * `exe` in the same directory as `anchor`, if both exist. Null when the anchor
+ * is null, so it composes directly with [onPath].
+ *
+ * @param {string | null} anchor
+ * @param {string} exe
+ * @returns {string | null}
+ */
+function beside(anchor, exe) {
+  if (!anchor) return null;
+  const candidate = path.join(path.dirname(anchor), exe);
+  return fs.existsSync(candidate) ? candidate : null;
+}
+
+/**
  * The Vyrn repo root that owns `startDir`: the nearest ancestor containing
  * `compiler/Cargo.toml`. Walking up from the FILE (not the workspace folder)
  * is what makes the run command work when a subdirectory — `examples/`, a
@@ -500,4 +549,6 @@ function quote(s) {
 
 function deactivate() {}
 
-module.exports = { activate, deactivate };
+// `onPath` and `beside` are exported for `test/resolve.test.mjs`. VS Code reads
+// `activate`/`deactivate` and ignores the rest.
+module.exports = { activate, deactivate, onPath, beside };
