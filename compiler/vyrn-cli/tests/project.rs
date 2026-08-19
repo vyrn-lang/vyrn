@@ -182,6 +182,193 @@ fn row_for(text: &str, tool: &str) -> String {
         .to_string()
 }
 
+/// RFC-0103 M1 made `artifacts` — and the `main`/`server`/`client` keys that
+/// are sugar for it — the declaration of what a project builds, and `vyrn deps`
+/// asked for a `main`. So the command that answers "what does this build depend
+/// on" could not answer for `examples/shelf`, which is a project this repository
+/// builds. It reports every declared artifact now.
+///
+/// Child processes, `VYRN_WASMTIME` removed, for the reason the M3 checks give:
+/// CI exports it, and a report about a discovered tool must not be answered by
+/// this runner's environment.
+#[test]
+fn deps_reports_every_declared_artifact() {
+    // Not `artifacts`: another test in this file already owns that scratch name,
+    // and two tests sharing one directory is a race that reads the other's
+    // manifest.
+    let dir = scratch("artifact-graphs");
+    std::fs::create_dir_all(dir.join("client")).unwrap();
+    std::fs::create_dir_all(dir.join("shared")).unwrap();
+    std::fs::write(
+        dir.join("vyrn.json"),
+        r#"{"name": "t", "artifacts": {
+             "api": {"entry": "server.vyrn", "target": "native"},
+             "app": {"entry": "client/boot.vyrn", "target": "browser"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("shared/wire.vyrn"),
+        "export fn tag() -> Int64 { return 7 }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("server.vyrn"),
+        "import { tag } from \"./shared/wire\"\nfn main() -> Int64 { return tag() }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("client/boot.vyrn"),
+        "import { tag } from \"../shared/wire\"\nfn main() -> Int64 { return tag() }\n",
+    )
+    .unwrap();
+
+    let out = vyrn()
+        .current_dir(&dir)
+        .env_remove("VYRN_WASMTIME")
+        .arg("deps")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Each artifact is named with its entry and its target, and its graph
+    // follows — the entry as the manifest writes it, relative to the project.
+    assert!(
+        text.contains("artifact `api` (native) — server.vyrn"),
+        "{text}"
+    );
+    assert!(
+        text.contains("artifact `app` (browser) — client/boot.vyrn"),
+        "{text}"
+    );
+    assert!(text.contains("shared/wire.vyrn"), "{text}");
+    // One toolchain section, under both graphs: the tools are the project's, not
+    // the artifact's.
+    assert_eq!(text.matches("toolchain:").count(), 1, "{text}");
+
+    // Naming one artifact scopes the report to it.
+    let out = vyrn()
+        .current_dir(&dir)
+        .env_remove("VYRN_WASMTIME")
+        .args(["deps", "app"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("artifact `app` (browser)"), "{text}");
+    assert!(!text.contains("artifact `api`"), "{text}");
+
+    // A name nobody declared says which names are declared.
+    let out = vyrn()
+        .current_dir(&dir)
+        .env_remove("VYRN_WASMTIME")
+        .args(["deps", "nope"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no artifact `nope`"), "{err}");
+    assert!(err.contains("api, app"), "{err}");
+}
+
+/// The sugar keys are artifacts, so a project that never wrote an `artifacts`
+/// map is reported the same way — and a project declaring only `main` is
+/// reported exactly as it was before this change, with no header at all.
+#[test]
+fn the_entry_point_keys_are_artifacts_to_deps_too() {
+    let dir = scratch("artifact-sugar");
+    std::fs::create_dir_all(dir.join("client")).unwrap();
+    std::fs::write(
+        dir.join("vyrn.json"),
+        r#"{"name": "t", "server": "server.vyrn", "client": "client/boot.vyrn"}"#,
+    )
+    .unwrap();
+    let src = "fn main() -> Int64 { return 0 }\n";
+    std::fs::write(dir.join("server.vyrn"), src).unwrap();
+    std::fs::write(dir.join("client/boot.vyrn"), src).unwrap();
+    let out = vyrn()
+        .current_dir(&dir)
+        .env_remove("VYRN_WASMTIME")
+        .arg("deps")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("artifact `server` (native)"), "{text}");
+    assert!(text.contains("artifact `client` (browser)"), "{text}");
+
+    // The `main`-only project: the graph, then the toolchain, and nothing else.
+    let dir = scratch("artifact-main-only");
+    std::fs::write(
+        dir.join("vyrn.json"),
+        r#"{"name": "t", "main": "main.vyrn"}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.vyrn"), src).unwrap();
+    let out = vyrn()
+        .current_dir(&dir)
+        .env_remove("VYRN_WASMTIME")
+        .arg("deps")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.contains("artifact `"), "{text}");
+    // The first line is the graph's root — the entry, not a header. The path is
+    // not compared whole: a temp directory reached through a symlink is
+    // canonicalized, and this check is about the SHAPE of the report.
+    assert!(
+        text.lines()
+            .next()
+            .is_some_and(|l| l.ends_with("main.vyrn")),
+        "{text}"
+    );
+    assert!(text.contains("toolchain:"), "{text}");
+}
+
+/// A manifest that pins tools and declares nothing to build — the repository's
+/// own root — is answered, not refused. The question was "what does this build
+/// depend on", and "no artifact is declared here" is the true answer to it.
+#[test]
+fn deps_answers_a_toolchain_only_manifest() {
+    let dir = scratch("toolchain-only");
+    std::fs::write(dir.join("vyrn.json"), r#"{"toolchain": {}}"#).unwrap();
+    let out = vyrn()
+        .current_dir(&dir)
+        .env_remove("VYRN_WASMTIME")
+        .arg("deps")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "a toolchain-only manifest is not an error: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("declares no artifacts"), "{text}");
+    assert!(text.contains("toolchain:"), "{text}");
+    assert!(row_for(&text, "clang").contains("clang"), "{text}");
+
+    // Asking it for an artifact by name is still an error: that name is not
+    // there to report.
+    let out = vyrn()
+        .current_dir(&dir)
+        .env_remove("VYRN_WASMTIME")
+        .args(["deps", "app"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("declares no artifacts"), "{err}");
+}
+
 #[test]
 fn unknown_bare_specifier_names_the_manifest_fix() {
     let dir = scratch("unknown");
