@@ -1,4 +1,10 @@
-/// The explorer: what the standard library holds, and what depends on what.
+/// The reference's search index and its import graph — what the standard
+/// library holds, and what depends on what.
+///
+/// Both belong to `/docs` (RFC-0105 M2). They were the whole of `/explore`, and
+/// `/explore` answered no question the reference could not; the reference now
+/// carries them and `/explore` is the package explorer (`packages.vyrn`). This
+/// module kept its contents and lost its old name with the page.
 ///
 /// Two views over one set of facts, both read off the source while the site
 /// compiles:
@@ -22,7 +28,7 @@ import { joinWith, toLower, substring } from "std/strings"
 import { escapeHtml } from "./code"
 
 /// One row of the index: a module, what it is, and every name it exports.
-export type ExploreRow = { name: String, href: String, summary: String, count: Int64, exports: Array<String>, q: String, e: String }
+export type SearchRow = { name: String, href: String, summary: String, count: Int64, exports: Array<String>, q: String, e: String }
 
 /// One node of the graph: where it sits, what it is called, and the two lists
 /// the highlight needs.
@@ -58,15 +64,15 @@ fn plainText(markup: String) -> String {
 }
 
 /// Every module, with everything a search over it can match.
-export fn exploreRows() -> Array<ExploreRow> {
-    let mut out: Array<ExploreRow> = []
+export fn searchRows() -> Array<SearchRow> {
+    let mut out: Array<SearchRow> = []
     for m in apiModules() {
         let mut names: Array<String> = []
         for e in apiEntries(m.name) {
             names.push(e.name.copy())
         }
         let joined = joinWith(names, " ")
-        out.push(ExploreRow {
+        out.push(SearchRow {
                 name: m.name.copy(),
                 href: apiHref(m.name),
                 summary: m.summary.copy(),
@@ -275,7 +281,7 @@ export fn usedByModule(m: String) -> Array<String> {
 }
 
 test "every module is a row, and every row carries its own search text" {
-    let rows = exploreRows()
+    let rows = searchRows()
     assertEq(rows.length, apiModules().length)
     for r in rows {
         assert(r.name.byteLength > 0)

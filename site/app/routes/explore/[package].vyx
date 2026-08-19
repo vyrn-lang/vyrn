@@ -1,0 +1,141 @@
+<script>
+// GET /explore/[package] — one package (RFC-0105 M2).
+//
+// Everything on this page is read off the package's own files while the site
+// compiles: the exports and their signatures from `std/*.vyrn` by the compiler's
+// own lexer, the dependencies from the `import` lines themselves, and a
+// project's artifacts from its `vyrn.json`.
+//
+// THE LINE A READER COPIES is the point of the page. For a module it is a real
+// `import` naming every export the reference renders, carried in the markup as
+// `data-import` as well as in the box — `site/test/importline.test.mjs` reads
+// that attribute out of the EXPORTED html, writes each line into a program of
+// its own, and runs `vyrn check` on it. A line that does not compile fails the
+// build.
+//
+// No prose is restated here. What a module is for is the reference's job, and
+// the page links there.
+import { Package, Artifact, PkgLink, packageKnown, packageOf, packageDeps, packageSource, docsHref, importLine, manifestText, artifactsOf, packageExports, exportHref } from "../../packages"
+import { ApiEntry } from "../../docs"
+import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
+import { pageHead } from "../../nav"
+params { package: String }
+
+export fn head(d: Package) -> Head {
+    return pageHead(d.name + " — Vyrn packages")
+}
+
+export fn data() -> ParamQuery<Params, Result<Package, PageError>> {
+    return paramQuery(fetchPackage)
+}
+
+fn fetchPackage(p: Params) -> Result<Package, PageError> {
+    if !packageKnown(p.package) {
+        return Err(notFound(p.package + " is not a package"))
+    }
+    return Ok(packageOf(p.package))
+}
+
+/// Whether this package is a standard library module. The two kinds share the
+/// page and differ in what they can be asked for: a module has exports and an
+/// import line, a project has artifacts and a manifest.
+fn isModule(d: Package) -> Bool {
+    return d.kind == "std"
+}
+
+/// `1 export`, `44 exports`, `2 artifacts`.
+fn unitLabel(d: Package) -> String {
+    let one = if isModule(d) { "export" } else { "artifact" }
+    return if d.exports == 1 { "1 " + one } else { d.exports.toString() + " " + one + "s" }
+}
+
+/// `no dependencies`, `1 dependency`, `6 dependencies`. A count and its noun
+/// disagreeing is the sort of thing a reader takes as a sign that nothing here
+/// was read.
+fn depLabel(d: Package) -> String {
+    if d.deps == 0 {
+        return "no dependencies"
+    }
+    return if d.deps == 1 { "1 dependency" } else { d.deps.toString() + " dependencies" }
+}
+
+/// The file a package's source link opens: the module, or the project directory.
+fn sourceLabel(d: Package) -> String {
+    return if isModule(d) { d.name + ".vyrn" } else { d.name + "/" }
+}
+</script>
+
+<template>
+<main class="page">
+    <aside class="rail">
+        <a href="#use"><span class="n">01</span>use it</a>
+        <a href="#api"><span class="n">02</span>what it gives</a>
+        <a href="#deps"><span class="n">03</span>what it needs</a>
+    </aside>
+
+    <section class="hero">
+        <p class="eyebrow"><a href="/explore.html">Packages</a> — {{ data.kind }}</p>
+        <h1 class="display">{{ data.name }}</h1>
+        <p class="lede" v-html="data.summary"></p>
+        <p class="notice"><a :href="packageSource(data.slug)">Read the source</a> — <code>{{ sourceLabel(data) }}</code>, the one thing this site does not host.</p>
+    </section>
+
+    <section class="band" id="use">
+        <p class="eyebrow">01 — use it</p>
+        <h2 v-if="isModule(data)">The line you copy</h2>
+        <h2 v-if="!isModule(data)">The manifest it declares</h2>
+        <p v-if="isModule(data)">Every name this module exports, in one <code>import</code>. Take the ones you want; the compiler will tell you about the rest. This line is compiled as a program of its own on every build, so it is a line that builds and not a line that reads like one.</p>
+        <p v-if="!isModule(data)">A project is not something you import. It is a directory with a manifest, and this is the manifest: what it builds, from which entry point, and where each artifact runs.</p>
+        <div class="cmd" data-copy>
+            <code v-if="isModule(data)" :data-import="importLine(data.slug)">{{ importLine(data.slug) }}</code>
+            <code v-if="!isModule(data)">{{ manifestText(data.slug) }}</code>
+            <button type="button" data-copy-btn aria-label="Copy it">Copy</button>
+        </div>
+        <p class="cap" v-if="!isModule(data)">Read from <code>{{ data.name }}/vyrn.json</code> while this page was built.</p>
+    </section>
+
+    <section class="band" id="api">
+        <p class="eyebrow">02 — what it gives</p>
+        <h2>{{ unitLabel(data) }}</h2>
+        <p v-if="isModule(data)">The signature as it is written in the source. The prose above each one is on <a :href="docsHref(data.slug)">the reference page</a>, which is generated from the same declarations — this list is the inventory, not a second copy of the documentation.</p>
+        <ul class="exports" v-if="isModule(data)">
+            <li v-for="e in packageExports(data.slug)" :key="e.name">
+                <a :href="exportHref(data.slug, e.name)">{{ e.name }}</a>
+                <span class="kindpill">{{ e.kind }}</span>
+                <pre class="code" v-html="e.sig"></pre>
+            </li>
+        </ul>
+        <p v-if="!isModule(data)">One row per artifact. The target is a capability declaration rather than a build flag: a browser has no filesystem, and no edit to the manifest can give it one.</p>
+        <div class="scroller" v-if="!isModule(data)">
+        <table>
+            <thead>
+                <tr><th>Artifact</th><th>Entry</th><th>Target</th></tr>
+            </thead>
+            <tbody>
+                <tr v-for="a in artifactsOf(data.slug)" :key="a.name">
+                    <td><code>{{ a.name }}</code></td>
+                    <td><code>{{ a.entry }}</code></td>
+                    <td><code>{{ a.target }}</code></td>
+                </tr>
+            </tbody>
+        </table>
+        </div>
+    </section>
+
+    <section class="band" id="deps">
+        <p class="eyebrow">03 — what it needs</p>
+        <h2>{{ depLabel(data) }}</h2>
+        <p>Every package this one pulls in, read from its own <code>import</code> lines by the compiler's lexer. Nothing else: the standard library depends on no registry, and neither does anything here.</p>
+        <dl class="specs">
+            <div>
+                <dt>Depends on</dt>
+                <dd class="links">
+                    <a v-for="d in packageDeps(data.slug)" :key="d.name" :href="d.href">{{ d.name }}</a>
+                    <span class="none" v-if="data.deps == 0">nothing at all</span>
+                </dd>
+            </div>
+        </dl>
+        <p class="cap" v-if="isModule(data)">The whole import graph, with this module in it, is on <a href="/docs.html#graph">the reference</a>.</p>
+    </section>
+</main>
+</template>

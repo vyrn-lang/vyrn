@@ -22,7 +22,7 @@
 // themed error page at 404 instead of an empty page.
 import { ApiEntry, apiEntries, apiIntro, apiKnown, apiSource, apiSourceLine, apiTests, apiHref } from "../../../docs"
 import { Demo, demoFor } from "../../../guide"
-import { examplesUsing, usesOfModule, usedByModule } from "../../../explore"
+import { examplesUsing, usesOfModule, usedByModule } from "../../../stdgraph"
 import { blob } from "../../../repo"
 import { Head, PageError, ParamQuery, noHead, notFound, paramQuery } from "std/ui"
 import { pageHead } from "../../../nav"
@@ -146,7 +146,7 @@ fn demoChapterHref(m: String, e: ApiEntry) -> String {
     <section class="band" id="graph">
         <p class="eyebrow">In the graph</p>
         <h2>What it needs, and who needs it</h2>
-        <p>Read from the module's own <code>import</code> lines while this page was built. <a href="/explore.html#graph">The whole graph</a> is on one page.</p>
+        <p>Read from the module's own <code>import</code> lines while this page was built. <a href="/docs.html#graph">The whole graph</a> is on one page.</p>
         <dl class="specs">
             <div>
                 <dt>Imports</dt>

@@ -8,7 +8,7 @@
 /// renamed or deleted fails the export.
 ///
 /// The two sockets the brief reserved are filled: `/guide` is the book, and
-/// `/explore` is the module explorer. Both arrived as a directory drop plus a
+/// `/explore` is the package explorer. Both arrived as a directory drop plus a
 /// row here, which is what reserving them was for. A row is still only written
 /// when the route behind it exists — there is no placeholder page anywhere.
 import { substring, split, repeat } from "std/strings"
@@ -35,7 +35,8 @@ export type NavRow = { href: String, label: String }
 /// A route keeps its own shape, and the URL keeps the `.html`. RFC-0014 has
 /// `readFile`, `writeFile` and `listDir` but no way to CREATE a directory, so a
 /// nested route needs its directory made before the export runs — `site.yml`
-/// makes `out/docs/std` — and `philosophy/index.html` would need one per page.
+/// makes `out/docs/std` and `out/explore` — and `philosophy/index.html` would
+/// need one per page.
 /// When a `makeDir` builtin lands, this one function changes and the extension
 /// can go.
 export fn published(path: String) -> String {

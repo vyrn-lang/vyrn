@@ -1,0 +1,494 @@
+/// The package explorer's model: what a reader could depend on, in the shape a
+/// registry has (RFC-0105 M2).
+///
+/// `/explore` used to be a second view of the standard library — a search field
+/// and an import graph over the same modules `/docs` documents. Both moved to
+/// the reference, where they answer a question the reference was already the
+/// place to ask. What is left for an explorer is the question a registry answers
+/// and a reference does not: what units exist, what each one costs to take on,
+/// and what you type to take it.
+///
+/// A PACKAGE is a unit somebody could depend on. Two kinds exist in this
+/// repository today, and each answers the four card questions from its own
+/// source:
+///
+///  - **`std`** — one standard library module. Its exports are the reference's
+///    exports, its dependencies are the `std/` modules its own `import` lines
+///    name, and the line a reader copies is a real `import` naming real export
+///    names. That line is compiled, per package, by
+///    `site/test/importline.test.mjs`.
+///  - **`project`** — a directory under `examples/` with a `vyrn.json`. Its
+///    exports are the artifacts the manifest declares — what the project builds
+///    — its dependencies are the `std/` modules its files import, and what a
+///    reader copies is the manifest itself.
+///
+/// WHAT A REMOTE PACKAGE WOULD ADD. `github:owner/repo@tag` is the third kind,
+/// and it fits this record with two more fields and no new shape: the VERSION
+/// the import pins and the sha256 `vyrn.lock` records for it (RFC-0010 M4). Both
+/// are facts a local package does not have, so neither is declared here and no
+/// page renders an empty slot waiting for them — a cell nothing fills is a dead
+/// cell on every card. The day a remote package exists, this record grows two
+/// fields and the package page grows two rows.
+///
+/// WHERE THE FILES ARE READ. `examples/*/vyrn.json` and the entry modules are
+/// read with `readFile` while the pages render, relative to the directory the
+/// export runs in — the repository root, the same way `backstage.vyrn` reads
+/// `rfcs/`. A compile-time generator would hold the same bytes behind a slower
+/// door.
+import { Json, JsonField, copyJson, copyJsonFields } from "std/json"
+import { parseJson } from "std/jsonread"
+import { ApiEntry, apiModules, apiEntries, apiHref, apiKnown, apiSource } from "./docs"
+import { usesOfModule, examplesUsing } from "./stdgraph"
+import { blob } from "./repo"
+import { hrefOf } from "./nav"
+import { escapeHtml } from "./code"
+import { joinWith, substring, indexOf, trim, replace, lines } from "std/strings"
+import { startsWith, endsWith } from "std/strpred"
+
+/// One package, as a card states it: what it is called, what kind it is, one
+/// line about it, and the two numbers a reader weighs a dependency by.
+export type Package = { slug: String, name: String, kind: String, summary: String, exports: Int64, deps: Int64, href: String }
+
+/// One artifact a project declares: the name it is built under, the entry
+/// module, and where it runs.
+export type Artifact = { name: String, entry: String, target: String }
+
+/// One link from a package page to another package's page.
+export type PkgLink = { name: String, href: String }
+
+/// Where the example projects live, relative to the directory the export runs
+/// in.
+fn examplesDir() -> String {
+    return "examples"
+}
+
+// ---------------------------------------------------------------------------
+// Which packages exist
+// ---------------------------------------------------------------------------
+
+/// The example directories that carry a manifest, in listing order.
+///
+/// A directory entry has no extension and a file does, but that rule is not the
+/// one applied here: what makes a directory a PROJECT is that it holds a
+/// `vyrn.json`, so the manifest read is the test. `examples/data` is a directory
+/// and is not a project, and no rule about names had to know that.
+export fn projectSlugs() -> Array<String> {
+    let mut out: Array<String> = []
+    for entry in listing(examplesDir()) {
+        if manifestText(entry).byteLength > 0 {
+            out.push(entry.copy())
+        }
+    }
+    return out
+}
+
+/// The entries of `dir`, or nothing when it cannot be read.
+fn listing(dir: String) -> Array<String> {
+    return match listDir(dir) {
+        Ok(names) => names.copy(),
+        Err(why) => [],
+    }
+}
+
+/// A project's manifest, verbatim, or `""` when the directory holds none.
+export fn manifestText(slug: String) -> String {
+    return match readFile(examplesDir() + "/" + slug + "/vyrn.json") {
+        Ok(text) => text.copy(),
+        Err(why) => "",
+    }
+}
+
+/// Whether `slug` names a package this site publishes a page for.
+export fn packageKnown(slug: String) -> Bool {
+    return apiKnown(slug) || manifestText(slug).byteLength > 0
+}
+
+/// Every package, standard library first, then the example projects.
+export fn packages() -> Array<Package> {
+    let mut out: Array<Package> = []
+    for m in apiModules() {
+        out.push(packageOf(m.name))
+    }
+    for slug in projectSlugs() {
+        out.push(packageOf(slug))
+    }
+    return out
+}
+
+/// One package, built from its own sources rather than by scanning the list.
+///
+/// The pages call this per page. Building all of them to answer about one is how
+/// a thirty-eight page section becomes the slowest part of an export.
+export fn packageOf(slug: String) -> Package {
+    let std = apiKnown(slug)
+    return Package {
+        slug: slug.copy(),
+        name: if std { "std/" + slug } else { examplesDir() + "/" + slug },
+        kind: if std { "std" } else { "project" },
+        summary: summaryOf(slug),
+        exports: if std { apiEntries(slug).length } else { artifactsOf(slug).length },
+        deps: packageDeps(slug).length,
+        href: packageHref(slug),
+    }
+}
+
+/// The page one package is published at.
+///
+/// Built from the path rather than from the router's typed helper, for the
+/// reason `docs.vyrn` gives: this module is imported BY the pages the router
+/// scans. `export.vyrn` checks every one of these against the generated helper.
+export fn packageHref(slug: String) -> String {
+    return hrefOf("/explore/" + slug)
+}
+
+/// The reference page for a package, or `""` where there is none. Only a
+/// standard library module has one; a project is not documented by the
+/// reference, and an empty string is what the page tests to decide.
+export fn docsHref(slug: String) -> String {
+    return if apiKnown(slug) { apiHref(slug) } else { "" }
+}
+
+/// The package's source, in the repository. The site does not host it.
+export fn packageSource(slug: String) -> String {
+    return if apiKnown(slug) { apiSource(slug) } else { blob(examplesDir() + "/" + slug) }
+}
+
+// ---------------------------------------------------------------------------
+// What a card says
+// ---------------------------------------------------------------------------
+
+/// One line about a package, as HTML.
+///
+/// A standard library module has one already: the reference's own summary, read
+/// off the module's `///` header and already rendered. A project has no summary
+/// anywhere, so the first SENTENCE of its first entry module's header is used —
+/// read off the source like everything else, rather than written here where it
+/// would drift from the code it describes. That half is ESCAPED, because it is
+/// prose from a source file and `Array<String>` in a doc comment is two words
+/// and not a tag; the two halves meet in one card and have to be one kind of
+/// thing.
+fn summaryOf(slug: String) -> String {
+    if apiKnown(slug) {
+        for m in apiModules() {
+            if m.name == slug {
+                return m.summary.copy()
+            }
+        }
+        return ""
+    }
+    let entries = artifactsOf(slug)
+    if entries.length == 0 {
+        return ""
+    }
+    return escapeHtml(firstSentence(headerOf(examplesDir() + "/" + slug + "/" + entries[0].entry)))
+}
+
+/// The `///` header at the top of a module, as one line of prose.
+///
+/// The lines are joined the way the reference joins them, and the file is only
+/// read as far as the header goes: the first line that is not a doc comment ends
+/// it.
+fn headerOf(path: String) -> String {
+    let src = match readFile(path) {
+        Ok(text) => text.copy(),
+        Err(why) => "",
+    }
+    let mut out = ""
+    for line in lines(src) {
+        let text = trim(line)
+        if !startsWith(text, "///") {
+            return out
+        }
+        let rest = trim(substring(text, 3, text.byteLength))
+        out = if out.byteLength == 0 { rest.copy() } else { out + " " + rest }
+    }
+    return out
+}
+
+/// The first sentence of `prose`, with its backticks dropped.
+///
+/// The backticks are markdown a card is not going to render: this string lands
+/// in a card as text, and `RFC-0072 M1` reads better than the same words wearing
+/// two stray accents. The reference's own summaries arrive as HTML and never
+/// come through here.
+fn firstSentence(prose: String) -> String {
+    let plain = replace(prose, "`", "")
+    return match indexOf(plain, ". ") {
+        Some(at) => substring(plain, 0, at + 1),
+        None => plain.copy(),
+    }
+}
+
+/// What a package depends on, as links to those packages' own pages.
+///
+/// For a standard library module: the `std/` modules its `import` lines name,
+/// read by the compiler's own lexer (`deps.vyrn`). For a project: the `std/`
+/// modules any file under its directory imports, which is the same reading from
+/// the other end.
+export fn packageDeps(slug: String) -> Array<PkgLink> {
+    let mut out: Array<PkgLink> = []
+    if apiKnown(slug) {
+        for m in usesOfModule(slug) {
+            out.push(PkgLink { name: "std/" + m, href: packageHref(m) })
+        }
+        return out
+    }
+    let prefix = examplesDir() + "/" + slug + "/"
+    for m in apiModules() {
+        for used in examplesUsing(m.name) {
+            if startsWith(used, prefix) && !named("std/" + m.name, out) {
+                out.push(PkgLink { name: "std/" + m.name, href: packageHref(m.name) })
+            }
+        }
+    }
+    return out
+}
+
+/// Whether `name` is already one of `links`.
+fn named(name: String, links: Array<PkgLink>) -> Bool {
+    for l in links {
+        if l.name == name {
+            return true
+        }
+    }
+    return false
+}
+
+// ---------------------------------------------------------------------------
+// The line a reader copies
+// ---------------------------------------------------------------------------
+
+/// The `import` line for a standard library package, naming every export.
+///
+/// This is the whole reason the explorer exists in this shape: a card that says
+/// what a package is and leaves the reader to work out how to write it down is
+/// half a page. Every name in it is an export the reference renders, so the line
+/// is right by construction — and it is COMPILED as its own program by
+/// `site/test/importline.test.mjs`, because "right by construction" is a claim
+/// and the gate is the proof.
+///
+/// A project has no import line: you do not import an application, you clone it.
+/// The manifest is what its page carries instead.
+export fn importLine(slug: String) -> String {
+    if !apiKnown(slug) {
+        return ""
+    }
+    let mut names: Array<String> = []
+    for e in apiEntries(slug) {
+        names.push(e.name.copy())
+    }
+    return "import { " + joinWith(names, ", ") + " } from \"std/" + slug + "\""
+}
+
+/// The exports of a standard library package, with their signatures. The
+/// reference already zips these; a package page shows the same list, each name
+/// linking to its entry on the reference page.
+export fn packageExports(slug: String) -> Array<ApiEntry> {
+    return apiEntries(slug)
+}
+
+/// The anchor of one export on the reference page, so a package page's export
+/// list lands on the declaration rather than at the top of the module.
+export fn exportHref(slug: String, name: String) -> String {
+    return apiHref(slug) + "#e-" + name
+}
+
+// ---------------------------------------------------------------------------
+// The manifest a project declares
+// ---------------------------------------------------------------------------
+
+/// The artifacts a project declares: what it builds, and where each one runs.
+///
+/// The rule is the compiler's, in `compiler/vyrn-frontend/src/artifacts.rs`:
+/// `main` and `server` name native artifacts, `client` names a browser one, and
+/// the `artifacts` map spells the same thing out. Sugar first, then the map, and
+/// an entry already named is not named twice — `examples/shelf` writes both
+/// spellings for the same two entry points.
+///
+/// A manifest that does not parse yields nothing rather than a wrong answer, and
+/// the test below fails on any project whose list comes back empty.
+export fn artifactsOf(slug: String) -> Array<Artifact> {
+    let top = manifestFields(slug)
+    let mut out: Array<Artifact> = []
+    for f in top {
+        if f.key == "main" || f.key == "server" {
+            out = withArtifact(out, Artifact { name: f.key.copy(), entry: stringOf(f.value), target: "native" })
+        }
+        if f.key == "client" {
+            out = withArtifact(out, Artifact { name: f.key.copy(), entry: stringOf(f.value), target: "browser" })
+        }
+    }
+    for f in top {
+        if f.key == "artifacts" {
+            for a in fieldsOf(copyJson(f.value)) {
+                let inner = fieldsOf(copyJson(a.value))
+                out = withArtifact(out, Artifact { name: a.key.copy(), entry: member(inner, "entry"), target: member(inner, "target") })
+            }
+        }
+    }
+    return out
+}
+
+/// `list` with `one` on the end, unless something already builds that entry.
+fn withArtifact(list: Array<Artifact>, one: Artifact) -> Array<Artifact> {
+    let mut out = list.copy()
+    for a in out {
+        if a.entry == one.entry {
+            return out
+        }
+    }
+    out.push(one.copy())
+    return out
+}
+
+/// The top-level fields of a project's manifest.
+fn manifestFields(slug: String) -> Array<JsonField> {
+    return match parseJson(manifestText(slug)) {
+        Ok(j) => fieldsOf(j),
+        Err(why) => [],
+    }
+}
+
+/// The fields of a JSON object, or `[]` for any other value. Copied, because a
+/// payload read out of a borrowed value is a read, not a move.
+fn fieldsOf(j: Json) -> Array<JsonField> {
+    return match j {
+        JObj(fs) => copyJsonFields(fs),
+        JArr(xs) => [],
+        JStr(s) => [],
+        JNum(s) => [],
+        JBool(b) => [],
+        JNull => [],
+    }
+}
+
+/// The text of a JSON string, or `""` for any other value.
+fn stringOf(j: Json) -> String {
+    return match j {
+        JStr(s) => s.copy(),
+        JObj(fs) => "",
+        JArr(xs) => "",
+        JNum(s) => "",
+        JBool(b) => "",
+        JNull => "",
+    }
+}
+
+/// The string value of one member of an object's fields, or `""`.
+fn member(fields: Array<JsonField>, key: String) -> String {
+    for f in fields {
+        if f.key == key {
+            return stringOf(copyJson(f.value))
+        }
+    }
+    return ""
+}
+
+test "every package is one of two kinds, and answers all four card questions" {
+    let all = packages()
+    assert(all.length > 30)
+    let mut std = 0
+    let mut projects = 0
+    for p in all {
+        assert(p.slug.byteLength > 0)
+        assert(p.summary.byteLength > 0)
+        assert(p.exports > 0)
+        assert(p.deps >= 0)
+        assertEq(p.href, "/explore/" + p.slug + ".html")
+        if p.kind == "std" {
+            assertEq(p.name, "std/" + p.slug)
+            std = std + 1
+        } else {
+            assertEq(p.kind, "project")
+            assertEq(p.name, "examples/" + p.slug)
+            projects = projects + 1
+        }
+    }
+    assertEq(std, apiModules().length)
+    assertEq(projects, projectSlugs().length)
+    assert(projects >= 4)
+}
+
+test "a package name is one package" {
+    // The two kinds share one namespace, because they share one URL space. A
+    // std module and an example project with the same name would publish one
+    // page for two packages, and the page would be the module's.
+    for slug in projectSlugs() {
+        assert(!apiKnown(slug))
+    }
+    assert(packageKnown("json"))
+    assert(packageKnown("shelf"))
+    assert(!packageKnown("nope"))
+}
+
+test "a standard library package's import line names every export it has" {
+    let line = importLine("math")
+    assert(startsWith(line, "import { min, max, "))
+    assert(endsWith(line, "} from \"std/math\""))
+    for e in apiEntries("math") {
+        assert(match indexOf(line, " " + e.name) {
+                Some(at) => true,
+                None => false,
+            })
+    }
+    // A project is not something you import.
+    assertEq(importLine("shelf"), "")
+    assertEq(importLine("nope"), "")
+}
+
+test "every project declares what it builds, and each artifact has a target" {
+    for slug in projectSlugs() {
+        let arts = artifactsOf(slug)
+        assert(arts.length > 0)
+        for a in arts {
+            assert(a.name.byteLength > 0)
+            assert(endsWith(a.entry, ".vyrn"))
+            assert(a.target == "native" || a.target == "browser" || a.target == "wasi")
+        }
+    }
+    // `examples/shelf` writes both spellings of the same two entry points, and
+    // that is two artifacts, not four.
+    let shelf = artifactsOf("shelf")
+    assertEq(shelf.length, 2)
+    assertEq(shelf[0].name, "server")
+    assertEq(shelf[0].entry, "server.vyrn")
+    assertEq(shelf[0].target, "native")
+    assertEq(shelf[1].target, "browser")
+    // `examples/fullstack` writes only the sugar keys, and `examples/leak` only
+    // the map. Both declare two artifacts.
+    assertEq(artifactsOf("fullstack").length, 2)
+    assertEq(artifactsOf("leak").length, 2)
+    assertEq(artifactsOf("leak")[0].name, "api")
+    assertEq(artifactsOf("nope").length, 0)
+}
+
+test "a package's dependencies are packages this site publishes" {
+    let mut checked = 0
+    for p in packages() {
+        for d in packageDeps(p.slug) {
+            assert(startsWith(d.name, "std/"))
+            assert(packageKnown(substring(d.name, 4, d.name.byteLength)))
+            assertEq(d.href, "/explore/" + substring(d.name, 4, d.name.byteLength) + ".html")
+            checked = checked + 1
+        }
+    }
+    assert(checked > 40)
+    // A leaf, and a project that reaches the library through several modules.
+    assertEq(packageDeps("json").length, 0)
+    assert(packageDeps("shelf").length > 3)
+}
+
+test "a summary is a sentence, and a header is read only as far as it goes" {
+    assertEq(firstSentence("One. Two."), "One.")
+    assertEq(firstSentence("`x` and `y`."), "x and y.")
+    assertEq(firstSentence("no full stop"), "no full stop")
+    assertEq(headerOf("nope/nothing.vyrn"), "")
+}
+
+test "the reference is the only place a package page sends a reader for prose" {
+    assertEq(docsHref("json"), "/docs/std/json.html")
+    assertEq(docsHref("shelf"), "")
+    assertEq(exportHref("json", "parse"), "/docs/std/json.html#e-parse")
+    assertEq(packageSource("json"), "https://github.com/vyrn-lang/vyrn/blob/main/std/json.vyrn")
+    assertEq(packageSource("shelf"), "https://github.com/vyrn-lang/vyrn/blob/main/examples/shelf")
+}

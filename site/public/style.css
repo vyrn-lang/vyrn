@@ -944,8 +944,9 @@ pre.doccode {
 .chapternav a.next { text-align: right; grid-column: -2; }
 
 /* -------------------------------------------------------------------------
-   The explorer (/explore). A search field over rows that are already on the
-   page, and the import graph drawn from the source.
+   The search and the import graph. Both are on the REFERENCE (/docs) since
+   RFC-0105 M2 — a search field over rows that are already on the page, and the
+   graph drawn from the source. `/explore` is the package explorer below.
    ------------------------------------------------------------------------- */
 
 .finder { margin-top: var(--s4); }
@@ -995,6 +996,34 @@ svg.graph.lit text { fill: var(--n2); }
 svg.graph .node.near text { fill: var(--ink); }
 svg.graph .node.on text { fill: var(--accent); font-weight: 600; }
 svg.graph .node.on circle { fill-opacity: 1; }
+
+/* -------------------------------------------------------------------------
+   The package explorer (/explore and /explore/*). A card per package and a
+   page per package, in the shape a registry has (RFC-0105 M2).
+
+   The cards are `.modlist`'s grid turned around: the reference's list leads
+   with a name and ends with prose, and a package card ends with the two
+   numbers a reader weighs a dependency by, because that is what the card is
+   FOR. Auto-fit columns, so 38 packages are a wall on a laptop and a column on
+   a phone without a breakpoint being written for either.
+   ------------------------------------------------------------------------- */
+
+.pkgs { list-style: none; padding: 0; margin: var(--s4) 0 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1px; background: var(--hair); border: 1px solid var(--hair); }
+.pkgs li { background: var(--paper); padding: var(--s2); display: grid; gap: 6px; align-content: start; }
+.pkgs a { font: 13px/1.6 var(--mono); color: var(--accent); text-decoration: none; }
+.pkgs a:hover { text-decoration: underline; }
+.pkgs .kindpill { justify-self: start; }
+.pkgs .note { color: var(--muted); font-size: 0.92rem; line-height: 1.5; }
+.pkgs .nums { font: 11px/1.6 var(--mono); letter-spacing: 0.06em; color: var(--n2); }
+
+/* One package's exports: the name, what kind of thing it is, and the signature
+ * as it is written. The prose is on the reference and this list says so, so a
+ * row here is an inventory line and not a second copy of the documentation. */
+.exports { list-style: none; padding: 0; margin: var(--s4) 0 0; }
+.exports li { padding: var(--s2) 0; border-top: 1px solid var(--hair); display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: var(--s2); align-items: baseline; }
+.exports a { font: 13px/1.6 var(--mono); color: var(--accent); text-decoration: none; }
+.exports a:hover { text-decoration: underline; }
+.exports pre.code { margin: 0; border: 0; background: transparent; padding: 0; font-size: 12px; overflow-x: auto; }
 
 /* What a module's tests promise. Closed by default: a list of claims a reader
  * opens when they want it, not a screen to scroll past. */
