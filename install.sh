@@ -117,10 +117,18 @@ stage="$tmp/${asset%.tar.gz}"
 # goes in $DIR/bin and the trees stay its siblings one level up. $DIR/cache
 # (remote imports, RFC-0010) is left alone.
 mkdir -p "$DIR/bin"
-rm -rf "$DIR/std" "$DIR/web" "$DIR/bin/vyrn"
+rm -rf "$DIR/std" "$DIR/web" "$DIR/bin/vyrn" "$DIR/bin/vyrn-lsp"
 mv "$stage/std" "$stage/web" "$DIR/"
 mv "$stage/vyrn" "$DIR/bin/vyrn"
 chmod +x "$DIR/bin/vyrn"
+# The language server goes BESIDE the driver, which is where the VS Code
+# extension looks for it (editor/vscode/extension.js): `vyrn-lsp` on PATH, or
+# next to the `vyrn` that is on PATH. Guarded, so this script still installs an
+# older archive that predates it.
+if [ -f "$stage/vyrn-lsp" ]; then
+  mv "$stage/vyrn-lsp" "$DIR/bin/vyrn-lsp"
+  chmod +x "$DIR/bin/vyrn-lsp"
+fi
 if [ -f "$stage/VERSION" ]; then mv "$stage/VERSION" "$DIR/VERSION"; fi
 if [ -f "$stage/README.md" ]; then mv "$stage/README.md" "$DIR/README.md"; fi
 

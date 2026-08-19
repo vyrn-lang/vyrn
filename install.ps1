@@ -105,13 +105,19 @@ try {
   # goes in $dir\bin and the trees stay its siblings one level up. $dir\cache
   # (remote imports, RFC-0010) is left alone.
   New-Item -ItemType Directory -Path (Join-Path $dir 'bin') -Force | Out-Null
-  foreach ($stale in 'std', 'web', 'bin\vyrn.exe') {
+  foreach ($stale in 'std', 'web', 'bin\vyrn.exe', 'bin\vyrn-lsp.exe') {
     $p = Join-Path $dir $stale
     if (Test-Path $p) { Remove-Item $p -Recurse -Force }
   }
   Move-Item (Join-Path $stage 'std') (Join-Path $dir 'std')
   Move-Item (Join-Path $stage 'web') (Join-Path $dir 'web')
   Move-Item (Join-Path $stage 'vyrn.exe') (Join-Path $dir 'bin\vyrn.exe')
+  # The language server goes BESIDE the driver, which is where the VS Code
+  # extension looks for it (editor\vscode\extension.js): `vyrn-lsp` on PATH, or
+  # next to the `vyrn` that is on PATH. Guarded, so this script still installs
+  # an older archive that predates it.
+  $lsp = Join-Path $stage 'vyrn-lsp.exe'
+  if (Test-Path $lsp) { Move-Item $lsp (Join-Path $dir 'bin\vyrn-lsp.exe') }
   foreach ($extra in 'VERSION', 'README.md') {
     $src = Join-Path $stage $extra
     if (Test-Path $src) { Move-Item $src (Join-Path $dir $extra) -Force }

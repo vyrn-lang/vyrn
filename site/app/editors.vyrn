@@ -164,29 +164,32 @@ export fn features() -> Array<Feature> {
     ]
 }
 
-/// The honest way to get it today, in order. There is no marketplace listing:
-/// what exists is a repository, a packaging script and a launch configuration.
+/// The way to get it, in order. There is no marketplace listing; what a release
+/// publishes is a `.vsix` file, and the two halves of the editor story arrive
+/// from two different assets of the same release.
 ///
-/// The first step is not optional and is not the one `/install` used to print.
-/// The packaging script builds the server in RELEASE and copies it into the
-/// extension, and the F5 development host looks for a DEBUG build — so the two
-/// paths need different builds, and each step below names its own.
+/// The split is the point. The extension is JavaScript and has no architecture,
+/// so ONE `.vsix` serves every platform. The half that does have an architecture
+/// is `vyrn-lsp`, and it ships in the per-platform archive beside `vyrn` — which
+/// is where the extension looks for it, so installing the toolchain is what
+/// gives the editor its server. Building from source is the third step because
+/// it is now the contributor's path, not the reader's.
 export fn steps() -> Array<Step> {
     return [
         Step {
-            title: "Install it as an extension",
-            command: "cd editor/vscode && npm install && npm run package",
-            what: "Builds the server in release, copies it next to <code>extension.js</code>, and writes a <code>.vsix</code> tagged for this platform. The binary is inside it, so the machine you install it on needs no Rust.",
+            title: "Install the toolchain, which carries the server",
+            command: "curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | sh",
+            what: "The archive holds <code>vyrn-lsp</code> beside <code>vyrn</code>, and the installer puts both in <code>~/.vyrn/bin</code>. On Windows the line is <code>irm https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.ps1 | iex</code>. If you already ran either, you already have the server.",
         },
         Step {
-            title: "Then hand the file to VS Code",
-            command: "code --install-extension vyrn-win32-x64-0.1.0.vsix",
-            what: "The file name carries the platform and the version the packaging step just printed. The bundled binary is host-specific: package once per platform you want to ship to.",
+            title: "Download the .vsix from the newest release and install it",
+            command: "code --install-extension vyrn-vscode-<version>.vsix",
+            what: "One file for every platform — the file name carries the version, and nothing else. The extension then finds the server on <code>PATH</code>, or beside the <code>vyrn</code> that is on <code>PATH</code>; <code>vyrn.serverPath</code> overrides both when yours lives somewhere else.",
         },
         Step {
             title: "Or work on the extension itself",
             command: "cargo build --manifest-path compiler/vyrn-lsp/Cargo.toml",
-            what: "A <strong>debug</strong> build, which is the one the F5 development host looks for. Then open the repository in VS Code and press F5. The launch does not rebuild the server — a running binary is locked on Windows — so re-run this line, or the <code>build-lsp</code> task, whenever you change the server.",
+            what: "A <strong>debug</strong> build, which is the one the F5 development host looks for. Then open the repository in VS Code and press F5. The launch does not rebuild the server — a running binary is locked on Windows — so re-run this line, or the <code>build-lsp</code> task, whenever you change the server. <code>npm run package</code> in <code>editor/vscode</code> builds the same <code>.vsix</code> the release does.",
         },
     ]
 }

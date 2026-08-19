@@ -111,20 +111,35 @@ jobs:
             exit 1
           fi
 
-      - name: Build the CLI
+      - name: Build the CLI and the language server
         working-directory: compiler
         # `--target` is named explicitly rather than left implicit so the
         # archive name is a fact about the binary, not about which architecture
         # GitHub happened to give the `macos-latest` label this year. Building
         # `vyrn` needs no clang, no LLVM and no wasi sysroot (compiler/Cargo.toml).
+        #
+        # `vyrn-lsp` is EXCLUDED from the workspace and carries its own
+        # Cargo.lock, so it needs its own `--manifest-path` and its own
+        # `--locked`. It ships in this archive because the .vsix is one
+        # platform-neutral file for every platform: the editor extension is
+        # JavaScript, the thing that has an architecture is the server, and the
+        # archives are per-platform already. So the extension resolves
+        # `vyrn-lsp` beside the `vyrn` on PATH, and installing the toolchain is
+        # what puts it there.
         run: |
           rustup target add ${{ matrix.target }}
           cargo build --release --locked -p vyrn-cli --target ${{ matrix.target }}
+          cargo build --release --locked --manifest-path vyrn-lsp/Cargo.toml --target ${{ matrix.target }}
 
       - name: Stage the archive
         shell: bash
         # What a user gets, and why:
         #   vyrn          the driver
+        #   vyrn-lsp      the language server the VS Code extension spawns. It
+        #                 sits BESIDE `vyrn` because that is how the extension
+        #                 finds it (editor/vscode/extension.js), and because the
+        #                 install scripts move the whole directory into
+        #                 $DIR/bin, which the user puts on PATH.
         #   std/          `vyrn` resolves `std/...` imports from files on disk;
         #                 it finds them by walking up from the executable, so
         #                 `std/` MUST stay a sibling of the binary's directory
@@ -141,8 +156,11 @@ jobs:
         run: |
           set -eu
           stage="vyrn-${{ matrix.name }}"
+          lsp="vyrn-lsp"
+          if [ "${{ runner.os }}" = "Windows" ]; then lsp="vyrn-lsp.exe"; fi
           mkdir -p "$stage"
           cp "compiler/target/${{ matrix.target }}/release/${{ matrix.bin }}" "$stage/"
+          cp "compiler/vyrn-lsp/target/${{ matrix.target }}/release/$lsp" "$stage/"
           cp -r std "$stage/std"
           cp -r web "$stage/web"
           cp README.md "$stage/"
@@ -226,6 +244,17 @@ jobs:
           EOF
           got=$(node --experimental-wasi-unstable-preview1 wasi-run.mjs hello.wasm 2>/dev/null)
           test "$got" = "$want" || { echo "the shipped wasm printed '$got'" >&2; exit 1; }
+          # The server in the same archive, proved the only way a server can be
+          # proved: speak to it. `vyrn-lsp` is an ordinary stdio LSP, so one
+          # `initialize` request framed with its Content-Length header and a
+          # closed stdin is a whole session — it answers with its capabilities
+          # and exits 0 at EOF. A binary that cannot start, or that was stripped
+          # of something it needed, fails here rather than in someone's editor.
+          lsp="$PWD/$stage/vyrn-lsp"
+          if [ "${{ runner.os }}" = "Windows" ]; then lsp="$lsp.exe"; fi
+          body='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"rootUri":null,"capabilities":{}}}'
+          printf 'Content-Length: %d\r\n\r\n%s' "${#body}" "$body" | "$lsp" > init.out
+          grep -q '"capabilities"' init.out || { echo "vyrn-lsp did not answer initialize:" >&2; cat init.out >&2; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:
@@ -235,9 +264,64 @@ jobs:
             vyrn-*.zip
           if-no-files-found: error
 
+  vsix:
+    name: package the VS Code extension
+    needs: gate
+    # ONE runner, not the matrix, because the .vsix is one file for every
+    # platform. The extension is plain JavaScript with a single runtime
+    # dependency; the only part of the editor story with an architecture is
+    # `vyrn-lsp`, and that ships in the per-platform archives above.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The tag and the extension version must agree
+        shell: bash
+        working-directory: editor/vscode
+        # Same refusal as the crate check, for the same reason: the version is
+        # baked into the .vsix and into its file name, and a version that
+        # disagrees with the tag beside it is a lie a user cannot see.
+        #
+        # The mapping is IDENTITY — `v0.1.0-alpha.2` means `0.1.0-alpha.2` — and
+        # that is a checked fact, not an assumption: `vsce@3.9.2 package`
+        # accepts a semver pre-release identifier, and `code --install-extension`
+        # installs the file it produces. No transform, so nothing to remember.
+        run: |
+          set -eu
+          ext=$(node -p "require('./package.json').version")
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$ext" != "$tag" ]; then
+            echo "tag ${GITHUB_REF_NAME} but editor/vscode/package.json says $ext" >&2
+            exit 1
+          fi
+
+      - name: Package the extension
+        working-directory: editor/vscode
+        # `vsce` is the official packager and the ONE third-party tool in this
+        # workflow. It is pinned by exact version in package.json's `package`
+        # script (`@vscode/vsce@3.9.2`) — one spelling of the pin, used by this
+        # job and by a contributor running `npm run package` — and it runs
+        # BEFORE the checksums, so whatever it produced is covered by
+        # SHA256SUMS like every other asset.
+        #
+        # `npm ci --omit=dev` installs exactly the lockfile's runtime tree
+        # (`vscode-languageclient` and its four transitive packages), which is
+        # what `.vscodeignore` lets into the .vsix.
+        run: |
+          set -eu
+          npm ci --omit=dev
+          npm run package -- -o "../../vyrn-vscode-${GITHUB_REF_NAME#v}.vsix"
+          ls -l ../../vyrn-vscode-*.vsix
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vyrn-vscode
+          path: vyrn-vscode-*.vsix
+          if-no-files-found: error
+
   publish:
     name: publish the release
-    needs: build
+    needs: [build, vsix]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -253,7 +337,7 @@ jobs:
         # install anything whose line is missing from it.
         run: |
           set -eu
-          sha256sum vyrn-*.tar.gz vyrn-*.zip | sort -k2 > SHA256SUMS
+          sha256sum vyrn-*.tar.gz vyrn-*.zip vyrn-vscode-*.vsix | sort -k2 > SHA256SUMS
           cat SHA256SUMS
 
       - name: Publish
@@ -281,6 +365,8 @@ jobs:
               irm https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.ps1 | iex
 
           Verify a manual download against `SHA256SUMS`.
+
+          VS Code support: download `vyrn-vscode-<version>.vsix` below and run `code --install-extension vyrn-vscode-<version>.vsix`. One file for every platform. It needs the `vyrn-lsp` server, which ships inside the archives above and beside `vyrn` — so an install through the script or the archive already has it.
 
           `vyrn run`, `vyrn check`, `vyrn test` and `vyrn build --target wasm` need nothing beyond this archive. `vyrn build` (native) needs `clang` on `PATH`.
           EOF

@@ -44,6 +44,7 @@ try {
   # file is there and moves it, and staging a genuine .exe would buy nothing the
   # release workflow's own smoke step does not already prove.
   Set-Content (Join-Path $stage 'vyrn.exe') 'not a real binary' -Encoding ascii
+  Set-Content (Join-Path $stage 'vyrn-lsp.exe') 'not a real binary either' -Encoding ascii
   Set-Content (Join-Path $stage 'std\strings.vyrn') 'export fn x() -> Int64 { return 0 }' -Encoding ascii
   Set-Content (Join-Path $stage 'web\vyrn-dom.js') '// browser runtime' -Encoding ascii
   Set-Content (Join-Path $stage 'VERSION') $tag -Encoding ascii
@@ -95,7 +96,9 @@ try {
   $r = Run-Install $dir
   if ($r.code -ne 0) { Fail "the happy path failed:`n$($r.out)" }
   if ($r.out -notmatch 'sha256 ok') { Fail "no checksum line:`n$($r.out)" }
-  foreach ($p in 'bin\vyrn.exe', 'std\strings.vyrn', 'web\vyrn-dom.js', 'VERSION') {
+  # `bin\vyrn-lsp.exe` is in this list because the VS Code extension finds the
+  # server by looking beside the driver — the install has to put it there.
+  foreach ($p in 'bin\vyrn.exe', 'bin\vyrn-lsp.exe', 'std\strings.vyrn', 'web\vyrn-dom.js', 'VERSION') {
     if (-not (Test-Path (Join-Path $dir $p))) { Fail "$p is missing from the install" }
   }
   Write-Host 'ok: installs, and the tree is shaped the way vyrn walks up for it'
