@@ -1,4 +1,4 @@
-# Vyrn RFCs
+﻿# Vyrn RFCs
 
 This directory is the **design record** for Vyrn. It is the north star: when the
 implementation and an RFC disagree, that is a bug in one of them, and the RFC is
@@ -44,7 +44,7 @@ drifts: each header says which milestone landed and what did not, and the
 
 ## The index
 
-104 RFCs, numbered 0001 to 0105, with one gap. **There is no RFC-0066** — the
+106 RFCs, numbered 0001 to 0107, with one gap. **There is no RFC-0066** — the
 number was skipped and never used. The only mention of it in the repository is
 this sentence. Closing the gap would mean renumbering thirty files and breaking
 every cross-reference, so the gap stays.
@@ -161,6 +161,8 @@ claim is true — is written down in the test's own header.
 | [0103](RFC-0103-a-target-is-a-capability-set.md) | A Target Is a Capability Set | Implemented |
 | [0104](RFC-0104-a-benchmark-is-a-claim-about-a-gap.md) | A Benchmark Is a Claim About a Gap | Implemented |
 | [0105](RFC-0105-a-site-has-two-audiences.md) | A Site Has Two Audiences | Implemented |
+| [0106](RFC-0106-a-consumer-page-is-scanned-not-read.md) | A Consumer Page Is Scanned, Not Read | Proposed |
+| [0107](RFC-0107-a-template-component-is-a-library.md) | A Template Component Is a Library | Proposed |
 
 ## The other documents here
 
