@@ -1,0 +1,10 @@
+/// P3 — deferred evaluation: the `.vyx` compiler's stand-in never loads the
+/// provider. It emits a module that IMPORTS the provider's generator with the
+/// names its tags used, and the loader runs that generation in turn.
+import { p3Nested } from "./probes"
+import { page } from p3Nested("./provider", "github discord")
+
+fn main() -> Int64 {
+    print(page())
+    return 0
+}

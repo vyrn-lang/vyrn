@@ -1,0 +1,10 @@
+<script>
+import { Icon } from "./provider"
+</script>
+
+<template>
+<span class="badge">
+    <Icon name="github"/>
+    <Icon name="discord"/>
+</span>
+</template>

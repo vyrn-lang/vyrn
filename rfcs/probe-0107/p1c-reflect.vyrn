@@ -1,0 +1,11 @@
+/// P1c — what a generator can see of a provider that IS under its declared input
+/// root: the whole exported surface, as reflection, and nothing callable.
+import { p1Reflect } from "./probes"
+import { seen } from p1Reflect("./provider")
+
+fn main() -> Int64 {
+    for row in seen() {
+        print(row)
+    }
+    return 0
+}

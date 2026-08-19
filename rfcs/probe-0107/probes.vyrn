@@ -1,0 +1,143 @@
+/// The RFC-0107 M0 probe generators. Each one asks the loader a single question
+/// about what a `.vyx`-style generator may do with a provider module named by the
+/// TEMPLATE rather than by the generator's own imports, and the answer is the
+/// program's output or the load diagnostic it fails with.
+///
+/// Run them from `rfcs/probe-0107/`; see README.md for the transcripts.
+import { indexOf, joinWith, lines, splitWhitespace, substring } from "std/strings"
+
+/// P1a — read a provider whose path the template named. `dir` is the generator's
+/// only path argument (a `.vyx` components directory); `../provider.vyrn` is the
+/// module the template's `<script>` imported.
+export gen fn p1EscapeRead(dir: String) -> String {
+    let seen = match readFile(dir + "/../provider.vyrn") {
+        Ok(v) => "read \{v.byteLength} bytes",
+        Err(e) => "readFile said: \{e}",
+    }
+    return "export fn seen() -> String {\n    return \"\{seen}\"\n}\n"
+}
+
+/// P1b — reflect the same provider through `moduleInterface`.
+export gen fn p1EscapeReflect(dir: String) -> String {
+    let mi = moduleInterface(dir + "/../provider")
+    return "export fn seen() -> String {\n    return \"reflected \{mi.functions.length} functions\"\n}\n"
+}
+
+/// P1c — the same reflection when the provider IS one of the generator's own
+/// constant arguments (the "declared at the call site" variant). Emits what the
+/// reflection carries, so the transcript shows how much of a provider a generator
+/// can see.
+export gen fn p1Reflect(spec: String) -> String {
+    let mi = moduleInterface(spec)
+    let mut rows: Array<String> = []
+    for f in mi.functions {
+        let mut ps: Array<String> = []
+        for p in f.params {
+            ps.push("\{p.name}: \{p.spelling}")
+        }
+        let sig = joinWith(ps, ", ")
+        rows.push("\{f.name}(\{sig}) -> \{f.ret}")
+    }
+    let mut out = "export fn seen() -> Array<String> {\n    return [\n"
+    for r in rows {
+        out = out + "        \"\{r}\",\n"
+    }
+    return out + "    ]\n}\n"
+}
+
+/// P3 — deferred evaluation. This generator stands in for the `.vyx` compiler: it
+/// never loads the provider itself. It EMITS a module that imports the provider's
+/// generator with the names the template's tags asked for, and calls it where the
+/// tags stood. `spec` is the provider module the template's `<script>` named,
+/// `names` the glyphs its tags used.
+export gen fn p3Nested(spec: String, names: String) -> String {
+    let mut out = "/// Emitted by the RFC-0107 M0 probe (the `.vyx` compiler's part).\n"
+    out = out + "import { toHtmlString, Html } from \"std/html\"\n"
+    out = out + "import { glyphs } from \"\{spec}\"\n"
+    out = out + "import * as g from glyphs(\"./data\", \"\{names}\")\n"
+    out = out + "export fn page() -> String {\n"
+    out = out + "    let mut parts = \"\"\n"
+    for n in namesOf(names) {
+        out = out + "    parts = parts + toHtmlString(g.\{n}())\n"
+    }
+    return out + "    return parts\n}\n"
+}
+
+/// One `<Icon name="…"/>` tag use, with the position the template put it at.
+type IconUse = { name: String, line: Int64, col: Int64 }
+
+/// P7 — the whole mechanism on a real template file. This is the `.vyx`
+/// compiler's part, in miniature: read the template (its own path argument),
+/// take the provider spec its `<script>` imported and the glyphs its tags named,
+/// and emit a module that imports the provider's generator once per tag — with
+/// the tag's own position, so the provider can anchor a report there.
+export gen fn p7Vyx(vyxPath: String) -> String {
+    let src = match readFile(vyxPath) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+    let spec = importSpec(src)
+    let uses = iconUses(src)
+    let mut out = "/// Emitted by the RFC-0107 M0 probe from \{vyxPath} — do not edit.\n"
+    out = out + "import { toHtmlString, Html } from \"std/html\"\n"
+    out = out + "import { glyphsAt } from \"\{spec}\"\n"
+    let mut i = 0
+    for u in uses {
+        let n = i.toString()
+        let l = u.line.toString()
+        let c = u.col.toString()
+        out = out + "import * as g\{n} from glyphsAt(\"./data\", \"\{u.name}\", \"\{vyxPath}\", \{l}, \{c})\n"
+        i = i + 1
+    }
+    out = out + "export fn page() -> String {\n    let mut parts = \"\"\n"
+    i = 0
+    for u in uses {
+        let n = i.toString()
+        out = out + "    parts = parts + toHtmlString(g\{n}.\{u.name}())\n"
+        i = i + 1
+    }
+    return out + "    return parts\n}\n"
+}
+
+/// The first `import … from "spec"` spec in the template's `<script>`.
+fn importSpec(src: String) -> String {
+    if let Some(at) = indexOf(src, " from \"") {
+        let rest = substring(src, at + 7, src.byteLength)
+        if let Some(q) = indexOf(rest, "\"") {
+            return substring(rest, 0, q)
+        }
+    }
+    return ""
+}
+
+/// Every `<Icon name="…"/>` in the template, at most one per line (the probe is
+/// about resolution, not about parsing — `std/vyx` already has a real scanner).
+fn iconUses(src: String) -> Array<IconUse> {
+    let mut out: Array<IconUse> = []
+    let mut ln = 1
+    for l in lines(src) {
+        if let Some(at) = indexOf(l, "<Icon name=\"") {
+            let rest = substring(l, at + 12, l.byteLength)
+            if let Some(q) = indexOf(rest, "\"") {
+                out.push(IconUse { name: substring(rest, 0, q), line: ln, col: at + 1 })
+            }
+        }
+        ln = ln + 1
+    }
+    return out
+}
+
+/// P6 — read a manifest-aliased file (the pinned collection an `vyrn add` would
+/// write). `alias` is the alias key as it appears in a module specifier.
+export gen fn p6Alias(alias: String) -> String {
+    let seen = match readFile(alias + "/collection.txt") {
+        Ok(v) => "read \{v.byteLength} bytes",
+        Err(e) => "readFile said: \{e}",
+    }
+    return "export fn seen() -> String {\n    return \"\{seen}\"\n}\n"
+}
+
+/// The names in a space-separated list.
+fn namesOf(names: String) -> Array<String> {
+    return splitWhitespace(names)
+}

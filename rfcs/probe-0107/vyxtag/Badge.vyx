@@ -1,0 +1,10 @@
+<script>
+import { glyphs } from "../provider"
+import * as g from glyphs("../data", "github")
+</script>
+
+<template>
+<span class="badge">
+    <Icon name="github"/>
+</span>
+</template>

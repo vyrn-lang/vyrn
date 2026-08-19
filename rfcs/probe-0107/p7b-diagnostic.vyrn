@@ -1,0 +1,9 @@
+/// P7b — the same template with a misspelled glyph: the provider's report has to
+/// land on the tag in the `.vyx`, not on the collection it read.
+import { p7Vyx } from "./probes"
+import { page } from p7Vyx("./BadgeTypo.vyx")
+
+fn main() -> Int64 {
+    print(page())
+    return 0
+}

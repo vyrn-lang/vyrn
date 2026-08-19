@@ -1,0 +1,11 @@
+/// The P2a probe lives in its own module ON PURPOSE: it does not compile, and a
+/// generator module that does not compile fails every program that imports it —
+/// which is itself part of the transcript (see README.md, "one contradiction").
+/// P2a — can a generator CALL an exported function of a module it only reflected?
+/// `FnInfo` is a record of names and type spellings; the probe asks for the one
+/// member that would make the design in RFC-0107's "The design" section work.
+export gen fn p2Call(spec: String) -> String {
+    let mi = moduleInterface(spec)
+    let f = mi.functions[0]
+    return f.call("github")
+}

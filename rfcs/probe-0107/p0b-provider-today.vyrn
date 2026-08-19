@@ -1,0 +1,11 @@
+/// P0b — the same provider reaching a template TODAY, with no tag: a `<script>`
+/// generator import plus `v-html`. Nothing here is new machinery; only the tag
+/// syntax in P0a is missing.
+import { components } from "std/vyx"
+import { plain } from components("./vyxcomp")
+import { toHtmlString } from "std/html"
+
+fn main() -> Int64 {
+    print(toHtmlString(plain()))
+    return 0
+}

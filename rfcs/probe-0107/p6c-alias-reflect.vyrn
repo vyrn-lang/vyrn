@@ -1,0 +1,10 @@
+/// P6c — and does `moduleInterface` resolve an alias?
+import { p1Reflect } from "./probes"
+import { seen } from p1Reflect("prov")
+
+fn main() -> Int64 {
+    for row in seen() {
+        print(row)
+    }
+    return 0
+}
