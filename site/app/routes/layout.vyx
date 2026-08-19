@@ -48,10 +48,10 @@ fn standing() -> String {
         <nav class="nav" aria-label="Site">
             <a v-for="r in navRows()" :key="r.href" :href="r.href">{{ r.label }}</a>
         </nav>
-        <!-- Three states, one attribute on `<html>`, and nothing at all without
-             script — `theme.js` says why. `v-html` needs an element to write
-             into, and the backstage masthead is built as a string where the
-             control's own `<div>` is the flex item; `.slot` is `display:
+        <!-- One button, three states, one attribute on `<html>`, and nothing at
+             all without script — `theme.js` says why. `v-html` needs an element
+             to write into, and the backstage masthead is built as a string where
+             the control's own `<button>` is the flex item; `.slot` is `display:
              contents`, so the two mastheads have the same boxes. -->
         <div class="slot" v-html="themeControl()"></div>
     </header>

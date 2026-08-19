@@ -144,6 +144,17 @@ other way:
 - **Cells with no delimiter row are not a table.** RFC-0077 has three such lines.
   GitHub prints the pipes; so does this.
 
+[Amended after M4. A fourth decision was missing, and it was wrong: a paragraph
+joined its lines with `"\n"`, so the corpus's eighty-column wrap went into the
+`<p>` it emitted. CommonMark renders a single newline inside a paragraph as a
+space, and `takeParagraph` joins with one now — which is also the rule for a code
+span written across two lines, whose interior line ending becomes a space as
+well. A blockquote and a list item both hand their lines back to `blocksHtml` and
+arrive at the same function, so the fix is in one place; the two remaining `"\n"`
+joins in the file are a fenced block and an indented one, where the line break is
+the content. `site/app/markdown.vyrn` holds the test: no `<p>` may contain a
+newline.]
+
 What is refused: a fenced block tagged with a language not in the list, a fence
 that is never closed, and a block of raw HTML. The corpus has none of the three
 today, which is the point — the day one appears, the build says so.
@@ -373,6 +384,16 @@ Dark — in the masthead of both fronts, from one function (`themeControl` in
 backstage builds its masthead as a string; both call the same code, so the two
 fronts cannot drift.
 
+[Amended after M4. The group was wrong and the reader who asked for the control
+said so: three buttons at `6px` padding are a 27px box in a row of 13px capitals,
+which made the masthead **76px** where it had been **64px** and took the
+navigation off the line it shared with the wordmark. It is ONE button now, and it
+cycles system → light → dark. The state is the word on it, so the three states
+are still all named, and the button is 13px of text between two 1px borders —
+15px, the height of the wordmark's own line — so the header measures 64px again,
+the same as a masthead with no control in it at all. The function, the file, the
+two mastheads and the one attribute on `<html>` are unchanged.]
+
 It writes one attribute on `<html>`: `data-theme="light"`, `data-theme="dark"`,
 or nothing at all for system. Nothing is the default, and nothing is the only
 state a browser with no script can be in.
@@ -387,7 +408,7 @@ Four hundred bytes on every page is the price of not flashing, and the export
 asserts both halves of it — the tag is `<script src>` and not
 `<script type="module">`, and it is before `<body>`.
 
-**And the no-script rule.** The group is `display: none` until `theme.js` marks
+**And the no-script rule.** The control is `display: none` until `theme.js` marks
 the document with `data-js`. A control that renders, takes focus and does
 nothing is worse than no control: it claims a choice the page cannot honour.
 With no script the site is what it was before this milestone —
@@ -537,6 +558,12 @@ box), the playhead and changed rows in a code plate (an outline), and a pill (a
 border). Everything else is hairlines, type and structure, and the navigation
 marker was already an underline rather than a colour.
 
+[Amended after M4. Two things, not three. The theme control's state was a wash
+and an accent on the pressed button, and a forced palette took both away; the
+cycling button that replaced it says its state in a WORD, which no palette can
+remove. The rule that gave the pressed button a box is deleted rather than
+rewritten — there is nothing colour-only left in the control to rescue.]
+
 ### M4 — the checklist
 
 No unchecked row. The method column says how each one was checked, and says it
@@ -548,15 +575,15 @@ and does not emulate `forced-colors` or `prefers-reduced-motion`.
 
 | # | What | Result | Method |
 |---|---|---|---|
-| 1 | The theme control is reachable by keyboard, in tab order, with a visible focus ring | pass | **browser** — keyboard walk from a cold load: Tab 1 is the skip link (on screen, 2px ring), then the wordmark, the nine navigation rows, then `Follow the system theme`, `Light theme`, `Dark theme`, each with a 2px solid ring, then the page's own content |
-| 2 | Each state of the control has an accessible name and states whether it is on | pass | **browser** — the accessibility tree reads `button "Follow the system theme"`, `button "Light theme"`, `button "Dark theme"`; `aria-pressed` tracks the choice (`system:true` → `light:true` → `dark:true`) |
+| 1 | The theme control is reachable by keyboard, in tab order, with a visible focus ring | pass | **browser** — keyboard walk from a cold load: Tab 1 is the skip link (on screen, 2px ring), then the wordmark, the nine navigation rows, then `Follow the system theme`, `Light theme`, `Dark theme`, each with a 2px solid ring, then the page's own content. [Amended: one button now, one tab stop instead of three. In the live page it is a `<button type="button">` with `tabIndex 0`, it matches `:focus-visible` when focused, and the ring computes `2px solid oklch(0.8442 0.1241 204.81)` at `outline-offset: 2px`. The last step — a real Tab and a real Enter — could not be walked: the browser pane stopped compositing, and an engine that is not painting does not deliver key events. What stands in its place: a native button turns Enter and Space into a `click` that bubbles, and the handler is one delegated `click` listener on `document`, so a click dispatched at the button advances the cycle in the live page, which it does] |
+| 2 | Each state of the control has an accessible name and states whether it is on | pass | **browser** — the accessibility tree reads `button "Follow the system theme"`, `button "Light theme"`, `button "Dark theme"`; `aria-pressed` tracks the choice (`system:true` → `light:true` → `dark:true`) [Amended: there is no pressed state to report, because there is one button and its text IS the state. The accessibility tree reads `button "Theme: Dark. Press to use System."` — the state and what the next press does, in one name that changes on the element that has focus. That pattern rather than an `aria-live` region beside it: the live region would announce the same fact a second time, and the name is what a reader hears when they arrive at the button as well as when they press it. The visible word is inside the name (`Theme: **System**. Press to use Light.`), so a voice control that is told "click System" hits the button a reader can see] |
 | 3 | An explicit **light** choice beats a system set to **dark** | pass | **browser** — system emulated dark, `Light` pressed: `data-theme="light"`, `background-color: oklch(0.975 0.002 60)`, `color-scheme: light` |
 | 4 | An explicit **dark** choice beats a system set to **light** | pass | **browser** — system emulated light, `Dark` pressed: `data-theme="dark"`, `background-color: oklch(0.155 0.005 60)` |
-| 5 | **System** clears the choice and follows `prefers-color-scheme` again | pass | **browser** — `System` pressed: attribute removed, `localStorage` key removed, palette back to the system's |
+| 5 | **System** clears the choice and follows `prefers-color-scheme` again | pass | **browser** — `System` pressed: attribute removed, `localStorage` key removed, palette back to the system's [Amended: system is the third press rather than a button of its own. Four presses from a cold load, read off the live page: `System`/none/`null` → `Light`/`light`/`"light"` → `Dark`/`dark`/`"dark"` → `System`/none/`null`, with `background-color` following each one] |
 | 6 | The choice persists across a reload | pass | **browser** — chose light, reloaded: `data-theme="light"` already applied, `light:true` marked, paper light |
 | 7 | No flash of the wrong theme on load | pass | **browser** + **program** — the live document's head holds `classic theme.js` before `module widgets.js`, so the attribute is set by a render-blocking script before the first paint; `site/export.vyrn` asserts the tag is classic and before `<body>` on a root page, a page three deep and a backstage page |
-| 8 | With no script the control is not shown, and the system decides | pass | **browser** — with `data-js` removed the group computes `display: none` (with it, `flex`); the palette still follows the media query, which is the pre-M4 behaviour |
-| 9 | The backstage carries the same control and the same palette | pass | **browser** — `/backstage.html`: three buttons, `Dark` gives `oklch(0.155 0.005 60)`, `System` restores; the page loads `theme.js` and nothing else |
+| 8 | With no script the control is not shown, and the system decides | pass | **browser** — with `data-js` removed the group computes `display: none` (with it, `flex`); the palette still follows the media query, which is the pre-M4 behaviour [Amended: unchanged in kind — with `data-js` removed the button computes `display: none`, and with it, `block`] |
+| 9 | The backstage carries the same control and the same palette | pass | **browser** — `/backstage.html`: three buttons, `Dark` gives `oklch(0.155 0.005 60)`, `System` restores; the page loads `theme.js` and nothing else [Amended: one button, and the choice made on the consumer front was already applied on arrival — `/backstage.html` opened at `data-theme="dark"`, `oklch(0.155 0.005 60)`, the button reading `Dark`] |
 | 10 | Both palettes meet WCAG AA on text (4.5:1) and non-text (3:1) | pass | **program** — `site/test/contrast.test.mjs`, 20 pairs × 2 palettes, table above; shown failing once on a deliberately broken `--n2` |
 | 11 | The explicit dark block and the system dark block cannot drift | pass | **program** — same file, "the explicit dark choice and the system dark default carry the same tokens"; it also fails if the `:not([data-theme="light"])` guard is dropped |
 | 12 | Skip-to-content is the first tab stop and lands before the content | pass | **browser** — Tab 1 on a cold load focuses `a.skip`, which moves to `left: 16px` and takes the ring; `site/export.vyrn` asserts one skip link and one `#main.skip-target` on all three page shapes |
@@ -571,9 +598,10 @@ and does not emulate `forced-colors` or `prefers-reduced-motion`.
 | 21 | No duplicate `id` on a page | pass | **browser** — audited on `/` and `/docs`: none |
 | 22 | Every image has a text alternative | pass | **browser** — no `<img>` without `alt` on any page audited; the only raster surface is the hero `<canvas>`, which is decorative |
 | 23 | Motion is behind `prefers-reduced-motion` | pass | **read** — 12 declarations in the sheet name a transition or an animation, 0 `@keyframes`, 1 `scroll-behavior: smooth`; all of them are covered by the reduced-motion block's `*, ::before, ::after { transition-duration: 1ms !important; animation-duration: 1ms !important }` and `html { scroll-behavior: auto }`, which the live document's CSSOM confirms is present. The two scripts guard themselves as well: `widgets.js` reads the query once and consults it at six sites, `hero.js` at three |
-| 24 | Forced colours keep every colour-only distinction | pass | **read** — a `@media (forced-colors: active)` block gives the pressed theme button a box, the playhead and changed code rows an outline, and a pill a border; confirmed present in the live document's CSSOM |
+| 24 | Forced colours keep every colour-only distinction | pass | **read** — a `@media (forced-colors: active)` block gives the pressed theme button a box, the playhead and changed code rows an outline, and a pill a border; confirmed present in the live document's CSSOM [Amended: two rules, not three. The theme control's state is a word now, so the rule that boxed the pressed button is deleted; the playhead and the pill keep theirs] |
+| 25 | The control does not change the height of the masthead | pass | **browser** — measured in the live page: with the control `64px`, with it hidden `64px`, and the first navigation row's top identical either way. The group this replaced is `27px` tall and takes the same header to `76px`. On the backstage, `75px` both ways |
 
-Gate: met. Twenty-four rows, no unchecked one, and the method named on each.
+Gate: met. Twenty-five rows, no unchecked one, and the method named on each.
 
 **One number, and one contradiction.** The export publishes the same 206 routes
 and one more asset (`theme.js`, 4 KB); it takes **73 s** against M2's 74 s, which

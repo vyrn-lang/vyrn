@@ -413,41 +413,43 @@ h1 code, h2 code, h3 code, h4 code {
 /* THE THEME CONTROL (RFC-0105 M4).
  *
  * Hidden until `theme.js` has run and marked the document. Without script the
- * three buttons would render, take focus, and do nothing — worse than an absent
+ * button would render, take focus, and do nothing — worse than an absent
  * control, because it claims a choice the page cannot honour. With no script
  * `prefers-color-scheme` decides and the page says nothing about it, which is
  * what it did before this milestone.
  *
- * `.slot` is the consumer layout's `v-html` host. It has no box, so the group
+ * IT MUST NOT CHANGE THE MASTHEAD'S HEIGHT. The row is `13px/1` mono with a 15px
+ * wordmark in it, so the tallest thing in it is a 15px line box, and that is
+ * what the header measured before this control existed. The button is therefore
+ * 13px of text between two 1px borders — 15px exactly — with no vertical
+ * padding. The first version of this control was three buttons at `6px` padding
+ * each, 27px tall, and it made the header fourteen pixels taller and pushed the
+ * navigation off the wordmark's baseline.
+ *
+ * `align-self: center` and not `baseline`: the row aligns on the baseline, and a
+ * bordered box whose baseline is its text's would hang 1px below the line the
+ * words share. Centred, the box straddles the text it sits beside and the flex
+ * line stays 15px.
+ *
+ * `.slot` is the consumer layout's `v-html` host. It has no box, so the button
  * below is the masthead's own flex item in both mastheads — the backstage builds
  * its masthead as one string and has no host element. */
 .theme { display: none; }
 .masthead .slot { display: contents; }
 [data-js] .theme {
-  display: flex;
+  display: block;
   margin-left: auto;
-  gap: 0;
   align-self: center;
-  border: 1px solid var(--rule);
-}
-.theme button {
   font: inherit;
   letter-spacing: inherit;
   text-transform: uppercase;
   color: var(--muted);
   background: none;
-  border: 0;
-  padding: 6px var(--s1);
+  border: 1px solid var(--rule);
+  padding: 0 var(--s1);
   cursor: pointer;
 }
-.theme button + button { border-left: 1px solid var(--rule); }
-.theme button:hover { color: var(--ink); }
-/* Which state is on. `aria-pressed` is the state itself, so the rule reads it
- * rather than a class somebody has to remember to keep in step with it. */
-.theme button[aria-pressed="true"] {
-  color: var(--accent);
-  background: color-mix(in oklab, var(--accent) 12%, transparent);
-}
+[data-js] .theme:hover { color: var(--ink); border-color: var(--accent); }
 
 .nav { display: flex; gap: var(--s3); flex-wrap: wrap; }
 .nav a { text-decoration: none; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; }
@@ -934,15 +936,13 @@ svg.chart a .cell:hover { fill-opacity: 1 !important; }
    A reader in a forced-colours mode gets the system's palette, and every
    `background` and `color` on this sheet is replaced. Most of the site is fine
    with that — it is hairlines, type and structure, and the navigation marker is
-   an underline rather than a colour. Three things said something in colour ALONE
-   and say it here in a way that survives.
+   an underline rather than a colour. Two things said something in colour ALONE
+   and say it here in a way that survives. (The third was the theme control's
+   pressed button, marked with a wash and an accent. The control is one cycling
+   button now and its state is the WORD on it, so there is nothing left here for
+   a forced palette to take away.)
    ------------------------------------------------------------------------- */
 @media (forced-colors: active) {
-  /* Which theme is chosen. The wash and the accent are both forced away, so the
-   * pressed button is marked by a box the reader can see instead. A theme
-   * control is nearly pointless under forced colours, and it stays because the
-   * setting persists and applies to every other display the reader opens. */
-  .theme button[aria-pressed="true"] { outline: 2px solid; outline-offset: -4px; }
   /* The playhead, and the row a control just changed. Both are a background
    * wash on a code row, and both become the row's own left edge. */
   .lines .cl.on, .lines .cl.changed { outline: 1px solid; outline-offset: -1px; }

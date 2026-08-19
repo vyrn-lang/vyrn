@@ -475,6 +475,26 @@ fn unwrapParagraph(html: String) -> String {
 }
 
 /// A paragraph: every line to the blank one, or to the block that interrupts it.
+///
+/// THE SOFT BREAK IS A SPACE. The corpus is hard-wrapped at eighty columns, and
+/// those newlines are the author's typing, not the record's meaning: CommonMark
+/// renders a single newline inside a paragraph as a space, and this joins with
+/// one. It used to join with `"\n"`, which put the source's line breaks into the
+/// `<p>` — collapsed to a space by a browser, and kept as breaks by everything
+/// else that reads the document: text copied out of the page, a paragraph
+/// extracted for a summary, a search index.
+///
+/// It is joined BEFORE the inline pass, which is also the rule for the one
+/// construct that would notice: a code span written across two lines. Its
+/// newline is a space too (CommonMark converts line endings inside a code span),
+/// and it has to be one, because `<code>` is `white-space: normal` here and a
+/// literal newline in it would be invisible in one browser and a break in the
+/// next.
+///
+/// This is the only place a paragraph is assembled. A blockquote and a list item
+/// both hand their lines back to `blocksHtml`, which arrives here; the two
+/// remaining `"\n"` joins in this file are a fenced block and an indented one,
+/// where the line break IS the content.
 fn takeParagraph(ls: Array<String>, i: Int64, known: Array<Int64>) -> Result<Taken, String> {
     let mut par: Array<String> = []
     let mut k = i
@@ -482,7 +502,7 @@ fn takeParagraph(ls: Array<String>, i: Int64, known: Array<Int64>) -> Result<Tak
         par.push(trim(ls[k]))
         k = k + 1
     }
-    let body = inlineHtml(joinWith(par, "\n"), known, false)?
+    let body = inlineHtml(joinWith(par, " "), known, false)?
     return Ok(Taken { html: "<p>" + body + "</p>", next: k })
 }
 
@@ -784,8 +804,9 @@ test "a list is a list, and a nested list is inside its item" {
     assertEq(renderOk("- a\n- b"), "<ul><li>a</li><li>b</li></ul>")
     assertEq(renderOk("1. a\n2. b"), "<ol><li>a</li><li>b</li></ol>")
     assertEq(renderOk("- a\n  - b"), "<ul><li>a<ul><li>b</li></ul></li></ul>")
-    // A line at the item's own column continues its paragraph.
-    assertEq(renderOk("- a\n  b"), "<ul><li>a\nb</li></ul>")
+    // A line at the item's own column continues its paragraph — with a space,
+    // like every other soft break.
+    assertEq(renderOk("- a\n  b"), "<ul><li>a b</li></ul>")
 }
 
 test "a table keeps its alignment and its header" {
@@ -793,7 +814,25 @@ test "a table keeps its alignment and its header" {
 }
 
 test "a quote is markdown of its own" {
-    assertEq(renderOk("> **x**\n> y"), "<blockquote><p><strong>x</strong>\ny</p></blockquote>")
+    assertEq(renderOk("> **x**\n> y"), "<blockquote><p><strong>x</strong> y</p></blockquote>")
+}
+
+test "a hard-wrapped paragraph is one run of prose, wherever it is" {
+    // The corpus is wrapped at eighty columns. Those newlines are typing, and
+    // CommonMark says a single one inside a paragraph is a space — so no `<p>`
+    // this renderer emits may hold one. A browser collapses it; text copied out
+    // of the page, and anything else reading the document, does not.
+    let par = renderOk("The site serves two readers with one navigation: a\nperson deciding whether to use Vyrn.")
+    assertEq(par, "<p>The site serves two readers with one navigation: a person deciding whether to use Vyrn.</p>")
+    assert(!contains(par, "\n"))
+    // Every path that gathers continuation lines arrives at the same place: a
+    // list item's lazy continuation, and a blockquote's own paragraph.
+    assert(!contains(renderOk("- one line\n  and its continuation"), "\n"))
+    assert(!contains(renderOk("> one line\n> and its continuation"), "\n"))
+    // And the one inline construct that would notice. A code span across two
+    // lines keeps its interior spacing as spaces, which is what CommonMark says
+    // a line ending in a code span becomes.
+    assertEq(renderOk("a `read at\nexport time` b"), "<p>a <code>read at export time</code> b</p>")
 }
 
 test "a fence keeps its language and its bytes" {
@@ -809,7 +848,7 @@ test "a construct this renderer does not know fails the build" {
     assert(refuses("<details><summary>x</summary></details>"))
     // Cells with no delimiter row are not a table and not a refusal: they are
     // the pipes GitHub prints for the same three lines of RFC-0077.
-    assertEq(renderOk("| a | b |\n| 1 | 2 |"), "<p>| a | b |\n| 1 | 2 |</p>")
+    assertEq(renderOk("| a | b |\n| 1 | 2 |"), "<p>| a | b | | 1 | 2 |</p>")
     // A fence marker with a backtick after it is an inline span, not a fence.
     assertEq(renderOk("``` `x` was removed ```"), "<p><code>`x` was removed</code></p>")
     // And the corpus itself does not trip it.
