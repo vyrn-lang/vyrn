@@ -1,8 +1,10 @@
 # RFC-0104 — A Benchmark Is a Claim About a Gap
 
-- **Status:** **M0 and M1 landed** (the census, see
+- **Status:** **M0, M1 and M2 landed** (the census, see
   [M0 — as landed](#m0--as-landed) and `rfcs/bench-0104/`; the eight programs,
-  see [M1 — as landed](#m1--as-landed) and `examples/`). M2 and M3 proposed.
+  see [M1 — as landed](#m1--as-landed) and `examples/`; the harness and the
+  numbers, see [M2 — as landed](#m2--as-landed) and
+  `rfcs/bench-0104/harness/` + `rfcs/bench-0104/results/`). M3 proposed.
   Milestones below; a milestone that fails its gate says so in this file.
 - **Depends on:** RFC-0055 (bench blocks, `blackBox`, `vyrn bench`), RFC-0102
   (toolchain pinning — what "measured against wasmtime 46.0.1" means is now a
@@ -128,7 +130,8 @@ expressible set, written idiomatically, output-verified against the fixtures,
 in the three-way parity corpus at small N. Gate: every program byte-identical
 across interp, native, and wasm, and `vyrn fmt --check` clean.
 
-**M2 — the harness and the numbers.** Same-discipline C, Rust, and JS sources;
+**M2 — the harness and the numbers.** *Landed — see
+[M2 — as landed](#m2--as-landed).* Same-discipline C, Rust, and JS sources;
 a runner that pins or records every toolchain, runs N times, takes medians,
 and commits JSON plus the environment record. Gate: the committed dataset
 reproduces on a second run within stated noise, and every Vyrn deviation from
@@ -540,6 +543,335 @@ Neither is M1's to fix — a language gap a program hits is a finding, not a sco
 change — and neither changes a printed byte. They are recorded here because the
 census's method is that a claim about the language is answered by running code,
 and these two were answered by running it.
+
+## M2 — as landed
+
+Gate met. Five contestants, eight programs, every one byte-identical to every
+other at the timing size before anything was timed; two full measurement runs
+whose medians agree to 1.9% (median) and 9.5% (worst); and every deviation of
+Vyrn native from Rust beyond that noise named below, with the two largest
+answered by an experiment rather than by an opinion.
+
+No compiler code was touched. M2 is `rfcs/bench-0104/harness/`,
+`rfcs/bench-0104/results/` and this section.
+
+**CI does not run any of this.** `rfcs/**` is CI-ignored, and that is
+deliberate: the harness needs clang, rustc, node and wasmtime together, it takes
+about fifteen minutes a run, and a number measured on a shared CI runner is not
+a number. The harness is run by hand and **the committed JSON is the record**.
+What CI still gates is that the eight programs keep printing the fixtures —
+`compiler/vyrn-cli/tests/benchgame.rs`, from M1.
+
+### The harness
+
+`rfcs/bench-0104/harness/` — `c/`, `rust/`, `js/`, one file per program per
+language, and `run.py`, which builds all five contestants, verifies them,
+times them and writes the record.
+
+- **Discipline on the other side.** Plain C11: no intrinsics, no threads, no
+  OpenMP, `<stdio.h>`/`<stdlib.h>`/`<string.h>`/`<math.h>` only. Safe Rust,
+  std only: no `unsafe`, no external crate, `BufWriter`/`BufRead` where a book
+  would, borrowed slice keys where a book would. Plain node: no
+  `worker_threads`, no addon, no dependency, typed arrays and `Map` because
+  those are ordinary JavaScript. Where the idiomatic form of a language does
+  structurally less work than the Vyrn program, it was written that way and the
+  difference is reported as a finding — that is the point of the milestone, not
+  a leak in it.
+- **Flags, stated.** `clang -O2 -ffp-contract=off -std=c11` for C;
+  `rustc -C opt-level=3` for Rust; no build for node. The two C flags are not a
+  choice — they are what `vyrn build` itself passes clang
+  (`add_native_clang_flags` in `compiler/vyrn-cli/src/main.rs`:
+  `-O2 -ffp-contract=off -Wno-override-module`, and no `-march` on the default
+  x86-64 target). Without `-ffp-contract=off` the C leg's last printed digit
+  would differ from everyone else's and the cross-check would fail for a reason
+  that has nothing to do with speed. The Vyrn legs are `vyrn build` and
+  `vyrn build --target wasm`, and the wasm one runs under the wasmtime the
+  repository's own lock pins — `run.py` reads `vyrn.lock` for the version and
+  the sha256 rather than trusting an environment variable, so the record cannot
+  claim a wasmtime the repo does not pin.
+- **N reaches the Vyrn programs through a temp copy.** M1 decided N is a `let`
+  in the program and not `args()`, so there is nothing to pass. The runner does
+  not edit `examples/*.vyrn`. It copies the source into its build directory and
+  rewrites exactly the one line matching `^let <name> = <number>$` — the match
+  must be unique or the run aborts — and compiles the copy. The check that this
+  is sound is in the verification pass: a copy stamped with the FIXTURE N is
+  built and must still print the fixture, which is what proves the stamp moved
+  the number and nothing else. C, Rust and node take N on the command line.
+- **Whole-process wall time**, the game's own convention, stdout discarded,
+  `perf_counter` around the process, ten runs, median reported with the raw
+  runs kept. So the number includes start-up, and for the wasm leg it includes
+  wasmtime's compile — `--floor` measures an empty program in each contestant
+  so a reader can subtract it: **C 4.1 ms, Rust 4.3 ms, Vyrn native 4.1 ms,
+  Vyrn wasm 14.3 ms, node 30.9 ms.**
+
+### The sizes
+
+Chosen so the Vyrn **native** leg lands roughly 0.5–5 s. reverse-complement and
+k-nucleotide have no N in the source; their size is the FASTA piped in, which
+the runner generates with the C fasta (itself verified against the fixture, and
+against the other four at fasta's own timing N).
+
+| program | census N | timing N | Vyrn native |
+|---|---|---|---|
+| nbody | 1,000 steps | 25,000,000 steps | 0.87 s |
+| spectral-norm | N = 100 | N = 5,500 | 0.98 s |
+| fannkuch-redux | n = 7 | n = 11 | 2.65 s |
+| binary-trees | depth 10 | depth 18 | 1.90 s |
+| fasta | n = 1,000 | n = 5,000,000 (50 M bases) | 0.92 s |
+| reverse-complement | that fasta | fasta n = 4,000,000 (40 M bases) | 1.07 s |
+| k-nucleotide | that fasta | **fasta n = 4,000** (20,000-base THREE) | 2.89 s |
+| pidigits | 27 digits | 12,000 digits | 1.29 s |
+
+k-nucleotide's N is three orders of magnitude below reverse-complement's, and
+that is the first finding rather than a mistake: see the cause below. **There
+is no N at which both ends of that row are in band** — at fasta n = 4,000 the C
+and Rust legs are 10.1 ms and 8.5 ms, near their 4 ms floor; at fasta n = 8,000
+they are still under 20 ms and the Vyrn leg is 13.4 s. The rule was kept on the
+Vyrn side and the asymmetry is recorded here.
+
+### The numbers
+
+`rfcs/bench-0104/results/2026-08-19-LOCUST.json` and
+`2026-08-19-LOCUST-run2.json`. Both were measured from the same commit and the
+same binaries; the second record's `worktree_clean: false` is the first
+record's own JSON sitting untracked beside it, and nothing under `compiler/`
+differs between them. Medians of ten runs, milliseconds:
+
+| program | N | C | Rust | node | Vyrn native | Vyrn wasm |
+|---|---|---|---|---|---|---|
+| nbody | 25,000,000 | 898 | 658 | 1114 | 866 | 13029 |
+| spectral-norm | 5,500 | 974 | 964 | 1388 | 981 | 3019 |
+| fannkuch-redux | 11 | 1857 | 1891 | 2656 | 2654 | 4090 |
+| binary-trees | 18 | 807 | 1799 | 437 | 1904 | 1085 |
+| fasta | 5,000,000 | 653 | 478 | 882 | 921 | 3420 |
+| reverse-complement | 4,000,000 | 288 | 69 | 497 | 1071 | 13318 |
+| k-nucleotide | 4,000 | 10.1 | 8.5 | 40 | 2888 | 3038 |
+| pidigits | 12,000 | 1280 | 1288 | 3064 | 1291 | 1968 |
+
+Normalized to C = 1.00:
+
+| program | C | Rust | node | Vyrn native | Vyrn wasm |
+|---|---|---|---|---|---|
+| nbody | 1.00 | 0.73 | 1.24 | **0.97** | 14.52 |
+| spectral-norm | 1.00 | 0.99 | 1.43 | **1.01** | 3.10 |
+| fannkuch-redux | 1.00 | 1.02 | 1.43 | **1.43** | 2.20 |
+| binary-trees | 1.00 | 2.23 | 0.54 | **2.36** | 1.35 |
+| fasta | 1.00 | 0.73 | 1.35 | **1.41** | 5.23 |
+| reverse-complement | 1.00 | 0.24 | 1.73 | **3.72** | 46.29 |
+| k-nucleotide | 1.00 | 0.84 | 4.01 | **287** | 302 |
+| pidigits | 1.00 | 1.01 | 2.39 | **1.01** | 1.54 |
+
+And against Rust, which is the comparison the gate is written about — Vyrn
+native divided by Rust: nbody **1.32**, spectral-norm **1.02**, fannkuch-redux
+**1.40**, binary-trees **1.06**, fasta **1.93**, reverse-complement **15.4**,
+k-nucleotide **340**, pidigits **1.00**.
+
+### The noise, stated numerically
+
+Two full runs, back to back, same machine, nothing else running. The gate's
+"within stated noise" is decided by the second run:
+
+- **Run-to-run median drift**, over all forty program/contestant cells: median
+  **1.9%**, 95th percentile **8.6%**, worst **9.5%** (binary-trees / Rust).
+  Thirty-six of the forty cells moved by less than 5%.
+- **Spread within a run** (max − min as a percentage of the median): under 15%
+  for thirty-eight of forty cells. The two outliers are k-nucleotide's C
+  (27.8%) and Rust (23.4%) cells, which are 10 ms and 8.5 ms measurements
+  against a 4 ms process floor — the noisiest cells in the set, and labelled as
+  such wherever they are used.
+
+**So the noise band is ±10% on a median**, and every ratio called a deviation
+below is outside it by a wide margin. Three rows are inside it and are
+therefore **not** deviations: spectral-norm (1.02× Rust), pidigits (1.00×) and
+binary-trees (1.06×).
+
+### The named causes
+
+The claim this RFC opened with is "same LLVM, same discipline, same numbers —
+every measured deviation is a named defect or a named missing feature". Five
+rows deviate. Here is each one, and what was ruled out where something was.
+
+**nbody — 1.32× Rust, 0.97× C. Cause: the vectorizer runs on rustc's IR and not
+on ours.** The emitted assembly answers it. Rust's `advance` is auto-vectorized
+and unrolled — 342 packed-double instructions and four `sqrtpd`, 1,236 lines.
+Vyrn's `vyrn_advance` is scalar: thirteen scalar float ops, one `sqrtsd`, 184
+lines. The C leg is scalar too (three `sqrtsd`, no `sqrtpd`), and loses to Rust
+by 1.40× — the same order Vyrn does. So this is not a Vyrn-specific defect; it
+is a difference between what two LLVM front ends tell the same optimizer, and
+Vyrn is on the clang side of that line because it hands clang textual IR. What
+that IR does not carry is the reason to look at next: **it contains no
+`noalias` at all** (zero occurrences in the whole module) and no loop metadata,
+so the facts the ownership model already proves are not written down where the
+optimizer can read them.
+
+Three hypotheses were tested and killed before that one was kept:
+
+1. *"Rust wins because the five bodies are a fixed-size stack array
+   (`[Body; 5]`) and Vyrn's `Array<Body>` is always heap."* Measured: the same
+   Rust program with `Vec<Body>` runs in **609 ms** against `[Body; 5]`'s
+   **640 ms** — the heap version is *faster*. Not it.
+2. *"The `F64x2` square-root shim costs a lane."* The emitted assembly for
+   `vyrn_advance` contains exactly one `sqrtsd`: the two-lane spelling folds to
+   a single scalar instruction. Not it.
+3. *"Bounds checks and the `consume`-in/owned-out move."* Vyrn native (866 ms)
+   is faster than plain C (898 ms), which has neither. Whatever they cost, it
+   cannot account for a loss.
+
+**fannkuch-redux — 1.40× Rust, 1.43× C. Cause: `perm1.copy()` allocates a fresh
+array per permutation** — 39,916,800 of them at n = 11. Rust reuses one scratch
+`Vec` with `clone_from`; C copies into one preallocated buffer. Measured, not
+argued: giving the C leg the same malloc/free per permutation and changing
+nothing else moves it from **1830 ms to 2430 ms**, so the allocation accounts
+for about 600 ms of the 763 ms gap. The language has no way to copy into an
+array that already exists; `.copy()` is the whole API and it always allocates.
+
+**fasta — 1.93× Rust, 1.41× C. Cause: what a 60-byte output line costs.** The
+program builds a fresh `Array<UInt8>` per line, grown from empty by doubling
+(4, 8, 16, 32, 64 — five reallocations for sixty bytes), and then calls
+`stringFromBytes`, which is a byte-at-a-time UTF-8 validation over bytes that
+are known to be ASCII plus a second malloc'd NUL-terminated copy — because
+`print` takes a `String` and there is no byte sink. Measured: that exact
+sequence, transcribed into C and run on its own, costs **160 ns a line**, which
+over 833,334 lines is **133 ms of the 268 ms gap to C**. Rust reuses one 60-byte
+`Vec` and writes it into a `BufWriter`: no validation, no per-line allocation.
+**The byte sink is not a new gap** — it is the one M0 already named for
+mandelbrot. What M2 adds is that it is not only mandelbrot's: it taxes every
+line of output in two more programs.
+
+**reverse-complement — 15.4× Rust, 3.7× C. Cause: three per-byte passes and the
+same per-line tax, on top of an input path C shares.** For 40 M bases the
+program performs about 120 M `push` operations — once building `seq` from the
+input, once building the complement, once filling each output line — each a
+bounds/capacity check into an array grown by doubling. Rust's
+`extend_from_slice` moves the input in one memcpy per line and `bs.chunks(60)`
+is a *view*, so its output loop allocates nothing at all: 69 ms against C's
+288 ms. The per-line `stringFromBytes` tax above accounts for ~107 ms of the
+783 ms Vyrn loses to C; the rest is the per-byte pushes. The input side is
+shared with the C leg and is why C is itself 4.2× Rust here: `readLine` in the
+native shim reads one byte at a time with `getchar()`.
+
+**k-nucleotide — 340× Rust, 287× C. Cause: `Map` is not a hash map.** In every
+engine, `Map<String, V>` is an insertion-ordered vector of pairs and lookup is a
+linear scan — `__vyrn_map_find` is literally
+`for (i = 0; i < len; i++) if (strcmp(keys[i], key) == 0) return i;`. So a
+program that counts every k-mer is **quadratic in the number of distinct keys**,
+and k-nucleotide is exactly that program. Measured on the Vyrn native binary,
+input quadrupling each step:
+
+| fasta n | THREE bases | Vyrn native | C |
+|---|---|---|---|
+| 2,000 | 10,000 | 0.78 s | 0.04 s |
+| 4,000 | 20,000 | 2.92 s | 0.01 s |
+| 8,000 | 40,000 | 13.4 s | 0.02 s |
+| 16,000 | 80,000 | 55.0 s | 0.03 s |
+
+Four times the input is 4.1–4.6× the time: quadratic, against C's flat line.
+Three further costs sit on top of it and are small only by comparison — one
+`stringFromBytes` per window (an allocation and a UTF-8 validation per position,
+which M0 did name), two scans per increment because `m[key]` and
+`m[key] = seen + 1` each search from the start, and the hand-written O(n²)
+insertion sort with three `.copy()` per swap that stands in for a comparator
+`sortBy` does not take.
+
+### Vyrn wasm against Vyrn native — the optimizer gap, priced
+
+RFC-0101 §2.3/§2.4 asked for a number. It is not a number; it is a range, and
+the shape of the range is the finding:
+
+| program | wasm ÷ native | |
+|---|---|---|
+| nbody | **15.0×** | tight scalar float loop |
+| reverse-complement | **12.4×** | per-byte `fd_read` (below) |
+| fasta | 3.7× | |
+| spectral-norm | 3.1× | |
+| fannkuch-redux | 1.5× | |
+| pidigits | 1.5× | |
+| k-nucleotide | 1.05× | both ends are the same linear scan |
+| binary-trees | **0.57×** | the wasm leg **wins** |
+
+The direct backend (RFC-0077) runs no optimizer at all, so 15× on nbody's
+register-hungry float loop is the honest top of the range. Two rows say
+something the average would hide:
+
+- **reverse-complement's 12.4× is not the optimizer.** `direct.rs` reads one
+  byte per WASI `fd_read`, and the source already says so in a `ponytail:`
+  comment naming exactly this ceiling ("one `fd_read` per byte, where C's
+  `getchar` is buffered"). At 40 M bases that is 40 M syscalls. This is a
+  deliberate shortcut that M2 has now priced.
+- **binary-trees is faster with no optimizer than with `clang -O2`.** The wasm
+  backend carries its own allocator — a segregated free list over size classes
+  with an eight-byte header — while the native leg's `__vyrn_malloc` is a thin
+  wrapper over the platform `malloc`, which on Windows is the UCRT heap. On the
+  one benchmark that is nothing but allocate-and-release, the backend's own
+  allocator beats the platform's by enough to cover having no optimizer.
+
+### Where node stands
+
+node is between 0.54× and 4.01× C, and it is not the slowest contestant on any
+row. It **wins binary-trees outright** (0.54× C, 4.4× faster than Vyrn native):
+a generational collector allocating short-lived trees by bumping a pointer beats
+`malloc`/`free`, which is the row's whole point. It is worst on k-nucleotide
+(4.01× C) and pidigits (2.39×) — and still 71× faster than Vyrn native on the
+first of those. It also carries the largest start-up in the set at 30.9 ms,
+which is why its advantage on small rows is understated here.
+
+### The work items
+
+Each is one fixable cause named above. None is in M2's scope; all of them are
+what this milestone exists to produce.
+
+1. **A hashed `Map`.** Lookup is a linear `strcmp` scan in both backends
+   (`__vyrn_map_find`); the ordered-vector representation can keep insertion
+   order with an index beside it.
+2. **Byte-slice map keys**, so a k-mer window is not a `String` allocation and a
+   UTF-8 validation per position.
+3. **One search per update**, so `m[k] = m[k] + 1` does not scan the map twice.
+4. **A comparator, or a secondary key, for `sortBy`**, so "count descending,
+   ties by fragment" stops being a hand-written insertion sort with three
+   `.copy()` per swap.
+5. **A copy into an array that already exists**, so `.copy()` inside a loop
+   stops allocating (fannkuch-redux: 600 ms of 763 ms, measured).
+6. **A byte sink for `print` and `writeFile`** — already named for mandelbrot in
+   M0, and now measured taxing fasta and reverse-complement at 160 ns a line.
+7. **Capacity reservation and a bulk append for `Array`**, so a 60-byte line is
+   one allocation rather than five doublings and sixty checked pushes.
+8. **Buffered stdin**: `getchar()` per byte in the native shim, one `fd_read`
+   per byte in the direct wasm backend.
+9. **Loop facts in the emitted IR.** No `noalias` anywhere and no loop metadata,
+   so the ownership model's proofs never reach the optimizer.
+10. **An allocator of Vyrn's own on the native leg.** The wasm backend's
+    segregated free list beats the platform `malloc` by enough to win
+    binary-trees while running no optimizer.
+
+### What contradicted the RFC
+
+1. **"Same LLVM, same discipline, same numbers" is too strong as written, and
+   the reason is not the language.** Feeding `clang -O2` the same source shape
+   Rust compiles does not put a program on Rust's footing: on nbody the
+   vectorizer runs on rustc's IR and not on the IR clang gets, and the C leg
+   loses by the same 1.4×. The claim survives as a claim about the *language* —
+   monomorphized, no collector, static releases — and it now has a stated
+   exception: same LLVM is not the same optimizer decisions, and the emitted IR
+   carries none of the facts that would change them.
+2. **M0's k-nucleotide row named the wrong cost.** It recorded the per-window
+   `stringFromBytes` and the missing comparator, and both are real. It did not
+   record that `Map` is a linear scan, because `p-mapkey.vyrn` measured only
+   k = 1 and k = 2 — four keys and sixteen, where a linear scan is free. The
+   cost the census could not see is the one that dominates the row by two orders
+   of magnitude. The census's own method is what caught it: a claim about the
+   language is answered by running code, at a size where the claim can fail.
+3. **The wasm line is not "the slow one".** This document said its distance from
+   native "prices RFC-0101's §2.3/§2.4 endpoints with a number instead of an
+   adjective". One number was the wrong shape: the range is 0.57× to 15.0×, and
+   on binary-trees the backend that runs no optimizer is the faster of the two.
+4. **"Why should it lose everywhere?"** — the question this arc started from —
+   is answered, and the answer is that it does not. Three of the eight rows are
+   at parity with Rust inside the noise band, and on nbody Vyrn native is faster
+   than C. The losses are five, they are all allocation, string or container
+   costs rather than code quality, and every one of them now has a work item.
+5. **The 0.5–5 s sizing rule cannot be applied symmetrically.** It was written
+   as if one N could put every contestant in band. k-nucleotide has no such N,
+   because the two ends of that row are not on the same curve.
 
 ## What this RFC does not do
 

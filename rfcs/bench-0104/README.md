@@ -15,6 +15,34 @@ three-way parity harness runs them. `compiler/vyrn-cli/tests/benchgame.rs`
 compares each one's output against the fixture below on every `cargo test`, so
 the probes here are history and the fixtures are live.
 
+M2 has landed too, and it is the two directories the first paragraph does not
+mention.
+
+## The harness (M2)
+
+`harness/` holds the other side of the comparison — `c/`, `rust/` and `js/`,
+one plainly-written file per program per language — and `run.py`, which builds
+all five contestants, checks each against the fixture, checks all five against
+each other at the timing size, and only then times anything.
+
+```
+cd harness
+python run.py                    # build, verify, time ten runs, write the record
+python run.py --only nbody --contestants c,rust,vyrn-native --runs 3
+python run.py --floor            # also measure the empty-program start-up
+```
+
+It needs clang, rustc, node, a release `vyrn` (or `$VYRN`) and the wasmtime the
+repository pins in `vyrn.lock`. **CI runs none of it** — `rfcs/**` is
+CI-ignored, so this is a by-hand runner and the committed JSON under `results/`
+is the record. The numbers, the environment, the noise and the named causes are
+in RFC-0104's "M2 — as landed".
+
+The eight Vyrn programs are never edited: `run.py` copies a program into its
+build directory and rewrites the one `let` that carries N. That the rewrite
+changes nothing else is checked, not assumed — a copy stamped with the fixture N
+must still print the fixture.
+
 ## The probes
 
 Each is a whole Vyrn program. Run any of them from this directory:
