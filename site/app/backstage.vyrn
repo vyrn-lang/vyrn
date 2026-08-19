@@ -1,0 +1,235 @@
+/// The backstage: the design record, and the shell it is read in (RFC-0105 M1).
+///
+/// The consumer site answers "should I use this". The backstage answers "how was
+/// this decided", and it is a section with its own masthead, its own navigation
+/// and no consumer navigation row pointing at it — one export, two fronts, and
+/// the only way in is the footer link the consumer layout carries.
+///
+/// WHERE THE INDEX COMES FROM. `rfcs/README.md` holds one table row per record —
+/// `| [0091](RFC-0091-….md) | The Container Protocols | M1, M2, M3 implemented |`
+/// — and `compiler/vyrn-cli/tests/rfc_index.rs` already checks that table against
+/// the directory both ways on every push. So the table is read here rather than
+/// restated: the number, the file, the real title (not the file name's words),
+/// and the status, in the order the record itself lists them. A second source
+/// would be a second thing to keep true.
+///
+/// It is read at EXPORT time with `readFile`, relative to the repository root,
+/// which is where `vyrn run site/export.vyrn out` runs from. The alternative was
+/// a compile-time generator holding 2.5 MB of markdown as string literals, which
+/// is the same bytes through a slower door.
+import { substring, split, trim, lines, padStart } from "std/strings"
+import { startsWith } from "std/strpred"
+import { Head, noHead, withTitle, withMeta, withStylesheet } from "std/ui"
+import { hrefOf } from "./nav"
+
+/// One record, as the index states it.
+export type IndexRow = { number: Int64, file: String, title: String, status: String }
+
+/// Where the record lives, relative to the directory the export runs in.
+fn rfcsDir() -> String {
+    return "rfcs"
+}
+
+/// `RFC-0091` — the tag the record calls itself by.
+export fn rfcTag(n: Int64) -> String {
+    return "RFC-" + rfcSlug(n)
+}
+
+/// `0091` — the four digits, which are the page's name.
+export fn rfcSlug(n: Int64) -> String {
+    return padStart(n.toString(), 4, "0")
+}
+
+/// The route path of one record's page.
+export fn rfcPath(n: Int64) -> String {
+    return "/backstage/rfcs/" + rfcSlug(n)
+}
+
+/// The URL of one record's page, as the site's own root names it.
+export fn rfcHref(n: Int64) -> String {
+    return hrefOf(rfcPath(n))
+}
+
+/// The backstage's own front page.
+export fn backstageIndexPath() -> String {
+    return "/backstage"
+}
+
+/// The index, in the order `rfcs/README.md` lists it, which is reading order.
+export fn rfcIndex() -> Array<IndexRow> {
+    let src = match readFile(rfcsDir() + "/README.md") {
+        Ok(text) => text.copy(),
+        Err(why) => "",
+    }
+    let mut out: Array<IndexRow> = []
+    for line in lines(src) {
+        let row = indexRow(trim(line))
+        if row.number > 0 {
+            out.push(row.copy())
+        }
+    }
+    return out
+}
+
+/// One index row, or number 0 for a line that is not one.
+///
+/// The shape is exactly what `rfc_index.rs` requires of the table:
+/// `| [NNNN](FILE.md) | Title | Status |`. The "other documents" table below it
+/// has no `[NNNN]` cell and drops out here.
+fn indexRow(line: String) -> IndexRow {
+    let none = IndexRow { number: 0, file: "", title: "", status: "" }
+    if !startsWith(line, "| [") {
+        return none
+    }
+    let cells = split(line, "|")
+    if cells.length < 5 {
+        return none
+    }
+    let link = trim(cells[1])
+    let close = split(link, "]")
+    if close.length < 2 {
+        return none
+    }
+    let digits = substring(close[0], 1, close[0].byteLength)
+    let file = trim(substring(close[1], 1, close[1].byteLength - 1))
+    if !startsWith(file, "RFC-") {
+        return none
+    }
+    return IndexRow { number: rfcNumberOf(digits), file: file, title: trim(cells[2]), status: trim(cells[3]) }
+}
+
+/// The digits of `s` as a number, or 0.
+export fn rfcNumberOf(s: String) -> Int64 {
+    let raw = bytes(s)
+    if raw.length == 0 {
+        return 0
+    }
+    let mut n = 0
+    for b in raw {
+        if b < '0' || b > '9' {
+            return 0
+        }
+        n = n * 10 + Int64(b) - 48
+    }
+    return n
+}
+
+/// Every number the backstage publishes a page for. A bare `RFC-NNNN` in a
+/// record's prose links only when this list holds it.
+export fn rfcPages() -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    for row in rfcIndex() {
+        out.push(row.number)
+    }
+    return out
+}
+
+/// Every number except one: what a record's own page links to.
+///
+/// A record names itself in its own first heading, and a link from a page to
+/// itself is a link that does nothing. Leaving the number out is the whole fix,
+/// and it keeps the renderer ignorant of which page it is rendering.
+export fn rfcPagesExcept(n: Int64) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    for row in rfcIndex() {
+        if row.number != n {
+            out.push(row.number)
+        }
+    }
+    return out
+}
+
+/// The row for `n`, or number 0 when the index does not carry it.
+export fn rfcRow(n: Int64) -> IndexRow {
+    for row in rfcIndex() {
+        if row.number == n {
+            return row.copy()
+        }
+    }
+    return IndexRow { number: 0, file: "", title: "", status: "" }
+}
+
+/// One record's markdown, or the reason it could not be read. A record the index
+/// names and the directory does not hold fails the export rather than publishing
+/// an empty page.
+export fn rfcBody(row: IndexRow) -> Result<String, String> {
+    return readFile(rfcsDir() + "/" + row.file)
+}
+
+/// The record's own file, on GitHub. The site renders the record; it does not
+/// host the repository.
+export fn rfcSource(row: IndexRow) -> String {
+    return "https://github.com/vyrn-lang/vyrn/blob/main/rfcs/" + row.file
+}
+
+/// The head every backstage page shares. The consumer layout supplies the
+/// stylesheet for consumer pages; these pages wear no consumer layout, so they
+/// name it themselves.
+export fn backstageHead(title: String) -> Head {
+    let titled = withTitle(noHead(), title)
+    let sized = withMeta(titled, "viewport", "width=device-width, initial-scale=1")
+    let described = withMeta(sized, "description", "The Vyrn design record: every decision in the language, with the argument that produced it.")
+    return withStylesheet(described, "/style.css")
+}
+
+/// What goes inside the backstage masthead, marked for the page it is on.
+///
+/// The ELEMENT is in each page's template, because it is a grid item of the
+/// sheet and a wrapper around it would take its place there. What it holds is
+/// written once here: two pages, one navigation.
+export fn backstageNav(current: String) -> String {
+    return "<a href=\"" + hrefOf("/") + "\" class=\"wordmark\" data-nav=\"hard\">vyrn</a><span class=\"pill\">backstage</span><nav class=\"nav\">" + navLink(hrefOf(backstageIndexPath()), "The record", current == "record") + "</nav>"
+}
+
+/// One backstage navigation link, marked when it is the page being read.
+fn navLink(href: String, label: String, here: Bool) -> String {
+    let mark = if here { " aria-current=\"page\"" } else { "" }
+    return "<a href=\"" + href + "\"" + mark + ">" + label + "</a>"
+}
+
+/// What goes inside the backstage footer, whose one job is the way back.
+///
+/// `data-nav="hard"` on the way home: the consumer pages carry the soft
+/// navigator, which swaps `<main>` and keeps the masthead it was loaded with. A
+/// soft navigation between the two fronts would leave the reader under the wrong
+/// masthead, which is the one thing this section exists to prevent.
+export fn backstageFooter() -> String {
+    return "<span>The design record. Every decision, with the argument that produced it.</span><a href=\"" + hrefOf("/") + "\" data-nav=\"hard\">Back to the site</a><a href=\"https://github.com/vyrn-lang/vyrn/tree/main/rfcs\">The record in the repository</a>"
+}
+
+test "the index is read from the record, and every row is a record" {
+    let rows = rfcIndex()
+    assert(rows.length > 100)
+    assertEq(rows[0].number, 1)
+    assertEq(rows[0].title, "Vision & Principles")
+    for row in rows {
+        assert(row.number > 0)
+        assert(row.title.byteLength > 0)
+        assert(row.status.byteLength > 0)
+        assert(startsWith(row.file, rfcTag(row.number)))
+    }
+}
+
+test "every record the index names is a file this export can read" {
+    for row in rfcIndex() {
+        assert(match rfcBody(row) {
+                Ok(text) => text.byteLength > 0,
+                Err(why) => false,
+            })
+    }
+}
+
+test "a record's page is named by its four digits" {
+    assertEq(rfcSlug(1), "0001")
+    assertEq(rfcSlug(105), "0105")
+    assertEq(rfcTag(91), "RFC-0091")
+    assertEq(rfcPath(91), "/backstage/rfcs/0091")
+    assertEq(rfcHref(91), "/backstage/rfcs/0091.html")
+}
+
+test "a row that is not an index row is not read as one" {
+    assertEq(indexRow("| [`PLAN-memory-model.md`](PLAN-memory-model.md) | The plan |").number, 0)
+    assertEq(indexRow("## The index").number, 0)
+    assertEq(indexRow("| [0001](RFC-0001-vision.md) | Vision | Draft |").number, 1)
+    assertEq(indexRow("| [0001](RFC-0001-vision.md) | Vision | Draft |").status, "Draft")
+}

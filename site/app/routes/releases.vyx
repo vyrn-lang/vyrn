@@ -1,5 +1,5 @@
 <script>
-// GET /releases — what is published, and the design record behind it.
+// GET /releases — what is published, and how a release is made.
 //
 // The newest tag is BAKED: `site/release.txt` is refreshed from the GitHub
 // listing before every build of this site, and read here through `../repo`.
@@ -8,14 +8,14 @@
 // the same listing once a visit and says so, in the notice under the heading, if
 // a newer release has appeared since this page was built.
 //
-// The RFC strip is the other half: one cell per design record, counted off the
-// file names in `rfcs/` while the page rendered. It is the closest thing to a
-// changelog the project has, and for a language this early it is the more useful
-// document.
+// THE RFC STRIP AND THE EIGHT NEWEST RECORDS ARE GONE FROM HERE (RFC-0105 M1).
+// A reader on this page wants to know what is published and whether it is safe
+// to depend on. The design record is what a contributor wants, it is a whole
+// section of its own now, and it renders every record rather than listing eight
+// links to GitHub.
 import { Head } from "std/ui"
 import { pageHead } from "../nav"
-import { rfcCells, rfcStripWidth, rfcStripHeight, rfcTag, rfcHref, Cell } from "../chart"
-import { rfcCount, rfcRows, RfcRow, hasRelease, releaseTag, releaseDate, releasePre, releaseUrl } from "../repo"
+import { hasRelease, releaseTag, releaseDate, releasePre, releaseUrl } from "../repo"
 
 export fn head() -> Head {
     return pageHead("Releases — Vyrn")
@@ -38,27 +38,13 @@ fn standing() -> String {
     return "Published " + releaseDate() + " as " + kind + "."
 }
 
-/// The five most recent design records, newest first — the closest thing to a
-/// changelog the project has today.
-fn latestRfcs() -> Array<RfcRow> {
-    let rows = rfcRows()
-    let mut out: Array<RfcRow> = []
-    let mut i = rows.length - 1
-    while i >= 0 && out.length < 8 {
-        out.push(RfcRow { number: rows[i].number, title: rows[i].title.copy() })
-        i = i - 1
-    }
-    return out
-}
 </script>
 
 <template>
 <main class="page">
     <aside class="rail">
         <a href="#status"><span class="n">01</span>status</a>
-        <a href="#record"><span class="n">02</span>the record</a>
-        <a href="#latest"><span class="n">03</span>latest</a>
-        <a href="#how"><span class="n">04</span>how it works</a>
+        <a href="#how"><span class="n">02</span>how it works</a>
     </aside>
         <section class="hero" id="status">
             <p class="eyebrow">Releases</p>
@@ -68,42 +54,8 @@ fn latestRfcs() -> Array<RfcRow> {
             <p class="notice" role="status" :data-release-note="releaseTag()" hidden="hidden"></p>
         </section>
 
-        <section class="band" id="record">
-            <p class="eyebrow">02 — the record</p>
-            <h2>{{ rfcCount() }} design records</h2>
-            <p>Every decision in this language was argued in writing before it was built. That record is the closest thing to a changelog the project has, and it is more useful than one: each entry carries the argument, not only the outcome.</p>
-            <div class="plate" data-widget="strip">
-                <div class="plate-head">
-                    <span class="pill">Record</span>
-                    <span class="eyebrow">rfcs/</span>
-                </div>
-                <span class="bignum"><span data-strip-count>{{ rfcCount() }}</span><small>RFCs, RFC-0001 onward</small></span>
-                <div class="stage">
-                    <svg class="chart" :viewBox='"0 0 " + rfcStripWidth() + " " + rfcStripHeight()' role="img" aria-label="One cell per design record, in order">
-                        <a v-for="c in rfcCells()" :key="c.id" :href="c.href">
-                            <title>{{ c.title }}</title>
-                            <rect class="cell" :x="c.x" :y="c.y" width="18" height="18" :data-tone="c.tone" fill="currentColor" :fill-opacity="c.tone"/>
-                        </a>
-                    </svg>
-                </div>
-                <p class="cap">One cell per file in rfcs/, counted while this page was built. Hover a cell for its number and title, or open the record itself. The tone steps every ten records so the sequence is countable.</p>
-            </div>
-        </section>
-
-        <section class="band" id="latest">
-            <p class="eyebrow">03 — latest</p>
-            <h2>The eight most recent</h2>
-            <ul class="feed">
-                <li v-for="r in latestRfcs()" :key="r.number">
-                    <a class="tag" :href="rfcHref(r)">{{ rfcTag(r.number) }}</a>
-                    <span>{{ r.title }}</span>
-                </li>
-            </ul>
-            <p class="notice">The whole index, with the status each record carries, is <a href="https://github.com/vyrn-lang/vyrn/blob/main/rfcs/README.md">in the repository</a>.</p>
-        </section>
-
         <section class="band" id="how">
-            <p class="eyebrow">04 — how a release works</p>
+            <p class="eyebrow">02 — how a release works</p>
             <h2>One tag, one archive per platform</h2>
             <p>Pushing a <code>v*</code> tag builds the <code>vyrn</code> binary for Linux, macOS on Apple silicon and Windows, checks that the tag and the crate version agree, and publishes a GitHub release with one <code>SHA256SUMS</code> listing every archive beside them. A tag carrying a suffix — <code>v0.1.0-alpha.1</code>, <code>v0.2.0-rc.1</code> — publishes as a pre-release, and this page names it and marks it rather than hiding it.</p>
             <p>That suffix rule is the whole of how this page decides: the installers take the newest release whatever kind it is, so the page shows the newest release, because showing anything else would name a version the command does not install. Pin a different one with <code>VYRN_VERSION</code>.</p>

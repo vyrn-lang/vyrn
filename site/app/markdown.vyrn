@@ -1,0 +1,838 @@
+/// The markdown the design record is written in — and a refusal for the rest.
+///
+/// `rfcs/*.md` is 2.5 MB of a FINITE subset of markdown, and this renders that
+/// subset. The subset was measured across all 104 files rather than guessed, and
+/// the measurement is the census table in RFC-0105's M1 section. What the corpus
+/// uses, in order of how much of it there is: paragraphs, ATX headings (`#` to
+/// `#####`), fenced code with a language tag, bullet and ordered lists (nested,
+/// three bullet characters, `1.` and one `1)`), tables (with alignment colons),
+/// blockquotes, thematic breaks, four indented code blocks — and inline: code
+/// spans (single and double backtick), `**strong**`, `*emphasis*`, `~~struck~~`,
+/// `[text](target)`, backslash escapes, and bare `RFC-NNNN` mentions.
+///
+/// THE REFUSAL IS THE POINT. A construct this module does not know is an `Err`,
+/// which fails the export, which fails the build. The alternative — pass the
+/// unknown text through, or drop it — is a page that quietly says something the
+/// RFC does not, and nobody finds out. The corpus grows every week; this way it
+/// cannot grow past the renderer in silence.
+///
+/// Two deliberate NON-features, both measured before they were decided:
+///
+///   - **Underscores are never emphasis.** Every `_x_` and `__x__` in the corpus
+///     is an identifier — `__loading__`, `__json$Json__`, `_pN_` — 28 of them,
+///     and not one is italic text. Treating them as emphasis would corrupt every
+///     one.
+///   - **Code is not coloured.** The compiler's own lexer is generation-only
+///     (`site/app/hl.vyrn` is a generator), and an RFC is read at export time, so
+///     the two cannot meet. The corpus also tags thirteen languages. Escaped and
+///     marked with its tag is what an RFC block gets.
+import { substring, split, trim, toLower, lines, joinWith, fromBytesOr, indexOf } from "std/strings"
+import { contains } from "std/strpred"
+import { startsWith } from "std/strpred"
+import { escapeHtml } from "./code"
+import { rfcHref } from "./backstage"
+import { blob } from "./repo"
+
+/// One block, and the line the caller carries on from.
+type Taken = { html: String, next: Int64 }
+
+/// A list marker: which kind, how far in, and where its text starts.
+type Marker = { ok: Bool, ordered: Bool, indent: Int64, content: Int64 }
+
+/// The language tags the corpus puts on a fenced block. An unknown one is a
+/// refusal rather than an unstyled block, so the next language somebody reaches
+/// for is a decision somebody makes.
+export fn knownLangs() -> Array<String> {
+    return ["vyrn", "vyx", "text", "json", "rust", "ts", "js", "html", "llvm", "graphql", "c", "yaml"]
+}
+
+/// `src` as HTML, or the reason it holds something this renderer does not know.
+///
+/// `known` is every RFC number the site publishes a page for: a bare `RFC-0091`
+/// becomes a link only when the page it would name exists.
+export fn renderMarkdown(src: String, known: Array<Int64>) -> Result<String, String> {
+    return blocksHtml(lines(src), known)
+}
+
+/// Every block in `ls`, in order.
+fn blocksHtml(ls: Array<String>, known: Array<Int64>) -> Result<String, String> {
+    let mut out = ""
+    let mut i = 0
+    while i < ls.length {
+        if isBlank(ls[i]) {
+            i = i + 1
+        } else {
+            let t = takeBlock(ls, i, known)?
+            out = out + t.html
+            i = t.next
+        }
+    }
+    return Ok(out)
+}
+
+/// The block starting at `i`, whichever kind it is.
+fn takeBlock(ls: Array<String>, i: Int64, known: Array<Int64>) -> Result<Taken, String> {
+    let t = trim(ls[i])
+    if isFenceOpen(t) {
+        return takeFence(ls, i)
+    }
+    if headingLevel(t) > 0 {
+        return takeHeading(ls, i, known)
+    }
+    if isRule(t) {
+        return Ok(Taken { html: "<hr/>", next: i + 1 })
+    }
+    if startsWith(t, ">") {
+        return takeQuote(ls, i, known)
+    }
+    if isTableAt(ls, i) {
+        return takeTable(ls, i, known)
+    }
+    if markerOf(ls[i]).ok {
+        return takeList(ls, i, known)
+    }
+    if indentOf(ls[i]) >= 4 {
+        return takeIndentedCode(ls, i)
+    }
+    if startsWith(t, "<") {
+        return Err("a block of raw HTML: " + trim(substring(t, 0, if t.byteLength < 60 { t.byteLength } else { 60 })))
+    }
+    return takeParagraph(ls, i, known)
+}
+
+/// Whether the line at `i` opens a block that ends the paragraph before it. An
+/// indented line does NOT: it is a continuation, and indented code only opens
+/// after a blank line.
+fn startsBlock(ls: Array<String>, i: Int64) -> Bool {
+    let t = trim(ls[i])
+    return isFenceOpen(t) || headingLevel(t) > 0 || isRule(t) || startsWith(t, ">") || isTableAt(ls, i) || markerOf(ls[i]).ok
+}
+
+/// Whether `t` opens a fenced block.
+///
+/// A backtick in the info string means it is not one — which is CommonMark's own
+/// rule, and it is here because the corpus leans on it: a paragraph in RFC-0058
+/// carries ```` ``` `at(xs, i)` was removed ``` ```` inline, four times, and read
+/// as a fence it swallows the rest of the section.
+fn isFenceOpen(t: String) -> Bool {
+    if !startsWith(t, "```") {
+        return false
+    }
+    return !contains(substring(t, 3, t.byteLength), "`")
+}
+
+/// Whether a table starts at `i`: a row of cells with a delimiter row under it.
+///
+/// Without the delimiter row it is not a table — GitHub renders those lines as a
+/// paragraph of literal pipes, and so does this. RFC-0077 carries three such
+/// lines, and they read the same here as they do in the repository.
+fn isTableAt(ls: Array<String>, i: Int64) -> Bool {
+    return startsWith(trim(ls[i]), "|") && i + 1 < ls.length && isDelimiterRow(trim(ls[i + 1]))
+}
+
+fn isBlank(line: String) -> Bool {
+    return trim(line).byteLength == 0
+}
+
+/// The number of leading spaces.
+fn indentOf(line: String) -> Int64 {
+    let raw = bytes(line)
+    let mut n = 0
+    while n < raw.length && raw[n] == ' ' {
+        n = n + 1
+    }
+    return n
+}
+
+/// `line` with up to `n` leading spaces removed. A line with fewer keeps none.
+fn dropIndent(line: String, n: Int64) -> String {
+    let has = indentOf(line)
+    let take = if has < n { has } else { n }
+    return substring(line, take, line.byteLength)
+}
+
+/// `1` to `6` for an ATX heading, `0` for anything else. Seven `#` is a
+/// paragraph, which is what CommonMark says and what the corpus never writes.
+fn headingLevel(t: String) -> Int64 {
+    let raw = bytes(t)
+    let mut n = 0
+    while n < raw.length && raw[n] == '#' {
+        n = n + 1
+    }
+    if n == 0 || n > 6 || n >= raw.length {
+        return 0
+    }
+    return if raw[n] == ' ' { n } else { 0 }
+}
+
+/// Whether `t` is a thematic break: three or more of one mark, and nothing else.
+fn isRule(t: String) -> Bool {
+    let raw = bytes(t)
+    if raw.length < 3 {
+        return false
+    }
+    let mark = raw[0]
+    if mark != '-' && mark != '*' && mark != '_' {
+        return false
+    }
+    for b in raw {
+        if b != mark && b != ' ' {
+            return false
+        }
+    }
+    return true
+}
+
+/// The list marker on `line`, if it carries one. A marker indented four or more
+/// is code, not a list.
+fn markerOf(line: String) -> Marker {
+    let no = Marker { ok: false, ordered: false, indent: 0, content: 0 }
+    let raw = bytes(line)
+    let ind = indentOf(line)
+    if ind > 3 || ind >= raw.length {
+        return no
+    }
+    let b = raw[ind]
+    if b == '-' || b == '*' || b == '+' {
+        if ind + 1 < raw.length && raw[ind + 1] == ' ' {
+            return Marker { ok: true, ordered: false, indent: ind, content: ind + 2 }
+        }
+        return no
+    }
+    let mut j = ind
+    while j < raw.length && raw[j] >= '0' && raw[j] <= '9' {
+        j = j + 1
+    }
+    if j == ind || j + 1 >= raw.length {
+        return no
+    }
+    if (raw[j] == '.' || raw[j] == ')') && raw[j + 1] == ' ' {
+        return Marker { ok: true, ordered: true, indent: ind, content: j + 2 }
+    }
+    return no
+}
+
+/// Whether `name` is one of `all`.
+fn oneOfStr(name: String, all: Array<String>) -> Bool {
+    for x in all {
+        if x == name {
+            return true
+        }
+    }
+    return false
+}
+
+/// A fenced block: its language is checked, its body is escaped, and an
+/// unterminated fence is a refusal rather than the rest of the file as code.
+fn takeFence(ls: Array<String>, i: Int64) -> Result<Taken, String> {
+    let open = trim(ls[i])
+    let lang = trim(substring(open, 3, open.byteLength))
+    if lang.byteLength > 0 && !oneOfStr(lang, knownLangs()) {
+        return Err("a fenced code block tagged `" + lang + "`; this renderer knows " + joinWith(knownLangs(), ", "))
+    }
+    let ind = indentOf(ls[i])
+    let mut body: Array<String> = []
+    let mut k = i + 1
+    while k < ls.length && !startsWith(trim(ls[k]), "```") {
+        body.push(dropIndent(ls[k], ind))
+        k = k + 1
+    }
+    if k >= ls.length {
+        return Err("a fenced code block that is never closed")
+    }
+    let attr = if lang.byteLength == 0 { "" } else { " data-lang=\"" + lang + "\"" }
+    return Ok(Taken { html: "<pre class=\"code\"" + attr + "><code>" + escapeHtml(joinWith(body, "\n")) + "</code></pre>", next: k + 1 })
+}
+
+/// Four spaces or more, after a blank line: a code block with no language.
+fn takeIndentedCode(ls: Array<String>, i: Int64) -> Result<Taken, String> {
+    let mut body: Array<String> = []
+    let mut k = i
+    let mut last = i
+    while k < ls.length && (isBlank(ls[k]) || indentOf(ls[k]) >= 4) {
+        body.push(dropIndent(ls[k], 4))
+        if !isBlank(ls[k]) {
+            last = k
+        }
+        k = k + 1
+    }
+    let mut kept: Array<String> = []
+    let mut j = 0
+    while j <= last - i {
+        kept.push(body[j].copy())
+        j = j + 1
+    }
+    return Ok(Taken { html: "<pre class=\"code\"><code>" + escapeHtml(joinWith(kept, "\n")) + "</code></pre>", next: last + 1 })
+}
+
+/// A heading, and the anchor a link can name it by.
+fn takeHeading(ls: Array<String>, i: Int64, known: Array<Int64>) -> Result<Taken, String> {
+    let t = trim(ls[i])
+    let n = headingLevel(t)
+    let text = trim(substring(t, n, t.byteLength))
+    let body = inlineHtml(text, known, false)?
+    let tag = "h" + n.toString()
+    return Ok(Taken { html: "<" + tag + " id=\"" + slugOf(text) + "\">" + body + "</" + tag + ">", next: i + 1 })
+}
+
+/// The anchor GitHub would give a heading, so a link written for GitHub lands
+/// here as well: lowercased, everything but letters, digits, `-` and `_`
+/// dropped, spaces turned into hyphens.
+export fn slugOf(text: String) -> String {
+    let raw = bytes(toLower(text))
+    let mut out: Array<UInt8> = []
+    for b in raw {
+        if (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '-' || b == '_' {
+            out.push(b)
+        } else if b == ' ' {
+            out.push('-')
+        }
+    }
+    return fromBytesOr(out, "")
+}
+
+/// A blockquote, whose content is markdown in its own right.
+fn takeQuote(ls: Array<String>, i: Int64, known: Array<Int64>) -> Result<Taken, String> {
+    let mut inner: Array<String> = []
+    let mut k = i
+    while k < ls.length && startsWith(trim(ls[k]), ">") {
+        let after = substring(ls[k], indentOf(ls[k]) + 1, ls[k].byteLength)
+        inner.push(if startsWith(after, " ") { substring(after, 1, after.byteLength) } else { after.copy() })
+        k = k + 1
+    }
+    let body = blocksHtml(inner, known)?
+    return Ok(Taken { html: "<blockquote>" + body + "</blockquote>", next: k })
+}
+
+/// A table: a header row, a delimiter row that may carry alignment colons, and
+/// the body. A run of `|` lines with no delimiter row is a refusal — it is
+/// either a table this renderer would render wrongly or not a table at all.
+fn takeTable(ls: Array<String>, i: Int64, known: Array<Int64>) -> Result<Taken, String> {
+    let mut rows: Array<String> = []
+    let mut k = i
+    while k < ls.length && startsWith(trim(ls[k]), "|") {
+        rows.push(trim(ls[k]))
+        k = k + 1
+    }
+    if rows.length < 2 || !isDelimiterRow(rows[1]) {
+        return Err("a row of `|` cells with no delimiter row under it: " + rows[0])
+    }
+    let aligns = alignmentsOf(rows[1])
+    let mut out = "<div class=\"scroller\"><table><thead><tr>"
+    out = out + rowHtml(rows[0], aligns, "th", known)?
+    out = out + "</tr></thead><tbody>"
+    let mut r = 2
+    while r < rows.length {
+        out = out + "<tr>" + rowHtml(rows[r], aligns, "td", known)? + "</tr>"
+        r = r + 1
+    }
+    return Ok(Taken { html: out + "</tbody></table></div>", next: k })
+}
+
+/// The cells of one row, without the empty ones the leading and trailing pipe
+/// produce.
+fn cellsOf(row: String) -> Array<String> {
+    let parts = split(row, "|")
+    let mut out: Array<String> = []
+    let mut i = 0
+    while i < parts.length {
+        let first = i == 0 && trim(parts[i]).byteLength == 0
+        let last = i == parts.length - 1 && trim(parts[i]).byteLength == 0
+        if !first && !last {
+            out.push(trim(parts[i]))
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// Whether every cell of `row` is made of the four bytes a delimiter row is.
+fn isDelimiterRow(row: String) -> Bool {
+    let cells = cellsOf(row)
+    if cells.length == 0 {
+        return false
+    }
+    for cell in cells {
+        let raw = bytes(cell)
+        if raw.length == 0 {
+            return false
+        }
+        for b in raw {
+            if b != '-' && b != ':' && b != ' ' {
+                return false
+            }
+        }
+    }
+    return true
+}
+
+/// The alignment of each column, as the delimiter row's colons state it.
+fn alignmentsOf(row: String) -> Array<String> {
+    let mut out: Array<String> = []
+    for cell in cellsOf(row) {
+        let raw = bytes(cell)
+        let left = raw[0] == ':'
+        let right = raw[raw.length - 1] == ':'
+        out.push(if left && right {
+                " style=\"text-align:center\""
+            } else if right {
+                " style=\"text-align:right\""
+            } else {
+                ""
+            })
+    }
+    return out
+}
+
+/// One row of cells, as `th` or `td`.
+fn rowHtml(row: String, aligns: Array<String>, tag: String, known: Array<Int64>) -> Result<String, String> {
+    let cells = cellsOf(row)
+    let mut out = ""
+    let mut i = 0
+    while i < cells.length {
+        let align = if i < aligns.length { aligns[i].copy() } else { "" }
+        let body = inlineHtml(cells[i], known, false)?
+        out = out + "<" + tag + align + ">" + body + "</" + tag + ">"
+        i = i + 1
+    }
+    return Ok(out)
+}
+
+/// A list, and the lists and blocks inside its items.
+///
+/// An item runs to the first line that is neither indented to its text column
+/// nor a lazy continuation of its paragraph. A blank line does not end the list
+/// when the next marker is one of its own.
+fn takeList(ls: Array<String>, i: Int64, known: Array<Int64>) -> Result<Taken, String> {
+    let first = markerOf(ls[i])
+    let tag = if first.ordered { "ol" } else { "ul" }
+    let mut out = "<" + tag + ">"
+    let mut k = i
+    let mut done = false
+    while !done {
+        let m = markerOf(ls[k])
+        let mut body: Array<String> = [substring(ls[k], m.content, ls[k].byteLength)]
+        k = k + 1
+        let mut inItem = true
+        while inItem && k < ls.length {
+            if isBlank(ls[k]) {
+                let ahead = nextContent(ls, k + 1)
+                if ahead < ls.length && indentOf(ls[ahead]) >= m.content {
+                    body.push("")
+                    k = k + 1
+                } else {
+                    inItem = false
+                }
+            } else if indentOf(ls[k]) >= m.content {
+                body.push(dropIndent(ls[k], m.content))
+                k = k + 1
+            } else if !markerOf(ls[k]).ok && !startsBlock(ls, k) && body[body.length - 1].byteLength > 0 {
+                // A paragraph continued at the margin, which CommonMark reads as
+                // part of the item it started in.
+                body.push(trim(ls[k]))
+                k = k + 1
+            } else {
+                inItem = false
+            }
+        }
+        let inner = blocksHtml(body, known)?
+        out = out + "<li>" + unwrapParagraph(inner) + "</li>"
+        let j = nextContent(ls, k)
+        let n = if j < ls.length { markerOf(ls[j]) } else { Marker { ok: false, ordered: false, indent: 0, content: 0 } }
+        if n.ok && n.ordered == first.ordered && n.indent == first.indent {
+            k = j
+        } else {
+            done = true
+        }
+    }
+    return Ok(Taken { html: out + "</" + tag + ">", next: k })
+}
+
+/// The next line from `i` that is not blank, or `ls.length`.
+fn nextContent(ls: Array<String>, i: Int64) -> Int64 {
+    let mut k = i
+    while k < ls.length && isBlank(ls[k]) {
+        k = k + 1
+    }
+    return k
+}
+
+/// A list item's first paragraph, without its `<p>`, when the item holds only
+/// the one. A one-line item is written as one line and reads as one; an item
+/// that really is two paragraphs keeps both.
+fn unwrapParagraph(html: String) -> String {
+    if !startsWith(html, "<p>") {
+        return html.copy()
+    }
+    return match indexOf(html, "</p>") {
+        Some(at) => if contains(substring(html, at, html.byteLength), "<p>") {
+            html.copy()
+        } else {
+            substring(html, 3, at) + substring(html, at + 4, html.byteLength)
+        },
+        None => html.copy(),
+    }
+}
+
+/// A paragraph: every line to the blank one, or to the block that interrupts it.
+fn takeParagraph(ls: Array<String>, i: Int64, known: Array<Int64>) -> Result<Taken, String> {
+    let mut par: Array<String> = []
+    let mut k = i
+    while k < ls.length && !isBlank(ls[k]) && (k == i || !startsBlock(ls, k)) {
+        par.push(trim(ls[k]))
+        k = k + 1
+    }
+    let body = inlineHtml(joinWith(par, "\n"), known, false)?
+    return Ok(Taken { html: "<p>" + body + "</p>", next: k })
+}
+
+// ---------------------------------------------------------------------------
+// Inline.
+//
+// One left-to-right pass over the bytes. Everything that is not one of the
+// twelve bytes below is plain text and is copied in runs, which is what keeps
+// 2.5 MB of design record inside a build rather than beside it.
+// ---------------------------------------------------------------------------
+
+/// The HTML entity for a byte that cannot be written as itself.
+fn entity(b: UInt8) -> String {
+    if b == '&' {
+        return "&amp;"
+    }
+    if b == '<' {
+        return "&lt;"
+    }
+    if b == '>' {
+        return "&gt;"
+    }
+    if b == '"' {
+        return "&quot;"
+    }
+    return "&#39;"
+}
+
+fn isMarkup(b: UInt8) -> Bool {
+    return b == '&' || b == '<' || b == '>' || b == '"' || b == '\''
+}
+
+/// `text` as inline HTML. `inLink` is true inside a link's own text, where a
+/// bare `RFC-NNNN` stays text: a link inside a link is not a link.
+fn inlineHtml(text: String, known: Array<Int64>, inLink: Bool) -> Result<String, String> {
+    let raw = bytes(text)
+    let mut out = ""
+    let mut plain = 0
+    let mut i = 0
+    while i < raw.length {
+        let b = raw[i]
+        if isMarkup(b) {
+            out = out + substring(text, plain, i) + entity(b)
+            i = i + 1
+            plain = i
+        } else if b == '`' {
+            let mut n = 0
+            while i + n < raw.length && raw[i + n] == '`' {
+                n = n + 1
+            }
+            let close = runAt(raw, i + n, n)
+            if close < 0 {
+                i = i + n
+            } else {
+                out = out + substring(text, plain, i) + "<code>" + escapeHtml(codeSpan(text, i + n, close)) + "</code>"
+                i = close + n
+                plain = i
+            }
+        } else if b == 92 {
+            if i + 1 < raw.length && isPunct(raw[i + 1]) {
+                let next = raw[i + 1]
+                out = out + substring(text, plain, i) + if isMarkup(next) { entity(next) } else { substring(text, i + 1, i + 2) }
+                i = i + 2
+                plain = i
+            } else {
+                i = i + 1
+            }
+        } else if b == '*' || b == '~' {
+            let double = i + 1 < raw.length && raw[i + 1] == b
+            let width = if double { 2 } else { 1 }
+            if b == '~' && !double {
+                i = i + 1
+            } else {
+                let close = markAt(raw, i + width, b, width)
+                if close < 0 {
+                    i = i + width
+                } else {
+                    let inner = inlineHtml(substring(text, i + width, close), known, inLink)?
+                    let tag = if b == '~' { "del" } else if double { "strong" } else { "em" }
+                    out = out + substring(text, plain, i) + "<" + tag + ">" + inner + "</" + tag + ">"
+                    i = close + width
+                    plain = i
+                }
+            }
+        } else if b == '[' {
+            let link = linkAt(text, raw, i, known, inLink)?
+            if link.next == i {
+                i = i + 1
+            } else {
+                out = out + substring(text, plain, i) + link.html
+                i = link.next
+                plain = i
+            }
+        } else if b == 'R' && !inLink {
+            let n = rfcAt(raw, i)
+            if n > 0 && oneOfInt(n, known) {
+                out = out + substring(text, plain, i) + "<a href=\"" + rfcHref(n) + "\">" + substring(text, i, i + 8) + "</a>"
+                i = i + 8
+                plain = i
+            } else {
+                i = i + 1
+            }
+        } else {
+            i = i + 1
+        }
+    }
+    return Ok(out + substring(text, plain, raw.length))
+}
+
+/// The bytes a backslash may escape. The corpus escapes `\{` and `\\` inside
+/// prose about string templates; the rest of the set is CommonMark's.
+fn isPunct(b: UInt8) -> Bool {
+    return b == 92 || b == '`' || b == '*' || b == '_' || b == '{' || b == '}' || b == '[' || b == ']' || b == '(' || b == ')' || b == '#' || b == '+' || b == '-' || b == '.' || b == '!' || b == '|' || b == '<' || b == '>' || b == '&' || b == '"' || b == '\'' || b == '~'
+}
+
+/// The start of the next run of exactly `n` backticks at or after `from`, or -1.
+fn runAt(raw: Array<UInt8>, from: Int64, n: Int64) -> Int64 {
+    let mut i = from
+    while i < raw.length {
+        if raw[i] == '`' {
+            let mut w = 0
+            while i + w < raw.length && raw[i + w] == '`' {
+                w = w + 1
+            }
+            if w == n {
+                return i
+            }
+            i = i + w
+        } else {
+            i = i + 1
+        }
+    }
+    return 0 - 1
+}
+
+/// The start of the next run of exactly `width` copies of `mark`, or -1. The run
+/// may not be the one that opens at `from` itself, and it may not follow a
+/// space: `a * b * c` is arithmetic in this corpus, not emphasis.
+fn markAt(raw: Array<UInt8>, from: Int64, mark: UInt8, width: Int64) -> Int64 {
+    let mut i = from
+    while i < raw.length {
+        if raw[i] == mark {
+            let mut w = 0
+            while i + w < raw.length && raw[i + w] == mark {
+                w = w + 1
+            }
+            if w == width && i > from && raw[i - 1] != ' ' {
+                return i
+            }
+            i = i + w
+        } else {
+            i = i + 1
+        }
+    }
+    return 0 - 1
+}
+
+/// A code span's text, with the one padding space CommonMark strips.
+fn codeSpan(text: String, from: Int64, to: Int64) -> String {
+    let inner = substring(text, from, to)
+    let raw = bytes(inner)
+    // The last BYTE, not the last character: `…` is three bytes, and a
+    // substring that cuts one of them is a trap, not a string.
+    if raw.length > 1 && raw[0] == ' ' && raw[raw.length - 1] == ' ' {
+        return substring(inner, 1, inner.byteLength - 1)
+    }
+    return inner
+}
+
+/// A rendered link, and the byte after it. `next == at` means there was no link
+/// here and the bracket is text.
+type Link = { html: String, next: Int64 }
+
+/// `[text](target)` at `at`, if that is what is there.
+fn linkAt(text: String, raw: Array<UInt8>, at: Int64, known: Array<Int64>, inLink: Bool) -> Result<Link, String> {
+    let none = Link { html: "", next: at }
+    let close = byteAt(raw, at + 1, ']')
+    if close < 0 || close + 1 >= raw.length || raw[close + 1] != '(' {
+        return Ok(none)
+    }
+    let end = byteAt(raw, close + 2, ')')
+    if end < 0 {
+        return Ok(none)
+    }
+    let label = inlineHtml(substring(text, at + 1, close), known, true)?
+    let target = substring(text, close + 2, end)
+    return Ok(Link { html: "<a href=\"" + escapeHtml(linkTarget(target, known)) + "\">" + label + "</a>", next: end + 1 })
+}
+
+/// The first `b` at or after `from`, or -1.
+fn byteAt(raw: Array<UInt8>, from: Int64, b: UInt8) -> Int64 {
+    let mut i = from
+    while i < raw.length {
+        if raw[i] == b {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+/// Where a link in an RFC points, once it is read from this site rather than
+/// from the directory it was written in.
+///
+///   - `#anchor` stays: the heading it names is on the same page.
+///   - another RFC becomes that RFC's page here.
+///   - anything else is a file in the repository, and this site does not host
+///     the repository, so it leaves.
+export fn linkTarget(target: String, known: Array<Int64>) -> String {
+    if startsWith(target, "#") || startsWith(target, "http") {
+        return target.copy()
+    }
+    let n = rfcAt(bytes(target), 0)
+    if n > 0 && oneOfInt(n, known) {
+        return rfcHref(n)
+    }
+    if startsWith(target, "../") {
+        return blob(substring(target, 3, target.byteLength))
+    }
+    return blob("rfcs/" + target)
+}
+
+/// The number of an `RFC-NNNN` written at `at`, or 0. A fifth digit is a
+/// different string and not this one.
+fn rfcAt(raw: Array<UInt8>, at: Int64) -> Int64 {
+    if at + 8 > raw.length {
+        return 0
+    }
+    if raw[at] != 'R' || raw[at + 1] != 'F' || raw[at + 2] != 'C' || raw[at + 3] != '-' {
+        return 0
+    }
+    let mut n = 0
+    let mut i = at + 4
+    while i < at + 8 {
+        if raw[i] < '0' || raw[i] > '9' {
+            return 0
+        }
+        n = n * 10 + Int64(raw[i]) - 48
+        i = i + 1
+    }
+    if at + 8 < raw.length && raw[at + 8] >= '0' && raw[at + 8] <= '9' {
+        return 0
+    }
+    return n
+}
+
+/// Whether `n` is one of `all`.
+fn oneOfInt(n: Int64, all: Array<Int64>) -> Bool {
+    for x in all {
+        if x == n {
+            return true
+        }
+    }
+    return false
+}
+
+test "a heading carries the anchor a link written for GitHub names" {
+    assertEq(slugOf("M0 — as landed"), "m0--as-landed")
+    assertEq(slugOf("The `slice` builtin"), "the-slice-builtin")
+    assertEq(renderOk("## The design"), "<h2 id=\"the-design\">The design</h2>")
+}
+
+test "the inline set is the one the corpus writes" {
+    assertEq(renderOk("a **b** c"), "<p>a <strong>b</strong> c</p>")
+    assertEq(renderOk("a *b* c"), "<p>a <em>b</em> c</p>")
+    assertEq(renderOk("a ~~b~~ c"), "<p>a <del>b</del> c</p>")
+    assertEq(renderOk("a `x < y` c"), "<p>a <code>x &lt; y</code> c</p>")
+    assertEq(renderOk("a ``x `y` z`` c"), "<p>a <code>x `y` z</code> c</p>")
+    assertEq(renderOk("\\{x\\}"), "<p>{x}</p>")
+}
+
+test "an underscore is an identifier, never emphasis" {
+    // Measured: every `_x_` and `__x__` in `rfcs/` is a name. Emphasis here
+    // would corrupt `__json$Json__` and twenty-seven others.
+    assertEq(renderOk("__loading__ and _pN_"), "<p>__loading__ and _pN_</p>")
+}
+
+test "markup in the source cannot become markup in the page" {
+    assertEq(renderOk("a <script>x</script> b"), "<p>a &lt;script&gt;x&lt;/script&gt; b</p>")
+    assertEq(renderOk("`<b>\"&`"), "<p><code>&lt;b&gt;&quot;&amp;</code></p>")
+}
+
+test "a bare RFC number links to the page this site publishes for it" {
+    assertEq(renderOk2("see RFC-0091 here", [91]), "<p>see <a href=\"/backstage/rfcs/0091.html\">RFC-0091</a> here</p>")
+    // A number with no page is text, and so is one inside a code span.
+    assertEq(renderOk2("see RFC-0066 here", [91]), "<p>see RFC-0066 here</p>")
+    assertEq(renderOk2("`RFC-0091`", [91]), "<p><code>RFC-0091</code></p>")
+}
+
+test "a link out of an RFC lands where that file is read from" {
+    assertEq(linkTarget("#the-design", [91]), "#the-design")
+    assertEq(linkTarget("RFC-0091-the-container-protocols.md", [91]), "/backstage/rfcs/0091.html")
+    assertEq(linkTarget("../std/scan.vyrn", [91]), "https://github.com/vyrn-lang/vyrn/blob/main/std/scan.vyrn")
+    assertEq(linkTarget("census-regions.md", [91]), "https://github.com/vyrn-lang/vyrn/blob/main/rfcs/census-regions.md")
+    assertEq(renderOk2("[a](RFC-0091-x.md)", [91]), "<p><a href=\"/backstage/rfcs/0091.html\">a</a></p>")
+}
+
+test "a list is a list, and a nested list is inside its item" {
+    assertEq(renderOk("- a\n- b"), "<ul><li>a</li><li>b</li></ul>")
+    assertEq(renderOk("1. a\n2. b"), "<ol><li>a</li><li>b</li></ol>")
+    assertEq(renderOk("- a\n  - b"), "<ul><li>a<ul><li>b</li></ul></li></ul>")
+    // A line at the item's own column continues its paragraph.
+    assertEq(renderOk("- a\n  b"), "<ul><li>a\nb</li></ul>")
+}
+
+test "a table keeps its alignment and its header" {
+    assertEq(renderOk("| a | b |\n|---|--:|\n| 1 | 2 |"), "<div class=\"scroller\"><table><thead><tr><th>a</th><th style=\"text-align:right\">b</th></tr></thead><tbody><tr><td>1</td><td style=\"text-align:right\">2</td></tr></tbody></table></div>")
+}
+
+test "a quote is markdown of its own" {
+    assertEq(renderOk("> **x**\n> y"), "<blockquote><p><strong>x</strong>\ny</p></blockquote>")
+}
+
+test "a fence keeps its language and its bytes" {
+    assertEq(renderOk("```vyrn\nlet x = 1 < 2\n```"), "<pre class=\"code\" data-lang=\"vyrn\"><code>let x = 1 &lt; 2</code></pre>")
+    assertEq(renderOk("```\nplain\n```"), "<pre class=\"code\"><code>plain</code></pre>")
+}
+
+test "a construct this renderer does not know fails the build" {
+    // The honesty gate. Every one of these is a page that would otherwise ship
+    // saying something the RFC does not.
+    assert(refuses("```python\nprint(1)\n```"))
+    assert(refuses("```vyrn\nlet x = 1\n"))
+    assert(refuses("<details><summary>x</summary></details>"))
+    // Cells with no delimiter row are not a table and not a refusal: they are
+    // the pipes GitHub prints for the same three lines of RFC-0077.
+    assertEq(renderOk("| a | b |\n| 1 | 2 |"), "<p>| a | b |\n| 1 | 2 |</p>")
+    // A fence marker with a backtick after it is an inline span, not a fence.
+    assertEq(renderOk("``` `x` was removed ```"), "<p><code>`x` was removed</code></p>")
+    // And the corpus itself does not trip it.
+    assert(!refuses("# A\n\nsome **text** and `code`.\n\n- a\n- b\n"))
+}
+
+/// The rendering, or the trap that says a test wrote something the renderer
+/// refuses. Test-only.
+fn renderOk(src: String) -> String {
+    return renderOk2(src, [])
+}
+
+fn renderOk2(src: String, known: Array<Int64>) -> String {
+    return match renderMarkdown(src, known) {
+        Ok(html) => html,
+        Err(why) => "REFUSED: " + why,
+    }
+}
+
+/// Whether the renderer refuses `src`. Test-only.
+fn refuses(src: String) -> Bool {
+    return match renderMarkdown(src, []) {
+        Ok(html) => false,
+        Err(why) => true,
+    }
+}

@@ -1266,3 +1266,59 @@ kbd {
    * upgrade, if a reader ever misses, is a long-press menu, not a taller word. */
   code.copyable { padding: 0.18em 0.34em; }
 }
+
+/* -------------------------------------------------------------------------
+   The backstage (RFC-0105 M1)
+   
+   A second front, in the same sheet and the same stylesheet. It is told apart
+   by ONE declaration: the accent token. Every rule on this page already reads
+   `--accent` — the wordmark, the rail, the links, the pills, the chart cells —
+   so redefining it on `#root.backstage` turns the whole section amber without
+   a second copy of anything. The badge in the masthead says the word as well,
+   because colour alone is not a label.
+   ------------------------------------------------------------------------- */
+
+#root.backstage { --accent: var(--amber); }
+.masthead.backstage { border-bottom-width: 2px; border-bottom-color: color-mix(in oklab, var(--accent) 45%, transparent); }
+/* `align-self`, because under 640px the masthead becomes a column with
+ * `align-items: stretch` and a badge that fills the row reads as a button. */
+.masthead.backstage .pill { margin-left: 0; align-self: flex-start; color: var(--accent); border-color: color-mix(in oklab, var(--accent) 40%, transparent); }
+.foot.backstage { border-top-color: color-mix(in oklab, var(--accent) 35%, transparent); }
+
+/* The index: a hundred rows, so the number column is fixed and the status is
+ * quiet. The whole row is a link target through its two anchors. */
+table.rfcindex td:first-child { font: 12px/1.6 var(--mono); white-space: nowrap; width: 7rem; }
+table.rfcindex td:last-child { color: var(--muted); font-size: 0.9rem; }
+table.rfcindex tbody tr:hover td { background: color-mix(in oklab, var(--accent) 7%, transparent); }
+table.rfcindex a { text-decoration-color: color-mix(in oklab, var(--accent) 40%, transparent); }
+
+/* A rendered record. The markdown is somebody's argument, at length, so the
+ * measure is the reading one and the headings step down hard enough to skim by.
+ * `.prose` sets the width; everything here is the parts `.prose` does not have
+ * because no other page renders a whole document. */
+.rfcdoc h1 { font-size: clamp(1.7rem, 1.1rem + 1.8vw, 2.4rem); line-height: 1.15; margin-bottom: var(--s3); }
+.rfcdoc h2 { margin-top: var(--s5); padding-top: var(--s2); border-top: 1px solid var(--rule); }
+.rfcdoc h3 { margin-top: var(--s4); }
+.rfcdoc h4, .rfcdoc h5, .rfcdoc h6 { margin-top: var(--s3); font-size: 1rem; }
+.rfcdoc > ul, .rfcdoc > ol { margin-top: var(--s3); padding-left: var(--s3); }
+.rfcdoc li { margin-top: var(--s1); line-height: 1.65; }
+.rfcdoc li > ul, .rfcdoc li > ol { padding-left: var(--s3); }
+.rfcdoc pre.code { max-width: none; }
+.rfcdoc blockquote {
+  margin: var(--s3) 0 0;
+  padding: var(--s1) 0 var(--s1) var(--s2);
+  border-left: 2px solid color-mix(in oklab, var(--accent) 45%, transparent);
+  color: var(--muted);
+}
+.rfcdoc blockquote > p { margin-top: var(--s1); }
+.rfcdoc hr { border: 0; border-top: 1px solid var(--hair); margin: var(--s5) 0 0; }
+.rfcdoc .scroller { margin-top: var(--s3); }
+.rfcdoc table { min-width: 24rem; }
+.rfcdoc del { color: var(--muted); }
+/* A record is one long document: the prose keeps the reading measure, and the
+ * code and the tables get the wide one, because a wrapped `impl` line and a
+ * five-column table are worse than a longer box. */
+.prose.rfcdoc { max-width: var(--wide); }
+.rfcdoc > p, .rfcdoc > ul, .rfcdoc > ol, .rfcdoc > blockquote, .rfcdoc > h1, .rfcdoc > h2, .rfcdoc > h3 { max-width: var(--measure); }
+.status { font: 12px/1.8 var(--mono); color: var(--muted); margin-top: var(--s2); }
+.status strong { color: var(--ink); letter-spacing: 0.08em; text-transform: uppercase; margin-right: var(--s1); }
