@@ -1,7 +1,10 @@
 # RFC-0106 — A Consumer Page Is Scanned, Not Read
 
-- **Status:** **Proposed.** No implementation. Milestones below; a milestone
-  that fails its gate says so in this file.
+- **Status:** **M0 measured; no page changed.** See
+  [M0 — as landed](#m0--as-landed) for the census, the ceilings every later
+  milestone is held to, and four things the measurements contradict in the
+  design below. Milestones below; a milestone that fails its gate says so in
+  this file.
 - **Depends on:** RFC-0105 (the site this redesigns — its two-front split,
   theme, accessibility checklist, and gates all survive and bind this work),
   RFC-0104 (the benchmark data the index will show), RFC-0107 (the icons the
@@ -102,7 +105,7 @@ page today; a mobile audit at 375px and 768px (the RFC-0105 M4 checklist has
 no viewport row — this adds one); the full inbound-URL inventory for the
 redirect map; the type/token audit; the search-index size estimate. Output:
 numeric ceilings per page written into this RFC. Gate: no target left as an
-adjective.
+adjective. **Gate met** — [M0 — as landed](#m0--as-landed).
 
 **M1 — the shell.** Navigation and CTA, display scale and density tokens, the
 search overlay and its build-time index, OG meta, redirect stubs, copy-page,
@@ -125,6 +128,546 @@ Gate: every matrix cell links to proof; word counts inside ceilings.
 consumer page; mobile rows added to the standing checklist and verified; the
 redirect tests permanent. Gate: the budgets fail the build when exceeded,
 shown once.
+
+## M0 — as landed
+
+No page changed. This milestone measures, and it sets the numbers the four
+milestones after it are held to. Everything below was produced by running
+something: `site/export.vyrn` against the working tree at `21d18b9`, then
+`scripts/site-census.py` over the tree it wrote, then a browser against that
+tree served over HTTP at two viewport widths. Where a figure comes from
+arithmetic rather than from a run, it says so.
+
+The one thing the export could not supply locally is `hero.wasm`: the deploy
+step builds it with a WASI sysroot this machine does not carry, so the hero
+canvas 404s in the local tree. Nothing in the census depends on it, and the
+figure it would add to page weight is named as unmeasured where page weight is
+counted.
+
+### The census
+
+`python3 scripts/site-census.py out`. Thirteen consumer pages. The
+representative chapter, module and package are the **median page of their
+section by byte size**, picked once and recorded in the script so a re-run
+measures the same page — `guide/ownership.html` (11,592 bytes, rank 7 of 13),
+`docs/std/json.html` (14,722 bytes, rank 19 of 37), and `explore/shelf.html`
+(8,167 bytes, the upper of the two middle pages of four that run 6,919 to
+8,184, and the fullstack dogfood).
+
+| Page | Words | Sec | Plates | Widgets | Blocks | Bytes | Cmds | Copyable | `.cap` | `.note`/`.notice` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| index | 644 | 6 | 4 | 6 | 16 | 16,024 | 1 | 0 | 5 | 5 |
+| install | 678 | 7 | 1 | 1 | 9 | 12,942 | 14 | 0 | 2 | 14 |
+| philosophy | 550 | 5 | 1 | 1 | 7 | 8,285 | 0 | 0 | 5 | 3 |
+| compare | 1329 | 9 | 9 | 16 | 34 | 63,602 | 0 | 0 | 10 | 12 |
+| releases | 235 | 2 | 0 | 0 | 2 | 3,754 | 0 | 0 | 0 | 3 |
+| guide (landing) | 643 | 4 | 0 | 0 | 4 | 7,393 | 0 | 0 | 0 | 13 |
+| guide/ownership | 330 | 3 | 2 | 0 | 5 | 11,592 | 0 | 0 | 2 | 0 |
+| docs (landing) | 872 | 6 | 1 | 1 | 8 | 50,174 | 0 | 0 | 3 | 40 |
+| docs/std/json | 786 | 7 | 0 | 0 | 7 | 14,722 | 1 | 0 | 9 | 1 |
+| explore (landing) | 477 | 4 | 0 | 0 | 4 | 6,158 | 0 | 0 | 1 | 4 |
+| explore/shelf | 482 | 4 | 0 | 0 | 4 | 8,167 | 2 | 0 | 5 | 1 |
+| editors | 704 | 4 | 0 | 0 | 4 | 17,356 | 3 | 0 | 2 | 6 |
+| play | 340 | 2 | 1 | 0 | 3 | 8,064 | 0 | 0 | 2 | 1 |
+| **all thirteen** | 8070 | 63 | 19 | 25 | 107 | 228,233 | 21 | 0 | 46 | 103 |
+
+**What a word is.** Prose only. The script removes `<script>`, `<style>`,
+`<svg>`, `<template>`, `<pre>`, `<code>`, `<table>` and `<textarea>` with
+their markup before it counts, so a keyword in a code plate and a cell in a
+benchmark table are not prose and shrinking them is not what the word budget
+is for. A token counts if it holds a letter, so `—`, `·` and a bare `2.1` do
+not inflate the figure. Attribute text is not counted, and that is a decision:
+an `aria-label` is prose a screen reader hears, and a budget that counted it
+would reward deleting it.
+
+**What a block is.** Three things, separate because the fix for each is
+different — `<section>` (the outline a reader scans), `class="plate"` (the
+sheet's bordered panel), and a widget (`class="stage"`, `<svg class="chart">`,
+`<canvas>`). `Blocks` is their sum. Plates sit inside sections, so the sum is
+a density reading and not a count of disjoint objects; it is comparable across
+pages, which is all a ceiling needs.
+
+**Own prose against generated prose.** Five of the thirteen carry text no
+editor wrote: an export's `///` documentation, a module one-liner, a chapter
+title. A word ceiling that ignored the split would demand cuts to `std/`
+source. Measured by dropping the repeating element and counting again:
+
+| Page | Total | Own prose | Generated | The generated part is |
+|---|---:|---:|---:|---|
+| docs/std/json | 786 | **424** | 362 | eight `.entry` blocks, from `std/json.vyrn`'s `///` |
+| docs (landing) | 872 | **428** | 444 | 37 `.modlist` one-liners |
+| guide (landing) | 643 | **300** | 343 | one `.modlist`, 13 chapter titles and their lines |
+| explore (landing) | 477 | **401** | 76 | one `.pkgs`, four package rows |
+| explore/shelf | 482 | **469** | 13 | two `.specs` lists (the manifest and the state) |
+
+Two of those readings are the sharpest single findings in the census. The
+registry landing spends **401 words explaining a list of 76 words**. A package
+page spends **469 words of prose on 13 words of package**. Own prose across
+all thirteen pages is **6,832** of the 8,070.
+
+**One number the export reports is not the number on disk.** `site/export.vyrn`
+prints `doc.body.byteLength`, and it prints it before `markCurrent`,
+`withLang`, `withIcon` and `relativize` have run. The published `index.html` is
+16,024 bytes; the export's own log says 15,978. The gap is the shell
+decorations, 42 to 112 bytes a page. M5 asserts the byte budget on the string
+that is written, not on `doc.body`.
+
+### The mobile audit
+
+**Method, named exactly.** The exported tree was served over HTTP on
+`127.0.0.1` and driven in this environment's browser pane. Two kinds of
+measurement, and each row says which:
+
+- **top-level** — the page loaded as the pane's own document, at the device
+  preset (375×812 with mobile device emulation, then 768×1024). Four pages
+  were walked this way: `/index.html` at 375, and `/compare.html` at 375 and
+  768 after the sweep flagged it.
+- **frame** — all thirteen pages loaded in turn into a 375×812 (then
+  768×1024) iframe inside that same emulated pane, audited by the same
+  routine. Media queries answer the frame's own viewport, so the responsive
+  blocks apply. The routine is calibrated rather than assumed: the frame
+  reading for `/index.html` at 375 is identical to the top-level reading in
+  every field — no horizontal scroll, masthead 152px, nav 718/343, eight
+  sub-24px targets of which five are in prose, the same four scrollers. The
+  frame reading is what the per-page table carries.
+
+A frame is not a phone. It does not reproduce a browser's URL bar collapsing,
+and `100vh` resolves against the frame. Nothing in the findings below turns on
+either.
+
+**The overflow test.** An element is reported only if its painted box leaves
+the viewport **and** no ancestor is a horizontal scroller narrower than the
+viewport — because a scroller is the fix, not the defect. The skip link at
+`left: -9999px` is excluded by the same rule; it is off-canvas on purpose.
+
+**The tap-target test.** Every `a[href]`, `button`, `select`, `input` and
+`textarea` that paints, measured, and counted if either side is under 24px
+(WCAG 2.2 AA target size). 44px is the sheet's own stated goal at ≤640px, so
+24px is the floor and not the aim. A target inside a paragraph, list item,
+`<dd>`, caption or table cell is counted separately: the sheet says in writing
+that a word in a sentence cannot be 44px tall, and that is accepted.
+
+| Page | 375: body scrolls sideways | 375: sub-24px targets (in prose) | 375: masthead | 768: body scrolls sideways | 768: sub-24px targets (in prose) | 768: masthead |
+|---|---|---:|---:|---|---:|---:|
+| index | no | 8 (5) | 152px | no | 19 (6) | 100px |
+| install | no | 8 (5) | 152px | no | 18 (5) | 100px |
+| philosophy | no | 4 (1) | 152px | no | 16 (3) | 100px |
+| compare | **YES, 455px on 375** | 23 (2) | 152px | **YES, 768px on 758** | 34 (3) | 100px |
+| releases | no | 5 (2) | 152px | no | 15 (2) | 100px |
+| guide (landing) | no | 17 (14) | 152px | no | 27 (14) | 100px |
+| guide/ownership | no | 6 (3) | 152px | no | 26 (3) | 100px |
+| docs (landing) | no | **83 (43)** | 152px | no | **95 (45)** | 100px |
+| docs/std/json | no | 29 (26) | 152px | no | 41 (26) | 100px |
+| explore (landing) | no | 7 (4) | 152px | no | 17 (4) | 100px |
+| explore/shelf | no | 16 (13) | 152px | no | 26 (13) | 100px |
+| editors | no | 6 (3) | 152px | no | 17 (4) | 100px |
+| play | no | 3 (0) | 152px | no | 13 (0) | 100px |
+
+**`/compare` breaks the rule the site already had, at both widths, for two
+different reasons.** RFC-0105 states that the body never scrolls sideways.
+It does, on one page, and the causes are separate:
+
+1. **375px, 80px over (455 against 375).** `table.matrix.bench.game` — the
+   per-program benchmark table RFC-0104 M3 shipped so the radar could be
+   checked — paints 422px wide inside a column of 309px, in a plain `<div>`
+   whose `overflow-x` computes `visible`. Two rules meet:
+   `.axispanes table.matrix { min-width: 0 }` lets the table off the 46rem
+   floor every other matrix keeps, and
+   `table.matrix.bench.game th, td { white-space: nowrap }` then stops it
+   shrinking past 422px. Both tables on the same page that sit in a
+   `.scroller` are fine. This one has no `.scroller` around it. Measured
+   top-level and in frame, identically.
+2. **768px: a tab row with no scroller, which reached the document edge in
+   this browser.** `.tabs.axes`, the radar's axis picker, is 743px of buttons
+   in a 708px column, and its last button (`pidigits`) paints from 674px to
+   768px. `.tabs` gets `overflow-x: auto` only inside
+   `@media (max-width: 640px)`, so **between 641px and 1024px the row has no
+   scroller and overflows its column by 35px** at any width in that range.
+   Whether that also scrolls the *document* depends on 10px: at the 768 preset
+   this browser takes 10px for a classic vertical scrollbar, so the
+   document's `clientWidth` is 758 and `scrollWidth` 768 — measured top-level,
+   one offending element. A device with overlay scrollbars would get the full
+   768 and no document scroll, and the tab row would still be 35px outside its
+   column with its last tab unreachable. The defect is the missing scroller;
+   the document scroll is how it showed up.
+
+Neither is a word-count problem, and neither is in the diagnosis at the top of
+this file. They are the mobile checklist's first two rows.
+
+**The shell costs 152px of an 812px screen before any content.** At 375px the
+masthead is a column — wordmark, then a nav strip, then the theme button — and
+it is 2.4 times its desktop height (`64px`, RFC-0105 M4 row 25). The nav strip
+is 718px of links showing 343px of itself, with `scrollbar-width: none`:
+**fewer than half the nine rows are on screen, and nothing on the page says
+so.** At 768px the
+nav wraps instead of scrolling (`flex-wrap: wrap`, 530px in a 530px box) and
+the masthead is 100px — the ragged second row the ≤640px rule was written to
+prevent, at a width that rule does not reach.
+
+**The nav rows are 13px tall at 768px and every width above it.**
+`min-height: 44px` on `.nav a` lives inside `@media (max-width: 640px)`. At
+768px a nav link measures 89×13. That is most of the sub-24px count on every
+page in the 768 column, and it is one rule in the wrong block.
+
+**`/docs` has 83 sub-24px targets at 375px, 43 of them in prose.** The module
+list is 37 rows of a 13px mono link at 21px of painted height, and the import
+graph adds its own. The categorized grid this RFC asks for has to fix the row
+height as well as the layout.
+
+**What behaves.** No page other than `/compare` scrolls sideways at either
+width. Every wide table, code plate, tab row and the import graph on the other
+twelve pages is inside a `.scroller` and scrolls in place — 4 such containers
+on `/index`, 17 on `/compare`, 6 on `/docs/std/json`. No SVG escapes its
+container. The `.cmd` row stacks at 375px (`flex-direction: column`, measured)
+and stays a row at 768px, exactly as the sheet's comment claims. The body font
+is 16px at 375px and 17px at 768px.
+
+**The checklist rows this adds** (to be verified again at M5, where they become
+standing):
+
+| # | What | Result today | Method |
+|---|---|---|---|
+| 26 | The body never scrolls sideways at 375px | **fail** — 1 page of 13 (`/compare`, 80px over) | browser, top-level and frame |
+| 27 | The body never scrolls sideways at 768px | **fail** — 1 page of 13 (`/compare`, 10px over on a browser with classic scrollbars) | browser, top-level and frame |
+| 28 | Every wide block scrolls inside its own container | pass — 12 of 13 pages, every table, plate, tab row and graph. `/compare`'s `.tabs.axes` is 35px outside its column between 641px and 1024px | browser, frame |
+| 29 | No interactive target under 24px outside running prose | **fail** — 3 to 40 per page at 375px, 13 to 50 at 768px | browser, frame |
+| 30 | The navigation is usable at 375px and 768px | **fail** — a 718px strip showing 343px of itself with a hidden scrollbar at 375; wrapped to two rows at 768 | browser, frame |
+| 31 | The masthead costs no more than one desktop masthead | **fail** — 152px at 375px, 100px at 768px, against 64px | browser, frame |
+
+### The inbound-URL inventory, and the redirect map
+
+**The design's premise is wrong, and this is where it is corrected.** The
+design paragraph says old routes need redirect stubs because "README, releases
+and old PRs link them". Nothing outside the site links the site at all:
+
+| Where a link was looked for | Site URLs found |
+|---|---|
+| `README.md` | **0.** It links the CI badge, `raw.githubusercontent.com` for the two install scripts, the releases page and the clone URL. It does not name the website. |
+| The two published releases (`gh api repos/vyrn-lang/vyrn/releases`, 263 lines of body) | **0.** One `github.com/.../compare/v…` link, which is a git range and not the `/compare` page. |
+| `install.sh`, `install.ps1` | **0.** `api.github.com`, `github.com`, and `github.com/$REPO#build-from-source`. |
+| `editor/vscode/README.md` | **0** URLs of any kind. |
+| Issue and pull-request templates | **none exist** — `.github/` holds three workflows and nothing else. |
+| `docs/`, `docs/api/` | **0.** The two `github.io` strings in the repository are both `vyrn-lang.github.io/vyrn/` inside a comment, in `.github/workflows/site.yml` and `site/export.vyrn`. |
+
+So the whole inbound surface is the site's own links, plus whatever a reader
+bookmarked or a search engine indexed. That is not nothing — the site has been
+published since RFC-0105 — but it removes the argument that a stub is needed
+for a file in this repository. Measured internal links, counted over the 64
+consumer documents with the masthead nav, the footer, the skip link and the
+wordmark removed, so only links a page's **content** wrote are counted:
+
+| Route | Content links in | Total links in (content + shell) | Linked from |
+|---|---:|---:|---|
+| `/docs` | 80 | 144 | every std module page, the guide, `/explore` |
+| `/play` | 42 | 106 | 20 std module pages, the guide |
+| `/guide` | 14 | 78 | `/docs`, 12 guide chapters |
+| `/install` | 6 | 70 | `/`, `/docs`, `/releases`, `guide/getting-started` |
+| `/explore` | 5 | 69 | `/docs` and the four package pages |
+| `/` | 4 | 68 | `/docs`, `/philosophy` |
+| `/releases` | 4 | 68 | the four package pages |
+| `/compare` | 2 | 66 | `/` only |
+| `/philosophy` | **1** | 65 | `/` only |
+| `/editors` | **1** | 65 | `/install` only |
+| `/backstage` | 0 | 64 | the footer only |
+| `docs/std/*` (37) | 284 | — | 2 to 22 each |
+| `guide/*` (13) | 227 | — | 15 to 21 each |
+| `explore/*` (4) | 4 | — | `/explore` only |
+
+`/philosophy` and `/editors` are each linked from exactly one page of content.
+The 106 backstage documents link `/` (216 times) and each other, and **no other
+consumer route** — so renaming a consumer route cannot break the design record.
+
+**A collision the design creates and does not name.** The five navigation
+groups are "**Docs** (the book) · **Reference** (the std API) · Explore ·
+Releases · Play". Today `/docs` **is** the std API and `/guide` is the book. If
+those names become paths, `/docs` has to mean two things at once: a reader with
+a bookmark to the reference would land on the book, which is worse than a 404
+because nothing tells them they are in the wrong place, and no stub can fix it
+— the path is occupied by its own replacement. The 37 reference pages are also
+the most deeply linked in the tree (284 content links).
+
+The map below therefore separates two kinds of change. A **label** change costs
+nothing and breaks nothing: the nav row reads `Reference` and points at
+`/docs`. A **path** change is taken only where the old path is genuinely free.
+
+| Old route | New route | Kind | Stub needed | Why |
+|---|---|---|---|---|
+| `/philosophy` | `/why-vyrn` | **path** | yes, 1 | The RFC replaces the page. One content link (from `/`) and 0 external. |
+| `/editors` | `/docs/editors` | **path** | yes, 1 | Absorbed into Docs. One content link (from `/install`) and 0 external. |
+| `/docs` | `/docs`, labelled **Reference** | label | no | The path cannot move: its replacement wants the same name. 80 content links. |
+| `/guide` | `/guide`, labelled **Docs** | label | no | Renaming it to `/docs` is the collision above. 14 content links, 13 child pages. |
+| `/docs/std/<module>` (37) | unchanged | none | no | 284 content links, the deepest-linked pages on the site. |
+| `/guide/<chapter>` (13) | unchanged | none | no | 227 content links. |
+| `/install` | unchanged | none | no | The persistent CTA points here. |
+| `/compare` | unchanged | none | no | Keeps its own route; reached from the index teaser and from Docs. Not a nav group. |
+| `/releases`, `/explore`, `/explore/<pkg>`, `/play` | unchanged | none | no | Already the nav names the design asks for. |
+| `/backstage`, `/backstage/*` (107) | unchanged | none | no | Exempt, and it links no consumer route but `/`. |
+
+**Two stubs, not a redirect layer.** Each is a published document at the old
+path with `<meta http-equiv="refresh" content="0; url=…">`, a `<link
+rel="canonical">` and a visible link for a reader whose browser declines the
+refresh. Static hosting has no 301, so a stub is the only mechanism available.
+Both are tested the way `site/test/basepath.test.mjs` tests everything else:
+fetch the old path, follow the target, assert it answers 200.
+
+**And one thing a rename touches that is not a URL.** Every consumer link
+carries `data-key` for the soft navigator (41 distinct values on `/` alone),
+and each page has a `.data.json` payload beside it. A path change moves three
+files, not one: the document, the payload, and the `data-key` every page writes
+for it.
+
+### The type and token audit
+
+Three token families, and they are not in the same state:
+
+| Family | Custom properties | Uses | Literals left |
+|---|---:|---:|---|
+| Colour | **25** | the whole sheet | **0** on a property (RFC-0105 M4 closed this) |
+| Spacing (`--s1`…`--s6` = 8/16/24/32/48/64) | **6** | 176 | 72 raw-px occurrences over 16 distinct values. **59 of the 72 are at 8px or below** — optical adjustments (`1px` ×28, `6px` ×12, `4px` ×6), which the 8pt grid was never going to hold. The 13 that are not: `10px` ×4, `12px` ×3, `14px` ×2, `16px` ×1, `9px` ×2, and the skip link's `-9999px`. |
+| **Type** | **0** | — | **34 distinct literal font sizes, plus 4 `clamp()` expressions, spread over 1,729 lines** |
+
+That is the finding. The sheet tokenized colour, tokenized spacing, and left
+the type scale as literals nobody can measure — the same argument RFC-0105 M4
+made for moving colour into one block, unapplied to type. (A grep for
+`--*size*` matches `--syn-type` three times; that is a colour, and the count
+above excludes it.)
+
+The ladder as declared, with the computed value at the sheet's own base — root
+`16px`, `body: 17px/1.6`, so `1rem` is 16px:
+
+| Declared | Computes to | Role, and where |
+|---|---|---|
+| `clamp(2.1rem, 1rem + 4vw, 4.5rem)` | 33.6px at ≤440px · 46.7px at 768 · 67.2px at 1280 · 72px above 1400 | `.display` — the one display step, one per page |
+| `clamp(1.8rem, 1rem + 2.4vw, 3rem)` | 28.8 – 48px | `.bignum`, mono — the only numeral scale |
+| `clamp(1.7rem, 1.1rem + 1.8vw, 2.4rem)` | 27.2 – 38.4px | `.rfcdoc h1` — backstage only |
+| `clamp(1.5rem, 1rem + 1.4vw, 2.2rem)` | 24 – 35.2px | `.band h2` — a section heading |
+| `1.5rem` | 24px | `.prose h2` — reference and guide body heading |
+| `1.2rem` | 19.2px | `.lede` |
+| `1.1rem` / `1rem` | 17.6 / 16px | `.prose h3` / `.rfcdoc h4`–`h6` |
+| `17px` | 17px | `body` |
+| `16px` | 16px | `body` at ≤640px |
+| `0.95rem` ×3 | 15.2px | `table`, `.notice`, `.modlist` note text |
+| `15px` | 15px | `.wordmark` |
+| `0.92rem` ×5, `0.92em` | 14.7px | `.note` in five places — the meta-prose size |
+| `0.9rem` ×2 | 14.4px | `table.matrix` |
+| `14px` | 14px | `.cmd code` — the copyable command |
+| `0.85rem` ×3 | 13.6px | a table caption, an empty-state |
+| `13.5px` ×2 | 13.5px | `pre.code`, `.lines` |
+| `13px` ×2 | 13px | `.nav a`, `.modlist a` |
+| `12.5px` | 12.5px | the playground editor at ≤640px |
+| `0.78rem` | 12.5px | `table.matrix.bench .norm` |
+| `12px` ×5 | 12px | `.eyebrow` (102 occurrences in the templates), `.cap` (44), `.modlist .count`, `.columns pre`, `.lines` at ≤640 |
+| `11px` ×3 | 11px | chart text, `.serieskeys button` |
+| `10px` ×3 | 10px | schematic sub-labels, radar names, `.columns .eyebrow` |
+| `9px` ×4 | 9px | every chart axis |
+| `0.42em` | ~12–20px | `.bignum small` |
+
+Also `1.25rem`, `1.3rem`, `1.6rem`, `2rem`, `2.2rem`, `2.4rem`, `3rem` and
+`4.5rem` appear as one-off literals or as clamp endpoints.
+
+**So "documentation-sized everywhere" is half right, and the half that is
+wrong matters.** There *is* a display step, and at 1280px it computes 67.2px,
+which is display size. Two things are true instead:
+
+1. **The scale has no name anywhere.** Nineteen steps between 9px and 24px, all
+   literals. A display scale added on top of that is a twentieth literal.
+2. **The display step collapses on a phone.** `clamp()`'s middle term is
+   `1rem + 4vw`, which at 375px is 31px — below the 33.6px floor, so every
+   width up to 440px gets the same 33.6px headline. The desktop hero is
+   display-sized and the phone hero is 1.4 lines of body text. That is the
+   width where the reference site is most emphatic and ours is least.
+
+**What a display scale must add, and what it must not disturb.** Add eight
+tokens on `:root` — `--t-display`, `--t-h1`, `--t-h2`, `--t-h3`, `--t-lede`,
+`--t-body`, `--t-meta`, `--t-eyebrow` — defined to the values above so that
+every existing rule that names a size instead names a token and computes the
+same number. Then raise only `--t-display`'s floor and its `vw` coefficient,
+scoped to the nine landing pages. The constraint is stated as a test M1 owns:
+**the computed `font-size` of every element on the 160 leaf pages (13 guide
+chapters, 37 reference modules, 4 package pages, 106 design records) is
+unchanged, at 375px, 768px and 1280px.** A display scale that changes a
+reference page has missed.
+
+### The search index
+
+Built as a prototype from the exported tree and measured, not estimated. One
+entry is `{"s":section,"t":title,"u":url,"d":one line}`, serialized with no
+whitespace:
+
+| Section | Entries | Bytes | Gzipped |
+|---|---:|---:|---:|
+| Reference exports (`id="e-…"` on 37 module pages) | 354 | 29,567 | 3,578 |
+| Reference modules | 37 | 5,729 | 643 |
+| Guide chapters and their headings | 41 | 4,472 | 736 |
+| Consumer pages (title + `<meta description>`) | 10 | 1,930 | 303 |
+| Packages | 4 | 383 | 143 |
+| Releases | 2 | 159 | 83 |
+| **One index** | **448** | **42,235** | **5,255** |
+| the same with the backstage (106 records + their headings) | 2,273 | 331,728 | 36,449 |
+
+**One file, for the whole consumer site.** The overlay is sectioned, so it
+needs every section on the first keystroke; splitting into six files buys
+nothing and costs six requests. 5.3 KB gzipped is less than `theme.js`
+(2.4 KB) plus `hero.js` (4.1 KB), both of which every page already fetches
+before first paint, and it is a fifth of `style.css` (24.9 KB gzipped). It is
+fetched on the first `/` press and never in the document.
+
+**The backstage stays out.** Including it multiplies the index by 5.1 in
+entries and by 6.9 gzipped, to serve the one reader this RFC exempts, and it
+would put `M4 — as landed` and `The token census` in front of a consumer who
+typed `json`. If a backstage search is ever wanted it is the same generator
+with a different source list, and a second file the consumer never fetches.
+
+**One thing does not exist yet.** Of the 28 `<h2>`/`<h3>` headings inside the
+13 guide chapters, **0 carry an `id`**, so the 41 guide entries above can only
+link to a chapter and not to a heading in it. M1 adds slug ids to guide
+headings, or the guide contributes 13 entries instead of 41.
+
+### The ceilings
+
+Numbers, on the metrics `scripts/site-census.py` already reports, so M5 wires a
+gate rather than inventing a measurement. `own prose` is the page's total minus
+the generated text measured above; `total` is what the script prints and what
+the gate asserts — for the five pages with generated text it is the own-prose
+ceiling plus the generated count as it stands today, which moves only when
+`std/` documentation or a chapter list moves.
+
+| Page | Words now (own prose) | Ceiling: own prose | Ceiling: total | Bytes now | Ceiling: bytes | `.cap` now | Ceiling: `.cap` | Cmds now | Floor: cmds |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| index | 644 (644) | **260** | **260** | 16,024 | **30,000** | 5 | **2** | 1 | **5** |
+| install | 678 (678) | **220** | **220** | 12,942 | **14,000** | 2 | **1** | 14 | **8** |
+| why-vyrn (was philosophy) | 550 (550) | **280** | **280** | 8,285 | **9,000** | 5 | **0** | 0 | **0** |
+| compare | 1329 (1329) | **420** | **420** | 63,602 | **55,000** | 10 | **3** | 0 | **0** |
+| releases | 235 (235) | **200** | **200** | 3,754 | **20,000** | 0 | **1** | 0 | **1** |
+| guide (landing) | 643 (300) | **180** | **523** | 7,393 | **9,000** | 0 | **0** | 0 | **0** |
+| guide/ownership | 330 (330) | **380** | **380** | 11,592 | **13,000** | 2 | **1** | 0 | **0** |
+| docs (landing) | 872 (428) | **200** | **644** | 50,174 | **40,000** | 3 | **1** | 0 | **0** |
+| docs/std/json | 786 (424) | **150** | **512** | 14,722 | **16,000** | 9 | **1** | 1 | **1** |
+| explore (landing) | 477 (401) | **160** | **236** | 6,158 | **8,000** | 1 | **1** | 0 | **0** |
+| explore/shelf | 482 (469) | **200** | **213** | 8,167 | **8,000** | 5 | **1** | 2 | **2** |
+| editors | 704 (704) | **200** | **200** | 17,356 | **10,000** | 2 | **1** | 3 | **3** |
+| play | 340 (340) | **120** | **120** | 8,064 | **9,000** | 2 | **1** | 0 | **0** |
+| **all thirteen** | **8070 (6832)** | **2970** | **4208** | 228,233 | 241,000 | 46 | **14** | 21 | **20** |
+
+Read the totals in the right order. Own prose falls from **6,832 to 2,970, a
+57% cut**, and the total from 8,070 to 4,208. HTML bytes do **not** fall, and
+that is deliberate: `/releases` grows from 3.7 KB to a hero with computable
+stat tiles, and `/` grows to hold a runnable editor, benchmark bars and a
+recorded demo. Prose leaves; structure arrives. The byte figure that has to
+fall is a different one.
+
+**Page weight, which is where the real excess is, and which the diagnosis at
+the top of this file does not mention.** Measured from the browser's own
+request list on a cold load of `/`: **twelve text requests — the document, the
+stylesheet, nine scripts and the favicon — 267,028 bytes, 88,025 gzipped**,
+plus `hero.wasm`. Every consumer page fetches the same twelve, and the reason
+is four lines at the top of `site/public/widgets.js`:
+
+```js
+import { mountHero }      from "./hero.js";
+import { refreshRelease } from "./fresh.js";
+import { mountPlay }      from "./play.js";     // and play.js imports play-wasm.js
+import { runVyrn }        from "./wasi-min.js";
+```
+
+Static imports, so a page that has no playground on it still downloads the
+playground's three JavaScript files — **14,587 gzipped, on twelve of the
+thirteen pages**. Verified in the request list: `/compare.html` fetched
+`play.js`, `wasi-min.js` and `play-wasm.js`. The compiler-as-wasm module those
+files load is lazy and is not in this count. `vyrn-nav.js` (which pulls
+`vyrn-dom.js`) arrives through a dynamic `import()` on the last line of
+`widgets.js`, so the pair is after first paint but still on every load.
+
+| Asset | Bytes | Gzipped | Needed on `/` |
+|---|---:|---:|---|
+| `style.css` | 84,123 | 24,866 | yes |
+| `widgets.js` | 44,181 | 15,013 | yes |
+| `vyrn-nav.js` | 34,630 | 11,315 | after first paint, or on first link hover |
+| `vyrn-dom.js` | 29,171 | 8,997 | with the navigator |
+| `wasi-min.js` | 22,885 | 8,214 | **no** — `/play` only |
+| `index.html` | 16,024 | 4,888 | yes |
+| `play.js` | 13,942 | 4,868 | **no** — `/play` only |
+| `hero.js` | 9,445 | 4,056 | yes, on `/` |
+| `theme.js` | 5,369 | 2,366 | yes, before first paint |
+| `fresh.js` | 3,450 | 1,641 | yes |
+| `play-wasm.js` | 3,182 | 1,505 | **no** — `/play` only |
+| `favicon.svg` | 626 | 296 | yes |
+| **total** | **267,028** | **88,025** | |
+| `hero.wasm` | not built locally | — | on `/` (unmeasured; the deploy step builds it) |
+
+So:
+
+- **Every consumer page except `/play`: ≤ 55,000 bytes gzipped on first load,
+  counting the document and every asset the browser fetches without an
+  interaction.** Today 88,025. Moving the three playground files to `/play`
+  saves 14,587 and deferring the navigator pair saves 20,312, which lands at
+  53,126 and leaves under 2 KB for the search overlay's own code. The search
+  index (5,255) does not count: it is fetched on the first `/` press.
+- **`/play`: ≤ 70,000 bytes gzipped**, the same figure plus the playground
+  runtime it is the only page that needs.
+- **`style.css`: ≤ 90,000 bytes raw, ≤ 27,000 gzipped.** Today 84,123 /
+  24,866. The eight type tokens, the density tokens and the search overlay's
+  rules get 6 KB and no more.
+- **The search index: ≤ 8,000 bytes gzipped, and never in a document.** The
+  prototype is 5,255.
+
+**Captions, and THE RULE as a number.** 46 `.cap` elements become **14**, at
+most one per plate that carries evidence, and **zero of the survivors is a
+paragraph in flow** — each is a `<details><summary>` inside its own plate, so
+the claim is visible and the method is one click away. `.note` and `.notice`
+together fall from **103 to 26**, at most two a page. `/docs` alone carries 40
+of the 103 today.
+
+**Commands is a floor, not a ceiling** — the design asks for a command at the
+end of a thought. `/` goes from 1 to at least 5 (install, the pillar cards, the
+demo). `/install` may go *down*, from 14 to 8: OS tabs replace four repeated
+tiles. Across the thirteen the floor is 20 against 21 today, which says the
+commands are already there and are on the wrong pages.
+
+**The display type scale goes on nine pages** — `/`, `/install`, `/why-vyrn`,
+`/compare`, `/releases`, `/guide` (landing), `/docs` (landing), `/explore`
+(landing), `/play`. The **160 leaf pages** keep the documentation scale with
+every computed size unchanged: 13 guide chapters, 37 reference modules, 4
+package pages, 106 design records. `/editors` folds into Docs as a leaf.
+
+### What M0 contradicts in the design above
+
+Recorded here rather than by editing the design, so the correction and its
+evidence sit together.
+
+1. **"README, releases and old PRs link them" is false.** Zero site URLs in
+   `README.md`, in either release body, in both install scripts, in the editor
+   README, in `docs/`, or in an issue or PR template — there are no templates.
+   The redirect map above is two stubs for two genuinely renamed routes, and
+   its argument is bookmarks and search engines, not this repository.
+2. **The nav's five names collide with two live paths.** "Docs" is the book in
+   the design and the reference on the site; a path rename would land a
+   reference bookmark on the book with nothing to say so, and no stub can hold
+   a path its replacement occupies. Labels move, those two paths do not.
+3. **"The current tokens are documentation-sized everywhere" is half wrong.**
+   There is a display step and at 1280px it is 67.2px. The real defects are
+   that the type scale has **no tokens at all** — 34 literal sizes against 25
+   colour tokens and 6 spacing tokens — and that the display step floors at
+   **33.6px for every width up to 440px**, so the phone hero is the size of
+   body copy.
+4. **The word budget is not where the page weight is.** Prose is 8,070 words
+   across thirteen pages; first load is **88 KB gzipped on every one of them**,
+   of which 14.6 KB is a playground runtime that twelve of the thirteen do not
+   use. A word budget cannot see that, and M1 has to fix it while it touches
+   the shell.
+
+Two smaller ones, on the record: `/compare` breaks RFC-0105's own
+no-sideways-scroll rule at both audited widths, for two unrelated reasons, and
+the export's byte log reads `doc.body` before the shell decorations are
+applied, so it under-reports every published page by 42 to 112 bytes.
+
+**One number, for comparison with RFC-0105 M4.** The export publishes **172
+routes** and 13 assets, where M4 recorded 206. Both counts are of what the
+program printed. The tree has grown since — two more design records — so the
+difference is in what was being counted and not in what was published; 172 is
+the number `site/export.vyrn` prints today: 11 top-level pages (`/backstage`
+among them), 13 guide chapters, 37 reference modules, 4 package pages, 106
+design records, and the benchmarks page.
 
 ## What this RFC does not do
 
