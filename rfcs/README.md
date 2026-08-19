@@ -44,7 +44,7 @@ drifts: each header says which milestone landed and what did not, and the
 
 ## The index
 
-102 RFCs, numbered 0001 to 0103, with one gap. **There is no RFC-0066** — the
+104 RFCs, numbered 0001 to 0105, with one gap. **There is no RFC-0066** — the
 number was skipped and never used. The only mention of it in the repository is
 this sentence. Closing the gap would mean renumbering thirty files and breaking
 every cross-reference, so the gap stays.
@@ -159,6 +159,8 @@ claim is true — is written down in the test's own header.
 | [0101](RFC-0101-a-backend-is-an-emitter.md) | A Backend Is an Emitter | Implemented (M1) |
 | [0102](RFC-0102-a-toolchain-is-a-dependency.md) | A Toolchain Is a Dependency | Implemented |
 | [0103](RFC-0103-a-target-is-a-capability-set.md) | A Target Is a Capability Set | Implemented |
+| [0104](RFC-0104-a-benchmark-is-a-claim-about-a-gap.md) | A Benchmark Is a Claim About a Gap | Proposed |
+| [0105](RFC-0105-a-site-has-two-audiences.md) | A Site Has Two Audiences | Proposed |
 
 ## The other documents here
 
