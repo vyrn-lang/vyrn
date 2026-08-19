@@ -785,6 +785,16 @@ the "no toolchain key" output above is a scaffolded project, not
 `examples/shelf`. Teaching `deps` to take an artifact entry is a separate change
 and is not made here; the toolchain section is unaffected by it either way.
 
+*[Amended: fixed after M4.] `vyrn deps` reads the RFC-0103 M1 artifact map now,
+which is the same declaration the floor reads, so it answers for `examples/shelf`
+and for every other project in this repository. With no argument it reports each
+declared artifact in turn — a line naming it, its target and its entry, then that
+artifact's graph — and `vyrn deps <name>` scopes the report to one. A
+project declaring only `main` prints exactly what it printed before, byte for
+byte: one graph, no header, since there is nothing to disambiguate. The toolchain
+section is unaffected, as this paragraph said it would be, and it is printed once
+under all the graphs because the tools are the project's and not an artifact's.*
+
 **Gates.** Full workspace `cargo test --release`: 1737 passed, 0 failed. Parity
 (`-p vyrn-cli --release --test parity -- --ignored --test-threads=1`) with
 `$VYRN_WASMTIME`, `$WASI_SYSROOT`, `$WASI_BUILTINS` and `VYRN_REQUIRE_TOOLS=1`:
@@ -853,6 +863,13 @@ those rules reads exactly what it read when no file was there — but "so it sho
 be fine" is the claim, and the evidence is that the full workspace suite is green
 with the file in place, including RFC-0103's floor tier and RFC-0072's audience
 tier, which are the two that key off the manifest hardest.
+
+*[Amended: fixed after M4.] One rule did not read the root manifest as it read
+no file at all: `vyrn deps` refused it, because a manifest with no `main` was a
+manifest it could not answer for. Declaring nothing to build is not a failure to
+declare, so `vyrn deps` at the root now says `<dir>/vyrn.json declares no
+artifacts, so there is no module graph to report`, prints the four pinned rows
+under it, and exits 0.*
 
 One comment was wrong the moment the file landed, and it is fixed rather than
 left: `floor.rs`'s `a_file_that_is_no_artifacts_entry_has_no_target` said

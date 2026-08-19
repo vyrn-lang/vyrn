@@ -31,10 +31,14 @@
 //!                                        one `.md` per module + `index.md` (default `docs/api/`).
 //!                                        `--std` documents the std library; `--verify` exits 1 on drift.
 //!   vyrn new     <name>                 Scaffold a project (vyrn.json + src/main.vyrn).
-//!   vyrn deps                           Print the resolved module graph, then a `toolchain:`
-//!                                        section: one row per tool (clang, wasmtime, wasi-sysroot,
-//!                                        wasi-builtins) with the path that would be used, its
-//!                                        version, and why that path was chosen (RFC-0102 M3).
+//!   vyrn deps    [artifact]             Print the resolved module graph of every artifact the
+//!                                        manifest declares (`artifacts`, or the `main`/`server`/
+//!                                        `client` keys that are sugar for it), or of the one
+//!                                        named; then a `toolchain:` section: one row per tool
+//!                                        (clang, wasmtime, wasi-sysroot, wasi-builtins) with the
+//!                                        path that would be used, its version, and why that path
+//!                                        was chosen (RFC-0102 M3). A manifest that declares no
+//!                                        artifacts prints the toolchain and says so.
 //!   vyrn why     --contract <file>      Print the contract governing a module (RFC-0071)
 //!   vyrn fix     [file.vyrn]            Apply the `.copy()` fixes the move diagnostics name.
 //!   vyrn why     --memory <file>        Print what is reclaimed, and why not (RFC-0087 U1)
@@ -68,7 +72,7 @@ mod remote;
 
 const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
        vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact-name>   (every import chain that pulls that capability into the artifact's closure)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
-       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [--locked] [alias] | vyrn vendor [--check] | vyrn deps\n       vyrn --version   (also -V)";
+       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [--locked] [alias] | vyrn vendor [--check] | vyrn deps [artifact]   (deps: every declared artifact's module graph, then the toolchain)\n       vyrn --version   (also -V)";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
 /// miss is a hard error instead.
@@ -326,7 +330,7 @@ fn real_main() -> ExitCode {
         return scaffold(name);
     }
     if cmd == "deps" {
-        return deps();
+        return deps(args.get(2).map(|s| s.as_str()));
     }
     if cmd == "why" {
         return why_cmd(&args[2..]);
@@ -1854,43 +1858,127 @@ fn print_toolchain(start: &Path) {
     }
 }
 
-/// `vyrn deps` — print the resolved module graph of the project's main, then the
-/// toolchain that would build it (RFC-0102 M3).
-fn deps() -> ExitCode {
-    let Some(main) = manifest_main() else {
-        eprintln!("error: no vyrn.json with a `main` found upward from here");
+/// `vyrn deps [artifact]` — print the resolved module graph of every artifact
+/// this project declares, then the toolchain that would build them (RFC-0102 M3).
+///
+/// The entry used to be the manifest's `main`, and no example project in this
+/// repository declares one: they declare `artifacts`, or the `server`/`client`
+/// keys RFC-0103 M1 made sugar for it. So the command that answers "what does
+/// this build depend on" could not answer for the projects that are built. It
+/// reads the artifact map now, which is the same declaration the floor reads —
+/// one reader, so `deps` cannot report a graph the build does not have.
+///
+/// A project declaring only `main` prints exactly what it printed before: one
+/// graph, no header. The header exists to say WHICH artifact a graph belongs to,
+/// and with one nameless-by-convention artifact there is nothing to disambiguate.
+///
+/// A manifest that declares no artifacts at all — the repository root's own,
+/// which pins a toolchain and nothing else — is not an error. It prints the
+/// toolchain and says there is no graph, because that is the true answer to the
+/// question asked.
+fn deps(name: Option<&str>) -> ExitCode {
+    let Some(cwd) = std::env::current_dir().ok() else {
+        eprintln!("error: cannot read the current directory");
         return ExitCode::FAILURE;
     };
-    let source = match std::fs::read_to_string(&main) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read {main}: {e}");
-            return ExitCode::FAILURE;
-        }
+    let Some(manifest) = nearest_manifest(&cwd) else {
+        eprintln!("error: no vyrn.json found upward from here");
+        return ExitCode::FAILURE;
     };
-    let root_key = main.trim_start_matches(r"\\?\").replace('\\', "/");
-    let opts = load_options(&root_key);
-    match vyrn_frontend::loader::module_graph(&source, &root_key, &opts, &FsResolver) {
-        Ok(graph) => {
-            for (module, imports) in graph {
-                println!("{module}");
-                for i in imports {
-                    println!("  -> {i}");
+    let dir = PathBuf::from(&manifest.dir);
+    let artifacts = manifest.artifacts.as_ref();
+    let list: Vec<&vyrn_frontend::artifacts::Artifact> = match (artifacts, name) {
+        // Naming an artifact scopes the report to it — the argument the CLI
+        // already had a slot for, resolved by name exactly as
+        // `vyrn why --capability` resolves it. An entry PATH is not accepted
+        // here: `why` needs it because a capability question starts from a file,
+        // and this one starts from the manifest.
+        (Some(map), Some(want)) => match map.list.iter().find(|a| a.name == want) {
+            Some(a) => vec![a],
+            None => {
+                let declared: Vec<&str> = map.list.iter().map(|a| a.name.as_str()).collect();
+                eprintln!(
+                    "error: {}/vyrn.json declares no artifact `{want}` (declared: {})",
+                    manifest.dir,
+                    declared.join(", ")
+                );
+                return ExitCode::from(2);
+            }
+        },
+        (Some(map), None) => map.list.iter().collect(),
+        (None, Some(want)) => {
+            eprintln!(
+                "error: {}/vyrn.json declares no artifacts, so it declares no `{want}`",
+                manifest.dir
+            );
+            return ExitCode::from(2);
+        }
+        (None, None) => Vec::new(),
+    };
+    if list.is_empty() {
+        println!(
+            "{}/vyrn.json declares no artifacts, so there is no module graph to report",
+            manifest.dir
+        );
+        print_toolchain(&dir);
+        return ExitCode::SUCCESS;
+    }
+
+    // One artifact called `main` is what every project declared before RFC-0103
+    // named the concept, and its report is unchanged.
+    let bare = list.len() == 1 && list[0].name == "main";
+    let mut failed = false;
+    for (i, artifact) in list.iter().enumerate() {
+        if !bare {
+            if i > 0 {
+                println!();
+            }
+            println!(
+                "artifact `{}` ({}) — {}",
+                artifact.name,
+                artifact.target,
+                artifacts.map_or_else(
+                    || artifact.entry.clone(),
+                    |m| m.display_path(&artifact.entry)
+                )
+            );
+        }
+        let root_key = &artifact.entry;
+        let source = match std::fs::read_to_string(root_key) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error: cannot read {root_key}: {e}");
+                failed = true;
+                continue;
+            }
+        };
+        let opts = load_options(root_key);
+        match vyrn_frontend::loader::module_graph(&source, root_key, &opts, &FsResolver) {
+            Ok(graph) => {
+                for (module, imports) in graph {
+                    println!("{module}");
+                    for i in imports {
+                        println!("  -> {i}");
+                    }
                 }
             }
-            print_toolchain(Path::new(&root_key).parent().unwrap_or(Path::new(".")));
-            ExitCode::SUCCESS
-        }
-        Err(diags) => {
-            for d in &diags {
-                let file = d.file.as_deref().unwrap_or(&root_key);
-                eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
-                if let Some(note) = &d.note {
-                    eprintln!("  note: {note}");
+            Err(diags) => {
+                for d in &diags {
+                    let file = d.file.as_deref().unwrap_or(root_key);
+                    eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
+                    if let Some(note) = &d.note {
+                        eprintln!("  note: {note}");
+                    }
                 }
+                failed = true;
             }
-            ExitCode::FAILURE
         }
+    }
+    print_toolchain(&dir);
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
