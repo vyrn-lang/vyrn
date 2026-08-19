@@ -1,0 +1,57 @@
+/// Probe: binary-trees at n = 10, whole — the allocation benchmark, and the one
+/// program whose shape the ownership model could refuse.
+///
+/// It builds a recursive tree, walks it, and drops it, millions of times. The
+/// doubts: does a recursive type exist, does the movecheck accept the natural
+/// build-walk-drop shape without a copy, and is the release automatic. Checked
+/// against `binarytrees-10.expected`.
+
+type Tree = | Leaf | Node(Tree, Tree)
+
+fn make(depth: Int64) -> Tree {
+    if depth == 0 {
+        return Leaf
+    }
+    return Node(make(depth - 1), make(depth - 1))
+}
+
+/// Node count — `1 + check(left) + check(right)`, the game's checksum.
+fn check(t: Tree) -> Int64 {
+    return match t {
+        Leaf => 1,
+        Node(l, r) => 1 + check(l) + check(r),
+    }
+}
+
+fn main() -> Int64 {
+    let n = 10
+    let minDepth = 4
+    let mut maxDepth = n
+    if maxDepth < minDepth + 2 {
+        maxDepth = minDepth + 2
+    }
+    let stretchDepth = maxDepth + 1
+
+    print("stretch tree of depth \{stretchDepth}\t check: \{check(make(stretchDepth))}")
+    let longLived = make(maxDepth)
+
+    let mut depth = minDepth
+    while depth < stretchDepth {
+        let mut iterations = 1
+        let mut s = 0
+        while s < maxDepth - depth + minDepth {
+            iterations = iterations * 2
+            s = s + 1
+        }
+        let mut sum = 0
+        let mut i = 0
+        while i < iterations {
+            sum = sum + check(make(depth))
+            i = i + 1
+        }
+        print("\{iterations}\t trees of depth \{depth}\t check: \{sum}")
+        depth = depth + 2
+    }
+    print("long lived tree of depth \{maxDepth}\t check: \{check(longLived)}")
+    return 0
+}

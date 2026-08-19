@@ -1,0 +1,43 @@
+/// Probe: is there a square root for one `Float64`?
+///
+/// nbody and spectral-norm are sqrt in a loop. RFC-0083 says "`sqrt` is the one
+/// operation in this RFC that is not writable in Vyrn at all" and gives it to
+/// `F32x4` and `F64x2` only — so a scalar caller has to reach the wide width for
+/// one lane, or iterate for it. This probe runs both and compares them.
+///
+/// `import { sqrt } from "std/math"` is what the first version said. It is a
+/// compile error, quoted in the RFC:
+///
+///     p-sqrt.vyrn:7:0: `…/std/math.vyrn` does not define `sqrt`
+
+/// One lane of the SIMD square root — exact, IEEE, one instruction.
+fn sqrtF(x: Float64) -> Float64 {
+    return F64x2.sqrt(F64x2(x, x)).lane(0)
+}
+
+/// Newton-Raphson, the answer a program without `F64x2` would have to write.
+/// Five iterations from a halved seed; compared against the lane above.
+fn sqrtNewton(x: Float64) -> Float64 {
+    if x <= 0.0 {
+        return 0.0
+    }
+    let mut g = x / 2.0
+    let mut i = 0
+    while i < 40 {
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    }
+    return g
+}
+
+fn main() -> Int64 {
+    print(sqrtF(2.0))
+    print(sqrtNewton(2.0))
+    print(sqrtF(2.0) == sqrtNewton(2.0))
+    // How far apart, in ULPs — a benchmark's last printed digit lives here.
+    print(Int64(floatBits(sqrtNewton(2.0))) - Int64(floatBits(sqrtF(2.0))))
+    // The shape nbody's inner loop wants: 1 / (d * sqrt(d)).
+    let d = 9.0
+    print(1.0 / (d * sqrtF(d)))
+    return 0
+}

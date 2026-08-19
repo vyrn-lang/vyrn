@@ -1,0 +1,77 @@
+/// Probe: reverse-complement, whole — read the whole of stdin, complement each
+/// sequence through a 256-entry byte table, reverse it, and print 60 columns.
+/// Checked against `revcomp-1000.expected` with `fasta-1000.input` on stdin.
+///
+/// The doubts: `readLine` is the only stdin there is (`Option<String>`, one line
+/// at a time), and the game's input at its published N is 25 MB; and a table
+/// lookup wants an `Array<UInt8>` indexed by a byte, which means an `Int64`
+/// index built from one.
+
+/// The IUB complement table, 256 entries, indexed by the input byte.
+fn complementTable() -> Array<UInt8> {
+    let mut t: Array<UInt8> = []
+    let mut i = 0
+    while i < 256 {
+        t.push(UInt8(i))
+        i = i + 1
+    }
+    let from = bytes("ACBDGHKMNSRUTWVYacbdghkmnsrutwvy")
+    let to = bytes("TGVHCDMKNSYAAWBRTGVHCDMKNSYAAWBR")
+    let mut k = 0
+    while k < from.length {
+        t[Int64(from[k])] = to[k]
+        k = k + 1
+    }
+    return t
+}
+
+fn line(w: Array<UInt8>) -> String {
+    return match stringFromBytes(w) {
+        Ok(s) => s,
+        Err(_) => "",
+    }
+}
+
+/// One sequence, reversed and complemented, 60 bytes to a line.
+fn emit(seq: Array<UInt8>, table: Array<UInt8>) {
+    let mut i = seq.length - 1
+    let mut w: Array<UInt8> = []
+    while i >= 0 {
+        w.push(table[Int64(seq[i])])
+        if w.length == 60 {
+            print(line(w))
+            w = []
+        }
+        i = i - 1
+    }
+    if w.length > 0 {
+        print(line(w))
+    }
+}
+
+fn main() -> Int64 {
+    let table = complementTable()
+    let mut header = ""
+    let mut seq: Array<UInt8> = []
+    while let Some(l) = readLine() {
+        if l.byteLength > 0 && bytes(l)[0] == '>' {
+            if header.byteLength > 0 {
+                print(header)
+                emit(seq, table)
+                seq = []
+            }
+            header = l
+        } else {
+            // `for b in l` over a String yields `Int64` and the array holds
+            // `UInt8`, so the line goes through `bytes` — one allocation a line.
+            for b in bytes(l) {
+                seq.push(b)
+            }
+        }
+    }
+    if header.byteLength > 0 {
+        print(header)
+        emit(seq, table)
+    }
+    return 0
+}

@@ -1,0 +1,39 @@
+/// Probe: the game prints `%.9f`, and Vyrn prints six places.
+///
+/// `print(x)` on a `Float64` is fixed at six decimals, and `std/num`'s `f64Str`
+/// — which is itself written in Vyrn — is the same six. nbody's expected output
+/// is `-0.169075164` and spectral-norm's is `1.274219991`, so a fixture cannot
+/// be checked without nine. This asks whether nine places are reachable with
+/// what exists, and whether the digits come out right.
+///
+/// The range the benchmark set needs is |x| < 2, so scaling by 10^9 into an
+/// `Int64` is exact enough to carry every digit that is printed. A general
+/// `%.9f` for any magnitude is `f64Str`'s job (base-10^6 limbs, no float
+/// arithmetic anywhere), not this one's.
+
+/// `x` at nine decimal places, rounding half away from zero, the way `printf`
+/// does for the values these programs print.
+fn fixed9(x: Float64) -> String {
+    let mut v = x
+    let mut sign = ""
+    if v < 0.0 {
+        sign = "-"
+        v = 0.0 - v
+    }
+    let scaled = Int64(v * 1000000000.0 + 0.5)
+    let whole = scaled / 1000000000
+    let mut frac = "\{scaled % 1000000000}"
+    while frac.byteLength < 9 {
+        frac = "0\{frac}"
+    }
+    return "\{sign}\{whole}.\{frac}"
+}
+
+fn main() -> Int64 {
+    print(fixed9(-0.16907516382852447)) // nbody, initial energy
+    print(fixed9(-0.16908760523460617)) // nbody, energy after 1000 steps
+    print(fixed9(1.2742199912349306)) // spectral-norm, N = 100
+    print(fixed9(0.0))
+    print(fixed9(1.0))
+    return 0
+}

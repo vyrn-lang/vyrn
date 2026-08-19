@@ -1,0 +1,56 @@
+/// Probe: regex-redux needs a regex engine over a multi-megabyte input.
+///
+/// Vyrn has one regex engine (`vyrn-frontend/src/regex.rs`). It is reached by
+/// the `=~` operator, its pattern is a compile-time constant — "there is no
+/// runtime pattern parsing" — and the match is a full anchored match. regex-redux
+/// needs neither of those things: it counts every occurrence of nine patterns
+/// ANYWHERE in the sequence, then rewrites the sequence with five substitutions.
+/// This asks what `=~` actually answers.
+
+fn main() -> Int64 {
+    let dna = "agggtaaacccagggtaaa"
+
+    // 1. A full anchored match against a literal pattern: this is what exists.
+    print(dna =~ "[acgt]+")
+    print("agggtaaa" =~ "agggtaaa|tttaccct")
+
+    // 2. What regex-redux asks: does the pattern occur, anywhere?
+    print(dna =~ "agggtaaa|tttaccct")
+
+    // 3. The windowing an unanchored search has to become — `.*` around it,
+    //    which answers "is it there" but never "how many" and never "where".
+    print(dna =~ ".*(agggtaaa|tttaccct).*")
+
+    // 4. Counting occurrences is the actual output. The only shape available is
+    //    one anchored test per start offset, which is a quadratic scan and needs
+    //    a slice per window; and the window length has to be known, so a pattern
+    //    of variable length cannot even be windowed.
+    let mut hits = 0
+    let mut i = 0
+    while i + 8 <= dna.byteLength {
+        // A pattern is a literal, so the window width 8 is hard-coded here from
+        // the outside. Nothing asks the engine how wide a match can be.
+        let w = window(dna, i, 8)
+        if w =~ "agggtaaa|tttaccct" {
+            hits = hits + 1
+        }
+        i = i + 1
+    }
+    print("occurrences of agggtaaa|tttaccct: \{hits}")
+    return 0
+}
+
+/// Eight bytes of `s` from `at`, since `=~` takes a String and not a range.
+fn window(s: String, at: Int64, width: Int64) -> String {
+    let b = bytes(s)
+    let mut w: Array<UInt8> = []
+    let mut i = 0
+    while i < width {
+        w.push(b[at + i])
+        i = i + 1
+    }
+    return match stringFromBytes(w) {
+        Ok(t) => t,
+        Err(_) => "",
+    }
+}
