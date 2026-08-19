@@ -1,0 +1,232 @@
+/// What the editor support IS, one row per thing it does, and the file that
+/// does it (RFC-0105 M3).
+///
+/// Every row carries a `path` into this repository and the `symbol` inside that
+/// file which implements the row. That is not decoration. The gate in
+/// `site/export.vyrn` — "every feature the editors page claims names a file that
+/// is in this repository" — reads the `data-impl` attribute off the RENDERED
+/// page and opens each path, so a row describing something nobody wrote fails
+/// the export, which fails the build.
+///
+/// The rows were written by reading the code, not the extension's README. Three
+/// things the README says are not what the code does, and the three rows below
+/// follow the code:
+///
+///  - it points at `editor/vscode/ROADMAP.md`, which does not exist;
+///  - it lists user `protocol`/`impl` method resolution as deferred, while
+///    `compiler/vyrn-frontend/src/symbols.rs` builds the impl and protocol
+///    member tables `.`-completion answers from;
+///  - it does not mention the bench, route or dev-server lenses, which all work.
+///
+/// And one thing the code does NOT do, so no row claims it: `.von` files get the
+/// Vyrn grammar and nothing else. The client's document selector names `vyrn`
+/// and `vyx` only, so a `.von` buffer is coloured and never analyzed.
+import { blob } from "./repo"
+import { startsWith } from "std/strpred"
+
+/// One thing the editor does: what it is called, what a reader gets from it,
+/// the repository file that implements it, and the declaration inside that file.
+export type Feature = { name: String, what: String, path: String, symbol: String }
+
+/// One step of getting the extension: the heading, the command, and what the
+/// command leaves you with.
+export type Step = { title: String, command: String, what: String }
+
+/// Where the extension lives. Written once because four rows and two sentences
+/// name it.
+export fn extensionDir() -> String {
+    return "editor/vscode"
+}
+
+/// The server's crate directory.
+export fn serverDir() -> String {
+    return "compiler/vyrn-lsp"
+}
+
+/// Every feature, in the order a reader meets them: the ones that answer while
+/// you type first, then the ones you ask for, then the ones the extension draws
+/// itself.
+///
+/// A row is here because the code is there. The pair of files is the whole
+/// story: `editor/vscode/extension.js` is a client that spawns a process and
+/// forwards JSON-RPC, and `compiler/vyrn-lsp` answers every question about the
+/// language by calling the same compiler front end `vyrn check` calls.
+export fn features() -> Array<Feature> {
+    return [
+        Feature {
+            name: "Errors while you type",
+            what: "The compiler's own diagnostics, on the line and the token they name. The editor calls <code>analyze_linked</code>, which is what <code>vyrn check</code> calls, so the squiggle and the command never disagree.",
+            path: "compiler/vyrn-lsp/src/main.rs",
+            symbol: "analyze_doc / publish",
+        },
+        Feature {
+            name: "Across the files you import",
+            what: "Imports are resolved and analyzed, so a name from another module is not an unknown one, and an error inside an imported file is reported against the file you have open. The resolver is read-only and offline: a remote module is read from the vendor directory or the sha256 cache only when <code>vyrn.lock</code> already pins it, and the editor never fetches.",
+            path: "compiler/vyrn-lsp/src/main.rs",
+            symbol: "load_context",
+        },
+        Feature {
+            name: "Hover",
+            what: "The type of a binding, the signature of a function, the arms of an enum, the doc comment above any of them — and, for a safelisted CSS class, the rule out of your own stylesheet.",
+            path: "compiler/vyrn-lsp/src/main.rs",
+            symbol: "handle_hover",
+        },
+        Feature {
+            name: "Go to definition",
+            what: "F12 on a name opens where it is declared, including across a module boundary; on a component tag in a template it opens that component's own file.",
+            path: "compiler/vyrn-lsp/src/main.rs",
+            symbol: "handle_definition",
+        },
+        Feature {
+            name: "Completion",
+            what: "Top-level names, locals and parameters, and <code>.</code> members off the receiver's type — built-in methods, record fields, and the methods a user <code>protocol</code> gives a type, whether by a concrete <code>impl</code> or a <code>&lt;T: P&gt;</code> bound.",
+            path: "compiler/vyrn-lsp/src/main.rs",
+            symbol: "handle_completion",
+        },
+        Feature {
+            name: "Outline and breadcrumbs",
+            what: "Ctrl-Shift-O and the breadcrumb bar list this document's own functions, methods, types, variants and <code>test</code> blocks. A name that came from an import is not in the list, because it is not in this document.",
+            path: "compiler/vyrn-lsp/src/main.rs",
+            symbol: "handle_document_symbol",
+        },
+        Feature {
+            name: "Highlight the binding, not the word",
+            what: "Putting the cursor on a name marks its actual references — reads and writes told apart — so a same-named binding in another scope, and the word inside a comment, stay unmarked.",
+            path: "compiler/vyrn-lsp/src/main.rs",
+            symbol: "handle_document_highlight",
+        },
+        Feature {
+            name: "Rename, including what a generator derived",
+            what: "Renaming a procedure rewrites the call sites that never name it in your source: the client stub a page calls, the dispatch name, the re-export a projection made. A spelling it cannot derive refuses the whole rename rather than doing half of it, and a cursor that cannot be renamed is told so before you type the new name.",
+            path: "compiler/vyrn-lsp/src/rename.rs",
+            symbol: "rename_at",
+        },
+        Feature {
+            name: "Quick fix on a contract",
+            what: "A page declaring an export its contract does not name gets the did-you-mean as an applicable edit — <code>laod</code> to <code>data</code> — not just as an error message.",
+            path: "compiler/vyrn-lsp/src/main.rs",
+            symbol: "handle_code_action",
+        },
+        Feature {
+            name: "Format, and format on save",
+            what: "Shift+Alt+F, or VS Code's own format-on-save with no extra setting, runs the canonical formatter over the whole document. A buffer that does not lex is returned unchanged rather than corrupted mid-edit.",
+            path: "compiler/vyrn-lsp/src/main.rs",
+            symbol: "handle_formatting",
+        },
+        Feature {
+            name: "Inlay hints",
+            what: "The type of a binding whose line does not say it, and a label at each point a value is moved — the one memory event with a position of its own. VS Code's own <code>editor.inlayHints.enabled</code> turns them off.",
+            path: "compiler/vyrn-lsp/src/main.rs",
+            symbol: "handle_inlay_hint",
+        },
+        Feature {
+            name: "Semantic colour",
+            what: "Every identifier is classified from the analysis — namespace, type, variant, parameter, property, function, method — which a grammar cannot do, because a grammar sees text. Both the whole document and one visible range are served.",
+            path: "compiler/vyrn-lsp/src/main.rs",
+            symbol: "handle_semantic_tokens_full",
+        },
+        Feature {
+            name: "Templates are the same language",
+            what: "In a <code>.vyx</code> file the diagnostics, hover, definition, highlight, hints and completion are the ones for the module the generator synthesizes, mapped back into the coordinates you wrote — plus completion for the things only a template has: tag names, sibling components, props, <code>@events</code> and class tokens.",
+            path: "compiler/vyrn-lsp/src/templates.rs",
+            symbol: "classify",
+        },
+        Feature {
+            name: "Syntax highlighting",
+            what: "A TextMate grammar derived from the lexer's own token set — keywords, types, calls, capability modifiers, tagged templates, and the structure of a regular expression after <code>=~</code>. It colours <code>.vyrn</code>, <code>.von</code> and <code>.vyx</code> with no server running at all.",
+            path: "editor/vscode/vyrn.tmLanguage.json",
+            symbol: "source.vyrn",
+        },
+        Feature {
+            name: "Snippets",
+            what: "Eleven, for the shapes with a body to fill in: <code>fn</code>, <code>main</code>, record and enum <code>type</code>, <code>protocol</code>, <code>impl</code>, <code>match</code>, <code>import</code>, the <code>logging</code> block, <code>test</code> and <code>bench</code>.",
+            path: "editor/vscode/snippets/vyrn.json",
+            symbol: "vyrn.json",
+        },
+        Feature {
+            name: "Run it from the file",
+            what: "A <strong>▶ Run</strong> above <code>fn main</code>, a <strong>▶ Run test</strong> above each <code>test</code> block and a <strong>▶ Run all tests</strong> above the first, and the same pair for <code>bench</code>. Each one runs the real command in the integrated terminal, against the compiler it finds beside your checkout.",
+            path: "editor/vscode/extension.js",
+            symbol: "provideCodeLenses",
+        },
+        Feature {
+            name: "▶ Run dev server, where it means something",
+            what: "The dev-server lens appears on a root that actually is one — a file importing <code>std/rpc</code> with an <code>rpcServer</code> call site. That is a question about the program, so the server answers it and the client draws the lens; a re-click restarts the server rather than stacking a second one on the port.",
+            path: "compiler/vyrn-lsp/src/main.rs",
+            symbol: "handle_is_dev_entry",
+        },
+        Feature {
+            name: "The wire path above the procedure",
+            what: "Over each procedure a generator mounts, the method and path it is reachable at. Nothing in the file states it — it is derived from the file's location and the export's name — which is exactly why it is worth showing.",
+            path: "compiler/vyrn-lsp/src/main.rs",
+            symbol: "handle_route_lenses",
+        },
+    ]
+}
+
+/// The honest way to get it today, in order. There is no marketplace listing:
+/// what exists is a repository, a packaging script and a launch configuration.
+///
+/// The first step is not optional and is not the one `/install` used to print.
+/// The packaging script builds the server in RELEASE and copies it into the
+/// extension, and the F5 development host looks for a DEBUG build — so the two
+/// paths need different builds, and each step below names its own.
+export fn steps() -> Array<Step> {
+    return [
+        Step {
+            title: "Install it as an extension",
+            command: "cd editor/vscode && npm install && npm run package",
+            what: "Builds the server in release, copies it next to <code>extension.js</code>, and writes a <code>.vsix</code> tagged for this platform. The binary is inside it, so the machine you install it on needs no Rust.",
+        },
+        Step {
+            title: "Then hand the file to VS Code",
+            command: "code --install-extension vyrn-win32-x64-0.1.0.vsix",
+            what: "The file name carries the platform and the version the packaging step just printed. The bundled binary is host-specific: package once per platform you want to ship to.",
+        },
+        Step {
+            title: "Or work on the extension itself",
+            command: "cargo build --manifest-path compiler/vyrn-lsp/Cargo.toml",
+            what: "A <strong>debug</strong> build, which is the one the F5 development host looks for. Then open the repository in VS Code and press F5. The launch does not rebuild the server — a running binary is locked on Windows — so re-run this line, or the <code>build-lsp</code> task, whenever you change the server.",
+        },
+    ]
+}
+
+/// The file a feature row points at, on GitHub. The site does not host the
+/// source, so this leaves — the same rule every other source link on the site
+/// follows.
+export fn implHref(f: Feature) -> String {
+    return blob(f.path)
+}
+
+test "every feature names a file and the declaration inside it" {
+    let rows = features()
+    assert(rows.length > 15)
+    for f in rows {
+        assert(f.name.byteLength > 0)
+        assert(f.what.byteLength > 0)
+        assert(f.symbol.byteLength > 0)
+        // A path into this repository, never a URL and never absolute: the gate
+        // in `site/export.vyrn` opens it relative to the directory the export
+        // runs in.
+        assert(f.path.byteLength > 0)
+        assert(implHref(f) == "https://github.com/vyrn-lang/vyrn/blob/main/" + f.path)
+    }
+}
+
+test "every feature is implemented by the extension or by the server" {
+    // The claim the page makes in its first sentence — two pieces of software
+    // and no third — checked against the rows rather than left as prose.
+    for f in features() {
+        assert(startsWith(f.path, extensionDir() + "/") || startsWith(f.path, serverDir() + "/"))
+    }
+}
+
+test "each step says what it leaves you with" {
+    let all = steps()
+    assertEq(all.length, 3)
+    for s in all {
+        assert(s.title.byteLength > 0)
+        assert(s.command.byteLength > 0)
+        assert(s.what.byteLength > 0)
+    }
+}

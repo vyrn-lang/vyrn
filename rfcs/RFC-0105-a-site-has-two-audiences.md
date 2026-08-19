@@ -1,6 +1,6 @@
 # RFC-0105 — A Site Has Two Audiences
 
-- **Status:** **M1 and M2 implemented.** M3–M4 proposed. Milestones below; a
+- **Status:** **M1, M2 and M3 implemented.** M4 proposed. Milestones below; a
   milestone that fails its gate says so in this file.
 - **Depends on:** the shipped site (`site/` — routes, `export.vyrn`, the
   document-relative URL rule), RFC-0026/0069 (std/ui and pages), RFC-0104 M3
@@ -256,9 +256,103 @@ of markdown, so the reason M1 moved the record pages out does not apply to
 these. One run of each, on one machine, which is enough to say what changed and
 what did not.
 
-**M3 — the editors page.** `/editors` in the consumer navigation. Gate: every
-feature row on the page names the code in `editor/` that implements it; no
-claimed feature without an implementation behind it.
+**M3 — the editors page.** *Implemented.* `/editors` in the consumer navigation.
+Gate: every feature row on the page names the code in `editor/` that implements
+it; no claimed feature without an implementation behind it.
+
+### M3 — as landed
+
+**The table.** Eighteen rows, in `site/app/editors.vyrn`, each carrying the file
+that implements it and the declaration inside that file. The order is the order a
+reader meets them: what answers while you type, then what you ask for, then what
+the extension draws itself.
+
+| Feature | Implemented by |
+|---|---|
+| Errors while you type | `compiler/vyrn-lsp/src/main.rs` — `analyze_doc` / `publish` |
+| Across the files you import | `compiler/vyrn-lsp/src/main.rs` — `load_context` |
+| Hover | `compiler/vyrn-lsp/src/main.rs` — `handle_hover` |
+| Go to definition | `compiler/vyrn-lsp/src/main.rs` — `handle_definition` |
+| Completion | `compiler/vyrn-lsp/src/main.rs` — `handle_completion` |
+| Outline and breadcrumbs | `compiler/vyrn-lsp/src/main.rs` — `handle_document_symbol` |
+| Highlight the binding, not the word | `compiler/vyrn-lsp/src/main.rs` — `handle_document_highlight` |
+| Rename, including what a generator derived | `compiler/vyrn-lsp/src/rename.rs` — `rename_at` |
+| Quick fix on a contract | `compiler/vyrn-lsp/src/main.rs` — `handle_code_action` |
+| Format, and format on save | `compiler/vyrn-lsp/src/main.rs` — `handle_formatting` |
+| Inlay hints | `compiler/vyrn-lsp/src/main.rs` — `handle_inlay_hint` |
+| Semantic colour | `compiler/vyrn-lsp/src/main.rs` — `handle_semantic_tokens_full` |
+| Templates are the same language | `compiler/vyrn-lsp/src/templates.rs` — `classify` |
+| Syntax highlighting | `editor/vscode/vyrn.tmLanguage.json` |
+| Snippets | `editor/vscode/snippets/vyrn.json` |
+| Run it from the file | `editor/vscode/extension.js` — `provideCodeLenses` |
+| ▶ Run dev server, where it means something | `compiler/vyrn-lsp/src/main.rs` — `handle_is_dev_entry` |
+| The wire path above the procedure | `compiler/vyrn-lsp/src/main.rs` — `handle_route_lenses` |
+
+**What moved.** M1's census row 16 said the extension's build commands stayed on
+`/install` §06 *until M3*. They are here now. `/install` §06 is three sentences
+that stop at the compiler and point at this page; `lspBuild()` is deleted from
+`install.vyx`, because the command it held was the wrong one (below). The
+section keeps the `vyrn.json` / `vyrn.lock` notice, which is about resolving
+modules and not about an editor.
+
+**Where the gate lives.** `site/export.vyrn`, "every feature the editors page
+claims names a file that is in this repository". It renders `/editors`, reads
+`data-impl` off the RENDERED page with the same attribute scanner the fragment
+and import-line gates use, and opens every path with `readFile` relative to the
+repository root. It reads the page rather than the table it was rendered from,
+so a row that is in the data and not in the markup fails it too, and it asserts
+the count against `features()` so a scan that found nothing cannot pass in
+silence. Shown failing once, on purpose, by pointing one row at
+`compiler/vyrn-lsp/src/refactor.rs`:
+
+```
+the editors page claims `compiler/vyrn-lsp/src/refactor.rs`, which this repository does not have: cannot read `compiler/vyrn-lsp/src/refactor.rs`
+test "every feature the editors page claims names a file that is in this repository" ... FAILED
+```
+
+Gate: met. Eighteen rows, eighteen `data-impl` paths, eighteen files that exist,
+checked on every export.
+
+**Four contradictions, found by reading the code instead of the README.** The
+brief asked for the page to be written against `editor/` reality. It is, and
+four things the repository says about itself are not true:
+
+- **`/install` printed a build that does not make F5 work.** §06 said
+  `cargo build --release --manifest-path vyrn-lsp/Cargo.toml`, and
+  `extension.js` resolves its development server at
+  `compiler/vyrn-lsp/target/debug/<exe>` — the release binary is in a directory
+  it never looks in. A reader who followed the page got "language server not
+  found". The two paths need two different builds, and the page's install
+  section now names each one for what it is: `npm run package` builds *release*
+  and puts the binary inside the `.vsix`; the F5 host wants the *debug* build
+  (which is what the repository's own `build-lsp` task does).
+- **Two commands are registered and not declared.** `extension.js` registers
+  `vyrn.bench` and `vyrn.benchAll`; `package.json` `contributes.commands` lists
+  only `vyrn.run`, `vyrn.test`, `vyrn.testAll` and `vyrn.dev`. The bench
+  CodeLenses work — a lens invokes a registered command directly — but neither
+  appears in the Command Palette. The page therefore claims the bench *lens* and
+  claims no palette entry for it.
+- **The extension's README is stale in two places.** It ends by pointing at
+  `editor/vscode/ROADMAP.md`, which does not exist, and it lists user
+  `protocol`/`impl` method resolution as deferred while
+  `compiler/vyrn-frontend/src/symbols.rs` builds the `impl_members` and
+  `protocol_members` tables that `.`-completion answers from. The page follows
+  the code. The README is not this milestone's ground and is left for a fix of
+  its own.
+- **`.von` is coloured and never analyzed.** `package.json` declares `von` as a
+  language with the Vyrn grammar, and the client's document selector names
+  `vyrn` and `vyx` only. So the page says the grammar colours all three
+  extensions, and says in the same section that a `.von` file gets nothing else —
+  rather than letting a reader infer a language server from a language id.
+
+**Other editors, checked before claiming it.** `main.rs` starts with
+`Connection::stdio()` and there is no socket path anywhere in the crate, so the
+page says what is true: any editor with a generic LSP client can spawn
+`vyrn-lsp` and get every row above except the lenses, which the client draws;
+there is no port to connect to.
+
+**One number.** The export publishes 206 routes rather than 205 and the new page
+is 16 KB. Nothing else moved.
 
 **M4 — accessibility and theme.** The control, the palettes, the checklist —
 each item verified in a browser and recorded here. Gate: the checklist has no
