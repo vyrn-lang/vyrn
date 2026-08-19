@@ -160,7 +160,7 @@ claim is true — is written down in the test's own header.
 | [0102](RFC-0102-a-toolchain-is-a-dependency.md) | A Toolchain Is a Dependency | Implemented |
 | [0103](RFC-0103-a-target-is-a-capability-set.md) | A Target Is a Capability Set | Implemented |
 | [0104](RFC-0104-a-benchmark-is-a-claim-about-a-gap.md) | A Benchmark Is a Claim About a Gap | M0 landed |
-| [0105](RFC-0105-a-site-has-two-audiences.md) | A Site Has Two Audiences | Proposed |
+| [0105](RFC-0105-a-site-has-two-audiences.md) | A Site Has Two Audiences | M1–M3 landed |
 
 ## The other documents here
 

@@ -26,13 +26,14 @@
 ///
 /// Every other route publishes flat, for the same reason (see `app/nav.vyrn`).
 import { pages } from "std/ui"
-import { route, rootPath, philosophyPath, comparePath, installPath, releasesPath, docsPath, explorePath, guidePath, playPath, backstagePath, hrefDocsStd, hrefGuide, hrefBackstageRfcs, hrefExplore } from pages("./app/routes")
+import { route, rootPath, philosophyPath, comparePath, installPath, editorsPath, releasesPath, docsPath, explorePath, guidePath, playPath, backstagePath, hrefDocsStd, hrefGuide, hrefBackstageRfcs, hrefExplore } from pages("./app/routes")
 import { published, navRows, hrefOf, upTo } from "./app/nav"
 import { rfcPages, rfcSlug } from "./app/backstage"
 import { apiModules, apiEntries, apiHref } from "./app/docs"
 import { chapterSlugs, chapterHref } from "./app/guide"
 import { searchRows } from "./app/stdgraph"
 import { packages, packageHref, importLine } from "./app/packages"
+import { features } from "./app/editors"
 import { substring, indexOf, split, replace } from "std/strings"
 import { startsWith } from "std/strpred"
 
@@ -44,7 +45,7 @@ import { startsWith } from "std/strpred"
 /// a module added to `std/` is exported here on the next build with nothing
 /// written by hand.
 fn sitePaths() -> Array<String> {
-    let mut out: Array<String> = [rootPath(), philosophyPath(), comparePath(), installPath(), releasesPath(), docsPath(), guidePath(), explorePath(), playPath()]
+    let mut out: Array<String> = [rootPath(), philosophyPath(), comparePath(), installPath(), editorsPath(), releasesPath(), docsPath(), guidePath(), explorePath(), playPath()]
     for m in apiModules() {
         out.push(hrefDocsStd(m.name))
     }
@@ -772,6 +773,42 @@ test "one module list, and the pages that do not render it" {
     // on a row and not a fetch.
     assertEq(countOf(docs, " data-q=\""), apiModules().length)
     assertEq(countOf(docs, " data-e=\""), apiModules().length)
+}
+
+/// Whether `path`, read relative to the directory the export runs in, is a file
+/// this repository has something in. A missing one says which page claimed it,
+/// because a bare failed assertion over eighteen rows names none of them.
+fn implExists(path: String) -> Bool {
+    return match readFile(path) {
+        Ok(body) => body.byteLength > 0,
+        Err(why) => saidMissing(path, why),
+    }
+}
+
+/// The failure half of `implExists`, so both arms answer a `Bool`.
+fn saidMissing(path: String, why: String) -> Bool {
+    print("the editors page claims `\{path}`, which this repository does not have: \{why}")
+    return false
+}
+
+test "every feature the editors page claims names a file that is in this repository" {
+    // RFC-0105 M3's gate, made permanent. The page renders one row per feature
+    // and stamps the implementing file on it as `data-impl`; this reads the
+    // attribute off the RENDERED page — not off the table it was rendered from —
+    // and opens every path. A feature row nobody implemented fails here, which
+    // fails the export, which fails the build.
+    //
+    // Relative to the repository root, which is where the export is run from and
+    // where `packages.vyrn` reads `examples/*/vyrn.json` from.
+    let html = route(documentRequest(editorsPath())).body
+    let claimed = attrValues(html, "data-impl")
+    // The table is the page's whole middle section: an empty scan would pass
+    // every assertion below in silence.
+    assert(claimed.length > 15)
+    assertEq(claimed.length, features().length)
+    for path in claimed {
+        assert(implExists(path))
+    }
 }
 
 test "the book publishes one page per chapter, and an unknown chapter is a 404" {

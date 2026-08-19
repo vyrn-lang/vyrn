@@ -82,6 +82,7 @@ export fn navRows() -> Array<NavRow> {
         NavRow { href: hrefOf("/philosophy"), label: "Philosophy" },
         NavRow { href: hrefOf("/compare"), label: "Compare" },
         NavRow { href: hrefOf("/install"), label: "Install" },
+        NavRow { href: hrefOf("/editors"), label: "Editors" },
         NavRow { href: hrefOf("/releases"), label: "Releases" },
         NavRow { href: hrefOf("/guide"), label: "Guide" },
         NavRow { href: hrefOf("/docs"), label: "Docs" },
@@ -110,5 +111,5 @@ test "a page's climb back to the root is its own depth and nothing else" {
 }
 
 test "the navigation covers every route but the home page" {
-    assertEq(navRows().length, 8)
+    assertEq(navRows().length, 9)
 }

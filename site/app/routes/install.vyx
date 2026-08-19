@@ -72,13 +72,6 @@ fn firstProgram() -> String {
     return vyrnHtml("hello")
 }
 
-/// The one command that builds the language server. It is written here rather
-/// than in the template because the template shows it coloured, and a coloured
-/// command is built from its text.
-fn lspBuild() -> String {
-    return "cargo build --release --manifest-path vyrn-lsp/Cargo.toml"
-}
-
 /// The source build, which is the same three lines everywhere.
 fn sourceBuild() -> String {
     return "git clone https://github.com/vyrn-lang/vyrn.git\ncd vyrn/compiler\ncargo build --release -p vyrn-cli"
@@ -122,7 +115,7 @@ fn versionLine() -> String {
         <a href="#source"><span class="n">03</span>from source</a>
         <a href="#check"><span class="n">04</span>check it</a>
         <a href="#first"><span class="n">05</span>first program</a>
-        <a href="#editor"><span class="n">06</span>editor</a>
+        <a href="#editor"><span class="n">06</span>your editor</a>
     </aside>
         <section class="hero">
             <p class="eyebrow">Install</p>
@@ -223,12 +216,8 @@ fn versionLine() -> String {
 
         <section class="band" id="editor">
             <p class="eyebrow">06 — editor</p>
-            <h2>The language server</h2>
-            <p><code>vyrn-lsp</code> is a synchronous language server: diagnostics, hover, go-to-definition and completion, across linked files. The VS Code extension lives in <code>editor/vscode/</code>. It is excluded from the main workspace, so it is built on its own:</p>
-            <div class="cmd" data-copy>
-                <code v-html="shellHtml(lspBuild())"></code>
-                <button type="button" data-copy-btn aria-label="Copy the language server build command">Copy</button>
-            </div>
+            <h2>Then set up your editor</h2>
+            <p>The VS Code extension and the <code>vyrn-lsp</code> language server both ship in this repository, and <a href="/editors.html">the editors page</a> has what they do and the two commands that install them. This page stops at the compiler.</p>
             <p class="notice">Modules resolve from <code>vyrn.json</code>. Remote imports (<code>github:</code>, <code>gist:</code>, <code>https:</code>) are pinned in <code>vyrn.lock</code> and cached by sha256 under <code>~/.vyrn</code>. <code>--offline</code> refuses to fetch.</p>
         </section>
 </main>
