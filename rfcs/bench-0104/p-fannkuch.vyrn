@@ -1,0 +1,92 @@
+/// Probe: fannkuch-redux at n = 7, whole — the permutation walk and the
+/// in-place prefix reversal, checked against `fannkuch-7.expected`.
+///
+/// The doubt was small (RFC-0011 gives `a[i] = v`), so the probe is the program:
+/// if an `Int64` array can be copied, indexed, assigned and reversed in place,
+/// the row is answered by a diff.
+
+/// Reverse `p[0 ..= k]` in place — the flip the benchmark counts.
+///
+/// A `read` parameter cannot be returned ("it is a second name for the `read`
+/// parameter `p`, and a return is owned"), so a helper that mutates an array the
+/// caller keeps using is `consume` in and owned out: a move each way, no copy.
+fn flip(p: consume Array<Int64>, k: Int64) -> Array<Int64> {
+    let mut a = p
+    let mut i = 0
+    let mut j = k
+    while i < j {
+        let t = a[i]
+        a[i] = a[j]
+        a[j] = t
+        i = i + 1
+        j = j - 1
+    }
+    return a
+}
+
+fn main() -> Int64 {
+    let n = 7
+    let mut perm1: Array<Int64> = []
+    let mut count: Array<Int64> = []
+    let mut i = 0
+    while i < n {
+        perm1.push(i)
+        count.push(0)
+        i = i + 1
+    }
+    let mut maxflips = 0
+    let mut checksum = 0
+    let mut permcount = 0
+    let mut r = n
+    let mut done = false
+    while !done {
+        while r != 1 {
+            count[r - 1] = r
+            r = r - 1
+        }
+        let mut perm: Array<Int64> = []
+        for x in perm1 {
+            perm.push(x)
+        }
+        let mut flips = 0
+        let mut k = perm[0]
+        while k != 0 {
+            perm = flip(perm, k)
+            flips = flips + 1
+            k = perm[0]
+        }
+        if flips > maxflips {
+            maxflips = flips
+        }
+        if permcount % 2 == 0 {
+            checksum = checksum + flips
+        } else {
+            checksum = checksum - flips
+        }
+        permcount = permcount + 1
+        // The next permutation, by rotating the first `r + 1` entries left.
+        let mut advanced = false
+        while !advanced && !done {
+            if r == n {
+                done = true
+            } else {
+                let first = perm1[0]
+                let mut m = 0
+                while m < r {
+                    perm1[m] = perm1[m + 1]
+                    m = m + 1
+                }
+                perm1[r] = first
+                count[r] = count[r] - 1
+                if count[r] > 0 {
+                    advanced = true
+                } else {
+                    r = r + 1
+                }
+            }
+        }
+    }
+    print(checksum)
+    print("Pfannkuchen(\{n}) = \{maxflips}")
+    return 0
+}

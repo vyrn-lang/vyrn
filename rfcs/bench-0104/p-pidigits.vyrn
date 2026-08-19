@@ -1,0 +1,108 @@
+/// Probe: pidigits, the row the RFC called "not expressible".
+///
+/// Two questions, because they have two different answers.
+///
+/// 1. Are there arbitrary-precision integers? `Int64` is the widest integer and
+///    it wraps; no `std` module exports a big integer. That is the absence the
+///    RFC names, and the game's rules ask for one by name — its pidigits is
+///    specified as "use arbitrary-precision arithmetic".
+/// 2. Is the OUTPUT reachable? Yes. The bounded spigot (Rabinowitz and Wagon)
+///    holds one small integer per digit column and never needs a number wider
+///    than `Int64`: at `n` digits the widest intermediate is about `(10n/3)^2`,
+///    which stays inside `Int64` past a billion digits. This probe prints 27
+///    digits in the game's format and is checked against `pidigits-27.expected`.
+///
+/// So the gap is a library gap, not a language gap — nothing here needs a
+/// compiler change, and `std/num`'s `f64Str` is already limb arithmetic written
+/// in Vyrn. What is missing is a big integer nobody has written.
+
+/// `Int64` wraps rather than widening — the first question, answered in one line.
+fn wraps() {
+    let mut big = 4611686018427387903 // (2^62 - 1)
+    big = big * 2 + 1 // 2^63 - 1, the largest Int64
+    print(big)
+    print(big + 1) // wraps to the smallest
+}
+
+/// The bounded spigot: `guard` extra digits are computed and thrown away,
+/// because a bounded spigot's last few columns are the ones that can be wrong.
+fn piDigits(n: Int64, guard: Int64) -> Array<Int64> {
+    let total = n + guard
+    let len = 10 * total / 3 + 1
+    let mut a: Array<Int64> = []
+    let mut i = 0
+    while i < len {
+        a.push(2)
+        i = i + 1
+    }
+    let mut out: Array<Int64> = []
+    let mut nines = 0
+    let mut predigit = 0
+    let mut j = 0
+    while j <= total {
+        let mut q = 0
+        let mut k = len
+        while k > 0 {
+            let x = 10 * a[k - 1] + q * k
+            a[k - 1] = x % (2 * k - 1)
+            q = x / (2 * k - 1)
+            k = k - 1
+        }
+        a[0] = q % 10
+        q = q / 10
+        if q == 9 {
+            nines = nines + 1
+        } else if q == 10 {
+            out.push(predigit + 1)
+            let mut z = 0
+            while z < nines {
+                out.push(0)
+                z = z + 1
+            }
+            predigit = 0
+            nines = 0
+        } else {
+            out.push(predigit)
+            predigit = q
+            let mut z = 0
+            while z < nines {
+                out.push(9)
+                z = z + 1
+            }
+            nines = 0
+        }
+        j = j + 1
+    }
+    // The first entry is the zero that precedes the 3; drop it and the guards.
+    let mut digits: Array<Int64> = []
+    let mut d = 1
+    while d <= n {
+        digits.push(out[d])
+        d = d + 1
+    }
+    return digits
+}
+
+fn main() -> Int64 {
+    wraps()
+
+    let n = 27
+    let digits = piDigits(n, 10)
+    let mut line = ""
+    let mut i = 0
+    while i < n {
+        line = "\{line}\{digits[i]}"
+        if (i + 1) % 10 == 0 {
+            print("\{line}\t:\{i + 1}")
+            line = ""
+        }
+        i = i + 1
+    }
+    if line.byteLength > 0 {
+        while line.byteLength < 10 {
+            line = "\{line} "
+        }
+        print("\{line}\t:\{n}")
+    }
+    return 0
+}

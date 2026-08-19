@@ -1,0 +1,136 @@
+/// Probe: k-nucleotide counts k-mers in a `Map`, and every key is a window of
+/// the input's bytes.
+///
+/// The doubts are what a key costs and what a key requires: `Map` is
+/// `Map<String, V>` (RFC-0028), a window of a sequence is bytes, and the only
+/// way from bytes to a String is `stringFromBytes`, which validates UTF-8 and
+/// allocates. The second doubt is the ordering — the game prints the table
+/// sorted by count descending, ties by fragment, and `std/arrays`' `sortBy`
+/// takes an `Int64` key and nothing else.
+///
+/// It reads `fasta-1000.expected` and prints the 1-mer and 2-mer sections of
+/// `knucleotide-1000.expected`, so the answer is a diff and not an opinion.
+
+import { indexOf, toUpper } from "std/strings"
+import { sortBy } from "std/arrays"
+
+type Entry = { frag: String, count: Int64 }
+
+/// The THREE section, uppercased, with the newlines taken out.
+fn thirdSequence(text: String) -> Array<UInt8> {
+    let mut out: Array<UInt8> = []
+    let start = match indexOf(text, ">THREE") {
+        Some(i) => i,
+        None => 0,
+    }
+    let all = bytes(toUpper(text))
+    let mut i = start
+    // Skip the header line itself.
+    while i < all.length && all[i] != '\n' {
+        i = i + 1
+    }
+    i = i + 1
+    while i < all.length {
+        if all[i] != '\n' {
+            out.push(all[i])
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// Every window of width `k`, counted. One `stringFromBytes` per window is the
+/// cost the census is asking about: an allocation and a UTF-8 validation per
+/// position of the sequence.
+fn countKmers(seq: Array<UInt8>, k: Int64) -> Map<String, Int64> {
+    let mut m: Map<String, Int64> = [:]
+    let mut i = 0
+    while i + k <= seq.length {
+        let mut w: Array<UInt8> = []
+        let mut j = 0
+        while j < k {
+            w.push(seq[i + j])
+            j = j + 1
+        }
+        let key = match stringFromBytes(w) {
+            Ok(s) => s,
+            Err(_) => "",
+        }
+        let seen = match m[key] {
+            Some(c) => c,
+            None => 0,
+        }
+        m[key] = seen + 1
+        i = i + 1
+    }
+    return m
+}
+
+/// `x` at three decimal places — `print` gives six and the game asks for three.
+fn fixed3(x: Float64) -> String {
+    let scaled = Int64(x * 1000.0 + 0.5)
+    let whole = scaled / 1000
+    let mut frac = "\{scaled % 1000}"
+    while frac.byteLength < 3 {
+        frac = "0\{frac}"
+    }
+    return "\{whole}.\{frac}"
+}
+
+/// Count descending, ties by fragment ascending. `sortBy` orders by an `Int64`
+/// and is stable, so the fragment order has to be established first — by a hand
+/// written insertion sort over `String`, since no comparator crosses the API.
+fn ranked(m: Map<String, Int64>) -> Array<Entry> {
+    let mut es: Array<Entry> = []
+    for k in m.keys() {
+        let c = match m[k] {
+            Some(v) => v,
+            None => 0,
+        }
+        es.push(Entry { frag: k, count: c })
+    }
+    let mut i = 1
+    while i < es.length {
+        let mut j = i
+        while j > 0 && es[j - 1].frag > es[j].frag {
+            // A record read out of an array it owns cannot be stored back into
+            // the same array, so an in-place swap of records is three copies.
+            let tmp = es[j - 1].copy()
+            es[j - 1] = es[j].copy()
+            es[j] = tmp
+            j = j - 1
+        }
+        i = i + 1
+    }
+    return sortBy(es, |e| 0 - e.count)
+}
+
+fn report(seq: Array<UInt8>, k: Int64) {
+    let m = countKmers(seq, k)
+    let mut total = 0
+    for key in m.keys() {
+        total = total + match m[key] {
+            Some(v) => v,
+            None => 0,
+        }
+    }
+    for e in ranked(m) {
+        print("\{e.frag} \{fixed3(100.0 * Float64(e.count) / Float64(total))}")
+    }
+    print("")
+}
+
+fn load(path: String) -> String {
+    if let Ok(t) = readFile(path) {
+        return t
+    }
+    print("cannot read \{path}")
+    return ""
+}
+
+fn main() -> Int64 {
+    let seq = thirdSequence(load("fasta-1000.expected"))
+    report(seq, 1)
+    report(seq, 2)
+    return 0
+}

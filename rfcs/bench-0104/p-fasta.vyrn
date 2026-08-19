@@ -1,0 +1,108 @@
+/// Probe: fasta at n = 1000, whole — the game's LCG, the weighted pick and the
+/// 60-column output, checked against `fasta-1000.expected`.
+///
+/// The doubts: the generator is specified exactly (`seed = (seed * 3877 + 29573)
+/// % 139968`, then `max * seed / IM` in floating point), so every byte of the
+/// output depends on `Int64` multiplication and an `Int64`-to-`Float64` division
+/// agreeing with C's; and the output is 10 KB of text at N = 1000 and 25 MB at
+/// the game's N, which `print` writes one line at a time.
+
+let alu = "GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGCGGGCGGATCACCTGAGGTCAGGAGTTCGAGACCAGCCTGGCCAACATGGTGAAACCCCGTCTCTACTAAAAATACAAAAATTAGCCGGGCGTGGTGGCGCGCGCCTGTAATCCCAGCTACTCGGGAGGCTGAGGCAGGAGAATCGCTTGAACCCGGGAGGCGGAGGTTGCAGTGAGCCGAGATCGCGCCACTGCACTCCAGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAA"
+
+let mut seed = 42
+
+/// The game's linear congruential generator, and the reason a fasta output is
+/// reproducible at all.
+fn nextRandom(max: Float64) -> Float64 {
+    seed = (seed * 3877 + 29573) % 139968
+    return max * Float64(seed) / 139968.0
+}
+
+/// A cumulative-probability table: pick the first symbol whose running total is
+/// above `r`.
+fn pick(syms: Array<UInt8>, cum: Array<Float64>) -> UInt8 {
+    let r = nextRandom(1.0)
+    let mut i = 0
+    while i < cum.length {
+        if cum[i] > r {
+            return syms[i]
+        }
+        i = i + 1
+    }
+    return syms[syms.length - 1]
+}
+
+fn line(w: Array<UInt8>) -> String {
+    return match stringFromBytes(w) {
+        Ok(s) => s,
+        Err(_) => "",
+    }
+}
+
+fn repeatFasta(header: String, src: String, count: Int64) {
+    print(header)
+    let b = bytes(src)
+    let mut k = 0
+    let mut todo = count
+    while todo > 0 {
+        let mut m = 60
+        if todo < m {
+            m = todo
+        }
+        let mut w: Array<UInt8> = []
+        let mut i = 0
+        while i < m {
+            w.push(b[k])
+            k = (k + 1) % b.length
+            i = i + 1
+        }
+        print(line(w))
+        todo = todo - m
+    }
+}
+
+fn randomFasta(header: String, syms: Array<UInt8>, cum: Array<Float64>, count: Int64) {
+    print(header)
+    let mut todo = count
+    while todo > 0 {
+        let mut m = 60
+        if todo < m {
+            m = todo
+        }
+        let mut w: Array<UInt8> = []
+        let mut i = 0
+        while i < m {
+            w.push(pick(syms, cum))
+            i = i + 1
+        }
+        print(line(w))
+        todo = todo - m
+    }
+}
+
+/// The running totals of `ws`, which is the form the pick needs.
+fn cumulative(ws: Array<Float64>) -> Array<Float64> {
+    let mut out: Array<Float64> = []
+    let mut p = 0.0
+    for w in ws {
+        p = p + w
+        out.push(p)
+    }
+    return out
+}
+
+fn main() -> Int64 {
+    let n = 1000
+    repeatFasta(">ONE Homo sapiens alu", alu, n * 2)
+
+    let iubSyms = bytes("acgtBDHKMNRSVWY")
+    let iubW: Array<Float64> = [
+        0.27, 0.12, 0.12, 0.27, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02,
+    ]
+    randomFasta(">TWO IUB ambiguity codes", iubSyms, cumulative(iubW), n * 3)
+
+    let humanSyms = bytes("acgt")
+    let humanW: Array<Float64> = [0.3029549426680, 0.1979883004921, 0.1975473066391, 0.3015094502008]
+    randomFasta(">THREE Homo sapiens frequency", humanSyms, cumulative(humanW), n * 5)
+    return 0
+}
