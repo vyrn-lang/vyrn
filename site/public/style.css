@@ -54,6 +54,17 @@
   --syn-num: var(--amber);
   --lane-a: var(--teal);
   --lane-b: var(--amber);
+  /* The five lines of the benchmark radar (RFC-0104 M3). Aliases, not new
+   * colours: every one of them resolves to a token `site/test/contrast.test.mjs`
+   * already measures in both palettes, and adding a sixth hue that passes in
+   * light and fails in dark is exactly what that file exists to prevent. C is
+   * deliberately the neutral — a baseline that carries an accent is competing.
+   * The two Vyrn legs share one hue and differ by a DASH, so the chart is
+   * readable with no colour vision at all. */
+  --sr-c: var(--n1);
+  --sr-rust: var(--lane-b);
+  --sr-node: var(--syn-str);
+  --sr-vyrn: var(--accent);
   /* How much accent an inline code chip carries. Two numbers, because the two
    * themes are not symmetric: the light accent is a dark navy, so one share of
    * it over warm paper is a heavy step, while the dark accent is a bright cyan
@@ -833,6 +844,86 @@ svg.chart g[data-series="yes"] { display: none; }
 svg.chart.declared g[data-series="yes"] { display: inline; }
 svg.chart.declared g[data-series="no"] { display: none; }
 
+/* The benchmark radar (RFC-0104 M3).
+ *
+ * Every coordinate in it was computed by `app/bench.vyrn` while the site was
+ * built, exactly as every bar chart above is — the script here swaps two
+ * strings and toggles two classes, and computes nothing. The colours are TOKENS
+ * and not literals for the same reason the syntax colours are: a stroke written
+ * as a hex triple two hundred lines down is a colour nothing measures.
+ *
+ * It is `role="img"` with a text alternative and it holds nothing focusable.
+ * That is deliberate and it is RFC-0105 M4's own finding: the axes, the
+ * contestants and every reading on this chart are ALSO buttons and a table
+ * directly under it, so putting thirteen more stops inside the graphic would
+ * duplicate the page's tab order rather than open it up. The wedges are a
+ * pointer convenience over controls a keyboard already reaches. */
+svg.chart.radar { max-width: 34rem; margin: 0 auto; }
+svg.chart.radar .ring { fill: none; stroke: currentColor; stroke-opacity: 0.13; stroke-width: 1; }
+/* One ring is not decoration: it is the language the chart is normalized to. */
+svg.chart.radar .ring.base { stroke-opacity: 0.45; stroke-dasharray: 3 3; }
+svg.chart.radar .axis line { stroke: currentColor; stroke-opacity: 0.1; stroke-width: 1; }
+svg.chart.radar .axis text { font-size: 9px; fill: var(--n2); }
+svg.chart.radar .names text { font-family: var(--mono); font-size: 10px; fill: var(--n2); }
+svg.chart.radar .names text.lit { fill: var(--accent); font-weight: 600; }
+svg.chart.radar .wedge { fill: transparent; }
+svg.chart.radar g.series polygon { fill: currentColor; fill-opacity: 0.07; stroke: currentColor; stroke-width: 2; stroke-linejoin: round; }
+/* The wasm leg is the same hue as the native one and a different stroke, so the
+ * two Vyrn lines read as one language on two engines. An unfilled dashed
+ * outline over a filled solid one also stops the second polygon from muddying
+ * the first. */
+svg.chart.radar g.series polygon.dashed { fill-opacity: 0; stroke-dasharray: 5 4; }
+/* A reading past the rim: the polygon stops at the rim and this continues. It
+ * is the only honest way to draw 302x on a scale that ends at 16x. */
+svg.chart.radar g.series .offscale { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+svg.chart.radar g.series.off { display: none; }
+svg.chart.radar g.marks[data-norm="rust"] { display: none; }
+svg.chart.radar.alt g.marks[data-norm="rust"] { display: inline; }
+svg.chart.radar.alt g.marks[data-norm="c"] { display: none; }
+
+/* The five series colours, wherever one is named: the polygon, the legend
+ * button, a table heading. `--k` carries the colour so the pressed-state rule
+ * below is one rule and not five. */
+/* Between the legend strip and the panels, both of which pad themselves. The
+ * shared `.tabs` margin was written for a strip that follows a plate head. */
+.tabs.axes { margin-top: 0; }
+
+.sr-c { color: var(--sr-c); --k: var(--sr-c); }
+.sr-rust { color: var(--sr-rust); --k: var(--sr-rust); }
+.sr-node { color: var(--sr-node); --k: var(--sr-node); }
+.sr-vyrn { color: var(--sr-vyrn); --k: var(--sr-vyrn); }
+
+/* A strip under the chart, inset by the same `--s2` every other part of a plate
+ * is. `.plate` carries no padding of its own — `.plate-head`, `.stage` and
+ * `.cap` each pad themselves — so a direct child that forgets to sits flush
+ * against the border, which is what this one did. */
+.serieskeys { display: flex; flex-wrap: wrap; gap: var(--s1); margin: 0; padding: var(--s2); border-top: 1px solid var(--hair); }
+.serieskeys button { font-size: 11px; padding: 7px 12px; }
+.serieskeys button::before { content: ""; display: inline-block; vertical-align: middle; width: 12px; height: 3px; margin-right: 8px; background: var(--k, currentColor); }
+.serieskeys button.dashed::before { background: repeating-linear-gradient(90deg, var(--k) 0 4px, transparent 4px 7px); }
+.serieskeys button[aria-pressed="true"] { color: var(--k); border-color: var(--k); }
+.serieskeys button[aria-pressed="false"] { opacity: 0.5; text-decoration: line-through; }
+
+/* The eight axis panels, and there is deliberately no rule here that hides
+ * seven of them. With no script every one is on the page, one after another,
+ * which is the eight findings as a list — a fair thing to read, and the only
+ * place the NAMED CAUSES appear at all. The tab group hides the other seven
+ * with `hidden` once it mounts, so what the markup ships is what a reader gets
+ * if the script never arrives. A CSS rule doing it first would have made the
+ * causes reachable only by script, which is the opposite of a fallback.
+ *
+ * The box is a `.stage`, which is where its inset comes from — the same one the
+ * chart above it sits in. It was a bare `<div>` and every row of it ran into
+ * the plate's border. */
+.axispanes > div:first-child { padding-top: 0; }
+.axispanes > div { padding-top: var(--s2); }
+/* A panel is narrower than the page, and 46rem of minimum would put a scrollbar
+ * under a five-column table that fits. */
+.axispanes table.matrix { min-width: 0; margin-top: var(--s2); }
+.axispanes .eyebrow { margin: 0; }
+.axispanes .note { display: block; color: var(--muted); font-size: 0.92rem; margin: var(--s2) 0 0; }
+.axispanes .note + .note { margin-top: var(--s1); }
+
 /* -------------------------------------------------------------------------
    Tables and comparison
    ------------------------------------------------------------------------- */
@@ -858,6 +949,27 @@ table.matrix th.yes { color: var(--accent); }
 table.matrix td.yes { color: var(--ink); font-weight: 520; }
 table.matrix td { padding-right: var(--s2); }
 table.matrix tbody tr:hover td, table.matrix tbody tr:hover th { background: color-mix(in oklab, var(--accent) 7%, transparent); }
+
+/* The benchmark table: a median, and the same figure normalized two ways under
+ * it. It is the chart's fallback and it is on the page whether the script
+ * arrives or not — a chart with no table beside it invites distrust. */
+table.matrix.bench th[scope="row"] { text-transform: none; letter-spacing: 0; width: 11rem; }
+/* A cell holds two lines here, not one, so it takes MORE air than the shared
+ * rule gives and not less. The first version cut the row padding to 6px and the
+ * eight rows read as one block of type. */
+table.matrix.bench th, table.matrix.bench td { padding-block: var(--s2); }
+table.matrix.bench .ms { display: block; color: var(--ink); }
+table.matrix.bench .norm { display: block; font-size: 0.78rem; color: var(--n2); }
+table.matrix.bench td.n { font: 11px/1.6 var(--mono); color: var(--n2); }
+table.matrix.bench td.runs code { font-size: 10px; white-space: nowrap; }
+/* A reading whose within-run spread is over 15% is one measured near the
+ * process floor. Saying so beside it is cheaper than a footnote nobody reads. */
+table.matrix .flag { color: var(--amber); font: 10px/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; }
+table.matrix caption { caption-side: bottom; text-align: left; padding-top: var(--s2); font-size: 0.85rem; color: var(--muted); }
+
+ol.plain { list-style: decimal; padding-left: var(--s3); margin: var(--s3) 0 0; }
+ol.plain li { padding: var(--s1) 0; }
+ol.plain .note { display: block; color: var(--muted); font-size: 0.92rem; }
 
 /* `.row` used to be a comparison section here. No page has carried one since the
  * matrix replaced it, and the only `class="row"` left in the site is the `<g>`

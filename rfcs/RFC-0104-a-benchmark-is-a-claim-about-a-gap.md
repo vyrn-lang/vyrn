@@ -1,11 +1,16 @@
 # RFC-0104 — A Benchmark Is a Claim About a Gap
 
-- **Status:** **M0, M1 and M2 landed** (the census, see
-  [M0 — as landed](#m0--as-landed) and `rfcs/bench-0104/`; the eight programs,
-  see [M1 — as landed](#m1--as-landed) and `examples/`; the harness and the
-  numbers, see [M2 — as landed](#m2--as-landed) and
-  `rfcs/bench-0104/harness/` + `rfcs/bench-0104/results/`). M3 proposed.
-  Milestones below; a milestone that fails its gate says so in this file.
+- **Status:** **Implemented (M0–M3).** The census answered every row by running
+  a program ([M0](#m0--as-landed), `rfcs/bench-0104/`); the eight expressible
+  programs are idiomatic corpus citizens ([M1](#m1--as-landed), `examples/`);
+  five contestants were verified byte-identical and then timed twice
+  ([M2](#m2--as-landed), `rfcs/bench-0104/harness/` +
+  `rfcs/bench-0104/results/`); and the radar is on `/compare` with the whole
+  dataset behind it ([M3](#m3--as-landed), `site/app/bench.vyrn`). The arc ends
+  where the claim said it should: every deviation is a named defect or a named
+  missing feature, ten work items came out of it, and no number on the site was
+  typed in by hand. Milestones below; a milestone that fails its gate says so in
+  this file.
 - **Depends on:** RFC-0055 (bench blocks, `blackBox`, `vyrn bench`), RFC-0102
   (toolchain pinning — what "measured against wasmtime 46.0.1" means is now a
   lock line), RFC-0101 (the direct wasm backend whose optimizer gap this arc
@@ -137,10 +142,11 @@ and commits JSON plus the environment record. Gate: the committed dataset
 reproduces on a second run within stated noise, and every Vyrn deviation from
 Rust beyond noise has a named cause filed in this document.
 
-**M3 — the interactive chart.** The radar as specified above, on `/compare`,
-with the backstage carrying the full data. Gate: the chart works without
-script (table fallback), the interactions work with keyboard alone, and the
-page passes the site's accessibility pass (RFC-0105 M4's checklist).
+**M3 — the interactive chart.** *Landed — see [M3 — as landed](#m3--as-landed).*
+The radar as specified above, on `/compare`, with the backstage carrying the full
+data. Gate: the chart works without script (table fallback), the interactions
+work with keyboard alone, and the page passes the site's accessibility pass
+(RFC-0105 M4's checklist).
 
 ## M0 — as landed
 
@@ -872,6 +878,179 @@ what this milestone exists to produce.
 5. **The 0.5–5 s sizing rule cannot be applied symmetrically.** It was written
    as if one N could put every contestant in band. k-nucleotide has no such N,
    because the two ends of that row are not on the same curve.
+
+## M3 — as landed
+
+Gate met on all three legs. The page answers with the script switched off — the
+eight-row table and all eight named causes are in the exported markup, not
+written by it. Every interaction is a button: the axes are a tab group with
+arrow keys, Home and End, the legend is five toggles, and the normalization is a
+pair. And the chart passes RFC-0105 M4's checklist, including its own finding
+about `role="img"`.
+
+No compiler code was touched. M3 is `site/`, one stylesheet block, one widget,
+and this section.
+
+### What shipped
+
+- **`site/app/bench.vyrn`** — the whole of it. It reads the two committed JSON
+  records, computes the radar's geometry in both normalizations, and produces
+  the table, the eight axis panels and every caption. 15 test blocks.
+- **`/compare` section 08** — the radar, a legend, an axis tab strip, eight
+  panels, and the full numbers table under it.
+- **`/backstage/benchmarks`** — both runs cell by cell, the drift between them,
+  the ten raw readings behind every median, the environment down to wasmtime's
+  sha256, the process floor, the named causes, the ten work items, and the
+  game's published ceiling.
+- **Four palette tokens** (`--sr-c`, `--sr-rust`, `--sr-node`, `--sr-vyrn`) and
+  eight new rows in `site/test/contrast.test.mjs`. Each is an alias of a colour
+  the checker already measured, so the chart's strokes are held to the same bar
+  as the syntax colours — 3:1 as a graphic that carries meaning, 4.5:1 where the
+  same token is the legend's label text. Both palettes pass.
+
+### The scale, which is the one decision this milestone had to make
+
+The measured ratios span **0.24× to 302×**. No linear radial axis carries both
+ends: on a scale that reaches k-nucleotide's 287×, every other point is a dot at
+the centre, and the chart says nothing about the seven rows a reader came for.
+
+The axis is **log₂ around the baseline**: the centre ring is ⅛ of it, every ring
+out is a doubling, the rim is 16×. So "one ring further out" reads as "twice as
+slow" everywhere on the chart, and the ring at 1× — the only one that means
+*the same time as the language this is normalized to* — carries the emphasis.
+
+**A reading past the rim is drawn AT the rim and says so.** Its spoke carries a
+stroke continuing outward with the exact figure in its `title`, and the figure
+is also in the table below, in that axis's panel and on the backstage page.
+Three readings are drawn that way against C — reverse-complement's wasm leg at
+46.29×, and both of k-nucleotide's Vyrn legs at 287× and 302× — and four against
+Rust. `no cell is ever silently truncated` counts the clamped cells and the
+marks and fails if they ever differ, which is what stops a future dataset from
+flattening a reading into the rim with nothing to say so. Nothing falls off the
+inner end: the fastest cell in the set is 0.24×, three rings out from the centre,
+and the clamp at that end is a rule that has never fired.
+
+**Further from the centre is slower**, which is the opposite of the usual radar
+convention and is stated on the page. Inverting it would have put the chart at
+odds with every table in this document.
+
+### The three implementation decisions, and why
+
+**The normalization switch swaps precomputed coordinates; it computes nothing.**
+Each polygon ships its C = 1 points in `points` and its Rust = 1 points in
+`data-alt`, and the off-scale marks ship as two groups the stylesheet shows one
+of. This is the site's own rule — Vyrn computes the geometry at build time,
+JavaScript moves one value — and it means the switch cannot disagree with the
+build.
+
+**The record is read by slicing it, not by parsing it.** `std/jsonread` is a
+real JSON reader and this is not one. It is also **72 seconds** on one of these
+two files, measured, under the interpreter that runs `vyrn run site/export.vyrn`
+— two and a half minutes on every build for a document whose shape is fixed by
+the program that writes it. `run.py` emits `json.dump(indent=2)`, so every key
+sits at a known depth and `indexOf` and `substring` cut it exactly; the whole
+read is 0.3 seconds. The shape is not assumed: `the record still has the shape
+this reader cuts` reads all forty cells and fails the build the day `run.py`
+changes its output.
+
+**The axis panels are `tabsWidget`'s, not the radar's.** The site already had a
+tab group with a roving tabindex, arrow keys, Home and End, paired ids and
+`aria-selected`; the radar returns that group's `select` and the SVG's hover
+wedges call it. So hovering an axis and tabbing to it land in one state rather
+than two states that look alike — and the spoke highlight *reads the selection
+back* rather than remembering it, which is the fix for the one defect found in
+the browser: the first version listened for `focus`, and an arrow-key walk moved
+the panel while leaving the spoke lit on the axis before it.
+
+### The accessibility pass
+
+- **`role="img"` with a text alternative, and nothing focusable inside the SVG**
+  — RFC-0105 M4's own finding, applied. Its opposite call was the import graph
+  on `/docs`, whose nodes are named and keyboard-reachable *because nothing else
+  on that page says who imports whom*. Here every axis, every contestant and
+  every reading is also a button or a table cell directly under the chart, so
+  thirteen stops inside the graphic would have duplicated the page's tab order
+  rather than opened it up. Checked on the exported markup: zero `a[href]`,
+  `button` or `[tabindex]` inside the radar.
+- **Keyboard alone.** Verified by walking the exported page: Tab reaches the
+  group once, ArrowRight/ArrowLeft move through all eight axes with the panel
+  and the lit spoke following together, Home and End jump to the ends, and the
+  legend and normalization controls are ordinary buttons carrying `aria-pressed`.
+- **Without script.** The exported HTML holds the SVG, the full 8 × 7 table with
+  its environment caption, and **all eight panels with all eight named causes**.
+  There is deliberately no CSS rule hiding seven of them: the tab group hides
+  them with `hidden` once it mounts, so what the markup ships is what a reader
+  without script gets. An earlier version had the stylesheet hide them first,
+  which would have made the causes reachable only by script — the opposite of a
+  fallback.
+- **Reduced motion.** By construction: this widget animates nothing. There is no
+  `requestAnimationFrame`, no transition on anything it changes, and the page
+  reports zero running CSS animations.
+- **Both palettes.** Every stroke on the chart resolves through a token in the
+  measured block — confirmed by reading the computed `stroke` under
+  `data-theme="light"` and `data-theme="dark"` and seeing it change. The two
+  Vyrn legs share one hue and differ by a **dash**, so the chart is separable
+  with no colour vision at all.
+
+### The published ceiling
+
+Fetched 2026-08-19 from `benchmarksgame-team.pages.debian.net` — the
+`.pages.dev` host did not resolve — and recorded on the backstage page with that
+date and host. Each Rust figure was cross-checked against two pages of the site
+and agreed to the rounding. No source code was read or copied, which is the
+third principle's own rule.
+
+**The rows may not be divided into ours, and the page says so in bold.** The
+game runs every program at its own N — 50,000,000 steps of nbody where this
+dataset runs 25,000,000, fannkuch-redux at n = 12 against n = 11, binary-trees at
+depth 21 against 18 — on its own machine with its own compilers. A ratio across
+those two worlds is arithmetic on unlike quantities. They are on no chart and in
+no ratio; they answer the one question they can, which is how far a hand-tuned
+entry sits from a plainly written one in the same language. One caveat travels
+with them: the N column comes only from the game's per-language measurements
+page, and was matched to the per-program pages by the times agreeing rather than
+by those pages stating N.
+
+### The tuned overlay is moot, and stays moot
+
+"The chart" above specifies an overlay toggle showing both Vyrn lines *where a
+tuned variant exists*. **None exists.** M1 shipped eight idiomatic programs and
+M2 measured them; no tuned variant was written, because principle 2 makes one
+worth writing only where the idiom measurably loses AND somebody has done the
+work. So the clause is recorded as **not applicable at M3** rather than built
+against an empty set — a toggle with one line under it is a control that lies
+about what the page has. The five work items that would produce a tuned variant
+worth charting are in M2's list; when one lands, the overlay is a sixth polygon
+in `radarLines` and a sixth legend button, and the geometry already takes it.
+
+### What contradicted the RFC
+
+1. **M2's cell count was wrong, and this milestone's own arithmetic found it.**
+   That section says "Thirty-six of the forty cells moved by less than 5%".
+   Recomputed from the two committed records — which is what the backstage page
+   does on every build — it is **thirty-four**. Every other noise figure M2
+   states reproduces to the digit (median 1.9%, 95th percentile 8.6%, worst
+   9.49% on binary-trees/Rust), and they reproduce *only* with the first run as
+   the denominator, which pins the convention M2 did not state. The corrected
+   count is what the page prints, because the page computes it; this paragraph
+   is here so the two documents do not disagree.
+2. **`/compare` said this chart could not be made honestly, and that claim is
+   now retired.** Its speed section carried: "There is no cross-language chart
+   here: that would need a second program written by us in someone else's
+   language, and a reader would have to take on trust that we wrote it well."
+   The objection was real and it is answered rather than ignored — the sources,
+   the discipline, the flags, the byte-for-byte verification and every raw
+   reading are published. A reader still has to judge whether the C, Rust and
+   JavaScript were written well; what changed is that there is now something to
+   judge. The paragraph on the page says exactly that, one section above the
+   chart.
+3. **A chart is not finished until it has been measured in a browser.** Two axis
+   names — `k-nucleotide` and `fannkuch-redux`, the two horizontal spokes — ran
+   off the sheet by 22 and 34 units. Nothing in the build could see it: the
+   geometry was right and the *type* was what overflowed. It was found with
+   `getBBox` on the exported page and is now pinned by `no axis name runs off the
+   sheet`, which is the same lesson `chart.vyrn`'s own layout rule records about
+   a label above a bar.
 
 ## What this RFC does not do
 
