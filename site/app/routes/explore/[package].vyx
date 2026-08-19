@@ -1,28 +1,30 @@
 <script>
-// GET /explore/[package] — one package (RFC-0105 M2).
+// GET /explore/[package] — one package, and the story of installing it
+// (RFC-0105 M2, amended).
 //
 // Everything on this page is read off the package's own files while the site
-// compiles: the exports and their signatures from `std/*.vyrn` by the compiler's
-// own lexer, the dependencies from the `import` lines themselves, and a
-// project's artifacts from its `vyrn.json`.
+// compiles: the artifacts from its `vyrn.json`, the module it offers and that
+// module's export names from the source, and the standard library modules it
+// needs from the `import` lines under it.
 //
-// THE LINE A READER COPIES is the point of the page. For a module it is a real
-// `import` naming every export the reference renders, carried in the markup as
-// `data-import` as well as in the box — `site/test/importline.test.mjs` reads
-// that attribute out of the EXPORTED html, writes each line into a program of
-// its own, and runs `vyrn check` on it. A line that does not compile fails the
-// build.
+// THE SPECIFIER IS THE POINT OF THE PAGE. It is carried in the markup as
+// `data-spec` as well as in the box, and `site/test/importline.test.mjs`
+// re-parses every one of them with the grammar
+// `compiler/vyrn-cli/src/remote.rs` applies. A line that reads like a command
+// and does not resolve is worse than no line: the reader types it, the compiler
+// refuses, and the page was the one that lied.
 //
-// No prose is restated here. What a module is for is the reference's job, and
-// the page links there.
-import { Package, Artifact, PkgLink, packageKnown, packageOf, packageDeps, packageSource, docsHref, importLine, manifestText, artifactsOf, packageExports, exportHref } from "../../packages"
-import { ApiEntry } from "../../docs"
+// The two file shapes are shapes, not transcripts. The commit `@main` resolves
+// to and the sha256 of the fetched bytes are the two facts a page built from a
+// checkout cannot know, and they are shown as what they are rather than as
+// numbers somebody might copy.
+import { Package, Artifact, PkgLink, Offer, packageKnown, packageOf, packageDeps, packageSource, offerOf, addCommand, manifestShape, lockShape, importFrom, artifactsOf } from "../../packages"
 import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
 import { pageHead } from "../../nav"
 params { package: String }
 
 export fn head(d: Package) -> Head {
-    return pageHead(d.name + " — Vyrn packages")
+    return pageHead(d.name + " — the Vyrn registry")
 }
 
 export fn data() -> ParamQuery<Params, Result<Package, PageError>> {
@@ -36,22 +38,13 @@ fn fetchPackage(p: Params) -> Result<Package, PageError> {
     return Ok(packageOf(p.package))
 }
 
-/// Whether this package is a standard library module. The two kinds share the
-/// page and differ in what they can be asked for: a module has exports and an
-/// import line, a project has artifacts and a manifest.
-fn isModule(d: Package) -> Bool {
-    return d.kind == "std"
-}
-
-/// `1 export`, `44 exports`, `2 artifacts`.
+/// `1 export`, `14 exports`. A count and its noun disagreeing is the sort of
+/// thing a reader takes as a sign that nothing here was read.
 fn unitLabel(d: Package) -> String {
-    let one = if isModule(d) { "export" } else { "artifact" }
-    return if d.exports == 1 { "1 " + one } else { d.exports.toString() + " " + one + "s" }
+    return if d.exports == 1 { "1 export" } else { d.exports.toString() + " exports" }
 }
 
-/// `no dependencies`, `1 dependency`, `6 dependencies`. A count and its noun
-/// disagreeing is the sort of thing a reader takes as a sign that nothing here
-/// was read.
+/// `no dependencies`, `1 dependency`, `6 dependencies`.
 fn depLabel(d: Package) -> String {
     if d.deps == 0 {
         return "no dependencies"
@@ -59,54 +52,73 @@ fn depLabel(d: Package) -> String {
     return if d.deps == 1 { "1 dependency" } else { d.deps.toString() + " dependencies" }
 }
 
-/// The file a package's source link opens: the module, or the project directory.
-fn sourceLabel(d: Package) -> String {
-    return if isModule(d) { d.name + ".vyrn" } else { d.name + "/" }
+/// `1 artifact`, `2 artifacts` — what the project builds, which is a different
+/// question from what it offers.
+fn buildLabel(d: Package) -> String {
+    let n = artifactsOf(d.slug).length
+    return if n == 1 { "1 artifact" } else { n.toString() + " artifacts" }
 }
 </script>
 
 <template>
 <main class="page">
     <aside class="rail">
-        <a href="#use"><span class="n">01</span>use it</a>
+        <a href="#use"><span class="n">01</span>install it</a>
         <a href="#api"><span class="n">02</span>what it gives</a>
         <a href="#deps"><span class="n">03</span>what it needs</a>
     </aside>
 
     <section class="hero">
-        <p class="eyebrow"><a href="/explore.html">Packages</a> — {{ data.kind }}</p>
+        <p class="eyebrow"><a href="/explore.html">Registry</a> — {{ data.kind }}</p>
         <h1 class="display">{{ data.name }}</h1>
         <p class="lede" v-html="data.summary"></p>
-        <p class="notice"><a :href="packageSource(data.slug)">Read the source</a> — <code>{{ sourceLabel(data) }}</code>, the one thing this site does not host.</p>
+        <p class="notice"><a :href="packageSource(data.slug)">Read the source</a> — <code>{{ data.name }}/</code>, the one thing this site does not host.</p>
     </section>
 
     <section class="band" id="use">
-        <p class="eyebrow">01 — use it</p>
-        <h2 v-if="isModule(data)">The line you copy</h2>
-        <h2 v-if="!isModule(data)">The manifest it declares</h2>
-        <p v-if="isModule(data)">Every name this module exports, in one <code>import</code>. Take the ones you want; the compiler will tell you about the rest. This line is compiled as a program of its own on every build, so it is a line that builds and not a line that reads like one.</p>
-        <p v-if="!isModule(data)">A project is not something you import. It is a directory with a manifest, and this is the manifest: what it builds, from which entry point, and where each artifact runs.</p>
+        <p class="eyebrow">01 — install it</p>
+        <h2>One command</h2>
+        <p>This package is a directory in a public repository, so its specifier is that repository, a ref, and a path. <code>vyrn add</code> fetches it, hashes it, pins it and records the alias — you type this once.</p>
         <div class="cmd" data-copy>
-            <code v-if="isModule(data)" :data-import="importLine(data.slug)">{{ importLine(data.slug) }}</code>
-            <code v-if="!isModule(data)">{{ manifestText(data.slug) }}</code>
+            <code :data-spec="offerOf(data.slug).spec">{{ addCommand(data.slug) }}</code>
             <button type="button" data-copy-btn aria-label="Copy it">Copy</button>
         </div>
-        <p class="cap" v-if="!isModule(data)">Read from <code>{{ data.name }}/vyrn.json</code> while this page was built.</p>
+        <p class="cap">The ref is <code>main</code>, the branch this site is built from, so what is listed below is what you get. Write a tag instead — the releases are on <a href="/releases.html">the releases page</a> — and everything else is the same.</p>
+
+        <h3>What it writes</h3>
+        <p>Two files, both in your project. <code>vyrn.json</code> gains the alias, which is the name your <code>import</code> lines use — appended after the keys you already had:</p>
+        <pre class="code">{{ manifestShape(data.slug) }}</pre>
+        <p><code>vyrn.lock</code> gains a line: the specifier, the immutable URL it resolved to, and the sha256 of the bytes. Tab-separated, sorted, one per pinned file. The hash is verified on every load afterwards, so an upstream that changes under a pinned URL fails the build rather than changing your program.</p>
+        <div class="scroller">
+        <pre class="code">{{ lockShape(data.slug) }}</pre>
+        </div>
+        <p class="cap"><code>&lt;commit&gt;</code> is the 40 hex digits <code>main</code> pointed at when you ran it, and <code>&lt;sha256&gt;</code> the 64 hex digits of the bytes it fetched. They are the two facts this page cannot know — nothing has been fetched — and <code>vyrn add</code> writes both.</p>
+
+        <h3>Then you import it</h3>
+        <p>The alias is a bare specifier the manifest maps, so the module reads like any other:</p>
+        <div class="cmd" data-copy>
+            <code>{{ importFrom(data.slug) }}</code>
+            <button type="button" data-copy-btn aria-label="Copy it">Copy</button>
+        </div>
     </section>
 
     <section class="band" id="api">
         <p class="eyebrow">02 — what it gives</p>
         <h2>{{ unitLabel(data) }}</h2>
-        <p v-if="isModule(data)">The signature as it is written in the source. The prose above each one is on <a :href="docsHref(data.slug)">the reference page</a>, which is generated from the same declarations — this list is the inventory, not a second copy of the documentation.</p>
-        <ul class="exports" v-if="isModule(data)">
-            <li v-for="e in packageExports(data.slug)" :key="e.name">
-                <a :href="exportHref(data.slug, e.name)">{{ e.name }}</a>
-                <span class="kindpill">{{ e.kind }}</span>
-                <pre class="code" v-html="e.sig"></pre>
-            </li>
-        </ul>
-        <p v-if="!isModule(data)">One row per artifact. The target is a capability declaration rather than a build flag: a browser has no filesystem, and no edit to the manifest can give it one.</p>
-        <div class="scroller" v-if="!isModule(data)">
+        <p>The specifier above names <code>{{ offerOf(data.slug).path }}</code>: the module with the most exports that this project does not itself build from. An entry point is what a project BUILDS; this is what it gives away. Any other module in the tree takes the same specifier with its own path in it.</p>
+        <dl class="specs">
+            <div>
+                <dt>Exports</dt>
+                <dd class="links">
+                    <code v-for="e in offerOf(data.slug).exports" :key="e">{{ e }}</code>
+                </dd>
+            </div>
+        </dl>
+        <p class="cap">Read off <code>{{ data.name }}/{{ offerOf(data.slug).path }}</code> while this page was built. A relative import inside a fetched module resolves inside the same pinned tree, so what this one reaches arrives with it — each file with a lock line of its own.</p>
+
+        <h3>{{ buildLabel(data) }}</h3>
+        <p>What the project builds, if you clone it rather than depend on it. The target is a capability declaration rather than a build flag: a browser has no filesystem, and no edit to the manifest can give it one.</p>
+        <div class="scroller">
         <table>
             <thead>
                 <tr><th>Artifact</th><th>Entry</th><th>Target</th></tr>
@@ -120,12 +132,13 @@ fn sourceLabel(d: Package) -> String {
             </tbody>
         </table>
         </div>
+        <p class="cap">Read from <code>{{ data.name }}/vyrn.json</code> while this page was built.</p>
     </section>
 
     <section class="band" id="deps">
         <p class="eyebrow">03 — what it needs</p>
         <h2>{{ depLabel(data) }}</h2>
-        <p>Every package this one pulls in, read from its own <code>import</code> lines by the compiler's lexer. Nothing else: the standard library depends on no registry, and neither does anything here.</p>
+        <p>Standard library modules, and nothing else — this package depends on no registry, because there is none. Every one of them arrives with the compiler, so none of them is a fetch; each link opens its page on the reference.</p>
         <dl class="specs">
             <div>
                 <dt>Depends on</dt>
@@ -135,7 +148,7 @@ fn sourceLabel(d: Package) -> String {
                 </dd>
             </div>
         </dl>
-        <p class="cap" v-if="isModule(data)">The whole import graph, with this module in it, is on <a href="/docs.html#graph">the reference</a>.</p>
+        <p class="cap">Read from the <code>import</code> lines under <code>{{ data.name }}/</code> by the compiler's own lexer.</p>
     </section>
 </main>
 </template>

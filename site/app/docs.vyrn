@@ -11,7 +11,7 @@
 import { apiDocs } from "./apidoc"
 import { docModules, docSummary, docIntro, docNames, docKinds, docSigs, docProse, docLines, docTests, docCount } from apiDocs("../../std")
 import { startsWith } from "std/strpred"
-import { substring, trimStart } from "std/strings"
+import { substring, trimStart, joinWith, indexOf } from "std/strings"
 import { hrefOf } from "./nav"
 import { blob } from "./repo"
 
@@ -109,6 +109,28 @@ export fn apiSourceLine(m: String, line: Int64) -> String {
     return apiSource(m) + "#L" + line.toString()
 }
 
+/// The `import` line for a module, naming every export the reference renders.
+///
+/// A reference that says what a name means and leaves the reader to work out how
+/// to write it down is half a page. Every name in this line is an export read
+/// off the source, so the line is right by construction — and it is COMPILED as
+/// its own program by `site/test/importline.test.mjs`, because "right by
+/// construction" is a claim and the gate is the proof.
+///
+/// It moved here from the explorer when the explorer stopped listing std
+/// modules: the reference is where a module is described, so it is where the
+/// line that takes one belongs.
+export fn importLine(m: String) -> String {
+    if !apiKnown(m) {
+        return ""
+    }
+    let mut names: Array<String> = []
+    for e in apiEntries(m) {
+        names.push(e.name.copy())
+    }
+    return "import { " + joinWith(names, ", ") + " } from \"std/" + m + "\""
+}
+
 /// How many times the byte `b` occurs in `s`. Only the balance gate below uses
 /// it, and it lives here because this is where the real signatures are.
 fn countByte(s: String, b: UInt8) -> Int64 {
@@ -189,4 +211,17 @@ test "a summary does not repeat the module's own name" {
 test "a module page and its source are one link each" {
     assertEq(apiHref("json"), "/docs/std/json.html")
     assertEq(apiSourceLine("json", 12), "https://github.com/vyrn-lang/vyrn/blob/main/std/json.vyrn#L12")
+}
+
+test "a module's import line names every export it has" {
+    let line = importLine("math")
+    assert(startsWith(line, "import { min, max, "))
+    for e in apiEntries("math") {
+        assert(match indexOf(line, " " + e.name) {
+                Some(at) => true,
+                None => false,
+            })
+    }
+    // Nothing that is not a module has one.
+    assertEq(importLine("nope"), "")
 }

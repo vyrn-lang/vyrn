@@ -184,7 +184,7 @@ fn commands() -> Array<Command> {
             <p class="eyebrow">05 — the other two ways in</p>
             <h2>A book, and a registry</h2>
             <p><a href="/guide.html">The guide</a> teaches the language in order: thirteen chapters, from the first program to a web application. Every code block in it is a program this site compiled and ran while the page was built, so nothing in the book is an illustration.</p>
-            <p><a href="/explore.html">The packages</a> are the other way in. This page answers what a module does; that one answers what it costs to depend on it — the exports and dependencies of every standard library module and every example project, with the line you copy to use it.</p>
+            <p><a href="/explore.html">The registry</a> answers a different question. Nothing in <code>std/</code> is there: the standard library arrives with the compiler, and this page is its one home. The registry lists what you can pull into a project from OUTSIDE it — a specifier, the command that pins it, and what the pin writes into <code>vyrn.json</code> and <code>vyrn.lock</code>.</p>
         </section>
 </main>
 </template>

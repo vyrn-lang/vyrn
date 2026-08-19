@@ -2,7 +2,7 @@
 
 - **Status:** **Implemented.** Four milestones and four pull requests. The
   backstage carries the design record and no consumer navigation row reaches it;
-  `/docs` is the one reference and `/explore` is the package explorer; `/editors`
+  `/docs` is the one reference and `/explore` is the registry; `/editors`
   names the file behind every feature it claims; and the theme control, the two
   measured palettes and the accessibility checklist are in
   [M4 — as landed](#m4--as-landed). Milestones below; a milestone that fails its
@@ -14,7 +14,9 @@
   consumer website part", "what about \"crates\" website explorer? At this
   moment docs and explore pages are same, chart and search should be moved to
   docs page", "there also must be info about support in code editors", "what
-  about accessibility stuff on website, theme configuration".
+  about accessibility stuff on website, theme configuration", and after M2
+  shipped: "there is hole on explore pages, also it still shows in-repo modules,
+  while I asked something like crates.io or lib.rs".
 
 ---
 
@@ -48,6 +50,15 @@ exports, dependencies, docs link, and the import line a user copies — covering
 `std/` modules and the repository's example projects today, with the page
 schema ready for remote (`github:`) packages when a community exists. No
 module list is rendered twice.
+
+[Amended after M2 shipped. "Covering `std/` modules" was the mistake, and the
+reader who asked for the explorer said so: "it still shows in-repo modules,
+while I asked something like crates.io or lib.rs". A registry lists what you can
+install; `std/` arrives with the compiler and nobody installs it, so a card per
+module was the reference again in a different frame. `/explore` lists packages
+with a remote specifier and nothing else, and `/docs` is the standard library's
+one home. [M2 — the registry, as landed](#m2--the-registry-as-landed) is the
+correction in full.]
 
 **Editors get a page.** `/editors`: the VS Code extension, what it does (the
 LSP feature table, matched against `editor/vscode` reality, with per-feature
@@ -271,6 +282,185 @@ their own — a package page is a few kilobytes rendered from a lookup, not 25 K
 of markdown, so the reason M1 moved the record pages out does not apply to
 these. One run of each, on one machine, which is enough to say what changed and
 what did not.
+
+### M2 — the registry, as landed
+
+The milestone above shipped and was wrong about one thing, and the reader who
+asked for the explorer said which: *"there is hole on explore pages, also it
+still shows in-repo modules, while I asked something like crates.io or
+lib.rs"*. Both halves are answered here, in this section, because the paragraph
+they correct is above and a correction filed somewhere else is a correction
+nobody reads.
+
+**The model was wrong, not the styling.** M2 kept `std/` modules as the
+explorer's content and gave them a card each. That is the reference again in a
+different frame: a card can say `std/json` has 21 exports and 0 dependencies,
+and a reader learns nothing about DEPENDING on it, because nobody depends on
+`std/` — it arrives with the compiler and no line of any manifest names it. What
+lib.rs and crates.io list is what you can install into a project you did not
+write. Vyrn has exactly one way to do that (RFC-0010 M4): a remote specifier,
+fetched once, pinned by sha256 in `vyrn.lock`. So a package is a thing with a
+specifier, and `/explore` lists those and nothing else. `std/` is documented on
+`/docs` and installed nowhere.
+
+**What moved, and where it went.**
+
+| What | Was | Is |
+|---|---|---|
+| The 37 `std` cards and their pages | `/explore` and `/explore/<module>` | **Gone.** A std module is not a package; `/explore/json` is a 404, checked by a test |
+| The import line a reader copies, with every real export name | `/explore/<module>` | **`/docs/std/<module>`**, section "Take it" — the reference is where a module is described, so it is where the line that takes one belongs. `importLine` moved from `packages.vyrn` to `docs.vyrn` with it |
+| A package's `std/` dependencies | linked to `/explore/<module>` | linked to `/docs/std/<module>` — the only place a module is described |
+| The search and the import graph | already moved by M2 | unchanged on `/docs` |
+| The card grid, the per-package page, the four card questions | `/explore` | unchanged in shape, four packages instead of forty-one |
+
+**What a package is now.** A directory under `examples/` with a `vyrn.json`,
+fetchable from `github.com/vyrn-lang/vyrn`. Four exist. Nothing else does: no
+Vyrn package is published outside this repository, and none was invented to make
+the grid look fuller — `/explore`'s third section says so in a sentence rather
+than leaving a reader to infer it from four cards. The `Package` record kept its
+shape; what changed is which sources fill it.
+
+**What a package offers, and the rule that picks it.** A project declares
+artifacts, and an artifact's entry module is what the project BUILDS. What it
+gives away is something else: the module with the most exports that is not one
+of its own entry points. That rule is two lines and it lands on the wire
+contract in all four projects — `shelf` and `fullstack` on `shared/wire.vyrn`,
+`bin` on `shared/wire/paste.vyrn`, `leak` on `shared/format.vyrn` — where "the
+module with the most exports" alone would have recommended `client/boot.vyrn`, a
+browser entry point, to two of them. The specifier names that module, the
+`import` line names its exports, and a reader who wants another module in the
+tree writes the same specifier with a different path, which the page says.
+
+The card's summary follows the same module. M2 read a project's one line off
+its first ENTRY module's header, and the cards said things like *"The native
+artifact's entry point — artifacts.api, target native."* — a sentence about the
+half you do not get. It is the offered module's header now, so `examples/shelf`
+reads *"The shelf wire types: the validated records and scalars that cross the
+RPC boundary, in their own leaf module."* One rule picks the module, and the
+specifier, the export list, the card's count and the card's sentence are all
+about it.
+
+Two consequences worth writing down. The export names are read by a LINE scan
+rather than by the compiler's lexer, because `lex` is only available during
+generation and these files are read while the page renders; the rule is written
+out in `exportNames` and pinned by counting two real files. And a relative
+import inside a fetched module resolves inside the same pinned tree
+(`loader.rs`, `remote_base`), never onto the reader's disk — so a package that
+spans several files arrives whole, each file with a lock line of its own, and
+the page says that too.
+
+**The install story, in the shapes the files actually take.** Each package page
+carries the specifier, the `vyrn add` line, what lands in `vyrn.json`, what
+lands in `vyrn.lock`, and the `import` line that follows. The manifest block is
+indented with four spaces because that is what `vyrn add` writes. The lock line
+is the specifier, the immutable URL and the sha256, tab-separated — with the
+commit and the hash shown as the two facts a page built from a checkout cannot
+know, rather than as numbers somebody might copy. The ref is `@main` and not the
+release tag, deliberately: this site is built from `main` and read the files off
+`main`, so the ref it prints is the ref whose contents it described. Floating is
+not unpinned — `vyrn add` resolves the branch to a commit once and freezes it.
+
+**The gate, rethought for a specifier.** M2's gate compiled every import line. A
+`github:` specifier cannot be checked that way: resolving one is a `git
+ls-remote` and fetching one is a `curl`, and a gate that needs the network is a
+gate that fails on a train. So the gate is split in three, and each part checks
+what it can check honestly.
+
+- **The import lines still compile**, 37 of them, unchanged — the same
+  `site/test/importline.test.mjs` reading `data-import` out of the exported
+  tree, now off `out/docs/std/` where the lines moved.
+- **Every specifier is re-parsed by the compiler's own grammar.**
+  `resolve_to_url` in `compiler/vyrn-cli/src/remote.rs` is forty lines of three
+  rules that have not moved since RFC-0010 M4; `resolveToUrl` in the same test
+  file is those rules in JavaScript, and every `data-spec` off the exported
+  registry pages must go through it to the URL the page says it names. The port
+  is checked against the compiler's own unit test in the same block — the four
+  shapes `resolve_to_url_shapes` asserts, asserted here — so the two cannot
+  drift without the test saying so. A second block asserts the five refusals,
+  each with the compiler's own words. Shown failing on a malformed specifier in
+  the exported tree, by dropping the `@ref` out of one page's `data-spec`:
+
+  ```
+  ✖ every install specifier resolves under the compiler's own grammar (0.4464ms)
+    Error: github specifier needs `@ref`
+  ```
+
+  A gate nobody has seen fail is a gate nobody has tested, and this one reads
+  the attribute off the html rather than the string it was rendered from — so a
+  specifier that is right in `packages.vyrn` and wrong in the markup fails it
+  too.
+
+- **The story was proved end to end once, by hand**, which is where a proof that
+  needs the network belongs. In a scratch project with a two-line manifest:
+
+  ```
+  $ vyrn add github:vyrn-lang/vyrn@main/examples/shelf/shared/wire.vyrn
+  pinned new remote imports in .../vyrn.lock
+  added `wire` -> github:vyrn-lang/vyrn@main/examples/shelf/shared/wire.vyrn
+
+  $ cat vyrn.json
+  {
+      "name": "proof",
+      "main": "main.vyrn",
+      "dependencies": {
+          "wire": "github:vyrn-lang/vyrn@main/examples/shelf/shared/wire.vyrn"
+      }
+  }
+
+  $ cat vyrn.lock
+  github:vyrn-lang/vyrn@main/examples/shelf/shared/wire.vyrn	https://raw.githubusercontent.com/vyrn-lang/vyrn/7737adfce10cfd67815a1f9f5d189f9d84000a53/examples/shelf/shared/wire.vyrn	6f56b9616f1b2966e2e076d3a2517279f3178a1fc6466b974efc250222f6f1de
+
+  $ cat main.vyrn
+  import { Book, AddBookReq } from "wire"
+  ...
+  $ vyrn run main.vyrn
+  Dune 5
+  ```
+
+  Three things that transcript settles and no offline gate could: the ref
+  resolved (`@main` → `7737adf`), the bytes hashed and pinned, and the alias
+  `vyrn add` chose with no `--name` is the file stem — which is the alias the
+  page's `import` line names. The four-space indentation of the manifest block
+  on every package page comes from this run; it was two before it.
+
+**The hole, and where the defect actually was.** `.pkgs` painted a hairline grid
+the way `.columns` above it does: `background: var(--hair)` on the container,
+`background: var(--paper)` on each cell, `gap: 1px` between them. That works
+while the author writes both the column count and the children. `.columns` is
+`repeat(3, …)` with three children written beside it. `.pkgs` is
+`repeat(auto-fill, minmax(280px, 1fr))`: the track count comes from the
+viewport, the card count comes from `examples/`, and neither knows about the
+other — so any last row that did not fill showed the container straight through
+as a filled dark box with nothing in it. That is what the reader saw.
+
+The fix paints the cells instead: `box-shadow: 0 0 0 1px var(--hair)` on each
+`<li>`, which covers the 1px gutter from both sides and leaves an unfilled track
+as page. One line each side, and identical to look at. It is pinned in
+`site/test/contrast.test.mjs` as the rule rather than as the case: no rule in
+the stylesheet that declares `auto-fill` or `auto-fit` may declare a background.
+That test names no selector, so the defect cannot return under a different one.
+Shown failing once by putting the background back:
+
+```
+✖ a grid whose column count the viewport decides never paints its own background
+  AssertionError: an auto-fill grid paints its own background, so a short last row is a filled empty cell:
+    .pkgs
+```
+
+**Gate: met.** No module list on two pages — and stronger than the sentence
+asked for: the registry index carries no link into `/docs/std/` at all, and no
+`/explore/<module>` page exists to carry one, both checked in `export.vyrn`. The
+search still works without script, unchanged. Every import line compiles, on the
+reference now. Every install specifier parses under the compiler's grammar, and
+one of them was installed for real.
+
+Two numbers, measured against `main` rather than against M2's — the machine is
+not the one M2 was timed on, so its 74 s says nothing about this change. One run
+of each, back to back, nothing else running: **207 routes, 5.9 MB and 1m48.6s**
+before, **170 routes, 5.6 MB and 1m55.6s** after. Thirty-seven package pages
+left, four arrived, and each of the 37 reference pages grew a copy box. Seven
+seconds slower for thirty-seven fewer pages is not a result one run each can
+separate from noise, and it is written down that way rather than as a finding.
 
 **M3 — the editors page.** *Implemented.* `/editors` in the consumer navigation.
 Gate: every feature row on the page names the code in `editor/` that implements

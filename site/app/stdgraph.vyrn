@@ -3,7 +3,8 @@
 ///
 /// Both belong to `/docs` (RFC-0105 M2). They were the whole of `/explore`, and
 /// `/explore` answered no question the reference could not; the reference now
-/// carries them and `/explore` is the package explorer (`packages.vyrn`). This
+/// carries them and `/explore` is the registry (`packages.vyrn`), which lists no
+/// standard library module at all. This
 /// module kept its contents and lost its old name with the page.
 ///
 /// Two views over one set of facts, both read off the source while the site
