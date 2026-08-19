@@ -13,7 +13,7 @@
 // Run: node --test editor/vscode/test/*.test.mjs   (no install needed)
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, symlink, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -40,7 +40,10 @@ async function withPath(dirs, body) {
 }
 
 async function fixture() {
-  const root = await mkdtemp(path.join(tmpdir(), "vyrn-resolve-"));
+  // macOS spells `tmpdir()` as `/var/…`, itself a symlink to `/private/var/…`.
+  // The resolver answers in realpath on purpose, so the expectation has to be
+  // spelled there too, or the assertion compares two names for one file.
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), "vyrn-resolve-")));
   const bin = path.join(root, "bin");
   await mkdir(bin, { recursive: true });
   await writeFile(path.join(bin, VYRN), "");
