@@ -1,0 +1,817 @@
+/// The corpus, measured: what each record cites, what it claims, and how big it
+/// is (RFC-0105 M1).
+///
+/// `backstage.vyrn` reads the INDEX — number, file, title, status — and that is
+/// the list. This module opens every record named in it, once, and derives the
+/// three things the index page draws from the corpus itself:
+///
+///  - **What it cites.** Every `RFC-NNNN` a record names is an edge from that
+///    record to the one it names. The recognizer is `markdown.vyrn`'s own
+///    `rfcMentions`, which is the function that turns those mentions into links
+///    on a record's page — one scanner, two readers, so the ring and the prose
+///    cannot disagree about what a mention is.
+///  - **What it claims.** The status is free text written by whoever moved the
+///    record, so it is CLASSIFIED here, by a rule small enough to state and
+///    tested below. Nothing is thrown away: a status the rule does not know
+///    lands in `other`, and the page prints every `other` record by name.
+///  - **How big it is.** The bytes of the file, which is the only size the
+///    export can read without parsing what it just read.
+///
+/// One pass, held in module state (RFC-0029). The corpus is 2.8 MB and the
+/// export renders the backstage index more than once — as a document and as the
+/// payload beside it — so a scan per accessor would be a scan per call. Filled
+/// on first use, like `bench.vyrn`'s cell table.
+import { IndexRow, rfcIndex, rfcBody, rfcPages, rfcTag, rfcHref, rfcSlug } from "./backstage"
+import { rfcMentions } from "./markdown"
+import { sin, cos } from "std/math"
+import { joinWith, substring, split } from "std/strings"
+import { contains } from "std/strpred"
+
+/// One record, measured.
+export type Record = { number: Int64, title: String, status: String, bucket: String, bytes: Int64, cites: Array<Int64>, citedBy: Array<Int64> }
+
+/// One bucket of the status picture: what it is called, how many records carry
+/// it, and where its segment sits on the bar.
+export type Bucket = { key: String, name: String, what: String, count: Int64, x: String, w: String, tone: String }
+
+/// One node of the citation ring: where it sits, where it points, and the two
+/// lists the highlight needs.
+export type CiteNode = { id: String, tag: String, href: String, x: String, y: String, cites: String, citedBy: String, label: String, tone: String }
+
+/// One chord: the path, and the two records it joins, citing end first.
+export type CiteEdge = { id: String, d: String, a: String, b: String }
+
+/// One tick around the ring, every tenth record, so the circle can be read as a
+/// sequence and not only as a texture.
+export type CiteTick = { id: String, x: String, y: String, anchor: String, label: String }
+
+/// One record as the citation fallback lists it: who it names, and who names it.
+export type CiteRow = { tag: String, href: String, title: String, cites: String, citedBy: String }
+
+/// One cell of the weight strip: a square whose SIZE is the record's bytes and
+/// whose colour is the status bucket it fell in.
+export type StripCell = { id: String, x: String, y: String, size: String, href: String, title: String, tone: String }
+
+// ---------------------------------------------------------------------------
+// The one pass
+// ---------------------------------------------------------------------------
+
+/// Every record, filled on first use.
+let mut records: Array<Record> = []
+
+/// Read the corpus, the first time anything asks.
+fn loadRecords() {
+    if records.length > 0 {
+        return
+    }
+    let known = rfcPages()
+    for row in rfcIndex() {
+        let body = match rfcBody(row) {
+            Ok(text) => text.copy(),
+            Err(why) => "",
+        }
+        let mut cites: Array<Int64> = []
+        for n in rfcMentions(body, known) {
+            // A record names itself in its own first heading, and a citation of
+            // oneself is not a citation.
+            if n != row.number {
+                cites.push(n)
+            }
+        }
+        records.push(Record {
+                number: row.number,
+                title: row.title.copy(),
+                status: row.status.copy(),
+                bucket: bucketOf(row.status),
+                bytes: body.byteLength,
+                cites: cites.copy(),
+                citedBy: [],
+            })
+    }
+    // The other direction, from the same edges: a record cannot know who names
+    // it until every record has been read.
+    let outbound = records.copy()
+    let mut i = 0
+    while i < records.length {
+        let mut inbound: Array<Int64> = []
+        for r in outbound {
+            if oneOf(records[i].number, r.cites) {
+                inbound.push(r.number)
+            }
+        }
+        records[i].citedBy = inbound.copy()
+        i = i + 1
+    }
+}
+
+/// Every record, measured.
+export fn corpusRecords() -> Array<Record> {
+    loadRecords()
+    return records.copy()
+}
+
+/// How many records there are.
+///
+/// `corpusRecords().length` answers the same question and copies 104 records
+/// with every ask. The ring asks it once per coordinate — twice per node and
+/// four times per chord, 3,000 times over — so it is answered off the state
+/// itself. The same reason `heaviest` and `indexOfNumber` read `records`
+/// directly: they are the inner loops, and a deep copy inside one turned a
+/// one-second scan into a minute.
+fn recordCount() -> Int64 {
+    loadRecords()
+    return records.length
+}
+
+/// Whether `n` is one of `all`.
+fn oneOf(n: Int64, all: Array<Int64>) -> Bool {
+    for x in all {
+        if x == n {
+            return true
+        }
+    }
+    return false
+}
+
+// ---------------------------------------------------------------------------
+// The status rule
+// ---------------------------------------------------------------------------
+
+/// Which bucket a status header falls in.
+///
+/// THE RULE, in the order it is applied. The status is free text — 40 distinct
+/// strings across 104 records — so the rule reads the FIRST WORD and one other
+/// thing, and nothing else:
+///
+///  1. `Superseded …`, `Draft …`, `Proposed …` — the first word IS the state.
+///  2. A REMAINDER: a `;` clause, or the words `in part`. A status that has to
+///     add a clause after a semicolon is a status about more than one thing —
+///     `M1, M2, M3 implemented; M4 stopped` — so it is not a plain claim of
+///     completion however it starts, and it lands in `partly`.
+///  3. A first word that claims completion — `Implemented`, `Complete`,
+///     `Shipped`, `Accepted`, `Landed` — with no remainder: `implemented`. A
+///     parenthesis is a SCOPE note and not a remainder: `Implemented (M1–M4)`
+///     names what was implemented, and the record's own page carries the rest.
+///  4. A first word that is a milestone — `M0`, `M1`, `M4a` — is a milestone
+///     list: `partly`.
+///  5. Anything else: `other`, and the page prints every one of them by name.
+export fn bucketOf(status: String) -> String {
+    let head = firstWord(status)
+    if head == "Superseded" {
+        return "superseded"
+    }
+    if head == "Draft" {
+        return "draft"
+    }
+    if head == "Proposed" {
+        return "proposed"
+    }
+    if contains(status, ";") || contains(status, "in part") {
+        return "partly"
+    }
+    if head == "Implemented" || head == "Complete" || head == "Shipped" || head == "Accepted" || head == "Landed" {
+        return "implemented"
+    }
+    if isMilestone(head) {
+        return "partly"
+    }
+    return "other"
+}
+
+/// The first word of `s`, without the punctuation a word can end a clause with.
+fn firstWord(s: String) -> String {
+    let raw = bytes(s)
+    let mut end = 0
+    while end < raw.length && raw[end] != ' ' {
+        end = end + 1
+    }
+    while end > 0 && (raw[end - 1] == ',' || raw[end - 1] == ';' || raw[end - 1] == ':' || raw[end - 1] == '.') {
+        end = end - 1
+    }
+    return substring(s, 0, end)
+}
+
+/// `M1`, `M0`, `M4a` — a milestone's name, which is an `M` and then a digit.
+fn isMilestone(word: String) -> Bool {
+    let raw = bytes(word)
+    return raw.length >= 2 && raw[0] == 'M' && raw[1] >= '0' && raw[1] <= '9'
+}
+
+/// The buckets, in the order the bar stacks them: the claim of completion
+/// first, then the partial one, then everything that claims neither.
+export fn buckets() -> Array<Bucket> {
+    let total = recordCount()
+    let mut out: Array<Bucket> = []
+    let mut at = 0
+    for spec in bucketSpecs() {
+        let n = bucketCount(spec[0])
+        let x = barWidth() * at / total
+        let w = barWidth() * (at + n) / total - x
+        out.push(Bucket {
+                key: spec[0].copy(),
+                name: spec[1].copy(),
+                what: spec[2].copy(),
+                count: n,
+                x: x.toString(),
+                w: w.toString(),
+                tone: spec[3].copy(),
+            })
+        at = at + n
+    }
+    return out
+}
+
+/// The bucket list itself: key, name, what the rule means by it, and the tone
+/// it is drawn in. Four tones for six buckets, and deliberately: the three that
+/// claim no build share one neutral and sit next to each other on the bar, so
+/// the bar reads as three arguments — built, part built, neither — while the
+/// legend keeps all six names and all six counts.
+fn bucketSpecs() -> Array<Array<String>> {
+    return [
+        ["implemented", "Implemented", "A first word that claims completion, with nothing after a semicolon.", "done"],
+        ["partly", "Partly", "A milestone list, or a claim with a remainder clause after a semicolon.", "part"],
+        ["draft", "Draft", "Written, not accepted.", "open"],
+        ["proposed", "Proposed", "Accepted in principle, not begun.", "open"],
+        ["superseded", "Superseded", "Replaced by a later record, which the status names.", "past"],
+        ["other", "Other", "A status the rule does not know. Every one is printed by name below.", "past"],
+    ]
+}
+
+/// How many records fell in one bucket.
+export fn bucketCount(key: String) -> Int64 {
+    let mut n = 0
+    for r in corpusRecords() {
+        if r.bucket == key {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+/// The records the rule could not place. The page lists them, with their own
+/// status text: a classifier whose misses are invisible is a classifier that
+/// can be wrong and look right.
+export fn otherRecords() -> Array<Record> {
+    let mut out: Array<Record> = []
+    for r in corpusRecords() {
+        if r.bucket == "other" {
+            out.push(r.copy())
+        }
+    }
+    return out
+}
+
+/// How wide the status bar is, in its own coordinates.
+export fn barWidth() -> Int64 {
+    return 900
+}
+
+/// The status bar's viewBox.
+export fn barViewBox() -> String {
+    return "0 0 " + barWidth().toString() + " 28"
+}
+
+// ---------------------------------------------------------------------------
+// The citation ring
+//
+// WHY A RING. The import graph on `/docs` puts a module one column right of
+// everything it imports, which works because that graph is acyclic and shallow.
+// This one is neither: 104 records, and a record cites both backwards and
+// forwards. What the corpus DOES have is an order — the number is the order the
+// decisions were argued in — so the ring carries it: record 1 at the top,
+// ascending clockwise, one dot each, evenly spaced. A chord is then a citation
+// across time, and its length is how far back the citing record reached.
+//
+// All 723 chords are drawn. None is dropped: a subset would be a picture of a
+// corpus that does not exist. They sit at a low opacity, which is what makes
+// the DENSITY readable, and pointing at (or tabbing to) a record raises that
+// record's own chords out of it.
+// ---------------------------------------------------------------------------
+
+/// The ring's box, and the middle of it.
+fn ringSize() -> Int64 {
+    return 700
+}
+
+fn ringMid() -> Int64 {
+    return 350
+}
+
+/// Where the dots sit, and where the decade labels sit outside them.
+fn ringRadius() -> Int64 {
+    return 288
+}
+
+fn tickRadius() -> Int64 {
+    return 312
+}
+
+/// The ring's viewBox.
+export fn citeViewBox() -> String {
+    return "0 0 " + ringSize().toString() + " " + ringSize().toString()
+}
+
+/// The angle of the `i`th record, clockwise from straight up.
+fn angleAt(i: Int64) -> Float64 {
+    return Float64(i) * 6.283185307179586 / Float64(recordCount())
+}
+
+/// The x of a point `r` out along the `i`th record's angle.
+fn ringX(i: Int64, r: Int64) -> Int64 {
+    return Int64(Float64(ringMid()) + Float64(r) * sin(angleAt(i)) + 0.5)
+}
+
+/// The y of the same point.
+fn ringY(i: Int64, r: Int64) -> Int64 {
+    return Int64(Float64(ringMid()) - Float64(r) * cos(angleAt(i)) + 0.5)
+}
+
+/// Where a record sits on the ring, by number. Every record on the ring is a
+/// record of the index, so a number that is not there is not asked for.
+fn indexOfNumber(n: Int64) -> Int64 {
+    loadRecords()
+    let mut i = 0
+    while i < records.length {
+        if records[i].number == n {
+            return i
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+/// Every record as a node on the ring.
+export fn citeNodes() -> Array<CiteNode> {
+    let mut out: Array<CiteNode> = []
+    let mut i = 0
+    for r in corpusRecords() {
+        out.push(CiteNode {
+                id: r.number.toString(),
+                tag: rfcTag(r.number),
+                href: rfcHref(r.number),
+                x: ringX(i, ringRadius()).toString(),
+                y: ringY(i, ringRadius()).toString(),
+                cites: numberList(r.cites),
+                citedBy: numberList(r.citedBy),
+                label: nodeLabel(r.copy()),
+                tone: toneOf(r.bucket),
+            })
+        i = i + 1
+    }
+    return out
+}
+
+/// What a keyboard reader hears on one node (RFC-0105 M4).
+///
+/// Every node is a link, so every node is a tab stop, and the same rule the
+/// import graph settled applies here: the name carries what the highlight
+/// SHOWS. Which records this one names, and how many name it, is the whole
+/// content of the picture, and it is what a reader who cannot see the chords
+/// would otherwise lose.
+fn nodeLabel(r: Record) -> String {
+    return rfcTag(r.number) + " " + r.title + ", cites " + countWord(r.cites.length) + ", cited by " + countWord(r.citedBy.length)
+}
+
+/// `1 record` / `4 records` / `no records` — the plural, in a sentence.
+fn countWord(n: Int64) -> String {
+    if n == 0 {
+        return "no records"
+    }
+    if n == 1 {
+        return "1 record"
+    }
+    return n.toString() + " records"
+}
+
+/// A list of numbers, space separated, as one data attribute.
+fn numberList(ns: Array<Int64>) -> String {
+    let mut parts: Array<String> = []
+    for n in ns {
+        parts.push(n.toString())
+    }
+    return joinWith(parts, " ")
+}
+
+/// The chords, built once. The page asks for them twice — the count in the
+/// heading, and the drawing — and the export renders the page twice, so the
+/// same 723 curves were laid out four times for one build.
+let mut chords: Array<CiteEdge> = []
+
+/// Every citation, as a chord.
+///
+/// The curve bends toward the middle, by AS MUCH as the citation is long: the
+/// control point sits on the line from the centre to the chord's midpoint, as
+/// far out as that midpoint is. Two neighbours therefore keep a short arc that
+/// hugs the rim, and a record reaching back sixty numbers sweeps through the
+/// middle. One constant bend would do neither — it drags a citation between
+/// consecutive records halfway to the centre and reads as the long one.
+export fn citeEdges() -> Array<CiteEdge> {
+    if chords.length > 0 {
+        return chords.copy()
+    }
+    let mut out: Array<CiteEdge> = []
+    let mut i = 0
+    for r in corpusRecords() {
+        let x1 = ringX(i, ringRadius())
+        let y1 = ringY(i, ringRadius())
+        for n in r.cites {
+            let j = indexOfNumber(n)
+            out.push(CiteEdge {
+                    id: r.number.toString() + "-" + n.toString(),
+                    d: chordPath(x1, y1, ringX(j, ringRadius()), ringY(j, ringRadius())),
+                    a: r.number.toString(),
+                    b: n.toString(),
+                })
+        }
+        i = i + 1
+    }
+    chords = out.copy()
+    return out
+}
+
+/// One chord, from a place on the ring to another place on it.
+fn chordPath(x1: Int64, y1: Int64, x2: Int64, y2: Int64) -> String {
+    let dx = (x1 + x2) / 2 - ringMid()
+    let dy = (y1 + y2) / 2 - ringMid()
+    let far = isqrt(dx * dx + dy * dy)
+    let cx = ringMid() + dx * far / ringRadius()
+    let cy = ringMid() + dy * far / ringRadius()
+    return "M\{x1} \{y1}Q\{cx} \{cy} \{x2} \{y2}"
+}
+
+/// How many citations the ring draws.
+export fn citeCount() -> Int64 {
+    return citeEdges().length
+}
+
+/// The most-cited record, which the caption names.
+export fn mostCited() -> Record {
+    let all = corpusRecords()
+    let mut best = all[0].copy()
+    for r in all {
+        if r.citedBy.length > best.citedBy.length {
+            best = r.copy()
+        }
+    }
+    return best.copy()
+}
+
+/// A label every tenth record, outside the ring, so the circle reads as the
+/// sequence it is.
+export fn citeTicks() -> Array<CiteTick> {
+    let mut out: Array<CiteTick> = []
+    let mut i = 0
+    for r in corpusRecords() {
+        if r.number % 10 == 0 {
+            let x = ringX(i, tickRadius())
+            out.push(CiteTick {
+                    id: r.number.toString(),
+                    x: x.toString(),
+                    y: (ringY(i, tickRadius()) + 3).toString(),
+                    anchor: if x > ringMid() + 8 { "start" } else if x < ringMid() - 8 { "end" } else { "middle" },
+                    label: rfcSlug(r.number),
+                })
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// The ring, as a list — the fallback for a reader with no script, and the only
+/// place the edges are written as words.
+export fn citeRows() -> Array<CiteRow> {
+    let mut out: Array<CiteRow> = []
+    for r in corpusRecords() {
+        out.push(CiteRow {
+                tag: rfcTag(r.number),
+                href: rfcHref(r.number),
+                title: r.title.copy(),
+                cites: tagList(r.cites),
+                citedBy: tagList(r.citedBy),
+            })
+    }
+    return out
+}
+
+/// A list of records as tags, in one string. Text, not links: every one of
+/// these numbers is already a link in the index table on the same page, and
+/// 1,446 more of them would be 1,446 more tab stops in front of it.
+fn tagList(ns: Array<Int64>) -> String {
+    if ns.length == 0 {
+        return "none"
+    }
+    let mut parts: Array<String> = []
+    for n in ns {
+        parts.push(rfcTag(n))
+    }
+    return joinWith(parts, " ")
+}
+
+// ---------------------------------------------------------------------------
+// The weight strip
+//
+// One cell per record, in reading order, twenty to a row — the strip this page
+// has always carried. What is new is that a cell now carries the two facts the
+// index table states in words: the record's SIZE, as the side of the square,
+// and its STATUS, as the colour. The tone used to step every ten records, which
+// was a ruler and not a measurement.
+// ---------------------------------------------------------------------------
+
+/// The side of one slot, and the widest square that fits in it.
+fn slot() -> Int64 {
+    return 22
+}
+
+fn cellMax() -> Int64 {
+    return 20
+}
+
+fn cellMin() -> Int64 {
+    return 6
+}
+
+/// The whole-number square root of `n`, for the size scale below.
+fn isqrt(n: Int64) -> Int64 {
+    let mut r = 0
+    while (r + 1) * (r + 1) <= n {
+        r = r + 1
+    }
+    return r
+}
+
+/// The bytes of the largest record, which sets the top of the scale.
+fn heaviest() -> Int64 {
+    loadRecords()
+    let mut most = 1
+    let mut i = 0
+    while i < records.length {
+        if records[i].bytes > most {
+            most = records[i].bytes
+        }
+        i = i + 1
+    }
+    return most
+}
+
+/// The side of one record's square.
+///
+/// The side goes as the SQUARE ROOT of the bytes, so the AREA is the size — the
+/// eye reads a square by its area, and a side proportional to bytes puts three
+/// quarters of the corpus at the floor and makes the picture a row of dots with
+/// four exceptions.
+fn sideOf(bytes: Int64) -> Int64 {
+    let side = cellMin() + (cellMax() - cellMin()) * isqrt(bytes) / isqrt(heaviest())
+    if side > cellMax() {
+        return cellMax()
+    }
+    return side
+}
+
+/// Every record as a cell of the strip.
+export fn weightCells() -> Array<StripCell> {
+    let mut out: Array<StripCell> = []
+    let mut i = 0
+    for r in corpusRecords() {
+        let side = sideOf(r.bytes)
+        // Centred in its slot, so a small record is small in the middle of the
+        // space a large one would fill and the rows still line up.
+        let pad = (slot() - 2 - side) / 2
+        out.push(StripCell {
+                id: r.number.toString(),
+                x: (i % 20 * slot() + pad).toString(),
+                y: (i / 20 * slot() + pad).toString(),
+                size: side.toString(),
+                href: rfcHref(r.number),
+                title: rfcTag(r.number) + " " + r.title + " — " + r.status + " — " + sizeOf(r.bytes),
+                tone: toneOf(r.bucket),
+            })
+        i = i + 1
+    }
+    return out
+}
+
+/// The tone a bucket is drawn in, on both the bar and the strip.
+export fn toneOf(bucket: String) -> String {
+    for spec in bucketSpecs() {
+        if spec[0] == bucket {
+            return spec[3].copy()
+        }
+    }
+    return "past"
+}
+
+/// A size, in the unit a reader thinks in: bytes, then whole KB, then MB to one
+/// decimal, which is where the whole corpus lands.
+export fn sizeOf(bytes: Int64) -> String {
+    if bytes < 1024 {
+        return bytes.toString() + " bytes"
+    }
+    if bytes < 1048576 {
+        return ((bytes + 512) / 1024).toString() + " KB"
+    }
+    let tenths = (bytes * 10 + 524288) / 1048576
+    return (tenths / 10).toString() + "." + (tenths % 10).toString() + " MB"
+}
+
+/// How wide the strip is, in its own coordinates.
+export fn stripWidth() -> String {
+    return (20 * slot()).toString()
+}
+
+/// How tall it is: one row per twenty records, rounded up.
+export fn stripHeight() -> String {
+    return ((recordCount() + 19) / 20 * slot()).toString()
+}
+
+/// The whole corpus, in bytes.
+export fn corpusBytes() -> Int64 {
+    let mut n = 0
+    for r in corpusRecords() {
+        n = n + r.bytes
+    }
+    return n
+}
+
+test "every record is read, measured, and placed in a bucket" {
+    let all = corpusRecords()
+    let known = rfcPages()
+    assert(all.length > 100)
+    assertEq(all.length, rfcIndex().length)
+    assertEq(all[0].number, 1)
+    for r in all {
+        assert(r.bytes > 0)
+        assert(r.title.byteLength > 0)
+        assert(r.bucket.byteLength > 0)
+        // A record never cites itself, and every record it cites has a page.
+        for n in r.cites {
+            assert(n != r.number)
+            assert(oneOf(n, known))
+        }
+    }
+    assert(corpusBytes() > 2000000)
+}
+
+test "the status rule reads the first word, and one clause after it" {
+    // The five that are the first word.
+    assertEq(bucketOf("Implemented"), "implemented")
+    assertEq(bucketOf("Draft"), "draft")
+    assertEq(bucketOf("Proposed"), "proposed")
+    assertEq(bucketOf("Superseded by RFC-0089"), "superseded")
+    assertEq(bucketOf("Complete (M0–M5)"), "implemented")
+    // A parenthesis is a scope note: it says what was implemented.
+    assertEq(bucketOf("Implemented (M1–M4)"), "implemented")
+    assertEq(bucketOf("Implemented (§1–§3)"), "implemented")
+    // A semicolon is a remainder: it says what was not.
+    assertEq(bucketOf("Implemented (§1–§3); §4 diagnosed, blocked"), "partly")
+    assertEq(bucketOf("Accepted; M1–M4 shipped"), "partly")
+    assertEq(bucketOf("Implemented in part"), "partly")
+    // A milestone list is a milestone list however it ends.
+    assertEq(bucketOf("M1 and M2 shipped"), "partly")
+    assertEq(bucketOf("M0 and M1 shipped; M2–M4 not started"), "partly")
+    // And anything else is `other`, which the page prints by name.
+    assertEq(bucketOf("Census, closed"), "other")
+    assertEq(bucketOf("Parked"), "other")
+    assertEq(firstWord("Census, closed"), "Census")
+    assertEq(firstWord("Implemented"), "Implemented")
+    assertEq(isMilestone("M4a"), true)
+    assertEq(isMilestone("Made"), false)
+}
+
+test "every record lands in exactly one bucket, and the buckets are the corpus" {
+    let mut total = 0
+    for b in buckets() {
+        total = total + b.count
+    }
+    assertEq(total, corpusRecords().length)
+    // The two that carry the corpus, and the one whose contents are printed.
+    assert(bucketCount("implemented") > 50)
+    assert(bucketCount("partly") > 10)
+    assertEq(otherRecords().length, bucketCount("other"))
+    for r in otherRecords() {
+        assert(r.status.byteLength > 0)
+    }
+}
+
+test "the bar tiles the whole width, with no gap and no overlap" {
+    let mut at = 0
+    for b in buckets() {
+        assertEq(b.x, at.toString())
+        at = at + wholeOf(b.w)
+    }
+    assertEq(at, barWidth())
+}
+
+test "the ring holds one node per record and one chord per citation" {
+    let nodes = citeNodes()
+    assertEq(nodes.length, corpusRecords().length)
+    // No two records share a place on the ring.
+    for a in nodes {
+        let mut same = 0
+        for b in nodes {
+            if a.x == b.x && a.y == b.y {
+                same = same + 1
+            }
+        }
+        assertEq(same, 1)
+    }
+    let edges = citeEdges()
+    assert(edges.length > 400)
+    let mut cited = 0
+    for r in corpusRecords() {
+        cited = cited + r.cites.length
+    }
+    assertEq(edges.length, cited)
+    for e in edges {
+        assert(e.a != e.b)
+        assert(e.d.byteLength > 10)
+        // No chord leaves the ring. The bend is proportional to the citation's
+        // length, so the control point rides the line from the centre out to
+        // the chord's own midpoint — and a formula that overshoots would put a
+        // curve outside the circle its ends sit on.
+        assert(fromMiddle(controlOf(e.d)) <= 290)
+    }
+    // And the bend follows the length: the first two records are neighbours on
+    // the ring and their control point is out at the rim; the pair half a turn
+    // apart is a straight line through the middle.
+    assert(fromMiddle(controlOf(chordBetween(nodes[0], nodes[1]))) > 270)
+    assert(fromMiddle(controlOf(chordBetween(nodes[0], nodes[52]))) < 8)
+}
+
+/// The control point of one `M x y Q cx cy x y` path, as `cx,cy`.
+fn controlOf(d: String) -> Array<Int64> {
+    let parts = split(split(d, "Q")[1], " ")
+    return [wholeOf(parts[0]), wholeOf(parts[1])]
+}
+
+/// How far a point is from the middle of the ring.
+fn fromMiddle(at: Array<Int64>) -> Int64 {
+    let dx = at[0] - 350
+    let dy = at[1] - 350
+    return isqrt(dx * dx + dy * dy)
+}
+
+/// The chord two nodes would be joined by, whether or not either cites the
+/// other — the geometry is a fact about the two places, not about the pair.
+fn chordBetween(a: CiteNode, b: CiteNode) -> String {
+    return chordPath(wholeOf(a.x), wholeOf(a.y), wholeOf(b.x), wholeOf(b.y))
+}
+
+/// A whole number written out, back as a number.
+fn wholeOf(s: String) -> Int64 {
+    let mut n = 0
+    for b in bytes(s) {
+        n = n * 10 + Int64(b) - 48
+    }
+    return n
+}
+
+test "what a record names and what names it are the same edges, both ways" {
+    // One copy, outside both loops. `corpusRecords()` hands out a copy of all
+    // 104 records, and a call in the inner loop is 723 of them.
+    let all = corpusRecords()
+    for r in all {
+        for n in r.cites {
+            // If this record names that one, that one is cited by this one.
+            let mut found = false
+            for other in all {
+                if other.number == n && oneOf(r.number, other.citedBy) {
+                    found = true
+                }
+            }
+            assert(found)
+        }
+    }
+    assert(mostCited().citedBy.length > 3)
+    assert(citeCount() > 400)
+}
+
+test "the fallback says in words what the ring says in chords" {
+    let rows = citeRows()
+    assertEq(rows.length, corpusRecords().length)
+    for row in rows {
+        assert(row.cites.byteLength > 0)
+        assert(row.citedBy.byteLength > 0)
+    }
+    assertEq(tagList([]), "none")
+    assertEq(tagList([91, 105]), "RFC-0091 RFC-0105")
+}
+
+test "a strip cell is as big as its record and as coloured as its status" {
+    let cells = weightCells()
+    assertEq(cells.length, corpusRecords().length)
+    for c in cells {
+        assert(c.title.byteLength > 8)
+        assert(c.tone.byteLength > 0)
+    }
+    // The scale: the largest record takes the whole slot, and nothing is
+    // smaller than the floor.
+    assertEq(sideOf(heaviest()), 20)
+    assertEq(sideOf(0), 6)
+    assert(sideOf(heaviest() / 4) < sideOf(heaviest()))
+    assertEq(isqrt(16), 4)
+    assertEq(isqrt(15), 3)
+    assertEq(sizeOf(512), "512 bytes")
+    assertEq(sizeOf(2048), "2 KB")
+    assertEq(sizeOf(2621440), "2.5 MB")
+    assertEq(stripWidth(), "440")
+}

@@ -42,6 +42,8 @@ on:
       - 'web/**'
       - 'compiler/**'
       - 'examples/**'
+      # The site's one build input is written by a script in here.
+      - 'scripts/**'
       - '.github/workflows/site.yml'
   schedule:
     # One daily run, as a safety net for a missed trigger.
@@ -70,10 +72,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The whole history, and the tags with it. The backstage draws the
+          # project's pulse — commits and merged pull requests per day, when
+          # each design record arrived, when each release was tagged — and the
+          # default single-commit checkout has none of that to count
+          # (RFC-0105 M1).
+          fetch-depth: 0
 
       - name: Build the CLI
         working-directory: compiler
         run: cargo build --release -p vyrn-cli
+
+      - name: The repository's own history
+        # BEFORE the export, which refuses to publish without this file — see
+        # `missingHistory` in `site/export.vyrn`. The export reads the working
+        # tree and nothing else (RFC-0014 has `readFile` and `listDir`, and no
+        # git), so the one input it is handed is written here, by a script in
+        # the repository that anybody can run for a local build.
+        run: |
+          mkdir -p site/data
+          python3 scripts/site-history.py > site/data/history.json
+          wc -c site/data/history.json
 
       - name: Refresh the baked release
         # `site/release.txt` holds the newest published tag and its date, and a

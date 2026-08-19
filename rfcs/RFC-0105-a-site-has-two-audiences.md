@@ -115,6 +115,60 @@ not by reading the markup — and the backstage carries its own masthead, its ow
 navigation and its own accent, reached only from the consumer footer and leaving
 only through its own.
 
+*[Amended: the index, after M4.]* The section landed as a masthead, row 6's
+strip and row 7's table, which is a list of the record and not a picture of it.
+`/backstage` now opens with five pictures and a stat row, all drawn as static
+SVG with no chart library, in the order the questions are asked in.
+
+**Velocity first, because that is what a development home is read for.** Two of
+the five are about the project rather than the corpus:
+
+- **The pulse.** Commits and merged pull requests per day, from the first commit
+  to the last, with each release a marked tick on the axis. Two panels over one
+  axis and not two scales on one panel: the two counts differ by an order of
+  magnitude, and a second y axis is how two unrelated shapes are made to look
+  like one argument. Per DAY and not per ISO week, which is what it started as —
+  the history is 36 days long, so a week is six bars; the week is still on the
+  axis as a label every seventh day.
+- **What was designed, and what became of it.** The cumulative count of records
+  by the day each one arrived, banded by the status it carries today. The top
+  edge is design velocity, the bands are what that design turned into, and the
+  bands come from the same classifier the status picture uses — so a record that
+  changes status moves band on the next build.
+
+**One build input, and the export refuses without it.** A commit is not in the
+working tree, and RFC-0014 gives the export `readFile` and `listDir` and no git.
+So `scripts/site-history.py` (standard library only, runnable by hand) walks the
+history once — days, arrivals, tags, and the repository's `test` block count —
+and writes `site/data/history.json`, which is gitignored because a derived file
+in the tree is a picture of the day somebody ran it. The site workflow runs it
+before the export, from a checkout with `fetch-depth: 0`, and `missingHistory`
+in `site/export.vyrn` fails the build with that command in the message when it
+is not there. A committed `site/data/history.fixture.json` — five made-up days —
+is what `vyrn test site/export.vyrn` runs on in a clone that has never run the
+script, and the preflight is what keeps it off a published page.
+
+**The corpus, after.** The other three are computed in Vyrn while the page is
+built (`site/app/corpus.vyrn`, one pass over `rfcs/*.md` held in module state):
+the **weight strip** — row 6's cells, now sized by the bytes of each file and
+coloured by its status; the **status picture** — one stacked bar over six
+buckets, classified from the free-text status by `bucketOf`, a function with
+tests, whose `other` bucket is printed record by record on the page so a
+misreading cannot hide; and the **citation ring** — every `RFC-NNNN` one record
+writes about another, 723 of them, drawn as chords between 104 nodes ordered by
+number, lit on hover and on focus. The citations are read by `markdown.vyrn`'s
+own `rfcMentions`, which is the recognizer that turns those mentions into links
+on a record's page: one scanner, two readers.
+
+The accessibility rules are M4's, unchanged: the ring is a `role="group"` of
+named links and the strip stays a `role="img"` of `tabindex="-1"` cells (row 16,
+and this is that rule rather than an exception to it), the two velocity charts
+and the status picture are `role="img"` with the same numbers stated in a table
+or a legend beside them, four new tokens are measured in both palettes by
+`site/test/contrast.test.mjs`, and no motion is added anywhere. The export takes
+118 s against 114 s on the commit before it, once the four structures the page
+asks for twice are built once.
+
 ### M1 — the markdown the record is written in
 
 The backstage renders `rfcs/*.md` with `site/app/markdown.vyrn`. The subset was
