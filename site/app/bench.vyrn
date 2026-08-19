@@ -1,7 +1,7 @@
 /// The Benchmarks Game radar, computed while the site builds (RFC-0104 M3).
 ///
-/// WHERE THE NUMBERS COME FROM. `rfcs/bench-0104/results/2026-08-19-LOCUST.json`
-/// and `-run2.json`, written by `rfcs/bench-0104/harness/run.py`, read here at
+/// WHERE THE NUMBERS COME FROM. `rfcs/bench-0104/results/2026-08-19-LOCUST-v2.json`
+/// and `-v2-run2.json`, written by `rfcs/bench-0104/harness/run.py`, read here at
 /// export time the way the backstage reads `rfcs/README.md`. Nothing on the two
 /// pages this module feeds is typed in by hand: change the record, rebuild, and
 /// every chart, ratio and caption moves with it. That is the point — a chart
@@ -18,8 +18,8 @@
 /// reader cuts` below fails the build the day `run.py` changes it.
 ///
 /// THE SCALE, AND WHY IT IS THE ONE DECISION THIS FILE MAKES OUT LOUD. The
-/// measured ratios span 0.24x to 302x. No linear radial axis can carry both ends:
-/// on a scale that reaches k-nucleotide's 287x, every other point on the chart is
+/// measured ratios span 0.24x to 222x. No linear radial axis can carry both ends:
+/// on a scale that reaches k-nucleotide's 211x, every other point on the chart is
 /// a dot at the centre. The axis is therefore **log2 around the baseline** — the
 /// centre ring is an eighth of it, every ring out is a doubling, the rim is
 /// sixteen times it. A value past the rim is drawn AT the rim and carries an
@@ -36,7 +36,7 @@ import { hrefOf } from "./nav"
 ///
 /// Times are MICROSECONDS as integers. The record holds seconds as floats; the
 /// site prints milliseconds and ratios, and integer microseconds carry every
-/// figure either page shows (the smallest is k-nucleotide's C leg at 10.1 ms)
+/// figure either page shows (the smallest is k-nucleotide's C leg at 13.7 ms)
 /// with no float arithmetic between the record and the reader.
 export type Measure = {
     program: String,
@@ -46,10 +46,16 @@ export type Measure = {
     spread1: String,
     spread2: String,
     runs1: String,
+    cpuUs: Int64,
+    peakBytes: Int64,
+    makeUs: Int64,
+    gzBytes: Int64,
 }
 
-/// One program, as the record and the game name it.
-export type Prog = { key: String, name: String, n: String, note: String }
+/// One program, as the record and the game name it, and where the game's own
+/// page for it is. The link is the point: a benchmark that names a program
+/// without pointing at the original is asking to be taken on trust.
+export type Prog = { key: String, name: String, n: String, note: String, game: String }
 
 /// One contestant: the key in the record, the name a reader sees, and the class
 /// the stylesheet colours it with.
@@ -67,26 +73,34 @@ export type Line = { key: String, name: String, tone: String, points: String, al
 /// A point that did not fit: drawn at the rim, named here, never dropped.
 export type Mark = { id: String, d: String, title: String }
 
-/// One cell of the static table, and of an axis panel.
-export type Reading = { key: String, name: String, tone: String, ms: String, vsC: String, vsRust: String, spread: String, noisy: Bool }
+/// One cell of a table or an axis panel. The first five fields after the name
+/// are the Benchmarks Game's own columns, in its own order — cpu secs, secs,
+/// mem, gz, make secs — because a reader who has read one of its per-program
+/// pages should not have to learn a second layout to read this one.
+export type Reading = { key: String, name: String, tone: String, cpu: String, secs: String, mem: String, gz: String, make: String, norm: String, ms: String, vsC: String, vsRust: String, spread: String, noisy: Bool }
 
 /// One row of the static table: a program and its five readings.
-export type Row = { key: String, name: String, n: String, cells: Array<Reading> }
+export type Row = { key: String, name: String, n: String, game: String, cells: Array<Reading> }
 
 /// One axis panel: everything known about one program, shown on focus.
-export type Panel = { key: String, name: String, n: String, note: String, cause: String, verdict: String, href: String, cells: Array<Reading> }
+export type Panel = { key: String, name: String, n: String, note: String, cause: String, label: String, verdict: String, href: String, game: String, cells: Array<Reading> }
 
 // ---------------------------------------------------------------------------
 // Reading the record
 // ---------------------------------------------------------------------------
 
 /// The dataset the site publishes. One machine, one afternoon, twice.
+///
+/// The `-v2` pair is the re-run under the M3 amendment: the same eight
+/// programs, the same five contestants, the same cross-verification, measured
+/// by a runner that also records cpu time, peak memory, build time and source
+/// size. M2's original pair stays committed beside it and is not edited.
 fn run1File() -> String {
-    return "rfcs/bench-0104/results/2026-08-19-LOCUST.json"
+    return "rfcs/bench-0104/results/2026-08-19-LOCUST-v2.json"
 }
 
 fn run2File() -> String {
-    return "rfcs/bench-0104/results/2026-08-19-LOCUST-run2.json"
+    return "rfcs/bench-0104/results/2026-08-19-LOCUST-v2-run2.json"
 }
 
 /// The text after the first `needle`, or nothing.
@@ -172,23 +186,33 @@ export fn programs() -> Array<Prog> {
                 name: p[1].copy(),
                 n: grouped(scalarAt(slice, "      ", "n")),
                 note: textAt(slice, "      ", "note"),
+                game: gameHref(p[2]),
             })
     }
     return out
 }
 
-/// The record's key for each program, and the name the game gives it.
+/// The record's key for each program, the name the game gives it, and the slug
+/// its own page sits under. The slug is written out rather than derived: it is
+/// `fannkuchredux` where the record says `fannkuch` and the reader sees
+/// `fannkuch-redux`, and three spellings do not compute from one another.
 fn progNames() -> Array<Array<String>> {
     return [
-        ["nbody", "nbody"],
-        ["spectralnorm", "spectral-norm"],
-        ["fannkuch", "fannkuch-redux"],
-        ["binarytrees", "binary-trees"],
-        ["fasta", "fasta"],
-        ["revcomp", "reverse-complement"],
-        ["knucleotide", "k-nucleotide"],
-        ["pidigits", "pidigits"],
+        ["nbody", "nbody", "nbody"],
+        ["spectralnorm", "spectral-norm", "spectralnorm"],
+        ["fannkuch", "fannkuch-redux", "fannkuchredux"],
+        ["binarytrees", "binary-trees", "binarytrees"],
+        ["fasta", "fasta", "fasta"],
+        ["revcomp", "reverse-complement", "revcomp"],
+        ["knucleotide", "k-nucleotide", "knucleotide"],
+        ["pidigits", "pidigits", "pidigits"],
     ]
+}
+
+/// The game's own page for one program. Every one of the eight was fetched and
+/// resolved on the date `ceilingFetched` states.
+fn gameHref(slug: String) -> String {
+    return "https://benchmarksgame-team.pages.debian.net/benchmarksgame/performance/" + slug + ".html"
 }
 
 /// The five lines on the radar. `c` is the baseline and is drawn as one: a
@@ -235,6 +259,10 @@ fn loadCells() {
                     spread1: scalarAt(cell1, "          ", "spread_pct"),
                     spread2: scalarAt(cell2, "          ", "spread_pct"),
                     runs1: rawRuns(cell1),
+                    cpuUs: microsOf(scalarAt(cell1, "          ", "cpu_median_s")),
+                    peakBytes: wholeOf(scalarAt(cell1, "          ", "peak_bytes")),
+                    makeUs: microsOf(scalarAt(cell1, "          ", "make_s")),
+                    gzBytes: wholeOf(scalarAt(cell1, "          ", "gz_bytes")),
                 })
         }
     }
@@ -263,7 +291,19 @@ fn cellOf(program: String, contestant: String) -> Measure {
             return c.copy()
         }
     }
-    return Measure { program: program.copy(), contestant: contestant.copy(), us1: 0 - 1, us2: 0 - 1, spread1: "", spread2: "", runs1: "" }
+    return Measure {
+        program: program.copy(),
+        contestant: contestant.copy(),
+        us1: 0 - 1,
+        us2: 0 - 1,
+        spread1: "",
+        spread2: "",
+        runs1: "",
+        cpuUs: 0 - 1,
+        peakBytes: 0 - 1,
+        makeUs: 0 - 1,
+        gzBytes: 0 - 1,
+    }
 }
 
 /// The median of `program` on `contestant`, in microseconds, from the published
@@ -288,6 +328,66 @@ export fn msOf(us: Int64) -> String {
     }
     let tenths = (us + 50) / 100
     return (tenths / 10).toString() + "." + (tenths % 10).toString() + " ms"
+}
+
+/// A whole number the record wrote, or -1 where it wrote nothing.
+fn wholeOf(text: String) -> Int64 {
+    return match parseFloat64(text) {
+        Some(v) => Int64(v),
+        None => 0 - 1,
+    }
+}
+
+/// Seconds to two decimals, which is the precision the game's own per-program
+/// tables print and the reason this column reads like one of theirs.
+///
+/// A reading that would round to `0.00` prints `<0.01` instead. Two cells in
+/// this set are that small — k-nucleotide's C and Rust legs at ten and eight
+/// milliseconds — and a table claiming a program took no time is worse than a
+/// table admitting the column cannot resolve it. The millisecond figure is a
+/// click away on the backstage either way.
+export fn secsOf(us: Int64) -> String {
+    if us < 0 {
+        return "—"
+    }
+    let cs = (us + 5000) / 10000
+    if cs == 0 && us > 0 {
+        return "<0.01"
+    }
+    return (cs / 100).toString() + "." + pad2(cs % 100)
+}
+
+/// Build time. Zero is not a very fast build: it is node, which has no build
+/// step at all, and a dash says that where `0.00` would claim a measurement.
+export fn makeOf(us: Int64) -> String {
+    if us == 0 {
+        return "—"
+    }
+    return secsOf(us)
+}
+
+/// Peak resident memory in the unit that fits: kilobytes below ten megabytes,
+/// megabytes to one decimal above it. The set spans 4 MB to over a gigabyte,
+/// and one unit across all of it is either six digits or a rounding error.
+export fn memOf(bytes: Int64) -> String {
+    if bytes <= 0 {
+        return "—"
+    }
+    let kb = (bytes + 512) / 1024
+    if kb < 10240 {
+        return grouped(kb.toString()) + " KB"
+    }
+    let tenths = (bytes * 10 + 524288) / 1048576
+    return grouped((tenths / 10).toString()) + "." + (tenths % 10).toString() + " MB"
+}
+
+/// A byte count, grouped. The game's `gz` column is the gzipped source in
+/// bytes, and it is how much program the entry took.
+export fn bytesOf(n: Int64) -> String {
+    if n <= 0 {
+        return "—"
+    }
+    return grouped(n.toString())
 }
 
 /// `a / b` in hundredths, rounded.
@@ -679,6 +779,12 @@ fn readingsFor(program: String) -> Array<Reading> {
                 key: s.key.copy(),
                 name: s.name.copy(),
                 tone: s.tone.copy(),
+                cpu: secsOf(cell.cpuUs),
+                secs: secsOf(cell.us1),
+                mem: memOf(cell.peakBytes),
+                gz: bytesOf(cell.gzBytes),
+                make: makeOf(cell.makeUs),
+                norm: normText(program, s.key),
                 ms: msOf(cell.us1),
                 vsC: ratioText(ratioOf(program, s.key, "c")),
                 vsRust: ratioText(ratioOf(program, s.key, "rust")),
@@ -687,6 +793,16 @@ fn readingsFor(program: String) -> Array<Reading> {
             })
     }
     return out
+}
+
+/// Both normalizations of one cell in one string: what the radar plots.
+///
+/// The chart is drawn from these two ratios, so they cannot leave the page —
+/// but five measured columns and two derived ones is a table nobody reads.
+/// They therefore ride on the row (a pointer sees them) and are printed in
+/// full in the ratio table under the chart, which is the chart's own fallback.
+fn normText(program: String, contestant: String) -> String {
+    return ratioText(ratioOf(program, contestant, "c")) + " C, " + ratioText(ratioOf(program, contestant, "rust")) + " Rust"
 }
 
 /// A percentage from the record, with its own sign.
@@ -698,9 +814,11 @@ fn pctOf(raw: String) -> String {
 }
 
 /// Whether a within-run spread is wide enough that the reading deserves a
-/// warning beside it. RFC-0104 M2 states the band: under 15% for thirty-eight of
-/// the forty cells, and the two that are not are k-nucleotide's C and Rust legs,
-/// which are ten-millisecond measurements against a four-millisecond floor.
+/// warning beside it. RFC-0104 M2 set the bar at 15% and the cells that cross it
+/// are the small ones — a reading a few multiples of the process floor cannot be
+/// read to better than the floor. The count is not pinned here: `the noisy cells
+/// are flagged where they are printed` counts what the record holds, so a
+/// quieter machine flags fewer and this module does not have to be edited.
 fn noisy(spread: String) -> Bool {
     return match parseFloat64(spread) {
         Some(v) => v >= 15.0,
@@ -713,7 +831,7 @@ fn noisy(spread: String) -> Bool {
 export fn tableRows() -> Array<Row> {
     let mut out: Array<Row> = []
     for p in programs() {
-        out.push(Row { key: p.key.copy(), name: p.name.copy(), n: p.n.copy(), cells: readingsFor(p.key) })
+        out.push(Row { key: p.key.copy(), name: p.name.copy(), n: p.n.copy(), game: p.game.copy(), cells: readingsFor(p.key) })
     }
     return out
 }
@@ -729,8 +847,10 @@ export fn axisPanels() -> Array<Panel> {
                 n: p.n.copy(),
                 note: p.note.copy(),
                 cause: causeOf(p.key),
+                label: labelOf(p.key),
                 verdict: verdictOf(p.key),
                 href: hrefOf("/backstage/benchmarks") + "#" + p.key,
+                game: p.game.copy(),
                 cells: readingsFor(p.key),
             })
     }
@@ -767,18 +887,35 @@ fn verdictOf(program: String) -> String {
     return ""
 }
 
-/// Program, verdict, cause. The verdict is the ratio of Vyrn native to Rust and
-/// whether it is outside the stated +/-10% noise band.
+/// The cause in a handful of words — the whole of what `/compare` prints about
+/// one program's deviation (RFC-0104 M3 amendment).
+///
+/// The paragraph it stands for is still written, still sourced, and still one
+/// click away on the backstage. What changed is where it is read: eight
+/// paragraphs of diagnosis under a chart is a page nobody finishes, and a
+/// label plus a link is the same claim at a length that gets read.
+fn labelOf(program: String) -> String {
+    for row in causeRows() {
+        if row[0] == program {
+            return row[3].copy()
+        }
+    }
+    return ""
+}
+
+/// Program, verdict, cause, label. The verdict is the ratio of Vyrn native to
+/// Rust and whether it is outside the stated +/-10% noise band; the label is
+/// the cause in a few words, for the consumer page.
 export fn causeRows() -> Array<Array<String>> {
     return [
-        ["nbody", "a deviation", "The vectorizer runs on rustc's IR and not on ours: Rust's inner loop is 342 packed-double instructions and four sqrtpd, ours is thirteen scalar ops and one sqrtsd. Plain C loses by the same order. The emitted IR carries no noalias anywhere, so the facts ownership already proves never reach the optimizer."],
-        ["spectralnorm", "inside the noise band", "Not a deviation. 1.02x Rust, well inside the +/-10% the second run fixes."],
-        ["fannkuch", "a deviation", "perm1.copy() allocates a fresh array per permutation — 39,916,800 of them at n = 11. Giving the C leg the same malloc and free per permutation and changing nothing else moved it from 1830 ms to 2430 ms, so the allocation is about 600 ms of the 763 ms gap. There is no way to copy into an array that already exists."],
-        ["binarytrees", "inside the noise band", "Not a deviation against Rust at 1.06x. The row's own finding is elsewhere: node wins it outright, and the Vyrn wasm leg — which runs no optimizer — beats the native one, because the wasm backend carries its own segregated free list and the native leg calls the platform malloc."],
-        ["fasta", "a deviation", "What a 60-byte output line costs: a fresh array grown from empty by doubling, then stringFromBytes, which is a byte-at-a-time UTF-8 validation over bytes known to be ASCII plus a second allocation — because print takes a String and there is no byte sink. Transcribed into C and measured on its own: 160 ns a line, 133 ms of the 268 ms gap."],
-        ["revcomp", "a deviation", "Three per-byte passes and the same per-line tax. About 120 M push operations for 40 M bases, each a bounds and capacity check into an array grown by doubling. Rust's output loop allocates nothing at all. The input side is shared with C, and is why C is itself 4.2x Rust here: readLine in the native shim reads one byte at a time with getchar()."],
-        ["knucleotide", "a deviation", "Map is not a hash map. In every engine Map<String, V> is an insertion-ordered vector of pairs and lookup is a linear strcmp scan, so a program that counts every k-mer is quadratic in the number of distinct keys. Measured: four times the input is 4.1 to 4.6 times the time, against C's flat line."],
-        ["pidigits", "inside the noise band", "Not a deviation. 1.00x Rust — the closest row in the set."],
+        ["nbody", "a deviation", "The vectorizer runs on rustc's IR and not on ours: Rust's inner loop is 342 packed-double instructions and four sqrtpd, ours is thirteen scalar ops and one sqrtsd. Plain C loses by the same order. The emitted IR carries no noalias anywhere, so the facts ownership already proves never reach the optimizer.", "no vector code, and no noalias"],
+        ["spectralnorm", "inside the noise band", "Not a deviation. 0.99x Rust, well inside the +/-10% band.", "no deviation to explain"],
+        ["fannkuch", "a deviation", "perm1.copy() allocates a fresh array per permutation — 39,916,800 of them at n = 11. Giving the C leg the same malloc and free per permutation and changing nothing else moved it from 1830 ms to 2430 ms, so the allocation is about 600 ms of a gap that measures 679 ms here and 763 ms on M2's dataset. There is no way to copy into an array that already exists.", "a copy per permutation"],
+        ["binarytrees", "at the edge of the band", "1.13x Rust on this dataset and 1.06x on M2's, either side of the +/-10% band, and Rust's own reading is what moved. The row's own finding is elsewhere: node wins it outright, and the Vyrn wasm leg — which runs no optimizer — beats the native one, because the wasm backend carries its own segregated free list and the native leg calls the platform malloc.", "the platform malloc"],
+        ["fasta", "a deviation", "What a 60-byte output line costs: a fresh array grown from empty by doubling, then stringFromBytes, which is a byte-at-a-time UTF-8 validation over bytes known to be ASCII plus a second allocation — because print takes a String and there is no byte sink. Transcribed into C and measured on its own: 160 ns a line, 133 ms of the 269 ms gap.", "the price of one output line"],
+        ["revcomp", "a deviation", "Three per-byte passes and the same per-line tax. About 120 M push operations for 40 M bases, each a bounds and capacity check into an array grown by doubling. Rust's output loop allocates nothing at all. The input side is shared with C, and is why C is itself 4.1x Rust here: readLine in the native shim reads one byte at a time with getchar().", "per-byte passes and a per-line tax"],
+        ["knucleotide", "a deviation", "Map is not a hash map. In every engine Map<String, V> is an insertion-ordered vector of pairs and lookup is a linear strcmp scan, so a program that counts every k-mer is quadratic in the number of distinct keys. Measured: four times the input is 4.1 to 4.6 times the time, against C's flat line.", "Map lookup is a linear scan"],
+        ["pidigits", "inside the noise band", "Not a deviation. 1.00x Rust — the closest row in the set.", "no deviation to explain"],
     ]
 }
 
@@ -796,6 +933,7 @@ export fn workItems() -> Array<String> {
         "Buffered stdin: getchar() per byte in the native shim, one fd_read per byte in the direct wasm backend.",
         "Loop facts in the emitted IR. No noalias anywhere and no loop metadata, so the ownership model's proofs never reach the optimizer.",
         "An allocator of Vyrn's own on the native leg. The wasm backend's segregated free list beats the platform malloc by enough to win binary-trees while running no optimizer.",
+        "A cause for binary-trees' memory. It peaks at 2,093 MB where C peaks at 20 MB and node at 383 MB, and both Vyrn backends land within 0.2% of each other — so it is not the allocator, it is what gets released. Found by the memory column the M3 amendment added; the wall clock never showed it, and no cause is named yet.",
     ]
 }
 
@@ -872,6 +1010,12 @@ export fn floorRows() -> Array<Reading> {
                 key: s.key.copy(),
                 name: s.name.copy(),
                 tone: s.tone.copy(),
+                cpu: secsOf(microsOf(scalarAt(cell, "      ", "cpu_median_s"))),
+                secs: secsOf(microsOf(scalarAt(cell, "      ", "median_s"))),
+                mem: memOf(wholeOf(scalarAt(cell, "      ", "peak_bytes"))),
+                gz: "",
+                make: "",
+                norm: "",
                 ms: msOf(microsOf(scalarAt(cell, "      ", "median_s"))),
                 vsC: "",
                 vsRust: "",
@@ -888,7 +1032,7 @@ export fn floorRows() -> Array<Reading> {
 
 /// One cell as the backstage prints it: both runs, the drift between them, the
 /// within-run spread, and the ten raw readings the median came from.
-export type Detail = { key: String, name: String, one: String, two: String, drift: String, spread: String, noisy: Bool, runs: String }
+export type Detail = { key: String, name: String, one: String, two: String, drift: String, cpu: String, mem: String, gz: String, make: String, spread: String, noisy: Bool, runs: String }
 
 /// One program's five cells, in full.
 export fn detailRows(program: String) -> Array<Detail> {
@@ -901,6 +1045,10 @@ export fn detailRows(program: String) -> Array<Detail> {
                 one: msOf(cell.us1),
                 two: msOf(cell.us2),
                 drift: driftText(cell.us1, cell.us2),
+                cpu: secsOf(cell.cpuUs),
+                mem: memOf(cell.peakBytes),
+                gz: bytesOf(cell.gzBytes),
+                make: makeOf(cell.makeUs),
                 spread: pctOf(cell.spread1),
                 noisy: noisy(cell.spread1),
                 runs: cell.runs1.copy(),
@@ -1033,35 +1181,36 @@ test "the record still has the shape this reader cuts" {
     assertEq(benchRuns(), "10")
 }
 
-test "the medians are the ones RFC-0104 M2 tabulates" {
-    // Every figure below is copied from the milestone's own table. They are the
-    // published claim; this is what stops the page from making a different one.
-    assertEq(msOf(medianUs("nbody", "c")), "898 ms")
+test "the medians are the ones the published record holds" {
+    // Every figure below is read off `2026-08-19-LOCUST-v2.json` by hand. They
+    // are pins, and they are meant to be: the day the record is replaced they
+    // fail, which is what makes a repointed reader visible instead of silent.
+    // RFC-0104 M2's own table is the earlier dataset and is not this one — see
+    // the M3 amendment for the four cells that moved and why.
+    assertEq(msOf(medianUs("nbody", "c")), "885 ms")
     assertEq(msOf(medianUs("nbody", "rust")), "658 ms")
-    assertEq(msOf(medianUs("nbody", "js")), "1114 ms")
-    assertEq(msOf(medianUs("nbody", "vyrn-native")), "866 ms")
-    assertEq(msOf(medianUs("nbody", "vyrn-wasm")), "13029 ms")
-    assertEq(msOf(medianUs("knucleotide", "c")), "10.1 ms")
-    assertEq(msOf(medianUs("knucleotide", "rust")), "8.5 ms")
+    assertEq(msOf(medianUs("nbody", "js")), "1128 ms")
+    assertEq(msOf(medianUs("nbody", "vyrn-native")), "895 ms")
+    assertEq(msOf(medianUs("nbody", "vyrn-wasm")), "12412 ms")
+    assertEq(msOf(medianUs("knucleotide", "c")), "13.7 ms")
+    assertEq(msOf(medianUs("knucleotide", "rust")), "12.3 ms")
     assertEq(msOf(medianUs("knucleotide", "vyrn-native")), "2888 ms")
-    assertEq(msOf(medianUs("binarytrees", "js")), "437 ms")
-    assertEq(msOf(medianUs("pidigits", "vyrn-native")), "1291 ms")
+    assertEq(msOf(medianUs("binarytrees", "js")), "426 ms")
+    assertEq(msOf(medianUs("pidigits", "vyrn-native")), "1309 ms")
 }
 
-test "the normalized figures are the ones the milestone published" {
-    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "c")), "0.97x")
-    assertEq(ratioText(ratioOf("nbody", "vyrn-wasm", "c")), "14.52x")
-    assertEq(ratioText(ratioOf("spectralnorm", "vyrn-native", "c")), "1.01x")
-    assertEq(ratioText(ratioOf("binarytrees", "js", "c")), "0.54x")
+test "the normalized figures are the ones the record computes" {
+    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "c")), "1.01x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-wasm", "c")), "14.02x")
+    assertEq(ratioText(ratioOf("spectralnorm", "vyrn-native", "c")), "0.99x")
+    assertEq(ratioText(ratioOf("binarytrees", "js", "c")), "0.52x")
     assertEq(ratioText(ratioOf("revcomp", "rust", "c")), "0.24x")
-    assertEq(ratioText(ratioOf("knucleotide", "vyrn-native", "c")), "287x")
-    assertEq(ratioText(ratioOf("knucleotide", "vyrn-wasm", "c")), "302x")
+    assertEq(ratioText(ratioOf("knucleotide", "vyrn-native", "c")), "211x")
+    assertEq(ratioText(ratioOf("knucleotide", "vyrn-wasm", "c")), "222x")
     // And against Rust, which is the comparison the gate was written about.
-    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "rust")), "1.32x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "rust")), "1.36x")
     assertEq(ratioText(ratioOf("pidigits", "vyrn-native", "rust")), "1.00x")
-    // M2's prose rounds this one to 15.4; two decimals off the same two medians
-    // is 15.44.
-    assertEq(ratioText(ratioOf("revcomp", "vyrn-native", "rust")), "15.44x")
+    assertEq(ratioText(ratioOf("revcomp", "vyrn-native", "rust")), "13.53x")
 }
 
 test "the log scale puts a doubling on every ring" {
@@ -1177,9 +1326,9 @@ test "the table is the whole dataset and the panels are the same numbers" {
         assertEq(r.cells.length, 5)
     }
     assertEq(rows[0].n, "25,000,000")
-    assertEq(rows[0].cells[0].ms, "898 ms")
-    assertEq(rows[0].cells[3].vsC, "0.97x")
-    assertEq(rows[0].cells[3].vsRust, "1.32x")
+    assertEq(rows[0].cells[0].ms, "885 ms")
+    assertEq(rows[0].cells[3].vsC, "1.01x")
+    assertEq(rows[0].cells[3].vsRust, "1.36x")
     let panels = axisPanels()
     assertEq(panels.length, 8)
     for i in [0, 1, 2, 3, 4, 5, 6, 7] {
@@ -1188,28 +1337,36 @@ test "the table is the whole dataset and the panels are the same numbers" {
         assert(panels[i].cause.byteLength > 40)
         assert(panels[i].verdict.byteLength > 0)
     }
-    // The three rows inside the noise band say so rather than naming a defect.
+    // The rows that are not deviations say so rather than naming a defect, and
+    // the one that sits on the line says THAT rather than picking a side.
     assertEq(panels[1].verdict, "inside the noise band")
-    assertEq(panels[3].verdict, "inside the noise band")
+    assertEq(panels[3].verdict, "at the edge of the band")
     assertEq(panels[7].verdict, "inside the noise band")
 }
 
-test "the two noisiest cells are flagged where they are printed" {
-    // M2's own finding: thirty-eight of forty cells hold a spread under 15%, and
-    // the two that do not are k-nucleotide's C and Rust legs.
+test "the noisy cells are flagged where they are printed" {
+    // The COUNT is not pinned: it is a property of the machine on the day, and a
+    // quieter one flags fewer. What is pinned is the wiring — every flag on the
+    // page is the spread of that program on that contestant, and not of the cell
+    // beside it — and that the mechanism is exercised by at least one cell.
     let mut flagged = 0
     for r in tableRows() {
-        for cell in r.cells {
-            if cell.noisy {
+        let mut i = 0
+        while i < r.cells.length {
+            assertEq(r.cells[i].noisy, noisy(cellOf(r.key, contestants()[i].key).spread1))
+            assertEq(r.cells[i].spread, pctOf(cellOf(r.key, contestants()[i].key).spread1))
+            if r.cells[i].noisy {
                 flagged = flagged + 1
             }
+            i = i + 1
         }
     }
-    assertEq(flagged, 2)
-    let knuc = readingsFor("knucleotide")
-    assert(knuc[0].noisy)
-    assert(knuc[1].noisy)
-    assert(!knuc[3].noisy)
+    assert(flagged > 0)
+    // k-nucleotide's C leg is the smallest reading in the set — a few multiples
+    // of the process floor — so it is noisy on any machine this runs on.
+    assert(readingsFor("knucleotide")[0].noisy)
+    // And nbody's, three orders of magnitude above the floor, is not.
+    assert(!readingsFor("nbody")[0].noisy)
 }
 
 test "the caption names the machine and the toolchain that produced the numbers" {
@@ -1225,8 +1382,8 @@ test "the caption names the machine and the toolchain that produced the numbers"
     // The floor is published beside the medians, because a whole-process time
     // that hides its floor cannot be checked.
     assertEq(floorRows().length, 5)
-    assertEq(floorRows()[0].ms, "4.1 ms")
-    assertEq(floorRows()[4].ms, "14.3 ms")
+    assertEq(floorRows()[0].ms, "7.8 ms")
+    assertEq(floorRows()[4].ms, "17.7 ms")
 }
 
 test "both runs are on the backstage, and the drift is computed from them" {
@@ -1240,9 +1397,9 @@ test "both runs are on the backstage, and the drift is computed from them" {
     }
     // The gate's own sentence, computed: thirty-six of forty cells moved by less
     // than five per cent, and the worst moved by 9.5%.
-    assertEq(steadyCells(), "34 of 40")
-    assertEq(detailRows("binarytrees")[1].drift, "-9.49%")
-    assert(has(worstDrift(), "binarytrees / rust"))
+    assertEq(steadyCells(), "37 of 40")
+    assertEq(detailRows("binarytrees")[1].drift, "+1.23%")
+    assert(has(worstDrift(), "knucleotide / c"))
 }
 
 test "the published ceiling is dated, and never mixed with the measured rows" {
@@ -1260,6 +1417,77 @@ test "the published ceiling is dated, and never mixed with the measured rows" {
     assertEq(rows[0][0], "nbody")
     assertEq(rows[0][1], "50,000,000")
     assert(has(ceilingFetched(), "2026-08-19"))
+}
+
+test "every program links to the game's own page for it" {
+    // The link is the amendment's own gate: a benchmark that names a program
+    // and does not point at the original is asking to be taken on trust. All
+    // eight were fetched and resolved on the date `ceilingFetched` states.
+    let progs = programs()
+    assertEq(progs.length, 8)
+    for p in progs {
+        assert(has(p.game, "https://benchmarksgame-team.pages.debian.net/benchmarksgame/performance/"))
+        assert(has(p.game, ".html"))
+    }
+    // The three spellings that do not compute from one another: the record's
+    // key, the name a reader sees, and the slug the game's own page sits under.
+    assertEq(progs[2].key, "fannkuch")
+    assertEq(progs[2].name, "fannkuch-redux")
+    assert(has(progs[2].game, "/fannkuchredux.html"))
+    assert(has(progs[1].game, "/spectralnorm.html"))
+    assert(has(progs[6].game, "/knucleotide.html"))
+    assert(has(progs[5].game, "/revcomp.html"))
+}
+
+test "every cell carries the five columns the game prints" {
+    for r in tableRows() {
+        assertEq(r.cells.length, 5)
+        for c in r.cells {
+            assert(c.cpu.byteLength > 0)
+            assert(c.secs.byteLength > 0)
+            assert(c.mem.byteLength > 2)
+            assert(c.gz.byteLength > 2)
+            assert(has(c.norm, " C, "))
+        }
+        // node is the one contestant with no build step, and the column says so
+        // rather than printing a zero somebody would read as a fast build.
+        assertEq(r.cells[2].make, "—")
+        assert(r.cells[0].make != "—")
+        assert(r.cells[3].make != "—")
+    }
+}
+
+test "a cause on the consumer page is a label and a link, not a paragraph" {
+    // RFC-0104 M3, amended: the diagnosis is still written and still sourced —
+    // it moved to the backstage, and what `/compare` prints is a few words and
+    // the way through to the whole of it.
+    for p in axisPanels() {
+        assert(p.label.byteLength > 0)
+        assert(p.label.byteLength < 40)
+        assert(p.cause.byteLength > 40)
+        assert(has(p.href, "backstage/benchmarks.html#" + p.key))
+    }
+    for row in causeRows() {
+        assertEq(row.length, 4)
+    }
+}
+
+test "a second, a memory size and a byte count read the way the game prints them" {
+    assertEq(secsOf(898000), "0.90")
+    assertEq(secsOf(13029000), "13.03")
+    assertEq(secsOf(10100), "0.01")
+    // Two cells in the set are smaller than the column can resolve, and this is
+    // what they print rather than claiming the program took no time.
+    assertEq(secsOf(4000), "<0.01")
+    assertEq(secsOf(0), "0.00")
+    assertEq(secsOf(0 - 1), "—")
+    assertEq(makeOf(0), "—")
+    assertEq(makeOf(591825), "0.59")
+    assertEq(memOf(4386816), "4,284 KB")
+    assertEq(memOf(41000000), "39.1 MB")
+    assertEq(memOf(0), "—")
+    assertEq(bytesOf(1168), "1,168")
+    assertEq(bytesOf(0), "—")
 }
 
 test "a thousands separator lands every three digits and nowhere else" {

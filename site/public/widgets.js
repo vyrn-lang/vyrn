@@ -691,9 +691,10 @@ function radarWidget(root) {
   if (!svg) return;
 
   // The markup ships every panel visible, one after another, because that is
-  // what this section IS with no script: eight findings in a list, and the only
-  // place the named causes appear. `tabsWidget` hides the other seven the
-  // moment it mounts, so nothing here has to.
+  // what this section IS with no script: eight compact tables in the game's own
+  // columns, each with the cause in a few words and a link to the whole of it.
+  // `tabsWidget` hides the other seven the moment it mounts, so nothing here
+  // has to.
   const select = tabsWidget(root, { tab: "axis", pane: "axis-pane" });
   const names = $$("[data-axis-name]", svg);
   const tabs = $$("[data-axis]", root);

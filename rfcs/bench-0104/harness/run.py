@@ -15,11 +15,28 @@ Three things about the method, because a benchmark is only worth its
 methodology:
 
 * **Whole-process wall time.** The game's own convention. `perf_counter`
-  around `subprocess.run`, stdout discarded. So the number carries process
+  around the child, stdout discarded. So the number carries process
   start-up, and for the wasm leg it carries wasmtime's JIT — that is the
   price of running the thing, and hiding it would be a different measurement.
   `python run.py --floor` prints the empty-program floor for each contestant
   so the reader can subtract it.
+
+  Beside the wall clock the runner records the four other columns the game's
+  own per-program pages print, so the record answers the questions a reader
+  brings to one of those pages (RFC-0104 M3 amendment):
+
+  - **cpu secs** — user plus kernel time of the child process, from
+    `GetProcessTimes` on Windows and `getrusage(RUSAGE_CHILDREN)` elsewhere.
+    Every contestant here is single-threaded, so cpu under wall is idle time
+    and cpu over wall would be parallelism; neither is hidden.
+  - **mem** — peak working set of the child, from
+    `GetProcessMemoryInfo(PeakWorkingSetSize)` on Windows and `ru_maxrss`
+    elsewhere; the largest of the timed runs, because a peak is a peak.
+  - **make secs** — wall time to build that contestant's timed artifact, once
+    per program. Zero for node, which has no build step.
+  - **gz** — the gzipped size of the single source file, which is the game's
+    own stand-in for how much program it took. The two Vyrn legs share one
+    source and therefore one figure.
 
 * **N reaches the Vyrn programs through a temp copy.** `examples/*.vyrn` hold
   N as a `let` (RFC-0104 M1 decided that: no `.args` fixtures, one
@@ -42,6 +59,7 @@ committed JSON under `results/` is the record.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import os
 import platform
@@ -300,6 +318,41 @@ def sh(cmd: list, **kw) -> subprocess.CompletedProcess:
     return r
 
 
+# How long each contestant's timed artifact took to build, keyed (program,
+# contestant). The game calls this column `make secs`; here it is the wall time
+# of the one command that produces the thing that gets timed, so a `--no-build`
+# run records no figure rather than a stale one.
+MAKE: dict[tuple[str, str], float] = {}
+
+
+def timed_sh(key: tuple[str, str], cmd: list, **kw):
+    t0 = time.perf_counter()
+    sh(cmd, **kw)
+    MAKE[key] = time.perf_counter() - t0
+
+
+def source_of(contestant: str, prog: Program) -> Path:
+    """The single source file one contestant's entry is written in.
+
+    The game prints one `gz` per entry and this is the file it is of. Both Vyrn
+    legs are built from the same `examples/<name>.vyrn`, so they carry the same
+    figure: what differs between them is the backend, not the program.
+    """
+    if contestant == "c":
+        return HARNESS / "c" / f"{prog.name}.c"
+    if contestant == "rust":
+        return HARNESS / "rust" / f"{prog.name}.rs"
+    if contestant == "js":
+        return HARNESS / "js" / f"{prog.name}.js"
+    return EXAMPLES / f"{prog.name}.vyrn"
+
+
+def gz_bytes(path: Path) -> int:
+    """The source gzipped at level 9, in bytes. `mtime=0`, or the header would
+    carry the clock and the same unchanged file would measure differently."""
+    return len(gzip.compress(path.read_bytes(), 9, mtime=0))
+
+
 def exe(name: str) -> Path:
     return BUILD / (name + (".exe" if os.name == "nt" else ""))
 
@@ -328,12 +381,15 @@ def build_all(progs: list[Program], want: list[str]):
     for p in progs:
         print(f"  build {p.name}", flush=True)
         if "c" in want:
-            sh(["clang", *CFLAGS, "-o", exe(f"c-{p.name}"), HARNESS / "c" / f"{p.name}.c"])
+            timed_sh((p.name, "c"), ["clang", *CFLAGS, "-o", exe(f"c-{p.name}"), HARNESS / "c" / f"{p.name}.c"])
         if "rust" in want:
-            sh(
+            timed_sh(
+                (p.name, "rust"),
                 ["rustc", *RUSTFLAGS, "-o", exe(f"rust-{p.name}"), HARNESS / "rust" / f"{p.name}.rs"],
                 cwd=BUILD,
             )
+        if "js" in want:
+            MAKE[(p.name, "js")] = 0.0  # node has no build step, and 0 says so
         # The Vyrn legs. A program whose N is a `let` gets two builds: the
         # committed source (which already carries the fixture N) and a stamped
         # copy at the timing N. A program that reads stdin gets one.
@@ -344,10 +400,16 @@ def build_all(progs: list[Program], want: list[str]):
         else:
             sources["timing"] = sources["fixture"]
         for tag, src in sources.items():
+            # Only the `timing` build is the one that gets timed, so only that
+            # one is what `make secs` is of.
+            native = (p.name, "vyrn-native") if tag == "timing" else None
+            wasm = (p.name, "vyrn-wasm") if tag == "timing" else None
             if "vyrn-native" in want:
-                sh([vyrn, "build", src, "-o", exe(f"vyrn-{p.name}-{tag}")])
+                cmd = [vyrn, "build", src, "-o", exe(f"vyrn-{p.name}-{tag}")]
+                timed_sh(native, cmd) if native else sh(cmd)
             if "vyrn-wasm" in want:
-                sh([vyrn, "build", src, "--target", "wasm", "-o", BUILD / f"vyrn-{p.name}-{tag}.wasm"])
+                cmd = [vyrn, "build", src, "--target", "wasm", "-o", BUILD / f"vyrn-{p.name}-{tag}.wasm"]
+                timed_sh(wasm, cmd) if wasm else sh(cmd)
 
 
 def command(contestant: str, prog: Program, n: int, tag: str) -> list:
@@ -461,22 +523,101 @@ def diff(want: bytes, got: bytes) -> str:
 # timing
 
 
-def measure(cmd: list, stdin_path: Path | None, runs: int) -> list[float]:
-    """Whole-process wall time, `runs` times, stdout discarded."""
-    times = []
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+
+    class _FileTime(ctypes.Structure):
+        _fields_ = [("lo", wintypes.DWORD), ("hi", wintypes.DWORD)]
+
+    class _MemCounters(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+
+def usage_of(proc: subprocess.Popen, before) -> tuple[float | None, int | None]:
+    """The cpu time and peak resident memory of one FINISHED child.
+
+    Windows: `GetProcessTimes` and `GetProcessMemoryInfo` on the handle
+    `Popen` still holds — both stay readable after the process exits, for as
+    long as a handle to it is open, which is what makes this exact per child
+    rather than a sampled guess.
+
+    Elsewhere: `getrusage(RUSAGE_CHILDREN)`, differenced across the run for
+    the cpu time and read directly for `ru_maxrss`, which is already a
+    high-water mark over all reaped children. Stdlib and ctypes only; the
+    harness takes no pip dependency.
+    """
+    if os.name == "nt":
+        h = wintypes.HANDLE(int(proc._handle))
+        created, exited, kernel, user = _FileTime(), _FileTime(), _FileTime(), _FileTime()
+        cpu = None
+        if ctypes.windll.kernel32.GetProcessTimes(
+            h, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user)
+        ):
+            ticks = ((kernel.hi << 32) | kernel.lo) + ((user.hi << 32) | user.lo)
+            cpu = ticks / 1e7  # FILETIME counts 100-nanosecond intervals
+        mem = _MemCounters()
+        mem.cb = ctypes.sizeof(_MemCounters)
+        peak = None
+        if ctypes.WinDLL("psapi").GetProcessMemoryInfo(h, ctypes.byref(mem), mem.cb):
+            peak = int(mem.PeakWorkingSetSize)
+        return cpu, peak
+    if before is None:
+        return None, None
+    import resource
+
+    now = resource.getrusage(resource.RUSAGE_CHILDREN)
+    cpu = (now.ru_utime - before.ru_utime) + (now.ru_stime - before.ru_stime)
+    scale = 1 if sys.platform == "darwin" else 1024  # ru_maxrss is bytes on macOS, KiB on Linux
+    return cpu, int(now.ru_maxrss) * scale
+
+
+def measure(cmd: list, stdin_path: Path | None, runs: int) -> tuple[list[float], list[float], list[int]]:
+    """Whole-process wall time, cpu time and peak memory, `runs` times.
+
+    `subprocess.run` became `Popen` plus `wait` so the handle survives long
+    enough to be asked what the child cost. With stdout and stderr going to
+    the null device there is no pipe to drain, so the two are the same
+    sequence of calls and the wall clock is measured exactly as M2 measured it.
+    """
+    walls: list[float] = []
+    cpus: list[float] = []
+    peaks: list[int] = []
     for _ in range(runs):
+        before = None
+        if os.name != "nt":
+            import resource
+
+            before = resource.getrusage(resource.RUSAGE_CHILDREN)
         with open(stdin_path, "rb") if stdin_path else open(os.devnull, "rb") as fh:
             t0 = time.perf_counter()
-            r = subprocess.run(
+            proc = subprocess.Popen(
                 [str(c) for c in cmd],
                 stdin=fh,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            times.append(time.perf_counter() - t0)
-        if r.returncode != 0:
-            die(f"nonzero exit while timing {' '.join(str(c) for c in cmd)}: {r.returncode}")
-    return times
+            rc = proc.wait()
+            walls.append(time.perf_counter() - t0)
+            cpu, peak = usage_of(proc, before)
+        if rc != 0:
+            die(f"nonzero exit while timing {' '.join(str(c) for c in cmd)}: {rc}")
+        if cpu is not None:
+            cpus.append(cpu)
+        if peak is not None:
+            peaks.append(peak)
+    return walls, cpus, peaks
 
 
 def floor(want: list[str], runs: int) -> dict:
@@ -504,14 +645,25 @@ def floor(want: list[str], runs: int) -> dict:
             sh([vyrn_exe(), "build", tmp / "e.vyrn", "--target", "wasm", "-o", tmp / "e.wasm"])
             cmds["vyrn-wasm"] = [wasmtime_exe(), "run", tmp / "e.wasm"]
         for c, cmd in cmds.items():
-            ts = measure(cmd, None, runs)
-            out[c] = {"median_s": statistics.median(ts), "runs_s": ts}
+            ts, cpus, peaks = measure(cmd, None, runs)
+            out[c] = {
+                "median_s": statistics.median(ts),
+                "runs_s": ts,
+                "cpu_median_s": statistics.median(cpus) if cpus else None,
+                "peak_bytes": max(peaks) if peaks else None,
+            }
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return out
 
 
-def summarize(ts: list[float]) -> dict:
+def summarize(ts: list[float], cpus: list[float], peaks: list[int], make: float | None, gz: int) -> dict:
+    """One cell of the record: the wall clock first, then the four columns the
+    game's own per-program pages print beside it.
+
+    Every key is a scalar or a flat list at one depth, because the site reads
+    this file by slicing it at known indentation rather than parsing it.
+    """
     m = statistics.median(ts)
     return {
         "median_s": m,
@@ -519,6 +671,11 @@ def summarize(ts: list[float]) -> dict:
         "max_s": max(ts),
         "spread_pct": round(100.0 * (max(ts) - min(ts)) / m, 2) if m else None,
         "runs_s": ts,
+        "cpu_median_s": statistics.median(cpus) if cpus else None,
+        "cpu_runs_s": cpus,
+        "peak_bytes": max(peaks) if peaks else None,
+        "make_s": make,
+        "gz_bytes": gz,
     }
 
 
@@ -573,10 +730,13 @@ def main() -> int:
         stdin_path = fasta_input(p.stdin_fasta_n) if p.stdin_fasta_n else None
         row = {}
         for c in want:
-            ts = measure(command(c, p, p.timing_n, "timing"), stdin_path, args.runs)
-            row[c] = summarize(ts)
-            print(f"  {p.name:<14} {c:<12} {row[c]['median_s'] * 1000:9.1f} ms"
-                  f"  (spread {row[c]['spread_pct']}%)", flush=True)
+            ts, cpus, peaks = measure(command(c, p, p.timing_n, "timing"), stdin_path, args.runs)
+            row[c] = summarize(ts, cpus, peaks, MAKE.get((p.name, c)), gz_bytes(source_of(c, p)))
+            cell = row[c]
+            print(f"  {p.name:<14} {c:<12} {cell['median_s'] * 1000:9.1f} ms"
+                  f"  cpu {(cell['cpu_median_s'] or 0) * 1000:8.1f} ms"
+                  f"  mem {(cell['peak_bytes'] or 0) // 1024:8d} KB"
+                  f"  (spread {cell['spread_pct']}%)", flush=True)
         results[p.name] = {"n": p.timing_n, "note": p.note, "contestants": row}
 
     record = {
@@ -585,6 +745,13 @@ def main() -> int:
         "date": date.today().isoformat(),
         "runs": args.runs,
         "method": "whole-process wall time, stdout discarded, median of the runs",
+        "columns": {
+            "median_s": "wall clock of the whole process, median of the runs",
+            "cpu_median_s": "user plus kernel time of the child, median of the runs",
+            "peak_bytes": "peak working set of the child, the largest of the runs",
+            "make_s": "wall clock of the one command that builds the timed artifact, 0 for node",
+            "gz_bytes": "the contestant's single source file, gzipped at level 9",
+        },
         "environment": env,
         "verification": verification,
         "results": results,
