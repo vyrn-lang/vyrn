@@ -749,6 +749,49 @@ fn rfcAt(raw: Array<UInt8>, at: Int64) -> Int64 {
     return n
 }
 
+/// Every record `text` names, in `known`'s own order, each once.
+///
+/// `inlineHtml` above turns a bare `RFC-NNNN` into a link. This answers the
+/// other question the same recognizer settles — WHICH records a record names —
+/// for the citation ring on `/backstage` (`corpus.vyrn`). One `rfcAt`, two
+/// readers: a second scanner would be a second opinion about what a mention is,
+/// and the ring would disagree with the links in the prose it was drawn from.
+///
+/// It reads the text WHOLE, so a mention inside a code span or a fence counts
+/// here and does not link there. That is the same rule in both places rather
+/// than two: a link inside `<code>` would be markup the corpus did not write,
+/// while a record that names another record in a code block has named it.
+export fn rfcMentions(text: String, known: Array<Int64>) -> Array<Int64> {
+    let raw = bytes(text)
+    let mut seen: Array<Int64> = []
+    let mut i = 0
+    while i < raw.length {
+        // The four bytes are compared HERE and not inside `rfcAt`, which takes
+        // the array: a call per `R` in 2.8 MB of prose is 30,000 calls, and the
+        // scan took twelve seconds instead of one. The guard leaves 2,000.
+        if raw[i] == 'R' && i + 4 <= raw.length && raw[i + 1] == 'F' && raw[i + 2] == 'C' && raw[i + 3] == '-' {
+            let n = rfcAt(raw, i)
+            if n > 0 {
+                if oneOfInt(n, known) && !oneOfInt(n, seen) {
+                    seen.push(n)
+                }
+                i = i + 8
+            } else {
+                i = i + 1
+            }
+        } else {
+            i = i + 1
+        }
+    }
+    let mut out: Array<Int64> = []
+    for n in known {
+        if oneOfInt(n, seen) {
+            out.push(n)
+        }
+    }
+    return out
+}
+
 /// Whether `n` is one of `all`.
 fn oneOfInt(n: Int64, all: Array<Int64>) -> Bool {
     for x in all {
@@ -790,6 +833,28 @@ test "a bare RFC number links to the page this site publishes for it" {
     // A number with no page is text, and so is one inside a code span.
     assertEq(renderOk2("see RFC-0066 here", [91]), "<p>see RFC-0066 here</p>")
     assertEq(renderOk2("`RFC-0091`", [91]), "<p><code>RFC-0091</code></p>")
+}
+
+test "the mentions of a record are the numbers it names, once each" {
+    assertEq(mentioned("see RFC-0091 and RFC-0091 again"), "91")
+    // In `known` order, whatever order the text names them in.
+    assertEq(mentioned("RFC-0105 then RFC-0091"), "91 105")
+    // A number with no page is not a citation, and a fifth digit is a different
+    // string — the same two rules the link half applies.
+    assertEq(mentioned("RFC-0066 RFC-00911"), "")
+    // A mention inside a code span counts here, where a link would be wrong.
+    assertEq(mentioned("`RFC-0091`"), "91")
+    assertEq(mentioned("nothing at all"), "")
+}
+
+/// The numbers `text` mentions of the two records this file's tests publish, as
+/// one string: an `Array<Int64>` is not equatable, and a joined list is.
+fn mentioned(text: String) -> String {
+    let mut parts: Array<String> = []
+    for n in rfcMentions(text, [91, 105]) {
+        parts.push(n.toString())
+    }
+    return joinWith(parts, " ")
 }
 
 test "a link out of an RFC lands where that file is read from" {

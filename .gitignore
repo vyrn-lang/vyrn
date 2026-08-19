@@ -47,3 +47,10 @@ tools/
 out/
 site/public/*.wasm
 gate-*.txt
+
+# The repository's own history, for the velocity charts on /backstage. Derived
+# from git by `scripts/site-history.py`, which the site workflow runs before the
+# export — a committed copy would be a picture of the day somebody ran it. The
+# fixture beside it IS committed: it is five made-up days, and it is what the
+# export's tests run on when nobody has run the script (RFC-0105 M1).
+site/data/history.json

@@ -27,10 +27,7 @@
 ///
 /// Every field is a `String`, because that is what an SVG attribute is. Rounding
 /// happens here, once, rather than in four `.toString()` calls at the template.
-import { rfcRows, RfcRow, blob } from "./repo"
-import { rfcTag, rfcHref } from "./backstage"
-import { startsWith } from "std/strpred"
-import { split, joinWith } from "std/strings"
+import { blob } from "./repo"
 import { vyrnLines } from "./snippets"
 
 /// One row of a bar chart: the bar itself, the row's full-width hit area, the
@@ -40,10 +37,6 @@ import { vyrnLines } from "./snippets"
 /// reader hovers the ROW. The hit rectangle spans the whole row, so a 26-unit
 /// sliver of a bar is not the only target on the chart.
 export type Bar = { id: String, y: String, hy: String, w: String, label: String, value: String, title: String, href: String, tone: String }
-
-/// One cell in the RFC strip. It is a link: a tinted square that answers a
-/// hover but not a click is a square pretending to be a control.
-export type Cell = { id: String, x: String, y: String, tone: String, title: String, href: String }
 
 /// A number as a string.
 fn px(v: Int64) -> String {
@@ -513,48 +506,6 @@ export fn compiledGrid() -> Array<Grid> {
 }
 
 // ---------------------------------------------------------------------------
-// The RFC strip. One cell per design record, in order, tinted by decade so the
-// eye can count. Real data: the file names in `rfcs/`, counted by the generator.
-// ---------------------------------------------------------------------------
-
-/// Every RFC as a cell, twenty to a row.
-export fn rfcCells() -> Array<Cell> {
-    let mut out: Array<Cell> = []
-    let mut i = 0
-    let rows = rfcRows()
-    while i < rows.length {
-        let r = rows[i]
-        out.push(Cell {
-                id: r.number.toString(),
-                x: px(i % 20 * 22),
-                y: px(i / 20 * 22),
-                tone: toneOf(r.number),
-                title: rfcTag(r.number) + " " + r.title,
-                href: rfcHref(r.number),
-            })
-        i = i + 1
-    }
-    return out
-}
-
-/// A cell's fill opacity, stepping every ten RFCs so the strip reads as a
-/// sequence rather than a texture.
-fn toneOf(number: Int64) -> String {
-    let step = (number - 1) / 10
-    return "0." + (3 + step * 7).toString()
-}
-
-/// How wide the RFC strip is, in its own coordinates.
-export fn rfcStripWidth() -> String {
-    return "440"
-}
-
-/// How tall the RFC strip is: one row per twenty RFCs, rounded up.
-export fn rfcStripHeight() -> String {
-    return px((rfcRows().length + 19) / 20 * 22)
-}
-
-// ---------------------------------------------------------------------------
 // The ownership replay
 //
 // The first version drew a horizontal timeline beside the code, with a big
@@ -739,31 +690,6 @@ test "a duration reads in the unit that suits it" {
     assertEq(msOf(38056), "38.1 s")
     assertEq(ratio1(207, 87), "2.4")
     assertEq(ratio1(10, 10), "1.0")
-}
-
-test "the RFC strip has one cell per RFC and wraps every twenty" {
-    let cells = rfcCells()
-    assertEq(cells.length, rfcRows().length)
-    assertEq(cells[0].x, "0")
-    assertEq(cells[0].y, "0")
-    assertEq(cells[20].x, "0")
-    assertEq(cells[20].y, "22")
-}
-
-test "a strip cell opens the record's page on this site" {
-    // The strip used to leave for GitHub. The record is rendered here now, so a
-    // cell opens the page beside it (RFC-0105 M1).
-    assertEq(rfcCells()[0].href, "/backstage/rfcs/0001.html")
-    for c in rfcCells() {
-        assert(startsWith(c.href, "/backstage/rfcs/"))
-    }
-}
-
-test "every tone is a fill-opacity between nothing and everything" {
-    for c in rfcCells() {
-        assert(c.tone.byteLength >= 3)
-        assert(c.title.byteLength > 4)
-    }
 }
 
 test "a lane is drawn on exactly the lines its binding is alive" {

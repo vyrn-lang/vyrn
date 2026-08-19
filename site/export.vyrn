@@ -29,6 +29,7 @@ import { pages } from "std/ui"
 import { route, rootPath, philosophyPath, comparePath, installPath, editorsPath, releasesPath, docsPath, explorePath, guidePath, playPath, backstagePath, backstageBenchmarksPath, hrefDocsStd, hrefGuide, hrefBackstageRfcs, hrefExplore } from pages("./app/routes")
 import { published, navRows, hrefOf, upTo } from "./app/nav"
 import { rfcPages, rfcSlug } from "./app/backstage"
+import { historyIsFixture, historyPath, historyCommand } from "./app/history"
 import { apiModules, apiEntries, apiHref, importLine } from "./app/docs"
 import { chapterSlugs, chapterHref } from "./app/guide"
 import { searchRows } from "./app/stdgraph"
@@ -288,6 +289,7 @@ fn assets() -> Array<Array<String>> {
         ["site/public/style.css", "style.css"],
         ["site/public/theme.js", "theme.js"],
         ["site/public/widgets.js", "widgets.js"],
+        ["site/public/backstage.js", "backstage.js"],
         ["site/public/hero.js", "hero.js"],
         ["site/public/fresh.js", "fresh.js"],
         ["site/public/play.js", "play.js"],
@@ -323,9 +325,32 @@ fn written(outDir: String, source: String, name: String, body: String) -> Int64 
     return emit("\{outDir}/\{name}", body)
 }
 
+/// The one input this program is HANDED rather than reads (RFC-0105 M1).
+///
+/// The velocity charts on `/backstage` are drawn from the repository's own
+/// history, and history is not in the working tree: RFC-0014 gives this program
+/// `readFile` and `listDir`, and there is no git behind either. So the site
+/// workflow runs `scripts/site-history.py` before this program, and this
+/// program refuses to publish without what it wrote. A committed fixture keeps
+/// the tests below runnable on a clone that has never run the script, and this
+/// check is what keeps that fixture out of a published page — the failure mode
+/// being ruled out is a chart that is drawn, is wrong, and says nothing.
+fn missingHistory() -> Bool {
+    if !historyIsFixture() {
+        return false
+    }
+    print("FAIL \{historyPath()}: not there, so the velocity charts would be five made-up days.")
+    print("     Run: \{historyCommand()}")
+    print("     The site workflow runs it before this program, from a checkout with fetch-depth: 0.")
+    return true
+}
+
 fn main() -> Int64 {
     let argv = args()
     let outDir = if argv.length > 1 { argv[1].copy() } else { "out" }
+    if missingHistory() {
+        return 1
+    }
     let mut failures = 0
     for path in sitePaths() {
         failures = failures + exportPath(outDir, path)

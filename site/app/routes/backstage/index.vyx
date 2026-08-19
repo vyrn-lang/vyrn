@@ -6,19 +6,33 @@
 // of the shell every other page shares, and the masthead below is its own. The
 // two fronts meet at one link each way, in the footer.
 //
-// Nothing here is written by hand. The rows are `rfcs/README.md`'s own index
-// table — number, title, status, in the order the record lists them — and the
-// strip is one cell per file in `rfcs/`, the same geometry the release page used
-// to carry before this section existed to carry it.
+// Nothing here is written by hand. Two sources, both read while the page is
+// built: `rfcs/README.md`'s own index table (number, title, status, in the
+// order the record lists them, plus the file behind each row — `corpus.vyrn`),
+// and the repository's own history, which this program cannot read and is
+// handed instead (`site/data/history.json`, written by
+// `scripts/site-history.py` before the export — `history.vyrn`).
+//
+// The order of the page is the order the questions are asked in: how fast is
+// this moving, what was designed and what became of it, where does it stand
+// today — and only then the shape of the corpus and the index itself.
 layout="none"
-import { Head } from "std/ui"
+import { Head, withModule } from "std/ui"
 import { IndexRow, rfcIndex, rfcHref, rfcTag, backstageHead, backstageNav, backstageFooter } from "../../backstage"
-import { rfcCells, rfcStripWidth, rfcStripHeight, Cell } from "../../chart"
+import { Bucket, CiteNode, CiteEdge, CiteTick, CiteRow, StripCell, Record, buckets, bucketCount, otherRecords, barViewBox, citeViewBox, citeNodes, citeEdges, citeTicks, citeRows, citeCount, mostCited, weightCells, stripWidth, stripHeight, corpusBytes, sizeOf } from "../../corpus"
+import { Day, Release, VBar, AxisMark, Band, days, releaseRows, commitCount, prCount, testBlockCount, testFileCount, dayCount, firstDay, lastDay, pulseViewBox, pulseAxisY, commitBars, prBars, weekMarks, releaseMarks, arrivalsViewBox, arrivalBands, arrivalMarks, arrivalList, ArrivalRow, firstDayRecords } from "../../history"
 import { shellHtml } from "../../code"
-import { rfcCount } from "../../repo"
+import { hrefOf } from "../../nav"
+import { rfcCount, exampleCount, stdCount, blob } from "../../repo"
+import { packages } from "../../packages"
 
 export fn head() -> Head {
-    return backstageHead("The design record — Vyrn backstage")
+    // The one module this section loads, and only on this page: the citation
+    // ring lights a record's chords on hover AND on focus, and 723 chords are
+    // not a CSS selector. The consumer `widgets.js` is not it — that file also
+    // carries the soft navigator, and a soft navigation between the two fronts
+    // would leave the reader under the wrong masthead.
+    return withModule(backstageHead("The design record — Vyrn backstage"), "/backstage.js")
 }
 
 /// The two commands that hold this record to the repository. Both run in CI on
@@ -29,6 +43,28 @@ fn checks() -> Array<Check> {
     return [
         Check { command: "cargo test --release -p vyrn-cli --test rfc_index", what: "The index on this page against the directory it describes: membership both ways, one row per record, and every <code>RFC-NNNN</code> the corpus names is a record that exists." },
         Check { command: "cargo test -p vyrn-cli --test parity -- --ignored", what: "Every example on all three backends, byte for byte — stdout, stderr, exit code and trap messages. The claim the whole site rests on, run in one command." },
+        Check { command: "python scripts/site-history.py > site/data/history.json", what: "The one input this site is handed rather than reads: the pulse and the arrivals above. It runs in CI before the export, and the export <strong>refuses to publish</strong> without what it writes — a chart drawn from nothing is the failure this whole page is built against." },
+    ]
+}
+
+/// The strip's own coordinates, as a style: it is drawn at one cell per record
+/// and never stretched, so a cell is the same square on every screen.
+fn stripStyle() -> String {
+    return "max-width:" + stripWidth() + "px"
+}
+
+/// Where the project stands today, in numbers — and every one of them links to
+/// the thing that proves it. A stat that cannot be checked is a slogan.
+type Stat = { name: String, value: String, note: String, href: String }
+
+fn stats() -> Array<Stat> {
+    return [
+        Stat { name: "Commits", value: commitCount().toString(), note: "in " + dayCount().toString() + " days, " + prCount().toString() + " of them merged pull requests", href: "https://github.com/vyrn-lang/vyrn/commits/main" },
+        Stat { name: "Design records", value: rfcCount().toString(), note: "the index below, and a page for each", href: "#index" },
+        Stat { name: "Test blocks", value: testBlockCount().toString(), note: "in " + testFileCount().toString() + " Vyrn files, all run in CI", href: blob(".github/workflows/ci.yml") },
+        Stat { name: "Example programs", value: exampleCount().toString(), note: "every one run on all three backends", href: blob("examples") },
+        Stat { name: "Std modules", value: stdCount().toString(), note: "written in Vyrn, not in Rust", href: hrefOf("/docs") },
+        Stat { name: "Packages", value: packages().length.toString(), note: "installable with vyrn add", href: hrefOf("/explore") },
     ]
 }
 </script>
@@ -40,50 +76,245 @@ fn checks() -> Array<Check> {
     <div id="main" class="skip-target" tabindex="-1"></div>
     <main class="page">
         <aside class="rail">
-            <a href="#strip"><span class="n">01</span>the record</a>
-            <a href="#index"><span class="n">02</span>the index</a>
-            <a href="#checked"><span class="n">03</span>checked</a>
+            <a href="#pulse"><span class="n">01</span>the pulse</a>
+            <a href="#arrivals"><span class="n">02</span>designed, built</a>
+            <a href="#strip"><span class="n">03</span>the shape</a>
+            <a href="#status"><span class="n">04</span>the claims</a>
+            <a href="#cites"><span class="n">05</span>the citations</a>
+            <a href="#index"><span class="n">06</span>the index</a>
+            <a href="#checked"><span class="n">07</span>checked</a>
         </aside>
 
         <section class="hero">
             <p class="eyebrow">Backstage</p>
             <h1 class="display">The design record</h1>
             <p class="lede">Every decision in this language was argued in writing before it was built, and the argument is the part worth keeping. {{ rfcCount() }} records, rendered here from the same files the repository holds. When the implementation and a record disagree, one of them is a bug.</p>
+            <dl class="specs state">
+                <div v-for="s in stats()" :key="s.name">
+                    <dt>{{ s.name }}</dt>
+                    <dd><a :href="s.href">{{ s.value }}</a><small>{{ s.note }}</small></dd>
+                </div>
+            </dl>
+            <p class="cap">Where the project stands on the day this page was built ({{ lastDay() }}). Every number links to the thing that proves it: the commits, the workflow that runs the tests, the directory, the page.</p>
+        </section>
+
+        <section class="band" id="pulse">
+            <p class="eyebrow">01 — the pulse</p>
+            <h2>{{ commitCount() }} commits and {{ prCount() }} merged pull requests, in {{ dayCount() }} days</h2>
+            <p>One bar per day, from the first commit ({{ firstDay() }}) to the last ({{ lastDay() }}). The upper panel is commits, the lower one is the subset that arrived as a merged pull request — two panels over one axis rather than two scales on one panel, because a second y axis is how two unrelated shapes are made to look like one argument. A release is a marked tick.</p>
+            <div class="plate">
+                <div class="plate-head">
+                    <span class="pill">History</span>
+                    <span class="eyebrow">git, read before the build</span>
+                </div>
+                <div class="stage">
+                    <svg class="chart pulse" :viewBox="pulseViewBox()" role="img" aria-label="Commits and merged pull requests per day, from the first commit to the last, with each release marked on the axis. The same numbers are in the table below.">
+                        <g class="bars commits">
+                            <rect v-for="b in commitBars()" :key="b.id" :x="b.x" :y="b.y" :width="b.w" :height="b.h"><title>{{ b.title }}</title></rect>
+                        </g>
+                        <g class="bars prs">
+                            <rect v-for="b in prBars()" :key="b.id" :x="b.x" :y="b.y" :width="b.w" :height="b.h"><title>{{ b.title }}</title></rect>
+                        </g>
+                        <g class="axis">
+                            <line x1="0" :y1="pulseAxisY()" x2="900" :y2="pulseAxisY()"/>
+                            <g v-for="m in weekMarks()" :key="m.id">
+                                <text :x="m.lx" :y="pulseAxisY()" dy="14">{{ m.label }}</text>
+                            </g>
+                        </g>
+                        <g class="releases">
+                            <g v-for="r in releaseMarks()" :key="r.id">
+                                <title>{{ r.title }}</title>
+                                <line :x1="r.x" y1="0" :x2="r.x" :y2="pulseAxisY()"/>
+                                <text :x="r.lx" y="10">{{ r.label }}</text>
+                            </g>
+                        </g>
+                    </svg>
+                </div>
+                <p class="cap">Counted by scripts/site-history.py from this repository's own git history, once, before the pages were built — a commit is not in the working tree, and this site's export reads nothing else. A merged pull request is a commit whose subject ends in (#NNN), which is this repository's merge convention.</p>
+            </div>
+            <details class="fallback">
+                <summary>Every day, as a table</summary>
+                <div class="scroller">
+                <table class="rfcindex">
+                    <thead>
+                        <tr><th>Day</th><th>Commits</th><th>Merged pull requests</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="d in days()" :key="d.date">
+                            <td>{{ d.date }}</td>
+                            <td>{{ d.commits }}</td>
+                            <td>{{ d.prs }}</td>
+                        </tr>
+                    </tbody>
+                </table>
+                </div>
+            </details>
+        </section>
+
+        <section class="band" id="arrivals">
+            <p class="eyebrow">02 — designed, and built</p>
+            <h2>What was designed, and what became of it</h2>
+            <p>Every record, on the day it first appeared in the repository, stacked — so the top edge is design velocity and the bands are what that design turned into by today. The bucket is the same classifier the status picture below uses, so a record that changes status moves band on the next build. The corpus opened with {{ firstDayRecords() }} records on day one; the rest were argued as the language went.</p>
+            <div class="plate">
+                <div class="plate-head">
+                    <span class="pill">History</span>
+                    <span class="eyebrow">arrival from git, status from the record</span>
+                </div>
+                <div class="stage">
+                    <svg class="chart arrivals" :viewBox="arrivalsViewBox()" role="img" aria-label="The cumulative number of design records by the day each one arrived, banded by the status it carries today. The counts are in the list below.">
+                        <g class="bands">
+                            <polygon v-for="b in arrivalBands()" :key="b.key" :points="b.points" :data-tone="b.tone"><title>{{ b.count }} {{ b.name }}</title></polygon>
+                        </g>
+                        <g class="axis">
+                            <text v-for="m in arrivalMarks()" :key="m.id" :x="m.lx" y="216">{{ m.label }}</text>
+                        </g>
+                    </svg>
+                </div>
+                <ul class="legend statuses">
+                    <li v-for="b in arrivalBands()" :key="b.key">
+                        <i class="key" :data-tone="b.tone"></i>
+                        <span class="num">{{ b.count }}</span>
+                        <span class="name">{{ b.name }}</span>
+                        <span class="note">records that arrived by {{ lastDay() }} and carry this status today</span>
+                    </li>
+                </ul>
+                <p class="cap">The arrival date is the commit that added the file, from one walk of the history; the band is the record's status header, read from rfcs/README.md while this page was built. Neither is typed anywhere.</p>
+            </div>
+            <details class="fallback">
+                <summary>Every record, with the day it arrived</summary>
+                <div class="scroller">
+                <table class="rfcindex">
+                    <thead>
+                        <tr><th>Record</th><th>Arrived</th><th>Today</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="a in arrivalList()" :key="a.tag">
+                            <td><a :href="a.href">{{ a.tag }}</a></td>
+                            <td>{{ a.date }}</td>
+                            <td>{{ a.band }}</td>
+                        </tr>
+                    </tbody>
+                </table>
+                </div>
+            </details>
         </section>
 
         <section class="band" id="strip">
-            <p class="eyebrow">01 — the record</p>
-            <h2>{{ rfcIndex().length }} records, in order</h2>
+            <p class="eyebrow">03 — the shape</p>
+            <h2>{{ rfcIndex().length }} records, {{ sizeOf(corpusBytes()) }} of argument</h2>
+            <p>One cell per record, in reading order. The cell's SIZE is the file's size and its colour is the bucket its status fell in, so the corpus's shape — where the long arguments are, and which of them are finished — is the picture rather than a caption under it.</p>
             <div class="plate">
                 <div class="plate-head">
                     <span class="pill">Record</span>
                     <span class="eyebrow">rfcs/</span>
                 </div>
                 <div class="stage">
-                    <svg class="chart" :viewBox='"0 0 " + rfcStripWidth() + " " + rfcStripHeight()' role="img" aria-label="One cell per design record, in order">
+                    <svg class="chart strip" :viewBox='"0 0 " + stripWidth() + " " + stripHeight()' :style="stripStyle()" role="img" aria-label="One cell per design record, in order, sized by the length of the file and coloured by the status it carries">
                         <!-- `tabindex="-1"`, and the opposite call from the
-                             import graph on `/docs` (RFC-0105 M4). Both are SVGs
+                             citation ring below (RFC-0105 M4). Both are SVGs
                              full of links; the difference is whether the same
-                             information is anywhere else on the page. The graph
-                             says who imports whom and nothing else does, so its
-                             nodes are named and keyboard-reachable. These 105
-                             cells are the index table twenty lines below, record
-                             for record — leaving them in the tab order puts 105
-                             duplicate stops in front of it. The strip stays a
-                             `role="img"` with a text alternative, which is what
-                             it is. -->
-                        <a v-for="c in rfcCells()" :key="c.id" :href="c.href" tabindex="-1">
+                             information is anywhere else on the page. The ring
+                             says who cites whom and nothing else does, so its
+                             nodes are named and keyboard-reachable. These 104
+                             cells are the index table three sections below,
+                             record for record — leaving them in the tab order
+                             puts 104 duplicate stops in front of it. The strip
+                             stays a `role="img"` with a text alternative, which
+                             is what it is. -->
+                        <a v-for="c in weightCells()" :key="c.id" :href="c.href" tabindex="-1">
                             <title>{{ c.title }}</title>
-                            <rect class="cell" :x="c.x" :y="c.y" width="18" height="18" :data-tone="c.tone" fill="currentColor" :fill-opacity="c.tone"/>
+                            <rect class="cell" :x="c.x" :y="c.y" :width="c.size" :height="c.size" :data-tone="c.tone"/>
                         </a>
                     </svg>
                 </div>
-                <p class="cap">One cell per file in rfcs/, counted while this page was built. Hover a cell for its number and title, or open the record. The tone steps every ten records so the sequence is countable.</p>
+                <p class="cap">Read from rfcs/ while this page was built: the bytes of each file, and the status its row in the index carries. The side of a square goes as the square root of the size, so the AREA is the length — hover a cell for the number, the title, the status and the size.</p>
             </div>
         </section>
 
+        <section class="band" id="status">
+            <p class="eyebrow">04 — the claims</p>
+            <h2>{{ bucketCount("implemented") }} of {{ rfcIndex().length }} say they are built</h2>
+            <p>A status is free text, written by whoever moved the record: forty distinct strings across the corpus. They are classified by one small rule — the first word, and whether a clause follows a semicolon — and the rule is a function with tests (<code>bucketOf</code> in <code>site/app/corpus.vyrn</code>). A status it does not know lands in <strong>Other</strong>, and every record that lands there is printed below by name, so a misreading has nowhere to hide.</p>
+            <div class="plate">
+                <div class="plate-head">
+                    <span class="pill">Built</span>
+                    <span class="eyebrow">one bar, six buckets</span>
+                </div>
+                <div class="stage">
+                    <svg class="chart statusbar" :viewBox="barViewBox()" role="img" aria-label="Every record, stacked by the bucket its status falls in. The counts are in the list below.">
+                        <rect class="seg" v-for="b in buckets()" :key="b.key" :x="b.x" y="0" :width="b.w" height="28" :data-tone="b.tone">
+                            <title>{{ b.count }} {{ b.name }}</title>
+                        </rect>
+                    </svg>
+                </div>
+                <ul class="legend statuses">
+                    <li v-for="b in buckets()" :key="b.key">
+                        <i class="key" :data-tone="b.tone"></i>
+                        <span class="num">{{ b.count }}</span>
+                        <span class="name">{{ b.name }}</span>
+                        <span class="note">{{ b.what }}</span>
+                    </li>
+                </ul>
+                <p class="cap">Counted from the status column of rfcs/README.md while this page was built. Three buckets share the neutral because none of them is a claim about built code; the six names and the six counts are the list, not the colour.</p>
+            </div>
+            <ul class="plain">
+                <li v-for="r in otherRecords()" :key="r.number">
+                    <a :href="rfcHref(r.number)">{{ rfcTag(r.number) }} — {{ r.title }}</a>
+                    <span class="note">Bucketed as <strong>Other</strong>: the status reads “{{ r.status }}”, and the rule claims nothing about it.</span>
+                </li>
+            </ul>
+        </section>
+
+        <section class="band" id="cites">
+            <p class="eyebrow">05 — the citations</p>
+            <h2>{{ citeCount() }} times a record names another</h2>
+            <p>Every <code>RFC-NNNN</code> written inside a record is a citation, and every one of them is a chord here — none is dropped, because a subset would be a picture of a corpus that does not exist. The records sit in their own order around the ring, 0001 at the top and clockwise, so a chord's length is how far back a decision reached. The most cited is <a :href="rfcHref(mostCited().number)">{{ rfcTag(mostCited().number) }} — {{ mostCited().title }}</a>, named by {{ mostCited().citedBy.length }} other records.</p>
+            <div class="plate">
+                <div class="plate-head">
+                    <span class="pill">Built</span>
+                    <span class="eyebrow">point at a record to light what it names</span>
+                </div>
+                <div class="stage">
+                    <!-- `role="group"` and not `role="img"` (RFC-0105 M4, row
+                         16). Every node is a link, so every node is a tab stop,
+                         and a tab stop inside a `role="img"` is present in the
+                         tab order and absent from the accessibility tree, which
+                         is the worst of both. Each link's name carries the two
+                         counts the highlight draws. -->
+                    <svg class="chart cites" :viewBox="citeViewBox()" role="group" aria-label="The citation ring: every design record, and every record it names. Each record is a link, named with how many records it cites and how many cite it.">
+                        <path class="chord" v-for="e in citeEdges()" :key="e.id" :d="e.d" :data-a="e.a" :data-b="e.b"/>
+                        <text class="tick" v-for="t in citeTicks()" :key="t.id" :x="t.x" :y="t.y" :text-anchor="t.anchor">{{ t.label }}</text>
+                        <g class="rnode" v-for="n in citeNodes()" :key="n.id" :data-n="n.id" :data-cites="n.cites" :data-citedby="n.citedBy">
+                            <a :href="n.href" :aria-label="n.label">
+                                <circle class="hit" :cx="n.x" :cy="n.y" r="8"/>
+                                <circle class="dot" :cx="n.x" :cy="n.y" r="3.5" :data-tone="n.tone"/>
+                            </a>
+                        </g>
+                    </svg>
+                </div>
+                <p class="cap">Read from the text of every record while this page was built, by the same recognizer that turns a bare RFC-NNNN into a link on a record's own page. What a record names is drawn one way, what names it the other. With no script the ring is the whole corpus at rest, and the list below says the same thing in words.</p>
+            </div>
+            <details class="fallback">
+                <summary>Every citation, as a list</summary>
+                <div class="scroller">
+                <table class="rfcindex">
+                    <thead>
+                        <tr><th>Record</th><th>Names</th><th>Named by</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="r in citeRows()" :key="r.tag">
+                            <td><a :href="r.href">{{ r.tag }}</a></td>
+                            <td>{{ r.cites }}</td>
+                            <td>{{ r.citedBy }}</td>
+                        </tr>
+                    </tbody>
+                </table>
+                </div>
+            </details>
+        </section>
+
         <section class="band" id="index">
-            <p class="eyebrow">02 — the index</p>
+            <p class="eyebrow">06 — the index</p>
             <h2>Every record, with the status it carries</h2>
             <p>Reading order, which is the order the record itself lists. The status is the record's own header, copied by <code>rfcs/README.md</code> and read from there — so a milestone that landed says so here on the next build.</p>
             <div class="scroller">
@@ -103,9 +334,9 @@ fn checks() -> Array<Check> {
         </section>
 
         <section class="band" id="checked">
-            <p class="eyebrow">03 — checked</p>
+            <p class="eyebrow">07 — checked</p>
             <h2>What holds the record honest</h2>
-            <p>A record that contradicts the code is worse than no record. These two run on every push, and they are what a reader of any claim on this site would type to check it.</p>
+            <p>A record that contradicts the code is worse than no record. These run on every push, and they are what a reader of any claim on this site would type to check it.</p>
             <ul class="plain">
                 <li v-for="c in checks()" :key="c.command">
                     <div class="cmd">
