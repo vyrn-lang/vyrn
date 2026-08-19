@@ -281,3 +281,34 @@ test("the explicit dark choice and the system dark default carry the same tokens
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// The hairline grids, and the cell nobody filled
+// ---------------------------------------------------------------------------
+
+test("a grid whose column count the viewport decides never paints its own background", () => {
+  // The registry's card grid was a painted container with hairline gutters: the
+  // `<ul>` carried `background: var(--hair)` and each `<li>` carried the paper
+  // colour on top, so the 1px gaps between cells showed through as lines. That
+  // works only while the author writes both the columns and the children.
+  // `.pkgs` is `repeat(auto-fill, …)` — the track count comes from the viewport
+  // and the card count comes from `examples/` — so any short last row showed
+  // the container straight through as a filled box with nothing in it. A reader
+  // reported it as a hole, which is what it was.
+  //
+  // The fix is where all such rules route through: paint the CELLS, never the
+  // container. This is the rule, so the defect cannot come back under another
+  // selector — and it is not a rule about `.pkgs`, which is why it does not
+  // name it.
+  const painted = [];
+  for (const m of CSS.matchAll(/(^|\n)([^\n{}]+)\{([^}]*)\}/g)) {
+    const [, , selector, body] = m;
+    if (!/auto-fill|auto-fit/.test(body)) continue;
+    if (/(^|[;\s])background(-color)?\s*:\s*(?!none|transparent)/.test(body)) painted.push(selector.trim());
+  }
+  assert.deepEqual(
+    painted,
+    [],
+    `an auto-fill grid paints its own background, so a short last row is a filled empty cell:\n  ${painted.join("\n  ")}`,
+  );
+});

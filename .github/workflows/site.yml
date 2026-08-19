@@ -183,7 +183,7 @@ jobs:
         # `out/docs/std`, `out/guide`, `out/backstage/rfcs` and `out/explore` are
         # made here too: RFC-0014 has no way to CREATE a directory, and the
         # reference publishes one page per std module, the guide one per chapter,
-        # the backstage one per design record, and the explorer one per package.
+        # the backstage one per design record, and the registry one per package.
         run: |
           mkdir -p out/docs/std out/guide out/backstage/rfcs out/explore
           compiler/target/release/vyrn build examples/herofield.vyrn --target wasm -o out/hero.wasm

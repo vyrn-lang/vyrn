@@ -20,7 +20,7 @@
 // A String segment binds the module name, and the query returns
 // `Result<ModuleDoc, PageError>`, so a name that is not a module renders the
 // themed error page at 404 instead of an empty page.
-import { ApiEntry, apiEntries, apiIntro, apiKnown, apiSource, apiSourceLine, apiTests, apiHref } from "../../../docs"
+import { ApiEntry, apiEntries, apiIntro, apiKnown, apiSource, apiSourceLine, apiTests, apiHref, importLine } from "../../../docs"
 import { Demo, demoFor } from "../../../guide"
 import { examplesUsing, usesOfModule, usedByModule } from "../../../stdgraph"
 import { blob } from "../../../repo"
@@ -141,6 +141,23 @@ fn demoChapterHref(m: String, e: ApiEntry) -> String {
 
     <section class="band" id="about">
         <div class="prose" v-html="data.intro"></div>
+    </section>
+
+    <!-- The line a reader copies. It was on the package explorer, which no
+         longer lists standard library modules: the library ships with the
+         compiler, so it is documented here and installed nowhere. The line is
+         also an attribute, because a gate cannot read a highlighted code box and
+         a reader cannot copy an attribute — both come from one `importLine`, and
+         `site/test/importline.test.mjs` compiles the attribute. -->
+    <section class="band" id="use">
+        <p class="eyebrow">Take it</p>
+        <h2>The line you copy</h2>
+        <p>Every name this module exports, in one <code>import</code>. Keep the ones you want; the compiler will tell you about the rest. Nothing is installed — <code>std/</code> arrives with the compiler — so this line is the whole of using it.</p>
+        <div class="cmd" data-copy>
+            <code :data-import="importLine(data.name)">{{ importLine(data.name) }}</code>
+            <button type="button" data-copy-btn aria-label="Copy it">Copy</button>
+        </div>
+        <p class="cap">Compiled as a program of its own on every build, so it is a line that builds and not a line that reads like one.</p>
     </section>
 
     <section class="band" id="graph">

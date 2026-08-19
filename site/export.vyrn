@@ -29,10 +29,10 @@ import { pages } from "std/ui"
 import { route, rootPath, philosophyPath, comparePath, installPath, editorsPath, releasesPath, docsPath, explorePath, guidePath, playPath, backstagePath, backstageBenchmarksPath, hrefDocsStd, hrefGuide, hrefBackstageRfcs, hrefExplore } from pages("./app/routes")
 import { published, navRows, hrefOf, upTo } from "./app/nav"
 import { rfcPages, rfcSlug } from "./app/backstage"
-import { apiModules, apiEntries, apiHref } from "./app/docs"
+import { apiModules, apiEntries, apiHref, importLine } from "./app/docs"
 import { chapterSlugs, chapterHref } from "./app/guide"
 import { searchRows } from "./app/stdgraph"
-import { packages, packageHref, importLine } from "./app/packages"
+import { packages, packageHref, offerOf, addCommand } from "./app/packages"
 import { features } from "./app/editors"
 import { substring, indexOf, split, replace } from "std/strings"
 import { startsWith } from "std/strpred"
@@ -737,43 +737,51 @@ test "every export the search offers has an anchor on the page it points at" {
     assert(names > 300)
 }
 
-test "the explorer publishes one page per package, and an unknown name is a 404" {
+test "the registry publishes one page per package, and an unknown name is a 404" {
     let all = packages()
-    assert(all.length > 30)
+    assert(all.length >= 4)
     for p in all {
         assertEq(packageHref(p.slug), "/" + published(hrefExplore(p.slug)))
         assertEq(route(documentRequest(hrefExplore(p.slug))).status, 200)
     }
+    // A standard library module is not a package: it arrives with the compiler,
+    // and the registry publishes nothing for it.
+    assertEq(route(documentRequest("/explore/json")).status, 404)
     assertEq(route(documentRequest("/explore/nope")).status, 404)
-    assertEq(currentNav("/explore/json"), "/explore.html")
+    assertEq(currentNav("/explore/shelf"), "/explore.html")
     assertEq(currentNav("/explore"), "/explore.html")
 }
 
-test "every standard library package page carries the import line, in the markup" {
-    // The line a reader copies is also an attribute, because a gate cannot read
-    // a highlighted code box and a reader cannot copy an attribute. Both come
-    // from the same `importLine`, so the two cannot disagree.
+test "every reference page carries the import line, and every package page the specifier" {
+    // The two lines a reader copies are also attributes, because a gate cannot
+    // read a highlighted code box and a reader cannot copy an attribute. Each
+    // comes from the one function the box is rendered from, so the two cannot
+    // disagree.
     //
-    // The COMPILING of those lines is `site/test/importline.test.mjs`: it takes
-    // this attribute out of the exported html, writes each line into a program
-    // of its own, and runs `vyrn check`. It lives there because this program
-    // cannot start another one, and it is the gate RFC-0105 M2 asks for.
-    let mut lines = 0
+    // What is done WITH those attributes is `site/test/importline.test.mjs`: it
+    // takes them out of the exported html, compiles every import line as a
+    // program of its own, and re-parses every specifier with the grammar
+    // `compiler/vyrn-cli/src/remote.rs` applies. It lives there because this
+    // program cannot start another one, and it is the gate RFC-0105 M2 asks for.
+    for m in apiModules() {
+        let html = route(documentRequest(hrefDocsStd(m.name))).body
+        let line = importLine(m.name)
+        assert(startsWith(line, "import { "))
+        assert(has(html, "data-import=\"" + escapedQuotes(line) + "\""))
+    }
+    let mut specs = 0
     for p in packages() {
         let html = route(documentRequest(hrefExplore(p.slug))).body
-        if p.kind == "std" {
-            let line = importLine(p.slug)
-            assert(startsWith(line, "import { "))
-            assert(has(html, "data-import=\"" + escapedQuotes(line) + "\""))
-            lines = lines + 1
-        } else {
-            // A project has no import line, and no empty attribute where one
-            // would be.
-            assertEq(importLine(p.slug), "")
-            assert(!has(html, "data-import="))
-        }
+        let spec = offerOf(p.slug).spec
+        assert(startsWith(spec, "github:"))
+        assert(has(html, "data-spec=\"" + escapedQuotes(spec) + "\""))
+        assert(has(html, addCommand(p.slug)))
+        // A package page is not a reference page: it carries no import line and
+        // no empty attribute where one would be.
+        assert(!has(html, "data-import="))
+        specs = specs + 1
     }
-    assertEq(lines, apiModules().length)
+    assertEq(specs, packages().length)
 }
 
 /// `s` with its quotes as `std/html` writes them into an attribute value.
@@ -782,19 +790,25 @@ fn escapedQuotes(s: String) -> String {
 }
 
 test "one module list, and the pages that do not render it" {
-    // RFC-0105 M2's gate, checked by construction rather than promised. The
-    // reference renders `apiModules()` and nothing else does; the explorer
-    // renders `packages()` and nothing else does. The proof that they are not
-    // two copies of one list is where each row LEADS: every module row on the
-    // reference opens that module's reference page, and no row on the explorer
-    // index does.
+    // RFC-0105 M2's gate, checked by construction rather than promised — and
+    // stronger than it was. The reference renders `apiModules()`; the registry
+    // index renders `packages()`, which no longer has a module in it. So the
+    // claim is no longer "the two lists lead to different places" but "the
+    // registry index does not list a module at all": not one link into
+    // `/docs/std/` from it, and not one package page for a module name.
     let docs = route(documentRequest(docsPath())).body
     let explore = route(documentRequest(explorePath())).body
+    assert(!has(explore, "href=\"/docs/std/"))
     for m in apiModules() {
         assert(has(docs, "href=\"/docs/std/\{m.name}.html\""))
-        assert(!has(explore, "href=\"/docs/std/\{m.name}.html\""))
-        assert(has(explore, "href=\"/explore/\{m.name}.html\""))
+        assert(!has(explore, "href=\"/explore/\{m.name}.html\""))
         assert(!has(docs, "href=\"/explore/\{m.name}.html\""))
+    }
+    // Every package leads to its own page, from the index and from nowhere on
+    // the reference.
+    for p in packages() {
+        assert(has(explore, "href=\"/explore/\{p.slug}.html\""))
+        assert(!has(docs, "href=\"/explore/\{p.slug}.html\""))
     }
     // And the search index is the reference's list: one input, one list, on one
     // page.

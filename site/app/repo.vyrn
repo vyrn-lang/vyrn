@@ -45,10 +45,28 @@ export fn rfcRows() -> Array<RfcRow> {
     return out
 }
 
+/// This repository, as GitHub names it. One string, because two places now spell
+/// it: the link a reader follows to the source, and the specifier a reader
+/// installs from.
+fn repoName() -> String {
+    return "vyrn-lang/vyrn"
+}
+
 /// A file in this repository, on GitHub. The site does not host the source, so
 /// every link to a source file leaves — and that is the only reason one does.
 export fn blob(path: String) -> String {
-    return "https://github.com/vyrn-lang/vyrn/blob/main/" + path
+    return "https://github.com/" + repoName() + "/blob/main/" + path
+}
+
+/// A file in this repository, as a remote import specifier (RFC-0010 M4).
+///
+/// `@main` rather than a release tag, and deliberately: this site is built from
+/// `main` and reads these files off `main`, so the ref the registry prints is
+/// the ref whose contents it described. Floating is not unpinned — `vyrn add`
+/// resolves the branch to a commit once and records the commit and the sha256
+/// in `vyrn.lock`, and only `vyrn update` moves either again.
+export fn remoteSpec(path: String) -> String {
+    return "github:" + repoName() + "@main/" + path
 }
 
 /// How many backends a program compiles to: the tree-walking interpreter, the

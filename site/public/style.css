@@ -1263,8 +1263,16 @@ svg.graph .node.on circle { fill-opacity: 1; }
    a phone without a breakpoint being written for either.
    ------------------------------------------------------------------------- */
 
-.pkgs { list-style: none; padding: 0; margin: var(--s4) 0 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1px; background: var(--hair); border: 1px solid var(--hair); }
-.pkgs li { background: var(--paper); padding: var(--s2); display: grid; gap: 6px; align-content: start; }
+/* The hairline grid is painted by the CELLS, not by the container. `.columns`
+   above can paint the container because its author writes both the three
+   columns and the three children; an `auto-fill` track count is decided by the
+   viewport and the card count is decided by `examples/`, so the last row is
+   short whenever the two disagree — and a painted container showed that gap as
+   a filled box with nothing in it. A ring on each cell covers the 1px gutter
+   from both sides and leaves an empty track as page. The container's 1px of
+   padding is the room the outer ring needs. */
+.pkgs { list-style: none; padding: 1px; margin: var(--s4) 0 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1px; }
+.pkgs li { background: var(--paper); box-shadow: 0 0 0 1px var(--hair); padding: var(--s2); display: grid; gap: 6px; align-content: start; }
 .pkgs a { font: 13px/1.6 var(--mono); color: var(--accent); text-decoration: none; }
 .pkgs a:hover { text-decoration: underline; }
 .pkgs .kindpill { justify-self: start; }

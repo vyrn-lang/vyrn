@@ -1,18 +1,28 @@
-// Every import line the explorer prints is a line that compiles (RFC-0105 M2).
+// Every line the site tells a reader to type is a line that works (RFC-0105 M2).
 //
-// A package page carries the line a reader copies — `import { … } from
-// "std/json"`, naming every export the reference renders — in the box and in a
-// `data-import` attribute beside it. A line that reads like code and does not
-// build is worse than no line: the reader types it, the compiler refuses, and
-// the page was the one that lied.
+// There are two of them, and they are checked here because they are checked
+// against something outside the site: a compiler, and a grammar the compiler
+// owns.
 //
-// So the line is taken out of the EXPORTED html, written into a program of its
-// own, and put through `vyrn check`. Nothing is parsed or reconstructed on the
-// way: what is compiled is the bytes a reader would paste.
+//   * **The reference's import line.** A module page carries the line a reader
+//     copies — `import { … } from "std/json"`, naming every export the reference
+//     renders — in the box and in a `data-import` attribute beside it. The line
+//     is taken out of the EXPORTED html, written into a program of its own, and
+//     put through `vyrn check`. Nothing is parsed or reconstructed on the way:
+//     what is compiled is the bytes a reader would paste.
+//   * **The registry's install specifier.** A package page carries the
+//     `github:` specifier `vyrn add` takes, in the box and in `data-spec`. A
+//     `github:` fetch is the network, and a gate that needs the network is a
+//     gate that fails on a train, so what is checked here is the GRAMMAR:
+//     `resolveToUrl` below is `resolve_to_url` in
+//     `compiler/vyrn-cli/src/remote.rs`, rule for rule, and every emitted
+//     specifier must go through it to the URL the site says it resolves to.
+//     That the story then works end to end was proved once by hand and recorded
+//     in the RFC, which is where a one-off proof belongs.
 //
-// It lives here rather than in `site/export.vyrn` for one reason — that program
+// Both live here rather than in `site/export.vyrn` for one reason — that program
 // cannot start another one. It is also the right side of the M1 timing lesson:
-// the export's own gates walk `sitePaths()` six to ten times, and thirty-four
+// the export's own gates walk `sitePaths()` six to ten times, and thirty-seven
 // compiler runs do not belong in that walk.
 //
 // Run: node --test site/test/*.test.mjs   (after `vyrn run site/export.vyrn out`
@@ -29,7 +39,8 @@ import path from "node:path";
 
 const run = promisify(execFile);
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
-const OUT = path.join(ROOT, "out", "explore");
+const DOCS = path.join(ROOT, "out", "docs", "std");
+const EXPLORE = path.join(ROOT, "out", "explore");
 
 /// The compiler this repository just built. There is no fallback to a `vyrn` on
 /// `PATH`: a gate that silently checks somebody else's compiler is not this
@@ -48,26 +59,32 @@ const unescape = (s) =>
     .replaceAll("&gt;", ">")
     .replaceAll("&amp;", "&");
 
-async function importLines() {
+/// The value of one attribute, off every html file in a directory of the
+/// exported tree.
+async function attribute(dir, name) {
   const out = [];
-  for (const name of await readdir(OUT).catch(() => [])) {
-    if (!name.endsWith(".html")) continue;
-    const html = await readFile(path.join(OUT, name), "utf8");
-    for (const m of html.matchAll(/ data-import="([^"]*)"/g)) out.push({ page: name, line: unescape(m[1]) });
+  const re = new RegExp(` ${name}="([^"]*)"`, "g");
+  for (const file of await readdir(dir).catch(() => [])) {
+    if (!file.endsWith(".html")) continue;
+    const html = await readFile(path.join(dir, file), "utf8");
+    for (const m of html.matchAll(re)) out.push({ page: file, value: unescape(m[1]) });
   }
   return out;
 }
 
-const lines = await importLines();
+// ---------------------------------------------------------------------------
+// The reference's import lines
+// ---------------------------------------------------------------------------
 
-test("the package pages are there, with an import line on each module's own", () => {
+const lines = await attribute(DOCS, "data-import");
+
+test("every module page carries an import line", () => {
   assert.ok(VYRN, `no release build of the compiler at compiler/target/release — run: cargo build --release -p vyrn-cli`);
-  // 34 standard library modules today, and the four example projects have no
-  // import line at all. A floor, so the list growing does not need an edit here
-  // and the list emptying does not pass in silence.
-  assert.ok(lines.length >= 30, `only ${lines.length} import line(s) found in out/explore — run: vyrn run site/export.vyrn out`);
-  for (const { page, line } of lines) {
-    assert.match(line, /^import \{ .+ \} from "std\/[a-z0-9-]+"$/, `${page}: not an import line`);
+  // 37 standard library modules today. A floor, so the list growing does not
+  // need an edit here and the list emptying does not pass in silence.
+  assert.ok(lines.length >= 30, `only ${lines.length} import line(s) found in out/docs/std — run: vyrn run site/export.vyrn out`);
+  for (const { page, value } of lines) {
+    assert.match(value, /^import \{ .+ \} from "std\/[a-z0-9-]+"$/, `${page}: not an import line`);
   }
 });
 
@@ -75,7 +92,7 @@ test("every import line compiles", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "vyrn-importline-"));
   try {
     // Eight at a time. One at a time takes a minute of wall clock for nothing;
-    // all thirty-four at once is thirty-four compilers on a two-core runner.
+    // all thirty-seven at once is thirty-seven compilers on a two-core runner.
     const queue = [...lines];
     const failures = [];
     const worker = async () => {
@@ -84,7 +101,7 @@ test("every import line compiles", async () => {
         // it. What is being checked is that the names are importable, which is
         // exactly what a reader who pastes the line finds out first.
         const file = path.join(dir, `${job.page.replace(/\.html$/, "")}.vyrn`);
-        await writeFile(file, `${job.line}\nfn main() -> Int64 {\n    return 0\n}\n`, "utf8");
+        await writeFile(file, `${job.value}\nfn main() -> Int64 {\n    return 0\n}\n`, "utf8");
         try {
           await run(VYRN, ["check", file]);
         } catch (e) {
@@ -93,8 +110,91 @@ test("every import line compiles", async () => {
       }
     };
     await Promise.all(Array.from({ length: 8 }, worker));
-    assert.deepEqual(failures, [], `an import line on a package page does not compile:\n${failures.join("\n")}`);
+    assert.deepEqual(failures, [], `an import line on a module page does not compile:\n${failures.join("\n")}`);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// The registry's install specifiers
+// ---------------------------------------------------------------------------
+
+/// `resolve_to_url` in `compiler/vyrn-cli/src/remote.rs`, in JavaScript. The
+/// three rules are four lines each and have not moved since RFC-0010 M4; what
+/// they cannot do without the network is turn a floating ref into a commit, and
+/// `<sha>` stands where `git ls-remote` would answer.
+///
+/// Throws with the compiler's own words for anything that is not a specifier,
+/// so a malformed one fails this gate with the message a user would get.
+export function resolveToUrl(spec) {
+  if (spec.startsWith("github:")) {
+    // github:owner/repo@ref/path(.vyrn)
+    const rest = spec.slice("github:".length);
+    const at = rest.indexOf("@");
+    if (at < 0) throw new Error("github specifier needs `@ref`");
+    const ownerRepo = rest.slice(0, at);
+    const after = rest.slice(at + 1);
+    const slash = after.indexOf("/");
+    if (slash < 0) throw new Error("github specifier needs a file path");
+    const ref = after.slice(0, slash);
+    const filePath = after.slice(slash);
+    const sha = /^[0-9a-fA-F]{40}$/.test(ref) ? ref : "<sha>";
+    return `https://raw.githubusercontent.com/${ownerRepo}/${sha}${filePath}`;
+  }
+  if (spec.startsWith("gist:")) {
+    // gist:user/id[@rev]/file(.vyrn)
+    const segs = spec.slice("gist:".length).split("/");
+    if (segs.length < 3) throw new Error("gist specifier needs user/id/file");
+    const [user, idRev, ...rest] = segs;
+    const file = rest.join("/");
+    const cut = idRev.indexOf("@");
+    const id = cut < 0 ? idRev : idRev.slice(0, cut);
+    const rev = cut < 0 ? null : idRev.slice(cut + 1);
+    return rev === null
+      ? `https://gist.githubusercontent.com/${user}/${id}/raw/${file}`
+      : `https://gist.githubusercontent.com/${user}/${id}/raw/${rev}/${file}`;
+  }
+  if (spec.startsWith("https://")) return spec;
+  throw new Error(`not a remote specifier: ${spec}`);
+}
+
+const specs = await attribute(EXPLORE, "data-spec");
+
+test("every install specifier resolves under the compiler's own grammar", () => {
+  // The four example projects today. A floor, for the reason the import-line
+  // one has: a registry that quietly emptied would otherwise pass.
+  assert.ok(specs.length >= 4, `only ${specs.length} specifier(s) found in out/explore — run: vyrn run site/export.vyrn out`);
+  for (const { page, value } of specs) {
+    // It parses, and it parses to the file the page says it names — the failure
+    // this catches is a specifier assembled from the wrong pieces, which is a
+    // string that parses and fetches somebody else's module.
+    const url = resolveToUrl(value);
+    assert.match(
+      url,
+      /^https:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[0-9a-f<>a-z]+\/.+\.vyrn$/,
+      `${page}: \`${value}\` resolves to ${url}`,
+    );
+    assert.ok(value.endsWith(".vyrn"), `${page}: \`${value}\` does not name a module`);
+    // The path in the specifier is the path in the URL, so the two halves of
+    // the page cannot disagree about which file is being installed.
+    assert.ok(url.endsWith(value.slice(value.indexOf("/", value.indexOf("@")))), `${page}: path lost in resolution`);
+  }
+});
+
+test("the grammar refuses what the compiler refuses", () => {
+  // A gate nobody has seen fail is a gate nobody has tested. Each of these is
+  // one rule of `resolve_to_url`, and each names the same refusal the CLI
+  // prints.
+  assert.throws(() => resolveToUrl("github:vyrn-lang/vyrn/examples/shelf/shared/wire.vyrn"), /needs `@ref`/);
+  assert.throws(() => resolveToUrl("github:vyrn-lang/vyrn@main"), /needs a file path/);
+  assert.throws(() => resolveToUrl("gist:user/id"), /needs user\/id\/file/);
+  assert.throws(() => resolveToUrl("http://x.dev/m.vyrn"), /not a remote specifier/);
+  assert.throws(() => resolveToUrl("./local.vyrn"), /not a remote specifier/);
+  // And the shapes it accepts, against the compiler's own unit test.
+  const sha = "a".repeat(40);
+  assert.equal(resolveToUrl(`github:o/r@${sha}/src/x.vyrn`), `https://raw.githubusercontent.com/o/r/${sha}/src/x.vyrn`);
+  assert.equal(resolveToUrl("gist:u/abc123/f.vyrn"), "https://gist.githubusercontent.com/u/abc123/raw/f.vyrn");
+  assert.equal(resolveToUrl("gist:u/abc123@rev9/f.vyrn"), "https://gist.githubusercontent.com/u/abc123/raw/rev9/f.vyrn");
+  assert.equal(resolveToUrl("https://x.dev/m.vyrn"), "https://x.dev/m.vyrn");
 });

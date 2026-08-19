@@ -8,7 +8,7 @@
 /// renamed or deleted fails the export.
 ///
 /// The two sockets the brief reserved are filled: `/guide` is the book, and
-/// `/explore` is the package explorer. Both arrived as a directory drop plus a
+/// `/explore` is the registry. Both arrived as a directory drop plus a
 /// row here, which is what reserving them was for. A row is still only written
 /// when the route behind it exists — there is no placeholder page anywhere.
 import { substring, split, repeat } from "std/strings"
