@@ -282,6 +282,7 @@ fn exportPath(outDir: String, path: String) -> Int64 {
 fn assets() -> Array<Array<String>> {
     return [
         ["site/public/style.css", "style.css"],
+        ["site/public/theme.js", "theme.js"],
         ["site/public/widgets.js", "widgets.js"],
         ["site/public/hero.js", "hero.js"],
         ["site/public/fresh.js", "fresh.js"],
@@ -480,6 +481,34 @@ test "the backstage publishes the index and a page for every record" {
     // A number the record does not carry is a 404, not an empty page.
     assertEq(route(documentRequest("/backstage/rfcs/0066")).status, 404)
     assertEq(route(documentRequest("/backstage/rfcs/91")).status, 404)
+}
+
+test "both fronts carry the theme control, and carry it without a flash" {
+    // RFC-0105 M4. Three documents, because there are three cases and not two
+    // hundred: a consumer page at the root, a consumer page three deep (the
+    // document-relative rule), and a backstage page, which wears its own shell
+    // and builds its masthead as a string rather than from the layout.
+    //
+    // What each has to be true of:
+    //   - `theme.js` is a CLASSIC script, so it blocks rendering and the root
+    //     attribute is set before the first paint. A module would be deferred,
+    //     and a theme applied after the first paint is the flash this prevents.
+    //   - It is in the HEAD, before `<body>` — the same reason.
+    //   - The control has exactly the three states, once.
+    for path in ["/", "/docs/std/json", "/backstage/rfcs/0105"] {
+        let doc = publishedDocument(path)
+        let up = upTo(path)
+        let tag = "<script src=\"" + up + "theme.js\">"
+        assert(!has(doc, "<script type=\"module\" src=\"" + up + "theme.js\">"))
+        assert(has(split(doc, "<body")[0], tag))
+        assertEq(countOf(doc, "data-theme-set=\"system\""), 1)
+        assertEq(countOf(doc, "data-theme-set=\"light\""), 1)
+        assertEq(countOf(doc, "data-theme-set=\"dark\""), 1)
+        assertEq(countOf(doc, "<div class=\"theme\" role=\"group\" aria-label=\"Theme\">"), 1)
+        // One skip link per document, and the anchor it lands on.
+        assertEq(countOf(doc, "class=\"skip\" href=\"#main\""), 1)
+        assertEq(countOf(doc, "id=\"main\" class=\"skip-target\" tabindex=\"-1\""), 1)
+    }
 }
 
 test "a reference page belongs under Docs, and the home page under nothing" {

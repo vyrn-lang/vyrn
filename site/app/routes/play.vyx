@@ -66,9 +66,14 @@ fn examples() -> Array<Example> {
                 <p class="cap">These lines reach <code>readLine()</code>, one per call. At the end of them it answers <code>None</code>, exactly as a pipe does.</p>
             </details>
 
-            <div class="diags" data-play-diags hidden="hidden"></div>
+            <!-- Both panes are what RUNNING says, and running is a button press
+                 with no page load behind it — so without a live region a screen
+                 reader is told nothing at all about the result (RFC-0105 M4).
+                 Polite, not assertive: the reader asked for this, and it can
+                 wait for the sentence they are on. -->
+            <div class="diags" data-play-diags hidden="hidden" aria-live="polite"></div>
 
-            <div class="out" data-play-out><span class="dim">Nothing has run yet.</span></div>
+            <div class="out" data-play-out aria-live="polite"><span class="dim">Nothing has run yet.</span></div>
         </div>
 
         <p class="notice" data-play-note>This is the <strong>tree-walking interpreter</strong> — the reference semantics, the same engine <code>vyrn run</code> uses, compiled to WebAssembly and running in this tab. The native and WebAssembly backends are checked against it byte for byte by the parity harness.</p>

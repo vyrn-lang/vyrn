@@ -29,6 +29,39 @@ export fn pageHead(title: String) -> Head {
 /// One navigation entry: where it goes, and what it is called.
 export type NavRow = { href: String, label: String }
 
+/// The theme control, for the masthead of both fronts (RFC-0105 M4).
+///
+/// Three buttons, not a `<select>` and not a single toggle. A toggle cannot say
+/// "follow the system", and the system IS the default — so a two-state control
+/// would either lose that state or hide it behind a long press. Three buttons in
+/// a labelled group say the three states, show which one is on, and are operable
+/// by keyboard because a `<button>` already is.
+///
+/// It renders with `system` pressed on every page, and `site/public/theme.js`
+/// corrects it from `localStorage` when the document is parsed. The stale
+/// marking is never seen: without script the whole group is `display: none`
+/// (`[data-js]` gates it), and with script the correction happens before a
+/// reader could look. The alternative — a control the export marks — cannot
+/// exist, because a static page has no reader's choice to mark it from.
+///
+/// One definition, two mastheads. The consumer layout puts it in `<template>`
+/// and the backstage builds its masthead as a string; both call this.
+export fn themeControl() -> String {
+    return "<div class=\"theme\" role=\"group\" aria-label=\"Theme\">"
+    + themeButton("system", "System", "Follow the system theme")
+    + themeButton("light", "Light", "Light theme")
+    + themeButton("dark", "Dark", "Dark theme")
+    + "</div>"
+}
+
+/// One state of the theme control. The visible text is a word, and the accessible
+/// name is the sentence — because "Light" beside two other words is a label a
+/// screen reader hears out of the group it belongs to.
+fn themeButton(value: String, label: String, described: String) -> String {
+    let pressed = if value == "system" { "true" } else { "false" }
+    return "<button type=\"button\" data-theme-set=\"" + value + "\" aria-pressed=\"" + pressed + "\" aria-label=\"" + described + "\">" + label + "</button>"
+}
+
 /// The published file for a route path: `/philosophy` is `philosophy.html`, and
 /// `/docs/std/json` is `docs/std/json.html`.
 ///

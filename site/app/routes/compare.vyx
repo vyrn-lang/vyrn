@@ -212,7 +212,7 @@ fn axes() -> Array<Axis> {
                     </div>
                 </div>
                 <div class="stage">
-                    <svg class="chart" :viewBox="moduleLadderBox()" role="img" aria-label="Eight example programs, and the size of the WebAssembly module each one builds to">
+                    <svg class="chart" :viewBox="moduleLadderBox()" role="group" aria-label="Eight example programs, and the size of the WebAssembly module each one builds to">
 <g class="axis">
                             <line v-for="g in moduleLadderGrid()" :key="g.id" :x1="g.x" y1="0" :x2="g.x" :y2="moduleLadderPlot()"/>
                             <text v-for="g in moduleLadderGrid()" :key="g.id" :x="g.x" :y="moduleLadderPlot()" dy="16" text-anchor="middle">{{ g.label }}</text>
@@ -221,7 +221,7 @@ fn axes() -> Array<Axis> {
                             <title>{{ b.title }}</title>
                             <rect class="hit" x="0" :y="b.hy" :width="barRight()" :height="barRow()"/>
                             <rect :class="b.tone" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
-                            <a :href="b.href"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
+                            <a :href="b.href" :aria-label="b.title"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
                             <text :x="barRight()" :y="b.y" :dy="barText()" text-anchor="end" class="val" :data-to="b.value">{{ b.value }}</text>
                         </g>
                     </svg>
@@ -240,7 +240,7 @@ fn axes() -> Array<Axis> {
                 </div>
                 <span class="bignum">{{ moduleRatio() }}<small>times smaller</small></span>
                 <div class="stage">
-                    <svg class="chart" :viewBox="moduleSizesBox()" role="img" aria-label="fib.wasm is 1.5 KB through the direct encoder and 277 KB through clang">
+                    <svg class="chart" :viewBox="moduleSizesBox()" role="group" aria-label="fib.wasm is 1.5 KB through the direct encoder and 277 KB through clang">
 <g class="axis">
                             <line v-for="g in moduleSizesGrid()" :key="g.id" :x1="g.x" y1="0" :x2="g.x" :y2="twoRowPlot()"/>
                             <text v-for="g in moduleSizesGrid()" :key="g.id" :x="g.x" :y="twoRowPlot()" dy="16" text-anchor="middle">{{ g.label }}</text>
@@ -249,7 +249,7 @@ fn axes() -> Array<Axis> {
                             <title>{{ b.title }}</title>
                             <rect class="hit" x="0" :y="b.hy" :width="barRight()" :height="barRow()"/>
                             <rect :class="b.tone" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
-                            <a :href="b.href"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
+                            <a :href="b.href" :aria-label="b.title"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
                             <text :x="barRight()" :y="b.y" :dy="barText()" text-anchor="end" class="val" :data-to="b.value">{{ b.value }}</text>
                         </g>
                     </svg>
@@ -273,7 +273,7 @@ fn axes() -> Array<Axis> {
                 </div>
                 <span class="bignum" data-leak-peak :data-alt="leakPeak(true)">{{ leakPeak(false) }}<small>peak, at 1,000,000 turns</small></span>
                 <div class="stage">
-                    <svg class="chart" data-leak-svg :viewBox="leakBox()" role="img" aria-label="Peak resident memory of the same loop, with and without the consume declaration">
+                    <svg class="chart" data-leak-svg :viewBox="leakBox()" role="group" aria-label="Peak resident memory of the same loop, with and without the consume declaration">
 <g class="axis">
                             <line v-for="g in leakGrid()" :key="g.id" :x1="g.x" y1="0" :x2="g.x" :y2="twoRowPlot()"/>
                             <text v-for="g in leakGrid()" :key="g.id" :x="g.x" :y="twoRowPlot()" dy="16" text-anchor="middle">{{ g.label }}</text>
@@ -283,7 +283,7 @@ fn axes() -> Array<Axis> {
                                 <title>{{ b.title }}</title>
                                 <rect class="hit" x="0" :y="b.hy" :width="barRight()" :height="barRow()"/>
                                 <rect :class="b.tone" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
-                                <a :href="b.href"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
+                                <a :href="b.href" :aria-label="b.title"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
                                 <text :x="barRight()" :y="b.y" :dy="barText()" text-anchor="end" class="val" :data-to="b.value">{{ b.value }}</text>
                             </g>
                         </g>
@@ -292,7 +292,7 @@ fn axes() -> Array<Axis> {
                                 <title>{{ b.title }}</title>
                                 <rect class="hit" x="0" :y="b.hy" :width="barRight()" :height="barRow()"/>
                                 <rect :class="b.tone" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
-                                <a :href="b.href"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
+                                <a :href="b.href" :aria-label="b.title"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
                                 <text :x="barRight()" :y="b.y" :dy="barText()" text-anchor="end" class="val" :data-to="b.value">{{ b.value }}</text>
                             </g>
                         </g>
@@ -318,7 +318,7 @@ fn axes() -> Array<Axis> {
                 </div>
                 <span class="bignum">{{ engineRatio() }}<small>times faster, compiled than interpreted</small></span>
                 <div class="stage">
-                    <svg class="chart" :viewBox="engineBox()" role="img" aria-label="The same program takes 38.1 seconds under the interpreter, 207 milliseconds as WebAssembly and 87 milliseconds as a native binary">
+                    <svg class="chart" :viewBox="engineBox()" role="group" aria-label="The same program takes 38.1 seconds under the interpreter, 207 milliseconds as WebAssembly and 87 milliseconds as a native binary">
 <g class="axis">
                             <line v-for="g in engineGrid()" :key="g.id" :x1="g.x" y1="0" :x2="g.x" :y2="enginePlot()"/>
                             <text v-for="g in engineGrid()" :key="g.id" :x="g.x" :y="enginePlot()" dy="16" text-anchor="middle">{{ g.label }}</text>
@@ -327,7 +327,7 @@ fn axes() -> Array<Axis> {
                             <title>{{ b.title }}</title>
                             <rect class="hit" x="0" :y="b.hy" :width="barRight()" :height="barRow()"/>
                             <rect :class="b.tone" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
-                            <a :href="b.href"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
+                            <a :href="b.href" :aria-label="b.title"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
                             <text :x="barRight()" :y="b.y" :dy="barText()" text-anchor="end" class="val" :data-to="b.value">{{ b.value }}</text>
                         </g>
                     </svg>
@@ -346,7 +346,7 @@ fn axes() -> Array<Axis> {
                 </div>
                 <span class="bignum">{{ wasmRatio() }}<small>times the native time, as WebAssembly under wasmtime</small></span>
                 <div class="stage">
-                    <svg class="chart" :viewBox="moduleSizesBox()" role="img" aria-label="The same two compiled engines rescaled: 207 milliseconds as WebAssembly against 87 milliseconds native">
+                    <svg class="chart" :viewBox="moduleSizesBox()" role="group" aria-label="The same two compiled engines rescaled: 207 milliseconds as WebAssembly against 87 milliseconds native">
 <g class="axis">
                             <line v-for="g in compiledGrid()" :key="g.id" :x1="g.x" y1="0" :x2="g.x" :y2="twoRowPlot()"/>
                             <text v-for="g in compiledGrid()" :key="g.id" :x="g.x" :y="twoRowPlot()" dy="16" text-anchor="middle">{{ g.label }}</text>
@@ -355,7 +355,7 @@ fn axes() -> Array<Axis> {
                             <title>{{ b.title }}</title>
                             <rect class="hit" x="0" :y="b.hy" :width="barRight()" :height="barRow()"/>
                             <rect :class="b.tone" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
-                            <a :href="b.href"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
+                            <a :href="b.href" :aria-label="b.title"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
                             <text :x="barRight()" :y="b.y" :dy="barText()" text-anchor="end" class="val" :data-to="b.value">{{ b.value }}</text>
                         </g>
                     </svg>
