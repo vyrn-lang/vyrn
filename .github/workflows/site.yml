@@ -180,11 +180,12 @@ jobs:
         # `writeFile` takes a String, so the export step cannot copy a wasm
         # module. It is built here instead, straight into the output.
         #
-        # `out/docs/std` and `out/guide` are made here too: RFC-0014 has no way
-        # to CREATE a directory, and the reference publishes one page per std
-        # module while the guide publishes one per chapter.
+        # `out/docs/std`, `out/guide` and `out/backstage/rfcs` are made here too:
+        # RFC-0014 has no way to CREATE a directory, and the reference publishes
+        # one page per std module, the guide one per chapter, and the backstage
+        # one per design record.
         run: |
-          mkdir -p out/docs/std out/guide
+          mkdir -p out/docs/std out/guide out/backstage/rfcs
           compiler/target/release/vyrn build examples/herofield.vyrn --target wasm -o out/hero.wasm
 
       - name: Render every page

@@ -6,11 +6,14 @@
 // `std/*.vyrn` and emits each export's signature, prose and line — so a module
 // name here opens a page rather than a Markdown file on GitHub.
 //
-// The links that remain point at things this site does not host: the source, the
-// design record, the examples. Those are the only ones worth leaving for.
+// The links that remain point at things this site does not host: the README, the
+// roadmap, the examples. Those are the only ones worth leaving for — the design
+// record and the compiler notes were two of them, and both were development
+// reading on a consumer page (RFC-0105 M1). The record is a section of its own
+// now, reached from the footer.
 import { Head } from "std/ui"
 import { pageHead } from "../../nav"
-import { exampleCount, rfcCount, blob } from "../../repo"
+import { exampleCount, blob } from "../../repo"
 import { ApiModule, apiModules, apiHref } from "../../docs"
 
 /// One place to read next, outside this site.
@@ -32,10 +35,8 @@ fn exportCount() -> Int64 {
 fn links() -> Array<Link> {
     return [
         Link { href: blob("examples"), name: "Examples", what: "Single-file programs. The parity harness runs every one on all three backends." },
-        Link { href: blob("rfcs"), name: "The design record", what: "Every language decision, with the argument that produced it. Start with RFC-0001, RFC-0003 and RFC-0004." },
         Link { href: blob("README.md"), name: "README", what: "What the language is, in one page, with the feature tour." },
         Link { href: blob("ROADMAP.md"), name: "Roadmap", what: "What ships today and what is next, in detail." },
-        Link { href: blob("compiler"), name: "Compiler notes", what: "The crate map, the build notes, and how to build the excluded crates." },
     ]
 }
 
@@ -110,8 +111,8 @@ fn commands() -> Array<Command> {
 
         <section class="band" id="read">
             <p class="eyebrow">03 — read</p>
-            <h2>Five places this site does not host</h2>
-            <p>{{ exampleCount() }} example programs and {{ rfcCount() }} design records live in the repository, and a link is honest when it points at something that is genuinely there and not here.</p>
+            <h2>Three places this site does not host</h2>
+            <p>{{ exampleCount() }} example programs live in the repository, and a link is honest when it points at something that is genuinely there and not here.</p>
             <ul class="plain">
                 <li v-for="l in links()" :key="l.href">
                     <a :href="l.href">{{ l.name }}</a>

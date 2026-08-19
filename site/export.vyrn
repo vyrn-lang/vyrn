@@ -25,8 +25,9 @@
 ///
 /// Every other route publishes flat, for the same reason (see `app/nav.vyrn`).
 import { pages } from "std/ui"
-import { route, rootPath, philosophyPath, comparePath, installPath, releasesPath, docsPath, explorePath, guidePath, playPath, hrefDocsStd, hrefGuide } from pages("./app/routes")
+import { route, rootPath, philosophyPath, comparePath, installPath, releasesPath, docsPath, explorePath, guidePath, playPath, backstagePath, hrefDocsStd, hrefGuide, hrefBackstageRfcs } from pages("./app/routes")
 import { published, navRows, hrefOf, upTo } from "./app/nav"
+import { rfcPages, rfcSlug } from "./app/backstage"
 import { apiModules, apiEntries, apiHref } from "./app/docs"
 import { chapterSlugs, chapterHref } from "./app/guide"
 import { exploreRows } from "./app/explore"
@@ -49,7 +50,36 @@ fn sitePaths() -> Array<String> {
     for slug in chapterSlugs() {
         out.push(hrefGuide(slug))
     }
+    out.push(backstagePath())
     return out
+}
+
+/// The backstage's record pages: one per row of `rfcs/README.md`, read the way
+/// the reference is read off `std/` (RFC-0105 M1).
+///
+/// They are a SECOND list, and the reason is measurement rather than taste. The
+/// record is 2.5 MB of markdown; rendering all of it takes 17 seconds, and the
+/// per-page gates below walk every path in `sitePaths()` between six and ten
+/// times. Putting these hundred pages in that list took `vyrn test` on this file
+/// from under a minute to ten. What those gates check is checked on these pages
+/// too, on the EXPORTED tree, by `site/test/basepath.test.mjs` — every link,
+/// every fragment, every mount point — which is the gate that caught the defect
+/// they exist for in the first place. One representative record is checked here
+/// as well, so the stamps are not left to the node run alone.
+fn recordPaths() -> Array<String> {
+    let mut out: Array<String> = []
+    for n in rfcPages() {
+        out.push(hrefBackstageRfcs(rfcSlug(n)))
+    }
+    return out
+}
+
+/// Whether `path` belongs to the backstage rather than the consumer site.
+///
+/// The two fronts differ in exactly one way that matters to this program: a
+/// backstage page hangs off no consumer navigation row, so nothing marks one.
+fn isBackstage(path: String) -> Bool {
+    return startsWith(path, "/backstage")
 }
 
 /// The request for a path's document representation.
@@ -203,6 +233,14 @@ fn failed(what: String, why: String) -> Int64 {
 
 /// Export one route: its document and its navigation payload. Returns the number
 /// of failures, so the caller exits non-zero instead of publishing a hole.
+///
+/// A BACKSTAGE PAGE PUBLISHES NO PAYLOAD. The payload exists for the soft
+/// navigator, and the backstage loads no script at all — it wears its own shell
+/// and every link into or out of it is a full load, deliberately (RFC-0105 M1).
+/// A record's payload would be a second copy of the whole rendered document that
+/// nothing ever fetches: 3.2 MB of the published tree, and half the export's
+/// time. `site/test/basepath.test.mjs` checks that they are absent the same way
+/// it checks the others are present.
 fn exportPath(outDir: String, path: String) -> Int64 {
     let name = published(path)
     let doc = route(documentRequest(path))
@@ -210,10 +248,15 @@ fn exportPath(outDir: String, path: String) -> Int64 {
         print("FAIL \{path} -> \{doc.status}")
         return 1
     }
+    let document = relativize(withIcon(withLang(markCurrent(doc.body, path))), path)
+    let mut bad = emit("\{outDir}/\{name}", document)
+    if isBackstage(path) {
+        print("\{path} -> \{name} (\{doc.body.byteLength} bytes)")
+        return bad
+    }
     let data = route(dataRequest(path))
     let json = payloadName(name)
-    let document = relativize(withIcon(withLang(markCurrent(doc.body, path))), path)
-    let bad = emit("\{outDir}/\{name}", document) + emit("\{outDir}/\{json}", relativize(data.body, path))
+    bad = bad + emit("\{outDir}/\{json}", relativize(data.body, path))
     print("\{path} -> \{name} (\{doc.body.byteLength} bytes) + \{json} (\{data.body.byteLength} bytes)")
     return bad
 }
@@ -270,6 +313,9 @@ fn main() -> Int64 {
     for path in sitePaths() {
         failures = failures + exportPath(outDir, path)
     }
+    for path in recordPaths() {
+        failures = failures + exportPath(outDir, path)
+    }
     for asset in assets() {
         failures = failures + copyAsset(outDir, asset[0], asset[1])
     }
@@ -277,7 +323,7 @@ fn main() -> Int64 {
         print("export failed: \{failures} file(s)")
         return 1
     }
-    print("exported \{sitePaths().length} route(s) and \{assets().length} asset(s) to \{outDir}")
+    print("exported \{sitePaths().length + recordPaths().length} route(s) and \{assets().length} asset(s) to \{outDir}")
     return 0
 }
 
@@ -389,9 +435,39 @@ test "every published document marks exactly one navigation row" {
                 None => 0,
             }
         }
-        // The home page is not a navigation row, and marks none.
-        assertEq(marked, if path == "/" { 0 } else { 1 })
+        // The home page is not a navigation row, and marks none. Neither is any
+        // backstage page: the section hangs off its own navigation.
+        assertEq(marked, if path == "/" || isBackstage(path) { 0 } else { 1 })
     }
+}
+
+test "no consumer navigation row leads to the backstage" {
+    // RFC-0105 M1's gate, as a test rather than as a promise. The two fronts
+    // meet at one footer link each way and nowhere else.
+    for row in navRows() {
+        assert(!startsWith(row.href, "/backstage"))
+    }
+    assertEq(currentNav(backstagePath()), "")
+    assertEq(currentNav("/backstage/rfcs/0105"), "")
+}
+
+test "the backstage publishes the index and a page for every record" {
+    assert(rfcPages().length > 100)
+    assertEq(recordPaths().length, rfcPages().length)
+    assertEq(recordPaths()[0], "/backstage/rfcs/0001")
+    // One record, rendered the way it publishes: the stamps every document
+    // carries, and no URL that only a root would resolve. The other hundred are
+    // checked on the exported tree by `site/test/basepath.test.mjs` — see
+    // `recordPaths` for why they are not all walked here.
+    let doc = publishedDocument("/backstage/rfcs/0105")
+    assert(has(doc, "<html lang=\"en\">"))
+    assert(has(doc, "<link rel=\"icon\" href=\"../../favicon.svg\" type=\"image/svg+xml\">"))
+    assert(has(doc, "<link rel=\"stylesheet\" href=\"../../style.css\">"))
+    assert(has(doc, "<h1 id=\"rfc-0105--a-site-has-two-audiences\">"))
+    assertEq(countOf(doc, "=\"/"), countOf(doc, "data-key=\"/"))
+    // A number the record does not carry is a 404, not an empty page.
+    assertEq(route(documentRequest("/backstage/rfcs/0066")).status, 404)
+    assertEq(route(documentRequest("/backstage/rfcs/91")).status, 404)
 }
 
 test "a reference page belongs under Docs, and the home page under nothing" {

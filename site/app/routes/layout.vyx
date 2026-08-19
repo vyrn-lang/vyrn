@@ -60,7 +60,13 @@ fn standing() -> String {
              landing page, by a check that runs. -->
         <span>{{ exampleCount() }} examples, {{ backendCount() }} backends</span>
         <a href="https://github.com/vyrn-lang/vyrn">Source on GitHub</a>
-        <a href="https://github.com/vyrn-lang/vyrn/tree/main/rfcs">The design record</a>
+        <!-- The one door to the other front (RFC-0105 M1). It is a footer link
+             and not a navigation row on purpose: a reader deciding whether to
+             use the language is never sent into the design record by the
+             masthead. `data-nav="hard"` because the backstage wears its own
+             shell, and a soft navigation would swap the content under this
+             masthead and leave the reader in neither section. -->
+        <a href="/backstage.html" data-nav="hard">Backstage — the design record</a>
         <span>{{ standing() }}</span>
     </footer>
 </div>

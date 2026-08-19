@@ -1,0 +1,110 @@
+<script>
+// GET /backstage — the design record, in reading order (RFC-0105 M1).
+//
+// The consumer site has no navigation row that reaches this page, and this page
+// wears none of the consumer chrome: `layout="none"` opts the whole section out
+// of the shell every other page shares, and the masthead below is its own. The
+// two fronts meet at one link each way, in the footer.
+//
+// Nothing here is written by hand. The rows are `rfcs/README.md`'s own index
+// table — number, title, status, in the order the record lists them — and the
+// strip is one cell per file in `rfcs/`, the same geometry the release page used
+// to carry before this section existed to carry it.
+layout="none"
+import { Head } from "std/ui"
+import { IndexRow, rfcIndex, rfcHref, rfcTag, backstageHead, backstageNav, backstageFooter } from "../../backstage"
+import { rfcCells, rfcStripWidth, rfcStripHeight, Cell } from "../../chart"
+import { shellHtml } from "../../code"
+import { rfcCount } from "../../repo"
+
+export fn head() -> Head {
+    return backstageHead("The design record — Vyrn backstage")
+}
+
+/// The two commands that hold this record to the repository. Both run in CI on
+/// every push, and both are what a reader of a claim would type to check it.
+type Check = { command: String, what: String }
+
+fn checks() -> Array<Check> {
+    return [
+        Check { command: "cargo test --release -p vyrn-cli --test rfc_index", what: "The index on this page against the directory it describes: membership both ways, one row per record, and every <code>RFC-NNNN</code> the corpus names is a record that exists." },
+        Check { command: "cargo test -p vyrn-cli --test parity -- --ignored", what: "Every example on all three backends, byte for byte — stdout, stderr, exit code and trap messages. The claim the whole site rests on, run in one command." },
+    ]
+}
+</script>
+
+<template>
+<div id="root" class="backstage">
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="masthead backstage" v-html='backstageNav("record")'></header>
+    <div id="main" class="skip-target" tabindex="-1"></div>
+    <main class="page">
+        <aside class="rail">
+            <a href="#strip"><span class="n">01</span>the record</a>
+            <a href="#index"><span class="n">02</span>the index</a>
+            <a href="#checked"><span class="n">03</span>checked</a>
+        </aside>
+
+        <section class="hero">
+            <p class="eyebrow">Backstage</p>
+            <h1 class="display">The design record</h1>
+            <p class="lede">Every decision in this language was argued in writing before it was built, and the argument is the part worth keeping. {{ rfcCount() }} records, rendered here from the same files the repository holds. When the implementation and a record disagree, one of them is a bug.</p>
+        </section>
+
+        <section class="band" id="strip">
+            <p class="eyebrow">01 — the record</p>
+            <h2>{{ rfcIndex().length }} records, in order</h2>
+            <div class="plate">
+                <div class="plate-head">
+                    <span class="pill">Record</span>
+                    <span class="eyebrow">rfcs/</span>
+                </div>
+                <div class="stage">
+                    <svg class="chart" :viewBox='"0 0 " + rfcStripWidth() + " " + rfcStripHeight()' role="img" aria-label="One cell per design record, in order">
+                        <a v-for="c in rfcCells()" :key="c.id" :href="c.href">
+                            <title>{{ c.title }}</title>
+                            <rect class="cell" :x="c.x" :y="c.y" width="18" height="18" :data-tone="c.tone" fill="currentColor" :fill-opacity="c.tone"/>
+                        </a>
+                    </svg>
+                </div>
+                <p class="cap">One cell per file in rfcs/, counted while this page was built. Hover a cell for its number and title, or open the record. The tone steps every ten records so the sequence is countable.</p>
+            </div>
+        </section>
+
+        <section class="band" id="index">
+            <p class="eyebrow">02 — the index</p>
+            <h2>Every record, with the status it carries</h2>
+            <p>Reading order, which is the order the record itself lists. The status is the record's own header, copied by <code>rfcs/README.md</code> and read from there — so a milestone that landed says so here on the next build.</p>
+            <div class="scroller">
+            <table class="rfcindex">
+                <thead>
+                    <tr><th>RFC</th><th>Title</th><th>Status</th></tr>
+                </thead>
+                <tbody>
+                    <tr v-for="r in rfcIndex()" :key="r.number">
+                        <td><a :href="rfcHref(r.number)">{{ rfcTag(r.number) }}</a></td>
+                        <td><a :href="rfcHref(r.number)">{{ r.title }}</a></td>
+                        <td>{{ r.status }}</td>
+                    </tr>
+                </tbody>
+            </table>
+            </div>
+        </section>
+
+        <section class="band" id="checked">
+            <p class="eyebrow">03 — checked</p>
+            <h2>What holds the record honest</h2>
+            <p>A record that contradicts the code is worse than no record. These two run on every push, and they are what a reader of any claim on this site would type to check it.</p>
+            <ul class="plain">
+                <li v-for="c in checks()" :key="c.command">
+                    <div class="cmd">
+                        <code v-html="shellHtml(c.command)"></code>
+                    </div>
+                    <span class="note" v-html="c.what"></span>
+                </li>
+            </ul>
+        </section>
+    </main>
+    <footer class="foot backstage" v-html="backstageFooter()"></footer>
+</div>
+</template>

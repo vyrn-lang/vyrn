@@ -28,6 +28,8 @@
 /// Every field is a `String`, because that is what an SVG attribute is. Rounding
 /// happens here, once, rather than in four `.toString()` calls at the template.
 import { rfcRows, RfcRow, blob } from "./repo"
+import { rfcTag, rfcHref } from "./backstage"
+import { startsWith } from "std/strpred"
 import { split, joinWith } from "std/strings"
 import { vyrnLines } from "./snippets"
 
@@ -528,31 +530,11 @@ export fn rfcCells() -> Array<Cell> {
                 y: px(i / 20 * 22),
                 tone: toneOf(r.number),
                 title: rfcTag(r.number) + " " + r.title,
-                href: rfcHref(r),
+                href: rfcHref(r.number),
             })
         i = i + 1
     }
     return out
-}
-
-/// An RFC number as its file name spells it: four digits.
-export fn rfcTag(n: Int64) -> String {
-    if n < 10 {
-        return "RFC-000" + n.toString()
-    }
-    if n < 100 {
-        return "RFC-00" + n.toString()
-    }
-    return "RFC-0" + n.toString()
-}
-
-/// A design record's file, on GitHub.
-///
-/// The generator read `RFC-0091-memory-model.md` and reported number 91 and
-/// title "memory model"; this puts the name back together. The title's words
-/// ARE the file's own words, so the round trip is exact and a test says so.
-export fn rfcHref(row: RfcRow) -> String {
-    return blob("rfcs/" + rfcTag(row.number) + "-" + joinWith(split(row.title, " "), "-") + ".md")
 }
 
 /// A cell's fill opacity, stepping every ten RFCs so the strip reads as a
@@ -768,26 +750,19 @@ test "the RFC strip has one cell per RFC and wraps every twenty" {
     assertEq(cells[20].y, "22")
 }
 
-test "a design record's link is the file name the generator read" {
-    assertEq(rfcHref(RfcRow { number: 91, title: "memory model" }), "https://github.com/vyrn-lang/vyrn/blob/main/rfcs/RFC-0091-memory-model.md")
-    assertEq(rfcHref(RfcRow { number: 1, title: "vision" }), "https://github.com/vyrn-lang/vyrn/blob/main/rfcs/RFC-0001-vision.md")
-    // Every row the repository reported round-trips to a plausible file.
-    for r in rfcRows() {
-        assert(rfcHref(r).byteLength > 60)
+test "a strip cell opens the record's page on this site" {
+    // The strip used to leave for GitHub. The record is rendered here now, so a
+    // cell opens the page beside it (RFC-0105 M1).
+    assertEq(rfcCells()[0].href, "/backstage/rfcs/0001.html")
+    for c in rfcCells() {
+        assert(startsWith(c.href, "/backstage/rfcs/"))
     }
-}
-
-test "an RFC number is padded the way its file name is" {
-    assertEq(rfcTag(1), "RFC-0001")
-    assertEq(rfcTag(42), "RFC-0042")
-    assertEq(rfcTag(96), "RFC-0096")
 }
 
 test "every tone is a fill-opacity between nothing and everything" {
     for c in rfcCells() {
         assert(c.tone.byteLength >= 3)
         assert(c.title.byteLength > 4)
-        assert(c.href.byteLength > 60)
     }
 }
 

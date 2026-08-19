@@ -13,7 +13,10 @@
 import { Head } from "std/ui"
 import { pageHead } from "../nav"
 import { heroRows, heroDiagnostic, ownershipReport, badRow } from "../snippets"
-import { exampleCount, rfcCount, stdCount, backendCount, hasRelease, releaseTag } from "../repo"
+// The design-record count and the parity harness command left this page with
+// RFC-0105 M1: a reader deciding whether to use the language is not the reader
+// who runs `cargo test`, and both live on the backstage now.
+import { exampleCount, stdCount, backendCount, hasRelease, releaseTag } from "../repo"
 import { shellHtml } from "../code"
 import { ownRows, lifetimes, lineCount, moduleRatio, targetsBox, targetsNodes, targetsEdges, OwnRow, Life, Node, Edge } from "../chart"
 import { parityReport } from "../../../examples/herofield"
@@ -96,10 +99,6 @@ fn builtDigest() -> String {
                 <div>
                     <dt>Std modules</dt>
                     <dd>{{ stdCount() }}<small>written in Vyrn, not in Rust</small></dd>
-                </div>
-                <div>
-                    <dt>Design records</dt>
-                    <dd>{{ rfcCount() }}<small>every decision, with its argument</small></dd>
                 </div>
                 <div>
                     <dt>Backends</dt>
@@ -241,7 +240,6 @@ fn builtDigest() -> String {
                 </div>
                 <p class="cap">The digest is <code>FNV-1a-64</code> of everything <code>examples/herofield.vyrn</code> prints — a frame, and the raw IEEE-754 bits behind it. The interpreter hashed it while this page was built; press Run and your browser fetches <code>hero.wasm</code>, runs it, and hashes what the module printed. Two engines, one number. <strong>Break one byte</strong> corrupts the digest the build recorded, so the comparison fails against a run that is still real.</p>
             </div>
-            <p class="notice">Run it yourself: <code>cargo test -p vyrn-cli --test parity -- --ignored</code>.</p>
         </section>
 
         <section class="band">
@@ -251,7 +249,7 @@ fn builtDigest() -> String {
                 <li><a href="/philosophy.html">Philosophy</a><span class="note">Intent over mechanism, and the six things Vyrn refuses to have.</span></li>
                 <li><a href="/compare.html">Compare</a><span class="note">The same task in four languages, and every number we can produce on demand.</span></li>
                 <li><a href="/install.html">Install</a><span class="note">Three commands, per platform, and how to check it runs.</span></li>
-                <li><a href="/docs.html">Docs</a><span class="note">The standard library reference, the examples and the design record.</span></li>
+                <li><a href="/docs.html">Docs</a><span class="note">The standard library reference, generated from the source, and the examples.</span></li>
             </ul>
         </section>
 </main>
