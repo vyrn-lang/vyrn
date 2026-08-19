@@ -231,6 +231,21 @@ const PAIRS = [
   ["the focus ring on a plate", "var(--accent)", PLATE, 3],
   ["an ownership lane (a graphic that carries the argument)", "var(--lane-a)", PAPER, 3],
   ["the other ownership lane", "var(--lane-b)", PAPER, 3],
+  // The benchmark radar's five strokes (RFC-0104 M3). A chart line is a graphic
+  // that carries meaning, so 3:1 — and each of these doubles as the legend
+  // button's own text, which is why they are also read at 4.5:1 below. They are
+  // aliases of tokens already measured above; the pairs are here so a future
+  // edit that gives one of them a colour of its own is caught by this file
+  // rather than by a reader.
+  ["the C line on the radar", "var(--sr-c)", PLATE, 3],
+  ["the Rust line", "var(--sr-rust)", PLATE, 3],
+  ["the node line", "var(--sr-node)", PLATE, 3],
+  ["the two Vyrn lines", "var(--sr-vyrn)", PLATE, 3],
+  // and as the legend's label text, which is prose and takes the text bar.
+  ["a legend label", "var(--sr-c)", PLATE, 4.5],
+  ["a legend label (Rust)", "var(--sr-rust)", PLATE, 4.5],
+  ["a legend label (node)", "var(--sr-node)", PLATE, 4.5],
+  ["a legend label (Vyrn)", "var(--sr-vyrn)", PLATE, 4.5],
 ];
 
 for (const [theme, tokens] of [["light", LIGHT], ["dark", DARK]]) {

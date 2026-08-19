@@ -13,11 +13,20 @@
 // leak-shape figures are the ones `rfcs/census-call-arguments.md` recorded, and
 // the caption names that file. The speed chart is `bench/engines.sh` over
 // `examples/threeengines.vyrn` — one program, the three engines it runs on, and
-// the machine and the date printed beside the numbers. There is no cross-
-// language speed chart, and the page says why rather than leaving a hole.
+// the machine and the date printed beside the numbers.
+//
+// SECTION 08 IS THE CROSS-LANGUAGE CHART THIS PAGE USED TO SAY IT COULD NOT MAKE
+// (RFC-0104 M3). The objection it stated was real — a cross-language chart needs
+// programs somebody wrote in someone else's language, and a reader has to trust
+// they were written well. What changed is that the programs, the discipline they
+// were held to, the flags, the verification that all five print the same bytes,
+// and every raw reading are now published for anyone to disagree with. The radar
+// is computed in `app/bench.vyrn` from the two committed JSON records, and NOT
+// ONE figure on it is typed in by hand.
 import { Head } from "std/ui"
-import { pageHead } from "../nav"
+import { pageHead, hrefOf } from "../nav"
 import { typeSpecs, memorySpecs, failureSpecs, Snippet } from "../snippets"
+import { programs, contestants, radarBox, radarCx, radarCy, radarRings, radarSpokes, radarLines, tableRows, axisPanels, benchMachine, benchRuns, benchMethod, Prog, Series, Ring, Spoke, Line, Mark, Reading, Row, Panel } from "../bench"
 import { moduleSizes, moduleSizesBox, moduleSizesGrid, moduleLadder, moduleLadderBox, moduleLadderGrid, moduleLadderPlot, twoRowPlot, moduleRatio, largestModule, leakBars, leakBox, leakGrid, leakPeak, engineBars, engineBox, engineGrid, enginePlot, engineRatio, engineRounds, engineCommand, engineMachine, wasmRatio, compiledBars, compiledGrid, barLeft, barRight, barText, barRow, Bar, Grid } from "../chart"
 
 /// One comparison axis: what is being compared, and where each answer stands.
@@ -40,6 +49,11 @@ fn leakWord(declared: Bool) -> String {
         return "fn wrap(s: consume String) -> Option<String>"
     }
     return "fn wrap(s: String) -> Option<String>"
+}
+
+/// Where the whole dataset is written out, one page down from this one.
+fn benchDetail() -> String {
+    return hrefOf("/backstage/benchmarks")
 }
 
 fn axes() -> Array<Axis> {
@@ -106,6 +120,7 @@ fn axes() -> Array<Axis> {
         <a href="#numbers"><span class="n">05</span>size</a>
         <a href="#leak"><span class="n">06</span>a leak</a>
         <a href="#speed"><span class="n">07</span>three engines</a>
+        <a href="#radar"><span class="n">08</span>eight programs</a>
     </aside>
         <section class="hero">
             <p class="eyebrow">Compare</p>
@@ -365,6 +380,104 @@ fn axes() -> Array<Axis> {
 
             <p class="notice">Where these numbers come from: <code>{{ engineCommand() }}</code>, on {{ engineMachine() }}, best of three runs per engine. Each reading is the whole process minus the same process at one round, so process start-up and the shell that timed it are out of it; the harness prints both halves. The ratio is the claim — one machine, one afternoon — and the milliseconds are published so it can be checked. The command was run twice: the second pass came in 8% slower on the interpreter and 6% on the native binary, the spread of an ordinary desktop, and the ratios moved by under 3%. There is no cross-language chart here: that would need a second program written by us in someone else's language, and a reader would have to take on trust that we wrote it well.</p>
             <p class="notice">Per-operation figures are a different instrument: <code>vyrn bench</code> and the <code>bench</code> blocks in <code>examples/</code>. CI runs every one of them on each push and refuses to merge one that stops compiling. It does not yet fail on a slowdown — <code>bench/baseline.json</code> is still an unseeded placeholder, and the file says exactly how to seed it from a CI run — so nothing on this page claims a trend over time.</p>
+            <p class="notice">That objection is answered one section down, and the answer is what section 08 is. It took eight Benchmarks Game programs, wrote each one four more times under a stated discipline, checked that all five print the same bytes before anything was timed, and published the sources, the flags and every raw reading. A reader still has to judge whether the C, Rust and JavaScript were written well — but now there is something to judge, rather than a promise.</p>
         </section>
+
+        <section class="band" id="radar">
+            <p class="eyebrow">08 — measured</p>
+            <h2>Eight Benchmarks Game programs, five contestants</h2>
+            <p>The same eight programs written five ways: plain C, safe Rust, plain node, Vyrn native and Vyrn as WebAssembly. Every contestant printed the same bytes at the timing size before a single run was timed. Further from the centre is <em>slower</em>, so a small shape is a fast one.</p>
+            <div class="plate" data-widget="radar">
+                <div class="plate-head">
+                    <span class="pill live">Measured</span>
+                    <span class="eyebrow">rfcs/bench-0104/results/2026-08-19-LOCUST.json</span>
+                    <span class="spacer"></span>
+                    <div class="controls" role="group" aria-label="Normalize the chart to">
+                        <button type="button" data-norm="c" aria-pressed="true">C = 1</button>
+                        <button type="button" data-norm="rust" aria-pressed="false">Rust = 1</button>
+                    </div>
+                </div>
+                <div class="stage">
+                    <svg class="chart radar" :viewBox="radarBox()" role="img" aria-label="A radar with one axis per Benchmarks Game program and one polygon per contestant. Every reading it plots is in the table below it.">
+                        <g class="axis">
+                            <polygon v-for="r in radarRings()" :key="r.id" :class="r.tone" :points="r.points"/>
+                            <line v-for="s in radarSpokes()" :key="s.key" :x1="radarCx()" :y1="radarCy()" :x2="s.x" :y2="s.y"/>
+                            <text v-for="r in radarRings()" :key="r.id" :x="radarCx()" :y="r.y" dx="6" dy="-3">{{ r.label }}</text>
+                        </g>
+                        <g class="series" v-for="l in radarLines()" :key="l.key" :data-series="l.key">
+                            <polygon :class="l.tone" :points="l.points" :data-alt="l.alt"/>
+                            <g class="marks" data-norm="c">
+                                <path v-for="m in l.marks" :key="m.id" class="offscale" :d="m.d"><title>{{ l.name }} — {{ m.title }}</title></path>
+                            </g>
+                            <g class="marks" data-norm="rust">
+                                <path v-for="m in l.altMarks" :key="m.id" class="offscale" :d="m.d"><title>{{ l.name }} — {{ m.title }}</title></path>
+                            </g>
+                        </g>
+                        <g class="wedges">
+                            <polygon v-for="s in radarSpokes()" :key="s.key" class="wedge" :points="s.wedge" :data-axis-hit="s.key"><title>{{ s.name }}</title></polygon>
+                        </g>
+                        <g class="names">
+                            <text v-for="s in radarSpokes()" :key="s.key" :x="s.lx" :y="s.ly" :text-anchor="s.anchor" :data-axis-name="s.key">{{ s.name }}</text>
+                        </g>
+                    </svg>
+                </div>
+                <div class="serieskeys" role="group" aria-label="Show or hide a contestant">
+                    <button type="button" v-for="s in contestants()" :key="s.key" :class="s.tone" :data-series-toggle="s.key" aria-pressed="true">{{ s.name }}</button>
+                </div>
+                <div class="tabs axes">
+                    <button type="button" v-for="p in programs()" :key="p.key" :data-axis="p.key">{{ p.name }}</button>
+                </div>
+                <div class="stage axispanes">
+                    <div v-for="p in axisPanels()" :key="p.key" :data-axis-pane="p.key">
+                        <p class="eyebrow">{{ p.name }} — N = {{ p.n }}</p>
+                        <table class="matrix bench">
+                            <thead>
+                                <tr><th>Contestant</th><th>Median</th><th>vs C</th><th>vs Rust</th><th>Spread</th></tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="c in p.cells" :key="c.key">
+                                    <th scope="row"><span :class="c.tone">{{ c.name }}</span></th>
+                                    <td>{{ c.ms }}</td>
+                                    <td>{{ c.vsC }}</td>
+                                    <td>{{ c.vsRust }}</td>
+                                    <td>{{ c.spread }}<span v-if="c.noisy" class="flag" title="Within-run spread over 15%: this reading is close to the four-millisecond process floor."> noisy</span></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        <p class="note"><strong>{{ p.verdict }}.</strong> {{ p.cause }}</p>
+                        <p class="note"><a :href="p.href">Both runs, the raw readings and the environment for {{ p.name }}</a></p>
+                    </div>
+                </div>
+                <p class="cap">Medians of {{ benchRuns() }} runs, {{ benchMethod() }}, on {{ benchMachine() }}. The radial axis is log2 around the baseline: the centre ring is an eighth of it, every ring out is a doubling, the rim is sixteen times it. A reading past the rim is drawn AT the rim with a stroke continuing outward, and its real figure is in the table below — three readings against C, four against Rust, and every one of them is named there.</p>
+            </div>
+
+            <p>The table is the chart. Nothing above it is a number that is not below it, and it is what the page says with no script running at all.</p>
+            <div class="scroller">
+            <table class="matrix bench">
+                <caption>Medians of {{ benchRuns() }} runs on {{ benchMachine() }}. Each cell reads: the median, then the same figure against C and against Rust.</caption>
+                <thead>
+                    <tr>
+                        <th>Program</th>
+                        <th>N</th>
+                        <th v-for="s in contestants()" :key="s.key"><span :class="s.tone">{{ s.name }}</span></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr v-for="r in tableRows()" :key="r.key">
+                        <th scope="row">{{ r.name }}</th>
+                        <td class="n">{{ r.n }}</td>
+                        <td v-for="c in r.cells" :key="c.key">
+                            <span class="ms">{{ c.ms }}</span>
+                            <span class="norm">{{ c.vsC }} C · {{ c.vsRust }} Rust</span>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+            </div>
+
+            <p class="notice">Where these numbers come from: eight of the ten Benchmarks Game programs — the two that are absent are absent because the language cannot express them, and that is recorded rather than worked around. The C is plain C11 with no intrinsics and no threads, the Rust is safe and standard-library only, the JavaScript is plain node with no worker threads. Every contestant's output was compared against the game's expected output before anything was timed. The whole record — both runs, the ten raw readings behind every median, the environment, the named cause under every deviation and the game's own published ceiling — is on <a :href="benchDetail()">the backstage page for this dataset</a>.</p>
+            <p class="notice">CI does not run this. The harness needs clang, rustc, node and wasmtime together and takes about fifteen minutes, and a time measured on a shared runner is not a time. It is run by hand and the committed JSON is the record; what CI does gate is that all eight programs keep printing the game's expected bytes.</p>
+        </section>
+
 </main>
 </template>

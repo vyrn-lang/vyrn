@@ -26,7 +26,7 @@
 ///
 /// Every other route publishes flat, for the same reason (see `app/nav.vyrn`).
 import { pages } from "std/ui"
-import { route, rootPath, philosophyPath, comparePath, installPath, editorsPath, releasesPath, docsPath, explorePath, guidePath, playPath, backstagePath, hrefDocsStd, hrefGuide, hrefBackstageRfcs, hrefExplore } from pages("./app/routes")
+import { route, rootPath, philosophyPath, comparePath, installPath, editorsPath, releasesPath, docsPath, explorePath, guidePath, playPath, backstagePath, backstageBenchmarksPath, hrefDocsStd, hrefGuide, hrefBackstageRfcs, hrefExplore } from pages("./app/routes")
 import { published, navRows, hrefOf, upTo } from "./app/nav"
 import { rfcPages, rfcSlug } from "./app/backstage"
 import { apiModules, apiEntries, apiHref } from "./app/docs"
@@ -59,6 +59,10 @@ fn sitePaths() -> Array<String> {
         out.push(hrefGuide(slug))
     }
     out.push(backstagePath())
+    // The benchmark dataset (RFC-0104 M3). It is one page and it renders in
+    // milliseconds, so it belongs in this list rather than beside the hundred
+    // record pages `recordPaths` keeps out of the per-page gates.
+    out.push(backstageBenchmarksPath())
     return out
 }
 
