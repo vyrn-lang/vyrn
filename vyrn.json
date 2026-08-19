@@ -1,0 +1,7 @@
+{
+  "toolchain": {
+    "wasmtime": "46.0.1",
+    "wasi-sysroot": "25.0",
+    "wasi-builtins": "25.0"
+  }
+}

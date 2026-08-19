@@ -208,8 +208,9 @@ hand.
 **What needs what.** `vyrn run`, `check`, `test`, `fmt`, `doc` and
 `build --target wasm` need nothing beyond the archive. **`vyrn build` — a native
 binary — needs `clang` on `PATH`** (or `$CLANG`); it emits textual LLVM IR and
-links it. Running the three-way parity harness also needs a `wasmtime` binary,
-through `$VYRN_WASMTIME`.
+links it. Running the three-way parity harness also needs a `wasmtime` binary:
+in a clone of this repository `vyrn update --locked` fetches the pinned one, and
+`$VYRN_WASMTIME` overrides it anywhere.
 
 ### Build from source
 
@@ -236,9 +237,14 @@ cargo run -p vyrn-cli -- build ../examples/fib.vyrn --target wasm -o fib.wasm
 ```
 
 The built binary finds `std/` and `web/` by walking up from its own path, so it
-works in place inside a clone. See the `parity` job in
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) for the exact wasmtime
-and wasi-sdk versions CI uses.
+works in place inside a clone.
+
+The wasmtime and wasi-sdk versions this repository builds and tests against are
+in [`vyrn.json`](vyrn.json)'s `toolchain` key, and the bytes of every one of them
+are pinned by sha256 in [`vyrn.lock`](vyrn.lock) (RFC-0102). `vyrn update
+--locked` fetches what the lock names, verifies it, and unpacks it under
+`~/.vyrn/tools/` — CI runs exactly that line, so there is one answer to "which
+version" rather than one per file that mentions it.
 
 [`compiler/README.md`](compiler/README.md) has the detailed build notes, the
 crate map, and how to build the excluded crates (`vyrn-lsp`, `vyrn-genwasm`).
@@ -261,7 +267,9 @@ lang/
 ├── docs/api/     generated std API docs, checked for drift by CI
 ├── editor/       the VS Code extension
 ├── bench/        the benchmark baseline
-├── tools/        local toolchain downloads (not tracked)
+├── vyrn.json     this repository's own manifest: the pinned toolchain versions
+├── vyrn.lock     the url and sha256 of every pinned tool artifact
+├── tools/        hand-unpacked toolchain downloads, if any (not tracked)
 └── ROADMAP.md    what ships today and what is next
 ```
 

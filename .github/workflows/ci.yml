@@ -200,10 +200,11 @@ jobs:
     # What it would cost, measured against run 31724777591 (warm caches): this
     # job takes about 8 minutes and runs in parallel with the others, so the
     # added WALL time is zero and the added runner minutes are free — the repo
-    # is public. The one-time work is a second cache slot and the aarch64
-    # wasmtime asset (`wasmtime-v46.0.1-aarch64-linux.tar.xz`); the wasi sysroot
-    # and the builtins archive are wasm32 target libraries and are the same file
-    # on every host. clang is preinstalled on the ARM image.
+    # is public. The one-time work is a second cache slot, and no new fetch at
+    # all: `vyrn.lock` already pins the aarch64-linux wasmtime beside this
+    # platform's, and the wasi sysroot and the builtins archive are wasm32 target
+    # libraries pinned `/any` — the same file on every host. clang is
+    # preinstalled on the ARM image.
     #
     # A cheap, real addition — deliberately left as its own change, because a
     # matrix leg nobody has watched go green is a claim, not a gate.
@@ -217,9 +218,9 @@ jobs:
           # Separate cache from the test job — different build graph (only
           # vyrn-cli's parity test) and keeps both under the size cap.
           prefix-key: parity
-      - name: wasm toolchain cache
+      - name: Pinned tool cache
         id: wasm-tools
-        # The ONLY job that fetches this now. It was shared with gen-engine,
+        # The ONLY job that needs these now. It was shared with gen-engine,
         # which exported WASI_SYSROOT/WASI_BUILTINS that nothing in its build
         # read — RFC-0076 M7 moved the shim to the direct backend and left the
         # exports behind.
@@ -229,28 +230,35 @@ jobs:
         # no clang, no sysroot and no builtins), and the codegen integration
         # tests below need the sysroot and the builtins archive to compile the
         # C shim and the layout program.
+        #
+        # RFC-0102 M4: which versions those are is `vyrn.json`'s answer and which
+        # BYTES are `vyrn.lock`'s, so the key is the lock's hash — a version bump
+        # invalidates this cache by editing the file that names the version. The
+        # hand-written key this replaces spelled two versions in YAML and could
+        # not go stale against a pin it never read. `~/.vyrn/tools/<sha256>/` is
+        # what the resolver looks in, so a hit needs no fetch and no unpack.
         uses: actions/cache@v4
         with:
-          path: ~/wasm-tools
-          key: wasm-tools-wasi25-wasmtime46
-      - name: Fetch wasi-sysroot + builtins + wasmtime
+          path: ~/.vyrn/tools
+          key: vyrn-tools-${{ hashFiles('vyrn.lock') }}
+      - name: Build vyrn
+        working-directory: compiler
+        run: cargo build --quiet -p vyrn-cli
+      - name: Populate ~/.vyrn/tools from vyrn.lock
         if: steps.wasm-tools.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p ~/wasm-tools && cd ~/wasm-tools
-          curl -sSfL -o sysroot.tar.gz https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sysroot-25.0.tar.gz
-          curl -sSfL -o builtins.tar.gz https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/libclang_rt.builtins-wasm32-wasi-25.0.tar.gz
-          curl -sSfL -o wasmtime.tar.xz https://github.com/bytecodealliance/wasmtime/releases/download/v46.0.1/wasmtime-v46.0.1-x86_64-linux.tar.xz
-          tar xf sysroot.tar.gz && tar xf builtins.tar.gz && tar xf wasmtime.tar.xz
+        # The three `curl`s this replaces named their URLs and their versions in
+        # shell, and checked nothing that arrived. `--locked` fetches only what
+        # the lock already pins for this platform, verifies every byte against
+        # the recorded sha256, refuses a mismatch, and never writes the lock —
+        # so a CI cache miss cannot silently re-pin anything.
+        run: compiler/target/debug/vyrn update --locked
       - name: Run the parity harness
         working-directory: compiler
-        # WASI_SYSROOT and WASI_BUILTINS are deliberately NOT exported: the wasm
-        # column is emitted directly, and leaving them unset is what makes this run
-        # evidence for M5's acceptance criterion rather than a claim about it. clang
-        # is still needed, for the NATIVE column.
-        run: |
-          export VYRN_WASMTIME=$(find ~/wasm-tools -type f -name wasmtime | head -1)
-          echo "wasmtime: $VYRN_WASMTIME"
-          cargo test --quiet -p vyrn-cli --test parity -- --ignored --nocapture
+        # Nothing is exported. The harness resolves wasmtime through the same
+        # three steps every other consumer takes — `$VYRN_WASMTIME`, the pin,
+        # the `tools/` walk — and the pin is what answers here. clang is still
+        # needed, for the NATIVE column, and stays discovered (RFC-0102 M3).
+        run: cargo test --quiet -p vyrn-cli --test parity -- --ignored --nocapture
       - name: The codegen integration tests that need a toolchain (RFC-0077)
         working-directory: compiler
         # THE JOB THAT MAKES `layout_vs_clang` A GATE. These eight tests —
@@ -267,22 +275,19 @@ jobs:
         # read it) — and they run here, the one place
         # with clang, the sysroot, the builtins archive and wasmtime together.
         # `VYRN_REQUIRE_TOOLS=1` from `env:` above is what makes a missing tool a
-        # panic rather than a skip, so a broken cache fails this step.
+        # panic rather than a skip, so a broken cache fails this step. It answers
+        # a different question from the pin (may a check skip?) and survives it:
+        # a pinned tool that cannot be resolved is already loud, but a tool
+        # nothing pins is still a quiet `None`.
         #
-        # This is also the live consumer of WASI_SYSROOT/WASI_BUILTINS: the shim
-        # compile (`toolchain::shim_wasm`) and the C layout program are the only
-        # readers left in the repo, which is why the fetch stays in THIS job and
-        # left the gen-engine one.
-        run: |
-          export VYRN_WASMTIME=$(find ~/wasm-tools -type f -name wasmtime | head -1)
-          export WASI_SYSROOT=$(echo ~/wasm-tools/wasi-sysroot-*)
-          export WASI_BUILTINS=$(find ~/wasm-tools -name 'libclang_rt.builtins-wasm32.a' | head -1)
-          for v in VYRN_WASMTIME WASI_SYSROOT WASI_BUILTINS; do
-            eval "p=\$$v"
-            [ -e "$p" ] || { echo "$v is not a path that exists: '$p'" >&2; exit 1; }
-            echo "$v=$p"
-          done
-          cargo test --quiet -p vyrn-codegen -- --ignored --nocapture
+        # This is also the live consumer of the sysroot and the builtins archive:
+        # the shim compile (`toolchain::shim_wasm`) and the C layout program are
+        # the only readers left in the repo, which is why the pinned cache stays
+        # in THIS job and left the gen-engine one. Three exported variables and
+        # their existence check are gone — the resolver reads the same pin the
+        # step above populated, and a pin that will not resolve fails LOUDLY
+        # rather than reading as a tool that is merely not installed.
+        run: cargo test --quiet -p vyrn-codegen -- --ignored --nocapture
       - name: Universal-pages integration (RFC-0069)
         # Ignored-tier like parity: spawning the bin server generates the whole
         # app cold (minutes in a debug build) — too slow for the test job.
@@ -306,9 +311,9 @@ jobs:
           # slot, like parity's.
           prefix-key: genwasm
       # No wasm toolchain here, deliberately. This job used to restore the same
-      # ~/wasm-tools cache as parity and export WASI_SYSROOT/WASI_BUILTINS into
-      # the test — three tarballs (~150 MB unpacked) for two variables NOTHING
-      # in this build reads. RFC-0076 M7 moved the generation engine's shim to
+      # tool cache as parity and export WASI_SYSROOT/WASI_BUILTINS into the test
+      # — three tarballs (~150 MB unpacked) for two variables NOTHING in this
+      # build reads. RFC-0076 M7 moved the generation engine's shim to
       # the direct backend (`vyrn-genwasm/src/lib.rs`), which needs no clang and
       # no sysroot, and its wasmtime is a crate rather than a spawned binary. The
       # only readers of those two variables left in the repo are the codegen

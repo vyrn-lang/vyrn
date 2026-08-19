@@ -102,6 +102,19 @@ pub fn resolve_to_url(spec: &str) -> Result<String, String> {
     Err(format!("not a remote specifier: {spec}"))
 }
 
+/// The refusal for bytes that arrived from a pinned URL and are not the pinned
+/// bytes, spelled once: a module reads it through [`RemoteResolver`] and a
+/// pinned tool reads it through `vyrn update --locked`, and a rule with two
+/// copies is a rule with two answers. `remedy` is the command that would accept
+/// the new content deliberately, which differs by what was fetched.
+pub fn upstream_changed(spec: &str, url: &str, got: &str, pinned: &str, remedy: &str) -> String {
+    format!(
+        "`{spec}` fetched from {url} hashes {got}, but vyrn.lock pins {pinned} — \
+         the upstream changed under an immutable URL; refusing to build \
+         (run `{remedy}` to accept the new content deliberately)"
+    )
+}
+
 /// Fetch a URL's bytes with `curl -sL --fail`.
 pub fn fetch(url: &str) -> Result<Vec<u8>, String> {
     let out = Command::new("curl")
@@ -149,11 +162,7 @@ impl RemoteResolver {
             let bytes = fetch(&url)?;
             let got = sha256_hex(&bytes);
             if got != sha {
-                return Err(format!(
-                    "`{spec}` fetched from {url} hashes {got}, but vyrn.lock pins {sha} — \
-                     the upstream changed under an immutable URL; refusing to build \
-                     (run `vyrn update` to accept the new content deliberately)"
-                ));
+                return Err(upstream_changed(spec, &url, &got, &sha, "vyrn update"));
             }
             write_blob(&cache_dir(), &sha, &bytes)?;
             return String::from_utf8(bytes).map_err(|_| "module is not UTF-8".into());
