@@ -1,0 +1,9 @@
+/// P1a — can a generator READ a provider module the template named, when that
+/// path is not one of the generator's own constant arguments?
+import { p1EscapeRead } from "./probes"
+import { seen } from p1EscapeRead("./data")
+
+fn main() -> Int64 {
+    print(seen())
+    return 0
+}

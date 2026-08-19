@@ -1,0 +1,9 @@
+/// P2a — evaluation inside the sandbox: is there any way to call into a provider
+/// the generator reflected?
+import { p2Call } from "./probe-p2"
+import { seen } from p2Call("./provider")
+
+fn main() -> Int64 {
+    print(seen())
+    return 0
+}

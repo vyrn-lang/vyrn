@@ -1,0 +1,10 @@
+/// P6 — can a generator read a MANIFEST-ALIASED file? `coll` is an alias in this
+/// directory's `vyrn.json` (RFC-0010 M3/M4) — the shape a pinned Iconify
+/// collection would arrive in.
+import { p6Alias } from "./probes"
+import { seen } from p6Alias("coll")
+
+fn main() -> Int64 {
+    print(seen())
+    return 0
+}

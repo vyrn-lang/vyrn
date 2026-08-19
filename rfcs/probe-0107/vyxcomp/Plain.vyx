@@ -1,0 +1,10 @@
+<script>
+import { glyphs } from "../provider"
+import { toHtmlString } from "std/html"
+import * as gp from glyphs("../data", "discord")
+</script>
+
+<template>
+<span class="badge" v-html="toHtmlString(gp.discord())">
+</span>
+</template>

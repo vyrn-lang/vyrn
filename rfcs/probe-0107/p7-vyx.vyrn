@@ -1,0 +1,10 @@
+/// P7 — the mechanism end to end: a template imports a provider, its tags name
+/// glyphs, and the page renders them. Nothing in the probe's compiler knows what
+/// `./provider` is until it reads the template.
+import { p7Vyx } from "./probes"
+import { page } from p7Vyx("./Badge.vyx")
+
+fn main() -> Int64 {
+    print(page())
+    return 0
+}

@@ -1,0 +1,9 @@
+/// P6b — the other half of the alias question: does an ALIASED module specifier
+/// work in generated source, and in a nested generator call?
+import { p3Nested } from "./probes"
+import { page } from p3Nested("prov", "github")
+
+fn main() -> Int64 {
+    print(page())
+    return 0
+}

@@ -1,0 +1,10 @@
+/// P0a — what `std/vyx` does with a capitalized tag whose name the `<script>`
+/// imported, as shipped today.
+import { components } from "std/vyx"
+import { badge } from components("./vyxtag")
+import { toHtmlString } from "std/html"
+
+fn main() -> Int64 {
+    print(toHtmlString(badge()))
+    return 0
+}

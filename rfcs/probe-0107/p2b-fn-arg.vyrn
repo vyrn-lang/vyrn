@@ -1,0 +1,10 @@
+/// P2b — the other shape RFC-0107's design implies: hand the generator the
+/// provider itself, as a value, instead of a name to load.
+import { p3Nested } from "./probes"
+import { glyphs } from "./provider"
+import { page } from p3Nested(glyphs, "github")
+
+fn main() -> Int64 {
+    print(page())
+    return 0
+}

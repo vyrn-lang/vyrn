@@ -1,0 +1,8 @@
+/// P1b — the same question for `moduleInterface`.
+import { p1EscapeReflect } from "./probes"
+import { seen } from p1EscapeReflect("./data")
+
+fn main() -> Int64 {
+    print(seen())
+    return 0
+}
