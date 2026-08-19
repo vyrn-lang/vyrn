@@ -29,37 +29,34 @@ export fn pageHead(title: String) -> Head {
 /// One navigation entry: where it goes, and what it is called.
 export type NavRow = { href: String, label: String }
 
-/// The theme control, for the masthead of both fronts (RFC-0105 M4).
+/// The theme control, for the masthead of both fronts (RFC-0105 M4, rebuilt).
 ///
-/// Three buttons, not a `<select>` and not a single toggle. A toggle cannot say
-/// "follow the system", and the system IS the default — so a two-state control
-/// would either lose that state or hide it behind a long press. Three buttons in
-/// a labelled group say the three states, show which one is on, and are operable
-/// by keyboard because a `<button>` already is.
+/// ONE button that cycles system → light → dark, not three in a group. The group
+/// shipped in M4 was three 27px boxes in a row of 13px capitals: it made the
+/// masthead fourteen pixels taller and moved the navigation off the baseline it
+/// had shared with the wordmark since the site was written. A cycling button is
+/// one box the height of the wordmark's own line, so the masthead is what it was
+/// before the control existed.
 ///
-/// It renders with `system` pressed on every page, and `site/public/theme.js`
-/// corrects it from `localStorage` when the document is parsed. The stale
-/// marking is never seen: without script the whole group is `display: none`
-/// (`[data-js]` gates it), and with script the correction happens before a
-/// reader could look. The alternative — a control the export marks — cannot
-/// exist, because a static page has no reader's choice to mark it from.
+/// It still says all three states, because the state is the button's TEXT —
+/// `System`, `Light`, `Dark` — and not a colour or a pressed mark. The
+/// accessible name says the state and what the next press does, so a reader who
+/// cannot see the word gets both halves: "Theme: System. Press to use Light."
+/// That is one string that changes on the focused element rather than a live
+/// region beside it, which would announce the same fact twice.
+///
+/// It renders in the `system` state on every page, and `site/public/theme.js`
+/// rewrites the word and the name from `localStorage` when the document is
+/// parsed. The stale word is never seen: without script the button is
+/// `display: none` (`[data-js]` gates it), and with script the correction
+/// happens before a reader could look. The alternative — a control the export
+/// marks — cannot exist, because a static page has no reader's choice to mark it
+/// from.
 ///
 /// One definition, two mastheads. The consumer layout puts it in `<template>`
 /// and the backstage builds its masthead as a string; both call this.
 export fn themeControl() -> String {
-    return "<div class=\"theme\" role=\"group\" aria-label=\"Theme\">"
-    + themeButton("system", "System", "Follow the system theme")
-    + themeButton("light", "Light", "Light theme")
-    + themeButton("dark", "Dark", "Dark theme")
-    + "</div>"
-}
-
-/// One state of the theme control. The visible text is a word, and the accessible
-/// name is the sentence — because "Light" beside two other words is a label a
-/// screen reader hears out of the group it belongs to.
-fn themeButton(value: String, label: String, described: String) -> String {
-    let pressed = if value == "system" { "true" } else { "false" }
-    return "<button type=\"button\" data-theme-set=\"" + value + "\" aria-pressed=\"" + pressed + "\" aria-label=\"" + described + "\">" + label + "</button>"
+    return "<button type=\"button\" class=\"theme\" data-theme-cycle aria-label=\"Theme: System. Press to use Light.\">System</button>"
 }
 
 /// The published file for a route path: `/philosophy` is `philosophy.html`, and
