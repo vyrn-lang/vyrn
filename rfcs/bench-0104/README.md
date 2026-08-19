@@ -8,6 +8,13 @@ Nothing here is a benchmark. Nothing here is timed. M1 writes the programs
 properly and M2 times them; these files exist so that neither milestone has to
 guess what a correct answer looks like.
 
+M1 has landed. The eight expressible programs live in `examples/` —
+`nbody.vyrn`, `spectralnorm.vyrn`, `fannkuch.vyrn`, `binarytrees.vyrn`,
+`fasta.vyrn`, `revcomp.vyrn`, `knucleotide.vyrn`, `pidigits.vyrn` — where the
+three-way parity harness runs them. `compiler/vyrn-cli/tests/benchgame.rs`
+compares each one's output against the fixture below on every `cargo test`, so
+the probes here are history and the fixtures are live.
+
 ## The probes
 
 Each is a whole Vyrn program. Run any of them from this directory:

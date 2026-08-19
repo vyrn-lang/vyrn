@@ -1,7 +1,8 @@
 # RFC-0104 — A Benchmark Is a Claim About a Gap
 
-- **Status:** **M0 landed** (the census; see
-  [M0 — as landed](#m0--as-landed) and `rfcs/bench-0104/`). M1 to M3 proposed.
+- **Status:** **M0 and M1 landed** (the census, see
+  [M0 — as landed](#m0--as-landed) and `rfcs/bench-0104/`; the eight programs,
+  see [M1 — as landed](#m1--as-landed) and `examples/`). M2 and M3 proposed.
   Milestones below; a milestone that fails its gate says so in this file.
 - **Depends on:** RFC-0055 (bench blocks, `blackBox`, `vyrn bench`), RFC-0102
   (toolchain pinning — what "measured against wasmtime 46.0.1" means is now a
@@ -122,10 +123,10 @@ for a small N checked into the corpus directory. The bignum and `F64x2` absences
 recorded as facts with the programs that measure them. Gate: the table above
 rewritten with no "probably" cell.
 
-**M1 — the programs.** The expressible set, written idiomatically, output-
-verified against the fixtures, in the three-way parity corpus at small N.
-Gate: every program byte-identical across interp, native, and wasm, and
-`vyrn fmt --check` clean.
+**M1 — the programs.** *Landed — see [M1 — as landed](#m1--as-landed).* The
+expressible set, written idiomatically, output-verified against the fixtures,
+in the three-way parity corpus at small N. Gate: every program byte-identical
+across interp, native, and wasm, and `vyrn fmt --check` clean.
 
 **M2 — the harness and the numbers.** Same-discipline C, Rust, and JS sources;
 a runner that pins or records every toolchain, runs N times, takes medians,
@@ -374,6 +375,171 @@ claims were:
 
 A fifth, smaller, was in the census's own expectations rather than this
 document's: `spawn` was expected to move an argument into the task, and does not.
+
+## M1 — as landed
+
+Gate met on all three legs. The eight expressible programs are in `examples/`,
+they are byte-identical across the interpreter, the native binary and wasm, they
+print the M0 fixtures byte for byte, and `vyrn fmt --check` passes on every one.
+No compiler code was touched: M1 is `examples/`, one test file and this section.
+
+### The programs
+
+| program | example | census N | fixture | bench N |
+|---|---|---|---|---|
+| nbody | `examples/nbody.vyrn` | 1000 steps | `nbody-1000.expected` | 50,000 steps |
+| spectral-norm | `examples/spectralnorm.vyrn` | N = 100 | `spectralnorm-100.expected` | N = 500 |
+| fannkuch-redux | `examples/fannkuch.vyrn` | n = 7 | `fannkuch-7.expected` | n = 9 |
+| binary-trees | `examples/binarytrees.vyrn` | depth 10 | `binarytrees-10.expected` | depth 14 |
+| fasta | `examples/fasta.vyrn` | n = 1000 | `fasta-1000.expected` | 250,000 bases |
+| reverse-complement | `examples/revcomp.vyrn` | that fasta on stdin | `revcomp-1000.expected` | 2,000,000 bases |
+| k-nucleotide | `examples/knucleotide.vyrn` | that fasta on stdin | `knucleotide-1000.expected` | 200,000 bases, k = 2 and k = 18 |
+| pidigits | `examples/pidigits.vyrn` | 27 digits | `pidigits-27.expected` | 1000 digits |
+
+**regex-redux and mandelbrot are not here, and their absence is the boundary
+rather than an omission.** Neither was worked around. `=~` is an anchored full
+match against a compile-time-constant pattern — it answers neither "how many"
+nor "where", and there is no substitution by pattern — so regex-redux needs a
+runtime regex that searches, counts and replaces. mandelbrot's pixels are right
+and cannot leave the program: `print` and `writeFile` both take a `String` and
+`stringFromBytes` refuses a packed row, so it needs a byte sink.
+`regexredux-1000.expected` and `mandelbrot-200.expected` stay committed with no
+program beside them, which is what a named gap looks like in a corpus.
+
+### Where each program deviates from its probe
+
+Seven of the eight were whole programs in M0 and are promoted rather than
+rewritten: the algorithms, the constants and the output formats are the probes'.
+Only k-nucleotide's probe stopped short of its fixture. What changed elsewhere
+is what a reader would notice.
+
+- **Every program.** The compute is a named function and `main` is the print, so
+  the bench block and `main` run the same code rather than two copies of it. The
+  N a program runs at is a `let` at the top with the fixture's value beside the
+  bench's, so "what size is this" is answered in the first ten lines.
+- **nbody, spectral-norm.** `sqrtF` and `fixed9` are duplicated in both files
+  rather than shared. That is deliberate: a Benchmarks Game entry is one file,
+  M2 compares each against a single-file C, Rust and JS source, and the two
+  helpers are the census's finding — the cost of no scalar `sqrt` and no
+  nine-decimal `print` should be visible in the program that pays it.
+  `spectralnorm`'s `fixed9` gained the sign branch its probe left out; the value
+  is a norm and cannot be negative, but a formatter a reader might copy should
+  not be wrong for the case it does not meet.
+- **fannkuch-redux.** The probe copied `perm1` element by element into a fresh
+  array; `perm1.copy()` is the one-line spelling and works. The `consume`-in
+  owned-out `flip` is unchanged — it is the language's real answer and M2 prices
+  it. The walk returns a `Fold` record instead of printing from inside itself,
+  and the one explicit `drop` in the eight programs is here: `foldCount` owns the
+  copy it folds and nothing else wants it back.
+- **binary-trees.** Unchanged apart from the split into `checkAll` and
+  `iterationsFor`. The probe's finding holds exactly: no `.copy()` and no
+  explicit `drop` anywhere in the file.
+- **fasta.** The 60-column width is one `lineWidth` rather than three copies of
+  the same `if`, and the weight tables are named functions. The generator's seed
+  stays module state, and the program now says why: the game specifies ONE
+  stream, so THREE continues where TWO left off and a per-call seed would
+  silently restart it.
+- **reverse-complement.** The probe complemented into 60-byte lines as it walked
+  backwards. M1 splits that into `reverseComplement` (the whole transformation)
+  and `writeWrapped` (the printing), because the bench block needs the first
+  without the second and because it is the shape a reader would write. The `for
+  b in bytes(l)` allocation a line is unchanged and still commented.
+- **k-nucleotide.** The probe read `fasta-1000.expected` with `readFile` and
+  printed the 1-mer and 2-mer sections. M1 reads stdin like the game, keeps only
+  the THREE sequence a line at a time so the whole input is never in memory, and
+  prints the whole fixture including the five named fragments. Nothing new was
+  needed for the fragment section: `countOf` builds the table for that width and
+  looks the fragment up, rather than scanning for the one string, because the
+  table IS the benchmark and a scan would measure something the other languages
+  are not doing. The hand-written insertion sort and its three `.copy()` stay —
+  see the findings below.
+- **pidigits.** `guard` is a named constant and the `wraps()` demonstration is
+  gone: it belonged to the census's question, not to the program. The rules
+  caveat moved into the file's own header, so a reader of `examples/pidigits.vyrn`
+  meets it before the code.
+
+### Corpus wiring, and why
+
+- **Flat files in `examples/`.** The parity loop reads `examples/*.vyrn`
+  non-recursively, so a `examples/bench/` subdirectory would have put all eight
+  outside the gate this milestone exists to enter.
+- **N is a `let` in the program, not `args()`.** No `.args` fixtures. Reading
+  argv would be the game's own interface, but the corpus needs one deterministic
+  run per program and M2's timing surface is the bench block, not a process
+  argument — so a constant is the whole of it, and there is one fewer file per
+  program to keep in step.
+- **Two `.stdin` fixtures, each a copy of `fasta-1000.expected`.** The harness's
+  rule is one fixture per example (`examples/<name>.stdin`, RFC-0014), so
+  `revcomp.stdin` and `knucleotide.stdin` are copies rather than one shared file.
+  M0 wrote that its directory holds one copy and not two; that decision was about
+  `rfcs/bench-0104/` and does not reach the corpus. The copies cannot drift:
+  `the_stdin_fixtures_are_the_fasta_output` compares both against
+  `fasta-1000.expected` on every `cargo test`.
+- **Bench blocks coexist with parity, verified.** Tests and benches are stripped
+  before `run` and `build` (RFC-0055), so the three engines never see a `bench`
+  block and the corpus output is `main`'s alone. All eight are in the parity run
+  and all eight are byte-identical.
+- **The bench blocks that cannot read stdin build their own input.**
+  `vyrn bench` does not run `main` and has no fixture piped into it, so
+  `revcomp` and `knucleotide` generate a synthetic sequence in the block — which
+  is RFC-0055's own rule ("each block builds what it reads") rather than a
+  concession. `fasta`'s block generates and assembles lines without writing
+  them, and says so: a sample that spends itself in a pipe measures the pipe.
+- **The bench corpus is a pinned list, and it moved.**
+  `bench_corpus_is_exactly_the_bench_bearing_examples` in
+  `compiler/vyrn-cli/tests/benching.rs` names every example carrying a `bench`
+  block, because CI's blocking `--check` step discovers that set by grep and a
+  silently lost row would be a gate that stopped gating. It went from five
+  entries to thirteen. The eight add about 40 seconds to that step: `--check`
+  runs each block once under the INTERPRETER, so a native median of 22.9 ms is
+  11.7 seconds there.
+- **Sample sizes.** Native medians are 1.8 ms (nbody), 8.0 ms (spectral-norm),
+  22.9 ms (fannkuch-redux), 13.6 ms (binary-trees), 4.6 ms (fasta), 2.2 ms
+  (reverse-complement), 10.5 ms and 32.9 ms (k-nucleotide), 9.4 ms (pidigits) —
+  all far enough above timer noise for M2 to work with, all small enough that
+  `vyrn bench --check` on the whole set is seconds.
+
+### The gate that outlives the milestone
+
+`compiler/vyrn-cli/tests/benchgame.rs` runs each program under `vyrn run` and
+compares its bytes against the M0 fixture, with line endings normalized. It
+needs no clang, no wasmtime and no build, so a plain `cargo test` runs it.
+
+It exists because parity is the wrong gate for this arc on its own. Parity says
+the three engines agree, and three engines can agree on a wrong answer. A
+benchmark is a measurement of the thing it names only while its output is still
+the game's output, and the moment a program is edited for speed that is exactly
+what stops being true silently. M2 will write tuned variants; this is where one
+that stopped printing the fixture fails.
+
+### What contradicted the census
+
+Two, both in the same place, and both found by writing k-nucleotide's sort
+properly rather than by reading the compiler.
+
+1. **The refusal to swap two records inside an array is not about records — it
+   is about whether the element type is named.** M0 recorded
+   `es[j] may not be stored into es — it is read out of a place that owns it` as
+   a fact about arrays of records. But `std/arrays`' own `sortBy` is an insertion
+   sort that performs precisely that swap over `Array<T>`, with no `.copy()`
+   anywhere, and `knucleotide.vyrn` calls it with `Array<Entry>` — so the
+   accepted generic monomorphizes into the shape the concrete spelling is
+   refused for. One rule, two answers, decided by whether the element type is a
+   parameter or a name. The three `.copy()` in `ranked` are still there, because
+   they are what the compiler asks for at that spelling; what M0 got wrong is the
+   scope of the rule, not the cost.
+2. **The first fix the diagnostic offers does not exist for an array element.**
+   The refusal reads
+   `fix: `consume es[j]` if `es` should give it up — the field is dead
+   afterwards`. Taking that advice produces
+   `es[..] may not be taken — an element is not a place a take reaches`, whose
+   own fix is `swapRemove`, which is not a swap. So the guidance's first branch
+   is dead for exactly the container it fires on most.
+
+Neither is M1's to fix — a language gap a program hits is a finding, not a scope
+change — and neither changes a printed byte. They are recorded here because the
+census's method is that a claim about the language is answered by running code,
+and these two were answered by running it.
 
 ## What this RFC does not do
 

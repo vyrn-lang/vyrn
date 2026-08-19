@@ -1,0 +1,129 @@
+// spectral-norm, from the Computer Language Benchmarks Game (RFC-0104 M1).
+//
+// The largest eigenvalue of an infinite matrix, by ten rounds of the power
+// method. Nothing but `Float64` arithmetic over two flat arrays, which is why
+// it is the cleanest single measurement of the numeric path in the set.
+//
+//   $ vyrn run examples/spectralnorm.vyrn
+//   $ vyrn bench examples/spectralnorm.vyrn
+//
+// `main` runs the census N and prints `rfcs/bench-0104/spectralnorm-100.expected`.
+//
+// It carries the same two things nbody does, for the same reason: `std` exports
+// no scalar square root, so one lane of `F64x2` stands in, and `print` on a
+// `Float64` gives six decimals where the game prints nine.
+
+/// The census N — a 100x100 window of the matrix, the size the fixture was
+/// written at.
+let order = 100
+
+/// The bench N. The work is quadratic in it, so 500 is 25 times the census run.
+let benchOrder = 500
+
+/// The square root of one `Float64`, which `std/math` does not export.
+fn sqrtF(v: Float64) -> Float64 {
+    return F64x2.sqrt(F64x2(v, v)).lane(0)
+}
+
+/// `v` at nine decimal places, the format the game prints.
+fn fixed9(v: Float64) -> String {
+    let mut a = v
+    let mut sign = ""
+    if a < 0.0 {
+        sign = "-"
+        a = 0.0 - a
+    }
+    let scaled = Int64(a * 1000000000.0 + 0.5)
+    let whole = scaled / 1000000000
+    let mut frac = "\{scaled % 1000000000}"
+    while frac.byteLength < 9 {
+        frac = "0\{frac}"
+    }
+    return "\{sign}\{whole}.\{frac}"
+}
+
+/// `A[i][j]` — the matrix is a formula, so no matrix is ever built.
+fn cell(i: Int64, j: Int64) -> Float64 {
+    return 1.0 / Float64((i + j) * (i + j + 1) / 2 + i + 1)
+}
+
+/// `out = A v`. The destination is `consume` in and owned out: a helper that
+/// fills an array the caller keeps using cannot borrow it, because a `read`
+/// parameter may not be returned. One array is reused across all forty passes.
+fn multiplyAv(n: Int64, v: Array<Float64>, out: consume Array<Float64>) -> Array<Float64> {
+    let mut w = out
+    let mut i = 0
+    while i < n {
+        let mut sum = 0.0
+        let mut j = 0
+        while j < n {
+            sum = sum + cell(i, j) * v[j]
+            j = j + 1
+        }
+        w[i] = sum
+        i = i + 1
+    }
+    return w
+}
+
+/// `out = A-transpose v`, which is `multiplyAv` with the indices of `cell` swapped.
+fn multiplyAtv(n: Int64, v: Array<Float64>, out: consume Array<Float64>) -> Array<Float64> {
+    let mut w = out
+    let mut i = 0
+    while i < n {
+        let mut sum = 0.0
+        let mut j = 0
+        while j < n {
+            sum = sum + cell(j, i) * v[j]
+            j = j + 1
+        }
+        w[i] = sum
+        i = i + 1
+    }
+    return w
+}
+
+/// `n` zeroes, the shape both working vectors start in.
+fn filled(n: Int64, x: Float64) -> Array<Float64> {
+    let mut out: Array<Float64> = []
+    let mut i = 0
+    while i < n {
+        out.push(x)
+        i = i + 1
+    }
+    return out
+}
+
+/// Ten rounds of `u = A-transpose A u`, then the Rayleigh quotient's square
+/// root — the whole program apart from the print.
+fn spectralNorm(n: Int64) -> Float64 {
+    let mut u = filled(n, 1.0)
+    let mut v = filled(n, 0.0)
+    let mut w = filled(n, 0.0)
+    let mut round = 0
+    while round < 10 {
+        w = multiplyAv(n, u, w)
+        v = multiplyAtv(n, w, v)
+        w = multiplyAv(n, v, w)
+        u = multiplyAtv(n, w, u)
+        round = round + 1
+    }
+    let mut vbv = 0.0
+    let mut vv = 0.0
+    let mut k = 0
+    while k < n {
+        vbv = vbv + u[k] * v[k]
+        vv = vv + v[k] * v[k]
+        k = k + 1
+    }
+    return sqrtF(vbv / vv)
+}
+
+bench "spectral-norm, N = 500" {
+    blackBox(fixed9(spectralNorm(blackBox(benchOrder))).byteLength)
+}
+
+fn main() -> Int64 {
+    print(fixed9(spectralNorm(order)))
+    return 0
+}

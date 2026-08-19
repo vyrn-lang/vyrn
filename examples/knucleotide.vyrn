@@ -1,0 +1,185 @@
+// k-nucleotide, from the Computer Language Benchmarks Game (RFC-0104 M1).
+//
+// Count every DNA fragment of a given length in the third sequence of a FASTA
+// file on stdin. It measures the hash map, and it measures it the hard way:
+// there is one key per position of the sequence, and the key is a window of its
+// bytes.
+//
+//   $ vyrn run examples/knucleotide.vyrn < rfcs/bench-0104/fasta-1000.expected
+//   $ vyrn bench examples/knucleotide.vyrn
+//
+// `examples/knucleotide.stdin` is that same fasta at the census N, so the parity
+// corpus feeds it automatically; the output is
+// `rfcs/bench-0104/knucleotide-1000.expected`.
+//
+// Two costs the census measured and this program still pays, because they are
+// the language's real answers today:
+//
+//   * `Map` is `Map<String, V>` (RFC-0028) and the only way from bytes to a
+//     `String` is `stringFromBytes`, so every window is an allocation and a
+//     UTF-8 validation.
+//   * `sortBy` orders by an `Int64` key and the game orders by count descending
+//     with ties by fragment, so the fragment order is a hand-written sort.
+
+import { toUpper } from "std/strings"
+import { startsWith } from "std/strpred"
+import { sortBy } from "std/arrays"
+
+/// The bench N — bases in the synthetic sequence the bench block builds. The
+/// census N comes from stdin instead, so there is no `order` beside it.
+let benchOrder = 200000
+
+/// The five fragments the game asks for by name, after the two frequency
+/// tables.
+fn namedFragments() -> Array<String> {
+    return ["GGT", "GGTA", "GGTATT", "GGTATTTTAATT", "GGTATTTTAATTTATAGT"]
+}
+
+type Entry = { frag: String, count: Int64 }
+
+/// The THREE sequence from FASTA on stdin: uppercased, with the newlines and
+/// the other two sequences left out.
+///
+/// It reads a line at a time and keeps only what it needs, so the whole input is
+/// never in memory — at the game's N that input is 250 MB.
+fn thirdSequence() -> Array<UInt8> {
+    let mut out: Array<UInt8> = []
+    let mut inThird = false
+    while let Some(l) = readLine() {
+        if l.startsWith(">") {
+            inThird = l.startsWith(">THREE")
+        } else if inThird {
+            for b in bytes(toUpper(l)) {
+                out.push(b)
+            }
+        }
+    }
+    return out
+}
+
+/// Every window of width `k`, counted. One `stringFromBytes` per window is what
+/// a key costs here, and it is the number this program exists to produce.
+fn countKmers(seq: Array<UInt8>, k: Int64) -> Map<String, Int64> {
+    let mut m: Map<String, Int64> = [:]
+    let mut i = 0
+    while i + k <= seq.length {
+        let mut w: Array<UInt8> = []
+        let mut j = 0
+        while j < k {
+            w.push(seq[i + j])
+            j = j + 1
+        }
+        let key = match stringFromBytes(w) {
+            Ok(s) => s,
+            Err(_) => "",
+        }
+        let seen = match m[key] {
+            Some(c) => c,
+            None => 0,
+        }
+        m[key] = seen + 1
+        i = i + 1
+    }
+    return m
+}
+
+/// `x` at three decimal places — `print` gives six and the game asks for three.
+fn fixed3(x: Float64) -> String {
+    let scaled = Int64(x * 1000.0 + 0.5)
+    let whole = scaled / 1000
+    let mut frac = "\{scaled % 1000}"
+    while frac.byteLength < 3 {
+        frac = "0\{frac}"
+    }
+    return "\{whole}.\{frac}"
+}
+
+/// Count descending, ties by fragment ascending.
+///
+/// `sortBy` orders by an `Int64` and is stable, so the fragment order has to be
+/// established first — and no comparator crosses the API, so that pass is a
+/// hand-written insertion sort. Swapping two records inside an array costs three
+/// `.copy()`, because a record read out of an array that owns it may not be
+/// stored back into the same array.
+fn ranked(m: Map<String, Int64>) -> Array<Entry> {
+    let mut es: Array<Entry> = []
+    for k in m.keys() {
+        let c = match m[k] {
+            Some(v) => v,
+            None => 0,
+        }
+        es.push(Entry { frag: k, count: c })
+    }
+    let mut i = 1
+    while i < es.length {
+        let mut j = i
+        while j > 0 && es[j - 1].frag > es[j].frag {
+            let tmp = es[j - 1].copy()
+            es[j - 1] = es[j].copy()
+            es[j] = tmp
+            j = j - 1
+        }
+        i = i + 1
+    }
+    return sortBy(es, |e| 0 - e.count)
+}
+
+/// One frequency table: every fragment of width `k` as a percentage of the
+/// windows there are, then a blank line.
+fn report(seq: Array<UInt8>, k: Int64) {
+    let m = countKmers(seq, k)
+    let total = seq.length - k + 1
+    for e in ranked(m) {
+        print("\{e.frag} \{fixed3(100.0 * Float64(e.count) / Float64(total))}")
+    }
+    print("")
+}
+
+/// The count of one named fragment.
+///
+/// It builds the whole table for that width and looks the fragment up, rather
+/// than scanning for the one string — because the table IS the benchmark, and a
+/// scan would measure something the other languages are not doing.
+fn countOf(seq: Array<UInt8>, frag: String) -> Int64 {
+    let m = countKmers(seq, Int64(frag.byteLength))
+    return match m[frag] {
+        Some(c) => c,
+        None => 0,
+    }
+}
+
+/// A sequence that repeats with a long period, so the 18-mer table has many
+/// distinct keys rather than four. The bench blocks build their own input
+/// because `vyrn bench` has no stdin to read one from.
+fn syntheticSequence(n: Int64) -> Array<UInt8> {
+    let alphabet = bytes("ACGT")
+    let mut out: Array<UInt8> = []
+    let mut state = 42
+    let mut i = 0
+    while i < n {
+        state = (state * 3877 + 29573) % 139968
+        out.push(alphabet[state % 4])
+        i = i + 1
+    }
+    return out
+}
+
+bench "k-nucleotide, 2-mers over 200000 bases" {
+    let seq = syntheticSequence(blackBox(benchOrder))
+    blackBox(countKmers(blackBox(seq), blackBox(2)).length)
+}
+
+bench "k-nucleotide, 18-mers over 200000 bases" {
+    let seq = syntheticSequence(blackBox(benchOrder))
+    blackBox(countKmers(blackBox(seq), blackBox(18)).length)
+}
+
+fn main() -> Int64 {
+    let seq = thirdSequence()
+    report(seq, 1)
+    report(seq, 2)
+    for frag in namedFragments() {
+        print("\{countOf(seq, frag)}\t\{frag}")
+    }
+    return 0
+}

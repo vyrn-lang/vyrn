@@ -1,0 +1,137 @@
+// fannkuch-redux, from the Computer Language Benchmarks Game (RFC-0104 M1).
+//
+// Every permutation of `1..n`, each one folded by repeatedly reversing the
+// prefix its first element names. It measures integer array indexing and
+// nothing else — no allocation in the inner loop, no floating point.
+//
+//   $ vyrn run examples/fannkuch.vyrn
+//   $ vyrn bench examples/fannkuch.vyrn
+//
+// `main` runs the census N and prints `rfcs/bench-0104/fannkuch-7.expected`.
+
+/// The census N. The work is `n!`, so this is the number the fixture was
+/// written at and not a number to raise casually.
+let order = 7
+
+/// The bench N. 9! is 362,880 permutations, about 250 times the census run.
+let benchOrder = 9
+
+type Fold = { checksum: Int64, maxflips: Int64 }
+
+/// Reverse `p[0 ..= k]` in place — the flip the benchmark counts.
+///
+/// It is `consume` in and owned out because a `read` parameter may not be
+/// returned: "it is a second name for the `read` parameter, and a return is
+/// owned". So a helper that mutates an array the caller keeps using takes it and
+/// hands it back. A move each way, and no copy anywhere.
+fn flip(p: consume Array<Int64>, k: Int64) -> Array<Int64> {
+    let mut a = p
+    let mut i = 0
+    let mut j = k
+    while i < j {
+        let t = a[i]
+        a[i] = a[j]
+        a[j] = t
+        i = i + 1
+        j = j - 1
+    }
+    return a
+}
+
+/// `0, 1, ... n - 1`.
+fn iota(n: Int64) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let mut i = 0
+    while i < n {
+        out.push(i)
+        i = i + 1
+    }
+    return out
+}
+
+/// `n` zeroes.
+fn zeroes(n: Int64) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let mut i = 0
+    while i < n {
+        out.push(0)
+        i = i + 1
+    }
+    return out
+}
+
+/// How many flips `p` takes to bring a 0 to the front.
+fn foldCount(p: consume Array<Int64>) -> Int64 {
+    let mut a = p
+    let mut flips = 0
+    let mut k = a[0]
+    while k != 0 {
+        a = flip(a, k)
+        flips = flips + 1
+        k = a[0]
+    }
+    drop a
+    return flips
+}
+
+/// The whole walk: the alternating-sign checksum and the deepest fold, over
+/// every permutation of `n` elements in the game's prescribed order.
+fn fannkuch(n: Int64) -> Fold {
+    let mut perm1 = iota(n)
+    let mut count = zeroes(n)
+    let mut maxflips = 0
+    let mut checksum = 0
+    let mut permcount = 0
+    let mut r = n
+    let mut done = false
+    while !done {
+        while r != 1 {
+            count[r - 1] = r
+            r = r - 1
+        }
+        let flips = foldCount(perm1.copy())
+        if flips > maxflips {
+            maxflips = flips
+        }
+        if permcount % 2 == 0 {
+            checksum = checksum + flips
+        } else {
+            checksum = checksum - flips
+        }
+        permcount = permcount + 1
+        // The next permutation, by rotating the first `r + 1` entries left and
+        // carrying into the next position when a rotation runs out.
+        let mut advanced = false
+        while !advanced && !done {
+            if r == n {
+                done = true
+            } else {
+                let first = perm1[0]
+                let mut m = 0
+                while m < r {
+                    perm1[m] = perm1[m + 1]
+                    m = m + 1
+                }
+                perm1[r] = first
+                count[r] = count[r] - 1
+                if count[r] > 0 {
+                    advanced = true
+                } else {
+                    r = r + 1
+                }
+            }
+        }
+    }
+    return Fold { checksum: checksum, maxflips: maxflips }
+}
+
+bench "fannkuch-redux, n = 9" {
+    blackBox(fannkuch(blackBox(benchOrder)).checksum)
+}
+
+fn main() -> Int64 {
+    let f = fannkuch(order)
+    print(f.checksum)
+    print("Pfannkuchen(\{order}) = \{f.maxflips}")
+    return 0
+}

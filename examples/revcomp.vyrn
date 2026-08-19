@@ -1,0 +1,130 @@
+// reverse-complement, from the Computer Language Benchmarks Game (RFC-0104 M1).
+//
+// Read FASTA on stdin, and write each sequence back reversed with every base
+// replaced by its IUB complement, 60 columns to a line. It measures reading,
+// a 256-entry table lookup per base, and writing — no arithmetic at all.
+//
+//   $ vyrn run examples/revcomp.vyrn < rfcs/bench-0104/fasta-1000.expected
+//   $ vyrn bench examples/revcomp.vyrn
+//
+// `examples/revcomp.stdin` is that same fasta at the census N, so the parity
+// corpus feeds it automatically; the output is
+// `rfcs/bench-0104/revcomp-1000.expected`.
+//
+// One friction the census found and this program still pays: `for b in line`
+// over a `String` yields `Int64`, and a byte table holds `UInt8`, so every input
+// line goes through `bytes` — one allocation a line.
+
+/// The bench N — bases in the synthetic sequence the bench block builds. The
+/// census N comes from stdin instead, so there is no `order` beside it.
+let benchOrder = 2000000
+
+/// The IUB complement table, 256 entries, indexed by the input byte. Bases that
+/// are not IUB codes map to themselves, which is what makes the lookup total.
+fn complementTable() -> Array<UInt8> {
+    let mut t: Array<UInt8> = []
+    let mut i = 0
+    while i < 256 {
+        t.push(UInt8(i))
+        i = i + 1
+    }
+    let from = bytes("ACBDGHKMNSRUTWVYacbdghkmnsrutwvy")
+    let to = bytes("TGVHCDMKNSYAAWBRTGVHCDMKNSYAAWBR")
+    let mut k = 0
+    while k < from.length {
+        t[Int64(from[k])] = to[k]
+        k = k + 1
+    }
+    return t
+}
+
+/// `seq` backwards, every base complemented — the whole transformation, and the
+/// only part of this program that is not I/O.
+fn reverseComplement(seq: Array<UInt8>, table: Array<UInt8>) -> Array<UInt8> {
+    let mut out: Array<UInt8> = []
+    let mut i = seq.length - 1
+    while i >= 0 {
+        out.push(table[Int64(seq[i])])
+        i = i - 1
+    }
+    return out
+}
+
+/// A line of bases as text. `print` takes a `String`, so every line pays one
+/// `stringFromBytes` — a UTF-8 validation over bases that are known to be ASCII.
+fn line(w: Array<UInt8>) -> String {
+    return match stringFromBytes(w) {
+        Ok(s) => s,
+        Err(_) => "",
+    }
+}
+
+/// `bs` printed 60 columns to a line, with a short last line if it does not
+/// divide.
+fn writeWrapped(bs: Array<UInt8>) {
+    let mut w: Array<UInt8> = []
+    let mut i = 0
+    while i < bs.length {
+        w.push(bs[i])
+        if w.length == 60 {
+            print(line(w))
+            w = []
+        }
+        i = i + 1
+    }
+    if w.length > 0 {
+        print(line(w))
+    }
+}
+
+/// The whole run: one header and one sequence at a time, transformed and
+/// written as soon as its last line arrives.
+fn run() {
+    let table = complementTable()
+    let mut header = ""
+    let mut seq: Array<UInt8> = []
+    while let Some(l) = readLine() {
+        if l.byteLength > 0 && bytes(l)[0] == '>' {
+            if header.byteLength > 0 {
+                print(header)
+                writeWrapped(reverseComplement(seq, table))
+                seq = []
+            }
+            header = l
+        } else {
+            // `for b in l` yields `Int64` and the array holds `UInt8`, so the
+            // line goes through `bytes` — one allocation a line.
+            for b in bytes(l) {
+                seq.push(b)
+            }
+        }
+    }
+    if header.byteLength > 0 {
+        print(header)
+        writeWrapped(reverseComplement(seq, table))
+    }
+}
+
+/// `n` bases, cycling the four the table maps most often. The bench block builds
+/// its own input because `vyrn bench` has no stdin to read one from.
+fn syntheticSequence(n: Int64) -> Array<UInt8> {
+    let alphabet = bytes("ACGT")
+    let mut out: Array<UInt8> = []
+    let mut i = 0
+    while i < n {
+        out.push(alphabet[i % 4])
+        i = i + 1
+    }
+    return out
+}
+
+bench "reverse-complement, 2000000 bases" {
+    let table = complementTable()
+    let seq = syntheticSequence(blackBox(benchOrder))
+    blackBox(reverseComplement(blackBox(seq), blackBox(table)).length)
+}
+
+fn main() -> Int64 {
+    run()
+    return 0
+}
