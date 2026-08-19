@@ -144,6 +144,17 @@ other way:
 - **Cells with no delimiter row are not a table.** RFC-0077 has three such lines.
   GitHub prints the pipes; so does this.
 
+[Amended after M4. A fourth decision was missing, and it was wrong: a paragraph
+joined its lines with `"\n"`, so the corpus's eighty-column wrap went into the
+`<p>` it emitted. CommonMark renders a single newline inside a paragraph as a
+space, and `takeParagraph` joins with one now — which is also the rule for a code
+span written across two lines, whose interior line ending becomes a space as
+well. A blockquote and a list item both hand their lines back to `blocksHtml` and
+arrive at the same function, so the fix is in one place; the two remaining `"\n"`
+joins in the file are a fenced block and an indented one, where the line break is
+the content. `site/app/markdown.vyrn` holds the test: no `<p>` may contain a
+newline.]
+
 What is refused: a fenced block tagged with a language not in the list, a fence
 that is never closed, and a block of raw HTML. The corpus has none of the three
 today, which is the point — the day one appears, the build says so.
