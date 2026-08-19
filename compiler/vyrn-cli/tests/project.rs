@@ -316,3 +316,54 @@ fn an_unknown_native_target_names_the_manifest_key() {
         .unwrap();
     assert!(w.status.success(), "{}", String::from_utf8_lossy(&w.stderr));
 }
+
+/// `vyrn update --locked` fetches what the lock pins and REFUSES what does not
+/// hash to what the lock says — the behaviour CI's cache-miss path needs
+/// (RFC-0102 M4). `vyrn update` would fetch too, and would then write whatever
+/// arrived into the lock, which is the one thing a CI run must not do.
+///
+/// The fetch is a `file://` URL, so this needs no network: what is under test is
+/// the comparison and the refusal, not curl's transport.
+#[test]
+fn update_locked_verifies_against_the_lock_and_never_rewrites_it() {
+    use vyrn_frontend::toolpin::{host_platform, tool_spec};
+    let dir = scratch("update-locked");
+    let archive = dir.join("not-really-wasmtime.tar.gz");
+    std::fs::write(&archive, b"these bytes are not the pinned bytes").unwrap();
+    let url = format!(
+        "file:///{}",
+        archive
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+    );
+    std::fs::write(
+        dir.join("vyrn.json"),
+        r#"{"toolchain": {"wasmtime": "9.9.9"}}"#,
+    )
+    .unwrap();
+    let lock = format!(
+        "{}\t{url}\t{}\n",
+        tool_spec("wasmtime", "9.9.9", &host_platform()),
+        "e".repeat(64)
+    );
+    std::fs::write(dir.join("vyrn.lock"), &lock).unwrap();
+
+    let out = vyrn()
+        .current_dir(&dir)
+        .args(["update", "--locked"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "a hash mismatch must not pass");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("the upstream changed under an immutable URL"),
+        "{err}"
+    );
+    assert!(err.contains(&"e".repeat(64)), "{err}");
+    // And the lock is the file it was: a locked run reads it, never writes it.
+    assert_eq!(
+        std::fs::read_to_string(dir.join("vyrn.lock")).unwrap(),
+        lock
+    );
+}

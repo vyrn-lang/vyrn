@@ -1,9 +1,11 @@
 # RFC-0102 — A Toolchain Is a Dependency
 
-- **Status:** **M3 landed** (the pin, all three tools; the report and the clang
-  key). M4 proposed. See "M1 — as landed", "M2 — as landed" and "M3 — as landed"
-  under Milestones for what shipped, what it is called, and where the
-  implementation corrected this document.
+- **Status:** **Implemented** (M1–M4). This repository pins its own toolchain in
+  `vyrn.json`, freezes every artifact's sha256 in `vyrn.lock`, and CI consumes
+  that lock instead of three unchecksummed `curl` lines — so the seven copies of
+  a wasmtime version are one, and the one is checked against a hash. See "M1 — as
+  landed" through "M4 — as landed" under Milestones for what shipped, what it is
+  called, and where the implementation corrected this document.
 - **Depends on:** RFC-0010 M4 (reproducible remote imports — `vyrn.lock`, the
   content-addressed cache under `~/.vyrn`, `vyrn add/update/vendor`, `--offline`),
   RFC-0021 (the generator cache, keyed on its recorded inputs), RFC-0077 M5 (the
@@ -816,6 +818,165 @@ string.
 
 M4's acceptance test is the RFC's acceptance test. If a wasmtime upgrade still
 touches seven files, this did not work.
+
+### M4 — as landed
+
+**The repository pins itself.** `vyrn.json` at the root, carrying one key and
+nothing else, and `vyrn.lock` beside it with six `tool:` lines — four wasmtime
+platforms and the two `/any` wasi-sdk artifacts — written by one real
+`vyrn update` run against upstream.
+
+```json
+{
+  "toolchain": {
+    "wasmtime": "46.0.1",
+    "wasi-sysroot": "25.0",
+    "wasi-builtins": "25.0"
+  }
+}
+```
+
+**Every hash matched what M1 and M2 recorded**, re-fetched from the same URLs
+three milestones later: `99f03806…` and its three siblings for wasmtime,
+`d09c62c1…` for the sysroot, `13aca556…` for the builtins archive. That is not a
+formality — it is the first evidence this repository has that those release
+assets are in fact immutable, produced by the mechanism whose whole job is to
+notice when they are not.
+
+**The root manifest is inert, and that was checked rather than assumed.** A
+`vyrn.json` at the root is found by `manifest::find`'s walk-up from *everywhere*
+in the tree: every example, every test with a cwd inside the checkout, both
+corpus harnesses, and `shim_wasm`, which walks up from the running executable
+inside `compiler/target/`. A toolchain-only manifest declares no `main`, no
+`dependencies`, no `audience`, no `artifacts` and no `nativeTarget`, so each of
+those rules reads exactly what it read when no file was there — but "so it should
+be fine" is the claim, and the evidence is that the full workspace suite is green
+with the file in place, including RFC-0103's floor tier and RFC-0072's audience
+tier, which are the two that key off the manifest hardest.
+
+One comment was wrong the moment the file landed, and it is fixed rather than
+left: `floor.rs`'s `a_file_that_is_no_artifacts_entry_has_no_target` said
+`examples/externdemo.vyrn` was "under no manifest". It is now under one. The
+assertion is unchanged and still passes, because what the floor needs is an
+`artifacts` map and there is none — which is the inertness, asserted at the exact
+place it would first be lost.
+
+**Update versus verify — the decision.** `vyrn update` fetches every platform's
+artifact and writes what arrives into the lock. That is right for a maintainer
+bumping a version and *wrong* for CI: a cache miss would re-pin whatever upstream
+serves that morning, which is the silent drift this RFC exists to forbid, arriving
+through the fetch. So `vyrn update` grew `--locked`, in Cargo's sense of the word:
+
+* the URL and the sha256 both come from `vyrn.lock`; nothing is re-resolved,
+* only this host's platform is fetched (recording another platform's hash is a
+  deliberate act, not a side effect of building),
+* nothing is fetched at all when the bytes are already cached, vendored or
+  unpacked — it takes the resolver's own path first,
+* a hash that disagrees is `remote::upstream_changed`, the same refusal a
+  changed module upstream gets, now spelled once and shared by both callers,
+* and the lock is never written. That is the whole difference, and it is one
+  `if !locked` on the save rather than a promise in a doc comment.
+
+`--locked` covers dependencies too, for free and for symmetry: a locked run does
+not remove a dependency's entry before re-reading it, so each one loads through
+the existing pin — which verifies its hash and refuses a changed upstream on the
+way.
+
+**The harnesses read the pin.** `common/mod.rs`'s
+`tools/wasmtime-v46.0.1-x86_64-windows/wasmtime.exe` — Exhibit 1's sharpest line,
+a version, an architecture and an operating system baked into a Rust test file —
+is gone. `wasmtime()` is now `find_wasmtime_from(<repo root>)`, which is the same
+three steps every other consumer takes. `$VYRN_WASMTIME` still wins, so a local
+run with the old variables set is unchanged; the codegen tier already resolved
+through `toolchain::` and needed no edit at all.
+
+**CI consumes the pin.** In the parity job — the only job that ever touched these
+tools; `release.yml` and `site.yml` fetch none of them, checked — the fetch step
+is deleted whole and both test steps lost their exports:
+
+| gone | arrived |
+| --- | --- |
+| `path: ~/wasm-tools`, `key: wasm-tools-wasi25-wasmtime46` | `path: ~/.vyrn/tools`, `key: vyrn-tools-${{ hashFiles('vyrn.lock') }}` |
+| 3 `curl`s with no checksum + 1 `tar` | `vyrn update --locked` |
+| 4 `export`s of a discovered path, and the `for` loop that checked they existed | nothing — the resolver reads the pin |
+
+Nineteen lines of shell became six. `VYRN_REQUIRE_TOOLS` stays exactly as it was,
+for the reason this document already gave: a pin removes two of the three failures
+it covers (an empty restored cache, a renamed asset) and the third — a tool
+nothing pins, resolving to a quiet `None` — is why the variable survives.
+
+The cache key is the interesting half. `wasm-tools-wasi25-wasmtime46` was a
+version written down in a place no program reads, which is Exhibit 1's disease in
+its purest form: it could not go stale, because nothing compared it to anything.
+`hashFiles('vyrn.lock')` cannot be stale by construction — a version bump changes
+the lock, which changes the key, which misses the cache, which runs the fetch that
+verifies against the new lock.
+
+**The acceptance test.** Every mention of `46.0.1`, `wasi-sdk-25`, `25.0` and
+`wasi-sysroot-25` outside `vyrn.json`, `vyrn.lock` and this file, after M4:
+
+| where | what | verdict |
+| --- | --- | --- |
+| `vyrn-frontend/src/toolpin.rs` (21) | the URL table's own checks, and two doc comments illustrating the unpacked layout | **record.** They assert the URL *shape* for a fabricated pin. A bump does not touch them and they keep passing. |
+| `vyrn-frontend/src/manifest.rs` (3) | a `toolchain` key parsed in a unit test | **record**, same reason |
+| `vyrn-codegen/src/toolchain.rs` (3) | a doc comment, and a fabricated `tools/` tree in a unit test | **record**, same reason |
+| `vyrn-codegen/tests/toolchain_pin.rs` (3) | a fabricated project pinning an uncacheable wasmtime | **record**, same reason |
+| `vyrn-cli/tests/project.rs` (3) | `vyrn deps`' unresolved-pin row | **record**, same reason |
+| `docs/research/cleanup-census.md` (3) | a dated inventory of `tools/` | **record.** A research note describing what was on one disk in one month. |
+| `site/app/chart.vyrn:372,401` (2) | "vyrn 0.1.0-alpha.1, wasmtime 46.0.1, 14 August 2026" | **record.** A benchmark caption naming the runtime a PAST measurement was taken under. Changing it on a bump would falsify the number it labels — the caption must go stale, and that is what makes it evidence. |
+
+So: **no pin survives outside `vyrn.json` and `vyrn.lock`.** Every survivor is a
+fabricated fixture or a dated record, and a wasmtime upgrade is now one edit to
+`vyrn.json` and one `vyrn update` — down from seven files, none of which checked
+the other six.
+
+Two survivors were this milestone's own prose and were rewritten rather than
+excused: the comment replacing the deleted harness path, and the comment
+replacing the deleted cache key, both of which quoted the version they had just
+finished deleting.
+
+`README.md`'s "see the parity job in `ci.yml` for the exact versions" — Exhibit 3,
+a specification that pointed at a CI file — now points at `vyrn.json` and names
+`vyrn update --locked`. `.gitignore`'s `tools/` rule, the only rule in that file
+with no comment, has one: it is step 3 of the discovery order, the fallback for a
+project that pins nothing, and this project pins.
+
+**One thing this milestone did NOT fix**, stated because M2 named it: the
+`tools_wasi_sysroot_from` lexicographic sort that picks 24 over 25. It is step 3,
+and this repository now has a pin, so it is unreachable *here* — the hazard is
+removed, not repaired, exactly as M2 said. A project that pins nothing still has
+it.
+
+**Gates.** Full workspace `cargo test --release`: **1738 passed, 0 failed** (M3's
+1737 plus the `--locked` refusal check). Parity
+(`-p vyrn-cli --release --test parity -- --ignored --test-threads=1`,
+`VYRN_REQUIRE_TOOLS=1`) run **twice**, which is this milestone's acceptance shape:
+with `$VYRN_WASMTIME` / `$WASI_SYSROOT` / `$WASI_BUILTINS` **unset**, resolving
+through the repository's own pin — **40 passed, 0 failed**; and with all three set
+the old way — **40 passed, 0 failed**. The worktree has no `tools/` directory
+anywhere in its ancestry, so with the variables unset the pin is the only thing
+that could have answered, and `VYRN_REQUIRE_TOOLS` would have panicked on a
+`None`. The codegen ignored tier (`-p vyrn-codegen -- --ignored`) with the same
+variables unset: **9 passed, 0 failed**, run again with `~/.vyrn/cache/shim`
+deleted first so the shim compile was real — it came back holding
+`shim-fcebe7fa…-33554432-clanged0eb075dbe2df0a.wasm`, compiled against the
+**pinned** sysroot and the pinned builtins archive. `vyrn-lsp`: 76 passed, 0
+failed. `vyrn-genwasm`: 1 passed. `vyrn-play` (`--target
+wasm32-unknown-unknown`): compiles. `cargo fmt --check` on the workspace and all
+three excluded crates: clean.
+
+The CI run on M4's own pull request is the gate this milestone exists for, and it
+is the one gate a Windows machine structurally cannot give: `~/.vyrn/tools` on a
+Linux runner, `tar` from a different userland, `HOME` instead of `USERPROFILE`.
+That is `main.rs:229`'s rule — *"A Windows-only check structurally cannot see this
+missing"* — applied to the milestone whose whole subject is a machine that is not
+this one.
+
+The new check is in `vyrn-cli/tests/project.rs`, and it runs `vyrn` as a child
+process for the reason M3's `deps` checks do. It fetches a `file://` URL, so it
+needs no network: what is under test is the comparison and the refusal, not
+curl's transport. It asserts both halves — the mismatch is refused with the
+upstream-changed wording, and the lock is byte-identical afterwards.
 
 ## Alternatives refused
 

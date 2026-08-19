@@ -157,7 +157,7 @@ claim is true — is written down in the test's own header.
 | [0099](RFC-0099-a-generator-may-report-a-diagnostic.md) | A Generator May Report a Diagnostic | M1 landed; M2 shipped as RFC-0100; M3 unspent |
 | [0100](RFC-0100-a-rule-is-a-library.md) | A Rule Is a Library | Implemented |
 | [0101](RFC-0101-a-backend-is-an-emitter.md) | A Backend Is an Emitter | Implemented (M1) |
-| [0102](RFC-0102-a-toolchain-is-a-dependency.md) | A Toolchain Is a Dependency | Proposed |
+| [0102](RFC-0102-a-toolchain-is-a-dependency.md) | A Toolchain Is a Dependency | Implemented |
 | [0103](RFC-0103-a-target-is-a-capability-set.md) | A Target Is a Capability Set | Implemented |
 
 ## The other documents here

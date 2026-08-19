@@ -68,7 +68,7 @@ mod remote;
 
 const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
        vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact-name>   (every import chain that pulls that capability into the artifact's closure)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
-       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps\n       vyrn --version   (also -V)";
+       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [--locked] [alias] | vyrn vendor [--check] | vyrn deps\n       vyrn --version   (also -V)";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
 /// miss is a hard error instead.
@@ -335,7 +335,9 @@ fn real_main() -> ExitCode {
         return add(&args[2..], is_offline);
     }
     if cmd == "update" {
-        return update(args.get(2).map(|s| s.as_str()));
+        let locked = args[2..].iter().any(|a| a == "--locked");
+        let alias = args[2..].iter().find(|a| !a.starts_with('-'));
+        return update(alias.map(|s| s.as_str()), locked);
     }
     if cmd == "vendor" {
         return vendor(args.get(2).is_some_and(|a| a == "--check"));
@@ -3037,11 +3039,72 @@ fn update_tool(name: &str, version: &str, lock: &mut remote::Lock) -> Result<(),
     Ok(())
 }
 
-/// `vyrn update [alias|tool]` — re-resolve floating refs (all remote deps, or
-/// just one alias) and rewrite their pins; and, for a name in the manifest's
-/// `toolchain`, fetch every platform's published artifact and pin it too
-/// (RFC-0102 M1).
-fn update(alias: Option<&str>) -> ExitCode {
+/// Make this machine hold what the lock ALREADY pins for it, and change nothing
+/// (`vyrn update --locked`, RFC-0102 M4).
+///
+/// This is the other half of a pin, and CI is the caller that needs it: a cache
+/// miss leaves `~/.vyrn/tools` empty, and the resolver deliberately never
+/// reaches the network. `update_tool` would fetch — and would then write
+/// whatever arrived into the lock, which is the one thing a CI run must not do.
+/// So the fetch is the LOCKED one: the URL and the hash both come from the lock,
+/// a mismatch is [`remote::upstream_changed`], and the lock is never rewritten.
+///
+/// This machine's platform only, unlike `update_tool`: recording a hash for
+/// another platform is a fact a networked machine gathers deliberately; running
+/// a build is not the moment to download three artifacts nothing here will run.
+fn verify_tool(
+    name: &str,
+    version: &str,
+    lock: &remote::Lock,
+    project_dir: Option<&str>,
+) -> Result<(), String> {
+    use vyrn_frontend::toolpin;
+    let platform = if toolpin::tool_platforms(name) == ["any"] {
+        "any".to_string()
+    } else {
+        toolpin::host_platform()
+    };
+    let spec = toolpin::tool_spec(name, version, &platform);
+    // The resolver first, so a machine that already has the bytes — cached,
+    // vendored or unpacked — needs no network at all and takes exactly the path
+    // the build takes.
+    if let Ok(dir) = toolpin::pinned_tool(project_dir, lock, name, version) {
+        println!("{spec} -> {}", dir.display());
+        return Ok(());
+    }
+    let Some((url, sha)) = lock.entries.get(&spec).cloned() else {
+        // No entry for this platform: the resolver's own refusal names the
+        // platforms the lock does cover and the command that adds one.
+        return toolpin::pinned_tool(project_dir, lock, name, version).map(|_| ());
+    };
+    println!("fetching {name} {version} for {platform}");
+    let bytes = remote::fetch(&url)?;
+    let got = remote::sha256_hex(&bytes);
+    if got != sha {
+        return Err(remote::upstream_changed(
+            &spec,
+            &url,
+            &got,
+            &sha,
+            &format!("vyrn update {name}"),
+        ));
+    }
+    remote::write_blob(&remote::cache_dir(), &sha, &bytes)?;
+    let dir = toolpin::pinned_tool(project_dir, lock, name, version)?;
+    println!("  verified {sha}\n  {spec} -> {}", dir.display());
+    Ok(())
+}
+
+/// `vyrn update [--locked] [alias|tool]` — re-resolve floating refs (all remote
+/// deps, or just one alias) and rewrite their pins; and, for a name in the
+/// manifest's `toolchain`, fetch every platform's published artifact and pin it
+/// too (RFC-0102 M1).
+///
+/// `--locked` is the same command with the writing taken out: nothing is
+/// re-resolved and the lock is never saved, so what it does is make the caches
+/// hold what the lock already says — fetching only what is missing, verifying
+/// every byte against the recorded hash, and refusing a mismatch.
+fn update(alias: Option<&str>, locked: bool) -> ExitCode {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let Some(manifest) = nearest_manifest(&cwd) else {
         eprintln!("error: no vyrn.json found");
@@ -3088,15 +3151,25 @@ fn update(alias: Option<&str>) -> ExitCode {
     // lock CI reads, and a lock that only covers the machine that wrote it makes
     // every other machine take the refusal.
     for (name, version) in &tools {
-        if let Err(e) = update_tool(name, version, &mut lock) {
+        let r = if locked {
+            verify_tool(name, version, &lock, project_dir.as_deref())
+        } else {
+            update_tool(name, version, &mut lock)
+        };
+        if let Err(e) = r {
             eprintln!("error: {e}");
             return ExitCode::FAILURE;
         }
     }
     for (name, spec) in &targets {
-        lock.entries.remove(spec);
-        lock.dirty = true;
-        println!("re-resolving `{name}` ({spec})");
+        // A locked run reads each dependency through its EXISTING pin, which
+        // verifies the hash and refuses a changed upstream on the way. Removing
+        // the entry is what makes a normal run re-resolve it.
+        if !locked {
+            lock.entries.remove(spec);
+            lock.dirty = true;
+            println!("re-resolving `{name}` ({spec})");
+        }
     }
     let resolver = remote::RemoteResolver {
         lock: std::cell::RefCell::new(lock),
@@ -3109,7 +3182,9 @@ fn update(alias: Option<&str>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    if save_lock(&resolver).is_err() {
+    // `--locked` writes nothing: that is the whole difference, and it is one
+    // line rather than a promise made in a doc comment.
+    if !locked && save_lock(&resolver).is_err() {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS

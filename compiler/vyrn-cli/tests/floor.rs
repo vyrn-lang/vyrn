@@ -99,7 +99,14 @@ fn a_file_that_is_no_artifacts_entry_has_no_target() {
     let (ok, err) = check(&leak.join("shared/format.vyrn"));
     assert!(ok, "a middle module declares no target:\n{err}");
     let (ok, err) = check(&repo_dir("examples/externdemo.vyrn"));
-    assert!(ok, "an extern demo under no manifest is untouched:\n{err}");
+    // The repository root carries a `vyrn.json` since RFC-0102 M4, and it
+    // declares only a `toolchain`: no artifacts, so no floor, so this file is
+    // still nobody's artifact and still untouched. That is the inertness the
+    // root manifest has to have, asserted where it would first be lost.
+    assert!(
+        ok,
+        "an extern demo under a manifest that declares no artifacts is untouched:\n{err}"
+    );
 }
 
 const CLIENT: &str = "import { read } from \"../server/db\"\n\

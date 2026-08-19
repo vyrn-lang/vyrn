@@ -1,0 +1,6 @@
+tool:wasi-builtins@25.0/any	https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/libclang_rt.builtins-wasm32-wasi-25.0.tar.gz	13aca55665321200b9659b292615adf5110ace9e891ab94511badd970553ca18
+tool:wasi-sysroot@25.0/any	https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sysroot-25.0.tar.gz	d09c62c18efcddffe4b2fdd8c5830109cc8e36130cdbc9acdc0bd1b204c942bb
+tool:wasmtime@46.0.1/aarch64-linux	https://github.com/bytecodealliance/wasmtime/releases/download/v46.0.1/wasmtime-v46.0.1-aarch64-linux.tar.xz	071c4def2a08f0ebc95c52dfd4f2886eb697ba495804217cf76e13b09d70a1be
+tool:wasmtime@46.0.1/aarch64-macos	https://github.com/bytecodealliance/wasmtime/releases/download/v46.0.1/wasmtime-v46.0.1-aarch64-macos.tar.xz	acee50be70dbe90b0ab2ac7db1321fc44715153a1b1cc58291c97b6d7cffc558
+tool:wasmtime@46.0.1/x86_64-linux	https://github.com/bytecodealliance/wasmtime/releases/download/v46.0.1/wasmtime-v46.0.1-x86_64-linux.tar.xz	9ae0b17ea298bcc52277a8208d6ab7fae8e1a89579672f9d82f9d86c116edb62
+tool:wasmtime@46.0.1/x86_64-windows	https://github.com/bytecodealliance/wasmtime/releases/download/v46.0.1/wasmtime-v46.0.1-x86_64-windows.zip	99f038066b16cb3aaf63c1d282a9d7ba7befafbadf7aa8827cc4c712d96bc31a

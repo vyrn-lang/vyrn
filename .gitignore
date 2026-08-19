@@ -35,6 +35,9 @@ editor/vscode/server/
 # OS noise
 Thumbs.db
 .DS_Store
+# A hand-unpacked wasmtime or wasi sysroot, which is step 3 of RFC-0102's
+# discovery order — the fallback for a project that pins nothing. This one pins
+# (see vyrn.json), so what a build here uses lives in ~/.vyrn/tools instead.
 tools/
 .claude/worktrees/
 .claude/settings.local.json

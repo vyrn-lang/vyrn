@@ -361,16 +361,17 @@ pub fn read_args(args_fixture: &Path) -> Vec<String> {
 /// `wasi_sysroot`/`wasm_toolchain` pair that used to live here went with the LLVM
 /// wasm path; `vyrn-codegen`'s own clang comparisons find their sysroot through
 /// `toolchain::`, which the generator engine still needs.
+///
+/// Which wasmtime is the resolver's answer, not this harness's (RFC-0102 M4).
+/// What stood here was a literal `tools/wasmtime-v<version>-x86_64-windows/
+/// wasmtime.exe` — a version, an architecture and an operating system baked into
+/// a test file, resolving on exactly one developer's machine and dead
+/// everywhere else. The repository root now pins the version in `vyrn.json`, so the same three steps
+/// every other consumer takes answer here too: `$VYRN_WASMTIME`, then the pin,
+/// then the `tools/` walk.
 pub fn wasmtime() -> Option<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let found = std::env::var("VYRN_WASMTIME")
-        .map(PathBuf::from)
-        .ok()
-        .filter(|p| p.exists())
-        .or_else(|| {
-            Some(root.join("tools/wasmtime-v46.0.1-x86_64-windows/wasmtime.exe"))
-                .filter(|p| p.exists())
-        });
+    let found = vyrn_codegen::toolchain::find_wasmtime_from(&root);
     require_tools("wasmtime", "VYRN_WASMTIME", found)
 }
 
