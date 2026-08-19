@@ -1,0 +1,96 @@
+// binary-trees, from the Computer Language Benchmarks Game (RFC-0104 M1).
+//
+// Build a tree, walk it, drop it, several hundred thousand times. It measures
+// the allocator and the release path and almost nothing else, which is why it is
+// the one program in the set whose shape the ownership model could have refused.
+//
+//   $ vyrn run examples/binarytrees.vyrn
+//   $ vyrn bench examples/binarytrees.vyrn
+//
+// `main` runs the census N and prints `rfcs/bench-0104/binarytrees-10.expected`.
+//
+// It refused nothing. A recursive enum, a `read` walk that destructures the
+// payloads, and a release that happens on its own: the movecheck asks for no
+// `.copy()` and no explicit `drop` anywhere in this file.
+
+/// The census N — depth 10, the size the fixture was written at.
+let order = 10
+
+/// The bench N. Each depth doubles the tree count, so 14 is 16 times the work.
+let benchOrder = 14
+
+/// The game's tree: no payload, because the benchmark is about the nodes and
+/// not about what they hold.
+type Tree = | Leaf | Node(Tree, Tree)
+
+/// A complete tree of `depth`.
+fn make(depth: Int64) -> Tree {
+    if depth == 0 {
+        return Leaf
+    }
+    return Node(make(depth - 1), make(depth - 1))
+}
+
+/// The node count — the game's checksum, and the reason the tree has to be
+/// walked rather than only allocated.
+fn check(t: Tree) -> Int64 {
+    return match t {
+        Leaf => 1,
+        Node(l, r) => 1 + check(l) + check(r),
+    }
+}
+
+/// `iterations` trees of `depth`, built, checked and released one at a time.
+fn checkAll(depth: Int64, iterations: Int64) -> Int64 {
+    let mut sum = 0
+    let mut i = 0
+    while i < iterations {
+        sum = sum + check(make(depth))
+        i = i + 1
+    }
+    return sum
+}
+
+/// How many trees of `depth` the game asks for at this `maxDepth`: enough that
+/// every depth allocates about the same number of nodes.
+fn iterationsFor(depth: Int64, maxDepth: Int64, minDepth: Int64) -> Int64 {
+    let mut n = 1
+    let mut s = 0
+    while s < maxDepth - depth + minDepth {
+        n = n * 2
+        s = s + 1
+    }
+    return n
+}
+
+/// The whole run at `n`, printing as it goes — the stretch tree, one line per
+/// even depth, and the long-lived tree that stays alive across all of them.
+fn run(n: Int64) {
+    let minDepth = 4
+    let mut maxDepth = n
+    if maxDepth < minDepth + 2 {
+        maxDepth = minDepth + 2
+    }
+    let stretchDepth = maxDepth + 1
+
+    print("stretch tree of depth \{stretchDepth}\t check: \{check(make(stretchDepth))}")
+    let longLived = make(maxDepth)
+
+    let mut depth = minDepth
+    while depth < stretchDepth {
+        let iterations = iterationsFor(depth, maxDepth, minDepth)
+        print("\{iterations}\t trees of depth \{depth}\t check: \{checkAll(depth, iterations)}")
+        depth = depth + 2
+    }
+    print("long lived tree of depth \{maxDepth}\t check: \{check(longLived)}")
+}
+
+bench "binary-trees, depth 14 at the minimum depth" {
+    let depth = blackBox(4)
+    blackBox(checkAll(depth, iterationsFor(depth, blackBox(benchOrder), depth)))
+}
+
+fn main() -> Int64 {
+    run(order)
+    return 0
+}

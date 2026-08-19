@@ -1,0 +1,170 @@
+// fasta, from the Computer Language Benchmarks Game (RFC-0104 M1).
+//
+// Generate three DNA sequences — one by repeating a fixed string, two by a
+// weighted random pick — and write them 60 columns to a line. It measures a
+// linear congruential generator, an `Int64`-to-`Float64` divide, and the cost of
+// getting bytes out one line at a time.
+//
+//   $ vyrn run examples/fasta.vyrn
+//   $ vyrn bench examples/fasta.vyrn
+//
+// `main` runs the census N and prints `rfcs/bench-0104/fasta-1000.expected`,
+// which is 10,245 bytes and is also the stdin of `revcomp.vyrn` and
+// `knucleotide.vyrn`.
+//
+// Every byte of the output depends on the generator agreeing with C's to the
+// last bit: the seed is `Int64` arithmetic and the pick divides it by 139968 in
+// `Float64`. It does agree — that is what a byte-for-byte fixture proves.
+
+/// The census N. The game's own N is 25,000,000, which is 250 MB of output.
+let order = 1000
+
+/// The bench N, for the generator alone — see the bench block.
+let benchOrder = 250000
+
+/// The 287-base repeat unit of the ONE sequence, as the game publishes it.
+let alu = "GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGCGGGCGGATCACCTGAGGTCAGGAGTTCGAGACCAGCCTGGCCAACATGGTGAAACCCCGTCTCTACTAAAAATACAAAAATTAGCCGGGCGTGGTGGCGCGCGCCTGTAATCCCAGCTACTCGGGAGGCTGAGGCAGGAGAATCGCTTGAACCCGGGAGGCGGAGGTTGCAGTGAGCCGAGATCGCGCCACTGCACTCCAGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAA"
+
+/// The generator's state. It is module state and not a parameter because the
+/// game specifies one stream shared by both random sequences: THREE continues
+/// where TWO left off, and a per-call seed would silently restart it.
+let mut seed = 42
+
+/// The game's linear congruential generator, and the reason a fasta output is
+/// reproducible at all.
+fn nextRandom(max: Float64) -> Float64 {
+    seed = (seed * 3877 + 29573) % 139968
+    return max * Float64(seed) / 139968.0
+}
+
+/// The running totals of `ws` — the form the weighted pick reads.
+fn cumulative(ws: Array<Float64>) -> Array<Float64> {
+    let mut out: Array<Float64> = []
+    let mut p = 0.0
+    for w in ws {
+        p = p + w
+        out.push(p)
+    }
+    return out
+}
+
+/// The first symbol whose running total is above the next random draw. A linear
+/// scan, as the game specifies — over four or fifteen symbols it is what a
+/// binary search would be, without the code.
+fn pick(syms: Array<UInt8>, cum: Array<Float64>) -> UInt8 {
+    let r = nextRandom(1.0)
+    let mut i = 0
+    while i < cum.length {
+        if cum[i] > r {
+            return syms[i]
+        }
+        i = i + 1
+    }
+    return syms[syms.length - 1]
+}
+
+/// A finished line of bases as text. `print` takes a `String` and a line is
+/// built as bytes, so every line pays one `stringFromBytes` — a UTF-8
+/// validation over ASCII that is known to be ASCII.
+fn line(w: Array<UInt8>) -> String {
+    return match stringFromBytes(w) {
+        Ok(s) => s,
+        Err(_) => "",
+    }
+}
+
+/// The width of an output line, and the last piece the two writers share.
+fn lineWidth(todo: Int64) -> Int64 {
+    if todo < 60 {
+        return todo
+    }
+    return 60
+}
+
+/// `count` bases taken from `src` cyclically — the ONE sequence.
+fn repeatFasta(header: String, src: String, count: Int64) {
+    print(header)
+    let b = bytes(src)
+    let mut k = 0
+    let mut todo = count
+    while todo > 0 {
+        let m = lineWidth(todo)
+        let mut w: Array<UInt8> = []
+        let mut i = 0
+        while i < m {
+            w.push(b[k])
+            k = (k + 1) % b.length
+            i = i + 1
+        }
+        print(line(w))
+        todo = todo - m
+    }
+}
+
+/// `count` bases drawn from the weighted table — the TWO and THREE sequences.
+fn randomFasta(header: String, syms: Array<UInt8>, cum: Array<Float64>, count: Int64) {
+    print(header)
+    let mut todo = count
+    while todo > 0 {
+        let m = lineWidth(todo)
+        let mut w: Array<UInt8> = []
+        let mut i = 0
+        while i < m {
+            w.push(pick(syms, cum))
+            i = i + 1
+        }
+        print(line(w))
+        todo = todo - m
+    }
+}
+
+/// The IUB ambiguity codes and their published weights.
+fn iubWeights() -> Array<Float64> {
+    return [
+        0.27, 0.12, 0.12, 0.27, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02,
+    ]
+}
+
+/// The Homo sapiens base frequencies, as the game publishes them.
+fn humanWeights() -> Array<Float64> {
+    return [0.3029549426680, 0.1979883004921, 0.1975473066391, 0.3015094502008]
+}
+
+/// The whole run at `n` — three sequences in the order the generator's single
+/// stream requires.
+fn run(n: Int64) {
+    repeatFasta(">ONE Homo sapiens alu", alu, n * 2)
+    randomFasta(">TWO IUB ambiguity codes", bytes("acgtBDHKMNRSVWY"), cumulative(iubWeights()), n * 3)
+    randomFasta(">THREE Homo sapiens frequency", bytes("acgt"), cumulative(humanWeights()), n * 5)
+}
+
+/// `count` draws from the weighted table, assembled into 60-column lines but not
+/// printed. What the bench block times: the generator, the pick and the line
+/// assembly, with the write to stdout left out, because a benchmark that spends
+/// its sample in a pipe measures the pipe.
+fn generate(syms: Array<UInt8>, cum: Array<Float64>, count: Int64) -> Int64 {
+    let mut written = 0
+    let mut todo = count
+    while todo > 0 {
+        let m = lineWidth(todo)
+        let mut w: Array<UInt8> = []
+        let mut i = 0
+        while i < m {
+            w.push(pick(syms, cum))
+            i = i + 1
+        }
+        written = written + Int64(line(w).byteLength)
+        todo = todo - m
+    }
+    return written
+}
+
+bench "fasta, 250000 random bases" {
+    seed = 42
+    blackBox(generate(bytes("acgt"), cumulative(humanWeights()), blackBox(benchOrder)))
+}
+
+fn main() -> Int64 {
+    run(order)
+    return 0
+}

@@ -291,6 +291,11 @@ fn bench_corpus_is_exactly_the_bench_bearing_examples() {
     // to be a number. `membench` arrived with RFC-0089 M0, for the same reason
     // over the memory model: RFC-0087 P8 found that the three things the model
     // costs are the three nothing timed.
+    // The eight Benchmarks Game programs arrived with RFC-0104 M1. Their blocks
+    // are not "does this operation cost anything" rows like the five above —
+    // each one is a whole published benchmark at a larger N than the parity
+    // corpus runs it at, so M2 has something to time without editing a program
+    // whose output is pinned to a fixture.
     let mut found: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(examples_dir()).unwrap() {
         let path = entry.unwrap().path();
@@ -307,10 +312,18 @@ fn bench_corpus_is_exactly_the_bench_bearing_examples() {
         found,
         vec![
             "benching".to_string(),
+            "binarytrees".to_string(),
+            "fannkuch".to_string(),
+            "fasta".to_string(),
+            "knucleotide".to_string(),
             "langbench".to_string(),
             "membench".to_string(),
+            "nbody".to_string(),
+            "pidigits".to_string(),
+            "revcomp".to_string(),
             "simdbench".to_string(),
-            "smallarray".to_string()
+            "smallarray".to_string(),
+            "spectralnorm".to_string()
         ],
         "bench corpus drifted"
     );
