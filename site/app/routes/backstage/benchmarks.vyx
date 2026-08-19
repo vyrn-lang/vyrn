@@ -37,8 +37,8 @@ fn recordTag() -> String {
 /// The two files the whole page is read from.
 fn recordFiles() -> Array<String> {
     return [
-        "rfcs/bench-0104/results/2026-08-19-LOCUST.json",
-        "rfcs/bench-0104/results/2026-08-19-LOCUST-run2.json",
+        "rfcs/bench-0104/results/2026-08-19-LOCUST-v2.json",
+        "rfcs/bench-0104/results/2026-08-19-LOCUST-v2-run2.json",
     ]
 }
 
@@ -72,6 +72,7 @@ fn harnessCommand() -> String {
             <p class="eyebrow">01 — the machine</p>
             <h2>What "measured" means here</h2>
             <p>One machine, one afternoon, twice. A benchmark that does not publish this is an advertisement, so it is the first thing on the page rather than a footnote at the bottom of it.</p>
+            <p class="notice"><strong>The machine was not quiet.</strong> A training job held one core of twelve and 7.2 GB of memory throughout both runs. It shows in the process floor below — an empty C program costs 7.8 ms here against 4.1 ms on the earlier dataset — and it moved four of the forty cells more than 10% off that dataset: k-nucleotide on C, Rust and node, and fasta on node. All four are the smallest readings in the set, where a doubled start-up is a large share of the number. Nothing was dropped and no method changed; the ratios this page publishes are computed from what the machine actually did.</p>
             <div class="scroller">
             <table class="matrix">
                 <thead>
@@ -99,25 +100,25 @@ fn harnessCommand() -> String {
                 </tbody>
             </table>
             </div>
-            <p class="cap">An empty program, ten runs, median. This is why k-nucleotide's C and Rust cells carry a noise warning below: they are ten- and eight-millisecond measurements against a four-millisecond floor.</p>
+            <p class="cap">An empty program, ten runs, median. It is what a reader subtracts, and it is why the smallest cells in the set carry a noise flag wherever they are printed: k-nucleotide's C and Rust legs are one to two floors of work, so nothing about them can be read to better than a few milliseconds.</p>
         </section>
 
         <section class="band" id="runs">
             <p class="eyebrow">02 — both runs</p>
             <h2>Every cell, twice, with the readings under it</h2>
             <p>The milestone's gate was that the committed dataset reproduces on a second run within stated noise. This is where that is checked rather than asserted: both medians, the drift between them, the within-run spread, and the ten raw readings the first median came from.</p>
-            <p class="notice">Across all forty cells the second run moved by a median of 1.9%, a 95th percentile of 8.6% and a worst case of <strong>{{ worstDrift() }}</strong>. <strong>{{ steadyCells() }}</strong> cells moved by less than five per cent. So the noise band is ±10% on a median, and every ratio the record calls a deviation is outside it by a wide margin.</p>
+            <p class="notice">Across all forty cells the second run moved by a median of 0.9% and a worst case of <strong>{{ worstDrift() }}</strong>. <strong>{{ steadyCells() }}</strong> cells moved by less than five per cent. The three that moved most are k-nucleotide's C, Rust and node legs — the three smallest readings in the set, all of them one to two process floors of work. So the noise band is ±10% on a median: every ratio the record calls a deviation is far outside it, and the one row that sits on the line says so instead of picking a side.</p>
 
             <div class="plate" v-for="r in tableRows()" :key="r.key" :id="r.key">
                 <div class="plate-head">
                     <span class="pill live">Measured</span>
-                    <span class="eyebrow">{{ r.name }} — N = {{ r.n }}</span>
+                    <span class="eyebrow"><a :href="r.game">{{ r.name }}</a> — N = {{ r.n }}</span>
                 </div>
                 <div class="stage">
                 <div class="scroller">
                 <table class="matrix bench">
                     <thead>
-                        <tr><th>Contestant</th><th>Run one</th><th>Run two</th><th>Drift</th><th>Spread</th><th>The ten readings of run one</th></tr>
+                        <tr><th>Contestant</th><th>Run one</th><th>Run two</th><th>Drift</th><th>cpu secs</th><th>mem</th><th>gz</th><th>make secs</th><th>Spread</th><th>The ten readings of run one</th></tr>
                     </thead>
                     <tbody>
                         <tr v-for="d in detailRows(r.key)" :key="d.key">
@@ -125,6 +126,10 @@ fn harnessCommand() -> String {
                             <td>{{ d.one }}</td>
                             <td>{{ d.two }}</td>
                             <td>{{ d.drift }}</td>
+                            <td>{{ d.cpu }}</td>
+                            <td>{{ d.mem }}</td>
+                            <td>{{ d.gz }}</td>
+                            <td>{{ d.make }}</td>
                             <td>{{ d.spread }}<span v-if="d.noisy" class="flag"> noisy</span></td>
                             <td class="runs"><code>{{ d.runs }}</code></td>
                         </tr>
@@ -133,7 +138,8 @@ fn harnessCommand() -> String {
                 </div>
                 </div>
             </div>
-            <p class="cap">Drift is the second run's median against the first. A spread is the widest reading minus the narrowest, as a percentage of the median, within one run. Everything on this page is read from <code>{{ recordFiles()[0] }}</code> and <code>{{ recordFiles()[1] }}</code> while the site is built.</p>
+            <p class="cap">Drift is the second run's median against the first. A spread is the widest reading minus the narrowest, as a percentage of the median, within one run. The four columns after it are the game's own: cpu time is user plus kernel of the child process, mem is its peak working set, gz is the gzipped source, make is the build. Everything on this page is read from <code>{{ recordFiles()[0] }}</code> and <code>{{ recordFiles()[1] }}</code> while the site is built.</p>
+            <p class="cap">Windows accounts process cpu time in 15.625-millisecond ticks, so a cpu figure is that granular and the two ten-millisecond cells resolve to one tick or none. The wall clock is not: it is <code>perf_counter</code>, and it is what every ratio on either page is computed from.</p>
         </section>
 
         <section class="band" id="causes">

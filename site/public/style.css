@@ -962,6 +962,19 @@ table.matrix.bench .ms { display: block; color: var(--ink); }
 table.matrix.bench .norm { display: block; font-size: 0.78rem; color: var(--n2); }
 table.matrix.bench td.n { font: 11px/1.6 var(--mono); color: var(--n2); }
 table.matrix.bench td.runs code { font-size: 10px; white-space: nowrap; }
+/* The Benchmarks Game's own columns, in its own order: a source name and then
+ * cpu secs, secs, mem, gz, make secs (RFC-0104 M3, amended). A reader who has
+ * read one of the game's per-program pages should not have to learn a second
+ * layout to read this one.
+ *
+ * The figures are mono and right-aligned. A column of numbers that does not
+ * line up on its last digit cannot be compared down its own length, which is
+ * the only thing a column of numbers is for. Six columns fit an axis panel, so
+ * nothing here scrolls sideways at reading width. */
+table.matrix.bench.game th[scope="row"] { width: 9rem; }
+table.matrix.bench.game th, table.matrix.bench.game td { padding-block: 8px; white-space: nowrap; }
+table.matrix.bench.game td.num { font: 12px/1.6 var(--mono); text-align: right; color: var(--ink); }
+table.matrix.bench.game thead th + th { text-align: right; }
 /* A reading whose within-run spread is over 15% is one measured near the
  * process floor. Saying so beside it is cheaper than a footnote nobody reads. */
 table.matrix .flag { color: var(--amber); font: 10px/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; }

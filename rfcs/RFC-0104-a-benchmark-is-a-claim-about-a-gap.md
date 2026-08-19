@@ -897,7 +897,9 @@ and this section.
   records, computes the radar's geometry in both normalizations, and produces
   the table, the eight axis panels and every caption. 15 test blocks.
 - **`/compare` section 08** — the radar, a legend, an axis tab strip, eight
-  panels, and the full numbers table under it.
+  panels, and the full numbers table under it. *[Amended below: the panels are
+  the game's own columns now, and the eight-row table under them carries the
+  two ratios the chart plots.]*
 - **`/backstage/benchmarks`** — both runs cell by cell, the drift between them,
   the ten raw readings behind every median, the environment down to wasmtime's
   sha256, the process floor, the named causes, the ten work items, and the
@@ -982,7 +984,10 @@ the panel while leaving the spoke lit on the axis before it.
   them with `hidden` once it mounts, so what the markup ships is what a reader
   without script gets. An earlier version had the stylesheet hide them first,
   which would have made the causes reachable only by script — the opposite of a
-  fallback.
+  fallback. *[Amended below — "the game's own columns". The eight panels are
+  still all in the markup and still hidden only by script; what each one holds
+  is now five measured columns and the cause in a few words, and the paragraph
+  behind those words is on the backstage.]*
 - **Reduced motion.** By construction: this widget animates nothing. There is no
   `requestAnimationFrame`, no transition on anything it changes, and the page
   reports zero running CSS animations.
@@ -1051,6 +1056,164 @@ in `radarLines` and a sixth legend button, and the geometry already takes it.
    `getBBox` on the exported page and is now pinned by `no axis name runs off the
    sheet`, which is the same lesson `chart.vyrn`'s own layout rule records about
    a label above a bar.
+
+## M3, amended — the game's own columns, and a page that reads like one
+
+The milestone shipped and the feedback on it was four sentences: the benchmark
+presentation is not designed well; the game's own pages carry `cpu secs / secs /
+mem / gz / make secs / N`; links to the originals would help; the design is
+overloaded and there is too much text. All four are answered here rather than in
+a later record, because a milestone corrected somewhere else is a milestone a
+reader has to assemble out of two documents.
+
+### The runner was measuring one column of five
+
+M2 recorded a wall clock and nothing else. A Benchmarks Game per-program page
+carries five figures per entry, and four of them were missing. `run.py` records
+them now — stdlib and `ctypes` only, so the harness still takes no pip
+dependency.
+
+| column | where it comes from | note |
+|---|---|---|
+| `cpu_median_s` | `GetProcessTimes` on the child handle `Popen` still holds; `getrusage(RUSAGE_CHILDREN)`, differenced, elsewhere | Windows accounts process cpu in **15.625 ms ticks**, so a ten-millisecond cell resolves to one tick or none |
+| `peak_bytes` | `GetProcessMemoryInfo(PeakWorkingSetSize)` on the same handle; `ru_maxrss` elsewhere | the largest of the timed runs, because a peak is a peak |
+| `make_s` | wall clock of the one command that builds the timed artifact | zero for node, which has no build step, and the page prints a dash rather than `0.00` |
+| `gz_bytes` | `gzip.compress(source, 9, mtime=0)` | `mtime=0` or the header carries the clock and an unchanged file measures differently |
+
+`subprocess.run` became `Popen` plus `wait`, so the handle survives long enough
+to be asked what the child cost. With stdout and stderr on the null device there
+is no pipe to drain, so the two are the same sequence of calls and the wall
+clock is measured exactly as M2 measured it.
+
+### What the memory column found that the clock could not
+
+Two gaps, neither of them visible in a wall time, both reproduced in the second
+run and in **both** Vyrn backends:
+
+| program | Vyrn native | Vyrn wasm | C | Rust | node |
+|---|---|---|---|---|---|
+| binary-trees | **2,093 MB** | 2,090 MB | 20 MB | 37 MB | 383 MB |
+| reverse-complement | **239 MB** | 236 MB | 43 MB | 45 MB | 319 MB |
+
+Every other cell in the set sits at the 4 MB process floor.
+
+Binary-trees builds one tree at a time, walks it and releases it; the C entry
+`malloc`s and `free`s every node and peaks at 20 MB, so the freed blocks are
+being reused there. A hundredfold gap on the row whose whole subject is the
+allocator and the release path is a finding, and **no cause is named for it
+here**. It is not the allocator: the native leg calls the platform `malloc` and
+the wasm leg carries its own segregated free list, and the two peak within
+0.2% of each other, which points at what is released rather than at what
+releases it. Naming it needs an experiment this amendment did not run — whether
+the peak scales with the tree or with the number of trees. Recorded as an open
+finding and as the eleventh work item, in the milestone's own terms: a measured
+deviation with no named defect under it yet is a debt, and writing it down is
+how it stays one.
+
+### The presentation went columnar
+
+`/compare` section 08 keeps the radar and everything the accessibility pass put
+around it — the tab group, the legend, the two normalizations, the off-scale
+marks, the eight panels in the markup. What changed is underneath it.
+
+- **One compact table per program, in the game's own column order**: `source`,
+  `cpu secs`, `secs`, `mem`, `gz`, `make secs`, with N in the heading. Per
+  program rather than merged, because that is the game's own idiom and because a
+  merged table of forty rows and six columns is the thing being fixed.
+- **The diagnosis left the consumer page.** Each program prints its verdict and
+  the cause in a few words, and that line *is* the link to the backstage, where
+  the paragraph behind it is unchanged. Eight paragraphs of diagnosis under a
+  chart is a page nobody finishes.
+- **The eight-row table under the chart became the chart.** It used to repeat
+  every median and add the two ratios; the medians are in the compact tables
+  now, so it carries only what the polygons plot.
+- **The two ratios stay on the page**: as the `title` of every row of every
+  compact table, and in full in that ratio table. They drive the radar so they
+  cannot leave; they are not columns, because five measured columns and two
+  derived ones is a table nobody reads.
+- **Seconds to two decimals**, which is the game's own precision. Two cells are
+  smaller than that resolves and print `<0.01` rather than `0.00`: a table
+  claiming a program took no time is worse than one admitting the column cannot
+  reach it, and the millisecond figure is one click away either way.
+
+**The words, counted on the exported page** rather than in the template, because
+the panels render eight times and the template says each of them once. Section
+08 of `out/compare.html`, both versions built from the same command:
+
+| | before | after |
+|---|---|---|
+| prose words, tables excluded | 968 | **465** (52% fewer) |
+| every word, table cells included | 1,580 | 1,033 |
+
+In the template it is 369 → 282 words of its own prose, and 466 → 61 words of
+per-program prose. Nothing was deleted rather than moved: the 372 words of named
+causes are on `/backstage/benchmarks`, where the rest of the evidence already
+was.
+
+### Every program links to the original
+
+The program name in each panel heading on `/compare`, and in each plate heading
+on the backstage, opens the game's own page for that program. All eight URLs
+were fetched and resolved on **2026-08-19**, the date the ceiling was read.
+
+The slug is written out beside the record's key and the reader's name rather
+than derived from either, because three spellings of one program do not compute
+from one another: the record says `fannkuch`, a reader sees `fannkuch-redux`,
+and the page is `fannkuchredux.html`.
+
+### The re-run, and the machine it was measured on
+
+`2026-08-19-LOCUST-v2.json` and `-v2-run2.json`, from commit `7a8922c`, clean
+worktree, same binaries, same eight programs, same five contestants, the same
+cross-verification before anything was timed: all five printed the same bytes at
+the timing N in both runs. M2's original pair stays committed and unedited
+beside them; the site reads the new pair, because the new columns are only in
+it.
+
+**Thirty-six of the forty cells reproduce M2 inside its ±10% band. Four do not,
+and the cause is not the language.** A machine-learning training job had been
+running on this machine since before either run started, holding one core of
+twelve continuously and 7.2 GB of resident memory. It shows up first in the
+process floor, which is a pure start-up measurement and nothing else: **C's
+empty program went from 4.1 ms to 7.8 ms**. Every cell it moved past the band is
+a small one, where a doubled start-up is a large fraction of the reading:
+
+| cell | M2 | re-run | move |
+|---|---|---|---|
+| k-nucleotide / Rust | 8.5 ms | 12.3 ms | +45.8% |
+| k-nucleotide / C | 10.1 ms | 13.7 ms | +36.2% |
+| k-nucleotide / node | 40.4 ms | 45.4 ms | +12.6% |
+| fasta / node | 882 ms | 994 ms | +12.7% |
+
+Those are the same cells M2 already labelled the noisiest in the set, and the
+page still labels them: k-nucleotide's C leg carries a 30.3% within-run spread
+in this record and prints `noisy` beside it. **The published dataset is
+therefore measured on a machine that was not quiet, and that is stated here and
+on the backstage rather than left for a reader to infer.** Nothing about the
+method changed to accommodate it and no cell was dropped. A quiet-machine re-run
+needs no code: it is `python rfcs/bench-0104/harness/run.py` twice and two new
+files, and every chart, ratio and caption moves with them.
+
+### What contradicted the amendment
+
+1. **The re-run's own noise was not the language's.** The brief for this work
+   said a cell outside M2's band should be investigated rather than shipped
+   silently. Four were, and the investigation found a training job on the
+   machine — not a regression, not a measurement bug, and not something the
+   record could have told anyone, because the record has no way to say what else
+   was running. That is the gap: `environment` describes the machine's
+   *capacity* and nothing about its *load*. No flag was added for it, because a
+   note somebody has to remember to pass is a note that will be wrong; the
+   honest fix is a quiet machine, and the honest interim is this paragraph.
+2. **A new column produced a deviation with no named cause.** Binary-trees holds
+   a hundred times C's memory. RFC-0104's claim is that every measured deviation
+   is a named defect or a named missing feature; this one is measured, is
+   reproduced twice in two backends, and is unnamed. It is the eleventh work
+   item rather than a sentence explaining it away.
+3. **`0.00` is a lie the game's own precision tells.** Two decimals of seconds
+   cannot hold a ten-millisecond reading. Printing `<0.01` was the second
+   attempt; the first printed `0.00` and a reader would have concluded the
+   program took no time at all.
 
 ## What this RFC does not do
 
