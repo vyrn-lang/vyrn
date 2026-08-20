@@ -33,6 +33,24 @@
 # a table can see. `install.sh`/`install.ps1` are per-platform scripts and belong
 # on the platform they install for. The bench and gen-engine jobs are 134 s and
 # 66 s against a 1243 s critical path, so nothing they could save is visible.
+#
+# WHAT THE TWO STEPS COST AFTERWARDS, from run 32401431915 — the first run of
+# this change, and a COLD one for both new caches:
+#
+#   step                          ubuntu  arm    windows  macos
+#   Workspace tests              306→138 288→136 398→286 244→125
+#   Bench --check                662→261 673→294 746→430 456→219
+#   ---------------------------------------------------------------
+#   job total                   1141→504 1043→507 1243→967 692→459
+#
+# The critical path is the Windows leg either way, so the run went 1248 s to
+# 983 s with the caches still cold. `Build vyrn, and put the pinned test runner
+# on PATH` is a new step and paid the nextest fetch in that run (26 s ubuntu,
+# 44 s Windows); on a cache hit it is the build alone.
+#
+# The next pole is now the parity harness at 468-500 s — one `#[test]` walking
+# 40 programs, so speeding it is a change to the harness rather than to this
+# file. It was not the critical path before and it is now.
 
 name: CI
 
