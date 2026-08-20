@@ -57,6 +57,69 @@ Every generation failure is a `std/diag` report (RFC-0099) anchored at the
 line of the `.vyx` file it came out of. Inspect the whole synthesized module
 with:  vyrn emit-gen <file>
 
+===========================================================================
+GENERATION-TIME COMPONENTS — the provider protocol (RFC-0107 M1)
+===========================================================================
+
+Directives are the language; components are libraries. `std/vyx` NAMES NO
+COMPONENT. A capitalized tag resolves first against the sibling `.vyx` files
+in the same directory, and then against the names the `<script>` sections
+imported. A tag that resolves to an imported name is a GENERATION-TIME
+COMPONENT: `std/vyx` emits a nested generator import that runs the imported
+`gen fn` — the PROVIDER — with the tag's attributes as constant arguments, and
+splices what the provider generated where the tag stood.
+
+  <script>
+  import { Icon } from "./icon-provider"
+  </script>
+  <template>
+  <p><Icon name="brand:github" label="GitHub"/></p>
+  </template>
+
+A provider is an ORDINARY LIBRARY MODULE. It does not import `std/vyx`, and
+nothing here knows what any provider is called. To write one, export a
+`gen fn` of exactly this shape:
+
+  export gen fn <TagName>(attrs: String, file: String, line: Int64, col: Int64) -> String
+
+  attrs  the tag's STATIC attributes as a JSON object, `{"name":"…", …}`, in
+         source order, every value a JSON string. `std/json`'s writer produced
+         it, so `std/jsonread`'s `parseJson` reads it back exactly; a value
+         holding a quote, a newline or any UTF-8 survives the trip. A tag with
+         no attributes gets `{}`.
+  file   the `.vyx` file the tag was written in.
+  line   the tag's 1-based line in that file.
+  col    the tag's column, for `std/diag`'s `report`. Always 1 today — a
+         template node carries a line and no column (see `std/vyx-hints`) — and
+         in the signature so that a provider needs no change when it learns one.
+
+The generated module MUST export the conventional entry point
+
+  export fn render() -> Html
+
+and may export or import anything else it needs. `std/vyx` calls exactly
+`render()` at the tag site, through a namespace alias it mints itself.
+
+Two rules follow from "the attributes are constant arguments", and both are
+refusals rather than surprises: a provider tag takes STATIC ATTRIBUTES ONLY —
+`:attr="expr"` and `@event="handler"` are generation diagnostics, because an
+expression cannot be written into a generator call — and it takes NO CHILDREN,
+because a provider's tree comes from its attributes alone. Compute the value in
+a sibling `.vyx` component when it has to be computed.
+
+The provider runs in its own generator sandbox with its own input roots (its
+own constant path arguments), so every file it reads is recorded in ITS cache
+entry: editing a collection file invalidates the provider's generation and
+leaves this compiler's — whose output is one import line — a cache hit.
+Diagnostics need no origin map: a provider anchors its own `report` at the
+`file`/`line` it was handed, so its objection lands on the tag.
+
+`std/vyx` does not check the provider's shape before emitting the call, and
+cannot: a generator may only read under its own constant path arguments, and a
+provider named by a TEMPLATE is never one of them (RFC-0107 M0, P1a/P1b). A
+provider that is not a `gen fn`, or has the wrong signature, or generates no
+`render`, fails the emitted import with the loader's own diagnostic.
+
 ## VyxAttr
 
 ```vyrn

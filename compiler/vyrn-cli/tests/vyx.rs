@@ -1028,3 +1028,448 @@ fn audit_hostile_sections_agree_with_the_generator() {
         );
     }
 }
+
+// ---- RFC-0107 M1: generation-time components (the provider protocol) -------
+//
+// A provider is an ordinary library module exporting a `gen fn` of the
+// conventional shape `(attrs, file, line, col) -> String`, whose generated module
+// exports `render() -> Html`. `std/vyx` names no provider: the tag resolves
+// against what a `<script>` imported, and the tag becomes a NESTED generation.
+
+/// The toy provider: ordinary Vyrn that knows nothing about `.vyx`. It reads the
+/// attribute object `std/vyx` handed it with the shared JSON reader, and reports
+/// an unknown glyph at the anchor it was given rather than in its own source.
+const PROVIDER: &str = r##"import { parseJson } from "std/jsonread"
+import { Json } from "std/json"
+import { fieldsOf, fieldAt } from "std/jsondec"
+import { report, Severity } from "std/diag"
+
+fn attrOf(attrs: String, key: String) -> String {
+    let j = match parseJson(attrs) {
+        Ok(v) => v,
+        Err(e) => JNull,
+    }
+    return match fieldAt(fieldsOf(j), key) {
+        JStr(s) => s,
+        JNull => "",
+        JBool(b) => "",
+        JNum(n) => "",
+        JArr(a) => "",
+        JObj(f) => "",
+    }
+}
+
+export gen fn Glyph(attrs: String, file: String, line: Int64, col: Int64) -> String {
+    let name = attrOf(attrs, "name")
+    let label = attrOf(attrs, "label")
+    if name != "github" && name != "discord" {
+        return report(Error, file, line, col, "no glyph `\{name}` here - nearest is `github`")
+    }
+    let body = if name == "github" { "M8 0 L16 8 L8 16 Z" } else { "M2 2 H14 V14 H2 Z" }
+    let mut out = "import { el, text, Attr, Html } from \"std/html\"\n"
+    out = out + "export fn render() -> Html {\n"
+    out = out + "    return el(\"svg\", [A(\"aria-label\", \"\{label}\")], [text(\"\{body}\")])\n"
+    out = out + "}\n"
+    return out
+}
+"##;
+
+/// The app that prints the `Badge` view, so the spliced tree is observable.
+const BADGE_APP: &str = "import { components } from \"std/vyx\"\n\
+     import { badge } from components(\"./comp\")\n\
+     import { toHtmlString } from \"std/html\"\n\
+     fn main() -> Int64 { print(toHtmlString(badge())) return 0 }\n";
+
+/// A scratch project with the toy provider and one `Badge.vyx` template body.
+fn provider_project(tag: &str, template: &str) -> PathBuf {
+    let dir = scratch(tag);
+    write(&dir.join("provider.vyrn"), PROVIDER);
+    write(
+        &dir.join("comp/Badge.vyx"),
+        &format!(
+            "<script>\nimport {{ Glyph }} from \"../provider\"\n</script>\n\n<template>\n{template}\n</template>\n"
+        ),
+    );
+    write(&dir.join("app.vyrn"), BADGE_APP);
+    dir
+}
+
+fn run_named(dir: &Path, app: &str) -> (bool, String) {
+    let out = vyrn().arg("run").arg(dir.join(app)).output().expect("run");
+    let combined =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    (out.status.success(), combined)
+}
+
+#[test]
+fn a_provider_tag_generates_and_splices_its_html() {
+    let dir = provider_project(
+        "provgen",
+        "<span class=\"badge\">\n    <Glyph name=\"github\" label=\"GitHub\"/>\n    <Glyph name=\"discord\" label=\"Discord\"/>\n</span>",
+    );
+    let (ok, out) = run_named(&dir, "app.vyrn");
+    assert!(ok, "a provider tag must load and run:\n{out}");
+    // Both tags reached the provider with their own attributes, and both trees
+    // were spliced where the tags stood.
+    assert!(
+        out.contains("<span class=\"badge\"><svg aria-label=\"GitHub\">M8 0 L16 8 L8 16 Z</svg><svg aria-label=\"Discord\">M2 2 H14 V14 H2 Z</svg></span>"),
+        "the provider's trees are not spliced at the tags:\n{out}"
+    );
+
+    // The emitted module shows the mechanism: one nested generator import per
+    // tag, the tag's static attributes as ONE JSON constant, the tag's own file
+    // and line as the anchor, and a `render()` call where the tag stood.
+    let gen = vyrn()
+        .arg("emit-gen")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("emit-gen");
+    let src = String::from_utf8_lossy(&gen.stdout);
+    assert!(
+        src.contains(
+            "from Glyph(\"{\\\"name\\\":\\\"github\\\",\\\"label\\\":\\\"GitHub\\\"}\", \"./comp/Badge.vyx\", 7, 1)"
+        ),
+        "the emitted provider import:\n{src}"
+    );
+    assert_eq!(
+        src.matches("import * as vyxp").count(),
+        2,
+        "one generation per tag:\n{src}"
+    );
+    assert_eq!(
+        src.matches(".render())").count(),
+        2,
+        "the conventional entry point is called at each tag:\n{src}"
+    );
+}
+
+#[test]
+fn a_provider_diagnostic_lands_on_the_tag() {
+    let dir = provider_project(
+        "provtypo",
+        "<span class=\"badge\">\n    <Glyph name=\"githup\" label=\"GitHub\"/>\n</span>",
+    );
+    let (ok, err) = run_named(&dir, "app.vyrn");
+    assert!(!ok, "an unknown glyph must fail the load");
+    // The provider never read the `.vyx`; the anchor travelled to it as
+    // arguments, and `std/diag` put its report on the tag's line.
+    assert!(
+        err.contains("Badge.vyx:7:1: no glyph `githup` here - nearest is `github`"),
+        "the provider's report is not anchored at the tag:\n{err}"
+    );
+}
+
+#[test]
+fn a_bound_attribute_on_a_provider_tag_is_refused() {
+    let dir = provider_project(
+        "provdyn",
+        "<span class=\"badge\">\n    <Glyph :name=\"which\" label=\"GitHub\"/>\n</span>",
+    );
+    let (ok, err) = run_named(&dir, "app.vyrn");
+    assert!(!ok, "a bound attribute on a provider tag must fail");
+    assert!(
+        err.contains("Badge.vyx:7:1: `<Glyph>` is a generation-time provider, and `:name` binds an expression"),
+        "the structural refusal:\n{err}"
+    );
+    assert!(
+        err.contains("a provider's attributes become constant arguments to a generator, so write `name=\"\u{2026}\"` as a static attribute, or wrap `<Glyph>` in a sibling `.vyx` component that computes it"),
+        "the refusal says what to do instead:\n{err}"
+    );
+}
+
+#[test]
+fn an_event_and_children_on_a_provider_tag_are_refused() {
+    let dir = provider_project(
+        "provevt",
+        "<span class=\"badge\">\n    <Glyph name=\"github\" @click=\"go\"/>\n</span>",
+    );
+    let (ok, err) = run_named(&dir, "app.vyrn");
+    assert!(!ok, "an event on a provider tag must fail");
+    assert!(
+        err.contains("`<Glyph>` is a generation-time provider, and `@click` binds a handler \u{2014} a provider's attributes become constant arguments to a generator, so a provider tag takes static attributes only"),
+        "the event refusal:\n{err}"
+    );
+
+    let dir = provider_project(
+        "provkids",
+        "<span class=\"badge\">\n    <Glyph name=\"github\">hi</Glyph>\n</span>",
+    );
+    let (ok, err) = run_named(&dir, "app.vyrn");
+    assert!(!ok, "children on a provider tag must fail");
+    assert!(
+        err.contains("`<Glyph>` is given children, and it is a generation-time provider \u{2014} a provider's tree comes from its attributes alone, so it takes none"),
+        "the children refusal:\n{err}"
+    );
+}
+
+#[test]
+fn an_unresolved_tag_says_what_the_two_resolution_paths_are() {
+    let dir = provider_project(
+        "provmiss",
+        "<span class=\"badge\">\n    <Glyf name=\"github\"/>\n</span>",
+    );
+    let (ok, err) = run_named(&dir, "app.vyrn");
+    assert!(!ok, "a tag naming neither path must fail");
+    // The message RFC-0107 M0 caught over-promising is now true of both paths.
+    assert!(
+        err.contains("`<Glyf>` names no component \u{2014} a component is a `.vyx` file in the same directory, or a generation-time provider a `<script>` imports"),
+        "the tag-miss message:\n{err}"
+    );
+}
+
+#[test]
+fn each_provider_tag_gets_its_own_minted_namespace() {
+    let dir = provider_project(
+        "provns",
+        "<span class=\"badge\">\n    <Glyph name=\"github\" label=\"GitHub\"/>\n    <Dot/>\n    <Glyph name=\"discord\" label=\"Discord\"/>\n</span>",
+    );
+    // A sibling component, and a second sibling whose OWN `<script>` imports
+    // nothing - the import namespace is flat across the set, so its tag resolves
+    // through `Badge.vyx`'s import exactly as the synthesized module does.
+    write(
+        &dir.join("comp/Dot.vyx"),
+        "<template><i class=\"dot\">.</i></template>\n",
+    );
+    write(
+        &dir.join("comp/Other.vyx"),
+        "<template><b><Glyph name=\"github\" label=\"Sib\"/></b></template>\n",
+    );
+    let (ok, out) = run_named(&dir, "app.vyrn");
+    assert!(
+        ok,
+        "provider tags beside a sibling component must run:\n{out}"
+    );
+    assert!(
+        out.contains("<svg aria-label=\"GitHub\">M8 0 L16 8 L8 16 Z</svg><i class=\"dot\">.</i><svg aria-label=\"Discord\">"),
+        "the sibling component and the two providers interleave:\n{out}"
+    );
+
+    let gen = vyrn()
+        .arg("emit-gen")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .expect("emit-gen");
+    let src = String::from_utf8_lossy(&gen.stdout);
+    let mut aliases: Vec<&str> = src
+        .lines()
+        .filter(|l| l.starts_with("import * as vyxp"))
+        .map(|l| l.split_whitespace().nth(3).unwrap())
+        .collect();
+    let total = aliases.len();
+    aliases.sort();
+    aliases.dedup();
+    assert_eq!(total, 3, "one generation per tag, three tags:\n{src}");
+    assert_eq!(
+        aliases.len(),
+        3,
+        "two tags shared one minted namespace:\n{src}"
+    );
+    // Minted, never the author's: the alias the `<script>` wrote is `Glyph`.
+    assert!(
+        aliases.iter().all(|a| a.starts_with("vyxp_")),
+        "an alias is not minted: {aliases:?}"
+    );
+}
+
+#[test]
+fn an_unchanged_rebuild_regenerates_no_provider() {
+    let dir = provider_project(
+        "provcache",
+        "<span class=\"badge\">\n    <Glyph name=\"github\" label=\"GitHub\"/>\n    <Glyph name=\"discord\" label=\"Discord\"/>\n</span>",
+    );
+    // This test's OWN cache directory, so the count is not somebody else's work.
+    let cache = dir.join("gen-cache");
+    let build = || -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+            .env("VYRN_GEN_CACHE_DIR", &cache)
+            .arg("run")
+            .arg(dir.join("app.vyrn"))
+            .output()
+            .expect("run");
+        assert!(
+            out.status.success(),
+            "cached build failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    // Every cache entry's name and modification time, so a REWRITE is visible and
+    // not just a new key.
+    let stamp = |cache: &Path| -> Vec<(String, std::time::SystemTime)> {
+        let mut v: Vec<_> = std::fs::read_dir(cache)
+            .unwrap()
+            .map(|e| {
+                let e = e.unwrap();
+                (
+                    e.file_name().to_string_lossy().to_string(),
+                    e.metadata().unwrap().modified().unwrap(),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    };
+
+    let first = build();
+    let after_first = stamp(&cache);
+    // The template's own generation plus one per provider tag.
+    assert_eq!(
+        after_first.len(),
+        3,
+        "one entry for the template and one per tag: {after_first:?}"
+    );
+    let second = build();
+    assert_eq!(first, second, "the cached rebuild rendered differently");
+    assert_eq!(
+        after_first,
+        stamp(&cache),
+        "an unchanged rebuild rewrote a cache entry"
+    );
+
+    // The provider's own source is one of ITS recorded inputs, so editing it
+    // invalidates the provider's generation - and not the template's, whose
+    // output is one import line that did not change.
+    write(
+        &dir.join("provider.vyrn"),
+        &PROVIDER.replace("M8 0 L16 8 L8 16 Z", "M9 9 L1 1 Z"),
+    );
+    let third = build();
+    assert!(
+        third.contains("M9 9 L1 1 Z"),
+        "editing the provider was a stale cache hit:\n{third}"
+    );
+}
+
+// ---- the negative gate: `std/vyx` names no component -----------------------
+
+/// The rule, stated precisely enough to test: **outside its `test` blocks,
+/// `std/vyx.vyrn` contains no string literal that is a bare capitalized
+/// identifier - the shape of a component tag - except the names below.**
+///
+/// A privileged built-in component cannot be added without one: whether it is
+/// compared against a tag, seeded into the registry, or emitted as the callee at
+/// a tag site, its name has to appear as such a literal. So this list is the
+/// place a hardwired `<Icon>` would have to declare itself, in the open, and the
+/// RFC-0107 line - "directives are the language; components are libraries" - is
+/// asserted rather than hoped for.
+///
+/// The allowed names are of two kinds, neither a component this compiler
+/// provides:
+///
+///   * `Html`, `Data`, `Params` - TYPE spellings written into generated code.
+///   * `UiPageBody`, `UiLayoutBody`, `UiErrorBody`, `UiClientData` - the stems
+///     `std/ui` gives the synthetic component it compiles a route file INTO. They
+///     name the user's own page, not a widget any template can import.
+const ALLOWED_CAPITALIZED_LITERALS: &[&str] = &[
+    "Data",
+    "Html",
+    "Params",
+    "UiClientData",
+    "UiErrorBody",
+    "UiLayoutBody",
+    "UiPageBody",
+];
+
+#[test]
+fn std_vyx_names_no_component() {
+    let src = std::fs::read_to_string(repo_file("std/vyx.vyrn")).unwrap();
+    // The `test` blocks are fixtures, not the compiler; they name components
+    // (`Item`, `Btn`, ...) because they compile them. The rule is about the code.
+    let cut = src
+        .lines()
+        .position(|l| l.starts_with("test \""))
+        .expect("std/vyx.vyrn has test blocks");
+    let code = src.lines().take(cut).collect::<Vec<_>>().join("\n");
+
+    // Every string literal in the code region, skipping `//` comment lines.
+    let cs: Vec<char> = code.chars().collect();
+    let mut literals: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < cs.len() {
+        if cs[i] == '"' {
+            let mut j = i + 1;
+            let mut buf = String::new();
+            while j < cs.len() {
+                if cs[j] == '\\' {
+                    j += 2;
+                    // An escape cannot be part of a bare identifier; a placeholder
+                    // keeps the literal from matching by accident.
+                    buf.push('\u{0}');
+                    continue;
+                }
+                if cs[j] == '"' {
+                    break;
+                }
+                buf.push(cs[j]);
+                j += 1;
+            }
+            literals.push(buf);
+            i = j + 1;
+            continue;
+        }
+        if cs[i] == '/' && i + 1 < cs.len() && cs[i + 1] == '/' {
+            while i < cs.len() && cs[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+
+    let tag_shaped = |s: &str| {
+        let mut it = s.chars();
+        matches!(it.next(), Some(c) if c.is_ascii_uppercase())
+            && it.all(|c| c.is_ascii_alphanumeric())
+    };
+    let mut offenders: Vec<&str> = literals
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|s| tag_shaped(s) && !ALLOWED_CAPITALIZED_LITERALS.contains(s))
+        .collect();
+    offenders.sort();
+    offenders.dedup();
+    assert!(
+        offenders.is_empty(),
+        "std/vyx.vyrn names a component: {offenders:?} - a component is a library \
+         (RFC-0107). If one of these is a type spelling or a synthetic stem, add it \
+         to ALLOWED_CAPITALIZED_LITERALS with the reason."
+    );
+}
+
+/// `std/vyx` does not check a provider's shape before emitting the call, and
+/// cannot: a generator may only read under its own constant path arguments, and a
+/// provider named by a TEMPLATE is never one of them (RFC-0107 M0, P1a/P1b). The
+/// decision costs nothing here, because the emitted import's own diagnostic is
+/// already specific AND already anchored at the tag - the import carries the
+/// tag's `//@origin`.
+#[test]
+fn a_provider_that_is_not_a_generator_fails_at_the_tag() {
+    let dir = provider_project(
+        "provshape",
+        "<span class=\"badge\">\n    <Glyph name=\"github\"/>\n</span>",
+    );
+    // A plain `fn` where the protocol wants a `gen fn`.
+    write(
+        &dir.join("provider.vyrn"),
+        "import { el, text, Html } from \"std/html\"\n\
+         export fn Glyph(a: String) -> Html { return el(\"i\", [], [text(a)]) }\n",
+    );
+    let (ok, err) = run_named(&dir, "app.vyrn");
+    assert!(!ok, "a non-generator provider must fail the load");
+    assert!(
+        err.contains("Badge.vyx:7:1: `Glyph` is not an imported `gen fn`"),
+        "the loader's own diagnostic lands on the tag:\n{err}"
+    );
+
+    // The same for a `gen fn` of the wrong arity.
+    write(
+        &dir.join("provider.vyrn"),
+        "export gen fn Glyph(a: String) -> String { return \"\" }\n",
+    );
+    let (ok, err) = run_named(&dir, "app.vyrn");
+    assert!(!ok, "a wrong-arity provider must fail the load");
+    assert!(
+        err.contains("Badge.vyx:7:1: generator `Glyph` takes 1 argument(s), got 4"),
+        "the arity diagnostic lands on the tag:\n{err}"
+    );
+}
