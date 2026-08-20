@@ -308,7 +308,11 @@ fn cellOf(program: String, contestant: String) -> Measure {
 
 /// The median of `program` on `contestant`, in microseconds, from the published
 /// run. Run two is the noise statement, not the published figure.
-fn medianUs(program: String, contestant: String) -> Int64 {
+///
+/// EXPORTED for the index's five-bar strip (RFC-0106 M2), which needs a length
+/// and not a formatted string: every other reader of this module takes `ms`,
+/// `secs` or a ratio, and a bar is a width in the chart's own units.
+export fn medianUs(program: String, contestant: String) -> Int64 {
     return cellOf(program, contestant).us1
 }
 

@@ -120,7 +120,7 @@ function stopWorker() {
   }
 }
 
-export function mountPlay(root) {
+export function mountPlay(root, opts = {}) {
   const editor = $("[data-play-editor]", root);
   const input = $("[data-play-src]", root);
   const layer = $("[data-play-hl]", root);
@@ -402,6 +402,10 @@ export function mountPlay(root) {
       runBtn.disabled = false;
       status.textContent = "Ready";
       edited();
+      // The index's hero editor is armed on first interaction and mounted then
+      // (RFC-0106 M2), so the press that armed it arrives before anything can
+      // run. `onReady` is how that press is honoured rather than swallowed.
+      if (opts.onReady) opts.onReady();
     },
     (err) => {
       status.textContent = "The compiler did not load";

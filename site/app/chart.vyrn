@@ -29,6 +29,11 @@
 /// happens here, once, rather than in four `.toString()` calls at the template.
 import { blob } from "./repo"
 import { vyrnLines } from "./snippets"
+// The index's five-bar strip reads the same committed benchmark record
+// `/compare` draws (RFC-0106 M2). No cycle: `bench.vyrn` imports `nav` and
+// `std/`, and nothing else on this side.
+import { medianUs, contestants, msOf as benchMs } from "./bench"
+import { hrefOf } from "./nav"
 
 /// One row of a bar chart: the bar itself, the row's full-width hit area, the
 /// label, the value, the native `<title>`, and where the row's name points.
@@ -273,6 +278,122 @@ export fn moduleSizesGrid() -> Array<Grid> {
 
 export fn twoRowPlot() -> String {
     return px(plotHeight(2))
+}
+
+// ---------------------------------------------------------------------------
+// The index's five bars (RFC-0106 M2)
+//
+// ONE program of RFC-0104's eight, on all five contestants, read out of the
+// same committed record `/compare` draws its radar from. The choice of program
+// is the only decision here and it is made out loud: `spectralnorm` is the
+// numeric kernel, and it is the row where Vyrn's native leg is not merely close
+// but first — 0.99x Rust, inside the +/-10% band the RFC set.
+//
+// A page that showed only this row and said nothing else would be picking its
+// evidence. So the caption on the index names the row, says it is one of eight,
+// and links the page that carries all eight WITH the five deviations and their
+// causes. The claim is inline and the evidence is one click, which is THE RULE.
+//
+// Nothing here is transcribed: `medianUs` cuts the record.
+// ---------------------------------------------------------------------------
+
+/// The program the index shows.
+export fn heroBench() -> String {
+    return "spectralnorm"
+}
+
+/// Its five bars, fastest first, on one linear scale against the slowest.
+export fn heroBars() -> Array<Bar> {
+    let rows = heroOrder()
+    let full = medianUs(heroBench(), rows[rows.length - 1])
+    let mut out: Array<Bar> = []
+    let mut i = 0
+    while i < rows.length {
+        let key = rows[i]
+        let us = medianUs(heroBench(), key)
+        out.push(Bar {
+                id: key.copy(),
+                y: rowY(i),
+                hy: hitY(i),
+                w: px(barRoom() * us / full),
+                label: heroName(key),
+                value: benchMs(us),
+                title: heroName(key) + " ran " + heroBench() + " in " + benchMs(us),
+                href: hrefOf("/compare") + "#numbers",
+                tone: if i == 0 { "bar focal" } else { "bar" },
+            })
+        i = i + 1
+    }
+    return out
+}
+
+/// The five contestants of that row, fastest first, by the record's own
+/// medians. Sorted rather than written down: the order is a measurement.
+fn heroOrder() -> Array<String> {
+    let mut keys: Array<String> = []
+    for s in contestants() {
+        keys.push(s.key.copy())
+    }
+    let mut i = 1
+    while i < keys.length {
+        let mut j = i
+        while j > 0 && medianUs(heroBench(), keys[j]) < medianUs(heroBench(), keys[j - 1]) {
+            let hold = keys[j].copy()
+            keys[j] = keys[j - 1].copy()
+            keys[j - 1] = hold
+            j = j - 1
+        }
+        i = i + 1
+    }
+    return keys
+}
+
+/// The name a reader sees for one contestant key.
+fn heroName(key: String) -> String {
+    for s in contestants() {
+        if s.key == key {
+            return s.name.copy()
+        }
+    }
+    return key.copy()
+}
+
+export fn heroBarsBox() -> String {
+    return barViewBox(contestants().length)
+}
+
+/// The strip's axis, in whole seconds of the slowest bar.
+export fn heroBarsGrid() -> Array<Grid> {
+    let rows = heroOrder()
+    return msGrid(medianUs(heroBench(), rows[rows.length - 1]))
+}
+
+export fn heroBarsPlot() -> String {
+    return px(plotHeight(contestants().length))
+}
+
+/// Gridlines every whole second, named once on the last.
+fn msGrid(fullUs: Int64) -> Array<Grid> {
+    return gridOf(fullUs, 1, 1000000, "s")
+}
+
+test "the five bars are the five contestants, fastest first, and the last fills the scale" {
+    let bars = heroBars()
+    assertEq(bars.length, contestants().length)
+    let order = heroOrder()
+    let mut i = 1
+    while i < order.length {
+        // "Fastest first" is a measurement, not an order somebody typed.
+        assert(medianUs(heroBench(), order[i]) >= medianUs(heroBench(), order[i - 1]))
+        i = i + 1
+    }
+    // The slowest bar IS the scale, so nothing can be drawn past the rim.
+    assertEq(bars[bars.length - 1].w, "672")
+    assertEq(bars[0].tone, "bar focal")
+    // And every bar carries a reading rather than a dash.
+    for b in bars {
+        assert(b.value != "—")
+    }
 }
 
 // ---------------------------------------------------------------------------

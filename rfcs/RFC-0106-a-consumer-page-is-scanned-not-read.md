@@ -1,12 +1,13 @@
 # RFC-0106 — A Consumer Page Is Scanned, Not Read
 
-- **Status:** **M1 shipped: the shell.** See
+- **Status:** **M2 shipped: the index and install.** See
   [M0 — as landed](#m0--as-landed) for the census, the ceilings every later
   milestone is held to, and four things the measurements contradict in the
-  design below, and [M1 — as landed](#m1--as-landed) for the eight items, the
-  three defects M1 found in its own earlier commits, and the two ceilings it
-  cannot meet. Milestones below; a milestone that fails its gate says so in
-  this file.
+  design below, [M1 — as landed](#m1--as-landed) for the eight items, the three
+  defects M1 found in its own earlier commits, and the two ceilings it cannot
+  meet, and [M2 — as landed](#m2--as-landed) for the two rebuilt pages, the
+  recorded demo, and the page-weight ceiling M1 recorded as out of reach and M2
+  met. Milestones below; a milestone that fails its gate says so in this file.
 - **Depends on:** RFC-0105 (the site this redesigns — its two-front split,
   theme, accessibility checklist, and gates all survive and bind this work),
   RFC-0104 (the benchmark data the index will show), RFC-0107 (the icons the
@@ -119,7 +120,7 @@ resolves; the a11y checklist rows for the new controls pass. **Gate met** —
 **M2 — index and install.** As designed above, including the CI-recorded
 demo. Gate: index page-weight inside M0's budget with the playground lazy;
 outputs in the demo are real and version-stamped; **screenshots to the user
-before merge**.
+before merge**. **Gate met** — [M2 — as landed](#m2--as-landed).
 
 **M3 — reference landing and releases.** Gate: word counts inside ceilings;
 stat tiles computable, no hand-written number; RSS validates.
@@ -977,6 +978,278 @@ section appears once.
   are hand-formatted — `vyrn fmt` does not read `.vyx`.
 - `cargo test --release -p vyrn-cli --test rfc_index`: 4 passed.
 - No compiler change. No `std/` change.
+
+## M2 — as landed
+
+Two pages, rebuilt. Every number below was produced by running something:
+`scripts/site-history.py` and `scripts/site-demo.py`, then `site/export.vyrn`
+over the working tree, then `scripts/site-census.py` over the tree it wrote,
+then `node --test site/test/*.test.mjs` over the same tree, then a headless
+browser against it served over HTTP at two widths in both palettes. Where a
+figure comes from arithmetic it says so.
+
+### The index
+
+**One viewport, and it is measured.** At 1280x800 the claim, the lede, the
+install command with its OS tabs, the facts chips and the whole runnable
+program end at 794px of an 800px viewport, under a 64px masthead. Under it:
+five benchmark bars, four pillar cards, seven recorded terminal steps and one
+comparison teaser. **Five sections against six, eleven blocks against sixteen,
+and 257 words against 644.**
+
+Five things left the page and are not on it anywhere: the hero canvas, the
+diagnostic replay, the ownership playhead, the three-target schematic, and the
+parity digest comparison. What replaced them is listed here rather than
+narrated on the page, which is the whole of THE RULE.
+
+**The hero editor is the playground, on a smaller root, loaded on the first
+interaction.** It is `mountPlay` and not a second editor: the same
+`data-play-*` hooks, the same keyboard contract, the same highlighter, so a
+reader gets the compiler's own lexer in both places and there is one control to
+keep working. What is new is WHEN. The document carries a coloured code block
+over a `readonly` textarea and nothing else; three things arm it — pointing at
+the plate, tabbing into it, and pressing Run — and the arming is what imports
+`play.js`, which imports `play-wasm.js`, which fetches `play.wasm`. Measured
+from the browser's own request list: **a cold load of `/` fetches four text
+files and the favicon; a `focusin` on the textarea fetches three more and the
+status line goes from `Press Run` to `Ready`.**
+
+The press is not lost. `mountPlay` takes an `onReady`, and the click that armed
+the editor is replayed when the compiler lands — verified end to end in the
+browser: one press on a cold page ends with `status: Ran`, the program's two
+lines in the output pane, and `readOnly` gone.
+
+**The five bars are one program out of RFC-0104's eight, and the page says so
+in the sentence above them.** `spectralnorm`, on all five contestants, fastest
+first, read out of the same committed record `/compare` draws its radar from —
+`chart.vyrn` calls `bench.vyrn`'s `medianUs`, and nothing is transcribed. The
+row was chosen because it is the numeric kernel and the one where Vyrn's native
+leg is first: 955 ms against Rust's 961 and C's 963, with node at 1339 and the
+Vyrn wasm leg at 2824. A page that showed that row and said nothing else would
+be picking its evidence, so the line above the plate reads "one of eight. Five
+of the rest are slower than Rust, each with a named cause" and the link under it
+goes to all eight and the five causes. The environment is a `<details>` inside
+the plate, not a caption under it.
+
+**The row names are labels and not links, and that is a checklist row.** Every
+other bar chart on this site links each row at its own source. An `<a>` inside
+an `<svg>` has no CSS box for padding to grow, so five rows were five sub-24px
+targets — all five pointing at the one page the notice under the plate already
+names. Dropping them took the index from **six interactive targets under 24px
+to one, and that one is a word in a sentence.**
+
+**Four pillar cards are written out one by one rather than looped, and the
+reason is RFC-0107 M1.** A provider tag takes static attributes; `:name` binds
+an expression and is refused at the tag. Four cards that differ in every field
+are four elements, and each carries its own `<Icon>`. The install tiles went
+the other way for a measured reason: the two hash-locked collections this site
+binds hold 180 glyphs between them and **none of them is an apple, a penguin or
+a window**, so a per-OS glyph does not exist to be bound, and the tiles stay a
+`v-for` with the OS named in words.
+
+### A minute with Vyrn
+
+**Seven steps, and every line of output in them came out of the real binary.**
+`scripts/site-demo.py` makes a scratch directory, runs `vyrn new demo`, walks
+what it wrote, runs `vyrn run`, writes one edit into `src/main.vyrn`, runs
+`vyrn test`, runs `vyrn build -o demo`, runs the binary, and writes
+`site/data/demo.json` — 1,598 bytes, version-stamped from `vyrn --version`. A
+command that exits non-zero stops the recording rather than publishing it.
+
+It is the `history.json` pattern, applied a second time and for the same
+reason: RFC-0014 gives `site/export.vyrn` `readFile`, `writeFile` and `listDir`
+and no way to start a process, so the site is HANDED the file and **refuses to
+publish without it** (`missingDemo`, beside `missingHistory`). The committed
+fixture is three obviously-fake steps stamped `vyrn 0.0.0-fixture`, and the
+refusal is what keeps it off a published page.
+
+Two steps carry no command, deliberately. The file listing is walked from the
+directory rather than typed, so no invented `ls` output is attributed to a
+shell. The edit is a file, shown as a file.
+
+**The edit is a `Port` and not the hero's `Age`**, because the hero editor at
+the top of the same page already shows `Age` and the same twelve lines twice on
+one page is a page that repeats itself.
+
+**The widget adds one thing and hides nothing.** All seven steps are in the
+document as a numbered list, which is the whole page with no script at all. The
+script hides six of them, builds the Back / Next / counter row — built rather
+than shipped in the markup, because a Next button on a page that shows every
+step at once is a control that does nothing — and binds the arrows. Verified in
+the browser: `1 / 7`, right to `2 / 7`, two lefts wrap to `7 / 7`, Back disabled
+at the first step, the counter `aria-live="polite"`, and the last step's Next
+reads `Replay`.
+
+### Install
+
+**Three tiles, eight commands, 208 words.** No tab hides an operating system: a
+reader on a phone deciding whether to install this needs to SEE that their
+machine is one of the three. There is no `brew` line, no `apt` line and no
+`winget` line, because there is no formula, no package and no manifest — a tab
+for a method that does not exist is the same fabrication as a "used by" logo.
+
+Uninstalling is one command in the flow of the page, the `.vsix` is one
+sentence pointing at the editors page, and the source build is a `<details>`.
+What left: five "commands worth knowing on day one" (they belong in Docs, and
+`/docs` now links the guide's own first-program section instead), the
+per-platform "You need" and "It downloads" paragraphs, and the three-paragraph
+account of what the installer verifies, which is three rows now.
+
+**A command on this page wraps rather than scrolls.** The sheet's default is
+`white-space: pre` inside a scroller, which is right for a long build line in a
+wide plate and wrong in a 300px tile: an install command clipped at
+`…/vyrn/main/inst` is a stranger's script a reader is asked to pipe into a shell
+without seeing the end of it. The install tiles, the index's install tabs and
+the pillar cards wrap; nothing else changed.
+
+### The numbers, against M0's ceilings
+
+| Page | Words | Ceiling | Bytes | Ceiling | Cmds | Floor | `.cap` | Ceiling | `.note`/`.notice` | Ceiling |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| index | **257** | 260 | **17,675** | 30,000 | **12** | 5 | **2** | 2 | **2** | 2 |
+| install | **208** | 220 | **8,780** | 14,000 | **8** | 8 | **1** | 1 | **2** | 2 |
+
+Both word figures INCLUDE the shell, which is 51 words of every page on the
+site — the skip link, five nav names, three controls, the overlay's two lines
+and the footer's four. The index's own prose is 206 of its 257 and the install
+page's is 157 of its 208.
+
+One of the four `.cap` elements the two pages carry is the shell's own, on
+every page of the site. Of the three that are the pages', two are
+`<details>` — the index's `Without script:` fallback is the only caption in
+flow on either page, and it is there because a `<noscript>` has to say
+something.
+
+### The page-weight ceiling M1 recorded as out of reach
+
+**53,824 bytes gzipped on a cold load of `/`, against M0's 55,000.** M1
+measured 87,716 and wrote that the ceiling "is further away than when M0 wrote
+it". Three items closed the gap, and none of them is a compression trick:
+
+| | Gzipped | How |
+|---|---:|---|
+| M1's `/` | 87,716 | |
+| the navigator pair | **-20,275** | `vyrn-nav.js` and `vyrn-dom.js` are fetched on the first `pointerover`, `touchstart` or `focusin` on a link, not on load |
+| `hero.js` | **-4,056** | the canvas left the index, so the module is deleted and so is the CI step that built `hero.wasm` |
+| three widgets | **-3,600** approx. | the parity, ownership and types widgets are 235 lines of `widgets.js` for three plates that are no longer on any page |
+| the sheet | **-1,147** | M1's lead, acted on: `.lines`, the ownership lanes, the parity columns, the hero canvas, `.metrics`, `.feed`, `.exports`, `.pill.warn`, `svg.schematic` and `button.danger` |
+| the document | **+387** | 17,675 bytes against M1's 18,219, and the new page carries a program, a chart and seven recorded steps |
+| **measured** | **53,824** | |
+
+The navigator deferral was M1's to defer and M0's to propose — the census's own
+asset table says `vyrn-nav.js` is needed "after first paint, or on first link
+hover". A hard navigation is the declared fallback and it is what happens
+before the module lands, so the change is which event fetches it and nothing
+else. Verified: `/` loads with no `vyrn-nav.js` in the request list, and one
+`pointerover` on a link in the content puts both files there.
+
+**`site/public/style.css`: 87,731 raw and 26,739 gzipped, against 90,000 and
+27,000.** And M2 found the gzipped half of that ceiling was never asserted:
+`site/test/typescale.test.mjs` checked the raw number only, and the raw number
+is the one that cannot fail first — this sheet is 48% comment prose, which
+compresses, so a page of new rules moves the gzipped figure much further than
+the raw one. **Measured at 27,170 gzipped with 89,272 raw and the test still
+green.** Both halves are asserted now, the way `search.json` has been since M1.
+
+### Accessibility, and how it was checked
+
+The browser pane in this session would not composite frames, so no real key
+press or click reached the page. Layout, the request list and the DOM are
+computed either way — which is why every geometry above is trustworthy — and
+every keystroke below was an event dispatched at the element a reader's key
+would reach, through the real listeners. Screenshots were taken with a headless
+browser against the same tree instead.
+
+| Row | Result |
+|---|---|
+| the hero editor has a keyboard path to activate | pass — `focusin` on the textarea arms it; the module lands and the status reads `Ready` |
+| the hero editor has a keyboard path to run | pass — the Run button is an enabled `<button>` in the tab order, and `Ctrl`+`Enter` in the editor runs, both `mountPlay`'s own |
+| the editor is not editable before it can be checked | pass — `readonly` until arming, removed by it |
+| the demo stepper is keyboard-operable | pass — left and right arrows, wrapping, Back disabled at the first step |
+| the demo announces the step it moved to | pass — the counter is `aria-live="polite"` |
+| the demo works with no script | pass — seven steps in the document as a numbered list; the controls are built by the script that needs them |
+| the OS tabs are a tab list | pass — `role="tablist"`, roving `tabindex`, arrows, Home and End, from the shared `tabsWidget` |
+| the OS tabs work with no script | pass — no `hidden` in the markup, so all three panes are on the page |
+| no interactive target under 24px outside running prose (row 29) | pass on `/` at 375 and 1280 — **one target under 24px on the whole page, and it is a link inside a sentence.** It was six |
+| every wide block scrolls inside its own container (row 28) | pass — the environment table and the five-bar strip both, after both were found failing |
+| the body never scrolls sideways (rows 26, 27) | **fail, and not this milestone's** — see below |
+| both palettes | pass — every new element takes its colour from a token; `site/test/contrast.test.mjs` is green |
+
+**Two blocks were found taking the document sideways at 375px and both are
+fixed.** The environment table inside the bar plate's disclosure painted 769px
+in a 343px column with no scroller over it. The five-bar strip was worse and
+quieter: `svg.chart` is `width: 100%`, so a 904-unit viewBox in a 343px column
+scales every glyph by 0.38 and a 9px axis label paints at **3.4px** — a chart
+that is present, is not overflowing, and cannot be read. It scrolls at its own
+size inside the plate below 640px now, which is the rule RFC-0105 already had.
+
+**And one that is not fixed, because it is the shell.** At 375px in a headless
+Chrome the masthead's `.tools` — Search, Install, and the theme control — is
+4px wider than the row, so the document is 379px against a 375px viewport.
+**It reproduces on `/compare.html`, which this milestone did not touch**, so it
+is not the index's or the install page's. M1 recorded the same defect at 320px,
+measured it as fitting at 375 "with 9px to spare" in a different browser, and
+assigned the fix to M4 on the grounds that every fix is a decision about which
+control loses its word. The number to add to M1's arithmetic: the row has 343px
+and wants 369, and the variance between two browsers on the same markup is
+13px.
+
+### What M2 deleted, and why each one is a deletion and not a move
+
+- **`site/public/hero.js` (242 lines), `out/hero.wasm`, and the CI step that
+  built it.** The canvas was on `/` and nowhere else. The parity claim it
+  illustrated is on `/compare` and in the harness that fails CI; the page that
+  argued it is not the page a first-time reader lands on.
+  `examples/herofield.vyrn` stays — it is a real example and `chart.vyrn`
+  measures its module.
+- **235 lines of `widgets.js`**: `parityWidget`, `ownershipWidget`,
+  `typesWidget` and the two hash helpers under them. Three plates, one page,
+  gone from it.
+- **1,147 bytes of `style.css`**, all of it selectors that match nothing in the
+  exported tree, in the browser modules, or in any template. Ten classes were
+  audited against all three and ten came back dead; `.copyfail` was on M1's
+  list and is NOT dead — `widgets.js` adds it on a failed copy.
+- **The five "commands worth knowing on day one"** from `/install`.
+
+The dead-code audit that found them is a script's worth of work and was run
+once, by hand, over the 181 class selectors the sheet declares. It is not
+wired into anything, and that is a gap M5 could close.
+
+### Gates
+
+- `python3 scripts/site-history.py`, `python3 scripts/site-demo.py --vyrn
+  compiler/target/release/vyrn`, then `vyrn run site/export.vyrn out`: **175
+  routes, 12 assets, 50 markdown twins, one index, one feed.** One asset fewer
+  than M1: `hero.js`.
+- the site's own test loop, declared against ran, over `site/export.vyrn` and
+  all 27 modules in `site/app/`: **191 blocks declared, 191 ran.**
+- `node --test site/test/*.test.mjs` over the exported tree: **31 tests, 31
+  pass** — four more than M1, and the four are the sheet's gzipped ceiling and
+  the three basepath mount points re-run against a tree with two rebuilt pages.
+- `vyrn fmt --check` on `site/app/*.vyrn`, `site/guide/*.vyrn` and
+  `site/export.vyrn`: clean. The two `.vyx` templates this milestone rewrote
+  are hand-formatted — `vyrn fmt` does not read `.vyx`.
+- `cargo test --release -p vyrn-cli --test rfc_index`: 4 passed.
+- No compiler change. No `std/` change.
+
+### Four links this milestone broke, and what happened to them
+
+Removing four sections from `/` broke four inbound fragment links, and
+`site/test/basepath.test.mjs` is what said so — the export's own link gate did
+not, because it checks the links a page WRITES and these are written by other
+pages. Each was repointed at the page that now carries the claim, rather than
+at `/` with the fragment dropped:
+
+| Was | Now | Written on |
+|---|---|---|
+| `/install#check` | `/guide/getting-started#first` | `/docs` |
+| `/index#memory` | `/guide/ownership` | `/docs` and `/why-vyrn` |
+| `/index#types` | `/play` | `/why-vyrn` |
+| `/index#parity` | `/compare#numbers` | `/why-vyrn` |
+
+`/why-vyrn` is M4's page and three of its sentences moved by one clause each.
+That is the milestone reaching outside its ground, and it is recorded here
+rather than left for M4 to discover.
 
 ## What this RFC does not do
 

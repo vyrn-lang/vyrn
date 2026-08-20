@@ -307,7 +307,7 @@ code {
  * source row or the module grid, `<code>` is structure rather than a span in a
  * sentence, and a second box around it would be noise. Kept ABOVE the rules for
  * those blocks, so each one still sets its own size. */
-pre code, .cmd code, .lines code {
+pre code, .cmd code {
   padding: 0;
   border: 0;
   background: none;
@@ -402,7 +402,7 @@ h1 code, h2 code, h3 code, h4 code {
 }
 
 /* Numbers never jitter. This is the whole reason data looks trustworthy. */
-.num, table, .metric, .bignum, .spec dd, .diffline {
+.num, table, .bignum {
   font-variant-numeric: tabular-nums slashed-zero;
 }
 
@@ -637,7 +637,6 @@ h1 code, h2 code, h3 code, h4 code {
   color: var(--muted);
 }
 .pill.live { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 40%, transparent); }
-.pill.warn { color: var(--amber); border-color: color-mix(in oklab, var(--amber) 45%, transparent); }
 
 /* ------------------------
    The widget chassis (brief 4). Pill + eyebrow, one headline number, one
@@ -693,7 +692,6 @@ button, .btn {
 button:hover, .btn:hover { border-color: var(--accent); color: var(--accent); }
 button:active { transform: translateY(1px); }
 button[aria-pressed="true"], button.on { border-color: var(--accent); color: var(--accent); }
-button.danger:hover { border-color: var(--danger); color: var(--danger); }
 
 .controls { display: flex; gap: var(--s1); flex-wrap: wrap; }
 
@@ -719,72 +717,9 @@ pre.code {
 .t { color: var(--syn-type); font-weight: 600; }
 .n { color: var(--syn-num); }
 
-/* Numbered source rows. Every code plate that has anything to point AT uses
- * these rather than a bare `<pre>`: a line number is what a diagnostic, a
- * playhead and an ownership lane all refer to. */
-.lines {
-  font-family: var(--mono);
-  font-size: var(--t-code);
-  line-height: 1.75;
-  tab-size: 4;
-  overflow-x: auto;
-}
-.lines .cl {
-  display: flex;
-  align-items: stretch;
-  white-space: pre;
-  transition: background-color 220ms var(--expo);
-}
-.lines .ln {
-  flex: none;
-  /* A fixed width, not `3ch`: the header row sets its own font size, and a `ch`
-   * would put its column somewhere else than the numbers it labels. */
-  width: 28px;
-  padding-right: var(--s2);
-  text-align: right;
-  color: var(--n2);
-  user-select: none;
-}
-.lines code { display: block; }
-/* The playhead's line, and the line a control just changed. Both are the same
- * gesture: say which row the number above is talking about. */
-.lines .cl.on { background: color-mix(in oklab, var(--accent) 13%, transparent); }
-.lines .cl.on .ln { color: var(--accent); }
-.lines .cl.changed { background: color-mix(in oklab, var(--danger) 16%, transparent); }
-
-/* Ownership lanes: one lane per binding, drawn on exactly the lines that
- * binding is alive. A lane that starts or ends on a row is inset, and capped,
- * so the eye can see where it begins and where the memory goes back. */
-/* `--lane-a` and `--lane-b` are palette tokens like every other colour on this
- * sheet, declared at the top with the rest of them. */
-
-.lines .lanes { flex: none; display: flex; gap: 6px; width: 32px; padding: 0 var(--s2) 0 4px; }
-/* Name the columns. Three-pixel bars in a gutter mean nothing until something
- * says what the gutter is for. */
-.lines .cl.head { font: var(--t-tick)/2 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--n2); border-bottom: 1px solid var(--hair); }
-
-.lines .lanes i { width: 3px; display: block; position: relative; }
-.lines .lanes i.lane.a { background: var(--lane-a); color: var(--lane-a); }
-.lines .lanes i.lane.b { background: var(--lane-b); color: var(--lane-b); }
-.lines .lanes i.start { margin-top: 6px; }
-.lines .lanes i.end { margin-bottom: 6px; }
-.lines .lanes i.start::before, .lines .lanes i.end::after {
-  content: "";
-  position: absolute;
-  left: -3px;
-  width: 9px;
-  height: 2px;
-  background: currentColor;
-}
-.lines .lanes i.start::before { top: 0; }
-.lines .lanes i.end::after { bottom: 0; }
-.lines .cl.ahead .lanes i { opacity: 0.3; }
-
 .legend { list-style: none; margin: 0 0 var(--s2); padding: 0; display: grid; gap: 6px; font: var(--t-eyebrow)/1.5 var(--mono); color: var(--muted); }
 .legend li { display: flex; align-items: center; gap: var(--s1); }
 .legend i.key { width: 3px; height: 14px; display: block; flex: none; }
-.legend i.key.firstSpace { background: var(--lane-a); }
-.legend i.key.whole { background: var(--lane-b); }
 .legend code { color: var(--ink); }
 
 /* Tool output is not code, and must not be dressed as code. A compiler
@@ -804,7 +739,6 @@ pre.code {
 .out > div { transition: color 220ms var(--expo); }
 .out > div.on { color: var(--ink); }
 .out > div.on .ol::before { color: var(--accent); }
-.lines .out { margin: 0; }
 
 .cmd {
   display: flex;
@@ -827,10 +761,88 @@ pre.code {
 
 .hero { padding: var(--s6) 0 var(--s5); }
 .hero .display { margin-bottom: var(--s3); }
+.hero .display em { font-style: normal; color: var(--accent); }
 
-.heroplate { margin-top: var(--s5); border: 1px solid var(--rule); }
-.heroplate canvas { display: block; width: 100%; height: 340px; background: color-mix(in oklab, var(--plate) 55%, transparent); }
-.hero-static { display: grid; place-items: center; height: 340px; margin: 0; color: var(--accent); font: 600 2rem/1 var(--mono); letter-spacing: 0.3em; }
+/* A LANDING PAGE WITH NO RAIL USES THE WHOLE SHEET (RFC-0106 M2). `.page > *`
+ * sits in columns 3..12 because a rail sits in 1..2. The index and the install
+ * page have no rail — the index is one scan and the install page is three tiles
+ * — so they take the two tracks back. `.page.wide` outranks `.page` by one
+ * class, which is the whole mechanism. */
+.page.wide > * { grid-column: 1 / 13; }
+
+/* THE SPLIT HERO. The claim and the command on the left, the program that runs
+ * on the right, both above the fold on a laptop. Below 1024px it is one column
+ * and the editor follows the command, which is the reading order the markup
+ * already has — no `order` anywhere. */
+.hero.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--s4); align-items: start; }
+@media (max-width: 1024px) { .hero.split { grid-template-columns: minmax(0, 1fr); } }
+
+/* The hero editor is the playground's own box at a height that leaves room for
+ * the output under it. `52vh` is right on a page that IS an editor and wrong on
+ * a page where the editor is one of two columns — at a 1700px window it made a
+ * 884px box for a fifteen-line program. THREE classes, not two: the rule it
+ * overrides (`.play .editor textarea`) is declared LATER in this sheet, so an
+ * override of equal specificity would lose. */
+.play.heroplay .editor textarea { height: auto; min-height: 0; }
+.heroplay .out { max-height: 9em; overflow: auto; }
+.heroplay .plate-head { border-bottom: 1px solid var(--rule); }
+
+/* Facts, as chips. Four short truths a reader can take at a glance, and every
+ * one of them is checkable on another page — which is why none of them is a
+ * badge with a number painted into it. */
+.chips { list-style: none; display: flex; flex-wrap: wrap; gap: var(--s1); margin: var(--s3) 0 0; padding: 0; }
+.chips li { padding: 6px var(--s2); border: 1px solid var(--rule); font: var(--t-eyebrow)/1.6 var(--mono); letter-spacing: 0.06em; color: var(--muted); }
+
+/* The four pillars. Two lines and one command each, and the command is the
+ * point: a card that ends in a paragraph ends in nothing to do. */
+.cards { list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--s3); margin: var(--s4) 0 0; padding: 0; }
+.cards > li { border: 1px solid var(--rule); padding: var(--s2); display: flex; flex-direction: column; }
+.cards h3 { font-size: var(--t-h3); margin-bottom: var(--s1); display: flex; align-items: center; gap: var(--s1); }
+.cards p { color: var(--muted); flex: 1; }
+.cards .cmd { margin-top: var(--s2); }
+
+/* The three install tiles. Not tabs: a reader on a phone deciding whether to
+ * install this wants to SEE that their machine is one of the three, and a tab
+ * hides two thirds of that answer behind a press. */
+.tiles { list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: var(--s3); margin: var(--s4) 0 0; padding: 0; }
+.tiles > li { border: 1px solid var(--rule); padding: var(--s2); }
+.tiles h3 { font-size: var(--t-h3); margin-bottom: var(--s1); }
+.tiles p { margin-top: var(--s2); color: var(--muted); font-size: var(--t-meta); }
+
+/* A COMMAND THAT MUST BE READ, NOT ONLY COPIED. The sheet's default is
+ * `white-space: pre` with a scroller, which is right for a long build line in a
+ * wide plate and wrong in a 300px tile: an install command clipped at
+ * `…/vyrn/main/inst` is a stranger's script a reader is asked to pipe into a
+ * shell without seeing the end of it. These three places wrap instead — the
+ * install tiles, the index's install tabs, and the pillar cards (RFC-0106 M2).
+ * It is the same rule the sheet already applies to every `.cmd` at 640px. */
+.tiles .cmd code, [data-install] .cmd code, .cards .cmd code { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* A row of calls to action, which is not a command row: `.cmd` is what the
+ * census counts as a command a reader types, and three links are not that. */
+.ctarow { display: flex; flex-wrap: wrap; gap: var(--s2); margin-top: var(--s3); }
+
+/* THE RECORDED DEMO. Every step is in the document; the script hides all but
+ * one and adds the counter. So the list is numbered and readable with no script
+ * at all, and the hidden steps below are only ever hidden BY the script. */
+.demo .steps { margin: 0; padding: 0 0 0 var(--s3); }
+.demo .steps > li { padding: var(--s2) 0; }
+.demo .steps > li + li { border-top: 1px solid var(--hair); }
+.demo .steps h3 { font-size: var(--t-h3); }
+.demo .steps p { color: var(--muted); font-size: var(--t-meta); margin-top: var(--s1); }
+.demo .steps .out { max-height: 22em; }
+.demo .demobar { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s2); }
+.demo .demobar .eyebrow { margin: 0; }
+
+/* A caption that IS a disclosure. THE RULE says the claim is inline and the
+ * method is one click away, so the method sits in a `<details>` and the
+ * summary is the only part that costs a line. */
+details.disc { margin-top: var(--s2); font: var(--t-meta)/1.6 var(--sans); color: var(--muted); }
+details.disc > summary { cursor: pointer; }
+details.disc > summary:hover { color: var(--ink); }
+details.disc[open] > summary { color: var(--accent); }
+details.disc table { margin-top: var(--s2); }
+.plate > details.disc { padding: 0 var(--s2) var(--s2); }
 
 .band { padding: var(--s6) 0 0; border-top: 1px solid var(--rule); margin-top: var(--s6); }
 .band h2 { font-size: var(--t-h2); margin-bottom: var(--s2); }
@@ -845,24 +857,6 @@ pre.code {
 .specs dt { font: var(--t-key)/1.4 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
 .specs dd { margin: var(--s1) 0 0; font: 600 1.6rem/1 var(--mono); letter-spacing: -0.02em; }
 .specs dd small { display: block; font: 400 var(--t-key)/1.5 var(--mono); color: var(--muted); letter-spacing: 0.06em; margin-top: 6px; }
-
-/* ------------------------
-   The parity strip
-   ------------------------ */
-
-.columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--hair); border: 1px solid var(--hair); }
-.columns > div { background: var(--paper); padding: var(--s2); }
-.columns h4 { font: var(--t-key)/1.4 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: var(--s1); }
-/* A column says WHERE its number came from, under the number: the build, this
- * browser, or the harness that is not in the page. The label is the smallest
- * thing on the plate and it is the thing that makes the plate honest. */
-.columns pre { margin: 0; font-size: var(--t-eyebrow); line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
-.columns .eyebrow { margin-top: var(--s1); font-size: var(--t-tick); }
-.columns .digest { color: var(--accent); }
-/* The digest the reader corrupted, wherever it sits. It used to be the last
- * column by position, from when the widget rewrote that column's text. */
-.columns .digest.bad, .columns.broken .digest.muted { color: var(--danger); }
-.columns .digest.muted { color: var(--muted); }
 
 .verdict { margin-top: var(--s2); font: 600 var(--t-h4)/1 var(--mono); color: var(--accent); }
 .verdict.bad { color: var(--danger); }
@@ -897,17 +891,6 @@ svg.chart g.row:hover a text { text-decoration-color: var(--accent); fill: var(-
 svg.chart text { font-family: var(--mono); font-size: var(--t-key); fill: var(--muted); }
 svg.chart text.val { fill: var(--ink); }
 svg.chart .cell { transition: fill-opacity 450ms ease-out; }
-
-/* The schematic: hairline boxes, two focal nodes, orthogonal wires. Names in
- * the page's sans, commands in mono — mono is for technical content, not a
- * blanket "developer" font. */
-svg.schematic .wire { fill: none; stroke: currentColor; stroke-opacity: 0.35; stroke-width: 1; }
-svg.schematic marker polygon { fill: currentColor; fill-opacity: 0.45; }
-svg.schematic .node rect { fill: none; stroke: currentColor; stroke-opacity: 0.28; stroke-width: 1; }
-svg.schematic .node.focal rect { stroke: var(--accent); stroke-opacity: 1; fill: var(--accent); fill-opacity: 0.08; }
-svg.schematic .name { font-family: var(--sans); font-size: var(--t-mono); font-weight: 600; fill: var(--ink); }
-svg.schematic .node.focal .name { fill: var(--accent); }
-svg.schematic .sub { font-family: var(--mono); font-size: var(--t-tick); fill: var(--muted); }
 
 /* Two series on one chart, one shown at a time. The markup holds both, so the
  * control switches an attribute rather than redrawing anything — and with no
@@ -1081,11 +1064,6 @@ ol.plain .note { display: block; color: var(--muted); font-size: var(--t-meta); 
 .panes > div { grid-area: 1 / 1; }
 .panes > div[hidden] { display: block; visibility: hidden; }
 
-.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--s3); margin-top: var(--s3); }
-.metrics div { border-top: 1px solid var(--hair); padding-top: var(--s1); }
-.metrics dt { font: var(--t-key)/1.4 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
-.metrics dd { margin: 6px 0 0; font: 600 1.3rem/1 var(--mono); }
-.metrics dd.none { font-size: var(--t-cap); font-weight: 400; color: var(--muted); letter-spacing: 0; }
 
 /* ------------------------
    Lists
@@ -1097,12 +1075,12 @@ dl.nongoals dd { margin: 6px 0 0; color: var(--muted); }
 
 ul.plain { list-style: none; padding: 0; margin: var(--s3) 0 0; }
 ul.plain li { padding: var(--s2) 0; border-bottom: 1px solid var(--hair); }
-ul.plain .note { display: block; color: var(--muted); font-size: var(--t-meta); margin-top: 4px; }
+/* The second line of a row. It used to require `class="note"`, which put a row
+ * of an ordinary list into the census's meta-prose count and against THE RULE's
+ * ceiling for it — a row's own sentence is the claim, not commentary on it. A
+ * bare `<span>` after the `<strong>` is the same line (RFC-0106 M2). */
+ul.plain li > span, ul.plain .note { display: block; color: var(--muted); font-size: var(--t-meta); margin-top: 4px; }
 
-.feed { list-style: none; padding: 0; margin: var(--s4) 0 0; }
-.feed li { padding: var(--s3) 0; border-top: 1px solid var(--hair); display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: var(--s2); }
-.feed a.tag { font: var(--t-mono)/1.6 var(--mono); color: var(--accent); text-decoration: none; }
-.feed a.tag:hover { text-decoration: underline; }
 svg.chart a .cell:hover { fill-opacity: 1 !important; }
 
 .notice {
@@ -1144,11 +1122,8 @@ svg.chart a .cell:hover { fill-opacity: 1 !important; }
    a forced palette to take away.)
    ------------------------ */
 @media (forced-colors: active) {
-  /* The playhead, and the row a control just changed. Both are a background
-   * wash on a code row, and both become the row's own left edge. */
-  .lines .cl.on, .lines .cl.changed { outline: 1px solid; outline-offset: -1px; }
-  /* A pill states its own word, so it needs no colour — but `live` and `warn`
-   * differ only by one, and a border keeps the shape. */
+  /* A pill states its own word, so it needs no colour; a border keeps the
+   * shape when the wash is gone. */
   .pill { border: 1px solid; }
 }
 
@@ -1339,11 +1314,10 @@ svg.graph .node.on circle { fill-opacity: 1; }
    a phone without a breakpoint being written for either.
    ------------------------ */
 
-/* The hairline grid is painted by the CELLS, not by the container. `.columns`
-   above can paint the container because its author writes both the three
-   columns and the three children; an `auto-fill` track count is decided by the
-   viewport and the card count is decided by `examples/`, so the last row is
-   short whenever the two disagree — and a painted container showed that gap as
+/* The hairline grid is painted by the CELLS, not by the container. A container
+   can be painted where its author writes both the track count and the children;
+   an `auto-fill` track count is decided by the viewport and the card count is
+   decided by `examples/`, so the last row is short whenever the two disagree — and a painted container showed that gap as
    a filled box with nothing in it. A ring on each cell covers the 1px gutter
    from both sides and leaves an empty track as page. The container's 1px of
    padding is the room the outer ring needs. */
@@ -1358,11 +1332,6 @@ svg.graph .node.on circle { fill-opacity: 1; }
 /* One package's exports: the name, what kind of thing it is, and the signature
  * as it is written. The prose is on the reference and this list says so, so a
  * row here is an inventory line and not a second copy of the documentation. */
-.exports { list-style: none; padding: 0; margin: var(--s4) 0 0; }
-.exports li { padding: var(--s2) 0; border-top: 1px solid var(--hair); display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: var(--s2); align-items: baseline; }
-.exports a { font: var(--t-mono)/1.6 var(--mono); color: var(--accent); text-decoration: none; }
-.exports a:hover { text-decoration: underline; }
-.exports pre.code { margin: 0; border: 0; background: transparent; padding: 0; font-size: var(--t-eyebrow); overflow-x: auto; }
 
 /* What a module's tests promise. Closed by default: a list of claims a reader
  * opens when they want it, not a screen to scroll past. */
@@ -1552,9 +1521,6 @@ kbd {
    * gutters that separate nothing. */
   #root { grid-template-columns: minmax(0, 1fr); gap: 0; padding: 0 var(--s2) var(--s5); }
   #root > *, #root > .masthead, #root > .foot, .page > *, .rail { grid-column: 1; }
-  .columns { grid-template-columns: minmax(0, 1fr); }
-  .heroplate canvas, .hero-static { height: 240px; }
-  .feed li { grid-template-columns: minmax(0, 1fr); gap: var(--s1); }
 
   /* The header stays one 64px row: the base rules that make `<details>` not a
    * disclosure are undone here, both models, and the panel leaves the flow. */
@@ -1588,6 +1554,15 @@ kbd {
   .rail a { white-space: nowrap; display: inline-flex; align-items: center; min-height: 44px; }
   .rail { padding: var(--s1) 0; }
 
+  /* A FIVE-BAR STRIP AT ITS OWN SIZE, INSIDE A SCROLLER (RFC-0106 M2).
+   * `svg.chart` is `width: 100%`, so a 904-unit viewBox in a 343px column
+   * scales every glyph by 0.38 and a 9px axis label paints at 3.4px. The
+   * sheet's own rule for a block wider than the column is that the BLOCK
+   * scrolls, not the page (RFC-0105 M4 row 28), and it is the rule that keeps
+   * the numbers beside the bars they belong to. */
+  .barstrip .stage { overflow-x: auto; }
+  .barstrip svg.chart { min-width: 904px; }
+
   /* A command is read before it is copied. At this width the button took two
    * thirds of the row and left the command a 120px window on 885px of text, so
    * the two stack and the command wraps rather than hides. */
@@ -1611,13 +1586,6 @@ kbd {
    * more at desktop widths, so the two stay. The upgrade is a browser fix. */
   code { word-break: break-all; }
 
-
-  /* Source rows keep their alignment — a line number, a lane and the line it
-   * belongs to cannot wrap independently — so they scroll, and they scroll in
-   * less space per character. */
-  .lines { font-size: var(--t-eyebrow); }
-  .lines .ln { width: 22px; padding-right: var(--s1); }
-  .lines .lanes { width: 24px; padding: 0 var(--s1) 0 4px; }
 
   /* A long unbroken word in a headline is the one thing `balance` cannot fix. */
   h1, h2, h3, h4 { overflow-wrap: break-word; }

@@ -181,7 +181,7 @@ jobs:
         # default and overflows a tenth of the way to the interpreter's limit.
         #
         # `writeFile` takes a String, so the export cannot copy a wasm module;
-        # this one lands straight in the output like the hero's.
+        # this one lands straight in the output.
         working-directory: compiler/vyrn-play
         run: |
           rustup target add wasm32-unknown-unknown
@@ -196,17 +196,22 @@ jobs:
         working-directory: compiler/vyrn-play
         run: cargo test --release
 
-      - name: The hero module
-        # `writeFile` takes a String, so the export step cannot copy a wasm
-        # module. It is built here instead, straight into the output.
-        #
-        # `out/docs/std`, `out/guide`, `out/backstage/rfcs` and `out/explore` are
-        # made here too: RFC-0014 has no way to CREATE a directory, and the
-        # reference publishes one page per std module, the guide one per chapter,
-        # the backstage one per design record, and the registry one per package.
+      - name: The output directories
+        # RFC-0014 has no way to CREATE a directory, and the reference publishes
+        # one page per std module, the guide one per chapter, the backstage one
+        # per design record, and the registry one per package.
+        run: mkdir -p out/docs/std out/guide out/backstage/rfcs out/explore
+
+      - name: A minute with Vyrn, recorded
+        # AFTER the CLI build, because it runs the binary that step just made,
+        # and BEFORE the export, which refuses to publish without this file —
+        # see `missingDemo` in `site/export.vyrn`. Seven steps in a scratch
+        # directory: `vyrn new`, the files it wrote, `vyrn run`, one edit,
+        # `vyrn test`, `vyrn build`, and the binary. Every line of output on the
+        # index came out of this run (RFC-0106 M2).
         run: |
-          mkdir -p out/docs/std out/guide out/backstage/rfcs out/explore
-          compiler/target/release/vyrn build examples/herofield.vyrn --target wasm -o out/hero.wasm
+          python3 scripts/site-demo.py --vyrn compiler/target/release/vyrn > site/data/demo.json
+          wc -c site/data/demo.json
 
       - name: Render every page
         # One `route()` call per path, twice: the document and the soft-

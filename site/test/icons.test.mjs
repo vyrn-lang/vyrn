@@ -29,8 +29,8 @@ const out = path.join(here, "..", "..", "out");
 /// backstage builds a masthead of its own and wears none of this.
 const SHELL = "layout.vyx";
 const SHELL_MARK = "Source on GitHub";
-/// The one route template that carries tags of its own, and the page it makes.
-const PAGE_TAGS = { "install.vyx": "install.html" };
+/// The route templates that carry tags of their own, and the pages they make.
+const PAGE_TAGS = { "install.vyx": "install.html", "index.vyx": "index.html" };
 
 /// Every `<Icon .../>` in a template, as `{ name, label }`.
 function tagsOf(src) {

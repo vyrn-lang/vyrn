@@ -73,10 +73,10 @@ fn graphStyle() -> String {
 
 fn commands() -> Array<Command> {
     return [
-        Command { name: "vyrn run | check | build | test | bench", what: "Run, type-check, compile, and run the tests and benchmarks written in the file. <a href=\"/install.html#check\">Five of them, on day one.</a>" },
+        Command { name: "vyrn run | check | build | test | bench", what: "Run, type-check, compile, and run the tests and benchmarks written in the file. <a href=\"/guide/getting-started.html#first\">Your first program.</a>" },
         Command { name: "vyrn fmt --check", what: "The canonical formatter. <code>--check</code> is the CI gate." },
         Command { name: "vyrn doc", what: "Markdown API docs from /// comments. <a href=\"/docs.html#std\">The pages on this site</a> are read off the same declarations." },
-        Command { name: "vyrn why <file>", what: "Why the compiler decided what it decided. <code>--memory</code> and <code>--contract</code> narrow it. <a href=\"/index.html#memory\">One report, replayed.</a>" },
+        Command { name: "vyrn why <file>", what: "Why the compiler decided what it decided. <code>--memory</code> and <code>--contract</code> narrow it. <a href=\"/guide/ownership.html\">The chapter on ownership.</a>" },
         Command { name: "vyrn emit-gen <file>", what: "The source a generator produced. A generator is not magic, and this prints it." },
         Command { name: "vyrn serve | dev | routes", what: "An HTTP host, the development server, and the resolved wire table." },
         Command { name: "vyrn new | add | update | vendor | deps", what: "Projects and modules. Remote imports pin in <code>vyrn.lock</code> and cache by sha256." },
