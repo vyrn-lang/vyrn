@@ -67,3 +67,6 @@ vyrn_vendor/
 
 # Python bytecode from the two build scripts in scripts/.
 __pycache__/
+
+# Screenshots taken for a milestone review. Not published, not an input.
+shots/

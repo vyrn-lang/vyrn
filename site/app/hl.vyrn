@@ -101,7 +101,7 @@ let bad = Age(5)    // the compiler refuses this
             src: "type Age = Int64 where value >= 18
 
 fn admit(n: Int64) -> String {
-    // Age?(n) answers None when the rule fails, so input never traps.
+    // None when the rule fails, so input never traps.
     return match Age?(n) {
         Some(a) => \"admitted at \\{a}\",
         None => \"refused: \\{n} is under 18\",

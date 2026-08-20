@@ -31,6 +31,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { gzipSync } from "node:zlib";
 import path from "node:path";
 
 const SHEET = path.resolve(import.meta.dirname, "../public/style.css");
@@ -146,9 +147,14 @@ test("only one selector raises the display step, and a leaf page cannot match it
   assert.equal(raised[1].trim(), "2.6rem");
 });
 
-test("the sheet stays inside M0's byte ceiling", () => {
-  // RFC-0106 M0: `style.css` <= 90,000 bytes raw. The type tokens, the density
-  // tokens and the search overlay's rules get 6 KB over the 84,123 the census
-  // measured, and no more.
+test("the sheet stays inside M0's byte ceiling, both halves", () => {
+  // RFC-0106 M0 sets TWO numbers on this file: `<= 90,000 bytes raw, <= 27,000
+  // gzipped`. Only the raw half was asserted, and the raw half is the one that
+  // cannot fail first — this sheet is 48% comment prose, which compresses, so a
+  // page of new rules moves the gzipped figure much further than the raw one.
+  // M2 measured 27,170 gzipped against 89,272 raw and found the ceiling already
+  // crossed with the raw check still green (RFC-0106 M2).
   assert.ok(css.length <= 90000, `style.css is ${css.length} bytes, ceiling 90,000`);
+  const gz = gzipSync(Buffer.from(css, "utf8"), { level: 9 }).length;
+  assert.ok(gz <= 27000, `style.css is ${gz} bytes gzipped (${css.length} raw), ceiling 27,000`);
 });

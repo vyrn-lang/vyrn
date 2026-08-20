@@ -307,7 +307,7 @@ code {
  * source row or the module grid, `<code>` is structure rather than a span in a
  * sentence, and a second box around it would be noise. Kept ABOVE the rules for
  * those blocks, so each one still sets its own size. */
-pre code, .cmd code, .lines code {
+pre code, .cmd code {
   padding: 0;
   border: 0;
   background: none;
@@ -692,7 +692,6 @@ button, .btn {
 button:hover, .btn:hover { border-color: var(--accent); color: var(--accent); }
 button:active { transform: translateY(1px); }
 button[aria-pressed="true"], button.on { border-color: var(--accent); color: var(--accent); }
-button.danger:hover { border-color: var(--danger); color: var(--danger); }
 
 .controls { display: flex; gap: var(--s1); flex-wrap: wrap; }
 
@@ -780,8 +779,11 @@ pre.code {
 
 /* The hero editor is the playground's own box at a height that leaves room for
  * the output under it. `52vh` is right on a page that IS an editor and wrong on
- * a page where the editor is one of two columns. */
-.heroplay .editor textarea { height: auto; min-height: 0; }
+ * a page where the editor is one of two columns — at a 1700px window it made a
+ * 884px box for a fifteen-line program. THREE classes, not two: the rule it
+ * overrides (`.play .editor textarea`) is declared LATER in this sheet, so an
+ * override of equal specificity would lose. */
+.play.heroplay .editor textarea { height: auto; min-height: 0; }
 .heroplay .out { max-height: 9em; overflow: auto; }
 .heroplay .plate-head { border-bottom: 1px solid var(--rule); }
 
@@ -806,6 +808,15 @@ pre.code {
 .tiles > li { border: 1px solid var(--rule); padding: var(--s2); }
 .tiles h3 { font-size: var(--t-h3); margin-bottom: var(--s1); }
 .tiles p { margin-top: var(--s2); color: var(--muted); font-size: var(--t-meta); }
+
+/* A COMMAND THAT MUST BE READ, NOT ONLY COPIED. The sheet's default is
+ * `white-space: pre` with a scroller, which is right for a long build line in a
+ * wide plate and wrong in a 300px tile: an install command clipped at
+ * `…/vyrn/main/inst` is a stranger's script a reader is asked to pipe into a
+ * shell without seeing the end of it. These three places wrap instead — the
+ * install tiles, the index's install tabs, and the pillar cards (RFC-0106 M2).
+ * It is the same rule the sheet already applies to every `.cmd` at 640px. */
+.tiles .cmd code, [data-install] .cmd code, .cards .cmd code { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* A row of calls to action, which is not a command row: `.cmd` is what the
  * census counts as a command a reader types, and three links are not that. */
@@ -880,17 +891,6 @@ svg.chart g.row:hover a text { text-decoration-color: var(--accent); fill: var(-
 svg.chart text { font-family: var(--mono); font-size: var(--t-key); fill: var(--muted); }
 svg.chart text.val { fill: var(--ink); }
 svg.chart .cell { transition: fill-opacity 450ms ease-out; }
-
-/* The schematic: hairline boxes, two focal nodes, orthogonal wires. Names in
- * the page's sans, commands in mono — mono is for technical content, not a
- * blanket "developer" font. */
-svg.schematic .wire { fill: none; stroke: currentColor; stroke-opacity: 0.35; stroke-width: 1; }
-svg.schematic marker polygon { fill: currentColor; fill-opacity: 0.45; }
-svg.schematic .node rect { fill: none; stroke: currentColor; stroke-opacity: 0.28; stroke-width: 1; }
-svg.schematic .node.focal rect { stroke: var(--accent); stroke-opacity: 1; fill: var(--accent); fill-opacity: 0.08; }
-svg.schematic .name { font-family: var(--sans); font-size: var(--t-mono); font-weight: 600; fill: var(--ink); }
-svg.schematic .node.focal .name { fill: var(--accent); }
-svg.schematic .sub { font-family: var(--mono); font-size: var(--t-tick); fill: var(--muted); }
 
 /* Two series on one chart, one shown at a time. The markup holds both, so the
  * control switches an attribute rather than redrawing anything — and with no
@@ -1122,11 +1122,8 @@ svg.chart a .cell:hover { fill-opacity: 1 !important; }
    a forced palette to take away.)
    ------------------------ */
 @media (forced-colors: active) {
-  /* The playhead, and the row a control just changed. Both are a background
-   * wash on a code row, and both become the row's own left edge. */
-  .lines .cl.on, .lines .cl.changed { outline: 1px solid; outline-offset: -1px; }
-  /* A pill states its own word, so it needs no colour — but `live` and `warn`
-   * differ only by one, and a border keeps the shape. */
+  /* A pill states its own word, so it needs no colour; a border keeps the
+   * shape when the wash is gone. */
   .pill { border: 1px solid; }
 }
 
@@ -1557,6 +1554,15 @@ kbd {
   .rail a { white-space: nowrap; display: inline-flex; align-items: center; min-height: 44px; }
   .rail { padding: var(--s1) 0; }
 
+  /* A FIVE-BAR STRIP AT ITS OWN SIZE, INSIDE A SCROLLER (RFC-0106 M2).
+   * `svg.chart` is `width: 100%`, so a 904-unit viewBox in a 343px column
+   * scales every glyph by 0.38 and a 9px axis label paints at 3.4px. The
+   * sheet's own rule for a block wider than the column is that the BLOCK
+   * scrolls, not the page (RFC-0105 M4 row 28), and it is the rule that keeps
+   * the numbers beside the bars they belong to. */
+  .barstrip .stage { overflow-x: auto; }
+  .barstrip svg.chart { min-width: 904px; }
+
   /* A command is read before it is copied. At this width the button took two
    * thirds of the row and left the command a 120px window on 885px of text, so
    * the two stack and the command wraps rather than hides. */
@@ -1580,13 +1586,6 @@ kbd {
    * more at desktop widths, so the two stay. The upgrade is a browser fix. */
   code { word-break: break-all; }
 
-
-  /* Source rows keep their alignment — a line number, a lane and the line it
-   * belongs to cannot wrap independently — so they scroll, and they scroll in
-   * less space per character. */
-  .lines { font-size: var(--t-eyebrow); }
-  .lines .ln { width: 22px; padding-right: var(--s1); }
-  .lines .lanes { width: 24px; padding: 0 var(--s1) 0 4px; }
 
   /* A long unbroken word in a headline is the one thing `balance` cannot fix. */
   h1, h2, h3, h4 { overflow-wrap: break-word; }

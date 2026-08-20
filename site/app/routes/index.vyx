@@ -129,7 +129,7 @@ fn pillarCmd(i: Int64) -> String {
             <p class="eyebrow"><Icon name="bytesize:activity"/> Measured</p>
             <h2>As quick as C on a numeric kernel</h2>
             <p><code>{{ heroBench() }}</code>, one of eight. Five of the rest are slower than Rust, each with a named cause.</p>
-            <div class="plate" data-widget="bars">
+            <div class="plate barstrip" data-widget="bars">
                 <div class="stage">
                     <svg class="chart" :viewBox="heroBarsBox()" role="group" aria-label="Five engines running the same numeric kernel, fastest first">
 <g class="axis">
@@ -140,16 +140,29 @@ fn pillarCmd(i: Int64) -> String {
                             <title>{{ b.title }}</title>
                             <rect class="hit" x="0" :y="b.hy" :width="barRight()" :height="barRow()"/>
                             <rect :class="b.tone" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
-                            <a :href="b.href" :aria-label="b.title"><text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text></a>
+                            <!-- The row NAME is a label and not a link. Every
+                                 other bar chart on this site links each row at
+                                 its own source, and an `<a>` inside an `<svg>`
+                                 has no CSS box for padding to grow — five rows
+                                 were five sub-24px targets (RFC-0105 M4 row 29),
+                                 all five pointing at the one page the notice
+                                 under this plate already names. -->
+                            <text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text>
                             <text :x="barRight()" :y="b.y" :dy="barText()" text-anchor="end" class="val">{{ b.value }}</text>
                         </g>
                     </svg>
                 </div>
                 <details class="disc">
                     <summary>The machine, and the method</summary>
-                    <table class="matrix">
-                        <tr v-for="r in envRows()" :key="r[0]"><th scope="row">{{ r[0] }}</th><td>{{ r[1] }}</td></tr>
-                    </table>
+                    <!-- Inside a `.scroller`, like every other wide block on
+                         this site: at 375px the environment rows are 769px and
+                         a table with no scroller over it takes the document
+                         sideways with it (RFC-0105 M4 rows 26 and 28). -->
+                    <div class="scroller">
+                        <table class="matrix">
+                            <tr v-for="r in envRows()" :key="r[0]"><th scope="row">{{ r[0] }}</th><td>{{ r[1] }}</td></tr>
+                        </table>
+                    </div>
                 </details>
             </div>
             <p class="notice"><a href="/compare.html#numbers">All eight programs, and the five causes</a></p>
