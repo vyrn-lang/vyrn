@@ -1327,11 +1327,15 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // went with the C they named.
     // Map<String, V> runtime (RFC-0028).
     out.push_str(
-        "declare i64 @__vyrn_map_find(ptr, i64, ptr)
+        "declare i64 @__vyrn_map_find(ptr, i64, ptr, ptr, i64)
 ",
     );
     out.push_str(
         "declare void @__vyrn_map_reserve(ptr, i64)
+",
+    );
+    out.push_str(
+        "declare void @__vyrn_map_index_add(ptr, i64)
 ",
     );
     out.push_str(
@@ -3561,7 +3565,7 @@ impl<'a> Gen<'a> {
                 let vals = self.fresh_tmp();
                 let len = self.fresh_tmp();
                 let cap = self.fresh_tmp();
-                let m = "{ ptr, ptr, i64, i64 }";
+                let m = "{ ptr, ptr, i64, i64, ptr }";
                 self.emit(format!("{keys} = extractvalue {m} {v}, 0"));
                 self.emit(format!("{vals} = extractvalue {m} {v}, 1"));
                 self.emit(format!("{len} = extractvalue {m} {v}, 2"));
@@ -3570,6 +3574,14 @@ impl<'a> Gen<'a> {
                 self.copy_elems(&kb, &len, &Type::Str)?;
                 let vb = self.copy_buf(&vals, &len, &cap, &vll);
                 self.copy_elems(&vb, &len, &vt)?;
+                // The index is copied rather than rebuilt: it holds POSITIONS,
+                // and a copy keeps the capacity as well as the order, so every
+                // bucket still names the entry it named.
+                let ix = self.fresh_tmp();
+                let nb = self.fresh_tmp();
+                self.emit(format!("{ix} = extractvalue {m} {v}, 4"));
+                self.emit(format!("{nb} = mul i64 {cap}, 2"));
+                let ib = self.copy_buf(&ix, &nb, &nb, "i64");
                 let a = self.fresh_tmp();
                 let b = self.fresh_tmp();
                 let c = self.fresh_tmp();
@@ -3578,7 +3590,9 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{b} = insertvalue {m} {a}, ptr {vb}, 1"));
                 self.emit(format!("{c} = insertvalue {m} {b}, i64 {len}, 2"));
                 self.emit(format!("{d} = insertvalue {m} {c}, i64 {cap}, 3"));
-                Ok(d)
+                let e = self.fresh_tmp();
+                self.emit(format!("{e} = insertvalue {m} {d}, ptr {ib}, 4"));
+                Ok(e)
             }
             Type::Record(_) => {
                 let fields = self
@@ -3778,17 +3792,20 @@ impl<'a> Gen<'a> {
             // releases anything releases its keys. The elements first, then the
             // buffers they live in.
             Type::Map(_, vt) if matches!(self.rel_kind(ty), Some(DropKind::Deep(_))) => {
-                let m = "{ ptr, ptr, i64, i64 }";
+                let m = "{ ptr, ptr, i64, i64, ptr }";
                 let keys = self.fresh_tmp();
                 let vals = self.fresh_tmp();
                 let len = self.fresh_tmp();
                 self.emit(format!("{keys} = extractvalue {m} {v}, 0"));
                 self.emit(format!("{vals} = extractvalue {m} {v}, 1"));
                 self.emit(format!("{len} = extractvalue {m} {v}, 2"));
+                let ix = self.fresh_tmp();
+                self.emit(format!("{ix} = extractvalue {m} {v}, 4"));
                 self.release_elems(&keys, &len, &Type::Str)?;
                 self.release_elems(&vals, &len, &vt)?;
                 self.emit(format!("call void @free(ptr {keys})"));
                 self.emit(format!("call void @free(ptr {vals})"));
+                self.emit(format!("call void @free(ptr {ix})"));
                 Ok(())
             }
             Type::Array(_) | Type::SmallArray(..) | Type::Map(..) => {
@@ -4634,20 +4651,28 @@ impl<'a> Gen<'a> {
                 self.emit(format!("call void @free(ptr {d})"));
             }
             DropKind::FreeMap => {
-                // Free both of the map's final backing buffers (keys, values);
-                // elements are a safe leak, exactly as for arrays (RFC-0028).
+                // Free all three of the map's final backing buffers (keys,
+                // values, the hash index); elements are a safe leak, exactly as
+                // for arrays (RFC-0028).
                 let a = self.fresh_tmp();
                 let k = self.fresh_tmp();
                 let v = self.fresh_tmp();
-                self.emit(format!("{a} = load {{ ptr, ptr, i64, i64 }}, ptr {slot}"));
+                let ix = self.fresh_tmp();
                 self.emit(format!(
-                    "{k} = extractvalue {{ ptr, ptr, i64, i64 }} {a}, 0"
+                    "{a} = load {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}"
                 ));
                 self.emit(format!(
-                    "{v} = extractvalue {{ ptr, ptr, i64, i64 }} {a}, 1"
+                    "{k} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {a}, 0"
+                ));
+                self.emit(format!(
+                    "{v} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {a}, 1"
+                ));
+                self.emit(format!(
+                    "{ix} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {a}, 4"
                 ));
                 self.emit(format!("call void @free(ptr {k})"));
                 self.emit(format!("call void @free(ptr {v})"));
+                self.emit(format!("call void @free(ptr {ix})"));
             }
             // Phase 5: an aggregate owns its places. The walk is the type — and
             // in a generic instantiation the type still carries its parameters,
@@ -4838,13 +4863,16 @@ impl<'a> Gen<'a> {
                 out.push((d, false));
             }
             Some(DropKind::FreeMap) => {
-                let m = "{ ptr, ptr, i64, i64 }";
+                let m = "{ ptr, ptr, i64, i64, ptr }";
                 let k = self.fresh_tmp();
                 let vv = self.fresh_tmp();
+                let ix = self.fresh_tmp();
                 self.emit(format!("{k} = extractvalue {m} {v}, 0"));
                 self.emit(format!("{vv} = extractvalue {m} {v}, 1"));
+                self.emit(format!("{ix} = extractvalue {m} {v}, 4"));
                 out.push((k, false));
                 out.push((vv, false));
+                out.push((ix, false));
             }
             _ => {}
         }
@@ -5795,7 +5823,7 @@ impl<'a> Gen<'a> {
                         Type::Map(..) => {
                             let len = self.fresh_tmp();
                             self.emit(format!(
-                                "{len} = extractvalue {{ ptr, ptr, i64, i64 }} {v}, 2"
+                                "{len} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {v}, 2"
                             ));
                             return Ok((len, Type::Int));
                         }
@@ -5930,7 +5958,7 @@ impl<'a> Gen<'a> {
                 }
                 build
             }
-            // A map literal (RFC-0028): `[:]` is the empty `{ptr,ptr,len,cap}`
+            // A map literal (RFC-0028): `[:]` is the empty `{ptr,ptr,len,cap,idx}`
             // (buffers null, value type from context — the representation is
             // type-independent). A non-empty literal builds the map in a temp
             // slot via the same insert-or-update path as `m[k] = v`, so a
@@ -5940,13 +5968,13 @@ impl<'a> Gen<'a> {
             Expr::MapLit { entries, .. } => {
                 if entries.is_empty() {
                     return Ok((
-                        "{ ptr null, ptr null, i64 0, i64 0 }".into(),
+                        "{ ptr null, ptr null, i64 0, i64 0, ptr null }".into(),
                         Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
                     ));
                 }
-                let slot = self.fresh_alloca("{ ptr, ptr, i64, i64 }");
+                let slot = self.fresh_alloca("{ ptr, ptr, i64, i64, ptr }");
                 self.emit(format!(
-                    "store {{ ptr, ptr, i64, i64 }} {{ ptr null, ptr null, i64 0, i64 0 }}, ptr {slot}"
+                    "store {{ ptr, ptr, i64, i64, ptr }} {{ ptr null, ptr null, i64 0, i64 0, ptr null }}, ptr {slot}"
                 ));
                 // RFC-0037: derive each value's expected type from the enclosing
                 // storage boundary's Map type, if any.
@@ -5991,7 +6019,9 @@ impl<'a> Gen<'a> {
                 }
                 let val = build?;
                 let agg = self.fresh_tmp();
-                self.emit(format!("{agg} = load {{ ptr, ptr, i64, i64 }}, ptr {slot}"));
+                self.emit(format!(
+                    "{agg} = load {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}"
+                ));
                 Ok((agg, Type::Map(Box::new(Type::Str), Box::new(val))))
             }
             // A lambda literal in a v1 argument position is monomorphized away
@@ -7432,6 +7462,22 @@ impl<'a> Gen<'a> {
     /// slot holds now" — rule 4's own question, asked exactly as the element
     /// store one screen up asks it (`slot_owns` and `mentions_place`), because a
     /// new value that names the map could name the very bytes this frees.
+    /// The two fields a lookup reads on top of `keys` and `len`: the bucket
+    /// array and the capacity that sizes it (`cap * 2` buckets). Every
+    /// `__vyrn_map_find` call site takes them from the same aggregate it took
+    /// the other two from, which is why they are extracted together here.
+    fn map_index_of(&mut self, agg: &str) -> (String, String) {
+        let cap = self.fresh_tmp();
+        let ix = self.fresh_tmp();
+        self.emit(format!(
+            "{cap} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {agg}, 3"
+        ));
+        self.emit(format!(
+            "{ix} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {agg}, 4"
+        ));
+        (ix, cap)
+    }
+
     fn emit_map_set(
         &mut self,
         slot: &str,
@@ -7448,16 +7494,19 @@ impl<'a> Gen<'a> {
         let hdr = self.fresh_tmp();
         let keys = self.fresh_tmp();
         let len = self.fresh_tmp();
-        self.emit(format!("{hdr} = load {{ ptr, ptr, i64, i64 }}, ptr {slot}"));
         self.emit(format!(
-            "{keys} = extractvalue {{ ptr, ptr, i64, i64 }} {hdr}, 0"
+            "{hdr} = load {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}"
         ));
         self.emit(format!(
-            "{len} = extractvalue {{ ptr, ptr, i64, i64 }} {hdr}, 2"
+            "{keys} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr}, 0"
         ));
+        self.emit(format!(
+            "{len} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr}, 2"
+        ));
+        let (ix, cap) = self.map_index_of(&hdr);
         let idx = self.fresh_tmp();
         self.emit(format!(
-            "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {key})"
+            "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {key}, ptr {ix}, i64 {cap})"
         ));
         let found = self.fresh_tmp();
         self.emit(format!("{found} = icmp sge i64 {idx}, 0"));
@@ -7469,7 +7518,7 @@ impl<'a> Gen<'a> {
         self.emit_label(&upd_l);
         let vals0 = self.fresh_tmp();
         self.emit(format!(
-            "{vals0} = extractvalue {{ ptr, ptr, i64, i64 }} {hdr}, 1"
+            "{vals0} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr}, 1"
         ));
         let ep0 = self.fresh_tmp();
         self.emit(format!(
@@ -7498,17 +7547,23 @@ impl<'a> Gen<'a> {
         let keys2 = self.fresh_tmp();
         let vals2 = self.fresh_tmp();
         self.emit(format!(
-            "{hdr2} = load {{ ptr, ptr, i64, i64 }}, ptr {slot}"
+            "{hdr2} = load {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}"
         ));
         self.emit(format!(
-            "{keys2} = extractvalue {{ ptr, ptr, i64, i64 }} {hdr2}, 0"
+            "{keys2} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr2}, 0"
         ));
         self.emit(format!(
-            "{vals2} = extractvalue {{ ptr, ptr, i64, i64 }} {hdr2}, 1"
+            "{vals2} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr2}, 1"
         ));
         let kep = self.fresh_tmp();
         self.emit(format!("{kep} = getelementptr ptr, ptr {keys2}, i64 {len}"));
         self.emit(format!("store ptr {key}, ptr {kep}"));
+        // The key is in its slot, so the index can record where. `reserve` above
+        // grew the bucket array and rebuilt it, so this is the only entry it is
+        // missing — and the reason the append stays O(1).
+        self.emit(format!(
+            "call void @__vyrn_map_index_add(ptr {slot}, i64 {len})"
+        ));
         let vep = self.fresh_tmp();
         self.emit(format!(
             "{vep} = getelementptr {vll}, ptr {vals2}, i64 {len}"
@@ -7518,7 +7573,7 @@ impl<'a> Gen<'a> {
         self.emit(format!("{nl} = add i64 {len}, 1"));
         let lenp = self.fresh_tmp();
         self.emit(format!(
-            "{lenp} = getelementptr {{ ptr, ptr, i64, i64 }}, ptr {slot}, i64 0, i32 2"
+            "{lenp} = getelementptr {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}, i64 0, i32 2"
         ));
         self.emit(format!("store i64 {nl}, ptr {lenp}"));
         self.emit_term(format!("br label %{done_l}"));
@@ -10437,17 +10492,18 @@ impl<'a> Gen<'a> {
                     let vals = self.fresh_tmp();
                     let len = self.fresh_tmp();
                     self.emit(format!(
-                        "{keys} = extractvalue {{ ptr, ptr, i64, i64 }} {av}, 0"
+                        "{keys} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {av}, 0"
                     ));
                     self.emit(format!(
-                        "{vals} = extractvalue {{ ptr, ptr, i64, i64 }} {av}, 1"
+                        "{vals} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {av}, 1"
                     ));
                     self.emit(format!(
-                        "{len} = extractvalue {{ ptr, ptr, i64, i64 }} {av}, 2"
+                        "{len} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {av}, 2"
                     ));
+                    let (ix, cap) = self.map_index_of(&av);
                     let idx = self.fresh_tmp();
                     self.emit(format!(
-                        "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {iv})"
+                        "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {iv}, ptr {ix}, i64 {cap})"
                     ));
                     let found = self.fresh_tmp();
                     self.emit(format!("{found} = icmp sge i64 {idx}, 0"));
@@ -10932,14 +10988,15 @@ impl<'a> Gen<'a> {
             let keys = self.fresh_tmp();
             let len = self.fresh_tmp();
             self.emit(format!(
-                "{keys} = extractvalue {{ ptr, ptr, i64, i64 }} {mv}, 0"
+                "{keys} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {mv}, 0"
             ));
             self.emit(format!(
-                "{len} = extractvalue {{ ptr, ptr, i64, i64 }} {mv}, 2"
+                "{len} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {mv}, 2"
             ));
+            let (ix, cap) = self.map_index_of(&mv);
             let idx = self.fresh_tmp();
             self.emit(format!(
-                "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {kv})"
+                "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {kv}, ptr {ix}, i64 {cap})"
             ));
             let found = self.fresh_tmp();
             self.emit(format!("{found} = icmp sge i64 {idx}, 0"));
@@ -10968,16 +11025,19 @@ impl<'a> Gen<'a> {
             let keys = self.fresh_tmp();
             let len = self.fresh_tmp();
             let (kv, _) = self.gen_expr(&args[1])?;
-            self.emit(format!("{hdr} = load {{ ptr, ptr, i64, i64 }}, ptr {slot}"));
             self.emit(format!(
-                "{keys} = extractvalue {{ ptr, ptr, i64, i64 }} {hdr}, 0"
+                "{hdr} = load {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}"
             ));
             self.emit(format!(
-                "{len} = extractvalue {{ ptr, ptr, i64, i64 }} {hdr}, 2"
+                "{keys} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr}, 0"
             ));
+            self.emit(format!(
+                "{len} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr}, 2"
+            ));
+            let (ix, cap) = self.map_index_of(&hdr);
             let idx = self.fresh_tmp();
             self.emit(format!(
-                "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {kv})"
+                "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {kv}, ptr {ix}, i64 {cap})"
             ));
             let found = self.fresh_tmp();
             self.emit(format!("{found} = icmp sge i64 {idx}, 0"));
@@ -10995,7 +11055,7 @@ impl<'a> Gen<'a> {
             if self.region_depth == 0 {
                 let vals = self.fresh_tmp();
                 self.emit(format!(
-                    "{vals} = extractvalue {{ ptr, ptr, i64, i64 }} {hdr}, 1"
+                    "{vals} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr}, 1"
                 ));
                 let kp = self.fresh_tmp();
                 self.emit(format!("{kp} = getelementptr ptr, ptr {keys}, i64 {idx}"));
@@ -11023,10 +11083,10 @@ impl<'a> Gen<'a> {
             let keys = self.fresh_tmp();
             let len = self.fresh_tmp();
             self.emit(format!(
-                "{keys} = extractvalue {{ ptr, ptr, i64, i64 }} {mv}, 0"
+                "{keys} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {mv}, 0"
             ));
             self.emit(format!(
-                "{len} = extractvalue {{ ptr, ptr, i64, i64 }} {mv}, 2"
+                "{len} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {mv}, 2"
             ));
             let buf = self.fresh_tmp();
             self.emit(format!(
@@ -13235,9 +13295,11 @@ pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
         // field whose variant it has not tested.
         Type::Stream(_) => "{ ptr, i64, i64, i64, i64, i64 }".into(),
         // A `Map<String, V>` (RFC-0028) is two parallel growable buffers
-        // sharing one length/capacity: { ptr keys, ptr values, i64 len,
-        // i64 cap }. Keys are `ptr` (String); values are `llt(V)`-stride.
-        Type::Map(..) => "{ ptr, ptr, i64, i64 }".into(),
+        // sharing one length/capacity, plus the hash index over them:
+        // { ptr keys, ptr values, i64 len, i64 cap, ptr idx }. Keys are `ptr`
+        // (String); values are `llt(V)`-stride; `idx` is `cap * 2` buckets of
+        // i64, and the shim's `map_hash`/`map_slot` are what read it.
+        Type::Map(..) => "{ ptr, ptr, i64, i64, ptr }".into(),
         // A fixed-size array lowers to the LLVM value aggregate [N x T].
         Type::ArrayN(inner, n) => format!("[{n} x {}]", llt_of(&inner, types)),
         // A small-buffer array (RFC-0056) lowers to

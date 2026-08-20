@@ -143,26 +143,77 @@ static void vstr_setlen(char* s, unsigned long long n) {
    milestone of this RFC has retired since M2b.) */
 
 /* ---- Map<String, V> runtime (RFC-0028) ---------------------------------- */
-/* A Map lowers to { char** keys, char* vals, i64 len, i64 cap } — two parallel
-   growable buffers sharing one length/capacity, in first-insertion order. The
-   value buffer is raw bytes with a per-entry stride `esz` (the value type's
-   size, passed by the caller). Keys are stored by pointer (no copy — matching
-   the array element-store convention). Lookup is a linear strcmp scan. */
-typedef struct { char** keys; char* vals; long long len, cap; } VMap;
-/* Index of `key`, or -1. Operates on a raw keys buffer so read paths (`at`,
-   `has`) can call it with values extracted from an SSA aggregate. */
-long long __vyrn_map_find(char** keys, long long len, const char* key) {
-    long long i;
-    for (i = 0; i < len; i++) if (strcmp(keys[i], key) == 0) return i;
-    return -1;
+/* A Map lowers to { char** keys, char* vals, i64 len, i64 cap, i64* idx } — two
+   parallel growable buffers sharing one length/capacity, in first-insertion
+   order, plus a hash INDEX over them. The value buffer is raw bytes with a
+   per-entry stride `esz` (the value type's size, passed by the caller). Keys are
+   stored by pointer (no copy — matching the array element-store convention).
+
+   The index is what makes a lookup O(1) (RFC-0104's k-nucleotide row): `idx` is
+   an open-addressed bucket array of `cap * 2` slots holding an entry's position
+   PLUS ONE, so 0 is the empty slot. It indexes the insertion-ordered storage and
+   never reorders it — the observable order is still the arrays', which is the
+   thing RFC-0028 locked and parity pins.
+
+   Two invariants hold the arithmetic up. `cap` is 0 or a power of two, because
+   `reserve` below is the only thing that ever writes it; and `len <= cap` means
+   the table is at most half full, so a probe always reaches an empty slot and
+   the loops below need no bound of their own. */
+typedef struct { char** keys; char* vals; long long len, cap; long long* idx; } VMap;
+/* FNV-1a over the key's bytes. The hash is never observable — no two backends
+   have to agree on it, only on the insertion order — so this is the cheap one
+   rather than a shared one. To the NUL, which is exactly the equality `strcmp`
+   below decides by. */
+static unsigned long long map_hash(const char* k) {
+    unsigned long long h = 14695981039346656037ULL;
+    while (*k) { h ^= (unsigned char)*k++; h *= 1099511628211ULL; }
+    return h;
 }
-/* Ensure room for one more entry, growing both buffers (cap 0 -> 4, else 2x). */
+/* The bucket `key` belongs in: the one that holds it, or the first empty one
+   after where it hashes. One probe serves both readers — a lookup asks whether
+   the bucket is occupied, an insert writes into it. */
+static unsigned long long map_slot(char** keys, long long* idx, long long nb, const char* key) {
+    unsigned long long mask = (unsigned long long)nb - 1;
+    unsigned long long b = map_hash(key) & mask;
+    while (idx[b] && strcmp(keys[idx[b] - 1], key) != 0) b = (b + 1) & mask;
+    return b;
+}
+/* Rebuild the whole index from the entries. Called where positions move: a grow
+   (the bucket count changed) and a remove (the survivors shifted down). Both are
+   already O(len) for their own reasons, so this adds no order of growth. */
+static void map_reindex(VMap* m) {
+    long long nb = m->cap * 2, i;
+    if (nb <= 0) return;
+    memset(m->idx, 0, (size_t)nb * sizeof(long long));
+    for (i = 0; i < m->len; i++) m->idx[map_slot(m->keys, m->idx, nb, m->keys[i])] = i + 1;
+}
+/* Index of `key`, or -1. Operates on raw buffers so read paths (`at`, `has`) can
+   call it with values extracted from an SSA aggregate. */
+long long __vyrn_map_find(char** keys, long long len, const char* key, long long* idx, long long cap) {
+    unsigned long long b;
+    /* An empty map has no index yet, and a map with a `cap` has one — the pair
+       is `reserve`'s to keep, so a null `idx` under a non-zero `cap` is a bug
+       here rather than a case to fall back on. */
+    if (len <= 0 || cap <= 0) return -1;
+    b = map_slot(keys, idx, cap * 2, key);
+    return idx[b] ? idx[b] - 1 : -1;
+}
+/* Ensure room for one more entry, growing all three buffers (cap 0 -> 4, else
+   2x) and rebuilding the index, whose bucket count is a function of `cap`. */
 void __vyrn_map_reserve(VMap* m, long long esz) {
     if (m->len + 1 > m->cap) {
         m->cap = m->cap ? m->cap * 2 : 4;
         m->keys = (char**)__vyrn_realloc(m->keys, (unsigned long long)m->cap * sizeof(char*));
         m->vals = (char*)__vyrn_realloc(m->vals, (unsigned long long)m->cap * (unsigned long long)esz);
+        m->idx = (long long*)__vyrn_realloc(m->idx, (unsigned long long)m->cap * 2 * sizeof(long long));
+        map_reindex(m);
     }
+}
+/* Record the entry appended at position `i`, whose key is already in `keys[i]`.
+   The append itself is codegen's — it stores the key and the value and bumps the
+   length — so this is the one line of it the index needs. */
+void __vyrn_map_index_add(VMap* m, long long i) {
+    m->idx[map_slot(m->keys, m->idx, m->cap * 2, m->keys[i])] = i + 1;
 }
 /* Remove entry `i`, shifting later entries down so first-insertion order is
    preserved for the survivors (remove-then-insert therefore moves a key end).
@@ -181,6 +232,7 @@ void __vyrn_map_remove_at(VMap* m, long long i, long long esz) {
         memmove(m->vals + i * esz, m->vals + (i + 1) * esz, (size_t)(rest * esz));
     }
     m->len--;
+    map_reindex(m);
 }
 /* A snapshot copy of the key pointers (for `keys()`), owned by the fresh
    Array<String>; the map may then be mutated without disturbing the snapshot. */

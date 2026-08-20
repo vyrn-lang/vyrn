@@ -101,7 +101,7 @@ pub const SHAPES: &[(&str, &str)] = &[
     // A `Stream<T>` (RFC-0075 M2b): the array triple, then the producer's tag,
     // payload and cursor generation.
     ("Stream", "{ ptr, i64, i64, i64, i64, i64 }"),
-    ("Map", "{ ptr, ptr, i64, i64 }"),
+    ("Map", "{ ptr, ptr, i64, i64, ptr }"),
     ("Ref", "{ i64, i64 }"),
     ("Fn", "{ i64, i64 }"),
     // The vectors (RFC-0083). Four Vyrn types under four spellings and one
@@ -362,10 +362,13 @@ mod tests {
         let a = of_ll("{ ptr, i64, i64 }").unwrap();
         assert_eq!((a.size, a.align, &a.fields[..]), (24, 8, &[0, 8, 16][..]));
         // `Map<String, V>` — the ONE aggregate the shim also declares, as `VMap`.
-        let m = of_ll("{ ptr, ptr, i64, i64 }").unwrap();
+        // The fifth field is RFC-0104 work item 1's hash index, and it lands in
+        // the tail padding an i64-aligned struct had anyway: 24 bytes became 32,
+        // not 28.
+        let m = of_ll("{ ptr, ptr, i64, i64, ptr }").unwrap();
         assert_eq!(
             (m.size, m.align, &m.fields[..]),
-            (24, 8, &[0, 4, 8, 16][..])
+            (32, 8, &[0, 4, 8, 16, 24][..])
         );
         // Option/Result: the `i1` is a byte, then 7 bytes of hole.
         let o = of_ll("{ i1, i64, i64 }").unwrap();
