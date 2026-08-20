@@ -217,13 +217,18 @@ fn serve(
             inputs.opts,
             &inputs.importer_dir,
             &inputs.allowed,
+            &inputs.aliased,
             reads,
             path,
         )
         .map(|lit| Served::Lit(Box::new(lit)));
     }
-    let resolved =
-        vyrn_frontend::interp::gen_scoped_path(&inputs.importer_dir, &inputs.allowed, path)?;
+    let resolved = vyrn_frontend::interp::gen_scoped_path(
+        &inputs.importer_dir,
+        &inputs.allowed,
+        &inputs.aliased,
+        path,
+    )?;
     if mode == MODE_LIST {
         return match inputs.resolver.list(&resolved) {
             Ok(mut names) => {
@@ -255,8 +260,18 @@ fn serve(
             }
             Ok(Served::Bytes(0, bytes))
         }
-        Err(_) => {
+        Err(why) => {
+            let remote = vyrn_frontend::loader::is_remote(&resolved);
             reads.push((resolved, None));
+            if remote {
+                // A pinned dependency that cannot be produced ABORTS generation
+                // with the resolver's own refusal, exactly as
+                // `Interp::gen_read_file` does (RFC-0107 M2). The status alphabet
+                // here carries no message, so serving status 1 would print the
+                // canonical `readFile` wording and lose the remedy — and an
+                // answer that differs by engine is two answers.
+                return Err(why);
+            }
             Ok(Served::Bytes(1, Vec::new()))
         }
     }

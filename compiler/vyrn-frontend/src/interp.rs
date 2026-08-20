@@ -1862,6 +1862,16 @@ pub struct GenInputs<'a> {
     /// Resolved path prefixes the generator may read under (its constant path
     /// args). Empty ⇒ no filesystem access is permitted.
     pub allowed: Vec<String>,
+    /// RFC-0107 M2: those constant path arguments that name a manifest
+    /// DEPENDENCY, paired with the module key the import map resolves them to.
+    /// A mediated read spelling one of them reaches the pinned bytes instead of a
+    /// path that exists on no disk.
+    ///
+    /// This does not widen the sandbox. Every pair comes from the generator's own
+    /// constant arguments and its resolved key is one of `allowed`, so the
+    /// input-root rule decides exactly as before — an alias is a second SPELLING
+    /// of a declared root, not a new root.
+    pub aliased: Vec<(String, String)>,
     /// Step budget and output-size cap (guardrails).
     pub fuel: u64,
     pub max_output: usize,
@@ -1882,20 +1892,38 @@ pub struct GenInputs<'a> {
 /// constant path args). Returns the resolved resolver key, or the scoping trap
 /// message.
 ///
+/// `aliased` is the import-map step (RFC-0107 M2): an argument that names a
+/// manifest dependency resolves to the key the LOADER resolved it to, the same
+/// key a module specifier of that name would reach. Path arithmetic cannot do
+/// this — a dependency's target is a lock-pinned remote key or a path rooted at
+/// the MANIFEST's directory, neither of which is `importer_dir/arg` — which is
+/// why a `gen fn` could not read a pinned collection file before.
+///
+/// The input-root rule below still decides, on the resolved key: the loader
+/// derives `aliased` from the generator's own constant arguments and puts each
+/// resolved key into `allowed`, so an alias adds a SPELLING of a declared root
+/// and never a root.
+///
 /// Public, and a free function, because the wasm generation engine (RFC-0076)
 /// mediates its host imports with exactly this rule. Two implementations of a
 /// sandbox boundary is one too many.
 pub fn gen_scoped_path(
     importer_dir: &str,
     allowed: &[String],
+    aliased: &[(String, String)],
     arg: &str,
 ) -> Result<String, String> {
-    let joined = if importer_dir.is_empty() {
-        arg.to_string()
-    } else {
-        format!("{importer_dir}/{arg}")
+    let resolved = match aliased.iter().find(|(spelling, _)| spelling == arg) {
+        Some((_, key)) => key.clone(),
+        None => {
+            let joined = if importer_dir.is_empty() {
+                arg.to_string()
+            } else {
+                format!("{importer_dir}/{arg}")
+            };
+            crate::loader::normalize(&joined)
+        }
     };
-    let resolved = crate::loader::normalize(&joined);
     let ok = allowed
         .iter()
         .any(|root| resolved == *root || resolved.starts_with(&format!("{root}/")));
@@ -1925,16 +1953,22 @@ pub fn gen_module_interface_lit(
     opts: &crate::loader::LoadOptions,
     importer_dir: &str,
     allowed: &[String],
+    aliased: &[(String, String)],
     reads: &mut Vec<GenRead>,
     path: &str,
 ) -> Result<Expr, String> {
     // Resolve like a module specifier (`.vyrn` appended), scoped like readFile.
-    let spec = if path.ends_with(".vyrn") || path.ends_with(".json") {
+    // A manifest dependency is left ALONE: the import map answers for the whole
+    // spelling, and its target already carries the extension.
+    let spec = if path.ends_with(".vyrn")
+        || path.ends_with(".json")
+        || aliased.iter().any(|(spelling, _)| spelling == path)
+    {
         path.to_string()
     } else {
         format!("{path}.vyrn")
     };
-    let resolved = gen_scoped_path(importer_dir, allowed, &spec)?;
+    let resolved = gen_scoped_path(importer_dir, allowed, aliased, &spec)?;
     let source = resolver.read(&resolved).map_err(|e| {
         format!(
             "moduleInterface {}: {e}",
@@ -2069,6 +2103,7 @@ pub fn generate_interpreted(
         opts: inputs.opts,
         importer_dir: inputs.importer_dir,
         allowed: inputs.allowed,
+        aliased: inputs.aliased,
         reads: RefCell::new(Vec::new()),
         fuel: std::cell::Cell::new(inputs.fuel),
     });
@@ -2299,6 +2334,9 @@ pub(crate) struct GenCtx<'a> {
     /// Resolved path prefixes the generator may read under — its constant path
     /// arguments. A mediated read outside all of them is a trap.
     allowed: Vec<String>,
+    /// The import-map step for those arguments that name a manifest dependency
+    /// (RFC-0107 M2): `(spelling, resolved module key)`.
+    aliased: Vec<(String, String)>,
     /// Every input read, in order: `(resolved path, bytes)`. Folded into the
     /// content-addressed cache key so a changed input invalidates the cache.
     reads: RefCell<Vec<GenRead>>,
@@ -2369,7 +2407,7 @@ impl<'a> Interp<'a> {
     /// (its constant path args). Returns the resolved key or a scoping trap.
     fn gen_scoped_path(&self, arg: &str) -> Result<String, Ctrl> {
         let g = self.gen.as_ref().expect("gen context");
-        gen_scoped_path(&g.importer_dir, &g.allowed, arg).map_err(Ctrl::Err)
+        gen_scoped_path(&g.importer_dir, &g.allowed, &g.aliased, arg).map_err(Ctrl::Err)
     }
 
     /// Mediated `readFile` (RFC-0021): read through the resolver, record the
@@ -2395,10 +2433,25 @@ impl<'a> Interp<'a> {
                     Box::new(Val::Str(std::rc::Rc::new(content))),
                 ))
             }
-            Err(_) => {
+            Err(why) => {
                 // A read that FAILED is recorded too: the generator branched on
                 // "not there", so the entry must miss once the file appears.
+                let remote = crate::loader::is_remote(&resolved);
                 g.reads.borrow_mut().push((resolved, None));
+                if remote {
+                    // A PINNED dependency that cannot be produced is not a
+                    // condition to branch on — it is "locked but not cached" or
+                    // "the upstream changed under an immutable URL", each with a
+                    // remedy the resolver already spells, and each a broken build.
+                    // So it aborts the generation with that refusal verbatim (the
+                    // one a module import of the same key prints) rather than
+                    // becoming an `Err` value under the canonical `readFile`
+                    // wording, which would hide the remedy. The wasm generation
+                    // engine refuses the same read the same way, because its
+                    // status alphabet carries no message and an answer that
+                    // differs by engine is two answers.
+                    return Err(Ctrl::Err(why));
+                }
                 Ok(Val::Result(
                     false,
                     Box::new(Val::Str(std::rc::Rc::new(crate::trap::io_at(
@@ -2463,6 +2516,7 @@ impl<'a> Interp<'a> {
             g.opts,
             &g.importer_dir,
             &g.allowed,
+            &g.aliased,
             &mut reads,
             path,
         );
@@ -6615,6 +6669,26 @@ impl<'a> Interp<'a> {
             (Type::Named(_), Val::Record(_, Some(stamped))) => {
                 self.stamp_only(ty, d).is_some_and(|n| **stamped == *n)
             }
+            // A sized int ALREADY at this width and signedness, holding a value
+            // that wrapping would not move, is nothing to do. The type is not the
+            // identity (`IntN` wraps, which is why `coercion_is_identity` says
+            // no), but this VALUE is already where wrapping would leave it, and
+            // the guard proves that rather than assuming it.
+            //
+            // The cost this removes is not per int, it is per `Array<UInt8>`
+            // BOUNDARY: without the arm every element answers `false`, so coerce
+            // rebuilds the whole array — on each call, for every `std/jsonread` /
+            // `std/scan` / `std/strings` function whose parameter is a byte array
+            // (RFC-0014's `bytes(s)`). Measured on a 43 kB document through
+            // `parseJson` under a `gen fn`: see RFC-0107's M2 section.
+            (
+                Type::IntN { bits, signed },
+                Val::IntN {
+                    v,
+                    bits: b,
+                    signed: s,
+                },
+            ) => bits == b && signed == s && wrap_intn(*v, *bits, *signed) == *v,
             (
                 Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _),
                 Val::Array(items),
