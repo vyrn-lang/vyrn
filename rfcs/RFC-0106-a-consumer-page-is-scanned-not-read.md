@@ -1,9 +1,11 @@
 # RFC-0106 — A Consumer Page Is Scanned, Not Read
 
-- **Status:** **M0 measured; no page changed.** See
+- **Status:** **M1 shipped: the shell.** See
   [M0 — as landed](#m0--as-landed) for the census, the ceilings every later
   milestone is held to, and four things the measurements contradict in the
-  design below. Milestones below; a milestone that fails its gate says so in
+  design below, and [M1 — as landed](#m1--as-landed) for the eight items, the
+  three defects M1 found in its own earlier commits, and the two ceilings it
+  cannot meet. Milestones below; a milestone that fails its gate says so in
   this file.
 - **Depends on:** RFC-0105 (the site this redesigns — its two-front split,
   theme, accessibility checklist, and gates all survive and bind this work),
@@ -111,7 +113,8 @@ adjective. **Gate met** — [M0 — as landed](#m0--as-landed).
 search overlay and its build-time index, OG meta, redirect stubs, copy-page,
 RSS. Content untouched; every page ships at every commit. Gate: the search
 answers on every page without script falling back sanely; every old URL
-resolves; the a11y checklist rows for the new controls pass.
+resolves; the a11y checklist rows for the new controls pass. **Gate met** —
+[M1 — as landed](#m1--as-landed).
 
 **M2 — index and install.** As designed above, including the CI-recorded
 demo. Gate: index page-weight inside M0's budget with the playground lazy;
@@ -668,6 +671,312 @@ difference is in what was being counted and not in what was published; 172 is
 the number `site/export.vyrn` prints today: 11 top-level pages (`/backstage`
 among them), 13 guide chapters, 37 reference modules, 4 package pages, 106
 design records, and the benchmarks page.
+
+## M1 — as landed
+
+The shell, in eight items. Every number below was produced by running
+something: `site/export.vyrn` over the working tree, then the site's own 188
+test blocks, then `node --test site/test/*.mjs` over the tree the export wrote,
+then a browser against that tree served over HTTP at twelve viewport widths.
+Where a figure comes from arithmetic it says so.
+
+**Content is untouched.** Not one word of a page's prose moved: the word
+budget is M5's and the pages it applies to are M2's, M3's and M4's.
+
+### The eight items
+
+**1. The navigation, the call to action, and the header.** Nine flat rows
+became five groups — Docs · Reference · Explore · Releases · Play — plus the
+persistent Install button and the theme control, in one `<nav>` rendered once,
+which is a `<details>` disclosure at 640px and a row above it. Two of the five
+names are LABELS and not paths, and M0's contradiction 2 is why. The masthead
+DECLARES 64px, and it is 64px on every one of the thirteen consumer pages at
+every width measured: 320, 375, 414, 640, 641, 700, 767, 768, 900, 1024, 1280
+and 1600. It was 152px at 375 and 100px at 768.
+
+**2. The type scale.** 34 literal font sizes over 1,729 lines became 22 named
+steps; 86 declarations were rewritten and none changed value. One value moved
+and only its floor: the display step's clamp floor, from 2.1rem to 2.6rem, so
+the phone hero is 41.6px instead of 33.6px and every width from 641px up is
+unchanged to the pixel. `site/test/typescale.test.mjs` fails on a font size in
+the sheet that names neither a token nor one of nine listed one-offs.
+
+**3. The search overlay and its index.** `/` opens it on every page, Esc
+closes it, the arrows walk the results and wrap, Enter follows the selection,
+and Tab returns to the field so nothing behind an `aria-modal` dialog is
+reachable. Focus is taken from wherever the reader was and given back to the
+same element. The index is ONE file, fetched on the first open and never
+inlined; the panel is empty in the document and `hidden`, so nothing in it is
+in the tab order until it opens. Without script there is no overlay and a
+`<noscript>` says what the site does instead — the reference landing filters
+its own module list with `data-q` and no script at all.
+
+**4. OG meta.** `og:title`, `og:description`, `og:type` and `twitter:card` on
+all 172 published routes bar the two stubs. DERIVED, not tabulated: a page
+already carries a `<title>` and a `<meta description>`, so the card is those
+two strings under the three names a crawler reads them by, and it works the
+same on a guide chapter, a reference module, a package page and a design
+record with no per-page list to maintain.
+
+**5. Copy page as markdown.** 50 files — 13 guide chapters and 37 reference
+modules — written by `site/app/pagemd.vyrn` from the same chapter prose and
+the same generated reference the pages render. The control is a LINK to the
+file; with a clipboard, a press copies it and the page does not move.
+
+**6. RSS.** `releases.xml`, one item per tag out of `site/data/history.json`,
+newest first, with `atom:link rel="self"` and RFC-822 `pubDate`s. Declared in
+the head of every page, so a reader who pastes any page of the site into an
+aggregator finds it.
+
+**7. The two renamed routes.** `/philosophy` → `/why-vyrn` and `/editors` →
+`/docs/editors`, each old path publishing a document with three separate ways
+out: the `http-equiv` refresh a browser may decline, the canonical a search
+engine reads, and a visible link, which is all a screen reader has before the
+hop fires.
+
+**8. The playground leaves the static import graph.** `play.js`,
+`play-wasm.js`, `wasi-min.js` and `hero.js` are `import()` at the point of use,
+so twelve of the thirteen pages stop fetching a playground they never run.
+
+### The search index, as shipped
+
+**448 entries, 42,797 bytes raw, 6,564 gzipped, against M0's ceiling of
+8,000.** One file, four sections, and the backstage nowhere in it — all three
+asserted on the written file by `site/test/search.test.mjs`, which also fetches
+every row's URL and fails on a result that would 404.
+
+Two measured decisions got it there, and both are about what a ROW carries,
+never about coverage — the 448 entries are the census's 448:
+
+- **A kind and not a signature.** 354 of the 448 rows are exports, so what
+  they carry decides the file. With each signature in the row the index was
+  70,080 bytes and 13,483 gzipped — 68% over. `fn` is four bytes, and the
+  signature is on the page the row leads to, one press away.
+- **No fragment, and the row still lands on the export.** `#e-emit` is the
+  row's own title with three bytes in front of it, so carrying it wrote 354
+  names into the file twice: **7,763 gzipped with it, 6,564 with it derived by
+  the overlay.** The derivation is one line of `widgets.js`, beside the
+  reference landing's own filter, which built the same fragment the same way
+  before this milestone. The test that replaced the fragment is stronger than
+  the fragment was: it opens each of the 37 module pages and asserts the id is
+  there, which a string this index wrote itself could never have caught.
+
+**The gate was shown failing.** Putting the signature back in `d` gave
+`search.json is 10405 bytes gzipped (58515 raw), ceiling 8,000` and one failed
+block; reverted, green again. The export makes the raw half of the same check —
+80,000 bytes, from the census's own 8.0 ratio — because RFC-0014 gives that
+program `readFile`, `writeFile` and `listDir` and no compressor, and a runaway
+index fails whichever half it reaches first.
+
+**The guide contributes 41 rows and not 13, and no markup changed.** M0 looked
+for an `id` on the 28 `<h2>`/`<h3>` headings in the chapters and found none.
+The id is one element up: every section is a `<section id="…">`, which is what
+a chapter's anchor has always been.
+
+### One table, three readers, and four titles that had drifted
+
+`app/meta.vyrn` is the ten consumer pages, each with its own title and its own
+sentence. Before it, every page on the site shipped the SAME `<meta
+description>` — one paragraph about the language, from `pageHead` — so a link
+to `/install` and a link to `/compare` previewed identically and neither said
+what was on the other end. The table is read by the page's own `<head>`
+(through `pageHeadOf`), by the OpenGraph card the export stamps, and by the
+search index's Docs rows, so a page cannot say one thing to a crawler and
+another in the overlay.
+
+It TAKES THE PATH and not the title, and the reason is what happened when the
+export first asserted that the two agreed. **Four of the ten titles were
+wrong:**
+
+| Route | Title it shipped | Title it ships now |
+|---|---|---|
+| `/why-vyrn` | `Philosophy — Vyrn` | `Why Vyrn — Vyrn` |
+| `/docs` | `Docs — Vyrn` | `Reference — Vyrn` |
+| `/guide` | `The guide — Vyrn` | `Docs — Vyrn` |
+| `/explore` | `The Vyrn registry — packages you can install` | `Explore — Vyrn` |
+
+The first is a rename this milestone made two commits earlier and left in the
+`<title>`. The other three are the masthead's five names disagreeing with the
+tab: the row called Docs is the book and the row called Reference is `std/`,
+and the titles said the opposite of that on both.
+
+### Three defects M1 found in its own earlier commits
+
+All three were live in the tree before this commit, all three were missed by
+the verification the commits that introduced them recorded, and the reason is
+the same in every case: **the check that was run was not the check the claim
+needed.**
+
+**A phone had no navigation at all.** `.menu > summary` is `display: none` in
+the base rules, and the 640px block that turns the `<details>` back into a
+disclosure restyled that summary — colour, letter-spacing, cursor, the marker —
+without restoring its `display`. So the `Menu` control was a 0x0 box at every
+width from 320 to 1600, and the five navigation rows were unreachable on a
+phone. The commit that built the shell reported "the summary takes focus, the
+platform's own activation opens and closes it" — read off the DOM, where the
+element is present and its `open` attribute does toggle; a control with no box
+is invisible to that question and obvious to `getBoundingClientRect`.
+
+**The header was 129px from 641px to 767px.** `Play` wrapped to a second row
+there, so the row the same commit declared to be 64px was twice that. It was
+measured at 375 and at 768 — M0's two audited widths — and 641 to 767 is
+neither. The Search opener then took 768px into the same state, because the
+five names want 381px of the 348px the row had left once three controls were in
+it; tightening the masthead's own gaps from 24px to 16px bought 16px and fixed
+768, and did nothing for 641. The fix is
+the rule that commit's own predecessor established for `.tabs`: a row whose
+item count is not a function of the viewport scrolls inside its own box. The
+nav is `flex-wrap: nowrap` with `overflow-x: auto` now, so the masthead is
+64px at every width and at 641px the last 112px of the row is a scroll rather
+than a second line.
+
+**The masthead overflows by 46px at 320px, and this one is not fixed.** The
+Search opener is 70px of a row that had 174px of controls and now has 252,
+and 320px is 32px of padding plus 288px of usable row. At 375px it fits with
+9px to spare, which is why the audited widths do not see it. It is left here
+rather than fixed because every fix is a decision about which control loses
+its word — the opener's label, the theme control's state, the CTA's verb — and
+**M4 owns the shell's words.** M4 has the arithmetic above; M5 adds 320px to
+the standing checklist, which today has 375 and 768 and no third column.
+
+### The mobile audit, re-run
+
+Thirteen consumer pages, at M0's two widths, in a browser against the exported
+tree:
+
+| Row | At 375px | At 768px |
+|---|---|---|
+| masthead height (31) | 64px on all 13 | 64px on all 13 |
+| document scrolls sideways (26) | none | none |
+| element outside the viewport with no scroller over it (27, 28) | none | none |
+| sub-24px targets (29) | 76, of which 54 are SVG and 21 are words in sentences | 88, of which 54 are SVG and 21 are words in sentences |
+| `/docs` alone (29) | 37, all 37 SVG | 37, all 37 SVG |
+
+Row 29 is still not a pass and the remainder is still what M0 named: an `<a>`
+inside an SVG has no CSS box for padding to grow, and **M3 rebuilds both
+charts.** The one element outside the viewport on every page is the skip link,
+parked at -9999px until it takes focus, which is what a skip link is.
+
+### The 161 leaf pages
+
+**M0's constraint on the leaves survives; the byte-identity that was used to
+check it does not, and could not.** The search overlay and its `<noscript>` are
+elements in every body — that is what "the search answers on every page" means
+— so every page's body is 711 to 802 bytes longer than it was. What M0 asked
+for is that the 160 leaf pages compute the font sizes they computed before, and
+that is held by an attribute rather than by a byte count: the display step is
+raised on `[data-landing]` alone, `site/test/typescale.test.mjs` proves that is
+the only selector in the sheet that redefines a type token, and
+`site/export.vyrn` asserts per published document that the nine landing pages
+carry the attribute and no leaf does.
+
+Measured instead, against the tree exported at the commit before this one:
+remove the four things M1 adds to the SHELL of a page — the card meta, the feed
+link, the Search opener with the overlay and its `<noscript>`, and the copy-page
+control — and **55 of 55 consumer leaves and 106 of 106 design records are
+byte-identical.** Nothing in a page's own content moved.
+
+### Page weight, and the ceiling that is still out of reach
+
+The browser's own request list on a cold load, gzipped at level 9, before and
+after this commit's own additions:
+
+| Page | Requests | Before | After | Delta |
+|---|---:|---:|---:|---:|
+| `/compare` | 9 | 87,199 | 90,978 | **+3,779** |
+| `/` | 10 | 83,899 | 87,716 | **+3,817** |
+
+**+3,436 of it is `widgets.js`** — the overlay, its listeners and the
+copy-page control, which is one file every page already fetched. The rest is
+the document: 287 bytes on `/compare` for the opener, the panel, the
+`<noscript>` and five head elements.
+
+**M0's 55,000-gzipped ceiling for a non-play page is further away than when
+M0 wrote it, and the arithmetic was already recorded as unreachable in M1.**
+Deferring the navigator pair — `vyrn-nav.js` and `vyrn-dom.js`, 20,275
+gzipped between them — is the item that closes most of the gap and it is
+RFC-0072's ground, not this milestone's. A `/compare` document is 12,705
+gzipped on its own against a 55,000 ceiling that was computed for `/`, whose
+document is 5,217. **The ceiling is a `/` ceiling as written**, and M2 owns
+`/`.
+
+Two files are outside every total above, and both deliberately: the search
+index (6,564 gzipped) is fetched on the first `/` press, and the feed (505) is
+fetched by no page at all.
+
+### The stylesheet, and where 1,813 bytes came from
+
+**88,878 bytes raw and 26,520 gzipped, against M0's 90,000 and 27,000.** M1
+was given 6 KB over the census's 84,123 and spent 4,755 of it: 22 type tokens,
+the overlay's ten rules, the header's declared height, and the two fixes above.
+
+It did not fit at first. The sheet reached 90,691 — 691 over — with the nav
+scroller and the one `display` that gives a phone its navigation back, and both
+of those are the difference between a shell that works and one that does not.
+The bytes came from the **dash rules of the banner comments**: 37 lines of
+them, every run shortened to 24 dashes, for **1,813 bytes and not one
+word.** 48% of
+this sheet is comment prose, which is deliberate and stays; a row of hyphens
+is not prose.
+
+**A LEAD FOR M2, MEASURED AND NOT ACTED ON.** A scan of the sheet's 200 class
+selectors against every `class` attribute in the exported tree, every
+`className` and `classList` call in the browser modules, and every template in
+`site/app/` finds **17 that appear nowhere.** Seven are false positives — a
+file extension inside a comment reads as a class — and ten are candidates:
+`copyfail`, `metric`, `metrics`, `spec`, `diffline`, `warn`, `warning`, `feed`,
+`tag`, `exports`. `.feed` is the releases list RFC-0105 M1 deleted. They are
+not deleted here because a class can be built by concatenation in a `.vyrn`
+generator, which no scan of attributes can see, and a milestone about the shell
+is the wrong place to delete a rule on a heuristic. M2 needs bytes and this is
+where they are.
+
+### The overlay's accessibility, and how it was checked
+
+**Keyboard-walked against the exported tree, through the real listeners, with
+dispatched events — and the method is named because the pane in this session
+would not composite frames**, so no real key press or click reached the page
+and no screenshot could be taken. Layout is computed either way, which is why
+every geometry above is trustworthy; input routing is not, so every keystroke
+below was a `KeyboardEvent` dispatched at the element a reader's key would
+reach. The listeners, the focus moves, the fetch and the DOM are the real ones.
+
+| What | Result |
+|---|---|
+| `/` from a link in the body | opens; focus is the field; the index is fetched, once |
+| `/` while a field or an editor has focus | does not open — a page with a module filter or a playground must not swallow a slash |
+| typing | `install` → 4 hits under Docs · `shelf` → 1 under Packages · `alpha` → 1 under Releases · `json` → 39 under Reference · `zzzznothing` → `Nothing matches "zzzznothing".` |
+| Down, Down, Up | row 0, row 1, row 0; exactly one row carries `aria-selected`; focus never leaves the field |
+| Up from the first row | wraps to the end of the list — index 37 of 39 after two presses |
+| Tab | `preventDefault`, focus back in the field |
+| Enter | follows the selected row to `docs/std/json.html#e-emit`, and the dialog is closed BEFORE the hop |
+| Esc | closes, empties the list, and returns focus to the element the reader came from |
+| the whole document | no element carries a positive `tabindex` |
+
+**One defect found in the overlay by this walk, and fixed.** "Sectioned" was
+not true. The results were sorted by rank alone and a heading was drawn
+whenever the section changed, so `text` gave
+`Reference · Docs · Reference · Docs · Reference` — five headings for two
+sections, which is a list that is not sectioned. Ranking and grouping answer
+different questions and are two passes now: the rank decides WHICH forty rows a
+reader sees and runs over all 448, then the section decides what order those
+forty appear in. `map`, `text` and `vyrn` each draw two headings now, and each
+section appears once.
+
+### Gates
+
+- `scripts/site-history.py`, then `vyrn run site/export.vyrn out`: **174
+  routes, 13 assets, 50 markdown twins, one index, one feed.**
+- the site's own test loop, declared against ran, over `site/export.vyrn` and
+  all 26 modules in `site/app/`: **188 blocks declared, 188 ran.**
+- `node --test site/test/*.test.mjs` over the exported tree: **27 tests, 27
+  pass** — basepath at three mount points and `file://`, contrast, the import
+  lines, the type scale, the index and its ceiling, and the feed.
+- `vyrn fmt --check` on `site/app/*.vyrn`, `site/guide/*.vyrn` and
+  `site/export.vyrn`: clean. The three `.vyx` templates this milestone touched
+  are hand-formatted — `vyrn fmt` does not read `.vyx`.
+- `cargo test --release -p vyrn-cli --test rfc_index`: 4 passed.
+- No compiler change. No `std/` change.
 
 ## What this RFC does not do
 

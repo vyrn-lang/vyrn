@@ -1,0 +1,279 @@
+/// The search index, built while the site builds (RFC-0106 M1).
+///
+/// One file for the whole consumer site, fetched on the first `/` press and
+/// never in a document. The census measured a prototype of exactly this shape at
+/// 42,235 bytes and 5,255 gzipped, against a ceiling of 8,000 gzipped: less than
+/// `theme.js` plus `hero.js`, both of which every page already fetched before
+/// first paint, and a fifth of the stylesheet.
+///
+/// ONE FILE AND NOT SIX. The overlay is sectioned, so it needs every section on
+/// the first keystroke. Splitting it buys nothing and costs six requests.
+///
+/// THE BACKSTAGE IS NOT IN IT. Including the 106 design records and their
+/// headings multiplies the index by 5.1 in entries and 6.9 gzipped, to serve the
+/// one reader RFC-0106 exempts, and it would put "M4 — as landed" and "The token
+/// census" in front of a consumer who typed `json`. If a backstage search is
+/// ever wanted it is this generator with a different source list, and a second
+/// file the consumer never fetches.
+///
+/// FOUR SECTIONS, and they are the overlay's headings rather than the source
+/// lists: Docs (the book's chapters, their sections, and the ten consumer
+/// pages), Reference (every module and every name it exports), Packages, and
+/// Releases. A reader types a word, not a provenance.
+import { emit, Json, JsonField } from "std/json"
+import { apiModules, apiEntries, apiHref } from "./docs"
+import { chapterSlugs, chapterOf, chapterHref } from "./guide"
+import { packages, packageHref } from "./packages"
+import { pageMetas } from "./meta"
+import { hasRelease, releaseTag, releaseDate, releasePre } from "./repo"
+import { hrefOf } from "./nav"
+import { substring, indexOf, replace } from "std/strings"
+
+/// One row of the index: the section it appears under, its title, where it goes,
+/// and one line about it.
+///
+/// The field names are one byte each, and that is the difference between 42 KB
+/// and 50 KB across 448 rows. The reader of this JSON is
+/// `site/public/widgets.js` and nothing else.
+export type FindRow = { s: String, t: String, u: String, d: String }
+
+/// The whole index, in the order the overlay shows it.
+export fn rows() -> Array<FindRow> {
+    let mut out: Array<FindRow> = []
+    // Docs: the ten consumer pages, then the book.
+    for m in pageMetas() {
+        out.push(FindRow { s: "Docs", t: m.title.copy(), u: hrefOf(m.path), d: m.blurb.copy() })
+    }
+    for slug in chapterSlugs() {
+        let ch = chapterOf(slug)
+        out.push(FindRow { s: "Docs", t: ch.title.copy(), u: chapterHref(slug), d: oneLine(ch.lede) })
+        // A section of a chapter. The `<section>` carries the anchor already —
+        // the census looked for an id on the `<h2>` and found none, and the id is
+        // one element up, which is why this needs no markup change and the guide
+        // contributes 41 rows rather than 13.
+        for sec in ch.sections {
+            out.push(FindRow { s: "Docs", t: "\{ch.title} — \{sec.heading}", u: "\{chapterHref(slug)}#\{sec.anchor}", d: oneLine(firstOf(sec.prose)) })
+        }
+    }
+    // Reference: a module, then each name it exports.
+    for mod in apiModules() {
+        out.push(FindRow { s: "Reference", t: "std/\{mod.name}", u: apiHref(mod.name), d: oneLine(mod.summary) })
+        for e in apiEntries(mod.name) {
+            // A KIND AND NOT A SIGNATURE, and it is a size decision measured
+            // rather than a taste: 354 of the 448 rows are exports, so what
+            // they carry decides the file. With the signature the index was
+            // 70,080 bytes and 13,483 gzipped, against M0's ceiling of 8,000 —
+            // and a signature is on the page the row leads to, one press away.
+            // The kind is four bytes and it is the thing a list of names is
+            // missing.
+            //
+            // NO FRAGMENT, AND THE ROW STILL LANDS ON THE EXPORT. `#e-emit` is
+            // this row's own title with three bytes in front of it, so carrying
+            // it here writes 354 names into the file twice: with the fragment the
+            // index was 7,763 gzipped against M0's 8,000 and with it derived it
+            // is 6,564. The overlay rebuilds it from `t` — one line, in
+            // `widgets.js`, beside the comment that says so — and
+            // `site/test/search.test.mjs` opens the module page and asserts the
+            // id is there, which is a stronger check than a string this file
+            // could have written wrong.
+            out.push(FindRow { s: "Reference", t: "\{e.name} — std/\{mod.name}", u: apiHref(mod.name), d: e.kind.copy() })
+        }
+    }
+    for p in packages() {
+        out.push(FindRow { s: "Packages", t: p.name.copy(), u: packageHref(p.slug), d: oneLine(p.summary) })
+    }
+    // Releases: the page, and the release it is about. The tag is baked into
+    // `site/release.txt` before the export runs, so this is one row and not a
+    // history — a reader searching for a version is searching for the one that
+    // exists.
+    out.push(FindRow { s: "Releases", t: "Releases", u: hrefOf("/releases"), d: "Every published release, and how a release is made." })
+    if hasRelease() {
+        let kind = if releasePre() { "pre-release" } else { "release" }
+        out.push(FindRow { s: "Releases", t: releaseTag(), u: hrefOf("/releases"), d: "Published \{releaseDate()} as a \{kind}." })
+    }
+    return out
+}
+
+/// The first element of `xs`, or "". A chapter section can open with a block
+/// rather than a paragraph.
+fn firstOf(xs: Array<String>) -> String {
+    if xs.length == 0 {
+        return ""
+    }
+    return xs[0].copy()
+}
+
+/// `text` as one line of plain words: no markup, no newline, and short enough
+/// that 448 of them are still one small file.
+///
+/// The sources are prose the site renders as HTML — a `///` line from `std/`, a
+/// chapter's lede — so a tag has to go rather than be escaped into the index as
+/// text a reader would see in a result row. Everything from a `<` to the next
+/// `>` is dropped, which is all this needs: the input is the site's own
+/// generated markup and not arbitrary HTML.
+fn oneLine(text: String) -> String {
+    let flat = replace(replace(stripTags(text), "\n", " "), "  ", " ")
+    // 60 bytes, which is what a result row shows on a phone. The
+    // first version cut at 120 and the index was 68% over M0's
+    // ceiling for the sake of text no row displayed.
+    if flat.byteLength <= 60 {
+        return flat.copy()
+    }
+    return substring(flat, 0, boundaryAt(flat, 59)) + "…"
+}
+
+/// The largest offset at or below `max` that is a character boundary.
+///
+/// `substring` traps on an offset inside a multi-byte character, and this
+/// project's prose is full of em dashes — cutting a doc line at a fixed 119
+/// bytes trapped on the first sentence that had one. A UTF-8 continuation byte
+/// is `10xxxxxx`, so walking back off those lands on the lead byte of the
+/// character that would have been split.
+fn boundaryAt(text: String, max: Int64) -> Int64 {
+    let mut at = max
+    while at > 0 && text[at] >= 128 && text[at] < 192 {
+        at = at - 1
+    }
+    return at
+}
+
+/// `text` with every `<…>` removed.
+fn stripTags(text: String) -> String {
+    let mut out = ""
+    let mut rest = text.copy()
+    while rest.byteLength > 0 {
+        let at = firstIndex(rest, "<")
+        if at < 0 {
+            return out + rest
+        }
+        out = out + substring(rest, 0, at)
+        let close = firstIndex(rest, ">")
+        if close < 0 {
+            // An unclosed tag takes the rest of the line with it. The input is
+            // this site's own generated markup, so this is a truncated source
+            // line and not a `<` a reader wrote.
+            return out.copy()
+        }
+        rest = substring(rest, close + 1, rest.byteLength)
+    }
+    return out.copy()
+}
+
+/// Where `needle` first occurs in `hay`, or -1. A `match` arm is an expression,
+/// so a loop that has to branch on an `Option` reads better with the index.
+fn firstIndex(hay: String, needle: String) -> Int64 {
+    return match indexOf(hay, needle) {
+        Some(at) => at,
+        None => 0 - 1,
+    }
+}
+
+/// The index as the file the overlay fetches: a JSON array of four-field
+/// objects, no whitespace.
+///
+/// `std/json`'s emitter does the escaping, because a `"` in a signature or a
+/// backslash in a doc line is a broken file and not a broken row (RFC-0059).
+export fn indexJson() -> String {
+    let mut items: Array<Json> = []
+    for r in rows() {
+        items.push(JObj([JsonField { key: "s", value: JStr(r.s.copy()) }, JsonField { key: "t", value: JStr(r.t.copy()) }, JsonField { key: "u", value: JStr(r.u.copy()) }, JsonField { key: "d", value: JStr(r.d.copy()) }]))
+    }
+    return emit(JArr(items))
+}
+
+/// The file the index publishes as, beside the pages.
+export fn indexName() -> String {
+    return "search.json"
+}
+
+test "the index covers every section, and the counts are the census's" {
+    let all = rows()
+    let mut docs = 0
+    let mut ref = 0
+    let mut pkg = 0
+    let mut rel = 0
+    for r in all {
+        if r.s == "Docs" {
+            docs = docs + 1
+        }
+        if r.s == "Reference" {
+            ref = ref + 1
+        }
+        if r.s == "Packages" {
+            pkg = pkg + 1
+        }
+        if r.s == "Releases" {
+            rel = rel + 1
+        }
+    }
+    // Ten consumer pages, thirteen chapters, and a row per chapter section.
+    assertEq(docs, 10 + chapterSlugs().length + sectionCount())
+    // A module and each of its exports.
+    assertEq(ref, apiModules().length + exportCount())
+    assertEq(pkg, packages().length)
+    assertEq(rel, if hasRelease() { 2 } else { 1 })
+    assertEq(all.length, docs + ref + pkg + rel)
+    // The census's prototype was 448 rows. A floor, because `std/` grows.
+    assert(all.length >= 440)
+}
+
+/// How many sections the book has, over every chapter.
+fn sectionCount() -> Int64 {
+    let mut n = 0
+    for slug in chapterSlugs() {
+        n = n + chapterOf(slug).sections.length
+    }
+    return n
+}
+
+/// How many names the reference documents, over every module.
+fn exportCount() -> Int64 {
+    let mut n = 0
+    for m in apiModules() {
+        n = n + apiEntries(m.name).length
+    }
+    return n
+}
+
+test "no row is empty, and no row points at nothing" {
+    for r in rows() {
+        assert(r.t.byteLength > 0)
+        assert(r.u.byteLength > 0)
+        assertEq(r.u[0], '/')
+        // A description is allowed to be empty — a `///`-less export has none —
+        // and it is never allowed to carry markup into the overlay.
+        assert(firstIndex(r.d, "<") < 0)
+        assert(firstIndex(r.d, "\n") < 0)
+        // A generated line is cut to 60 bytes plus an ellipsis; a consumer
+        // page's blurb comes from `meta.vyrn`, which caps itself at 160.
+        assert(r.d.byteLength <= 160)
+        // A reference row carries no fragment — the overlay derives `#e-name`
+        // from the title — and a chapter section row is the only kind that does.
+        if r.s == "Reference" {
+            assert(firstIndex(r.u, "#") < 0)
+        }
+    }
+}
+
+test "a tag is removed and not escaped" {
+    assertEq(stripTags("a <code>b</code> c"), "a b c")
+    assertEq(stripTags("plain"), "plain")
+    assertEq(stripTags("<b>only</b>"), "only")
+    // An unclosed tag takes the rest of the line rather than leaking a `<`.
+    assertEq(stripTags("half <b"), "half ")
+}
+
+test "the index is one JSON array the overlay can read" {
+    let json = indexJson()
+    assertEq(json[0], '[')
+    assertEq(json[json.byteLength - 1], ']')
+    // No whitespace between the values: 448 rows of pretty printing is a third
+    // of the file again.
+    assert(firstIndex(json, "\n") < 0)
+    // A `": "` would prove it, except that a description is allowed to hold
+    // one, so the shape of the first object is the check instead.
+    assertEq(firstIndex(json, "[{\"s\":\"Docs\",\"t\":\""), 0)
+    // The four one-byte keys, and the backstage nowhere in it.
+    assert(json.byteLength > 20000)
+    assert(firstIndex(json, "/backstage") < 0)
+}

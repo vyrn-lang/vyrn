@@ -19,7 +19,7 @@
 // The non-goals are the list in README.md's "Not in v1" and RFC-0001's Non-goals
 // section, with the reason each one is refused.
 import { Head } from "std/ui"
-import { pageHead } from "../nav"
+import { pageHeadOf } from "../nav"
 import { vyrnHtml } from "../snippets"
 
 /// Something the language refuses, and why.
@@ -30,7 +30,7 @@ type NonGoal = { what: String, why: String }
 type Capability = { id: String, word: String, means: String, refuses: String, html: String }
 
 export fn head() -> Head {
-    return pageHead("Philosophy — Vyrn")
+    return pageHeadOf("/why-vyrn")
 }
 
 /// An angle bracket written in a template is escaped twice, so the command that

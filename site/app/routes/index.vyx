@@ -11,7 +11,7 @@
 // widget cannot show; the widget does the rest. Anything a reader could learn by
 // pressing the control is not written out above the control.
 import { Head } from "std/ui"
-import { pageHead } from "../nav"
+import { pageHeadOf } from "../nav"
 import { heroRows, heroDiagnostic, ownershipReport, badRow } from "../snippets"
 // The design-record count and the parity harness command left this page with
 // RFC-0105 M1: a reader deciding whether to use the language is not the reader
@@ -24,7 +24,7 @@ import { fnv1aStr } from "std/hash"
 import { toHex } from "std/strings"
 
 export fn head() -> Head {
-    return pageHead("Vyrn — a systems language with the expressiveness of TypeScript")
+    return pageHeadOf("/")
 }
 
 /// The command a first-time reader should copy.

@@ -16,12 +16,12 @@
 // No script. Four cards of static markup need no filter; the search that exists
 // is on the reference, where the four hundred exports are.
 import { Head } from "std/ui"
-import { pageHead } from "../../nav"
+import { pageHeadOf } from "../../nav"
 import { Package, packages } from "../../packages"
 import { stdCount } from "../../repo"
 
 export fn head() -> Head {
-    return pageHead("The Vyrn registry — packages you can install")
+    return pageHeadOf("/explore")
 }
 
 /// `1 export`, `14 exports` — how many names the module this package offers

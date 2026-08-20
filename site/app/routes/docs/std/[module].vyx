@@ -26,6 +26,7 @@ import { examplesUsing, usesOfModule, usedByModule } from "../../../stdgraph"
 import { blob } from "../../../repo"
 import { Head, PageError, ParamQuery, noHead, notFound, paramQuery } from "std/ui"
 import { pageHead } from "../../../nav"
+import { mdUrl } from "../../../pagemd"
 params { module: String }
 
 /// One module's whole page: its name, its header prose, and its exports.
@@ -137,6 +138,11 @@ fn demoChapterHref(m: String, e: ApiEntry) -> String {
         <h1 class="display">std/{{ data.name }}</h1>
         <p class="lede">{{ exportCount(data.entries.length) }}, read off <code>std/{{ data.name }}.vyrn</code> by the compiler's own lexer while this page was built.</p>
         <p class="notice"><a :href="apiSource(data.name)">Read the source</a> — the one thing this site does not host.</p>
+        <!-- The module as markdown (RFC-0106 M1): the same exports, the same
+             signatures, the same prose, in the shape a reader pastes somewhere.
+             A link to the file the export writes beside this page; `widgets.js`
+             turns a press into a clipboard write where there is a clipboard. -->
+        <p><a class="btn" :href="mdUrl(apiHref(data.name))" data-copy-md>Copy as Markdown</a></p>
     </section>
 
     <section class="band" id="about">

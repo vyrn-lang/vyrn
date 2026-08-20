@@ -23,12 +23,12 @@
 // and the README is what is wrong. The four disagreements are recorded in the
 // RFC's "M3 — as landed".
 import { Head } from "std/ui"
-import { pageHead } from "../../nav"
+import { pageHeadOf } from "../../nav"
 import { shellHtml } from "../../code"
 import { features, steps, implHref, extensionDir, serverDir } from "../../editors"
 
 export fn head() -> Head {
-    return pageHead("Editors — Vyrn")
+    return pageHeadOf("/docs/editors")
 }
 </script>
 

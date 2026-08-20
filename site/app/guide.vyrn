@@ -113,6 +113,17 @@ export fn playHref(src: String) -> String {
     return "/play.html#c=" + replace(replace(replace(raw, "+", "-"), "/", "_"), "=", "")
 }
 
+/// The program itself, as it is written in `site/guide/`.
+///
+/// `Block.source` is the URL of the file in the repository and `Block.lines` is
+/// the same program coloured for the page, so neither is the text. The markdown
+/// twin of a chapter needs the text (RFC-0106 M1), and the playground link is
+/// built from it a few lines below — one file read by the generator, three
+/// readers.
+export fn blockSource(id: String) -> String {
+    return guideSrc(id)
+}
+
 /// One block, ready to render.
 export fn blockOf(id: String) -> Block {
     let src = guideSrc(id)

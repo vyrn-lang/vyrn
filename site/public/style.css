@@ -93,13 +93,10 @@
   --mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Menlo, monospace;
   --sans: ui-sans-serif, "Segoe UI", Roboto, Helvetica, sans-serif;
 
-  /* THE TYPE SCALE (RFC-0106 M1). Type was 34 literal sizes over 1,729 lines
-   * while colour and spacing were tokens — a scale nobody could measure.
-   * `site/test/typescale.test.mjs` resolves every `font-size` and every `font:`
-   * shorthand in this file against this block and fails on an unnamed literal.
-   * Root is 16px, so `1rem` is 16px below, and every number here was already in
-   * the sheet. The display step is the one that MOVED, and only its floor: see
-   * `[data-landing]` above and the RFC for the curve. */
+  /* THE TYPE SCALE (RFC-0106 M1). Type was 34 unnamed literals while colour and
+   * spacing were tokens. `site/test/typescale.test.mjs` resolves every size in
+   * this file against this block. Root is 16px; every number was already in the
+   * sheet bar the display floor. */
   --t-display: clamp(2.1rem, 1rem + 4vw, 4.5rem);
   --t-h1: clamp(1.7rem, 1.1rem + 1.8vw, 2.4rem);
   --t-h2: clamp(1.5rem, 1rem + 1.4vw, 2.2rem);
@@ -110,10 +107,8 @@
   --t-mono: 13px; --t-eyebrow: 12px; --t-key: 11px; --t-tick: 10px;
   --t-axis: 9px;
 
-  /* Six sizes are NOT steps and a seventh must be as clearly a one-off: four
-   * mono numerals each sized to one widget's box, `.bignum`'s ramp, `0.78rem` in
-   * one cell. Three are relative BY INTENT — `0.92em`, `0.9em`, `0.42em` — and a
-   * share of your context is not a step on a scale. */
+  /* Nine sizes are NOT steps — four mono numerals sized to one widget's box,
+   * `.bignum`'s ramp, one cell's `0.78rem`, three shares of a context. */
 
   /* 8pt grid. Nothing outside this list. */
   --s1: 8px;
@@ -238,9 +233,8 @@
  * scrollbar follow the page rather than the system. */
 :root[data-theme="light"] { color-scheme: light; }
 
-/* The display step, on the nine landing pages only. `site/export.vyrn` stamps
- * `data-landing` per route and asserts no leaf page carries it, which is what
- * makes M0's constraint on the 160 leaves checkable (RFC-0106 M1). */
+/* The display step, on the nine landing pages only: `export.vyrn` stamps
+ * `data-landing` per route, and asserts no leaf has it (RFC-0106 M1). */
 :root[data-landing] { --t-display: clamp(2.6rem, 1rem + 4vw, 4.5rem); }
 
 * { box-sizing: border-box; }
@@ -265,9 +259,8 @@ p + p { margin-top: var(--s2); }
 a { color: inherit; text-decoration-color: var(--n2); text-underline-offset: 3px; }
 a:hover { text-decoration-color: var(--accent); }
 
-/* A link in running text is 24px of target: `padding-block` grows the box the
- * browser hit-tests and not the line box, so nothing reflows. 2px and not 3 —
- * two rows of links must not overlap (RFC-0106 M1, checklist row 29). */
+/* A link in running text is 24px of target: `padding-block` grows the
+ * hit-tested box, not the line box. 2px, or two rows would overlap. */
 p a, li a, dd a, dt a, caption a, figcaption a, .note a, .notice a, .cap a, td a, .foot a {
   padding-block: 2px;
 }
@@ -413,9 +406,9 @@ h1 code, h2 code, h3 code, h4 code {
   font-variant-numeric: tabular-nums slashed-zero;
 }
 
-/* -------------------------------------------------------------------------
+/* ------------------------
    The sheet: twelve columns, a rail in the margin, the content in 3..13.
-   ------------------------------------------------------------------------- */
+   ------------------------ */
 
 #root {
   max-width: 1280px;
@@ -453,11 +446,10 @@ h1 code, h2 code, h3 code, h4 code {
  * the same selector. */
 #root > .masthead, #root > .foot { grid-column: 1 / 13; }
 
-/* ONE HEADER, 64px AT EVERY WIDTH — declared and not emergent, so a 44px target
- * fits and no control can grow the row. It was 152px at 375px (RFC-0106 M1,
- * checklist row 31). */
+/* ONE HEADER, 64px AT EVERY WIDTH — declared, so a 44px target fits and no
+ * control can grow the row. It was 152px at 375px (RFC-0106 M1, row 31). */
 .masthead {
-  display: flex; align-items: center; gap: var(--s3);
+  display: flex; align-items: center; gap: var(--s2);
   min-height: 64px; padding: var(--s1) 0;
   border-bottom: 1px solid var(--rule);
   font: var(--t-mono)/1 var(--mono); letter-spacing: 0.08em;
@@ -465,8 +457,7 @@ h1 code, h2 code, h3 code, h4 code {
 
 .wordmark { font-weight: 600; font-size: var(--t-mark); letter-spacing: 0.18em; text-transform: uppercase; text-decoration: none; color: var(--accent); }
 
-/* Everything in the header is a 44px box (RFC-0106 M1, row 29). One rule, not
- * the same three declarations on six selectors. */
+/* Everything in the header is a 44px box: one rule, not six (row 29). */
 .masthead a, .masthead button, .masthead summary { display: inline-flex; align-items: center; min-height: 44px; }
 
 /* THE THEME CONTROL (RFC-0105 M4).
@@ -478,31 +469,41 @@ h1 code, h2 code, h3 code, h4 code {
  * what it did before this milestone.
  *
  * It is a 44px target now, and that costs the masthead nothing: the header
- * declares 64px, so no item in it decides the height (RFC-0106 M1).
+ * declares 64px, so no item in it decides the height. `.find`, the search
+ * opener, shares every rule and the same reason for being gated (RFC-0106 M1).
  *
  * `.slot` is the consumer layout's `v-html` host. It has no box, so the button
  * below is the masthead's own flex item in both mastheads — the backstage builds
  * its masthead as one string and has no host element. */
-.theme { display: none; }
+.theme, .find { display: none; }
 .masthead .slot { display: contents; }
-[data-js] .theme {
-  display: inline-flex;
-  margin-left: auto;
-  font: inherit;
-  letter-spacing: inherit;
-  text-transform: uppercase;
-  color: var(--muted);
-  background: none;
-  border: 1px solid var(--rule);
-  padding: 0 var(--s1);
-  cursor: pointer;
+[data-js] .theme, [data-js] .find {
+  display: inline-flex; font: inherit; letter-spacing: inherit;
+  text-transform: uppercase; color: var(--muted); background: none;
+  border: 1px solid var(--rule); padding: 0 var(--s1); cursor: pointer;
 }
-[data-js] .theme:hover { color: var(--ink); border-color: var(--accent); }
+[data-js] .theme { margin-left: auto; }
+[data-js] .theme:hover, [data-js] .find:hover { color: var(--ink); border-color: var(--accent); }
 
-/* `.theme` carries its own `margin-left: auto` for the backstage masthead,
- * which has no wrapper; inside this one it would push the two apart. */
+/* `.theme`'s own auto margin is for the backstage masthead, which has no
+ * wrapper; inside this one it would push the two apart. */
 .tools { display: flex; align-items: center; gap: var(--s2); margin-left: auto; }
 .tools .theme { margin-left: 0; }
+
+/* THE SEARCH OVERLAY (RFC-0106 M1). A sheet near the top, not a centred box: a
+ * list belongs under the field that filters it. The index is fetched on the
+ * first open, so these rules are all it costs a page that never opens. */
+.findbox { position: fixed; inset: 0; z-index: 200; background: color-mix(in oklab, var(--n0) 45%, transparent); display: flex; justify-content: center; padding: var(--s5) var(--s2); }
+.findbox[hidden] { display: none; }
+.findpanel { width: 100%; max-width: 44rem; max-height: 70vh; display: flex; flex-direction: column; background: var(--paper); border: 1px solid var(--accent); }
+.findpanel input { font: var(--t-lede)/1.4 var(--sans); padding: var(--s2); border: 0; border-bottom: 1px solid var(--rule); background: none; color: var(--ink); }
+.findpanel input:focus-visible { outline-offset: -2px; }
+.findpanel [data-search-results] { overflow-y: auto; }
+.findpanel .sect { font: var(--t-eyebrow)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); padding: var(--s2) var(--s2) var(--s1); border-top: 1px solid var(--hair); }
+.findpanel .hit { display: block; padding: var(--s1) var(--s2); min-height: 44px; text-decoration: none; color: var(--ink); }
+.findpanel .hit .d { display: block; color: var(--muted); font-size: var(--t-meta); }
+.findpanel .hit[aria-selected="true"] { background: color-mix(in oklab, var(--accent) 12%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
+.findpanel .cap { border: 0; padding: var(--s1) var(--s2); }
 
 /* The one call to action (RFC-0106 M1). The only filled thing in the header,
  * because there is one of it. */
@@ -512,21 +513,25 @@ h1 code, h2 code, h3 code, h4 code {
   text-transform: uppercase; letter-spacing: 0.1em; white-space: nowrap;
 }
 .cta:hover { background: color-mix(in oklab, var(--accent) 85%, var(--ink)); }
-/* On `/install` itself the button is where the reader already is, so it stops
- * inviting and starts reporting — the same job the nav marker does, in the
- * shape this control has. */
+/* On `/install` the button is where the reader is, so it reports rather than
+ * invites — the nav marker's job, in this control's shape. */
 .cta[aria-current="page"] { background: none; color: var(--accent); }
 
-/* THE NAVIGATION DISCLOSURE (RFC-0106 M1). ONE `<nav>`: a row of five links
- * here, a panel behind a `Menu` press in the 640px block near the end of this
- * file. These are BASE rules so a browser with no media queries still has
- * navigation, and forcing the panel open takes TWO declarations because engines
- * implement a closed `<details>` two ways. */
+/* THE NAVIGATION DISCLOSURE (RFC-0106 M1). ONE `<nav>`: five links in a row
+ * here, a panel behind `Menu` in the 640px block. BASE rules, so a browser with
+ * no media queries still has navigation. Forcing the panel open takes TWO
+ * declarations: engines close a `<details>` two ways. */
 .menu { display: contents; }
 .menu > summary { display: none; }
 .menu::details-content { display: contents; content-visibility: visible; }
 
-.nav { display: flex; gap: var(--s3); flex-wrap: wrap; }
+/* THE ROW NEVER WRAPS, so the 64px the masthead declares is what it is. Wrapping
+ * put Play on a second line from 641 to 767px and made the header 121px — the
+ * defect row 31 exists for, back again because Search joined the row. It scrolls
+ * instead, which is `.tabs`'s rule: the number of items is not a function of the
+ * viewport (RFC-0106 M1). */
+.nav { display: flex; gap: var(--s2); flex-wrap: nowrap; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.nav::-webkit-scrollbar { display: none; }
 /* 44px at every width: this MOVED out of the 640px query, which left every nav
  * link 89x13 above 640px (RFC-0106 M1). */
 .nav a { text-decoration: none; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; white-space: nowrap; }
@@ -591,9 +596,9 @@ h1 code, h2 code, h3 code, h4 code {
 .rail.toc a.on { color: var(--ink); }
 .rail.toc .eyebrow { margin-bottom: var(--s1); }
 
-/* -------------------------------------------------------------------------
+/* ------------------------
    Type
-   ------------------------------------------------------------------------- */
+   ------------------------ */
 
 .eyebrow {
   font: var(--t-eyebrow)/1.4 var(--mono);
@@ -634,10 +639,10 @@ h1 code, h2 code, h3 code, h4 code {
 .pill.live { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 40%, transparent); }
 .pill.warn { color: var(--amber); border-color: color-mix(in oklab, var(--amber) 45%, transparent); }
 
-/* -------------------------------------------------------------------------
+/* ------------------------
    The widget chassis (brief 4). Pill + eyebrow, one headline number, one
    control, the stage, and a caption that is never optional.
-   ------------------------------------------------------------------------- */
+   ------------------------ */
 
 .plate {
   border: 1px solid var(--rule);
@@ -692,9 +697,9 @@ button.danger:hover { border-color: var(--danger); color: var(--danger); }
 
 .controls { display: flex; gap: var(--s1); flex-wrap: wrap; }
 
-/* -------------------------------------------------------------------------
+/* ------------------------
    Code
-   ------------------------------------------------------------------------- */
+   ------------------------ */
 
 pre.code {
   margin: var(--s3) 0 0;
@@ -816,9 +821,9 @@ pre.code {
 }
 .cmd button { border: 0; border-left: 1px solid var(--rule); }
 
-/* -------------------------------------------------------------------------
+/* ------------------------
    Landing
-   ------------------------------------------------------------------------- */
+   ------------------------ */
 
 .hero { padding: var(--s6) 0 var(--s5); }
 .hero .display { margin-bottom: var(--s3); }
@@ -841,9 +846,9 @@ pre.code {
 .specs dd { margin: var(--s1) 0 0; font: 600 1.6rem/1 var(--mono); letter-spacing: -0.02em; }
 .specs dd small { display: block; font: 400 var(--t-key)/1.5 var(--mono); color: var(--muted); letter-spacing: 0.06em; margin-top: 6px; }
 
-/* -------------------------------------------------------------------------
+/* ------------------------
    The parity strip
-   ------------------------------------------------------------------------- */
+   ------------------------ */
 
 .columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--hair); border: 1px solid var(--hair); }
 .columns > div { background: var(--paper); padding: var(--s2); }
@@ -862,9 +867,9 @@ pre.code {
 .verdict { margin-top: var(--s2); font: 600 var(--t-h4)/1 var(--mono); color: var(--accent); }
 .verdict.bad { color: var(--danger); }
 
-/* -------------------------------------------------------------------------
+/* ------------------------
    Charts
-   ------------------------------------------------------------------------- */
+   ------------------------ */
 
 svg.chart { display: block; width: 100%; height: auto; }
 /* A replay grows a bar's WIDTH from its own left edge. It is NOT a transform:
@@ -991,9 +996,9 @@ svg.chart.radar.alt g.marks[data-norm="c"] { display: none; }
 .axispanes .note { display: block; color: var(--muted); font-size: var(--t-meta); margin: var(--s2) 0 0; }
 .axispanes .note + .note { margin-top: var(--s1); }
 
-/* -------------------------------------------------------------------------
+/* ------------------------
    Tables and comparison
-   ------------------------------------------------------------------------- */
+   ------------------------ */
 
 /* Wide content scrolls inside its own box. The page body never scrolls
  * sideways, on any width. */
@@ -1056,9 +1061,9 @@ ol.plain .note { display: block; color: var(--muted); font-size: var(--t-meta); 
  * around each bar of a chart — where `padding` and `border-top` do nothing. The
  * rules are gone rather than left to be read as live layout. */
 
-/* A tab row scrolls at every width: the number of tabs is not a function of the
- * viewport. This MOVED out of the 640px query too, which left the radar's axis
- * picker 35px outside its column (RFC-0106 M1, rows 27 and 28). */
+/* A tab row scrolls at every width — the number of tabs is not a function of
+ * the viewport. MOVED out of the 640px query, which left the radar's axis
+ * picker 35px outside its column (RFC-0106 M1, rows 27, 28). */
 .tabs { display: flex; gap: 0; margin-top: var(--s3); border-bottom: 1px solid var(--rule); overflow-x: auto; scrollbar-width: none; }
 .tabs::-webkit-scrollbar { display: none; }
 .tabs button { border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
@@ -1082,9 +1087,9 @@ ol.plain .note { display: block; color: var(--muted); font-size: var(--t-meta); 
 .metrics dd { margin: 6px 0 0; font: 600 1.3rem/1 var(--mono); }
 .metrics dd.none { font-size: var(--t-cap); font-weight: 400; color: var(--muted); letter-spacing: 0; }
 
-/* -------------------------------------------------------------------------
+/* ------------------------
    Lists
-   ------------------------------------------------------------------------- */
+   ------------------------ */
 
 dl.nongoals { margin: var(--s3) 0 0; }
 dl.nongoals dt { font-weight: 620; margin-top: var(--s3); }
@@ -1110,9 +1115,9 @@ svg.chart a .cell:hover { fill-opacity: 1 !important; }
   max-width: var(--wide); /* INTRO: a note under a plate, not a page of copy. */
 }
 
-/* -------------------------------------------------------------------------
+/* ------------------------
    Motion, and the way out of it
-   ------------------------------------------------------------------------- */
+   ------------------------ */
 
 .staged > * { opacity: 0; transform: translateY(10px); }
 .entered > * { opacity: 1; transform: none; transition: opacity 420ms var(--expo), transform 420ms var(--expo); }
@@ -1126,7 +1131,7 @@ svg.chart a .cell:hover { fill-opacity: 1 !important; }
   .staged > * { opacity: 1; transform: none; }
 }
 
-/* -------------------------------------------------------------------------
+/* ------------------------
    Forced colours (RFC-0105 M4)
 
    A reader in a forced-colours mode gets the system's palette, and every
@@ -1137,7 +1142,7 @@ svg.chart a .cell:hover { fill-opacity: 1 !important; }
    pressed button, marked with a wash and an accent. The control is one cycling
    button now and its state is the WORD on it, so there is nothing left here for
    a forced palette to take away.)
-   ------------------------------------------------------------------------- */
+   ------------------------ */
 @media (forced-colors: active) {
   /* The playhead, and the row a control just changed. Both are a background
    * wash on a code row, and both become the row's own left edge. */
@@ -1149,10 +1154,10 @@ svg.chart a .cell:hover { fill-opacity: 1 !important; }
 
 
 
-/* -------------------------------------------------------------------------
+/* ------------------------
    The reference (/docs and /docs/std/*). Generated from std/ at build time, so
    the styling has to hold for a module with one export and for one with 44.
-   ------------------------------------------------------------------------- */
+   ------------------------ */
 
 .modlist { list-style: none; padding: 0; margin: var(--s4) 0 0; }
 .modlist li {
@@ -1217,10 +1222,10 @@ pre.doccode {
   .modlist .note { grid-column: 1 / 3; }
 }
 
-/* -------------------------------------------------------------------------
+/* ------------------------
    The guide (/guide and /guide/*). A chapter is prose with a program under
    each idea, and every program on the page ran while the page was built.
-   ------------------------------------------------------------------------- */
+   ------------------------ */
 
 /* The rail is the book's contents, so the chapter being read is marked the way
  * the masthead marks the page you are on: full-strength ink, and a rule in the
@@ -1263,11 +1268,11 @@ pre.doccode {
 .chapternav a .eyebrow { display: block; margin-bottom: 4px; }
 .chapternav a.next { text-align: right; grid-column: -2; }
 
-/* -------------------------------------------------------------------------
+/* ------------------------
    The search and the import graph. Both are on the REFERENCE (/docs) since
    RFC-0105 M2 — a search field over rows that are already on the page, and the
    graph drawn from the source. `/explore` is the package explorer below.
-   ------------------------------------------------------------------------- */
+   ------------------------ */
 
 .finder { margin-top: var(--s4); }
 .finder label { display: block; margin-bottom: var(--s1); }
@@ -1323,7 +1328,7 @@ svg.graph .node.near text { fill: var(--ink); }
 svg.graph .node.on text { fill: var(--accent); font-weight: 600; }
 svg.graph .node.on circle { fill-opacity: 1; }
 
-/* -------------------------------------------------------------------------
+/* ------------------------
    The package explorer (/explore and /explore/*). A card per package and a
    page per package, in the shape a registry has (RFC-0105 M2).
 
@@ -1332,7 +1337,7 @@ svg.graph .node.on circle { fill-opacity: 1; }
    numbers a reader weighs a dependency by, because that is what the card is
    FOR. Auto-fit columns, so 38 packages are a wall on a laptop and a column on
    a phone without a breakpoint being written for either.
-   ------------------------------------------------------------------------- */
+   ------------------------ */
 
 /* The hairline grid is painted by the CELLS, not by the container. `.columns`
    above can paint the container because its author writes both the three
@@ -1381,9 +1386,9 @@ svg.graph .node.on circle { fill-opacity: 1; }
 .specs dd.links .none { color: var(--muted); font-size: var(--t-cap); }
 .cap.demo { border-top: 0; padding-top: 0; }
 
-/* -------------------------------------------------------------------------
+/* ------------------------
    Reflow
-   -------------------------------------------------------------------------
+   ------------------------
    360px is the design target, not the failure case.
 
    The bug that made every earlier narrow reading wrong, written down so it is
@@ -1397,9 +1402,9 @@ svg.graph .node.on circle { fill-opacity: 1; }
 
    A page-level audit does not catch that: the page never scrolled sideways.
    What catches it is measuring a band against the viewport.
-   ------------------------------------------------------------------------- */
+   ------------------------ */
 
-/* -------------------------------------------------------------------------
+/* ------------------------
    The playground.
 
    The editor is TWO boxes in one place: a `<pre>` the compiler colours and a
@@ -1411,7 +1416,7 @@ svg.graph .node.on circle { fill-opacity: 1; }
    Neither box wraps. A wrapped line in one and not the other is the same drift
    by another route, and a program is read in columns; the editor scrolls
    sideways inside its own border, which is why the page does not.
-   ------------------------------------------------------------------------- */
+   ------------------------ */
 
 .play .editor {
   position: relative;
@@ -1552,19 +1557,20 @@ kbd {
   .feed li { grid-template-columns: minmax(0, 1fr); gap: var(--s1); }
 
   /* The header stays one 64px row: the base rules that make `<details>` not a
-   * disclosure are undone here, both models, and the panel leaves the flow so
-   * opening it cannot change the height. It was a column of 152px. */
+   * disclosure are undone here, both models, and the panel leaves the flow. */
   .masthead { gap: var(--s1); position: relative; }
   .tools { gap: var(--s1); }
-  /* A triangle costs 12px of 343, and a panel that opens says it. */
-  .menu > summary { list-style: none; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; cursor: pointer; }
+  /* A triangle costs 12px of 343, and a panel that opens says it. `display` is
+   * the load-bearing one: the base rule above hides this summary at every width,
+   * and without this line a phone has a Menu control with no box and NO WAY TO
+   * REACH THE NAVIGATION (RFC-0106 M1). */
+  .menu > summary { display: inline-flex; list-style: none; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; cursor: pointer; }
   .menu > summary::-webkit-details-marker { display: none; }
   .menu > summary:hover { color: var(--ink); }
   .menu[open] > summary { color: var(--accent); }
   .menu:not([open])::details-content { content-visibility: hidden; }
   .menu:not([open]) > .nav { display: none; }
-  /* Out of the flow and over the page: a header that grew 220px on a press is
-   * the 152px column with a press in front of it. */
+  /* Over the page: a header that grew 220px on a press is the 152px column */
   .menu > .nav {
     position: absolute; top: 100%; left: 0; right: 0; z-index: 60; gap: 0;
     flex-direction: column; align-items: stretch; padding: var(--s1) var(--s2);
@@ -1573,12 +1579,12 @@ kbd {
   .menu > .nav a { border-bottom: 1px solid var(--hair); }
   .menu > .nav a:last-child { border-bottom: 0; }
   .rail { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; gap: var(--s3); }
+  .rail::-webkit-scrollbar { display: none; }
   /* Four section names push sideways; forty export names do not. The index
    * wraps into a block a third of the screen tall and scrolls down. */
   .rail.toc { flex-wrap: wrap; overflow-x: hidden; overflow-y: auto; max-height: 32vh; gap: 0 var(--s3); }
   .rail.toc .eyebrow { flex-basis: 100%; margin: 0; }
-  .rail::-webkit-scrollbar { display: none; }
-  /* `.nav a` moved to the base rules. The rail is still a phone-only strip. */
+  /* `.nav a` moved to the base rules; the rail is still a phone strip. */
   .rail a { white-space: nowrap; display: inline-flex; align-items: center; min-height: 44px; }
   .rail { padding: var(--s1) 0; }
 
@@ -1591,8 +1597,7 @@ kbd {
 
   /* A finger is not a cursor. */
   button, .btn { padding: 12px 16px; min-height: 44px; }
-  /* The tab row's scroller moved to the base rules. A finger-sized tab is the
-   * `button` rule above — `.tabs button` declares no height. */
+  /* The tab row's scroller moved to the base rules; the height is `button`. */
 
   /* A token has no break in it, and on a phone there is no room to wait for
    * one. `overflow-wrap: anywhere` is a last resort the breaker often declines;
@@ -1645,7 +1650,7 @@ kbd {
   code.copyable { padding: 0.18em 0.34em; }
 }
 
-/* -------------------------------------------------------------------------
+/* ------------------------
    The backstage (RFC-0105 M1)
    
    A second front, in the same sheet and the same stylesheet. It is told apart
@@ -1654,7 +1659,7 @@ kbd {
    so redefining it on `#root.backstage` turns the whole section amber without
    a second copy of anything. The badge in the masthead says the word as well,
    because colour alone is not a label.
-   ------------------------------------------------------------------------- */
+   ------------------------ */
 
 #root.backstage { --accent: var(--amber); }
 .masthead.backstage { border-bottom-width: 2px; border-bottom-color: color-mix(in oklab, var(--accent) 45%, transparent); }

@@ -1,0 +1,97 @@
+/// What each consumer page IS, in one sentence, in one place (RFC-0106 M1).
+///
+/// Three things wanted the same sentence and the site had none of them: the
+/// OpenGraph and Twitter cards a shared link renders as, the `<meta
+/// description>` a search result shows, and the search overlay's own row for a
+/// page. Before this milestone every page shipped the SAME description — one
+/// paragraph about the language, from `pageHead` — so a shared link to
+/// `/install` and a shared link to `/compare` previewed identically, and the
+/// index had nothing to say about either.
+///
+/// ONE TABLE, THREE CONSUMERS. `site/export.vyrn` stamps the card meta per
+/// route from this table and builds the index's Docs section from the same rows,
+/// so a page's description cannot say one thing to a crawler and another in the
+/// overlay. Ten rows, which is the ten consumer pages the census counted: the
+/// nine landing pages and the one leaf that is not generated from `std/`, a
+/// chapter or a manifest.
+///
+/// A blurb is one sentence and no more than about 150 bytes, because that is
+/// what a card renders before it truncates. It is not the page's lede: a lede is
+/// read after the reader has arrived, and this is read instead of arriving.
+import { startsWith } from "std/strpred"
+
+/// A page, its title, and what it is.
+export type PageMeta = { path: String, title: String, blurb: String }
+
+/// The ten. In navigation order, then the pages the masthead does not name.
+export fn pageMetas() -> Array<PageMeta> {
+    return [
+        PageMeta { path: "/", title: "Vyrn — a systems language with the expressiveness of TypeScript", blurb: "Types carry the rules that make a value valid. Ownership is a word you write on a parameter. No garbage collector, three backends, one result." },
+        PageMeta { path: "/guide", title: "Docs — Vyrn", blurb: "The book, in reading order: thirteen chapters whose every code block is a program this site compiles and runs while it builds." },
+        PageMeta { path: "/docs", title: "Reference — Vyrn", blurb: "Every standard library module and every name it exports, read off std/ while the page was built." },
+        PageMeta { path: "/explore", title: "Explore — Vyrn", blurb: "The packages you can install, each with the vyrn add line that installs it and the manifest it resolves to." },
+        PageMeta { path: "/releases", title: "Releases — Vyrn", blurb: "What is published, whether it is safe to depend on, and how a release is made." },
+        PageMeta { path: "/play", title: "Playground — Vyrn", blurb: "Write Vyrn in the page and run it. The compiler front end is WebAssembly and the program never leaves your browser." },
+        PageMeta { path: "/install", title: "Install — Vyrn", blurb: "One command per operating system, what it verifies, and how to build from source. Uninstalling is deleting a directory." },
+        PageMeta { path: "/compare", title: "Compare — Vyrn", blurb: "Vyrn against C, Rust and node on eight Benchmarks Game programs, with every raw reading published." },
+        PageMeta { path: "/why-vyrn", title: "Why Vyrn — Vyrn", blurb: "Intent over mechanism: state what must be true of a value, and what a function does with its argument. And the six things Vyrn refuses." },
+        PageMeta { path: "/docs/editors", title: "Editors — Vyrn", blurb: "One VS Code extension and one language server, both in this repository, both answering from the compiler front end itself." },
+    ]
+}
+
+/// The row for `path`, or a row with an empty title when there is none. A caller
+/// checks the title rather than being handed an `Option`, because both callers
+/// want to skip a page with no row rather than handle a failure.
+export fn metaOf(path: String) -> PageMeta {
+    for m in pageMetas() {
+        if m.path == path {
+            return PageMeta { path: m.path.copy(), title: m.title.copy(), blurb: m.blurb.copy() }
+        }
+    }
+    return PageMeta { path: path.copy(), title: "", blurb: "" }
+}
+
+/// Whether `path` has a row here.
+export fn hasMeta(path: String) -> Bool {
+    return metaOf(path).title.byteLength > 0
+}
+
+test "every row is a consumer path with a sentence on it" {
+    let all = pageMetas()
+    assertEq(all.length, 10)
+    for m in all {
+        assert(startsWith(m.path, "/"))
+        assert(m.title.byteLength > 0)
+        // A card truncates around 150 bytes and a one-word blurb says nothing.
+        assert(m.blurb.byteLength > 40)
+        assert(m.blurb.byteLength <= 160)
+        // One sentence, so it ends in a full stop.
+        assertEq(m.blurb[m.blurb.byteLength - 1], '.')
+    }
+}
+
+test "a page with no row says so rather than answering with someone else's" {
+    assertEq(metaOf("/install").title, "Install — Vyrn")
+    assert(hasMeta("/"))
+    assert(hasMeta("/docs/editors"))
+    assert(!hasMeta("/docs/std/json"))
+    assert(!hasMeta("/guide/values"))
+    assertEq(metaOf("/guide/values").blurb, "")
+}
+
+test "no two rows share a title or a blurb" {
+    // The defect this table exists to end: ten pages with one description
+    // between them, so every shared link previewed as the same page.
+    let all = pageMetas()
+    let mut i = 0
+    while i < all.length {
+        let mut j = i + 1
+        while j < all.length {
+            assert(all[i].title != all[j].title)
+            assert(all[i].blurb != all[j].blurb)
+            assert(all[i].path != all[j].path)
+            j = j + 1
+        }
+        i = i + 1
+    }
+}

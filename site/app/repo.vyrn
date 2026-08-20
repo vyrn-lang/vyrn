@@ -114,6 +114,26 @@ export fn releasePre() -> Bool {
     }
 }
 
+/// Where this site is published, with the trailing slash (RFC-0106 M1).
+///
+/// THE ONLY ABSOLUTE URL THE EXPORT WRITES, and it is here rather than in the
+/// two modules that use it because one origin with two readers is a constant and
+/// two are a contradiction waiting to happen. Everything else on the site is
+/// relative on purpose: `relativize` in `site/export.vyrn` rewrites every `href`
+/// and every `src` against the document that carries it, so ONE exported tree
+/// serves from a domain root, from `/vyrn/` on GitHub Pages, from a nested
+/// preview path and from `file://` — and `site/test/basepath.test.mjs` fetches
+/// all four to prove it.
+///
+/// Two artifacts cannot be relative, because neither is read inside a document:
+/// the releases feed, which a reader's aggregator fetches with no page around
+/// it, and the markdown twin of a page, which exists to be pasted somewhere
+/// else. Both name this origin, and a copy served from anywhere but here links
+/// back to here, which is the honest failure of the two.
+export fn siteOrigin() -> String {
+    return "https://vyrn-lang.github.io/vyrn/"
+}
+
 /// The release's page on GitHub — the whole feed when there is no release to
 /// name, so the link is never a URL with nothing on the end of it.
 export fn releaseUrl() -> String {

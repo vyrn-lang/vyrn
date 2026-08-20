@@ -35,6 +35,10 @@ import { chapterSlugs, chapterHref } from "./app/guide"
 import { searchRows } from "./app/stdgraph"
 import { packages, packageHref, offerOf, addCommand } from "./app/packages"
 import { features } from "./app/editors"
+import { indexJson, indexName, rows } from "./app/search"
+import { pageMetas, metaOf, hasMeta } from "./app/meta"
+import { mdPaths, mdName, mdUrl, markdownOf } from "./app/pagemd"
+import { feedName, feedUrl, feedXml, feedItemCount } from "./app/feed"
 import { substring, indexOf, split, replace } from "std/strings"
 import { startsWith } from "std/strpred"
 
@@ -274,14 +278,96 @@ fn withIcon(html: String) -> String {
     return insertInHead(html, "<link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">")
 }
 
+/// `html` with the releases feed declared (RFC-0106 M1).
+///
+/// On EVERY page and not only on `/releases`, because a reader who wants the
+/// feed pastes the address they are on into their aggregator, and every browser
+/// and every reader looks for this element to find the feed from any page of a
+/// site. The `href` is root-absolute here and `relativize` makes it relative to
+/// the document, the same as every other URL this program writes.
+fn withFeed(html: String) -> String {
+    return insertInHead(html, "<link rel=\"alternate\" type=\"application/rss+xml\" title=\"Vyrn releases\" href=\"/\{feedName()}\">")
+}
+
+/// `html` with the meta a shared link renders as, and with the page's own
+/// description where there is one (RFC-0106 M1).
+///
+/// DERIVED, AND THAT IS THE WHOLE DESIGN. A page already says what it is called
+/// and what it is about — a `<title>` and a `<meta description>` are in the head
+/// this program is splicing anyway — so the card is those two strings copied into
+/// the three names a crawler reads them under. There is no per-page table here,
+/// nothing to keep in step, and it works the same on all 174 pages: a guide
+/// chapter, a reference module, a package page and a design record each name
+/// themselves.
+///
+/// THE SENTENCE IS THE PAGE'S OWN, and that half is `app/nav.vyrn`'s. Every page
+/// used to carry the same `<meta description>`, so a link to `/install` previewed
+/// as a link to `/compare`; the ten consumer pages take their title and their
+/// sentence from `app/meta.vyrn` through `pageHeadOf`, which is also where the
+/// search index's Docs rows come from. One table, one author, and this function
+/// cannot disagree with the document it reads.
+///
+/// `og:type` is `website` on the nine landing pages and `article` everywhere
+/// else, off the same list the display type step uses.
+///
+/// NO `og:image` AND NO `og:url`, and both absences are decisions. The site
+/// publishes one graphic, `favicon.svg`, and no crawler renders an SVG card —
+/// the honest state is a `summary` card with no image rather than a broken one.
+/// And `og:url` is absolute by definition, while every other URL in this export
+/// is relative so that ONE tree serves from any mount point (see `relativize`);
+/// the canonical the stubs write is document-relative for the same reason. The
+/// feed is where an absolute URL is unavoidable, and it names its origin once.
+///
+/// A stub gets none of this. It is the old name of a page and not a place, and
+/// what it has to carry is the three ways out that `withRedirect` writes.
+fn withCards(html: String, path: String) -> String {
+    if redirectTarget(path).byteLength > 0 {
+        return html.copy()
+    }
+    let kind = if isLanding(path) { "website" } else { "article" }
+    return insertInHead(html, "<meta property=\"og:title\" content=\"\{titleOf(html)}\"><meta property=\"og:description\" content=\"\{descriptionOf(html)}\"><meta property=\"og:type\" content=\"\{kind}\"><meta name=\"twitter:card\" content=\"summary\">")
+}
+
+/// What the document says it is called, between its `<title>` tags.
+fn titleOf(html: String) -> String {
+    return between(html, "<title>", "</title>")
+}
+
+/// What the document says it is about, out of the description it carries.
+fn descriptionOf(html: String) -> String {
+    return between(html, "<meta name=\"description\" content=\"", "\"")
+}
+
+/// The text between the first `open` and the next `close` after it, or "".
+///
+/// Both callers read a value out of a head element this program is about to copy
+/// into another attribute, so neither escapes anything: `std/html` escaped the
+/// text on the way in, `"` with it, which is what makes reading a value out of
+/// one attribute and into another safe here and would not be for arbitrary HTML.
+fn between(html: String, open: String, close: String) -> String {
+    return match indexOf(html, open) {
+        Some(at) => upToClose(html, at + open.byteLength, close),
+        None => "",
+    }
+}
+
+/// The write half of `between`, once the opening delimiter is found.
+fn upToClose(html: String, from: Int64, close: String) -> String {
+    let rest = substring(html, from, html.byteLength)
+    return match indexOf(rest, close) {
+        Some(end) => substring(rest, 0, end),
+        None => "",
+    }
+}
+
 /// `html` with `extra` spliced in directly after `<head>`.
 ///
-/// The one splice three stamps share — the icon above, and the redirect stub's
-/// two elements below. Each of them is a head element `std/ui`'s `Head` cannot
-/// express: it has entries for a title, a stylesheet, a script and a
-/// `<meta name=…>`, and none for a `<link>` of another `rel` or a `<meta
-/// http-equiv=…>`. Adding them there is a standard library change with golden
-/// output behind it, so the site stamps its own.
+/// The one splice four stamps share — the icon above, the cards, and the redirect
+/// stub's two elements below. Each of them is a head element `std/ui`'s `Head`
+/// cannot express: it has entries for a title, a stylesheet, a script and a
+/// `<meta name=…>`, and none for a `<link>` of another `rel`, a `<meta
+/// property=…>` or a `<meta http-equiv=…>`. Adding them there is a standard
+/// library change with golden output behind it, so the site stamps its own.
 fn insertInHead(html: String, extra: String) -> String {
     return match indexOf(html, "<head>") {
         Some(at) => substring(html, 0, at) + "<head>" + extra + substring(html, at + 6, html.byteLength),
@@ -380,7 +466,7 @@ fn exportPath(outDir: String, path: String) -> Int64 {
         print("FAIL \{path} -> \{doc.status}")
         return 1
     }
-    let document = relativize(withRedirect(withIcon(withLang(markCurrent(doc.body, path), path)), path), path)
+    let document = relativize(withRedirect(withCards(withFeed(withIcon(withLang(markCurrent(doc.body, path), path))), path), path), path)
     let mut bad = emit("\{outDir}/\{name}", document)
     if isBackstage(path) {
         print("\{path} -> \{name} (\{doc.body.byteLength} bytes)")
@@ -476,12 +562,63 @@ fn main() -> Int64 {
     for asset in assets() {
         failures = failures + copyAsset(outDir, asset[0], asset[1])
     }
+    for path in mdPaths() {
+        failures = failures + writeMarkdown(outDir, path)
+    }
+    failures = failures + writeIndex(outDir)
+    failures = failures + writeFeed(outDir)
     if failures > 0 {
         print("export failed: \{failures} file(s)")
         return 1
     }
     print("exported \{sitePaths().length + recordPaths().length} route(s) and \{assets().length} asset(s) to \{outDir}")
     return 0
+}
+
+/// One page's markdown twin, beside the page (RFC-0106 M1).
+///
+/// `app/pagemd.vyrn` builds it from the same chapter and the same generated
+/// reference the document is built from. An empty one is a failure and not a
+/// file: a "copy as markdown" button that hands a reader nothing is worse than
+/// no button, and the export is where that is caught rather than in the browser.
+fn writeMarkdown(outDir: String, path: String) -> Int64 {
+    let md = markdownOf(path)
+    if md.byteLength == 0 {
+        print("FAIL \{mdName(path)}: no markdown for \{path}")
+        return 1
+    }
+    return emit("\{outDir}/\{mdName(path)}", md)
+}
+
+/// The releases feed, as RSS 2.0 (RFC-0106 M1).
+fn writeFeed(outDir: String) -> Int64 {
+    print("\{feedName()} (\{feedItemCount()} item(s))")
+    return emit("\{outDir}/\{feedName()}", feedXml())
+}
+
+/// The search index, written beside the pages (RFC-0106 M1).
+///
+/// Not an asset, because it is not copied from anywhere: it is built from the
+/// same `std/`, the same book and the same manifests the pages are, by
+/// `app/search.vyrn`, while this program runs.
+///
+/// THE CEILING IS ASSERTED HERE, AND IT IS THE RAW ONE. M0's number is 8,000
+/// gzipped and this program cannot gzip — RFC-0014 has `readFile`, `writeFile`
+/// and `listDir`, and no compressor behind any of them. The raw ceiling below is
+/// the one it CAN check, set from the census's own measurement of the same shape
+/// (42,235 raw at 5,255 gzipped, a ratio of 8.0), with room for `std/` to grow;
+/// `site/test/typescale.test.mjs`'s sibling in `site/test/search.test.mjs`
+/// gzips the written file and asserts the 8,000. Two halves, and a runaway index
+/// fails whichever it reaches first.
+fn writeIndex(outDir: String) -> Int64 {
+    let json = indexJson()
+    if json.byteLength > 80000 {
+        print("FAIL \{indexName()}: \{json.byteLength} bytes of index, ceiling 80,000 raw")
+        print("     RFC-0106 M0's ceiling is 8,000 gzipped; this is the raw check the export can make.")
+        return 1
+    }
+    print("\{indexName()} (\{rows().length} entries, \{json.byteLength} bytes)")
+    return emit("\{outDir}/\{indexName()}", json)
 }
 
 /// Whether `needle` occurs in `haystack`. Only the tests below use it.
@@ -746,7 +883,7 @@ test "every name in a module's index points at an export that is on the page" {
 /// order `exportPath` applies them. The tests below read this rather than the
 /// router's raw body, because the raw body is not what ships.
 fn publishedDocument(path: String) -> String {
-    return relativize(withRedirect(withIcon(withLang(markCurrent(route(documentRequest(path)).body, path), path)), path), path)
+    return relativize(withRedirect(withCards(withFeed(withIcon(withLang(markCurrent(route(documentRequest(path)).body, path), path))), path), path), path)
 }
 
 /// How many times `needle` occurs in `hay`.
@@ -864,6 +1001,73 @@ test "every published document points at an icon this export writes" {
         let html = withIcon(route(documentRequest(path)).body)
         assert(has(html, "<link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">"))
     }
+}
+
+test "every page says what it is to a crawler, and no two of the ten say the same" {
+    // The gate for RFC-0106 M1's OG meta. The defect it closes is one shared
+    // description on 174 pages, so the assertions are about DIFFERENCE and not
+    // about presence: a card that is there and identical everywhere is the bug.
+    let mut seen: Array<String> = []
+    let mut websites = 0
+    for path in sitePaths() {
+        let doc = publishedDocument(path)
+        if redirectTarget(path).byteLength > 0 {
+            // A stub is the old name of a page, not a place. It carries the three
+            // ways out and nothing that would preview as a page of its own.
+            assert(!has(doc, "og:title"))
+            continue
+        }
+        assert(has(doc, "<meta property=\"og:title\" content=\""))
+        assert(has(doc, "<meta property=\"og:description\" content=\""))
+        assert(has(doc, "<meta name=\"twitter:card\" content=\"summary\">"))
+        // The type is the same nine-page list the display step uses.
+        let kind = if isLanding(path) { "website" } else { "article" }
+        assert(has(doc, "<meta property=\"og:type\" content=\"\{kind}\">"))
+        if isLanding(path) {
+            websites = websites + 1
+        }
+        // The card names the page the reader would land on. A title read out of
+        // the document cannot disagree with the document.
+        let title = titleOf(doc)
+        assert(title.byteLength > 0)
+        assert(has(doc, "<meta property=\"og:title\" content=\"\{title}\">"))
+        // And the ten pages the table covers carry their OWN sentence, in the
+        // description a search result shows as well as in the card.
+        if hasMeta(path) {
+            let blurb = metaOf(path).blurb
+            assertEq(title, metaOf(path).title)
+            assert(has(doc, "<meta name=\"description\" content=\"\{blurb}\">"))
+            assert(has(doc, "<meta property=\"og:description\" content=\"\{blurb}\">"))
+            for was in seen {
+                assert(was != blurb)
+            }
+            seen.push(blurb.copy())
+        }
+    }
+    assertEq(seen.length, pageMetas().length)
+    assertEq(websites, landingPaths().length)
+    // A leaf keeps the language's own description, and its card is its own title.
+    let leaf = publishedDocument(hrefDocsStd("json"))
+    assertEq(titleOf(leaf), "std/json — Vyrn")
+    assert(has(leaf, "<meta property=\"og:title\" content=\"std/json — Vyrn\">"))
+    assert(has(leaf, "<meta property=\"og:type\" content=\"article\">"))
+    // The backstage previews as itself too, off its own head and with no row here.
+    let record = publishedDocument("/backstage/rfcs/0105")
+    assert(has(record, "<meta property=\"og:type\" content=\"article\">"))
+    assert(has(record, "<meta property=\"og:description\" content=\"The Vyrn design record"))
+}
+
+test "a value is read out of one attribute and into another, or it is not there" {
+    let head = "<title>A — Vyrn</title><meta name=\"description\" content=\"One line.\">"
+    assertEq(titleOf(head), "A — Vyrn")
+    assertEq(descriptionOf(head), "One line.")
+    assertEq(titleOf("<head>nothing</head>"), "")
+    assertEq(descriptionOf("<head>nothing</head>"), "")
+    // An unterminated value is nothing rather than the rest of the document.
+    assertEq(titleOf("<title>A — Vyrn"), "")
+    // A page whose head carries an SVG `<title>` further down still reads its
+    // own: `/compare` has 39 of them, one per shape in the charts.
+    assertEq(titleOf("<title>Head</title><svg><title>A bar</title></svg>"), "Head")
 }
 
 test "an attribute scan reads the values and stops at the quote" {

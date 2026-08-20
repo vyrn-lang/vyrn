@@ -1,0 +1,357 @@
+/// Every guide chapter and every reference module, as markdown (RFC-0106 M1).
+///
+/// WHY A FILE AND NOT A BUTTON THAT SCRAPES THE PAGE. A reader who wants a page
+/// as markdown wants it to paste somewhere — into a model, into notes, into an
+/// issue — and a page is the wrong shape for that: its prose is wrapped in
+/// plates, its code is coloured, and its headings carry the site's furniture. So
+/// the export writes `guide/values.md` beside `guide/values.html` from the SAME
+/// data the page renders, and the button on the page copies that file. Without
+/// script the button is the link it always was, and the file is the answer.
+///
+/// FIFTY FILES, AND THE TWO KINDS THE RFC NAMES: thirteen chapters of the book
+/// and thirty-seven reference modules. Neither is written by hand — a chapter's
+/// prose is in `app/guide.vyrn` and its programs are files in `site/guide/`, and
+/// a module's whole page is read off `std/` by a generator — so a markdown page
+/// cannot say something the HTML page does not.
+///
+/// THE URLS ARE ABSOLUTE, and this is the one place in the export where that is
+/// true of a link (the feed is the other, and for the same reason). Every URL in
+/// a published document is made relative so that one tree serves from any mount
+/// point; a markdown file that travels has no document to be relative to, so a
+/// `/install.html` in it would resolve against whatever opened it.
+import { chapterOf, chapterSlugs, chapterHref, blockOf, blockSource } from "./guide"
+import { apiModules, apiEntries, apiIntro, apiHref } from "./docs"
+import { published } from "./nav"
+import { siteOrigin } from "./repo"
+import { substring, indexOf, replace, trimEnd } from "std/strings"
+import { startsWith } from "std/strpred"
+
+/// The markdown beside a page: `/guide/values.html` → `/guide/values.md`.
+///
+/// It takes the page's own href, so a template asks for "the markdown of this
+/// page" with the URL it already has and there is no second table mapping one to
+/// the other.
+export fn mdUrl(pageHref: String) -> String {
+    return swapExtension(pageHref, ".md")
+}
+
+/// The file a route's markdown publishes as: `/guide/values` → `guide/values.md`.
+/// The payload beside a document is named the same way — see `payloadName` in
+/// `site/export.vyrn`.
+export fn mdName(path: String) -> String {
+    return swapExtension(published(path), ".md")
+}
+
+/// `name` with its `.html` replaced by `ext`, and unchanged when it has none.
+fn swapExtension(name: String, ext: String) -> String {
+    if name.byteLength < 5 {
+        return name.copy()
+    }
+    if substring(name, name.byteLength - 5, name.byteLength) != ".html" {
+        return name.copy()
+    }
+    return substring(name, 0, name.byteLength - 5) + ext
+}
+
+/// Every route that publishes a markdown twin, in the order the site lists them.
+export fn mdPaths() -> Array<String> {
+    let mut out: Array<String> = []
+    for slug in chapterSlugs() {
+        out.push("/guide/\{slug}")
+    }
+    for m in apiModules() {
+        out.push("/docs/std/\{m.name}")
+    }
+    return out
+}
+
+/// The markdown for `path`, whichever of the two kinds it is. A path with no
+/// twin answers with "", which the export refuses to write rather than
+/// publishing an empty file.
+export fn markdownOf(path: String) -> String {
+    if startsWith(path, "/guide/") {
+        return chapterMd(substring(path, 7, path.byteLength))
+    }
+    if startsWith(path, "/docs/std/") {
+        return moduleMd(substring(path, 10, path.byteLength))
+    }
+    return ""
+}
+
+/// One chapter of the book: its lede, its sections, and every program in it with
+/// the output that program printed while the site was built.
+fn chapterMd(slug: String) -> String {
+    let ch = chapterOf(slug)
+    let mut out = "# \{ch.title}\n\n\{ch.lede}\n"
+    for s in ch.sections {
+        out = out + "\n## \{s.heading}\n\n"
+        for p in s.prose {
+            out = out + asMarkdown(p) + "\n\n"
+        }
+        for id in s.blocks {
+            out = out + fenced("vyrn", blockSource(id))
+            let printed = blockOf(id).output
+            if printed.byteLength > 0 {
+                // The word the page uses on its pill, for the reason the page
+                // uses it: the program ran once, when this file was written.
+                out = out + "Built output:\n\n" + fenced("", printed)
+            }
+        }
+    }
+    return collapse(out) + trailer(absolute(chapterHref(slug)))
+}
+
+/// One reference module: its header prose, then every export with its signature
+/// exactly as it is declared.
+fn moduleMd(name: String) -> String {
+    let mut out = "# std/\{name}\n\n" + asMarkdown(apiIntro(name)) + "\n"
+    for e in apiEntries(name) {
+        out = out + "\n## \{e.name}\n\n`\{e.kind}`, at line \{e.line}.\n\n"
+        // The signature is on the page as coloured HTML, which is the same text
+        // with spans around its tokens: dropping them gives back what is
+        // declared in `std/\{name}.vyrn`.
+        out = out + fenced("vyrn", asMarkdown(e.sig))
+        let prose = asMarkdown(e.prose)
+        if prose.byteLength > 0 {
+            out = out + prose + "\n\n"
+        }
+    }
+    return collapse(out) + trailer(absolute(apiHref(name)))
+}
+
+/// `body` as a code fence tagged `lang`, with exactly one blank line after it.
+///
+/// The tag is a parameter because a program and what a program PRINTED are two
+/// different things, and a fence that calls terminal output Vyrn is a
+/// highlighter colouring words that are not code.
+fn fenced(lang: String, body: String) -> String {
+    return "```\{lang}\n" + trimEnd(body) + "\n```\n\n"
+}
+
+/// The last line of every one of these files: where it came from.
+///
+/// A markdown file that travels has to say where it is from, because the reader
+/// who receives it did not fetch it. One line, and it is a URL rather than a
+/// sentence about provenance.
+fn trailer(url: String) -> String {
+    return "---\n\nFrom \{url} — generated by `site/export.vyrn` from the Vyrn repository.\n"
+}
+
+/// A site URL as a reader anywhere can follow it. A URL that is already absolute
+/// — every link that leaves the site — is left alone.
+fn absolute(url: String) -> String {
+    if startsWith(url, "/") {
+        return siteOrigin() + substring(url, 1, url.byteLength)
+    }
+    return url.copy()
+}
+
+/// `html` as markdown.
+///
+/// It handles the tags this site's own prose is written with and drops the rest,
+/// which is the whole reason it can be this short: the input is generated markup
+/// from `app/guide.vyrn` and from the `///` lines in `std/`, not arbitrary HTML.
+/// A tag nobody writes here does not need a rule.
+///
+///   - `<code>` becomes a backtick, and NOT inside a fence, where the source
+///     already reads as code and a backtick would end the block early.
+///   - `<a href="…">` becomes `[text](url)`, with the URL made absolute.
+///   - `<pre>` becomes a Vyrn fence: every one of them on these pages is Vyrn.
+///   - a paragraph, a list item and a `<br>` become the break they are.
+///
+/// The text between the tags is UNESCAPED as it is copied, because `Array&lt;T&gt;`
+/// is `Array<T>` in a markdown file and the escaping was the HTML's.
+export fn asMarkdown(html: String) -> String {
+    let mut out = ""
+    let mut text = 0
+    let mut i = 0
+    let mut href = ""
+    let mut fence = false
+    while i < html.byteLength {
+        if html[i] != '<' {
+            i = i + 1
+            continue
+        }
+        let close = closeFrom(html, i)
+        if close < 0 {
+            // No `>` after this `<`, so it is a less-than sign in text and the
+            // rest of the string is text with it.
+            break
+        }
+        out = out + unescape(substring(html, text, i))
+        let tag = substring(html, i + 1, close)
+        let name = tagName(tag)
+        if name == "a" {
+            href = absolute(attr(tag, "href"))
+            out = out + "["
+        } else if name == "/a" {
+            out = out + "](\{href})"
+        } else if name == "pre" {
+            fence = true
+            out = out + "```vyrn\n"
+        } else if name == "/pre" {
+            fence = false
+            out = out + "\n```\n\n"
+        } else if name == "code" || name == "/code" {
+            out = out + if fence { "" } else { "`" }
+        } else if name == "/p" || name == "br" || name == "/div" {
+            out = out + "\n\n"
+        } else if name == "li" {
+            out = out + "- "
+        } else if name == "/li" || name == "/ul" || name == "/ol" {
+            out = out + "\n"
+        } else if name == "strong" || name == "/strong" || name == "b" || name == "/b" {
+            out = out + "**"
+        } else if name == "em" || name == "/em" || name == "i" || name == "/i" {
+            out = out + "*"
+        }
+        i = close + 1
+        text = i
+    }
+    return collapse(trimEnd(out + unescape(substring(html, text, html.byteLength))))
+}
+
+/// Where the `>` that closes the tag opening at `at` is, or -1.
+fn closeFrom(html: String, at: Int64) -> Int64 {
+    let rest = substring(html, at, html.byteLength)
+    return match indexOf(rest, ">") {
+        Some(end) => at + end,
+        None => 0 - 1,
+    }
+}
+
+/// A tag's name, with the slash of a closing tag kept on the front: `p`, `/p`,
+/// `a`, `pre`. Everything after the name is attributes and is not it.
+fn tagName(tag: String) -> String {
+    let cut = match indexOf(tag, " ") {
+        Some(at) => at,
+        None => tag.byteLength,
+    }
+    return substring(tag, 0, cut)
+}
+
+/// The value of `key` in a tag's attributes, or "". Double quotes, because this
+/// site's own generated markup writes them and nothing here writes single ones.
+fn attr(tag: String, key: String) -> String {
+    let needle = "\{key}=\""
+    return match indexOf(tag, needle) {
+        Some(at) => upTo(substring(tag, at + needle.byteLength, tag.byteLength), "\""),
+        None => "",
+    }
+}
+
+/// `text` up to the first `close`, or all of it.
+fn upTo(text: String, close: String) -> String {
+    return match indexOf(text, close) {
+        Some(end) => substring(text, 0, end),
+        None => text.copy(),
+    }
+}
+
+/// `s` with the five entities `escapeHtml` writes turned back into the bytes
+/// they stand for. `&amp;` is LAST, so that an escaped entity — `&amp;lt;` —
+/// becomes the text `&lt;` and not a `<`.
+fn unescape(s: String) -> String {
+    let angles = replace(replace(s, "&lt;", "<"), "&gt;", ">")
+    let quotes = replace(replace(angles, "&quot;", "\""), "&#39;", "'")
+    return replace(quotes, "&amp;", "&")
+}
+
+/// Whether `needle` occurs in `hay`. A `match` arm is an expression, so a caller
+/// that only wants the answer reads better with a predicate than with two arms.
+fn has(hay: String, needle: String) -> Bool {
+    return match indexOf(hay, needle) {
+        Some(at) => true,
+        None => false,
+    }
+}
+
+/// `s` with no run of more than two newlines in it.
+///
+/// A `</p></div>` is two breaks written by two rules that are each right on
+/// their own, and markdown reads three blank lines the same as one. This is
+/// where that arithmetic stops mattering.
+fn collapse(s: String) -> String {
+    let mut out = s.copy()
+    while has(out, "\n\n\n") {
+        out = replace(out, "\n\n\n", "\n\n")
+    }
+    return out
+}
+
+test "the tags this site writes become the markdown they mean" {
+    assertEq(asMarkdown("<p>A <code>let</code> binds.</p>"), "A `let` binds.")
+    assertEq(asMarkdown("A <a href=\"/install.html\">page</a>."), "A [page](\{siteOrigin()}install.html).")
+    // A link that leaves the site is already absolute and is not touched.
+    assertEq(asMarkdown("<a href=\"https://example.org/x\">x</a>"), "[x](https://example.org/x)")
+    // Entities become the characters they stand for: a signature is full of them.
+    assertEq(asMarkdown("fn f(xs: Array&lt;String&gt;) -&gt; Bool"), "fn f(xs: Array<String>) -> Bool")
+    assertEq(asMarkdown("&amp;amp; is an escaped ampersand"), "&amp; is an escaped ampersand")
+    // A tag with no rule leaves its text behind and nothing else.
+    assertEq(asMarkdown("<span class=\"k\">import</span> x"), "import x")
+    assertEq(asMarkdown("<b>b</b> and <em>e</em>"), "**b** and *e*")
+    // Two paragraphs are one blank line apart, not three.
+    assertEq(asMarkdown("<p>One.</p><p>Two.</p>"), "One.\n\nTwo.")
+    // A `<` with no `>` after it is a less-than sign in prose.
+    assertEq(asMarkdown("a < b"), "a < b")
+}
+
+test "a code span inside a fence stays inside it" {
+    // The defect this rules out: a backtick written inside a fenced block ends
+    // the block, and the rest of the file renders as prose.
+    let fenced = asMarkdown("<pre><code>let x = 1</code></pre>")
+    assertEq(fenced, "```vyrn\nlet x = 1\n```")
+    // Outside a fence the same tag is a backtick.
+    assertEq(asMarkdown("<code>x</code>"), "`x`")
+}
+
+test "the two names beside a page are the page's own" {
+    assertEq(mdUrl("/guide/values.html"), "/guide/values.md")
+    assertEq(mdUrl("/docs/std/json.html"), "/docs/std/json.md")
+    assertEq(mdName("/guide/values"), "guide/values.md")
+    assertEq(mdName("/docs/std/json"), "docs/std/json.md")
+    // A name with no `.html` on it is left alone rather than being cut short.
+    assertEq(mdUrl("/style.css"), "/style.css")
+}
+
+test "every chapter and every module publishes a markdown twin" {
+    let paths = mdPaths()
+    assertEq(paths.length, chapterSlugs().length + apiModules().length)
+    // A path outside the two kinds has no twin, and says so rather than
+    // answering with an empty document.
+    assertEq(markdownOf("/install"), "")
+    assertEq(markdownOf("/backstage/rfcs/0106"), "")
+}
+
+test "a chapter's markdown carries its programs and its prose" {
+    let md = markdownOf("/guide/getting-started")
+    assert(startsWith(md, "# Getting started\n"))
+    // Its sections, as headings.
+    assert(has(md, "\n## Install and check\n"))
+    // Its first program, and the output that program printed. `hello` prints
+    // one line, and this is the whole point of the book's own rule.
+    assert(has(md, "```vyrn\n"))
+    assert(has(md, "fn main() -> Int64"))
+    // What a program PRINTED is not Vyrn, and its fence does not claim it is.
+    assert(has(md, "Built output:\n\n```\nhello, world\n```"))
+    // No run of blank lines: two rules that are each right can write three.
+    assert(!has(md, "\n\n\n"))
+    // No markup survives into it, and no root-relative link.
+    assert(!has(md, "<code>"))
+    assert(!has(md, "<a href"))
+    assert(!has(md, "](/"))
+    assert(!has(md, "&lt;"))
+    assert(has(md, siteOrigin()))
+}
+
+test "a module's markdown carries every export it documents" {
+    let md = markdownOf("/docs/std/json")
+    assert(startsWith(md, "# std/json\n"))
+    for e in apiEntries("json") {
+        assert(has(md, "\n## \{e.name}\n"))
+    }
+    // The import line comes from the module's own header prose, as a fence.
+    assert(has(md, "import {"))
+    assert(!has(md, "<span"))
+    assert(!has(md, "&quot;"))
+}

@@ -14,7 +14,7 @@
 // from `site/release.txt` through `../repo`, baked while this page built, and
 // `fresh.js` says so on the page if a newer one appears before the next build.
 import { Head } from "std/ui"
-import { pageHead } from "../nav"
+import { pageHeadOf } from "../nav"
 import { vyrnHtml } from "../snippets"
 import { shellHtml } from "../code"
 import { hasRelease, releaseTag, releaseDate, releasePre, releaseUrl } from "../repo"
@@ -23,7 +23,7 @@ import { hasRelease, releaseTag, releaseDate, releasePre, releaseUrl } from "../
 type Platform = { id: String, name: String, install: String, archive: String, deps: String, run: String }
 
 export fn head() -> Head {
-    return pageHead("Install — Vyrn")
+    return pageHeadOf("/install")
 }
 
 fn platforms() -> Array<Platform> {

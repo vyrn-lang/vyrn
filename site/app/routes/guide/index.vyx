@@ -5,11 +5,11 @@
 // appears here, in the rail of every chapter page, and in the export's route
 // table, with nothing written twice.
 import { Head } from "std/ui"
-import { pageHead } from "../../nav"
+import { pageHeadOf } from "../../nav"
 import { Chapter, chapters, chapterHref, chapterNumber, chapterTag, blockCount } from "../../guide"
 
 export fn head() -> Head {
-    return pageHead("The guide — Vyrn")
+    return pageHeadOf("/guide")
 }
 
 /// The chapter's number, as the rail and the list print it.
