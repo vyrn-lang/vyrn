@@ -5,7 +5,10 @@
   that lock instead of three unchecksummed `curl` lines — so the seven copies of
   a wasmtime version are one, and the one is checked against a hash. See "M1 — as
   landed" through "M4 — as landed" under Milestones for what shipped, what it is
-  called, and where the implementation corrected this document.
+  called, and where the implementation corrected this document. Amended once
+  since: the table's fourth tool is `cargo-nextest`, a build tool rather than a
+  target artifact, added with no design change at all — see "the table grew a
+  fourth tool" at the end of Milestones.
 - **Depends on:** RFC-0010 M4 (reproducible remote imports — `vyrn.lock`, the
   content-addressed cache under `~/.vyrn`, `vyrn add/update/vendor`, `--offline`),
   RFC-0021 (the generator cache, keyed on its recorded inputs), RFC-0077 M5 (the
@@ -492,7 +495,7 @@ manifest already travels:
 
 ```text
 unknown tool `wasmtimee` in vyrn.json's `toolchain` — the tools vyrn can pin are
-wasmtime, wasi-sysroot, wasi-builtins
+wasmtime, wasi-sysroot, wasi-builtins, cargo-nextest
 ```
 
 That is a correction to this document, which put the refusal in the resolver. A
@@ -994,6 +997,50 @@ process for the reason M3's `deps` checks do. It fetches a `file://` URL, so it
 needs no network: what is under test is the comparison and the refusal, not
 curl's transport. It asserts both halves — the mismatch is refused with the
 upstream-changed wording, and the lock is byte-identical afterwards.
+
+### Amendment — the table grew a fourth tool, and the fourth is a build tool
+
+The machinery this RFC built was asked for by something it did not anticipate.
+CI's longest test step ran 65 test binaries one at a time; `cargo-nextest` runs
+them all at once and cut that step from 155 s to 53 s on the machine where both
+were measured. The question was how a workflow acquires it, and the answer was
+not a new mechanism: a row in `tool_url`, `"cargo-nextest": "0.9.143"` in
+`vyrn.json`, four hash-locked lines from `vyrn update cargo-nextest`, and
+`vyrn update --locked cargo-nextest` in the job. Nothing about the design changed
+to admit it. That is the claim "a tool is a dependency" cashing out.
+
+Three things it did surface, each recorded rather than smoothed over:
+
+- **The vocabulary is the host, not the asset.** `PLATFORMS` names four hosts,
+  and nextest publishes per Rust target triple — with ONE macOS artifact, a
+  universal binary. So `aarch64-macos` maps to `universal-apple-darwin`, and the
+  mapping lives in `tool_url`'s arm where every other naming quirk already does.
+  A `.tar.gz` on every platform including Windows, so unlike wasmtime there is no
+  extension to choose. `unpack_tool`'s `tar -xf` reads it, and the binary is at
+  the top of the archive, which `tool_binary`'s `at_top_or_one_in` already covers.
+- **`tool_env_var` was a hole.** It returned `""` for a name it did not know, and
+  both refusals interpolated it — so a tool outside the three would have printed
+  *"or point $ at a binary you trust"*. `escape_hatch` renders the clause or
+  renders nothing, which is the honest answer for `cargo-nextest`: no Rust code
+  in this compiler resolves it, the workflow puts it on PATH, and inventing a
+  `$VYRN_NEXTEST` no reader honours would be the WASI_SYSROOT defect again.
+- **`vyrn update --locked <name>` is the CI shape, and it already existed.**
+  Naming one tool fetches that tool for this platform only, which is what a job
+  wanting a test runner and not a 150 MB sysroot needs. The workflow reads the
+  unpacked directory from the resolver's own `<spec> -> <dir>` line rather than
+  searching `~/.vyrn/tools` — a stale directory from an earlier pinned version
+  would answer a search just as happily as the current one.
+
+One gap, stated rather than papered over: `vyrn deps`' `toolchain:` section still
+prints four rows and `cargo-nextest` is not one of them. Every row there is a
+tool with a resolver — `wasmtime_from`, `wasi_sysroot_from` — because the section
+reports *the toolchain that would build a program*, and nextest builds nothing.
+A project that declares it therefore sees it in `vyrn.json` and in `vyrn.lock`
+but not in `vyrn deps`. Closing that means either a resolver no build calls or a
+fifth row that reads the pin and stops, and neither is worth writing before
+something asks for it.
+
+`clang` is still recorded and not pinned, and this changes nothing about that.
 
 ## Alternatives refused
 

@@ -1,3 +1,109 @@
+# WHERE THIS WORKFLOW'S TIME GOES, measured rather than guessed: median step
+# seconds over the last four main-branch runs (32303455868, 32310445020,
+# 32316020952, 32387445497), from `gh run view --json jobs`. Every job starts at
+# once, so the wall clock is the slowest job and the slowest job is `test`.
+#
+#   step                          ubuntu  arm    windows  macos
+#   Rust cache (restore)              10    6        14      10
+#   Formatting gate                    4    3         4       1
+#   Workspace tests                  306  288       398     244
+#   Browser runtime tests (node)       0    0         1       1
+#   LSP tests (excluded crate)        56   46       124      57
+#   Docs drift gate                    0    0         0       0
+#   install.sh / install.ps1           0    0         4      19
+#   Bench --check                    662  673       746     456
+#   ---------------------------------------------------------------
+#   job total                       1141 1043      1243     692
+#
+#   parity: harness 468, build 18, codegen 8, universal-pages 13   -> 561
+#   gen-engine: the one release test 57                            ->  66
+#   bench: run + compare 114, build 15                             -> 134
+#
+# Two facts the table settles. The caches are already right: `Swatinem/rust-cache`
+# restores in 6-14 s and the builds behind every step above are warm (an 18 s
+# `cargo build -p vyrn-cli` in the parity job is the proof), so there is no
+# cargo-caching win left to take here. And the long poles are not builds at all —
+# they are two steps that run work in series on a runner with idle cores:
+# `Bench --check`, thirteen independent processes in a `for` loop, and
+# `Workspace tests`, 65 test binaries that `cargo test` starts one at a time.
+# Both are fixed below, and each step says how.
+#
+# What was measured and left alone: the node step (0-1 s) and the docs drift gate
+# (0 s) run on all four platforms, and moving them to one leg would save nothing
+# a table can see. `install.sh`/`install.ps1` are per-platform scripts and belong
+# on the platform they install for. The bench and gen-engine jobs are 134 s and
+# 66 s against a 1243 s critical path, so nothing they could save is visible.
+#
+# WHAT THE TWO STEPS COST AFTERWARDS, over two runs of this change — 32401431905
+# cold for both new caches, then 32403119413 warm. The WORSE of the two is quoted
+# per cell, because the two runs disagree by up to 40% on identical ubuntu-latest
+# steps (402 s against 261 s for the same bench corpus) and that spread is the
+# fleet spread `BENCH_THRESHOLD` below already documents: one label, several CPU
+# models. A number picked from the kinder run would be a claim about scheduling.
+#
+#   step                          ubuntu  arm    windows  macos
+#   Workspace tests              306→201 288→136 398→286 244→140
+#   Bench --check                662→402 673→294 746→430 456→221
+#   ---------------------------------------------------------------
+#   job total                   1141→704 1043→507 1243→967 692→484
+#
+# The critical path is the Windows leg before and after, so the whole run went
+# 1248 s to 983 s cold and 863 s warm. What the warm run bought is the tool
+# cache: `Pinned test-runner cache` hits in 1-2 s and `Build vyrn, and put the
+# pinned test runner on PATH` drops from 26-44 s to 12-32 s, because it stops
+# paying nextest's fetch.
+#
+# ROUND TWO, because 863 s is still fourteen minutes of Windows and the reason
+# was structural: the three heavyweights were STEPS IN ONE JOB. Windows spent
+# 252 s on the workspace suite, then 412 s on the bench corpus, then 111 s on the
+# LSP crate — 775 s in series between three things that never read each other's
+# output. A step can only wait its turn.
+#
+# Two changes, and the smaller-looking one is the bigger:
+#
+#   1. The old `test` job is now `test` (fmt + the workspace suite) and `checks`
+#      (bench, LSP, node, docs, install), which run at the same time. Two jobs
+#      and not three — a third was measured on paper and does not move the pole,
+#      which is now the workspace suite.
+#   2. `checks` builds vyrn `--release`. `bench --check` runs every bench body
+#      under the INTERPRETER, so the interpreter's own speed IS that step, and a
+#      debug interpreter is 4-7x slower per bench. Over the corpus on one
+#      machine: 323 s serial / 148 s at -P 4 debug, against 62 s serial / 29 s at
+#      -P 4 release. Release+SERIAL beats debug+parallel by 2.4x. One bench
+#      dominates the corpus — spectralnorm is 95 s of the 323 s debug total, and
+#      16 s of the 62 s release one — so no amount of -P could have cut below it
+#      and the optimization level was always the larger lever.
+#
+# The gate loses nothing by not being debug: `--check` runs no codegen, and the
+# four first-party `debug_assert!`s in this workspace are in vyrn-codegen (2),
+# vyrn-lower (1) and vyrn-genwasm (1) — NONE in the interpreter. The 1753-test
+# workspace suite still runs in debug, so every assertion still has a job that
+# trips it. Same corpus, same one-run-per-body, same verdict.
+#
+# WHERE IT LANDED, from run 32408641317 (warm; 32407284624 is the cold one):
+#
+#   step                          ubuntu  arm    windows  macos
+#   Bench --check                662→ 45 673→ 36 746→ 59 456→ 28
+#   Workspace tests              306→153 288→129 398→253 244→129
+#   LSP tests (excluded crate)    56→ 63  46→ 47 124→128  57→ 64
+#   Build vyrn (release), new         50     45      87     46
+#   ---------------------------------------------------------------
+#   tests (workspace) job             181    161     319    176
+#   checks job                        179    153     319    195
+#   CRITICAL PATH (the max)      1141→181 1043→161 1243→319 692→195
+#
+# The bench gate went 10-15x, and that is the release binary rather than the
+# `xargs` — one bench dominated the corpus, so no -P could have cut below it.
+# The LSP step costs what it always did; it simply stopped being in series with
+# the two big ones. On Windows the two jobs come out at 319 s each, which is the
+# balance a two-way split is supposed to find and the reason a third job would
+# only have added a checkout.
+#
+# THERE IS NO SINGLE POLE any more. `parity` swings 271-500 s across the fleet
+# (one `#[test]` walking 40 programs) and the Windows test leg sits at ~310-320 s;
+# which one tops a given run is scheduling. Cutting further therefore means the
+# parity harness itself — a change to the harness, not to this file.
+
 name: CI
 
 on:
@@ -68,7 +174,7 @@ env:
 
 jobs:
   test:
-    name: tests (workspace + LSP) — ${{ matrix.os }}
+    name: tests (workspace) — ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       # The opposite of the release matrix's setting, for the opposite reason:
@@ -106,9 +212,29 @@ jobs:
         # and prunes stale artifacts.
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            compiler
-            compiler/vyrn-lsp
+          # `compiler` alone now: the LSP crate moved to the `checks` job, and a
+          # workspace listed here that this job never builds is a target tree
+          # saved and restored for nothing — which matters against the 10 GB
+          # repository cache cap the split already pushes on.
+          workspaces: compiler
+      - name: Pinned test-runner cache
+        # `cargo-nextest` is a pinned tool like wasmtime (RFC-0102): a row in
+        # `toolpin.rs`, a version in `vyrn.json`, four hash-locked lines in
+        # `vyrn.lock`, and `~/.vyrn/tools/<sha256>/` to unpack into. Same key
+        # shape as the parity job's, with two differences that matter:
+        #
+        #   * `${{ matrix.os }}` is in the key, because this is a four-platform
+        #     matrix and the four artifacts are different binaries. The parity
+        #     job is ubuntu-only and needs no such word.
+        #   * a DISTINCT prefix from `vyrn-tools-`, because the two jobs put
+        #     different subsets of the same directory in the cache. Sharing one
+        #     key would let this job's nextest-only save answer the parity job's
+        #     restore as a hit — and its populate step is `if: cache-hit !=
+        #     'true'`, so wasmtime would silently never arrive.
+        uses: actions/cache@v4
+        with:
+          path: ~/.vyrn/tools
+          key: vyrn-nextest-${{ matrix.os }}-${{ hashFiles('vyrn.lock') }}
       - name: Formatting gate
         # First, because it is seconds and its fix is mechanical — a reader gets
         # the verdict before the build spends five minutes.
@@ -126,9 +252,169 @@ jobs:
           cargo fmt --check
           cargo fmt --check --manifest-path vyrn-lsp/Cargo.toml
           cargo fmt --check --manifest-path vyrn-genwasm/Cargo.toml
+      - name: Build vyrn, and put the pinned test runner on PATH
+        # Two things this job needed anyway, in one step. `vyrn-cli` is built by
+        # the test compile regardless — the suites spawn the binary — so hoisting
+        # it here costs nothing and gives the two steps below something to call
+        # that is not `cargo run`.
+        #
+        # The runner's directory comes from the resolver's own last line
+        # (`<spec> -> <dir>`), not from a `find` over `~/.vyrn/tools`: a stale
+        # directory from an earlier pinned version would answer a `find` just as
+        # happily as the current one, and CI would run a version nothing pins.
+        # `--locked` fetches only what `vyrn.lock` pins FOR THIS PLATFORM (so no
+        # wasmtime and no 150 MB sysroot arrive here), verifies every byte
+        # against the recorded sha256, refuses a mismatch, and never writes the
+        # lock — a cache miss cannot silently re-pin anything.
+        run: |
+          set -eu
+          cargo build --quiet --manifest-path compiler/Cargo.toml -p vyrn-cli
+          line=$(compiler/target/debug/vyrn update --locked cargo-nextest | tail -1)
+          # Forward slashes so the one Windows leg's path works both as a bash
+          # test below and as a PATH entry.
+          dir=$(printf '%s' "${line#*-> }" | tr '\\' '/')
+          [ -x "$dir/cargo-nextest" ] || [ -x "$dir/cargo-nextest.exe" ] || {
+            echo "the pin resolved to a directory with no cargo-nextest in it: $line" >&2
+            exit 1
+          }
+          echo "$dir" >> "$GITHUB_PATH"
       - name: Workspace tests
         working-directory: compiler
-        run: cargo test --quiet
+        # `cargo nextest run`, not `cargo test`: cargo runs the workspace's 65
+        # test binaries one after another, and nextest runs every test in its own
+        # process with all of them in flight. Measured warm on one machine over
+        # this workspace: 155 s under `cargo test`, 53 s under nextest, same 1753
+        # passed and 69 skipped.
+        #
+        # It is the WORKSPACE step only. The LSP crate's two binaries were
+        # measured too — 11 s either way, because two binaries have nothing to
+        # interleave — so that step stays on `cargo test` rather than gaining a
+        # tool for no reason.
+        #
+        # `--no-fail-fast` keeps what `cargo test` gave: nextest stops the whole
+        # run at the first failure by default, and this job exists to learn WHICH
+        # tests are broken (`fail-fast: false` on the matrix, for the same
+        # reason). `--status-level fail` is the `--quiet` it replaces — the
+        # failures and the summary, not 1753 lines of PASS.
+        run: cargo nextest run --no-fail-fast --status-level fail
+
+  checks:
+    name: checks (bench, LSP, docs, install) — ${{ matrix.os }}
+    # THE OTHER HALF OF THE OLD `test` JOB, and the reason it is a job rather
+    # than more steps: everything here is independent of the workspace suite, and
+    # a step can only wait its turn. The old job ran fmt, the workspace suite,
+    # node, the LSP crate, the docs gate, the install script and the bench corpus
+    # in one line — 855 s on Windows, of which 252 s and 412 s were two steps
+    # that never needed each other's output.
+    #
+    # Two jobs and not three. A third (LSP and the small gates on their own)
+    # was measured on paper against the numbers below and buys nothing: it would
+    # be ~160 s against `tests (workspace)`'s ~290 s, so the critical path does
+    # not move and it costs another checkout, another cache slot and another
+    # release build. The split stops where the pole stops moving.
+    #
+    # The cost this pays, stated: a second job per platform is a second checkout
+    # (2-9 s), a second cache restore (4-42 s) and its own build. It is worth it
+    # only because the two halves are each hundreds of seconds. The ceiling to
+    # watch is the repository's 10 GB cache cap — this takes the Rust cache slots
+    # from 7 to 11, and if eviction starts making runs partially cold, merging
+    # this job's `compiler` slot with the test job's via rust-cache's
+    # `shared-key` is the first thing to try.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            compiler
+            compiler/vyrn-lsp
+          # Its own slot: this job builds vyrn-cli in RELEASE and the test job
+          # builds it in debug, and one slot holding both target trees would be
+          # twice the size for two jobs that never read each other's half.
+          prefix-key: checks
+      - name: Build vyrn (release)
+        working-directory: compiler
+        # `--release`, and the bench step below is why. `vyrn bench --check` runs
+        # every bench body once under the INTERPRETER, so the interpreter's own
+        # speed is the whole cost of that step — and a debug interpreter is
+        # 4-7x slower per bench than an optimized one. Measured over the corpus
+        # on one machine: 323 s serial and 148 s at -P 4 with a debug binary,
+        # against 62 s serial and 29 s at -P 4 with a release one. Release+serial
+        # beats debug+parallel by 2.4x, so this is the larger of the two levers
+        # and it is not parallelism.
+        #
+        # `gen-engine` below already made this trade and wrote down the same
+        # shape of number ("20 s release against 98 s debug"), so this is the
+        # established answer here rather than a new idea.
+        #
+        # WHAT THE GATE LOSES BY NOT BEING DEBUG: nothing it could have caught.
+        # `--check` compiles no native code and runs no codegen, and the whole
+        # workspace carries four first-party `debug_assert!`s — two in
+        # vyrn-codegen, one in vyrn-lower, one in vyrn-genwasm — and NONE in the
+        # interpreter this step exercises. The 1753-test workspace suite still
+        # runs in debug, so every `debug_assert` that exists still has a job that
+        # trips it. What the gate verifies — that each bench body still compiles
+        # and still runs, deterministically — is unchanged, and so is the corpus.
+        run: cargo build --quiet --release -p vyrn-cli
+      - name: Bench --check (deterministic, RFC-0063)
+        # The BLOCKING half of bench-in-CI: `vyrn bench --check` runs each bench
+        # body ONCE under the interpreter — deterministic, no clang, no timing —
+        # so a bench that stops compiling/running fails the build. The corpus is
+        # every example carrying `bench "` (benching, smallarray, and any future
+        # one), discovered here exactly as the RFC specifies.
+        #
+        # It was the longest step in CI: 662 s on ubuntu and 746 s on Windows,
+        # thirteen independent processes run one after another with a debug
+        # binary. Two things fixed it, and the ORDER of their sizes is the
+        # finding — the release binary above is worth more than the parallelism,
+        # because one bench dominates the corpus (spectralnorm is 95 s of the
+        # 323 s debug total, so no -P can cut below it, while release takes that
+        # same bench to 16 s).
+        #
+        # `-P 4` and not `$(nproc)`: `nproc` is not on macOS, every runner in
+        # this matrix has at least three cores, and slight oversubscription on a
+        # three-core box costs far less than the serial loop did.
+        #
+        # The built binary rather than `cargo run` per file, for the reason the
+        # bench job below already uses it: four concurrent `cargo run`s would
+        # queue on cargo's build lock and undo the parallelism.
+        #
+        # Output is collected per file and printed in corpus order after the
+        # run — interleaved stdout from four processes is not a log anyone can
+        # read, and the order a failure appears in must not depend on scheduling.
+        working-directory: compiler
+        run: |
+          set -eu
+          corpus=$(grep -rl 'bench "' ../examples --include='*.vyrn' | sort)
+          [ -n "$corpus" ] || { echo "no bench corpus found under examples/" >&2; exit 1; }
+          echo "bench corpus:"; echo "$corpus"
+          logs=$(mktemp -d)
+          status=0
+          printf '%s\n' $corpus | xargs -P 4 -I@ sh -c \
+            '"$1" bench "@" --check > "$2/$(basename @ .vyrn).log" 2>&1' \
+            sh target/release/vyrn "$logs" || status=1
+          for f in $corpus; do
+            echo "== vyrn bench --check $f =="
+            cat "$logs/$(basename "$f" .vyrn).log" 2>/dev/null \
+              || echo "(no output: this bench never ran)"
+          done
+          exit $status
+      - name: LSP tests (excluded crate)
+        working-directory: compiler
+        # Stays on `cargo test`: measured 11 s either way against nextest, warm,
+        # 83 passed and 4 ignored under both, because two test binaries have
+        # nothing to interleave. Its 47-141 s here is compiling that excluded
+        # crate, not running it — which is also why it belongs in the job that is
+        # not the critical path.
+        run: cargo test --quiet --manifest-path vyrn-lsp/Cargo.toml
       - name: Browser runtime tests (web/) and the extension's own
         # The zero-dependency JavaScript beside the compiler gets the same gate.
         # node:test is in the runner's Node already, so this adds no install.
@@ -138,15 +424,15 @@ jobs:
         # nothing in `node_modules`, and the test imports the real
         # server-resolution helpers rather than a copy of them.
         run: node --test "web/test/*.test.mjs" "editor/vscode/test/*.test.mjs"
-      - name: LSP tests (excluded crate)
-        working-directory: compiler
-        run: cargo test --quiet --manifest-path vyrn-lsp/Cargo.toml
       - name: Docs drift gate (RFC-0065)
         # The committed std API docs (docs/api/) must match what `vyrn doc`
         # generates from std/ — regenerated in the same commit as any std doc
         # change. Cheap (no clang): --verify writes nothing and exits 1 on drift.
+        #
+        # The release binary built above, not `cargo run`: same program, same
+        # answer, and it is already sitting there.
         working-directory: compiler
-        run: cargo run --quiet -p vyrn-cli -- doc --std -o ../docs/api --verify
+        run: target/release/vyrn doc --std -o ../docs/api --verify
       - name: The install script installs, and refuses what it cannot verify
         if: runner.os != 'Windows'
         # `install.sh` and `install.ps1` were executed by NOTHING — including the
@@ -163,22 +449,6 @@ jobs:
         run: |
           & powershell -NoProfile -ExecutionPolicy Bypass -File install-test.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Bench --check (deterministic, RFC-0063)
-        # The BLOCKING half of bench-in-CI: `vyrn bench --check` runs each bench
-        # body ONCE under the interpreter — deterministic, no clang, no timing —
-        # so a bench that stops compiling/running fails the build. The corpus is
-        # every example carrying `bench "` (benching, smallarray, and any future
-        # one), discovered here exactly as the RFC specifies.
-        working-directory: compiler
-        run: |
-          set -eu
-          corpus=$(grep -rl 'bench "' ../examples --include='*.vyrn' | sort)
-          [ -n "$corpus" ] || { echo "no bench corpus found under examples/" >&2; exit 1; }
-          echo "bench corpus:"; echo "$corpus"
-          for f in $corpus; do
-            echo "== vyrn bench --check $f =="
-            cargo run --quiet -p vyrn-cli -- bench "$f" --check
-          done
 
   parity:
     name: three-way parity (interp == native == wasm)

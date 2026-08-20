@@ -20,11 +20,16 @@ use common::*;
 
 /// The body of `fn <name>` in `src`'s emitted LLVM IR.
 fn body_of(src: &str, name: &str) -> String {
-    let dir = std::env::temp_dir().join("vyrn-simd");
-    std::fs::create_dir_all(&dir).unwrap();
-    static NTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let nth = NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let file = dir.join(format!("{name}-{nth}.vyrn"));
+    // `scratch`, not a hand-rolled path: this helper used to build
+    // `$TMP/vyrn-simd/<name>-<nth>` from a process-local counter, which is
+    // unique across the THREADS of one `cargo test` and not across processes.
+    // Two tests here pass the same `name`, so a runner that gives each test its
+    // own process — `cargo nextest`, which CI now uses — had them both write
+    // `read-0.vyrn` and race: whichever wrote last is the source both compiled,
+    // and the count came back 1 where 4 was asserted. `scratch` puts the pid in
+    // the path, which is exactly the missing half.
+    let dir = scratch("simd-ir");
+    let file = dir.join(format!("{name}.vyrn"));
     std::fs::write(&file, src).unwrap();
     let out = vyrn()
         .arg("emit-ir")

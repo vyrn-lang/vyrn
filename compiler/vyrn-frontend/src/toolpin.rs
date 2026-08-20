@@ -28,10 +28,10 @@ pub const PLATFORMS: [&str; 4] = [
     "x86_64-windows",
 ];
 
-/// The tools the table knows. Three entries, because these are the three this
+/// The tools the table knows. Four entries, because these are the four this
 /// repository fetches; a name outside this list is a refusal, never a
 /// fall-through to PATH.
-pub const KNOWN_TOOLS: [&str; 3] = ["wasmtime", "wasi-sysroot", "wasi-builtins"];
+pub const KNOWN_TOOLS: [&str; 4] = ["wasmtime", "wasi-sysroot", "wasi-builtins", "cargo-nextest"];
 
 /// This machine, in [`PLATFORMS`]' vocabulary. Rust's own `ARCH`/`OS` constants
 /// already spell it that way (`x86_64`, `aarch64`; `linux`, `macos`, `windows`),
@@ -61,12 +61,30 @@ pub fn tool_platforms(name: &str) -> &'static [&'static str] {
 
 /// The environment variable that overrides a tool, so a refusal can name the
 /// escape hatch it is refusing to take silently.
+///
+/// Empty for a tool no code in this compiler resolves — see [`escape_hatch`].
 pub fn tool_env_var(name: &str) -> &'static str {
     match name {
         "wasmtime" => "VYRN_WASMTIME",
         "wasi-sysroot" => "WASI_SYSROOT",
         "wasi-builtins" => "WASI_BUILTINS",
         _ => "",
+    }
+}
+
+/// The clause a refusal appends to name the escape hatch — and nothing at all
+/// for a tool that has none.
+///
+/// `cargo-nextest` is the case that needed this: it is CI's test runner, pinned
+/// by this table and put on PATH by the workflow, and no Rust code here ever
+/// looks for it. A variable nothing reads is the exact defect the three
+/// `WASI_*` exports were (RFC-0076 M7 left them behind for a build that had
+/// stopped reading them), so the refusal says `vyrn update cargo-nextest` and
+/// stops there rather than inventing a `$VYRN_NEXTEST` no reader honours.
+pub fn escape_hatch(name: &str) -> String {
+    match tool_env_var(name) {
+        "" => String::new(),
+        v => format!(", or point ${v} at a binary you trust"),
     }
 }
 
@@ -109,6 +127,28 @@ pub fn tool_url(name: &str, version: &str, platform: &str) -> Result<String, Str
             };
             Ok(format!(
                 "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-{major}/{asset}"
+            ))
+        }
+        // One archive per Rust target triple, and a `.tar.gz` for every one of
+        // them — Windows included, unlike wasmtime — so there is no extension
+        // to choose here. macOS publishes ONE artifact, a universal binary,
+        // which is why `aarch64-macos` maps to `universal-apple-darwin`: the
+        // vocabulary above names the host, and this arm names the asset.
+        "cargo-nextest" => {
+            let triple = match platform {
+                "x86_64-linux" => "x86_64-unknown-linux-gnu",
+                "aarch64-linux" => "aarch64-unknown-linux-gnu",
+                "aarch64-macos" => "universal-apple-darwin",
+                "x86_64-windows" => "x86_64-pc-windows-msvc",
+                _ => {
+                    return Err(format!(
+                        "cargo-nextest publishes no artifact for {platform}"
+                    ))
+                }
+            };
+            Ok(format!(
+                "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-{version}/\
+                 cargo-nextest-{version}-{triple}.tar.gz"
             ))
         }
         _ => Err(unknown_tool(name)),
@@ -212,8 +252,8 @@ pub fn pinned_tool(
         return Err(format!(
             "{name} {version} is pinned, and vyrn.lock has no entry for {platform}.\n  \
              Pinned platforms: {covered}.\n  \
-             Add one with `vyrn update {name}`, or point ${} at a binary you trust.",
-            tool_env_var(name)
+             Add one with `vyrn update {name}`{}.",
+            escape_hatch(name)
         ));
     };
     let out = tools_dir().join(sha);
@@ -225,10 +265,10 @@ pub fn pinned_tool(
         Some(Err(e)) => Err(e),
         None => Err(format!(
             "{name} {version} is pinned for {platform} (sha256 {sha}) but not cached — \
-             run `vyrn update {name}` online, `vyrn vendor`, drop any copy of the \
-             archive with that hash into {}, or point ${} at a binary you trust",
+             run `vyrn update {name}` online, `vyrn vendor`, or drop any copy of the \
+             archive with that hash into {}{}",
             slash(&cache_dir()),
-            tool_env_var(name)
+            escape_hatch(name)
         )),
     }
 }
@@ -282,8 +322,42 @@ pub fn tool_root(dir: &Path, marker: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// One archive per Rust target triple, `.tar.gz` on every platform, and one
+    /// universal binary for macOS — the three ways cargo-nextest's naming
+    /// differs from wasmtime's, each pinned here.
     #[test]
-    fn the_table_knows_three_tools_and_refuses_the_rest() {
+    fn cargo_nextest_names_a_target_triple_and_one_universal_mac_artifact() {
+        let base = "https://github.com/nextest-rs/nextest/releases/download/\
+                    cargo-nextest-0.9.143/cargo-nextest-0.9.143-";
+        for (platform, triple) in [
+            ("x86_64-linux", "x86_64-unknown-linux-gnu"),
+            ("aarch64-linux", "aarch64-unknown-linux-gnu"),
+            ("aarch64-macos", "universal-apple-darwin"),
+            ("x86_64-windows", "x86_64-pc-windows-msvc"),
+        ] {
+            assert_eq!(
+                tool_url("cargo-nextest", "0.9.143", platform).unwrap(),
+                format!("{base}{triple}.tar.gz"),
+            );
+        }
+        // Every host in the vocabulary is covered, so the table needs no
+        // fall-through — and a host outside it is a refusal that says so.
+        assert_eq!(tool_platforms("cargo-nextest"), &PLATFORMS);
+        assert_eq!(
+            tool_url("cargo-nextest", "0.9.143", "aarch64-windows").unwrap_err(),
+            "cargo-nextest publishes no artifact for aarch64-windows"
+        );
+        // No Rust code here resolves it, so the refusal names no variable.
+        assert_eq!(tool_env_var("cargo-nextest"), "");
+        assert_eq!(escape_hatch("cargo-nextest"), "");
+        assert_eq!(
+            escape_hatch("wasmtime"),
+            ", or point $VYRN_WASMTIME at a binary you trust"
+        );
+    }
+
+    #[test]
+    fn the_table_knows_four_tools_and_refuses_the_rest() {
         assert_eq!(
             tool_url("wasmtime", "46.0.1", "x86_64-linux").unwrap(),
             "https://github.com/bytecodealliance/wasmtime/releases/download/v46.0.1/\
@@ -311,7 +385,7 @@ mod tests {
         assert_eq!(
             e,
             "unknown tool `wasm-opt` in vyrn.json's `toolchain` — the tools vyrn can pin \
-             are wasmtime, wasi-sysroot, wasi-builtins"
+             are wasmtime, wasi-sysroot, wasi-builtins, cargo-nextest"
         );
     }
 

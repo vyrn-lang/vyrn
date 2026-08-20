@@ -1,3 +1,7 @@
+tool:cargo-nextest@0.9.143/aarch64-linux	https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-aarch64-unknown-linux-gnu.tar.gz	2a64b3566a92508550a7ab29c3e8db25472ca37730ecb4d22100b6aa440c2a68
+tool:cargo-nextest@0.9.143/aarch64-macos	https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-universal-apple-darwin.tar.gz	4830d430411148d17602a75cc880bfb4dc8dac153dea59a48a2ef4cc93577f07
+tool:cargo-nextest@0.9.143/x86_64-linux	https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-x86_64-unknown-linux-gnu.tar.gz	66786b9abe23920d022a182d1416b1bbc8130dd4872a9553d76985a1708dcd1e
+tool:cargo-nextest@0.9.143/x86_64-windows	https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-x86_64-pc-windows-msvc.tar.gz	c42a1dbde532da06dc9b4a43d44fd0ce668b836c2ab7388410f10ff9834476a2
 tool:wasi-builtins@25.0/any	https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/libclang_rt.builtins-wasm32-wasi-25.0.tar.gz	13aca55665321200b9659b292615adf5110ace9e891ab94511badd970553ca18
 tool:wasi-sysroot@25.0/any	https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sysroot-25.0.tar.gz	d09c62c18efcddffe4b2fdd8c5830109cc8e36130cdbc9acdc0bd1b204c942bb
 tool:wasmtime@46.0.1/aarch64-linux	https://github.com/bytecodealliance/wasmtime/releases/download/v46.0.1/wasmtime-v46.0.1-aarch64-linux.tar.xz	071c4def2a08f0ebc95c52dfd4f2886eb697ba495804217cf76e13b09d70a1be
