@@ -80,25 +80,28 @@
 # workspace suite still runs in debug, so every assertion still has a job that
 # trips it. Same corpus, same one-run-per-body, same verdict.
 #
-# WHAT ROUND TWO COST, from run 32407284624 — cold for the `checks` slot, which
-# did not exist before it:
+# WHERE IT LANDED, from run 32408641317 (warm; 32407284624 is the cold one):
 #
 #   step                          ubuntu  arm    windows  macos
-#   Bench --check                662→ 43 673→ 35 746→ 59 456→ 30
-#   Workspace tests              306→208 288→127 398→262 244→155
+#   Bench --check                662→ 45 673→ 36 746→ 59 456→ 28
+#   Workspace tests              306→153 288→129 398→253 244→129
+#   LSP tests (excluded crate)    56→ 63  46→ 47 124→128  57→ 64
+#   Build vyrn (release), new         50     45      87     46
 #   ---------------------------------------------------------------
-#   tests (workspace) job total       253    162     326     202
-#   checks job total                  357    222     610     362
+#   tests (workspace) job             181    161     319    176
+#   checks job                        179    153     319    195
+#   CRITICAL PATH (the max)      1141→181 1043→161 1243→319 692→195
 #
 # The bench gate went 10-15x, and that is the release binary rather than the
-# `xargs`. The `checks` totals above are a COLD slot and mostly one step: the
-# LSP crate compiled from scratch — 422 s on Windows, 218-220 s elsewhere —
-# where the old job saw 47-141 s warm. So `checks` is not really 610 s; the warm
-# run is the one to read, and after it the pole is `tests (workspace)`.
+# `xargs` — one bench dominated the corpus, so no -P could have cut below it.
+# The LSP step costs what it always did; it simply stopped being in series with
+# the two big ones. On Windows the two jobs come out at 319 s each, which is the
+# balance a two-way split is supposed to find and the reason a third job would
+# only have added a checkout.
 #
-# After the parity harness at 468-500 s, that is the pole nobody has moved: one
-# `#[test]` walking 40 programs, which is a change to the harness rather than to
-# this file.
+# THE WHOLE WORKFLOW is now bounded by `parity` at 492 s, not by these legs — one
+# `#[test]` walking 40 programs. That is the next pole and it is a change to the
+# harness rather than to this file.
 
 name: CI
 
