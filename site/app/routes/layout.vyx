@@ -7,6 +7,11 @@
 // a directory of routes plus one row each in `navRows`, and nothing else here
 // changed.
 import { navRows, NavRow, themeControl, installCta } from "../nav"
+// The glyph provider (RFC-0107). `<Icon>` is a tag here because this `<script>`
+// imports a `gen fn` of that name and for no other reason — `std/vyx` names no
+// component. Each tag becomes its own generation, reading a hash-locked Iconify
+// collection at build time and splicing one inline `<svg>` where the tag stood.
+import { Icon } from "../icons"
 import { exampleCount, backendCount, hasRelease, releaseTag, releasePre } from "../repo"
 // The stylesheet and the one script module, for every page.
 //
@@ -77,7 +82,7 @@ fn standing() -> String {
                  the theme button, because without script it would take focus
                  and do nothing — the `<noscript>` below says where to go
                  instead. -->
-            <button type="button" class="find" data-find-open aria-label="Search this site. Press slash.">Search</button>
+            <button type="button" class="find" data-find-open aria-label="Search this site. Press slash."><Icon name="bytesize:search"/> Search</button>
             <span class="slot" v-html="installCta()"></span>
             <span class="slot" v-html="themeControl()"></span>
         </div>
@@ -117,14 +122,20 @@ fn standing() -> String {
              rule forbids. The parity claim is made where it can be shown: on the
              landing page, by a check that runs. -->
         <span>{{ exampleCount() }} examples, {{ backendCount() }} backends</span>
-        <a href="https://github.com/vyrn-lang/vyrn">Source on GitHub</a>
+        <!-- Two glyphs, one of each kind, and the difference is the whole a11y
+             rule (RFC-0107 M3). The mark beside the words is DECORATION: it
+             renders `aria-hidden`, because a screen reader that announced it
+             would say the link twice. The arrow after them is CONTENT: it says
+             the link leaves this site, which no word here says, so it carries a
+             `label` and renders as `role="img"` with that name. -->
+        <a href="https://github.com/vyrn-lang/vyrn"><Icon name="bytesize:github"/> Source on GitHub <Icon name="bytesize:external" label="opens on github.com"/></a>
         <!-- The one door to the other front (RFC-0105 M1). It is a footer link
              and not a navigation row on purpose: a reader deciding whether to
              use the language is never sent into the design record by the
              masthead. `data-nav="hard"` because the backstage wears its own
              shell, and a soft navigation would swap the content under this
              masthead and leave the reader in neither section. -->
-        <a href="/backstage.html" data-nav="hard">Backstage — the design record</a>
+        <a href="/backstage.html" data-nav="hard"><Icon name="codex:checklist"/> Backstage — the design record</a>
         <span>{{ standing() }}</span>
     </footer>
 </div>

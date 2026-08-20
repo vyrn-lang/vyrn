@@ -54,3 +54,7 @@ gate-*.txt
 # fixture beside it IS committed: it is five made-up days, and it is what the
 # export's tests run on when nobody has run the script (RFC-0105 M1).
 site/data/history.json
+# `vyrn vendor` output: content-addressed copies of everything vyrn.lock pins,
+# the toolchain archives included — hundreds of megabytes, all of it
+# regenerable from the lock.
+vyrn_vendor/

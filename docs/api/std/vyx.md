@@ -95,10 +95,18 @@ nothing here knows what any provider is called. To write one, export a
 
 The generated module MUST export the conventional entry point
 
-  export fn render() -> Html
+  export fn provide() -> Html
 
 and may export or import anything else it needs. `std/vyx` calls exactly
-`render()` at the tag site, through a namespace alias it mints itself.
+`provide()` at the tag site, through a namespace alias it mints itself.
+
+It was `render()` until RFC-0107 M3, and the rename is not cosmetic:
+`render` is one of RFC-0054's four SURFACE BUILTINS, which are deliberately
+not reserved — a user function of that name wins. That shadowing is decided
+across the whole program rather than per module, so a provider module
+exporting `render` took the name away from `render(vyrn"…")` in every OTHER
+module, this one included, and the build failed in `std/vyx`. `provide` is
+a word no builtin spells.
 
 Two rules follow from "the attributes are constant arguments", and both are
 refusals rather than surprises: a provider tag takes STATIC ATTRIBUTES ONLY —
