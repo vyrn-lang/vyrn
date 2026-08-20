@@ -54,6 +54,69 @@
 /// Every generation failure is a `std/diag` report (RFC-0099) anchored at the
 /// line of the `.vyx` file it came out of. Inspect the whole synthesized module
 /// with:  vyrn emit-gen <file>
+///
+/// ===========================================================================
+/// GENERATION-TIME COMPONENTS — the provider protocol (RFC-0107 M1)
+/// ===========================================================================
+///
+/// Directives are the language; components are libraries. `std/vyx` NAMES NO
+/// COMPONENT. A capitalized tag resolves first against the sibling `.vyx` files
+/// in the same directory, and then against the names the `<script>` sections
+/// imported. A tag that resolves to an imported name is a GENERATION-TIME
+/// COMPONENT: `std/vyx` emits a nested generator import that runs the imported
+/// `gen fn` — the PROVIDER — with the tag's attributes as constant arguments, and
+/// splices what the provider generated where the tag stood.
+///
+///   <script>
+///   import { Icon } from "./icon-provider"
+///   </script>
+///   <template>
+///   <p><Icon name="brand:github" label="GitHub"/></p>
+///   </template>
+///
+/// A provider is an ORDINARY LIBRARY MODULE. It does not import `std/vyx`, and
+/// nothing here knows what any provider is called. To write one, export a
+/// `gen fn` of exactly this shape:
+///
+///   export gen fn <TagName>(attrs: String, file: String, line: Int64, col: Int64) -> String
+///
+///   attrs  the tag's STATIC attributes as a JSON object, `{"name":"…", …}`, in
+///          source order, every value a JSON string. `std/json`'s writer produced
+///          it, so `std/jsonread`'s `parseJson` reads it back exactly; a value
+///          holding a quote, a newline or any UTF-8 survives the trip. A tag with
+///          no attributes gets `{}`.
+///   file   the `.vyx` file the tag was written in.
+///   line   the tag's 1-based line in that file.
+///   col    the tag's column, for `std/diag`'s `report`. Always 1 today — a
+///          template node carries a line and no column (see `std/vyx-hints`) — and
+///          in the signature so that a provider needs no change when it learns one.
+///
+/// The generated module MUST export the conventional entry point
+///
+///   export fn render() -> Html
+///
+/// and may export or import anything else it needs. `std/vyx` calls exactly
+/// `render()` at the tag site, through a namespace alias it mints itself.
+///
+/// Two rules follow from "the attributes are constant arguments", and both are
+/// refusals rather than surprises: a provider tag takes STATIC ATTRIBUTES ONLY —
+/// `:attr="expr"` and `@event="handler"` are generation diagnostics, because an
+/// expression cannot be written into a generator call — and it takes NO CHILDREN,
+/// because a provider's tree comes from its attributes alone. Compute the value in
+/// a sibling `.vyx` component when it has to be computed.
+///
+/// The provider runs in its own generator sandbox with its own input roots (its
+/// own constant path arguments), so every file it reads is recorded in ITS cache
+/// entry: editing a collection file invalidates the provider's generation and
+/// leaves this compiler's — whose output is one import line — a cache hit.
+/// Diagnostics need no origin map: a provider anchors its own `report` at the
+/// `file`/`line` it was handed, so its objection lands on the tag.
+///
+/// `std/vyx` does not check the provider's shape before emitting the call, and
+/// cannot: a generator may only read under its own constant path arguments, and a
+/// provider named by a TEMPLATE is never one of them (RFC-0107 M0, P1a/P1b). A
+/// provider that is not a `gen fn`, or has the wrong signature, or generates no
+/// `render`, fails the emitted import with the loader's own diagnostic.
 
 // Shared string / array helpers (RFC-0046/0059) — the former private vyxJoin,
 // vyxContains, vyxTrim copies now live once in std; the infallible-decode swallows
@@ -67,6 +130,11 @@ import { includes } from "std/arrays"
 // generated module's own `std/html` import is separate, emitted text.
 import { checkContract } from "std/contract"
 import { Html } from "std/html"
+// RFC-0107 M1: a provider tag's static attributes travel to the provider as ONE
+// constant string argument, and `std/json`'s writer is what makes that lossless —
+// the escaping is already written, already tested, and `std/jsonread` reads back
+// what it emits. This file links the writer only (`std/json` imports nothing).
+import { Json, JsonField, emit } from "std/json"
 import { contains, endsWith, startsWith } from "std/strpred"
 // Generator diagnostics (RFC-0099): every objection below fails the load in this
 // compiler's own wording, anchored in the `.vyx` file it came out of.
@@ -1896,7 +1964,11 @@ gen fn vyxRelocateComp(comp: VyxComp, realBa: Array<UInt8>, sStart: Int64, sEnd:
 /// `themed` (RFC-0036) routes every `class` attribute through `vyxTheme.cls(…)`
 /// (compile-checked for a static literal, runtime-validated for a dynamic expr)
 /// instead of a bare `Cls(…)`.
-type VyxRegistry = { names: Array<String>, comps: Array<VyxComp>, themed: Bool }
+///
+/// `imported` (RFC-0107 M1) is the SECOND resolution path: the names the
+/// `<script>` sections imported selectively. A capitalized tag no sibling `.vyx`
+/// file answers resolves against it, and a hit is a generation-time provider.
+type VyxRegistry = { names: Array<String>, imported: Array<String>, comps: Array<VyxComp>, themed: Bool }
 
 fn vyxLookup(reg: VyxRegistry, name: String) -> Int64 {
     let mut i = 0
@@ -1912,28 +1984,36 @@ fn vyxLookup(reg: VyxRegistry, name: String) -> Int64 {
 /// Emit the statements pushing every node in `nodes` into accumulator `acc`,
 /// under tree-path `path`. Accumulates component-resolution errors into `errs`
 /// (returned via the result).
-type VyxEmit = { code: String, err: String }
+///
+/// `imports` carries MODULE-LEVEL import lines a node needs — today exactly the
+/// nested generator import a generation-time provider tag emits (RFC-0107 M1).
+/// A provider tag is only discovered while its view's body is emitted, and an
+/// import cannot sit in a function body, so it rides back out beside `err` and
+/// `vyxBuildModule` puts it in the module's import block.
+type VyxEmit = { code: String, err: String, imports: String }
 
 gen fn vyxEmitChildren(nodes: Array<VyxNode>, acc: String, path: String, reg: VyxRegistry, src: String) -> VyxEmit {
     let mut code = ""
     let mut err = ""
+    let mut imports = ""
     let mut j = 0
     for n in nodes {
         let r = vyxEmitPush(n, acc, path + "_" + j.toString(), reg, src)
         code = code + r.code
         err = err + r.err
+        imports = imports + r.imports
         j = j + 1
     }
-    return VyxEmit { code: code, err: err }
+    return VyxEmit { code: code, err: err, imports: imports }
 }
 
 /// Emit the statements that push one node into `acc`.
 gen fn vyxEmitPush(n: VyxNode, acc: String, path: String, reg: VyxRegistry, src: String) -> VyxEmit {
     return match n {
-        VNText(s) => VyxEmit { code: acc + ".push(text(" + vyxStrLit(s) + "))\n", err: "" },
-        VNInterp(x, l, c) => VyxEmit { code: vyxRegion(acc + ".push(text((" + x + ").toString()))\n", src, l, c), err: "" },
-        VNRaw(x, l, c) => VyxEmit { code: vyxRegion(acc + ".push(Raw(" + x + "))\n", src, l, c), err: "" },
-        VNChildren => VyxEmit { code: "for vyxCh in consume children {\n" + acc + ".push(vyxCh)\n}\n", err: "" },
+        VNText(s) => VyxEmit { code: acc + ".push(text(" + vyxStrLit(s) + "))\n", err: "", imports: "" },
+        VNInterp(x, l, c) => VyxEmit { code: vyxRegion(acc + ".push(text((" + x + ").toString()))\n", src, l, c), err: "", imports: "" },
+        VNRaw(x, l, c) => VyxEmit { code: vyxRegion(acc + ".push(Raw(" + x + "))\n", src, l, c), err: "", imports: "" },
+        VNChildren => VyxEmit { code: "for vyxCh in consume children {\n" + acc + ".push(vyxCh)\n}\n", err: "", imports: "" },
         VNElem(tag, isComp, attrs, kids, l) => vyxEmitElem(tag, isComp, attrs, kids, l, acc, path, reg, src),
         VNIf(conds, cl, cc, bodies, els, has) => vyxEmitIf(conds, cl, cc, bodies, els, has, acc, path, reg, src),
         VNFor(v, it, k, body, l, c) => vyxEmitFor(v, it, k, body, l, c, acc, path, reg, src),
@@ -1953,7 +2033,7 @@ gen fn vyxEmitElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: Array
     // references that binding. Static attributes stay inline (`ae.list`).
     let ae = vyxEmitAttrs(attrs, reg, src, kacc)
     let code = "let mut " + kacc + ": Array<Html> = []\n" + kids2.code + ae.pre + acc + ".push(el(" + vyxStrLit(tag) + ", [" + ae.list + "], " + kacc + "))\n"
-    return VyxEmit { code: code, err: kids2.err + ae.err }
+    return VyxEmit { code: code, err: kids2.err + ae.err, imports: consume kids2.imports }
 }
 
 /// Emit a component call, resolving props by name against the component's
@@ -1961,7 +2041,13 @@ gen fn vyxEmitElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: Array
 gen fn vyxEmitComp(tag: String, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, acc: String, path: String, reg: VyxRegistry, src: String) -> VyxEmit {
     let idx = vyxLookup(reg, tag)
     if idx < 0 {
-        return VyxEmit { code: acc + ".push(empty())\n", err: vyxErr(src, line, "`<\{tag}>` names no component — a component is a `.vyx` file in the same directory, or one this `<script>` imports") }
+        // RFC-0107 M1: no sibling `.vyx` answers the tag, so the second
+        // resolution path runs — the names a `<script>` imported. A hit is a
+        // generation-time provider, and the tag becomes a nested generation.
+        if includes(reg.imported, tag) {
+            return vyxEmitProvider(tag, attrs, kids, line, acc, path, src)
+        }
+        return VyxEmit { code: acc + ".push(empty())\n", err: vyxErr(src, line, "`<\{tag}>` names no component — a component is a `.vyx` file in the same directory, or a generation-time provider a `<script>` imports"), imports: "" }
     }
     let comp = reg.comps[idx]
     let mut err = ""
@@ -1994,12 +2080,91 @@ gen fn vyxEmitComp(tag: String, attrs: Array<VyxAttr>, kids: Array<VyxNode>, lin
         let kacc = "k" + path
         let kids2 = vyxEmitChildren(kids, kacc, path, reg, src)
         let code = "let mut " + kacc + ": Array<Html> = []\n" + kids2.code + acc + ".push(" + comp.fnName + "(" + vyxJoinArgs(args) + kacc + "))\n"
-        return VyxEmit { code: code, err: err + kids2.err }
+        return VyxEmit { code: code, err: err + kids2.err, imports: consume kids2.imports }
     }
     if hasKids {
         err = err + vyxErr(src, line, "`<\{tag}>` is given children, and its `<template>` has no `<slot/>` to put them in")
     }
-    return VyxEmit { code: acc + ".push(" + comp.fnName + "(" + vyxJoinArgsClose(args) + "))\n", err: err }
+    return VyxEmit { code: acc + ".push(" + comp.fnName + "(" + vyxJoinArgsClose(args) + "))\n", err: err, imports: "" }
+}
+
+/// Emit one generation-time provider tag (RFC-0107 M1): the nested generator
+/// import that runs the provider `tag` with this tag's static attributes as
+/// constant arguments, and the call that splices what the provider generated where
+/// the tag stood.
+///
+/// The refusals come first, and they are structural rather than stylistic: a
+/// `:attr` or an `@event` is an EXPRESSION, and an expression cannot be written
+/// into a generator call at all; children are an `Html` tree, and a provider's
+/// tree comes from its attributes. Each is a report on the offending attribute's
+/// own line.
+gen fn vyxEmitProvider(tag: String, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, acc: String, path: String, src: String) -> VyxEmit {
+    let mut err = ""
+    for a in attrs {
+        if a.evt {
+            err = err + vyxErr(src, a.line, "`<\{tag}>` is a generation-time provider, and `@\{a.name}` binds a handler — a provider's attributes become constant arguments to a generator, so a provider tag takes static attributes only")
+        } else if a.dyn {
+            err = err + vyxErr(src, a.line, "`<\{tag}>` is a generation-time provider, and `:\{a.name}` binds an expression — a provider's attributes become constant arguments to a generator, so write `\{a.name}=\"…\"` as a static attribute, or wrap `<\{tag}>` in a sibling `.vyx` component that computes it")
+        }
+    }
+    if kids.length > 0 {
+        err = err + vyxErr(src, line, "`<\{tag}>` is given children, and it is a generation-time provider — a provider's tree comes from its attributes alone, so it takes none")
+    }
+    if err != "" {
+        return VyxEmit { code: acc + ".push(empty())\n", err: consume err, imports: "" }
+    }
+    // The anchor the provider reports at: this `.vyx` file and the tag's line. The
+    // column is 1 — a template node carries a line and no column — and it is an
+    // argument all the same, so a provider needs no change when it learns one.
+    let ns = vyxProvNs(src, path)
+    let call = tag + "(" + vyxStrLit(vyxProvAttrs(attrs)) + ", " + vyxStrLit(src) + ", " + line.toString() + ", 1)"
+    let imp = vyxImportLine("import * as " + ns + " from " + call, true, src, line, 1)
+    return VyxEmit { code: acc + ".push(" + ns + ".render())\n", err: "", imports: consume imp }
+}
+
+/// The namespace alias `std/vyx` mints for one provider tag's nested generation.
+///
+/// MINTED, never the author's: sibling components share ONE flat import namespace
+/// (`vyxMergeImports`), and binding an alias twice to different arguments is
+/// already a generation diagnostic, so an alias a template wrote could not be
+/// reused per tag. The mint is the component's source path plus the node's tree
+/// path, which together name exactly one tag in the whole set — so no counter has
+/// to be threaded through the emitter to keep two tags apart, and the same
+/// template mints the same names on every run.
+fn vyxProvNs(src: String, path: String) -> String {
+    return "vyxp_" + vyxIdentBytes(src) + "_" + path
+}
+
+/// `s` with every byte outside `[A-Za-z0-9_]` replaced by `_`, so a file path can
+/// be part of an identifier.
+fn vyxIdentBytes(s: String) -> String {
+    let mut out: Array<UInt8> = []
+    for b in bytes(s) {
+        if vyxIsIdent(b) {
+            out.push(b)
+        } else {
+            out.push('_')
+        }
+    }
+    return fromBytesOr(out, "x")
+}
+
+/// A provider tag's STATIC attributes as the JSON object that carries its request,
+/// in source order. `std/json`'s writer does the escaping, so a value holding a
+/// quote, a newline or any UTF-8 reaches the provider intact and
+/// `std/jsonread`'s `parseJson` reads back exactly what was written. A tag with no
+/// attributes gets `{}`.
+///
+/// Dynamic and event attributes are absent because `vyxEmitProvider` already
+/// refused them; a `v-…` directive never reaches here (the parser strips them).
+fn vyxProvAttrs(attrs: Array<VyxAttr>) -> String {
+    let mut fs: Array<JsonField> = []
+    for a in attrs {
+        if a.evt == false && a.dyn == false {
+            fs.push(JsonField { key: a.name.copy(), value: JStr(a.value.copy()) })
+        }
+    }
+    return emit(JObj(fs))
 }
 
 /// The argument prefix `a, b, ` (trailing separator) for a call that appends a
@@ -2054,12 +2219,14 @@ fn vyxFindAttr(attrs: Array<VyxAttr>, name: String) -> VyxAttrFound {
 gen fn vyxEmitIf(conds: Array<String>, condLines: Array<Int64>, condCols: Array<Int64>, bodies: Array<VyxBody>, els: VyxBody, has: Bool, acc: String, path: String, reg: VyxRegistry, src: String) -> VyxEmit {
     let mut code = ""
     let mut err = ""
+    let mut imports = ""
     let mut bi = 0
     while bi < conds.length {
         let head = if bi > 0 { "} else if " } else { "if " }
         let bacc = "k" + path + "_b" + bi.toString()
         let inner = vyxEmitChildren(bodies[bi].nodes, bacc, path + "_b" + bi.toString(), reg, src)
         err = err + inner.err
+        imports = imports + inner.imports
         code = code + vyxRegion(head + conds[bi] + " {\n", src, condLines[bi], condCols[bi])
         code = code + "let mut " + bacc + ": Array<Html> = []\n" + inner.code
         code = code + "for vyxN in consume " + bacc + " {\n" + acc + ".push(vyxN)\n}\n"
@@ -2069,12 +2236,13 @@ gen fn vyxEmitIf(conds: Array<String>, condLines: Array<Int64>, condCols: Array<
         let eacc = "k" + path + "_be"
         let inner = vyxEmitChildren(els.nodes, eacc, path + "_be", reg, src)
         err = err + inner.err
+        imports = imports + inner.imports
         code = code + "} else {\n"
         code = code + "let mut " + eacc + ": Array<Html> = []\n" + inner.code
         code = code + "for vyxN in consume " + eacc + " {\n" + acc + ".push(vyxN)\n}\n"
     }
     code = code + "}\n"
-    return VyxEmit { code: code, err: err }
+    return VyxEmit { code: code, err: err, imports: imports }
 }
 
 /// Emit a `v-for` loop: each iteration fills a fresh accumulator, then splices it
@@ -2088,7 +2256,7 @@ gen fn vyxEmitFor(v: String, it: String, key: String, body: Array<VyxNode>, line
     code = code + "let mut " + facc + ": Array<Html> = []\n" + inner.code
     code = code + "for vyxN in consume " + facc + " {\n" + acc + ".push(keyed((" + key + ").toString(), vyxN))\n}\n"
     code = code + "}\n"
-    return VyxEmit { code: code, err: consume inner.err }
+    return VyxEmit { code: code, err: consume inner.err, imports: consume inner.imports }
 }
 
 // ---- attributes -------------------------------------------------------------
@@ -2468,17 +2636,17 @@ gen fn vyxEmitComponent(comp: VyxComp, reg: VyxRegistry) -> VyxEmit {
     let mut out = vyxEmitSignature(comp)
     let rootEmit = vyxEmitRoot(comp.root, reg, comp.srcPath)
     out = out + rootEmit.code + "}\n"
-    return VyxEmit { code: out, err: consume rootEmit.err }
+    return VyxEmit { code: out, err: consume rootEmit.err, imports: consume rootEmit.imports }
 }
 
 /// Emit the root node as `let …; return <expr>` (the view fn returns one `Html`).
 gen fn vyxEmitRoot(root: VyxNode, reg: VyxRegistry, src: String) -> VyxEmit {
     return match root {
         VNElem(tag, isComp, attrs, kids, l) => vyxEmitRootElem(tag, isComp, attrs, kids, l, reg, src),
-        VNText(s) => VyxEmit { code: "return text(" + vyxStrLit(s) + ")\n", err: "" },
-        VNInterp(x, l, c) => VyxEmit { code: vyxRegion("return text((" + x + ").toString())\n", src, l, c), err: "" },
-        VNRaw(x, l, c) => VyxEmit { code: vyxRegion("return Raw(" + x + ")\n", src, l, c), err: "" },
-        VNChildren => VyxEmit { code: "let mut kr: Array<Html> = []\nfor vyxCh in children {\nkr.push(vyxCh)\n}\nreturn el(\"div\", [], kr)\n", err: "" },
+        VNText(s) => VyxEmit { code: "return text(" + vyxStrLit(s) + ")\n", err: "", imports: "" },
+        VNInterp(x, l, c) => VyxEmit { code: vyxRegion("return text((" + x + ").toString())\n", src, l, c), err: "", imports: "" },
+        VNRaw(x, l, c) => VyxEmit { code: vyxRegion("return Raw(" + x + ")\n", src, l, c), err: "", imports: "" },
+        VNChildren => VyxEmit { code: "let mut kr: Array<Html> = []\nfor vyxCh in children {\nkr.push(vyxCh)\n}\nreturn el(\"div\", [], kr)\n", err: "", imports: "" },
         VNIf(cc, cl, ccc, bb, ee, hh) => vyxEmitRootWrap(root, reg, src),
         VNFor(v, it, k, bd, l, c) => vyxEmitRootWrap(root, reg, src),
     }
@@ -2489,12 +2657,12 @@ gen fn vyxEmitRootElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: A
     if isComp {
         let pushed = vyxEmitComp(tag, attrs, kids, line, "kr", "r", reg, src)
         let code = "let mut kr: Array<Html> = []\n" + pushed.code + "return kr[0]\n"
-        return VyxEmit { code: code, err: consume pushed.err }
+        return VyxEmit { code: code, err: consume pushed.err, imports: consume pushed.imports }
     }
     let kids2 = vyxEmitChildren(kids, "kr", "r", reg, src)
     let ae = vyxEmitAttrs(attrs, reg, src, "kr")
     let code = "let mut kr: Array<Html> = []\n" + kids2.code + ae.pre + "return el(" + vyxStrLit(tag) + ", [" + ae.list + "], kr)\n"
-    return VyxEmit { code: code, err: kids2.err + ae.err }
+    return VyxEmit { code: code, err: kids2.err + ae.err, imports: consume kids2.imports }
 }
 
 /// A root that is a bare `v-if` / `v-for` — pushed into a `<div>` wrapper (kept
@@ -2502,7 +2670,7 @@ gen fn vyxEmitRootElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: A
 gen fn vyxEmitRootWrap(root: VyxNode, reg: VyxRegistry, src: String) -> VyxEmit {
     let pushed = vyxEmitPush(root, "kr", "r", reg, src)
     let code = "let mut kr: Array<Html> = []\n" + pushed.code + "return el(\"div\", [], kr)\n"
-    return VyxEmit { code: code, err: consume pushed.err }
+    return VyxEmit { code: code, err: consume pushed.err, imports: consume pushed.imports }
 }
 
 /// Assemble the whole synthesized module from the compiled components. When
@@ -2514,7 +2682,7 @@ export gen fn vyxBuildModule(comps: consume Array<VyxComp>, themed: Bool, theme:
     // The registry TAKES the components — a `VyxComp` holds a `VyxNode`, which
     // refers to itself and so has no `copy`. Everything below reads them back
     // out of `reg`.
-    let reg = VyxRegistry { names: vyxCompNames(comps), comps: comps, themed: themed }
+    let reg = VyxRegistry { names: vyxCompNames(comps), imported: vyxImportedNames(comps), comps: comps, themed: themed }
     // The module banner + `std/html` import: a hole-less code quote, so the fixed
     // preamble is validated as Vyrn when `std/vyx` is compiled (RFC-0054 M4b),
     // never re-lexed at generation. Byte-identical to the former string literals.
@@ -2542,20 +2710,57 @@ import * as vyxTheme from tw(\{theme})
     // RFC-0048 §1: each verbatim-copied helper line is bracketed by its own
     // `//@origin` directive so a helper `fn`/`type`/`let` identifier maps back to
     // the `.vyx` — the helper CODE is unchanged, only origin comments are added.
+    // One view function per component. The views are built BEFORE they are
+    // appended, because a generation-time provider tag (RFC-0107 M1) emits a
+    // nested generator import that has to reach the module's IMPORT BLOCK, and the
+    // tag is only found while its own view body is emitted. With no provider tag
+    // anywhere `provImports` is "" and the module is byte-identical to the one
+    // this assembled when it wrote the views in place.
+    let mut views = ""
+    let mut provImports = ""
+    let mut err = ""
+    for c in reg.comps {
+        let e = vyxEmitComponent(c, reg)
+        views = views + e.code
+        provImports = provImports + e.imports
+        err = err + e.err
+    }
+    if err != "" {
+        return err
+    }
+    out = out + provImports
     for c in reg.comps {
         if trim(c.helpers).byteLength > 0 {
             out = out + vyxHelperBlock(c)
         }
     }
-    // One view function per component.
-    let mut err = ""
-    for c in reg.comps {
-        let e = vyxEmitComponent(c, reg)
-        out = out + e.code
-        err = err + e.err
-    }
-    if err != "" {
-        return err
+    return out + views
+}
+
+/// Every name a component's `<script>` imported SELECTIVELY, across the whole set —
+/// the second resolution path for a capitalized tag (RFC-0107 M1).
+///
+/// The set is FLAT on purpose: the synthesized module has one import block merged
+/// from every component (`vyxMergeImports`) and one flat helper namespace, so a
+/// name a sibling's `<script>` imported is genuinely in scope where any tag is
+/// emitted. Resolving per-component would refuse a call the module would accept.
+/// An `import * as ns` alias is not here — a namespace is not a callable provider
+/// name, and `ns.member` is not a tag.
+fn vyxImportedNames(comps: Array<VyxComp>) -> Array<String> {
+    let mut out: Array<String> = []
+    for c in comps {
+        let mut li = 0
+        while li < c.imports.length {
+            let imp = vyxParseImport(c.imports[li])
+            if imp.ok && imp.ns == false {
+                for nm in imp.names {
+                    if includes(out, nm) == false {
+                        out.push(nm.copy())
+                    }
+                }
+            }
+            li = li + 1
+        }
     }
     return out
 }
