@@ -99,9 +99,10 @@
 # balance a two-way split is supposed to find and the reason a third job would
 # only have added a checkout.
 #
-# THE WHOLE WORKFLOW is now bounded by `parity` at 492 s, not by these legs — one
-# `#[test]` walking 40 programs. That is the next pole and it is a change to the
-# harness rather than to this file.
+# THERE IS NO SINGLE POLE any more. `parity` swings 271-500 s across the fleet
+# (one `#[test]` walking 40 programs) and the Windows test leg sits at ~310-320 s;
+# which one tops a given run is scheduling. Cutting further therefore means the
+# parity harness itself — a change to the harness, not to this file.
 
 name: CI
 
