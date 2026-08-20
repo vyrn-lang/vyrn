@@ -1,0 +1,32 @@
+/// The site's `<Icon>` provider (RFC-0107 M3).
+///
+/// A generation-time component is a LIBRARY, not a template built-in: `std/vyx`
+/// names no component, and a capitalized tag resolves against what a `<script>`
+/// imported. So the tag `<Icon>` exists on this site because this file exports a
+/// `gen fn` of that name, and for no other reason.
+///
+/// Everything about drawing a glyph lives in `std/icons`. What cannot live there
+/// is the PREFIX VOCABULARY: `bytesize` and `codex` are keys in this project's
+/// own `vyrn.json`, pinned at one commit of `iconify/icon-sets` and hash-locked
+/// in `vyrn.lock`, so the collections are read from the content cache and nothing
+/// is fetched at run time — or, for that matter, at build time after the first.
+///
+///   <script>
+///   import { Icon } from "../icons"
+///   </script>
+///   <template>
+///   <a href="…"><Icon name="bytesize:github"/> Source on GitHub</a>
+///   </template>
+///
+/// `name` is required; `size`, `label` and `class` are optional, and any other
+/// attribute is refused at the tag. A glyph with no `label` is `aria-hidden`
+/// decoration, which is right beside a text label and wrong when the icon IS the
+/// label — give it a `label` then, and it becomes `role="img"` with that name.
+import { iconProvider } from "std/icons"
+
+/// One `<Icon>` tag. `attrs`, `file`, `line` and `col` are the provider
+/// protocol's own arguments (RFC-0107 M1): the tag's static attributes as a JSON
+/// object, and where the tag was written so a misspelled glyph is reported there.
+export gen fn Icon(attrs: String, file: String, line: Int64, col: Int64) -> String {
+    return iconProvider(attrs, file, line, col, "bytesize codex")
+}

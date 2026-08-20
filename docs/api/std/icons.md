@@ -42,13 +42,53 @@ of the name (`circle-check` becomes `circleCheck`), which is the house
 spelling for an identifier. Two glyphs whose names camel-case to one
 identifier are refused rather than silently collapsed.
 
-## For a template language
+## `<Icon>` in a template — the provider recipe (RFC-0107 M3)
 
-[`iconsModule`] is the whole generator with the read already done: hand it the
-collection TEXT, the path to name in diagnostics, the glyph names, and an
-anchor (`file`, `line`, `col`) to report against. That is what an RFC-0107
-provider — a `gen fn` a `.vyx` `<script>` imports — calls, and it is why this
-module knows nothing about `.vyx`. The dependency arrow points one way.
+A template's `<Icon name="ui:github"/>` is a GENERATION-TIME PROVIDER: the
+template compiler emits a generator import of a `gen fn` the `<script>`
+imported, with the tag's static attributes as constant arguments. The provider
+is a module THE PROJECT writes, and it is three lines, because the prefix
+vocabulary is the one thing a library cannot supply — a collection alias is a
+key in the project's own `vyrn.json`:
+
+```vyrn
+// app/icons.vyrn — the project's provider. `vyrn.json` binds `ui` and
+// `codex` to two pinned collections; those two names are the prefixes.
+import { iconProvider } from "std/icons"
+
+export gen fn Icon(attrs: String, file: String, line: Int64, col: Int64) -> String {
+    return iconProvider(attrs, file, line, col, "ui codex")
+}
+```
+
+```
+<script>
+import { Icon } from "../icons"
+</script>
+<template>
+<a href="…"><Icon name="ui:github"/> Source on GitHub</a>
+<button><Icon name="ui:search" label="Search this site"/></button>
+</template>
+```
+
+The tag takes `name` (required, `collection:glyph` when the provider binds
+more than one collection), and optionally `size` (any CSS length — `1.25em`),
+`label` (the accessible name: the glyph becomes `role="img"` with that
+`aria-label` and stops being `aria-hidden`) and `class`. Any other attribute
+is refused by name, at the tag.
+
+[`iconProvider`] READS NOTHING. It emits an [`iconsAt`] import naming the
+collection, so the alias is that nested generation's own constant argument —
+which is what lets a collection stay a `vyrn.json` dependency even though the
+attribute JSON a provider receives can declare no input root (RFC-0107 M2,
+contradiction 1).
+
+## For another template language
+
+[`iconsAt`] is the generator with an anchor: a collection, the glyph names, and
+the `file`/`line`/`col` a report about a misspelled glyph should land on.
+[`iconsModule`] is the same with the read already done — hand it the collection
+TEXT. Neither knows what `.vyx` is; the dependency arrow points one way.
 
 Inspect any generated module with:  vyrn emit-gen <file>
 
@@ -65,6 +105,21 @@ One module, one function per named glyph, read from the collection at
 generation sandbox, so the collection is one of this generator's declared
 inputs and a change to it invalidates exactly this generation.
 
+## iconsAt
+
+```vyrn
+fn iconsAt(collection: String, names: String, anchorFile: String, line: Int64, col: Int64) -> String
+```
+
+[`icons`] with an anchor: `anchorFile`/`line`/`col` is where a report about a
+glyph lands — the tag in a template that asked for it, rather than the
+collection file, which is what a reader of the message can act on.
+
+This is the surface a provider emits an import of (RFC-0107 M3), and the
+reason the collection can be a `vyrn.json` alias: named HERE it is this
+generation's own constant argument, so the import map and the input-root rule
+both apply to it (RFC-0107 M2).
+
 ## iconsModule
 
 ```vyrn
@@ -78,3 +133,40 @@ provider calls (RFC-0107 M1's protocol).
 header; nothing is read from it here. `anchorFile`/`line`/`col` is where a
 report about a glyph should land — a tag in a template, say. Pass `""` for
 `anchorFile` and reports anchor in the collection file instead.
+
+## iconProvider
+
+```vyrn
+fn iconProvider(attrs: String, file: String, line: Int64, col: Int64, collections: String) -> String
+```
+
+The whole of a project's `<Icon>` provider, minus the one thing a library
+cannot know: which collections the project pinned. `collections` is a
+space-separated list of `vyrn.json` dependency aliases, and those names ARE
+the tag's prefix vocabulary (`name="ui:github"`). With exactly one collection
+bound a bare `name="github"` means that one; with more than one a bare name is
+refused rather than resolved by position.
+
+`attrs`, `file`, `line` and `col` are the provider protocol's own arguments
+(RFC-0107 M1) — pass them straight through. The header of this module carries
+the three-line project module that calls this.
+
+It reads NOTHING. What it returns is an [`iconsAt`] import naming the
+collection, so the collection is that nested generation's constant argument
+and an alias resolves there.
+
+## iconAttrs
+
+```vyrn
+fn iconAttrs(g: consume Html, size: String, label: String, class: String) -> Html
+```
+
+A generated glyph with the use site's own attributes on it — the runtime half
+of the provider, and the only part of `std/icons` that runs outside a
+generator.
+
+A `size` (any CSS length) replaces the `1em` the glyph was drawn at. A `label`
+makes the glyph CONTENT rather than decoration: it gains `role="img"` and that
+`aria-label`, and loses `aria-hidden`, which is the whole of the a11y rule an
+icon has to follow — an icon beside a label is hidden, an icon that IS the
+label is named. A `class` is appended and nothing else is touched.

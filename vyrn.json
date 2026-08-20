@@ -1,8 +1,12 @@
 {
-  "toolchain": {
-    "wasmtime": "46.0.1",
-    "wasi-sysroot": "25.0",
-    "wasi-builtins": "25.0",
-    "cargo-nextest": "0.9.143"
-  }
+    "toolchain": {
+        "wasmtime": "46.0.1",
+        "wasi-sysroot": "25.0",
+        "wasi-builtins": "25.0",
+        "cargo-nextest": "0.9.143"
+    },
+    "dependencies": {
+        "bytesize": "github:iconify/icon-sets@66114542c442d138c1da78932ddbad862fb7a65c/json/bytesize.json",
+        "codex": "github:iconify/icon-sets@66114542c442d138c1da78932ddbad862fb7a65c/json/codex.json"
+    }
 }

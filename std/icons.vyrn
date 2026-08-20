@@ -40,18 +40,60 @@
 /// spelling for an identifier. Two glyphs whose names camel-case to one
 /// identifier are refused rather than silently collapsed.
 ///
-/// ## For a template language
+/// ## `<Icon>` in a template — the provider recipe (RFC-0107 M3)
 ///
-/// [`iconsModule`] is the whole generator with the read already done: hand it the
-/// collection TEXT, the path to name in diagnostics, the glyph names, and an
-/// anchor (`file`, `line`, `col`) to report against. That is what an RFC-0107
-/// provider — a `gen fn` a `.vyx` `<script>` imports — calls, and it is why this
-/// module knows nothing about `.vyx`. The dependency arrow points one way.
+/// A template's `<Icon name="ui:github"/>` is a GENERATION-TIME PROVIDER: the
+/// template compiler emits a generator import of a `gen fn` the `<script>`
+/// imported, with the tag's static attributes as constant arguments. The provider
+/// is a module THE PROJECT writes, and it is three lines, because the prefix
+/// vocabulary is the one thing a library cannot supply — a collection alias is a
+/// key in the project's own `vyrn.json`:
+///
+/// ```vyrn
+/// // app/icons.vyrn — the project's provider. `vyrn.json` binds `ui` and
+/// // `codex` to two pinned collections; those two names are the prefixes.
+/// import { iconProvider } from "std/icons"
+///
+/// export gen fn Icon(attrs: String, file: String, line: Int64, col: Int64) -> String {
+///     return iconProvider(attrs, file, line, col, "ui codex")
+/// }
+/// ```
+///
+/// ```
+/// <script>
+/// import { Icon } from "../icons"
+/// </script>
+/// <template>
+/// <a href="…"><Icon name="ui:github"/> Source on GitHub</a>
+/// <button><Icon name="ui:search" label="Search this site"/></button>
+/// </template>
+/// ```
+///
+/// The tag takes `name` (required, `collection:glyph` when the provider binds
+/// more than one collection), and optionally `size` (any CSS length — `1.25em`),
+/// `label` (the accessible name: the glyph becomes `role="img"` with that
+/// `aria-label` and stops being `aria-hidden`) and `class`. Any other attribute
+/// is refused by name, at the tag.
+///
+/// [`iconProvider`] READS NOTHING. It emits an [`iconsAt`] import naming the
+/// collection, so the alias is that nested generation's own constant argument —
+/// which is what lets a collection stay a `vyrn.json` dependency even though the
+/// attribute JSON a provider receives can declare no input root (RFC-0107 M2,
+/// contradiction 1).
+///
+/// ## For another template language
+///
+/// [`iconsAt`] is the generator with an anchor: a collection, the glyph names, and
+/// the `file`/`line`/`col` a report about a misspelled glyph should land on.
+/// [`iconsModule`] is the same with the read already done — hand it the collection
+/// TEXT. Neither knows what `.vyx` is; the dependency arrow points one way.
 ///
 /// Inspect any generated module with:  vyrn emit-gen <file>
 
 import { Json, JsonField, copyJsonFields } from "std/json"
 import { parseJson } from "std/jsonread"
+import { fieldsOf } from "std/jsondec"
+import { el, toHtmlString, Html, Attr } from "std/html"
 import { splitWhitespace, editDistance, joinWith, fromBytesOr } from "std/strings"
 import { contains } from "std/strpred"
 import { includes } from "std/arrays"
@@ -70,11 +112,34 @@ import { report, reportHere, Severity } from "std/diag"
 export gen fn icons(collection: String, names: String) -> String {
     return match readFile(collection) {
         Ok(text) => iconsModule(text, collection, names, "", 0, 0),
-        Err(why) => reportHere(
-            Error,
-            "std/icons cannot read the collection `\{collection}`: \{why} — a collection is a JSON file: a relative path, or a dependency in vyrn.json (`vyrn add <specifier> --name \{collection}`)",
-        ),
+        Err(why) => reportHere(Error, cannotRead(collection, why)),
     }
+}
+
+/// [`icons`] with an anchor: `anchorFile`/`line`/`col` is where a report about a
+/// glyph lands — the tag in a template that asked for it, rather than the
+/// collection file, which is what a reader of the message can act on.
+///
+/// This is the surface a provider emits an import of (RFC-0107 M3), and the
+/// reason the collection can be a `vyrn.json` alias: named HERE it is this
+/// generation's own constant argument, so the import map and the input-root rule
+/// both apply to it (RFC-0107 M2).
+export gen fn iconsAt(
+    collection: String,
+    names: String,
+    anchorFile: String,
+    line: Int64,
+    col: Int64,
+) -> String {
+    return match readFile(collection) {
+        Ok(text) => iconsModule(text, collection, names, anchorFile, line, col),
+        Err(why) => anchored(anchorFile, collection, line, col, cannotRead(collection, why)),
+    }
+}
+
+/// The one sentence about a collection that cannot be read, spelled once.
+fn cannotRead(collection: String, why: String) -> String {
+    return "std/icons cannot read the collection `\{collection}`: \{why} — a collection is a JSON file: a relative path, or a dependency in vyrn.json (`vyrn add <specifier> --name \{collection}`)"
 }
 
 /// The generator with the read already done — the surface a template language's
@@ -536,6 +601,232 @@ fn nearest(coll: Collection, want: String) -> String {
 }
 
 // ===========================================================================
+// The provider layer (RFC-0107 M3)
+// ===========================================================================
+
+/// The whole of a project's `<Icon>` provider, minus the one thing a library
+/// cannot know: which collections the project pinned. `collections` is a
+/// space-separated list of `vyrn.json` dependency aliases, and those names ARE
+/// the tag's prefix vocabulary (`name="ui:github"`). With exactly one collection
+/// bound a bare `name="github"` means that one; with more than one a bare name is
+/// refused rather than resolved by position.
+///
+/// `attrs`, `file`, `line` and `col` are the provider protocol's own arguments
+/// (RFC-0107 M1) — pass them straight through. The header of this module carries
+/// the three-line project module that calls this.
+///
+/// It reads NOTHING. What it returns is an [`iconsAt`] import naming the
+/// collection, so the collection is that nested generation's constant argument
+/// and an alias resolves there.
+export gen fn iconProvider(
+    attrs: String,
+    file: String,
+    line: Int64,
+    col: Int64,
+    collections: String,
+) -> String {
+    let bound = splitWhitespace(collections)
+    if bound.length == 0 {
+        return report(
+            Error,
+            file,
+            line,
+            col,
+            "this `<Icon>` provider binds no collection — name each pinned collection's `vyrn.json` alias, `iconProvider(attrs, file, line, col, \"ui\")`",
+        )
+    }
+    let ask = iconRequest(attrs)
+    if ask.error != "" {
+        return report(Error, file, line, col, ask.error)
+    }
+    if ask.name == "" {
+        return report(
+            Error,
+            file,
+            line,
+            col,
+            "`<Icon>` needs a `name` — the glyph to draw, `name=\"\{bound[0]}:github\"`",
+        )
+    }
+    let at = iconCollectionOf(ask.name, bound)
+    if at.error != "" {
+        return report(Error, file, line, col, at.error)
+    }
+    return iconProviderModule(at.collection, at.glyph, ask, file, line, col)
+}
+
+/// One tag's attributes, read.
+type IconAsk = { name: String, size: String, label: String, class: String, error: String }
+
+/// The tag's attribute object as an [`IconAsk`]. `std/vyx` wrote the JSON with
+/// `std/json`'s writer, so it parses; an unparseable one is still a message and
+/// not a crash. Every attribute this provider does not know is refused BY NAME —
+/// a typo silently dropped is a glyph rendered wrong.
+fn iconRequest(attrs: String) -> IconAsk {
+    let doc = match parseJson(attrs) {
+        Ok(v) => v,
+        Err(why) => JNull,
+    }
+    let mut ask = IconAsk { name: "", size: "", label: "", class: "", error: "" }
+    for f in fieldsOf(doc) {
+        if f.key == "name" {
+            ask.name = jsonString(f.value)
+        } else if f.key == "size" {
+            ask.size = jsonString(f.value)
+        } else if f.key == "label" {
+            ask.label = jsonString(f.value)
+        } else if f.key == "class" {
+            ask.class = jsonString(f.value)
+        } else if ask.error == "" {
+            ask.error = "`<Icon>` has no `\{f.key}` attribute — it takes `name`, and optionally `size` (a CSS length), `label` (the accessible name) and `class`"
+        }
+    }
+    return ask
+}
+
+/// Which collection a `name` names, and the glyph inside it.
+type IconWhere = { collection: String, glyph: String, error: String }
+
+/// The prefix rule: `collection:glyph` picks one of the bound collections, a bare
+/// name means the only one there is. The refusals name the vocabulary, because
+/// the vocabulary is the project's and no reader can guess it.
+fn iconCollectionOf(name: String, bound: Array<String>) -> IconWhere {
+    let vocab = joinWith(bound, "`, `")
+    if contains(name, ":") {
+        let prefix = beforeColon(name)
+        let glyph = afterColon(name)
+        if !includes(bound, prefix) {
+            return iconNowhere(
+                "`\{name}` names the collection `\{prefix}`, and this provider binds `\{vocab}` — write one of those, or bind `\{prefix}` in the provider module",
+            )
+        }
+        if glyph == "" {
+            return iconNowhere("`\{name}` names a collection and no glyph — write `\{prefix}:github`")
+        }
+        return IconWhere { collection: prefix, glyph: glyph, error: "" }
+    }
+    if bound.length > 1 {
+        return iconNowhere(
+            "`\{name}` names no collection, and this provider binds `\{vocab}` — write `\{bound[0]}:\{name}` for one of them",
+        )
+    }
+    return IconWhere { collection: bound[0].copy(), glyph: name.copy(), error: "" }
+}
+
+fn iconNowhere(why: String) -> IconWhere {
+    return IconWhere { collection: "", glyph: "", error: why.copy() }
+}
+
+/// The module one `<Icon>` tag becomes: the glyph, generated by [`iconsAt`] from
+/// the collection the prefix named and anchored at the tag, and the conventional
+/// entry point the template compiler calls where the tag stood.
+gen fn iconProviderModule(
+    collection: String,
+    glyph: String,
+    ask: IconAsk,
+    file: String,
+    line: Int64,
+    col: Int64,
+) -> String {
+    // Every value below is baked through an RFC-0054 code quote, for the reason
+    // `glyphSource` bakes an SVG body that way: the compiler's own escaper writes
+    // the literal, so an attribute holding a quote cannot become source.
+    let mut out = "/// `<Icon name=\"\{collection}:\{glyph}\"/>` at \{file}:\{line.toString()} — generated by std/icons.\n"
+    out = out + "import { iconsAt, iconAttrs } from \"std/icons\"\n"
+    out = out + "import { Html } from \"std/html\"\n"
+    out = out
+    + "import * as g from iconsAt(\{lit(collection)}, \{lit(glyph)}, \{lit(file)}, \{line.toString()}, \{col.toString()})\n"
+    out = out + "export fn provide() -> Html {\n"
+    out = out
+    + "    return iconAttrs(g.\{camel(glyph)}(), \{lit(ask.size)}, \{lit(ask.label)}, \{lit(ask.class)})\n"
+    out = out + "}\n"
+    return out
+}
+
+/// `s` as the source text of a string literal that holds exactly `s`.
+gen fn lit(s: String) -> String {
+    return render(vyrn"\{s}")
+}
+
+/// A generated glyph with the use site's own attributes on it — the runtime half
+/// of the provider, and the only part of `std/icons` that runs outside a
+/// generator.
+///
+/// A `size` (any CSS length) replaces the `1em` the glyph was drawn at. A `label`
+/// makes the glyph CONTENT rather than decoration: it gains `role="img"` and that
+/// `aria-label`, and loses `aria-hidden`, which is the whole of the a11y rule an
+/// icon has to follow — an icon beside a label is hidden, an icon that IS the
+/// label is named. A `class` is appended and nothing else is touched.
+export fn iconAttrs(g: consume Html, size: String, label: String, class: String) -> Html {
+    return match g {
+        El(tag, attrs, kids) => el(tag, iconAttrList(attrs, size, label, class), kids),
+        Empty => Empty,
+        Text(s) => Text(s),
+        Raw(s) => Raw(s),
+    }
+}
+
+/// The glyph's own attributes, rewritten by the use site's.
+fn iconAttrList(
+    attrs: consume Array<Attr>,
+    size: String,
+    label: String,
+    class: String,
+) -> Array<Attr> {
+    let mut out: Array<Attr> = []
+    for a in consume attrs {
+        iconAttrOne(a, size, label, out)
+    }
+    if label != "" {
+        out.push(A("role", "img"))
+        out.push(A("aria-label", label.copy()))
+    }
+    if class != "" {
+        out.push(Cls(class.copy()))
+    }
+    return out
+}
+
+/// One attribute of the drawn glyph: kept, resized, or dropped.
+fn iconAttrOne(a: consume Attr, size: String, label: String, out: modify Array<Attr>) -> Unit {
+    match a {
+        A(n, v) => iconAttrNamed(n, v, size, label, out),
+        Cls(c) => iconAttrKeep(Cls(c), out),
+        Id(i) => iconAttrKeep(Id(i), out),
+        On(e, h, p) => iconAttrKeep(On(e, h, p), out),
+        Key(k) => iconAttrKeep(Key(k), out),
+    }
+}
+
+/// One attribute, kept as it was. A `push` is not a `Unit` expression, so the
+/// arms of the match above need a call that is.
+fn iconAttrKeep(a: consume Attr, out: modify Array<Attr>) -> Unit {
+    out.push(a)
+}
+
+/// `width`/`height` take the requested size; `aria-hidden` goes when the icon is
+/// named. Everything else — the `viewBox` above all — passes through.
+fn iconAttrNamed(
+    n: consume String,
+    v: consume String,
+    size: String,
+    label: String,
+    out: modify Array<Attr>,
+) -> Unit {
+    if size != "" && (n == "width" || n == "height") {
+        out.push(A(n, size.copy()))
+        drop v
+        return
+    }
+    if label != "" && n == "aria-hidden" {
+        drop n
+        drop v
+        return
+    }
+    out.push(A(n, v))
+}
+
+// ===========================================================================
 // Small shared helpers
 // ===========================================================================
 
@@ -581,6 +872,18 @@ fn camel(name: String) -> String {
         return core
     }
     return "icon\{core}"
+}
+
+/// The part of `name` before its first `:`.
+fn beforeColon(name: String) -> String {
+    let bs = bytes(name)
+    let mut out: Array<UInt8> = []
+    let mut i = 0
+    while i < bs.length && bs[i] != ':' {
+        out.push(bs[i])
+        i = i + 1
+    }
+    return fromBytesOr(out, "")
 }
 
 /// The part of `name` after its first `:`.
@@ -754,4 +1057,77 @@ test "a collection that is not JSON is refused, naming the path" {
 test "a JSON document that is not a collection is refused, naming the path" {
     let src = iconsModule("{\"prefix\":\"x\"}", "./empty.json", "github", "", 0, 0)
     assert(contains(src, "the collection `./empty.json` has no `icons` object"))
+}
+
+// ---- the provider layer (RFC-0107 M3) -------------------------------------
+//
+// The provider reads nothing, so its whole surface is a function of the
+// attribute JSON `std/vyx` hands it — no file, no manifest, no cache. The tag
+// that produced each of these is in the test's name.
+
+test "a tag becomes an anchored iconsAt import and the conventional entry point" {
+    let src = iconProvider("{\"name\":\"toy:github\"}", "./B.vyx", 7, 1, "toy")
+    assert(contains(src, "import * as g from iconsAt(\"toy\", \"github\", \"./B.vyx\", 7, 1)"))
+    assert(contains(src, "export fn provide() -> Html {"))
+    assert(contains(src, "return iconAttrs(g.github(), \"\", \"\", \"\")"))
+}
+
+test "one bound collection takes a bare name" {
+    let src = iconProvider("{\"name\":\"circle-check\"}", "./B.vyx", 7, 1, "toy")
+    assert(contains(src, "iconsAt(\"toy\", \"circle-check\""))
+    assert(contains(src, "iconAttrs(g.circleCheck()"))
+}
+
+test "with two bound collections a bare name is refused, naming the vocabulary" {
+    let src = iconProvider("{\"name\":\"github\"}", "./B.vyx", 7, 1, "toy other")
+    assert(contains(src, "//@diag error ./B.vyx:7:1"))
+    assert(contains(src, "`github` names no collection, and this provider binds `toy`, `other`"))
+    assert(contains(src, "iconsAt") == false)
+}
+
+test "a prefix the provider does not bind is refused at the tag" {
+    let src = iconProvider("{\"name\":\"brand:github\"}", "./B.vyx", 7, 1, "toy")
+    assert(contains(src, "names the collection `brand`, and this provider binds `toy`"))
+}
+
+test "an attribute the provider does not know is refused by name" {
+    let src = iconProvider("{\"name\":\"toy:github\",\"colour\":\"red\"}", "./B.vyx", 7, 1, "toy")
+    assert(contains(src, "`<Icon>` has no `colour` attribute — it takes `name`"))
+}
+
+test "a tag with no name says what one looks like in this project's vocabulary" {
+    let src = iconProvider("{}", "./B.vyx", 7, 1, "toy")
+    assert(contains(src, "`<Icon>` needs a `name` — the glyph to draw, `name=\"toy:github\"`"))
+}
+
+test "size, label and class reach the use site" {
+    let src = iconProvider(
+        "{\"name\":\"toy:github\",\"size\":\"1.5em\",\"label\":\"GitHub\",\"class\":\"big\"}",
+        "./B.vyx",
+        7,
+        1,
+        "toy",
+    )
+    assert(contains(src, "iconAttrs(g.github(), \"1.5em\", \"GitHub\", \"big\")"))
+}
+
+test "a decorative glyph stays hidden and a labelled one is named" {
+    let drawn = el(
+        "svg",
+        [A("viewBox", "0 0 16 16"), A("width", "1em"), A("height", "1em"), A("aria-hidden", "true")],
+        [Raw("<path/>")],
+    )
+    assert(
+        toHtmlString(iconAttrs(drawn, "", "", ""))
+        == "<svg viewBox=\"0 0 16 16\" width=\"1em\" height=\"1em\" aria-hidden=\"true\"><path/></svg>",
+    )
+    let named = el(
+        "svg",
+        [A("viewBox", "0 0 16 16"), A("width", "1em"), A("height", "1em"), A("aria-hidden", "true")],
+        [Raw("<path/>")],
+    )
+    assert(
+        toHtmlString(iconAttrs(named, "2em", "Search", "find"))
+        == "<svg viewBox=\"0 0 16 16\" width=\"2em\" height=\"2em\" role=\"img\" aria-label=\"Search\" class=\"find\"><path/></svg>",
+    )
 }
