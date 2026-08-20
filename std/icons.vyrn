@@ -1,0 +1,757 @@
+/// std/icons — an icon collection is a LIBRARY (RFC-0107 M2), not a compiler
+/// feature and not a template built-in.
+///
+/// An Iconify collection is one JSON file: `{prefix, icons: {name: {body, …}},
+/// aliases?, width, height, info}`. Pin it like any other dependency and name the
+/// glyphs you want in the import:
+///
+/// ```vyrn
+/// import { icons } from "std/icons"
+/// import * as ic from icons("icons", "github rss circle-check")
+/// import { toHtmlString } from "std/html"
+///
+/// fn main() -> Int64 {
+///     print(toHtmlString(ic.github()))
+///     return 0
+/// }
+/// ```
+///
+/// `"icons"` is the collection: a relative path to a `.json` file, or — the point
+/// of this module — a DEPENDENCY ALIAS from `vyrn.json`, so the bytes come from
+/// `vyrn.lock` and the content-addressed cache:
+///
+/// ```
+/// vyrn add github:iconify/icon-sets@<sha>/json/lucide.json --name icons
+/// ```
+///
+/// Everything after that is offline. Resolution happens at GENERATION time from
+/// hash-locked bytes: nothing is fetched at run time, ever, and a misspelled glyph
+/// fails the build with a nearest-name suggestion instead of rendering an empty
+/// box. Only the glyphs you name are generated, so the artifact carries exactly
+/// what it uses and the editor has five functions to analyze rather than 1,800.
+///
+/// The generated module exports one `fn <name>() -> Html` per glyph — an inline
+/// `<svg>` that inherits `currentColor` and the surrounding font size, and is
+/// `aria-hidden="true"` because an icon beside a label is decoration. Give it an
+/// accessible name at the USE site when the icon is the whole content.
+///
+/// Names are Iconify's own, hyphens and all; the function is the lowerCamelCase
+/// of the name (`circle-check` becomes `circleCheck`), which is the house
+/// spelling for an identifier. Two glyphs whose names camel-case to one
+/// identifier are refused rather than silently collapsed.
+///
+/// ## For a template language
+///
+/// [`iconsModule`] is the whole generator with the read already done: hand it the
+/// collection TEXT, the path to name in diagnostics, the glyph names, and an
+/// anchor (`file`, `line`, `col`) to report against. That is what an RFC-0107
+/// provider — a `gen fn` a `.vyx` `<script>` imports — calls, and it is why this
+/// module knows nothing about `.vyx`. The dependency arrow points one way.
+///
+/// Inspect any generated module with:  vyrn emit-gen <file>
+
+import { Json, JsonField, copyJsonFields } from "std/json"
+import { parseJson } from "std/jsonread"
+import { splitWhitespace, editDistance, joinWith, fromBytesOr } from "std/strings"
+import { contains } from "std/strpred"
+import { includes } from "std/arrays"
+import { report, reportHere, Severity } from "std/diag"
+
+// ===========================================================================
+// The generator
+// ===========================================================================
+
+/// One module, one function per named glyph, read from the collection at
+/// `collection` — a relative `.json` path or a `vyrn.json` dependency alias.
+///
+/// `names` is a space-separated list of Iconify names. The read goes through the
+/// generation sandbox, so the collection is one of this generator's declared
+/// inputs and a change to it invalidates exactly this generation.
+export gen fn icons(collection: String, names: String) -> String {
+    return match readFile(collection) {
+        Ok(text) => iconsModule(text, collection, names, "", 0, 0),
+        Err(why) => reportHere(
+            Error,
+            "std/icons cannot read the collection `\{collection}`: \{why} — a collection is a JSON file: a relative path, or a dependency in vyrn.json (`vyrn add <specifier> --name \{collection}`)",
+        ),
+    }
+}
+
+/// The generator with the read already done — the surface a template language's
+/// provider calls (RFC-0107 M1's protocol).
+///
+/// `collectionPath` is only ever NAMED, in diagnostics and in the generated
+/// header; nothing is read from it here. `anchorFile`/`line`/`col` is where a
+/// report about a glyph should land — a tag in a template, say. Pass `""` for
+/// `anchorFile` and reports anchor in the collection file instead.
+export gen fn iconsModule(
+    collectionText: String,
+    collectionPath: String,
+    names: String,
+    anchorFile: String,
+    line: Int64,
+    col: Int64,
+) -> String {
+    let wanted = splitWhitespace(names)
+    if wanted.length == 0 {
+        return anchored(
+            anchorFile,
+            collectionPath,
+            line,
+            col,
+            "icons(\"\{collectionPath}\", \"\") names no glyph — list the glyphs the program uses, separated by spaces",
+        )
+    }
+    let coll = iconCollection(collectionText, collectionPath)
+    if coll.error != "" {
+        return anchored(anchorFile, collectionPath, line, col, coll.error)
+    }
+    return iconsEmit(coll, wanted, collectionPath, anchorFile, line, col)
+}
+
+// ===========================================================================
+// The collection
+// ===========================================================================
+
+/// A collection, as much of it as generating a glyph needs. `icons` and
+/// `aliases` are the document's own field lists, UNEXPANDED: only the named
+/// glyphs are looked up, so expanding 1,800 entries to emit five would be work
+/// the caller did not ask for.
+/// `prefix` is the collection's own (`lucide`); `box` its collection-level
+/// `viewBox`; `license` the notice for the generated header; `path` what the
+/// caller named it by, for diagnostics; `icons` is `name -> {body, width?,
+/// height?}` and `aliases` is `name -> {parent, …}`; `error` is why the
+/// collection is unusable, or `""`.
+type Collection = {
+    prefix: String,
+    box: String,
+    license: String,
+    path: String,
+    icons: Array<JsonField>,
+    aliases: Array<JsonField>,
+    error: String,
+}
+
+/// Parse a collection file. A document that does not parse, or that carries no
+/// `icons` object, is an `error` naming the fault — never a collection with no
+/// glyphs in it, which would report one nearest-name miss per glyph instead of
+/// the one cause.
+fn iconCollection(text: String, path: String) -> Collection {
+    return match parseJson(text) {
+        Ok(doc) => collectionOf(doc, path),
+        Err(why) => collectionError("the collection `\{path}` is not JSON: \{why}"),
+    }
+}
+
+/// The parsed document as a [`Collection`].
+fn collectionOf(doc: Json, path: String) -> Collection {
+    let top = jsonFields(doc)
+    if top.length == 0 {
+        return collectionError(
+            "the collection `\{path}` is \{jsonKind(doc)}, not an object of glyphs",
+        )
+    }
+    // The scalars first: a collection's `width`/`height` may sit AFTER `icons`
+    // in field order (lucide's do), and a per-glyph box needs them.
+    let mut prefix = ""
+    let mut w = ""
+    let mut h = ""
+    let mut license = noLicense()
+    for f in top {
+        if f.key == "prefix" {
+            prefix = jsonString(f.value)
+        }
+        if f.key == "width" {
+            w = jsonNumber(f.value)
+        }
+        if f.key == "height" {
+            h = jsonNumber(f.value)
+        }
+        if f.key == "info" {
+            license = licenseLine(f.value)
+        }
+    }
+    let mut icons: Array<JsonField> = []
+    let mut aliases: Array<JsonField> = []
+    for f in top {
+        if f.key == "icons" {
+            icons = jsonFields(f.value)
+        }
+        if f.key == "aliases" {
+            aliases = jsonFields(f.value)
+        }
+    }
+    if icons.length == 0 {
+        return collectionError(
+            "the collection `\{path}` has no `icons` object — it is not an Iconify collection",
+        )
+    }
+    return Collection {
+        prefix: prefix,
+        box: iconBox(w, h, "", ""),
+        license: license,
+        path: path.copy(),
+        icons: icons,
+        aliases: aliases,
+        error: "",
+    }
+}
+
+/// An unusable collection, carrying the sentence that says why.
+fn collectionError(why: String) -> Collection {
+    return Collection {
+        prefix: "",
+        box: "",
+        license: "",
+        path: "",
+        icons: [],
+        aliases: [],
+        error: why.copy(),
+    }
+}
+
+/// The `viewBox` for a glyph: its own `width`/`height` when it overrides them,
+/// the collection's otherwise, and Iconify's own default of 16 when neither says.
+fn iconBox(collW: String, collH: String, ownW: String, ownH: String) -> String {
+    let w = pick(ownW, collW, "16")
+    let h = pick(ownH, collH, "16")
+    return "0 0 \{w} \{h}"
+}
+
+/// The first of three that is not empty.
+fn pick(a: String, b: String, c: String) -> String {
+    if a != "" {
+        return a.copy()
+    }
+    if b != "" {
+        return b.copy()
+    }
+    return c.copy()
+}
+
+/// What a collection that declares no terms says. Spelled once: a glyph without
+/// its licence is the thing this line exists to prevent, so the absence is
+/// stated rather than left out.
+fn noLicense() -> String {
+    return "License: not declared in the collection file"
+}
+
+/// The `info.license` notice as one header line. Iconify's shape is
+/// `{title, spdx?, url?}`.
+fn licenseLine(info: Json) -> String {
+    let mut name = ""
+    let mut url = ""
+    for f in jsonFields(info) {
+        if f.key == "license" {
+            for g in jsonFields(f.value) {
+                if g.key == "title" {
+                    name = jsonString(g.value)
+                }
+                if g.key == "spdx" && name == "" {
+                    name = jsonString(g.value)
+                }
+                if g.key == "url" {
+                    url = jsonString(g.value)
+                }
+            }
+        }
+    }
+    if name == "" && url == "" {
+        return noLicense()
+    }
+    if url == "" {
+        return "License: \{name}"
+    }
+    if name == "" {
+        return "License: see \{url}"
+    }
+    return "License: \{name} — \{url}"
+}
+
+// ===========================================================================
+// Emitting
+// ===========================================================================
+
+/// The generated module: a header carrying the collection's terms, one shared
+/// `glyph` helper, and one exported function per glyph the caller named.
+gen fn iconsEmit(
+    coll: Collection,
+    wanted: Array<String>,
+    path: String,
+    anchorFile: String,
+    line: Int64,
+    col: Int64,
+) -> String {
+    let mut diags = ""
+    let mut body = ""
+    let mut taken: Array<String> = []
+    for want in wanted {
+        if contains(want, ":") {
+            diags = diags
+            + anchored(
+                anchorFile,
+                path,
+                line,
+                col,
+                "`\{want}` names a collection as well as a glyph — the collection is the first argument, so write `\{afterColon(want)}`",
+            )
+        } else {
+            let fnName = camel(want)
+            if includes(taken, fnName) {
+                diags = diags
+                + anchored(
+                    anchorFile,
+                    path,
+                    line,
+                    col,
+                    "`\{want}` and an earlier glyph in this import both become `\{fnName}()` — import the collection twice and take one glyph in each",
+                )
+            } else {
+                let one = glyphSource(coll, want, fnName, path, anchorFile, line, col)
+                diags = diags + one.diag
+                body = body + one.code
+                taken.push(fnName.copy())
+            }
+        }
+    }
+    let mut out = "/// Glyphs from `\{path}`"
+    if coll.prefix != "" {
+        out = out + " (prefix `\{coll.prefix}`)"
+    }
+    out = out + ", generated by std/icons — do not edit.\n"
+    out = out + "///\n/// \{coll.license}\n"
+    out = out + diags
+    out = out + "import { el, Html, Attr } from \"std/html\"\n"
+    out = out + iconHelper()
+    return out + body
+}
+
+/// The one helper every generated function calls. `currentColor` and a pixel
+/// size are not written here — that is the point: an Iconify body already paints
+/// itself in `currentColor`, and sizing in `em` makes the glyph take the colour
+/// and the size of the text around it, so the palette tokens and the theme
+/// control reach it with no per-icon work.
+fn iconHelper() -> String {
+    let mut out = "/// One glyph: an inline `<svg>` that follows the surrounding colour and\n"
+    out = out + "/// font size. Decorative — give it an accessible name at the use site when\n"
+    out = out + "/// the icon is the whole content.\n"
+    out = out + "fn glyph(box: String, markup: String) -> Html {\n"
+    out = out + "    return el(\n"
+    out = out + "        \"svg\",\n"
+    out = out + "        [\n"
+    out = out + "            A(\"viewBox\", box),\n"
+    out = out + "            A(\"width\", \"1em\"),\n"
+    out = out + "            A(\"height\", \"1em\"),\n"
+    out = out + "            A(\"aria-hidden\", \"true\"),\n"
+    out = out + "        ],\n"
+    out = out + "        [Raw(markup)],\n"
+    out = out + "    )\n"
+    out = out + "}\n"
+    return out
+}
+
+/// What one requested glyph contributes: a declaration, or a report.
+type Glyph = { code: String, diag: String }
+
+/// One glyph's declaration, or the report that it is not in the collection.
+gen fn glyphSource(
+    coll: Collection,
+    want: String,
+    fnName: String,
+    path: String,
+    anchorFile: String,
+    line: Int64,
+    col: Int64,
+) -> Glyph {
+    let found = resolveGlyph(coll, want, 0)
+    if found.error != "" {
+        return Glyph { code: "", diag: anchored(anchorFile, path, line, col, found.error) }
+    }
+    let mut out = "\n/// `\{qualified(coll, want)}`\n"
+    out = out + "export fn \{fnName}() -> Html {\n"
+    // The markup is baked through an RFC-0054 code quote: the hole sits in
+    // expression position, so the compiler's own escaper writes the literal. An
+    // SVG body carries quotes and a JSON decode has already unescaped it once; a
+    // hand-written escaper here would be a second escaper, free to disagree with
+    // the lexer about the layer it adds.
+    out = out + "    return glyph(\{render(vyrn"\{found.box}")}, \{render(vyrn"\{found.body}")})\n"
+    out = out + "}\n"
+    return Glyph { code: out, diag: "" }
+}
+
+/// A glyph's name as the collection spells it, `prefix:name` when there is one.
+fn qualified(coll: Collection, want: String) -> String {
+    if coll.prefix == "" {
+        return want.copy()
+    }
+    return "\{coll.prefix}:\{want}"
+}
+
+// ===========================================================================
+// Looking one glyph up
+// ===========================================================================
+
+/// A resolved glyph: its `viewBox` and its markup, or why neither exists.
+type Found = { box: String, body: String, error: String }
+
+/// How many `aliases` hops [`resolveGlyph`] will follow. Iconify aliases point at
+/// icons, and occasionally at other aliases; a cycle in a data file must not be a
+/// hang, and a chain this long is a broken collection either way.
+fn aliasDepth() -> Int64 {
+    return 8
+}
+
+/// The glyph `want`: from `icons` directly, or through `aliases` to a parent.
+///
+/// An alias that also asks for a TRANSFORM (`rotate`, `hFlip`, `vFlip`) is
+/// refused rather than rendered untransformed — a wrong glyph is worse than a
+/// message, and applying the transform means an SVG rewriter this module does not
+/// have.
+fn resolveGlyph(coll: Collection, want: String, hop: Int64) -> Found {
+    for f in coll.icons {
+        if f.key == want {
+            return glyphOf(coll, f.value)
+        }
+    }
+    for f in coll.aliases {
+        if f.key == want {
+            return aliasGlyph(coll, want, f.value, hop)
+        }
+    }
+    return notFound(
+        "the collection `\{coll.path}` has no glyph `\{want}` — nearest is `\{nearest(coll, want)}`",
+    )
+}
+
+/// One `aliases` entry followed to its parent.
+fn aliasGlyph(coll: Collection, want: String, entry: Json, hop: Int64) -> Found {
+    if hop >= aliasDepth() {
+        return notFound(
+            "the alias `\{want}` in `\{coll.path}` is more than \{aliasDepth().toString()} hops from any glyph — the collection's `aliases` chain is broken or circular",
+        )
+    }
+    let mut parent = ""
+    let mut extra: Array<String> = []
+    for g in jsonFields(entry) {
+        if g.key == "parent" {
+            parent = jsonString(g.value)
+        }
+        if g.key != "parent" && g.key != "width" && g.key != "height" {
+            extra.push(g.key.copy())
+        }
+    }
+    if extra.length > 0 {
+        return notFound(
+            "`\{want}` is an alias asking for `\{joinWith(extra, "`, `")}`, which std/icons does not apply — name its parent `\{parent}` instead, or draw the transform in your own markup",
+        )
+    }
+    if parent == "" {
+        return notFound("`\{want}` is an alias with no `parent` in `\{coll.path}`")
+    }
+    let found = resolveGlyph(coll, parent, hop + 1)
+    if found.error != "" {
+        return found
+    }
+    return overrideBox(coll, found, entry)
+}
+
+/// One glyph entry (`{body, width?, height?}`) as a [`Found`].
+fn glyphOf(coll: Collection, entry: Json) -> Found {
+    let mut body = ""
+    let mut w = ""
+    let mut h = ""
+    for g in jsonFields(entry) {
+        if g.key == "body" {
+            body = jsonString(g.value)
+        }
+        if g.key == "width" {
+            w = jsonNumber(g.value)
+        }
+        if g.key == "height" {
+            h = jsonNumber(g.value)
+        }
+    }
+    if body == "" {
+        return notFound("the collection `\{coll.path}` carries no `body` for this glyph")
+    }
+    if w == "" && h == "" {
+        return Found { box: coll.box.copy(), body: body, error: "" }
+    }
+    return Found { box: sizedBox(coll, w, h), body: body, error: "" }
+}
+
+/// An alias may resize its parent; nothing else about it changes.
+fn overrideBox(coll: Collection, found: Found, entry: Json) -> Found {
+    let mut w = ""
+    let mut h = ""
+    for g in jsonFields(entry) {
+        if g.key == "width" {
+            w = jsonNumber(g.value)
+        }
+        if g.key == "height" {
+            h = jsonNumber(g.value)
+        }
+    }
+    if w == "" && h == "" {
+        return Found { box: found.box.copy(), body: found.body.copy(), error: "" }
+    }
+    return Found { box: sizedBox(coll, w, h), body: found.body.copy(), error: "" }
+}
+
+/// The collection's box with `w`/`h` substituted where they are given.
+fn sizedBox(coll: Collection, w: String, h: String) -> String {
+    let parts = splitWhitespace(coll.box)
+    let mut cw = ""
+    let mut ch = ""
+    if parts.length == 4 {
+        cw = parts[2].copy()
+        ch = parts[3].copy()
+    }
+    return iconBox(cw, ch, w, h)
+}
+
+fn notFound(why: String) -> Found {
+    return Found { box: "", body: "", error: why.copy() }
+}
+
+/// The known name closest to `want` — the "nearest is" half of the miss.
+fn nearest(coll: Collection, want: String) -> String {
+    let mut best = ""
+    let mut bestD = 1000000
+    for f in coll.icons {
+        let d = editDistance(f.key, want)
+        if d < bestD {
+            bestD = d
+            best = f.key.copy()
+        }
+    }
+    for f in coll.aliases {
+        let d = editDistance(f.key, want)
+        if d < bestD {
+            bestD = d
+            best = f.key.copy()
+        }
+    }
+    return best
+}
+
+// ===========================================================================
+// Small shared helpers
+// ===========================================================================
+
+/// A report, anchored at the template site the caller gave, or in the collection
+/// file when it gave none.
+fn anchored(anchorFile: String, path: String, line: Int64, col: Int64, why: String) -> String {
+    if anchorFile == "" {
+        return report(Error, path, 1, 1, why)
+    }
+    return report(Error, anchorFile, line, col, why)
+}
+
+/// The lowerCamelCase identifier for an Iconify name: `circle-check` becomes
+/// `circleCheck`, `1-circle` becomes `icon1Circle` (an identifier cannot start
+/// with a digit, and a name that does is not this module's to rename).
+fn camel(name: String) -> String {
+    let bs = bytes(name)
+    let mut out: Array<UInt8> = []
+    let mut upper = false
+    let mut i = 0
+    while i < bs.length {
+        let b = bs[i]
+        let letter = (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+        let digit = b >= '0' && b <= '9'
+        if letter || digit {
+            if upper && b >= 'a' && b <= 'z' {
+                out.push(b - 32)
+            } else {
+                out.push(b)
+            }
+            upper = false
+        } else {
+            upper = true
+        }
+        i = i + 1
+    }
+    let core = fromBytesOr(out, "")
+    if core == "" {
+        return "glyph"
+    }
+    let first = bytes(core)[0]
+    if (first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') {
+        return core
+    }
+    return "icon\{core}"
+}
+
+/// The part of `name` after its first `:`.
+fn afterColon(name: String) -> String {
+    let bs = bytes(name)
+    let mut out: Array<UInt8> = []
+    let mut seen = false
+    let mut i = 0
+    while i < bs.length {
+        if seen {
+            out.push(bs[i])
+        }
+        if bs[i] == ':' {
+            seen = true
+        }
+        i = i + 1
+    }
+    return fromBytesOr(out, "")
+}
+
+/// The fields of a JSON object, `[]` for anything else. Copied: a payload read
+/// out of a borrowed value is a read, not a move.
+fn jsonFields(j: Json) -> Array<JsonField> {
+    return match j {
+        JObj(fs) => copyJsonFields(fs),
+        JArr(xs) => [],
+        JStr(s) => [],
+        JNum(s) => [],
+        JBool(b) => [],
+        JNull => [],
+    }
+}
+
+/// The text of a JSON string, `""` for anything else.
+fn jsonString(j: Json) -> String {
+    return match j {
+        JStr(s) => s.copy(),
+        JObj(fs) => "",
+        JArr(xs) => "",
+        JNum(s) => "",
+        JBool(b) => "",
+        JNull => "",
+    }
+}
+
+/// The raw text of a JSON number, `""` for anything else. Raw, because a
+/// `viewBox` wants the digits the collection wrote, not a float round-trip.
+fn jsonNumber(j: Json) -> String {
+    return match j {
+        JNum(s) => s.copy(),
+        JStr(s) => "",
+        JObj(fs) => "",
+        JArr(xs) => "",
+        JBool(b) => "",
+        JNull => "",
+    }
+}
+
+/// What a JSON value IS, for the message about a document that is not a
+/// collection.
+fn jsonKind(j: Json) -> String {
+    return match j {
+        JObj(fs) => "an empty object",
+        JArr(xs) => "an array",
+        JStr(s) => "a string",
+        JNum(s) => "a number",
+        JBool(b) => "a boolean",
+        JNull => "null",
+    }
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+/// A three-glyph collection with everything the emitter has to handle: a
+/// per-glyph width override, an alias, and an alias that asks for a transform.
+/// Test-only, and inline rather than on disk: the emitter is a function of the
+/// collection TEXT, so nothing here needs a file, a manifest or a cache.
+fn toyCollection() -> String {
+    return """{
+        "prefix": "toy",
+        "info": { "license": { "title": "MIT", "url": "https://example.test/L" } },
+        "icons": {
+            "github": { "body": "<path d=\\"M8 0 L16 8Z\\"/>" },
+            "circle-check": { "body": "<circle r=\\"7\\"/>" },
+            "wide": { "body": "<rect/>", "width": 32 }
+        },
+        "aliases": {
+            "check-circle": { "parent": "circle-check" },
+            "spun": { "parent": "github", "rotate": 1 }
+        },
+        "width": 16,
+        "height": 16
+    }"""
+}
+
+test "a named glyph becomes one function over the shared helper" {
+    let src = iconsModule(toyCollection(), "toy", "github", "", 0, 0)
+    assert(contains(src, "export fn github() -> Html {"))
+    assert(contains(src, "A(\"aria-hidden\", \"true\")"))
+    assert(contains(src, "glyph(\"0 0 16 16\", \"<path d=\\\"M8 0 L16 8Z\\\"/>\")"))
+    assert(contains(src, "//@diag") == false)
+}
+
+test "the collection's licence is the generated header's own line" {
+    let src = iconsModule(toyCollection(), "toy", "github", "", 0, 0)
+    assert(contains(src, "/// License: MIT — https://example.test/L"))
+}
+
+test "a collection that declares no terms says so rather than saying nothing" {
+    let src = iconsModule("{\"icons\":{\"a\":{\"body\":\"<a/>\"}}}", "bare", "a", "", 0, 0)
+    assert(contains(src, "/// License: not declared in the collection file"))
+}
+
+test "a hyphenated name becomes one lowerCamelCase function" {
+    let src = iconsModule(toyCollection(), "toy", "circle-check", "", 0, 0)
+    assert(contains(src, "export fn circleCheck() -> Html {"))
+}
+
+test "an alias resolves to its parent's markup" {
+    let src = iconsModule(toyCollection(), "toy", "check-circle", "", 0, 0)
+    assert(contains(src, "export fn checkCircle() -> Html {"))
+    assert(contains(src, "<circle r=\\\"7\\\"/>"))
+}
+
+test "a glyph that overrides its width gets its own viewBox" {
+    let src = iconsModule(toyCollection(), "toy", "wide", "", 0, 0)
+    assert(contains(src, "glyph(\"0 0 32 16\""))
+}
+
+test "an unknown glyph is a report with the nearest name, and no declaration" {
+    let src = iconsModule(toyCollection(), "toy", "githup", "", 0, 0)
+    assert(contains(src, "the collection `toy` has no glyph `githup` — nearest is `github`"))
+    assert(contains(src, "export fn githup") == false)
+}
+
+test "a report lands on the anchor the caller gave" {
+    let src = iconsModule(toyCollection(), "toy", "githup", "./Badge.vyx", 7, 1)
+    assert(contains(src, "//@diag error ./Badge.vyx:7:1 the collection `toy` has no glyph"))
+}
+
+test "an alias asking for a transform is refused, not rendered unturned" {
+    let src = iconsModule(toyCollection(), "toy", "spun", "", 0, 0)
+    assert(contains(src, "`spun` is an alias asking for `rotate`, which std/icons does not apply"))
+    assert(contains(src, "export fn spun") == false)
+}
+
+test "two names that camel-case to one identifier are refused" {
+    let src = iconsModule(toyCollection(), "toy", "circle-check circleCheck", "", 0, 0)
+    assert(contains(src, "both become `circleCheck()`"))
+}
+
+test "a prefixed name is refused, naming the bare glyph to write" {
+    let src = iconsModule(toyCollection(), "toy", "toy:github", "", 0, 0)
+    assert(contains(src, "names a collection as well as a glyph"))
+    assert(contains(src, "so write `github`"))
+}
+
+test "an empty name list is refused" {
+    let src = iconsModule(toyCollection(), "toy", "  ", "", 0, 0)
+    assert(contains(src, "names no glyph — list the glyphs the program uses"))
+}
+
+test "a collection that is not JSON is refused, naming the path" {
+    let src = iconsModule("{oops", "./broken.json", "github", "", 0, 0)
+    assert(contains(src, "the collection `./broken.json` is not JSON:"))
+    assert(contains(src, "export fn") == false)
+}
+
+test "a JSON document that is not a collection is refused, naming the path" {
+    let src = iconsModule("{\"prefix\":\"x\"}", "./empty.json", "github", "", 0, 0)
+    assert(contains(src, "the collection `./empty.json` has no `icons` object"))
+}

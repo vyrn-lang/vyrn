@@ -15,6 +15,7 @@
 - [std/html](std/html.md) — std/html — the view tree and the string renderer (RFC-0026 M1).
 - [std/http](std/http.md) — std/http — the REST projection (RFC-0074 M1), a library over the same
 - [std/i18n](std/i18n.md) — std/i18n — typed translations as a library (RFC-0020 M2), built entirely on
+- [std/icons](std/icons.md) — std/icons — an icon collection is a LIBRARY (RFC-0107 M2), not a compiler
 - [std/json](std/json.md) — std/json (RFC-0059) — the shared JSON value tree and its canonical writer,
 - [std/jsondec](std/jsondec.md) — std/jsondec (RFC-0078 M3) — the untyped half of `fromJson`, in Vyrn.
 - [std/jsonread](std/jsonread.md) — std/jsonread (RFC-0059, split out by RFC-0078 M2a) — the STRICT JSON reader,

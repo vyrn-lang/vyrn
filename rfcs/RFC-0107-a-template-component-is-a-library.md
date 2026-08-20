@@ -1,10 +1,12 @@
 # RFC-0107 — A Template Component Is a Library
 
-- **Status:** **Proposed.** M0 (the feasibility probe) and M1 (the protocol in
-  `std/vyx`) have landed — see [M0 — as landed](#m0--as-landed),
-  [M1 — as landed](#m1--as-landed) and `rfcs/probe-0107/`. The protocol works and
-  `std/icons` (M2) is not written. Milestones below; a milestone that fails its
-  gate says so in this file.
+- **Status:** **Proposed.** M0 (the feasibility probe), M1 (the protocol in
+  `std/vyx`) and M2 (`std/icons` and the alias hole) have landed — see
+  [M0 — as landed](#m0--as-landed), [M1 — as landed](#m1--as-landed),
+  [M2 — as landed](#m2--as-landed) and `rfcs/probe-0107/`. The protocol works, the
+  core is a library any `.vyrn` file can import, and the `<Icon>` consumer (M3)
+  is not written. Milestones below; a milestone that fails its gate says so in
+  this file.
 - **Depends on:** RFC-0021 (generators — the comptime sandbox and the recorded
   inputs its cache is keyed on), RFC-0026/0039 (std/vyx, the template compiler
   this RFC gives an extension point), RFC-0099 (generator diagnostics with
@@ -525,6 +527,278 @@ is about the compiler, and its region ends at the first `test "` line.
    to the importing file) is untouched**, as scoped. So is the alias-data-read
    hole, which is M2's.
 
+## M2 — as landed
+
+Two things: the hole M0 found is filled in the compiler, and `std/icons` is a
+library over it. Nothing in `std/vyx` changed — the core knows no template
+language, which was the layering claim, and the file count says so.
+
+### The alias hole, as filled
+
+M0's three ways out were: teach the mediated reads to resolve an alias, reach the
+bytes by their `vyrn vendor` path, or ship the collection as a `.vyrn` module.
+The first was taken, for the reason M0 gave — it is the only one that keeps a
+collection a JSON file `vyrn add` pins.
+
+**The import map is one step, in one place.** `gen_scoped_path` took
+`(importer_dir, allowed, arg)` and did path arithmetic. It now takes
+`aliased` as well: the `(spelling, resolved key)` pairs for those of the
+generator's constant arguments that name a `vyrn.json` dependency. The loader
+builds them with `resolve_spec` — the same function a module specifier goes
+through, so an alias means one thing in this compiler and not two. A read
+spelling one of them gets the resolved key; every other read is the arithmetic it
+always was.
+
+**The sandbox rule is unchanged, and that is a property of where the pairs come
+from.** They come from the generator's OWN constant arguments, and each resolved
+key is pushed into `allowed` beside the two spellings that argument already
+contributed. So the input-root check still decides, on the resolved key, with the
+same message. An alias is a second SPELLING of a declared root, never a new root.
+The negative row `the_input_root_rule_still_decides` builds a path under an alias
+argument that climbs out of it, and gets:
+
+```
+generator read `coll/../../secret.txt` escapes its declared inputs (…) — a generator may only read under its constant path arguments
+```
+
+**Cache soundness needed the resolved key too, and this is the part that is easy
+to get wrong.** The lookup key is `sha256(generator sources ++ args ++ resolved
+inputs)`, and the recorded inputs are validated by re-hashing. Re-pinning a
+dependency changes neither the arguments nor the bytes of the file the old entry
+recorded, so without the resolved key in the lookup the entry stays valid and the
+build serves the glyph nobody points at any more. Measured, not argued: removing
+the one `allowed.push(key)` from the cache key's input list (and only from there)
+makes `re_pinning_a_collection_misses_the_generator_cache` fail with the old
+glyph in the message.
+
+**A pinned read that fails ABORTS the generation, in the resolver's own
+words.** A local `readFile` miss stays an `Err` value under the canonical wording
+(RFC-0014: never OS text). A pinned dependency that cannot be produced is not a
+condition to branch on — it is "locked but not cached" or "the upstream changed
+under an immutable URL", each with a remedy — so it is a trap carrying that
+refusal verbatim:
+
+```
+app.vyrn:2:0: generator `icons("icons", "activity alert archive")` failed: `github:iconify/icon-sets@66114542c442d138c1da78932ddbad862fb7a65c/json/bytesize.json` is locked (sha256 33c635f7…) but not cached, and this is an offline build — run once online, `vyrn vendor`, or drop any copy of the file with that hash into the cache
+```
+
+That wording is `vyrn-cli`'s existing one, single-sourced, reached through the
+same `RemoteResolver` a module import uses — so the lock, the vendor directory,
+the content cache, the hash check and `--offline` all apply with no second copy
+of any of them. The wasm generation engine (RFC-0076) refuses the same read the
+same way, because its status alphabet carries no message and an answer that
+differs by engine is two answers.
+
+**What it does NOT do: subpaths under an alias.** `icons/lucide.json` is not
+resolved, because `resolve_spec` does not resolve it for a module import either —
+a bare specifier is an EXACT key in the dependency map. One collection is one
+alias, which is what `vyrn add --name` writes. Growing that is a change to module
+resolution, not to the sandbox.
+
+`moduleInterface` goes through the same step; the only care needed was to leave
+an alias spelling alone rather than append `.vyrn` to it.
+
+### std/icons, the surface
+
+```vyrn
+import { icons } from "std/icons"
+import * as ic from icons("icons", "activity alert archive")
+```
+
+- **`icons(collection, names)`** — the plain-`.vyrn` generator. `collection` is a
+  relative `.json` path or a dependency alias; `names` is space-separated Iconify
+  names. It emits one `export fn <name>() -> Html` per glyph over one private
+  `glyph(box, markup)` helper.
+- **`iconsModule(collectionText, collectionPath, names, anchorFile, line, col)`** —
+  the same generator with the read already done, exported for an M3 provider. A
+  `gen fn` can call it (`std/rpc` calls `std/symbolmap`'s `symbolMapFn` the same
+  way), and it is a pure function of its text: no read, no manifest, no `.vyx`.
+
+Emitted markup is `<svg viewBox="0 0 W H" width="1em" height="1em"
+aria-hidden="true">` with the collection's body verbatim inside a `Raw`. No
+`fill` and no pixel size are written, and that is deliberate: an Iconify body
+already paints itself in `currentColor` (lucide's carry `fill="none"
+stroke="currentColor"` on the body element), so leaving both alone is what makes
+the glyph follow the palette tokens and the theme control. `aria-hidden="true"`
+because an icon beside a label is decoration; the accessible name belongs at the
+use site.
+
+The body is baked with an RFC-0054 code quote — `render(vyrn"\{body}")` — for
+`std/symbolmap`'s reason: an SVG body carries quotes, a JSON decode has already
+unescaped it once, and a hand-written escaper here would be a second escaper free
+to disagree with the lexer.
+
+**Aliases, sizes and licences.** The collection's `aliases` are followed to their
+parent (bounded at 8 hops, so a circular data file is a message and not a hang).
+A per-glyph or per-alias `width`/`height` overrides the collection's. `aliases`
+also carry TRANSFORMS in real collections (`rotate`, `hFlip`, `vFlip`); applying
+one needs an SVG rewriter this module does not have, so such an alias is refused
+by name rather than rendered unturned. `info.license` becomes the generated
+module's own header line, and a collection that declares none says so:
+
+```
+/// Glyphs from `icons` (prefix `bytesize`), generated by std/icons — do not edit.
+///
+/// License: MIT — https://github.com/danklammer/bytesize-icons/blob/master/LICENSE.md
+```
+
+**Lookup is lazy on purpose.** The parsed document's `icons` and `aliases` field
+lists are kept as they are and scanned per requested name. Expanding 1,800
+entries to emit five is work the caller did not ask for, and the RFC's "only
+named glyphs are generated" is about the editor and the artifact as much as about
+the build.
+
+### The gate, as run
+
+**Two collections, offline, from the lock.** Both are real Iconify collections,
+pinned at one commit with `vyrn add`:
+
+```
+vyrn add github:iconify/icon-sets@66114542c442d138c1da78932ddbad862fb7a65c/json/bytesize.json --name icons
+vyrn add github:iconify/icon-sets@66114542c442d138c1da78932ddbad862fb7a65c/json/codex.json  --name codex
+```
+
+`vyrn run --offline`, with a cold generator cache and the bytes from
+`~/.vyrn/cache`:
+
+```
+<svg viewBox="0 0 32 32" width="1em" height="1em" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16h7l3 13l4-26l3 13h7"/></svg>
+<svg viewBox="0 0 32 32" width="1em" height="1em" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m16 3l14 26H2Zm0 8v8m0 4v2"/></svg>
+<svg viewBox="0 0 32 32" width="1em" height="1em" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 10v18h24V10M2 4v6h28V4Zm10 11h8"/></svg>
+<svg viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2" d="M9 12V7.1a.1.1 0 0 1 .1-.1h1.3c1.1 0 3.6.1 3.6 2.5c0 0 0 2.5-3 2.5m-2 0v4.8c0 .11.09.2.2.2h3.3c1.5 0 2.5-1 2.5-2.5c0-2.795-4-2.5-4-2.5m-2 0h2"/></svg>
+<svg viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2" d="M18 7H6m12 10H6m10-5H8"/></svg>
+```
+
+Cold: 8.9 s for both collections. Warm (generator cache hit): 0.045 s. No network
+was reachable for either run — the second half of
+`a_pinned_remote_collection_reads_offline_from_the_vendor` proves the point
+negatively by deleting the bytes and getting the pinning refusal.
+
+**The misspelled glyph, verbatim.**
+
+```
+toy:1:1: the collection `toy` has no glyph `githup` — nearest is `github`
+  note: in generated code generated by icons("toy", "githup") at bad.vyrn:4 (see `vyrn emit-gen`)
+```
+
+With an anchor from a caller (what an M3 provider passes), the same sentence
+lands on the tag instead:
+
+```
+//@diag error ./Badge.vyx:7:1 the collection `toy` has no glyph `githup` — nearest is `github`
+```
+
+### Gate results
+
+- **The alias hole, proven both ways.** `compiler/vyrn-cli/tests/icons.rs`, six
+  rows: the aliased read (a manifest at the root, the program in `src/`, so the
+  arithmetic alone reaches nothing), the undeclared alias, the input-root refusal,
+  the re-pin cache miss, a pinned REMOTE collection read offline from
+  `vyrn_vendor/` and then the pinning refusal with its bytes deleted, and the
+  two-collection program with the misspelled glyph. Against `main`'s binary the
+  first of them prints
+  `std/icons cannot read the collection \`coll\`: cannot read \`coll\``; here it
+  prints the glyph.
+- **`std/icons`'s own `test` blocks: 14 passed, 0 failed**, discovered by the
+  `std_suite` sweep rather than listed anywhere. They run on an inline
+  three-glyph collection, so the suite needs no file, no manifest and no cache.
+- **Existing generators byte-identical.** `vyrn emit-gen` over all **171**
+  examples: **0 differing** against a `main` build (each run with its own
+  `VYRN_GEN_CACHE_DIR`, since two compilers sharing one cache directory warn
+  about each other's entries on stderr).
+- **Workspace `cargo test --release`:** 72 suites, **1,758 tests, 0 failed**.
+  **Parity** (`--ignored --test-threads=1`, tools pinned): **40 passed, 0
+  failed**, 252.9 s.
+- **Excluded crates:** `vyrn-lsp` 76 + 7 passed; `vyrn-genwasm` tests pass;
+  `vyrn-play` builds for `wasm32-unknown-unknown`. `cargo fmt --all --check`
+  clean for the workspace and for the three excluded manifests.
+  `vyrn fmt --check std/icons.vyrn` clean. `vyrn doc --std -o docs/api --verify`
+  up to date (39 files), committed.
+
+### The wall M2 hit, with numbers
+
+**`std/icons` cannot read a 566 kB collection under the default build, and the
+reason is not `std/icons`.** `parseJson` in the generation sandbox is QUADRATIC in
+document size. Timings, `VYRN_NO_GEN_CACHE=1`, one `gen fn` that reads a
+synthetic Iconify-shaped document and parses it:
+
+| document | before | after | after, `--features wasm-gen` |
+| --- | --- | --- | --- |
+| 2.7 kB | 0.33 s | — | — |
+| 11 kB | 4.5 s | 1.16 s | — |
+| 43 kB | 94 s | 15.8 s | — |
+| 566 kB (`lucide.json`) | did not finish in 10 min | still over 2 min | **0.41 s** |
+
+The cause is parameter binding, not the reader. A parameter of type
+`Array<UInt8>` — which is what `bytes(s)` gives, so it is what every byte-level
+`std/strings`, `std/scan` and `std/jsonread` function takes — was COERCED on every
+call, and the coercion rebuilt the whole array. `coercion_is_noop` had no arm for
+"an `IntN` value already at this width and signedness", so every element answered
+"there is work to do" and the array was rebuilt element by element, per call. The
+control cases pin it exactly, all at 43 kB: the same byte loop with no
+`Array<UInt8>` parameter runs in 0.075 s, with an `Array<Int64>` parameter (no
+range to check) in 0.18 s, and compiled to wasm in about a second including the
+runtime's own start-up — the compiled backends pass by reference and never had
+this.
+
+The one arm that was missing is now there, with a guard that PROVES the value is
+where wrapping would leave it rather than assuming it, so the semantics cannot
+see it. It buys 6x. **It does not make the reader linear** — the array is still
+scanned per call, just cheaply — so a 566 kB collection is still out of reach in
+the interpreter. Making it O(1) means an array value that carries its element
+type, which is a change to `Val` and to RFC-0082's boundary rules, and is not
+this RFC's. Recorded here because M2 is what surfaced it, and because every
+generator in this repository that reads a file pays it.
+
+**The RFC-0076 engine already clears the wall, and that is the strongest
+statement available about whose wall it is.** With `--features wasm-gen` the
+generator is compiled and runs in wasmtime, which passes arrays by reference and
+never had the coercion at all: `lucide.json` — all 566 kB, 1,843 icons and 217
+aliases of it, `activity-square` resolved through the alias table — generates four
+glyphs in **0.41 s**, and the two-collection gate below runs in **0.088 s**
+instead of 8.9 s. So the design reads a real Iconify collection today. What cannot
+is the DEFAULT build, which is what `cargo test` uses and what
+`.github/workflows/release.yml` ships (it builds `-p vyrn-cli` with no features).
+Which of those two facts to change — the interpreter's coercion, or what the
+release carries — belongs to RFC-0082 and RFC-0076 respectively, and neither is
+decided here.
+
+So the gate ran on the two smallest real collections in `iconify/icon-sets`
+(22 kB and 23 kB) rather than on `lucide.json`. That is the honest scope of what
+landed: `std/icons` is correct on real data, fast on real data of any size under
+the compiled engine, and fast enough on 22 kB under the interpreted one.
+
+### What M2 contradicts, and what it leaves
+
+1. **An M3 provider cannot name its collection by alias yet, and the reason is
+   structural.** M1's protocol hands a provider `(attrs, file, line, col)`, with
+   the tag's attributes as ONE JSON string. A collection alias inside that string
+   is not a constant path argument, so it contributes no input root and this
+   milestone's import-map step never sees it — P1a applies to it exactly as it
+   applied to reading a provider the template chose. M3 therefore has to either
+   give the provider the collection as an argument of its own (a provider module
+   per collection, which the "the prefix vocabulary is the manifest's alias keys"
+   sentence did not anticipate), or the root rule has to grow a way to declare an
+   input that arrives inside a structured argument. Neither is decided here.
+   `iconsModule` is shaped for the first: it takes the collection TEXT, so
+   whoever can read the bytes can call it.
+2. **A report about an alias-named collection anchors at the alias spelling.**
+   `toy:1:1` above is not a file any editor can open. `std/diag` anchors at a file
+   the generator NAMED, and what the generator was given is `toy`; the resolved
+   key is the sandbox's business and is not handed back. The note carries the
+   import site, which is the position a reader actually wants. Recorded, not
+   fixed.
+3. **The prefix vocabulary is not implemented, because the core does not need
+   one.** The RFC's `<Icon name="brand:github"/>` splits a prefix off the name;
+   the core takes the collection as its first argument instead, and REFUSES a
+   name carrying a `:` with the bare name to write. Splitting belongs to whoever
+   parses the tag.
+4. **Two glyphs whose names camel-case to one identifier are refused**, not
+   renamed. `circle-check` and `circleCheck` in one import both want
+   `circleCheck()`. Emitting both would be a duplicate-declaration error inside a
+   generated module; the refusal names both and says to import the collection
+   twice.
+
 ## Milestones
 
 **M0 — the feasibility probe.** **Landed** — `rfcs/probe-0107/`, verdicts in
@@ -558,7 +832,20 @@ Gate: a toy provider in the test suite
 round-trips; `std/vyx` contains zero component names — asserted by a test,
 not a grep someone runs once; all existing `.vyx` pages compile unchanged.
 
-**M2 — std/icons core.** The generator, the `vyrn add` flow for a collection,
+**M2 — std/icons core.** **Landed** — see [M2 — as landed](#m2--as-landed).
+The hole M0 found is filled the way M0 called honest: the mediated reads take an
+import-map step, through the same `resolve_spec` a module specifier uses, with
+the resolved key in the input roots AND in the generator cache key. `std/icons`
+is the library over it. Gate met on two REAL pinned Iconify collections, offline
+from the lock, with the misspelled-glyph diagnostic recorded verbatim there.
+M2 also hit a wall it did not create and could not close: `parseJson` in the
+generation sandbox is quadratic in document size, so a 566 kB collection does not
+finish under the INTERPRETED engine, which is what the default build and the
+release use. The compiled engine (`--features wasm-gen`) does the same collection
+in 0.41 s. The cause is measured, one arm of it is fixed (6x), the rest is filed,
+and the gate ran on 22 kB and 23 kB collections instead — all of it in that
+section. The original line was:
+The generator, the `vyrn add` flow for a collection,
 license surfacing, the nearest-name diagnostic, `* as` usage from plain
 `.vyrn`. **Plus the hole M0 found**: a `gen fn` cannot read a manifest-aliased
 file today, so M2 owns the choice between teaching the mediated reads to resolve
