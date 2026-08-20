@@ -237,6 +237,29 @@ p { text-wrap: pretty; margin: 0; }
 p + p { margin-top: var(--s2); }
 a { color: inherit; text-decoration-color: var(--n2); text-underline-offset: 3px; }
 a:hover { text-decoration-color: var(--accent); }
+
+/* A LINK IN RUNNING TEXT IS 24px OF TARGET (RFC-0106 M1, checklist row 29).
+ *
+ * The census counted 83 sub-24px targets on `/docs` at 375px, 43 of them inside
+ * a sentence or a list item; the module list alone is 37 rows of a 13px mono
+ * link painting 21px tall. WCAG 2.2's floor is 24px and the sheet's own goal is
+ * 44px, and a word inside a paragraph cannot be 44px tall without opening the
+ * line box — the sheet has said so in writing since RFC-0105 M4, and that part
+ * is still true.
+ *
+ * What it can be is 24px. `padding-block` on an inline box grows the box the
+ * browser hit-tests and paints without touching the line box or the line
+ * height, so a 21px link becomes a 25px target and not one paragraph moves. It
+ * is 2px and not 3, because two adjacent lines of links would then overlap; the
+ * same 1.6 line height that leaves 21px of ink leaves 27px of line, so 25px is
+ * the largest target that still cannot collide.
+ *
+ * This does not reach every counted target: an 11px `<th>` link in a table
+ * paints 18px and a 2px band leaves it at 22px, and an SVG `<a>` has no CSS box
+ * at all. Those are M3's, where the tables and the graph are rebuilt. */
+p a, li a, dd a, dt a, caption a, figcaption a, .note a, .notice a, .cap a, td a {
+  padding-block: 2px;
+}
 code, pre, kbd { font-family: var(--mono); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
@@ -419,11 +442,23 @@ h1 code, h2 code, h3 code, h4 code {
  * the same selector. */
 #root > .masthead, #root > .foot { grid-column: 1 / 13; }
 
+/* ONE HEADER, 64px, AT EVERY WIDTH (RFC-0106 M1).
+ *
+ * It was 64px at desktop and 152px at 375px — a column of wordmark, then a
+ * 718px nav strip showing 343px of itself, then the theme button, on an 812px
+ * screen (RFC-0106 M0, checklist row 31). The height is now declared rather
+ * than emergent: `min-height: 64px` with 8px of padding, so a 44px target fits
+ * inside it with room and the row cannot grow when a control is added to it.
+ *
+ * `align-items: center` and no longer `baseline`: every item in the row is now
+ * a 44px box with its text centred (the tap-target floor, checklist row 29),
+ * and boxes of one height centred on one line share their baseline anyway. */
 .masthead {
   display: flex;
-  align-items: baseline;
-  gap: var(--s4);
-  padding: var(--s3) 0;
+  align-items: center;
+  gap: var(--s3);
+  min-height: 64px;
+  padding: var(--s1) 0;
   border-bottom: 1px solid var(--rule);
   font: 13px/1 var(--mono);
   letter-spacing: 0.08em;
@@ -436,6 +471,9 @@ h1 code, h2 code, h3 code, h4 code {
   text-transform: uppercase;
   text-decoration: none;
   color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
 }
 
 /* THE THEME CONTROL (RFC-0105 M4).
@@ -446,18 +484,12 @@ h1 code, h2 code, h3 code, h4 code {
  * `prefers-color-scheme` decides and the page says nothing about it, which is
  * what it did before this milestone.
  *
- * IT MUST NOT CHANGE THE MASTHEAD'S HEIGHT. The row is `13px/1` mono with a 15px
- * wordmark in it, so the tallest thing in it is a 15px line box, and that is
- * what the header measured before this control existed. The button is therefore
- * 13px of text between two 1px borders — 15px exactly — with no vertical
- * padding. The first version of this control was three buttons at `6px` padding
- * each, 27px tall, and it made the header fourteen pixels taller and pushed the
- * navigation off the wordmark's baseline.
- *
- * `align-self: center` and not `baseline`: the row aligns on the baseline, and a
- * bordered box whose baseline is its text's would hang 1px below the line the
- * words share. Centred, the box straddles the text it sits beside and the flex
- * line stays 15px.
+ * IT IS A 44px TARGET, AND THAT NO LONGER COSTS THE MASTHEAD ANYTHING
+ * (RFC-0106 M1). M4 sized this button to 15px — 13px of text between two 1px
+ * borders, no vertical padding — because the header's height was whatever its
+ * tallest item happened to be, and a taller control pushed the navigation off
+ * the wordmark's baseline. The header now DECLARES 64px, so every item in it is
+ * a 44px box and none of them decides the height.
  *
  * `.slot` is the consumer layout's `v-html` host. It has no box, so the button
  * below is the masthead's own flex item in both mastheads — the backstage builds
@@ -465,9 +497,10 @@ h1 code, h2 code, h3 code, h4 code {
 .theme { display: none; }
 .masthead .slot { display: contents; }
 [data-js] .theme {
-  display: block;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
   margin-left: auto;
-  align-self: center;
   font: inherit;
   letter-spacing: inherit;
   text-transform: uppercase;
@@ -480,7 +513,20 @@ h1 code, h2 code, h3 code, h4 code {
 [data-js] .theme:hover { color: var(--ink); border-color: var(--accent); }
 
 .nav { display: flex; gap: var(--s3); flex-wrap: wrap; }
-.nav a { text-decoration: none; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; }
+/* 44px AT EVERY WIDTH, and this is a rule that moved (RFC-0106 M1). It lived
+ * inside `@media (max-width: 640px)`, so at 768px and every width above it a
+ * navigation link measured 89×13 — most of the sub-24px target count on every
+ * page of the census's 768 column, from one rule in the wrong block. */
+.nav a {
+  text-decoration: none;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+}
 .nav a:hover { color: var(--ink); }
 /* Where the reader is. `site/export.vyrn` stamps the attribute per published
  * document and `widgets.js` moves it after a soft navigation, so the marker is
@@ -1006,8 +1052,18 @@ ol.plain .note { display: block; color: var(--muted); font-size: 0.92rem; }
  * around each bar of a chart — where `padding` and `border-top` do nothing. The
  * rules are gone rather than left to be read as live layout. */
 
-.tabs { display: flex; gap: 0; margin-top: var(--s3); border-bottom: 1px solid var(--rule); }
-.tabs button { border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+/* A TAB ROW SCROLLS AT EVERY WIDTH, and this is the second rule that moved
+ * (RFC-0106 M1). `overflow-x: auto` lived inside `@media (max-width: 640px)`,
+ * so between 641px and 1024px a tab row had no scroller at all: the radar's
+ * eight-program axis picker on `/compare` is 743px of buttons in a 708px
+ * column, and its last tab painted from 674px to 768px — 35px outside its
+ * column, unreachable, and on a browser with classic scrollbars it scrolled the
+ * document (RFC-0106 M0, checklist rows 27 and 28). A row of tabs is a strip
+ * you push at any width, because the number of tabs is not a function of the
+ * viewport. */
+.tabs { display: flex; gap: 0; margin-top: var(--s3); border-bottom: 1px solid var(--rule); overflow-x: auto; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
+.tabs button { border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
 .tabs button[aria-selected="true"] { border-bottom-color: var(--accent); color: var(--accent); }
 
 /* Every pane occupies the same cell, so the box is as tall as the tallest one
@@ -1507,7 +1563,9 @@ kbd {
   .rail.toc { flex-wrap: wrap; overflow-x: hidden; overflow-y: auto; max-height: 32vh; gap: 0 var(--s3); }
   .rail.toc .eyebrow { flex-basis: 100%; margin: 0; }
   .nav::-webkit-scrollbar, .rail::-webkit-scrollbar { display: none; }
-  .nav a, .rail a { white-space: nowrap; display: inline-flex; align-items: center; min-height: 44px; }
+  /* `.nav a` moved out of this block and up to the base rules: it is 44px at
+   * every width now (RFC-0106 M1). The rail is still a phone-only strip. */
+  .rail a { white-space: nowrap; display: inline-flex; align-items: center; min-height: 44px; }
   .rail { padding: var(--s1) 0; }
 
   /* A command is read before it is copied. At this width the button took two
@@ -1519,11 +1577,10 @@ kbd {
 
   /* A finger is not a cursor. */
   button, .btn { padding: 12px 16px; min-height: 44px; }
-  /* Three finger-sized tabs are wider than a 320px phone, so the tab row is a
-   * strip you push, like the nav and the rail. */
-  .tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
-  .tabs::-webkit-scrollbar { display: none; }
-  .tabs button { min-height: 44px; white-space: nowrap; }
+  /* The tab row's own scroller moved to the base rules — a strip you push is
+   * what a tab row is at every width (RFC-0106 M1). The finger-sized tab it
+   * used to state here is the `button` rule directly above: `.tabs button`
+   * declares no height of its own, so that rule is what a tab gets. */
 
   /* A token has no break in it, and on a phone there is no room to wait for
    * one. `overflow-wrap: anywhere` is a last resort the breaker often declines;
