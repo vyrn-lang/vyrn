@@ -53,9 +53,36 @@
 # pinned test runner on PATH` drops from 26-44 s to 12-32 s, because it stops
 # paying nextest's fetch.
 #
-# The next pole is now the parity harness at 468-500 s — one `#[test]` walking
-# 40 programs, so speeding it is a change to the harness rather than to this
-# file. It was not the critical path before and it is now.
+# ROUND TWO, because 863 s is still fourteen minutes of Windows and the reason
+# was structural: the three heavyweights were STEPS IN ONE JOB. Windows spent
+# 252 s on the workspace suite, then 412 s on the bench corpus, then 111 s on the
+# LSP crate — 775 s in series between three things that never read each other's
+# output. A step can only wait its turn.
+#
+# Two changes, and the smaller-looking one is the bigger:
+#
+#   1. The old `test` job is now `test` (fmt + the workspace suite) and `checks`
+#      (bench, LSP, node, docs, install), which run at the same time. Two jobs
+#      and not three — a third was measured on paper and does not move the pole,
+#      which is now the workspace suite.
+#   2. `checks` builds vyrn `--release`. `bench --check` runs every bench body
+#      under the INTERPRETER, so the interpreter's own speed IS that step, and a
+#      debug interpreter is 4-7x slower per bench. Over the corpus on one
+#      machine: 323 s serial / 148 s at -P 4 debug, against 62 s serial / 29 s at
+#      -P 4 release. Release+SERIAL beats debug+parallel by 2.4x. One bench
+#      dominates the corpus — spectralnorm is 95 s of the 323 s debug total, and
+#      16 s of the 62 s release one — so no amount of -P could have cut below it
+#      and the optimization level was always the larger lever.
+#
+# The gate loses nothing by not being debug: `--check` runs no codegen, and the
+# four first-party `debug_assert!`s in this workspace are in vyrn-codegen (2),
+# vyrn-lower (1) and vyrn-genwasm (1) — NONE in the interpreter. The 1753-test
+# workspace suite still runs in debug, so every assertion still has a job that
+# trips it. Same corpus, same one-run-per-body, same verdict.
+#
+# After the parity harness at 468-500 s, that is the pole nobody has moved: one
+# `#[test]` walking 40 programs, which is a change to the harness rather than to
+# this file.
 
 name: CI
 
@@ -127,7 +154,7 @@ env:
 
 jobs:
   test:
-    name: tests (workspace + LSP) — ${{ matrix.os }}
+    name: tests (workspace) — ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       # The opposite of the release matrix's setting, for the opposite reason:
@@ -248,40 +275,73 @@ jobs:
         # reason). `--status-level fail` is the `--quiet` it replaces — the
         # failures and the summary, not 1753 lines of PASS.
         run: cargo nextest run --no-fail-fast --status-level fail
-      - name: Browser runtime tests (web/) and the extension's own
-        # The zero-dependency JavaScript beside the compiler gets the same gate.
-        # node:test is in the runner's Node already, so this adds no install.
+
+  checks:
+    name: checks (bench, LSP, docs, install) — ${{ matrix.os }}
+    # THE OTHER HALF OF THE OLD `test` JOB, and the reason it is a job rather
+    # than more steps: everything here is independent of the workspace suite, and
+    # a step can only wait its turn. The old job ran fmt, the workspace suite,
+    # node, the LSP crate, the docs gate, the install script and the bench corpus
+    # in one line — 855 s on Windows, of which 252 s and 412 s were two steps
+    # that never needed each other's output.
+    #
+    # Two jobs and not three. A third (LSP and the small gates on their own)
+    # was measured on paper against the numbers below and buys nothing: it would
+    # be ~160 s against `tests (workspace)`'s ~290 s, so the critical path does
+    # not move and it costs another checkout, another cache slot and another
+    # release build. The split stops where the pole stops moving.
+    #
+    # The cost this pays, stated: a second job per platform is a second checkout
+    # (2-9 s), a second cache restore (4-42 s) and its own build. It is worth it
+    # only because the two halves are each hundreds of seconds. The ceiling to
+    # watch is the repository's 10 GB cache cap — this takes the Rust cache slots
+    # from 7 to 11, and if eviction starts making runs partially cold, merging
+    # this job's `compiler` slot with the test job's via rust-cache's
+    # `shared-key` is the first thing to try.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            compiler
+            compiler/vyrn-lsp
+          # Its own slot: this job builds vyrn-cli in RELEASE and the test job
+          # builds it in debug, and one slot holding both target trees would be
+          # twice the size for two jobs that never read each other's half.
+          prefix-key: checks
+      - name: Build vyrn (release)
+        working-directory: compiler
+        # `--release`, and the bench step below is why. `vyrn bench --check` runs
+        # every bench body once under the INTERPRETER, so the interpreter's own
+        # speed is the whole cost of that step — and a debug interpreter is
+        # 4-7x slower per bench than an optimized one. Measured over the corpus
+        # on one machine: 323 s serial and 148 s at -P 4 with a debug binary,
+        # against 62 s serial and 29 s at -P 4 with a release one. Release+serial
+        # beats debug+parallel by 2.4x, so this is the larger of the two levers
+        # and it is not parallelism.
         #
-        # `editor/vscode/test/` needs no install either: `extension.js` requires
-        # `vscode-languageclient` inside `activate()`, so the module loads with
-        # nothing in `node_modules`, and the test imports the real
-        # server-resolution helpers rather than a copy of them.
-        run: node --test "web/test/*.test.mjs" "editor/vscode/test/*.test.mjs"
-      - name: LSP tests (excluded crate)
-        working-directory: compiler
-        run: cargo test --quiet --manifest-path vyrn-lsp/Cargo.toml
-      - name: Docs drift gate (RFC-0065)
-        # The committed std API docs (docs/api/) must match what `vyrn doc`
-        # generates from std/ — regenerated in the same commit as any std doc
-        # change. Cheap (no clang): --verify writes nothing and exits 1 on drift.
-        working-directory: compiler
-        run: cargo run --quiet -p vyrn-cli -- doc --std -o ../docs/api --verify
-      - name: The install script installs, and refuses what it cannot verify
-        if: runner.os != 'Windows'
-        # `install.sh` and `install.ps1` were executed by NOTHING — including the
-        # checksum refusal the README advertises and the release notes point at.
-        # The harness serves a fake release over a local python `http.server`
-        # (the `VYRN_REPO`/`VYRN_DOWNLOAD` hooks the script's own header says are
-        # "used by the test harness"), so it needs no network and no release.
-        run: sh install-test.sh
-      - name: The install script installs, and refuses what it cannot verify
-        if: runner.os == 'Windows'
-        # Windows PowerShell rather than the job's bash default: `install.ps1` is
-        # what the documented `irm | iex` line runs, so it is what gets executed.
-        shell: powershell
-        run: |
-          & powershell -NoProfile -ExecutionPolicy Bypass -File install-test.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        # `gen-engine` below already made this trade and wrote down the same
+        # shape of number ("20 s release against 98 s debug"), so this is the
+        # established answer here rather than a new idea.
+        #
+        # WHAT THE GATE LOSES BY NOT BEING DEBUG: nothing it could have caught.
+        # `--check` compiles no native code and runs no codegen, and the whole
+        # workspace carries four first-party `debug_assert!`s — two in
+        # vyrn-codegen, one in vyrn-lower, one in vyrn-genwasm — and NONE in the
+        # interpreter this step exercises. The 1753-test workspace suite still
+        # runs in debug, so every `debug_assert` that exists still has a job that
+        # trips it. What the gate verifies — that each bench body still compiles
+        # and still runs, deterministically — is unchanged, and so is the corpus.
+        run: cargo build --quiet --release -p vyrn-cli
       - name: Bench --check (deterministic, RFC-0063)
         # The BLOCKING half of bench-in-CI: `vyrn bench --check` runs each bench
         # body ONCE under the interpreter — deterministic, no clang, no timing —
@@ -289,11 +349,13 @@ jobs:
         # every example carrying `bench "` (benching, smallarray, and any future
         # one), discovered here exactly as the RFC specifies.
         #
-        # THE LONGEST STEP IN CI, and thirteen independent processes: 662 s on
-        # ubuntu and 746 s on Windows, spent running thirteen bench bodies one
-        # after another on a four-core runner with three cores idle. `xargs -P 4`
-        # is the whole fix. Measured on one machine over this corpus: 323 s
-        # serial, 148 s at -P 4.
+        # It was the longest step in CI: 662 s on ubuntu and 746 s on Windows,
+        # thirteen independent processes run one after another with a debug
+        # binary. Two things fixed it, and the ORDER of their sizes is the
+        # finding — the release binary above is worth more than the parallelism,
+        # because one bench dominates the corpus (spectralnorm is 95 s of the
+        # 323 s debug total, so no -P can cut below it, while release takes that
+        # same bench to 16 s).
         #
         # `-P 4` and not `$(nproc)`: `nproc` is not on macOS, every runner in
         # this matrix has at least three cores, and slight oversubscription on a
@@ -316,13 +378,55 @@ jobs:
           status=0
           printf '%s\n' $corpus | xargs -P 4 -I@ sh -c \
             '"$1" bench "@" --check > "$2/$(basename @ .vyrn).log" 2>&1' \
-            sh target/debug/vyrn "$logs" || status=1
+            sh target/release/vyrn "$logs" || status=1
           for f in $corpus; do
             echo "== vyrn bench --check $f =="
             cat "$logs/$(basename "$f" .vyrn).log" 2>/dev/null \
               || echo "(no output: this bench never ran)"
           done
           exit $status
+      - name: LSP tests (excluded crate)
+        working-directory: compiler
+        # Stays on `cargo test`: measured 11 s either way against nextest, warm,
+        # 83 passed and 4 ignored under both, because two test binaries have
+        # nothing to interleave. Its 47-141 s here is compiling that excluded
+        # crate, not running it — which is also why it belongs in the job that is
+        # not the critical path.
+        run: cargo test --quiet --manifest-path vyrn-lsp/Cargo.toml
+      - name: Browser runtime tests (web/) and the extension's own
+        # The zero-dependency JavaScript beside the compiler gets the same gate.
+        # node:test is in the runner's Node already, so this adds no install.
+        #
+        # `editor/vscode/test/` needs no install either: `extension.js` requires
+        # `vscode-languageclient` inside `activate()`, so the module loads with
+        # nothing in `node_modules`, and the test imports the real
+        # server-resolution helpers rather than a copy of them.
+        run: node --test "web/test/*.test.mjs" "editor/vscode/test/*.test.mjs"
+      - name: Docs drift gate (RFC-0065)
+        # The committed std API docs (docs/api/) must match what `vyrn doc`
+        # generates from std/ — regenerated in the same commit as any std doc
+        # change. Cheap (no clang): --verify writes nothing and exits 1 on drift.
+        #
+        # The release binary built above, not `cargo run`: same program, same
+        # answer, and it is already sitting there.
+        working-directory: compiler
+        run: target/release/vyrn doc --std -o ../docs/api --verify
+      - name: The install script installs, and refuses what it cannot verify
+        if: runner.os != 'Windows'
+        # `install.sh` and `install.ps1` were executed by NOTHING — including the
+        # checksum refusal the README advertises and the release notes point at.
+        # The harness serves a fake release over a local python `http.server`
+        # (the `VYRN_REPO`/`VYRN_DOWNLOAD` hooks the script's own header says are
+        # "used by the test harness"), so it needs no network and no release.
+        run: sh install-test.sh
+      - name: The install script installs, and refuses what it cannot verify
+        if: runner.os == 'Windows'
+        # Windows PowerShell rather than the job's bash default: `install.ps1` is
+        # what the documented `irm | iex` line runs, so it is what gets executed.
+        shell: powershell
+        run: |
+          & powershell -NoProfile -ExecutionPolicy Bypass -File install-test.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   parity:
     name: three-way parity (interp == native == wasm)
