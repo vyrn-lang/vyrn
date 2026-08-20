@@ -7,10 +7,17 @@
 //
 // No framework, no bundler, no dependency. Three files: this one, hero.js, and
 // fresh.js.
-import { mountHero } from "./hero.js";
 import { refreshRelease } from "./fresh.js";
-import { mountPlay } from "./play.js";
-import { runVyrn } from "./wasi-min.js";
+// THE PLAYGROUND IS NOT IMPORTED HERE (RFC-0106 M1). `play.js`, `play-wasm.js`
+// and `wasi-min.js` used to be two more lines above this one, and a static
+// import is a download: twelve of the thirteen consumer pages fetched the
+// playground's 14,587 gzipped bytes to run none of it, which is the largest
+// single item in the census's page-weight finding and the one the word budget
+// could not see. Both are `import()` at the point of use now — `play.js` inside
+// the loop over the elements only `/play` has, and `wasi-min.js` inside the
+// digest the parity widget computes when the reader presses Run. Nothing else
+// about either widget changed, and neither module is fetched until a page needs
+// it.
 
 // Where the site is. Every file this page loads is a sibling of this script, and
 // this script knows its own URL, so that is the whole derivation — no flag baked
@@ -328,6 +335,7 @@ async function wasmDigest() {
     const res = await fetch(new URL("hero.wasm", SITE));
     if (!res.ok) return null;
     const bytes = new Uint8Array(await res.arrayBuffer());
+    const { runVyrn } = await import("./wasi-min.js");
     const run = await runVyrn(bytes, { onStdout: () => {}, onStderr: () => {} });
     if (run.exitCode !== 0 || !run.stdout) return null;
     return fnv1aHex(run.stdout);
@@ -1018,7 +1026,17 @@ function boot() {
   for (const el of $$('[data-widget="radar"]')) radarWidget(el);
   for (const el of $$("[data-install]")) installPicker(el);
   moduleSearch();
-  for (const el of $$('[data-widget="play"]')) mountPlay(el);
+  // The playground, on the one page that has one. `boot()` is not awaited and
+  // the mount does not have to finish before the rest of the page works, so the
+  // import is fired and left to land — a rejection is reported rather than
+  // swallowed, because a playground that silently never mounts is worse than an
+  // error in the console.
+  const playgrounds = $$('[data-widget="play"]');
+  if (playgrounds.length) {
+    import("./play.js").then(({ mountPlay }) => {
+      for (const el of playgrounds) mountPlay(el);
+    }, (err) => console.error("the playground did not load", err));
+  }
   for (const el of $$("svg.graph")) graphWidget(el);
   // One hero at a time. `boot` runs again after every soft navigation, and a
   // mount that was never torn down keeps a window `resize`, a document
@@ -1028,8 +1046,20 @@ function boot() {
     hero.destroy();
     hero = null;
   }
+  // And the hero, on the one page that has a canvas for it — imported at the
+  // point of use for the reason the playground is (RFC-0106 M1). The census
+  // itself says `hero.js` is needed "yes, on `/`", which is another way of
+  // saying twelve pages were fetching 4,245 gzipped bytes to find no canvas.
   const canvas = document.getElementById("field");
-  if (canvas) hero = mountHero(canvas, { cellPx: 6 });
+  if (canvas) {
+    const at = canvas;
+    import("./hero.js").then(({ mountHero }) => {
+      // A soft navigation can have left the page while the module was in
+      // flight; mounting onto a canvas the document no longer holds would
+      // start a resize listener over nothing.
+      if (at.isConnected) hero = mountHero(at, { cellPx: 6 });
+    }, (err) => console.error("the hero did not load", err));
+  }
   refreshRelease();
 }
 
