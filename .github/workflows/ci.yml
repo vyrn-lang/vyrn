@@ -1,3 +1,39 @@
+# WHERE THIS WORKFLOW'S TIME GOES, measured rather than guessed: median step
+# seconds over the last four main-branch runs (32303455868, 32310445020,
+# 32316020952, 32387445497), from `gh run view --json jobs`. Every job starts at
+# once, so the wall clock is the slowest job and the slowest job is `test`.
+#
+#   step                          ubuntu  arm    windows  macos
+#   Rust cache (restore)              10    6        14      10
+#   Formatting gate                    4    3         4       1
+#   Workspace tests                  306  288       398     244
+#   Browser runtime tests (node)       0    0         1       1
+#   LSP tests (excluded crate)        56   46       124      57
+#   Docs drift gate                    0    0         0       0
+#   install.sh / install.ps1           0    0         4      19
+#   Bench --check                    662  673       746     456
+#   ---------------------------------------------------------------
+#   job total                       1141 1043      1243     692
+#
+#   parity: harness 468, build 18, codegen 8, universal-pages 13   -> 561
+#   gen-engine: the one release test 57                            ->  66
+#   bench: run + compare 114, build 15                             -> 134
+#
+# Two facts the table settles. The caches are already right: `Swatinem/rust-cache`
+# restores in 6-14 s and the builds behind every step above are warm (an 18 s
+# `cargo build -p vyrn-cli` in the parity job is the proof), so there is no
+# cargo-caching win left to take here. And the long poles are not builds at all —
+# they are two steps that run work in series on a runner with idle cores:
+# `Bench --check`, thirteen independent processes in a `for` loop, and
+# `Workspace tests`, 65 test binaries that `cargo test` starts one at a time.
+# Both are fixed below, and each step says how.
+#
+# What was measured and left alone: the node step (0-1 s) and the docs drift gate
+# (0 s) run on all four platforms, and moving them to one leg would save nothing
+# a table can see. `install.sh`/`install.ps1` are per-platform scripts and belong
+# on the platform they install for. The bench and gen-engine jobs are 134 s and
+# 66 s against a 1243 s critical path, so nothing they could save is visible.
+
 name: CI
 
 on:
@@ -109,6 +145,24 @@ jobs:
           workspaces: |
             compiler
             compiler/vyrn-lsp
+      - name: Pinned test-runner cache
+        # `cargo-nextest` is a pinned tool like wasmtime (RFC-0102): a row in
+        # `toolpin.rs`, a version in `vyrn.json`, four hash-locked lines in
+        # `vyrn.lock`, and `~/.vyrn/tools/<sha256>/` to unpack into. Same key
+        # shape as the parity job's, with two differences that matter:
+        #
+        #   * `${{ matrix.os }}` is in the key, because this is a four-platform
+        #     matrix and the four artifacts are different binaries. The parity
+        #     job is ubuntu-only and needs no such word.
+        #   * a DISTINCT prefix from `vyrn-tools-`, because the two jobs put
+        #     different subsets of the same directory in the cache. Sharing one
+        #     key would let this job's nextest-only save answer the parity job's
+        #     restore as a hit — and its populate step is `if: cache-hit !=
+        #     'true'`, so wasmtime would silently never arrive.
+        uses: actions/cache@v4
+        with:
+          path: ~/.vyrn/tools
+          key: vyrn-nextest-${{ matrix.os }}-${{ hashFiles('vyrn.lock') }}
       - name: Formatting gate
         # First, because it is seconds and its fix is mechanical — a reader gets
         # the verdict before the build spends five minutes.
@@ -126,9 +180,51 @@ jobs:
           cargo fmt --check
           cargo fmt --check --manifest-path vyrn-lsp/Cargo.toml
           cargo fmt --check --manifest-path vyrn-genwasm/Cargo.toml
+      - name: Build vyrn, and put the pinned test runner on PATH
+        # Two things this job needed anyway, in one step. `vyrn-cli` is built by
+        # the test compile regardless — the suites spawn the binary — so hoisting
+        # it here costs nothing and gives the two steps below something to call
+        # that is not `cargo run`.
+        #
+        # The runner's directory comes from the resolver's own last line
+        # (`<spec> -> <dir>`), not from a `find` over `~/.vyrn/tools`: a stale
+        # directory from an earlier pinned version would answer a `find` just as
+        # happily as the current one, and CI would run a version nothing pins.
+        # `--locked` fetches only what `vyrn.lock` pins FOR THIS PLATFORM (so no
+        # wasmtime and no 150 MB sysroot arrive here), verifies every byte
+        # against the recorded sha256, refuses a mismatch, and never writes the
+        # lock — a cache miss cannot silently re-pin anything.
+        run: |
+          set -eu
+          cargo build --quiet --manifest-path compiler/Cargo.toml -p vyrn-cli
+          line=$(compiler/target/debug/vyrn update --locked cargo-nextest | tail -1)
+          # Forward slashes so the one Windows leg's path works both as a bash
+          # test below and as a PATH entry.
+          dir=$(printf '%s' "${line#*-> }" | tr '\\' '/')
+          [ -x "$dir/cargo-nextest" ] || [ -x "$dir/cargo-nextest.exe" ] || {
+            echo "the pin resolved to a directory with no cargo-nextest in it: $line" >&2
+            exit 1
+          }
+          echo "$dir" >> "$GITHUB_PATH"
       - name: Workspace tests
         working-directory: compiler
-        run: cargo test --quiet
+        # `cargo nextest run`, not `cargo test`: cargo runs the workspace's 65
+        # test binaries one after another, and nextest runs every test in its own
+        # process with all of them in flight. Measured warm on one machine over
+        # this workspace: 155 s under `cargo test`, 53 s under nextest, same 1753
+        # passed and 69 skipped.
+        #
+        # It is the WORKSPACE step only. The LSP crate's two binaries were
+        # measured too — 11 s either way, because two binaries have nothing to
+        # interleave — so that step stays on `cargo test` rather than gaining a
+        # tool for no reason.
+        #
+        # `--no-fail-fast` keeps what `cargo test` gave: nextest stops the whole
+        # run at the first failure by default, and this job exists to learn WHICH
+        # tests are broken (`fail-fast: false` on the matrix, for the same
+        # reason). `--status-level fail` is the `--quiet` it replaces — the
+        # failures and the summary, not 1753 lines of PASS.
+        run: cargo nextest run --no-fail-fast --status-level fail
       - name: Browser runtime tests (web/) and the extension's own
         # The zero-dependency JavaScript beside the compiler gets the same gate.
         # node:test is in the runner's Node already, so this adds no install.
@@ -169,16 +265,41 @@ jobs:
         # so a bench that stops compiling/running fails the build. The corpus is
         # every example carrying `bench "` (benching, smallarray, and any future
         # one), discovered here exactly as the RFC specifies.
+        #
+        # THE LONGEST STEP IN CI, and thirteen independent processes: 662 s on
+        # ubuntu and 746 s on Windows, spent running thirteen bench bodies one
+        # after another on a four-core runner with three cores idle. `xargs -P 4`
+        # is the whole fix. Measured on one machine over this corpus: 323 s
+        # serial, 148 s at -P 4.
+        #
+        # `-P 4` and not `$(nproc)`: `nproc` is not on macOS, every runner in
+        # this matrix has at least three cores, and slight oversubscription on a
+        # three-core box costs far less than the serial loop did.
+        #
+        # The built binary rather than `cargo run` per file, for the reason the
+        # bench job below already uses it: four concurrent `cargo run`s would
+        # queue on cargo's build lock and undo the parallelism.
+        #
+        # Output is collected per file and printed in corpus order after the
+        # run — interleaved stdout from four processes is not a log anyone can
+        # read, and the order a failure appears in must not depend on scheduling.
         working-directory: compiler
         run: |
           set -eu
           corpus=$(grep -rl 'bench "' ../examples --include='*.vyrn' | sort)
           [ -n "$corpus" ] || { echo "no bench corpus found under examples/" >&2; exit 1; }
           echo "bench corpus:"; echo "$corpus"
+          logs=$(mktemp -d)
+          status=0
+          printf '%s\n' $corpus | xargs -P 4 -I@ sh -c \
+            '"$1" bench "@" --check > "$2/$(basename @ .vyrn).log" 2>&1' \
+            sh target/debug/vyrn "$logs" || status=1
           for f in $corpus; do
             echo "== vyrn bench --check $f =="
-            cargo run --quiet -p vyrn-cli -- bench "$f" --check
+            cat "$logs/$(basename "$f" .vyrn).log" 2>/dev/null \
+              || echo "(no output: this bench never ran)"
           done
+          exit $status
 
   parity:
     name: three-way parity (interp == native == wasm)
