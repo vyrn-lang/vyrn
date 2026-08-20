@@ -80,6 +80,22 @@
 # workspace suite still runs in debug, so every assertion still has a job that
 # trips it. Same corpus, same one-run-per-body, same verdict.
 #
+# WHAT ROUND TWO COST, from run 32407284624 — cold for the `checks` slot, which
+# did not exist before it:
+#
+#   step                          ubuntu  arm    windows  macos
+#   Bench --check                662→ 43 673→ 35 746→ 59 456→ 30
+#   Workspace tests              306→208 288→127 398→262 244→155
+#   ---------------------------------------------------------------
+#   tests (workspace) job total       253    162     326     202
+#   checks job total                  357    222     610     362
+#
+# The bench gate went 10-15x, and that is the release binary rather than the
+# `xargs`. The `checks` totals above are a COLD slot and mostly one step: the
+# LSP crate compiled from scratch — 422 s on Windows, 218-220 s elsewhere —
+# where the old job saw 47-141 s warm. So `checks` is not really 610 s; the warm
+# run is the one to read, and after it the pole is `tests (workspace)`.
+#
 # After the parity harness at 468-500 s, that is the pole nobody has moved: one
 # `#[test]` walking 40 programs, which is a change to the harness rather than to
 # this file.
@@ -192,9 +208,11 @@ jobs:
         # and prunes stale artifacts.
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            compiler
-            compiler/vyrn-lsp
+          # `compiler` alone now: the LSP crate moved to the `checks` job, and a
+          # workspace listed here that this job never builds is a target tree
+          # saved and restored for nothing — which matters against the 10 GB
+          # repository cache cap the split already pushes on.
+          workspaces: compiler
       - name: Pinned test-runner cache
         # `cargo-nextest` is a pinned tool like wasmtime (RFC-0102): a row in
         # `toolpin.rs`, a version in `vyrn.json`, four hash-locked lines in
