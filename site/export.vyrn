@@ -220,11 +220,41 @@ fn markCurrent(html: String, path: String) -> String {
 /// changing that is a standard library change with golden output behind it, so
 /// the site stamps its own — exactly as it stamps the navigation marker below,
 /// and in the same one pass over the document.
-fn withLang(html: String) -> String {
+/// It also stamps `data-landing`, and the reason it is the SAME pass is that
+/// both are attributes on the document element and there is one place that has
+/// one (RFC-0106 M1). The display type step is raised on that attribute and
+/// nowhere else, so the 160 leaf pages compute the font sizes they computed
+/// before — the constraint M0 wrote down, held by an attribute that is either on
+/// a document or not, and checked by `isLanding` below.
+fn withLang(html: String, path: String) -> String {
+    let attrs = if isLanding(path) { "<html lang=\"en\" data-landing>" } else { "<html lang=\"en\">" }
     return match indexOf(html, "<html>") {
-        Some(at) => substring(html, 0, at) + "<html lang=\"en\">" + substring(html, at + 6, html.byteLength),
+        Some(at) => substring(html, 0, at) + attrs + substring(html, at + 6, html.byteLength),
         None => html.copy(),
     }
+}
+
+/// The nine pages that carry a display type step, and no others (RFC-0106 M0,
+/// "The display type scale goes on nine pages").
+///
+/// A LIST AND NOT A RULE. Every candidate rule is wrong on one page: "top-level"
+/// admits the two redirect stubs and `/backstage`; "has a `.display` heading"
+/// admits all 160 leaf pages, which every one of them has; "not under a
+/// directory" admits `/compare` correctly and `/docs/editors` wrongly. Nine
+/// strings are cheaper than a rule with four exceptions, and M2 to M4 add to a
+/// list without re-deriving a predicate.
+fn landingPaths() -> Array<String> {
+    return [rootPath(), installPath(), whyVyrnPath(), comparePath(), releasesPath(), guidePath(), docsPath(), explorePath(), playPath()]
+}
+
+/// Whether `path` is one of the nine.
+fn isLanding(path: String) -> Bool {
+    for p in landingPaths() {
+        if p == path {
+            return true
+        }
+    }
+    return false
 }
 
 /// `html` with the site's own mark declared as its icon.
@@ -350,7 +380,7 @@ fn exportPath(outDir: String, path: String) -> Int64 {
         print("FAIL \{path} -> \{doc.status}")
         return 1
     }
-    let document = relativize(withRedirect(withIcon(withLang(markCurrent(doc.body, path))), path), path)
+    let document = relativize(withRedirect(withIcon(withLang(markCurrent(doc.body, path), path)), path), path)
     let mut bad = emit("\{outDir}/\{name}", document)
     if isBackstage(path) {
         print("\{path} -> \{name} (\{doc.body.byteLength} bytes)")
@@ -716,7 +746,7 @@ test "every name in a module's index points at an export that is on the page" {
 /// order `exportPath` applies them. The tests below read this rather than the
 /// router's raw body, because the raw body is not what ships.
 fn publishedDocument(path: String) -> String {
-    return relativize(withRedirect(withIcon(withLang(markCurrent(route(documentRequest(path)).body, path))), path), path)
+    return relativize(withRedirect(withIcon(withLang(markCurrent(route(documentRequest(path)).body, path), path)), path), path)
 }
 
 /// How many times `needle` occurs in `hay`.
@@ -769,13 +799,54 @@ test "a payload sits beside its document" {
 }
 
 test "every published document declares its language" {
-    assertEq(withLang("<!doctype html>\n<html>\n<head>"), "<!doctype html>\n<html lang=\"en\">\n<head>")
+    assertEq(withLang("<!doctype html>\n<html>\n<head>", "/docs/std/json"), "<!doctype html>\n<html lang=\"en\">\n<head>")
     // Stamped once, on the document element, and on every page.
     for path in sitePaths() {
-        let html = withLang(route(documentRequest(path)).body)
-        assert(has(html, "<html lang=\"en\">"))
+        let html = withLang(route(documentRequest(path)).body, path)
+        assert(has(html, "<html lang=\"en\""))
         assert(!has(html, "<html>"))
     }
+}
+
+test "the display type step reaches nine pages and no leaf page" {
+    // THE GATE RFC-0106 M0 ASKS M1 FOR, in the one form a program with no layout
+    // engine can assert exactly. The display step is raised on `[data-landing]`
+    // and nowhere else — `site/test/typescale.test.mjs` reads the stylesheet and
+    // proves that — so "the computed font-size of every element on the 160 leaf
+    // pages is unchanged" reduces to "no leaf page carries the attribute", which
+    // is this test.
+    assertEq(landingPaths().length, 9)
+    let mut stamped = 0
+    for path in sitePaths() {
+        let doc = publishedDocument(path)
+        let on = countOf(doc, "<html lang=\"en\" data-landing>")
+        assertEq(on, if isLanding(path) { 1 } else { 0 })
+        stamped = stamped + on
+        // And every document declares the language once, either way.
+        assertEq(countOf(doc, "<html lang=\"en\""), 1)
+    }
+    assertEq(stamped, 9)
+    // The leaf pages, by kind, named rather than left to the loop above: 13 guide
+    // chapters, 37 reference modules, 4 package pages. The 106 design records are
+    // in `recordPaths()`, and one of them is checked below.
+    for slug in chapterSlugs() {
+        assert(!isLanding(hrefGuide(slug)))
+    }
+    for m in apiModules() {
+        assert(!isLanding(hrefDocsStd(m.name)))
+    }
+    for p in packages() {
+        assert(!isLanding(hrefExplore(p.slug)))
+    }
+    assert(!has(publishedDocument("/backstage/rfcs/0105"), "data-landing"))
+    // The two stubs are not landing pages either. They carry a `.display`
+    // heading and three words, and a stub is not where a hero belongs.
+    assert(!isLanding("/philosophy"))
+    assert(!isLanding("/editors"))
+    // The one page whose URL says `/docs/` and which is NOT the reference
+    // landing: it is a leaf, and it keeps the documentation scale.
+    assert(!isLanding("/docs/editors"))
+    assert(isLanding("/docs"))
 }
 
 test "every published document points at an icon this export writes" {
