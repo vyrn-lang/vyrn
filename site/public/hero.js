@@ -12,7 +12,6 @@
 // If the module will not load, the same formula is evaluated here instead. That
 // is the brief's circuit breaker, not a second implementation to maintain: the
 // hero must always paint something, and a blank hero looks broken.
-import { runVyrn } from "./wasi-min.js";
 
 const RAMP = ".:+=VYRN#$&"; // eleven glyphs, dark to light; VYRN in the mid-tones
 
@@ -225,6 +224,13 @@ async function loadModule() {
     const res = await fetch(new URL("hero.wasm", import.meta.url));
     if (!res.ok) return null;
     const bytes = new Uint8Array(await res.arrayBuffer());
+    // The WASI shim is imported HERE and not at the top of this file
+    // (RFC-0106 M1). This module is imported by `widgets.js` on every page and
+    // runs on one, so a static import made every page fetch 8,214 gzipped bytes
+    // of runtime to instantiate nothing. The module is 22 KB and the hero is
+    // already waiting on a fetch of its own, so one more await costs the hero
+    // nothing and costs twelve pages the whole file.
+    const { runVyrn } = await import("./wasi-min.js");
     // `main` prints a sample frame and the field's bit patterns. That is the
     // parity proof, and in a page it belongs in the console, not on the page.
     const run = await runVyrn(bytes, { onStdout: () => {}, onStderr: () => {} });

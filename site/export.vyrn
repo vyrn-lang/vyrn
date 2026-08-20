@@ -26,7 +26,7 @@
 ///
 /// Every other route publishes flat, for the same reason (see `app/nav.vyrn`).
 import { pages } from "std/ui"
-import { route, rootPath, philosophyPath, comparePath, installPath, editorsPath, releasesPath, docsPath, explorePath, guidePath, playPath, backstagePath, backstageBenchmarksPath, hrefDocsStd, hrefGuide, hrefBackstageRfcs, hrefExplore } from pages("./app/routes")
+import { route, rootPath, philosophyPath, whyVyrnPath, comparePath, installPath, editorsPath, docsEditorsPath, releasesPath, docsPath, explorePath, guidePath, playPath, backstagePath, backstageBenchmarksPath, hrefDocsStd, hrefGuide, hrefBackstageRfcs, hrefExplore } from pages("./app/routes")
 import { published, navRows, hrefOf, upTo } from "./app/nav"
 import { rfcPages, rfcSlug } from "./app/backstage"
 import { historyIsFixture, historyPath, historyCommand } from "./app/history"
@@ -35,6 +35,10 @@ import { chapterSlugs, chapterHref } from "./app/guide"
 import { searchRows } from "./app/stdgraph"
 import { packages, packageHref, offerOf, addCommand } from "./app/packages"
 import { features } from "./app/editors"
+import { indexJson, indexName, rows } from "./app/search"
+import { pageMetas, metaOf, hasMeta } from "./app/meta"
+import { mdPaths, mdName, mdUrl, markdownOf } from "./app/pagemd"
+import { feedName, feedUrl, feedXml, feedItemCount } from "./app/feed"
 import { substring, indexOf, split, replace } from "std/strings"
 import { startsWith } from "std/strpred"
 
@@ -46,7 +50,13 @@ import { startsWith } from "std/strpred"
 /// a module added to `std/` is exported here on the next build with nothing
 /// written by hand.
 fn sitePaths() -> Array<String> {
-    let mut out: Array<String> = [rootPath(), philosophyPath(), comparePath(), installPath(), editorsPath(), releasesPath(), docsPath(), guidePath(), explorePath(), playPath()]
+    let mut out: Array<String> = [rootPath(), whyVyrnPath(), comparePath(), installPath(), docsEditorsPath(), releasesPath(), docsPath(), guidePath(), explorePath(), playPath()]
+    // The two old paths, as stubs. They are routes like any other — a document
+    // and a payload — and they are published for the reason `redirects()` below
+    // gives (RFC-0106 M1).
+    for pair in redirects() {
+        out.push(pair[0].copy())
+    }
     for m in apiModules() {
         out.push(hrefDocsStd(m.name))
     }
@@ -87,6 +97,30 @@ fn recordPaths() -> Array<String> {
     return out
 }
 
+/// The two routes RFC-0106 M1 renamed: the old path, and the path that carries
+/// the page now.
+///
+/// TWO, and M0's inventory is why. `/philosophy` had one content link into it
+/// and `/editors` had one; neither appears in `README.md`, in either install
+/// script, in either published release body, in the editor README, in `docs/`,
+/// or in an issue or pull-request template — there are none. Every other route
+/// on the site either keeps its path or was never going to move: `/docs` is the
+/// reference under 284 content links and `/guide` is the book under 227, and the
+/// nav rows above them are LABELS for exactly that reason.
+fn redirects() -> Array<Array<String>> {
+    return [[philosophyPath(), whyVyrnPath()], [editorsPath(), docsEditorsPath()]]
+}
+
+/// The path that replaced `path`, or "" when `path` was not renamed.
+fn redirectTarget(path: String) -> String {
+    for pair in redirects() {
+        if pair[0] == path {
+            return pair[1].copy()
+        }
+    }
+    return ""
+}
+
 /// Whether `path` belongs to the backstage rather than the consumer site.
 ///
 /// The two fronts differ in exactly one way that matters to this program: a
@@ -106,7 +140,7 @@ fn dataRequest(path: String) -> Request {
     return Request { method: "GET", path: path.copy(), headers: ["accept": "application/json"], body: "" }
 }
 
-/// The payload file beside a document: `philosophy.html` → `philosophy.data.json`.
+/// The payload file beside a document: `why-vyrn.html` → `why-vyrn.data.json`.
 fn payloadName(name: String) -> String {
     return substring(name, 0, name.byteLength - 5) + ".data.json"
 }
@@ -123,8 +157,23 @@ fn currentNav(path: String) -> String {
             return row.href.copy()
         }
     }
-    if startsWith(path, "/docs/") {
+    // The persistent call to action is not a navigation row, and it is still the
+    // masthead's statement of where the reader is (RFC-0106 M1). `/install` left
+    // the row and kept the marker.
+    if path == "/install" {
+        return hrefOf("/install")
+    }
+    if startsWith(path, "/docs/std/") {
         return hrefOf("/docs")
+    }
+    if startsWith(path, "/docs/") {
+        // `/docs/editors` has a URL under the reference and belongs to the BOOK.
+        // M0's map moved the page here — "absorbed into Docs" — and gave the nav
+        // row labelled Docs the path `/guide`, so the prefix and the group say
+        // two different things. The marker follows the group, because that is
+        // what a reader is being told: where they are in the navigation. The
+        // contradiction is recorded in the RFC's "M1 — as landed".
+        return hrefOf("/guide")
     }
     if startsWith(path, "/guide/") {
         return hrefOf("/guide")
@@ -147,14 +196,22 @@ fn currentNav(path: String) -> String {
 ///
 /// A soft navigation swaps `<main>` and never touches the masthead, so
 /// `widgets.js` moves the marker after every one. This is the full-load half.
+///
+/// The needle stops after the `data-key` value and does NOT include the closing
+/// `>`, which is a change RFC-0106 M1 made and the install button is the reason:
+/// the persistent call to action is `<a href="/install.html"
+/// data-key="/install.html" class="cta">`, and `/install` is no longer a
+/// navigation row, so it is the only element on the page that can carry the
+/// marker for that route. A needle ending in `>` would have missed it and left a
+/// reader on `/install` with nothing in the masthead saying so.
 fn markCurrent(html: String, path: String) -> String {
     let href = currentNav(path)
     if href.byteLength == 0 {
         return html.copy()
     }
-    let anchor = "<a href=\"\{href}\" data-key=\"\{href}\">"
+    let anchor = "<a href=\"\{href}\" data-key=\"\{href}\""
     return match indexOf(html, anchor) {
-        Some(at) => substring(html, 0, at) + "<a href=\"\{href}\" data-key=\"\{href}\" aria-current=\"page\">" + substring(html, at + anchor.byteLength, html.byteLength),
+        Some(at) => substring(html, 0, at) + anchor + " aria-current=\"page\"" + substring(html, at + anchor.byteLength, html.byteLength),
         None => html.copy(),
     }
 }
@@ -167,11 +224,41 @@ fn markCurrent(html: String, path: String) -> String {
 /// changing that is a standard library change with golden output behind it, so
 /// the site stamps its own — exactly as it stamps the navigation marker below,
 /// and in the same one pass over the document.
-fn withLang(html: String) -> String {
+/// It also stamps `data-landing`, and the reason it is the SAME pass is that
+/// both are attributes on the document element and there is one place that has
+/// one (RFC-0106 M1). The display type step is raised on that attribute and
+/// nowhere else, so the 160 leaf pages compute the font sizes they computed
+/// before — the constraint M0 wrote down, held by an attribute that is either on
+/// a document or not, and checked by `isLanding` below.
+fn withLang(html: String, path: String) -> String {
+    let attrs = if isLanding(path) { "<html lang=\"en\" data-landing>" } else { "<html lang=\"en\">" }
     return match indexOf(html, "<html>") {
-        Some(at) => substring(html, 0, at) + "<html lang=\"en\">" + substring(html, at + 6, html.byteLength),
+        Some(at) => substring(html, 0, at) + attrs + substring(html, at + 6, html.byteLength),
         None => html.copy(),
     }
+}
+
+/// The nine pages that carry a display type step, and no others (RFC-0106 M0,
+/// "The display type scale goes on nine pages").
+///
+/// A LIST AND NOT A RULE. Every candidate rule is wrong on one page: "top-level"
+/// admits the two redirect stubs and `/backstage`; "has a `.display` heading"
+/// admits all 160 leaf pages, which every one of them has; "not under a
+/// directory" admits `/compare` correctly and `/docs/editors` wrongly. Nine
+/// strings are cheaper than a rule with four exceptions, and M2 to M4 add to a
+/// list without re-deriving a predicate.
+fn landingPaths() -> Array<String> {
+    return [rootPath(), installPath(), whyVyrnPath(), comparePath(), releasesPath(), guidePath(), docsPath(), explorePath(), playPath()]
+}
+
+/// Whether `path` is one of the nine.
+fn isLanding(path: String) -> Bool {
+    for p in landingPaths() {
+        if p == path {
+            return true
+        }
+    }
+    return false
 }
 
 /// `html` with the site's own mark declared as its icon.
@@ -188,10 +275,124 @@ fn withLang(html: String) -> String {
 /// binary `.ico` a very old browser would want; a browser that cannot read the
 /// SVG shows the blank sheet it showed before, and asks for nothing.
 fn withIcon(html: String) -> String {
+    return insertInHead(html, "<link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">")
+}
+
+/// `html` with the releases feed declared (RFC-0106 M1).
+///
+/// On EVERY page and not only on `/releases`, because a reader who wants the
+/// feed pastes the address they are on into their aggregator, and every browser
+/// and every reader looks for this element to find the feed from any page of a
+/// site. The `href` is root-absolute here and `relativize` makes it relative to
+/// the document, the same as every other URL this program writes.
+fn withFeed(html: String) -> String {
+    return insertInHead(html, "<link rel=\"alternate\" type=\"application/rss+xml\" title=\"Vyrn releases\" href=\"/\{feedName()}\">")
+}
+
+/// `html` with the meta a shared link renders as, and with the page's own
+/// description where there is one (RFC-0106 M1).
+///
+/// DERIVED, AND THAT IS THE WHOLE DESIGN. A page already says what it is called
+/// and what it is about — a `<title>` and a `<meta description>` are in the head
+/// this program is splicing anyway — so the card is those two strings copied into
+/// the three names a crawler reads them under. There is no per-page table here,
+/// nothing to keep in step, and it works the same on all 174 pages: a guide
+/// chapter, a reference module, a package page and a design record each name
+/// themselves.
+///
+/// THE SENTENCE IS THE PAGE'S OWN, and that half is `app/nav.vyrn`'s. Every page
+/// used to carry the same `<meta description>`, so a link to `/install` previewed
+/// as a link to `/compare`; the ten consumer pages take their title and their
+/// sentence from `app/meta.vyrn` through `pageHeadOf`, which is also where the
+/// search index's Docs rows come from. One table, one author, and this function
+/// cannot disagree with the document it reads.
+///
+/// `og:type` is `website` on the nine landing pages and `article` everywhere
+/// else, off the same list the display type step uses.
+///
+/// NO `og:image` AND NO `og:url`, and both absences are decisions. The site
+/// publishes one graphic, `favicon.svg`, and no crawler renders an SVG card —
+/// the honest state is a `summary` card with no image rather than a broken one.
+/// And `og:url` is absolute by definition, while every other URL in this export
+/// is relative so that ONE tree serves from any mount point (see `relativize`);
+/// the canonical the stubs write is document-relative for the same reason. The
+/// feed is where an absolute URL is unavoidable, and it names its origin once.
+///
+/// A stub gets none of this. It is the old name of a page and not a place, and
+/// what it has to carry is the three ways out that `withRedirect` writes.
+fn withCards(html: String, path: String) -> String {
+    if redirectTarget(path).byteLength > 0 {
+        return html.copy()
+    }
+    let kind = if isLanding(path) { "website" } else { "article" }
+    return insertInHead(html, "<meta property=\"og:title\" content=\"\{titleOf(html)}\"><meta property=\"og:description\" content=\"\{descriptionOf(html)}\"><meta property=\"og:type\" content=\"\{kind}\"><meta name=\"twitter:card\" content=\"summary\">")
+}
+
+/// What the document says it is called, between its `<title>` tags.
+fn titleOf(html: String) -> String {
+    return between(html, "<title>", "</title>")
+}
+
+/// What the document says it is about, out of the description it carries.
+fn descriptionOf(html: String) -> String {
+    return between(html, "<meta name=\"description\" content=\"", "\"")
+}
+
+/// The text between the first `open` and the next `close` after it, or "".
+///
+/// Both callers read a value out of a head element this program is about to copy
+/// into another attribute, so neither escapes anything: `std/html` escaped the
+/// text on the way in, `"` with it, which is what makes reading a value out of
+/// one attribute and into another safe here and would not be for arbitrary HTML.
+fn between(html: String, open: String, close: String) -> String {
+    return match indexOf(html, open) {
+        Some(at) => upToClose(html, at + open.byteLength, close),
+        None => "",
+    }
+}
+
+/// The write half of `between`, once the opening delimiter is found.
+fn upToClose(html: String, from: Int64, close: String) -> String {
+    let rest = substring(html, from, html.byteLength)
+    return match indexOf(rest, close) {
+        Some(end) => substring(rest, 0, end),
+        None => "",
+    }
+}
+
+/// `html` with `extra` spliced in directly after `<head>`.
+///
+/// The one splice four stamps share — the icon above, the cards, and the redirect
+/// stub's two elements below. Each of them is a head element `std/ui`'s `Head`
+/// cannot express: it has entries for a title, a stylesheet, a script and a
+/// `<meta name=…>`, and none for a `<link>` of another `rel`, a `<meta
+/// property=…>` or a `<meta http-equiv=…>`. Adding them there is a standard
+/// library change with golden output behind it, so the site stamps its own.
+fn insertInHead(html: String, extra: String) -> String {
     return match indexOf(html, "<head>") {
-        Some(at) => substring(html, 0, at) + "<head><link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">" + substring(html, at + 6, html.byteLength),
+        Some(at) => substring(html, 0, at) + "<head>" + extra + substring(html, at + 6, html.byteLength),
         None => html.copy(),
     }
+}
+
+/// `html` with a renamed route's two head elements, when `path` is one of the
+/// two stubs, and unchanged when it is not (RFC-0106 M1).
+///
+/// The refresh URL is written document-relative here rather than left to
+/// `relativize`: that function rewrites `href` and `src`, and this URL lives
+/// inside a `content=` attribute, where a root-absolute path would 404 under
+/// `https://vyrn-lang.github.io/vyrn/`. Both stubs sit at the root, so `upTo` is
+/// "" and the URL is the target's own file name — the general form is written
+/// anyway, because the next stub might not be at the root.
+///
+/// `0` seconds and not `1`. A stub with a visible delay is a page a reader
+/// starts to read, and this one has nothing to say.
+fn withRedirect(html: String, path: String) -> String {
+    let to = redirectTarget(path)
+    if to.byteLength == 0 {
+        return html.copy()
+    }
+    return insertInHead(html, "<meta http-equiv=\"refresh\" content=\"0; url=\{upTo(path)}\{published(to)}\"><link rel=\"canonical\" href=\"\{hrefOf(to)}\">")
 }
 
 /// `text` with every site-root URL it writes made relative to the document
@@ -265,7 +466,7 @@ fn exportPath(outDir: String, path: String) -> Int64 {
         print("FAIL \{path} -> \{doc.status}")
         return 1
     }
-    let document = relativize(withIcon(withLang(markCurrent(doc.body, path))), path)
+    let document = relativize(withRedirect(withCards(withFeed(withIcon(withLang(markCurrent(doc.body, path), path))), path), path), path)
     let mut bad = emit("\{outDir}/\{name}", document)
     if isBackstage(path) {
         print("\{path} -> \{name} (\{doc.body.byteLength} bytes)")
@@ -361,12 +562,63 @@ fn main() -> Int64 {
     for asset in assets() {
         failures = failures + copyAsset(outDir, asset[0], asset[1])
     }
+    for path in mdPaths() {
+        failures = failures + writeMarkdown(outDir, path)
+    }
+    failures = failures + writeIndex(outDir)
+    failures = failures + writeFeed(outDir)
     if failures > 0 {
         print("export failed: \{failures} file(s)")
         return 1
     }
     print("exported \{sitePaths().length + recordPaths().length} route(s) and \{assets().length} asset(s) to \{outDir}")
     return 0
+}
+
+/// One page's markdown twin, beside the page (RFC-0106 M1).
+///
+/// `app/pagemd.vyrn` builds it from the same chapter and the same generated
+/// reference the document is built from. An empty one is a failure and not a
+/// file: a "copy as markdown" button that hands a reader nothing is worse than
+/// no button, and the export is where that is caught rather than in the browser.
+fn writeMarkdown(outDir: String, path: String) -> Int64 {
+    let md = markdownOf(path)
+    if md.byteLength == 0 {
+        print("FAIL \{mdName(path)}: no markdown for \{path}")
+        return 1
+    }
+    return emit("\{outDir}/\{mdName(path)}", md)
+}
+
+/// The releases feed, as RSS 2.0 (RFC-0106 M1).
+fn writeFeed(outDir: String) -> Int64 {
+    print("\{feedName()} (\{feedItemCount()} item(s))")
+    return emit("\{outDir}/\{feedName()}", feedXml())
+}
+
+/// The search index, written beside the pages (RFC-0106 M1).
+///
+/// Not an asset, because it is not copied from anywhere: it is built from the
+/// same `std/`, the same book and the same manifests the pages are, by
+/// `app/search.vyrn`, while this program runs.
+///
+/// THE CEILING IS ASSERTED HERE, AND IT IS THE RAW ONE. M0's number is 8,000
+/// gzipped and this program cannot gzip — RFC-0014 has `readFile`, `writeFile`
+/// and `listDir`, and no compressor behind any of them. The raw ceiling below is
+/// the one it CAN check, set from the census's own measurement of the same shape
+/// (42,235 raw at 5,255 gzipped, a ratio of 8.0), with room for `std/` to grow;
+/// `site/test/typescale.test.mjs`'s sibling in `site/test/search.test.mjs`
+/// gzips the written file and asserts the 8,000. Two halves, and a runaway index
+/// fails whichever it reaches first.
+fn writeIndex(outDir: String) -> Int64 {
+    let json = indexJson()
+    if json.byteLength > 80000 {
+        print("FAIL \{indexName()}: \{json.byteLength} bytes of index, ceiling 80,000 raw")
+        print("     RFC-0106 M0's ceiling is 8,000 gzipped; this is the raw check the export can make.")
+        return 1
+    }
+    print("\{indexName()} (\{rows().length} entries, \{json.byteLength} bytes)")
+    return emit("\{outDir}/\{indexName()}", json)
 }
 
 /// Whether `needle` occurs in `haystack`. Only the tests below use it.
@@ -467,20 +719,65 @@ test "the two representations of one URL differ" {
     assertEq(data.contentType, "application/json")
 }
 
-test "every published document marks exactly one navigation row" {
+test "every published document marks exactly one thing in its masthead" {
+    // RFC-0106 M1 turned nine navigation rows into five plus a persistent
+    // Install button, so "exactly one row" became "exactly one masthead
+    // element": five rows and one call to action, and a page marks one of the
+    // six or none of them.
+    let mut targets: Array<String> = [hrefOf("/install")]
+    for row in navRows() {
+        targets.push(row.href.copy())
+    }
     for path in sitePaths() {
         let html = markCurrent(route(documentRequest(path)).body, path)
         let mut marked = 0
-        for row in navRows() {
-            marked = marked + match indexOf(html, "data-key=\"\{row.href}\" aria-current=\"page\"") {
-                Some(at) => 1,
-                None => 0,
-            }
+        for href in targets {
+            marked = marked + countOf(html, "data-key=\"\{href}\" aria-current=\"page\"")
         }
-        // The home page is not a navigation row, and marks none. Neither is any
-        // backstage page: the section hangs off its own navigation.
-        assertEq(marked, if path == "/" || isBackstage(path) { 0 } else { 1 })
+        // Four kinds of page mark nothing, and each is deliberate: the home page,
+        // which is the wordmark's route and not a row; the two pages that are
+        // reached from content rather than from the masthead; the two redirect
+        // stubs, which are the old name of a page and not a place; and every
+        // backstage page, which hangs off its own navigation.
+        let orphan = path == "/" || path == "/compare" || path == "/why-vyrn" || redirectTarget(path).byteLength > 0
+        assertEq(marked, if orphan || isBackstage(path) { 0 } else { 1 })
     }
+}
+
+test "each renamed route publishes a stub that carries the reader to the new one" {
+    // The gate RFC-0106 M1 owns: a bookmark and a search result for either old
+    // URL still answer, and what answers points at the page. Three mechanisms
+    // are checked, because a reader might only get one of them — the refresh a
+    // browser may be told to decline, the canonical a search engine reads, and
+    // the visible link that is all a screen reader has before the hop fires.
+    assertEq(redirects().length, 2)
+    for pair in redirects() {
+        let old = pair[0]
+        let to = pair[1]
+        // The old URL answers, as a document and as a payload.
+        assertEq(route(documentRequest(old)).status, 200)
+        assertEq(route(dataRequest(old)).status, 200)
+        // And the page it names answers too — a stub pointing at a 404 is worse
+        // than the 404 it replaced.
+        assertEq(route(documentRequest(to)).status, 200)
+        let doc = publishedDocument(old)
+        let hop = upTo(old) + published(to)
+        assert(has(doc, "<meta http-equiv=\"refresh\" content=\"0; url=\{hop}\">"))
+        assert(has(doc, "<link rel=\"canonical\" href=\"\{hop}\">"))
+        assert(has(doc, "<a href=\"\{hop}\">"))
+        // A stub is a stub: it says nothing else, and it does not carry the
+        // marker of a page it is not.
+        assert(!has(doc, "aria-current=\"page\""))
+        // The page it points at is NOT a stub — a pair of stubs pointing at each
+        // other is the loop this assertion exists to rule out.
+        assertEq(redirectTarget(to).byteLength, 0)
+        assert(!has(publishedDocument(to), "http-equiv=\"refresh\""))
+    }
+    // Both old paths, by name, so a future edit to `redirects()` that drops one
+    // fails here rather than passing an empty loop.
+    assertEq(redirectTarget("/philosophy"), "/why-vyrn")
+    assertEq(redirectTarget("/editors"), "/docs/editors")
+    assertEq(redirectTarget("/docs"), "")
 }
 
 test "no consumer navigation row leads to the backstage" {
@@ -539,17 +836,33 @@ test "both fronts carry the theme control, and carry it without a flash" {
     }
 }
 
-test "a reference page belongs under Docs, and the home page under nothing" {
-    assertEq(currentNav("/install"), "/install.html")
+test "a reference page marks Reference, an editors page marks Docs, the home page nothing" {
+    // The five rows, and the two that are labels over a path that says something
+    // else (RFC-0106 M1).
     assertEq(currentNav("/docs"), "/docs.html")
     assertEq(currentNav("/docs/std/json"), "/docs.html")
+    assertEq(currentNav("/guide"), "/guide.html")
+    // The page whose URL is under the reference and whose GROUP is the book. M0's
+    // map made it so, and this is the line that decides which one the reader is
+    // told about.
+    assertEq(currentNav("/docs/editors"), "/guide.html")
+    // Not a row, and still marked: the persistent button.
+    assertEq(currentNav("/install"), "/install.html")
+    // Reached from content, so nothing in the masthead claims them.
     assertEq(currentNav("/"), "")
+    assertEq(currentNav("/compare"), "")
+    assertEq(currentNav("/why-vyrn"), "")
+    assertEq(currentNav("/philosophy"), "")
 }
 
 test "the marker lands on the navigation, not on the first link in the body" {
-    let nav = "<a href=\"/docs.html\" data-key=\"/docs.html\">Docs</a>"
+    let nav = "<a href=\"/docs.html\" data-key=\"/docs.html\">Reference</a>"
     let body = "<p>" + nav + "</p>"
-    assertEq(markCurrent(nav + body, "/docs"), "<a href=\"/docs.html\" data-key=\"/docs.html\" aria-current=\"page\">Docs</a>" + body)
+    assertEq(markCurrent(nav + body, "/docs"), "<a href=\"/docs.html\" data-key=\"/docs.html\" aria-current=\"page\">Reference</a>" + body)
+    // And it reaches an anchor that carries a third attribute — the call to
+    // action does, and it is the only element that can be marked for `/install`.
+    let cta = "<a href=\"/install.html\" data-key=\"/install.html\" class=\"cta\">Install</a>"
+    assertEq(markCurrent(cta, "/install"), "<a href=\"/install.html\" data-key=\"/install.html\" aria-current=\"page\" class=\"cta\">Install</a>")
 }
 
 test "every name in a module's index points at an export that is on the page" {
@@ -570,7 +883,7 @@ test "every name in a module's index points at an export that is on the page" {
 /// order `exportPath` applies them. The tests below read this rather than the
 /// router's raw body, because the raw body is not what ships.
 fn publishedDocument(path: String) -> String {
-    return relativize(withIcon(withLang(markCurrent(route(documentRequest(path)).body, path))), path)
+    return relativize(withRedirect(withCards(withFeed(withIcon(withLang(markCurrent(route(documentRequest(path)).body, path), path))), path), path), path)
 }
 
 /// How many times `needle` occurs in `hay`.
@@ -619,17 +932,58 @@ test "no published document names a root that only one host has" {
 
 test "a payload sits beside its document" {
     assertEq(payloadName("index.html"), "index.data.json")
-    assertEq(payloadName("philosophy.html"), "philosophy.data.json")
+    assertEq(payloadName("why-vyrn.html"), "why-vyrn.data.json")
 }
 
 test "every published document declares its language" {
-    assertEq(withLang("<!doctype html>\n<html>\n<head>"), "<!doctype html>\n<html lang=\"en\">\n<head>")
+    assertEq(withLang("<!doctype html>\n<html>\n<head>", "/docs/std/json"), "<!doctype html>\n<html lang=\"en\">\n<head>")
     // Stamped once, on the document element, and on every page.
     for path in sitePaths() {
-        let html = withLang(route(documentRequest(path)).body)
-        assert(has(html, "<html lang=\"en\">"))
+        let html = withLang(route(documentRequest(path)).body, path)
+        assert(has(html, "<html lang=\"en\""))
         assert(!has(html, "<html>"))
     }
+}
+
+test "the display type step reaches nine pages and no leaf page" {
+    // THE GATE RFC-0106 M0 ASKS M1 FOR, in the one form a program with no layout
+    // engine can assert exactly. The display step is raised on `[data-landing]`
+    // and nowhere else — `site/test/typescale.test.mjs` reads the stylesheet and
+    // proves that — so "the computed font-size of every element on the 160 leaf
+    // pages is unchanged" reduces to "no leaf page carries the attribute", which
+    // is this test.
+    assertEq(landingPaths().length, 9)
+    let mut stamped = 0
+    for path in sitePaths() {
+        let doc = publishedDocument(path)
+        let on = countOf(doc, "<html lang=\"en\" data-landing>")
+        assertEq(on, if isLanding(path) { 1 } else { 0 })
+        stamped = stamped + on
+        // And every document declares the language once, either way.
+        assertEq(countOf(doc, "<html lang=\"en\""), 1)
+    }
+    assertEq(stamped, 9)
+    // The leaf pages, by kind, named rather than left to the loop above: 13 guide
+    // chapters, 37 reference modules, 4 package pages. The 106 design records are
+    // in `recordPaths()`, and one of them is checked below.
+    for slug in chapterSlugs() {
+        assert(!isLanding(hrefGuide(slug)))
+    }
+    for m in apiModules() {
+        assert(!isLanding(hrefDocsStd(m.name)))
+    }
+    for p in packages() {
+        assert(!isLanding(hrefExplore(p.slug)))
+    }
+    assert(!has(publishedDocument("/backstage/rfcs/0105"), "data-landing"))
+    // The two stubs are not landing pages either. They carry a `.display`
+    // heading and three words, and a stub is not where a hero belongs.
+    assert(!isLanding("/philosophy"))
+    assert(!isLanding("/editors"))
+    // The one page whose URL says `/docs/` and which is NOT the reference
+    // landing: it is a leaf, and it keeps the documentation scale.
+    assert(!isLanding("/docs/editors"))
+    assert(isLanding("/docs"))
 }
 
 test "every published document points at an icon this export writes" {
@@ -647,6 +1001,73 @@ test "every published document points at an icon this export writes" {
         let html = withIcon(route(documentRequest(path)).body)
         assert(has(html, "<link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">"))
     }
+}
+
+test "every page says what it is to a crawler, and no two of the ten say the same" {
+    // The gate for RFC-0106 M1's OG meta. The defect it closes is one shared
+    // description on 174 pages, so the assertions are about DIFFERENCE and not
+    // about presence: a card that is there and identical everywhere is the bug.
+    let mut seen: Array<String> = []
+    let mut websites = 0
+    for path in sitePaths() {
+        let doc = publishedDocument(path)
+        if redirectTarget(path).byteLength > 0 {
+            // A stub is the old name of a page, not a place. It carries the three
+            // ways out and nothing that would preview as a page of its own.
+            assert(!has(doc, "og:title"))
+            continue
+        }
+        assert(has(doc, "<meta property=\"og:title\" content=\""))
+        assert(has(doc, "<meta property=\"og:description\" content=\""))
+        assert(has(doc, "<meta name=\"twitter:card\" content=\"summary\">"))
+        // The type is the same nine-page list the display step uses.
+        let kind = if isLanding(path) { "website" } else { "article" }
+        assert(has(doc, "<meta property=\"og:type\" content=\"\{kind}\">"))
+        if isLanding(path) {
+            websites = websites + 1
+        }
+        // The card names the page the reader would land on. A title read out of
+        // the document cannot disagree with the document.
+        let title = titleOf(doc)
+        assert(title.byteLength > 0)
+        assert(has(doc, "<meta property=\"og:title\" content=\"\{title}\">"))
+        // And the ten pages the table covers carry their OWN sentence, in the
+        // description a search result shows as well as in the card.
+        if hasMeta(path) {
+            let blurb = metaOf(path).blurb
+            assertEq(title, metaOf(path).title)
+            assert(has(doc, "<meta name=\"description\" content=\"\{blurb}\">"))
+            assert(has(doc, "<meta property=\"og:description\" content=\"\{blurb}\">"))
+            for was in seen {
+                assert(was != blurb)
+            }
+            seen.push(blurb.copy())
+        }
+    }
+    assertEq(seen.length, pageMetas().length)
+    assertEq(websites, landingPaths().length)
+    // A leaf keeps the language's own description, and its card is its own title.
+    let leaf = publishedDocument(hrefDocsStd("json"))
+    assertEq(titleOf(leaf), "std/json — Vyrn")
+    assert(has(leaf, "<meta property=\"og:title\" content=\"std/json — Vyrn\">"))
+    assert(has(leaf, "<meta property=\"og:type\" content=\"article\">"))
+    // The backstage previews as itself too, off its own head and with no row here.
+    let record = publishedDocument("/backstage/rfcs/0105")
+    assert(has(record, "<meta property=\"og:type\" content=\"article\">"))
+    assert(has(record, "<meta property=\"og:description\" content=\"The Vyrn design record"))
+}
+
+test "a value is read out of one attribute and into another, or it is not there" {
+    let head = "<title>A — Vyrn</title><meta name=\"description\" content=\"One line.\">"
+    assertEq(titleOf(head), "A — Vyrn")
+    assertEq(descriptionOf(head), "One line.")
+    assertEq(titleOf("<head>nothing</head>"), "")
+    assertEq(descriptionOf("<head>nothing</head>"), "")
+    // An unterminated value is nothing rather than the rest of the document.
+    assertEq(titleOf("<title>A — Vyrn"), "")
+    // A page whose head carries an SVG `<title>` further down still reads its
+    // own: `/compare` has 39 of them, one per shape in the charts.
+    assertEq(titleOf("<title>Head</title><svg><title>A bar</title></svg>"), "Head")
 }
 
 test "an attribute scan reads the values and stops at the quote" {
@@ -871,7 +1292,7 @@ test "every feature the editors page claims names a file that is in this reposit
     //
     // Relative to the repository root, which is where the export is run from and
     // where `packages.vyrn` reads `examples/*/vyrn.json` from.
-    let html = route(documentRequest(editorsPath())).body
+    let html = route(documentRequest(docsEditorsPath())).body
     let claimed = attrValues(html, "data-impl")
     // The table is the page's whole middle section: an empty scan would pass
     // every assertion below in silence.

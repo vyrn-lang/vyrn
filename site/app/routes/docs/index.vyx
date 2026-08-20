@@ -26,7 +26,7 @@
 // packages — a different set, a different shape, and every card goes to that
 // package's own page.
 import { Head } from "std/ui"
-import { pageHead } from "../../nav"
+import { pageHeadOf } from "../../nav"
 import { exampleCount, blob } from "../../repo"
 import { ApiModule, apiModules, apiHref } from "../../docs"
 import { SearchRow, GraphNode, GraphEdge, searchRows, graphNodes, graphEdges, graphViewBox, graphWidth, edgeCount, leafCount } from "../../stdgraph"
@@ -35,7 +35,7 @@ import { SearchRow, GraphNode, GraphEdge, searchRows, graphNodes, graphEdges, gr
 type Link = { href: String, name: String, what: String }
 
 export fn head() -> Head {
-    return pageHead("Docs — Vyrn")
+    return pageHeadOf("/docs")
 }
 
 /// How many exports the whole reference covers.

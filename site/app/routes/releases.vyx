@@ -14,11 +14,11 @@
 // section of its own now, and it renders every record rather than listing eight
 // links to GitHub.
 import { Head } from "std/ui"
-import { pageHead } from "../nav"
+import { pageHeadOf } from "../nav"
 import { hasRelease, releaseTag, releaseDate, releasePre, releaseUrl } from "../repo"
 
 export fn head() -> Head {
-    return pageHead("Releases — Vyrn")
+    return pageHeadOf("/releases")
 }
 
 /// The heading, which is a different sentence in each of the two states.

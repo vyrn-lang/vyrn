@@ -17,11 +17,11 @@
 // reads them back with `textContent`. Nothing here is a JavaScript string
 // holding a program.
 import { Head } from "std/ui"
-import { pageHead } from "../nav"
+import { pageHeadOf } from "../nav"
 import { playExamples, Example } from "../play"
 
 export fn head() -> Head {
-    return pageHead("Playground — Vyrn")
+    return pageHeadOf("/play")
 }
 
 fn examples() -> Array<Example> {

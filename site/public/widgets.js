@@ -7,10 +7,17 @@
 //
 // No framework, no bundler, no dependency. Three files: this one, hero.js, and
 // fresh.js.
-import { mountHero } from "./hero.js";
 import { refreshRelease } from "./fresh.js";
-import { mountPlay } from "./play.js";
-import { runVyrn } from "./wasi-min.js";
+// THE PLAYGROUND IS NOT IMPORTED HERE (RFC-0106 M1). `play.js`, `play-wasm.js`
+// and `wasi-min.js` used to be two more lines above this one, and a static
+// import is a download: twelve of the thirteen consumer pages fetched the
+// playground's 14,587 gzipped bytes to run none of it, which is the largest
+// single item in the census's page-weight finding and the one the word budget
+// could not see. Both are `import()` at the point of use now — `play.js` inside
+// the loop over the elements only `/play` has, and `wasi-min.js` inside the
+// digest the parity widget computes when the reader presses Run. Nothing else
+// about either widget changed, and neither module is fetched until a page needs
+// it.
 
 // Where the site is. Every file this page loads is a sibling of this script, and
 // this script knows its own URL, so that is the whole derivation — no flag baked
@@ -20,7 +27,7 @@ import { runVyrn } from "./wasi-min.js";
 // the module that wrote it.
 const SITE = new URL(".", import.meta.url);
 
-// Soft navigation across a static host: the payload for /philosophy.html lives
+// Soft navigation across a static host: the payload for /why-vyrn.html lives
 // beside it in /philosophy.data.json, because a file host cannot vary on
 // `Accept`. Set before the runtime module loads.
 window.__vyrnNavConfig = { staticData: true };
@@ -120,6 +127,36 @@ function copyButtons() {
         getSelection().selectAllChildren(code);
       }
       setTimeout(() => (btn.textContent = "Copy"), 1600);
+    });
+  }
+}
+
+/// COPY THIS PAGE AS MARKDOWN (RFC-0106 M1).
+///
+/// The element is a LINK to the `.md` file the export writes beside the page, so
+/// with no script — or with no clipboard, which is every insecure origin — a
+/// press does the thing the element says it does. With both, the file is fetched
+/// and put on the clipboard and the page does not move.
+///
+/// A failure is REPORTED and then falls through to the navigation: the link is
+/// still the answer, and a reader who pressed a button and got nothing has been
+/// lied to.
+function copyPageButtons() {
+  for (const link of $$("a[data-copy-md]")) {
+    // Set once the fetch has failed. The second press is then an ordinary press
+    // on an ordinary link, which is where a reader should end up when the copy
+    // cannot happen — not at a button that reports the same failure forever.
+    let broken = false;
+    link.addEventListener("click", async (e) => {
+      if (broken || !navigator.clipboard) return;
+      e.preventDefault();
+      pinWidth(link);
+      const was = link.textContent;
+      const res = await fetch(link.href).catch(() => null);
+      const md = res && res.ok ? await res.text() : "";
+      broken = !md;
+      link.textContent = md && (await writeClipboard(md)) ? "Copied" : "Open it instead";
+      setTimeout(() => (link.textContent = was), 1600);
     });
   }
 }
@@ -328,6 +365,7 @@ async function wasmDigest() {
     const res = await fetch(new URL("hero.wasm", SITE));
     if (!res.ok) return null;
     const bytes = new Uint8Array(await res.arrayBuffer());
+    const { runVyrn } = await import("./wasi-min.js");
     const run = await runVyrn(bytes, { onStdout: () => {}, onStderr: () => {} });
     if (run.exitCode !== 0 || !run.stdout) return null;
     return fnv1aHex(run.stdout);
@@ -1000,6 +1038,7 @@ let hero = null;
 
 function boot() {
   copyButtons();
+  copyPageButtons();
   markCopyable();
   entrance();
   anchorShell();
@@ -1018,7 +1057,17 @@ function boot() {
   for (const el of $$('[data-widget="radar"]')) radarWidget(el);
   for (const el of $$("[data-install]")) installPicker(el);
   moduleSearch();
-  for (const el of $$('[data-widget="play"]')) mountPlay(el);
+  // The playground, on the one page that has one. `boot()` is not awaited and
+  // the mount does not have to finish before the rest of the page works, so the
+  // import is fired and left to land — a rejection is reported rather than
+  // swallowed, because a playground that silently never mounts is worse than an
+  // error in the console.
+  const playgrounds = $$('[data-widget="play"]');
+  if (playgrounds.length) {
+    import("./play.js").then(({ mountPlay }) => {
+      for (const el of playgrounds) mountPlay(el);
+    }, (err) => console.error("the playground did not load", err));
+  }
   for (const el of $$("svg.graph")) graphWidget(el);
   // One hero at a time. `boot` runs again after every soft navigation, and a
   // mount that was never torn down keeps a window `resize`, a document
@@ -1028,12 +1077,262 @@ function boot() {
     hero.destroy();
     hero = null;
   }
+  // And the hero, on the one page that has a canvas for it — imported at the
+  // point of use for the reason the playground is (RFC-0106 M1). The census
+  // itself says `hero.js` is needed "yes, on `/`", which is another way of
+  // saying twelve pages were fetching 4,245 gzipped bytes to find no canvas.
   const canvas = document.getElementById("field");
-  if (canvas) hero = mountHero(canvas, { cellPx: 6 });
+  if (canvas) {
+    const at = canvas;
+    import("./hero.js").then(({ mountHero }) => {
+      // A soft navigation can have left the page while the module was in
+      // flight; mounting onto a canvas the document no longer holds would
+      // start a resize listener over nothing.
+      if (at.isConnected) hero = mountHero(at, { cellPx: 6 });
+    }, (err) => console.error("the hero did not load", err));
+  }
   refreshRelease();
 }
 
 boot();
+
+// ---------------------------------------------------------------------------
+// THE SEARCH OVERLAY (RFC-0106 M1)
+//
+// `/` opens it on every page, Esc closes it, the arrows walk the results and
+// Enter follows one. The index is ONE file, fetched on the first open and never
+// again, and never inlined in a document: 448 rows and 42 KB that a page which
+// never searches does not pay for. `site/app/search.vyrn` builds it.
+//
+// Bound ONCE, outside `boot()`. `boot()` runs again after every soft navigation,
+// and a key listener added per navigation is a key listener per navigation — the
+// overlay lives in the shell, which a soft navigation never swaps, so its
+// listeners belong out here with it.
+// ---------------------------------------------------------------------------
+{
+  const box = $("[data-find]");
+  const field = $("[data-find-input]");
+  const list = $("[data-find-results]");
+  const note = $("[data-find-note]");
+  // The backstage wears its own shell and has no overlay in it.
+  if (box && field && list) {
+    let index = null;
+    let loading = null;
+    let cursor = -1;
+    // Where focus was when the overlay opened, so it can be given back. A
+    // reader who presses `/` in the middle of a reference page and then Esc has
+    // to end up where they were and not at the top of the document.
+    let cameFrom = null;
+
+    /// Fetch the index once. A failure says so in the panel rather than leaving
+    /// an empty list, which would read as "nothing matches".
+    function load() {
+      if (index) return Promise.resolve();
+      if (loading) return loading;
+      loading = fetch(new URL("search.json", SITE))
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(r.status))))
+        .then((rows) => {
+          index = rows;
+          loading = null;
+        })
+        .catch((err) => {
+          loading = null;
+          note.textContent = "The index did not load. Every page is still linked from the navigation.";
+          console.error("the search index did not load", err);
+        });
+      return loading;
+    }
+
+    // The four sections, in the order the overlay shows them, which is the order
+    // `site/app/search.vyrn` writes them in.
+    const SECTIONS = ["Docs", "Reference", "Packages", "Releases"];
+
+    /// The rows that match `q`: the best 40, in section order.
+    ///
+    /// A substring match over the title and the description, ranked by where the
+    /// hit lands: a title that STARTS with the query, then any title hit, then a
+    /// description hit. No fuzzy matching and no scoring model — 448 rows, and a
+    /// reader who is typing a name they already know.
+    ///
+    /// RANKED FIRST, THEN GROUPED, and the two are separate passes because they
+    /// answer different questions. The rank decides WHICH forty rows a reader
+    /// sees, so it must run over all of them; the section decides what ORDER
+    /// those forty appear in, so it runs over the forty. Sorting by rank alone
+    /// and drawing a heading whenever the section changed gave
+    /// `Reference · Docs · Reference · Docs · Reference` for `text` — five
+    /// headings for two sections, which is a list that is not sectioned at all.
+    /// Both sorts are stable, so a section's rows stay in their ranked order
+    /// inside it.
+    function search(q) {
+      const needle = q.toLowerCase();
+      const hits = [];
+      for (const r of index) {
+        const at = r.t.toLowerCase().indexOf(needle);
+        let rank = -1;
+        if (at === 0) rank = 0;
+        else if (at > 0) rank = 1;
+        else if (r.d.toLowerCase().includes(needle)) rank = 2;
+        if (rank >= 0) hits.push({ r, rank });
+      }
+      hits.sort((a, b) => a.rank - b.rank);
+      const best = hits.slice(0, 40).map((h) => h.r);
+      best.sort((a, b) => SECTIONS.indexOf(a.s) - SECTIONS.indexOf(b.s));
+      return best;
+    }
+
+    /// The fragment `r` leads to: an export's own id on its module's page, and
+    /// nothing for every other row.
+    ///
+    /// A reference row's title is `emit — std/json` and the id the page carries
+    /// is `e-emit`, which is why the index does not spend 354 names on saying it
+    /// twice. A module's own row is `std/json` and has no dash in it, so the two
+    /// kinds of reference row stay apart on the one thing that distinguishes
+    /// them.
+    function anchorOf(r) {
+      if (r.s !== "Reference") return "";
+      const cut = r.t.indexOf(" — std/");
+      return cut > 0 ? "#e-" + r.t.slice(0, cut) : "";
+    }
+
+    /// Draw the results under their section headings.
+    function render(q) {
+      list.textContent = "";
+      cursor = -1;
+      if (!q || !index) {
+        if (!q) note.textContent = "Type to search. Esc closes.";
+        return;
+      }
+      const hits = search(q);
+      note.textContent = hits.length
+        ? `${hits.length} result${hits.length === 1 ? "" : "s"}. Arrows to move, Enter to open, Esc to close.`
+        : `Nothing matches "${q}".`;
+      let section = null;
+      for (const r of hits) {
+        if (r.s !== section) {
+          section = r.s;
+          const h = document.createElement("p");
+          h.className = "sect";
+          h.textContent = section;
+          list.append(h);
+        }
+        const a = document.createElement("a");
+        a.className = "hit";
+        // The index carries the route's identity — `/docs.html` — and every
+        // document is served from an unknown mount point, so the URL is resolved
+        // against this script's own directory, exactly as the export resolves the
+        // ones it writes.
+        //
+        // AN EXPORT'S ANCHOR IS DERIVED AND NOT CARRIED. `#e-emit` is the row's
+        // own title with three bytes in front of it, and 354 of the 448 rows are
+        // exports, so the index would have written every one of those names
+        // twice: 7,763 gzipped against M0's 8,000, or 6,564 with this line here.
+        // The reference landing's own filter builds the same fragment the same
+        // way, further up this file.
+        a.href = new URL(r.u.slice(1) + anchorOf(r), SITE).href;
+        a.setAttribute("role", "option");
+        a.setAttribute("aria-selected", "false");
+        a.textContent = r.t;
+        if (r.d) {
+          const d = document.createElement("span");
+          d.className = "d";
+          d.textContent = r.d;
+          a.append(d);
+        }
+        list.append(a);
+      }
+    }
+
+    /// Move the selection by `step`, wrapping, and keep it on screen.
+    ///
+    /// FOCUS STAYS IN THE FIELD and the row is marked `aria-selected`. That is
+    /// the listbox pattern: a reader who has typed three letters and pressed
+    /// Down must be able to type a fourth without moving focus back.
+    function move(step) {
+      const hits = $$(".hit", list);
+      if (!hits.length) return;
+      if (cursor >= 0) hits[cursor].setAttribute("aria-selected", "false");
+      cursor = (cursor + step + hits.length) % hits.length;
+      hits[cursor].setAttribute("aria-selected", "true");
+      hits[cursor].scrollIntoView({ block: "nearest" });
+    }
+
+    function open() {
+      if (!box.hidden) return;
+      cameFrom = document.activeElement;
+      box.hidden = false;
+      field.value = "";
+      render("");
+      field.focus();
+      load().then(() => render(field.value));
+    }
+
+    function close() {
+      if (box.hidden) return;
+      box.hidden = true;
+      list.textContent = "";
+      // Back where the reader was. A soft navigation may have replaced that
+      // element, so its presence is checked rather than assumed.
+      if (cameFrom && cameFrom.isConnected) cameFrom.focus();
+      cameFrom = null;
+    }
+
+    for (const btn of $$("[data-find-open]")) btn.addEventListener("click", open);
+
+    // `/` from anywhere, unless the reader is already typing. A page with a
+    // module filter or a playground editor on it must not swallow a slash.
+    addEventListener("keydown", (e) => {
+      const el = document.activeElement;
+      const typing = /^(input|textarea|select)$/i.test(el.tagName) || el.isContentEditable;
+      if (e.key === "/" && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        open();
+      } else if (e.key === "Escape" && !box.hidden) {
+        e.preventDefault();
+        close();
+      }
+    });
+
+    // Pressing the ground closes it; pressing the panel does not.
+    box.addEventListener("mousedown", (e) => {
+      if (e.target === box) close();
+    });
+
+    field.addEventListener("input", () => render(field.value));
+    field.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        move(1);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        move(-1);
+      } else if (e.key === "Enter") {
+        const hits = $$(".hit", list);
+        const pick = cursor >= 0 ? hits[cursor] : hits[0];
+        if (pick) {
+          e.preventDefault();
+          // Closed BEFORE the navigation, and without restoring focus: the
+          // element focus came from is about to be replaced, and a reader must
+          // not land on a new page with a dialog over it.
+          box.hidden = true;
+          list.textContent = "";
+          cameFrom = null;
+          pick.click();
+        }
+      }
+    });
+
+    // THE FOCUS TRAP, and it is one rule because the panel is one field and a
+    // list walked with the arrows: while the overlay is open, Tab returns to the
+    // field. Nothing behind the dialog can be reached, which is what
+    // `aria-modal` claims and what a claim has to be true of.
+    box.addEventListener("keydown", (e) => {
+      if (e.key === "Tab") {
+        e.preventDefault();
+        field.focus();
+      }
+    });
+  }
+}
 
 /// Where the reader is after a soft navigation (RFC-0105 M4).
 ///

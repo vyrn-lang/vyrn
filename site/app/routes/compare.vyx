@@ -24,7 +24,7 @@
 // is computed in `app/bench.vyrn` from the two committed JSON records, and NOT
 // ONE figure on it is typed in by hand.
 import { Head } from "std/ui"
-import { pageHead, hrefOf } from "../nav"
+import { pageHeadOf, hrefOf } from "../nav"
 import { typeSpecs, memorySpecs, failureSpecs, Snippet } from "../snippets"
 import { programs, contestants, radarBox, radarCx, radarCy, radarRings, radarSpokes, radarLines, tableRows, axisPanels, benchMachine, benchRuns, Prog, Series, Ring, Spoke, Line, Mark, Reading, Row, Panel } from "../bench"
 import { moduleSizes, moduleSizesBox, moduleSizesGrid, moduleLadder, moduleLadderBox, moduleLadderGrid, moduleLadderPlot, twoRowPlot, moduleRatio, largestModule, leakBars, leakBox, leakGrid, leakPeak, engineBars, engineBox, engineGrid, enginePlot, engineRatio, engineRounds, engineCommand, engineMachine, wasmRatio, compiledBars, compiledGrid, barLeft, barRight, barText, barRow, Bar, Grid } from "../chart"
@@ -33,7 +33,7 @@ import { moduleSizes, moduleSizesBox, moduleSizesGrid, moduleLadder, moduleLadde
 type Axis = { id: String, name: String, vyrn: String, rust: String, ts: String, go: String }
 
 export fn head() -> Head {
-    return pageHead("Compare — Vyrn")
+    return pageHeadOf("/compare")
 }
 
 /// Text that holds an angle bracket lives here rather than in the template: a
@@ -430,6 +430,20 @@ fn axes() -> Array<Axis> {
                 <div class="stage axispanes">
                     <div v-for="p in axisPanels()" :key="p.key" :data-axis-pane="p.key">
                         <p class="eyebrow"><a :href="p.game">{{ p.name }}</a> — N = {{ p.n }}</p>
+                        <!-- The `.scroller` its two siblings on this page always
+                             had (RFC-0106 M1). This table was the one wide block
+                             on the site with no scroller around it, and it broke
+                             RFC-0105's own rule that the body never scrolls
+                             sideways: six nowrap columns paint 422px inside a
+                             309px column at 375px, and the 80px went to the
+                             document (RFC-0106 M0, checklist row 26). Two rules
+                             meet to make it 422px and both are right —
+                             `.axispanes table.matrix { min-width: 0 }` keeps a
+                             five-column panel off the 46rem floor, and
+                             `white-space: nowrap` keeps a column of numbers
+                             comparable down its own length. What was missing was
+                             the box to scroll in. -->
+                        <div class="scroller">
                         <table class="matrix bench game">
                             <thead>
                                 <tr><th>source</th><th>cpu secs</th><th>secs</th><th>mem</th><th>gz</th><th>make secs</th></tr>
@@ -445,6 +459,7 @@ fn axes() -> Array<Axis> {
                                 </tr>
                             </tbody>
                         </table>
+                        </div>
                         <p class="note"><a :href="p.href">{{ p.verdict }} — {{ p.label }}</a></p>
                     </div>
                 </div>
