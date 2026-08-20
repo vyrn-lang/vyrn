@@ -34,19 +34,24 @@
 # on the platform they install for. The bench and gen-engine jobs are 134 s and
 # 66 s against a 1243 s critical path, so nothing they could save is visible.
 #
-# WHAT THE TWO STEPS COST AFTERWARDS, from run 32401431915 — the first run of
-# this change, and a COLD one for both new caches:
+# WHAT THE TWO STEPS COST AFTERWARDS, over two runs of this change — 32401431905
+# cold for both new caches, then 32403119413 warm. The WORSE of the two is quoted
+# per cell, because the two runs disagree by up to 40% on identical ubuntu-latest
+# steps (402 s against 261 s for the same bench corpus) and that spread is the
+# fleet spread `BENCH_THRESHOLD` below already documents: one label, several CPU
+# models. A number picked from the kinder run would be a claim about scheduling.
 #
 #   step                          ubuntu  arm    windows  macos
-#   Workspace tests              306→138 288→136 398→286 244→125
-#   Bench --check                662→261 673→294 746→430 456→219
+#   Workspace tests              306→201 288→136 398→286 244→140
+#   Bench --check                662→402 673→294 746→430 456→221
 #   ---------------------------------------------------------------
-#   job total                   1141→504 1043→507 1243→967 692→459
+#   job total                   1141→704 1043→507 1243→967 692→484
 #
-# The critical path is the Windows leg either way, so the run went 1248 s to
-# 983 s with the caches still cold. `Build vyrn, and put the pinned test runner
-# on PATH` is a new step and paid the nextest fetch in that run (26 s ubuntu,
-# 44 s Windows); on a cache hit it is the build alone.
+# The critical path is the Windows leg before and after, so the whole run went
+# 1248 s to 983 s cold and 863 s warm. What the warm run bought is the tool
+# cache: `Pinned test-runner cache` hits in 1-2 s and `Build vyrn, and put the
+# pinned test runner on PATH` drops from 26-44 s to 12-32 s, because it stops
+# paying nextest's fetch.
 #
 # The next pole is now the parity harness at 468-500 s — one `#[test]` walking
 # 40 programs, so speeding it is a change to the harness rather than to this
