@@ -2605,7 +2605,7 @@ impl<'p> Fn_<'_, 'p> {
             Type::Array(_) => Some(Rel::Buffers(vec![self.layout_of(&t, line)?.fields[0]])),
             Type::Map(..) => {
                 let l = self.layout_of(&t, line)?;
-                Some(Rel::Buffers(vec![l.fields[0], l.fields[1]]))
+                Some(Rel::Buffers(vec![l.fields[0], l.fields[1], l.fields[4]]))
             }
             // `{ i64 len, i64 cap, ptr data, [N x T] inline }` — field 2, and it is
             // null until the array spills, which is exactly the case `free`
@@ -2761,6 +2761,11 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalGet(buf))
                         .ins(&Instruction::Call(self.cx.rt.free));
                 }
+                // The index holds no elements — it holds positions — so it is
+                // freed and not walked.
+                b.ins(&Instruction::LocalGet(a))
+                    .ins(&Instruction::I32Load(word_at(l.fields[4])))
+                    .ins(&Instruction::Call(self.cx.rt.free));
                 Ok(())
             }
             Type::Array(_) | Type::SmallArray(..) | Type::Map(..) => {
@@ -2975,7 +2980,11 @@ impl<'p> Fn_<'_, 'p> {
                 Type::Array(_) => vec![(self.layout_of(&t, line)?.fields[0], false)],
                 Type::Map(..) => {
                     let l = self.layout_of(&t, line)?;
-                    vec![(l.fields[0], false), (l.fields[1], false)]
+                    vec![
+                        (l.fields[0], false),
+                        (l.fields[1], false),
+                        (l.fields[4], false),
+                    ]
                 }
                 Type::SmallArray(..) => vec![(self.layout_of(&t, line)?.fields[2], false)],
                 _ => Vec::new(),
@@ -10476,6 +10485,22 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::I32Store(word_at(l.fields[i])));
                     self.copy_each(b, nb, n, stride, &elem, line)?;
                 }
+                // The index is copied rather than rebuilt: it holds POSITIONS,
+                // and a copy keeps the capacity as well as the order, so every
+                // bucket still names the entry it named. `cap * 2` buckets of
+                // eight bytes, all of them live.
+                let (isrc, ibytes) = (b.local(ValType::I32), b.local(ValType::I32));
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I32Load(word_at(l.fields[4])));
+                b.ins(&Instruction::LocalSet(isrc));
+                b.ins(&Instruction::LocalGet(cap));
+                b.ins(&Instruction::I32Const(16));
+                b.ins(&Instruction::I32Mul);
+                b.ins(&Instruction::LocalSet(ibytes));
+                let ib = self.dup_buf(b, isrc, ibytes, ibytes);
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::LocalGet(ib));
+                b.ins(&Instruction::I32Store(word_at(l.fields[4])));
                 Ok(())
             }
             Type::Record(_) => {
@@ -11515,7 +11540,7 @@ impl<'p> Fn_<'_, 'p> {
             (None, Some((_, ve))) => self.peek(ve, line)?,
             // An empty literal in no map position at all. `Map<String, Int64>` is
             // what the textual backend defaults to, and the two have to agree
-            // because the header is the same 24 bytes either way.
+            // because the header is the same 32 bytes either way.
             (None, None) => Type::Int,
         };
         let mty = Type::Map(Box::new(Type::Str), Box::new(val.clone()));
@@ -11595,6 +11620,14 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Add);
         b.ins(&Instruction::LocalGet(k));
         b.ins(&Instruction::I32Store(word()));
+        // The key is in its slot, so the index can record where. `map_reserve`
+        // above grew the bucket array and rebuilt it, so this is the only entry it
+        // is missing — and the reason the append stays O(1).
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        self.map_index(b, hdr, l);
+        b.ins(&Instruction::LocalGet(idx));
+        b.ins(&Instruction::Call(self.cx.rt.map_put));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[2])));
@@ -11644,7 +11677,7 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// `map_find(keys, len, k)` into `idx`.
+    /// `map_find(keys, len, k, idx, cap)` into `idx`.
     fn map_scan(&mut self, b: &mut Frame, hdr: u32, l: &Layout, k: u32, idx: u32) {
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
@@ -11652,8 +11685,25 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64Load(at(l.fields[2])));
         b.ins(&Instruction::I32WrapI64);
         b.ins(&Instruction::LocalGet(k));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I32Load(word_at(l.fields[4])));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I64Load(at(l.fields[3])));
+        b.ins(&Instruction::I32WrapI64);
         b.ins(&Instruction::Call(self.cx.rt.map_find));
         b.ins(&Instruction::LocalSet(idx));
+    }
+
+    /// The index's bucket array and its bucket count (`cap * 2`), pushed in that
+    /// order — the two arguments `map_put` and `map_reindex` share.
+    fn map_index(&mut self, b: &mut Frame, hdr: u32, l: &Layout) {
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I32Load(word_at(l.fields[4])));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I64Load(at(l.fields[3])));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::I32Const(2));
+        b.ins(&Instruction::I32Mul);
     }
 
     /// The address of entry `idx`'s value.
@@ -11733,6 +11783,28 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(nc));
         b.ins(&Instruction::I64ExtendI32U);
         b.ins(&Instruction::I64Store(at(l.fields[3])));
+        // The index last, because its bucket count is a function of the capacity
+        // just stored. It is rebuilt rather than copied: the buckets are keyed by
+        // `hash & (nb - 1)` and `nb` has just doubled, so every one of them moved.
+        // A fresh block and a fill, since nothing of the old is read.
+        let ni = b.local(ValType::I32);
+        b.ins(&Instruction::LocalGet(nc));
+        b.ins(&Instruction::I64ExtendI32U);
+        b.ins(&Instruction::I64Const(16));
+        b.ins(&Instruction::I64Mul);
+        b.ins(&Instruction::Call(self.cx.rt.malloc));
+        b.ins(&Instruction::LocalSet(ni));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I32Load(word_at(l.fields[4])));
+        b.ins(&Instruction::Call(self.cx.rt.free));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::LocalGet(ni));
+        b.ins(&Instruction::I32Store(word_at(l.fields[4])));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        b.ins(&Instruction::LocalGet(len));
+        self.map_index(b, hdr, l);
+        b.ins(&Instruction::Call(self.cx.rt.map_reindex));
         self.depth -= 1;
         b.ins(&Instruction::End);
     }
@@ -11966,6 +12038,17 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::I64Const(1));
             b.ins(&Instruction::I64Sub);
             b.ins(&Instruction::I64Store(at(l.fields[2])));
+            // Every survivor after the hole moved down a slot, so every bucket
+            // naming one is now off by one — the index is rebuilt rather than
+            // patched. The shift above is already O(len), so this costs `remove`
+            // nothing it was not paying.
+            b.ins(&Instruction::LocalGet(hdr));
+            b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+            b.ins(&Instruction::LocalGet(hdr));
+            b.ins(&Instruction::I64Load(at(l.fields[2])));
+            b.ins(&Instruction::I32WrapI64);
+            self.map_index(b, hdr, &l);
+            b.ins(&Instruction::Call(self.cx.rt.map_reindex));
             self.depth -= 1;
             b.ins(&Instruction::End);
         }
@@ -12689,10 +12772,17 @@ struct Rt {
     /// COMPUTED — `slot` appends — so an absent entry shifts the ones after it and
     /// nothing outside one compile depends on where they land.
     list_dir: Option<u32>,
-    /// RFC-0028's `Map<String, V>` key scan (M2l). The ONE piece of the map that
-    /// is a function: `reserve`, `remove_at` and `keys_copy` are each reached from
-    /// a single site and are a `malloc` plus a copy, so they are emitted there.
+    /// RFC-0028's `Map<String, V>` lookup (M2l), and the three helpers the hash
+    /// index put under it. `reserve`, `remove_at` and `keys_copy` are each reached
+    /// from a single site and are a `malloc` plus a copy, so they are emitted
+    /// there; these four are shared, and `map_slot` is shared twice over — a
+    /// lookup and an insert probe for the same bucket and differ only in what they
+    /// do when they find it.
     map_find: u32,
+    map_hash: u32,
+    map_slot: u32,
+    map_put: u32,
+    map_reindex: u32,
     /// RFC-0046's `=~` (M2m): walk a complete DFA over a NUL-terminated string.
     /// One helper for every pattern in the module, because the pattern is entirely
     /// in the table it is handed — which is the same split the textual backend's
@@ -12843,6 +12933,10 @@ impl Rt {
             fsync_file: slot("fsync_file"),
             list_dir: gen_host.then(|| slot("list_dir")),
             map_find: slot("map_find"),
+            map_hash: slot("map_hash"),
+            map_slot: slot("map_slot"),
+            map_put: slot("map_put"),
+            map_reindex: slot("map_reindex"),
             regex_run: slot("regex_run"),
             parse_i64: slot("parse_i64"),
             line_at: slot("line_at"),
@@ -14002,52 +14096,255 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
 
     io_runtime(m, &rt, wasi, gen);
 
-    // map_find(keys, len, key) -> the entry's index, or -1.
+    // map_find(keys, len, key, idx, cap) -> the entry's index, or -1.
     //
-    // A linear `strcmp` scan over the key-pointer buffer, which is what the C
-    // shim's `__vyrn_map_find` is — RFC-0028 chose insertion order over hashing,
-    // so the scan IS the lookup and matching it is not a simplification. Written
-    // without a `return`: M1's rule is that a body reaches its epilogue, so the
-    // hit branches out of a block carrying the index in a local.
-    let (i, found) = (3, 4);
-    let strcmp = rt.strcmp;
+    // The hash index (RFC-0104's k-nucleotide row) — one probe, not the linear
+    // `strcmp` scan this was until the whole map was O(keys) per lookup and every
+    // program with distinct keys was quadratic in them. `idx` is `cap * 2` buckets
+    // of i64 holding an entry's position PLUS ONE, so 0 is the empty bucket; it
+    // indexes the insertion-ordered storage and never reorders it, which is how
+    // RFC-0028's locked order survives a hash living underneath it.
+    //
+    // An empty map has no index yet and a map with a `cap` has one — that pair is
+    // `map_reserve`'s to keep, so a null `idx` under a non-zero `cap` is a bug
+    // here rather than a case to fall back on. Written without a `return`: M1's
+    // rule is that a body reaches its epilogue, so the empty answer branches out
+    // of a block carrying the value.
+    let bkt = 6;
     rt.next_is(m, rt.map_find);
+    let (map_slot, map_hash) = (rt.map_slot, rt.map_hash);
     m.func(
-        &[ValType::I32, ValType::I32, ValType::I32],
+        &[
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+        ],
         &[ValType::I32],
-        &[ValType::I32, ValType::I32],
+        &[ValType::I32],
         0,
         |b| {
-            b.ins(&Instruction::I32Const(-1))
-                .ins(&Instruction::LocalSet(found));
+            b.ins(&Instruction::Block(BlockType::Result(ValType::I32)));
+            b.ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32LeS)
+                .ins(&Instruction::LocalGet(4))
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32LeS)
+                .ins(&Instruction::I32Or)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(-1))
+                .ins(&Instruction::Br(1))
+                .ins(&Instruction::End);
+            // The bucket the key belongs in, then the entry it names: a zero is
+            // the empty bucket, so the key is not here.
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::LocalGet(3))
+                .ins(&Instruction::LocalGet(4))
+                .ins(&Instruction::I32Const(2))
+                .ins(&Instruction::I32Mul)
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::Call(map_slot))
+                .ins(&Instruction::I32Const(8))
+                .ins(&Instruction::I32Mul)
+                .ins(&Instruction::LocalGet(3))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I64Load(word8()))
+                .ins(&Instruction::I32WrapI64)
+                .ins(&Instruction::LocalSet(bkt));
+            b.ins(&Instruction::LocalGet(bkt))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::If(BlockType::Result(ValType::I32)))
+                .ins(&Instruction::I32Const(-1))
+                .ins(&Instruction::Else)
+                .ins(&Instruction::LocalGet(bkt))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Sub)
+                .ins(&Instruction::End);
+            b.ins(&Instruction::End);
+        },
+    );
+
+    // map_hash(key) -> FNV-1a over the key's bytes, to the NUL.
+    //
+    // The hash is never observable — no two backends have to agree on it, only on
+    // the insertion order — so this is the cheap one rather than a shared one. To
+    // the NUL, which is exactly the equality `strcmp` decides by.
+    let (h, c) = (2, 3);
+    rt.next_is(m, rt.map_hash);
+    m.func(
+        &[ValType::I32],
+        &[ValType::I64],
+        &[ValType::I64, ValType::I32],
+        0,
+        |b| {
+            b.ins(&Instruction::I64Const(14695981039346656037u64 as i64))
+                .ins(&Instruction::LocalSet(h));
             b.ins(&Instruction::Block(BlockType::Empty))
                 .ins(&Instruction::Loop(BlockType::Empty));
-            b.ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32GeS)
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Load8U(byte()))
+                .ins(&Instruction::LocalTee(c))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::BrIf(1));
+            b.ins(&Instruction::LocalGet(h))
+                .ins(&Instruction::LocalGet(c))
+                .ins(&Instruction::I64ExtendI32U)
+                .ins(&Instruction::I64Xor)
+                .ins(&Instruction::I64Const(1099511628211))
+                .ins(&Instruction::I64Mul)
+                .ins(&Instruction::LocalSet(h));
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(0))
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End)
+                .ins(&Instruction::End);
+            b.ins(&Instruction::LocalGet(h));
+        },
+    );
+
+    // map_slot(keys, idx, nb, key) -> the bucket `key` belongs in: the one that
+    // holds it, or the first empty one after where it hashes.
+    //
+    // One probe serves both readers — a lookup asks whether the bucket it lands on
+    // is occupied, an insert writes into it. `len <= cap` means the table is at
+    // most half full, so the walk always reaches an empty bucket and needs no
+    // bound of its own; `nb` is a power of two, so the wrap is a mask.
+    let (slot_b, mask, ent) = (5, 6, 7);
+    rt.next_is(m, rt.map_slot);
+    let strcmp = rt.strcmp;
+    m.func(
+        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+        &[ValType::I32],
+        &[ValType::I32, ValType::I32, ValType::I32],
+        0,
+        |b| {
+            b.ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Sub)
+                .ins(&Instruction::LocalSet(mask));
+            b.ins(&Instruction::LocalGet(3))
+                .ins(&Instruction::Call(map_hash))
+                .ins(&Instruction::I32WrapI64)
+                .ins(&Instruction::LocalGet(mask))
+                .ins(&Instruction::I32And)
+                .ins(&Instruction::LocalSet(slot_b));
+            b.ins(&Instruction::Block(BlockType::Empty))
+                .ins(&Instruction::Loop(BlockType::Empty));
+            b.ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::LocalGet(slot_b))
+                .ins(&Instruction::I32Const(8))
+                .ins(&Instruction::I32Mul)
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I64Load(word8()))
+                .ins(&Instruction::I32WrapI64)
+                .ins(&Instruction::LocalTee(ent))
+                .ins(&Instruction::I32Eqz)
                 .ins(&Instruction::BrIf(1));
             b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::LocalGet(ent))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Sub)
                 .ins(&Instruction::I32Const(4))
                 .ins(&Instruction::I32Mul)
                 .ins(&Instruction::I32Add)
                 .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::LocalGet(3))
                 .ins(&Instruction::Call(strcmp))
                 .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::LocalSet(found))
-                .ins(&Instruction::Br(2))
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::BrIf(1));
+            b.ins(&Instruction::LocalGet(slot_b))
                 .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(i))
+                .ins(&Instruction::LocalGet(mask))
+                .ins(&Instruction::I32And)
+                .ins(&Instruction::LocalSet(slot_b))
                 .ins(&Instruction::Br(0))
                 .ins(&Instruction::End)
                 .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(found));
+            b.ins(&Instruction::LocalGet(slot_b));
+        },
+    );
+
+    // map_put(keys, idx, nb, i) — record the entry at position `i`, whose key is
+    // already in `keys[i]`. The bucket probe is `map_slot`'s; this is the write.
+    rt.next_is(m, rt.map_put);
+    let map_slot_f = rt.map_slot;
+    m.func(
+        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+        &[],
+        &[],
+        0,
+        |b| {
+            b.ins(&Instruction::LocalGet(1));
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::LocalGet(3))
+                .ins(&Instruction::I32Const(4))
+                .ins(&Instruction::I32Mul)
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::Call(map_slot_f))
+                .ins(&Instruction::I32Const(8))
+                .ins(&Instruction::I32Mul)
+                .ins(&Instruction::I32Add);
+            b.ins(&Instruction::LocalGet(3))
+                .ins(&Instruction::I64ExtendI32U)
+                .ins(&Instruction::I64Const(1))
+                .ins(&Instruction::I64Add)
+                .ins(&Instruction::I64Store(word8()));
+        },
+    );
+
+    // map_reindex(keys, len, idx, nb) — rebuild the whole index from the entries.
+    //
+    // Called where positions move: a grow (the bucket count changed) and a remove
+    // (the survivors shifted down). Both are already O(len) for their own reasons,
+    // so this adds no order of growth to either.
+    let ri = 5;
+    rt.next_is(m, rt.map_reindex);
+    let map_put = rt.map_put;
+    m.func(
+        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+        &[],
+        &[ValType::I32],
+        0,
+        |b| {
+            b.ins(&Instruction::Block(BlockType::Empty));
+            b.ins(&Instruction::LocalGet(3))
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32LeS)
+                .ins(&Instruction::BrIf(0));
+            b.ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::LocalGet(3))
+                .ins(&Instruction::I32Const(8))
+                .ins(&Instruction::I32Mul)
+                .ins(&Instruction::MemoryFill(0));
+            b.ins(&Instruction::Block(BlockType::Empty))
+                .ins(&Instruction::Loop(BlockType::Empty));
+            b.ins(&Instruction::LocalGet(ri))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::I32GeS)
+                .ins(&Instruction::BrIf(1));
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::LocalGet(3))
+                .ins(&Instruction::LocalGet(ri))
+                .ins(&Instruction::Call(map_put));
+            b.ins(&Instruction::LocalGet(ri))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(ri))
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End)
+                .ins(&Instruction::End);
+            b.ins(&Instruction::End);
         },
     );
 

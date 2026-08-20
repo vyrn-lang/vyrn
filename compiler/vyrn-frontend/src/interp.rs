@@ -375,12 +375,8 @@ pub enum Val {
     /// A cache that stores the `Rc` keeps the allocation alive, so an address
     /// cannot be recycled under a live cache entry.
     Array(std::rc::Rc<Vec<Val>>),
-    /// A growable, insertion-ordered dictionary (RFC-0028): a `Vec` of
-    /// `(key, value)` pairs kept in first-insertion order — an update rewrites
-    /// the pair in place, a remove shifts later pairs down, a fresh insert
-    /// appends. The `Vec` (not a `HashMap`) is what makes iteration/encoding
-    /// order deterministic and parity-stable.
-    Map(Vec<(String, Val)>),
+    /// A growable, insertion-ordered dictionary (RFC-0028). See [`MapVal`].
+    Map(MapVal),
     /// An opaque `Code` fragment (RFC-0054): a sequence of rendered text pieces,
     /// some carrying an origin span. Produced only inside a generation context by
     /// `vyrn"…"` quotes / `raw` / `rawAt`, concatenated by `+`, and consumed by
@@ -399,6 +395,88 @@ pub enum Val {
     /// — an endless one exists, and `take(n)` over it reads n+1 elements rather
     /// than all of them.
     Stream(Box<StreamVal>),
+}
+
+/// A `Map<String, V>` (RFC-0028): the `(key, value)` pairs in first-insertion
+/// order, plus a hash INDEX over them.
+///
+/// The `Vec` is the value — an update rewrites the pair in place, a remove shifts
+/// later pairs down, a fresh insert appends — and it is what makes
+/// iteration/encoding order deterministic and parity-stable. The `HashMap` beside
+/// it holds each key's POSITION in that `Vec`, so a lookup stops being the linear
+/// scan that made every map operation O(keys) and every program with distinct
+/// keys quadratic in them (RFC-0104's k-nucleotide row, the same defect the two
+/// compiled backends carried). It never decides an order; only the `pairs` do,
+/// which is the whole reason the index is a second structure rather than a
+/// different first one.
+///
+/// The index costs a second copy of each key. That is the oracle's trade and not
+/// the compiled backends' — theirs index by position into a bucket array — and it
+/// buys the same order of growth in the interpreter that generators run in.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MapVal {
+    pairs: Vec<(String, Val)>,
+    idx: std::collections::HashMap<String, usize>,
+}
+
+impl MapVal {
+    /// The value stored under `k`, or `None`.
+    pub fn get(&self, k: &str) -> Option<&Val> {
+        self.idx.get(k).map(|i| &self.pairs[*i].1)
+    }
+
+    /// Whether `k` has an entry — `m.has(k)`.
+    pub fn contains(&self, k: &str) -> bool {
+        self.idx.contains_key(k)
+    }
+
+    /// `m[k] = v`: overwrite in place on a hit (the entry keeps its position, so
+    /// the order does not move), append on a miss.
+    pub fn insert(&mut self, k: String, v: Val) {
+        match self.idx.get(&k) {
+            Some(i) => self.pairs[*i].1 = v,
+            None => {
+                self.idx.insert(k.clone(), self.pairs.len());
+                self.pairs.push((k, v));
+            }
+        }
+    }
+
+    /// `m.remove(k)`: drop the entry, shifting the survivors down so
+    /// first-insertion order holds for them — which is why a remove-then-insert
+    /// moves a key to the end. Every survivor after the hole moved, so their
+    /// positions are renumbered; the shift is already O(len), so this is free.
+    pub fn remove(&mut self, k: &str) -> bool {
+        let Some(i) = self.idx.remove(k) else {
+            return false;
+        };
+        self.pairs.remove(i);
+        for at in self.idx.values_mut() {
+            if *at > i {
+                *at -= 1;
+            }
+        }
+        true
+    }
+}
+
+impl std::ops::Deref for MapVal {
+    type Target = [(String, Val)];
+    fn deref(&self) -> &Self::Target {
+        &self.pairs
+    }
+}
+
+impl FromIterator<(String, Val)> for MapVal {
+    /// Built by insertion, so a repeated key in the source updates in place and
+    /// keeps its slot — the one policy every builder of a map shares.
+    fn from_iter<T: IntoIterator<Item = (String, Val)>>(it: T) -> Self {
+        let mut m = MapVal::default();
+        for (k, v) in it {
+            m.insert(k, v);
+        }
+        m
+    }
 }
 
 /// The two shapes a [`Val::Stream`] can take (RFC-0075 M2b) — the interpreter's
@@ -3033,7 +3111,7 @@ impl<'a> Interp<'a> {
             // A map's keys are Strings and declare nothing; its values are the
             // half that can.
             Val::Map(kv) => {
-                for (_, x) in kv {
+                for (_, x) in kv.iter() {
                     self.release_nested(x)?;
                 }
             }
@@ -3625,19 +3703,12 @@ impl<'a> Interp<'a> {
                         if let Some(t) = &val_ty {
                             v = self.coerce(v, t)?;
                         }
-                        fn insert_pair(pairs: &mut Vec<(String, Val)>, k: String, v: Val) {
-                            if let Some(slot) = pairs.iter_mut().find(|(pk, _)| pk == &k) {
-                                slot.1 = v;
-                            } else {
-                                pairs.push((k, v));
-                            }
-                        }
                         for frame in scope.iter_mut().rev() {
                             if let Some(Slot {
                                 v: Val::Map(pairs), ..
                             }) = frame.get_mut(name)
                             {
-                                insert_pair(pairs, (*k).clone(), v);
+                                pairs.insert((*k).clone(), v);
                                 return Ok(Flow::Normal);
                             }
                         }
@@ -3645,7 +3716,7 @@ impl<'a> Interp<'a> {
                             v: Val::Map(pairs), ..
                         }) = self.globals.borrow_mut().get_mut(name)
                         {
-                            insert_pair(pairs, (*k).clone(), v);
+                            pairs.insert((*k).clone(), v);
                             return Ok(Flow::Normal);
                         }
                         return Err(format!("index-assignment to unbound map `{name}`").into());
@@ -4573,28 +4644,19 @@ impl<'a> Interp<'a> {
                             )
                         }
                     };
-                    let remove_from = |pairs: &mut Vec<(String, Val)>| -> bool {
-                        if let Some(i) = pairs.iter().position(|(k, _)| k.as_str() == key.as_str())
-                        {
-                            pairs.remove(i);
-                            true
-                        } else {
-                            false
-                        }
-                    };
                     for frame in scope.iter_mut().rev() {
                         if let Some(Slot {
                             v: Val::Map(pairs), ..
                         }) = frame.get_mut(&recv)
                         {
-                            return Ok(Val::Bool(remove_from(pairs)));
+                            return Ok(Val::Bool(pairs.remove(key.as_str())));
                         }
                     }
                     if let Some(Slot {
                         v: Val::Map(pairs), ..
                     }) = self.globals.borrow_mut().get_mut(&recv)
                     {
-                        return Ok(Val::Bool(remove_from(pairs)));
+                        return Ok(Val::Bool(pairs.remove(key.as_str())));
                     }
                     return Err("`remove` needs a mutable map binding".into());
                 }
@@ -5498,18 +5560,13 @@ impl<'a> Interp<'a> {
                             .ok_or_else(|| crate::trap::string_index(i).into()),
                         // `m[k]` on a Map (RFC-0028) → `Option<V>`.
                         (Val::Map(pairs), Val::Str(k)) => Ok(Val::Option(
-                            pairs
-                                .iter()
-                                .find(|(pk, _)| pk.as_str() == k.as_str())
-                                .map(|(_, v)| Box::new(v.clone())),
+                            pairs.get(k.as_str()).map(|v| Box::new(v.clone())),
                         )),
                         _ => Err("at of non-Array/Int64".into()),
                     },
                     // `m.has(k)` (RFC-0028) — membership test.
                     "@has" => match (&vals[0], &vals[1]) {
-                        (Val::Map(pairs), Val::Str(k)) => Ok(Val::Bool(
-                            pairs.iter().any(|(pk, _)| pk.as_str() == k.as_str()),
-                        )),
+                        (Val::Map(pairs), Val::Str(k)) => Ok(Val::Bool(pairs.contains(k.as_str()))),
                         _ => Err("`has` needs a Map and a String key".into()),
                     },
                     // `m.keys()` (RFC-0028) — a fresh snapshot Array<String> in
@@ -5923,7 +5980,7 @@ impl<'a> Interp<'a> {
             // A map literal (RFC-0028): evaluate entries in written order as
             // insertions — a repeated key updates in place (keeps its slot).
             Expr::MapLit { entries, .. } => {
-                let mut pairs: Vec<(String, Val)> = Vec::with_capacity(entries.len());
+                let mut pairs = MapVal::default();
                 for (ke, ve) in entries {
                     let k = match self.expr(ke, scope)? {
                         Val::Str(s) => s,
@@ -5934,11 +5991,7 @@ impl<'a> Interp<'a> {
                         }
                     };
                     let v = self.expr(ve, scope)?;
-                    if let Some(slot) = pairs.iter_mut().find(|(pk, _)| pk.as_str() == k.as_str()) {
-                        slot.1 = v;
-                    } else {
-                        pairs.push(((*k).clone(), v));
-                    }
+                    pairs.insert((*k).clone(), v);
                 }
                 Ok(Val::Map(pairs))
             }
@@ -6566,9 +6619,9 @@ impl<'a> Interp<'a> {
             // A `Map<String, V>` coerces (and thus validates) every value into
             // `V` — the boundary re-validation for a predicated value type.
             (Type::Map(_, val), Val::Map(pairs)) => {
-                let mut out = Vec::with_capacity(pairs.len());
-                for (k, v) in pairs {
-                    out.push((k, self.coerce(v, val)?));
+                let mut out = MapVal::default();
+                for (k, v) in pairs.pairs {
+                    out.insert(k, self.coerce(v, val)?);
                 }
                 Ok(Val::Map(out))
             }

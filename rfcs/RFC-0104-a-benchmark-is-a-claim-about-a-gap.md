@@ -828,7 +828,7 @@ what this milestone exists to produce.
 
 1. **A hashed `Map`.** Lookup is a linear `strcmp` scan in both backends
    (`__vyrn_map_find`); the ordered-vector representation can keep insertion
-   order with an index beside it.
+   order with an index beside it. **Closed** — see *Work item 1, closed* below.
 2. **Byte-slice map keys**, so a k-mer window is not a `String` allocation and a
    UTF-8 validation per position.
 3. **One search per update**, so `m[k] = m[k] + 1` does not scan the map twice.
@@ -1214,6 +1214,94 @@ files, and every chart, ratio and caption moves with them.
    cannot hold a ten-millisecond reading. Printing `<0.01` was the second
    attempt; the first printed `0.00` and a reader would have concluded the
    program took no time at all.
+
+## Work item 1, closed — `Map` is a hash map
+
+The first of the ten. M2 named the cause exactly and the fix is the one it
+named: a hash INDEX beside the insertion-ordered storage, not a different
+storage. RFC-0028 locked the order and parity pins it, so the arrays that decide
+it are untouched — what changed is that finding a key in them stopped being a
+walk over all of them.
+
+The scan lived in three places, one per engine, and all three are gone:
+`Val::Map`'s `Vec` scan in the interpreter (five of them, one per operation);
+`__vyrn_map_find` in the native shim, the `for`/`strcmp` loop this document
+quoted; and the identical loop hand-emitted as wasm in `direct.rs`, reached from
+the one funnel `map_scan` that every map operation goes through.
+
+The map header gained a fifth field, `idx` — `cap * 2` buckets of i64 holding an
+entry's position plus one, so zero is the empty bucket, probed by FNV-1a over
+the key's bytes with linear probing. Two invariants make the arithmetic free:
+`cap` is a power of two, so the wrap is a mask, and `len <= cap` means the table
+is at most half full, so a probe always reaches an empty bucket. `remove` needs
+no tombstones — RFC-0028's removal is an order-preserving shift and therefore
+already O(len), so it rebuilds the index, and so does a grow. The cost is 16
+bytes of index per capacity slot, which is 16 to 32 per entry.
+
+### The re-run of the cause experiment
+
+The same experiment M2 ran, on the same machine, best of three, with the C leg
+rebuilt beside it as the flat line it was:
+
+| fasta n | THREE bases | Vyrn native, linear scan | Vyrn native, hashed | C |
+|---|---|---|---|---|
+| 2,000 | 10,000 | 0.72 s | **0.012 s** | 0.007 s |
+| 4,000 | 20,000 | 2.86 s | **0.020 s** | 0.010 s |
+| 8,000 | 40,000 | 12.58 s | **0.036 s** | 0.015 s |
+| 16,000 | 80,000 | 52.09 s | **0.111 s** | 0.036 s |
+
+Four times the input was 3.98×, 4.39× and 4.14× the time — the quadratic M2
+recorded. It is now 1.59×, 1.82× and 3.11×, against C's own 1.30×, 1.61× and
+2.31× on the same inputs: the Vyrn line has the shape of the C line, and what is
+left of the difference is the three costs still on top of the map rather than the
+map. The left column reproduces M2's recorded 0.78 / 2.92 / 13.4 / 55.0 within a
+few percent on the same machine, which is what makes the two columns comparable
+at all.
+
+The Vyrn legs print identical bytes at every size; that equality is asserted by
+the probe rather than eyeballed.
+
+**At the row's own timing size — fasta n = 4,000, the 20,000-base THREE
+sequence — the native leg goes from 2.86 s to 20 ms, and from 287× C to 2.0× C.**
+The wasm leg goes from 3.49 s to 49 ms. Neither number comes from the harness:
+they are best-of-three wall clock over the same binaries and the same input the
+harness feeds, taken while nothing else was building, and the C and old-Vyrn
+cells reproduce M2's to within a few percent, which is the check that makes them
+readable beside it. The published dataset is unchanged and still says 287×; a
+harness re-run is `python rfcs/bench-0104/harness/run.py` and two new files, and
+every chart and ratio moves with them.
+
+### What this does not fix
+
+Work items 2 and 3 are the rest of k-nucleotide's map cost and both are
+untouched here: a k-mer window is still a `String` allocation and a UTF-8
+validation per position (2), and `m[k] = m[k] + 1` still searches twice (3) —
+two probes now rather than two scans, which is why they stopped dominating
+without being fixed. Item 4's hand-written insertion sort is likewise still
+there. The row is no longer a `Map` row; the remaining costs are the ones M0
+originally named, in the proportion it thought they had.
+
+### What contradicted the work item
+
+1. **"k-nucleotide: 1.05×, both ends are the same linear scan" is retired.** M2's
+   wasm-against-native table used this row as the one place the optimizer gap
+   disappears, and the reason it gave was exactly right: the scan dominated both
+   ends, so both ends measured the scan. With the scan gone the row is 2.5×
+   (49 ms against 20 ms) and it has rejoined the range the other seven rows are
+   in. The finding survives, inverted: a row where the two backends agree is a
+   row where neither is measuring the backend.
+2. **The census could not have found this, and neither could a microbenchmark of
+   the fix.** M2 already said `p-mapkey.vyrn` measured k = 1 and k = 2 — four
+   keys and sixteen — where a linear scan is free. The same size dependence runs
+   the other way here: at those sizes the hashed map is not measurably faster
+   either, and every number above comes from the size at which the claim can
+   fail.
+3. **A silent fall-back was refused.** The obvious defensive shape for the new
+   lookup is "if there is no index, scan" — three lines, and it can never be
+   wrong. It is not there: a missing index is a bug in the one function that
+   maintains it, and a fall-back would answer correctly while quietly restoring
+   the exact defect this item exists to close. The empty map is answered by its
+   own length instead.
 
 ## What this RFC does not do
 
