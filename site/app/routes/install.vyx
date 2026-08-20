@@ -217,7 +217,7 @@ fn versionLine() -> String {
         <section class="band" id="editor">
             <p class="eyebrow">06 — editor</p>
             <h2>Then set up your editor</h2>
-            <p>The VS Code extension and the <code>vyrn-lsp</code> language server both ship in this repository, and <a href="/editors.html">the editors page</a> has what they do and the two commands that install them. This page stops at the compiler.</p>
+            <p>The VS Code extension and the <code>vyrn-lsp</code> language server both ship in this repository, and <a href="/docs/editors.html">the editors page</a> has what they do and the two commands that install them. This page stops at the compiler.</p>
             <p class="notice">Modules resolve from <code>vyrn.json</code>. Remote imports (<code>github:</code>, <code>gist:</code>, <code>https:</code>) are pinned in <code>vyrn.lock</code> and cached by sha256 under <code>~/.vyrn</code>. <code>--offline</code> refuses to fetch.</p>
         </section>
 </main>

@@ -12,6 +12,7 @@
 /// row here, which is what reserving them was for. A row is still only written
 /// when the route behind it exists — there is no placeholder page anywhere.
 import { substring, split, repeat } from "std/strings"
+import { startsWith } from "std/strpred"
 import { Head, noHead, withTitle, withMeta } from "std/ui"
 
 /// The head every page shares: its title, the viewport (without which a page
@@ -59,7 +60,7 @@ export fn themeControl() -> String {
     return "<button type=\"button\" class=\"theme\" data-theme-cycle aria-label=\"Theme: System. Press to use Light.\">System</button>"
 }
 
-/// The published file for a route path: `/philosophy` is `philosophy.html`, and
+/// The published file for a route path: `/why-vyrn` is `why-vyrn.html`, and
 /// `/docs/std/json` is `docs/std/json.html`.
 ///
 /// A route keeps its own shape, and the URL keeps the `.html`. RFC-0014 has
@@ -103,22 +104,47 @@ export fn upTo(path: String) -> String {
     return repeat("../", split(published(path), "/").length - 1)
 }
 
-/// The navigation, in reading order.
+/// The navigation: FIVE groups, in reading order (RFC-0106 M1).
 ///
-/// Guide sits before Docs: the book teaches in order, the reference answers one
-/// question at a time, and a reader who wants the second usually knows it.
+/// It was nine flat rows with no hierarchy — 718px of links showing 343px of
+/// itself on a phone, with a hidden scrollbar and nothing on the page saying so
+/// (RFC-0106 M0, checklist row 30). Five names a reader already knows, and the
+/// four routes that left the row are not gone: `/install` is the persistent
+/// button below, `/compare` is reached from the index teaser and from the book,
+/// `/why-vyrn` from the index, and the editors page from the book.
+///
+/// TWO OF THESE ARE LABEL CHANGES AND NOT PATH CHANGES, and the reason is in
+/// M0's redirect map. `Docs` is the book, which lives at `/guide`; `Reference`
+/// is the standard library, which lives at `/docs`. Renaming the paths to match
+/// the labels would need `/docs` to mean the reference to the 284 links that
+/// name it and the book to the nav row above it at the same time, and no
+/// redirect stub can hold a path its own replacement occupies. A label costs
+/// nothing and breaks nothing.
 export fn navRows() -> Array<NavRow> {
     return [
-        NavRow { href: hrefOf("/philosophy"), label: "Philosophy" },
-        NavRow { href: hrefOf("/compare"), label: "Compare" },
-        NavRow { href: hrefOf("/install"), label: "Install" },
-        NavRow { href: hrefOf("/editors"), label: "Editors" },
-        NavRow { href: hrefOf("/releases"), label: "Releases" },
-        NavRow { href: hrefOf("/guide"), label: "Guide" },
-        NavRow { href: hrefOf("/docs"), label: "Docs" },
+        NavRow { href: hrefOf("/guide"), label: "Docs" },
+        NavRow { href: hrefOf("/docs"), label: "Reference" },
         NavRow { href: hrefOf("/explore"), label: "Explore" },
+        NavRow { href: hrefOf("/releases"), label: "Releases" },
         NavRow { href: hrefOf("/play"), label: "Play" },
     ]
+}
+
+/// The one call to action, in the masthead of every consumer page (RFC-0106 M1).
+///
+/// It is a LINK and not a button, because it goes to a page: `/install` is where
+/// the commands are, and a reader who middle-clicks or bookmarks it gets what
+/// they asked for. It reads as a button because it is the one thing on the page
+/// the site wants pressed.
+///
+/// A string rather than markup in the layout, for the reason `themeControl()` is
+/// one: `site/export.vyrn` stamps `aria-current` by finding
+/// `<a href="…" data-key="…"` in the document, so the two attributes have to be
+/// the first two and in that order. A template writing `class` first would put
+/// the CTA outside the marker's reach, and the reader on `/install` would see
+/// nothing in the masthead saying so.
+export fn installCta() -> String {
+    return "<a href=\"\{hrefOf("/install")}\" data-key=\"\{hrefOf("/install")}\" class=\"cta\">Install</a>"
 }
 
 test "the home page keeps the bare index name" {
@@ -127,7 +153,7 @@ test "the home page keeps the bare index name" {
 }
 
 test "a route becomes one file, and a nested route keeps its directory" {
-    assertEq(published("/philosophy"), "philosophy.html")
+    assertEq(published("/why-vyrn"), "why-vyrn.html")
     assertEq(hrefOf("/compare"), "/compare.html")
     assertEq(published("/docs/std/json"), "docs/std/json.html")
     assertEq(hrefOf("/docs/std/json"), "/docs/std/json.html")
@@ -135,11 +161,33 @@ test "a route becomes one file, and a nested route keeps its directory" {
 
 test "a page's climb back to the root is its own depth and nothing else" {
     assertEq(upTo("/"), "")
-    assertEq(upTo("/philosophy"), "")
+    assertEq(upTo("/why-vyrn"), "")
     assertEq(upTo("/guide/values"), "../")
     assertEq(upTo("/docs/std/json"), "../../")
 }
 
-test "the navigation covers every route but the home page" {
-    assertEq(navRows().length, 9)
+test "the navigation is five groups, and two of them are relabelled paths" {
+    let rows = navRows()
+    assertEq(rows.length, 5)
+    // The label a reader sees, against the path it goes to. These two pairs are
+    // the whole of M0's label decision, and a change to either of them is a
+    // change to what 284 and 227 content links mean.
+    assertEq(rows[0].label, "Docs")
+    assertEq(rows[0].href, "/guide.html")
+    assertEq(rows[1].label, "Reference")
+    assertEq(rows[1].href, "/docs.html")
+    // The four routes that left the row are not in it under another name.
+    for row in rows {
+        assert(row.href != hrefOf("/install"))
+        assert(row.href != hrefOf("/compare"))
+        assert(row.href != hrefOf("/why-vyrn"))
+        assert(row.href != hrefOf("/docs/editors"))
+    }
+}
+
+test "the call to action names the install route, and names it first" {
+    let cta = installCta()
+    // The two attributes the export's marker looks for, in the order it looks
+    // for them. A `class` written before them puts the CTA out of its reach.
+    assert(startsWith(cta, "<a href=\"/install.html\" data-key=\"/install.html\""))
 }

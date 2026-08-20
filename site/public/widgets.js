@@ -20,7 +20,7 @@ import { runVyrn } from "./wasi-min.js";
 // the module that wrote it.
 const SITE = new URL(".", import.meta.url);
 
-// Soft navigation across a static host: the payload for /philosophy.html lives
+// Soft navigation across a static host: the payload for /why-vyrn.html lives
 // beside it in /philosophy.data.json, because a file host cannot vary on
 // `Accept`. Set before the runtime module loads.
 window.__vyrnNavConfig = { staticData: true };

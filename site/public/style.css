@@ -257,7 +257,7 @@ a:hover { text-decoration-color: var(--accent); }
  * This does not reach every counted target: an 11px `<th>` link in a table
  * paints 18px and a 2px band leaves it at 22px, and an SVG `<a>` has no CSS box
  * at all. Those are M3's, where the tables and the graph are rebuilt. */
-p a, li a, dd a, dt a, caption a, figcaption a, .note a, .notice a, .cap a, td a {
+p a, li a, dd a, dt a, caption a, figcaption a, .note a, .notice a, .cap a, td a, .foot a {
   padding-block: 2px;
 }
 code, pre, kbd { font-family: var(--mono); }
@@ -512,6 +512,58 @@ h1 code, h2 code, h3 code, h4 code {
 }
 [data-js] .theme:hover { color: var(--ink); border-color: var(--accent); }
 
+/* The right-hand group: the call to action and the theme control, together at
+ * the end of the row. `.theme` carries its own `margin-left: auto` because the
+ * backstage masthead has no wrapper to put one on, and inside this one that
+ * auto margin would push the two apart. */
+.tools { display: flex; align-items: center; gap: var(--s2); margin-left: auto; }
+.tools .theme { margin-left: 0; }
+
+/* THE ONE CALL TO ACTION (RFC-0106 M1). The site had no persistent one: install
+ * was the third of nine equal nav rows. It is filled and the only filled thing
+ * in the header, because there is one of it. */
+.cta {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 var(--s2);
+  background: var(--accent);
+  color: var(--paper);
+  border: 1px solid var(--accent);
+  text-decoration: none;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.cta:hover { background: color-mix(in oklab, var(--accent) 85%, var(--ink)); }
+/* On `/install` itself the button is where the reader already is, so it stops
+ * inviting and starts reporting — the same job the nav marker does, in the
+ * shape this control has. */
+.cta[aria-current="page"] { background: none; color: var(--accent); }
+
+/* THE NAVIGATION DISCLOSURE (RFC-0106 M1).
+ *
+ * ONE `<nav>`, rendered once, that is a row of five links above 640px and a
+ * panel behind a `Menu` press below it. These four rules are the "above 640px"
+ * half, and they are the BASE rules rather than a `min-width` query so that a
+ * browser with no media-query support at all still gets the navigation:
+ *
+ *   - `.menu { display: contents }` dissolves the `<details>` box, so the nav is
+ *     the masthead's own flex item.
+ *   - the summary is not shown, because there is nothing to disclose.
+ *   - the panel is forced open, and this takes TWO declarations because engines
+ *     implement a closed `<details>` two ways: the older model puts
+ *     `display: none` on every non-summary child, and the newer one puts
+ *     `content-visibility: hidden` on a `::details-content` pseudo-element.
+ *     Overriding both is how one sheet is right in both engines.
+ *
+ * The `@media (max-width: 640px)` block near the end of this file puts the
+ * disclosure back. */
+.menu { display: contents; }
+.menu > summary { display: none; }
+.menu::details-content { display: contents; content-visibility: visible; }
+
 .nav { display: flex; gap: var(--s3); flex-wrap: wrap; }
 /* 44px AT EVERY WIDTH, and this is a rule that moved (RFC-0106 M1). It lived
  * inside `@media (max-width: 640px)`, so at 768px and every width above it a
@@ -528,6 +580,7 @@ h1 code, h2 code, h3 code, h4 code {
   min-height: 44px;
 }
 .nav a:hover { color: var(--ink); }
+.menu > .nav { display: flex; }
 /* Where the reader is. `site/export.vyrn` stamps the attribute per published
  * document and `widgets.js` moves it after a soft navigation, so the marker is
  * right on a first load with no script and right after every navigation with
@@ -1553,16 +1606,61 @@ kbd {
   .heroplate canvas, .hero-static { height: 240px; }
   .feed li { grid-template-columns: minmax(0, 1fr); gap: var(--s1); }
 
-  /* The masthead and the rail are both ONE LINE that you push, not a list that
-   * wraps into ragged pairs. Wrapping put "RELEASES DOCS" on a second row under
-   * three others and read as a mistake; a strip reads as a strip. */
-  .masthead { flex-direction: column; align-items: stretch; gap: var(--s1); padding: var(--s2) 0; }
-  .nav, .rail { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; gap: var(--s3); }
+  /* THE HEADER STAYS ONE 64px ROW (RFC-0106 M1, checklist row 31).
+   *
+   * It was a column here — wordmark, then a nav strip, then the theme button —
+   * 152px of an 812px screen before a word of content, with fewer than half the
+   * nine rows on screen and a hidden scrollbar saying nothing about it. The
+   * navigation is a disclosure at this width instead: the four rules at the top
+   * of this sheet that make `<details>` not a disclosure are undone here, in
+   * both engine models, and the panel is taken out of the flow so opening it
+   * cannot change the header's height.
+   *
+   * The gap drops to `--s1`: four items in 343px is the whole budget. */
+  .masthead { gap: var(--s1); position: relative; }
+  .tools { gap: var(--s1); }
+  .menu > summary {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    /* A marker triangle beside the word costs 12px of a 343px row, and the word
+     * `Menu` beside a panel that visibly opens says the same thing. */
+    list-style: none;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    cursor: pointer;
+  }
+  .menu > summary::-webkit-details-marker { display: none; }
+  .menu > summary:hover { color: var(--ink); }
+  .menu[open] > summary { color: var(--accent); }
+  .menu:not([open])::details-content { content-visibility: hidden; }
+  .menu:not([open]) > .nav { display: none; }
+  /* The panel. Out of the flow, the full width of the sheet, and above the page
+   * — a header that grew by 220px when the reader pressed Menu would be the
+   * 152px column again with an extra press in front of it. */
+  .menu > .nav {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 60;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    padding: var(--s1) var(--s2);
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-top: 0;
+  }
+  .menu > .nav a { border-bottom: 1px solid var(--hair); }
+  .menu > .nav a:last-child { border-bottom: 0; }
+  .rail { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; gap: var(--s3); }
   /* Four section names push sideways; forty export names do not. The index
    * wraps into a block a third of the screen tall and scrolls down. */
   .rail.toc { flex-wrap: wrap; overflow-x: hidden; overflow-y: auto; max-height: 32vh; gap: 0 var(--s3); }
   .rail.toc .eyebrow { flex-basis: 100%; margin: 0; }
-  .nav::-webkit-scrollbar, .rail::-webkit-scrollbar { display: none; }
+  .rail::-webkit-scrollbar { display: none; }
   /* `.nav a` moved out of this block and up to the base rules: it is 44px at
    * every width now (RFC-0106 M1). The rail is still a phone-only strip. */
   .rail a { white-space: nowrap; display: inline-flex; align-items: center; min-height: 44px; }

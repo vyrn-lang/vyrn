@@ -6,7 +6,7 @@
 // two reserved sockets were filled that way: `/guide` and `/explore` arrived as
 // a directory of routes plus one row each in `navRows`, and nothing else here
 // changed.
-import { navRows, NavRow, themeControl } from "../nav"
+import { navRows, NavRow, themeControl, installCta } from "../nav"
 import { exampleCount, backendCount, hasRelease, releaseTag, releasePre } from "../repo"
 // The stylesheet and the one script module, for every page.
 //
@@ -45,15 +45,35 @@ fn standing() -> String {
     <a class="skip" href="#main">Skip to content</a>
     <header class="masthead">
         <a href="/index.html" class="wordmark">vyrn</a>
-        <nav class="nav" aria-label="Site">
-            <a v-for="r in navRows()" :key="r.href" :href="r.href">{{ r.label }}</a>
-        </nav>
-        <!-- One button, three states, one attribute on `<html>`, and nothing at
-             all without script — `theme.js` says why. `v-html` needs an element
-             to write into, and the backstage masthead is built as a string where
-             the control's own `<button>` is the flex item; `.slot` is `display:
-             contents`, so the two mastheads have the same boxes. -->
-        <div class="slot" v-html="themeControl()"></div>
+        <!-- THE FIVE GROUPS, AND THE DISCLOSURE THAT IS ONE ONLY ON A PHONE
+             (RFC-0106 M1).
+             `<details>` and not a script: at 375px there is 343px of usable
+             row, and the wordmark, the Install button and the theme control
+             take 178px of it. Five nav groups do not fit in the 165px left, and
+             a strip that scrolls with a hidden scrollbar is what the census
+             measured and called unusable. A summary the reader presses is the
+             platform's own answer, it works with no JavaScript at all, and it
+             keeps the header at one height.
+             Above 640px this element is not a disclosure: the stylesheet hides
+             the summary and forces the panel open, so the same markup is a row
+             of five links. One nav, rendered once. -->
+        <details class="menu">
+            <summary>Menu</summary>
+            <nav class="nav" aria-label="Site">
+                <a v-for="r in navRows()" :key="r.href" :href="r.href">{{ r.label }}</a>
+            </nav>
+        </details>
+        <!-- The one call to action and the theme control, pushed to the end of
+             the row together. Both are strings from `../nav` rather than markup
+             here: the theme control because the backstage builds its masthead as
+             one string and has no host element, and the CTA because the export's
+             `aria-current` marker matches on `href` and `data-key` being the
+             first two attributes, which a template cannot promise. `.slot` is
+             `display: contents`, so `v-html` costs no box either time. -->
+        <div class="tools">
+            <span class="slot" v-html="installCta()"></span>
+            <span class="slot" v-html="themeControl()"></span>
+        </div>
     </header>
     <!-- Where the skip link lands, and why it is not the `<main>` itself: every
          route's `<main class="page">` is `display: contents`, so its children

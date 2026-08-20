@@ -246,7 +246,7 @@ fn builtDigest() -> String {
             <p class="eyebrow">05 — next</p>
             <h2>Read it, or build it</h2>
             <ul class="plain">
-                <li><a href="/philosophy.html">Philosophy</a><span class="note">Intent over mechanism, and the six things Vyrn refuses to have.</span></li>
+                <li><a href="/why-vyrn.html">Why Vyrn</a><span class="note">Intent over mechanism, and the six things Vyrn refuses to have.</span></li>
                 <li><a href="/compare.html">Compare</a><span class="note">The same task in four languages, and every number we can produce on demand.</span></li>
                 <li><a href="/install.html">Install</a><span class="note">Three commands, per platform, and how to check it runs.</span></li>
                 <li><a href="/docs.html">Docs</a><span class="note">The standard library reference, generated from the source, and the examples.</span></li>
