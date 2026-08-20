@@ -53,7 +53,7 @@ test("the export is there to check", () => {
   assert.ok(pages.length >= 160, `expected the exported tree in out/, found ${pages.length} page(s) — run: vyrn run site/export.vyrn out`);
   assert.ok(pages.includes("backstage.html"), "the backstage index is missing");
   assert.ok(pages.filter((p) => p.startsWith("backstage/rfcs/")).length > 100, "the design record is missing");
-  for (const f of ["style.css", "widgets.js", "vyrn-nav.js", "favicon.svg", "hero.wasm", "play.wasm", "play-worker.js"])
+  for (const f of ["style.css", "widgets.js", "vyrn-nav.js", "favicon.svg", "play.wasm", "play-worker.js"])
     assert.ok(files.includes(f), `out/${f} is missing`);
 });
 
@@ -140,7 +140,7 @@ for (const prefix of PREFIXES) {
 
       // The scripts fetch three things no page mentions, each one relative to
       // the script's own URL. They are checked where the scripts would ask.
-      for (const asset of ["hero.wasm", "play.wasm", "play-worker.js"]) wanted.set(`${base}/${asset}`, "the site's scripts");
+      for (const asset of ["play.wasm", "play-worker.js"]) wanted.set(`${base}/${asset}`, "the site's scripts");
 
       for (const [url, named] of wanted) {
         const res = await fetch(url);

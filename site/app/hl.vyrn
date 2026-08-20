@@ -90,6 +90,31 @@ let bad = Age(5)    // the compiler refuses this
 }
 ",
         },
+        // The index's hero editor (RFC-0106 M2). It RUNS: the reader presses
+        // Run, the compiler front end arrives as WebAssembly, and this program
+        // prints its two lines in the page. So it needs a `main`, and it is
+        // the one snippet on the site whose source a reader edits — which is
+        // why `hlSource` exists beside `hlLines`, to put the same bytes in the
+        // textarea that the colour above it was measured from.
+        Piece {
+            id: "runme",
+            src: "type Age = Int64 where value >= 18
+
+fn admit(n: Int64) -> String {
+    // Age?(n) answers None when the rule fails, so input never traps.
+    return match Age?(n) {
+        Some(a) => \"admitted at \\{a}\",
+        None => \"refused: \\{n} is under 18\",
+    }
+}
+
+fn main() -> Int64 {
+    print(admit(30))
+    print(admit(5))
+    return 0
+}
+",
+        },
         Piece {
             id: "cmpTypes",
             src: "type Age = Int64 where value >= 18
@@ -370,6 +395,31 @@ fn quoted(s: String) -> String {
     return out + substring(s, plain, raw.length) + "\""
 }
 
+/// A whole snippet as ONE Vyrn string literal, newlines escaped.
+///
+/// `quoted` is for a single coloured line and never meets a newline, because
+/// `linesLit` splits on them first. This one does meet them — a snippet is
+/// twelve lines and the textarea wants all twelve — so it is a separate
+/// function rather than a flag on that one.
+fn srcLit(s: String) -> String {
+    let raw = bytes(s)
+    let mut out = "\""
+    let mut plain = 0
+    let mut i = 0
+    while i < raw.length {
+        if raw[i] == 92 || raw[i] == '"' {
+            out = out + substring(s, plain, i) + "\\"
+            plain = i
+        }
+        if raw[i] == 10 {
+            out = out + substring(s, plain, i) + "\\n"
+            plain = i + 1
+        }
+        i = i + 1
+    }
+    return out + substring(s, plain, raw.length) + "\""
+}
+
 /// A Vyrn array literal of the coloured lines of `src`. The trailing newline
 /// every snippet ends with would otherwise become an empty final row.
 gen fn linesLit(src: String, toks: Array<Token>) -> String {
@@ -394,6 +444,16 @@ export gen fn vyrnCode() -> String {
         out = out + "    if id == " + quoted(p.id) + " { return " + linesLit(p.src, lex(p.src)) + " }\n"
     }
     out = out + "    return []\n}\n"
+    // And the same snippets UNCOLOURED. One page needs both halves of the same
+    // bytes: the index's hero editor paints the coloured lines and puts the raw
+    // source in the textarea under them, and a second copy of the program
+    // written out by hand is a copy that drifts (RFC-0106 M2).
+    out = out + "/// The raw source of one snippet, exactly as `hlLines` was measured from.\n"
+    out = out + "export fn hlSource(id: String) -> String {\n"
+    for p in pieces() {
+        out = out + "    if id == " + quoted(p.id) + " { return " + srcLit(p.src) + " }\n"
+    }
+    out = out + "    return \"\"\n}\n"
     return out
 }
 

@@ -5,19 +5,17 @@
 // every label below is already in the markup when this file loads. Nothing here
 // computes a chart; it fades, sweeps, counts, or moves a playhead.
 //
-// No framework, no bundler, no dependency. Three files: this one, hero.js, and
-// fresh.js.
+// No framework, no bundler, no dependency. Two files: this one and fresh.js.
 import { refreshRelease } from "./fresh.js";
-// THE PLAYGROUND IS NOT IMPORTED HERE (RFC-0106 M1). `play.js`, `play-wasm.js`
-// and `wasi-min.js` used to be two more lines above this one, and a static
-// import is a download: twelve of the thirteen consumer pages fetched the
-// playground's 14,587 gzipped bytes to run none of it, which is the largest
-// single item in the census's page-weight finding and the one the word budget
-// could not see. Both are `import()` at the point of use now — `play.js` inside
-// the loop over the elements only `/play` has, and `wasi-min.js` inside the
-// digest the parity widget computes when the reader presses Run. Nothing else
-// about either widget changed, and neither module is fetched until a page needs
-// it.
+// NOTHING ELSE IS IMPORTED HERE, and that is the page-weight rule (RFC-0106
+// M1, M2). `play.js`, `play-wasm.js` and `wasi-min.js` were static imports
+// once, and a static import is a download: twelve of the thirteen consumer
+// pages fetched the playground's 14,587 gzipped bytes to run none of it. They
+// are `import()` at the point of use now — inside the loop over the elements
+// only `/play` has, and inside the hero editor's first interaction on `/`.
+// `vyrn-nav.js` and `vyrn-dom.js` (20,275 gzipped between them) left the same
+// way at the foot of this file: a soft navigator is fetched when a reader
+// reaches for a link, not before they have read anything.
 
 // Where the site is. Every file this page loads is a sibling of this script, and
 // this script knows its own URL, so that is the whole derivation — no flag baked
@@ -301,241 +299,6 @@ function installPicker(root) {
       ? "macos"
       : "linux";
   tabsWidget(root, { tab: "plat", pane: "plat-pane", initial: guess });
-}
-
-// ---------------------------------------------------------------------------
-// W2 — the parity check. It RUNS.
-//
-// This widget used to be a 900 ms timer that revealed a digest written into the
-// markup. On the one page whose argument is "believe the measurement", that was
-// the picture of a green tick the design brief said not to build.
-//
-// What happens now:
-//
-//   - The INTERP column is a digest the site's export computed while this page
-//     was built. The interpreter ran `examples/herofield.vyrn`'s
-//     `parityReport()` and hashed what it returned. It is in the markup because
-//     it was measured, not because it was typed.
-//   - The WASM column is empty until it runs. Then `/hero.wasm` — the same
-//     module compiled from the same file — is fetched, instantiated by
-//     `wasi-min.js`, and its `main` runs IN THIS BROWSER. The number that
-//     appears is the FNV-1a-64 of the bytes that module wrote to stdout,
-//     computed here, from that run.
-//   - The verdict compares the two, byte for byte.
-//
-// The NATIVE column cannot run in a page and does not pretend to: it says so,
-// and names the harness that does compare it.
-//
-// No digest is written into this file, and nothing is on a timer.
-// ---------------------------------------------------------------------------
-
-/// FNV-1a-64 of a string's UTF-8 bytes, as sixteen lowercase hex digits.
-///
-/// This is `std/hash`'s `fnv1a` in the language the browser has — same offset
-/// basis, same prime, same wrapping 64-bit multiply, which is why a digest this
-/// computes can be compared with one the export computed. `BigInt` because a
-/// `Number` loses the low bits of a 64-bit product.
-function fnv1aHex(text) {
-  const PRIME = 1099511628211n;
-  const MASK = 0xffffffffffffffffn;
-  let h = 14695981039346656037n;
-  for (const b of new TextEncoder().encode(text)) {
-    h = ((h ^ BigInt(b)) * PRIME) & MASK;
-  }
-  return h.toString(16).padStart(16, "0");
-}
-
-/// How many of the eight digest bytes differ. Two hex digits are one byte.
-function digestBytesDiffer(a, b) {
-  if (a.length !== b.length) return 8;
-  let n = 0;
-  for (let i = 0; i < a.length; i += 2) {
-    if (a.slice(i, i + 2) !== b.slice(i, i + 2)) n += 1;
-  }
-  return n;
-}
-
-/// Run `examples/herofield.vyrn` as wasm, here, and hash what it printed.
-///
-/// Returns the digest, or null if the module could not be fetched or would not
-/// instantiate — a page served without `hero.wasm` beside it says that, rather
-/// than showing a number it did not compute.
-async function wasmDigest() {
-  try {
-    const res = await fetch(new URL("hero.wasm", SITE));
-    if (!res.ok) return null;
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    const { runVyrn } = await import("./wasi-min.js");
-    const run = await runVyrn(bytes, { onStdout: () => {}, onStderr: () => {} });
-    if (run.exitCode !== 0 || !run.stdout) return null;
-    return fnv1aHex(run.stdout);
-  } catch (err) {
-    return null;
-  }
-}
-
-function parityWidget(root) {
-  const cols = $("[data-parity-cols]", root);
-  const verdict = $("[data-parity-verdict]", root);
-  const num = $("[data-parity-num]", root);
-  const runBtn = $("[data-parity-run]", root);
-  const breakBtn = $("[data-parity-break]", root);
-  const interpPane = $('[data-col="interp"]', root);
-  const wasmPane = $('[data-col="wasm"]', root);
-  if (!interpPane || !wasmPane || !runBtn) return;
-
-  // What the build measured. The only number this file trusts, and it came off
-  // the page rather than out of a constant here.
-  const built = interpPane.textContent.trim();
-  // The same digest with one byte flipped. "Break one byte" corrupts the number
-  // the run is compared AGAINST — the run itself is real either way, which is
-  // the honest way to show that the check is a byte comparison.
-  const flipped = built.slice(0, -1) + (built.endsWith("3") ? "7" : "3");
-  let breaking = false;
-  let measured = null;
-  let running = false;
-
-  const expected = () => (breaking ? flipped : built);
-
-  /// Everything the widget shows, as a function of what has actually happened.
-  const settle = () => {
-    interpPane.textContent = expected();
-    interpPane.classList.toggle("bad", breaking);
-    wasmPane.textContent = measured || "—";
-    const differ = measured ? digestBytesDiffer(measured, expected()) : -1;
-    cols.classList.toggle("broken", differ > 0);
-    verdict.classList.toggle("bad", differ > 0);
-    if (differ < 0) {
-      verdict.textContent = running
-        ? "running examples/herofield.vyrn here…"
-        : "nothing has run yet — press Run it here";
-      num.firstChild.textContent = "— ";
-      num.querySelector("small").textContent = "bytes differ";
-      return;
-    }
-    verdict.textContent =
-      differ === 0
-        ? "0 bytes differ — this browser and the build agree"
-        : differ + (differ === 1 ? " byte differs" : " bytes differ") + " — the harness fails";
-    num.firstChild.textContent = differ + " ";
-    num.querySelector("small").textContent = differ === 1 ? "byte differs" : "bytes differ";
-  };
-
-  /// Fetch, instantiate, run, hash. The wait is the module doing the work.
-  async function run() {
-    if (running) return;
-    running = true;
-    runBtn.disabled = true;
-    pinWidth(runBtn);
-    const label = runBtn.textContent;
-    runBtn.textContent = "Running";
-    settle();
-    measured = await wasmDigest();
-    running = false;
-    runBtn.disabled = false;
-    runBtn.textContent = label;
-    if (!measured) {
-      verdict.classList.add("bad");
-      verdict.textContent = "hero.wasm did not load — nothing ran, so there is nothing to compare";
-      return;
-    }
-    settle();
-  }
-
-  settle();
-  runBtn.addEventListener("click", run);
-  if (breakBtn) {
-    breakBtn.addEventListener("click", () => {
-      breaking = !breaking;
-      breakBtn.setAttribute("aria-pressed", String(breaking));
-      breakBtn.textContent = breaking ? "Put the byte back" : "Break one byte";
-      settle();
-    });
-  }
-  // Run it when the reader reaches it, so the number is theirs before they ask.
-  // `onView` fires immediately under reduced motion, which is right here: this
-  // is a computation, not an animation, and a reader who asked for less motion
-  // did not ask for less measurement.
-  onView(root, () => run());
-}
-
-// ---------------------------------------------------------------------------
-// W6 — the ownership replay. Shape A: one scalar, one pure render.
-//
-// The playhead is a SOURCE LINE, and every part of the widget is that one
-// number: the readout prints it, the code row carries it, and the report row
-// that names it lights up with them. There is nothing left for the three to
-// disagree about, because there is only one value.
-// ---------------------------------------------------------------------------
-
-function ownershipWidget(root) {
-  const rows = $$("[data-own-rows] .cl", root);
-  const report = $$("[data-own-report] > div", root);
-  const label = $("[data-own-n]", root);
-  if (!rows.length || !label) return;
-  const lineOf = (el) => Number(el.dataset.l);
-
-  /// Everything the widget shows, as a function of p alone.
-  const render = (p) => {
-    const i = Math.min(rows.length - 1, Math.floor(p * rows.length));
-    const line = lineOf(rows[i]);
-    label.textContent = String(line);
-    rows.forEach((r, k) => {
-      r.classList.toggle("on", k === i);
-      r.classList.toggle("ahead", k > i);
-    });
-    for (const row of report) {
-      row.classList.toggle("on", Number(row.dataset.from) <= line && line <= Number(row.dataset.to));
-    }
-  };
-
-  const replay = () => (REDUCED ? render(1) : play(3200, render));
-  render(0);
-  const btn = $("[data-own-play]", root);
-  if (btn) btn.addEventListener("click", replay);
-  onView(root, (animate) => (animate ? replay() : render(1)));
-}
-
-// ---------------------------------------------------------------------------
-// W1 supporting act — the validated-types specimen.
-//
-// The control has to be TRUE: it says it uncomments a line, so it uncomments
-// the line. The export ships both renderings of that one row — the commented
-// markup in place, the uncommented markup on the row's own `data-alt` — so the
-// swap is a string assignment and the compiler's lexer coloured both halves.
-// The diagnostic then moves under the row it is about, rather than to the foot
-// of the plate where it belonged to nothing.
-// ---------------------------------------------------------------------------
-
-function typesWidget(root) {
-  const btn = $("[data-types-btn]", root);
-  const err = $("[data-types-error]", root);
-  const row = $$("[data-types-code] .cl", root).find((r) => r.dataset.alt);
-  if (!btn || !err || !row) return;
-  const code = $("code", row);
-  const commented = code.innerHTML;
-  const uncommented = row.dataset.alt;
-  // The export renders the diagnostic visible and last, so a reader with no
-  // JavaScript still sees the compiler's answer. The script anchors it to the
-  // line and hides it until that line exists.
-  row.after(err);
-  err.hidden = true;
-  let on = false;
-  btn.addEventListener("click", () => {
-    pinWidth(btn);
-    on = !on;
-    code.innerHTML = on ? uncommented : commented;
-    err.hidden = !on;
-    btn.textContent = on ? "Comment it out again" : "Uncomment the bad line";
-    btn.setAttribute("aria-pressed", String(on));
-    btn.classList.toggle("on", on);
-    if (REDUCED) return;
-    row.classList.remove("changed");
-    // Restart the flash even when the two clicks are close together.
-    void row.offsetWidth;
-    row.classList.add("changed");
-    setTimeout(() => row.classList.remove("changed"), 900);
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1032,9 +795,113 @@ function entrance() {
 }
 
 // ---------------------------------------------------------------------------
+// THE HERO EDITOR, ARMED AND NOT MOUNTED (RFC-0106 M2)
+//
+// The index's editor is the playground on a smaller root: same `data-play-*`
+// hooks, same keyboard contract, same highlighter, `mountPlay` and not a second
+// editor. What is different is WHEN. Mounting it on load would fetch `play.js`,
+// `play-wasm.js`, `wasi-min.js` and the compiler module itself on a page a
+// reader has not decided to use yet — M0's whole page-weight finding, applied to
+// the one page the finding was computed for.
+//
+// So the document ships a coloured code block over a read-only textarea, and
+// three interactions arm it: pointing at the plate, tabbing into it, and
+// pressing Run. The first two are enough time for the module to land before the
+// reader reaches the button; the third does not lose the press, because the
+// mount reports readiness and the click is replayed. Without script the same
+// markup is a code block with a link to `/play`, which is what the `<noscript>`
+// in the template says.
+// ---------------------------------------------------------------------------
 
-/// The hero mounted by the last `boot`, if the page it was on had one.
-let hero = null;
+function armHeroEditor(root) {
+  const runBtn = $("[data-play-run]", root);
+  const src = $("[data-play-src]", root);
+  const status = $("[data-play-status]", root);
+  if (!runBtn || !src) return;
+  let armed = false;
+
+  const arm = (thenRun) => {
+    if (armed) return;
+    armed = true;
+    // Editable from the moment the reader has asked for it, and not before: a
+    // textarea a reader can type into while nothing can check or run it is a
+    // control that lies about what it does.
+    src.removeAttribute("readonly");
+    if (status) status.textContent = "Loading the compiler…";
+    import("./play.js").then(
+      ({ mountPlay }) => {
+        if (!root.isConnected) return;
+        mountPlay(root, { onReady: () => thenRun && runBtn.click() });
+      },
+      (err) => {
+        if (status) status.textContent = "The compiler did not load";
+        console.error("the hero editor did not load", err);
+      }
+    );
+  };
+
+  // `pointerenter` covers a mouse and a touch; `focusin` covers a keyboard,
+  // and it is the row the a11y checklist asks for. Both are `once`.
+  root.addEventListener("pointerenter", () => arm(false), { once: true });
+  root.addEventListener("focusin", () => arm(false), { once: true });
+  // Bound BEFORE `mountPlay` adds its own, so the first press arms and the
+  // replayed press runs. A press while the module is in flight is a no-op in
+  // `mountPlay`'s own handler, which is why readiness has to drive the replay.
+  runBtn.addEventListener("click", () => arm(true));
+}
+
+// ---------------------------------------------------------------------------
+// THE RECORDED DEMO (RFC-0106 M2)
+//
+// Seven steps, all seven in the document, all seven real output from a real
+// binary — `scripts/site-demo.py` ran it before the page was rendered. Without
+// script they are a numbered list and the page is complete. With script they
+// become one step at a time with a counter, which is the only thing this adds:
+// no content is script-only, and nothing is fetched.
+//
+// The controls are BUILT here rather than shipped in the markup, because a
+// `Next` button on a page that shows every step at once is a control that does
+// nothing (RFC-0105 M4's rule, and M1's `Menu` summary is what happens when it
+// is broken).
+// ---------------------------------------------------------------------------
+
+function demoWidget(root) {
+  const steps = $$("[data-step]", root);
+  if (steps.length < 2) return;
+
+  const bar = document.createElement("div");
+  bar.className = "controls demobar";
+  const back = document.createElement("button");
+  back.type = "button";
+  back.textContent = "Back";
+  const next = document.createElement("button");
+  next.type = "button";
+  next.textContent = "Next";
+  const count = document.createElement("span");
+  count.className = "eyebrow";
+  // Polite, because the reader pressed the button that changed it.
+  count.setAttribute("aria-live", "polite");
+  bar.append(back, next, count);
+  root.prepend(bar);
+
+  let at = 0;
+  const show = (i) => {
+    at = (i + steps.length) % steps.length;
+    steps.forEach((s, k) => (s.hidden = k !== at));
+    count.textContent = at + 1 + " / " + steps.length;
+    back.disabled = at === 0;
+    next.textContent = at === steps.length - 1 ? "Replay" : "Next";
+  };
+  back.addEventListener("click", () => show(at - 1));
+  next.addEventListener("click", () => show(at === steps.length - 1 ? 0 : at + 1));
+  root.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowRight") return e.preventDefault(), show(at + 1);
+    if (e.key === "ArrowLeft") return e.preventDefault(), show(at - 1);
+  });
+  show(0);
+}
+
+// ---------------------------------------------------------------------------
 
 function boot() {
   copyButtons();
@@ -1044,9 +911,7 @@ function boot() {
   anchorShell();
   markNav();
   railSpy();
-  for (const el of $$('[data-widget="parity"]')) parityWidget(el);
-  for (const el of $$('[data-widget="ownership"]')) ownershipWidget(el);
-  for (const el of $$('[data-widget="types"]')) typesWidget(el);
+  for (const el of $$('[data-widget="demo"]')) demoWidget(el);
   for (const el of $$('[data-widget="bars"]')) barsWidget(el);
   for (const el of $$('[data-widget="leak"]')) {
     barsWidget(el);
@@ -1068,29 +933,8 @@ function boot() {
       for (const el of playgrounds) mountPlay(el);
     }, (err) => console.error("the playground did not load", err));
   }
+  for (const el of $$('[data-widget="playhero"]')) armHeroEditor(el);
   for (const el of $$("svg.graph")) graphWidget(el);
-  // One hero at a time. `boot` runs again after every soft navigation, and a
-  // mount that was never torn down keeps a window `resize`, a document
-  // `visibilitychange` and a `matchMedia` listener alive over a canvas that is
-  // no longer in the document.
-  if (hero) {
-    hero.destroy();
-    hero = null;
-  }
-  // And the hero, on the one page that has a canvas for it — imported at the
-  // point of use for the reason the playground is (RFC-0106 M1). The census
-  // itself says `hero.js` is needed "yes, on `/`", which is another way of
-  // saying twelve pages were fetching 4,245 gzipped bytes to find no canvas.
-  const canvas = document.getElementById("field");
-  if (canvas) {
-    const at = canvas;
-    import("./hero.js").then(({ mountHero }) => {
-      // A soft navigation can have left the page while the module was in
-      // flight; mounting onto a canvas the document no longer holds would
-      // start a resize listener over nothing.
-      if (at.isConnected) hero = mountHero(at, { cellPx: 6 });
-    }, (err) => console.error("the hero did not load", err));
-  }
   refreshRelease();
 }
 
@@ -1361,4 +1205,26 @@ function landed() {
 // Soft navigation replaces the page body, so every widget on the new page needs
 // booting again. `vyrn-nav.js` announces that it has swapped the DOM.
 document.addEventListener("vyrn:nav-end", landed);
-import("./vyrn-nav.js").catch(() => {}); // a hard navigation is a fine fallback
+
+// AND THE NAVIGATOR ITSELF, ON THE FIRST REACH FOR A LINK (RFC-0106 M2).
+//
+// This was a bare `import()` on load, so every page fetched `vyrn-nav.js` and
+// `vyrn-dom.js` — 20,275 gzipped between them, the single largest item left in
+// M0's page-weight census and the one M1 recorded as out of reach. It is not a
+// module a page NEEDS: a hard navigation is the declared fallback and it is
+// what happens before this lands. So it is fetched the first time a reader
+// points at, touches, or tabs to a link, which is earlier than the click that
+// would use it and later than the paint that would pay for it.
+{
+  let asked = false;
+  const fetchNavigator = () => {
+    if (asked) return;
+    asked = true;
+    import("./vyrn-nav.js").catch(() => {}); // a hard navigation is a fine fallback
+  };
+  for (const kind of ["pointerover", "touchstart", "focusin"]) {
+    document.addEventListener(kind, (e) => {
+      if (e.target.closest && e.target.closest("a[href]")) fetchNavigator();
+    }, { passive: true });
+  }
+}
