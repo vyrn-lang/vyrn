@@ -1584,12 +1584,33 @@ fn run_generator(
     // Each constant string path argument becomes an allowed input root. A path
     // that names a module (no extension) also admits its `.vyrn` file, so
     // `moduleInterface("./contract")` may read `contract.vyrn`.
+    // A path argument that names a manifest DEPENDENCY also admits the key the
+    // import map resolves it to (RFC-0107 M2), so a generator can read a
+    // lock-pinned collection file. The pair goes to the sandbox as the
+    // import-map step `gen_scoped_path` has no way to perform, and the resolved
+    // key joins `allowed` so the input-root rule keeps deciding — and so it joins
+    // the cache key below, which is what makes RE-PINNING the dependency a miss.
+    // Without that the entry's recorded input would be the OLD pinned key, which
+    // still hashes as it did, and the stale output would be served.
     let mut allowed: Vec<String> = Vec::new();
+    let mut aliased: Vec<(String, String)> = Vec::new();
     for c in &consts {
         if let crate::consteval::ConstVal::Str(s) = c {
             allowed.push(join_dir(s));
             if !s.ends_with(".vyrn") && !s.ends_with(".json") {
                 allowed.push(join_dir(&format!("{s}.vyrn")));
+            }
+            // A declared alias whose target `resolve_spec` refuses (a manifest
+            // that maps it to something that is not a specifier) contributes no
+            // pair, so the read stays the path it was and fails as one. The
+            // manifest's own fault is already loud where a module IMPORT of that
+            // alias reports it, and inventing a second wording here would be a
+            // second answer about one broken key.
+            if opts.aliases.contains_key(s.as_str()) {
+                if let Ok(key) = resolve_spec(s, importer, opts) {
+                    allowed.push(key.clone());
+                    aliased.push((s.clone(), key));
+                }
             }
         }
     }
@@ -1699,6 +1720,7 @@ fn run_generator(
             opts,
             importer_dir,
             allowed,
+            aliased,
             fuel: GEN_FUEL_OVERRIDE.with(|c| c.get()).unwrap_or(GEN_FUEL),
             max_output: GEN_MAX_OUTPUT_OVERRIDE
                 .with(|c| c.get())
