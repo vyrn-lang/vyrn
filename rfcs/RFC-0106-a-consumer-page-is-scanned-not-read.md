@@ -2487,14 +2487,17 @@ owns the budgets, and these four are what M5 will fail on.**
 
 ### Found by the verification, and fixed
 
-Five defects the sweep found that nobody had filed, all in census section R:
+Six defects the verification found that nobody had filed, all in census section R:
 a `pre.code` on `/explore/shelf` and a `pre.doccode` on `/docs/std/json` still
 drew a scrollbar at rest, five rounds after L2 said none should; the area cards'
 `minmax(360px, 1fr)` floor is a HARD floor, so it took `/docs` 12px wider than a
 375px screen; the editors table broke `analyze_document` across two lines
 mid-word once the content column narrowed; and the icons gate keyed its
 template-to-page map by file NAME, which stopped being unique the moment a second
-`index.vyx` carried a glyph.
+`index.vyx` carried a glyph. The sixth was found by LOOKING at a 2x crop, which
+is the only thing that could have found it: the right pane carried a
+`border-left`, and the two panes are different heights, so the sheet drew a
+full-height hairline on the left and a stub that stopped halfway on the right.
 
 ### Gate
 

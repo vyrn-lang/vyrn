@@ -786,7 +786,13 @@ h1 code, h2 code, h3 code, h4 code {
 }
 .docstree::-webkit-scrollbar, .onpage::-webkit-scrollbar { display: none; }
 .docstree { border-right: 1px solid var(--hair); padding-right: var(--s3); }
-.onpage { border-left: 1px solid var(--hair); padding-left: var(--s3); }
+/* NO RULE ON THE RIGHT PANE, and that is a correction rather than a shortcut.
+ * It had one, and the two panes are different heights — 928px of tree against
+ * 432px of headings — so the sheet drew a full-height hairline on the left and a
+ * stub that stopped halfway on the right. The rail on the left separates the
+ * navigation from the column it navigates; the index on the right sits in the
+ * margin the page's own plate already ends at. */
+.onpage { padding-left: var(--s3); }
 
 /* A ROW WRAPS RATHER THAN CLIPPING. It was `text-overflow: ellipsis` and a
  * 174px column ate the end of six chapter titles — "04 Ownership, consume,…",
