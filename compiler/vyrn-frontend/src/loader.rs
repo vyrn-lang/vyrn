@@ -4468,14 +4468,16 @@ fn rewrite_module_refs(p: &mut Program, map: &HashMap<String, String>, ns: &Hash
     }
 }
 
-/// Every reference name (types and expression callees/variables/variants) used
-/// anywhere in a module's declarations — for the RFC-0022 check that an aliased
-/// import's original name is not also used directly.
-///
-/// Bodies are scanned scope-aware (the same walk [`fn_body_ref_names`] uses): a
-/// name bound by a local — a param, a `let`, a loop or lambda variable — is not
-/// a reference to a like-named foreign decl, so it must not satisfy this check.
-/// Type positions are always kept: a value local never shadows a type.
+// Every reference name (types and expression callees/variables/variants) used
+// anywhere in a module's declarations — for the RFC-0022 check that an aliased
+// import's original name is not also used directly.
+//
+// Bodies are scanned scope-aware (the same walk `fn_body_ref_names` uses): a
+// name bound by a local — a param, a `let`, a loop or lambda variable — is not
+// a reference to a like-named foreign decl, so it must not satisfy this check.
+// Type positions are always kept: a value local never shadows a type.
+// (`//` and not `///`: a doc comment on a `thread_local!` invocation documents
+// nothing and rustc warns.)
 thread_local! {
     /// The namespace bindings of the module `program_ref_names` is currently
     /// walking, so [`scope_expr`] can tell method sugar (`ns.f(x)`, recorded

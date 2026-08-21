@@ -187,7 +187,7 @@ fn run(
     // Only a fingerprinted key describes the generator well enough to trust a
     // file written by a previous process — see `artifact_key`.
     let persist = inputs.sources_fingerprint.is_some();
-    let mut source = run_module(&key, persist, &argv, program, inputs, &mut reads, || {
+    let source = run_module(&key, persist, &argv, program, inputs, &mut reads, || {
         let wrapper = wrapper_program(program)
             .ok_or_else(|| decline("the wrapper program cannot be synthesized"))?;
         compile_to_wasm(&key, &wrapper)
@@ -418,12 +418,16 @@ fn unframe_result(stdout: &[u8]) -> Result<(Vec<u8>, Vec<u8>), &'static str> {
     if begin >= end {
         return Err("the guest framed its result backwards");
     }
-    // Each `print` appends exactly one newline: one inside the frame, one after
-    // the closing marker. Anything else is not the shape the wrapper emits.
-    let Some(source) = stdout[begin + RESULT_BEGIN.len()..end].strip_suffix(b"\n") else {
+    // Each `print` appends exactly one newline: one after the begin marker,
+    // one after the source, one after the closing marker. Anything else is not
+    // the shape the wrapper emits.
+    let Some(inner) = stdout[begin + RESULT_BEGIN.len()..end].strip_prefix(b"\n") else {
+        return Err("the framed result does not begin where the wrapper put it");
+    };
+    let Some(source) = inner.strip_suffix(b"\n") else {
         return Err("the framed result does not end where the wrapper put it");
     };
-    if stdout[end + RESULT_END.len()..] != b"\n" {
+    if stdout[end + RESULT_END.len()..] != *b"\n" {
         return Err("the framed result does not end where the wrapper put it");
     }
     Ok((stdout[..begin].to_vec(), source.to_vec()))
