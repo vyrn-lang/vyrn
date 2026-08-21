@@ -9,6 +9,11 @@ reference pages the user named.
 Status values: **FIXED**, **DEFERRED** (with the reason), **NOT A DEFECT** (a
 probe hit that survived inspection, kept so nobody re-files it).
 
+**Sections A to I are the second round. Section J is the third**, added after the
+user read the second round and sent back eight findings — six of which are
+defects the second round created or left standing, plus two the sweep written for
+them found on its own.
+
 ## A. Command blocks that wrap — the defect the user led with
 
 `.cmd code` was `white-space: pre-wrap` on the index, the install page and the
@@ -128,3 +133,87 @@ were the fixes' own.
 | H4 | `/docs` is 52,815 bytes against M0's 40,000 | the import graph is 25,347 of them; moving it off the landing is M4's decision |
 | H5 | `widgets.js` is 17,762 of the 31,700 gzipped bytes every page fetches | its comments cannot be stripped by a scanner the size of the stylesheet's |
 | H6 | the census page list still names `/philosophy` and `/editors`, now redirect stubs | M5 owns the census wiring |
+
+## J. The third round — the eight the user sent back
+
+The user read the second round and returned eight findings. They are recorded
+here in their own section rather than mixed into the tables above, because six of
+the eight are defects the second round CREATED or left standing, and that is the
+more useful thing to keep.
+
+| # | Page / file | Defect | Status |
+|---|---|---|---|
+| J1 | `.github/workflows/site.yml` | the `Site / build` job failed: `site-demo.py` raised `FileNotFoundError` on `compiler/target/release/vyrn` | **FIXED** — the path, not the workflow. See below |
+| J2 | index, install | three OS tiles, two of which carried the same command; the target was `raw.githubusercontent.com`; `Checksum-verified.` in the hero | **FIXED** — two tiles, the site's own origin, and the line is gone |
+| J3 | install | the OS guess did nothing on the page a reader installs from | **FIXED** — `data-os` was on the index's radios and not on the install page's, so the selector matched nothing there |
+| J4 | releases, nav | an install command duplicating `/install`, and a fifth masthead row for a changelog | **FIXED** — the block is one link, the row is gone, and the index carries a `Latest release` section |
+| J5 | search overlay | the result list did not scroll, and the scrim painted white in dark mode | **FIXED** — one rule named an attribute the markup does not carry, and the scrim was an alias of the ink |
+| J6 | every page | elements sitting closer to a neighbour than the rhythm allows | **FIXED** — three rules, and a fourth defect the sweep found on its own (J10) |
+| J7 | — | "we take the reference site's good decisions, we do not copy wholesale" | recorded in the RFC's as-landed section |
+| J8 | index | the page carries a release teaser now and the word budget is 260 | **FIXED** — 260 exactly, after `Every release` became `Releases` |
+
+### J1, the one that blocked everything
+
+The workflow DOES build the binary — `cargo build --release -p vyrn-cli`, the
+first step, 62 seconds — and the three steps between the build and the failure
+ran that same binary by that same path. The bug is in `scripts/site-demo.py`:
+every recorded step runs in a scratch directory, and **on POSIX a relative
+program path is resolved against the CHILD's working directory**, not the
+parent's. Windows resolves it against the parent's, which is why the script had
+always worked on the machine it was written on. `shutil.which` does not help: a
+path with a separator in it comes back unchanged. One `os.path.abspath`.
+
+Where the seventeen minutes went, measured on the failed run: 62 s to build the
+CLI, 25 s + 45 s for the playground's wasm build and host tests — and **907 s in
+`The site's own tests`, of which 687 s is `vyrn test site/export.vyrn` alone**.
+A cache takes the 132 s of cargo work off a warm run and cannot touch the rest.
+Two things changed: `Swatinem/rust-cache` on its own slot, the pattern `ci.yml`
+already uses, and the demo and history steps moved ABOVE the fifteen-minute test
+loop, so a broken export input fails the job in two minutes instead of at
+minute seventeen.
+
+### J5, and why a search box can pass every test and still be broken
+
+`.findpanel [data-search-results] { overflow-y: auto }` — and the markup carries
+`data-find-results`. Nothing in the panel had ever scrolled: a query with forty
+results drew all forty, the panel clipped at `70vh`, and the rows past the edge
+could not be reached with the mouse or with the arrow keys. `min-height: 0` is
+the other half, for the same reason `.cmd code` needs it.
+
+The scrim was `color-mix(in oklab, var(--n0) 45%, transparent)`, and `--n0` is
+the INK: near-black in the light block, near-white in the two dark ones. So the
+dialog dimmed the page in light mode and washed it white in dark mode. It is a
+`--scrim` token now, defined in all three blocks, because a scrim darkens what is
+behind it in both palettes and is not a neutral-ramp alias.
+
+### J9 and J10 — found by the sweep, not by the user
+
+| # | Defect | Status |
+|---|---|---|
+| J9 | `.band` prose glued to the block above and below it: `/compare`'s radar section had `The chart, as a table.` touching the plate above and the table below; `/editors` had the same pair; `/explore/shelf` had three `<h3>`s sitting on a caption's last line | **FIXED** — three rules, all in the section-rhythm block |
+| J10 | `.split > * { margin-top: 0 }` — the rule that exists to kill the dead strip at the top of a right column — is specificity (0,1,0) and lost to every `element.class` selector in the sheet. `ul.plain` is (0,1,1), so the reset never reached the block it is most often applied to: three pages started their right column 24px below their left | **FIXED** — the class is written twice, `.split.split > *`, which is (0,2,0). Order cannot fix this: a lower-specificity rule loses wherever it sits |
+
+### The gap assertion, and what it can and cannot be
+
+The sweep gained one: **for every pair of stacked neighbours inside a `<section>`
+or a `.say` column, the gap is at least 8px.** 26 page-width pairs (13 pages ×
+1280 and 375), all clean.
+
+`.cap` is exempt, and that is a decision rather than a hole: `.cap` carries its
+own `border-top` and padding and is built to sit flush with the block above it —
+that rule is what says the caption belongs to that block. Its OTHER side is not
+exempt, which is J9's third row.
+
+It is not a committed test. Every assertion in `site/test/*.test.mjs` reads the
+exported bytes; a gap is a layout fact, and measuring one needs a layout engine.
+Adding a headless browser to this repository to assert 8px is a dependency the
+site does not otherwise have, so the sweep stays a browser script and the numbers
+stay here.
+
+### Probe hits from the third round that are not defects
+
+| # | Hit | Why not |
+|---|---|---|
+| J11 | `/docs`'s `.modgrid` is 32px wider than its container at every width | the rule grid's own bleed, `margin: 0 calc(-1 * var(--s2))`, bounded by `--gut` and documented at the rule. The document width is unchanged |
+| J12 | the install page's `git clone … / cd … / cargo build …` block reports three lines | it is three commands and is written with three newlines. The wrap assertion compares line boxes to newlines now, not to 1 |
+| J13 | `/play` at 375: the example `<select>` is 22px inside a 4px `.pickbox` | real, pre-existing, and not this round's: `/play` is not a page M3 touched and the fix is a decision about that toolbar's flex model. Deferred, recorded here so it is not re-filed |

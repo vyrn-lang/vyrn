@@ -12,8 +12,12 @@
   20,693 gzipped bytes of design record that stopped being a download, and
   [M3 — the second round](#m3--the-second-round-after-the-pages-were-rejected)
   for the craft census the user's rejection forced, the header-row defect three
-  milestones had deferred, and the release data that can no longer go stale.
-  Milestones below; a milestone that fails its gate says so in this file.
+  milestones had deferred, and the release data that can no longer go stale, and
+  [M3 — the third round](#m3--the-third-round-and-the-reference-site-as-a-source-rather-than-a-model)
+  for the deploy job that was failing on a relative path, the install command
+  that names this site, the changelog leaving the masthead, the search box that
+  had never scrolled, and the three reference-site patterns this site does not
+  take. Milestones below; a milestone that fails its gate says so in this file.
 - **Depends on:** RFC-0105 (the site this redesigns — its two-front split,
   theme, accessibility checklist, and gates all survive and bind this work),
   RFC-0104 (the benchmark data the index will show), RFC-0107 (the icons the
@@ -1823,6 +1827,275 @@ The published stylesheet is 49,459 raw and 9,742 gzipped against 90,000 and
   page-width pairs clean.
 - 51 screenshots in `shots/`, including a 2x capture of each hero, because the
   defects this round found are the ones that only show at full size.
+
+## M3 — the third round, and the reference site as a source rather than a model
+
+The user read the second round and sent eight findings. The census file carries
+them row by row (section J); this is what they changed and the three judgment
+calls they forced.
+
+**The general principle, in the user's words: we take the reference site's good
+decisions, we do not copy wholesale.** Where one of its patterns meets one of
+this site's constraints — no-JavaScript discipline, square-cornered mono brand,
+static hosting with no server — the constraint wins, and the disagreement gets
+written down here. Three of them did, below.
+
+### The `Site / build` job, which was failing for a reason nobody had guessed
+
+It was not the workflow. The first step of that job is
+`cargo build --release -p vyrn-cli`, it took 62 seconds, and the three steps
+between it and the failure ran the binary it produced by exactly the path the
+failing step passed. The bug is one line of `scripts/site-demo.py`:
+
+> Every recorded step runs in a scratch directory, and **on POSIX a relative
+> program path is resolved against the CHILD's working directory.** Windows
+> resolves it against the parent's, which is why the script had always worked
+> where it was written. `shutil.which` does not save you: a path with a
+> separator in it comes back unchanged — measured, it returns
+> `compiler/target/release/vyrn` verbatim.
+
+One `os.path.abspath`, and it is the root cause rather than the symptom: the fix
+is in the function that decides what to execute, so it holds for every step and
+on every platform.
+
+**Where the seventeen minutes went**, measured on the failed run: 62 s for the
+CLI, 25 s for the playground's wasm build, 45 s for its host tests — and
+**907 s in `The site's own tests`, of which 687 s is `vyrn test
+site/export.vyrn` alone** (32 blocks, most of them rendering pages, over 175
+routes). A cache takes the 132 s of cargo off a warm run and cannot touch the
+rest, so two things changed and the job says both out loud:
+
+- `Swatinem/rust-cache` on its own slot for the two workspaces this job builds,
+  which is the pattern `ci.yml` already uses and gives the reason for.
+- The demo and history steps moved **above** the fifteen-minute test loop. A
+  missing export input now fails the job in two minutes instead of at minute
+  seventeen. That is not a speed fix; it is a feedback fix, and it is free.
+
+The remaining pole is the interpreter's, not this workflow's, and the step now
+says so where the next person will look.
+
+### One command, two tabs, and the site's own origin
+
+The picker had three tiles and two commands: macOS and Linux showed a reader the
+same `curl … | sh` line twice, so the choice it asked for was not a choice. The
+question is which SHELL — a POSIX one or PowerShell — so there are two tiles now,
+`macOS & Linux` and `Windows`, matching the reference site's own scheme.
+
+**The install command names this site.** `install.sh` and `install.ps1` are
+copied out of the repository root into the published tree by `assets()` in
+`site/export.vyrn`, beside the stylesheet, so:
+
+    curl -fsSL https://vyrn-lang.github.io/vyrn/install.sh | sh
+    powershell -c "irm https://vyrn-lang.github.io/vyrn/install.ps1|iex"
+
+**The base URL decision, and why it is not a display trick.** The origin is
+`https://vyrn-lang.github.io/vyrn/` — the deployed Pages URL, read off the
+repository's Pages configuration, `cname: null`. It is 43 characters against the
+62 of `raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh`, and it is the
+site's own name rather than a hosting detail of where the source is kept. The
+brief allowed showing one URL and fetching another; that was refused. What is
+displayed IS what is fetched, because a command a reader cannot verify by reading
+it is worse than a long one. The risk that argument has to answer — a Pages
+deploy lagging `main` — is answered by the installers themselves: neither takes a
+version, both resolve the newest release at run time, so an hour-old copy of the
+script installs exactly what `main` would.
+
+There is now exactly one place that spells either command: `installTargets()` in
+`site/app/repo.vyrn`, beside `siteOrigin()`, with a test that asserts the bytes.
+The index hero and `/install` both read it. They had a copy each before, which is
+how one of them ended up with the `data-os` attribute the OS guess needs and the
+other without it.
+
+`siteOrigin()`'s own note changed with it: **three** things on this site cannot
+be a relative URL, not two. The feed, the markdown twin, and now the install
+command — which is typed into a terminal that has no idea what page it came from.
+
+**And `Checksum-verified.` is deleted from both heroes.** It was the last line of
+a hero, under a command, in 12px capitals. The verification story is a whole
+section of `/install` with three claims and two links in it, and that section is
+where a reader who cares about it is going. A hero does not get to make the
+argument twice.
+
+Beside each command is `View the install script`, pointing at the file the
+command fetches — the reference site has one and it is a good idea, and here it
+costs nothing extra because the site is already serving that file. It is a
+site-root link, so `basepath.test.mjs` fetches it: a rename that forgot
+`assets()` fails there.
+
+### The changelog left the masthead
+
+`/releases` carried its own `curl … | sh` block: one platform's command, on a
+page that is not about platforms, duplicating the page that is. It is one link
+now — `Install or upgrade` — and the page is what its name says: the version and
+its date, the four computed stat tiles, the design records that arrived since the
+tag, then every release ever tagged.
+
+**The row is gone too, and the navigation is four names.** Nobody navigates to a
+changelog before they have installed anything, and it was holding a permanent
+quarter of a row that four pages a reader does want are in. Three doors replace
+it, and each is where somebody would actually look:
+
+- a `Latest release` section on the index — kicker, the tag, the date line, two
+  or three highlights, one link — which is the good half of the reference site's
+  blog idea for a project that has no blog. Every line of it is computed: the tag
+  and date are baked, the highlights are the design records after the tag with
+  the status each holds today.
+- `Release notes` on `/install`, which used to point straight at GitHub and now
+  points at this page, which links GitHub.
+- a footer link on every page.
+
+`site/export.vyrn`'s masthead-marker assertion moved `/releases` into the group
+of pages that mark nothing, which is the same list `/compare` and `/why-vyrn` are
+in and for the same reason.
+
+### THE PATTERN WE DID NOT TAKE
+
+Three, and each is a constraint winning:
+
+1. **A blog.** The reference site's release notes are posts. Ours are written on
+   GitHub and are not in this repository, so a blog here would be a directory of
+   files somebody has to remember to write, and the honest version of "what
+   changed" is the design record — which this repository does have, dated, with a
+   status. The index section is the shape of the idea; the content is ours.
+2. **A short, brandable install URL.** `bun.sh/install.ps1` is 21 characters
+   because it is a domain. We have no domain, and inventing a redirector to fake
+   one is infrastructure with an owner and an expiry date. So the command is
+   longer than theirs, and in the index hero's 523px column the PowerShell line
+   scrolls by 67px inside its own box (census H7, unchanged — `/install` shows
+   both whole at 736px, one click away). A scroller a reader can drag beats a
+   pretty URL that can lapse.
+3. **A JavaScript picker.** The OS tabs stay two radio buttons, a `:checked ~`
+   selector and no script. What the script adds is a GUESS, three lines of it,
+   and the no-script default is the first tab.
+
+### The OS guess, which the second round claimed and did not have
+
+Two things were wrong, and both are the kind that pass review:
+
+1. `guessOs` looked for `input[data-os]`, and only the INDEX carried that
+   attribute. On `/install` — the page a reader installs from — there was nothing
+   to match, so it silently did nothing. That is what happens when two pages keep
+   their own copy of one control.
+2. It read `navigator.platform`, which is deprecated and frozen. It still answers
+   `Win32` in Chrome, but a browser reporting the frozen `Linux x86_64` answers
+   wrong, and there is no reason to prefer it to `navigator.userAgentData`.
+
+It asks the question the picker asks now — PowerShell or a POSIX shell — off
+`userAgentData.platform`, then `platform`, then the user-agent string, and
+anything that is not Windows takes the first tab, which is also the no-script
+default. So a wrong guess costs one press and never a wrong command. Verified in
+the browser by overriding the platform the page reports, in both directions,
+against the shipped `widgets.js`: `shots/install-autodetect-unix.png` and
+`shots/install-autodetect-windows.png`.
+
+### The search box, which had never scrolled
+
+`.findpanel [data-search-results] { overflow-y: auto }` — and the markup carries
+`data-find-results`. For three milestones nothing in that panel scrolled: a query
+with forty results drew all forty, the panel clipped at `70vh`, and every row
+past the edge was unreachable with the mouse AND with the arrow keys, which walk
+a selection the reader cannot see. One attribute name, and `min-height: 0` beside
+it for the same reason `.cmd code` needs one.
+
+**The white flash in dark mode was a token inversion.** The scrim was
+`color-mix(in oklab, var(--n0) 45%, transparent)`, and `--n0` is the INK:
+near-black in the light block, near-white in both dark ones. So the dialog that
+dimmed the page in light mode washed it WHITE in dark mode. It is a `--scrim`
+token now, declared in all three palette blocks — a scrim darkens what is behind
+it in both palettes, which makes it not a neutral-ramp alias. Fixed at the token
+level, as the instruction asked, with no JavaScript involved.
+
+Everything else about that overlay was measured working and left alone: `/` opens
+it, Esc closes it and returns focus, the arrows move `aria-selected` while focus
+stays in the field, Enter follows the row, the ground closes it and the panel
+does not, and with no script there is no overlay and the `<noscript>` says where
+to go.
+
+### The glued-spacing class, swept
+
+`.eyebrow` is `margin: 0 0 8px` — it is written to sit OVER something. Used as a
+footnote UNDER a command box or a stat grid it inherited that zero and its first
+line sat on the border above it, which is the defect the user saw on `/releases`.
+It had been patched once, locally, with `.hero.mid > .eyebrow`.
+
+Four rules replace that patch, all in the section-rhythm block, and each one was
+written against a measurement:
+
+| Rule | What it was fixing |
+|---|---|
+| `.band > * + .eyebrow`, `.hero > …`, `.say > …` | a label used as a footnote, on three section shapes |
+| `.band > * + p:not(.cap, .eyebrow)` | `/compare`'s `The chart, as a table.` touching the plate above it |
+| `.band > p + .scroller`, `.band > p + table` | and the table below it. `/editors` had the same pair |
+| `.band > .cap + :not(.cap)` | three `<h3>`s sitting on a caption's last line on `/explore/shelf` |
+
+`.cap` is exempt on its own top side, and that is a decision: it carries its own
+`border-top` and padding and is BUILT to sit flush with the block above it. That
+rule is what says the caption belongs to that block.
+
+**And the sweep found one the user had not:** `.split > * { margin-top: 0 }`, the
+rule that exists to kill the dead strip at the top of a right column, is
+specificity (0,1,0) and lost to every `element.class` selector in the sheet.
+`ul.plain` is (0,1,1) — so on three pages the right column started 24px below
+the left, and no amount of moving the rule could fix it, because a
+lower-specificity rule loses wherever it sits. The class is written twice now,
+`.split.split > *`, which is (0,2,0).
+
+### A new assertion, and the one it cannot be
+
+The sweep gained a minimum-gap check: **for every pair of stacked neighbours
+inside a `<section>` or a `.say` column, the gap is at least 8px.** 26
+page-width pairs — thirteen pages at 1280 and at 375 — all clean, after the four
+rules above.
+
+It is not a committed test, and the reason is worth recording rather than
+apologizing for. Every assertion in `site/test/*.test.mjs` reads the exported
+BYTES; a gap is a layout fact and measuring one needs a layout engine. Adding a
+headless browser to this repository to assert 8px would be a dependency the
+language does not otherwise have — so the sweep stays a browser script and its
+numbers live in the census.
+
+### The numbers, third round
+
+| Page | Words | Ceiling | Bytes | Ceiling | Cold load, gzipped | Ceiling |
+|---|---:|---:|---:|---:|---:|---:|
+| index | **260** | 260 | 17,872 | 30,000 | **36,015** | 55,000 |
+| install | **208** | 220 | 8,873 | 14,000 | **33,616** | 55,000 |
+| releases | **166** | 200 | 6,629 | 20,000 | **33,199** | 55,000 |
+| docs (landing) | **640** | 644 | 53,061 | 40,000 | **42,632** | 55,000 |
+
+The index is at its ceiling to the word, and that is what the release section
+cost: it arrived at 261 and `Every release` became `Releases`. The section it
+replaced was a heading and three buttons repeating three links already on the
+page, which is where most of the room came from.
+
+The published stylesheet is 49,645 raw and 9,809 gzipped against 90,000 and
+27,000. `/docs` is still over M0's byte ceiling by the width of its import graph
+(census H4, M4's decision).
+
+### Gates, third round
+
+- **the workflow's own command sequence, run locally in its own order**: history,
+  the output directories, the demo recording, the site's test loop, the guide's
+  programs, `fmt --check`, the render, the node tests. Every step green, and the
+  demo step — the one that failed in CI — is green with the same relative
+  `--vyrn` argument the workflow passes.
+- `vyrn run site/export.vyrn out`: **175 routes, 13 assets** — two more than the
+  second round, and they are `install.sh` and `install.ps1`.
+- the site's own loop: **196 test blocks declared, 196 ran** (one more than the
+  second round: the install command's bytes).
+- `node --test site/test/*.test.mjs`: **31 tests, 31 pass**, including the
+  base-path fetch of every URL every page names — which now includes the served
+  install scripts.
+- `vyrn fmt --check`: clean.
+  `cargo test --release -p vyrn-cli --test rfc_index`: 4 passed.
+- the geometry sweep at 1280 and 375 over thirteen pages: no horizontal overflow,
+  no section taller than its content plus padding, no wrapped command line
+  (compared against the newlines the command is WRITTEN with, so a three-command
+  block is no longer a false positive), and no inter-element gap under 8px.
+  **26 of 26 page-width pairs clean.**
+- 55 screenshots in `shots/`, the 51 of the second round re-taken plus four new
+  ones: the search overlay open in both palettes, and the OS guess proved in both
+  directions.
 
 ## What this RFC does not do
 
