@@ -219,7 +219,9 @@ fn pillarCmd(i: Int64) -> String {
                      joined to the command box they select. -->
                 <!-- Command first, the chips under it — the reference front
                      page's order: the command is the point and the tabs are
-                     the quietest thing near it. -->
+                     the quietest thing near it. The label above the box names
+                     the version, so the hero says what today's install is. -->
+                <p class="cmdlabel">Install Vyrn <a href="/releases.html">{{ releaseTag() }}</a></p>
                 <fieldset class="picker">
                     <legend class="sr-only">Operating system</legend>
                     <input class="sr-only" type="radio" name="os" id="os-unix" checked="checked" data-os="unix"/>
@@ -234,9 +236,9 @@ fn pillarCmd(i: Int64) -> String {
                     </div>
                     <div class="ostabs">
                         <label v-for="p in installTargets()" :key="p.id" :for="osId(p)">{{ p.name }}</label>
+                        <a class="tablink" href="/install.html">Other ways to install</a>
                     </div>
                 </fieldset>
-                <p class="ctarow"><a class="cta" href="/install.html">Other ways to install</a></p>
             </div>
 
             <!-- THE RUNNABLE HERO. The `data-play-*` hooks are the playground's

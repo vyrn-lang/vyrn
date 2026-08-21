@@ -437,3 +437,12 @@ actually made — sans for chrome, mono only for what is code or data — applie
 | O3 | Editor internals | Inner stroke transparent (metrics kept for the overlay); the plate is the frame |
 | O4 | Section rhythm | `--sect` 32–56px → 40–76px; compact sections earn more air between them |
 | O5 | Eyebrow-links ("Other ways to install", "View the install script", "Release notes") | The arrow-link voice, not caps-mono underline — the loudest links once the chrome quieted |
+
+## P. The ninth round — the plate, the label, the prompt
+
+Against the reference hero one more time:
+
+| # | Element | Change |
+|---|---|---|
+| P1 | The page | Two full-height hairlines frame a 1232px content column — the reference site's quietest structural device; the section seams already bled to this exact border box |
+| P2 | Install cluster | "Install Vyrn <tag>" label above the command (the version is the link), the shell's real prompt in the accent (`$` sh, `>` PowerShell, as pseudo so Copy never captures it), Copy's divider gone, tabs and "Other ways to install →" on one row |

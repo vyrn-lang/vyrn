@@ -455,8 +455,13 @@ h1 code, h2 code, h3 code, h4 code {
    ------------------------ */
 
 #root {
-  max-width: 1280px;
+  max-width: 1232px;
   margin: 0 auto;
+  /* THE PAGE IS A PLATE (RFC-0106 M3, ninth round): two full-height hairlines
+   * frame the content column, the reference site's quietest structural device.
+   * The section seams already bleed by `--gut` to this border box, so every
+   * seam lands exactly on the frame. */
+  border-inline: 1px solid var(--hair);
   padding: 0 var(--gut) var(--s6);
   display: grid;
   /* `minmax(0, 1fr)`, not `1fr`. A `1fr` track is `minmax(auto, 1fr)`, so its
@@ -914,7 +919,7 @@ pre.code {
   mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
 }
 .cmd code::-webkit-scrollbar { display: none; }
-.cmd button { border: 0; border-left: 1px solid var(--hair); align-self: stretch; background: none; font-size: var(--t-key); color: var(--n2); }
+.cmd button { border: 0; align-self: stretch; background: none; font-size: var(--t-key); color: var(--n2); }
 /* A command block is one row, and the row is the height of one line of code
  * plus its padding. Nothing inside it may grow it. */
 .cmd code { line-height: 1.5; }
@@ -1049,6 +1054,7 @@ pre.code {
  * `install.ps1` through PowerShell. Three tiles meant macOS and Linux showed a
  * reader the same line twice (RFC-0106 M3, third round). */
 .picker { margin: var(--s4) 0 var(--s2); border: 0; padding: 0; min-width: 0; }
+.cmdlabel + .picker { margin-top: var(--s2); }
 
 /* CHIPS, NOT A BAR (RFC-0106 M3, seventh round). The fused segmented header
  * made the picker the heaviest element in the hero — a 44px two-cell bar wider
@@ -1072,6 +1078,23 @@ pre.code {
 .ostabs label:hover { color: var(--ink); }
 .ospane { display: none; text-align: left; }
 .ospane .cmd { margin-top: 0; }
+/* The prompt each shell actually shows, in the accent — the command reads as
+ * a terminal line, and the glyph is a pseudo so Copy never captures it. */
+.ospanes > .ospane:nth-child(1) .cmd code::before { content: "$ "; color: var(--accent); }
+.ospanes > .ospane:nth-child(2) .cmd code::before { content: "> "; color: var(--accent); }
+/* The install label above the box, and the quiet link at the tab row's end —
+ * the reference site's own install cluster, three rows and done. */
+.cmdlabel { font: 600 var(--t-cmd)/1.4 var(--sans); margin: var(--s4) 0 calc(-1 * var(--s1)); }
+.cmdlabel a { color: inherit; text-decoration: none; color: var(--accent); }
+.cmdlabel a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.ostabs .tablink {
+  margin-left: auto; align-self: center;
+  font: 500 var(--t-mono)/1 var(--sans);
+  color: var(--muted); text-decoration: none;
+  transition: color 140ms var(--expo);
+}
+.ostabs .tablink::after { content: " \2192"; }
+.ostabs .tablink:hover { color: var(--accent); }
 /* The "view the install script" line under the command it fetches. A label that
  * FOLLOWS a block needs the gap the kicker rule gives one that precedes it. */
 .ospane > .eyebrow { margin-top: var(--s2); margin-bottom: 0; }
