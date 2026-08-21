@@ -394,3 +394,20 @@ Cut, not restyled: the hero chips row (restated the headline two inches below
 it) and the editor's Ctrl+Enter chip (the binding stays; the hint moved to the
 Run button's title). The headline takes two explicit breaks — at 5.1rem,
 auto-wrap orphaned "No" at a line end.
+
+## M. The sixth round — the loudness gap
+
+The user's verdict on the fifth: still dirty, elements too attention-grabbing,
+not alive. The reference site whispers everywhere except two deliberate pops;
+this site set twelve controls per screen in the kicker's own voice — uppercase,
+tracked-out, hard-boxed. Entries, all fixed:
+
+| # | Element | Defect | Fix |
+|---|---|---|---|
+| M1 | Every control | Uppercase 0.1em mono on buttons, nav, tabs, table headers, theme control — the kicker voice on the whole chrome | Caps and tracking stay on `.eyebrow` alone; controls are natural-case 0.02em, on a wash behind a hairline; hover earns the accent |
+| M2 | "Runs here" pill | A bordered chip shouting beside two buttons | A breathing accent dot and a quiet label; `prefers-reduced-motion` stills it |
+| M3 | Module teaser | Eight boxed inline-code pills read as a tag cloud | Plain accent mono names, no boxes |
+| M4 | Theme control | Bordered box at rest | A word; the box appears on hover |
+| M5 | Passive frames | `pre.code` and the editor at full `--rule` weight | `--hair`; interactive `.cmd` keeps `--rule` |
+| M6 | Full-scale bar | Ran under its own value once bars got pigment | Paper-stroke halo on `.val` (`paint-order: stroke`) |
+| M7 | Cards | Inert | Border warms toward the accent on hover, 160ms |

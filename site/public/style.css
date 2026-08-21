@@ -522,12 +522,12 @@ h1 code, h2 code, h3 code, h4 code {
 .theme, .find { display: none; }
 .masthead .slot { display: contents; }
 [data-js] .theme, [data-js] .find {
-  display: inline-flex; font: inherit; letter-spacing: inherit;
-  text-transform: uppercase; color: var(--muted); background: none;
-  border: 1px solid var(--rule); padding: 0 var(--s1); cursor: pointer;
+  display: inline-flex; font: inherit; letter-spacing: 0.02em;
+  color: var(--muted); background: none;
+  border: 1px solid var(--hair); padding: 0 var(--s1); cursor: pointer;
 }
 [data-js] .theme { margin-left: auto; }
-[data-js] .theme:hover, [data-js] .find:hover { color: var(--ink); border-color: var(--accent); }
+[data-js] .theme:hover, [data-js] .find:hover { color: var(--ink); border-color: color-mix(in oklab, var(--accent) 55%, transparent); }
 
 /* THE SEARCH CONTROL LOOKS LIKE A FIELD ON A DESKTOP (RFC-0106 M3, fourth
  * round). It was a 83px icon-and-word button, which is a control a reader has to
@@ -574,7 +574,9 @@ h1 code, h2 code, h3 code, h4 code {
 /* `.theme`'s own auto margin is for the backstage masthead, which has no
  * wrapper; inside this one it would push the two apart. */
 .tools { display: flex; align-items: center; gap: var(--s2); margin-left: auto; }
-.tools .theme { margin-left: 0; }
+/* The theme control earns its box on hover; at rest it is a word. */
+.tools .theme { margin-left: 0; border-color: transparent; background: none; }
+.tools .theme:hover { border-color: var(--hair); background: color-mix(in oklab, var(--ink) 4%, transparent); }
 
 /* THE SEARCH OVERLAY (RFC-0106 M1). A sheet near the top, not a centred box: a
  * list belongs under the field that filters it. The index is fetched on the
@@ -611,7 +613,7 @@ h1 code, h2 code, h3 code, h4 code {
   background: var(--accent); color: var(--paper);
   border: 1px solid var(--accent); text-decoration: none;
   font: 600 var(--t-eyebrow)/1.4 var(--mono);
-  text-transform: uppercase; letter-spacing: 0.1em; white-space: nowrap;
+  letter-spacing: 0.02em; white-space: nowrap;
 }
 /* The masthead's row is 64px and every control in it is a 44px target. */
 .masthead .cta { min-height: 44px; padding: 0 var(--s2); }
@@ -648,7 +650,7 @@ h1 code, h2 code, h3 code, h4 code {
 .nav::-webkit-scrollbar { display: none; }
 /* 44px at every width: this MOVED out of the 640px query, which left every nav
  * link 89x13 above 640px (RFC-0106 M1). */
-.nav a { text-decoration: none; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; white-space: nowrap; }
+.nav a { text-decoration: none; color: var(--muted); letter-spacing: 0.02em; white-space: nowrap; transition: color 140ms var(--expo); }
 .nav a:hover { color: var(--ink); }
 .menu > .nav { display: flex; }
 /* Where the reader is. `site/export.vyrn` stamps the attribute per published
@@ -760,7 +762,20 @@ h2, .cards h3 { font-family: var(--sans-d); letter-spacing: -0.02em; font-weight
   border: 1px solid var(--rule);
   color: var(--muted);
 }
-.pill.live { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 40%, transparent); }
+/* "Runs here" is a state, not a control: a breathing dot and a quiet label,
+ * not a bordered chip shouting beside two buttons. */
+.pill.live {
+  color: var(--muted); border: 0; padding: 0; min-height: 0;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  display: inline-flex; align-items: center; gap: 7px;
+}
+.pill.live::before {
+  content: ""; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent);
+  animation: breathe 2.4s var(--expo) infinite;
+}
+@keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .pill.live::before { animation: none; } }
 
 /* ------------------------
    The widget chassis (brief 4). Pill + eyebrow, one headline number, one
@@ -802,18 +817,22 @@ h2, .cards h3 { font-family: var(--sans-d); letter-spacing: -0.02em; font-weight
   margin: 0;
 }
 
+/* A CONTROL SPEAKS QUIETLY (RFC-0106 M3, sixth round). Every button was
+ * uppercase tracked-out mono in a hard box — the same voice as a kicker, on
+ * twelve controls per screen, which is why the page read as shouting. Controls
+ * keep the mono but drop the caps and the tracking, sit on a soft wash behind
+ * a hairline, and save the hard accent for hover and the one filled CTA. */
 button, .btn {
   font: var(--t-eyebrow)/1 var(--mono);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  padding: 9px 14px;
-  border: 1px solid var(--rule);
-  background: transparent;
+  letter-spacing: 0.02em;
+  padding: 8px 12px;
+  border: 1px solid var(--hair);
+  background: color-mix(in oklab, var(--ink) 4%, transparent);
   color: var(--ink);
   cursor: pointer;
-  transition: border-color 160ms var(--expo), color 160ms var(--expo), transform 160ms var(--overshoot);
+  transition: border-color 160ms var(--expo), color 160ms var(--expo), background 160ms var(--expo), transform 160ms var(--overshoot);
 }
-button:hover, .btn:hover { border-color: var(--accent); color: var(--accent); }
+button:hover, .btn:hover { border-color: color-mix(in oklab, var(--accent) 55%, transparent); color: var(--accent); }
 button:active { transform: translateY(1px); }
 button[aria-pressed="true"], button.on { border-color: var(--accent); color: var(--accent); }
 
@@ -826,7 +845,7 @@ button[aria-pressed="true"], button.on { border-color: var(--accent); color: var
 pre.code {
   margin: var(--s3) 0 0;
   padding: var(--s2);
-  border: 1px solid var(--rule);
+  border: 1px solid var(--hair);
   overflow-x: auto;
   font-size: var(--t-code);
   line-height: 1.7;
@@ -889,7 +908,7 @@ pre.code {
   mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
 }
 .cmd code::-webkit-scrollbar { display: none; }
-.cmd button { border: 0; border-left: 1px solid var(--rule); align-self: stretch; }
+.cmd button { border: 0; border-left: 1px solid var(--rule); align-self: stretch; background: none; font-size: var(--t-key); color: var(--n2); }
 /* A command block is one row, and the row is the height of one line of code
  * plus its padding. Nothing inside it may grow it. */
 .cmd code { line-height: 1.5; }
@@ -958,7 +977,8 @@ pre.code {
 /* The four pillars. Two lines and one command each, and the command is the
  * point: a card that ends in a paragraph ends in nothing to do. */
 .cards { list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--s3); margin: var(--s4) 0 0; padding: 0; }
-.cards > li { border: 1px solid var(--rule); padding: var(--s3); display: flex; flex-direction: column; }
+.cards > li { border: 1px solid var(--rule); padding: var(--s3); display: flex; flex-direction: column; transition: border-color 160ms var(--expo); }
+.cards > li:hover { border-color: color-mix(in oklab, var(--accent) 40%, var(--rule)); }
 .cards h3 { font-size: var(--t-h3); margin-bottom: var(--s1); display: flex; align-items: center; gap: var(--s1); }
 .cards p { color: var(--muted); flex: 1; }
 /* A card is 280px, so its command stacks over its Copy button and takes the
@@ -971,7 +991,7 @@ pre.code {
  * and 13px mono holds all 30 inside a 280px track where 14px clips two of
  * the four into the fade. */
 .cards .cmd code { font-size: var(--t-mono); padding: 10px 12px; }
-.cards .cmd button { border-left: 0; border-top: 1px solid var(--hair); min-height: 30px; font-size: var(--t-key); color: var(--n2); }
+.cards .cmd button { border-left: 0; border-top: 1px solid var(--hair); min-height: 26px; padding: 4px 10px; }
 
 /* A COMMAND IS ONE LINE (RFC-0106 M3, second round).
  *
@@ -1047,9 +1067,10 @@ pre.code {
 .ostabs { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); border: 1px solid var(--rule); border-bottom: 0; }
 .ostabs label {
   display: flex; align-items: center; justify-content: center;
-  min-height: 48px; padding: 9px var(--s2); cursor: pointer;
-  font: var(--t-eyebrow)/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase;
+  min-height: 44px; padding: 9px var(--s2); cursor: pointer;
+  font: var(--t-eyebrow)/1 var(--mono); letter-spacing: 0.02em;
   color: var(--muted);
+  transition: color 140ms var(--expo), background 140ms var(--expo);
 }
 .ostabs label + label { border-left: 1px solid var(--rule); }
 .ostabs label:hover { color: var(--ink); }
@@ -1107,7 +1128,9 @@ pre.code {
 .modteaser > li > .eyebrow { padding-bottom: var(--s1); border-bottom: 1px solid var(--rule); }
 .modteaser a { display: flex; justify-content: space-between; gap: var(--s1); align-items: baseline; padding: 6px 0; text-decoration: none; border-bottom: 1px solid var(--hair); }
 .modteaser a:hover { color: var(--accent); }
-.modteaser code { font-size: var(--t-mono); }
+/* A module name in the teaser is a link's text, not an inline-code chip:
+ * eight boxed pills in a grid read as a tag cloud. */
+.modteaser code { font-size: var(--t-mono); background: none; border: 0; padding: 0; color: var(--accent); }
 .modteaser span { font: var(--t-key)/1.4 var(--mono); color: var(--n2); }
 
 /* A LIST THAT IS A GRID (RFC-0106 M3). Short rows down two columns: half the
@@ -1377,7 +1400,9 @@ svg.chart .axis text { font-size: var(--t-svg-s); fill: var(--n2); }
 svg.chart a text { text-decoration: underline; text-decoration-color: transparent; transition: text-decoration-color 160ms var(--expo); }
 svg.chart g.row:hover a text { text-decoration-color: var(--accent); fill: var(--accent); }
 svg.chart text { font-family: var(--mono); font-size: var(--t-svg); fill: var(--muted); }
-svg.chart text.val { fill: var(--ink); font-weight: 600; }
+/* A value that a full-scale bar runs under keeps its own ground: the halo is
+ * the paper, so the text reads over pigment and over nothing alike. */
+svg.chart text.val { fill: var(--ink); font-weight: 600; paint-order: stroke; stroke: var(--paper); stroke-width: 4px; stroke-linejoin: round; }
 svg.chart .cell { transition: fill-opacity 450ms ease-out; }
 
 /* Two series on one chart, one shown at a time. The markup holds both, so the
@@ -1484,7 +1509,7 @@ td.no { color: var(--muted); }
  * column is the only one that carries the accent, and the row header is the
  * axis, so a reader scans down one language or across one axis. */
 table.matrix { font-size: var(--t-matrix); min-width: 46rem; }
-table.matrix th[scope="row"] { font: var(--t-key)/1.4 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); width: 8rem; }
+table.matrix th[scope="row"] { font: var(--t-key)/1.4 var(--mono); letter-spacing: 0.02em; color: var(--muted); width: 8rem; }
 /* The accent is spent ONCE, on the column header. Twenty-four accented cells
  * would be twenty-four things claiming to be the focus. The Vyrn column carries
  * full-strength ink against the muted others, which is the hierarchy. */
@@ -1922,7 +1947,7 @@ svg.graph .node.on circle { fill-opacity: 1; }
 .play .editor textarea {
   margin: 0;
   padding: var(--s2);
-  border: 1px solid var(--rule);
+  border: 1px solid var(--hair);
   font: var(--t-code)/1.7 var(--mono);
   tab-size: 2;
   white-space: pre;
