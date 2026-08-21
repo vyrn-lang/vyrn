@@ -125,12 +125,12 @@ fn scriptHref(p: InstallTarget) -> String {
                             <code v-html="shellHtml(p.cmd)"></code>
                             <button type="button" data-copy-btn aria-label="Copy the install command">Copy</button>
                         </div>
-                        <p class="eyebrow"><a :href="scriptHref(p)">View the install script</a></p>
+                        <p class="ctarow"><a class="cta" :href="scriptHref(p)">View the install script</a></p>
                     </div>
                 </div>
             </fieldset>
 
-            <p class="eyebrow"><a href="/releases.html">Release notes</a></p>
+            <p class="ctarow"><a class="cta" href="/releases.html">Release notes</a></p>
         </section>
 
         <section class="band split" id="verify">

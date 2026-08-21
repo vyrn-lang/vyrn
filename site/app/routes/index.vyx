@@ -236,7 +236,7 @@ fn pillarCmd(i: Int64) -> String {
                         <label v-for="p in installTargets()" :key="p.id" :for="osId(p)">{{ p.name }}</label>
                     </div>
                 </fieldset>
-                <p class="eyebrow"><a href="/install.html">Other ways to install</a></p>
+                <p class="ctarow"><a class="cta" href="/install.html">Other ways to install</a></p>
             </div>
 
             <!-- THE RUNNABLE HERO. The `data-play-*` hooks are the playground's

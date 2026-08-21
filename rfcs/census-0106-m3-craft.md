@@ -421,3 +421,19 @@ The user named three components that still read heavier than bun.sh:
 | N1 | Install picker | A fused 44px two-cell segmented bar — the heaviest element in the hero, wider than the command it selects | Small detached chips in the control voice; command first in the index hero (the reference front page's order), chips centred above on `/install`; same radio mechanism, zero script |
 | N2 | "A minute with Vyrn" | A Back/Next toolbar over the whole card | The pager lives at the bottom of the pane it pages — `1 / 7 ‹ ›` — the reference site's own placement; steps stay clickable |
 | N3 | "Runs here" + "Press Run" | Two adjacent caps labels reading as one confusing element | One state: the breathing dot moved onto the status itself (`● Ready` → `Running…` → `Ran`), on the index hero and the playground both |
+
+## O. The eighth round — chrome is sans, code is mono
+
+Seven rounds in, every control and label was still monospace and still
+outlined: the hero viewport held roughly twelve stroked rectangles where the
+reference site holds five, and a page whose chrome is all mono reads as
+terminal output regardless of case. The material decision the reference site
+actually made — sans for chrome, mono only for what is code or data — applied:
+
+| # | Element | Change |
+|---|---|---|
+| O1 | Masthead, nav, buttons, tabs, footer | Sans at the command size; mono stays on the wordmark, kickers, commands, counters and values |
+| O2 | Command boxes | A fill first, hairline second — a lighter field on the ground, not an outlined rectangle |
+| O3 | Editor internals | Inner stroke transparent (metrics kept for the overlay); the plate is the frame |
+| O4 | Section rhythm | `--sect` 32–56px → 40–76px; compact sections earn more air between them |
+| O5 | Eyebrow-links ("Other ways to install", "View the install script", "Release notes") | The arrow-link voice, not caps-mono underline — the loudest links once the chrome quieted |

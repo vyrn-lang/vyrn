@@ -153,7 +153,7 @@
    * seam sat hard against one block and floated away from the next. A section is
    * `padding: var(--sect) 0` and a `border-top` now: sections touch, and no
    * section carries a vertical margin. 32px on a phone, 56px from 1244px. */
-  --sect: clamp(32px, 4.5vw, 56px);
+  --sect: clamp(40px, 6vw, 76px);
 
   /* The sheet's own side gutter, as a token, because two rules need the same
    * number: `#root`'s padding, and the negative offset that lets a section's
@@ -496,10 +496,15 @@ h1 code, h2 code, h3 code, h4 code {
   display: flex; align-items: center; gap: var(--s2);
   min-height: 64px; padding: var(--s1) 0;
   border-bottom: 1px solid var(--rule);
-  font: var(--t-mono)/1 var(--mono); letter-spacing: 0.08em;
+  /* CHROME IS SANS, CODE IS MONO (RFC-0106 M3, eighth round). Every control
+   * and label on the site was monospace, so the whole page read as terminal
+   * output and no amount of case could quiet it. Mono is reserved for what is
+   * actually code or data — commands, counters, kickers, the wordmark — and
+   * the chrome speaks the body's own face. */
+  font: var(--t-cmd)/1 var(--sans);
 }
 
-.wordmark { font-weight: 600; font-size: var(--t-mark); letter-spacing: 0.18em; text-transform: uppercase; text-decoration: none; color: var(--accent); }
+.wordmark { font: 600 var(--t-mark)/1 var(--mono); letter-spacing: 0.18em; text-transform: uppercase; text-decoration: none; color: var(--accent); }
 
 /* Everything in the header is a 44px box: one rule, not six (row 29). */
 .masthead a, .masthead button, .masthead summary { display: inline-flex; align-items: center; min-height: 44px; }
@@ -612,8 +617,8 @@ h1 code, h2 code, h3 code, h4 code {
   min-height: 40px; padding: 0 var(--s3);
   background: var(--accent); color: var(--paper);
   border: 1px solid var(--accent); text-decoration: none;
-  font: 600 var(--t-eyebrow)/1.4 var(--mono);
-  letter-spacing: 0.02em; white-space: nowrap;
+  font: 600 var(--t-cmd)/1.4 var(--sans);
+  white-space: nowrap;
 }
 /* The masthead's row is 64px and every control in it is a 44px target. */
 .masthead .cta { min-height: 44px; padding: 0 var(--s2); }
@@ -650,7 +655,7 @@ h1 code, h2 code, h3 code, h4 code {
 .nav::-webkit-scrollbar { display: none; }
 /* 44px at every width: this MOVED out of the 640px query, which left every nav
  * link 89x13 above 640px (RFC-0106 M1). */
-.nav a { text-decoration: none; color: var(--muted); letter-spacing: 0.02em; white-space: nowrap; transition: color 140ms var(--expo); }
+.nav a { text-decoration: none; color: var(--muted); font-weight: 500; white-space: nowrap; transition: color 140ms var(--expo); }
 .nav a:hover { color: var(--ink); }
 .menu > .nav { display: flex; }
 /* Where the reader is. `site/export.vyrn` stamps the attribute per published
@@ -670,7 +675,7 @@ h1 code, h2 code, h3 code, h4 code {
   margin-top: var(--s6);
   padding-top: var(--s3);
   border-top: 1px solid var(--rule);
-  font: var(--t-eyebrow)/1.8 var(--mono);
+  font: var(--t-meta)/1.8 var(--sans);
   color: var(--muted);
   display: flex;
   flex-wrap: wrap;
@@ -822,8 +827,7 @@ h2, .cards h3 { font-family: var(--sans-d); letter-spacing: -0.02em; font-weight
  * keep the mono but drop the caps and the tracking, sit on a soft wash behind
  * a hairline, and save the hard accent for hover and the one filled CTA. */
 button, .btn {
-  font: var(--t-eyebrow)/1 var(--mono);
-  letter-spacing: 0.02em;
+  font: 500 var(--t-mono)/1 var(--sans);
   padding: 8px 12px;
   border: 1px solid var(--hair);
   background: color-mix(in oklab, var(--ink) 4%, transparent);
@@ -882,10 +886,13 @@ pre.code {
 .out > div.on { color: var(--ink); }
 .out > div.on .ol::before { color: var(--accent); }
 
+/* A command box is a fill first and a hairline second — the reference site's
+ * command is a lighter field on the ground, not an outlined rectangle. */
 .cmd {
   display: flex;
   align-items: stretch;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--hair);
+  background: color-mix(in oklab, var(--plate) 55%, transparent);
   margin-top: var(--s2);
 }
 .cmd code {
@@ -907,7 +914,7 @@ pre.code {
   mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
 }
 .cmd code::-webkit-scrollbar { display: none; }
-.cmd button { border: 0; border-left: 1px solid var(--rule); align-self: stretch; background: none; font-size: var(--t-key); color: var(--n2); }
+.cmd button { border: 0; border-left: 1px solid var(--hair); align-self: stretch; background: none; font-size: var(--t-key); color: var(--n2); }
 /* A command block is one row, and the row is the height of one line of code
  * plus its padding. Nothing inside it may grow it. */
 .cmd code { line-height: 1.5; }
@@ -1026,6 +1033,7 @@ pre.code {
  * measure than a ragged-right one, not the container's. */
 .hero.mid .lede { max-width: 32rem; margin-left: auto; margin-right: auto; }
 .hero.mid .cmd { text-align: left; }
+.hero.mid .ctarow { text-align: center; margin-top: var(--s2); }
 
 /* THE OS PICKER: TWO RADIO BUTTONS, NO SCRIPT, NO ID IN THIS SHEET.
  *
@@ -1055,7 +1063,7 @@ pre.code {
 .ostabs label {
   display: inline-flex; align-items: center; justify-content: center;
   min-height: 36px; padding: 7px 12px; cursor: pointer;
-  font: var(--t-key)/1 var(--mono); letter-spacing: 0.02em;
+  font: 500 var(--t-mono)/1 var(--sans);
   color: var(--muted);
   border: 1px solid var(--hair);
   background: color-mix(in oklab, var(--ink) 4%, transparent);
@@ -1931,11 +1939,14 @@ svg.graph .node.on circle { fill-opacity: 1; }
   margin: var(--s3) var(--s2) 0;
 }
 
+/* The plate already frames the editor; an inner stroke was a box in a box.
+ * The border stays transparent rather than removed so the textarea overlay
+ * keeps the highlight layer's exact metrics. */
 .play .editor pre.hl,
 .play .editor textarea {
   margin: 0;
   padding: var(--s2);
-  border: 1px solid var(--hair);
+  border: 1px solid transparent;
   font: var(--t-code)/1.7 var(--mono);
   tab-size: 2;
   white-space: pre;
