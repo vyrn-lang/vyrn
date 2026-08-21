@@ -126,6 +126,11 @@
    * section carries a vertical margin. 32px on a phone, 56px from 1244px. */
   --sect: clamp(32px, 4.5vw, 56px);
 
+  /* The sheet's own side gutter, as a token, because two rules need the same
+   * number: `#root`'s padding, and the negative offset that lets a section's
+   * hairline reach the page edge instead of stopping inside it. */
+  --gut: var(--s4);
+
   /* TEXT ROLES AND THEIR WIDTH. Three roles, and the role decides the width —
    * not the element. Read this before changing any `max-width` on text.
    *
@@ -421,7 +426,7 @@ h1 code, h2 code, h3 code, h4 code {
 #root {
   max-width: 1280px;
   margin: 0 auto;
-  padding: 0 var(--s4) var(--s6);
+  padding: 0 var(--gut) var(--s6);
   display: grid;
   /* `minmax(0, 1fr)`, not `1fr`. A `1fr` track is `minmax(auto, 1fr)`, so its
    * floor is the WIDEST MIN-CONTENT inside it — one `<pre>` of unbreakable
@@ -836,7 +841,9 @@ pre.code {
  * command. The only centred text on this site, and only because nothing is
  * beside it. */
 .hero.mid { text-align: center; max-width: 44rem; margin: 0 auto; }
-.hero.mid .lede { max-width: none; }
+/* A centred paragraph is read on both edges at once, so it wants a NARROWER
+ * measure than a ragged-right one, not the container's. */
+.hero.mid .lede { max-width: 32rem; margin-left: auto; margin-right: auto; }
 .hero.mid .cmd { text-align: left; }
 
 /* THE OS PICKER: THREE RADIO BUTTONS, NO SCRIPT, NO ID IN THIS SHEET.
@@ -850,9 +857,14 @@ pre.code {
  * and its `<legend>` is its name; the default border and padding come off. */
 .picker { margin: var(--s4) 0 var(--s3); border: 0; padding: 0; min-width: 0; }
 .ostabs { display: flex; justify-content: center; flex-wrap: wrap; gap: 0; }
+/* TILES, not tabs: equal boxes a reader picks their machine out of. They carry
+ * no glyph, and that is measured rather than assumed — the two hash-locked icon
+ * collections this site binds hold 180 glyphs between them and none of them is
+ * an apple, a penguin or a window (RFC-0106 M2). A 112px square with one word
+ * in the middle of it is an empty cell, so the tile is the size of its word. */
 .ostabs label {
   display: inline-flex; align-items: center; justify-content: center;
-  min-height: 44px; padding: 9px 18px; cursor: pointer;
+  min-width: 8rem; min-height: 56px; padding: 9px 18px; cursor: pointer;
   border: 1px solid var(--rule); margin-left: -1px;
   font: var(--t-eyebrow)/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase;
   color: var(--muted);
@@ -944,7 +956,19 @@ details.disc > p { max-width: var(--wide); }
  *   FULL   `.band`        heading row, then a dense grid or one artifact.
  *   SPLIT  `.band.split`  left (`.say`): kicker, 2-6 word heading, at most two
  *                         short sentences, one link. Right: the artifact. */
-.band { padding: var(--sect) 0; border-top: 1px solid var(--rule); }
+.band { padding: var(--sect) 0; position: relative; }
+/* THE SEAM REACHES THE PAGE EDGE. A rule that stops inside the sheet's own
+ * gutter reads as an underline on a block; one that runs edge to edge reads as
+ * the join between two bands, which is what a section is. The bleed is exactly
+ * `--gut`, so the line lands on `#root`'s border box and never past it — a
+ * `100vw` bleed would add a scrollbar of its own. On a page with a rail the
+ * section starts after the rail and so does its seam, which is right: the rail
+ * is a different column, not part of the band. */
+.band::before {
+  content: ""; position: absolute; top: 0;
+  left: calc(-1 * var(--gut)); right: calc(-1 * var(--gut));
+  border-top: 1px solid var(--rule);
+}
 .band h2 { font-size: var(--t-h2); margin-bottom: var(--s2); }
 
 .split { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: var(--s5); align-items: start; }
@@ -1260,8 +1284,15 @@ svg.chart a .cell:hover { fill-opacity: 1 !important; }
 .modgroup + .modgroup { margin-top: var(--s5); }
 .modgroup > .eyebrow { padding-bottom: var(--s1); border-bottom: 1px solid var(--rule); font-size: var(--t-eyebrow); }
 .modgroup:not(:has(li:not([hidden]))) { display: none; }
-.modgrid { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 0 var(--s4); }
-.modgrid > li { padding: var(--s2) 0; border-bottom: 1px solid var(--hair); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 var(--s1); align-items: baseline; }
+/* NO COLUMN GAP, AND THE PADDING IS INSIDE THE CELL. A gap breaks the hairline
+ * between every pair of columns and the block reads as three lists; cells that
+ * butt together make one continuous rule grid, which is what a reader scans
+ * across. The grid bleeds its own cell padding sideways so the first column's
+ * names still line up with everything else on the page; the bleed is `--s2` and
+ * `--gut` is never smaller than that, so it lands inside the sheet at every
+ * width, the way the section seam above does. */
+.modgrid { list-style: none; padding: 0; margin: 0 calc(-1 * var(--s2)); display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 0; }
+.modgrid > li { padding: var(--s2); border-bottom: 1px solid var(--hair); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 var(--s1); align-items: baseline; align-content: start; }
 .modgrid a { font: var(--t-mono)/1.4 var(--mono); color: var(--accent); text-decoration: none; }
 .modgrid a:hover { text-decoration: underline; }
 .modgrid .count { font: var(--t-key)/1.4 var(--mono); color: var(--n2); text-align: right; }
@@ -1654,7 +1685,8 @@ kbd {
 }
 
 @media (max-width: 1024px) {
-  #root { grid-template-columns: repeat(6, minmax(0, 1fr)); padding: 0 var(--s3) var(--s5); }
+  :root { --gut: var(--s3); }
+  #root { grid-template-columns: repeat(6, minmax(0, 1fr)); padding: 0 var(--gut) var(--s5); }
   /* Every one of these has to outrank what it replaces, the shell included. */
   #root > *, #root > .masthead, #root > .foot, .page > * { grid-column: 1 / 7; }
   .rail { grid-column: 1 / 7; grid-row: auto; border-right: 0; border-bottom: 1px solid var(--hair); position: static; padding: var(--s3) 0; display: flex; gap: var(--s3); flex-wrap: wrap; }
@@ -1663,11 +1695,12 @@ kbd {
 }
 
 @media (max-width: 640px) {
+  :root { --gut: var(--s2); }
   body { font-size: var(--t-body-s); }
   /* One column. A twelve-column sheet is a sheet; a phone is a strip, and six
    * tracks with 24px gutters between them spend a quarter of the width on
    * gutters that separate nothing. */
-  #root { grid-template-columns: minmax(0, 1fr); gap: 0; padding: 0 var(--s2) var(--s5); }
+  #root { grid-template-columns: minmax(0, 1fr); gap: 0; padding: 0 var(--gut) var(--s5); }
   #root > *, #root > .masthead, #root > .foot, .page > *, .rail { grid-column: 1; }
 
   /* The header stays one 64px row: the base rules that make `<details>` not a

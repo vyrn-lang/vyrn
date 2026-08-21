@@ -9,7 +9,7 @@
   recorded demo, and the page-weight ceiling M1 recorded as out of reach and M2
   met, and [M3 — as landed](#m3--as-landed) for the one spacing token every
   section on the site now obeys, the geometry assertions that hold it, and the
-  19,610 gzipped bytes of design record that stopped being a download.
+  20,693 gzipped bytes of design record that stopped being a download.
   Milestones below; a milestone that fails its gate says so in this file.
 - **Depends on:** RFC-0105 (the site this redesigns — its two-front split,
   theme, accessibility checklist, and gates all survive and bind this work),
@@ -1361,6 +1361,45 @@ that arithmetic: **the overflow is a constant 379px and does not depend on the
 viewport at all**, so the row is not shrinking below 379 and the fix has to
 remove or wrap something.
 
+### The reference site, measured rather than remembered
+
+The user asked for four of its pages to be opened and compared side by side
+before the layout was finalised, for DENSITY and RHYTHM and not for branding,
+colour, type or text. Four numbers came back, and three of them changed
+something.
+
+| What | Reference, at 1280px | Here, before | Here, after |
+|---|---|---|---|
+| section padding | `112px / 112px`, `margin: 0`, `border-top: 1px`, section spans the full viewport | 56/56, margin 0, border-top — but the rule stopped inside the sheet's gutter | 56/56, and **the seam reaches the page edge** |
+| reference index | 3 columns, no gap, `padding: 20px` inside each cell, one continuous rule grid | 3-4 columns with a 32px gap, so the hairline broke at every column | **no gap, padding inside the cell, one continuous grid** |
+| install hero | centred, 64px heading, lede capped at 504px, four 112px square OS tiles | centred, lede at the container's 704px, three text pills 44px tall | lede at **32rem**, three equal tiles **8rem by 56px** |
+| a docs content page | 577px column, ~69ch, 16.8px/27.3 (1.63), `h2` 56px above | `--measure: 65ch`, `1.65`, `h2` 64px above | unchanged — the tokens already agree |
+
+**The seam.** A rule that stops inside the sheet's own gutter reads as an
+underline on a block; one that runs edge to edge reads as the join between two
+bands, which is what a section is. `.band::before` is absolutely positioned with
+`left` and `right` at `calc(-1 * var(--gut))`, where `--gut` is a new token
+holding the number `#root`'s side padding already used at all three widths — so
+the line lands exactly on `#root`'s border box and never past it. A `100vw`
+bleed would have added a scrollbar of its own, and this page already has one
+overflow it did not cause. Measured after: the seam runs `0..1270` of 1280,
+`0..365` of 375, `0..310` of 320, and the document width is unchanged at every
+width. On a page with a rail the section starts after the rail and so does its
+seam, which is right — the rail is a different column, not part of the band.
+
+**The grid.** A column gap breaks the hairline between every pair of columns and
+the block reads as three lists; cells that butt together with their padding
+inside them make one continuous rule grid, which is the thing a reader scans
+across. The whole 38-module library is about one screen now.
+
+**And the one number deliberately NOT matched: 56px against their 112px.** Their
+sections run 800 to 1,666px tall, so 112px of padding is 14% of the block. Ours
+run 200 to 630px, where 112 would be more than half of some of them, and the
+complaint that started this milestone was whitespace. At 56px our ratio is 19% —
+already proportionally MORE air than the reference has. The rhythm that was
+copied is the structure: symmetric padding, zero margin, a hairline seam at the
+join. The number is ours.
+
 ### The index and install, tightened
 
 - **The hero editor fills its column.** `.heroplay .out` was `max-height: 9em`
@@ -1499,7 +1538,7 @@ The sheet is 48% comment prose: which defect a rule closes, which checklist row
 it answers, what was measured before it. M0 gave it **90,000 bytes raw and 27,000
 gzipped**, and M2 landed at 89,272 / 27,170 — about 700 bytes of headroom. A
 global section system does not fit in 700 bytes. Trimming M3's own comments to
-half their length got the sheet to 95,818 / 29,120, which is still over both, and
+half their length got the sheet to 95,818 / 29,120, which was still over both, and
 `/` to **57,315 gzipped against a 55,000 ceiling**.
 
 Raising two ceilings was the cheap answer. The honest one is that **the design
@@ -1516,11 +1555,11 @@ there is a test for exactly that case.
 
 | | Raw | Gzipped |
 |---|---:|---:|
-| `site/public/style.css`, the source | 96,957 | 29,561 |
-| `out/style.css`, what a reader fetches | **48,709** | **9,563** |
+| `site/public/style.css`, the source | 99,083 | 30,353 |
+| `out/style.css`, what a reader fetches | **49,024** | **9,660** |
 | M0's ceiling | 90,000 | 27,000 |
 
-**19,610 gzipped bytes, off every page of the site**, and it is prose no browser
+**20,693 gzipped bytes, off every page of the site**, and it is prose no browser
 was ever going to render. `site/test/typescale.test.mjs` measures both ceilings
 against the shipped form now; the source keeps no byte ceiling of its own, on
 purpose — a comment budget is a budget on explaining yourself, and that was never
@@ -1532,13 +1571,13 @@ without an interaction:
 
 | Page | M2 | M3 | Ceiling |
 |---|---:|---:|---:|
-| `/` | 53,824 | **36,801** | 55,000 |
-| `/install` | — | **34,565** | 55,000 |
-| `/releases` | — | **34,308** | 55,000 |
-| `/docs` | — | **43,596** | 55,000 |
+| `/` | 53,824 | **36,898** | 55,000 |
+| `/install` | — | **34,662** | 55,000 |
+| `/releases` | — | **34,405** | 55,000 |
+| `/docs` | — | **43,693** | 55,000 |
 
-The shared assets are 31,603 of every one of those, and `widgets.js` is 17,762 of
-the 31,603 — **56% of what every page of this site downloads is one JavaScript
+The shared assets are 31,700 of every one of those, and `widgets.js` is 17,762 of
+them — **56% of what every page of this site downloads is one JavaScript
 file**, and the same argument applies to its comments. It is not stripped, and
 the reason is that JavaScript comments are not a regular language a
 forty-line scanner can find the end of. That is the next page-weight item and it
