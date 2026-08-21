@@ -342,10 +342,13 @@ code {
   padding: 0.08em 0.34em;
   /* A token has no spaces in it, so a sentence holding `moduleInterface` or
    * `--manifest-path` cannot be narrower than that word — and on a 360px phone
-   * that one word pushed the whole page sideways. It breaks when it must, which
-   * is never on a sheet wide enough to hold it. (`white-space: pre` wins inside
-   * a `<pre>`, so a block is untouched and still scrolls.) */
-  overflow-wrap: anywhere;
+   * that one word pushed the whole page sideways. `break-word`, NOT `anywhere`:
+   * `anywhere` invites the breaker to split a chip mid-word whenever the line
+   * is merely tight (`std/i18n` painted as `std/i1‌8n` on a 375px phone), while
+   * `break-word` moves the chip whole and splits only a token wider than the
+   * line itself. (`white-space: pre` wins inside a `<pre>`, so a block is
+   * untouched and still scrolls.) */
+  overflow-wrap: break-word;
   border: 1px solid color-mix(in oklab, var(--accent) 22%, transparent);
   background: color-mix(in oklab, var(--accent) var(--code-wash), transparent);
   color: color-mix(in oklab, var(--ink) 75%, var(--accent));
@@ -2391,17 +2394,10 @@ kbd {
   button, .btn { padding: 12px 16px; min-height: 44px; }
   /* The tab row's scroller moved to the base rules; the height is `button`. */
 
-  /* A token has no break in it, and on a phone there is no room to wait for
-   * one. `overflow-wrap: anywhere` is a last resort the breaker often declines;
-   * `break-all` is the instruction. It applies to code only, where a break
-   * inside a token beats a token that leaves the column.
-   *
-   * ponytail: a chip's own 1px border is left out of the width the line-breaker
-   * measures, so a span that lands at the end of a line can still put 2px past
-   * the column — measured on one paragraph at 320px and one at 390px, out of
-   * 40 pages. `box-decoration-break: clone` fixes those two and costs eight
-   * more at desktop widths, so the two stay. The upgrade is a browser fix. */
-  code { word-break: break-all; }
+  /* No `break-all` here any more (M4 follow-up): it split every chip that
+   * landed near a line end — `std/i18n` painted as `std/i‌18n` on a 375 phone —
+   * when the base rule's `overflow-wrap: break-word` already breaks the one
+   * genuinely-too-wide token and moves every other chip whole. */
 
 
   /* A long unbroken word in a headline is the one thing `balance` cannot fix. */

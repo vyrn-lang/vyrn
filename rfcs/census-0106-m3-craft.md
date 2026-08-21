@@ -534,3 +534,11 @@ and each of these is an existing component's treatment moved to a new place:
   round's rule (O1) says mono is for what is code.
 - `.chapternav` became `.pager`: one name for one component, now that the
   reference wears the same foot the book had.
+
+**R7 (orchestrator follow-up).** Inline code chips split mid-word on phones —
+`std/i18n` painted as `std/i‌18n` — from two rules pulling the same direction:
+the base `code { overflow-wrap: anywhere }` and the phone block's
+`code { word-break: break-all }`. Both invited the breaker to split a chip that
+merely landed near a line end. The base rule is `break-word` now and the phone
+`break-all` is deleted: the one genuinely-too-wide token still breaks, and
+every other chip moves whole. Verified on `/docs/std/json` at a true 375.
