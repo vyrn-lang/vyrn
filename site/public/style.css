@@ -28,11 +28,15 @@
   --danger: oklch(0.5568 0.2078 25.33);
   --amber: oklch(0.52 0.1447 70.08);
 
-  --n0: oklch(0.18 0.004 60);
+  /* The light paper sits at 0.955, not 0.975: a near-white ground under
+   * near-black ink read as glare next to the reference site's softer field
+   * (tenth-round user note: "less flashing light"). The ink lifts a step in
+   * trade, so every AA pair keeps its margin. */
+  --n0: oklch(0.21 0.004 60);
   --n1: oklch(0.42 0.004 60);
-  --n2: oklch(0.53 0.004 60);
-  --n3: oklch(0.92 0.003 60);
-  --n4: oklch(0.975 0.002 60);
+  --n2: oklch(0.505 0.004 60);
+  --n3: oklch(0.905 0.003 60);
+  --n4: oklch(0.955 0.002 60);
 
   --ink: var(--n0);
   --muted: var(--n1);
