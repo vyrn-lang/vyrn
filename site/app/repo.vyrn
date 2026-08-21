@@ -140,7 +140,14 @@ export fn releaseUrl() -> String {
     if !hasRelease() {
         return "https://github.com/vyrn-lang/vyrn/releases"
     }
-    return "https://github.com/vyrn-lang/vyrn/releases/tag/" + releaseTag()
+    return releaseUrlOf(releaseTag())
+}
+
+/// Any tag's release page, which is where its archives and its `SHA256SUMS`
+/// are. The site does not host a binary, so this is the only link a row in the
+/// release table can carry (RFC-0106 M3).
+export fn releaseUrlOf(tag: String) -> String {
+    return "https://github.com/" + repoName() + "/releases/tag/" + tag
 }
 
 test "the repository counts are all positive" {
