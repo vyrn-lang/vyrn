@@ -1,21 +1,52 @@
 <script>
-// GET /releases — what is published, and how a release is made.
+// GET /releases — the changelog: what is published, and what has landed since
+// (RFC-0106 M3).
+//
+// IT DOES NOT INSTALL ANYTHING. This page used to carry a `curl … | sh` block of
+// its own, which was one platform's command on a page that is not about
+// platforms, and a second copy of the thing `/install` exists to be. One link
+// takes its place (RFC-0106 M3, third round). The page is now what its name says:
+// the latest version at the top with the stat tiles and the highlights, then
+// every release ever tagged.
+//
+// It is also NOT IN THE MASTHEAD any more. Four nav names beat five, and nobody
+// navigates to a changelog before they have installed anything — so it is reached
+// from the index's own `Latest release` section, from `/install`, and from the
+// footer of every page.
 //
 // The newest tag is BAKED: `site/release.txt` is refreshed from the GitHub
-// listing before every build of this site, and read here through `../repo`.
+// listing before every build of this site, and read here through `../repo`,
+// which reconciles it against the repository's own tags and takes the newer.
 // Nothing on this page is written by hand — not the tag, not the date, not
-// whether it is a pre-release, which is the tag's own suffix. `fresh.js` asks
-// the same listing once a visit and says so, in the notice under the heading, if
-// a newer release has appeared since this page was built.
+// whether it is a pre-release, which is the tag's own suffix.
 //
-// THE RFC STRIP AND THE EIGHT NEWEST RECORDS ARE GONE FROM HERE (RFC-0105 M1).
-// A reader on this page wants to know what is published and whether it is safe
-// to depend on. The design record is what a contributor wants, it is a whole
-// section of its own now, and it renders every record rather than listing eight
-// links to GitHub.
+// FOUR STAT TILES, AND NOT ONE OF THEM IS TYPED. Each is arithmetic over a file
+// something else wrote: the pull requests are summed out of
+// `site/data/history.json` over the days AFTER the baked tag, the test blocks
+// and their files are counted in that same file by `scripts/site-history.py`,
+// and the examples and the standard library are counted off the working tree by
+// the generator in `app/facts.vyrn`. The tiles this page does NOT carry are the
+// ones RFC-0106 M3's brief asked for and this repository cannot compute: the
+// number of ARCHIVES a release published, and the platforms they were built
+// for, live in the release on GitHub and nowhere in this tree. A tile is a
+// number a reader trusts, so a number nobody can recompute does not get one.
+//
+// THE RECORDS SINCE THE TAG ARE THE HIGHLIGHTS, and they are the honest form of
+// them: release NOTES are written on GitHub and are not in this repository (the
+// feed says the same thing and for the same reason), so this page lists the
+// design records that arrived after the tag, each with the status it holds
+// today and a link to the record itself.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
-import { hasRelease, releaseTag, releaseDate, releasePre, releaseUrl } from "../repo"
+import { hasRelease, releaseTag, releaseDate, releasePre, releaseUrl, releaseUrlOf, exampleCount, stdCount, backendCount } from "../repo"
+import { Release, ArrivalRow, releaseRows, arrivalList, days, testBlockCount, testFileCount } from "../history"
+import { feedName } from "../feed"
+import { indexOf } from "std/strings"
+
+/// The feed, as a site-root path the export can rewrite like any other link.
+fn feedHref() -> String {
+    return "/" + feedName()
+}
 
 export fn head() -> Head {
     return pageHeadOf("/releases")
@@ -38,28 +69,111 @@ fn standing() -> String {
     return "Published " + releaseDate() + " as " + kind + "."
 }
 
+/// Merged pull requests since the baked tag, summed out of the history the
+/// script wrote. Dates are ISO, so `>` on the strings is `>` on the days.
+fn prsSince() -> Int64 {
+    let mut n = 0
+    for d in days() {
+        if d.date > releaseDate() {
+            n = n + d.prs
+        }
+    }
+    return n
+}
+
+/// The design records that arrived after the tag, newest first. `arrivalList`
+/// is oldest first, so this walks it backwards.
+fn sinceRows() -> Array<ArrivalRow> {
+    let all = arrivalList()
+    let mut out: Array<ArrivalRow> = []
+    let mut i = all.length - 1
+    while i >= 0 {
+        if all[i].date > releaseDate() {
+            out.push(ArrivalRow { tag: all[i].tag.copy(), href: all[i].href.copy(), date: all[i].date.copy(), band: all[i].band.copy() })
+        }
+        i = i - 1
+    }
+    return out
+}
+
+/// Every release, newest first — the table's own order, which is the order a
+/// reader looks for the current one in.
+fn releasesNewestFirst() -> Array<Release> {
+    let rows = releaseRows()
+    let mut out: Array<Release> = []
+    let mut i = rows.length - 1
+    while i >= 0 {
+        out.push(Release { tag: rows[i].tag.copy(), date: rows[i].date.copy() })
+        i = i - 1
+    }
+    return out
+}
+
+/// Whether a tag is a pre-release: it carries a suffix. The same rule
+/// `release.yml` applies when it decides whether to pass `--prerelease`.
+fn kindOf(tag: String) -> String {
+    return match indexOf(tag, "-") {
+        Some(at) => "pre-release",
+        None => "stable",
+    }
+}
 </script>
 
 <template>
-<main class="page">
-    <aside class="rail">
-        <a href="#status"><span class="n">01</span>status</a>
-        <a href="#how"><span class="n">02</span>how it works</a>
-    </aside>
-        <section class="hero" id="status">
-            <p class="eyebrow">Releases</p>
-            <h1 class="display">{{ headline() }}</h1>
-            <p class="lede">{{ standing() }} The language changes without a deprecation period, so read the design records before you depend on any of it. <a href="/install.html">Install it in one line</a>, or build from source.</p>
-            <p class="notice"><a :href="releaseUrl()">Release notes and downloads</a> — every archive is listed in that release's <code>SHA256SUMS</code>, and both installers refuse anything that does not match it.</p>
-            <p class="notice" role="status" :data-release-note="releaseTag()" hidden="hidden"></p>
+<main class="page wide">
+        <!-- SPLIT (RFC-0106 M3): what is published on the left with the command
+             that gets it, what it took to get there on the right. -->
+        <section class="hero split" id="status">
+            <div class="say">
+                <p class="eyebrow">Releases · {{ kindOf(releaseTag()) }}</p>
+                <h1 class="display">{{ headline() }}</h1>
+                <p class="lede">{{ standing() }} The language changes without a deprecation period.</p>
+                <p class="ctarow"><a class="cta" href="/install.html">Install or upgrade</a></p>
+                <p class="eyebrow"><a :href="releaseUrl()">Notes and downloads</a> · <a :href="feedHref()">Feed</a></p>
+            </div>
+
+            <div>
+                <dl class="specs">
+                    <div><dt>Since the tag</dt><dd>{{ prsSince() }}<small>pull requests merged</small></dd></div>
+                    <div><dt>Test blocks</dt><dd>{{ testBlockCount() }}<small>in {{ testFileCount() }} files</small></dd></div>
+                    <div><dt>Examples</dt><dd>{{ exampleCount() }}<small>on {{ backendCount() }} engines each</small></dd></div>
+                    <div><dt>Standard library</dt><dd>{{ stdCount() }}<small>modules, in Vyrn</small></dd></div>
+                </dl>
+                <p class="eyebrow">Design records since the tag</p>
+                <ul class="twocol">
+                    <li v-for="r in sinceRows()" :key="r.tag"><a :href="r.href">{{ r.tag }}</a> <span class="dim">{{ r.band }}</span></li>
+                </ul>
+            </div>
         </section>
 
-        <section class="band" id="how">
-            <p class="eyebrow">02 — how a release works</p>
-            <h2>One tag, one archive per platform</h2>
-            <p>Pushing a <code>v*</code> tag builds the <code>vyrn</code> binary for Linux, macOS on Apple silicon and Windows, checks that the tag and the crate version agree, and publishes a GitHub release with one <code>SHA256SUMS</code> listing every archive beside them. A tag carrying a suffix — <code>v0.1.0-alpha.1</code>, <code>v0.2.0-rc.1</code> — publishes as a pre-release, and this page names it and marks it rather than hiding it.</p>
-            <p>That suffix rule is the whole of how this page decides: the installers take the newest release whatever kind it is, so the page shows the newest release, because showing anything else would name a version the command does not install. Pin a different one with <code>VYRN_VERSION</code>.</p>
-            <p class="notice">What is stable today is the verification, not the surface. Every example runs under all three backends and must agree byte for byte, and CI enforces that on every push.</p>
+        <section class="band" id="all">
+            <p class="eyebrow">Every release</p>
+            <div class="scroller">
+                <table>
+                    <thead><tr><th>Version</th><th>Tagged</th><th>Kind</th><th>Archives</th></tr></thead>
+                    <tbody>
+                        <tr v-for="r in releasesNewestFirst()" :key="r.tag">
+                            <td><code>{{ r.tag }}</code></td>
+                            <td>{{ r.date }}</td>
+                            <td>{{ kindOf(r.tag) }}</td>
+                            <td><a :href="releaseUrlOf(r.tag)">Archives and SHA256SUMS</a></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="band split" id="how">
+            <div class="say">
+                <p class="eyebrow">How</p>
+                <h2>One tag, one archive per platform</h2>
+                <p>A <code>v*</code> tag builds <code>vyrn</code> for Linux, macOS and Windows, checks it against the crate version, and publishes one <code>SHA256SUMS</code> beside the archives. A suffix makes it a pre-release.</p>
+            </div>
+            <ul class="plain">
+                <li><strong>The installers take the newest release</strong><span>Pin another with <code>VYRN_VERSION</code>.</span></li>
+                <li><strong>Every example runs on three engines</strong><span>Byte for byte, on every push.</span></li>
+                <li><strong>Verified, not stable</strong><span><a href="/backstage.html">Where every change is argued.</a></span></li>
+            </ul>
         </section>
 </main>
 </template>

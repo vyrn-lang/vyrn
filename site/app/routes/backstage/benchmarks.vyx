@@ -37,8 +37,8 @@ fn recordTag() -> String {
 /// The two files the whole page is read from.
 fn recordFiles() -> Array<String> {
     return [
-        "rfcs/bench-0104/results/2026-08-19-LOCUST-v2.json",
-        "rfcs/bench-0104/results/2026-08-19-LOCUST-v2-run2.json",
+        "rfcs/bench-0104/results/2026-08-19-v2.json",
+        "rfcs/bench-0104/results/2026-08-19-v2-run2.json",
     ]
 }
 

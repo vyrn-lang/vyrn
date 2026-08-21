@@ -1,0 +1,206 @@
+/// A minute with Vyrn, as the site reads it (RFC-0106 M2).
+///
+/// WHERE THIS COMES FROM, and why it is the second file the site is handed
+/// rather than reads. The index shows six terminal steps — `vyrn new`, the files
+/// it wrote, `vyrn run`, one edit, `vyrn test`, `vyrn build` and the binary — and
+/// every line of output in them is what the real binary printed. This program
+/// cannot produce them: RFC-0014 gives the export `readFile`, `writeFile` and
+/// `listDir`, and no way to start a process. So `scripts/site-demo.py` runs the
+/// binary once, before the export, and writes `site/data/demo.json`:
+///
+///     python scripts/site-demo.py --vyrn compiler/target/release/vyrn > site/data/demo.json
+///
+/// `site/export.vyrn` REFUSES to publish without it, exactly as it refuses
+/// without the history — the failure being ruled out is a terminal demo that is
+/// drawn, is a paragraph somebody typed, and says nothing about it. The
+/// committed fixture beside it is three obviously-fake steps stamped
+/// `vyrn 0.0.0-fixture`, and it exists so `vyrn test` runs on a clone that has
+/// never recorded anything.
+import { Json, JsonField } from "std/json"
+import { parseJson } from "std/jsonread"
+
+/// One recorded step: what was typed, what came back, and the one line of prose
+/// that says what it proves. `cmd` is empty for the two steps that are not a
+/// command — the file listing, which is walked, and the edit, which is a file.
+export type DemoStep = { id: String, title: String, cmd: String, out: String, note: String }
+
+/// Where the workflow writes it, relative to the directory the export runs in.
+export fn demoPath() -> String {
+    return "site/data/demo.json"
+}
+
+/// What to type when it is not there.
+export fn demoCommand() -> String {
+    return "python scripts/site-demo.py --vyrn compiler/target/release/vyrn > " + demoPath()
+}
+
+fn demoFixturePath() -> String {
+    return "site/data/demo.fixture.json"
+}
+
+/// Whether the steps on the page are the fixture's rather than a real run's.
+/// The export asks this before it renders anything.
+export fn demoIsFixture() -> Bool {
+    loadDemo()
+    return fromFixture
+}
+
+let mut loaded = false
+let mut fromFixture = false
+let mut stepRows: Array<DemoStep> = []
+let mut version = ""
+let mut recordedOn = ""
+
+/// Read the file, once.
+fn loadDemo() {
+    if loaded {
+        return
+    }
+    loaded = true
+    let real = match readFile(demoPath()) {
+        Ok(text) => text.copy(),
+        Err(why) => "",
+    }
+    let src = if real.byteLength > 0 { real.copy() } else { fixtureText() }
+    fromFixture = real.byteLength == 0
+    let fields = match parseJson(src) {
+        Ok(j) => fieldsOf(j),
+        Err(why) => [],
+    }
+    version = stringAt(fields, "vyrn")
+    recordedOn = stringAt(fields, "recorded")
+    for s in arrayAt(fields, "steps") {
+        let f = fieldsOf(s.copy())
+        stepRows.push(DemoStep {
+                id: stringAt(f, "id"),
+                title: stringAt(f, "title"),
+                cmd: stringAt(f, "cmd"),
+                out: stringAt(f, "out"),
+                note: stringAt(f, "note"),
+            })
+    }
+}
+
+/// The fixture's text, or nothing at all.
+fn fixtureText() -> String {
+    return match readFile(demoFixturePath()) {
+        Ok(text) => text.copy(),
+        Err(why) => "",
+    }
+}
+
+/// The fields of a JSON object, or `[]` for any other value.
+fn fieldsOf(j: Json) -> Array<JsonField> {
+    return match j {
+        JObj(fs) => copyFields(fs),
+        JArr(xs) => [],
+        JStr(s) => [],
+        JNum(s) => [],
+        JBool(b) => [],
+        JNull => [],
+    }
+}
+
+fn copyFields(fs: Array<JsonField>) -> Array<JsonField> {
+    let mut out: Array<JsonField> = []
+    for f in fs {
+        out.push(JsonField { key: f.key.copy(), value: f.value.copy() })
+    }
+    return out
+}
+
+/// The array member `key` holds, or `[]`.
+fn arrayAt(fields: Array<JsonField>, key: String) -> Array<Json> {
+    for f in fields {
+        if f.key == key {
+            return match f.value.copy() {
+                JArr(xs) => copyList(xs),
+                JObj(fs) => [],
+                JStr(s) => [],
+                JNum(s) => [],
+                JBool(b) => [],
+                JNull => [],
+            }
+        }
+    }
+    return []
+}
+
+fn copyList(xs: Array<Json>) -> Array<Json> {
+    let mut out: Array<Json> = []
+    for x in xs {
+        out.push(x.copy())
+    }
+    return out
+}
+
+/// The string member `key` holds, or `""`.
+fn stringAt(fields: Array<JsonField>, key: String) -> String {
+    for f in fields {
+        if f.key == key {
+            return match f.value.copy() {
+                JStr(s) => s.copy(),
+                JObj(fs) => "",
+                JArr(xs) => "",
+                JNum(s) => "",
+                JBool(b) => "",
+                JNull => "",
+            }
+        }
+    }
+    return ""
+}
+
+/// The recorded steps, in order.
+export fn demoSteps() -> Array<DemoStep> {
+    loadDemo()
+    let mut out: Array<DemoStep> = []
+    for s in stepRows {
+        out.push(DemoStep { id: s.id.copy(), title: s.title.copy(), cmd: s.cmd.copy(), out: s.out.copy(), note: s.note.copy() })
+    }
+    return out
+}
+
+/// How many steps there are, for the widget's counter.
+export fn demoCount() -> Int64 {
+    return demoSteps().length
+}
+
+/// The build that produced the output above, as `vyrn --version` printed it.
+export fn demoVersion() -> String {
+    loadDemo()
+    return version.copy()
+}
+
+/// The day it was recorded.
+export fn demoRecorded() -> String {
+    loadDemo()
+    return recordedOn.copy()
+}
+
+/// The line under the widget: which binary printed this, and when.
+export fn demoStamp() -> String {
+    return "Recorded by running " + demoVersion() + " on " + demoRecorded() + "."
+}
+
+test "the fixture parses into steps a page could draw" {
+    // On a clone that has never run the recorder this reads the fixture, and on
+    // one that has it reads the real file. Either way the shape is the shape.
+    let steps = demoSteps()
+    assert(steps.length >= 3)
+    for s in steps {
+        assert(s.id.byteLength > 0)
+        assert(s.title.byteLength > 0)
+        assert(s.out.byteLength > 0)
+        assert(s.note.byteLength > 0)
+    }
+    assertEq(steps[0].cmd, "vyrn new demo")
+    assertEq(demoCount(), steps.length)
+}
+
+test "the steps are version-stamped, and the fixture says it is one" {
+    assert(demoVersion().byteLength > 0)
+    assert(demoRecorded().byteLength > 0)
+    // Nine bytes of `vyrn X.Y.Z` at the shortest, and the stamp names both.
+    assert(demoStamp().byteLength > demoVersion().byteLength + demoRecorded().byteLength)
+}

@@ -12,7 +12,7 @@
 import { highlightWith, terminalHtml, rustWords, tsWords, goWords } from "./code"
 import { joinWith } from "std/strings"
 import { vyrnCode } from "./hl"
-import { hlLines } from vyrnCode()
+import { hlLines, hlSource } from vyrnCode()
 
 /// A snippet in one language, ready for `v-html`.
 export type Snippet = { id: String, lang: String, label: String, html: String }
@@ -34,6 +34,13 @@ export fn vyrnLines(id: String) -> Array<String> {
 /// A Vyrn snippet as one coloured block.
 export fn vyrnHtml(id: String) -> String {
     return joinWith(hlLines(id), "\n")
+}
+
+/// A Vyrn snippet's RAW source — the same bytes the colour above was measured
+/// from. One page needs both: the index's hero editor paints the coloured lines
+/// and puts this in the textarea under them (RFC-0106 M2).
+export fn vyrnSource(id: String) -> String {
+    return hlSource(id)
 }
 
 /// A Vyrn snippet as numbered rows, starting at line `from`.

@@ -2,6 +2,12 @@
     "version": "0.0.1",
     "configurations": [
         {
+            "name": "site",
+            "runtimeExecutable": "python",
+            "runtimeArgs": ["-m", "http.server", "8811", "--directory", "out"],
+            "port": 8811
+        },
+        {
             "name": "vyrn-web-demo",
             "runtimeExecutable": "python",
             "runtimeArgs": ["-m", "http.server", "8734", "--directory", "web"],

@@ -29,7 +29,7 @@ import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { exampleCount, blob } from "../../repo"
 import { ApiModule, apiModules, apiHref } from "../../docs"
-import { SearchRow, GraphNode, GraphEdge, searchRows, graphNodes, graphEdges, graphViewBox, graphWidth, edgeCount, leafCount } from "../../stdgraph"
+import { SearchRow, SearchGroup, GraphNode, GraphEdge, searchRows, searchGroups, graphNodes, graphEdges, graphViewBox, graphWidth, edgeCount, leafCount } from "../../stdgraph"
 
 /// One place to read next, outside this site.
 type Link = { href: String, name: String, what: String }
@@ -49,9 +49,9 @@ fn exportCount() -> Int64 {
 
 fn links() -> Array<Link> {
     return [
-        Link { href: blob("examples"), name: "Examples", what: "Single-file programs. The parity harness runs every one on all three backends." },
-        Link { href: blob("README.md"), name: "README", what: "What the language is, in one page, with the feature tour." },
-        Link { href: blob("ROADMAP.md"), name: "Roadmap", what: "What ships today and what is next, in detail." },
+        Link { href: blob("examples"), name: "Examples", what: "Single-file programs, every one run on three engines." },
+        Link { href: blob("README.md"), name: "README", what: "The language in one page." },
+        Link { href: blob("ROADMAP.md"), name: "Roadmap", what: "What ships today, and what is next." },
     ]
 }
 
@@ -73,10 +73,10 @@ fn graphStyle() -> String {
 
 fn commands() -> Array<Command> {
     return [
-        Command { name: "vyrn run | check | build | test | bench", what: "Run, type-check, compile, and run the tests and benchmarks written in the file. <a href=\"/install.html#check\">Five of them, on day one.</a>" },
+        Command { name: "vyrn run | check | build | test | bench", what: "Run, type-check, compile, and run the tests and benchmarks written in the file. <a href=\"/guide/getting-started.html#first\">Your first program.</a>" },
         Command { name: "vyrn fmt --check", what: "The canonical formatter. <code>--check</code> is the CI gate." },
         Command { name: "vyrn doc", what: "Markdown API docs from /// comments. <a href=\"/docs.html#std\">The pages on this site</a> are read off the same declarations." },
-        Command { name: "vyrn why <file>", what: "Why the compiler decided what it decided. <code>--memory</code> and <code>--contract</code> narrow it. <a href=\"/index.html#memory\">One report, replayed.</a>" },
+        Command { name: "vyrn why <file>", what: "Why the compiler decided what it decided. <code>--memory</code> and <code>--contract</code> narrow it. <a href=\"/guide/ownership.html\">The chapter on ownership.</a>" },
         Command { name: "vyrn emit-gen <file>", what: "The source a generator produced. A generator is not magic, and this prints it." },
         Command { name: "vyrn serve | dev | routes", what: "An HTTP host, the development server, and the resolved wire table." },
         Command { name: "vyrn new | add | update | vendor | deps", what: "Projects and modules. Remote imports pin in <code>vyrn.lock</code> and cache by sha256." },
@@ -90,42 +90,49 @@ fn commands() -> Array<Command> {
         <a href="#std"><span class="n">01</span>std</a>
         <a href="#graph"><span class="n">02</span>graph</a>
         <a href="#cli"><span class="n">03</span>cli</a>
-        <a href="#read"><span class="n">04</span>read</a>
-        <a href="#soon"><span class="n">05</span>later</a>
+        <a href="#read"><span class="n">04</span>elsewhere</a>
     </aside>
-        <section class="hero">
-            <p class="eyebrow">Docs</p>
-            <h1 class="display">The reference is generated from the source</h1>
-            <p class="lede">{{ apiModules().length }} standard library modules and {{ exportCount() }} exports, each with the signature as it is written and the prose written above it. Read off <code>std/</code> by the compiler's own lexer while this page was built, so it cannot drift from the code.</p>
-        </section>
-
-        <section class="band" id="std">
-            <p class="eyebrow">01 — the standard library</p>
-            <h2>{{ apiModules().length }} modules, written in Vyrn</h2>
-            <p>Not one of them is a compiler feature. RPC, UI, i18n, OpenAPI and GraphQL are libraries built on compile-time generators, and <code>vyrn emit-gen</code> prints the source each one produces.</p>
+        <section class="hero split">
+            <div class="say">
+                <p class="eyebrow">Reference</p>
+                <h1 class="display">Generated from the source</h1>
+                <p class="lede">{{ apiModules().length }} modules, {{ exportCount() }} exports, read off <code>std/</code> by the compiler's own lexer while this page was built.</p>
+            </div>
             <div class="finder" data-search>
                 <label class="eyebrow" for="std-q">Search modules and exports</label>
                 <input id="std-q" type="search" autocomplete="off" spellcheck="false" placeholder="parse, Map, schema, byteLength" data-search-input/>
-                <p class="cap" data-search-count aria-live="polite">{{ searchRows().length }} modules</p>
+                <p class="eyebrow" data-search-count aria-live="polite">{{ searchRows().length }} modules</p>
             </div>
-            <ul class="modlist" data-search-list>
-                <li v-for="r in searchRows()" :key="r.name" :data-q="r.q" :data-e="r.e" :data-m="r.name">
-                    <a :href="r.href">std/{{ r.name }}</a>
-                    <span class="count">{{ r.count }}</span>
-                    <span class="note" v-html="r.summary"></span>
-                </li>
-            </ul>
-            <p class="cap">Listed from std/ while this page was built. The count is how many things the module exports. Type a module name, an export name or a word from a module's first line and the list narrows; with no script it is the same list, whole.</p>
+        </section>
+
+        <!-- THE WHOLE LIBRARY, IN FOUR GROUPS AND THREE COLUMNS (RFC-0106 M3).
+             Every row is generated — `apiGroups()` reads `std/` — so a module
+             added tomorrow is on this page on the next build. The rows still
+             carry `data-q` and `data-e`, so the search above filters them where
+             they sit; a group whose rows are all filtered out hides itself. -->
+        <section class="band" id="std">
+            <div data-search-list>
+                <div class="modgroup" v-for="g in searchGroups()" :key="g.name">
+                    <h2 class="eyebrow">{{ g.name }}</h2>
+                    <ul class="modgrid">
+                        <li v-for="r in g.rows" :key="r.name" :data-q="r.q" :data-e="r.e" :data-m="r.name">
+                            <a :href="r.href">std/{{ r.name }}</a>
+                            <span class="count">{{ r.count }}</span>
+                            <span class="d" v-html="r.summary"></span>
+                        </li>
+                    </ul>
+                </div>
+            </div>
         </section>
 
         <section class="band" id="graph">
-            <p class="eyebrow">02 — the graph</p>
+            <p class="eyebrow">The graph</p>
             <h2>{{ edgeCount() }} imports between {{ searchRows().length }} modules</h2>
-            <p>Every wire is an <code>import</code> line in the source. A module sits one column to the right of everything it imports, so dependencies are on the left and the modules that need them are on the right. {{ leafCount() }} modules import nothing else in <code>std/</code>.</p>
+            <p>Every wire is an <code>import</code> line; {{ leafCount() }} modules import nothing else in <code>std/</code>.</p>
             <div class="plate">
                 <div class="plate-head">
                     <span class="pill">Built</span>
-                    <span class="eyebrow">point at a module to light its imports</span>
+                    <span class="eyebrow">point at a module to light its wires</span>
                 </div>
                 <div class="stage scroller">
                     <!-- `role="group"` and not `role="img"` (RFC-0105 M4). Every
@@ -146,12 +153,12 @@ fn commands() -> Array<Command> {
                         </g>
                     </svg>
                 </div>
-                <p class="cap">Read from the <code>import</code> lines of <code>std/*.vyrn</code> by the compiler's own lexer while this page was built. An import written inside a code quote is a string, and is not a wire.</p>
+                <p class="cap">Read from the <code>import</code> lines of <code>std/*.vyrn</code>. An import inside a code quote is a string, not a wire.</p>
             </div>
         </section>
 
         <section class="band" id="cli">
-            <p class="eyebrow">03 — the driver</p>
+            <p class="eyebrow">The driver</p>
             <h2>What <code>vyrn</code> does</h2>
             <div class="scroller">
             <table>
@@ -168,23 +175,18 @@ fn commands() -> Array<Command> {
             </div>
         </section>
 
-        <section class="band" id="read">
-            <p class="eyebrow">04 — read</p>
-            <h2>Three places this site does not host</h2>
-            <p>{{ exampleCount() }} example programs live in the repository, and a link is honest when it points at something that is genuinely there and not here.</p>
+        <section class="band split" id="read">
+            <div class="say">
+                <p class="eyebrow">Elsewhere</p>
+                <h2>Three ways on, three off</h2>
+                <p><a href="/guide.html">The guide</a> teaches the language in order. <a href="/explore.html">The registry</a> lists what a project pulls in from outside <code>std/</code>.</p>
+            </div>
             <ul class="plain">
                 <li v-for="l in links()" :key="l.href">
                     <a :href="l.href">{{ l.name }}</a>
-                    <span class="note">{{ l.what }}</span>
+                    <span>{{ l.what }}</span>
                 </li>
             </ul>
-        </section>
-
-        <section class="band" id="soon">
-            <p class="eyebrow">05 — the other two ways in</p>
-            <h2>A book, and a registry</h2>
-            <p><a href="/guide.html">The guide</a> teaches the language in order: thirteen chapters, from the first program to a web application. Every code block in it is a program this site compiled and ran while the page was built, so nothing in the book is an illustration.</p>
-            <p><a href="/explore.html">The registry</a> answers a different question. Nothing in <code>std/</code> is there: the standard library arrives with the compiler, and this page is its one home. The registry lists what you can pull into a project from OUTSIDE it — a specifier, the command that pins it, and what the pin writes into <code>vyrn.json</code> and <code>vyrn.lock</code>.</p>
         </section>
 </main>
 </template>

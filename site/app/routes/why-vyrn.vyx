@@ -100,14 +100,14 @@ fn capabilities() -> Array<Capability> {
         </section>
 
         <section class="band" id="rules">
-            <p class="eyebrow">01 — a rule is part of a type</p>
+            <p class="eyebrow">a rule is part of a type</p>
             <h2>The check you cannot forget</h2>
             <p>A validated type carries its <code>where</code> clause everywhere it goes. The compiler rejects what it can prove invalid, erases the check where it can prove validity, and emits it where it can prove neither — which is every boundary a value arrives at.</p>
-            <p class="notice"><a href="/index.html#types">The front page runs this one</a> — uncomment the bad line and the compiler answers.</p>
+            <p class="notice"><a href="/play.html">The playground runs this one</a> — change the value and the compiler answers.</p>
         </section>
 
         <section class="band" id="ownership">
-            <p class="eyebrow">02 — ownership is declared</p>
+            <p class="eyebrow">ownership is declared</p>
             <h2>Four words, and no lifetime syntax</h2>
             <p>A parameter says what the function intends. Nothing is inferred, so there is nothing to fight.</p>
             <div class="plate" data-tabs>
@@ -127,11 +127,11 @@ fn capabilities() -> Array<Capability> {
                 </div>
                 <p class="cap">Every pane is coloured by the compiler's own lexer, and the capability word is tinted as the keyword it is in that position.</p>
             </div>
-            <p class="notice"><code>{{ whyCommand() }}</code> names the site each binding is reclaimed at, and the reason when it is not. <a href="/index.html#memory">The front page replays one report.</a></p>
+            <p class="notice"><code>{{ whyCommand() }}</code> names the site each binding is reclaimed at, and the reason when it is not. <a href="/guide/ownership.html">The chapter on ownership walks one.</a></p>
         </section>
 
         <section class="band" id="refuses">
-            <p class="eyebrow">03 — non-goals</p>
+            <p class="eyebrow">non-goals</p>
             <h2>What Vyrn refuses</h2>
             <p>What a language refuses is the sharpest statement of what it believes.</p>
             <dl class="nongoals">
@@ -143,10 +143,10 @@ fn capabilities() -> Array<Capability> {
         </section>
 
         <section class="band" id="predictable">
-            <p class="eyebrow">04 — predictability</p>
+            <p class="eyebrow">predictability</p>
             <h2>The same program means the same thing</h2>
             <p>The native binary and the WebAssembly module must agree with the interpreter byte for byte, floating point included. A language whose backends disagree has no meaning, only implementations.</p>
-            <p class="notice"><a href="/index.html#parity">The front page runs one half of that comparison in your browser</a> — the interpreter's digest was computed while the page was built, and the WebAssembly module computes its own when you press Run.</p>
+            <p class="notice"><a href="/compare.html#numbers">The comparison page publishes every reading</a> — three engines, eight programs, and the parity harness that fails CI when the bytes disagree.</p>
         </section>
 </main>
 </template>

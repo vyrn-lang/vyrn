@@ -76,7 +76,7 @@ fn buildLabel(d: Package) -> String {
     </section>
 
     <section class="band" id="use">
-        <p class="eyebrow">01 — install it</p>
+        <p class="eyebrow">install it</p>
         <h2>One command</h2>
         <p>This package is a directory in a public repository, so its specifier is that repository, a ref, and a path. <code>vyrn add</code> fetches it, hashes it, pins it and records the alias — you type this once.</p>
         <div class="cmd" data-copy>
@@ -103,7 +103,7 @@ fn buildLabel(d: Package) -> String {
     </section>
 
     <section class="band" id="api">
-        <p class="eyebrow">02 — what it gives</p>
+        <p class="eyebrow">what it gives</p>
         <h2>{{ unitLabel(data) }}</h2>
         <p>The specifier above names <code>{{ offerOf(data.slug).path }}</code>: the module with the most exports that this project does not itself build from. An entry point is what a project BUILDS; this is what it gives away. Any other module in the tree takes the same specifier with its own path in it.</p>
         <dl class="specs">
@@ -136,7 +136,7 @@ fn buildLabel(d: Package) -> String {
     </section>
 
     <section class="band" id="deps">
-        <p class="eyebrow">03 — what it needs</p>
+        <p class="eyebrow">what it needs</p>
         <h2>{{ depLabel(data) }}</h2>
         <p>Standard library modules, and nothing else — this package depends on no registry, because there is none. Every one of them arrives with the compiler, so none of them is a fetch; each link opens its page on the reference.</p>
         <dl class="specs">

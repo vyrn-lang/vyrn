@@ -40,7 +40,6 @@ fn examples() -> Array<Example> {
     <section class="band">
         <div class="plate" data-play-plate>
             <div class="plate-head">
-                <span class="pill">Running</span>
                 <span class="eyebrow" data-play-status>Loading the compiler…</span>
                 <span class="spacer"></span>
                 <label class="pickbox">
@@ -49,6 +48,7 @@ fn examples() -> Array<Example> {
                         <option v-for="e in examples()" :key="e.id" :value="e.id">{{ e.title }}</option>
                     </select>
                 </label>
+                <button type="button" class="btn" data-play-reset>Reset</button>
                 <button type="button" class="btn" data-play-share>Copy link</button>
                 <button type="button" class="btn primary" data-play-run disabled="disabled">Run</button>
             </div>

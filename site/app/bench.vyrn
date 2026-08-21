@@ -1,6 +1,6 @@
 /// The Benchmarks Game radar, computed while the site builds (RFC-0104 M3).
 ///
-/// WHERE THE NUMBERS COME FROM. `rfcs/bench-0104/results/2026-08-19-LOCUST-v2.json`
+/// WHERE THE NUMBERS COME FROM. `rfcs/bench-0104/results/2026-08-19-v2.json`
 /// and `-v2-run2.json`, written by `rfcs/bench-0104/harness/run.py`, read here at
 /// export time the way the backstage reads `rfcs/README.md`. Nothing on the two
 /// pages this module feeds is typed in by hand: change the record, rebuild, and
@@ -96,11 +96,11 @@ export type Panel = { key: String, name: String, n: String, note: String, cause:
 /// by a runner that also records cpu time, peak memory, build time and source
 /// size. M2's original pair stays committed beside it and is not edited.
 fn run1File() -> String {
-    return "rfcs/bench-0104/results/2026-08-19-LOCUST-v2.json"
+    return "rfcs/bench-0104/results/2026-08-19-v2.json"
 }
 
 fn run2File() -> String {
-    return "rfcs/bench-0104/results/2026-08-19-LOCUST-v2-run2.json"
+    return "rfcs/bench-0104/results/2026-08-19-v2-run2.json"
 }
 
 /// The text after the first `needle`, or nothing.
@@ -308,7 +308,11 @@ fn cellOf(program: String, contestant: String) -> Measure {
 
 /// The median of `program` on `contestant`, in microseconds, from the published
 /// run. Run two is the noise statement, not the published figure.
-fn medianUs(program: String, contestant: String) -> Int64 {
+///
+/// EXPORTED for the index's five-bar strip (RFC-0106 M2), which needs a length
+/// and not a formatted string: every other reader of this module takes `ms`,
+/// `secs` or a ratio, and a bar is a width in the chart's own units.
+export fn medianUs(program: String, contestant: String) -> Int64 {
     return cellOf(program, contestant).us1
 }
 
@@ -979,8 +983,14 @@ export fn envRows() -> Array<Array<String>> {
     let vyrn = objectAt(env, "    ", "vyrn")
     let wasmtime = objectAt(env, "    ", "wasmtime")
     let flags = objectAt(env, "    ", "flags")
+    // NO HOST ROW (RFC-0106 M3, fourth round). It printed the machine's own
+    // name — `LOCUST` — in a caption on the index and on `/compare`, which is a
+    // private detail of somebody's desk and tells a reader nothing about the
+    // number beside it. What makes a measurement checkable is below: the CPU,
+    // the memory, the OS and every toolchain version and flag. The recorder
+    // stopped collecting it too, and the four committed records stopped carrying
+    // it — see `rfcs/bench-0104/harness/run.py`.
     return [
-        ["Host", textAt(env, "    ", "host")],
         ["Operating system", textAt(env, "    ", "os")],
         ["CPU", textAt(hw, "      ", "cpu") + " (" + scalarAt(hw, "      ", "cores") + " logical cores)"],
         ["Memory", scalarAt(hw, "      ", "ram_gib") + " GiB"],
@@ -1182,7 +1192,7 @@ test "the record still has the shape this reader cuts" {
 }
 
 test "the medians are the ones the published record holds" {
-    // Every figure below is read off `2026-08-19-LOCUST-v2.json` by hand. They
+    // Every figure below is read off `2026-08-19-v2.json` by hand. They
     // are pins, and they are meant to be: the day the record is replaced they
     // fail, which is what makes a repointed reader visible instead of silent.
     // RFC-0104 M2's own table is the earlier dataset and is not this one — see
@@ -1369,16 +1379,22 @@ test "the noisy cells are flagged where they are printed" {
     assert(!readingsFor("nbody")[0].noisy)
 }
 
-test "the caption names the machine and the toolchain that produced the numbers" {
+test "the caption names the hardware and the toolchain, and never the machine" {
     let cap = benchMachine()
     assert(has(cap, "Ryzen"))
     assert(has(cap, "wasmtime 46.0.1"))
     assert(has(cap, "2026-08-19"))
-    assertEq(envRows().length, 15)
+    assertEq(envRows().length, 14)
     for row in envRows() {
         assert(row[0].byteLength > 0)
         assert(row[1].byteLength > 0)
+        // The host name is gone from the record, from the file names and from
+        // here, and this is what says so if one comes back (RFC-0106 M3, fourth
+        // round). A row whose label is `Host` would fail the first assertion; a
+        // record that still carried the field would fail the second.
+        assert(row[0] != "Host")
     }
+    assert(!has(envText(), "\"host\""))
     // The floor is published beside the medians, because a whole-process time
     // that hides its floor cannot be checked.
     assertEq(floorRows().length, 5)

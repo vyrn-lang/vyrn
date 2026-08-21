@@ -176,6 +176,7 @@ the same test as the index: a file here that nothing links to fails it.
 | [`NOTES-dogfood-bin.md`](NOTES-dogfood-bin.md) | Friction record from writing `examples/bin`, the pastebin that survives restarts — the first persistent app. |
 | [`NOTES-dogfood-shelf.md`](NOTES-dogfood-shelf.md) | Friction record from writing `examples/shelf`, the full-stack app. |
 | [`NOTES-dogfood-vlog.md`](NOTES-dogfood-vlog.md) | Friction record from writing `examples/vlog.vyrn`, the CLI and text app. |
+| [`census-0106-m3-craft.md`](census-0106-m3-craft.md) | The adversarial re-audit of the consumer pages after RFC-0106 M3's first round was rejected: every defect found, and whether it was fixed or deferred. |
 | [`census-builtins.md`](census-builtins.md) | Measurement of every reserved builtin name. Became RFC-0094. |
 | [`census-call-arguments.md`](census-call-arguments.md) | Measurement of call-argument shapes, then implemented; §9 records what landed. |
 | [`census-regions.md`](census-regions.md) | Measurement of `region { .. }` use. Its recommendation closed two rows of the builtins census. |

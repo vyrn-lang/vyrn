@@ -129,7 +129,7 @@ fn axes() -> Array<Axis> {
         </section>
 
         <section class="band" id="axes">
-            <p class="eyebrow">01 — six axes</p>
+            <p class="eyebrow">six axes</p>
             <h2>The whole comparison, on one screen</h2>
             <div class="scroller">
             <table class="matrix">
@@ -151,7 +151,7 @@ fn axes() -> Array<Axis> {
         </section>
 
         <section class="band" id="rule">
-            <p class="eyebrow">02 — a rule about a value</p>
+            <p class="eyebrow">a rule about a value</p>
             <h2>A number that is only valid at 18 or above</h2>
             <p>In Vyrn the rule is part of the type. Everywhere else it lives beside the type — in a constructor, a schema object, or a function the caller has to remember.</p>
             <div class="plate" data-tabs>
@@ -172,7 +172,7 @@ fn axes() -> Array<Axis> {
         </section>
 
         <section class="band" id="memory">
-            <p class="eyebrow">03 — what a function does with its argument</p>
+            <p class="eyebrow">what a function does with its argument</p>
             <h2>Read it, change it, or take it</h2>
             <p>Three intents, one word each. Rust spells them as reference kinds and adds a lifetime the moment one is stored; the other two hand the question to a collector.</p>
             <div class="plate" data-tabs>
@@ -193,7 +193,7 @@ fn axes() -> Array<Axis> {
         </section>
 
         <section class="band" id="failure">
-            <p class="eyebrow">04 — when the value is not there</p>
+            <p class="eyebrow">when the value is not there</p>
             <h2>There is no null to forget</h2>
             <p>Vyrn and Rust both make absence a value you have to open. TypeScript has two absences and a compiler flag; Go has a convention.</p>
             <div class="plate" data-tabs>
@@ -214,7 +214,7 @@ fn axes() -> Array<Axis> {
         </section>
 
         <section class="band" id="numbers">
-            <p class="eyebrow">05 — measured</p>
+            <p class="eyebrow">measured</p>
             <h2>What a WebAssembly module weighs</h2>
             <p>Every bar was built with the release binary in this repository, one command per row, and read off the file. A module carries only the runtime its own code reaches.</p>
             <div class="plate" data-widget="bars">
@@ -274,7 +274,7 @@ fn axes() -> Array<Axis> {
         </section>
 
         <section class="band" id="leak">
-            <p class="eyebrow">06 — measured</p>
+            <p class="eyebrow">measured</p>
             <h2>What one keyword is worth</h2>
             <p>The same loop, a million turns, native. One word changes on the callee's parameter, and a shape that grows becomes a shape that does not.</p>
             <div class="plate" data-widget="leak">
@@ -319,7 +319,7 @@ fn axes() -> Array<Axis> {
         </section>
 
         <section class="band" id="speed">
-            <p class="eyebrow">07 — measured</p>
+            <p class="eyebrow">measured</p>
             <h2>One program, three engines</h2>
             <p>The same source file runs three ways: the tree-walking interpreter, a native binary, and a WebAssembly module. They print the same forty bytes — the harness checks that before it reports a single time — and they take these times to do it.</p>
             <div class="plate" data-widget="bars">
@@ -384,13 +384,13 @@ fn axes() -> Array<Axis> {
         </section>
 
         <section class="band" id="radar">
-            <p class="eyebrow">08 — measured</p>
+            <p class="eyebrow">measured</p>
             <h2>Eight Benchmarks Game programs, five contestants</h2>
             <p>The same eight programs written five ways: plain C, safe Rust, plain node, Vyrn native and Vyrn as WebAssembly. Further from the centre is <em>slower</em>, so a small shape is a fast one.</p>
             <div class="plate" data-widget="radar">
                 <div class="plate-head">
                     <span class="pill live">Measured</span>
-                    <span class="eyebrow">rfcs/bench-0104/results/2026-08-19-LOCUST-v2.json</span>
+                    <span class="eyebrow">rfcs/bench-0104/results/2026-08-19-v2.json</span>
                     <span class="spacer"></span>
                     <div class="controls" role="group" aria-label="Normalize the chart to">
                         <button type="button" data-norm="c" aria-pressed="true">C = 1</button>

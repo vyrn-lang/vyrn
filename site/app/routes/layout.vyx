@@ -82,7 +82,13 @@ fn standing() -> String {
                  the theme button, because without script it would take focus
                  and do nothing — the `<noscript>` below says where to go
                  instead. -->
-            <button type="button" class="find" data-find-open aria-label="Search this site. Press slash."><Icon name="bytesize:search"/> Search</button>
+            <!-- THREE FORMS OF ONE CONTROL, and the two narrow ones are what
+                 they were (RFC-0106 M3, fourth round). `.word` is the word that
+                 goes at phone widths; `.hint` is the rest of the placeholder and
+                 the `/` chip, which the sheet only shows above 1024px, where the
+                 row has room. The accessible name is the `aria-label` either
+                 way, so none of this text is announced twice. -->
+            <button type="button" class="find" data-find-open aria-label="Search this site. Press slash."><Icon name="bytesize:search"/> <span class="word">Search<span class="hint"> docs, reference…</span></span> <kbd class="key">/</kbd></button>
             <span class="slot" v-html="installCta()"></span>
             <span class="slot" v-html="themeControl()"></span>
         </div>
@@ -122,6 +128,11 @@ fn standing() -> String {
              rule forbids. The parity claim is made where it can be shown: on the
              landing page, by a check that runs. -->
         <span>{{ exampleCount() }} examples, {{ backendCount() }} backends</span>
+        <!-- The changelog. It was a masthead row until M3's third round: four nav
+             names beat five, and a reader who wants to know what changed is
+             looking down the page and not up at it. The index's `Latest release`
+             section and the install page are the other two doors. -->
+        <a href="/releases.html"><Icon name="bytesize:tag"/> Releases</a>
         <!-- Two glyphs, one of each kind, and the difference is the whole a11y
              rule (RFC-0107 M3). The mark beside the words is DECORATION: it
              renders `aria-hidden`, because a screen reader that announced it

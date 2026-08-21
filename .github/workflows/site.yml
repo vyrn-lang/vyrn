@@ -89,6 +89,28 @@ jobs:
           # (RFC-0105 M1).
           fetch-depth: 0
 
+      - name: Rust cache
+        # The pattern `ci.yml` already uses, and for the reason recorded there:
+        # rust-cache refreshes the saved target dir per run and prunes stale
+        # artifacts, where `actions/cache` on a lockfile key never re-uploads
+        # after the first hit. Its own slot, because this job builds two
+        # workspaces neither test job builds — `vyrn-play` for wasm, which is not
+        # in the workspace at all.
+        #
+        # WHERE THE TIME GOES, measured on run 32440081819 (17m23s): the CLI
+        # build 62 s, the playground's wasm build 25 s and its host tests 45 s —
+        # 132 s of cargo, which is what this step removes on a warm run. The pole
+        # is not a build. `The site's own tests` is 907 s of it, and 687 s of THAT
+        # is `vyrn test site/export.vyrn`: 32 blocks, most of which render pages,
+        # against 175 routes. That number belongs to the interpreter and not to
+        # this file, and it is the next thing to attack here.
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            compiler
+            compiler/vyrn-play
+          prefix-key: site
+
       - name: Build the CLI
         working-directory: compiler
         run: cargo build --release -p vyrn-cli
@@ -133,6 +155,28 @@ jobs:
               echo "no release data from the API; keeping the committed file:"
               grep -v '^#' site/release.txt ;;
           esac
+
+      - name: The output directories
+        # RFC-0014 has no way to CREATE a directory, and the reference publishes
+        # one page per std module, the guide one per chapter, the backstage one
+        # per design record, and the registry one per package.
+        run: mkdir -p out/docs/std out/guide out/backstage/rfcs out/explore
+
+      - name: A minute with Vyrn, recorded
+        # AFTER the CLI build, because it runs the binary that step just made,
+        # and BEFORE the export, which refuses to publish without this file —
+        # see `missingDemo` in `site/export.vyrn`.
+        #
+        # AND BEFORE THE TEST LOOP, which is fifteen minutes long. This step used
+        # to sit under it: when it broke, the job spent seventeen minutes getting
+        # to the failure. Every input the export needs is now written in the first
+        # two, so a broken input says so while a reader is still watching. Seven steps in a scratch
+        # directory: `vyrn new`, the files it wrote, `vyrn run`, one edit,
+        # `vyrn test`, `vyrn build`, and the binary. Every line of output on the
+        # index came out of this run (RFC-0106 M2).
+        run: |
+          python3 scripts/site-demo.py --vyrn compiler/target/release/vyrn > site/data/demo.json
+          wc -c site/data/demo.json
 
       - name: The site's own tests
         # The export asserts that every navigation row points at a route that
@@ -190,7 +234,7 @@ jobs:
         # default and overflows a tenth of the way to the interpreter's limit.
         #
         # `writeFile` takes a String, so the export cannot copy a wasm module;
-        # this one lands straight in the output like the hero's.
+        # this one lands straight in the output.
         working-directory: compiler/vyrn-play
         run: |
           rustup target add wasm32-unknown-unknown
@@ -204,18 +248,6 @@ jobs:
         # host where a failure is readable.
         working-directory: compiler/vyrn-play
         run: cargo test --release
-
-      - name: The hero module
-        # `writeFile` takes a String, so the export step cannot copy a wasm
-        # module. It is built here instead, straight into the output.
-        #
-        # `out/docs/std`, `out/guide`, `out/backstage/rfcs` and `out/explore` are
-        # made here too: RFC-0014 has no way to CREATE a directory, and the
-        # reference publishes one page per std module, the guide one per chapter,
-        # the backstage one per design record, and the registry one per package.
-        run: |
-          mkdir -p out/docs/std out/guide out/backstage/rfcs out/explore
-          compiler/target/release/vyrn build examples/herofield.vyrn --target wasm -o out/hero.wasm
 
       - name: Render every page
         # One `route()` call per path, twice: the document and the soft-

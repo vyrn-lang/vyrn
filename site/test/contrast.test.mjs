@@ -7,8 +7,9 @@
 // parses the token blocks, resolves `var()`, `oklch()` and `color-mix()` the way
 // a browser does, and measures every pair a reader actually looks at.
 //
-// WHY THE SOURCE AND NOT THE EXPORT. `site/public/style.css` is copied to
-// `out/style.css` byte for byte, and `export.vyrn` already asserts that copy. A
+// WHY THE SOURCE AND NOT THE EXPORT. `out/style.css` is this file with its
+// comments removed and nothing else changed (RFC-0106 M3), so every declaration
+// this test reads is in the published sheet, and `export.vyrn` asserts it. A
 // checker that needs an export cannot run while the palette is being edited,
 // which is the moment it is worth having.
 //

@@ -65,7 +65,6 @@ import os
 import platform
 import re
 import shutil
-import socket
 import statistics
 import subprocess
 import sys
@@ -275,7 +274,11 @@ def environment() -> dict:
         ["git", "-C", str(ROOT), "status", "--porcelain"], capture_output=True, text=True
     ).stdout.strip()
     return {
-        "host": socket.gethostname(),
+        # NO HOST NAME. It was `socket.gethostname()`, it was published in every
+        # record, and the site printed it in a caption on two pages — a private
+        # detail of somebody's desk that adds nothing to a measurement. What
+        # makes a number checkable is the CPU, the OS, the toolchain versions and
+        # the flags, and all of those stay (RFC-0106 M3, fourth round).
         "os": f"{platform.system()} {platform.release()} {platform.version()}",
         "hardware": hardware(),
         "clang": tool_version(["clang", "--version"]),
@@ -767,7 +770,10 @@ def main() -> int:
     if args.out:
         out = Path(args.out)
     else:
-        base = f"{record['date']}-{env['host']}"
+        # The date and nothing else. This used to append the host name, which is
+        # how four committed records ended up with a machine's name in their
+        # file names as well as in their bodies.
+        base = f"{record['date']}"
         out = RESULTS / f"{base}.json"
         k = 2
         while out.exists():
