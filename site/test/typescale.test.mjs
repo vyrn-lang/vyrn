@@ -45,9 +45,9 @@ const bare = css.replace(/\/\*[\s\S]*?\*\//g, "");
 /// This table is the assertion — a token whose value moves fails here with both
 /// numbers, which is what "measurable" means for a type scale.
 const SCALE = {
-  "--t-display": "clamp(2.1rem, 1rem + 4vw, 4.5rem)",
+  "--t-display": "clamp(2.1rem, 0.9rem + 4.6vw, 5.1rem)",
   "--t-h1": "clamp(1.7rem, 1.1rem + 1.8vw, 2.4rem)",
-  "--t-h2": "clamp(1.5rem, 1rem + 1.4vw, 2.2rem)",
+  "--t-h2": "clamp(1.6rem, 1rem + 2vw, 2.75rem)",
   "--t-h3": "1.5rem",
   "--t-h4": "1.1rem",
   "--t-h5": "1rem",
@@ -139,7 +139,7 @@ test("only one selector raises the display step, and a leaf page cannot match it
   const overrides = tokenDecls(bare).filter((d) => d.selector !== ":root");
   assert.deepEqual(
     overrides.map((d) => `${d.selector} { ${d.token}: ${d.value} }`),
-    ['[data-landing] { --t-display: clamp(2.6rem, 1rem + 4vw, 4.5rem) }'.replace("[data-landing]", ":root[data-landing]")],
+    ['[data-landing] { --t-display: clamp(2.6rem, 0.9rem + 4.6vw, 5.1rem) }'.replace("[data-landing]", ":root[data-landing]")],
   );
   // The raise is the FLOOR and nothing else: the middle term and the cap are the
   // same in both curves, so every width from 641px up computes what it computed

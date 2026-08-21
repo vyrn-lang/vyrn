@@ -101,14 +101,19 @@
 
   --mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Menlo, monospace;
   --sans: ui-sans-serif, "Segoe UI", Roboto, Helvetica, sans-serif;
+  /* Display faces for headings only: the optical-size cuts (Segoe UI Variable
+   * Display, SF Pro Display) carry tight tracking at 40px+ where the text cut
+   * reads like a bolded paragraph — the single largest visual gap to the
+   * reference site, closed with zero shipped font bytes. */
+  --sans-d: "Segoe UI Variable Display", "SF Pro Display", ui-sans-serif, "Segoe UI", Roboto, Helvetica, sans-serif;
 
   /* THE TYPE SCALE (RFC-0106 M1). Type was 34 unnamed literals while colour and
    * spacing were tokens. `site/test/typescale.test.mjs` resolves every size in
    * this file against this block. Root is 16px; every number was already in the
    * sheet bar the display floor. */
-  --t-display: clamp(2.1rem, 1rem + 4vw, 4.5rem);
+  --t-display: clamp(2.1rem, 0.9rem + 4.6vw, 5.1rem);
   --t-h1: clamp(1.7rem, 1.1rem + 1.8vw, 2.4rem);
-  --t-h2: clamp(1.5rem, 1rem + 1.4vw, 2.2rem);
+  --t-h2: clamp(1.6rem, 1rem + 2vw, 2.75rem);
   --t-h3: 1.5rem; --t-h4: 1.1rem; --t-h5: 1rem; --t-lede: 1.2rem;
   --t-body: 17px; --t-body-s: 16px;
   --t-note: 0.95rem; --t-meta: 0.92rem; --t-matrix: 0.9rem; --t-cap: 0.85rem;
@@ -274,7 +279,7 @@
 
 /* The display step, on the nine landing pages only: `export.vyrn` stamps
  * `data-landing` per route, and asserts no leaf has it (RFC-0106 M1). */
-:root[data-landing] { --t-display: clamp(2.6rem, 1rem + 4vw, 4.5rem); }
+:root[data-landing] { --t-display: clamp(2.6rem, 0.9rem + 4.6vw, 5.1rem); }
 
 * { box-sizing: border-box; }
 
@@ -614,6 +619,17 @@ h1 code, h2 code, h3 code, h4 code {
 /* On `/install` the button is where the reader is, so it reports rather than
  * invites — the nav marker's job, in this control's shape. */
 .cta[aria-current="page"] { background: none; color: var(--accent); }
+/* A CONTENT CTA IS A LINK, NOT A BUTTON. The filled box is the masthead
+ * Install's shape, and there is one of it; a second filled box in every
+ * section makes four "primary" actions per screen. In content the same class
+ * is an accent arrow-link: same mono voice, no fill, weight from the arrow. */
+.ctarow .cta {
+  background: none; border: 0; color: var(--accent);
+  padding: 0; min-height: 44px;
+}
+.ctarow .cta::after { content: " \2192"; margin-left: 6px; transition: translate 160ms var(--expo); }
+.ctarow .cta:hover { background: none; color: var(--accent); text-decoration: underline; text-underline-offset: 4px; }
+.ctarow .cta:hover::after { translate: 3px 0; }
 
 /* THE NAVIGATION DISCLOSURE (RFC-0106 M1). ONE `<nav>`: five links in a row
  * here, a panel behind `Menu` in the 640px block. BASE rules, so a browser with
@@ -707,11 +723,17 @@ h1 code, h2 code, h3 code, h4 code {
 }
 
 .display {
+  font-family: var(--sans-d);
   font-size: var(--t-display);
-  line-height: 0.98;
-  letter-spacing: -0.03em;
-  font-weight: 640;
+  line-height: 0.95;
+  letter-spacing: -0.042em;
+  font-weight: 720;
 }
+
+/* Section headings take the display face too — a page whose h2s are body-face
+ * bold reads as one long article, not sections. Tracking scales with size:
+ * looser than the display, tighter than text. */
+h2, .cards h3 { font-family: var(--sans-d); letter-spacing: -0.02em; font-weight: 700; }
 
 /* READING. A lede is the one paragraph deliberately narrower than the block
  * beside it: the display headline above it is what fills the column, and the
@@ -859,7 +881,14 @@ pre.code {
   font-size: var(--t-cmd);
   overflow-x: auto;
   white-space: pre;
+  /* A scrollbar at rest is the loudest thing in any box it sits under. The
+   * scroller stays (trackpad, touch, keyboard all still pan) but draws no bar;
+   * the mask fades the last 24px of PAINTED text, so a command that fits shows
+   * no fade at all and a clipped one visibly dissolves instead of slicing. */
+  scrollbar-width: none;
+  mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
 }
+.cmd code::-webkit-scrollbar { display: none; }
 .cmd button { border: 0; border-left: 1px solid var(--rule); align-self: stretch; }
 /* A command block is one row, and the row is the height of one line of code
  * plus its padding. Nothing inside it may grow it. */
@@ -902,7 +931,14 @@ pre.code {
  * 884px box for a fifteen-line program. THREE classes, not two: the rule it
  * overrides (`.play .editor textarea`) is declared LATER in this sheet, so an
  * override of equal specificity would lose. */
-.play.heroplay .editor textarea { height: auto; min-height: 0; }
+.play.heroplay .editor textarea { height: auto; min-height: 0; resize: none; }
+/* The hero editor holds a program that fits it; a scrollbar at rest says
+ * otherwise. Panning still works everywhere it could before. */
+.heroplay .editor pre, .heroplay .editor textarea, .heroplay .out { scrollbar-width: none; }
+.heroplay .editor pre::-webkit-scrollbar, .heroplay .editor textarea::-webkit-scrollbar, .heroplay .out::-webkit-scrollbar { display: none; }
+/* On a phone the head's four items cannot share 343px: the pill is the one
+ * that is decor, so it is the one that goes, and Run stays on the row. */
+@media (max-width: 640px) { .heroplay .pill { display: none; } }
 /* THE OUTPUT PANE GROWS INTO THE COLUMN (RFC-0106 M3). It was `max-height: 9em`
  * against a fixed editor, so the plate ended well above the column beside it. */
 .heroplay .out { flex: 1; min-height: 6em; max-height: none; overflow: auto; }
@@ -910,12 +946,8 @@ pre.code {
 /* The keyboard hint and the reset control, both of which only mean anything with
  * a script: `[data-js]` is on the root once `theme.js` has run, and the shell
  * gates the theme and search controls the same way. */
-.keyhint, .btn.jsonly { display: none; }
-[data-js] .keyhint { display: inline-flex; align-items: center; gap: 4px; }
+.btn.jsonly { display: none; }
 [data-js] .btn.jsonly { display: inline-flex; }
-/* A keyboard shortcut is not a hint on a phone. Written with the same attribute
- * as the rule it overrides, so specificity decides nothing by accident. */
-@media (max-width: 640px) { [data-js] .keyhint { display: none; } }
 
 /* Facts, as chips. Four short truths a reader can take at a glance, and every
  * one of them is checkable on another page — which is why none of them is a
@@ -926,13 +958,20 @@ pre.code {
 /* The four pillars. Two lines and one command each, and the command is the
  * point: a card that ends in a paragraph ends in nothing to do. */
 .cards { list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--s3); margin: var(--s4) 0 0; padding: 0; }
-.cards > li { border: 1px solid var(--rule); padding: var(--s2); display: flex; flex-direction: column; }
+.cards > li { border: 1px solid var(--rule); padding: var(--s3); display: flex; flex-direction: column; }
 .cards h3 { font-size: var(--t-h3); margin-bottom: var(--s1); display: flex; align-items: center; gap: var(--s1); }
 .cards p { color: var(--muted); flex: 1; }
 /* A card is 280px, so its command stacks over its Copy button and takes the
- * whole width rather than sharing it with an 86px button. */
-.cards .cmd { margin-top: var(--s2); flex-direction: column; align-items: stretch; }
-.cards .cmd button { border-left: 0; border-top: 1px solid var(--rule); }
+ * whole width rather than sharing it with an 86px button. The card's own
+ * border is the only hard edge: the command sits on a wash, not in a second
+ * box, and Copy is a quiet strip — a card drawn as three stacked rectangles
+ * of equal border weight was the boxes-in-boxes read. */
+.cards .cmd { margin-top: var(--s2); flex-direction: column; align-items: stretch; border: 0; background: color-mix(in oklab, var(--ink) 5%, transparent); }
+/* One size down inside a card: the longest pillar command is 30 characters,
+ * and 13px mono holds all 30 inside a 280px track where 14px clips two of
+ * the four into the fade. */
+.cards .cmd code { font-size: var(--t-mono); padding: 10px 12px; }
+.cards .cmd button { border-left: 0; border-top: 1px solid var(--hair); min-height: 30px; font-size: var(--t-key); color: var(--n2); }
 
 /* A COMMAND IS ONE LINE (RFC-0106 M3, second round).
  *
@@ -1118,7 +1157,12 @@ pre.code {
 .demo .steps > li::before { content: counter(step); grid-column: 1; grid-row: 1 / span 2; font: var(--t-key)/1.7 var(--mono); color: var(--n2); }
 .demo .steps > li + li { border-top: 1px solid var(--hair); }
 .demo .steps h3 { grid-column: 2; font-size: var(--t-h4); }
-.demo .steps .cmd { grid-column: 2; margin-top: var(--s1); }
+/* A step's command is a line, not a plate: seven bordered boxes inside seven
+ * bordered rows inside a bordered card was most of the "looks broken". The
+ * prompt glyph does the framing a border did. */
+.demo .steps .cmd { grid-column: 2; margin-top: 2px; border: 0; }
+.demo .steps .cmd code { padding: 2px 0; }
+.demo .steps .cmd code::before { content: "$ "; color: var(--n2); }
 
 .demo .panes { min-width: 0; padding: var(--s2); display: flex; flex-direction: column; gap: var(--s3); }
 .demo .pane { min-width: 0; display: flex; flex-direction: column; }
@@ -1301,7 +1345,8 @@ svg.graph { max-width: 726px; }
  * floor, and 11.4px on six charts. The width that matters is the CONTAINER's,
  * which a media query cannot see; a `min-width` can. At 1280 no container on the
  * site is under its own floor, so nothing scrolls on a desktop. */
-.stage { overflow-x: auto; }
+.stage { overflow-x: auto; scrollbar-width: none; }
+.stage::-webkit-scrollbar { display: none; }
 svg.chart { min-width: 640px; }
 svg.chart.radar, svg.chart.cites { min-width: 500px; }
 svg.chart.strip { min-width: 320px; }
@@ -1316,10 +1361,13 @@ svg.chart .hit { fill: transparent; }
 /* One focal bar per chart, and everything else recedes. Eight bars in one tint
  * is eight bars with no argument; an accent on all of them is an accent on
  * none. The focal bar is the one the caption is about. */
-svg.chart .bar { fill: currentColor; fill-opacity: 0.18; }
-svg.chart .bar.focal { fill: var(--accent); fill-opacity: 0.32; }
-svg.chart g.row:hover .bar { fill-opacity: 0.34; }
-svg.chart g.row:hover .bar.focal { fill-opacity: 0.5; }
+/* Bars carry the reading, so they get real pigment: at 0.18 the strip was a
+ * watermark and the values floated over nothing. The focal bar is nearly
+ * solid; the field bars stay a clear step behind it. */
+svg.chart .bar { fill: currentColor; fill-opacity: 0.45; }
+svg.chart .bar.focal { fill: var(--accent); fill-opacity: 0.9; }
+svg.chart g.row:hover .bar { fill-opacity: 0.6; }
+svg.chart g.row:hover .bar.focal { fill-opacity: 1; }
 
 /* An axis, so a bar can be measured and not merely read. Faint enough to sit
  * under the data, and it starts at zero on every chart. */
@@ -1329,7 +1377,7 @@ svg.chart .axis text { font-size: var(--t-svg-s); fill: var(--n2); }
 svg.chart a text { text-decoration: underline; text-decoration-color: transparent; transition: text-decoration-color 160ms var(--expo); }
 svg.chart g.row:hover a text { text-decoration-color: var(--accent); fill: var(--accent); }
 svg.chart text { font-family: var(--mono); font-size: var(--t-svg); fill: var(--muted); }
-svg.chart text.val { fill: var(--ink); }
+svg.chart text.val { fill: var(--ink); font-weight: 600; }
 svg.chart .cell { transition: fill-opacity 450ms ease-out; }
 
 /* Two series on one chart, one shown at a time. The markup holds both, so the

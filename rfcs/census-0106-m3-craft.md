@@ -375,3 +375,22 @@ actually pays for.
 | # | Defect | Status |
 |---|---|---|
 | K8 | `/backstage` takes the document 139px wide at 1280 and 405px at 375 — two `span.name`/`span.note` pairs in a row that does not wrap | **DEFERRED, and pre-existing**: measured identical with the stylesheet as committed before this round, by serving the old sheet against the same document. The backstage is the developer front and is not one of RFC-0106's thirteen census pages; recorded here with the numbers so the milestone that owns it has them |
+
+## L. The fifth round — the finish gap, against the reference site at 1440
+
+The user's verdict on the fourth round: still not bun.sh. Read side by side,
+the distance was finish, not structure. Six entries, all fixed:
+
+| # | Element | Defect | Fix |
+|---|---|---|---|
+| L1 | Every heading | Set in the body stack: an 80px claim rendered as a bolded paragraph | `--sans-d` display stack (Segoe UI Variable Display / SF Pro Display), weight 720, 0.95 leading, −0.042em; display cap 4.5rem → 5.1rem, `--t-h2` cap 2.2rem → 2.75rem; typescale records updated, floor-only landing invariant kept |
+| L2 | Command scrollers, hero editor | A scrollbar at rest under the hero command, inside three pillar cards, beside the editor | Bars hidden, panning kept; 24px mask fade where text clips; `resize` grip off the hero textarea |
+| L3 | Pillar cards | Three stacked rectangles of equal border weight; two commands clipped | Command on a wash, no inner border; Copy a 30px strip; 13px mono fits all four commands |
+| L4 | Content CTAs | Solid accent blocks — four "primary" actions per screen | Accent arrow-links; the masthead Install is the one filled box |
+| L5 | Demo step commands | A bordered plate per row inside a bordered card | `$ `-prefixed plain lines |
+| L6 | Index bars | 0.18 fill-opacity read as a watermark; values floated over nothing | Focal 0.9, field 0.45, values 600-weight ink |
+
+Cut, not restyled: the hero chips row (restated the headline two inches below
+it) and the editor's Ctrl+Enter chip (the binding stays; the hint moved to the
+Run button's title). The headline takes two explicit breaks — at 5.1rem,
+auto-wrap orphaned "No" at a line end.

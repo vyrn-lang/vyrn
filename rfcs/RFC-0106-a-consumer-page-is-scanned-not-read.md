@@ -2304,6 +2304,38 @@ The published stylesheet is 52,951 raw and 10,325 gzipped against 90,000 and
   pre-existing, it is the developer front, and it is not one of this RFC's
   thirteen census pages. Census K8 has the numbers.
 
+## M3 — the fifth round: craft against the reference site, by hand
+
+The fourth round left the pages correct and still visibly behind bun.sh. The
+gap, read off a side-by-side at 1440px, was not layout — it was finish, in six
+places. Census section L carries the entries; the changes:
+
+- **Headings get a display face.** The sheet set every heading in the body
+  stack, so an 80px claim rendered as a bolded paragraph. Headings now take
+  `--sans-d` — the optical display cuts the visitor already has (Segoe UI
+  Variable Display, SF Pro Display) — at weight 720, 0.95 leading, −0.042em
+  tracking, and the display step's curve rises to a 5.1rem cap. Zero font bytes
+  shipped. The typescale test's records moved with it, and the landing-raise
+  invariant (floor-only, same curve) held by raising the base curve, not by
+  widening the exception.
+- **No scrollbar at rest, anywhere.** Every command scroller and the hero
+  editor drew a permanent bar. They scroll the same and draw no bar; a clipped
+  command dissolves through a 24px mask fade instead of slicing.
+- **A card is one box.** The pillar cards were three stacked rectangles of
+  equal border weight (card, command, Copy). The command sits on a wash now,
+  Copy is a 30px quiet strip, and the card's own border is the only hard edge.
+  One size down (13px) lets all four pillar commands fit their 280px track.
+- **A content CTA is a link.** The filled box is the masthead Install's shape;
+  in content the same class is an accent arrow-link. Four "primary" actions
+  per screen became one.
+- **The demo's commands are lines.** `$ vyrn new demo` under its step title,
+  not a bordered plate per row inside a bordered card.
+- **Bars carry pigment.** 0.18 fill-opacity was a watermark; the focal bar is
+  0.9, the field 0.45, and values are 600-weight ink.
+- Cut outright: the hero chips row (it restated the headline two inches below
+  it) and the editor's Ctrl+Enter chip (now the Run button's title; the
+  shortcut itself is unchanged).
+
 ## What this RFC does not do
 
 - No JavaScript framework, no CSS framework, no analytics, no dependency.

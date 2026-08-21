@@ -208,7 +208,7 @@ fn pillarCmd(i: Int64) -> String {
         <section class="hero split">
             <div>
                 <p class="eyebrow">A systems language</p>
-                <h1 class="display">Types carry the <em>rules</em>.<br/>Native speed. No collector.</h1>
+                <h1 class="display">Types carry the <em>rules</em>.<br/>Native speed.<br/>No collector.</h1>
                 <p class="lede">Write the rule into the type. The compiler proves it, or refuses the value.</p>
 
                 <!-- ONE OS PICKER ON THIS SITE (RFC-0106 M3, second round). This
@@ -234,13 +234,6 @@ fn pillarCmd(i: Int64) -> String {
                     </div>
                 </fieldset>
                 <p class="eyebrow"><a href="/install.html">Other ways to install</a></p>
-
-                <ul class="chips">
-                    <li>No collector</li>
-                    <li>One binary</li>
-                    <li>Native and wasm</li>
-                    <li>Alpha, no deprecations</li>
-                </ul>
             </div>
 
             <!-- THE RUNNABLE HERO. The `data-play-*` hooks are the playground's
@@ -261,9 +254,8 @@ fn pillarCmd(i: Int64) -> String {
                     <span class="pill live">Runs here</span>
                     <span class="eyebrow" data-play-status>Press Run</span>
                     <span class="spacer"></span>
-                    <span class="eyebrow keyhint"><kbd>Ctrl</kbd>+<kbd>Enter</kbd></span>
                     <button type="button" class="btn jsonly" data-play-reset>Reset</button>
-                    <button type="button" class="btn primary" data-play-run>Run</button>
+                    <button type="button" class="btn primary" data-play-run title="Ctrl+Enter">Run</button>
                 </div>
                 <div class="editor" data-play-editor>
                     <pre class="code hl" aria-hidden="true"><code data-play-hl v-html="vyrnHtml(heroSnippet())"></code></pre>
