@@ -131,9 +131,9 @@ fn classify_in_tag(chars: &[char], lt: usize, offset: usize, line: usize) -> Vyx
     let mut word_start = i;
     // The last attribute name token seen (word before `=`), to name a value.
     let mut last_word: Option<(usize, usize)> = None; // (start, end)
-    // The cursor sits just past a CLOSED attribute value (`class="x"|`): that
-    // slot owns no attribute-name completion — one whose textEdit span covers
-    // the value and its closing quote would delete them.
+                                                      // The cursor sits just past a CLOSED attribute value (`class="x"|`): that
+                                                      // slot owns no attribute-name completion — one whose textEdit span covers
+                                                      // the value and its closing quote would delete them.
     let mut closed_value = false;
     let mut j = i;
     while j < offset {
@@ -511,12 +511,12 @@ mod tests {
         let closed = "<div class=\"x\"/>";
         assert_eq!(classify(closed, 1, 15), VyxCursor::Other);
         // Inside the value it is still a class slot.
-        assert!(matches!(
-            classify(vyx, 1, 13),
-            VyxCursor::ClassValue { .. }
-        ));
+        assert!(matches!(classify(vyx, 1, 13), VyxCursor::ClassValue { .. }));
         // After a space past the value, attribute naming resumes (empty prefix).
         let spaced = "<div class=\"x\" ";
-        assert!(matches!(classify(spaced, 1, 16), VyxCursor::AttrName { .. }));
+        assert!(matches!(
+            classify(spaced, 1, 16),
+            VyxCursor::AttrName { .. }
+        ));
     }
 }

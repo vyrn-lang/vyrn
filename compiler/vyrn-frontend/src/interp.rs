@@ -614,14 +614,12 @@ fn code_splice(val: &Val, ctx: i64) -> Result<Vec<CodePiece>, Ctrl> {
             // boundary — not downstream as a module that cannot parse.
             Val::Float(f) if f.is_finite() => text(format!("{f:?}")),
             Val::Float32(f) if f.is_finite() => text(format!("{f:?}")),
-            Val::Float(f) => Err(format!(
-                "cannot splice non-finite float {f} into a code quote"
-            )
-            .into()),
-            Val::Float32(f) => Err(format!(
-                "cannot splice non-finite float {f} into a code quote"
-            )
-            .into()),
+            Val::Float(f) => {
+                Err(format!("cannot splice non-finite float {f} into a code quote").into())
+            }
+            Val::Float32(f) => {
+                Err(format!("cannot splice non-finite float {f} into a code quote").into())
+            }
             Val::Bool(b) => text(b.to_string()),
             other => Err(format!(
                 "cannot splice {} into a code quote (expected String, number, Bool, or Code)",

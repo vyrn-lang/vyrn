@@ -899,12 +899,8 @@ mod tests {
             std_root: Some("std".into()),
             ..Default::default()
         };
-        let program = crate::load(src, "main.vyrn", &opts, &files).map_err(|ds| {
-            ds.iter()
-                .map(|d| d.render())
-                .collect::<Vec<_>>()
-                .join("\n")
-        })?;
+        let program = crate::load(src, "main.vyrn", &opts, &files)
+            .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))?;
         crate::interp::run(&program)
     }
 

@@ -4575,15 +4575,27 @@ impl Parser {
                 // untouched for postfix, so field reads and method calls keep
                 // their shapes.
                 while *self.peek() == Tok::Dot
-                    && matches!(self.tokens.get(self.pos + 1).map(|t| &t.tok), Some(Tok::Ident(_)))
-                    && matches!(self.tokens.get(self.pos + 2).map(|t| &t.tok), Some(Tok::Question))
-                    && matches!(self.tokens.get(self.pos + 3).map(|t| &t.tok), Some(Tok::LParen))
+                    && matches!(
+                        self.tokens.get(self.pos + 1).map(|t| &t.tok),
+                        Some(Tok::Ident(_))
+                    )
+                    && matches!(
+                        self.tokens.get(self.pos + 2).map(|t| &t.tok),
+                        Some(Tok::Question)
+                    )
+                    && matches!(
+                        self.tokens.get(self.pos + 3).map(|t| &t.tok),
+                        Some(Tok::LParen)
+                    )
                 {
                     self.advance(); // the `.`
-                    name = format!("{name}.{}", match self.advance() {
-                        Tok::Ident(seg) => seg,
-                        _ => unreachable!("looked ahead"),
-                    });
+                    name = format!(
+                        "{name}.{}",
+                        match self.advance() {
+                            Tok::Ident(seg) => seg,
+                            _ => unreachable!("looked ahead"),
+                        }
+                    );
                 }
                 let fallible =
                     *self.peek() == Tok::Question && self.tokens[self.pos + 1].tok == Tok::LParen;

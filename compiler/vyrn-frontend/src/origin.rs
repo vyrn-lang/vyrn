@@ -670,7 +670,10 @@ mod tests {
             "backwards region: {regions:?}"
         );
         // The first directive (line 2) governs nothing: the next sits on line 3.
-        let first = regions.iter().find(|r| r.origin.file.ends_with("a.vyx")).unwrap();
+        let first = regions
+            .iter()
+            .find(|r| r.origin.file.ends_with("a.vyx"))
+            .unwrap();
         assert_eq!(first.gen_start_line, 3);
         assert_eq!(first.gen_end_line, 3);
     }

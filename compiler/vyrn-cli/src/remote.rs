@@ -341,9 +341,12 @@ mod tests {
         .unwrap();
         assert_eq!(sha, "b".repeat(40));
         // Two live refs refuse, naming both and the way out.
-        let e = ls_remote_ref(url, &["feature", "feature/2"], "github:o/r@feature/2/x.vyrn", |_, _| {
-            Ok("c".repeat(40))
-        })
+        let e = ls_remote_ref(
+            url,
+            &["feature", "feature/2"],
+            "github:o/r@feature/2/x.vyrn",
+            |_, _| Ok("c".repeat(40)),
+        )
         .unwrap_err();
         assert!(e.contains("`feature`"), "{e}");
         assert!(e.contains("`feature/2`"), "{e}");

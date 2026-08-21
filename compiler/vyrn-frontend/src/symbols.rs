@@ -2420,8 +2420,7 @@ fn collect_lets(
             Stmt::Assign { value, .. }
             | Stmt::SetField { value, .. }
             | Stmt::Return {
-                value: Some(value),
-                ..
+                value: Some(value), ..
             } => collect_lets_expr(value, fn_line, tok_info, let_types, out),
             Stmt::IndexSet { index, value, .. } => {
                 collect_lets_expr(index, fn_line, tok_info, let_types, out);
@@ -2457,9 +2456,7 @@ fn collect_lets_expr(
                 // spelling anchors it ([`binder_pos`]); a desugar's
                 // `@`-prefixed binder is unspellable and never surfaces.
                 for b in crate::movecheck::pattern_bindings(&arm.pattern) {
-                    if let Some((line, col, end_col)) =
-                        binder_pos(tok_info, b, e.line(), out)
-                    {
+                    if let Some((line, col, end_col)) = binder_pos(tok_info, b, e.line(), out) {
                         out.push(LocalBinding {
                             name: b.to_string(),
                             kind: LocalKind::Let { mutable: false },
@@ -2508,9 +2505,7 @@ fn collect_lets_expr(
             collect_lets_expr(lhs, fn_line, tok_info, let_types, out);
             collect_lets_expr(rhs, fn_line, tok_info, let_types, out);
         }
-        Expr::Call { args, .. }
-        | Expr::Spawn { args, .. }
-        | Expr::TryConstruct { args, .. } => {
+        Expr::Call { args, .. } | Expr::Spawn { args, .. } | Expr::TryConstruct { args, .. } => {
             for a in args {
                 collect_lets_expr(a, fn_line, tok_info, let_types, out);
             }
@@ -2570,8 +2565,7 @@ fn binder_pos(
         .iter()
         .filter(|t| t.text == name && t.line >= from_line)
         .find(|t| {
-            !out
-                .iter()
+            !out.iter()
                 .any(|b| b.name == name && b.line == t.line && b.col == t.col)
         })
         .map(|t| (t.line, t.col, t.end_col))
@@ -4557,5 +4551,4 @@ fn main() -> Int64 {
         let expected_col = l4.rfind('a').unwrap() + 2;
         assert_eq!(hints[0].col, expected_col, "{hints:?}");
     }
-
 }

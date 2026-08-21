@@ -5669,9 +5669,19 @@ mod tests {
         assert!(wants_version(&args(&["vyrn", "--version"])));
         assert!(wants_version(&args(&["vyrn", "-V"])));
         // A leading option does not end the scan.
-        assert!(wants_version(&args(&["vyrn", "--version", "run", "x.vyrn"])));
+        assert!(wants_version(&args(&[
+            "vyrn",
+            "--version",
+            "run",
+            "x.vyrn"
+        ])));
         // But a positional does: the flag belongs to the program being run.
-        assert!(!wants_version(&args(&["vyrn", "run", "app.vyrn", "--version"])));
+        assert!(!wants_version(&args(&[
+            "vyrn",
+            "run",
+            "app.vyrn",
+            "--version"
+        ])));
         assert!(!wants_version(&args(&["vyrn", "run", "app.vyrn", "-V"])));
         assert!(!wants_version(&args(&["vyrn", "app.vyrn", "--version"])));
     }

@@ -3903,8 +3903,7 @@ fn scope_expr(e: &Expr, line: usize, locals: &HashSet<String>, out: &mut Vec<(St
             // shaped argument keeps the bare spelling.
             let mut sugar = false;
             if let Some(Expr::Var { name: recv, .. }) = args.first() {
-                sugar = !locals.contains(recv)
-                    && SCOPE_NS.with(|s| s.borrow().contains(recv));
+                sugar = !locals.contains(recv) && SCOPE_NS.with(|s| s.borrow().contains(recv));
             }
             if sugar {
                 if let Some(Expr::Var { name: recv, .. }) = args.first() {
@@ -4278,7 +4277,9 @@ fn rewrite_stmt(
     locals: &mut HashSet<String>,
 ) {
     match s {
-        Stmt::Let { name, value, ty, .. } => {
+        Stmt::Let {
+            name, value, ty, ..
+        } => {
             if let Some(t) = ty {
                 rewrite_type(t, map);
             }
@@ -4349,7 +4350,9 @@ fn rewrite_stmt(
             let mut inner = locals.clone();
             rewrite_block(body, map, ns, &mut inner);
         }
-        Stmt::ForIn { var, iter, body, .. } => {
+        Stmt::ForIn {
+            var, iter, body, ..
+        } => {
             rewrite_expr(iter, map, ns, locals);
             let mut inner = locals.clone();
             inner.insert(var.clone());
@@ -5424,7 +5427,10 @@ mod tests {
                     fn main() -> Int64 { let f = flip() return f + lam() + peek() + flag }";
         // flip reads its LOCAL (1), lam's parameter is untouched by the global's
         // rename (11), peek reads lib's own state and main reads root's (9 + 7).
-        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 1 + 11 + 9 + 7);
+        assert_eq!(
+            run_multi(root, &[("lib.vyrn", lib)]).unwrap(),
+            1 + 11 + 9 + 7
+        );
     }
 
     #[test]
@@ -5461,10 +5467,7 @@ mod tests {
         let root = "import { A } from \"./a\" \
                     import { B } from \"./b\" \
                     fn main() -> Int64 { let x = A { v: 4 } return x.area() }";
-        assert_eq!(
-            run_multi(root, &[("a.vyrn", a), ("b.vyrn", b)]).unwrap(),
-            4
-        );
+        assert_eq!(run_multi(root, &[("a.vyrn", a), ("b.vyrn", b)]).unwrap(), 4);
     }
 
     #[test]
@@ -5517,8 +5520,12 @@ mod tests {
         // that mints growing arguments never trips the cycle check and used to
         // recurse until the stack died. The nesting counter now refuses first.
         LOAD_DEPTH.with(|d| d.set(GEN_DEPTH_MAX + 1));
-        let (r, _, _, _) =
-            load_with_origins("fn main() -> Int64 { return 0 }", "main.vyrn", &opts(), &map(&[]));
+        let (r, _, _, _) = load_with_origins(
+            "fn main() -> Int64 { return 0 }",
+            "main.vyrn",
+            &opts(),
+            &map(&[]),
+        );
         LOAD_DEPTH.with(|d| d.set(0));
         let e = r.unwrap_err();
         assert!(

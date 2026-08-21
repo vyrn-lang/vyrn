@@ -15540,10 +15540,10 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::BrIf(0));
             sum2_write(b, &sum2, 1, Some(buf));
             b.ins(&Instruction::Br(1)).ins(&Instruction::End); // none
-            // Both ways of answering None land here, and both leave the line
-            // buffer with no owner. The EOF exit at the top lands here too,
-            // before any buffer exists — `buf` is then still 0, which `free`
-            // refuses.
+                                                               // Both ways of answering None land here, and both leave the line
+                                                               // buffer with no owner. The EOF exit at the top lands here too,
+                                                               // before any buffer exists — `buf` is then still 0, which `free`
+                                                               // refuses.
             b.ins(&Instruction::LocalGet(buf));
             str_hdr(b);
             b.ins(&Instruction::Call(free));

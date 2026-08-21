@@ -1981,8 +1981,9 @@ impl MoveCheck<'_> {
     fn callee_keeps(&self, callee: &str, i: usize) -> bool {
         match self.caps.get(callee).and_then(|c| c.get(i)) {
             Some(cap) => *cap == Capability::Consume,
-            None => crate::prelude::capability(callee, i)
-                .map_or(true, |cap| cap == Capability::Consume),
+            None => {
+                crate::prelude::capability(callee, i).map_or(true, |cap| cap == Capability::Consume)
+            }
         }
     }
 
@@ -5594,7 +5595,8 @@ mod tests {
         // A projection of module state keeps RFC-0013's sentence.
         let e = go("return take(gb.xs)").unwrap_err();
         assert!(
-            e.contains("`gb.xs` may not be passed to a `consume` parameter") && e.contains("module state"),
+            e.contains("`gb.xs` may not be passed to a `consume` parameter")
+                && e.contains("module state"),
             "{e}"
         );
         // Module state as a WHOLE keeps its own sentence at the call arm.
@@ -5606,10 +5608,8 @@ mod tests {
         // A binder over an OWNED scrutinee is the one projected shape still
         // waved through: it is keyed to the scrutinee's row and the arm records
         // the hand-off, which is the drain `std/html`'s `keyed` is written as.
-        assert!(go(
-            "let o: Option<Array<Int64>> = Some([1]) \
-             return match o { Some(v) => take(v), None => 0 }"
-        )
+        assert!(go("let o: Option<Array<Int64>> = Some([1]) \
+             return match o { Some(v) => take(v), None => 0 }")
         .is_ok());
         // An ordinary `let` of the same projection is refused like the spelling
         // it hides: the frame still owns the aggregate.
@@ -5654,12 +5654,12 @@ mod tests {
         .is_ok());
         // The fast path survives: a parameter that provably borrows keeps the
         // non-escaping assumption, which is every `map`-style call.
-        assert!(run(
-            "fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(0) } \
+        assert!(
+            run("fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(0) } \
              fn go(q: read String) -> Int64 { return apply(|n| n + q.byteLength) } \
-             fn main() -> Int64 { return 0 }"
-        )
-        .is_ok());
+             fn main() -> Int64 { return 0 }")
+            .is_ok()
+        );
     }
 
     /// A lender forwarded through an AGGREGATE is still a lender: `calls_in`

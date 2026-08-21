@@ -1091,14 +1091,16 @@ fn check_accum_inner(
     //    (preserving the historical single-error `check()` surface) and leaves
     //    the rest in the sink, which we drain here.
     // Only meaningful when reuse was asked for; computed once for the whole pass.
-    let sig_fp = reuse.map(|_| signature_fingerprint(
-        &types,
-        &sigs,
-        &program.globals,
-        &variants,
-        &protocol_methods,
-        &impl_heads,
-    ));
+    let sig_fp = reuse.map(|_| {
+        signature_fingerprint(
+            &types,
+            &sigs,
+            &program.globals,
+            &variants,
+            &protocol_methods,
+            &impl_heads,
+        )
+    });
 
     for f in &program.functions {
         // Reusable only if this function's module is known AND unchanged.
@@ -7615,9 +7617,10 @@ impl<'a> Checker<'a> {
                 let key = crate::types::type_key(&recv);
                 let matching: Vec<_> = candidates
                     .iter()
-                    .filter(|(p, _)| key.as_ref().map_or(false, |k| {
-                        self.impls.contains(&(p.clone(), k.clone()))
-                    }))
+                    .filter(|(p, _)| {
+                        key.as_ref()
+                            .map_or(false, |k| self.impls.contains(&(p.clone(), k.clone())))
+                    })
                     .collect();
                 match matching.len() {
                     1 => matching[0].clone(),
@@ -8970,10 +8973,7 @@ fn has_nested_wrap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
     match ty {
         Type::Option(t) => wrapped(t) || has_nested_wrap(t, types),
         Type::Result(a, b) => {
-            wrapped(a)
-                || wrapped(b)
-                || has_nested_wrap(a, types)
-                || has_nested_wrap(b, types)
+            wrapped(a) || wrapped(b) || has_nested_wrap(a, types) || has_nested_wrap(b, types)
         }
         Type::Array(t) | Type::ArrayN(t, _) | Type::SmallArray(t, _) | Type::Task(t) => {
             has_nested_wrap(t, types)
@@ -14074,10 +14074,8 @@ mod tests {
     /// and the storage rules a T obeys reach through the thunk.
     #[test]
     fn a_lazy_field_must_name_a_real_type() {
-        let e = check_src(
-            "type Bad = { f: lazy NoSuchType } fn main() -> Int64 { return 0 }",
-        )
-        .unwrap_err();
+        let e = check_src("type Bad = { f: lazy NoSuchType } fn main() -> Int64 { return 0 }")
+            .unwrap_err();
         assert!(e.contains("unknown type `NoSuchType`"), "{e}");
     }
 
@@ -14134,10 +14132,8 @@ mod tests {
     /// reach through the thunk, so a stream behind one is refused.
     #[test]
     fn a_lazy_field_may_not_hold_a_stream() {
-        let e = check_src(
-            "type B = { f: lazy Stream<Int64> } fn main() -> Int64 { return 0 }",
-        )
-        .unwrap_err();
+        let e = check_src("type B = { f: lazy Stream<Int64> } fn main() -> Int64 { return 0 }")
+            .unwrap_err();
         assert!(e.contains("nothing may store it"), "{e}");
     }
 

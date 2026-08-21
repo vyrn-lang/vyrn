@@ -1428,7 +1428,10 @@ mod tests {
         // Same bound for the sequence-alphabet path: `(a|b){3}` has 8
         // separator-free members — at the cap it enumerates all of them, one
         // short it bails out as soon as the successor list says so.
-        assert_eq!(dfa("(a|b){3}").enumerate_without(b' ', 8).map(|v| v.len()), Some(8));
+        assert_eq!(
+            dfa("(a|b){3}").enumerate_without(b' ', 8).map(|v| v.len()),
+            Some(8)
+        );
         assert_eq!(dfa("(a|b){3}").enumerate_without(b' ', 7), None);
     }
 

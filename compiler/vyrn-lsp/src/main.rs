@@ -1254,9 +1254,9 @@ fn vyx_completion(
         .cloned()
         .or_else(|| uri_path(uri).and_then(|p| std::fs::read_to_string(p).ok()))?;
     match templates::classify(&raw, line, col) {
-        VyxCursor::TagName { prefix, start_col } => {
-            Some(tag_name_completion(uri, &raw, &prefix, line, start_col, col))
-        }
+        VyxCursor::TagName { prefix, start_col } => Some(tag_name_completion(
+            uri, &raw, &prefix, line, start_col, col,
+        )),
         VyxCursor::AttrName {
             tag,
             prefix: _,
@@ -1421,7 +1421,12 @@ fn attr_name_completion(
 }
 
 /// `@event` completion: the DOM events the runtime dispatches.
-fn event_name_completion(raw: &str, line: usize, start_col: usize, col: usize) -> CompletionResponse {
+fn event_name_completion(
+    raw: &str,
+    line: usize,
+    start_col: usize,
+    col: usize,
+) -> CompletionResponse {
     // Replace from the `@` (start_col) so the inserted `@click` keeps the sigil.
     let range = replace_range(raw, line, start_col, col);
     let items = templates::EVENTS
@@ -1934,7 +1939,9 @@ fn handle_semantic_tokens_range(
     let end = (p.range.end.line + 1) as usize;
     toks.retain(|t| t.line >= start && t.line <= end);
     let text = doc_text(server, &p.text_document.uri).unwrap_or_default();
-    Some(SemanticTokensRangeResult::Tokens(encode_tokens(toks, &text)))
+    Some(SemanticTokensRangeResult::Tokens(encode_tokens(
+        toks, &text,
+    )))
 }
 
 /// The classified tokens for `uri`: from the cached analysis for a `.vyrn`

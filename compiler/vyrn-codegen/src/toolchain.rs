@@ -1343,8 +1343,16 @@ mod tests {
         let other = Path::new("/tools/other/libclang_rt.builtins-wasm32.a");
 
         let key = shim_key("clang version 1", v25, lib);
-        assert_ne!(key, shim_key("clang version 1", v26, lib), "sysroot moves it");
-        assert_ne!(key, shim_key("clang version 1", v25, other), "builtins move it");
+        assert_ne!(
+            key,
+            shim_key("clang version 1", v26, lib),
+            "sysroot moves it"
+        );
+        assert_ne!(
+            key,
+            shim_key("clang version 1", v25, other),
+            "builtins move it"
+        );
         // The components are IN the key, not merely represented by it.
         assert!(key.contains(&shim_key_clang_component("clang version 1")));
         assert!(key.contains(&shim_key_sysroot_component(v25, lib)));

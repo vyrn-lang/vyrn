@@ -247,10 +247,7 @@ impl P<'_> {
                     // (RFC 8259 §7) — the same rule codec.rs enforces on its
                     // own parser.
                     if c < '\u{20}' {
-                        return Err(format!(
-                            "control character in string at offset {}",
-                            self.i
-                        ));
+                        return Err(format!("control character in string at offset {}", self.i));
                     }
                     out.push(c);
                     self.i += 1;
@@ -1427,9 +1424,7 @@ mod tests {
     /// which reflection (`predicate_bounds`) reads too.
     #[test]
     fn an_i64_min_minimum_bounds_at_i64_min() {
-        let decls = synth(
-            r#"{"title": "T", "type": "integer", "minimum": -9223372036854775808}"#,
-        );
+        let decls = synth(r#"{"title": "T", "type": "integer", "minimum": -9223372036854775808}"#);
         let pred = crate::checker::pred_summary(decls[0].predicate.as_ref().unwrap());
         assert_eq!(pred, "value >= -9223372036854775808");
         // And the ordinary negative case keeps its exact value.

@@ -1906,9 +1906,8 @@ mod tests {
     /// which is what the interpreter does with them (vyrn_out! → println!).
     #[test]
     fn a_generators_own_prints_never_enter_the_source() {
-        let (prints, source) =
-            unframe_result(&framed("debug\n", "fn f() -> Int64 { return 1 }"))
-                .expect("the wrapper's own framing unframes");
+        let (prints, source) = unframe_result(&framed("debug\n", "fn f() -> Int64 { return 1 }"))
+            .expect("the wrapper's own framing unframes");
         assert_eq!(prints, b"debug\n");
         assert_eq!(source, b"fn f() -> Int64 { return 1 }");
 
@@ -1927,13 +1926,13 @@ mod tests {
         // An artifact from before the framing: bare result, no markers.
         assert!(unframe_result(b"fn f() -> Int64 { return 1 }\n").is_err());
         // The generator echoed a marker of its own: two begins.
-        let echoed = framed(&format!("x{RESULT_BEGIN}\n"), "fn f() -> Int64 { return 1 }");
+        let echoed = framed(
+            &format!("x{RESULT_BEGIN}\n"),
+            "fn f() -> Int64 { return 1 }",
+        );
         assert!(unframe_result(&echoed).is_err());
         // The RESULT itself contains a marker: two ends once framed.
-        let inside = framed(
-            "",
-            &format!("fn f() -> Str {{ return \"{RESULT_END}\" }}"),
-        );
+        let inside = framed("", &format!("fn f() -> Str {{ return \"{RESULT_END}\" }}"));
         assert!(unframe_result(&inside).is_err());
     }
 

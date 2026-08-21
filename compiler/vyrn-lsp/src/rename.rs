@@ -836,7 +836,10 @@ fn f() -> Int64 {\n    other.listPastes()\n    return store.listPastes()\n}\n";
     #[test]
     fn a_directory_covers_only_its_own_subtree() {
         // A directory argument resolves as the loader's file guess `<dir>.vyrn`.
-        assert!(covers_dir("/p/server/api.vyrn", "/p/server/api/pastes.vyrn"));
+        assert!(covers_dir(
+            "/p/server/api.vyrn",
+            "/p/server/api/pastes.vyrn"
+        ));
         assert!(covers_dir("/p/server/api", "/p/server/api/pastes.vyrn"));
         assert!(covers_dir("/p/server/api/", "/p/server/api/deep/x.vyrn"));
         assert!(!covers_dir("/p/server/api", "/p/server/api.vyrn"));

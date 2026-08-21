@@ -10359,7 +10359,9 @@ impl<'a> Gen<'a> {
             let data = self.fresh_tmp();
             let len = self.fresh_tmp();
             let cap = self.fresh_tmp();
-            self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {hdr}, 0"));
+            self.emit(format!(
+                "{data} = extractvalue {{ ptr, i64, i64 }} {hdr}, 0"
+            ));
             self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {hdr}, 1"));
             self.emit(format!("{cap} = extractvalue {{ ptr, i64, i64 }} {hdr}, 2"));
             let full = self.fresh_tmp();
@@ -16756,8 +16758,7 @@ mod tests {
         let body = &ir[start..];
         let elem = body.find("@vyrn_takeLast").expect("element call emitted");
         assert!(
-            body[elem..]
-                .contains("load { ptr, i64, i64 }, ptr %a.addr"),
+            body[elem..].contains("load { ptr, i64, i64 }, ptr %a.addr"),
             "the header is re-read from the binding's slot after the element \
              expression ran:\n{body}"
         );
@@ -16806,7 +16807,9 @@ mod tests {
                    fn inc(x: Int64) -> Int64 { return x + 1 } \
                    fn main() -> Int64 { return twice(1, inc) }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        let start = ir.find("define i64 @vyrn_twice__ho").expect("specialization present");
+        let start = ir
+            .find("define i64 @vyrn_twice__ho")
+            .expect("specialization present");
         let end = ir[start..].find("\n}\n").expect("definition closes");
         let def = &ir[start..start + end];
         assert!(

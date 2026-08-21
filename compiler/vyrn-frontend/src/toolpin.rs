@@ -547,7 +547,10 @@ mod tests {
     fn a_lock_sha_that_is_not_a_sha256_refuses_before_any_path_join() {
         assert!(is_sha256(&"a".repeat(64)));
         assert!(is_sha256(&"0f".repeat(32)));
-        assert!(!is_sha256(&"A".repeat(64)), "uppercase is not the lock's spelling");
+        assert!(
+            !is_sha256(&"A".repeat(64)),
+            "uppercase is not the lock's spelling"
+        );
         assert!(!is_sha256(&"a".repeat(63)), "short is not full width");
         assert!(!is_sha256("../../escape"));
         assert!(!is_sha256(""));

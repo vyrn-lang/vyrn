@@ -106,11 +106,7 @@ pub struct ParseError(pub String);
 /// parity surface — keep it in lockstep with the C shim.
 pub fn parse(src: &str) -> Result<JsonV, ParseError> {
     let b = src.as_bytes();
-    let mut p = Parser {
-        b,
-        i: 0,
-        depth: 0,
-    };
+    let mut p = Parser { b, i: 0, depth: 0 };
     p.ws();
     let v = p.value()?;
     p.ws();
@@ -367,8 +363,7 @@ impl Parser<'_> {
             Some(c) if c.is_ascii_digit() => self.i += 1,
             Some(_) => return Err(self.unexpected()),
         }
-        if self.b[self.i - 1] == b'0'
-            && matches!(self.b.get(self.i), Some(c) if c.is_ascii_digit())
+        if self.b[self.i - 1] == b'0' && matches!(self.b.get(self.i), Some(c) if c.is_ascii_digit())
         {
             return Err(self.unexpected());
         }
@@ -1143,12 +1138,12 @@ mod tests {
         assert_eq!(parse(&format!("\"{body}\"")).unwrap(), face);
 
         for bad in [
-            r#""\ud83d""#,          // high half, nothing follows
-            r#""\ud83dx""#,         // high half, not an escape
-            r#""\ud83d\n""#,        // high half, a different escape
-            r#""\ud83d\u0041""#,    // high half, not a low half
-            r#""\ude00""#,          // lone low half
-            r#""\udbff""#,          // lone high half at the top of the range
+            r#""\ud83d""#,       // high half, nothing follows
+            r#""\ud83dx""#,      // high half, not an escape
+            r#""\ud83d\n""#,     // high half, a different escape
+            r#""\ud83d\u0041""#, // high half, not a low half
+            r#""\ude00""#,       // lone low half
+            r#""\udbff""#,       // lone high half at the top of the range
         ] {
             assert!(parse(bad).is_err(), "{bad} parses");
         }
