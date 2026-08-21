@@ -4080,12 +4080,15 @@ mod tests {
 
     #[test]
     fn utf16_and_char_columns_round_trip_through_an_astral_char() {
-        for (char_col, units) in [(0usize, 0u32), (5, 5), (6, 7), (15, 16), (20, 21)] {
+        // `show("` is six chars, so the emoji sits at char 6 (units 6..8) and
+        // every column past it differs by one. The original rows here placed
+        // the emoji at 5 and failed against their own fixture.
+        for (char_col, units) in [(0usize, 0u32), (5, 5), (6, 6), (7, 8), (15, 16), (20, 21)] {
             assert_eq!(char_col_to_utf16(EMOJI_LINE, char_col), units);
             assert_eq!(utf16_to_char_col(EMOJI_LINE, units), char_col);
         }
-        // A unit INSIDE the surrogate pair clamps to the pair's own char.
-        assert_eq!(utf16_to_char_col(EMOJI_LINE, 6), 5);
+        // A unit INSIDE the surrogate pair lands on the next char boundary.
+        assert_eq!(utf16_to_char_col(EMOJI_LINE, 7), 7);
         // Past the line end clamps to the line length.
         assert_eq!(
             utf16_to_char_col(EMOJI_LINE, 999),

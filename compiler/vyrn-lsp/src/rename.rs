@@ -49,8 +49,8 @@ use std::collections::HashMap;
 // delegates to `vyrn_frontend::vyx`, which applies `std/vyx`'s own section rule.
 use vyrn_frontend::ast::{Expr, ImportDecl, ImportSource};
 
+use crate::contracts::vyx_script;
 use lsp_types::{Position, PrepareRenameResponse, Range, TextEdit, Url, WorkspaceEdit};
-use vyrn_frontend::ast::ImportSource;
 use vyrn_frontend::symbolmap::{same_file, MappedSymbol};
 use vyrn_frontend::{analyze, references, references_to, Analysis, SymbolKind};
 
@@ -312,7 +312,12 @@ impl Reaches {
         let mut quals = Vec::new();
         let mut allowed = false;
         if w.direct {
-            allowed |= !self.direct_ns.is_empty() || !self.exact_gen_ns.is_empty();
+            // A flat selective import (`import { Note } from ...`) reaches the
+            // declaration with no namespace at all: the bare-pinning rule is
+            // what admits it, or every such candidate silently dropped out.
+            allowed |= !self.direct_ns.is_empty()
+                || !self.exact_gen_ns.is_empty()
+                || self.bare_is_ours(&w.old);
             quals.extend(self.direct_ns.iter().chain(&self.exact_gen_ns).cloned());
         }
         if w.generated {
@@ -376,6 +381,14 @@ fn reaches(
                         r.exact_gen_ns.push(ns.clone());
                     } else if targets.iter().any(|t| covers_dir(t, target_file)) {
                         r.dir_gen_ns.push(ns.clone());
+                    } else if targets.iter().any(|t| mounts_import(t, target_file, opts)) {
+                        // The RE-EMITTED reach: `client("./server/api")` emits
+                        // stubs whose signatures name the wire types the api
+                        // modules import — one level of indirection the path
+                        // prefix cannot see. A generator qualifies for derived
+                        // spellings when a module it mounts imports the
+                        // declaring file directly.
+                        r.dir_gen_ns.push(ns.clone());
                     }
                 }
             }
@@ -389,13 +402,71 @@ fn reaches(
     r
 }
 
+/// Whether any module the generator argument `resolved` mounts imports
+/// `target_file` DIRECTLY — the one level of indirection a generated client
+/// adds when it re-emits the wire types its api modules take in signatures.
+/// Reads the real tree: the unit fixtures use paths that exist nowhere, and
+/// for them this is simply `false`, which is the un-transitive answer they
+/// assert. Capped, and one level only on purpose: a generator emits from the
+/// modules it mounts, not from their whole import closure.
+fn mounts_import(
+    resolved: &str,
+    target_file: &str,
+    opts: &vyrn_frontend::loader::LoadOptions,
+) -> bool {
+    let stem = resolved.strip_suffix(".vyrn").unwrap_or(resolved);
+    let mut mounted: Vec<String> = Vec::new();
+    if std::path::Path::new(resolved).is_file() {
+        mounted.push(resolved.to_string());
+    }
+    if let Ok(entries) = std::fs::read_dir(stem) {
+        for e in entries.flatten().take(64) {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "vyrn") {
+                mounted.push(p.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    for file in mounted {
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let Ok(tokens) = vyrn_frontend::lexer::lex(&text) else {
+            continue;
+        };
+        let (program, _) = vyrn_frontend::parser::parse_accum(tokens);
+        for imp in &program.imports {
+            if let ImportSource::Path(spec) = &imp.source {
+                if let Ok(t) = vyrn_frontend::loader::resolve_spec(spec, &file, opts) {
+                    if same_file(&t, target_file) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Whether a resolved target reaches declarations in `target_file` through a
 /// DIRECTORY (`client("./server/api")` mounts every module under `server/api`).
 /// A directory argument resolves as the loader's file guess `<dir>.vyrn`, so the
 /// guess's extension is stripped before the prefix check — a real file target
 /// never gets here (the exact match ran first).
 fn covers_dir(resolved: &str, target_file: &str) -> bool {
-    let norm = |p: &str| p.replace('\\', "/").trim_matches('/').to_string();
+    // The same normalization [`same_file`] applies, drive letter included: a
+    // target that arrives as `c:/...` off a file URL must still be covered by
+    // a directory resolved as `C:/...` — the mismatch that silently emptied
+    // every reach on Windows.
+    let norm = |p: &str| {
+        let s = p.replace('\\', "/");
+        let mut c = s.chars();
+        let s = match c.next() {
+            Some(d) => d.to_ascii_lowercase().to_string() + c.as_str(),
+            None => s,
+        };
+        s.trim_matches('/').to_string()
+    };
     let t = norm(target_file);
     let mut d = norm(resolved);
     if let Some(stem) = d.strip_suffix(".vyrn") {
@@ -773,7 +844,11 @@ fn f() -> Int64 {\n    other.listPastes()\n    return store.listPastes()\n}\n";
     #[test]
     fn a_directory_generator_reaches_derived_names_but_not_the_bare_one() {
         let imports = vec![ns_import("api", gen("client", "./server/api"))];
-        let r = reaches(&imports, Some("/proj/src/root.vyrn"), PASTES, &opts());
+        // The target sits INSIDE the mounted directory — `PASTES` is
+        // `server/pastes.vyrn`, a sibling `./server/api` never covers, and the
+        // test failed against its own fixture until this file was its own.
+        let inside = "/proj/src/server/api/pastes.vyrn";
+        let r = reaches(&imports, Some("/proj/src/root.vyrn"), inside, &opts());
         let direct = Wanted {
             old: "create".to_string(),
             new: "add".to_string(),
