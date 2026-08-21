@@ -29,7 +29,8 @@ import { pages } from "std/ui"
 import { route, rootPath, philosophyPath, whyVyrnPath, comparePath, installPath, editorsPath, docsEditorsPath, releasesPath, docsPath, explorePath, guidePath, playPath, backstagePath, backstageBenchmarksPath, hrefDocsStd, hrefGuide, hrefBackstageRfcs, hrefExplore } from pages("./app/routes")
 import { published, navRows, hrefOf, upTo } from "./app/nav"
 import { rfcPages, rfcSlug } from "./app/backstage"
-import { historyIsFixture, historyPath, historyCommand } from "./app/history"
+import { historyIsFixture, historyPath, historyCommand, releaseRows } from "./app/history"
+import { releaseTag } from "./app/repo"
 import { demoIsFixture, demoPath, demoCommand } from "./app/demo"
 import { apiModules, apiEntries, apiHref, importLine } from "./app/docs"
 import { chapterSlugs, chapterHref } from "./app/guide"
@@ -492,7 +493,6 @@ fn assets() -> Array<Array<String>> {
         ["site/public/theme.js", "theme.js"],
         ["site/public/widgets.js", "widgets.js"],
         ["site/public/backstage.js", "backstage.js"],
-        ["site/public/fresh.js", "fresh.js"],
         ["site/public/play.js", "play.js"],
         ["site/public/play-wasm.js", "play-wasm.js"],
         ["site/public/play-worker.js", "play-worker.js"],
@@ -1083,6 +1083,30 @@ test "the display type step reaches nine pages and no leaf page" {
     // landing: it is a leaf, and it keeps the documentation scale.
     assert(!isLanding("/docs/editors"))
     assert(isLanding("/docs"))
+}
+
+test "the version the pages feature is the newest one the repository has" {
+    // RFC-0106 M3, second round. `site/release.txt` is refreshed by hand and had
+    // been stale for three days, so `/`, `/install` and `/releases` all featured
+    // `v0.1.0-alpha.1` while `v0.1.0-alpha.2` was what the install command
+    // fetched. `repo.vyrn` reconciles the baked file against the repository's
+    // own tags now; this is what says so out loud when it stops working.
+    let rows = releaseRows()
+    if rows.length > 0 {
+        assertEq(releaseTag(), rows[rows.length - 1].tag)
+    }
+    // And no page may name a tag that is not the newest one. Two pages LIST
+    // every tag on purpose — the release table, and the backstage's own
+    // timeline — so the sweep is over the other nine.
+    for path in sitePaths() {
+        if path != "/releases" && path != "/backstage" {
+            for row in rows {
+                if row.tag != releaseTag() {
+                    assert(!has(publishedDocument(path), row.tag))
+                }
+            }
+        }
+    }
 }
 
 test "the published stylesheet keeps every rule and none of the prose" {

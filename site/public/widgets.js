@@ -5,8 +5,7 @@
 // every label below is already in the markup when this file loads. Nothing here
 // computes a chart; it fades, sweeps, counts, or moves a playhead.
 //
-// No framework, no bundler, no dependency. Two files: this one and fresh.js.
-import { refreshRelease } from "./fresh.js";
+// No framework, no bundler, no dependency. One file.
 // NOTHING ELSE IS IMPORTED HERE, and that is the page-weight rule (RFC-0106
 // M1, M2). `play.js`, `play-wasm.js` and `wasi-min.js` were static imports
 // once, and a static import is a download: twelve of the thirteen consumer
@@ -287,18 +286,17 @@ document.addEventListener("click", (e) => {
 });
 
 
-/// Pick the platform tab that matches the visitor, and let them override it.
+/// Check the OS radio that matches the visitor.
 ///
-/// The picker IS the tab widget below — same buttons, same panes, same keyboard
-/// contract — with one difference: which tab starts selected is a guess about
-/// the reader rather than the first one.
-function installPicker(root) {
-  const guess = /Win/i.test(navigator.platform)
-    ? "windows"
-    : /Mac/i.test(navigator.platform)
-      ? "macos"
-      : "linux";
-  tabsWidget(root, { tab: "plat", pane: "plat-pane", initial: guess });
+/// The picker itself is CSS and markup — three radio buttons, a `:checked ~`
+/// selector, no script (RFC-0106 M3). This is the whole of what a script adds:
+/// a guess about which one to open on. With no script the first is checked and
+/// the control works exactly the same, which is why this can be three lines and
+/// has no keyboard contract of its own — a native radio group already has one.
+function guessOs(root) {
+  const want = /Win/i.test(navigator.platform) ? "windows" : /Mac/i.test(navigator.platform) ? "macos" : "linux";
+  const radio = $(`input[data-os="${want}"]`, root);
+  if (radio) radio.checked = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -928,7 +926,7 @@ function boot() {
   for (const el of $$('[data-widget="strip"]')) stripWidget(el);
   for (const el of $$("[data-tabs]")) tabsWidget(el);
   for (const el of $$('[data-widget="radar"]')) radarWidget(el);
-  for (const el of $$("[data-install]")) installPicker(el);
+  for (const el of $$(".picker")) guessOs(el);
   moduleSearch();
   // The playground, on the one page that has one. `boot()` is not awaited and
   // the mount does not have to finish before the rest of the page works, so the
@@ -943,7 +941,6 @@ function boot() {
   }
   for (const el of $$('[data-widget="playhero"]')) armHeroEditor(el);
   for (const el of $$("svg.graph")) graphWidget(el);
-  refreshRelease();
 }
 
 boot();

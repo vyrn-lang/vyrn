@@ -9,7 +9,10 @@
   recorded demo, and the page-weight ceiling M1 recorded as out of reach and M2
   met, and [M3 — as landed](#m3--as-landed) for the one spacing token every
   section on the site now obeys, the geometry assertions that hold it, and the
-  20,693 gzipped bytes of design record that stopped being a download.
+  20,693 gzipped bytes of design record that stopped being a download, and
+  [M3 — the second round](#m3--the-second-round-after-the-pages-were-rejected)
+  for the craft census the user's rejection forced, the header-row defect three
+  milestones had deferred, and the release data that can no longer go stale.
   Milestones below; a milestone that fails its gate says so in this file.
 - **Depends on:** RFC-0105 (the site this redesigns — its two-front split,
   theme, accessibility checklist, and gates all survive and bind this work),
@@ -1662,6 +1665,164 @@ somebody being told.
 - **No compiler change and no `std/` change. Zero Rust files touched.**
 - 48 screenshots, four pages by five widths by two palettes plus a full-length
   page each, in `shots/` (gitignored).
+
+## M3 — the second round, after the pages were rejected
+
+The user read the screenshots of everything above and rejected it: the defects
+they listed were "only a small portion of issues". They were right, and the
+reason the first round missed them is worth writing down — **the geometry
+assertions all passed.** Uniform padding, no dead columns, no empty cells, no
+overflow beyond an inherited one. What a geometry assertion cannot see is a
+command wrapped across four lines, a control that inherited the wrong font, or a
+page featuring a version that is three days stale. A page can be geometrically
+correct and still be badly made.
+
+So the second round is an ADVERSARIAL CENSUS rather than a checklist:
+[`rfcs/census-0106-m3-craft.md`](census-0106-m3-craft.md), written before
+anything was fixed, page by page against the four reference pages the user
+named. **34 entries: 27 fixed, 3 kept as not-defects, 4 deferred.** The counts
+and the deferred list are in that file. What follows is what changed and what
+the fixes taught.
+
+### A command is one line
+
+M2 made four places wrap, to stop a long install line being CLIPPED. Measured on
+the exported tree with real line boxes rather than height arithmetic, that gave:
+the index hero's three commands at two lines each, `vyrn build … --target wasm`
+at **four** lines in a pillar card, and the `Copy` buttons beside them at **50,
+73, 95 and 118px tall on one page**, because each stretched to its own wrapped
+command. A shell command broken across four lines is one a reader cannot tell
+they have copied whole.
+
+`white-space: pre` inside a scroller, everywhere, and the `pre-wrap` ruleset is
+deleted. Where the command still would not fit, the BOX grew rather than the
+command breaking: the install hero is 50rem now and the command sits in it
+whole, while the sentence above it stays at a centred 32rem — which is the
+reference site's shape and the reason its command never wraps either. The four
+pillar commands were shortened to lines that fit a 280px card and still run as
+written.
+
+### One picker, joined to the thing it selects
+
+There were two, doing the same job with different shapes and different keyboard
+models: underline tabs driven by `tabsWidget` on the index, the CSS-only radio
+picker on `/install`. And on `/install` the tiles floated 24px above a command
+box of a different width, so they read as chips over an unrelated block.
+
+One component now, on both pages: equal columns, shared borders, and the command
+box's top border sitting on the tile row's bottom one — a segmented control
+joined to its own output. `installPicker` and its `tabsWidget` call are gone;
+what replaced them is three lines that check the radio matching the visitor's
+OS, over a control that already works with no script at all.
+
+### The stale version, fixed where it came from
+
+`site/release.txt` said `v0.1.0-alpha.1` on 2026-08-21, three days after
+`v0.1.0-alpha.2` was published — so `/`, `/install` and `/releases` all featured
+a version that was not the one the install command fetches. A `role="status"`
+notice apologized for it on two of them at run time.
+
+The tree already knew: `scripts/site-history.py` writes every git tag into
+`site/data/history.json`, and the site refuses to build without that file.
+`repo.vyrn` reconciles the baked file against it and the newer tag wins, so a
+stale `release.txt` cannot reach a page; the file is refreshed too, and
+`site/export.vyrn` asserts the two agree — plus that **no page but the release
+table and the backstage timeline names a tag that is not the newest**.
+
+That import closed a cycle: `history` → `corpus` → `markdown` → `repo` →
+`history`, and the link that closed it was `markdown.vyrn` wanting one URL
+builder. So the three GitHub URL builders moved down into `app/github.vyrn`, a
+leaf that imports nothing, and `repo.vyrn` re-exports them — every other caller
+on the site is unchanged and there is still one place that spells the
+repository's name.
+
+**And the notice is deleted, and `site/public/fresh.js` with it.** A page that
+cannot be stale has nothing to apologize for. That removes an asset, 1,632
+gzipped bytes from every page, and a request to `api.github.com` on every visit
+by every reader — which the site was making solely to cover for a file somebody
+forgot to update.
+
+### Lines that did not earn their place
+
+The archive filenames under each install command (a reader installing does not
+need `vyrn-aarch64-macos.tar.gz`; the PATH it lands in is the useful half, and
+that moved into Advanced). `v0.1.0-alpha.1, published 2026-08-11 as a
+pre-release`, which restated the kicker three lines above it. `Checksum-verified.
+v0.1.0-alpha.1 today.`, where "today" told a reader nothing they had asked. The
+two empty status notices. And the `01 — `, `02 — ` numbering on 24 section
+kickers across 17 consumer templates, which the rail beside them already carries
+and which the M3 pages had already dropped.
+
+### Seven control heights became four
+
+Measured at 1280px: 44 (masthead), 56 (OS tile), 33 (chip), 32 (button), 29
+(content CTA), 27 (radar key), 25 (pill). The worst was `.cta`: it declared no
+font and no box, so in the masthead it inherited that row's 13px mono and a 44px
+target, and in CONTENT it inherited the body's **17px sans** and came out 29px
+tall — the same class rendering as two different controls, and the one on `/`
+and `/install` the odd element out among 12px mono buttons. It carries its own
+font and a 40px box now. `.pill` and `.chips li` are one static-label box.
+
+### The header row, which three milestones had deferred
+
+M1 recorded it at 320px, M2 measured it at 375px and assigned it to M4 "on the
+grounds that every fix is a decision about which control loses its word". M3's
+first round repeated that.
+
+It is fixed, and mostly as a side effect. Giving `.cta` a 12px mono font took
+the row from **59px over at 320px to 54**. Hiding the search control's WORD at
+phone widths — its glyph stays and its accessible name is on `aria-label`, so
+nothing is lost to a screen reader — took it to **2**. The Install button's side
+padding took it to **0**.
+
+**Every consumer page now has zero horizontal overflow at 320, 360, 375, 767 and
+1280px: 45 page-width pairs measured, 45 clean.** It was the oldest open defect
+in this RFC.
+
+### Two traps the verification found, both the fixes' own
+
+Recorded because both are the kind that pass every assertion until the exact
+width that breaks them:
+
+1. **A flex item's automatic minimum is its min-content.** With `white-space:
+   pre` restored, `.cmd code`'s min-content is the whole 79-character command, so
+   the box refused to shrink and took the document to **706px inside a 320px
+   phone**. `min-width: 0` is what makes a flex scroller actually scroll.
+2. **`margin: 0 auto` on a grid item is not centring, it is `justify-self:
+   center`** — and a non-stretched grid item is sized `fit-content`, so
+   `.hero.mid` took the min-content of the widest thing inside it and painted
+   690px in a 278px column. An explicit `width: 100%` fixes it and the auto
+   margins still centre it wherever the track is wider.
+
+### The numbers, second round
+
+| Page | Words | Ceiling | Bytes | Ceiling | Cold load, gzipped | Ceiling |
+|---|---:|---:|---:|---:|---:|---:|
+| index | **254** | 260 | 17,860 | 30,000 | **35,419** | 55,000 |
+| install | **201** | 220 | 8,999 | 14,000 | **33,073** | 55,000 |
+| releases | **169** | 200 | 6,666 | 20,000 | **32,768** | 55,000 |
+| docs (landing) | **640** | 644 | 52,841 | 40,000 | **42,167** | 55,000 |
+
+`.note`/`.notice` across the thirteen census pages: **45**, from 91 before M3.
+The published stylesheet is 49,459 raw and 9,742 gzipped against 90,000 and
+27,000.
+
+### Gates, second round
+
+- `vyrn run site/export.vyrn out`: **175 routes, 11 assets** — one fewer than the
+  first round, and it is `fresh.js`.
+- the site's own loop: **32 blocks declared, 32 ran** — one more, and it is the
+  version assertion.
+- `node --test site/test/*.test.mjs`: **31 tests, 31 pass**.
+- `vyrn fmt --check`, `cargo fmt --all --check`: clean.
+  `cargo test --release -p vyrn-cli --test rfc_index`: 4 passed — after the
+  census file was added to `rfcs/README.md`, which is what that test is for.
+- the geometry sweep, plus two assertions the first round did not have: **no
+  wrapped line inside any command block** (real line boxes, not height
+  arithmetic) and **no page names a tag that is not the newest**. 45 of 45
+  page-width pairs clean.
+- 51 screenshots in `shots/`, including a 2x capture of each hero, because the
+  defects this round found are the ones that only show at full size.
 
 ## What this RFC does not do
 

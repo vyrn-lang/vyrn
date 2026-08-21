@@ -520,11 +520,21 @@ h1 code, h2 code, h3 code, h4 code {
 
 /* The one call to action (RFC-0106 M1). The only filled thing in the header,
  * because there is one of it. */
+/* THE CALL TO ACTION HAS ITS OWN BOX AND ITS OWN FONT (RFC-0106 M3, second
+ * round). It had neither: in the masthead it inherited that row's 13px mono and
+ * a 44px min-height, and in CONTENT it inherited the body's 17px sans and came
+ * out 29px tall — so the same class was two different controls, and the one on
+ * `/` and `/install` was the odd element out among 12px mono buttons. */
 .cta {
-  padding: 0 var(--s2); background: var(--accent); color: var(--paper);
-  border: 1px solid var(--accent); text-decoration: none; font-weight: 600;
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 40px; padding: 0 var(--s3);
+  background: var(--accent); color: var(--paper);
+  border: 1px solid var(--accent); text-decoration: none;
+  font: 600 var(--t-eyebrow)/1.4 var(--mono);
   text-transform: uppercase; letter-spacing: 0.1em; white-space: nowrap;
 }
+/* The masthead's row is 64px and every control in it is a 44px target. */
+.masthead .cta { min-height: 44px; padding: 0 var(--s2); }
 .cta:hover { background: color-mix(in oklab, var(--accent) 85%, var(--ink)); }
 /* On `/install` the button is where the reader is, so it reports rather than
  * invites — the nav marker's job, in this control's shape. */
@@ -640,12 +650,16 @@ h1 code, h2 code, h3 code, h4 code {
 .prose h2 { margin-top: var(--s6); font-size: var(--t-h3); }
 .prose h3 { margin-top: var(--s4); font-size: var(--t-h4); }
 
-.pill {
-  display: inline-block;
+/* ONE STATIC LABEL BOX. `.pill` was 25px tall and `.chips li` 33px, for two
+ * things that are both a word in a bordered box (RFC-0106 M3, second round). */
+.pill, .chips li {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
   font: var(--t-key)/1 var(--mono);
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  padding: 6px 10px;
+  padding: 0 10px;
   border: 1px solid var(--rule);
   color: var(--muted);
 }
@@ -761,12 +775,20 @@ pre.code {
 }
 .cmd code {
   flex: 1;
+  /* `min-width: 0`, or the scroller never scrolls: a flex item's automatic
+   * minimum is its MIN-CONTENT width, and the min-content width of a `pre`
+   * command is the whole command — so the box grew to 800px inside a 288px
+   * phone and took the document with it (RFC-0106 M3, second round). */
+  min-width: 0;
   padding: 14px var(--s2);
   font-size: var(--t-cmd);
   overflow-x: auto;
   white-space: pre;
 }
-.cmd button { border: 0; border-left: 1px solid var(--rule); }
+.cmd button { border: 0; border-left: 1px solid var(--rule); align-self: stretch; }
+/* A command block is one row, and the row is the height of one line of code
+ * plus its padding. Nothing inside it may grow it. */
+.cmd code { line-height: 1.5; }
 
 /* ------------------------
    Landing
@@ -815,7 +837,7 @@ pre.code {
  * one of them is checkable on another page — which is why none of them is a
  * badge with a number painted into it. */
 .chips { list-style: none; display: flex; flex-wrap: wrap; gap: var(--s1); margin: var(--s3) 0 0; padding: 0; }
-.chips li { padding: 6px var(--s2); border: 1px solid var(--rule); font: var(--t-eyebrow)/1.6 var(--mono); letter-spacing: 0.06em; color: var(--muted); }
+.chips li { padding: 0 var(--s2); }
 
 /* The four pillars. Two lines and one command each, and the command is the
  * point: a card that ends in a paragraph ends in nothing to do. */
@@ -823,28 +845,46 @@ pre.code {
 .cards > li { border: 1px solid var(--rule); padding: var(--s2); display: flex; flex-direction: column; }
 .cards h3 { font-size: var(--t-h3); margin-bottom: var(--s1); display: flex; align-items: center; gap: var(--s1); }
 .cards p { color: var(--muted); flex: 1; }
-.cards .cmd { margin-top: var(--s2); }
+/* A card is 280px, so its command stacks over its Copy button and takes the
+ * whole width rather than sharing it with an 86px button. */
+.cards .cmd { margin-top: var(--s2); flex-direction: column; align-items: stretch; }
+.cards .cmd button { border-left: 0; border-top: 1px solid var(--rule); }
 
-/* A COMMAND THAT MUST BE READ, NOT ONLY COPIED. The sheet's default is
- * `white-space: pre` with a scroller, which is right for a long build line in a
- * wide plate and wrong in a narrow one: an install command clipped at
- * `…/vyrn/main/inst` is a stranger's script a reader is asked to pipe into a
- * shell without seeing the end of it. These three places wrap instead — the
- * OS picker, the index's install tabs, and the pillar cards (RFC-0106 M2).
- * It is the same rule the sheet already applies to every `.cmd` at 640px.
+/* A COMMAND IS ONE LINE (RFC-0106 M3, second round).
  *
- * `.tiles` was the fourth, and the three install tiles it styled are the OS
- * picker now; the ruleset went with them (RFC-0106 M3). */
-.ospane .cmd code, [data-install] .cmd code, .cards .cmd code, .say .cmd code { white-space: pre-wrap; overflow-wrap: anywhere; }
+ * M2 made four places WRAP instead, to stop a long install line being clipped
+ * at `…/vyrn/main/inst`. That traded one defect for a worse one: measured on
+ * the exported tree, the index hero's three commands each painted two lines,
+ * `vyrn build … --target wasm` painted FOUR in a pillar card, and every `Copy`
+ * button stretched to match — 50, 73, 95 and 118px tall on one page. A shell
+ * command broken across four lines is a command a reader cannot tell they have
+ * copied whole.
+ *
+ * So the sheet's own default holds everywhere: `white-space: pre` inside a
+ * scroller. The block scrolls, the page does not, and the fix for "the end is
+ * off the edge" is to give the block more width — which is what `.cmdwide`
+ * below does, and what the reference site does with its own command box. */
 
 /* THE CENTRED HERO (/install, RFC-0106 M3). One question, one answer, one
  * command. The only centred text on this site, and only because nothing is
  * beside it. */
-.hero.mid { text-align: center; max-width: 44rem; margin: 0 auto; }
+/* THE COMMAND BOX IS WIDER THAN THE LEDE, which is the reference site's shape
+ * and the reason its install command never wraps: 50rem holds the longest line
+ * this site publishes (79 characters at `--t-cmd`, plus the Copy button) with
+ * nothing to scroll, while the sentence above it stays at a centred measure. */
+/* `width: 100%` IS LOAD-BEARING. `margin: 0 auto` on a grid item makes it
+ * self-align `center` instead of `stretch`, and a non-stretched grid item is
+ * sized `fit-content` — so the section took the MIN-CONTENT of the widest thing
+ * in it, which is a 79-character install command, and painted 690px inside a
+ * 278px phone column. With an explicit width the section is its track, the
+ * command scrolls inside its own box, and the auto margins still centre it
+ * wherever the track is wider than 50rem. */
+.hero.mid { text-align: center; max-width: 50rem; width: 100%; margin: 0 auto; }
 /* A centred paragraph is read on both edges at once, so it wants a NARROWER
  * measure than a ragged-right one, not the container's. */
 .hero.mid .lede { max-width: 32rem; margin-left: auto; margin-right: auto; }
 .hero.mid .cmd { text-align: left; }
+.hero.mid > .eyebrow { margin-top: var(--s2); }
 
 /* THE OS PICKER: THREE RADIO BUTTONS, NO SCRIPT, NO ID IN THIS SHEET.
  *
@@ -855,24 +895,25 @@ pre.code {
  * and one more line here. There is no JavaScript for it at all, and a keyboard
  * gets a native radio group, arrows included. The `<fieldset>` IS that group
  * and its `<legend>` is its name; the default border and padding come off. */
-.picker { margin: var(--s4) 0 var(--s3); border: 0; padding: 0; min-width: 0; }
-.ostabs { display: flex; justify-content: center; flex-wrap: wrap; gap: 0; }
-/* TILES, not tabs: equal boxes a reader picks their machine out of. They carry
- * no glyph, and that is measured rather than assumed — the two hash-locked icon
- * collections this site binds hold 180 glyphs between them and none of them is
- * an apple, a penguin or a window (RFC-0106 M2). A 112px square with one word
- * in the middle of it is an empty cell, so the tile is the size of its word. */
+.picker { margin: var(--s4) 0 var(--s2); border: 0; padding: 0; min-width: 0; }
+
+/* ONE UNIT, NOT TWO (RFC-0106 M3, second round). The tile row and the command
+ * box it selects were 24px apart and different widths, so the tiles read as
+ * chips floating over an unrelated block. They are a segmented control joined
+ * to its own output now: equal columns, shared borders, and the pane's top
+ * border sitting ON the tile row's bottom one. */
+.ostabs { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
 .ostabs label {
-  display: inline-flex; align-items: center; justify-content: center;
-  min-width: 8rem; min-height: 56px; padding: 9px 18px; cursor: pointer;
-  border: 1px solid var(--rule); margin-left: -1px;
+  display: flex; align-items: center; justify-content: center;
+  min-height: 48px; padding: 9px var(--s2); cursor: pointer;
+  border: 1px solid var(--rule);
   font: var(--t-eyebrow)/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase;
   color: var(--muted);
 }
-.ostabs label:first-child { margin-left: 0; }
+.ostabs label + label { border-left: 0; }
 .ostabs label:hover { color: var(--ink); }
-.ospane { display: none; margin-top: var(--s3); text-align: left; }
-.ospane .eyebrow { margin: var(--s1) 0 0; }
+.ospane { display: none; text-align: left; }
+.ospane .cmd { margin-top: -1px; }
 
 .picker input:nth-of-type(1):checked ~ .ostabs > :nth-child(1),
 .picker input:nth-of-type(2):checked ~ .ostabs > :nth-child(2),
@@ -880,6 +921,9 @@ pre.code {
   color: var(--accent); border-color: var(--accent); position: relative; z-index: 1;
   background: color-mix(in oklab, var(--accent) var(--code-wash), transparent);
 }
+/* A checked tile keeps its own left border even when a sibling dropped one. */
+.picker input:nth-of-type(2):checked ~ .ostabs > :nth-child(2),
+.picker input:nth-of-type(3):checked ~ .ostabs > :nth-child(3) { border-left-width: 1px; margin-left: -1px; }
 .picker input:nth-of-type(1):checked ~ .ospanes > :nth-child(1),
 .picker input:nth-of-type(2):checked ~ .ospanes > :nth-child(2),
 .picker input:nth-of-type(3):checked ~ .ospanes > :nth-child(3) { display: block; }
@@ -970,6 +1014,9 @@ details.disc > p { max-width: var(--wide); }
   border-top: 1px solid var(--rule);
 }
 .band h2 { font-size: var(--t-h2); margin-bottom: var(--s2); }
+/* A kicker sits 8px over a heading and 24px over anything else. It was 8, 16 or
+ * 32 depending on which page you were on (RFC-0106 M3, second round). */
+.band > .eyebrow + :not(h2) { margin-top: var(--s3); }
 
 .split { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: var(--s5); align-items: start; }
 @media (max-width: 1024px) { .split { grid-template-columns: minmax(0, 1fr); gap: var(--s4); } }
@@ -1707,6 +1754,17 @@ kbd {
    * disclosure are undone here, both models, and the panel leaves the flow. */
   .masthead { gap: var(--s1); position: relative; }
   .tools { gap: var(--s1); }
+  /* THE HEADER ROW AT A PHONE'S WIDTH (RFC-0106 M3, second round). It wants
+   * 358px and a 320px screen gives it 278. The search control's word goes and
+   * its glyph stays — the button's accessible name is on `aria-label`, so
+   * nothing is lost to a screen reader and 55px is returned to the row. It is
+   * NOT the whole fix: 25px still overflow at 320, and which control loses its
+   * word next is M4's decision, exactly as M1 and M2 both wrote. */
+  .find .word { display: none; }
+  /* And the last two pixels: the Install button's side padding, which at this
+   * width is the only place in the row with any to give. 320px is clean now —
+   * it had been 59px over since M1 recorded it. */
+  .masthead .cta { padding: 0 12px; }
   /* A triangle costs 12px of 343, and a panel that opens says it. `display` is
    * the load-bearing one: the base rule above hides this summary at every width,
    * and without this line a phone has a Menu control with no box and NO WAY TO
@@ -1748,8 +1806,8 @@ kbd {
    * thirds of the row and left the command a 120px window on 885px of text, so
    * the two stack and the command wraps rather than hides. */
   .cmd { flex-direction: column; align-items: stretch; }
-  .cmd code { white-space: pre-wrap; overflow-wrap: anywhere; padding: var(--s2); }
-  .cmd button { border-left: 0; border-top: 1px solid var(--rule); }
+  .cmd code { padding: var(--s2); }
+  .cmd button { border-left: 0; border-top: 1px solid var(--rule); min-height: 44px; }
 
   /* A finger is not a cursor. */
   button, .btn { padding: 12px 16px; min-height: 44px; }

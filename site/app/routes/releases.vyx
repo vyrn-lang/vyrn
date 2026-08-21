@@ -128,12 +128,11 @@ fn kindOf(tag: String) -> String {
                     <button type="button" data-copy-btn aria-label="Copy the upgrade command">Copy</button>
                 </div>
                 <p class="eyebrow">Upgrading is the same line. <a :href="releaseUrl()">Notes and downloads</a> · <a :href="feedHref()">Feed</a></p>
-                <p class="notice" role="status" :data-release-note="releaseTag()" hidden="hidden"></p>
             </div>
 
             <div>
                 <dl class="specs">
-                    <div><dt>Merged since</dt><dd>{{ prsSince() }}<small>pull requests</small></dd></div>
+                    <div><dt>Since the tag</dt><dd>{{ prsSince() }}<small>pull requests merged</small></dd></div>
                     <div><dt>Test blocks</dt><dd>{{ testBlockCount() }}<small>in {{ testFileCount() }} files</small></dd></div>
                     <div><dt>Examples</dt><dd>{{ exampleCount() }}<small>on {{ backendCount() }} engines each</small></dd></div>
                     <div><dt>Standard library</dt><dd>{{ stdCount() }}<small>modules, in Vyrn</small></dd></div>

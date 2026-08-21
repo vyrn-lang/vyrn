@@ -49,7 +49,7 @@ export fn head() -> Head {
     </section>
 
     <section class="band" id="features">
-        <p class="eyebrow">02 — every feature</p>
+        <p class="eyebrow">every feature</p>
         <h2>{{ features().length }} things it does, and where each one lives</h2>
         <p>A feature list is easy to write and easy to inflate, so this one is checked: every row carries the file that implements it, and the site's own tests open every one of those files while the page is exported. A row describing something nobody wrote does not ship — it fails the build.</p>
         <div class="scroller">
@@ -71,7 +71,7 @@ export fn head() -> Head {
     </section>
 
     <section class="band" id="get">
-        <p class="eyebrow">03 — how to get it</p>
+        <p class="eyebrow">how to get it</p>
         <h2>Install the toolchain, then the .vsix</h2>
         <p>The extension lives in <code>{{ extensionDir() }}</code> and the server in <code>{{ serverDir() }}</code>, which is excluded from the main workspace and built on its own. Both are published: the server inside every platform archive, the extension as one <code>.vsix</code> asset. Building from source is still here, and it is now the path for working on the extension rather than for using it.</p>
         <ul class="plain">
@@ -89,7 +89,7 @@ export fn head() -> Head {
     </section>
 
     <section class="band" id="other">
-        <p class="eyebrow">04 — other editors</p>
+        <p class="eyebrow">other editors</p>
         <h2>Nothing else is written, and nothing else has to be</h2>
         <p>There is one extension and it is the one above. But <code>vyrn-lsp</code> is an ordinary language server that speaks JSON-RPC over stdin and stdout, and knows nothing about VS Code: any editor with a generic LSP client can start the binary and get the whole table above except the lenses, which are the client's own drawing. There is no socket mode and no port to connect to — a client that cannot spawn a process cannot use it.</p>
         <p>The rest of what the VS Code extension contributes is data any editor can read: the grammar is TextMate JSON, and the snippets are one flat file.</p>

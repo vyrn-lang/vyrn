@@ -48,13 +48,19 @@ fn plats() -> Array<Plat> {
     ]
 }
 
-/// What the command installs today — baked from `site/release.txt`, never
-/// written by hand.
+/// The one thing a reader needs to know about a command they are asked to pipe
+/// into a shell. The version used to be here too, with the word "today" after
+/// it, which told a reader nothing they had asked for (RFC-0106 M3).
 fn releaseLine() -> String {
     if !hasRelease() {
         return "Nothing published yet — build from source."
     }
-    return "Checksum-verified. <code>" + releaseTag() + "</code> today."
+    return "Checksum-verified."
+}
+
+/// The radio that selects one platform's pane, matching the install page's.
+fn osId(p: Plat) -> String {
+    return "os-" + p.id
 }
 
 /// The four pillar commands, coloured. They are indexed rather than looped
@@ -62,11 +68,14 @@ fn releaseLine() -> String {
 /// generation-time provider and `:name` is refused at the tag (RFC-0107 M1), so
 /// four cards with four glyphs are four elements.
 fn pillarCmd(i: Int64) -> String {
+    // SHORT, AND STILL REAL. A card is 280px wide and a command does not wrap
+    // (RFC-0106 M3, second round), so a 49-character line would be a 40px
+    // window on it. Every one of these runs as written.
     let all = [
-        "vyrn check src/main.vyrn",
-        "vyrn why --memory examples/ownership.vyrn",
-        "vyrn build src/main.vyrn --target wasm -o app.wasm",
-        "vyrn emit-gen src/main.vyrn",
+        "vyrn check main.vyrn",
+        "vyrn why --memory main.vyrn",
+        "vyrn build main.vyrn --target wasm",
+        "vyrn emit-gen main.vyrn",
     ]
     return shellHtml(all[i])
 }
@@ -80,20 +89,30 @@ fn pillarCmd(i: Int64) -> String {
                 <h1 class="display">Types carry the <em>rules</em>.<br/>Native speed. No collector.</h1>
                 <p class="lede">Write the rule into the type. The compiler proves it, or refuses the value.</p>
 
-                <div class="plate" data-install>
-                    <div class="tabs">
-                        <button type="button" v-for="p in plats()" :key="p.id" :data-plat="p.id">{{ p.name }}</button>
+                <!-- ONE OS PICKER ON THIS SITE (RFC-0106 M3, second round). This
+                     was a second one — underline tabs driven by `tabsWidget` —
+                     doing the same job as the install page's with a different
+                     shape and a different keyboard model. It is the same three
+                     radio buttons now: no script, a native group, and the tiles
+                     joined to the command box they select. -->
+                <fieldset class="picker">
+                    <legend class="sr-only">Operating system</legend>
+                    <input class="sr-only" type="radio" name="os" id="os-macos" checked="checked" data-os="macos"/>
+                    <input class="sr-only" type="radio" name="os" id="os-linux" data-os="linux"/>
+                    <input class="sr-only" type="radio" name="os" id="os-windows" data-os="windows"/>
+                    <div class="ostabs">
+                        <label v-for="p in plats()" :key="p.id" :for="osId(p)">{{ p.name }}</label>
                     </div>
-                    <div class="panes">
-                        <div v-for="p in plats()" :key="p.id" :data-plat-pane="p.id">
+                    <div class="ospanes">
+                        <div class="ospane" v-for="p in plats()" :key="p.id">
                             <div class="cmd" data-copy>
                                 <code v-html="shellHtml(p.cmd)"></code>
                                 <button type="button" data-copy-btn aria-label="Copy the install command">Copy</button>
                             </div>
                         </div>
                     </div>
-                    <p class="eyebrow"><span v-html="releaseLine()"></span> <a href="/install.html">All platforms</a></p>
-                </div>
+                </fieldset>
+                <p class="eyebrow"><span v-html="releaseLine()"></span> <a href="/install.html">All platforms</a></p>
 
                 <ul class="chips">
                     <li>No collector</li>

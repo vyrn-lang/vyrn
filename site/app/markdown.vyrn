@@ -31,7 +31,7 @@ import { contains } from "std/strpred"
 import { startsWith } from "std/strpred"
 import { escapeHtml } from "./code"
 import { rfcHref } from "./backstage"
-import { blob } from "./repo"
+import { ghBlob as blob } from "./github"
 
 /// One block, and the line the caller carries on from.
 type Taken = { html: String, next: Int64 }

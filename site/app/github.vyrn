@@ -1,0 +1,52 @@
+/// Where this repository lives, and the two URL shapes the site builds from it.
+///
+/// WHY THIS IS ITS OWN MODULE (RFC-0106 M3, second round). These three functions
+/// were in `repo.vyrn`, which was the right home for them right up until
+/// `repo.vyrn` had to read the repository's own tags to stop featuring a stale
+/// release. That import closed a cycle — `history` -> `corpus` -> `markdown` ->
+/// `repo` -> `history` — and the link that closed it was `markdown.vyrn`
+/// wanting one URL builder.
+///
+/// So the constant moved DOWN to a leaf that imports nothing. `repo.vyrn`
+/// re-exports all three, so every other caller on the site is unchanged and
+/// there is still exactly one place that spells the repository's name.
+///
+/// The site does not host the source, so every link built here leaves. That is
+/// the only reason one does.
+
+/// This repository, as GitHub names it.
+fn repoName() -> String {
+    return "vyrn-lang/vyrn"
+}
+
+/// A file in this repository, on GitHub.
+export fn ghBlob(path: String) -> String {
+    return "https://github.com/" + repoName() + "/blob/main/" + path
+}
+
+/// A file in this repository, as a remote import specifier (RFC-0010 M4).
+///
+/// `@main` rather than a release tag, and deliberately: this site is built from
+/// `main` and reads these files off `main`, so the ref the registry prints is
+/// the ref whose contents it described. Floating is not unpinned — `vyrn add`
+/// resolves the branch to a commit once and records the commit and the sha256
+/// in `vyrn.lock`, and only `vyrn update` moves either again.
+export fn ghSpec(path: String) -> String {
+    return "github:" + repoName() + "@main/" + path
+}
+
+/// A tag's release page, which is where its archives and its `SHA256SUMS` are.
+export fn ghRelease(tag: String) -> String {
+    if tag.byteLength == 0 {
+        return "https://github.com/" + repoName() + "/releases"
+    }
+    return "https://github.com/" + repoName() + "/releases/tag/" + tag
+}
+
+test "one repository name, three URL shapes" {
+    assertEq(ghBlob("README.md"), "https://github.com/vyrn-lang/vyrn/blob/main/README.md")
+    assertEq(ghSpec("std/json.vyrn"), "github:vyrn-lang/vyrn@main/std/json.vyrn")
+    assertEq(ghRelease("v0.1.0"), "https://github.com/vyrn-lang/vyrn/releases/tag/v0.1.0")
+    // No tag is the listing, so a link is never a URL with nothing on the end.
+    assertEq(ghRelease(""), "https://github.com/vyrn-lang/vyrn/releases")
+}

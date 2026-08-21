@@ -21,11 +21,11 @@
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
 import { shellHtml } from "../code"
-import { hasRelease, releaseTag, releaseDate, releasePre, releaseUrl } from "../repo"
+import { hasRelease, releaseTag, releasePre, releaseUrl } from "../repo"
 import { Icon } from "../icons"
 
-/// One platform: the one-line install, and what lands.
-type Platform = { id: String, name: String, install: String, archive: String, home: String }
+/// One platform, and the one line that installs it.
+type Platform = { id: String, name: String, install: String }
 
 export fn head() -> Head {
     return pageHeadOf("/install")
@@ -37,22 +37,16 @@ fn platforms() -> Array<Platform> {
             id: "macos",
             name: "macOS",
             install: "curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | sh",
-            archive: "vyrn-aarch64-macos.tar.gz",
-            home: "~/.vyrn/bin",
         },
         Platform {
             id: "linux",
             name: "Linux",
             install: "curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | sh",
-            archive: "vyrn-x86_64-linux.tar.gz",
-            home: "~/.vyrn/bin",
         },
         Platform {
             id: "windows",
             name: "Windows",
             install: "irm https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.ps1 | iex",
-            archive: "vyrn-x86_64-windows.zip",
-            home: "%USERPROFILE%\\.vyrn\\bin",
         },
     ]
 }
@@ -84,16 +78,6 @@ fn pinnedInstall() -> String {
 /// Checking a manual download by hand, which is what the installer does for you.
 fn manualCheck() -> String {
     return "sha256sum -c SHA256SUMS"
-}
-
-/// The version line under the heading. One function, because the two states
-/// differ by a fact and not by a layout.
-fn versionLine() -> String {
-    if !hasRelease() {
-        return "Nothing published yet: the script says so and points at the source build."
-    }
-    let kind = if releasePre() { "pre-release" } else { "release" }
-    return releaseTag() + ", published " + releaseDate() + " as a " + kind + "."
 }
 
 /// The kicker over the heading: the word, then the version it installs today.
@@ -145,13 +129,11 @@ fn osId(p: Platform) -> String {
                             <code v-html="shellHtml(p.install)"></code>
                             <button type="button" data-copy-btn aria-label="Copy the install command">Copy</button>
                         </div>
-                        <p class="eyebrow"><code>{{ p.archive }}</code> into <code>{{ p.home }}</code></p>
                     </div>
                 </div>
             </fieldset>
 
-            <p class="eyebrow">{{ versionLine() }} <a :href="releaseUrl()">Release notes</a></p>
-            <p class="notice" role="status" :data-release-note="releaseTag()" hidden="hidden"></p>
+            <p class="eyebrow"><a :href="releaseUrl()">Release notes</a></p>
         </section>
 
         <section class="band split" id="verify">
@@ -171,6 +153,7 @@ fn osId(p: Platform) -> String {
             <p class="eyebrow">Advanced</p>
             <details class="disc">
                 <summary>Pin a version, check by hand, uninstall, build from source</summary>
+                <p>It installs one archive into <code>~/.vyrn/bin</code> — <code>%USERPROFILE%\.vyrn\bin</code> on Windows — and writes nothing outside it.</p>
                 <p>Pin a tag instead of taking the newest release:</p>
                 <div class="cmd" data-copy>
                     <code v-html="shellHtml(pinnedInstall())"></code>
