@@ -125,10 +125,17 @@ fn pillarCmd(i: Int64) -> String {
             </div>
         </section>
 
-        <section class="band" id="speed">
-            <p class="eyebrow"><Icon name="bytesize:activity"/> Measured</p>
-            <h2>As quick as C on a numeric kernel</h2>
-            <p><code>{{ heroBench() }}</code>, one of eight. Five of the rest are slower than Rust, each with a named cause.</p>
+        <!-- SPLIT (RFC-0106 M3): the claim and its link on the left, the chart
+             on the right. The section is exactly as tall as the chart plus the
+             rhythm's padding, which is the geometry rule this milestone asserts
+             in the browser rather than eyeballs. -->
+        <section class="band split" id="speed">
+            <div class="say">
+                <p class="eyebrow"><Icon name="bytesize:activity"/> Measured</p>
+                <h2>As quick as C</h2>
+                <p><code>{{ heroBench() }}</code>, one of eight. Five of the rest are slower than Rust, each with a named cause.</p>
+                <p class="ctarow"><a class="cta" href="/compare.html#numbers">All eight, and the causes</a></p>
+            </div>
             <div class="plate barstrip" data-widget="bars">
                 <div class="stage">
                     <svg class="chart" :viewBox="heroBarsBox()" role="group" aria-label="Five engines running the same numeric kernel, fastest first">
@@ -165,10 +172,10 @@ fn pillarCmd(i: Int64) -> String {
                     </div>
                 </details>
             </div>
-            <p class="notice"><a href="/compare.html#numbers">All eight programs, and the five causes</a></p>
         </section>
 
         <section class="band" id="what">
+            <p class="eyebrow">Four ideas</p>
             <!-- FOUR CARDS, WRITTEN OUT. A `v-for` cannot carry `<Icon>`: a
                  provider tag takes static attributes and `:name` binds an
                  expression, which RFC-0107 M1 refuses at the tag. Four cards
