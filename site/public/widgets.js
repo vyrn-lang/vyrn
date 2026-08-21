@@ -909,16 +909,20 @@ function demoWidget(root) {
   bar.className = "controls demobar";
   const back = document.createElement("button");
   back.type = "button";
-  back.textContent = "Back";
+  back.textContent = "‹";
+  back.setAttribute("aria-label", "Back");
   const next = document.createElement("button");
   next.type = "button";
-  next.textContent = "Next";
+  next.textContent = "›";
+  next.setAttribute("aria-label", "Next");
   const count = document.createElement("span");
   count.className = "eyebrow";
   // Polite, because the reader pressed the button that changed it.
   count.setAttribute("aria-live", "polite");
-  bar.append(back, next, count);
-  root.prepend(bar);
+  bar.append(count, back, next);
+  // The controls belong to the pane they page — the bottom of the terminal,
+  // the reference site's own placement — not a toolbar over the whole card.
+  ($(".panes", root) || root).append(bar);
 
   // The list of titles STAYS (RFC-0106 M3). It used to set `hidden` on six of
   // seven, which threw the outline away with the detail; every row is on the
@@ -943,7 +947,9 @@ function demoWidget(root) {
     panes.forEach((p, k) => p.classList.toggle("on", k === at));
     count.textContent = at + 1 + " / " + steps.length;
     back.disabled = at === 0;
-    next.textContent = at === steps.length - 1 ? "Replay" : "Next";
+    next.textContent = at === steps.length - 1 ? "Replay" : "›";
+    if (at === steps.length - 1) next.removeAttribute("aria-label");
+    else next.setAttribute("aria-label", "Next");
   };
   // Pointer-only, and deliberately: every step is already reachable with Back,
   // Next and the arrow keys, so this adds no function a keyboard cannot do.

@@ -40,7 +40,6 @@ fn examples() -> Array<Example> {
     <section class="band">
         <div class="plate" data-play-plate>
             <div class="plate-head">
-                <span class="pill">Running</span>
                 <span class="eyebrow" data-play-status>Loading the compiler…</span>
                 <span class="spacer"></span>
                 <label class="pickbox">

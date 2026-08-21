@@ -217,13 +217,13 @@ fn pillarCmd(i: Int64) -> String {
                      shape and a different keyboard model. It is the same three
                      radio buttons now: no script, a native group, and the tiles
                      joined to the command box they select. -->
+                <!-- Command first, the chips under it — the reference front
+                     page's order: the command is the point and the tabs are
+                     the quietest thing near it. -->
                 <fieldset class="picker">
                     <legend class="sr-only">Operating system</legend>
                     <input class="sr-only" type="radio" name="os" id="os-unix" checked="checked" data-os="unix"/>
                     <input class="sr-only" type="radio" name="os" id="os-windows" data-os="windows"/>
-                    <div class="ostabs">
-                        <label v-for="p in installTargets()" :key="p.id" :for="osId(p)">{{ p.name }}</label>
-                    </div>
                     <div class="ospanes">
                         <div class="ospane" v-for="p in installTargets()" :key="p.id">
                             <div class="cmd" data-copy>
@@ -231,6 +231,9 @@ fn pillarCmd(i: Int64) -> String {
                                 <button type="button" data-copy-btn aria-label="Copy the install command">Copy</button>
                             </div>
                         </div>
+                    </div>
+                    <div class="ostabs">
+                        <label v-for="p in installTargets()" :key="p.id" :for="osId(p)">{{ p.name }}</label>
                     </div>
                 </fieldset>
                 <p class="eyebrow"><a href="/install.html">Other ways to install</a></p>
@@ -251,8 +254,7 @@ fn pillarCmd(i: Int64) -> String {
                      no script this textarea is read-only and there is nothing to
                      reset. -->
                 <div class="plate-head">
-                    <span class="pill live">Runs here</span>
-                    <span class="eyebrow" data-play-status>Press Run</span>
+                    <span class="eyebrow" data-play-status>Ready</span>
                     <span class="spacer"></span>
                     <button type="button" class="btn jsonly" data-play-reset>Reset</button>
                     <button type="button" class="btn primary" data-play-run title="Ctrl+Enter">Run</button>

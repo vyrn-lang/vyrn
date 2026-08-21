@@ -762,20 +762,19 @@ h2, .cards h3 { font-family: var(--sans-d); letter-spacing: -0.02em; font-weight
   border: 1px solid var(--rule);
   color: var(--muted);
 }
-/* "Runs here" is a state, not a control: a breathing dot and a quiet label,
- * not a bordered chip shouting beside two buttons. */
-.pill.live {
-  color: var(--muted); border: 0; padding: 0; min-height: 0;
-  letter-spacing: 0.08em; text-transform: uppercase;
-  display: inline-flex; align-items: center; gap: 7px;
-}
-.pill.live::before {
-  content: ""; width: 7px; height: 7px; border-radius: 50%;
+/* A state is a dot and a word, once (RFC-0106 M3, seventh round). "Runs here"
+ * beside "Press Run" was two caps labels reading as one confusing element; the
+ * breathing dot now lives on the status itself — `Ready`, `Running…`, `Ran` —
+ * and there is nothing else to reconcile it with. */
+.pill.live { color: var(--muted); border: 0; padding: 0; min-height: 0; letter-spacing: 0.08em; text-transform: uppercase; display: inline-flex; align-items: center; gap: 7px; }
+.pill.live::before, .plate-head [data-play-status]::before {
+  content: ""; width: 7px; height: 7px; border-radius: 50%; flex: none;
   background: var(--accent);
   animation: breathe 2.4s var(--expo) infinite;
 }
+.plate-head [data-play-status] { display: inline-flex; align-items: center; gap: 7px; }
 @keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
-@media (prefers-reduced-motion: reduce) { .pill.live::before { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .pill.live::before, .plate-head [data-play-status]::before { animation: none; } }
 
 /* ------------------------
    The widget chassis (brief 4). Pill + eyebrow, one headline number, one
@@ -1043,43 +1042,27 @@ pre.code {
  * reader the same line twice (RFC-0106 M3, third round). */
 .picker { margin: var(--s4) 0 var(--s2); border: 0; padding: 0; min-width: 0; }
 
-/* ONE UNIT, NOT TWO (RFC-0106 M3, second round). The tile row and the command
- * box it selects were 24px apart and different widths, so the tiles read as
- * chips floating over an unrelated block. They are a segmented control joined
- * to its own output: equal columns, one divider between them, and the command
- * box's own top border as the row's bottom edge.
- *
- * EVERY EDGE IS EXACTLY ONE HAIRLINE, AND NOTHING OVERLAPS (fourth round). It
- * used to build the unit out of four borders per label, `border-left: 0` on the
- * siblings, and then `margin-left: -1px` plus `margin-top: -1px` to pull the
- * checked tile and the command box back over the borders they doubled. Two
- * negative margins over subpixel grid columns is a lottery: at a 523px container
- * an `1fr` column is 261.5px, so a shifted 1px border straddles two device
- * pixels and paints as two half-covered ones — visibly THINNER and lighter than
- * its neighbours, differently at 1x and at 2x, and only on the selected tile,
- * which is the one a reader is looking at.
- *
- * So the row draws its own box, the divider is a single border on one side of
- * one element, and the selection is an INSET SHADOW rather than a border colour.
- * A shadow takes no space, so nothing has to be pulled back over anything: three
- * of them, top and both sides, leaving the tile open at the bottom into the
- * command box it selects. */
-.ostabs { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); border: 1px solid var(--rule); border-bottom: 0; }
+/* CHIPS, NOT A BAR (RFC-0106 M3, seventh round). The fused segmented header
+ * made the picker the heaviest element in the hero — a 44px two-cell bar wider
+ * than the command it selects. The reference site's tabs are the quietest
+ * thing near the command: a short row of small chips. Ours are the same chips
+ * the control voice already defined, selection carried by the accent, and the
+ * row sits wherever the markup puts it — under the command in the index hero
+ * (the reference front page's order), above it on `/install`. */
+.ostabs { display: flex; flex-wrap: wrap; gap: var(--s1); margin: 0 0 var(--s2); }
+.ospanes + .ostabs { margin: var(--s2) 0 0; }
+.hero.mid .ostabs { justify-content: center; }
 .ostabs label {
-  display: flex; align-items: center; justify-content: center;
-  min-height: 44px; padding: 9px var(--s2); cursor: pointer;
-  font: var(--t-eyebrow)/1 var(--mono); letter-spacing: 0.02em;
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 36px; padding: 7px 12px; cursor: pointer;
+  font: var(--t-key)/1 var(--mono); letter-spacing: 0.02em;
   color: var(--muted);
-  transition: color 140ms var(--expo), background 140ms var(--expo);
+  border: 1px solid var(--hair);
+  background: color-mix(in oklab, var(--ink) 4%, transparent);
+  transition: color 140ms var(--expo), border-color 140ms var(--expo), background 140ms var(--expo);
 }
-.ostabs label + label { border-left: 1px solid var(--rule); }
 .ostabs label:hover { color: var(--ink); }
 .ospane { display: none; text-align: left; }
-/* The command box IS the tab row's bottom edge, so the two touch: `.cmd`'s own
- * 16px top margin would put the unit back in two pieces, which is the defect the
- * second round closed. It used to be pulled back with `margin-top: -1px` over
- * the row's own bottom border; the row has no bottom border now, so the box's
- * top border is the join and nothing overlaps. */
 .ospane .cmd { margin-top: 0; }
 /* The "view the install script" line under the command it fetches. A label that
  * FOLLOWS a block needs the gap the kicker rule gives one that precedes it. */
@@ -1096,7 +1079,7 @@ pre.code {
 .picker input:nth-of-type(5):checked ~ .ostabs > :nth-child(5) {
   color: var(--accent);
   background: color-mix(in oklab, var(--accent) var(--code-wash), transparent);
-  box-shadow: inset 0 1px 0 0 var(--accent), inset 1px 0 0 0 var(--accent), inset -1px 0 0 0 var(--accent);
+  border-color: color-mix(in oklab, var(--accent) 55%, transparent);
 }
 .picker input:nth-of-type(1):checked ~ .ospanes > :nth-child(1),
 .picker input:nth-of-type(2):checked ~ .ospanes > :nth-child(2),
@@ -1168,8 +1151,13 @@ pre.code {
  * pane is stacked in column 2 under its own title, and with the script one pane
  * is shown and the row that selects it is marked. */
 .demo { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); align-items: stretch; }
-.demo .demobar { grid-column: 1 / -1; display: flex; align-items: center; gap: var(--s2); padding: var(--s1) var(--s2); border-bottom: 1px solid var(--hair); }
-.demo .demobar .eyebrow { margin: 0; }
+/* The pager lives at the bottom of the pane it pages, counter left and the
+ * two glyph chips right — not a toolbar over the whole card. `margin-top:
+ * auto` pins it when the pane is short. */
+.demo .demobar { display: flex; align-items: center; gap: var(--s1); margin-top: auto; padding-top: var(--s2); border-top: 1px solid var(--hair); }
+.demo .demobar .eyebrow { margin: 0 auto 0 0; }
+.demo .demobar button { min-height: 30px; padding: 4px 12px; font-size: var(--t-mark); line-height: 1; }
+.demo .demobar button:disabled { opacity: 0.35; cursor: default; }
 
 .demo .steps { list-style: none; margin: 0; padding: 0; counter-reset: step; border-right: 1px solid var(--hair); }
 /* Each row: the number in its own 2ch column, the title and the command in the

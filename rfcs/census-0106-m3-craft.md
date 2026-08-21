@@ -411,3 +411,13 @@ tracked-out, hard-boxed. Entries, all fixed:
 | M5 | Passive frames | `pre.code` and the editor at full `--rule` weight | `--hair`; interactive `.cmd` keeps `--rule` |
 | M6 | Full-scale bar | Ran under its own value once bars got pigment | Paper-stroke halo on `.val` (`paint-order: stroke`) |
 | M7 | Cards | Inert | Border warms toward the accent on hover, 160ms |
+
+## N. The seventh round — three components against their reference shapes
+
+The user named three components that still read heavier than bun.sh:
+
+| # | Element | Defect | Fix |
+|---|---|---|---|
+| N1 | Install picker | A fused 44px two-cell segmented bar — the heaviest element in the hero, wider than the command it selects | Small detached chips in the control voice; command first in the index hero (the reference front page's order), chips centred above on `/install`; same radio mechanism, zero script |
+| N2 | "A minute with Vyrn" | A Back/Next toolbar over the whole card | The pager lives at the bottom of the pane it pages — `1 / 7 ‹ ›` — the reference site's own placement; steps stay clickable |
+| N3 | "Runs here" + "Press Run" | Two adjacent caps labels reading as one confusing element | One state: the breathing dot moved onto the status itself (`● Ready` → `Running…` → `Ran`), on the index hero and the playground both |
