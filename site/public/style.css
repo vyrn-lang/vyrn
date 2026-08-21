@@ -118,6 +118,14 @@
   --s5: 48px;
   --s6: 64px;
 
+  /* SECTION RHYTHM (RFC-0106 M3). ONE number for the vertical space around every
+   * section on every consumer page. `.band` used to be a 64px margin ABOVE its
+   * rule with 64px of padding below it and nothing under its content, so the
+   * seam sat hard against one block and floated away from the next. A section is
+   * `padding: var(--sect) 0` and a `border-top` now: sections touch, and no
+   * section carries a vertical margin. 32px on a phone, 56px from 1244px. */
+  --sect: clamp(32px, 4.5vw, 56px);
+
   /* TEXT ROLES AND THEIR WIDTH. Three roles, and the role decides the width —
    * not the element. Read this before changing any `max-width` on text.
    *
@@ -759,7 +767,9 @@ pre.code {
    Landing
    ------------------------ */
 
-.hero { padding: var(--s6) 0 var(--s5); }
+/* A hero is a section, and it obeys the same rhythm as every other one. It has
+ * no rule above it because the masthead's own bottom border is that seam. */
+.hero { padding: var(--sect) 0; }
 .hero .display { margin-bottom: var(--s3); }
 .hero .display em { font-style: normal; color: var(--accent); }
 
@@ -774,8 +784,15 @@ pre.code {
  * on the right, both above the fold on a laptop. Below 1024px it is one column
  * and the editor follows the command, which is the reading order the markup
  * already has — no `order` anywhere. */
-.hero.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--s4); align-items: start; }
+/* The index's hero stays 1fr/1fr: 2fr of 1216px sets a 67px display headline in
+ * 486px, which is four lines of two words. `stretch` is the M3 half — the editor
+ * is as tall as the column beside it and the OUTPUT AREA takes the slack, so the
+ * right column cannot end above the left and leave a dead strip. */
+.hero.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--s4); align-items: stretch; }
 @media (max-width: 1024px) { .hero.split { grid-template-columns: minmax(0, 1fr); } }
+.hero.split > div { min-width: 0; }
+.heroplay { display: flex; flex-direction: column; }
+.heroplay .editor { flex: 0 0 auto; }
 
 /* The hero editor is the playground's own box at a height that leaves room for
  * the output under it. `52vh` is right on a page that IS an editor and wrong on
@@ -784,7 +801,9 @@ pre.code {
  * overrides (`.play .editor textarea`) is declared LATER in this sheet, so an
  * override of equal specificity would lose. */
 .play.heroplay .editor textarea { height: auto; min-height: 0; }
-.heroplay .out { max-height: 9em; overflow: auto; }
+/* THE OUTPUT PANE GROWS INTO THE COLUMN (RFC-0106 M3). It was `max-height: 9em`
+ * against a fixed editor, so the plate ended well above the column beside it. */
+.heroplay .out { flex: 1; min-height: 4.5em; max-height: none; overflow: auto; }
 .heroplay .plate-head { border-bottom: 1px solid var(--rule); }
 
 /* Facts, as chips. Four short truths a reader can take at a glance, and every
@@ -801,26 +820,80 @@ pre.code {
 .cards p { color: var(--muted); flex: 1; }
 .cards .cmd { margin-top: var(--s2); }
 
-/* The three install tiles. Not tabs: a reader on a phone deciding whether to
- * install this wants to SEE that their machine is one of the three, and a tab
- * hides two thirds of that answer behind a press. */
-.tiles { list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: var(--s3); margin: var(--s4) 0 0; padding: 0; }
-.tiles > li { border: 1px solid var(--rule); padding: var(--s2); }
-.tiles h3 { font-size: var(--t-h3); margin-bottom: var(--s1); }
-.tiles p { margin-top: var(--s2); color: var(--muted); font-size: var(--t-meta); }
-
 /* A COMMAND THAT MUST BE READ, NOT ONLY COPIED. The sheet's default is
  * `white-space: pre` with a scroller, which is right for a long build line in a
- * wide plate and wrong in a 300px tile: an install command clipped at
+ * wide plate and wrong in a narrow one: an install command clipped at
  * `…/vyrn/main/inst` is a stranger's script a reader is asked to pipe into a
  * shell without seeing the end of it. These three places wrap instead — the
- * install tiles, the index's install tabs, and the pillar cards (RFC-0106 M2).
- * It is the same rule the sheet already applies to every `.cmd` at 640px. */
-.tiles .cmd code, [data-install] .cmd code, .cards .cmd code { white-space: pre-wrap; overflow-wrap: anywhere; }
+ * OS picker, the index's install tabs, and the pillar cards (RFC-0106 M2).
+ * It is the same rule the sheet already applies to every `.cmd` at 640px.
+ *
+ * `.tiles` was the fourth, and the three install tiles it styled are the OS
+ * picker now; the ruleset went with them (RFC-0106 M3). */
+.ospane .cmd code, [data-install] .cmd code, .cards .cmd code, .say .cmd code { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* THE CENTRED HERO (/install, RFC-0106 M3). One question, one answer, one
+ * command. The only centred text on this site, and only because nothing is
+ * beside it. */
+.hero.mid { text-align: center; max-width: 44rem; margin: 0 auto; }
+.hero.mid .lede { max-width: none; }
+.hero.mid .cmd { text-align: left; }
+
+/* THE OS PICKER: THREE RADIO BUTTONS, NO SCRIPT, NO ID IN THIS SHEET.
+ *
+ * The inputs are visually hidden and come first in the markup, so `:checked ~`
+ * reaches both the labels and the panes. Selection is BY POSITION — the nth
+ * input drives the nth label and the nth pane — so the sheet never spells a
+ * platform's name and a fourth platform is one more `<label>`, one more `<div>`
+ * and one more line here. There is no JavaScript for it at all, and a keyboard
+ * gets a native radio group, arrows included. The `<fieldset>` IS that group
+ * and its `<legend>` is its name; the default border and padding come off. */
+.picker { margin: var(--s4) 0 var(--s3); border: 0; padding: 0; min-width: 0; }
+.ostabs { display: flex; justify-content: center; flex-wrap: wrap; gap: 0; }
+.ostabs label {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 44px; padding: 9px 18px; cursor: pointer;
+  border: 1px solid var(--rule); margin-left: -1px;
+  font: var(--t-eyebrow)/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--muted);
+}
+.ostabs label:first-child { margin-left: 0; }
+.ostabs label:hover { color: var(--ink); }
+.ospane { display: none; margin-top: var(--s3); text-align: left; }
+.ospane .eyebrow { margin: var(--s1) 0 0; }
+
+.picker input:nth-of-type(1):checked ~ .ostabs > :nth-child(1),
+.picker input:nth-of-type(2):checked ~ .ostabs > :nth-child(2),
+.picker input:nth-of-type(3):checked ~ .ostabs > :nth-child(3) {
+  color: var(--accent); border-color: var(--accent); position: relative; z-index: 1;
+  background: color-mix(in oklab, var(--accent) var(--code-wash), transparent);
+}
+.picker input:nth-of-type(1):checked ~ .ospanes > :nth-child(1),
+.picker input:nth-of-type(2):checked ~ .ospanes > :nth-child(2),
+.picker input:nth-of-type(3):checked ~ .ospanes > :nth-child(3) { display: block; }
+/* The input is off-screen, so the focus ring is drawn on the label instead. */
+.picker input:nth-of-type(1):focus-visible ~ .ostabs > :nth-child(1),
+.picker input:nth-of-type(2):focus-visible ~ .ostabs > :nth-child(2),
+.picker input:nth-of-type(3):focus-visible ~ .ostabs > :nth-child(3) {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+
+/* A LIST THAT IS A GRID (RFC-0106 M3). Short rows down two columns: half the
+ * height, and `columns` keeps the reading order a two-track grid would not. */
+.twocol { list-style: none; margin: var(--s2) 0 0; padding: 0; columns: 2; column-gap: var(--s4); font-size: var(--t-note); }
+.twocol li { break-inside: avoid; padding: 5px 0; }
+.twocol a { text-decoration: none; font-family: var(--mono); font-size: var(--t-mono); }
+.twocol a:hover { text-decoration: underline; }
+.twocol .dim { color: var(--n2); font: var(--t-key)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; }
+@media (max-width: 640px) { .twocol { columns: 1; } }
 
 /* A row of calls to action, which is not a command row: `.cmd` is what the
  * census counts as a command a reader types, and three links are not that. */
 .ctarow { display: flex; flex-wrap: wrap; gap: var(--s2); margin-top: var(--s3); }
+/* `.cta` is `nowrap` so the masthead's Install button cannot break in two. A CTA
+ * in CONTENT can carry a sentence, and at 320px a five-word one was 286px in a
+ * 278px column (RFC-0106 M3) — so in a row, it wraps. */
+.ctarow .cta { white-space: normal; }
 
 /* THE RECORDED DEMO. Every step is in the document; the script hides all but
  * one and adds the counter. So the list is numbered and readable with no script
@@ -828,9 +901,27 @@ pre.code {
 .demo .steps { margin: 0; padding: 0 0 0 var(--s3); }
 .demo .steps > li { padding: var(--s2) 0; }
 .demo .steps > li + li { border-top: 1px solid var(--hair); }
-.demo .steps h3 { font-size: var(--t-h3); }
+.demo .steps h3 { font-size: var(--t-h4); }
 .demo .steps p { color: var(--muted); font-size: var(--t-meta); margin-top: var(--s1); }
 .demo .steps .out { max-height: 22em; }
+
+/* A STEP IS A SPLIT (RFC-0106 M3): what you type on the left, what came back on
+ * the right. The markup order is unchanged and two column assignments do it. */
+.demo .steps > li { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 0 var(--s4); align-items: start; padding: var(--s3) 0; }
+.demo .steps > li > :not(.out) { grid-column: 1; }
+.demo .steps > li > .out { grid-column: 2; grid-row: 1 / span 3; margin-top: 0; }
+@media (max-width: 1024px) {
+  .demo .steps > li { grid-template-columns: minmax(0, 1fr); }
+  .demo .steps > li > .out { grid-column: 1; grid-row: auto; margin-top: var(--s2); }
+}
+
+/* WITH SCRIPT THE LIST STAYS AND ONE STEP IS OPEN. `.stepped` is added by
+ * `widgets.js`, so with no script nothing here matches and every step is open.
+ * A stepper that hides six of seven TITLES has thrown the outline away. */
+.demo.stepped .steps > li:not(.on) > :not(h3) { display: none; }
+.demo.stepped .steps > li:not(.on) { padding: var(--s1) 0; cursor: pointer; }
+.demo.stepped .steps > li:not(.on) h3 { color: var(--muted); font-weight: 500; }
+.demo.stepped .steps > li:not(.on):hover h3 { color: var(--ink); }
 .demo .demobar { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s2); }
 .demo .demobar .eyebrow { margin: 0; }
 
@@ -838,14 +929,40 @@ pre.code {
  * method is one click away, so the method sits in a `<details>` and the
  * summary is the only part that costs a line. */
 details.disc { margin-top: var(--s2); font: var(--t-meta)/1.6 var(--sans); color: var(--muted); }
-details.disc > summary { cursor: pointer; }
+/* 24px, because a summary IS a target and it was 19 (RFC-0105 M4 row 29). */
+details.disc > summary { cursor: pointer; min-height: 24px; padding: 2px 0; }
 details.disc > summary:hover { color: var(--ink); }
 details.disc[open] > summary { color: var(--accent); }
 details.disc table { margin-top: var(--s2); }
+/* A disclosure's paragraphs are INTRO like the band's own, and `.band > p`
+ * cannot reach them through the `<details>` (RFC-0106 M3). */
+details.disc > p { max-width: var(--wide); }
 .plate > details.disc { padding: 0 var(--s2) var(--s2); }
 
-.band { padding: var(--s6) 0 0; border-top: 1px solid var(--rule); margin-top: var(--s6); }
+/* TWO SECTION PATTERNS, AND EVERY CONSUMER SECTION IS ONE OF THEM (RFC-0106 M3).
+ *
+ *   FULL   `.band`        heading row, then a dense grid or one artifact.
+ *   SPLIT  `.band.split`  left (`.say`): kicker, 2-6 word heading, at most two
+ *                         short sentences, one link. Right: the artifact. */
+.band { padding: var(--sect) 0; border-top: 1px solid var(--rule); }
 .band h2 { font-size: var(--t-h2); margin-bottom: var(--s2); }
+
+.split { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: var(--s5); align-items: start; }
+@media (max-width: 1024px) { .split { grid-template-columns: minmax(0, 1fr); gap: var(--s4); } }
+
+/* Every block that can be an artifact carries a top margin for the case where it
+ * FOLLOWS prose. At the top of a column there is no prose above it, and that
+ * margin is the dead strip that starts a right column below its own sentence. */
+.split > *, .split > * > :first-child { margin-top: 0; }
+
+/* Four stat tiles in a split's column are 2x2, not 3+1: `auto-fit` measures the
+ * track and not the count, so the fourth tile fell to a row of its own and the
+ * block read as three tiles and a stray (RFC-0106 M3). */
+.split .specs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+/* Two sentences set to 88ch beside a chart is the paragraph an artifact was
+ * supposed to replace, so a split's left column is READING width. */
+.split > .say > p:not(.eyebrow, .cap) { max-width: var(--measure); }
 /* INTRO, not READING: the paragraph introduces the plate under it. `:not()`
  * keeps the eyebrow and the caption out — they are LABELs, and a measure in
  * THEIR font (12px mono) stopped them at 457px under a 1001px plate. */
@@ -1134,6 +1251,33 @@ svg.chart a .cell:hover { fill-opacity: 1 !important; }
    the styling has to hold for a module with one export and for one with 44.
    ------------------------ */
 
+/* THE REFERENCE INDEX, IN GROUPS OF THREE COLUMNS (RFC-0106 M3). It was 38
+ * full-width rows to answer "is there one for X"; three columns is the same data
+ * in a third of the height. `auto-fill`, so a narrow window drops to two and a
+ * phone to one with no breakpoint. `:has` keeps the search honest — `widgets.js`
+ * hides ROWS and knows nothing about groups, so a group with nothing visible
+ * left in it removes its own heading rather than standing over a gap. */
+.modgroup + .modgroup { margin-top: var(--s5); }
+.modgroup > .eyebrow { padding-bottom: var(--s1); border-bottom: 1px solid var(--rule); font-size: var(--t-eyebrow); }
+.modgroup:not(:has(li:not([hidden]))) { display: none; }
+.modgrid { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 0 var(--s4); }
+.modgrid > li { padding: var(--s2) 0; border-bottom: 1px solid var(--hair); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 var(--s1); align-items: baseline; }
+.modgrid a { font: var(--t-mono)/1.4 var(--mono); color: var(--accent); text-decoration: none; }
+.modgrid a:hover { text-decoration: underline; }
+.modgrid .count { font: var(--t-key)/1.4 var(--mono); color: var(--n2); text-align: right; }
+/* TWO LINES, and the rest is on the module's own page. A grid whose cells are
+ * one to four lines tall is a grid with a ragged row under every row; the whole
+ * sentence is still in the document, so a screen reader and the search both
+ * still have it. */
+.modgrid .d {
+  grid-column: 1 / -1; color: var(--muted); font-size: var(--t-meta);
+  line-height: 1.45; margin-top: 3px;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+}
+.modgrid li[hidden] { display: none; }
+/* The matched export names the search appends, under the row that holds them. */
+.modgrid .hits { grid-column: 1 / -1; }
+
 .modlist { list-style: none; padding: 0; margin: var(--s4) 0 0; }
 .modlist li {
   display: grid;
@@ -1262,6 +1406,10 @@ pre.doccode {
 }
 .finder input:focus-visible { border-color: var(--accent); }
 .finder .cap { border: 0; padding: var(--s1) 0 0; }
+/* The live count is a LABEL on the field above it, not a caption on evidence —
+ * `.cap` is what THE RULE budgets, and a row saying "38 modules" is not a
+ * methodology note (RFC-0106 M3). */
+.finder [data-search-count] { margin: var(--s1) 0 0; }
 
 /* The exports a search matched, under the module that holds them. They appear
  * only while a search is running, and each is a link to that export's own

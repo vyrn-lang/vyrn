@@ -884,14 +884,22 @@ function demoWidget(root) {
   bar.append(back, next, count);
   root.prepend(bar);
 
+  // The list of titles STAYS (RFC-0106 M3). It used to set `hidden` on six of
+  // seven, which threw the outline away with the detail; the class collapses a
+  // step to its title instead, and `.stepped` is what tells the sheet a script
+  // is driving — with no script no step is `.on` and every one is open.
+  root.classList.add("stepped");
   let at = 0;
   const show = (i) => {
     at = (i + steps.length) % steps.length;
-    steps.forEach((s, k) => (s.hidden = k !== at));
+    steps.forEach((s, k) => s.classList.toggle("on", k === at));
     count.textContent = at + 1 + " / " + steps.length;
     back.disabled = at === 0;
     next.textContent = at === steps.length - 1 ? "Replay" : "Next";
   };
+  // Pointer-only, and deliberately: every step is already reachable with Back,
+  // Next and the arrow keys, so this adds no function a keyboard cannot do.
+  steps.forEach((s, k) => s.addEventListener("click", () => show(k)));
   back.addEventListener("click", () => show(at - 1));
   next.addEventListener("click", () => show(at === steps.length - 1 ? 0 : at + 1));
   root.addEventListener("keydown", (e) => {
