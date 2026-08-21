@@ -1,54 +1,38 @@
 <script>
 // GET /install — the quickstart (RFC-0106 M2).
 //
-// THREE TILES, ONE COMMAND EACH, and no method a reader could not run today.
-// Two installers exist — `install.sh` and `install.ps1` — so the tiles carry two
-// commands between them. There is no `brew` line, no `apt` line and no `winget`
-// line, because there is no formula, no package and no manifest; a tab for a
-// method that does not exist is the same fabrication as a "used by" logo.
+// TWO TILES, ONE COMMAND EACH, and no method a reader could not run today.
+// Two installers exist — `install.sh` and `install.ps1` — so there are two
+// commands, and therefore two tiles: `macOS & Linux` run the same script through
+// the same pipe, and a picker that split them made a reader choose between two
+// identical lines (RFC-0106 M3, third round). There is no `brew` line, no `apt`
+// line and no `winget` line, because there is no formula, no package and no
+// manifest; a tab for a method that does not exist is the same fabrication as a
+// "used by" logo.
+//
+// THE COMMANDS ARE NOT WRITTEN HERE. `installTargets()` in `../repo` is the one
+// place they exist, because this page and the index hero show the same two.
 //
 // NO OS GLYPH ON A TILE, and the reason is measured rather than assumed: the two
 // hash-locked collections this site binds (`bytesize`, `codex`) hold 180 glyphs
 // between them and none of them is an apple, a penguin or a window. A `v-for`
 // could not carry one either — a provider tag takes static attributes, and
 // `:name` binds an expression (RFC-0107 M1) — so the tiles stay a loop over
-// `platforms()` and the OS is named in words, which is what a reader scans for.
+// `installTargets()` and the OS is named in words, which is what a reader scans
+// for.
 //
 // NO VERSION IS WRITTEN HERE. Neither installer takes one: both resolve the
 // newest release themselves, pre-releases included. The version SHOWN comes from
-// `site/release.txt` through `../repo`, baked while this page built, and
-// `fresh.js` says so on the page if a newer one appears before the next build.
+// `../repo`, which reconciles the baked `site/release.txt` against the tags in
+// the repository's own history and takes the newer of the two.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
 import { shellHtml } from "../code"
-import { hasRelease, releaseTag, releasePre, releaseUrl } from "../repo"
+import { hasRelease, releaseTag, InstallTarget, installTargets, installScript } from "../repo"
 import { Icon } from "../icons"
-
-/// One platform, and the one line that installs it.
-type Platform = { id: String, name: String, install: String }
 
 export fn head() -> Head {
     return pageHeadOf("/install")
-}
-
-fn platforms() -> Array<Platform> {
-    return [
-        Platform {
-            id: "macos",
-            name: "macOS",
-            install: "curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | sh",
-        },
-        Platform {
-            id: "linux",
-            name: "Linux",
-            install: "curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | sh",
-        },
-        Platform {
-            id: "windows",
-            name: "Windows",
-            install: "irm https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.ps1 | iex",
-        },
-    ]
 }
 
 /// The source build, which is the same three lines everywhere.
@@ -72,7 +56,7 @@ fn pinnedInstall() -> String {
     if !hasRelease() {
         return "VYRN_VERSION=v0.1.0 sh"
     }
-    return "curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | VYRN_VERSION=" + releaseTag() + " sh"
+    return "curl -fsSL " + installScript("install.sh") + " | VYRN_VERSION=" + releaseTag() + " sh"
 }
 
 /// Checking a manual download by hand, which is what the installer does for you.
@@ -88,12 +72,22 @@ fn kicker() -> String {
     return "Install · " + releaseTag()
 }
 
-/// The radio that selects one platform's pane. Three inputs, one name, and the
+/// The radio that selects one target's pane. Two inputs, one name, and the
 /// FIRST is checked — which is what makes the picker work with no script at
 /// all: the sheet selects the pane with `:checked ~`, and a browser with
 /// JavaScript switched off still has radio buttons.
-fn osId(p: Platform) -> String {
+fn osId(p: InstallTarget) -> String {
     return "os-" + p.id
+}
+
+/// The script the selected command pipes into a shell, so a reader can read it
+/// before they run it. It is the file this site serves and the command fetches —
+/// the same bytes, one click, no second copy to keep in step.
+fn scriptHref(p: InstallTarget) -> String {
+    if p.id == "windows" {
+        return "/install.ps1"
+    }
+    return "/install.sh"
 }
 </script>
 
@@ -108,32 +102,35 @@ fn osId(p: Platform) -> String {
             <h1 class="display">Install Vyrn</h1>
             <p class="lede">One command, one self-contained binary, nothing else to install. Uninstalling is deleting a directory.</p>
 
-            <!-- THE PICKER IS THREE RADIO BUTTONS AND NO SCRIPT. The inputs come
+            <!-- THE PICKER IS TWO RADIO BUTTONS AND NO SCRIPT. The inputs come
                  first so `:checked ~ .ospanes` can reach the panes; the sheet
                  selects by position (`:nth-of-type`), so nothing here depends on
                  an id spelled twice. They are written out rather than looped
                  because only the first carries `checked`, and `v-for` has no way
                  to put an attribute on one iteration — an empty `checked=""` is
-                 still checked in HTML, so a bound value cannot express it. -->
+                 still checked in HTML, so a bound value cannot express it.
+                 `data-os` is what `widgets.js` reads to open on the visitor's own
+                 shell; with no script the first is checked and the control works
+                 exactly the same. -->
             <fieldset class="picker">
                 <legend class="sr-only">Operating system</legend>
-                <input class="sr-only" type="radio" name="os" id="os-macos" checked="checked"/>
-                <input class="sr-only" type="radio" name="os" id="os-linux"/>
-                <input class="sr-only" type="radio" name="os" id="os-windows"/>
+                <input class="sr-only" type="radio" name="os" id="os-unix" checked="checked" data-os="unix"/>
+                <input class="sr-only" type="radio" name="os" id="os-windows" data-os="windows"/>
                 <div class="ostabs">
-                    <label v-for="p in platforms()" :key="p.id" :for="osId(p)">{{ p.name }}</label>
+                    <label v-for="p in installTargets()" :key="p.id" :for="osId(p)">{{ p.name }}</label>
                 </div>
                 <div class="ospanes">
-                    <div class="ospane" v-for="p in platforms()" :key="p.id">
+                    <div class="ospane" v-for="p in installTargets()" :key="p.id">
                         <div class="cmd" data-copy>
-                            <code v-html="shellHtml(p.install)"></code>
+                            <code v-html="shellHtml(p.cmd)"></code>
                             <button type="button" data-copy-btn aria-label="Copy the install command">Copy</button>
                         </div>
+                        <p class="eyebrow"><a :href="scriptHref(p)">View the install script</a></p>
                     </div>
                 </div>
             </fieldset>
 
-            <p class="eyebrow"><a :href="releaseUrl()">Release notes</a></p>
+            <p class="eyebrow"><a href="/releases.html">Release notes</a></p>
         </section>
 
         <section class="band split" id="verify">

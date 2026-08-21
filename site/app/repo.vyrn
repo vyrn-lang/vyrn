@@ -134,22 +134,67 @@ export fn releasePre() -> Bool {
 
 /// Where this site is published, with the trailing slash (RFC-0106 M1).
 ///
-/// THE ONLY ABSOLUTE URL THE EXPORT WRITES, and it is here rather than in the
-/// two modules that use it because one origin with two readers is a constant and
-/// two are a contradiction waiting to happen. Everything else on the site is
+/// THE ONE ABSOLUTE URL THE SITE SPELLS, and it is here rather than in the
+/// modules that use it because one origin with three readers is a constant and
+/// three are a contradiction waiting to happen. Every LINK on the site is
 /// relative on purpose: `relativize` in `site/export.vyrn` rewrites every `href`
 /// and every `src` against the document that carries it, so ONE exported tree
 /// serves from a domain root, from `/vyrn/` on GitHub Pages, from a nested
 /// preview path and from `file://` — and `site/test/basepath.test.mjs` fetches
 /// all four to prove it.
 ///
-/// Two artifacts cannot be relative, because neither is read inside a document:
-/// the releases feed, which a reader's aggregator fetches with no page around
-/// it, and the markdown twin of a page, which exists to be pasted somewhere
-/// else. Both name this origin, and a copy served from anywhere but here links
-/// back to here, which is the honest failure of the two.
+/// Three things cannot be relative, because none of them is read inside a
+/// document: the releases feed, which a reader's aggregator fetches with no page
+/// around it; the markdown twin of a page, which exists to be pasted somewhere
+/// else; and the install command, which is typed into a terminal that has no
+/// idea which page it was copied from. All three name this origin, and a copy
+/// served from anywhere but here points back to here, which is the honest
+/// failure of the three.
 export fn siteOrigin() -> String {
     return "https://vyrn-lang.github.io/vyrn/"
+}
+
+/// One installer, as a URL on this site.
+///
+/// THE SITE SERVES ITS OWN INSTALL SCRIPTS (RFC-0106 M3, third round), and the
+/// export copies `install.sh` and `install.ps1` out of the repository root into
+/// the published tree beside the stylesheet. The command a reader pastes names
+/// this origin — 43 characters against the 62 of
+/// `raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh`, and it is the
+/// site's own name rather than a hosting detail of where the source is kept.
+///
+/// It is the REAL target and not a prettier alias: what is served is the same
+/// file, byte for byte, published by the same job that publishes the pages, and
+/// both installers resolve the newest release themselves at run time — so a
+/// deploy that lags `main` by an hour installs exactly what `main` would.
+export fn installScript(name: String) -> String {
+    return siteOrigin() + name
+}
+
+/// One install target, and the one line that installs it.
+///
+/// TWO ROWS, NOT THREE. macOS and Linux run the same `install.sh` through the
+/// same pipe, so a picker that separated them asked a reader to choose between
+/// two identical commands (RFC-0106 M3, third round). What the reader is really
+/// choosing is a SHELL: a POSIX one, or PowerShell.
+///
+/// It lives here, beside the origin the commands name, because both the index
+/// hero and `/install` show them and two copies of a command are two commands.
+export type InstallTarget = { id: String, name: String, cmd: String }
+
+export fn installTargets() -> Array<InstallTarget> {
+    return [
+        InstallTarget {
+            id: "unix",
+            name: "macOS & Linux",
+            cmd: "curl -fsSL " + installScript("install.sh") + " | sh",
+        },
+        InstallTarget {
+            id: "windows",
+            name: "Windows",
+            cmd: "powershell -c \"irm " + installScript("install.ps1") + "|iex\"",
+        },
+    ]
 }
 
 /// The release's page on GitHub — the whole feed when there is no release to
@@ -179,6 +224,21 @@ test "every RFC has a number and a title" {
         assert(r.number > 0)
         assert(r.title.byteLength > 0)
     }
+}
+
+test "two install commands, and both of them name this site" {
+    let rows = installTargets()
+    // The bytes a reader pastes into a shell, spelled out: this is the one
+    // string on the site that a typo makes into a 404 nobody sees until someone
+    // tries to install the language.
+    assertEq(rows.length, 2)
+    assertEq(rows[0].id, "unix")
+    assertEq(rows[0].cmd, "curl -fsSL https://vyrn-lang.github.io/vyrn/install.sh | sh")
+    assertEq(rows[1].id, "windows")
+    assertEq(rows[1].cmd, "powershell -c \"irm https://vyrn-lang.github.io/vyrn/install.ps1|iex\"")
+    // And the file each one fetches is one the export publishes — see
+    // `assets()` in `site/export.vyrn`, which is the other half of this claim.
+    assertEq(installScript("install.sh"), siteOrigin() + "install.sh")
 }
 
 test "the module list is as long as the module count" {

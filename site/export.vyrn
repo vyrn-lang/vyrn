@@ -500,6 +500,14 @@ fn assets() -> Array<Array<String>> {
         ["web/vyrn-nav.js", "vyrn-nav.js"],
         ["web/vyrn-dom.js", "vyrn-dom.js"],
         ["editor/vscode/icons/vyrn.svg", "favicon.svg"],
+        // THE TWO INSTALLERS, SERVED FROM THIS SITE (RFC-0106 M3, third round).
+        // The command in both heroes is `curl -fsSL <origin>/install.sh | sh`,
+        // so the origin has to answer for it — and because they are copied here
+        // rather than rewritten, what a reader runs is the repository's own file
+        // byte for byte. `basepath.test.mjs` fetches the link beside the command,
+        // which is this file, so a rename that skipped this line fails there.
+        ["install.sh", "install.sh"],
+        ["install.ps1", "install.ps1"],
     ]
 }
 
@@ -834,11 +842,15 @@ test "every published document marks exactly one thing in its masthead" {
             marked = marked + countOf(html, "data-key=\"\{href}\" aria-current=\"page\"")
         }
         // Four kinds of page mark nothing, and each is deliberate: the home page,
-        // which is the wordmark's route and not a row; the two pages that are
+        // which is the wordmark's route and not a row; the three pages that are
         // reached from content rather than from the masthead; the two redirect
         // stubs, which are the old name of a page and not a place; and every
         // backstage page, which hangs off its own navigation.
-        let orphan = path == "/" || path == "/compare" || path == "/why-vyrn" || redirectTarget(path).byteLength > 0
+        //
+        // `/releases` joined the second group in M3's third round: it left the
+        // row, and it is reached from the index's `Latest release` section, from
+        // `/install` and from the footer.
+        let orphan = path == "/" || path == "/compare" || path == "/why-vyrn" || path == "/releases" || redirectTarget(path).byteLength > 0
         assertEq(marked, if orphan || isBackstage(path) { 0 } else { 1 })
     }
 }

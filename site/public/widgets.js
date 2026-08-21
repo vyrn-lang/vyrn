@@ -288,14 +288,30 @@ document.addEventListener("click", (e) => {
 
 /// Check the OS radio that matches the visitor.
 ///
-/// The picker itself is CSS and markup — three radio buttons, a `:checked ~`
+/// The picker itself is CSS and markup — two radio buttons, a `:checked ~`
 /// selector, no script (RFC-0106 M3). This is the whole of what a script adds:
 /// a guess about which one to open on. With no script the first is checked and
 /// the control works exactly the same, which is why this can be three lines and
 /// has no keyboard contract of its own — a native radio group already has one.
+///
+/// TWO THINGS WERE WRONG WITH THE FIRST VERSION, and both are the kind that pass
+/// review and fail in a browser (RFC-0106 M3, third round):
+///
+///   1. It looked for `input[data-os]` and only the INDEX carried that attribute.
+///      On `/install` — the page a reader actually installs from — there was
+///      nothing to match, so the guess silently did nothing.
+///   2. `navigator.platform` is deprecated and frozen. It still answers `Win32`
+///      in Chrome, but a Windows browser reporting the frozen `Linux x86_64`
+///      answers wrong, and there is no reason to prefer it to
+///      `userAgentData.platform`, which is the replacement, or to the user-agent
+///      string, which every browser still has.
+///
+/// The question is now the one the picker actually asks: PowerShell or a POSIX
+/// shell. Anything that is not Windows takes the first tab, which is also the
+/// no-script default, so a wrong guess costs one press and never a wrong command.
 function guessOs(root) {
-  const want = /Win/i.test(navigator.platform) ? "windows" : /Mac/i.test(navigator.platform) ? "macos" : "linux";
-  const radio = $(`input[data-os="${want}"]`, root);
+  const ua = navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || "";
+  const radio = $(`input[data-os="${/win/i.test(ua) ? "windows" : "unix"}"]`, root);
   if (radio) radio.checked = true;
 }
 

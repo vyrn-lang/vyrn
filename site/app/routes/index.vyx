@@ -19,7 +19,8 @@ import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
 import { vyrnHtml, vyrnSource } from "../snippets"
 import { shellHtml } from "../code"
-import { hasRelease, releaseTag } from "../repo"
+import { hasRelease, releaseTag, releaseDate, releasePre, InstallTarget, installTargets } from "../repo"
+import { ArrivalRow, arrivalList } from "../history"
 import { heroBars, heroBarsBox, heroBarsGrid, heroBarsPlot, heroBench, barLeft, barRight, barRow, barText, Bar, Grid } from "../chart"
 import { envRows } from "../bench"
 import { demoSteps, demoVersion, demoRecorded, DemoStep } from "../demo"
@@ -35,32 +36,48 @@ export fn head() -> Head {
     return pageHeadOf("/")
 }
 
-/// One platform's install line. Two scripts exist and no package manager does,
-/// so this table has two commands and three rows — inventing a `brew` line
-/// would be the cosplay this RFC's design section rules out by name.
-type Plat = { id: String, name: String, cmd: String }
-
-fn plats() -> Array<Plat> {
-    return [
-        Plat { id: "macos", name: "macOS", cmd: "curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | sh" },
-        Plat { id: "linux", name: "Linux", cmd: "curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | sh" },
-        Plat { id: "windows", name: "Windows", cmd: "irm https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.ps1 | iex" },
-    ]
+/// The radio that selects one target's pane, matching the install page's. The
+/// two commands themselves live in `../repo` — this hero and `/install` show the
+/// same pair, and two copies of a command are two commands.
+fn osId(p: InstallTarget) -> String {
+    return "os-" + p.id
 }
 
-/// The one thing a reader needs to know about a command they are asked to pipe
-/// into a shell. The version used to be here too, with the word "today" after
-/// it, which told a reader nothing they had asked for (RFC-0106 M3).
-fn releaseLine() -> String {
+/// The newest tag, or the honest sentence when there is not one.
+fn headline() -> String {
+    if !hasRelease() {
+        return "Not released yet"
+    }
+    return releaseTag()
+}
+
+/// What is published, in one line. `Checksum-verified.` used to sit here and on
+/// the install hero: the verification story is a whole section of `/install`,
+/// which is where a reader who cares about it is going, and a hero is not where
+/// they read it (RFC-0106 M3, third round).
+fn standing() -> String {
     if !hasRelease() {
         return "Nothing published yet — build from source."
     }
-    return "Checksum-verified."
+    let kind = if releasePre() { " as a pre-release." } else { "." }
+    return "Published " + releaseDate() + kind
 }
 
-/// The radio that selects one platform's pane, matching the install page's.
-fn osId(p: Plat) -> String {
-    return "os-" + p.id
+/// The design records that arrived after the tag, newest first, capped at three.
+/// The releases page carries the whole list; this is the teaser (RFC-0106 M3,
+/// third round). Release NOTES are written on GitHub and are not in this
+/// repository, so the honest highlight is the record, with the status it holds.
+fn highlights() -> Array<ArrivalRow> {
+    let all = arrivalList()
+    let mut out: Array<ArrivalRow> = []
+    let mut i = all.length - 1
+    while i >= 0 && out.length < 3 {
+        if all[i].date > releaseDate() {
+            out.push(ArrivalRow { tag: all[i].tag.copy(), href: all[i].href.copy(), date: all[i].date.copy(), band: all[i].band.copy() })
+        }
+        i = i - 1
+    }
+    return out
 }
 
 /// The four pillar commands, coloured. They are indexed rather than looped
@@ -97,14 +114,13 @@ fn pillarCmd(i: Int64) -> String {
                      joined to the command box they select. -->
                 <fieldset class="picker">
                     <legend class="sr-only">Operating system</legend>
-                    <input class="sr-only" type="radio" name="os" id="os-macos" checked="checked" data-os="macos"/>
-                    <input class="sr-only" type="radio" name="os" id="os-linux" data-os="linux"/>
+                    <input class="sr-only" type="radio" name="os" id="os-unix" checked="checked" data-os="unix"/>
                     <input class="sr-only" type="radio" name="os" id="os-windows" data-os="windows"/>
                     <div class="ostabs">
-                        <label v-for="p in plats()" :key="p.id" :for="osId(p)">{{ p.name }}</label>
+                        <label v-for="p in installTargets()" :key="p.id" :for="osId(p)">{{ p.name }}</label>
                     </div>
                     <div class="ospanes">
-                        <div class="ospane" v-for="p in plats()" :key="p.id">
+                        <div class="ospane" v-for="p in installTargets()" :key="p.id">
                             <div class="cmd" data-copy>
                                 <code v-html="shellHtml(p.cmd)"></code>
                                 <button type="button" data-copy-btn aria-label="Copy the install command">Copy</button>
@@ -112,7 +128,7 @@ fn pillarCmd(i: Int64) -> String {
                         </div>
                     </div>
                 </fieldset>
-                <p class="eyebrow"><span v-html="releaseLine()"></span> <a href="/install.html">All platforms</a></p>
+                <p class="eyebrow"><a href="/install.html">Other ways to install</a></p>
 
                 <ul class="chips">
                     <li>No collector</li>
@@ -241,9 +257,28 @@ fn pillarCmd(i: Int64) -> String {
             </div>
         </section>
 
-        <section class="band" id="next">
-            <h2>Against C, Rust and node</h2>
-            <p class="ctarow"><a class="cta" href="/compare.html">Compare</a> <a class="cta" href="/guide.html">Docs</a> <a class="cta" href="/play.html">Play</a></p>
+        <!-- LATEST RELEASE (RFC-0106 M3, third round). `Releases` left the
+             masthead — four names a reader knows beats five, and a changelog is
+             not what anybody navigates to before they have installed anything —
+             so the page arrives HERE instead, where a reader who has just read
+             the install command is standing. It is the good half of a blog for a
+             project that has no blog, and every line of it is computed: the tag
+             and the date are baked, and the highlights are the design records
+             that arrived after the tag, with the status each holds today.
+             The section it replaced was a heading and three buttons repeating
+             three links already on the page. -->
+        <section class="band split" id="release">
+            <div class="say">
+                <p class="eyebrow">Latest release</p>
+                <h2>{{ headline() }}</h2>
+                <p>{{ standing() }}</p>
+                <!-- One word, and it is the page's own name. The index's word
+                     budget is 260 and this section put it at 261. -->
+                <p class="ctarow"><a class="cta" href="/releases.html">Releases</a></p>
+            </div>
+            <ul class="plain">
+                <li v-for="r in highlights()" :key="r.tag"><strong><a :href="r.href">{{ r.tag }}</a></strong><span>{{ r.band }}</span></li>
+            </ul>
         </section>
 </main>
 </template>
