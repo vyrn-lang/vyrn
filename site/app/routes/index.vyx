@@ -19,8 +19,25 @@ import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
 import { vyrnHtml, vyrnSource } from "../snippets"
 import { shellHtml } from "../code"
-import { hasRelease, releaseTag, releaseDate, releasePre, InstallTarget, installTargets } from "../repo"
+import { hasRelease, releaseTag, releaseDate, releasePre, InstallTarget, installTargets, stdCount } from "../repo"
 import { ArrivalRow, arrivalList } from "../history"
+// THE SHOWCASE READS THE BOOK'S OWN PROGRAMS (RFC-0106 M3, fourth round). Every
+// snippet in these tabs is a FILE in `site/guide/`, which means it is compiled
+// while this page renders, run by `/guide` while that page renders, and checked
+// by `vyrn test site/guide/*.vyrn` in CI. There is no snippet literal on this
+// page and none in `hl.vyrn` for it: a showcase of code that does not compile is
+// the fabrication this RFC's design section rules out by name.
+//
+// It imports `../guide` rather than calling `guideCode` itself, and that is
+// load-bearing: the generator's cache is keyed on its argument string, so a
+// second call site naming the directory with a different `../` prefix would
+// generate a second module whose exports collide with the first program-wide.
+import { Block, blockOf } from "../guide"
+// The reference's own module list, from the same generator the reference page
+// reads. Nine names on this page and thirty-eight on that one, and neither list
+// is typed by hand.
+import { ApiGroup, ApiModule, apiGroups, apiHref } from "../docs"
+import { joinWith } from "std/strings"
 import { heroBars, heroBarsBox, heroBarsGrid, heroBarsPlot, heroBench, barLeft, barRight, barRow, barText, Bar, Grid } from "../chart"
 import { envRows } from "../bench"
 import { demoSteps, demoVersion, demoRecorded, DemoStep } from "../demo"
@@ -78,6 +95,94 @@ fn highlights() -> Array<ArrivalRow> {
         i = i - 1
     }
     return out
+}
+
+/// One tab of the showcase: the file in `site/guide/` it shows, the word on the
+/// tab, and the one line that says what to look at.
+///
+/// FIVE OF THE BOOK'S TWENTY-FIVE PROGRAMS, and the choice is the only editorial
+/// line here. They are picked to be a language feature, a data shape, a standard
+/// library the reader would reach for, the compile-time story and the tooling —
+/// and to be within nine lines of each other in length, so switching a tab does
+/// not resize the section under the reader's cursor.
+///
+/// TWO THINGS THE BRIEF ASKED FOR THAT ARE NOT HERE, both because the tree does
+/// not hold them: `std/stream` has no chapter program yet, and `protocols` is 31
+/// lines against this set's 10 to 19. Writing a snippet for either would have
+/// made it the one block on the page that nothing compiles.
+type Tab = { id: String, label: String, block: String, caption: String }
+
+fn tabs() -> Array<Tab> {
+    return [
+        Tab { id: "types", label: "Types", block: "validated", caption: "The rule is part of the type." },
+        Tab { id: "records", label: "Records", block: "records", caption: "A shape, and no inheritance." },
+        Tab { id: "html", label: "HTML", block: "html", caption: "A view is a function." },
+        Tab { id: "gen", label: "Generators", block: "genuse", caption: "It runs while you compile." },
+        Tab { id: "bench", label: "Benchmarks", block: "benches", caption: "The timer is in the language." },
+    ]
+}
+
+/// The radio that selects one tab's pane, matching the install page's picker.
+fn tabId(t: Tab) -> String {
+    return "tab-" + t.id
+}
+
+/// One tab's program, coloured by the compiler's own lexer at generation time.
+fn tabCode(t: Tab) -> String {
+    return joinWith(blockOf(t.block).lines, "\n")
+}
+
+/// Where that program opens in the playground, or NOTHING when it is not a whole
+/// program on its own — `genuse` imports its generator from a sibling file, and
+/// the playground takes one source. The template asks whether this is empty
+/// before it writes the link, because an `href=""` is a link that silently
+/// reloads the page a reader is on, and `site/export.vyrn` fails the build over
+/// one. It did, on the first export of this section.
+fn tabPlay(t: Tab) -> String {
+    return blockOf(t.block).play
+}
+
+/// The file itself, in the repository. The claim this section makes is that the
+/// code is real, and this is the link that lets a reader check it.
+fn tabFile(t: Tab) -> String {
+    return blockOf(t.block).source
+}
+
+fn tabPath(t: Tab) -> String {
+    return "site/guide/" + t.block + ".vyrn"
+}
+
+/// The standard library teaser: the two biggest modules of each named group,
+/// eight in all, in the reference's own order.
+///
+/// BIGGEST BY EXPORT COUNT, which is a fact and not a favourite. "Notable" would
+/// have been a list somebody maintains, and the same sentence that asked for this
+/// grid forbade hand-listing it — so the order is `apiGroups()`, the group names
+/// are the reference's, and the only number here is one the generator counted.
+fn teaserGroups() -> Array<ApiGroup> {
+    let mut out: Array<ApiGroup> = []
+    for g in apiGroups() {
+        // The two biggest of the group: seed with the first two, then let any
+        // bigger module displace the smaller of the pair.
+        let mut top: Array<ApiModule> = []
+        for m in g.modules {
+            if top.length < 2 {
+                top.push(ApiModule { name: m.name.copy(), summary: "", count: m.count })
+            } else {
+                let least = if top[1].count < top[0].count { 1 } else { 0 }
+                if m.count > top[least].count {
+                    top[least] = ApiModule { name: m.name.copy(), summary: "", count: m.count }
+                }
+            }
+        }
+        out.push(ApiGroup { name: g.name.copy(), modules: top.copy() })
+    }
+    return out
+}
+
+/// The reference page, and how many modules are on it.
+fn allModules() -> String {
+    return "All " + stdCount().toString() + " modules"
 }
 
 /// The four pillar commands, coloured. They are indexed rather than looped
@@ -144,10 +249,20 @@ fn pillarCmd(i: Int64) -> String {
                  `data-widget="playhero"` and not `"play"` is what keeps it lazy
                  — `boot()` mounts the second on sight and arms the first. -->
             <div class="plate play heroplay" data-widget="playhero">
+                <!-- ONE ROW OF STATE AND TWO CONTROLS (RFC-0106 M3, fourth
+                     round). `data-play-status` is the run state and it is real:
+                     `Press Run`, then `Loading the compiler…`, `Running…`, and
+                     then `Ran`, `Did not compile` or `Stopped` — with the exit
+                     code printed under the output beside it. `Reset` puts the
+                     original program back; it is `[data-js]`-gated, because with
+                     no script this textarea is read-only and there is nothing to
+                     reset. -->
                 <div class="plate-head">
                     <span class="pill live">Runs here</span>
                     <span class="eyebrow" data-play-status>Press Run</span>
                     <span class="spacer"></span>
+                    <span class="eyebrow keyhint"><kbd>Ctrl</kbd>+<kbd>Enter</kbd></span>
+                    <button type="button" class="btn jsonly" data-play-reset>Reset</button>
                     <button type="button" class="btn primary" data-play-run>Run</button>
                 </div>
                 <div class="editor" data-play-editor>
@@ -239,22 +354,84 @@ fn pillarCmd(i: Int64) -> String {
             </ul>
         </section>
 
+        <!-- FIVE TABS OF REAL CODE (RFC-0106 M3, fourth round). Same control as
+             the install page's OS picker — radio buttons, `:checked ~`, no
+             script — and the same reason: a reader with JavaScript switched off
+             gets a working tab strip, and a keyboard gets a native radio group.
+             The inputs are written out because only the first carries `checked`
+             and `v-for` has no way to put an attribute on one iteration. -->
+        <section class="band" id="code">
+            <p class="eyebrow">Five programs, compiled by this build</p>
+            <h2>The parts you reach for</h2>
+            <fieldset class="picker">
+                <legend class="sr-only">Language feature</legend>
+                <input class="sr-only" type="radio" name="tab" id="tab-types" checked="checked"/>
+                <input class="sr-only" type="radio" name="tab" id="tab-records"/>
+                <input class="sr-only" type="radio" name="tab" id="tab-html"/>
+                <input class="sr-only" type="radio" name="tab" id="tab-gen"/>
+                <input class="sr-only" type="radio" name="tab" id="tab-bench"/>
+                <div class="ostabs">
+                    <label v-for="t in tabs()" :key="t.id" :for="tabId(t)">{{ t.label }}</label>
+                </div>
+                <div class="ospanes">
+                    <div class="ospane showcase" v-for="t in tabs()" :key="t.id">
+                        <pre class="code"><code v-html="tabCode(t)"></code></pre>
+                        <p class="cap">{{ t.caption }} <a :href="tabFile(t)">{{ tabPath(t) }}</a><span v-if="tabPlay(t).byteLength > 0"> · <a :href="tabPlay(t)">Run it</a></span></p>
+                    </div>
+                </div>
+            </fieldset>
+        </section>
+
+        <!-- THE REFERENCE, TEASED (RFC-0106 M3, fourth round). Eight names and
+             their export counts, read off `std/` by the same generator the
+             reference landing reads — so a module added tomorrow can appear here
+             and none of this is a list somebody maintains. -->
+        <section class="band split" id="std">
+            <div class="say">
+                <p class="eyebrow">Standard library</p>
+                <h2>Written in Vyrn, all of it</h2>
+                <p>Every module below compiles under the same rules your program does.</p>
+                <p class="ctarow"><a class="cta" href="/docs.html">{{ allModules() }}</a></p>
+            </div>
+            <ul class="modteaser">
+                <li v-for="g in teaserGroups()" :key="g.name">
+                    <p class="eyebrow">{{ g.name }}</p>
+                    <a v-for="m in g.modules" :key="m.name" :href="apiHref(m.name)"><code>std/{{ m.name }}</code> <span>{{ m.count }}</span></a>
+                </li>
+            </ul>
+        </section>
+
         <section class="band" id="minute">
             <p class="eyebrow"><Icon name="bytesize:play"/> A minute with Vyrn</p>
             <!-- Every line of output below came out of the real binary, recorded
                  by `scripts/site-demo.py` before this page was rendered. Without
                  script all seven steps are on the page at once. -->
+            <!-- TWO LISTS, ONE INDEX (RFC-0106 M3, fourth round). The steps are
+                 column 1 and their outputs are column 2, as siblings, because
+                 the card is the split — one `li` carrying its own output was a
+                 shape that only worked in the state nobody sees, with all seven
+                 open. `widgets.js` marks the nth row and the nth pane; with no
+                 script every pane is on the page under its own title. -->
             <div class="plate demo" data-widget="demo">
                 <ol class="steps">
                     <li v-for="s in demoSteps()" :key="s.id" :data-step="s.id">
                         <h3>{{ s.title }}</h3>
                         <div class="cmd" v-if="s.cmd.byteLength > 0"><code v-html="shellHtml(s.cmd)"></code></div>
-                        <pre class="out">{{ s.out }}</pre>
-                        <p>{{ s.note }}</p>
                     </li>
                 </ol>
-                <p class="eyebrow">Recorded by running <code>{{ demoVersion() }}</code> on <code>{{ demoRecorded() }}</code>.</p>
+                <div class="panes">
+                    <div class="pane" v-for="s in demoSteps()" :key="s.id" :data-pane="s.id">
+                        <p class="eyebrow">{{ s.title }}</p>
+                        <pre class="out">{{ s.out }}</pre>
+                        <p class="stepnote">{{ s.note }}</p>
+                    </div>
+                </div>
             </div>
+            <!-- The provenance line, BELOW the card and not inside it. `.cap` is
+                 the class built to sit flush under the block it is about; as an
+                 `.eyebrow` inside the plate it landed on top of the last step's
+                 row. -->
+            <p class="cap">Recorded by running <code>{{ demoVersion() }}</code> on <code>{{ demoRecorded() }}</code>.</p>
         </section>
 
         <!-- LATEST RELEASE (RFC-0106 M3, third round). `Releases` left the
