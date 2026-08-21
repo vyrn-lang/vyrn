@@ -66,7 +66,13 @@ const SCALE = {
   "--t-eyebrow": "12px",
   "--t-key": "11px",
   "--t-tick": "10px",
-  "--t-axis": "9px",
+  // The two chart steps are USER UNITS inside a `viewBox`, not pixels on a
+  // screen: what a reader gets is the number times the chart's own scale, which
+  // `svg.chart`'s `max-width` and the phone scroller bound to [0.73, 1.0]
+  // (RFC-0106 M3, fourth round). They replaced `--t-axis: 9px`, which painted
+  // 3px text on a phone.
+  "--t-svg": "18px",
+  "--t-svg-s": "17px",
 };
 
 /// The sizes that are deliberately not steps on a scale. Four mono numerals each
