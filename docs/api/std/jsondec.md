@@ -96,8 +96,9 @@ The value of `key`, or `JNull` when absent. First occurrence wins — which
 fn elemAt(items: Array<Json>, i: Int64) -> Json
 ```
 
-Element `i`, or `JNull` when the index is past the end — a short tuple
-payload decodes its missing members against `null` and fails there.
+Element `i`, or `JNull` when the index is past the end. Tuple payloads
+never reach this past their own end — the generated decoder checks the
+wire arity first, so a short payload is refused before any member decodes.
 
 ## tagOf
 
