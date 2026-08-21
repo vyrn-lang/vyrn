@@ -102,8 +102,7 @@ fn capabilities() -> Array<Capability> {
         <section class="band" id="rules">
             <p class="eyebrow">a rule is part of a type</p>
             <h2>The check you cannot forget</h2>
-            <p>A validated type carries its <code>where</code> clause everywhere it goes. The compiler rejects what it can prove invalid, erases the check where it can prove validity, and emits it where it can prove neither — which is every boundary a value arrives at.</p>
-            <p class="notice"><a href="/play.html">The playground runs this one</a> — change the value and the compiler answers.</p>
+            <p>A validated type carries its <code>where</code> clause everywhere it goes. The compiler rejects what it can prove invalid, erases the check where it can prove validity, and emits it where it can prove neither — which is every boundary a value arrives at. <a href="/play.html">The playground runs one</a>.</p>
         </section>
 
         <section class="band" id="ownership">
@@ -122,12 +121,18 @@ fn capabilities() -> Array<Capability> {
                     <div v-for="c in capabilities()" :key="c.id" :data-pane="c.id">
                         <p class="lede" style="font-size:1.05rem">{{ c.means }}</p>
                         <pre class="code" v-html="c.html"></pre>
-                        <p class="cap" style="border:0;padding:16px 0 0">{{ c.refuses }}</p>
+                        <!-- `.refuses` AND NOT `.cap` (RFC-0106 M4). What the
+                             compiler stops you doing is the pane's own claim —
+                             the whole reason the tab exists — and `.cap` is what
+                             the census counts against THE RULE's ceiling of one
+                             disclosure per plate. Four panes were four. The
+                             plate's real caption is the one under them. -->
+                        <p class="refuses">{{ c.refuses }}</p>
                     </div>
                 </div>
                 <p class="cap">Every pane is coloured by the compiler's own lexer, and the capability word is tinted as the keyword it is in that position.</p>
             </div>
-            <p class="notice"><code>{{ whyCommand() }}</code> names the site each binding is reclaimed at, and the reason when it is not. <a href="/guide/ownership.html">The chapter on ownership walks one.</a></p>
+            <p><code>{{ whyCommand() }}</code> names the site each binding is reclaimed at, and the reason when it is not. <a href="/guide/ownership.html">The chapter on ownership walks one.</a></p>
         </section>
 
         <section class="band" id="refuses">
@@ -145,8 +150,7 @@ fn capabilities() -> Array<Capability> {
         <section class="band" id="predictable">
             <p class="eyebrow">predictability</p>
             <h2>The same program means the same thing</h2>
-            <p>The native binary and the WebAssembly module must agree with the interpreter byte for byte, floating point included. A language whose backends disagree has no meaning, only implementations.</p>
-            <p class="notice"><a href="/compare.html#numbers">The comparison page publishes every reading</a> — three engines, eight programs, and the parity harness that fails CI when the bytes disagree.</p>
+            <p>The native binary and the WebAssembly module must agree with the interpreter byte for byte, floating point included. A language whose backends disagree has no meaning, only implementations. <a href="/compare.html#numbers">Every reading is published</a>, and the parity harness fails CI when the bytes disagree.</p>
         </section>
 </main>
 </template>

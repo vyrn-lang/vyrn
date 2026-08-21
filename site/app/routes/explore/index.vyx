@@ -50,18 +50,18 @@ fn depLabel(p: Package) -> String {
     <section class="hero">
         <p class="eyebrow">Registry</p>
         <h1 class="display">{{ packages().length }} packages</h1>
-        <p class="lede">Everything you can pull into a project from outside it. Not the standard library — that arrives with the compiler and is documented in <a href="/docs.html">the reference</a>. These are packages: fetched by URL, pinned by hash, and yours to depend on.</p>
+        <p class="lede">Everything you can pull into a project from outside it, fetched by URL and pinned by hash. Not the standard library — that arrives with the compiler and is in <a href="/docs.html">the reference</a>.</p>
     </section>
 
     <section class="band" id="packages">
         <p class="eyebrow">the index</p>
         <h2>One card per package</h2>
-        <p>The two numbers are what a reader weighs a dependency by: what it gives you, and what it drags in. Both are read off the source while this page is built — the exports from the module the package offers, the dependencies from the <code>import</code> lines under it.</p>
+        <p>The two numbers are what a dependency is weighed by: what it gives you, and what it drags in. Both are read off the source while this page is built.</p>
         <ul class="pkgs">
             <li v-for="p in packages()" :key="p.slug" :data-kind="p.kind">
                 <a :href="p.href">{{ p.name }}</a>
                 <span class="kindpill">{{ p.kind }}</span>
-                <span class="note" v-html="p.summary"></span>
+                <span class="d" v-html="p.summary"></span>
                 <span class="nums">{{ unitLabel(p) }} · {{ depLabel(p) }}</span>
             </li>
         </ul>
@@ -71,16 +71,14 @@ fn depLabel(p: Package) -> String {
     <section class="band" id="install">
         <p class="eyebrow">how you install one</p>
         <h2>A URL, a hash, and two files</h2>
-        <p>Vyrn has no registry server and no account. A dependency is a URL: <code>github:owner/repo@ref/path.vyrn</code>, or <code>gist:</code>, or a plain <code>https:</code> address. <code>vyrn add</code> fetches it once, records the immutable URL it resolved to and the sha256 of the bytes in <code>vyrn.lock</code>, and writes the alias into <code>vyrn.json</code>. After that the hash is checked on every load, so an upstream that changes under a pinned URL fails the build instead of changing your program.</p>
-        <p>The bytes live in <code>~/.vyrn/cache/sha256/</code>, keyed by content. <code>vyrn vendor</code> copies them into your repository, <code>--offline</code> forbids the network outright, and any copy of a file with the right hash restores an upstream that vanished. That is the whole mechanism — <a href="/docs.html#cli"><code>vyrn add</code>, <code>vyrn update</code>, <code>vyrn vendor</code> and <code>vyrn deps</code></a>.</p>
-        <p>A relative import inside a fetched module resolves inside the same pinned tree and never onto your disk, so a package that spans several files arrives whole, with a lock line each.</p>
+        <p>Vyrn has no registry server and no account. A dependency is a URL — <code>github:owner/repo@ref/path.vyrn</code>, <code>gist:</code>, or a plain <code>https:</code> address. <code>vyrn add</code> fetches it once, records the immutable URL and the sha256 of the bytes in <code>vyrn.lock</code>, and writes the alias into <code>vyrn.json</code>. The hash is checked on every load after that, so an upstream that changes under a pinned URL fails the build instead of changing your program.</p>
+        <p>The bytes are cached by content under <code>~/.vyrn</code>. <code>vyrn vendor</code> copies them into your repository and <code>--offline</code> forbids the network outright, so any copy with the right hash restores an upstream that vanished. <a href="/docs.html#cli">The four commands</a> are the whole mechanism.</p>
     </section>
 
     <section class="band" id="young">
         <p class="eyebrow">the state of it</p>
         <h2>The ecosystem is young</h2>
-        <p>No Vyrn package is published outside this repository yet, so every package listed here comes from this one — and nothing is listed that does not. The {{ stdCount() }} standard library modules are not in the count: you do not install them, and putting them here would make the grid look fuller while telling a reader nothing.</p>
-        <p>The page schema is the one a third-party package will use unchanged: a specifier, a command, a lock line, exports, dependencies, source. When somebody publishes one, it is a card.</p>
+        <p>Nothing is published outside this repository yet, so every package here comes from it — and nothing is listed that does not. The {{ stdCount() }} standard library modules are not in the count: you do not install them. The page schema is the one a third-party package will use unchanged, and when somebody publishes one it is a card.</p>
     </section>
 </main>
 </template>

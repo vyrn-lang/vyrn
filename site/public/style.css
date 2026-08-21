@@ -727,6 +727,129 @@ h1 code, h2 code, h3 code, h4 code {
 .rail.toc .eyebrow { margin-bottom: var(--s1); }
 
 /* ------------------------
+   THE DOCS SHELL (RFC-0106 M4)
+   ------------------------
+
+   One layout for every documentation page. A reference module page, a guide
+   chapter and the editors page each had their own partial furniture: a rail of
+   this page's exports, a rail of the book's chapters, a rail of four section
+   names. Each answered "where am I in this page" and none answered "where does
+   this page sit", and none of the three offered a way forward — a reader who
+   finished `std/json` had the Back button.
+
+   Three panes, and the SHEET'S OWN TWELVE COLUMNS carry them: the section's tree
+   in 1-2, the content in 3-10, this page's headings in 11-12. The content column
+   is two tracks narrower than a one-rail page's, which is the trade the third
+   pane costs and is why it exists only where the sheet is twelve tracks wide.
+
+   THE SHELL IS A SUBGRID, and every other page on this site is `display:
+   contents`. The difference is rows, and it was found by measuring rather than
+   reasoned about: a pane has to span the whole column, so it takes `grid-row: 1 /
+   span 60` — and under `display: contents` those sixty rows are the SHEET's rows,
+   in the same grid the masthead and the footer are auto-placed into. Both of
+   those span all twelve columns, so neither could fit beside the rails and both
+   were pushed past them. Measured on the first build: the masthead painted at
+   y=928, under a sidebar, with the page's own content starting at y=992.
+
+   `grid-template-columns: subgrid` is the exact tool. The shell takes the
+   sheet's twelve column tracks — so the rail still lines up with the rule grid
+   and the section seams — and keeps its own rows, which is the only thing it
+   needed to stop sharing.
+
+   The right pane is written LAST in the document on purpose: it is furniture,
+   and a reader on a screen reader or a phone meets the page's content before its
+   index. An explicit row is what lets it be. */
+#root > .page.docs {
+  display: grid;
+  grid-column: 1 / 13;
+  grid-template-columns: subgrid;
+  row-gap: 0;
+}
+.page.docs > * { grid-column: 3 / 11; }
+.page.docs > .docstree { grid-column: 1 / 3; }
+.page.docs > .onpage { grid-column: 11 / 13; }
+
+.docstree, .onpage {
+  grid-row: 1 / span 60;
+  align-self: start;
+  position: sticky;
+  top: var(--s3);
+  padding-top: var(--s5);
+  max-height: calc(100vh - var(--s4));
+  overflow-y: auto;
+  /* NO BAR AT REST, anywhere on this site (RFC-0106 M3, fifth round, L2). Both
+   * panes scroll and neither shows that it does until a reader is in it. */
+  scrollbar-width: none;
+  font: var(--t-eyebrow)/1.9 var(--sans);
+  letter-spacing: 0.01em;
+  color: var(--muted);
+}
+.docstree::-webkit-scrollbar, .onpage::-webkit-scrollbar { display: none; }
+.docstree { border-right: 1px solid var(--hair); padding-right: var(--s3); }
+.onpage { border-left: 1px solid var(--hair); padding-left: var(--s3); }
+
+/* A ROW WRAPS RATHER THAN CLIPPING. It was `text-overflow: ellipsis` and a
+ * 174px column ate the end of six chapter titles — "04 Ownership, consume,…",
+ * "09 gen fns and generato…" — and of every heading in the right pane. A title
+ * is a phrase, not a symbol: the reader needs the words, and two lines cost
+ * less than a name they cannot read. */
+.docstree a, .onpage a {
+  display: block; text-decoration: none; color: var(--muted);
+  padding: 3px var(--s1); margin-left: calc(-1 * var(--s1));
+  overflow-wrap: break-word;
+}
+.docstree a:hover, .onpage a:hover, .onpage a:focus-visible { color: var(--accent); }
+
+/* THE PLACE MARKER, and it is the sheet's own selection device rather than a
+ * fourth one. The install picker's selected segment is a lighter fill and an
+ * inset shadow (RFC-0106 M3, fourth round, K4); a shadow takes no space, so the
+ * accent edge does not shift the row it marks by a pixel. */
+.docstree a[aria-current="page"] {
+  color: var(--ink);
+  background: color-mix(in oklab, var(--ink) 5%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.onpage a.on { color: var(--ink); }
+
+.treegroup + .treegroup { margin-top: var(--s2); }
+.treegroup > .eyebrow { margin: 0 0 4px; }
+/* ABOVE 1024px THE TREE IS NOT A DISCLOSURE. `<details>` carries no `open` in
+ * the markup — the masthead's Menu is written the same way and for the same
+ * reason: `open` is an attribute a stylesheet cannot remove, so the element is
+ * shut by default and this block forces it open where the sidebar belongs. One
+ * tree, rendered once, and it works with no script at either width. */
+.treebox > summary { display: none; }
+.treebox::details-content { display: block; content-visibility: visible; }
+
+/* An export name is a name in the source, so it is set in the code face — the
+ * one place in this pane where mono is right (RFC-0106 M3, eighth round, O1). */
+.onpage .sub {
+  padding-left: var(--s2); font-family: var(--mono);
+  font-size: var(--t-key); color: var(--accent);
+}
+.onpage .sub:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+
+/* ONE LINE ABOVE THE H1, and it is the only thing the shell puts there. The
+ * three pages each opened with an `.eyebrow` that half-named the section and
+ * half-said something else — "Docs — the standard library", "The guide — chapter
+ * 4 of 13". A breadcrumb says the same in the shape a reader already reads, and
+ * every step but the last is a link. */
+.crumbs {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0 var(--s1);
+  padding-top: var(--s5);
+  font: var(--t-eyebrow)/1.6 var(--sans);
+  letter-spacing: 0.01em;
+  color: var(--muted);
+}
+.crumbs > * + *::before { content: "/"; margin-right: var(--s1); color: var(--n2); }
+.crumbs a { color: var(--muted); text-decoration: none; }
+.crumbs a:hover { color: var(--accent); }
+.crumbs span { color: var(--ink); }
+/* The hero under a breadcrumb has already had its air; a second `--sect` above
+ * the h1 puts the page's own name below the fold on a laptop. */
+.crumbs + .hero { padding-top: var(--s3); }
+
+/* ------------------------
    Type
    ------------------------ */
 
@@ -859,11 +982,17 @@ pre.code {
   padding: var(--s2);
   border: 1px solid var(--hair);
   overflow-x: auto;
+  /* NO BAR AT REST (RFC-0106 M3, fifth round, L2; the last block that still had
+   * one). The hero editor's panes and `.cmd code` were fixed then, and a plain
+   * code block was not: measured on `/explore/shelf`, a 1,298px program in a
+   * 966px box drew a grey rail under it. Panning is untouched. */
+  scrollbar-width: none;
   font-size: var(--t-code);
   line-height: 1.7;
   background: color-mix(in oklab, var(--plate) 45%, transparent);
   tab-size: 4;
 }
+pre.code::-webkit-scrollbar { display: none; }
 .plate pre.code { margin: 0; border: 0; background: transparent; }
 
 .k { color: var(--syn-kw); }
@@ -1015,6 +1144,22 @@ pre.code {
  * the four into the fade. */
 .cards .cmd code { font-size: var(--t-mono); padding: 10px 12px; }
 .cards .cmd button { border-left: 0; border-top: 1px solid var(--hair); min-height: 26px; padding: 4px 10px; }
+/* A card whose action is a LINK rather than a command (RFC-0106 M4's area cards
+ * on `/docs`). `.cards p { flex: 1 }` exists to push the command to the foot of
+ * the tallest card in the row, and it reached this row too — so the arrow-link
+ * sat centred in the leftover space instead of under the sentence. */
+.cards .ctarow { flex: none; margin-top: var(--s3); }
+/* FOUR CARDS ARE TWO ROWS OF TWO, not three and an orphan. `auto-fit` with a
+ * 280px floor puts three in the 968px content column and leaves the fourth
+ * alone under them, which reads as one card that did not belong. A 360px floor
+ * cannot fit three, so four make a square — and on a narrower column the same
+ * rule drops to one, with no breakpoint.
+ *
+ * `min(360px, 100%)` and not `360px`: a `minmax()` floor is a HARD floor, so a
+ * 360px track in a 343px phone column takes the document 12px wider than the
+ * screen — measured at 375, and the reason `.cards` above gets away with 280 is
+ * only that 280 is under 343. */
+.cards.areas { grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr)); }
 
 /* A COMMAND IS ONE LINE (RFC-0106 M3, second round).
  *
@@ -1538,7 +1683,18 @@ svg.chart.radar.alt g.marks[data-norm="c"] { display: none; }
 
 /* Wide content scrolls inside its own box. The page body never scrolls
  * sideways, on any width. */
-.scroller { overflow-x: auto; }
+/* A BLOCK THAT SCROLLS DOES NOT SAY SO AT REST (RFC-0106 M3, fifth round, L2).
+ * `.cmd code` and both docs-shell rails already hid their bars; this is the same
+ * rule for the wrapper the wide tables and the charts sit in, so the whole site
+ * answers the same way. */
+.scroller { overflow-x: auto; scrollbar-width: none; }
+.scroller::-webkit-scrollbar { display: none; }
+/* A SYMBOL IS ONE TOKEN. The docs shell narrowed the content column from ten
+ * tracks to eight (RFC-0106 M4), and the editors table's third column started
+ * breaking `analyze_document` across two lines mid-word, with the code
+ * background painted around each half. The cell holds a name; the scroller
+ * around the table is what the extra width is for. */
+.scroller td code { white-space: nowrap; }
 table { width: 100%; min-width: 30rem; border-collapse: collapse; margin-top: var(--s3); font-size: var(--t-note); }
 th, td { text-align: left; padding: 10px var(--s2) 10px 0; border-bottom: 1px solid var(--hair); vertical-align: top; }
 th { font: var(--t-key)/1.4 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
@@ -1616,6 +1772,10 @@ ol.plain .note { display: block; color: var(--muted); font-size: var(--t-meta); 
 .panes { display: grid; grid-template-columns: minmax(0, 1fr); }
 .panes > div { grid-area: 1 / 1; }
 .panes > div[hidden] { display: block; visibility: hidden; }
+/* What a capability word refuses, under the code that shows it. It carried
+ * `.cap` and two inline style overrides that undid `.cap`'s own border and
+ * padding, which is the tell that it was never a caption (RFC-0106 M4). */
+.panes .refuses { margin-top: var(--s2); color: var(--muted); font-size: var(--t-meta); }
 
 
 /* ------------------------
@@ -1718,6 +1878,11 @@ svg.chart a .cell:hover { fill-opacity: 1 !important; }
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
 }
 .modgrid li[hidden] { display: none; }
+/* CHROME IS SANS, CODE IS MONO — and a chapter title is neither code nor a name
+ * in the source (RFC-0106 M3, eighth round, O1). `/guide` renders its contents
+ * through this same grid since M4, and `std/json` set in the code face is right
+ * for exactly the reason "Ownership, consume, regions" set in it is wrong. */
+.modgrid.chapters a { font: 560 var(--t-note)/1.4 var(--sans); letter-spacing: 0; }
 /* The matched export names the search appends, under the row that holds them. */
 .modgrid .hits { grid-column: 1 / -1; }
 
@@ -1775,9 +1940,13 @@ pre.doccode {
   padding: var(--s2);
   border-left: 1px solid var(--rule);
   overflow-x: auto;
+  /* And no bar at rest, the same as `pre.code` — measured on `/docs/std/json`
+   * at 375, where a fenced block inside the module's own prose drew one. */
+  scrollbar-width: none;
   font: var(--t-mono)/1.7 var(--mono);
   tab-size: 4;
 }
+pre.doccode::-webkit-scrollbar { display: none; }
 
 @media (max-width: 1024px) {
   .modlist li { grid-template-columns: minmax(0, 1fr) 40px; }
@@ -1809,9 +1978,11 @@ pre.doccode {
 .plate.block .cap a { color: inherit; }
 .plate-head .btn { text-decoration: none; }
 
-/* Previous and next, at the foot of a chapter. Each link names the chapter it
- * goes to, because "next" alone tells a reader nothing about where it goes. */
-.chapternav {
+/* Previous and next, at the foot of every page under the docs shell. Each link
+ * names the page it goes to, because "next" alone tells a reader nothing about
+ * where it goes. It was `.chapternav`, the book's own; RFC-0106 M4 gave the
+ * reference the same foot, and one name for one component. */
+.pager {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: var(--s2);
@@ -1819,16 +1990,16 @@ pre.doccode {
   padding-top: var(--s3);
   border-top: 1px solid var(--rule);
 }
-.chapternav a {
+.pager a {
   display: block;
   padding: var(--s2);
   border: 1px solid var(--rule);
   text-decoration: none;
   font-weight: 560;
 }
-.chapternav a:hover { border-color: var(--accent); color: var(--accent); }
-.chapternav a .eyebrow { display: block; margin-bottom: 4px; }
-.chapternav a.next { text-align: right; grid-column: -2; }
+.pager a:hover { border-color: var(--accent); color: var(--accent); }
+.pager a .eyebrow { display: block; margin-bottom: 4px; }
+.pager a.next { text-align: right; grid-column: -2; }
 
 /* ------------------------
    The search and the import graph. Both are on the REFERENCE (/docs) since
@@ -1917,7 +2088,11 @@ svg.graph .node.on circle { fill-opacity: 1; }
 .pkgs a { font: var(--t-mono)/1.6 var(--mono); color: var(--accent); text-decoration: none; }
 .pkgs a:hover { text-decoration: underline; }
 .pkgs .kindpill { justify-self: start; }
-.pkgs .note { color: var(--muted); font-size: var(--t-meta); line-height: 1.5; }
+/* `.d` AND NOT `.note` (RFC-0106 M4), the same correction `ul.plain` took in M2
+ * and `.modlist` took here: a card's summary is that card's own claim, and
+ * `.note` is what the census counts against THE RULE's one-disclosure-per-plate
+ * ceiling. Four cards were four disclosures for saying what four packages are. */
+.pkgs .d { color: var(--muted); font-size: var(--t-meta); line-height: 1.5; }
 .pkgs .nums { font: var(--t-key)/1.6 var(--mono); letter-spacing: 0.06em; color: var(--n2); }
 
 /* One package's exports: the name, what kind of thing it is, and the signature
@@ -2108,10 +2283,42 @@ kbd {
   :root { --gut: var(--s3); }
   #root { grid-template-columns: repeat(6, minmax(0, 1fr)); padding: 0 var(--gut) var(--s5); }
   /* Every one of these has to outrank what it replaces, the shell included. */
-  #root > *, #root > .masthead, #root > .foot, .page > * { grid-column: 1 / 7; }
+  #root > *, #root > .masthead, #root > .foot, .page > *, .page.docs > * { grid-column: 1 / 7; }
   .rail { grid-column: 1 / 7; grid-row: auto; border-right: 0; border-bottom: 1px solid var(--hair); position: static; padding: var(--s3) 0; display: flex; gap: var(--s3); flex-wrap: wrap; }
   .rail a { display: inline; }
   .rail.toc { max-height: 32vh; }
+
+  /* THE DOCS SHELL BELOW TWELVE TRACKS (RFC-0106 M4). Three panes need three
+   * columns; six tracks are one column of content with two rails' worth of
+   * furniture to place, so the furniture changes shape rather than shrinking.
+   *
+   * The tree becomes the masthead's own disclosure: a `<summary>` a reader
+   * presses, closed by default, over the whole width. `<details>` is what the
+   * markup already is — the sheet turns the disclosure OFF above this width and
+   * simply stops doing that here — so it works with no script at either width.
+   *
+   * The right pane is not shown at all. A sidebar of the page's own headings is
+   * an aid to scanning a two-metre column with a mouse; on one column it is a
+   * second copy of the page above the page, and the reader can scroll. */
+  #root > .page.docs { grid-column: 1 / 7; }
+  .page.docs > .docstree { grid-column: 1 / 7; grid-row: auto; position: static; max-height: none; overflow: visible; padding: var(--s3) 0 0; border-right: 0; }
+  .page.docs > .onpage { display: none; }
+  .treebox > summary {
+    display: flex; align-items: center; min-height: 44px;
+    list-style: none; cursor: pointer;
+    text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted);
+    border-bottom: 1px solid var(--hair);
+  }
+  .treebox > summary::-webkit-details-marker { display: none; }
+  .treebox > summary::after { content: " \25BE"; margin-left: var(--s1); }
+  .treebox[open] > summary { color: var(--accent); }
+  .treebox[open] > summary::after { content: " \25B4"; }
+  /* Shut until pressed: a tree of forty module names above every chapter is the
+   * page itself pushed off the screen. */
+  .treebox:not([open])::details-content { content-visibility: hidden; }
+  .treebox:not([open]) > .treegroup { display: none; }
+  .treebox > .treegroup { padding-top: var(--s2); }
+  .docstree a { min-height: 32px; display: flex; align-items: center; }
 }
 
 @media (max-width: 640px) {
@@ -2121,7 +2328,7 @@ kbd {
    * tracks with 24px gutters between them spend a quarter of the width on
    * gutters that separate nothing. */
   #root { grid-template-columns: minmax(0, 1fr); gap: 0; padding: 0 var(--gut) var(--s5); }
-  #root > *, #root > .masthead, #root > .foot, .page > *, .rail { grid-column: 1; }
+  #root > *, #root > .masthead, #root > .foot, #root > .page.docs, .page > *, .page.docs > *, .rail { grid-column: 1; }
 
   /* The header stays one 64px row: the base rules that make `<details>` not a
    * disclosure are undone here, both models, and the panel leaves the flow. */
@@ -2332,6 +2539,15 @@ svg.chart.strip a:hover .cell, svg.chart.strip a:focus-visible .cell { fill-opac
 svg.chart.statusbar { max-width: 100%; }
 svg.chart.statusbar .seg { fill-opacity: 0.8; }
 .legend.statuses { grid-template-columns: auto auto auto minmax(0, 1fr); gap: 6px var(--s2); align-items: baseline; }
+/* THE FOUR COLUMNS ABOVE ONLY EXIST IF THE `<li>` STOPS BEING A BOX
+ * (RFC-0106 M3, fourth round, K8; fixed in M4). `.legend li` is `display: flex`,
+ * so each row was ONE grid item holding four flex children and the template
+ * described a grid nothing was in: six rows landed four-per-row in three
+ * `auto` tracks sized to their widest content, and the plate painted 1,148px
+ * inside 966. `display: contents` dissolves the row's box and its four spans
+ * become the four cells the template was written for — so the last column is
+ * the `minmax(0, 1fr)` that wraps, and the row gap is the grid's own. */
+.legend.statuses > li { display: contents; }
 .legend.statuses i.key { width: 14px; height: 14px; align-self: center; }
 .legend.statuses i.key[data-tone="done"] { background: var(--st-done); }
 .legend.statuses i.key[data-tone="part"] { background: var(--st-part); }

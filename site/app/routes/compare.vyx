@@ -378,9 +378,17 @@ fn axes() -> Array<Axis> {
                 <p class="cap">The two bars a hair apart on the chart above, rescaled. The WebAssembly module came out of the compiler's own encoder — no LLVM, no <code>clang</code> — and ran under <code>wasmtime</code>, which is a standalone runtime and not a browser. A browser's engine is a different measurement, and this page does not make it.</p>
             </div>
 
-            <p class="notice">Where these numbers come from: <code>{{ engineCommand() }}</code>, on {{ engineMachine() }}, best of three runs per engine. Each reading is the whole process minus the same process at one round, so process start-up and the shell that timed it are out of it; the harness prints both halves. The ratio is the claim — one machine, one afternoon — and the milliseconds are published so it can be checked. The command was run twice: the second pass came in 8% slower on the interpreter and 6% on the native binary, the spread of an ordinary desktop, and the ratios moved by under 3%. There is no cross-language chart here: that would need a second program written by us in someone else's language, and a reader would have to take on trust that we wrote it well.</p>
-            <p class="notice">Per-operation figures are a different instrument: <code>vyrn bench</code> and the <code>bench</code> blocks in <code>examples/</code>. CI runs every one of them on each push and refuses to merge one that stops compiling. It does not yet fail on a slowdown — <code>bench/baseline.json</code> is still an unseeded placeholder, and the file says exactly how to seed it from a CI run — so nothing on this page claims a trend over time.</p>
-            <p class="notice">That objection is answered one section down, and the answer is what section 08 is. It took eight Benchmarks Game programs, wrote each one four more times under a stated discipline, checked that all five print the same bytes before anything was timed, and published the sources, the flags and every raw reading. A reader still has to judge whether the C, Rust and JavaScript were written well — but now there is something to judge, rather than a promise.</p>
+            <!-- THREE `.notice` PARAGRAPHS BECAME ONE DISCLOSURE (RFC-0106 M4).
+                 They were 280 words of method in the reader's way, above the
+                 chart they qualify — and M0's rule for exactly this is that the
+                 claim is visible and the method is one click away. Nothing was
+                 dropped except the third paragraph, which pointed at the section
+                 directly under it. -->
+            <details class="disc">
+                <summary>How these were measured</summary>
+                <p><code>{{ engineCommand() }}</code>, on {{ engineMachine() }}, best of three runs per engine. Each reading is the whole process minus the same process at one round, so start-up and the timing shell are out of it. The ratio is the claim — one machine, one afternoon — and the milliseconds are published so it can be checked. Run twice: the second pass was 8% slower on the interpreter and 6% on the native binary, and the ratios moved by under 3%.</p>
+                <p>Per-operation figures are a different instrument: <code>vyrn bench</code> and the <code>bench</code> blocks in <code>examples/</code>. CI runs every one on each push and refuses a benchmark that stops compiling. It does not yet fail on a slowdown — <code>bench/baseline.json</code> is an unseeded placeholder — so nothing here claims a trend over time.</p>
+            </details>
         </section>
 
         <section class="band" id="radar">
@@ -490,7 +498,10 @@ fn axes() -> Array<Axis> {
             </table>
             </div>
 
-            <p class="notice">Eight of the ten Benchmarks Game programs; the other two are absent because the language cannot express them, which is recorded rather than worked around. The C is plain C11, the Rust is safe and standard-library only, the JavaScript is plain node — no intrinsics, no threads. All five printed the same bytes before anything was timed. CI does not run the harness: it needs clang, rustc, node and wasmtime together and takes about fifteen minutes, so it is run by hand and the committed JSON is the record. Both runs, every raw reading, the environment, and the named cause under each deviation are on <a :href="benchDetail()">the backstage page for this dataset</a>.</p>
+            <details class="disc">
+                <summary>How these were measured</summary>
+                <p>Eight of the ten Benchmarks Game programs; the other two are absent because the language cannot express them, which is recorded rather than worked around. The C is plain C11, the Rust is safe and standard-library only, the JavaScript is plain node — no intrinsics, no threads. All five printed the same bytes before anything was timed. CI does not run the harness: it needs clang, rustc, node and wasmtime together, so it is run by hand and the committed JSON is the record. Both runs, every raw reading, the environment and the named cause under each deviation are on <a :href="benchDetail()">the backstage page for this dataset</a>.</p>
+            </details>
         </section>
 
 </main>

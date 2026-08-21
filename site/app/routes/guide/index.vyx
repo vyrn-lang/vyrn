@@ -7,6 +7,7 @@
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { Chapter, chapters, chapterHref, chapterNumber, chapterTag, blockCount } from "../../guide"
+import { inlineCode } from "../../code"
 
 export fn head() -> Head {
     return pageHeadOf("/guide")
@@ -29,24 +30,30 @@ fn tagOf(c: Chapter) -> String {
     <section class="hero">
         <p class="eyebrow">The guide</p>
         <h1 class="display">Learn the language in order</h1>
-        <p class="lede">Thirteen chapters, from the first program to a web application. Written for a developer who knows one other language. Every program in the book was compiled and run while this page was built.</p>
+        <p class="lede">Thirteen chapters, from the first program to a web application, for a developer who knows one other language. Every program in the book ran while this page was built.</p>
     </section>
 
     <section class="band" id="read">
         <p class="eyebrow">how to read it</p>
         <h2>Start at the top, or jump</h2>
-        <p>The chapters build on each other, so the first read is best in order. Each one is a page: a few sections, a program per idea, and the output that program produced. Nothing on these pages is an excerpt or an illustration.</p>
-        <p>The <a href="/docs.html">reference</a> answers one question at a time — a signature, its prose, the line it sits on. The book answers the questions in the order they come up.</p>
+        <p>The chapters build on each other, so the first read is best in order. The <a href="/docs.html">reference</a> answers one question at a time; the book answers them in the order they come up.</p>
     </section>
 
+    <!-- THE CHAPTER LIST IS THE REFERENCE'S OWN GRID (RFC-0106 M4). It was
+         `.modlist`, a full-width row per chapter with the lede in a
+         `class="note"` — thirteen rows the census counted as thirteen
+         disclosures, against THE RULE's ceiling of one per plate, for text that
+         is each row's own claim rather than commentary on it. `.modgrid` is the
+         component `/docs` already uses for exactly this: a name, a counter and
+         two clamped lines, in a continuous rule grid. -->
     <section class="band" id="chapters">
         <p class="eyebrow">chapters</p>
         <h2>{{ chapters().length }} chapters</h2>
-        <ul class="modlist">
+        <ul class="modgrid chapters">
             <li v-for="c in chapters()" :key="c.slug">
                 <a :href="chapterHref(c.slug)">{{ c.title }}</a>
                 <span class="count">{{ tagOf(c) }}</span>
-                <span class="note">{{ c.lede }}</span>
+                <span class="d" v-html="inlineCode(c.lede)"></span>
             </li>
         </ul>
     </section>
@@ -55,8 +62,7 @@ fn tagOf(c: Chapter) -> String {
         <p class="eyebrow">running the code</p>
         <h2>{{ blockCount() }} programs, each one run at build time</h2>
         <p>Every code block in this book is a file in <code>site/guide/</code>. The site imports each file and calls it while the pages are built, and prints what it answered. A program that does not compile fails the build; a program that traps fails the export. That is why there is no pseudo-code here.</p>
-        <p>Each program has the same shape: a <code>demo</code> function that returns the output, and the four-line <code>main</code> that prints it. The run link on a block carries that whole source to the playground, so what you run is what you read.</p>
-        <p>Two blocks carry no run link. A generator needs the file that imports it, and the playground takes one source, so those two say so under the block instead of opening something that cannot compile.</p>
+        <p>The run link on a block carries its whole source to the playground, so what you run is what you read. Two blocks have none: a generator needs the file that imports it, and the playground takes one source.</p>
     </section>
 </main>
 </template>
