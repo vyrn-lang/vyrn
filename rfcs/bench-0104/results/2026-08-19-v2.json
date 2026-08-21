@@ -12,7 +12,6 @@
     "gz_bytes": "the contestant's single source file, gzipped at level 9"
   },
   "environment": {
-    "host": "LOCUST",
     "os": "Windows 11 10.0.26200",
     "hardware": {
       "cpu": "AMD Ryzen 5 9600X 6-Core Processor",

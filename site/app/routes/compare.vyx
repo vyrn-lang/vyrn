@@ -390,7 +390,7 @@ fn axes() -> Array<Axis> {
             <div class="plate" data-widget="radar">
                 <div class="plate-head">
                     <span class="pill live">Measured</span>
-                    <span class="eyebrow">rfcs/bench-0104/results/2026-08-19-LOCUST-v2.json</span>
+                    <span class="eyebrow">rfcs/bench-0104/results/2026-08-19-v2.json</span>
                     <span class="spacer"></span>
                     <div class="controls" role="group" aria-label="Normalize the chart to">
                         <button type="button" data-norm="c" aria-pressed="true">C = 1</button>
