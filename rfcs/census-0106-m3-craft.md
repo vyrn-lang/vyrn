@@ -9,7 +9,9 @@ reference pages the user named.
 Status values: **FIXED**, **DEFERRED** (with the reason), **NOT A DEFECT** (a
 probe hit that survived inspection, kept so nobody re-files it).
 
-**Sections A to I are the second round, J is the third, K is the fourth.** Each
+**Sections A to I are the second round, J is the third, K is the fourth, L to
+Q are the fifth to the tenth. R is M4's own, appended after the milestone shipped
+(see the end of this file).** Each
 was added after the user read the round before it: eight findings in the third
 round, seven in the fourth, and in both rounds most of what came back were
 defects the previous round had created or left half-made — plus the ones the
@@ -454,3 +456,80 @@ Against the reference hero one more time:
 | Q1 | Demo step commands | The eighth round's command fill leaked into the borderless step lines — a wash strip inside every row, fighting the active row's own wash | `background: none` on step commands and on the pane output; the card's ground is the terminal's ground |
 | Q2 | OS switch | Two detached chips | One pill: a single bordered container, quiet word segments, selection a lighter fill inside it — the reference switch. `.tabrow` added so the link out never enters the container; the picker's sibling selectors route through it |
 | Q3 | Hero editor | The code floated as a lighter washed box inset in the plate — a box in a box by background | One surface: head, code and output split by hairlines only. The override needed three classes; `.play .editor pre.hl` is declared later and an equal-specificity rule loses — the sheet's own documented trap, hit again |
+
+## R. M4 — the docs shell, and what its own verification found
+
+Sections A to Q are RFC-0106 M3's rounds. This one is M4's, kept in the same
+file because six of its ten entries are defects an earlier round left standing or
+created, which is the pattern the whole file records.
+
+### The four M3 deferred rows M4 owned
+
+| # | Row | Status |
+|---|---|---|
+| R1 | **H4** — `/docs` is 52,815 bytes against M0's 40,000, and the import graph is 25,347 of them | **FIXED** — the graph is `/docs/graph`, a page of its own, and the landing is **29,231**. Nothing about the drawing changed |
+| R2 | **H2** — `/guide`'s chapter list carries 14 `.note` elements | **FIXED** — the list is `.modgrid`, the component `/docs` already uses. **14 to 1**, and the one left is the shell's own `<noscript>` |
+| R3 | **H3** — `/compare` has 14 blocks wider than their container at 1280px | **ALREADY CLOSED, by M3's own `.scroller` work.** Re-measured on the exported tree at 1280 and 375: every wide block is inside a scroll container, nothing paints outside one, the document is exactly the viewport. The eight `.band` hits a naive probe returns are G2 — the seam's own bleed. The row was recorded before those rules landed and nobody re-measured it |
+| R4 | **K8** — `/backstage` takes the document 139px wide at 1280 and 405px at 375 | **FIXED**, and the cause is one word. See below |
+| R5 | **H6** — the census page list still names `/philosophy` and `/editors` | **FIXED** — and it had been worse than a stale label: two of thirteen rows were measuring a redirect stub, so `/why-vyrn`'s 540 words and `/docs/editors`' 786 had never been counted at all |
+
+### R4, and the grid nothing was in
+
+`.legend.statuses` declares `grid-template-columns: auto auto auto minmax(0, 1fr)`
+— a key, a count, a name, and a note that wraps. `.legend li` declares
+`display: flex`. So each ROW was one item of that four-column grid, holding four
+flex children: six rows landed four-per-row across three `auto` tracks sized to
+their widest content, the fourth column's `minmax(0, 1fr)` never applied to
+anything, and the plate painted **1,148px inside 966**. `display: contents` on
+the row dissolves its box and its four spans become the four cells the template
+was written for.
+
+**1,399px to 1,270px at 1280, and zero elements outside the viewport at both
+widths.** Nothing else on the backstage changed, which is what the milestone
+brief asked for.
+
+### The defect the shell's own first build had
+
+**A pane spans the whole column, so it takes `grid-row: 1 / span 60` — and every
+page on this site is `display: contents`, so those sixty rows are the SHEET's
+rows.** The masthead and the footer span all twelve columns and are auto-placed
+into that same grid, so neither could fit beside the rails and both were pushed
+past them. Measured on the first build: the masthead painted at **y=928, under a
+sidebar**, and the page's own content started at y=992.
+
+`grid-template-columns: subgrid` is the exact tool and it is one declaration: the
+shell takes the sheet's twelve column tracks, so the rail still lines up with the
+rule grid and the section seams bleed to the same border box, and it keeps its
+own rows — which is the only thing it needed to stop sharing.
+
+Found by measuring the placed items, not by looking at a screenshot: the page
+LOOKED plausible in a viewport-height crop, because a masthead at y=928 is simply
+below the fold.
+
+### Found by the sweep, and not filed by anyone
+
+| # | Defect | Status |
+|---|---|---|
+| R6 | `pre.code` on `/explore/shelf` (a 1,298px program in a 966px box) and `pre.doccode` on `/docs/std/json` at 375 still drew a scrollbar at rest — five rounds after L2 said none should. The fifth round fixed the command scrollers and the hero editor; a plain code block was never in that sweep | **FIXED** — `scrollbar-width: none` on both, and on `.scroller`, which had the same hole. Panning is untouched |
+| R7 | The area cards' `minmax(360px, 1fr)` took `/docs` to a 377px document inside a 375px screen. **A `minmax()` floor is a HARD floor**: a 360px track in a 343px column does not shrink. `.cards` gets away with 280 only because 280 is under 343 | **FIXED** — `minmax(min(360px, 100%), 1fr)` |
+| R8 | The editors table broke `analyze_document` across two lines mid-word, with the code background painted around each half, once the shell narrowed the content column from ten tracks to eight | **FIXED** — `.scroller td code { white-space: nowrap }`. The scroller around that table is what the extra width is for |
+| R9 | `site/test/icons.test.mjs` keyed its template-to-page map by FILE NAME, and a directory of routes has one `index.vyx` per directory. The moment `docs/index.vyx` carried a glyph the map had two entries under one key and the gate failed on its own bookkeeping | **FIXED** — keyed by the path under `routes/`, with the separator normalized |
+| R10 | The book's chapter ledes are markdown and were printed as text, so `/guide` and all 13 chapter pages rendered "``match`` covers every case" with the backticks visible. The module summaries beside them come out of `apidoc.vyrn` already rendered, which is why only these showed it | **FIXED** — `inlineCode()` in `site/app/code.vyrn`, which renders the one markdown construct a lede uses and escapes everything else on both sides of the backtick |
+
+### Register decisions made by copying, not by inventing
+
+Recorded because the brief's instruction was application rather than invention,
+and each of these is an existing component's treatment moved to a new place:
+
+- The sidebar's place marker is the install picker's selection device — a lighter
+  fill and an inset shadow (K4), so the accent edge shifts nothing.
+- The phone tree is the masthead's `<details>` Menu, including the reason it
+  carries no `open` in the markup: `open` is an attribute a stylesheet cannot
+  remove, so the element is shut by default and the desktop block forces it open.
+- The area cards are `.cards`, the index's pillar component, with its arrow-link
+  CTA (`.ctarow .cta`) instead of a command.
+- The chapter list is `.modgrid`, the reference's own rule grid — with one
+  override, because a chapter title is not a name in the source and the eighth
+  round's rule (O1) says mono is for what is code.
+- `.chapternav` became `.pager`: one name for one component, now that the
+  reference wears the same foot the book had.

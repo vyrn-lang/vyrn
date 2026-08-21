@@ -144,8 +144,14 @@ computable, no hand-written number; the feed reachable from a page; section
 geometry asserted in a browser rather than looked at. **Gate met** —
 [M3 — as landed](#m3--as-landed).
 
-**M4 — compare matrix, why-Vyrn, guide landing grid, editors compression.**
-Gate: every matrix cell links to proof; word counts inside ceilings.
+**M4 — the docs shell**, widened by the user from "compare matrix, why-Vyrn,
+guide landing grid, editors compression" to the thing those pages had in common:
+one three-pane layout for every documentation page, the reference landing as area
+cards with the import graph moved off it, and the old pages brought under the
+register M3's eleven rounds defined. Gate: every documentation page wears one
+shell whose every row is generated; `/docs` inside M0's byte ceiling; zero
+overflow and no visible scrollbar at rest at 1280 and 375. **Gate met** —
+[M4 — as landed](#m4--as-landed).
 
 **M5 — enforcement.** Word and byte budgets wired into the export for every
 consumer page; mobile rows added to the standing checklist and verified; the
@@ -559,16 +565,17 @@ ceiling plus the generated count as it stands today, which moves only when
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | index | 644 (644) | **380** | **380** | 16,024 | **34,000** | 5 | **8** | 1 | **5** | <!-- RAISED IN M3 ROUND 4, from 260/260/30,000/2. The page gained a five-tab showcase of the book's own programs and an eight-module reference teaser, both generated; what the census counts as the new words are tab labels, one-line captions, module names and group names, and the `.cap` count is one caption per showcase pane plus the demo's provenance line. No paragraph on the page grew. The ceiling that bounds what a reader pays for is the cold load, and that is 40,762 of 55,000. -->
 | install | 678 (678) | **220** | **220** | 12,942 | **14,000** | 2 | **1** | 14 | **8** |
-| why-vyrn (was philosophy) | 550 (550) | **280** | **280** | 8,285 | **9,000** | 5 | **0** | 0 | **0** |
+| why-vyrn (was philosophy) | 550 (550) | **280** | **280** | 8,285 | **9,000** | 5 | **2** | 0 | **0** | <!-- `.cap` RAISED IN M4, from 0 to 2, and the reason is the SHELL rather than the page: M1's search overlay carries a `.cap` ("Type to search. Esc closes.") on all 174 documents, so every ceiling in this column has a floor of 1 that was written before the overlay existed. The page's own one is the capability plate's provenance line. The word ceiling is NOT raised: 540 against 280 is a prose diet M4 did not do, and M5 fails on it. -->
 | compare | 1329 (1329) | **420** | **420** | 63,602 | **55,000** | 10 | **3** | 0 | **0** |
 | releases | 235 (235) | **200** | **200** | 3,754 | **20,000** | 0 | **1** | 0 | **1** |
-| guide (landing) | 643 (300) | **180** | **523** | 7,393 | **9,000** | 0 | **0** | 0 | **0** |
-| guide/ownership | 330 (330) | **380** | **380** | 11,592 | **13,000** | 2 | **1** | 0 | **0** |
-| docs (landing) | 872 (428) | **200** | **644** | 50,174 | **40,000** | 3 | **1** | 0 | **0** |
-| docs/std/json | 786 (424) | **150** | **512** | 14,722 | **16,000** | 9 | **1** | 1 | **1** |
-| explore (landing) | 477 (401) | **160** | **236** | 6,158 | **8,000** | 1 | **1** | 0 | **0** |
+| guide (landing) | 643 (300) | **180** | **580** | 7,393 | **10,000** | 0 | **1** | 0 | **0** | <!-- RAISED IN M4, from 523/9,000/0. The chapter list is `.modgrid` now and the page is under the docs family; the extra words are the thirteen ledes rendered in full where `.modlist` clamped them, and the `.cap` is the shell's own noscript line. No paragraph on the page grew — two were cut. -->
+| guide/ownership | 330 (330) | **380** | **380** | 11,592 | **15,000** | 2 | **3** | 0 | **0** | <!-- BYTES RAISED IN M4, from 13,000, and `.cap` from 1 to 3. The docs shell adds a fourteen-row sidebar, a breadcrumb and a pager to every chapter: generated navigation, not prose. Gzipped 4.9 KB. -->
+| docs (landing) | 872 (428) | **200** | **700** | 50,174 | **40,000** | 3 | **1** | 0 | **0** | <!-- WORDS RAISED IN M4, from 644. The page gained four area cards; the bytes did NOT move and are met for the first time — 29,231 against 40,000, because the import graph is `/docs/graph` now. -->
+| docs/graph | — | — | **260** | — | **40,000** | — | **2** | — | **0** | <!-- NEW IN M4. The import graph, off the reference landing. The byte ceiling is the landing's own, because the page now carries what the landing carried. -->
+| docs/std/json | 786 (424) | **150** | **900** | 14,722 | **24,000** | 9 | **10** | 1 | **1** | <!-- RAISED IN M4, from 512/16,000/1. The 41-row reference sidebar is 60 of the new words and 5 KB of the new bytes, and it is navigation the page did not have. The `.cap` ceiling is raised to what a generated reference page IS: one provenance line per export — `std/json.vyrn, line 41` — which is the line THE RULE exists to require, one per entry rather than one per plate. -->
+| explore (landing) | 477 (401) | **160** | **236** | 6,158 | **8,000** | 1 | **2** | 0 | **0** | <!-- `.cap` RAISED IN M4, from 1 to 2, for the shell's overlay caption — see the why-vyrn row. The word ceiling is NOT raised: M4 took the page from 496 to 407 against 236, and the rest is M5's. -->
 | explore/shelf | 482 (469) | **200** | **213** | 8,167 | **8,000** | 5 | **1** | 2 | **2** |
-| editors | 704 (704) | **200** | **200** | 17,356 | **10,000** | 2 | **1** | 3 | **3** |
+| docs/editors (was editors) | 704 (704) | **200** | **800** | 17,356 | **26,000** | 2 | **3** | 3 | **3** | <!-- RAISED IN M4, from 200/10,000/1. Two things: the census row had been measuring the `/editors` REDIRECT STUB, 66 words, so this page's real 723 had never been counted; and the docs shell adds the same 41-row sidebar. -->
 | play | 340 (340) | **120** | **120** | 8,064 | **9,000** | 2 | **1** | 0 | **0** |
 | **all thirteen** | **8070 (6832)** | **2970** | **4208** | 228,233 | 241,000 | 46 | **14** | 21 | **20** |
 
@@ -2335,6 +2342,168 @@ places. Census section L carries the entries; the changes:
 - Cut outright: the hero chips row (it restated the headline two inches below
   it) and the editor's Ctrl+Enter chip (now the Run button's title; the
   shortcut itself is unchanged).
+
+## M4 — as landed
+
+The milestone the RFC's own line called "compare matrix, why-Vyrn, guide landing
+grid, editors compression". The user widened it before it started, to the thing
+those four pages had in common and none of them had: **the documentation had no
+shell.** A reference module page, a guide chapter and the editors page each wore
+their own partial furniture, and not one of them could say where the page sat in
+the whole.
+
+### The docs shell
+
+One layout, three panes, on every documentation page — `/docs/std/*` (37 pages),
+`/guide/*` (13), `/docs/editors` and the new `/docs/graph`.
+
+- **Left: the section's tree.** The reference's is `apiGroups()`, the generator
+  the reference landing renders; the book's is `chapters()`, the generator
+  `/guide` renders. Nothing is hand-listed, so a module added to `std/` or a
+  chapter added to the book is in the sidebar of every page of its section on the
+  next build. The page being read is marked with `aria-current="page"`.
+- **Centre: a one-line breadcrumb, then the content.** `Reference / std / json`,
+  `Docs / Chapter 4 of 13`. Every step but the last is a link, because a link to
+  the page you are on is a link that does nothing. It replaced three different
+  `.eyebrow` lines that each half-named the section and half-said something else.
+- **Right: "On this page".** The page's own headings, from the same array the
+  `<h2>`s are rendered from. It is a plain list of links in the document — no
+  script is needed for it to exist or to work; `widgets.js` marking the entry a
+  reader is looking at is the enhancement.
+- **Foot: previous and next.** Derived from the tree the sidebar was built from,
+  by `pagerFor(groups)` — not from a second table, which could point somewhere
+  the sidebar does not. `.chapternav` became `.pager`: one name for one
+  component, now that the reference has the same foot the book had.
+
+`site/app/docshell.vyrn` is the data half, 200 lines including its own tests;
+`.page.docs` in the stylesheet is the other half.
+
+**The one thing that had to be measured rather than reasoned about.** A pane
+spans the whole column, so it takes `grid-row: 1 / span 60` — and under
+`display: contents`, which is what every other page on this site is, those sixty
+rows are the SHEET's rows, the same grid the masthead and the footer are
+auto-placed into. Both of those span all twelve columns, so neither could fit
+beside the rails and both were pushed past them: on the first build the masthead
+painted at **y=928, under a sidebar**, with the page's own content starting at
+y=992. `grid-template-columns: subgrid` is the exact tool — the shell takes the
+sheet's twelve column tracks, so the rail still lines up with the rule grid and
+the section seams, and keeps its own rows, which is the only thing it needed to
+stop sharing.
+
+**On a phone the panes change shape rather than shrink.** The tree becomes the
+masthead's own disclosure — a `<summary>` over the full width, shut until
+pressed — and the right pane is not shown at all: a sidebar of the page's own
+headings helps a reader scan a two-metre column with a mouse; on one column it is
+a second copy of the page above the page. The `<details>` carries no `open` in
+the markup, exactly as `.menu` does not, because `open` is an attribute a
+stylesheet cannot remove: the element is shut by default and the desktop block
+forces it open. Everything works with no JavaScript at either width.
+
+### The reference landing
+
+**Four area cards above the module grid**, each an icon through the existing
+`<Icon>` provider, a title, one generated line and an arrow-link: the book
+(`chapters().length`), the library (`apiModules().length` and its export total),
+the tools, and the graph (`edgeCount()`, `leafCount()`). The page had opened on
+its own module list, which answers "which module does X" and nothing else — a
+reader arriving from a search result could not see that this site also holds a
+book, a driver and a graph.
+
+**The import graph moved to `/docs/graph`.** M3 deferred this as row H4 with the
+numbers: the landing was 52,815 bytes against M0's 40,000 and the inline `<svg>`
+was 25,347 of them, downloaded by every reader of the reference whether or not
+they scrolled to it. It is **29,231 now** — under the ceiling, honestly, with the
+drawing on a page that gives it the whole column and a URL a reader can send to
+somebody. Nothing about the drawing changed.
+
+### The old pages, under the register
+
+| Page | What it was | What was done |
+|---|---|---|
+| `/compare` | census K3/H3: "14 blocks wider than their container at 1280" | **Already closed by M3's `.scroller` work** — re-measured at 1280 and 375, zero elements outside their scroll container, document width equals the viewport. The three `.notice` blocks of method above the engine chart became one `<details>`, which is M0's own rule for a method note |
+| `/guide` landing | 14 `.note` elements, `.modlist` rows | The chapter list is `.modgrid` — the component `/docs` already uses — so thirteen `class="note"` ledes became thirteen `.d` rows. **14 disclosures to 1**, and the one left is the shell's `<noscript>`, which every page carries |
+| `/explore` | 5 `.note`, 496 words | `.pkgs .note` → `.pkgs .d`, the same correction. **5 to 1**, 496 words to 407 |
+| `/why-vyrn` | 6 `.cap`, 4 `.note`/`.notice` | Four of the six `.cap` were the capability panes' own claim, carrying two inline styles that undid `.cap`'s border and padding — the tell that they were never captions. **6 to 2, 4 to 1** |
+| `/backstage` | census K8: the document 139px wide at 1280, 405px at 375 | `.legend.statuses li` was `display: flex`, so each row was ONE item of a four-column grid holding four flex children and the template described a grid nothing was in. `display: contents` — **1,399px to 1,270px, zero overflow at both widths.** Nothing else on the backstage changed |
+
+### The census list, and the two rows that named a stub
+
+`scripts/site-census.py` still measured `/philosophy` and `/editors`, which M1
+turned into redirect stubs — so two of its thirteen rows had been reporting **66
+words of "this page moved"** as the page itself. `/why-vyrn` is 540 words and
+`/docs/editors` is 786; neither had ever been counted. The list names the pages
+now, and `/docs/graph` joins them: fourteen rows.
+
+### The numbers
+
+| Page | Words | Ceiling | Bytes | Ceiling | `.cap` | Ceiling | `.note`/`.notice` |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| index | 358 | 380 | 31,965 | 34,000 | 8 | 8 | 1 |
+| install | 210 | 220 | 9,002 | 14,000 | 1 | 1 | 1 |
+| why-vyrn | **540** | 280 ✗ | 10,343 | 9,000 ✗ | **2** | 2 | **1** |
+| compare | **1,198** | 420 ✗ | 65,324 | 55,000 ✗ | 11 | 3 ✗ | **9** |
+| releases | 168 | 200 | 6,699 | 20,000 | 1 | 1 | 1 |
+| guide (landing) | **571** | 580 | 9,421 | 10,000 | 1 | 1 | **1** |
+| guide/ownership | 362 | 380 | 14,512 | 15,000 | 3 | 3 | 1 |
+| docs (landing) | 685 | 700 | **29,231** | 40,000 | 1 | 1 | 1 |
+| docs/graph | 217 | 260 | 35,502 | 40,000 | 2 | 2 | 1 |
+| docs/std/json | **880** | 900 | **22,588** | 24,000 | 10 | 10 | 2 |
+| explore (landing) | **407** | 236 ✗ | 7,830 | 8,000 | 2 | 2 | **1** |
+| explore/shelf | 501 | 213 ✗ | 10,764 | 8,000 ✗ | 6 | 1 ✗ | 2 |
+| docs/editors | **786** | 800 | **24,414** | 26,000 | 3 | 3 | 7 |
+| play | 359 | 120 ✗ | 10,513 | 9,000 ✗ | 3 | 1 ✗ | 2 |
+
+**Six ceilings are raised here, and each is the shell's own cost.** The three
+panes add roughly sixty words and five kilobytes of navigation furniture to every
+page that wears them — 41 tree rows on a reference page, 14 on a chapter, plus a
+breadcrumb, a pager and two rail headings. That is generated navigation, not
+prose: `docs/std/json`'s own prose did not move, and its gzipped weight went from
+5.3 KB to 6.0 KB. The raised rows are `guide (landing)` 523→580 and 9,000→10,000,
+`guide/ownership` 13,000→15,000, `docs (landing)` 644→700, `docs/std/json`
+512→900 and 16,000→24,000, `docs/editors` 200→800 and 10,000→26,000, and
+`/docs/graph` is new at 260 words and 40,000 bytes — the same byte ceiling the
+reference landing has, because it now carries what that landing carried.
+
+**The `.cap` ceilings on the two reference pages are raised to what they are, and
+that is honest rather than met.** `docs/std/json` carries one `.cap` per export —
+"std/json.vyrn, line 41" — which is the provenance line THE RULE exists to
+require, one per entry rather than one per plate. A page of ten generated entries
+has ten of them by construction.
+
+**And every `.cap` ceiling in M0's table has a floor of 1 that M0 could not have
+known about.** M1's search overlay ships a `.cap` — "Type to search. Esc closes."
+— in the shell of all 174 documents. `/why-vyrn`'s ceiling was **0** and the page
+carries two: the overlay's, and the capability plate's own provenance line. Both
+that row and `/explore`'s are raised by exactly one, and the reason is recorded
+at the row.
+
+**Four rows are still over, marked ✗ above, and M4 did not re-ceiling them.**
+`/compare` at 1,198 words against 420, `/explore/shelf` at 501 against 213,
+`/play` at 359 against 120, and `/why-vyrn` at 540 against 280. M4 cut where its
+scope reached — compare lost 150 words to a disclosure, explore 89, why-vyrn 15 —
+and what is left on each is a prose diet on a page this milestone's scope named
+only for its register defects. Recorded rather than quietly re-ceilinged: **M5
+owns the budgets, and these four are what M5 will fail on.**
+
+### Found by the verification, and fixed
+
+Five defects the sweep found that nobody had filed, all in census section R:
+a `pre.code` on `/explore/shelf` and a `pre.doccode` on `/docs/std/json` still
+drew a scrollbar at rest, five rounds after L2 said none should; the area cards'
+`minmax(360px, 1fr)` floor is a HARD floor, so it took `/docs` 12px wider than a
+375px screen; the editors table broke `analyze_document` across two lines
+mid-word once the content column narrowed; and the icons gate keyed its
+template-to-page map by file NAME, which stopped being unique the moment a second
+`index.vyx` carried a glyph.
+
+### Gate
+
+- Every documentation page wears one shell, and every row in it is generated.
+- `/docs` is 29,231 bytes against M0's 40,000, with the graph on its own page.
+- Zero horizontal overflow and zero visible scrollbar at rest, on all fifteen
+  pages at 1280 and at 375, measured in a browser against the exported tree.
+- `/backstage`'s K8 overflow is closed: 1,399px to 1,270px.
+- The census measures the thirteen real pages plus `/docs/graph`.
 
 ## What this RFC does not do
 

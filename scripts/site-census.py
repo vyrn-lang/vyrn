@@ -60,19 +60,26 @@ import sys
 #   docs/std/json.html    14,722 B, rank 19 of 37
 #   explore/shelf.html     8,167 B, the upper of the two middle pages of 4
 #                          (they run 6,919 to 8,184), and the fullstack dogfood
+# TWO ROWS NAMED A REDIRECT STUB (RFC-0106 M4). `/philosophy` and `/editors`
+# became stubs in M1 — three words and a refresh — so the census had been
+# measuring 66 words of "this page moved" on two of its thirteen rows and
+# reporting them as the pages themselves. `/why-vyrn` is 555 words and
+# `/docs/editors` is 786; neither had ever been counted. The list names the
+# pages, not the URLs that used to reach them.
 PAGES = [
     ("index", "index.html"),
     ("install", "install.html"),
-    ("philosophy", "philosophy.html"),
+    ("why-vyrn", "why-vyrn.html"),
     ("compare", "compare.html"),
     ("releases", "releases.html"),
     ("guide (landing)", "guide.html"),
     ("guide/ownership", "guide/ownership.html"),
     ("docs (landing)", "docs.html"),
+    ("docs/graph", "docs/graph.html"),
     ("docs/std/json", "docs/std/json.html"),
     ("explore (landing)", "explore.html"),
     ("explore/shelf", "explore/shelf.html"),
-    ("editors", "editors.html"),
+    ("docs/editors", "docs/editors.html"),
     ("play", "play.html"),
 ]
 
@@ -162,7 +169,7 @@ def main():
         print("| " + label + " | " + " | ".join(cells) + " |")
     tot = {k: sum(r[k] for r in rows.values()) for k, _ in COLUMNS}
     print(
-        "| **all thirteen** | "
+        "| **all " + str(len(PAGES)) + "** | "
         + " | ".join(
             format(tot[k], ",") if k == "bytes" else str(tot[k]) for k, _ in COLUMNS
         )
