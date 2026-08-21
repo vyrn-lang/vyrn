@@ -5,7 +5,6 @@
   "runs": 10,
   "method": "whole-process wall time, stdout discarded, median of the runs",
   "environment": {
-    "host": "LOCUST",
     "os": "Windows 11 10.0.26200",
     "hardware": {
       "cpu": "AMD Ryzen 5 9600X 6-Core Processor",

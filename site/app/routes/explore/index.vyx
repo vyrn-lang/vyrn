@@ -54,7 +54,7 @@ fn depLabel(p: Package) -> String {
     </section>
 
     <section class="band" id="packages">
-        <p class="eyebrow">01 — the index</p>
+        <p class="eyebrow">the index</p>
         <h2>One card per package</h2>
         <p>The two numbers are what a reader weighs a dependency by: what it gives you, and what it drags in. Both are read off the source while this page is built — the exports from the module the package offers, the dependencies from the <code>import</code> lines under it.</p>
         <ul class="pkgs">
@@ -69,7 +69,7 @@ fn depLabel(p: Package) -> String {
     </section>
 
     <section class="band" id="install">
-        <p class="eyebrow">02 — how you install one</p>
+        <p class="eyebrow">how you install one</p>
         <h2>A URL, a hash, and two files</h2>
         <p>Vyrn has no registry server and no account. A dependency is a URL: <code>github:owner/repo@ref/path.vyrn</code>, or <code>gist:</code>, or a plain <code>https:</code> address. <code>vyrn add</code> fetches it once, records the immutable URL it resolved to and the sha256 of the bytes in <code>vyrn.lock</code>, and writes the alias into <code>vyrn.json</code>. After that the hash is checked on every load, so an upstream that changes under a pinned URL fails the build instead of changing your program.</p>
         <p>The bytes live in <code>~/.vyrn/cache/sha256/</code>, keyed by content. <code>vyrn vendor</code> copies them into your repository, <code>--offline</code> forbids the network outright, and any copy of a file with the right hash restores an upstream that vanished. That is the whole mechanism — <a href="/docs.html#cli"><code>vyrn add</code>, <code>vyrn update</code>, <code>vyrn vendor</code> and <code>vyrn deps</code></a>.</p>
@@ -77,7 +77,7 @@ fn depLabel(p: Package) -> String {
     </section>
 
     <section class="band" id="young">
-        <p class="eyebrow">03 — the state of it</p>
+        <p class="eyebrow">the state of it</p>
         <h2>The ecosystem is young</h2>
         <p>No Vyrn package is published outside this repository yet, so every package listed here comes from this one — and nothing is listed that does not. The {{ stdCount() }} standard library modules are not in the count: you do not install them, and putting them here would make the grid look fuller while telling a reader nothing.</p>
         <p>The page schema is the one a third-party package will use unchanged: a specifier, a command, a lock line, exports, dependencies, source. When somebody publishes one, it is a card.</p>

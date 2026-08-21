@@ -23,5 +23,5 @@
 # If this file is ever stale, `site/public/fresh.js` says so on the page: it asks
 # the same listing once a visit and, when the newest tag is not the one below,
 # writes one line saying a newer release exists.
-v0.1.0-alpha.1
-2026-08-11
+v0.1.0-alpha.2
+2026-08-18

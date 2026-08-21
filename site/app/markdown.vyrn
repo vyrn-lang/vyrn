@@ -31,7 +31,7 @@ import { contains } from "std/strpred"
 import { startsWith } from "std/strpred"
 import { escapeHtml } from "./code"
 import { rfcHref } from "./backstage"
-import { blob } from "./repo"
+import { ghBlob as blob } from "./github"
 
 /// One block, and the line the caller carries on from.
 type Taken = { html: String, next: Int64 }
@@ -43,7 +43,10 @@ type Marker = { ok: Bool, ordered: Bool, indent: Int64, content: Int64 }
 /// refusal rather than an unstyled block, so the next language somebody reaches
 /// for is a decision somebody makes.
 export fn knownLangs() -> Array<String> {
-    return ["vyrn", "vyx", "text", "json", "rust", "ts", "js", "html", "llvm", "graphql", "c", "yaml"]
+    // `css` is here because RFC-0106 M3 is a record about a stylesheet and
+    // quoted six declarations of it — which is the decision this list exists to
+    // make somebody take. It renders escaped and unstyled, like `yaml`.
+    return ["vyrn", "vyx", "text", "json", "rust", "ts", "js", "html", "llvm", "graphql", "c", "yaml", "css"]
 }
 
 /// `src` as HTML, or the reason it holds something this renderer does not know.

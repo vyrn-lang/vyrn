@@ -220,7 +220,14 @@ def main():
     vyrn = "vyrn"
     if "--vyrn" in args:
         vyrn = args[args.index("--vyrn") + 1]
-    vyrn = shutil.which(vyrn) or vyrn
+    # ABSOLUTE, and this line is load-bearing. Every step below runs in a scratch
+    # directory, and on POSIX a relative program path is resolved against the
+    # CHILD's working directory — so `--vyrn compiler/target/release/vyrn`, which
+    # is what `site.yml` passes, raised `FileNotFoundError` on the first step
+    # while the same argument worked on Windows, where `CreateProcess` resolves
+    # it against the parent's. `shutil.which` returns a path with a separator in
+    # it unchanged, so it does not fix this either.
+    vyrn = os.path.abspath(shutil.which(vyrn) or vyrn)
     json.dump(record(vyrn), sys.stdout, separators=(",", ":"), sort_keys=True)
     sys.stdout.write("\n")
 

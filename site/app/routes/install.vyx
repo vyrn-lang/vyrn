@@ -1,60 +1,38 @@
 <script>
 // GET /install — the quickstart (RFC-0106 M2).
 //
-// THREE TILES, ONE COMMAND EACH, and no method a reader could not run today.
-// Two installers exist — `install.sh` and `install.ps1` — so the tiles carry two
-// commands between them. There is no `brew` line, no `apt` line and no `winget`
-// line, because there is no formula, no package and no manifest; a tab for a
-// method that does not exist is the same fabrication as a "used by" logo.
+// TWO TILES, ONE COMMAND EACH, and no method a reader could not run today.
+// Two installers exist — `install.sh` and `install.ps1` — so there are two
+// commands, and therefore two tiles: `macOS & Linux` run the same script through
+// the same pipe, and a picker that split them made a reader choose between two
+// identical lines (RFC-0106 M3, third round). There is no `brew` line, no `apt`
+// line and no `winget` line, because there is no formula, no package and no
+// manifest; a tab for a method that does not exist is the same fabrication as a
+// "used by" logo.
+//
+// THE COMMANDS ARE NOT WRITTEN HERE. `installTargets()` in `../repo` is the one
+// place they exist, because this page and the index hero show the same two.
 //
 // NO OS GLYPH ON A TILE, and the reason is measured rather than assumed: the two
 // hash-locked collections this site binds (`bytesize`, `codex`) hold 180 glyphs
 // between them and none of them is an apple, a penguin or a window. A `v-for`
 // could not carry one either — a provider tag takes static attributes, and
 // `:name` binds an expression (RFC-0107 M1) — so the tiles stay a loop over
-// `platforms()` and the OS is named in words, which is what a reader scans for.
+// `installTargets()` and the OS is named in words, which is what a reader scans
+// for.
 //
 // NO VERSION IS WRITTEN HERE. Neither installer takes one: both resolve the
 // newest release themselves, pre-releases included. The version SHOWN comes from
-// `site/release.txt` through `../repo`, baked while this page built, and
-// `fresh.js` says so on the page if a newer one appears before the next build.
+// `../repo`, which reconciles the baked `site/release.txt` against the tags in
+// the repository's own history and takes the newer of the two.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
 import { shellHtml } from "../code"
-import { hasRelease, releaseTag, releaseDate, releasePre, releaseUrl } from "../repo"
+import { hasRelease, releaseTag, InstallTarget, installTargets, installScript } from "../repo"
 import { Icon } from "../icons"
-
-/// One platform: the one-line install, and what lands.
-type Platform = { id: String, name: String, install: String, archive: String, home: String }
 
 export fn head() -> Head {
     return pageHeadOf("/install")
-}
-
-fn platforms() -> Array<Platform> {
-    return [
-        Platform {
-            id: "macos",
-            name: "macOS",
-            install: "curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | sh",
-            archive: "vyrn-aarch64-macos.tar.gz",
-            home: "~/.vyrn/bin",
-        },
-        Platform {
-            id: "linux",
-            name: "Linux",
-            install: "curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | sh",
-            archive: "vyrn-x86_64-linux.tar.gz",
-            home: "~/.vyrn/bin",
-        },
-        Platform {
-            id: "windows",
-            name: "Windows",
-            install: "irm https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.ps1 | iex",
-            archive: "vyrn-x86_64-windows.zip",
-            home: "%USERPROFILE%\\.vyrn\\bin",
-        },
-    ]
 }
 
 /// The source build, which is the same three lines everywhere.
@@ -78,7 +56,7 @@ fn pinnedInstall() -> String {
     if !hasRelease() {
         return "VYRN_VERSION=v0.1.0 sh"
     }
-    return "curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | VYRN_VERSION=" + releaseTag() + " sh"
+    return "curl -fsSL " + installScript("install.sh") + " | VYRN_VERSION=" + releaseTag() + " sh"
 }
 
 /// Checking a manual download by hand, which is what the installer does for you.
@@ -86,84 +64,126 @@ fn manualCheck() -> String {
     return "sha256sum -c SHA256SUMS"
 }
 
-/// The version line under the heading. One function, because the two states
-/// differ by a fact and not by a layout.
-fn versionLine() -> String {
+/// The kicker over the heading: the word, then the version it installs today.
+fn kicker() -> String {
     if !hasRelease() {
-        return "Nothing published yet: the script says so and points at the source build."
+        return "Install"
     }
-    let kind = if releasePre() { "pre-release" } else { "release" }
-    return releaseTag() + ", published " + releaseDate() + " as a " + kind + "."
+    return "Install · " + releaseTag()
+}
+
+/// The radio that selects one target's pane. Two inputs, one name, and the
+/// FIRST is checked — which is what makes the picker work with no script at
+/// all: the sheet selects the pane with `:checked ~`, and a browser with
+/// JavaScript switched off still has radio buttons.
+fn osId(p: InstallTarget) -> String {
+    return "os-" + p.id
+}
+
+/// The script the selected command pipes into a shell, so a reader can read it
+/// before they run it. It is the file this site serves and the command fetches —
+/// the same bytes, one click, no second copy to keep in step.
+fn scriptHref(p: InstallTarget) -> String {
+    if p.id == "windows" {
+        return "/install.ps1"
+    }
+    return "/install.sh"
 }
 </script>
 
 <template>
 <main class="page wide">
-        <section class="hero">
-            <p class="eyebrow">Install</p>
-            <h1 class="display">One command, and it <em>runs</em></h1>
-            <p class="lede">It checks the archive against the release's own checksums, and installs nothing it cannot verify.</p>
-            <p class="eyebrow">{{ versionLine() }} <a :href="releaseUrl()">Release notes</a></p>
-            <p class="notice" role="status" :data-release-note="releaseTag()" hidden="hidden"></p>
-        </section>
+        <!-- A CENTRED HERO, AND ONE COMMAND ON IT (RFC-0106 M3). Three tiles
+             with three commands made a reader compare rows before they could
+             type anything; the picker answers "which machine" once and shows
+             one command. -->
+        <section class="hero mid">
+            <p class="eyebrow">{{ kicker() }}</p>
+            <h1 class="display">Install Vyrn</h1>
+            <p class="lede">One command, one self-contained binary, nothing else to install. Uninstalling is deleting a directory.</p>
 
-        <section class="band" id="get">
-            <h2><Icon name="bytesize:download"/> Pick your machine</h2>
-            <ul class="tiles">
-                <li v-for="p in platforms()" :key="p.id">
-                    <h3>{{ p.name }}</h3>
-                    <div class="cmd" data-copy>
-                        <code v-html="shellHtml(p.install)"></code>
-                        <button type="button" data-copy-btn aria-label="Copy the install command">Copy</button>
+            <!-- THE PICKER IS TWO RADIO BUTTONS AND NO SCRIPT. The inputs come
+                 first so `:checked ~ .ospanes` can reach the panes; the sheet
+                 selects by position (`:nth-of-type`), so nothing here depends on
+                 an id spelled twice. They are written out rather than looped
+                 because only the first carries `checked`, and `v-for` has no way
+                 to put an attribute on one iteration — an empty `checked=""` is
+                 still checked in HTML, so a bound value cannot express it.
+                 `data-os` is what `widgets.js` reads to open on the visitor's own
+                 shell; with no script the first is checked and the control works
+                 exactly the same. -->
+            <fieldset class="picker">
+                <legend class="sr-only">Operating system</legend>
+                <input class="sr-only" type="radio" name="os" id="os-unix" checked="checked" data-os="unix"/>
+                <input class="sr-only" type="radio" name="os" id="os-windows" data-os="windows"/>
+                <div class="tabrow">
+                    <div class="ostabs">
+                        <label v-for="p in installTargets()" :key="p.id" :for="osId(p)">{{ p.name }}</label>
                     </div>
-                    <p><code>{{ p.archive }}</code> into <code>{{ p.home }}</code></p>
-                </li>
-            </ul>
-            <p>Then:</p>
-            <div class="cmd" data-copy>
-                <code v-html="shellHtml(firstRun())"></code>
-                <button type="button" data-copy-btn aria-label="Copy the run command">Copy</button>
-            </div>
-            <p>Pin a tag:</p>
-            <div class="cmd" data-copy>
-                <code v-html="shellHtml(pinnedInstall())"></code>
-                <button type="button" data-copy-btn aria-label="Copy the pinned install command">Copy</button>
-            </div>
+                </div>
+                <div class="ospanes">
+                    <div class="ospane" v-for="p in installTargets()" :key="p.id">
+                        <div class="cmd" data-copy>
+                            <code v-html="shellHtml(p.cmd)"></code>
+                            <button type="button" data-copy-btn aria-label="Copy the install command">Copy</button>
+                        </div>
+                        <p class="ctarow"><a class="cta" :href="scriptHref(p)">View the install script</a></p>
+                    </div>
+                </div>
+            </fieldset>
+
+            <p class="ctarow"><a class="cta" href="/releases.html">Release notes</a></p>
         </section>
 
-        <section class="band" id="verify">
-            <h2><Icon name="bytesize:lock"/> It refuses what it cannot check</h2>
-            <p>Running a stranger's script deserves this much:</p>
+        <section class="band split" id="verify">
+            <div class="say">
+                <p class="eyebrow"><Icon name="bytesize:lock"/> Verified</p>
+                <h2>It refuses what it cannot check</h2>
+                <p>Running a stranger's script deserves this much. Read it first: <a href="https://github.com/vyrn-lang/vyrn/blob/main/install.sh">install.sh</a>, <a href="https://github.com/vyrn-lang/vyrn/blob/main/install.ps1">install.ps1</a>.</p>
+            </div>
             <ul class="plain">
                 <li><strong>Downloads the release's own <code>SHA256SUMS</code></strong></li>
                 <li><strong>Hashes the archive and compares</strong><span>A mismatch deletes it and installs nothing.</span></li>
-                <li><strong>Both refusals run on every push</strong><span>On all three, against a fake release.</span></li>
+                <li><strong>Both refusals run on every push</strong><span>On all three platforms, against a fake release.</span></li>
             </ul>
-            <p>By hand:</p>
-            <div class="cmd" data-copy>
-                <code v-html="shellHtml(manualCheck())"></code>
-                <button type="button" data-copy-btn aria-label="Copy the checksum command">Copy</button>
-            </div>
-            <p>Read it before you pipe it: <a href="https://github.com/vyrn-lang/vyrn/blob/main/install.sh">install.sh</a> and <a href="https://github.com/vyrn-lang/vyrn/blob/main/install.ps1">install.ps1</a>.</p>
         </section>
 
-        <section class="band" id="after">
-            <h2>Your editor, and undoing it</h2>
-            <p>The VS Code extension ships as a <code>.vsix</code> on every release. <a href="/docs/editors.html">The editors page</a> has both commands.</p>
-            <p>Uninstalling is deleting a directory:</p>
-            <div class="cmd" data-copy>
-                <code v-html="shellHtml(uninstall())"></code>
-                <button type="button" data-copy-btn aria-label="Copy the uninstall command">Copy</button>
-            </div>
+        <section class="band" id="advanced">
+            <p class="eyebrow">Advanced</p>
             <details class="disc">
-                <summary>Build from source instead</summary>
-                <p>For the newest commit, or a machine with no archive. Needs a recent Rust toolchain.</p>
+                <summary>Pin a version, check by hand, uninstall, build from source</summary>
+                <p>It installs one archive into <code>~/.vyrn/bin</code> — <code>%USERPROFILE%\.vyrn\bin</code> on Windows — and writes nothing outside it.</p>
+                <p>Pin a tag instead of taking the newest release:</p>
+                <div class="cmd" data-copy>
+                    <code v-html="shellHtml(pinnedInstall())"></code>
+                    <button type="button" data-copy-btn aria-label="Copy the pinned install command">Copy</button>
+                </div>
+                <p>Check a manual download yourself:</p>
+                <div class="cmd" data-copy>
+                    <code v-html="shellHtml(manualCheck())"></code>
+                    <button type="button" data-copy-btn aria-label="Copy the checksum command">Copy</button>
+                </div>
+                <p>Uninstall:</p>
+                <div class="cmd" data-copy>
+                    <code v-html="shellHtml(uninstall())"></code>
+                    <button type="button" data-copy-btn aria-label="Copy the uninstall command">Copy</button>
+                </div>
+                <p>Build from source, for the newest commit or a machine with no archive. Needs a recent Rust toolchain; a native binary needs <code>clang</code> on <code>PATH</code>.</p>
                 <div class="cmd" data-copy>
                     <code v-html="shellHtml(sourceBuild())"></code>
                     <button type="button" data-copy-btn aria-label="Copy the build commands">Copy</button>
                 </div>
-                <p>A native binary needs <code>clang</code> on <code>PATH</code>. A wasm module needs nothing.</p>
             </details>
+        </section>
+
+        <section class="band" id="after">
+            <p class="eyebrow">Then</p>
+            <h2>Build something</h2>
+            <div class="cmd" data-copy>
+                <code v-html="shellHtml(firstRun())"></code>
+                <button type="button" data-copy-btn aria-label="Copy the run command">Copy</button>
+            </div>
+            <p class="ctarow"><a class="cta" href="/guide/getting-started.html">Quickstart</a> <a class="cta" href="/docs.html">Reference</a> <a class="cta" href="/play.html">Play</a> <a class="cta" href="/docs/editors.html">Editor</a></p>
         </section>
 </main>
 </template>

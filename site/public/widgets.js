@@ -5,8 +5,7 @@
 // every label below is already in the markup when this file loads. Nothing here
 // computes a chart; it fades, sweeps, counts, or moves a playhead.
 //
-// No framework, no bundler, no dependency. Two files: this one and fresh.js.
-import { refreshRelease } from "./fresh.js";
+// No framework, no bundler, no dependency. One file.
 // NOTHING ELSE IS IMPORTED HERE, and that is the page-weight rule (RFC-0106
 // M1, M2). `play.js`, `play-wasm.js` and `wasi-min.js` were static imports
 // once, and a static import is a download: twelve of the thirteen consumer
@@ -287,18 +286,33 @@ document.addEventListener("click", (e) => {
 });
 
 
-/// Pick the platform tab that matches the visitor, and let them override it.
+/// Check the OS radio that matches the visitor.
 ///
-/// The picker IS the tab widget below — same buttons, same panes, same keyboard
-/// contract — with one difference: which tab starts selected is a guess about
-/// the reader rather than the first one.
-function installPicker(root) {
-  const guess = /Win/i.test(navigator.platform)
-    ? "windows"
-    : /Mac/i.test(navigator.platform)
-      ? "macos"
-      : "linux";
-  tabsWidget(root, { tab: "plat", pane: "plat-pane", initial: guess });
+/// The picker itself is CSS and markup — two radio buttons, a `:checked ~`
+/// selector, no script (RFC-0106 M3). This is the whole of what a script adds:
+/// a guess about which one to open on. With no script the first is checked and
+/// the control works exactly the same, which is why this can be three lines and
+/// has no keyboard contract of its own — a native radio group already has one.
+///
+/// TWO THINGS WERE WRONG WITH THE FIRST VERSION, and both are the kind that pass
+/// review and fail in a browser (RFC-0106 M3, third round):
+///
+///   1. It looked for `input[data-os]` and only the INDEX carried that attribute.
+///      On `/install` — the page a reader actually installs from — there was
+///      nothing to match, so the guess silently did nothing.
+///   2. `navigator.platform` is deprecated and frozen. It still answers `Win32`
+///      in Chrome, but a Windows browser reporting the frozen `Linux x86_64`
+///      answers wrong, and there is no reason to prefer it to
+///      `userAgentData.platform`, which is the replacement, or to the user-agent
+///      string, which every browser still has.
+///
+/// The question is now the one the picker actually asks: PowerShell or a POSIX
+/// shell. Anything that is not Windows takes the first tab, which is also the
+/// no-script default, so a wrong guess costs one press and never a wrong command.
+function guessOs(root) {
+  const ua = navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || "";
+  const radio = $(`input[data-os="${/win/i.test(ua) ? "windows" : "unix"}"]`, root);
+  if (radio) radio.checked = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -817,6 +831,8 @@ function armHeroEditor(root) {
   const runBtn = $("[data-play-run]", root);
   const src = $("[data-play-src]", root);
   const status = $("[data-play-status]", root);
+  const resetBtn = $("[data-play-reset]", root);
+  const outPane = $("[data-play-out]", root);
   if (!runBtn || !src) return;
   let armed = false;
 
@@ -834,7 +850,23 @@ function armHeroEditor(root) {
         mountPlay(root, { onReady: () => thenRun && runBtn.click() });
       },
       (err) => {
+        // HONEST WHEN IT CANNOT RUN (RFC-0106 M3, fourth round). This used to
+        // set the status line and stop: the output pane still said `Not run
+        // yet.`, the textarea stayed editable, and the Run button stayed live
+        // over an editor with no compiler behind it. Now the pane says what
+        // happened and where to go, the box goes back to read-only, and the two
+        // controls are disabled — the same shape as `mountPlay`'s own failure.
         if (status) status.textContent = "The compiler did not load";
+        if (outPane) {
+          outPane.textContent = "";
+          const el = document.createElement("span");
+          el.className = "stderr";
+          el.textContent = "The compiler did not load, so nothing here can run. Every program on this page is on /play too.";
+          outPane.append(el);
+        }
+        src.setAttribute("readonly", "readonly");
+        runBtn.disabled = true;
+        if (resetBtn) resetBtn.disabled = true;
         console.error("the hero editor did not load", err);
       }
     );
@@ -844,6 +876,9 @@ function armHeroEditor(root) {
   // and it is the row the a11y checklist asks for. Both are `once`.
   root.addEventListener("pointerenter", () => arm(false), { once: true });
   root.addEventListener("focusin", () => arm(false), { once: true });
+  // `Reset` before the editor is mounted arms it, so the button is never a
+  // control that does nothing. `mountPlay` binds the real handler after.
+  if (resetBtn) resetBtn.addEventListener("click", () => arm(false));
   // Bound BEFORE `mountPlay` adds its own, so the first press arms and the
   // replayed press runs. A press while the module is in flight is a no-op in
   // `mountPlay`'s own handler, which is why readiness has to drive the replay.
@@ -867,31 +902,58 @@ function armHeroEditor(root) {
 
 function demoWidget(root) {
   const steps = $$("[data-step]", root);
-  if (steps.length < 2) return;
+  const panes = $$("[data-pane]", root);
+  if (steps.length < 2 || panes.length !== steps.length) return;
 
   const bar = document.createElement("div");
   bar.className = "controls demobar";
   const back = document.createElement("button");
   back.type = "button";
-  back.textContent = "Back";
+  back.textContent = "‹";
+  back.setAttribute("aria-label", "Back");
   const next = document.createElement("button");
   next.type = "button";
-  next.textContent = "Next";
+  next.textContent = "›";
+  next.setAttribute("aria-label", "Next");
   const count = document.createElement("span");
   count.className = "eyebrow";
   // Polite, because the reader pressed the button that changed it.
   count.setAttribute("aria-live", "polite");
-  bar.append(back, next, count);
-  root.prepend(bar);
+  bar.append(count, back, next);
+  // The controls belong to the pane they page — the bottom of the terminal,
+  // the reference site's own placement — not a toolbar over the whole card.
+  ($(".panes", root) || root).append(bar);
 
+  // The list of titles STAYS (RFC-0106 M3). It used to set `hidden` on six of
+  // seven, which threw the outline away with the detail; every row is on the
+  // page and `.stepped` is what tells the sheet a script is driving — with no
+  // script no step is `.on`, every pane is open, and the sheet's `.stepped`
+  // rules match nothing.
+  //
+  // TWO LISTS, ONE INDEX (fourth round): the nth row and the nth pane are
+  // marked together, and the guard above refuses to drive them at all unless
+  // there is exactly one pane per step. `aria-current` is on the row rather than
+  // announced from the counter, so the marked step is the marked step for a
+  // screen reader too.
+  root.classList.add("stepped");
   let at = 0;
   const show = (i) => {
     at = (i + steps.length) % steps.length;
-    steps.forEach((s, k) => (s.hidden = k !== at));
+    steps.forEach((s, k) => {
+      s.classList.toggle("on", k === at);
+      if (k === at) s.setAttribute("aria-current", "step");
+      else s.removeAttribute("aria-current");
+    });
+    panes.forEach((p, k) => p.classList.toggle("on", k === at));
     count.textContent = at + 1 + " / " + steps.length;
     back.disabled = at === 0;
-    next.textContent = at === steps.length - 1 ? "Replay" : "Next";
+    next.textContent = at === steps.length - 1 ? "Replay" : "›";
+    if (at === steps.length - 1) next.removeAttribute("aria-label");
+    else next.setAttribute("aria-label", "Next");
   };
+  // Pointer-only, and deliberately: every step is already reachable with Back,
+  // Next and the arrow keys, so this adds no function a keyboard cannot do.
+  steps.forEach((s, k) => s.addEventListener("click", () => show(k)));
   back.addEventListener("click", () => show(at - 1));
   next.addEventListener("click", () => show(at === steps.length - 1 ? 0 : at + 1));
   root.addEventListener("keydown", (e) => {
@@ -920,7 +982,7 @@ function boot() {
   for (const el of $$('[data-widget="strip"]')) stripWidget(el);
   for (const el of $$("[data-tabs]")) tabsWidget(el);
   for (const el of $$('[data-widget="radar"]')) radarWidget(el);
-  for (const el of $$("[data-install]")) installPicker(el);
+  for (const el of $$(".picker")) guessOs(el);
   moduleSearch();
   // The playground, on the one page that has one. `boot()` is not awaited and
   // the mount does not have to finish before the rest of the page works, so the
@@ -935,7 +997,6 @@ function boot() {
   }
   for (const el of $$('[data-widget="playhero"]')) armHeroEditor(el);
   for (const el of $$("svg.graph")) graphWidget(el);
-  refreshRelease();
 }
 
 boot();

@@ -28,11 +28,15 @@
   --danger: oklch(0.5568 0.2078 25.33);
   --amber: oklch(0.52 0.1447 70.08);
 
-  --n0: oklch(0.18 0.004 60);
+  /* The light paper sits at 0.955, not 0.975: a near-white ground under
+   * near-black ink read as glare next to the reference site's softer field
+   * (tenth-round user note: "less flashing light"). The ink lifts a step in
+   * trade, so every AA pair keeps its margin. */
+  --n0: oklch(0.21 0.004 60);
   --n1: oklch(0.42 0.004 60);
-  --n2: oklch(0.53 0.004 60);
-  --n3: oklch(0.92 0.003 60);
-  --n4: oklch(0.975 0.002 60);
+  --n2: oklch(0.505 0.004 60);
+  --n3: oklch(0.905 0.003 60);
+  --n4: oklch(0.955 0.002 60);
 
   --ink: var(--n0);
   --muted: var(--n1);
@@ -42,6 +46,15 @@
   --hair: color-mix(in oklab, var(--n0) 10%, transparent);
   --accent: var(--navy);
   --field: 18, 50, 88;
+
+  /* THE SCRIM UNDER THE SEARCH OVERLAY, AND WHY IT IS ITS OWN TOKEN
+   * (RFC-0106 M3, third round). It was `color-mix(… var(--n0) 45% …)`, and
+   * `--n0` is the INK: it is near-black in this block and near-white in the two
+   * below it, so the dialog that dimmed the page in light mode washed it WHITE
+   * in dark mode. A scrim does one job in both palettes — it darkens what is
+   * behind it — so it is not a neutral-ramp alias. It is darker and more opaque
+   * in dark mode, where the page under it is already dark. */
+  --scrim: oklch(0.18 0.004 60 / 0.45);
 
   /* Syntax colour, and the two ownership lanes. Tokens rather than literals on
    * the rules below, for one reason: a palette that lives in one block can be
@@ -92,20 +105,40 @@
 
   --mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Menlo, monospace;
   --sans: ui-sans-serif, "Segoe UI", Roboto, Helvetica, sans-serif;
+  /* Display faces for headings only: the optical-size cuts (Segoe UI Variable
+   * Display, SF Pro Display) carry tight tracking at 40px+ where the text cut
+   * reads like a bolded paragraph — the single largest visual gap to the
+   * reference site, closed with zero shipped font bytes. */
+  --sans-d: "Segoe UI Variable Display", "SF Pro Display", ui-sans-serif, "Segoe UI", Roboto, Helvetica, sans-serif;
 
   /* THE TYPE SCALE (RFC-0106 M1). Type was 34 unnamed literals while colour and
    * spacing were tokens. `site/test/typescale.test.mjs` resolves every size in
    * this file against this block. Root is 16px; every number was already in the
    * sheet bar the display floor. */
-  --t-display: clamp(2.1rem, 1rem + 4vw, 4.5rem);
+  --t-display: clamp(2.1rem, 0.9rem + 4.6vw, 5.1rem);
   --t-h1: clamp(1.7rem, 1.1rem + 1.8vw, 2.4rem);
-  --t-h2: clamp(1.5rem, 1rem + 1.4vw, 2.2rem);
+  --t-h2: clamp(1.6rem, 1rem + 2vw, 2.75rem);
   --t-h3: 1.5rem; --t-h4: 1.1rem; --t-h5: 1rem; --t-lede: 1.2rem;
   --t-body: 17px; --t-body-s: 16px;
   --t-note: 0.95rem; --t-meta: 0.92rem; --t-matrix: 0.9rem; --t-cap: 0.85rem;
   --t-mark: 15px; --t-cmd: 14px; --t-code: 13.5px; --t-code-s: 12.5px;
   --t-mono: 13px; --t-eyebrow: 12px; --t-key: 11px; --t-tick: 10px;
-  --t-axis: 9px;
+
+  /* THE TWO STEPS THAT ARE NOT PIXELS (RFC-0106 M3, fourth round).
+   *
+   * Text inside a `viewBox` is drawn in USER UNITS and scaled with the picture,
+   * so a token's number here is not what a reader gets. Measured on the shipped
+   * tree, at `--t-axis: 9px` and `--t-key: 11px`: the index's bar strip painted
+   * its labels at 6.6 and 8.0 px on a 1280px desktop, `/compare`'s five bar
+   * charts at 3.0 and 3.6 px on a phone, and the backstage's pulse at 3.0. Every
+   * chart on the site was under 12px and most were under 9.
+   *
+   * The scale is the container's width over the viewBox's, and two rules below
+   * bound it — `max-width` so no chart is ever drawn LARGER than its own units,
+   * and a scroller under 900px so none is ever drawn smaller than 0.77 of them.
+   * Inside that band these two numbers are 12.4 to 18.1 px of real text, which
+   * is the claim `svg.chart` carries and the sweep measures. */
+  --t-svg: 18px; --t-svg-s: 17px;
 
   /* Nine sizes are NOT steps — four mono numerals sized to one widget's box,
    * `.bignum`'s ramp, one cell's `0.78rem`, three shares of a context. */
@@ -117,6 +150,19 @@
   --s4: 32px;
   --s5: 48px;
   --s6: 64px;
+
+  /* SECTION RHYTHM (RFC-0106 M3). ONE number for the vertical space around every
+   * section on every consumer page. `.band` used to be a 64px margin ABOVE its
+   * rule with 64px of padding below it and nothing under its content, so the
+   * seam sat hard against one block and floated away from the next. A section is
+   * `padding: var(--sect) 0` and a `border-top` now: sections touch, and no
+   * section carries a vertical margin. 32px on a phone, 56px from 1244px. */
+  --sect: clamp(40px, 6vw, 76px);
+
+  /* The sheet's own side gutter, as a token, because two rules need the same
+   * number: `#root`'s padding, and the negative offset that lets a section's
+   * hairline reach the page edge instead of stopping inside it. */
+  --gut: var(--s4);
 
   /* TEXT ROLES AND THEIR WIDTH. Three roles, and the role decides the width —
    * not the element. Read this before changing any `max-width` on text.
@@ -195,6 +241,7 @@
     --danger: oklch(0.72 0.17 25.33);
     --amber: oklch(0.8 0.15 70.08);
     --field: 79, 227, 242;
+    --scrim: oklch(0.08 0.004 60 / 0.72);
     --syn-kw: var(--cyan);
     --syn-str: oklch(0.78 0.1 150);
     --syn-com: var(--n1);
@@ -219,6 +266,7 @@
   --danger: oklch(0.72 0.17 25.33);
   --amber: oklch(0.8 0.15 70.08);
   --field: 79, 227, 242;
+  --scrim: oklch(0.08 0.004 60 / 0.72);
   --syn-kw: var(--cyan);
   --syn-str: oklch(0.78 0.1 150);
   --syn-com: var(--n1);
@@ -235,7 +283,7 @@
 
 /* The display step, on the nine landing pages only: `export.vyrn` stamps
  * `data-landing` per route, and asserts no leaf has it (RFC-0106 M1). */
-:root[data-landing] { --t-display: clamp(2.6rem, 1rem + 4vw, 4.5rem); }
+:root[data-landing] { --t-display: clamp(2.6rem, 0.9rem + 4.6vw, 5.1rem); }
 
 * { box-sizing: border-box; }
 
@@ -411,9 +459,14 @@ h1 code, h2 code, h3 code, h4 code {
    ------------------------ */
 
 #root {
-  max-width: 1280px;
+  max-width: 1232px;
   margin: 0 auto;
-  padding: 0 var(--s4) var(--s6);
+  /* THE PAGE IS A PLATE (RFC-0106 M3, ninth round): two full-height hairlines
+   * frame the content column, the reference site's quietest structural device.
+   * The section seams already bleed by `--gut` to this border box, so every
+   * seam lands exactly on the frame. */
+  border-inline: 1px solid var(--hair);
+  padding: 0 var(--gut) var(--s6);
   display: grid;
   /* `minmax(0, 1fr)`, not `1fr`. A `1fr` track is `minmax(auto, 1fr)`, so its
    * floor is the WIDEST MIN-CONTENT inside it — one `<pre>` of unbreakable
@@ -452,10 +505,15 @@ h1 code, h2 code, h3 code, h4 code {
   display: flex; align-items: center; gap: var(--s2);
   min-height: 64px; padding: var(--s1) 0;
   border-bottom: 1px solid var(--rule);
-  font: var(--t-mono)/1 var(--mono); letter-spacing: 0.08em;
+  /* CHROME IS SANS, CODE IS MONO (RFC-0106 M3, eighth round). Every control
+   * and label on the site was monospace, so the whole page read as terminal
+   * output and no amount of case could quiet it. Mono is reserved for what is
+   * actually code or data — commands, counters, kickers, the wordmark — and
+   * the chrome speaks the body's own face. */
+  font: var(--t-cmd)/1 var(--sans);
 }
 
-.wordmark { font-weight: 600; font-size: var(--t-mark); letter-spacing: 0.18em; text-transform: uppercase; text-decoration: none; color: var(--accent); }
+.wordmark { font: 600 var(--t-mark)/1 var(--mono); letter-spacing: 0.18em; text-transform: uppercase; text-decoration: none; color: var(--accent); }
 
 /* Everything in the header is a 44px box: one rule, not six (row 29). */
 .masthead a, .masthead button, .masthead summary { display: inline-flex; align-items: center; min-height: 44px; }
@@ -478,44 +536,116 @@ h1 code, h2 code, h3 code, h4 code {
 .theme, .find { display: none; }
 .masthead .slot { display: contents; }
 [data-js] .theme, [data-js] .find {
-  display: inline-flex; font: inherit; letter-spacing: inherit;
-  text-transform: uppercase; color: var(--muted); background: none;
-  border: 1px solid var(--rule); padding: 0 var(--s1); cursor: pointer;
+  display: inline-flex; font: inherit; letter-spacing: 0.02em;
+  color: var(--muted); background: none;
+  border: 1px solid var(--hair); padding: 0 var(--s1); cursor: pointer;
 }
 [data-js] .theme { margin-left: auto; }
-[data-js] .theme:hover, [data-js] .find:hover { color: var(--ink); border-color: var(--accent); }
+[data-js] .theme:hover, [data-js] .find:hover { color: var(--ink); border-color: color-mix(in oklab, var(--accent) 55%, transparent); }
+
+/* THE SEARCH CONTROL LOOKS LIKE A FIELD ON A DESKTOP (RFC-0106 M3, fourth
+ * round). It was a 83px icon-and-word button, which is a control a reader has to
+ * recognize rather than read; the reference site ships a wide field with its
+ * placeholder and its shortcut visible, and that half is worth taking.
+ *
+ * IT IS STILL A BUTTON. A real `<input>` here would be a second search field
+ * that has to hand its keystrokes to the overlay's own — two fields, one query,
+ * and a no-script page with a text box that does nothing. This is a button that
+ * opens a dialog, and it says so: `aria-label` is the accessible name, so the
+ * placeholder text and the `/` chip are decoration a screen reader never
+ * announces twice.
+ *
+ * ONLY ABOVE 1024px, and that is deliberate rather than shy. The masthead row
+ * fits at 320px with ZERO pixels to spare (RFC-0106 M3, second round, I3), and
+ * the phone band's rules are what bought that. So the wide form is added where
+ * the row has slack and the two narrower forms below are exactly what they
+ * were: icon and word to 1023px, icon alone to 640px. */
+@media (min-width: 1024px) {
+  [data-js] .find {
+    width: 17rem; justify-content: flex-start; gap: var(--s1);
+    padding: 0 var(--s1) 0 var(--s2);
+  }
+  .find .word {
+    flex: 1; text-align: left; text-transform: none;
+    letter-spacing: 0; color: var(--n2);
+  }
+  .find .key {
+    border: 1px solid var(--rule); padding: 2px 7px;
+    font: var(--t-key)/1.4 var(--mono); color: var(--n2);
+  }
+  [data-js] .find:hover .key { border-color: var(--accent); }
+}
+/* Below the wide form the chip and the rest of the placeholder are not shown at
+ * all: at 1023px and under the control is the word `Search`, and at 640px and
+ * under the glyph alone. A keyboard hint on a phone is noise, and a 17rem field
+ * at 768px is the header-row overflow three milestones spent fixing. */
+.find .key, .find .hint { display: none; }
+@media (min-width: 1024px) {
+  .find .key { display: inline-flex; }
+  .find .hint { display: inline; }
+}
 
 /* `.theme`'s own auto margin is for the backstage masthead, which has no
  * wrapper; inside this one it would push the two apart. */
 .tools { display: flex; align-items: center; gap: var(--s2); margin-left: auto; }
-.tools .theme { margin-left: 0; }
+/* The theme control earns its box on hover; at rest it is a word. */
+.tools .theme { margin-left: 0; border-color: transparent; background: none; }
+.tools .theme:hover { border-color: var(--hair); background: color-mix(in oklab, var(--ink) 4%, transparent); }
 
 /* THE SEARCH OVERLAY (RFC-0106 M1). A sheet near the top, not a centred box: a
  * list belongs under the field that filters it. The index is fetched on the
  * first open, so these rules are all it costs a page that never opens. */
-.findbox { position: fixed; inset: 0; z-index: 200; background: color-mix(in oklab, var(--n0) 45%, transparent); display: flex; justify-content: center; padding: var(--s5) var(--s2); }
+.findbox { position: fixed; inset: 0; z-index: 200; background: var(--scrim); display: flex; justify-content: center; padding: var(--s5) var(--s2); }
 .findbox[hidden] { display: none; }
 .findpanel { width: 100%; max-width: 44rem; max-height: 70vh; display: flex; flex-direction: column; background: var(--paper); border: 1px solid var(--accent); }
-.findpanel input { font: var(--t-lede)/1.4 var(--sans); padding: var(--s2); border: 0; border-bottom: 1px solid var(--rule); background: none; color: var(--ink); }
+.findpanel input { font: var(--t-lede)/1.4 var(--sans); padding: var(--s2); border: 0; border-bottom: 1px solid var(--rule); background: none; color: var(--ink); flex: 0 0 auto; }
 .findpanel input:focus-visible { outline-offset: -2px; }
-.findpanel [data-search-results] { overflow-y: auto; }
+/* THE RESULT LIST IS THE PART THAT SCROLLS (RFC-0106 M3, third round). This rule
+ * named `[data-search-results]` and the markup carries `data-find-results`, so
+ * for three milestones nothing in the panel scrolled: forty results ran out of
+ * a 70vh box, the last thirty were unreachable with the mouse, and the arrow
+ * keys walked a selection off the bottom edge into nothing. `min-height: 0` is
+ * the other half — a flex item will not shrink below its content without it, so
+ * `overflow-y` alone would have had nothing to overflow. */
+.findpanel [data-find-results] { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 .findpanel .sect { font: var(--t-eyebrow)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); padding: var(--s2) var(--s2) var(--s1); border-top: 1px solid var(--hair); }
 .findpanel .hit { display: block; padding: var(--s1) var(--s2); min-height: 44px; text-decoration: none; color: var(--ink); }
 .findpanel .hit .d { display: block; color: var(--muted); font-size: var(--t-meta); }
 .findpanel .hit[aria-selected="true"] { background: color-mix(in oklab, var(--accent) 12%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
-.findpanel .cap { border: 0; padding: var(--s1) var(--s2); }
+.findpanel .cap { border: 0; padding: var(--s1) var(--s2); flex: 0 0 auto; }
 
 /* The one call to action (RFC-0106 M1). The only filled thing in the header,
  * because there is one of it. */
+/* THE CALL TO ACTION HAS ITS OWN BOX AND ITS OWN FONT (RFC-0106 M3, second
+ * round). It had neither: in the masthead it inherited that row's 13px mono and
+ * a 44px min-height, and in CONTENT it inherited the body's 17px sans and came
+ * out 29px tall — so the same class was two different controls, and the one on
+ * `/` and `/install` was the odd element out among 12px mono buttons. */
 .cta {
-  padding: 0 var(--s2); background: var(--accent); color: var(--paper);
-  border: 1px solid var(--accent); text-decoration: none; font-weight: 600;
-  text-transform: uppercase; letter-spacing: 0.1em; white-space: nowrap;
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 40px; padding: 0 var(--s3);
+  background: var(--accent); color: var(--paper);
+  border: 1px solid var(--accent); text-decoration: none;
+  font: 600 var(--t-cmd)/1.4 var(--sans);
+  white-space: nowrap;
 }
+/* The masthead's row is 64px and every control in it is a 44px target. */
+.masthead .cta { min-height: 44px; padding: 0 var(--s2); }
 .cta:hover { background: color-mix(in oklab, var(--accent) 85%, var(--ink)); }
 /* On `/install` the button is where the reader is, so it reports rather than
  * invites — the nav marker's job, in this control's shape. */
 .cta[aria-current="page"] { background: none; color: var(--accent); }
+/* A CONTENT CTA IS A LINK, NOT A BUTTON. The filled box is the masthead
+ * Install's shape, and there is one of it; a second filled box in every
+ * section makes four "primary" actions per screen. In content the same class
+ * is an accent arrow-link: same mono voice, no fill, weight from the arrow. */
+.ctarow .cta {
+  background: none; border: 0; color: var(--accent);
+  padding: 0; min-height: 44px;
+}
+.ctarow .cta::after { content: " \2192"; margin-left: 6px; transition: translate 160ms var(--expo); }
+.ctarow .cta:hover { background: none; color: var(--accent); text-decoration: underline; text-underline-offset: 4px; }
+.ctarow .cta:hover::after { translate: 3px 0; }
 
 /* THE NAVIGATION DISCLOSURE (RFC-0106 M1). ONE `<nav>`: five links in a row
  * here, a panel behind `Menu` in the 640px block. BASE rules, so a browser with
@@ -534,7 +664,7 @@ h1 code, h2 code, h3 code, h4 code {
 .nav::-webkit-scrollbar { display: none; }
 /* 44px at every width: this MOVED out of the 640px query, which left every nav
  * link 89x13 above 640px (RFC-0106 M1). */
-.nav a { text-decoration: none; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; white-space: nowrap; }
+.nav a { text-decoration: none; color: var(--muted); font-weight: 500; white-space: nowrap; transition: color 140ms var(--expo); }
 .nav a:hover { color: var(--ink); }
 .menu > .nav { display: flex; }
 /* Where the reader is. `site/export.vyrn` stamps the attribute per published
@@ -554,7 +684,7 @@ h1 code, h2 code, h3 code, h4 code {
   margin-top: var(--s6);
   padding-top: var(--s3);
   border-top: 1px solid var(--rule);
-  font: var(--t-eyebrow)/1.8 var(--mono);
+  font: var(--t-meta)/1.8 var(--sans);
   color: var(--muted);
   display: flex;
   flex-wrap: wrap;
@@ -609,11 +739,17 @@ h1 code, h2 code, h3 code, h4 code {
 }
 
 .display {
+  font-family: var(--sans-d);
   font-size: var(--t-display);
-  line-height: 0.98;
-  letter-spacing: -0.03em;
-  font-weight: 640;
+  line-height: 0.95;
+  letter-spacing: -0.042em;
+  font-weight: 720;
 }
+
+/* Section headings take the display face too — a page whose h2s are body-face
+ * bold reads as one long article, not sections. Tracking scales with size:
+ * looser than the display, tighter than text. */
+h2, .cards h3 { font-family: var(--sans-d); letter-spacing: -0.02em; font-weight: 700; }
 
 /* READING. A lede is the one paragraph deliberately narrower than the block
  * beside it: the display headline above it is what fills the column, and the
@@ -627,16 +763,32 @@ h1 code, h2 code, h3 code, h4 code {
 .prose h2 { margin-top: var(--s6); font-size: var(--t-h3); }
 .prose h3 { margin-top: var(--s4); font-size: var(--t-h4); }
 
-.pill {
-  display: inline-block;
+/* ONE STATIC LABEL BOX. `.pill` was 25px tall and `.chips li` 33px, for two
+ * things that are both a word in a bordered box (RFC-0106 M3, second round). */
+.pill, .chips li {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
   font: var(--t-key)/1 var(--mono);
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  padding: 6px 10px;
+  padding: 0 10px;
   border: 1px solid var(--rule);
   color: var(--muted);
 }
-.pill.live { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 40%, transparent); }
+/* A state is a dot and a word, once (RFC-0106 M3, seventh round). "Runs here"
+ * beside "Press Run" was two caps labels reading as one confusing element; the
+ * breathing dot now lives on the status itself — `Ready`, `Running…`, `Ran` —
+ * and there is nothing else to reconcile it with. */
+.pill.live { color: var(--muted); border: 0; padding: 0; min-height: 0; letter-spacing: 0.08em; text-transform: uppercase; display: inline-flex; align-items: center; gap: 7px; }
+.pill.live::before, .plate-head [data-play-status]::before {
+  content: ""; width: 7px; height: 7px; border-radius: 50%; flex: none;
+  background: var(--accent);
+  animation: breathe 2.4s var(--expo) infinite;
+}
+.plate-head [data-play-status] { display: inline-flex; align-items: center; gap: 7px; }
+@keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .pill.live::before, .plate-head [data-play-status]::before { animation: none; } }
 
 /* ------------------------
    The widget chassis (brief 4). Pill + eyebrow, one headline number, one
@@ -678,18 +830,21 @@ h1 code, h2 code, h3 code, h4 code {
   margin: 0;
 }
 
+/* A CONTROL SPEAKS QUIETLY (RFC-0106 M3, sixth round). Every button was
+ * uppercase tracked-out mono in a hard box — the same voice as a kicker, on
+ * twelve controls per screen, which is why the page read as shouting. Controls
+ * keep the mono but drop the caps and the tracking, sit on a soft wash behind
+ * a hairline, and save the hard accent for hover and the one filled CTA. */
 button, .btn {
-  font: var(--t-eyebrow)/1 var(--mono);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  padding: 9px 14px;
-  border: 1px solid var(--rule);
-  background: transparent;
+  font: 500 var(--t-mono)/1 var(--sans);
+  padding: 8px 12px;
+  border: 1px solid var(--hair);
+  background: color-mix(in oklab, var(--ink) 4%, transparent);
   color: var(--ink);
   cursor: pointer;
-  transition: border-color 160ms var(--expo), color 160ms var(--expo), transform 160ms var(--overshoot);
+  transition: border-color 160ms var(--expo), color 160ms var(--expo), background 160ms var(--expo), transform 160ms var(--overshoot);
 }
-button:hover, .btn:hover { border-color: var(--accent); color: var(--accent); }
+button:hover, .btn:hover { border-color: color-mix(in oklab, var(--accent) 55%, transparent); color: var(--accent); }
 button:active { transform: translateY(1px); }
 button[aria-pressed="true"], button.on { border-color: var(--accent); color: var(--accent); }
 
@@ -702,7 +857,7 @@ button[aria-pressed="true"], button.on { border-color: var(--accent); color: var
 pre.code {
   margin: var(--s3) 0 0;
   padding: var(--s2);
-  border: 1px solid var(--rule);
+  border: 1px solid var(--hair);
   overflow-x: auto;
   font-size: var(--t-code);
   line-height: 1.7;
@@ -740,26 +895,46 @@ pre.code {
 .out > div.on { color: var(--ink); }
 .out > div.on .ol::before { color: var(--accent); }
 
+/* A command box is a fill first and a hairline second — the reference site's
+ * command is a lighter field on the ground, not an outlined rectangle. */
 .cmd {
   display: flex;
   align-items: stretch;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--hair);
+  background: color-mix(in oklab, var(--plate) 55%, transparent);
   margin-top: var(--s2);
 }
 .cmd code {
   flex: 1;
+  /* `min-width: 0`, or the scroller never scrolls: a flex item's automatic
+   * minimum is its MIN-CONTENT width, and the min-content width of a `pre`
+   * command is the whole command — so the box grew to 800px inside a 288px
+   * phone and took the document with it (RFC-0106 M3, second round). */
+  min-width: 0;
   padding: 14px var(--s2);
   font-size: var(--t-cmd);
   overflow-x: auto;
   white-space: pre;
+  /* A scrollbar at rest is the loudest thing in any box it sits under. The
+   * scroller stays (trackpad, touch, keyboard all still pan) but draws no bar;
+   * the mask fades the last 24px of PAINTED text, so a command that fits shows
+   * no fade at all and a clipped one visibly dissolves instead of slicing. */
+  scrollbar-width: none;
+  mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
 }
-.cmd button { border: 0; border-left: 1px solid var(--rule); }
+.cmd code::-webkit-scrollbar { display: none; }
+.cmd button { border: 0; align-self: stretch; background: none; font-size: var(--t-key); color: var(--n2); }
+/* A command block is one row, and the row is the height of one line of code
+ * plus its padding. Nothing inside it may grow it. */
+.cmd code { line-height: 1.5; }
 
 /* ------------------------
    Landing
    ------------------------ */
 
-.hero { padding: var(--s6) 0 var(--s5); }
+/* A hero is a section, and it obeys the same rhythm as every other one. It has
+ * no rule above it because the masthead's own bottom border is that seam. */
+.hero { padding: var(--sect) 0; }
 .hero .display { margin-bottom: var(--s3); }
 .hero .display em { font-style: normal; color: var(--accent); }
 
@@ -774,8 +949,23 @@ pre.code {
  * on the right, both above the fold on a laptop. Below 1024px it is one column
  * and the editor follows the command, which is the reading order the markup
  * already has — no `order` anywhere. */
-.hero.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--s4); align-items: start; }
+/* The index's hero stays 1fr/1fr: 2fr of 1216px sets a 67px display headline in
+ * 486px, which is four lines of two words. `stretch` is the M3 half — the editor
+ * is as tall as the column beside it and the OUTPUT AREA takes the slack, so the
+ * right column cannot end above the left and leave a dead strip. */
+.hero.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--s4); align-items: stretch; }
 @media (max-width: 1024px) { .hero.split { grid-template-columns: minmax(0, 1fr); } }
+.hero.split > div { min-width: 0; }
+.heroplay { display: flex; flex-direction: column; }
+/* ONE SURFACE (RFC-0106 M3, tenth round). The editor floated as a lighter
+ * washed box inset inside the plate — a box in a box by background instead of
+ * border. The plate is the terminal: head, code and output are one surface
+ * split by hairlines, which is the reference site's card anatomy. */
+.heroplay .editor { flex: 0 0 auto; margin: 0; }
+/* Three classes, same reason as the textarea height above: `.play .editor
+ * pre.hl` is declared later, so an equal-specificity override loses. */
+.play.heroplay .editor pre.hl { background: none; }
+.heroplay .out { margin: 0; border-left: 0; border-top: 1px solid var(--hair); background: none; }
 
 /* The hero editor is the playground's own box at a height that leaves room for
  * the output under it. `52vh` is right on a page that IS an editor and wrong on
@@ -783,69 +973,389 @@ pre.code {
  * 884px box for a fifteen-line program. THREE classes, not two: the rule it
  * overrides (`.play .editor textarea`) is declared LATER in this sheet, so an
  * override of equal specificity would lose. */
-.play.heroplay .editor textarea { height: auto; min-height: 0; }
-.heroplay .out { max-height: 9em; overflow: auto; }
+.play.heroplay .editor textarea { height: auto; min-height: 0; resize: none; }
+/* The hero editor holds a program that fits it; a scrollbar at rest says
+ * otherwise. Panning still works everywhere it could before. */
+.heroplay .editor pre, .heroplay .editor textarea, .heroplay .out { scrollbar-width: none; }
+.heroplay .editor pre::-webkit-scrollbar, .heroplay .editor textarea::-webkit-scrollbar, .heroplay .out::-webkit-scrollbar { display: none; }
+/* On a phone the head's four items cannot share 343px: the pill is the one
+ * that is decor, so it is the one that goes, and Run stays on the row. */
+@media (max-width: 640px) { .heroplay .pill { display: none; } }
+/* THE OUTPUT PANE GROWS INTO THE COLUMN (RFC-0106 M3). It was `max-height: 9em`
+ * against a fixed editor, so the plate ended well above the column beside it. */
+.heroplay .out { flex: 1; min-height: 6em; max-height: none; overflow: auto; }
 .heroplay .plate-head { border-bottom: 1px solid var(--rule); }
+/* The keyboard hint and the reset control, both of which only mean anything with
+ * a script: `[data-js]` is on the root once `theme.js` has run, and the shell
+ * gates the theme and search controls the same way. */
+.btn.jsonly { display: none; }
+[data-js] .btn.jsonly { display: inline-flex; }
 
 /* Facts, as chips. Four short truths a reader can take at a glance, and every
  * one of them is checkable on another page — which is why none of them is a
  * badge with a number painted into it. */
 .chips { list-style: none; display: flex; flex-wrap: wrap; gap: var(--s1); margin: var(--s3) 0 0; padding: 0; }
-.chips li { padding: 6px var(--s2); border: 1px solid var(--rule); font: var(--t-eyebrow)/1.6 var(--mono); letter-spacing: 0.06em; color: var(--muted); }
+.chips li { padding: 0 var(--s2); }
 
 /* The four pillars. Two lines and one command each, and the command is the
  * point: a card that ends in a paragraph ends in nothing to do. */
 .cards { list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--s3); margin: var(--s4) 0 0; padding: 0; }
-.cards > li { border: 1px solid var(--rule); padding: var(--s2); display: flex; flex-direction: column; }
+.cards > li { border: 1px solid var(--rule); padding: var(--s3); display: flex; flex-direction: column; transition: border-color 160ms var(--expo); }
+.cards > li:hover { border-color: color-mix(in oklab, var(--accent) 40%, var(--rule)); }
 .cards h3 { font-size: var(--t-h3); margin-bottom: var(--s1); display: flex; align-items: center; gap: var(--s1); }
 .cards p { color: var(--muted); flex: 1; }
-.cards .cmd { margin-top: var(--s2); }
+/* A card is 280px, so its command stacks over its Copy button and takes the
+ * whole width rather than sharing it with an 86px button. The card's own
+ * border is the only hard edge: the command sits on a wash, not in a second
+ * box, and Copy is a quiet strip — a card drawn as three stacked rectangles
+ * of equal border weight was the boxes-in-boxes read. */
+.cards .cmd { margin-top: var(--s2); flex-direction: column; align-items: stretch; border: 0; background: color-mix(in oklab, var(--ink) 5%, transparent); }
+/* One size down inside a card: the longest pillar command is 30 characters,
+ * and 13px mono holds all 30 inside a 280px track where 14px clips two of
+ * the four into the fade. */
+.cards .cmd code { font-size: var(--t-mono); padding: 10px 12px; }
+.cards .cmd button { border-left: 0; border-top: 1px solid var(--hair); min-height: 26px; padding: 4px 10px; }
 
-/* The three install tiles. Not tabs: a reader on a phone deciding whether to
- * install this wants to SEE that their machine is one of the three, and a tab
- * hides two thirds of that answer behind a press. */
-.tiles { list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: var(--s3); margin: var(--s4) 0 0; padding: 0; }
-.tiles > li { border: 1px solid var(--rule); padding: var(--s2); }
-.tiles h3 { font-size: var(--t-h3); margin-bottom: var(--s1); }
-.tiles p { margin-top: var(--s2); color: var(--muted); font-size: var(--t-meta); }
+/* A COMMAND IS ONE LINE (RFC-0106 M3, second round).
+ *
+ * M2 made four places WRAP instead, to stop a long install line being clipped
+ * at `…/vyrn/main/inst`. That traded one defect for a worse one: measured on
+ * the exported tree, the index hero's three commands each painted two lines,
+ * `vyrn build … --target wasm` painted FOUR in a pillar card, and every `Copy`
+ * button stretched to match — 50, 73, 95 and 118px tall on one page. A shell
+ * command broken across four lines is a command a reader cannot tell they have
+ * copied whole.
+ *
+ * So the sheet's own default holds everywhere: `white-space: pre` inside a
+ * scroller. The block scrolls, the page does not, and the fix for "the end is
+ * off the edge" is to give the block more width — which is what `.cmdwide`
+ * below does, and what the reference site does with its own command box. */
 
-/* A COMMAND THAT MUST BE READ, NOT ONLY COPIED. The sheet's default is
- * `white-space: pre` with a scroller, which is right for a long build line in a
- * wide plate and wrong in a 300px tile: an install command clipped at
- * `…/vyrn/main/inst` is a stranger's script a reader is asked to pipe into a
- * shell without seeing the end of it. These three places wrap instead — the
- * install tiles, the index's install tabs, and the pillar cards (RFC-0106 M2).
- * It is the same rule the sheet already applies to every `.cmd` at 640px. */
-.tiles .cmd code, [data-install] .cmd code, .cards .cmd code { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* THE CENTRED HERO (/install, RFC-0106 M3). One question, one answer, one
+ * command. The only centred text on this site, and only because nothing is
+ * beside it. */
+/* THE COMMAND BOX IS WIDER THAN THE LEDE, which is the reference site's shape
+ * and the reason its install command never wraps: 50rem holds the longest line
+ * this site publishes (79 characters at `--t-cmd`, plus the Copy button) with
+ * nothing to scroll, while the sentence above it stays at a centred measure. */
+/* `width: 100%` IS LOAD-BEARING. `margin: 0 auto` on a grid item makes it
+ * self-align `center` instead of `stretch`, and a non-stretched grid item is
+ * sized `fit-content` — so the section took the MIN-CONTENT of the widest thing
+ * in it, which is a 79-character install command, and painted 690px inside a
+ * 278px phone column. With an explicit width the section is its track, the
+ * command scrolls inside its own box, and the auto margins still centre it
+ * wherever the track is wider than 50rem. */
+.hero.mid { text-align: center; max-width: 50rem; width: 100%; margin: 0 auto; }
+/* A centred paragraph is read on both edges at once, so it wants a NARROWER
+ * measure than a ragged-right one, not the container's. */
+.hero.mid .lede { max-width: 32rem; margin-left: auto; margin-right: auto; }
+.hero.mid .cmd { text-align: left; }
+.hero.mid .ctarow { text-align: center; margin-top: var(--s2); }
+
+/* THE OS PICKER: TWO RADIO BUTTONS, NO SCRIPT, NO ID IN THIS SHEET.
+ *
+ * The inputs are visually hidden and come first in the markup, so `:checked ~`
+ * reaches both the labels and the panes. Selection is BY POSITION — the nth
+ * input drives the nth label and the nth pane — so the sheet never spells a
+ * platform's name and a third target is one more `<label>`, one more `<div>`
+ * and one more line here. There is no JavaScript for it at all, and a keyboard
+ * gets a native radio group, arrows included. The `<fieldset>` IS that group
+ * and its `<legend>` is its name; the default border and padding come off.
+ *
+ * TWO, because there are two commands: `install.sh` through a POSIX shell and
+ * `install.ps1` through PowerShell. Three tiles meant macOS and Linux showed a
+ * reader the same line twice (RFC-0106 M3, third round). */
+.picker { margin: var(--s4) 0 var(--s2); border: 0; padding: 0; min-width: 0; }
+.cmdlabel + .picker { margin-top: var(--s2); }
+
+/* CHIPS, NOT A BAR (RFC-0106 M3, seventh round). The fused segmented header
+ * made the picker the heaviest element in the hero — a 44px two-cell bar wider
+ * than the command it selects. The reference site's tabs are the quietest
+ * thing near the command: a short row of small chips. Ours are the same chips
+ * the control voice already defined, selection carried by the accent, and the
+ * row sits wherever the markup puts it — under the command in the index hero
+ * (the reference front page's order), above it on `/install`. */
+/* ONE PILL, NOT TWO CHIPS (tenth round). The reference switch is a single
+ * container whose segments are quiet words; selection is a lighter fill
+ * inside it. `.tabrow` holds the pill and, on the index hero, the one link
+ * out — it exists so the pill can be `inline-flex` without the link entering
+ * the container. */
+.tabrow { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin: 0 0 var(--s2); }
+.ospanes + .tabrow { margin: var(--s2) 0 0; }
+.hero.mid .tabrow { justify-content: center; }
+.ostabs {
+  display: inline-flex; flex-wrap: wrap; gap: 3px; padding: 3px;
+  border: 1px solid var(--hair);
+  background: color-mix(in oklab, var(--ink) 3%, transparent);
+}
+.ostabs label {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 30px; padding: 5px 12px; cursor: pointer;
+  font: 500 var(--t-mono)/1 var(--sans);
+  color: var(--muted);
+  transition: color 140ms var(--expo), background 140ms var(--expo);
+}
+.ostabs label:hover { color: var(--ink); }
+.ospane { display: none; text-align: left; }
+.ospane .cmd { margin-top: 0; }
+/* The prompt each shell actually shows, in the accent — the command reads as
+ * a terminal line, and the glyph is a pseudo so Copy never captures it. */
+.ospanes > .ospane:nth-child(1) .cmd code::before { content: "$ "; color: var(--accent); }
+.ospanes > .ospane:nth-child(2) .cmd code::before { content: "> "; color: var(--accent); }
+/* The install label above the box, and the quiet link at the tab row's end —
+ * the reference site's own install cluster, three rows and done. */
+.cmdlabel { font: 600 var(--t-cmd)/1.4 var(--sans); margin: var(--s4) 0 calc(-1 * var(--s1)); }
+.cmdlabel a { color: inherit; text-decoration: none; color: var(--accent); }
+.cmdlabel a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.tabrow .tablink {
+  margin-left: auto;
+  font: 500 var(--t-mono)/1 var(--sans);
+  color: var(--muted); text-decoration: none;
+  transition: color 140ms var(--expo);
+}
+.tabrow .tablink::after { content: " \2192"; }
+.tabrow .tablink:hover { color: var(--accent); }
+/* The "view the install script" line under the command it fetches. A label that
+ * FOLLOWS a block needs the gap the kicker rule gives one that precedes it. */
+.ospane > .eyebrow { margin-top: var(--s2); margin-bottom: 0; }
+
+/* FIVE PAIRS, FOR TWO CONTROLS (RFC-0106 M3, fourth round). The install page's
+ * picker uses the first two and the index's code showcase uses all five, and
+ * they are one selector list on purpose: the site has ONE tab control, and a
+ * second implementation of it is what the second round deleted. */
+.picker input:nth-of-type(1):checked ~ .tabrow .ostabs > :nth-child(1),
+.picker input:nth-of-type(2):checked ~ .tabrow .ostabs > :nth-child(2),
+.picker input:nth-of-type(3):checked ~ .tabrow .ostabs > :nth-child(3),
+.picker input:nth-of-type(4):checked ~ .tabrow .ostabs > :nth-child(4),
+.picker input:nth-of-type(5):checked ~ .tabrow .ostabs > :nth-child(5) {
+  color: var(--ink);
+  background: color-mix(in oklab, var(--ink) 9%, transparent);
+}
+.picker input:nth-of-type(1):checked ~ .ospanes > :nth-child(1),
+.picker input:nth-of-type(2):checked ~ .ospanes > :nth-child(2),
+.picker input:nth-of-type(3):checked ~ .ospanes > :nth-child(3),
+.picker input:nth-of-type(4):checked ~ .ospanes > :nth-child(4),
+.picker input:nth-of-type(5):checked ~ .ospanes > :nth-child(5) { display: block; }
+/* The input is off-screen, so the focus ring is drawn on the label instead. */
+.picker input:nth-of-type(1):focus-visible ~ .tabrow .ostabs > :nth-child(1),
+.picker input:nth-of-type(2):focus-visible ~ .tabrow .ostabs > :nth-child(2),
+.picker input:nth-of-type(3):focus-visible ~ .tabrow .ostabs > :nth-child(3),
+.picker input:nth-of-type(4):focus-visible ~ .tabrow .ostabs > :nth-child(4),
+.picker input:nth-of-type(5):focus-visible ~ .tabrow .ostabs > :nth-child(5) {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+
+/* A SHOWCASE PANE: a program, and one line under it (RFC-0106 M3, fourth round).
+ * The pane is the tab row's own output box, so it carries the border the command
+ * box carries on `/install` — one hairline, and the tab above it opens into it.
+ * The code scrolls sideways inside the pane rather than wrapping, which is the
+ * rule every code block on this site follows. */
+.ospane.showcase { border: 1px solid var(--rule); }
+.ospane.showcase .code { margin: 0; border: 0; }
+.ospane.showcase .cap { border-top: 1px solid var(--hair); }
+
+/* THE REFERENCE TEASER. Four named groups across the row, two modules under
+ * each, and the export count right-aligned so the numbers form a column. */
+.modteaser { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--s3) var(--s2); }
+.modteaser > li { min-width: 0; }
+.modteaser > li > .eyebrow { padding-bottom: var(--s1); border-bottom: 1px solid var(--rule); }
+.modteaser a { display: flex; justify-content: space-between; gap: var(--s1); align-items: baseline; padding: 6px 0; text-decoration: none; border-bottom: 1px solid var(--hair); }
+.modteaser a:hover { color: var(--accent); }
+/* A module name in the teaser is a link's text, not an inline-code chip:
+ * eight boxed pills in a grid read as a tag cloud. */
+.modteaser code { font-size: var(--t-mono); background: none; border: 0; padding: 0; color: var(--accent); }
+.modteaser span { font: var(--t-key)/1.4 var(--mono); color: var(--n2); }
+
+/* A LIST THAT IS A GRID (RFC-0106 M3). Short rows down two columns: half the
+ * height, and `columns` keeps the reading order a two-track grid would not. */
+.twocol { list-style: none; margin: var(--s2) 0 0; padding: 0; columns: 2; column-gap: var(--s4); font-size: var(--t-note); }
+.twocol li { break-inside: avoid; padding: 5px 0; }
+.twocol a { text-decoration: none; font-family: var(--mono); font-size: var(--t-mono); }
+.twocol a:hover { text-decoration: underline; }
+.twocol .dim { color: var(--n2); font: var(--t-key)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; }
+@media (max-width: 640px) { .twocol { columns: 1; } }
 
 /* A row of calls to action, which is not a command row: `.cmd` is what the
  * census counts as a command a reader types, and three links are not that. */
 .ctarow { display: flex; flex-wrap: wrap; gap: var(--s2); margin-top: var(--s3); }
+/* `.cta` is `nowrap` so the masthead's Install button cannot break in two. A CTA
+ * in CONTENT can carry a sentence, and at 320px a five-word one was 286px in a
+ * 278px column (RFC-0106 M3) — so in a row, it wraps. */
+.ctarow .cta { white-space: normal; }
 
-/* THE RECORDED DEMO. Every step is in the document; the script hides all but
- * one and adds the counter. So the list is numbered and readable with no script
- * at all, and the hidden steps below are only ever hidden BY the script. */
-.demo .steps { margin: 0; padding: 0 0 0 var(--s3); }
-.demo .steps > li { padding: var(--s2) 0; }
+/* THE RECORDED DEMO: A NUMBERED LIST OF STEPS, AND THE OUTPUT OF ONE OF THEM
+ * (RFC-0106 M3, fourth round).
+ *
+ * WHAT WAS WRONG, and it was a layout that only broke in the state a reader
+ * actually sees. Each `li` was its own 2fr/3fr grid, with the step's output in
+ * the second column — a shape drawn for the no-script case, where all seven
+ * steps are open and each one reads as a row of "typed | came back". Under the
+ * script exactly ONE step is open, so that grid painted a two-line command in
+ * column 1, its output floating top-right of the same row, and the other six
+ * steps as flat full-width title bars underneath. The card looked broken because
+ * it was: one geometry serving two states, and correct in the rarer one.
+ *
+ * The CARD is the split now, not the row. The list of seven is column 1 and is
+ * always whole — number, title, command — and the output is column 2, stretched
+ * to the card's height. That reads the same in both states: with no script every
+ * pane is stacked in column 2 under its own title, and with the script one pane
+ * is shown and the row that selects it is marked. */
+.demo { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); align-items: stretch; }
+/* The pager lives at the bottom of the pane it pages, counter left and the
+ * two glyph chips right — not a toolbar over the whole card. `margin-top:
+ * auto` pins it when the pane is short. */
+.demo .demobar { display: flex; align-items: center; gap: var(--s1); margin-top: auto; padding-top: var(--s2); border-top: 1px solid var(--hair); }
+.demo .demobar .eyebrow { margin: 0 auto 0 0; }
+.demo .demobar button { min-height: 30px; padding: 4px 12px; font-size: var(--t-mark); line-height: 1; }
+.demo .demobar button:disabled { opacity: 0.35; cursor: default; }
+
+.demo .steps { list-style: none; margin: 0; padding: 0; counter-reset: step; border-right: 1px solid var(--hair); }
+/* Each row: the number in its own 2ch column, the title and the command in the
+ * second. `align-content: start` so a row with no command does not stretch its
+ * own contents apart — two of the seven steps are not commands (the file
+ * listing is walked and the edit is a file), and they are title rows on purpose. */
+.demo .steps > li { counter-increment: step; display: grid; grid-template-columns: 2ch minmax(0, 1fr); gap: 0 var(--s2); align-content: start; padding: var(--s2); }
+.demo .steps > li::before { content: counter(step); grid-column: 1; grid-row: 1 / span 2; font: var(--t-key)/1.7 var(--mono); color: var(--n2); }
 .demo .steps > li + li { border-top: 1px solid var(--hair); }
-.demo .steps h3 { font-size: var(--t-h3); }
-.demo .steps p { color: var(--muted); font-size: var(--t-meta); margin-top: var(--s1); }
-.demo .steps .out { max-height: 22em; }
-.demo .demobar { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s2); }
-.demo .demobar .eyebrow { margin: 0; }
+.demo .steps h3 { grid-column: 2; font-size: var(--t-h4); }
+/* A step's command is a line, not a plate: seven bordered boxes inside seven
+ * bordered rows inside a bordered card was most of the "looks broken". The
+ * prompt glyph does the framing a border did. */
+.demo .steps .cmd { grid-column: 2; margin-top: 2px; border: 0; background: none; }
+.demo .steps .cmd code { padding: 2px 0; }
+.demo .steps .cmd code::before { content: "$ "; color: var(--n2); }
+
+.demo .panes { min-width: 0; padding: var(--s2); display: flex; flex-direction: column; gap: var(--s3); }
+.demo .pane { min-width: 0; display: flex; flex-direction: column; }
+.demo .pane > .eyebrow { margin-bottom: var(--s1); }
+/* The output takes the slack, so the pane is the card's height and a long
+ * listing scrolls inside it rather than growing the card. `margin-top: 0`
+ * because it is the first thing in its own box here, not a block after prose. */
+/* The output is as tall as what it printed, with a floor so a one-line step and
+ * a twenty-line one do not resize the card, and a ceiling so the longest one
+ * scrolls instead. It does NOT take the pane's slack: at `flex: 1` a one-line
+ * output made a 600px empty terminal and pushed its own note to the bottom of
+ * the card, 500px from the thing it is about. */
+/* The pane is the terminal; its output is plain quoted text on the card's own
+ * ground, not a second washed box inside it. */
+.demo .pane .out { flex: 0 1 auto; min-height: 9em; max-height: 34em; margin-top: 0; overflow: auto; background: none; border-left: 0; padding: var(--s1) 0 0; }
+/* NOT `.note` (RFC-0106 M3, fourth round). The census counts `.note` and
+ * `.notice` as the sheet's two ways of saying something beside the claim, and
+ * M0's rule is at most one per plate — seven of them in one card took the index
+ * from one to eight. This is the step's own line, not a disclosure about it. */
+.demo .pane .stepnote { color: var(--muted); font-size: var(--t-meta); margin-top: var(--s2); }
+
+/* WITH SCRIPT, ONE PANE. `.stepped` is added by `widgets.js`, so with no script
+ * nothing below matches: every pane is on the page under its own title, which is
+ * the fallback and not a degraded copy of one. */
+.demo.stepped .pane { display: none; }
+.demo.stepped .pane.on { display: flex; flex: 1; }
+/* The pane's title is the row that is marked, so it is not printed twice. */
+.demo.stepped .pane > .eyebrow { display: none; }
+.demo.stepped .steps > li { cursor: pointer; }
+.demo.stepped .steps > li.on { background: color-mix(in oklab, var(--accent) var(--code-wash), transparent); box-shadow: inset 3px 0 0 var(--accent); }
+.demo.stepped .steps > li.on::before { color: var(--accent); }
+.demo.stepped .steps > li:not(.on) h3 { color: var(--muted); font-weight: 500; }
+.demo.stepped .steps > li:not(.on):hover h3 { color: var(--ink); }
+
+/* One column on a phone, and the list keeps its own rule as a bottom edge. */
+@media (max-width: 900px) {
+  .demo { grid-template-columns: minmax(0, 1fr); }
+  .demo .steps { border-right: 0; border-bottom: 1px solid var(--hair); }
+}
 
 /* A caption that IS a disclosure. THE RULE says the claim is inline and the
  * method is one click away, so the method sits in a `<details>` and the
  * summary is the only part that costs a line. */
 details.disc { margin-top: var(--s2); font: var(--t-meta)/1.6 var(--sans); color: var(--muted); }
-details.disc > summary { cursor: pointer; }
+/* 24px, because a summary IS a target and it was 19 (RFC-0105 M4 row 29). */
+details.disc > summary { cursor: pointer; min-height: 24px; padding: 2px 0; }
 details.disc > summary:hover { color: var(--ink); }
 details.disc[open] > summary { color: var(--accent); }
 details.disc table { margin-top: var(--s2); }
+/* A disclosure's paragraphs are INTRO like the band's own, and `.band > p`
+ * cannot reach them through the `<details>` (RFC-0106 M3). */
+details.disc > p { max-width: var(--wide); }
 .plate > details.disc { padding: 0 var(--s2) var(--s2); }
 
-.band { padding: var(--s6) 0 0; border-top: 1px solid var(--rule); margin-top: var(--s6); }
+/* TWO SECTION PATTERNS, AND EVERY CONSUMER SECTION IS ONE OF THEM (RFC-0106 M3).
+ *
+ *   FULL   `.band`        heading row, then a dense grid or one artifact.
+ *   SPLIT  `.band.split`  left (`.say`): kicker, 2-6 word heading, at most two
+ *                         short sentences, one link. Right: the artifact. */
+.band { padding: var(--sect) 0; position: relative; }
+/* THE SEAM REACHES THE PAGE EDGE. A rule that stops inside the sheet's own
+ * gutter reads as an underline on a block; one that runs edge to edge reads as
+ * the join between two bands, which is what a section is. The bleed is exactly
+ * `--gut`, so the line lands on `#root`'s border box and never past it — a
+ * `100vw` bleed would add a scrollbar of its own. On a page with a rail the
+ * section starts after the rail and so does its seam, which is right: the rail
+ * is a different column, not part of the band. */
+.band::before {
+  content: ""; position: absolute; top: 0;
+  left: calc(-1 * var(--gut)); right: calc(-1 * var(--gut));
+  border-top: 1px solid var(--rule);
+}
 .band h2 { font-size: var(--t-h2); margin-bottom: var(--s2); }
+/* A kicker sits 8px over a heading and 24px over anything else. It was 8, 16 or
+ * 32 depending on which page you were on (RFC-0106 M3, second round). */
+.band > .eyebrow + :not(h2) { margin-top: var(--s3); }
+
+/* AND A LABEL THAT FOLLOWS A BLOCK IS NOT A KICKER (RFC-0106 M3, third round).
+ *
+ * `.eyebrow` is `margin: 0 0 8px` — it is written to sit OVER something. Used
+ * as a footnote under a command box or a stat grid it inherited that zero, so
+ * its first line sat flat on the border above it: the releases page had
+ * `Upgrading is the same line.` touching the bottom edge of the command block,
+ * and the same hole was patched once, locally, with `.hero.mid > .eyebrow`.
+ * One rule for all three section shapes instead, and it is 16px because these
+ * are captions of the block above them and not the heading of a new one. */
+.band > * + .eyebrow,
+.hero > * + .eyebrow,
+.say > * + .eyebrow { margin-top: var(--s2); }
+
+/* AND PROSE AFTER A BLOCK, AND A BLOCK AFTER PROSE, take the rhythm's own gap.
+ *
+ * The same hole, one element along. A `<p>` has no top margin in this sheet —
+ * the section patterns give every block its own — so a paragraph written between
+ * two artifacts sat flat against both of them. Measured with the gap sweep, at
+ * 1280 and at 375: `/compare`'s radar section had `The chart, as a table.`
+ * touching the bottom border of the plate above it and the top border of the
+ * table below it, and `/editors` had the same pair. `.cap` is EXEMPT because it
+ * is built to sit flush — it carries its own `border-top` and padding, and that
+ * rule is what says it belongs to the block above it. */
+.band > * + p:not(.cap, .eyebrow) { margin-top: var(--s3); }
+.band > p + .scroller,
+.band > p + table { margin-top: var(--s3); }
+/* And the other side of a caption: `.cap` is flush with the block ABOVE it, so
+ * whatever comes after it starts a new subject and needs the gap. Measured on
+ * `/explore/shelf`, where three `<h3>`s sat on the caption's last line. */
+.band > .cap + :not(.cap) { margin-top: var(--s3); }
+
+.split { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: var(--s5); align-items: start; }
+@media (max-width: 1024px) { .split { grid-template-columns: minmax(0, 1fr); gap: var(--s4); } }
+
+/* Every block that can be an artifact carries a top margin for the case where it
+ * FOLLOWS prose. At the top of a column there is no prose above it, and that
+ * margin is the dead strip that starts a right column below its own sentence.
+ *
+ * THE CLASS IS WRITTEN TWICE ON PURPOSE (RFC-0106 M3, third round). At one class
+ * this rule is specificity (0,1,0) and it lost to every `element.class` selector
+ * in the sheet — `ul.plain` is (0,1,1) — so the reset silently did not reach the
+ * one block it is most often applied to. Measured on the index's new release
+ * section: the highlight list started 24px BELOW the kicker in the column beside
+ * it, which is the exact dead strip this rule was written to remove, on three
+ * pages. Order cannot fix it: a lower-specificity rule loses wherever it sits. */
+.split.split > *, .split.split > * > :first-child { margin-top: 0; }
+
+/* Four stat tiles in a split's column are 2x2, not 3+1: `auto-fit` measures the
+ * track and not the count, so the fourth tile fell to a row of its own and the
+ * block read as three tiles and a stray (RFC-0106 M3). */
+.split .specs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+/* Two sentences set to 88ch beside a chart is the paragraph an artifact was
+ * supposed to replace, so a split's left column is READING width. */
+.split > .say > p:not(.eyebrow, .cap) { max-width: var(--measure); }
 /* INTRO, not READING: the paragraph introduces the plate under it. `:not()`
  * keeps the eyebrow and the caption out — they are LABELs, and a measure in
  * THEIR font (12px mono) stopped them at 457px under a 1001px plate. */
@@ -865,7 +1375,45 @@ details.disc table { margin-top: var(--s2); }
    Charts
    ------------------------ */
 
-svg.chart { display: block; width: 100%; height: auto; }
+/* A CHART IS NEVER DRAWN BIGGER THAN ITS OWN UNITS (RFC-0106 M3, fourth round).
+ *
+ * `width: 100%` alone means the scale is whatever the container is: 1.07 in a
+ * full band, 0.73 in a split column, 0.33 on a phone. Text scales with it, so
+ * the same token painted 18px in one place and 3px in another. `max-width` is
+ * the ceiling — a chart at its natural size or smaller, never stretched — and
+ * the media query further down is the floor. Between them the scale sits in
+ * [0.73, 1.0] and the two `--t-svg` steps are real pixels a reader can read.
+ *
+ * The numbers are the viewBox widths the generators emit: 904 for a bar chart
+ * (`chart.vyrn`), 700 for the radar and the citation ring, 440 for the status
+ * strip, 726 for the import graph. A generator that emits a new width adds a
+ * line here, and the sweep's 12px assertion is what says so if it does not. */
+svg.chart { display: block; width: 100%; height: auto; max-width: 904px; }
+svg.chart.radar, svg.chart.cites { max-width: 700px; }
+svg.chart.strip { max-width: 440px; }
+svg.graph { max-width: 726px; }
+
+/* AND NEVER SMALLER THAN 0.71 OF THEM, WHICH IS WHERE 12px LIVES.
+ *
+ * The floor is `12 / 18` of each viewBox's width — the scale at which the
+ * smaller of the two `--t-svg` steps still paints 12 real pixels — so a chart in
+ * a container narrower than that scrolls inside its own `.stage` instead of
+ * shrinking. That is the sheet's own rule for a block wider than its column
+ * (RFC-0105 M4 row 28), and `.barstrip` on the index has had it since M2 with
+ * the reason written in general terms; every OTHER chart on the site kept
+ * shrinking, down to 3.0px on a phone.
+ *
+ * NOT IN A MEDIA QUERY, and that is the correction the measurement forced: with
+ * the floor inside the phone block, a 700px window fell between the two — no
+ * floor, and 11.4px on six charts. The width that matters is the CONTAINER's,
+ * which a media query cannot see; a `min-width` can. At 1280 no container on the
+ * site is under its own floor, so nothing scrolls on a desktop. */
+.stage { overflow-x: auto; scrollbar-width: none; }
+.stage::-webkit-scrollbar { display: none; }
+svg.chart { min-width: 640px; }
+svg.chart.radar, svg.chart.cites { min-width: 500px; }
+svg.chart.strip { min-width: 320px; }
+svg.graph { min-width: 520px; }
 /* A replay grows a bar's WIDTH from its own left edge. It is NOT a transform:
  * `transform-box` defaults to `view-box` on SVG, so `transform-origin: left`
  * meant the viewBox's left edge, and scaling slid every bar in from x=0 — the
@@ -876,20 +1424,25 @@ svg.chart .hit { fill: transparent; }
 /* One focal bar per chart, and everything else recedes. Eight bars in one tint
  * is eight bars with no argument; an accent on all of them is an accent on
  * none. The focal bar is the one the caption is about. */
-svg.chart .bar { fill: currentColor; fill-opacity: 0.18; }
-svg.chart .bar.focal { fill: var(--accent); fill-opacity: 0.32; }
-svg.chart g.row:hover .bar { fill-opacity: 0.34; }
-svg.chart g.row:hover .bar.focal { fill-opacity: 0.5; }
+/* Bars carry the reading, so they get real pigment: at 0.18 the strip was a
+ * watermark and the values floated over nothing. The focal bar is nearly
+ * solid; the field bars stay a clear step behind it. */
+svg.chart .bar { fill: currentColor; fill-opacity: 0.45; }
+svg.chart .bar.focal { fill: var(--accent); fill-opacity: 0.9; }
+svg.chart g.row:hover .bar { fill-opacity: 0.6; }
+svg.chart g.row:hover .bar.focal { fill-opacity: 1; }
 
 /* An axis, so a bar can be measured and not merely read. Faint enough to sit
  * under the data, and it starts at zero on every chart. */
 svg.chart .axis line { stroke: currentColor; stroke-opacity: 0.12; stroke-width: 1; }
 svg.chart .axis line:first-of-type { stroke-opacity: 0.28; }
-svg.chart .axis text { font-size: var(--t-axis); fill: var(--n2); }
+svg.chart .axis text { font-size: var(--t-svg-s); fill: var(--n2); }
 svg.chart a text { text-decoration: underline; text-decoration-color: transparent; transition: text-decoration-color 160ms var(--expo); }
 svg.chart g.row:hover a text { text-decoration-color: var(--accent); fill: var(--accent); }
-svg.chart text { font-family: var(--mono); font-size: var(--t-key); fill: var(--muted); }
-svg.chart text.val { fill: var(--ink); }
+svg.chart text { font-family: var(--mono); font-size: var(--t-svg); fill: var(--muted); }
+/* A value that a full-scale bar runs under keeps its own ground: the halo is
+ * the paper, so the text reads over pigment and over nothing alike. */
+svg.chart text.val { fill: var(--ink); font-weight: 600; paint-order: stroke; stroke: var(--paper); stroke-width: 4px; stroke-linejoin: round; }
 svg.chart .cell { transition: fill-opacity 450ms ease-out; }
 
 /* Two series on one chart, one shown at a time. The markup holds both, so the
@@ -918,8 +1471,8 @@ svg.chart.radar .ring { fill: none; stroke: currentColor; stroke-opacity: 0.13; 
 /* One ring is not decoration: it is the language the chart is normalized to. */
 svg.chart.radar .ring.base { stroke-opacity: 0.45; stroke-dasharray: 3 3; }
 svg.chart.radar .axis line { stroke: currentColor; stroke-opacity: 0.1; stroke-width: 1; }
-svg.chart.radar .axis text { font-size: var(--t-axis); fill: var(--n2); }
-svg.chart.radar .names text { font-family: var(--mono); font-size: var(--t-tick); fill: var(--n2); }
+svg.chart.radar .axis text { font-size: var(--t-svg-s); fill: var(--n2); }
+svg.chart.radar .names text { font-family: var(--mono); font-size: var(--t-svg-s); fill: var(--n2); }
 svg.chart.radar .names text.lit { fill: var(--accent); font-weight: 600; }
 svg.chart.radar .wedge { fill: transparent; }
 svg.chart.radar g.series polygon { fill: currentColor; fill-opacity: 0.07; stroke: currentColor; stroke-width: 2; stroke-linejoin: round; }
@@ -996,7 +1549,7 @@ td.no { color: var(--muted); }
  * column is the only one that carries the accent, and the row header is the
  * axis, so a reader scans down one language or across one axis. */
 table.matrix { font-size: var(--t-matrix); min-width: 46rem; }
-table.matrix th[scope="row"] { font: var(--t-key)/1.4 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); width: 8rem; }
+table.matrix th[scope="row"] { font: var(--t-key)/1.4 var(--mono); letter-spacing: 0.02em; color: var(--muted); width: 8rem; }
 /* The accent is spent ONCE, on the column header. Twenty-four accented cells
  * would be twenty-four things claiming to be the focus. The Vyrn column carries
  * full-strength ink against the muted others, which is the hierarchy. */
@@ -1134,6 +1687,40 @@ svg.chart a .cell:hover { fill-opacity: 1 !important; }
    the styling has to hold for a module with one export and for one with 44.
    ------------------------ */
 
+/* THE REFERENCE INDEX, IN GROUPS OF THREE COLUMNS (RFC-0106 M3). It was 38
+ * full-width rows to answer "is there one for X"; three columns is the same data
+ * in a third of the height. `auto-fill`, so a narrow window drops to two and a
+ * phone to one with no breakpoint. `:has` keeps the search honest — `widgets.js`
+ * hides ROWS and knows nothing about groups, so a group with nothing visible
+ * left in it removes its own heading rather than standing over a gap. */
+.modgroup + .modgroup { margin-top: var(--s5); }
+.modgroup > .eyebrow { padding-bottom: var(--s1); border-bottom: 1px solid var(--rule); font-size: var(--t-eyebrow); }
+.modgroup:not(:has(li:not([hidden]))) { display: none; }
+/* NO COLUMN GAP, AND THE PADDING IS INSIDE THE CELL. A gap breaks the hairline
+ * between every pair of columns and the block reads as three lists; cells that
+ * butt together make one continuous rule grid, which is what a reader scans
+ * across. The grid bleeds its own cell padding sideways so the first column's
+ * names still line up with everything else on the page; the bleed is `--s2` and
+ * `--gut` is never smaller than that, so it lands inside the sheet at every
+ * width, the way the section seam above does. */
+.modgrid { list-style: none; padding: 0; margin: 0 calc(-1 * var(--s2)); display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 0; }
+.modgrid > li { padding: var(--s2); border-bottom: 1px solid var(--hair); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 var(--s1); align-items: baseline; align-content: start; }
+.modgrid a { font: var(--t-mono)/1.4 var(--mono); color: var(--accent); text-decoration: none; }
+.modgrid a:hover { text-decoration: underline; }
+.modgrid .count { font: var(--t-key)/1.4 var(--mono); color: var(--n2); text-align: right; }
+/* TWO LINES, and the rest is on the module's own page. A grid whose cells are
+ * one to four lines tall is a grid with a ragged row under every row; the whole
+ * sentence is still in the document, so a screen reader and the search both
+ * still have it. */
+.modgrid .d {
+  grid-column: 1 / -1; color: var(--muted); font-size: var(--t-meta);
+  line-height: 1.45; margin-top: 3px;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+}
+.modgrid li[hidden] { display: none; }
+/* The matched export names the search appends, under the row that holds them. */
+.modgrid .hits { grid-column: 1 / -1; }
+
 .modlist { list-style: none; padding: 0; margin: var(--s4) 0 0; }
 .modlist li {
   display: grid;
@@ -1262,6 +1849,10 @@ pre.doccode {
 }
 .finder input:focus-visible { border-color: var(--accent); }
 .finder .cap { border: 0; padding: var(--s1) 0 0; }
+/* The live count is a LABEL on the field above it, not a caption on evidence —
+ * `.cap` is what THE RULE budgets, and a row saying "38 modules" is not a
+ * methodology note (RFC-0106 M3). */
+.finder [data-search-count] { margin: var(--s1) 0 0; }
 
 /* The exports a search matched, under the module that holds them. They appear
  * only while a search is running, and each is a link to that export's own
@@ -1283,7 +1874,7 @@ pre.doccode {
 svg.graph { display: block; height: auto; }
 svg.graph .wire { fill: none; stroke: currentColor; stroke-opacity: 0.16; stroke-width: 1; }
 svg.graph circle { fill: var(--accent); fill-opacity: 0.55; }
-svg.graph text { font-family: var(--mono); font-size: var(--t-key); fill: var(--muted); }
+svg.graph text { font-family: var(--mono); font-size: var(--t-svg); fill: var(--muted); }
 svg.graph .hit { fill: transparent; }
 svg.graph a { text-decoration: none; }
 /* A node is a link, so a keyboard reaches it, so it has to SHOW that it has been
@@ -1392,11 +1983,14 @@ svg.graph .node.on circle { fill-opacity: 1; }
   margin: var(--s3) var(--s2) 0;
 }
 
+/* The plate already frames the editor; an inner stroke was a box in a box.
+ * The border stays transparent rather than removed so the textarea overlay
+ * keeps the highlight layer's exact metrics. */
 .play .editor pre.hl,
 .play .editor textarea {
   margin: 0;
   padding: var(--s2);
-  border: 1px solid var(--rule);
+  border: 1px solid transparent;
   font: var(--t-code)/1.7 var(--mono);
   tab-size: 2;
   white-space: pre;
@@ -1490,7 +2084,12 @@ svg.graph .node.on circle { fill-opacity: 1; }
 .play .diag .at { color: var(--muted); margin-right: var(--s2); }
 .play .diag .note { display: block; color: var(--muted); }
 
-.play .out { margin: var(--s2); white-space: pre-wrap; }
+/* A PANE THAT DOES NOT JUMP BETWEEN STATES (RFC-0106 M3, fourth round). Idle is
+ * one line, `…` is one, and a run is two lines of output plus the exit row — so
+ * the box grew and shrank under the reader on every press. `min-height` holds
+ * the common case; anything longer scrolls in `.heroplay`, where the pane has
+ * the column's slack, and grows on `/play`, where the plate is the page. */
+.play .out { margin: var(--s2); white-space: pre-wrap; min-height: 6em; }
 .play .out .stdout { color: var(--ink); }
 .play .out .stderr { color: var(--danger); }
 .play .out .exit { margin-top: var(--s1); color: var(--muted); }
@@ -1506,7 +2105,8 @@ kbd {
 }
 
 @media (max-width: 1024px) {
-  #root { grid-template-columns: repeat(6, minmax(0, 1fr)); padding: 0 var(--s3) var(--s5); }
+  :root { --gut: var(--s3); }
+  #root { grid-template-columns: repeat(6, minmax(0, 1fr)); padding: 0 var(--gut) var(--s5); }
   /* Every one of these has to outrank what it replaces, the shell included. */
   #root > *, #root > .masthead, #root > .foot, .page > * { grid-column: 1 / 7; }
   .rail { grid-column: 1 / 7; grid-row: auto; border-right: 0; border-bottom: 1px solid var(--hair); position: static; padding: var(--s3) 0; display: flex; gap: var(--s3); flex-wrap: wrap; }
@@ -1515,17 +2115,29 @@ kbd {
 }
 
 @media (max-width: 640px) {
+  :root { --gut: var(--s2); }
   body { font-size: var(--t-body-s); }
   /* One column. A twelve-column sheet is a sheet; a phone is a strip, and six
    * tracks with 24px gutters between them spend a quarter of the width on
    * gutters that separate nothing. */
-  #root { grid-template-columns: minmax(0, 1fr); gap: 0; padding: 0 var(--s2) var(--s5); }
+  #root { grid-template-columns: minmax(0, 1fr); gap: 0; padding: 0 var(--gut) var(--s5); }
   #root > *, #root > .masthead, #root > .foot, .page > *, .rail { grid-column: 1; }
 
   /* The header stays one 64px row: the base rules that make `<details>` not a
    * disclosure are undone here, both models, and the panel leaves the flow. */
   .masthead { gap: var(--s1); position: relative; }
   .tools { gap: var(--s1); }
+  /* THE HEADER ROW AT A PHONE'S WIDTH (RFC-0106 M3, second round). It wants
+   * 358px and a 320px screen gives it 278. The search control's word goes and
+   * its glyph stays — the button's accessible name is on `aria-label`, so
+   * nothing is lost to a screen reader and 55px is returned to the row. It is
+   * NOT the whole fix: 25px still overflow at 320, and which control loses its
+   * word next is M4's decision, exactly as M1 and M2 both wrote. */
+  .find .word { display: none; }
+  /* And the last two pixels: the Install button's side padding, which at this
+   * width is the only place in the row with any to give. 320px is clean now —
+   * it had been 59px over since M1 recorded it. */
+  .masthead .cta { padding: 0 12px; }
   /* A triangle costs 12px of 343, and a panel that opens says it. `display` is
    * the load-bearing one: the base rule above hides this summary at every width,
    * and without this line a phone has a Menu control with no box and NO WAY TO
@@ -1554,21 +2166,13 @@ kbd {
   .rail a { white-space: nowrap; display: inline-flex; align-items: center; min-height: 44px; }
   .rail { padding: var(--s1) 0; }
 
-  /* A FIVE-BAR STRIP AT ITS OWN SIZE, INSIDE A SCROLLER (RFC-0106 M2).
-   * `svg.chart` is `width: 100%`, so a 904-unit viewBox in a 343px column
-   * scales every glyph by 0.38 and a 9px axis label paints at 3.4px. The
-   * sheet's own rule for a block wider than the column is that the BLOCK
-   * scrolls, not the page (RFC-0105 M4 row 28), and it is the rule that keeps
-   * the numbers beside the bars they belong to. */
-  .barstrip .stage { overflow-x: auto; }
-  .barstrip svg.chart { min-width: 904px; }
 
   /* A command is read before it is copied. At this width the button took two
    * thirds of the row and left the command a 120px window on 885px of text, so
    * the two stack and the command wraps rather than hides. */
   .cmd { flex-direction: column; align-items: stretch; }
-  .cmd code { white-space: pre-wrap; overflow-wrap: anywhere; padding: var(--s2); }
-  .cmd button { border-left: 0; border-top: 1px solid var(--rule); }
+  .cmd code { padding: var(--s2); }
+  .cmd button { border-left: 0; border-top: 1px solid var(--rule); min-height: 44px; }
 
   /* A finger is not a cursor. */
   button, .btn { padding: 12px 16px; min-height: 44px; }
@@ -1706,16 +2310,16 @@ svg.chart.pulse .bars.commits rect { fill-opacity: 0.65; }
 svg.chart.pulse .bars.prs rect { fill-opacity: 0.32; }
 svg.chart.pulse .bars rect:hover { fill-opacity: 1; }
 svg.chart.pulse .axis line { stroke: currentColor; stroke-opacity: 0.28; stroke-width: 1; }
-svg.chart.pulse .axis text { font-family: var(--mono); font-size: var(--t-axis); fill: var(--n2); text-anchor: middle; }
+svg.chart.pulse .axis text { font-family: var(--mono); font-size: var(--t-svg-s); fill: var(--n2); text-anchor: middle; }
 /* A release is the one thing on this chart that is not a count, so it is a
  * hairline through the panel rather than another filled shape. */
 svg.chart.pulse .releases line { stroke: var(--st-part); stroke-width: 1; stroke-dasharray: 2 3; }
-svg.chart.pulse .releases text { font-family: var(--mono); font-size: var(--t-axis); fill: var(--st-part); text-anchor: middle; }
+svg.chart.pulse .releases text { font-family: var(--mono); font-size: var(--t-svg-s); fill: var(--st-part); text-anchor: middle; }
 
 /* The arrivals: the cumulative corpus, banded by what each record became. The
  * bands carry the same four tones as everything else on the page. */
 svg.chart.arrivals polygon { fill-opacity: 0.75; stroke: var(--paper); stroke-width: 0.5; }
-svg.chart.arrivals .axis text { font-family: var(--mono); font-size: var(--t-axis); fill: var(--n2); text-anchor: middle; }
+svg.chart.arrivals .axis text { font-family: var(--mono); font-size: var(--t-svg-s); fill: var(--n2); text-anchor: middle; }
 
 /* 01 — the strip. One square per record, sized by the file and centred in its
  * slot. It is not stretched to the plate: a cell is a measurement, and a
@@ -1741,7 +2345,7 @@ svg.chart.statusbar .seg { fill-opacity: 0.8; }
  * argues with itself this much. Pointing at one record raises its own. */
 svg.chart.cites { max-width: 40rem; margin: 0 auto; }
 svg.chart.cites .chord { fill: none; stroke: currentColor; stroke-opacity: 0.09; stroke-width: 1; transition: stroke-opacity 160ms var(--expo); }
-svg.chart.cites .tick { font-family: var(--mono); font-size: var(--t-axis); fill: var(--n2); }
+svg.chart.cites .tick { font-family: var(--mono); font-size: var(--t-svg-s); fill: var(--n2); }
 svg.chart.cites .hit { fill: transparent; }
 svg.chart.cites .dot { fill-opacity: 0.65; }
 svg.chart.cites a { text-decoration: none; }

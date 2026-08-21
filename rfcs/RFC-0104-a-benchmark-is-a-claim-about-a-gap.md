@@ -637,8 +637,8 @@ Vyrn side and the asymmetry is recorded here.
 
 ### The numbers
 
-`rfcs/bench-0104/results/2026-08-19-LOCUST.json` and
-`2026-08-19-LOCUST-run2.json`. Both were measured from the same commit and the
+`rfcs/bench-0104/results/2026-08-19.json` and
+`2026-08-19-run2.json`. Both were measured from the same commit and the
 same binaries; the second record's `worktree_clean: false` is the first
 record's own JSON sitting untracked beside it, and nothing under `compiler/`
 differs between them. Medians of ten runs, milliseconds:
@@ -1163,7 +1163,7 @@ and the page is `fannkuchredux.html`.
 
 ### The re-run, and the machine it was measured on
 
-`2026-08-19-LOCUST-v2.json` and `-v2-run2.json`, from commit `7a8922c`, clean
+`2026-08-19-v2.json` and `-v2-run2.json`, from commit `7a8922c`, clean
 worktree, same binaries, same eight programs, same five contestants, the same
 cross-verification before anything was timed: all five printed the same bytes at
 the timing N in both runs. M2's original pair stays committed and unedited
