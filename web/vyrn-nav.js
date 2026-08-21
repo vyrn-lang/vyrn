@@ -379,6 +379,41 @@ function restorePopScroll() {
   apply();
 }
 
+// A cross-page #fragment — the search index links sections as
+// `/guide/x.html#anchor` — must land on its target after a soft nav, the way
+// a hard navigation would. The id is percent-decoded first; like
+// restorePopScroll, the landing retries while content streams in under us,
+// and an anchor that never appears leaves the page at the top.
+function scrollToFragment(url) {
+  let id;
+  try {
+    id = decodeURIComponent(url.hash.slice(1));
+  } catch (_) {
+    id = url.hash.slice(1);
+  }
+  const delays = [0, 60, 160, 320, 520];
+  let i = 0;
+  const apply = () => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.scrollIntoView();
+      return;
+    }
+    window.scrollTo(0, 0);
+    i += 1;
+    if (i < delays.length) setTimeout(apply, delays[i] - delays[i - 1]);
+  };
+  apply();
+}
+
+// Where a freshly painted page ends up: a Back/Forward pop keeps its place, a
+// plain navigation lands at the top, and a #fragment lands on its section.
+function settleScroll(url, push) {
+  if (!push) restorePopScroll();
+  else if (url.hash && url.hash !== "#") scrollToFragment(url);
+  else window.scrollTo(0, 0);
+}
+
 // RFC-0070: a lazy page's soft nav. Paint the skeleton (the `Loading` view) at
 // once from a `{"__loading__":true}` payload — no wait — then fetch the data marker
 // and fill in `Ready(props)` by PATCHING the retained skeleton view (only the data
@@ -392,12 +427,16 @@ async function navigateLazy(url, { push }, resolved) {
 
   // 1) Instant skeleton paint (best-effort).
   let view = null;
+  let pushed = false; // one history entry per navigation, even if the skeleton paint throws
   try {
     const loadingTree = pageRenderer(JSON.stringify({ page: resolved.page, props: { __loading__: true }, params: null }));
     if (loadingTree && loadingTree !== "__vyrn_fallback__") {
       const liveMain = document.querySelector("main");
       if (liveMain) {
-        if (push) pushEntry(url);
+        if (push) {
+          pushEntry(url);
+          pushed = true;
+        }
         if (resolved.title) document.title = String(resolved.title);
         view = makePageView(loadingTree);
         liveMain.replaceWith(view.dom);
@@ -464,13 +503,19 @@ async function navigateLazy(url, { push }, resolved) {
       patchPageView(view, readyTree);
     } else {
       // No skeleton painted, or a different page (a failed lazy load's @error):
-      // repaint <main> wholesale. Push/scroll only if the skeleton step didn't.
-      if (!view && push) pushEntry(url);
+      // repaint <main> wholesale. Push only if the skeleton step didn't.
+      if (!view && push && !pushed) {
+        pushEntry(url);
+        pushed = true;
+      }
       paintMain(readyTree);
       syncIslands();
-      if (!view && push) window.scrollTo(0, 0);
     }
-    if (!push) restorePopScroll();
+    // Post-paint scroll: a pop keeps its place; a push lands at the top — or,
+    // for a #fragment URL, on its section now that the real content is in
+    // (the skeleton's instant top scroll above is just feedback while the
+    // fetch runs).
+    settleScroll(url, push);
     emit("nav-end", { url });
   } catch (err) {
     emit("nav-error", { url, reason: "render-failed" });
@@ -515,8 +560,7 @@ async function navigate(url, { push }) {
       if (resolved.title) document.title = String(resolved.title);
       paintMain(treeJson);
       syncIslands();
-      if (push) window.scrollTo(0, 0);
-      else restorePopScroll();
+      settleScroll(url, push);
       emit("nav-end", { url });
     } catch (err) {
       emit("nav-error", { url, reason: "resolve-render-failed" });
@@ -585,8 +629,7 @@ async function navigate(url, { push }) {
       if (payload && payload.title != null) document.title = String(payload.title);
       paintMain(treeJson);
       syncIslands();
-      if (push) window.scrollTo(0, 0);
-      else restorePopScroll();
+      settleScroll(url, push);
       emit("nav-end", { url });
     } catch (err) {
       emit("nav-error", { url, reason: "render-failed" });
@@ -611,8 +654,7 @@ async function navigate(url, { push }) {
       const doc = new DOMParser().parseFromString(html, "text/html");
       if (push) pushEntry(url);
       applyDocument(doc);
-      if (push) window.scrollTo(0, 0);
-      else restorePopScroll();
+      settleScroll(url, push);
       emit("nav-end", { url });
     } catch (err) {
       // Any exception mid-swap: reload for real rather than leave a half-swapped

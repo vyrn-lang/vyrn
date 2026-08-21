@@ -39,6 +39,8 @@
 ///     comes from — an empty query root, or a zero-field record (`type Empty =
 ///     {}`). GraphQL requires an object type to define at least one field, so
 ///     `type Empty {}` is a syntax error that poisons every field referencing it.
+///     The executor bakes the same field into its graph and its resolver table,
+///     so the field the document invents is one the endpoint answers.
 ///   - a NAME the document would define twice (a contract type called `Query`,
 ///     `Mutation` or `JSON`; a record `Foo` beside a type `FooInput`), or one
 ///     beginning with the introspection-reserved `__`, is REPORTED (RFC-0099)
@@ -806,6 +808,15 @@ fn gqlRootMembers(iface: ModuleInterface, root: String) -> Array<GqlMember> {
     return out
 }
 
+/// The stand-in member `gqlBlock` writes into an otherwise empty object body:
+/// the SDL's `_placeholder: Boolean`. The executor bakes the same member into
+/// the type graph (and, at an empty query root, into the resolver table), so
+/// the field the document invents to stay parseable is one the endpoint
+/// answers rather than one it refuses.
+fn gqlPlaceholderMember() -> GqlMember {
+    return GqlMember { name: "_placeholder", ref: "Boolean", inputRef: "Boolean" }
+}
+
 // ===========================================================================
 // The generator.
 // ===========================================================================
@@ -1134,6 +1145,7 @@ fn gqlObjectValue(sc: modify Scanner, depth: Int64) -> GqlVal {
 fn gqlArgList(sc: modify Scanner, depth: Int64) -> GqlArgs {
     advance(sc)
     let mut out: Array<JsonField> = []
+    let mut names: Array<String> = []
     skipWs(sc)
     while atEnd(sc) == false && gqlAt(sc, ')') == false {
         if gqlAt(sc, ',') {
@@ -1145,6 +1157,10 @@ fn gqlArgList(sc: modify Scanner, depth: Int64) -> GqlArgs {
         if name == "" {
             return GqlArgs { args: [], err: "expected an argument name" }
         }
+        if gqlHas(names, name) {
+            return GqlArgs { args: [], err: "duplicate argument `" + name + "`" }
+        }
+        names.push(name.copy())
         skipWs(sc)
         if gqlAt(sc, ':') == false {
             return GqlArgs { args: [], err: "argument `" + name + "`: expected `:`" }
@@ -1174,6 +1190,7 @@ fn gqlSelSet(sc: modify Scanner, depth: Int64) -> GqlSet {
     }
     advance(sc)
     let mut out: Array<GqlSel> = []
+    let mut keys: Array<String> = []
     skipWs(sc)
     while atEnd(sc) == false && gqlAt(sc, '}') == false {
         if gqlAt(sc, ',') {
@@ -1198,6 +1215,13 @@ fn gqlSelSet(sc: modify Scanner, depth: Int64) -> GqlSet {
             }
             skipWs(sc)
         }
+        // One response key, once: the reply is JSON keyed by these, and a key
+        // written twice (`{ x: a x: b }`) would put `x` in the reply twice —
+        // GraphQL refuses a duplicated response name instead.
+        if gqlHas(keys, first) {
+            return gqlSetErr("duplicate response key `" + first + "` in a selection set")
+        }
+        keys.push(first.copy())
         let mut args: Array<JsonField> = []
         if gqlAt(sc, '(') {
             let parsed = gqlArgList(sc, depth)
@@ -1720,6 +1744,63 @@ export fn gqlArgError(field: String, issues: Array<Issue>) -> String {
 /// a fault climbs past a NON-NULL root field — which this generator's own SDL
 /// never declares, since a root field is nullable by construction precisely so a
 /// sibling's answer survives.
+///
+/// **Validation executes nothing** (GraphQL's own order, made explicit): the
+/// whole selection tree is checked against the type graph FIRST, recursively,
+/// so a document that selects what no procedure declares — a typo'd subfield
+/// of a `mut fn`, say — is refused before ANY procedure runs. The eager
+/// resolve this once preceded made `{ deleteUser { typo } }` perform the
+/// deletion and only then report the typo. A document that fails validation
+/// never executes, so its reply is the request-fault shape: `errors` alone,
+/// no `data`. Argument DECODE faults stay where they were — they need the
+/// generated `fromJson`, so they still surface per field, at their own path,
+/// beside whatever siblings answered.
+
+/// One selection position validated against the type graph, recursively — the
+/// subfields too, so a whole tree is known sound before anything runs.
+///
+/// `rootArgsOk` marks the one position whose arguments are the resolver's
+/// business (the SDL declares them there and nowhere else); everywhere below,
+/// an argument names something no field declares.
+fn gqlValidateSel(
+    owner: String,
+    s: GqlSel,
+    rootArgsOk: Bool,
+    schema: fn(String, String) -> String,
+) -> String {
+    let tref = schema(owner, s.name)
+    let bad = gqlCheckSel(owner, s.name, gqlNamed(tref), s.subs.length > 0, schema)
+    if bad != "" {
+        return bad
+    }
+    if rootArgsOk == false {
+        let stray = gqlNoArgs(s.name, s.args)
+        if stray != "" {
+            return stray
+        }
+    }
+    let ty = gqlNamed(tref)
+    for sub in s.subs {
+        let inner = gqlValidateSel(ty, sub, false, schema)
+        if inner != "" {
+            return inner
+        }
+    }
+    return ""
+}
+
+/// Every root selection validated, or the FIRST fault found — the message a
+/// request-fault reply carries.
+fn gqlValidate(rootType: String, sels: Array<GqlSel>, schema: fn(String, String) -> String) -> String {
+    for s in sels {
+        let bad = gqlValidateSel(rootType, s, true, schema)
+        if bad != "" {
+            return bad
+        }
+    }
+    return ""
+}
+
 export fn gqlAnswer(
     body: String,
     resolve: fn(String, String, Array<JsonField>) -> Result<Json, String>,
@@ -1730,6 +1811,12 @@ export fn gqlAnswer(
         return gqlReply(gqlErrorBody(q.err))
     }
     let rootType = gqlRootType(q.root)
+    // Validate BEFORE executing: nothing below runs unless the whole tree is
+    // sound (`gqlValidateSel`).
+    let bad = gqlValidate(rootType, q.sels, schema)
+    if bad != "" {
+        return gqlReply(gqlErrorBody(bad))
+    }
     let mut out: Array<JsonField> = []
     let mut errs: Array<GqlErr> = []
     let mut dataNull = false
@@ -1751,12 +1838,13 @@ export fn gqlAnswer(
 
 /// Complete one root field at its own path.
 ///
-/// A resolver's refusal — an undeclared field, an argument that fails `fromJson`
-/// — is a fault AT this position like any other, so it is attributed and bubbled
-/// by the same rule rather than ending the request. A resolver's `Err` VALUE is a
-/// different thing entirely and never reaches here: `Result<A, B>` is a modelled
-/// outcome the schema declared, and it projects into `data` as the tagged object
-/// it is.
+/// A resolver's refusal — an argument that fails `fromJson` — is a fault AT
+/// this position like any other, so it is attributed and bubbled by the same
+/// rule rather than ending the request. An UNDECLARED field never gets here at
+/// all: `gqlValidate` refused the document before anything ran. A resolver's
+/// `Err` VALUE is a different thing entirely and never reaches here:
+/// `Result<A, B>` is a modelled outcome the schema declared, and it projects
+/// into `data` as the tagged object it is.
 fn gqlAnswerOne(
     rootType: String,
     sel: GqlSel,
@@ -1865,6 +1953,15 @@ fn gqlResolverTable(iface: ModuleInterface) -> String {
     out = out + "    }\n}\n"
     out = out + "/// The resolver table, generated from the contract's reflection.\n"
     out = out + "fn gqlResolve(root: String, field: String, args: Array<JsonField>) -> Result<Json, String> {\n"
+    // An empty query root's `_placeholder` (`gqlBlock` repairs its SDL body):
+    // the graph arm baked below answers the field, so the resolver must too,
+    // or the document would accept what the executor refuses.
+    let roots = gqlRootMembers(iface, "query")
+    if roots.length == 0 {
+        out = out + "    if root == \"Query\" && field == \"_placeholder\" {\n"
+        out = out + "        return Ok(JNull)\n"
+        out = out + "    }\n"
+    }
     for f in iface.functions {
         let want = gqlRootOf(f)
         out = out + "    if field == \"" + f.name + "\" {\n"
@@ -1918,7 +2015,9 @@ fn gqlResolverArm(f: FnInfo) -> String {
 /// definitions are emitted from, and the same `gqlRootOf` split the roots are:
 /// a field the document declares and a field the projector will descend into are
 /// one set. Only object types get an arm — a leaf is the ABSENCE of one, which is
-/// exactly the answer "has no subfields".
+/// exactly the answer "has no subfields". An object whose members are EMPTY keeps
+/// an arm carrying `_placeholder` — the same repair `gqlBlock` writes into the
+/// SDL — so the document and this graph answer a field with one voice.
 fn gqlSchemaTable(iface: ModuleInterface) -> String {
     let mut out = "/// The schema's type graph: `gqlSchema(t, field)` is the GraphQL type reference\n"
     out = out + "/// of `t`'s `field`, non-null markers included (\"\" when it declares none), and\n"
@@ -1926,13 +2025,28 @@ fn gqlSchemaTable(iface: ModuleInterface) -> String {
     out = out + "/// leaf, which has no subfields). The `!` markers are what say how far a `null`\n"
     out = out + "/// climbs (RFC-0085 M3).\n"
     out = out + "fn gqlSchema(t: String, field: String) -> String {\n"
-    out = out + gqlSchemaArm("Query", gqlRootMembers(iface, "query"))
+    // An empty query root bakes the `_placeholder` arm its SDL body carries
+    // (`gqlBlock`). An empty MUTATION bakes none: the SDL omits `type Mutation`
+    // altogether when no `mut fn` exists, so there is nothing to agree with.
+    let mut queries = gqlRootMembers(iface, "query")
+    if queries.length == 0 {
+        queries.push(gqlPlaceholderMember())
+    }
+    out = out + gqlSchemaArm("Query", queries)
     out = out + gqlSchemaArm("Mutation", gqlRootMembers(iface, "mutation"))
     for t in iface.types {
         let decl = gqlSplitDecl(t.source)
         let ms = gqlMembers(decl, iface)
-        if ms.length > 0 {
-            out = out + gqlSchemaArm(decl.name, ms)
+        // A zero-field RECORD is an object whose SDL body IS the `_placeholder`
+        // repair (`gqlBlock`), so it bakes an arm too; a leaf — a nullary enum,
+        // a scalar — stays the ABSENCE of an arm, which is exactly the answer
+        // "has no subfields".
+        if ms.length > 0 || decl.rhs.startsWith("{") {
+            let mut members = ms
+            if members.length == 0 {
+                members.push(gqlPlaceholderMember())
+            }
+            out = out + gqlSchemaArm(decl.name, members)
         }
     }
     return out + "    return \"\"\n}\n"
@@ -2303,4 +2417,105 @@ test "gqlErrorBody is the shape a client reads" {
     assertEq(gqlErrorBody("nope"), "{\"errors\":[{\"message\":\"nope\"}]}")
     assertEq(gqlRootType("mutation"), "Mutation")
     assertEq(gqlRootType("query"), "Query")
+}
+
+// ---- validate-before-execute (RFC-0085, the executor's order) --------------
+
+/// A resolver that announces itself: any execution carries this message into
+/// the reply, so a test asserting its absence proves the procedure never ran.
+fn gqlSpyResolve(root: String, field: String, args: Array<JsonField>) -> Result<Json, String> {
+    return Err("the resolver for `" + field + "` RAN")
+}
+
+/// A graph over that spy: a query root and a mutation root over the BookList /
+/// Book shapes [`gqlTestSchema`] draws — the two tables one contract bakes.
+fn gqlExecTestSchema(t: String, field: String) -> String {
+    if t == "Query" {
+        if field == "" {
+            return t.copy()
+        }
+        if field == "browse" {
+            return "BookList!"
+        }
+        return ""
+    }
+    if t == "Mutation" {
+        if field == "" {
+            return t.copy()
+        }
+        if field == "dropAll" {
+            return "Boolean"
+        }
+        return ""
+    }
+    return gqlTestSchema(t, field)
+}
+
+test "a typo'd subfield of a mut fn is refused BEFORE the procedure runs" {
+    // The eager resolve this once preceded performed the mutation and only then
+    // reported the typo. The spy fails loudly whenever it is invoked, so the
+    // reply must carry the validation fault and never the spy's message — and
+    // a document that fails validation executes nothing, so there is no `data`.
+    let r = gqlAnswer("mutation { dropAll { typo } }", gqlSpyResolve, gqlExecTestSchema)
+    assert(r.body.contains("must not have a selection"))
+    assert(r.body.contains("RAN") == false)
+    assert(r.body.contains("\"data\"") == false)
+}
+
+test "validation descends: a typo two levels down refuses before any resolver runs" {
+    let r = gqlAnswer("{ browse { books { nope } } }", gqlSpyResolve, gqlExecTestSchema)
+    assert(r.body.contains("Cannot query field `nope` on type `Book`."))
+    assert(r.body.contains("RAN") == false)
+    // An argument written where no field declares one is refused the same way,
+    // before anything runs.
+    let deep = gqlAnswer("{ browse { books(first: 2) { title } } }", gqlSpyResolve, gqlExecTestSchema)
+    assert(deep.body.contains("Unknown argument `first` on field `books`."))
+    assert(deep.body.contains("RAN") == false)
+}
+test "a valid operation still reaches its resolvers" {
+    // The same spy, a well-formed mutation: the fault IS the spy's, attributed
+    // at the field's own path — proof the execute pass runs what validation
+    // passed, and that only validation moved, not execution.
+    let r = gqlAnswer("mutation { dropAll }", gqlSpyResolve, gqlExecTestSchema)
+    assert(r.body.contains("the resolver for `dropAll` RAN"))
+}
+
+test "a response key may be selected once" {
+    assert(gqlParseQuery("{ a a }").err.contains("duplicate response key `a`"))
+    assert(gqlParseQuery("{ x: a x: b }").err.contains("duplicate response key `x`"))
+    // Different keys over one field are ordinary aliases and stay legal.
+    assertEq(gqlParseQuery("{ a b: a }").err, "")
+}
+
+test "an argument may be written once" {
+    assert(gqlParseQuery("{ f(a: 1, a: 2) { b } }").err.contains("duplicate argument `a`"))
+    assertEq(gqlParseQuery("{ f(a: 1) { b } }").err, "")
+}
+
+// ---- the `_placeholder` repair, document and endpoint together -------------
+
+/// The graph a contract with NO query procedures bakes (`gqlSchemaTable`): an
+/// empty Query arm whose one field is the `_placeholder` its SDL body carries.
+fn gqlEmptyRootSchema(t: String, field: String) -> String {
+    if t == "Query" {
+        if field == "" {
+            return t.copy()
+        }
+        if field == "_placeholder" {
+            return "Boolean"
+        }
+    }
+    return ""
+}
+
+fn gqlNullResolve(root: String, field: String, args: Array<JsonField>) -> Result<Json, String> {
+    return Ok(JNull)
+}
+
+test "{ _placeholder } on an empty query root is answered, not refused" {
+    // `gqlBlock` repairs an empty SDL body with `_placeholder: Boolean`; the
+    // baked graph and the resolver table bake the same field, so the one field
+    // the document can select is one the endpoint answers.
+    let r = gqlAnswer("{ _placeholder }", gqlNullResolve, gqlEmptyRootSchema)
+    assertEq(r.body, "{\"data\":{\"_placeholder\":null}}")
 }

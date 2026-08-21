@@ -183,13 +183,15 @@ export gen fn iconsModule(
 /// glyphs are looked up, so expanding 1,800 entries to emit five would be work
 /// the caller did not ask for.
 /// `prefix` is the collection's own (`lucide`); `box` its collection-level
-/// `viewBox`; `license` the notice for the generated header; `path` what the
-/// caller named it by, for diagnostics; `icons` is `name -> {body, width?,
-/// height?}` and `aliases` is `name -> {parent, …}`; `error` is why the
-/// collection is unusable, or `""`.
+/// `viewBox` with its `left`/`top` origin; `license` the notice for the
+/// generated header; `path` what the caller named it by, for diagnostics;
+/// `icons` is `name -> {body, left?, top?, width?, height?}` and `aliases` is
+/// `name -> {parent, …}`; `error` is why the collection is unusable, or `""`.
 type Collection = {
     prefix: String,
     box: String,
+    left: String,
+    top: String,
     license: String,
     path: String,
     icons: Array<JsonField>,
@@ -210,8 +212,8 @@ fn iconCollection(text: String, path: String) -> Collection {
 
 /// The parsed document as a [`Collection`].
 fn collectionOf(doc: Json, path: String) -> Collection {
-    let top = jsonFields(doc)
-    if top.length == 0 {
+    let fields = jsonFields(doc)
+    if fields.length == 0 {
         return collectionError(
             "the collection `\{path}` is \{jsonKind(doc)}, not an object of glyphs",
         )
@@ -221,8 +223,10 @@ fn collectionOf(doc: Json, path: String) -> Collection {
     let mut prefix = ""
     let mut w = ""
     let mut h = ""
+    let mut left = ""
+    let mut top = ""
     let mut license = noLicense()
-    for f in top {
+    for f in fields {
         if f.key == "prefix" {
             prefix = jsonString(f.value)
         }
@@ -232,13 +236,19 @@ fn collectionOf(doc: Json, path: String) -> Collection {
         if f.key == "height" {
             h = jsonNumber(f.value)
         }
+        if f.key == "left" {
+            left = jsonNumber(f.value)
+        }
+        if f.key == "top" {
+            top = jsonNumber(f.value)
+        }
         if f.key == "info" {
             license = licenseLine(f.value)
         }
     }
     let mut icons: Array<JsonField> = []
     let mut aliases: Array<JsonField> = []
-    for f in top {
+    for f in fields {
         if f.key == "icons" {
             icons = jsonFields(f.value)
         }
@@ -253,7 +263,9 @@ fn collectionOf(doc: Json, path: String) -> Collection {
     }
     return Collection {
         prefix: prefix,
-        box: iconBox(w, h, "", ""),
+        box: boxOf(left, top, w, h),
+        left: left,
+        top: top,
         license: license,
         path: path.copy(),
         icons: icons,
@@ -267,6 +279,8 @@ fn collectionError(why: String) -> Collection {
     return Collection {
         prefix: "",
         box: "",
+        left: "",
+        top: "",
         license: "",
         path: "",
         icons: [],
@@ -275,12 +289,31 @@ fn collectionError(why: String) -> Collection {
     }
 }
 
-/// The `viewBox` for a glyph: its own `width`/`height` when it overrides them,
-/// the collection's otherwise, and Iconify's own default of 16 when neither says.
-fn iconBox(collW: String, collH: String, ownW: String, ownH: String) -> String {
-    let w = pick(ownW, collW, "16")
-    let h = pick(ownH, collH, "16")
-    return "0 0 \{w} \{h}"
+/// The `viewBox` string for an origin and a size, empty parts defaulted to
+/// Iconify's own (origin `0 0`, size 16).
+fn boxOf(l: String, t: String, w: String, h: String) -> String {
+    return "\{pick(l, "", "0")} \{pick(t, "", "0")} \{pick(w, "", "16")} \{pick(h, "", "16")}"
+}
+
+/// A glyph's `viewBox`: its entry's `left`/`top`/`width`/`height` over the
+/// `base` box it resolves against (the collection's for an entry, the PARENT
+/// glyph's for an alias — an override must keep the levels it does not
+/// replace), over Iconify's defaults underneath. Iconify positions art
+/// INSIDE the box with `left`/`top` — dropping the origin shifts or clips the
+/// drawing — so the origin rides beside the size everywhere a box is built.
+fn glyphBox(base: String, l: String, t: String, w: String, h: String) -> String {
+    let parts = splitWhitespace(base)
+    let mut cl = ""
+    let mut ct = ""
+    let mut cw = ""
+    let mut ch = ""
+    if parts.length == 4 {
+        cl = parts[0].copy()
+        ct = parts[1].copy()
+        cw = parts[2].copy()
+        ch = parts[3].copy()
+    }
+    return "\{pick(l, cl, "0")} \{pick(t, ct, "0")} \{pick(w, cw, "16")} \{pick(h, ch, "16")}"
 }
 
 /// The first of three that is not empty.
@@ -349,7 +382,13 @@ gen fn iconsEmit(
 ) -> String {
     let mut diags = ""
     let mut body = ""
+    // Seed the collision set with what the generated module ITSELF binds, so a
+    // glyph named like one of those is refused below instead of emitted into a
+    // module that cannot compile.
     let mut taken: Array<String> = []
+    for r in reservedNames() {
+        taken.push(r.copy())
+    }
     for want in wanted {
         if contains(want, ":") {
             diags = diags
@@ -362,7 +401,16 @@ gen fn iconsEmit(
             )
         } else {
             let fnName = camel(want)
-            if includes(taken, fnName) {
+            if includes(reservedNames(), fnName) {
+                diags = diags
+                + anchored(
+                    anchorFile,
+                    path,
+                    line,
+                    col,
+                    "`\{want}` becomes `\{fnName}()`, which the generated module itself needs (\{joinWith(reservedNames(), "`, `")}) — import the collection twice and take one glyph in each",
+                )
+            } else if includes(taken, fnName) {
                 diags = diags
                 + anchored(
                     anchorFile,
@@ -389,6 +437,15 @@ gen fn iconsEmit(
     out = out + "import { el, Html, Attr } from \"std/html\"\n"
     out = out + iconHelper()
     return out + body
+}
+
+/// The identifiers a generated module binds itself: the shared `glyph` helper,
+/// the `el` call, and the `Html`/`Attr`/`A`/`Raw` constructors its functions
+/// are written against. A glyph whose function name would take one is refused
+/// with the curated collision message rather than emitted as a module that
+/// cannot compile.
+fn reservedNames() -> Array<String> {
+    return ["glyph", "el", "Html", "Attr", "A", "Raw"]
 }
 
 /// The one helper every generated function calls. `currentColor` and a pixel
@@ -501,7 +558,7 @@ fn aliasGlyph(coll: Collection, want: String, entry: Json, hop: Int64) -> Found 
         if g.key == "parent" {
             parent = jsonString(g.value)
         }
-        if g.key != "parent" && g.key != "width" && g.key != "height" {
+        if g.key != "parent" && g.key != "width" && g.key != "height" && g.key != "left" && g.key != "top" {
             extra.push(g.key.copy())
         }
     }
@@ -520,11 +577,13 @@ fn aliasGlyph(coll: Collection, want: String, entry: Json, hop: Int64) -> Found 
     return overrideBox(coll, found, entry)
 }
 
-/// One glyph entry (`{body, width?, height?}`) as a [`Found`].
+/// One glyph entry (`{body, left?, top?, width?, height?}`) as a [`Found`].
 fn glyphOf(coll: Collection, entry: Json) -> Found {
     let mut body = ""
     let mut w = ""
     let mut h = ""
+    let mut left = ""
+    let mut top = ""
     for g in jsonFields(entry) {
         if g.key == "body" {
             body = jsonString(g.value)
@@ -535,20 +594,25 @@ fn glyphOf(coll: Collection, entry: Json) -> Found {
         if g.key == "height" {
             h = jsonNumber(g.value)
         }
+        if g.key == "left" {
+            left = jsonNumber(g.value)
+        }
+        if g.key == "top" {
+            top = jsonNumber(g.value)
+        }
     }
     if body == "" {
         return notFound("the collection `\{coll.path}` carries no `body` for this glyph")
     }
-    if w == "" && h == "" {
-        return Found { box: coll.box.copy(), body: body, error: "" }
-    }
-    return Found { box: sizedBox(coll, w, h), body: body, error: "" }
+    return Found { box: glyphBox(coll.box, left, top, w, h), body: body, error: "" }
 }
 
-/// An alias may resize its parent; nothing else about it changes.
+/// An alias may resize or re-origin its parent; nothing else about it changes.
 fn overrideBox(coll: Collection, found: Found, entry: Json) -> Found {
     let mut w = ""
     let mut h = ""
+    let mut left = ""
+    let mut top = ""
     for g in jsonFields(entry) {
         if g.key == "width" {
             w = jsonNumber(g.value)
@@ -556,23 +620,17 @@ fn overrideBox(coll: Collection, found: Found, entry: Json) -> Found {
         if g.key == "height" {
             h = jsonNumber(g.value)
         }
+        if g.key == "left" {
+            left = jsonNumber(g.value)
+        }
+        if g.key == "top" {
+            top = jsonNumber(g.value)
+        }
     }
-    if w == "" && h == "" {
+    if w == "" && h == "" && left == "" && top == "" {
         return Found { box: found.box.copy(), body: found.body.copy(), error: "" }
     }
-    return Found { box: sizedBox(coll, w, h), body: found.body.copy(), error: "" }
-}
-
-/// The collection's box with `w`/`h` substituted where they are given.
-fn sizedBox(coll: Collection, w: String, h: String) -> String {
-    let parts = splitWhitespace(coll.box)
-    let mut cw = ""
-    let mut ch = ""
-    if parts.length == 4 {
-        cw = parts[2].copy()
-        ch = parts[3].copy()
-    }
-    return iconBox(cw, ch, w, h)
+    return Found { box: glyphBox(found.box, left, top, w, h), body: found.body.copy(), error: "" }
 }
 
 fn notFound(why: String) -> Found {
@@ -1057,6 +1115,48 @@ test "a collection that is not JSON is refused, naming the path" {
 test "a JSON document that is not a collection is refused, naming the path" {
     let src = iconsModule("{\"prefix\":\"x\"}", "./empty.json", "github", "", 0, 0)
     assert(contains(src, "the collection `./empty.json` has no `icons` object"))
+}
+
+test "a glyph named like the module's own helper is refused, not emitted broken" {
+    let src = iconsModule("{\"prefix\":\"t\",\"icons\":{\"glyph\":{\"body\":\"<g/>\"}}}", "t", "glyph", "", 0, 0)
+    assert(contains(src, "`glyph` becomes `glyph()`, which the generated module itself needs"))
+    assert(contains(src, "export fn glyph") == false)
+}
+
+test "an entry origin reaches the viewBox" {
+    let src = iconsModule(
+        "{\"prefix\":\"o\",\"width\":16,\"height\":16,\"icons\":{\"shifted\":{\"body\":\"<rect/>\",\"left\":2,\"top\":3}}}",
+        "o",
+        "shifted",
+        "",
+        0,
+        0,
+    )
+    assert(contains(src, "glyph(\"2 3 16 16\""))
+}
+
+test "the collection's own origin is inherited when the entry has none" {
+    let src = iconsModule(
+        "{\"prefix\":\"o\",\"left\":1,\"top\":4,\"icons\":{\"a\":{\"body\":\"<a/>\"}}}",
+        "o",
+        "a",
+        "",
+        0,
+        0,
+    )
+    assert(contains(src, "glyph(\"1 4 16 16\""))
+}
+
+test "an alias may re-origin as well as resize" {
+    let src = iconsModule(
+        "{\"prefix\":\"o\",\"icons\":{\"p\":{\"body\":\"<p/>\",\"left\":9}},\"aliases\":{\"q\":{\"parent\":\"p\",\"top\":5}}}",
+        "o",
+        "q",
+        "",
+        0,
+        0,
+    )
+    assert(contains(src, "glyph(\"9 5 16 16\""))
 }
 
 // ---- the provider layer (RFC-0107 M3) -------------------------------------

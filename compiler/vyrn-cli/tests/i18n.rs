@@ -112,9 +112,13 @@ fn emit_gen_shows_the_synthesized_translation_module() {
         "plural doc:\n{src}"
     );
 
-    // The plural compiled to a real Vyrn if-chain (no ICU runtime).
+    // The plural compiled to a real Vyrn if-chain (no ICU runtime). The
+    // operand is the CLDR absolute value: negative counts take the same
+    // branches as their magnitudes, so the comparison spells `abs(v)`.
     assert!(
-        src.contains("count % 10 == 1 && count % 100 != 11"),
+        src.contains(
+            "(if count < 0 { 0 - count } else { count }) % 10 == 1 && (if count < 0 { 0 - count } else { count }) % 100 != 11",
+        ),
         "uk one rule:\n{src}"
     );
 

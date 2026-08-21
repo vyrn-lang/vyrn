@@ -4536,7 +4536,7 @@ impl Parser {
                 self.eat(&Tok::RParen)?;
                 Ok(Expr::Spawn { name, args, line })
             }
-            Tok::Ident(name) => {
+            Tok::Ident(mut name) => {
                 // Tagged template `tag"...\{e}..."` (RFC-0007): an identifier
                 // directly followed — on the same line — by an interpolated
                 // string literal. The same-line requirement keeps a statement
@@ -4568,7 +4568,23 @@ impl Parser {
                         ),
                     ));
                 }
-                // Fallible construction: `Name?(args)`.
+                // Fallible construction: `Name?(args)` — including a
+                // namespace-qualified `ns.Name?(args)`, whose dotted path folds
+                // into `name` exactly as a dotted type does (RFC-0027). Only a
+                // path that continues `?(` is folded here; anything else stays
+                // untouched for postfix, so field reads and method calls keep
+                // their shapes.
+                while *self.peek() == Tok::Dot
+                    && matches!(self.tokens.get(self.pos + 1).map(|t| &t.tok), Some(Tok::Ident(_)))
+                    && matches!(self.tokens.get(self.pos + 2).map(|t| &t.tok), Some(Tok::Question))
+                    && matches!(self.tokens.get(self.pos + 3).map(|t| &t.tok), Some(Tok::LParen))
+                {
+                    self.advance(); // the `.`
+                    name = format!("{name}.{}", match self.advance() {
+                        Tok::Ident(seg) => seg,
+                        _ => unreachable!("looked ahead"),
+                    });
+                }
                 let fallible =
                     *self.peek() == Tok::Question && self.tokens[self.pos + 1].tok == Tok::LParen;
                 if fallible {
@@ -6931,5 +6947,54 @@ impl Unwrap for Int64 { fn get(self) -> Output { return self }  type Output = In
                 .any(|d| d.message.contains("must be declared before the methods")),
             "{late:?}"
         );
+    }
+    /// `ns.Age?(5)` is ONE fallible construction of the dotted name — the
+    /// dotted path folds into `TryConstruct.name` exactly as a dotted type
+    /// rides `Type::Named` (RFC-0027). Before, only a bare `Name?(…)` was
+    /// recognized: `ns.Age?` parsed as Try-of-field and `(5)` leaked out as a
+    /// stray second statement with no diagnostic at all.
+    #[test]
+    fn namespaced_fallible_construction_parses_as_one_tryconstruct() {
+        let p = parse_src("fn main() -> Int64 { return ns.Age?(5) }");
+        assert_eq!(p.functions[0].body.stmts.len(), 1);
+        match &p.functions[0].body.stmts[0] {
+            Stmt::Return {
+                value: Some(Expr::TryConstruct { name, args, .. }),
+                ..
+            } => {
+                assert_eq!(name, "ns.Age");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected TryConstruct ns.Age, got {other:?}"),
+        }
+    }
+
+    /// The dotted fold only fires when the path continues `?(` — field reads
+    /// and method calls keep their postfix shapes.
+    #[test]
+    fn dotted_paths_without_the_question_stay_postfix() {
+        let p = parse_src("fn main() -> Int64 { return ns.f(1) }");
+        match &p.functions[0].body.stmts[0] {
+            Stmt::Return {
+                value: Some(Expr::Call { name, args, .. }),
+                ..
+            } => {
+                // Method-call sugar: `f(ns, 1)`.
+                assert_eq!(name, "f");
+                assert_eq!(args.len(), 2);
+            }
+            other => panic!("expected method-sugar call, got {other:?}"),
+        }
+        let p = parse_src("fn main() -> Int64 { return ns.f }");
+        match &p.functions[0].body.stmts[0] {
+            Stmt::Return {
+                value: Some(Expr::Field { field, expr, .. }),
+                ..
+            } => {
+                assert_eq!(field, "f");
+                assert!(matches!(expr.as_ref(), Expr::Var { name, .. } if name == "ns"));
+            }
+            other => panic!("expected field read, got {other:?}"),
+        }
     }
 }

@@ -560,6 +560,18 @@ gen fn scanArgs(msg: String) -> ArgScan {
                         kinds.push("plural")
                         branches.push("")
                     } else {
+                        // A selector containing ',' cannot survive the round trip:
+                        // the branch set is serialized comma-joined and split back
+                        // on ',', so the emitted finite type would admit each PART
+                        // while the compiled code compares the WHOLE token —
+                        // passing `on` would silently pick `other`. Refuse it at
+                        // scan time; the caller anchors the refusal in the locale
+                        // file.
+                        for b in br.branches {
+                            if contains(b.selector, ",") {
+                                return argError("select selector `\{b.selector}` contains `,`, but branch names are serialized comma-joined — rename the branch")
+                            }
+                        }
                         kinds.push("select")
                         branches.push(joinSortedSelectors(br))
                     }
@@ -703,32 +715,45 @@ gen fn pluralSupported(tag: String) -> Bool {
     return true
 }
 
+/// The CLDR absolute-value operand over generated variable `v`: CLDR defines
+/// every plural operand on |n|, and Vyrn's `%` truncates toward zero
+/// (`-5 % 10 == -5`), so the generated comparisons spell the absolute value out
+/// inline — as an expression, so two plurals in one message cannot collide over
+/// a shared local.
+gen fn pluralAbs(v: String) -> String {
+    return "(if " + v + " < 0 { 0 - " + v + " } else { " + v + " })"
+}
+
 /// The Vyrn boolean condition selecting category `cat` for `tag`, over variable
-/// `v`. Mirrors the CLDR cardinal rules for the covered locales.
+/// `v`. Mirrors the CLDR cardinal rules for the covered locales, evaluated over
+/// `pluralAbs(v)`: without the absolute value, -3 misses `few` and -5 misses
+/// `many` in every Slavic locale, and both silently render as `other`. (`#`
+/// keeps printing the raw count — only the CATEGORY selection is absolute.)
 gen fn pluralCondition(tag: String, cat: String, v: String) -> String {
+    let a = pluralAbs(v)
     if tag == "en" || tag == "de" || tag == "es" || tag == "it" {
-        return v + " == 1"
+        return a + " == 1"
     }
     if tag == "fr" || tag == "pt" {
-        return v + " == 0 || " + v + " == 1"
+        return a + " == 0 || " + a + " == 1"
     }
     if tag == "uk" || tag == "ru" {
         if cat == "one" {
-            return v + " % 10 == 1 && " + v + " % 100 != 11"
+            return a + " % 10 == 1 && " + a + " % 100 != 11"
         }
         if cat == "few" {
-            return v + " % 10 >= 2 && " + v + " % 10 <= 4 && (" + v + " % 100 < 12 || " + v + " % 100 > 14)"
+            return a + " % 10 >= 2 && " + a + " % 10 <= 4 && (" + a + " % 100 < 12 || " + a + " % 100 > 14)"
         }
-        return v + " % 10 == 0 || (" + v + " % 10 >= 5 && " + v + " % 10 <= 9) || (" + v + " % 100 >= 11 && " + v + " % 100 <= 14)"
+        return a + " % 10 == 0 || (" + a + " % 10 >= 5 && " + a + " % 10 <= 9) || (" + a + " % 100 >= 11 && " + a + " % 100 <= 14)"
     }
     // pl
     if cat == "one" {
-        return v + " == 1"
+        return a + " == 1"
     }
     if cat == "few" {
-        return v + " % 10 >= 2 && " + v + " % 10 <= 4 && (" + v + " % 100 < 12 || " + v + " % 100 > 14)"
+        return a + " % 10 >= 2 && " + a + " % 10 <= 4 && (" + a + " % 100 < 12 || " + a + " % 100 > 14)"
     }
-    return v + " != 1 && ((" + v + " % 10 >= 0 && " + v + " % 10 <= 1) || (" + v + " % 10 >= 5 && " + v + " % 10 <= 9) || (" + v + " % 100 >= 12 && " + v + " % 100 <= 14))"
+    return a + " != 1 && ((" + a + " % 10 >= 0 && " + a + " % 10 <= 1) || (" + a + " % 10 >= 5 && " + a + " % 10 <= 9) || (" + a + " % 100 >= 12 && " + a + " % 100 <= 14))"
 }
 
 // ===========================================================================
@@ -897,15 +922,24 @@ gen fn icuBadBrace(msg: String) -> Bool {
     return depth != 0
 }
 
-/// Key-collision errors for the base locale, anchored in its file. TWO injectivity
-/// failures both surface otherwise as a confusing "function `t…` defined twice";
-/// each becomes a report naming the colliding keys instead of a silent rename:
+/// Key-collision errors for the base locale, anchored in its file. Every
+/// injectivity failure here surfaces otherwise as a confusing "function defined
+/// twice"; each becomes a report naming the colliding keys instead of a silent
+/// rename:
 ///   - a DOTTED key (`"a.b"`) and a NESTED object (`"a": {"b": …}`) flatten to the
 ///     same `a.b`;
 ///   - two distinct keys whose PascalCase concatenation collides (`home.title` and
-///     `homeTitle` both make `tHomeTitle`).
+///     `homeTitle` both make `tHomeTitle` — and with it the same-named alias);
+///   - two keys whose derived names CROSS: one key's un-prefixed alias can be
+///     another key's function name (`Tcart.items` aliases to `tCartItems`, which
+///     is exactly what `cart.items` exports);
+///   - a key whose derived names land on the module's OWN exports — a key
+///     `Locale` emits the alias `locale` beside the generated `locale()`.
 gen fn keyCollisionErrors(base: LocaleData, dir: String, tag: String) -> String {
     let keys = localeKeys(base)
+    // The exports the synthesized module owns outright, beside the per-key
+    // functions: locale state, `t`, and the runtime key check.
+    let reserved: Array<String> = ["locale", "setLocale", "t", "transKey"]
     let mut out = ""
     let mut i = 0
     while i < keys.length {
@@ -925,10 +959,34 @@ gen fn keyCollisionErrors(base: LocaleData, dir: String, tag: String) -> String 
                     tag,
                     "keys `\{keys[i]}` and `\{keys[j]}` both name the function `\{keyFnName(keys[i])}` — a key and a Vyrn identifier are different alphabets, and these two keys convert to one name; rename one key",
                 )
+            } else if keyPlainName(keys[i]) == keyFnName(keys[j]) || keyFnName(keys[i]) == keyPlainName(keys[j]) {
+                let shared = if keyPlainName(keys[i]) == keyFnName(keys[j]) {
+                    keyFnName(keys[j])
+                } else {
+                    keyFnName(keys[i])
+                }
+                out = out
+                + localeErr(
+                    dir,
+                    tag,
+                    "keys `\{keys[i]}` and `\{keys[j]}` collide through different doors — one key's un-prefixed alias is the other's function `\{shared}`; rename one key",
+                )
             }
             j = j + 1
         }
         i = i + 1
+    }
+    for k in keys {
+        for r in reserved {
+            if keyPlainName(k) == r || keyFnName(k) == r {
+                out = out
+                + localeErr(
+                    dir,
+                    tag,
+                    "key `\{k}` derives the name `\{r}`, which is the module's own export — rename the key",
+                )
+            }
+        }
     }
     return out
 }
@@ -1048,7 +1106,17 @@ export gen fn i18n(dir: String) -> String {
     let mut ki = 0
     while ki < base.entries.length {
         let key = base.entries[ki].key
-        let baseSig = argSignature(scanArgs(base.entries[ki].value))
+        let baseScan = scanArgs(base.entries[ki].value)
+        if baseScan.ok == false {
+            // Before drift: a base the scanner refuses must be reported as the
+            // refusal it is, not as a signature mismatch against every locale.
+            return localeErr(
+                dir,
+                baseTag,
+                "key `\{key}` uses ICU this generator does not support — \{baseScan.error}",
+            )
+        }
+        let baseSig = argSignature(baseScan)
         let mut lj = 1
         while lj < tags.length {
             let d = datas[lj]
@@ -1411,8 +1479,32 @@ test "plural categories cover the Slavic locales" {
 
 test "compileBody turns a plural into an if-chain" {
     let code = compileBody("{count, plural, one {# item} other {# items}}", "en", "    ", "")
-    assert(code.contains("count == 1"))
+    // Category conditions run over |count| (CLDR operands are absolute); `#`
+    // still prints the raw count.
+    assert(code.contains("(if count < 0 { 0 - count } else { count }) == 1"))
     assert(code.contains("count.toString()"))
+}
+
+test "plural conditions take the absolute value, so negatives pick the CLDR branch" {
+    // Vyrn's % truncates toward zero (-3 % 10 == -3), so without |n| a negative
+    // count matches neither `few` (-3) nor `many` (-5) in uk and drops to
+    // `other`. The generated comparisons must spell the absolute value out.
+    let few = pluralCondition("uk", "few", "count")
+    assert(few.contains("(if count < 0 { 0 - count } else { count }) % 10 >= 2"))
+    assert(few.contains("(if count < 0 { 0 - count } else { count }) % 100 < 12"))
+    let many = pluralCondition("uk", "many", "count")
+    assert(many.contains("(if count < 0 { 0 - count } else { count }) % 10 >= 5"))
+    assert(many.contains("(if count < 0 { 0 - count } else { count }) % 100 >= 11"))
+}
+
+test "a select selector containing a comma is refused at scan time" {
+    // The branch set serializes comma-joined and splits back on ',', so a
+    // comma-bearing selector round-trips wrongly: the emitted type admits `on`
+    // while the compiled code compares `on,off` — passing `on` would silently
+    // pick `other`. Refused instead; the caller anchors it in the locale file.
+    let sc = scanArgs("{state, select, on,off {X} other {Y}}")
+    assert(sc.ok == false)
+    assert(sc.error.contains("serialized comma-joined"))
 }
 
 test "keyFnName pascalizes dotted keys" {
@@ -1457,7 +1549,7 @@ test "icuBadBrace flags an unmatched or stray brace, quote-aware" {
     assertEq(icuBadBrace("x '{' y"), false)
 }
 
-test "keyCollisionErrors names both collision classes" {
+test "keyCollisionErrors names every collision class" {
     // Dotted vs nested flatten to the same `a.b`.
     let dup = LocaleData { ok: true, error: "", entries: [LocaleEntry { key: "a.b", value: "x" }, LocaleEntry { key: "a.b", value: "y" }] }
     assert(keyCollisionErrors(dup, "./locales", "en").contains("key `a.b` is defined twice"))
@@ -1466,6 +1558,16 @@ test "keyCollisionErrors names both collision classes" {
     assert(
         keyCollisionErrors(clash, "./locales", "en")
         .contains("keys `home.title` and `homeTitle` both name the function `tHomeTitle`"),
+    )
+    // `tCart.items` and `cart.items` collide through different doors: the
+    // first key's un-prefixed alias (`tCartItems`) is the second's function.
+    let cross = LocaleData { ok: true, error: "", entries: [LocaleEntry { key: "tCart.items", value: "A" }, LocaleEntry { key: "cart.items", value: "B" }] }
+    assert(keyCollisionErrors(cross, "./locales", "en").contains("collide through different doors"))
+    // A key `Locale` derives the alias `locale` — the module's own export.
+    let reserved = LocaleData { ok: true, error: "", entries: [LocaleEntry { key: "Locale", value: "A" }] }
+    assert(
+        keyCollisionErrors(reserved, "./locales", "en")
+        .contains("derives the name `locale`, which is the module's own export"),
     )
     // A clean key set collides with nothing.
     let ok = LocaleData { ok: true, error: "", entries: [LocaleEntry { key: "home.title", value: "A" }, LocaleEntry { key: "cart.items", value: "B" }] }

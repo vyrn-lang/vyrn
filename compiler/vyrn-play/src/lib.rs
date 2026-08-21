@@ -80,8 +80,26 @@ pub extern "C" fn play_check(src_len: usize) -> usize {
 
 /// Run `input[..src_len]`, with `input[src_len..src_len + stdin_len]` as stdin
 /// and `now_ms` as the wall clock. See [`run_json`].
+///
+/// The lengths are the host's word, and a slice past the reserved buffer
+/// would panic — which on this target aborts the instance silently. Out-of-
+/// range lengths therefore answer with a diagnostic instead, the same shape
+/// the page already knows how to render.
 #[no_mangle]
 pub extern "C" fn play_run(src_len: usize, stdin_len: usize, now_ms: f64) -> usize {
+    let out_of_range = INPUT.with(|i| {
+        let b = i.borrow();
+        src_len.checked_add(stdin_len).is_none_or(|end| end > b.len())
+    });
+    if out_of_range {
+        let d = Diagnostic::error(
+            0,
+            0,
+            "host",
+            format!("play_run lengths {src_len} + {stdin_len} exceed the input buffer"),
+        );
+        return publish_json(format!("{{\"diagnostics\":[{}]}}", diag_json(&d)));
+    }
     let stdin = INPUT.with(|i| i.borrow()[src_len..src_len + stdin_len].to_vec());
     with_input(src_len, |src| run_json(src, &stdin, now_ms as i64))
 }
@@ -90,8 +108,20 @@ pub extern "C" fn play_run(src_len: usize, stdin_len: usize, now_ms: f64) -> usi
 ///
 /// The page sends `TextEncoder` output, so the invalid case is unreachable in
 /// practice; it still answers with a diagnostic rather than a panic, because a
-/// panic on this target aborts the instance and says nothing.
+/// panic on this target aborts the instance and says nothing. A `src_len`
+/// past the reserved buffer gets the same treatment — the length is the
+/// host's word, and slicing would panic.
 fn with_input(src_len: usize, f: impl FnOnce(&str) -> String) -> usize {
+    let too_long = INPUT.with(|i| src_len > i.borrow().len());
+    if too_long {
+        let d = Diagnostic::error(
+            0,
+            0,
+            "host",
+            format!("src_len {src_len} exceeds the input buffer"),
+        );
+        return publish_json(format!("{{\"diagnostics\":[{}]}}", diag_json(&d)));
+    }
     let bytes = INPUT.with(|i| i.borrow()[..src_len].to_vec());
     let json = match std::str::from_utf8(&bytes) {
         Ok(src) => f(src),
@@ -100,6 +130,12 @@ fn with_input(src_len: usize, f: impl FnOnce(&str) -> String) -> usize {
             format!("{{\"diagnostics\":[{}]}}", diag_json(&d))
         }
     };
+    publish_json(json)
+}
+
+/// Store the JSON result and return its length — the calling convention's
+/// return value, shared by every entry point.
+fn publish_json(json: String) -> usize {
     RESULT.with(|r| {
         let mut b = r.borrow_mut();
         *b = json.into_bytes();
@@ -476,6 +512,35 @@ mod tests {
             0,
         );
         assert!(json.contains("\"exitCode\":0"), "{json}");
+    }
+
+    /// The lengths are the host's word; a slice past the reserved buffer used
+    /// to panic, and a panic on wasm aborts the instance silently. Out-of-
+    /// range lengths must answer through the normal JSON channel instead.
+    #[test]
+    fn play_run_lengths_past_the_buffer_answer_instead_of_aborting() {
+        input_ptr(8); // reserve 8 zero bytes
+        let read = |len: usize| {
+            String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(result_ptr(), len) })
+                .into_owned()
+        };
+        let n = play_run(100, 0, 0.0);
+        assert!(read(n).contains("exceed the input buffer"), "{}", read(n));
+        // stdin alone past the end is the same refusal.
+        let n = play_run(4, 100, 0.0);
+        assert!(read(n).contains("exceed the input buffer"), "{}", read(n));
+        // A length addition that overflows usize must not wrap into range.
+        let n = play_run(usize::MAX, usize::MAX, 0.0);
+        assert!(read(n).contains("exceed the input buffer"), "{}", read(n));
+    }
+
+    #[test]
+    fn play_tokens_length_past_the_buffer_answers_instead_of_aborting() {
+        input_ptr(4);
+        let n = play_tokens(usize::MAX);
+        let json = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(result_ptr(), n) })
+            .into_owned();
+        assert!(json.contains("exceeds the input buffer"), "{json}");
     }
 
     #[test]

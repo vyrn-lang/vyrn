@@ -61,21 +61,33 @@ pub fn resolve_to_url(spec: &str) -> Result<String, String> {
         let at = rest.find('@').ok_or("github specifier needs `@ref`")?;
         let (owner_repo, rest) = rest.split_at(at);
         let rest = &rest[1..];
-        let slash = rest.find('/').ok_or("github specifier needs a file path")?;
-        let (r, path) = rest.split_at(slash);
+        // The ref and the file path share their `/`, so a branch named
+        // `feature/2/api` before `/src/x.vyrn` reads as ref `feature` — and
+        // may BE ref `feature`. `@ref=<ref>/<path>` names both sides
+        // outright; without it every `/` boundary is a candidate ref, tried
+        // shortest-first: the reading the specifier always used to get.
+        let (r, path, candidates) = if let Some(explicit) = rest.strip_prefix("ref=") {
+            let slash = explicit
+                .find('/')
+                .ok_or("`@ref=<ref>/<path>` needs the file path after the ref")?;
+            let (r, path) = (&explicit[..slash], &explicit[slash..]);
+            (r, path, vec![r])
+        } else {
+            let slash = rest.find('/').ok_or("github specifier needs a file path")?;
+            let (r, path) = (&rest[..slash], &rest[slash..]);
+            let candidates: Vec<&str> = rest.match_indices('/').map(|(i, _)| &rest[..i]).collect();
+            (r, path, candidates)
+        };
         let sha = if r.len() == 40 && r.bytes().all(|b| b.is_ascii_hexdigit()) {
+            // Already a commit: immutable, no network.
             r.to_string()
         } else {
-            let out = Command::new("git")
-                .args(["ls-remote", &format!("https://github.com/{owner_repo}"), r])
-                .output()
-                .map_err(|e| format!("cannot run git ls-remote: {e}"))?;
-            let text = String::from_utf8_lossy(&out.stdout);
-            text.split_whitespace()
-                .next()
-                .filter(|s| s.len() == 40)
-                .ok_or_else(|| format!("cannot resolve ref `{r}` in github.com/{owner_repo}"))?
-                .to_string()
+            ls_remote_ref(
+                &format!("https://github.com/{owner_repo}"),
+                &candidates,
+                spec,
+                ls_remote_once,
+            )?
         };
         return Ok(format!(
             "https://raw.githubusercontent.com/{owner_repo}/{sha}{path}"
@@ -102,6 +114,58 @@ pub fn resolve_to_url(spec: &str) -> Result<String, String> {
     Err(format!("not a remote specifier: {spec}"))
 }
 
+/// Resolve a floating github ref to a commit sha by probing `git ls-remote`
+/// with each candidate, shortest-first. Exactly one live ref wins; several
+/// refuse with the ambiguity named — a guess here pins whichever branch
+/// answered under a specifier that cannot say which one it meant — and none
+/// reports the shortest reading's own failure. `probe` is the network edge,
+/// split out so the disambiguation is testable offline.
+fn ls_remote_ref(
+    url: &str,
+    candidates: &[&str],
+    spec: &str,
+    mut probe: impl FnMut(&str, &str) -> Result<String, String>,
+) -> Result<String, String> {
+    let mut live: Vec<(&str, String)> = Vec::new();
+    let mut first_err = String::new();
+    for r in candidates {
+        match probe(url, r) {
+            Ok(sha) => live.push((r, sha)),
+            Err(e) => {
+                if first_err.is_empty() {
+                    first_err = e;
+                }
+            }
+        }
+    }
+    match live.len() {
+        1 => Ok(live.remove(0).1),
+        0 => Err(first_err),
+        _ => Err(format!(
+            "`{spec}` is ambiguous: refs {} all exist in {url} — \
+             write `@ref=<ref>/<path>` to name the ref and the file path explicitly",
+            live.iter()
+                .map(|(r, _)| format!("`{r}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// Ask `git ls-remote` for the commit a ref names.
+fn ls_remote_once(url: &str, r: &str) -> Result<String, String> {
+    let out = Command::new("git")
+        .args(["ls-remote", url, r])
+        .output()
+        .map_err(|e| format!("cannot run git ls-remote: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.split_whitespace()
+        .next()
+        .filter(|s| s.len() == 40)
+        .map(str::to_string)
+        .ok_or_else(|| format!("cannot resolve ref `{r}` in {url}"))
+}
+
 /// The refusal for bytes that arrived from a pinned URL and are not the pinned
 /// bytes, spelled once: a module reads it through [`RemoteResolver`] and a
 /// pinned tool reads it through `vyrn update --locked`, and a rule with two
@@ -116,9 +180,20 @@ pub fn upstream_changed(spec: &str, url: &str, got: &str, pinned: &str, remedy: 
 }
 
 /// Fetch a URL's bytes with `curl -sL --fail`.
+///
+/// The URL reaches curl as an argv element, and lock files are data: a
+/// crafted entry like `-K/etc/passwd` would hand curl a config file to obey.
+/// So only `https://` URLs are fetched from the network — every URL the
+/// resolver builds is https — and `file://` is allowed beside it for local
+/// pins (an offline test fixture, or a vendored tarball): curl reads it from
+/// this machine and the sha256 gate still decides what the build accepts.
+/// `--` ends curl's option parsing before the URL regardless.
 pub fn fetch(url: &str) -> Result<Vec<u8>, String> {
+    if !url.starts_with("https://") && !url.starts_with("file://") {
+        return Err(format!("refusing to fetch a non-https URL: {url}"));
+    }
     let out = Command::new("curl")
-        .args(["-sL", "--fail", url])
+        .args(["-sL", "--fail", "--", url])
         .output()
         .map_err(|e| format!("cannot run curl: {e}"))?;
     if !out.status.success() {
@@ -235,6 +310,67 @@ mod tests {
             resolve_to_url("https://x.dev/m.vyrn").unwrap(),
             "https://x.dev/m.vyrn"
         );
+    }
+
+    #[test]
+    fn explicit_ref_form_names_both_sides() {
+        // `@ref=<ref>/<path>` says where the ref ends, so a branch whose own
+        // name carries `/` needs no guessing.
+        let sha = "b".repeat(40);
+        assert_eq!(
+            resolve_to_url(&format!("github:o/r@ref={sha}/src/x.vyrn")).unwrap(),
+            format!("https://raw.githubusercontent.com/o/r/{sha}/src/x.vyrn")
+        );
+        let e = resolve_to_url("github:o/r@ref=main").unwrap_err();
+        assert!(e.contains("needs the file path"), "{e}");
+    }
+
+    #[test]
+    fn slashed_refs_disambiguate_shortest_first_or_refuse() {
+        let url = "https://github.com/o/r";
+        // One live ref wins, whatever its length.
+        let sha = ls_remote_ref(
+            url,
+            &["feature", "feature/2"],
+            "github:o/r@feature/2/x.vyrn",
+            |_, r| match r {
+                "feature/2" => Ok("b".repeat(40)),
+                _ => Err(format!("cannot resolve ref `{r}`")),
+            },
+        )
+        .unwrap();
+        assert_eq!(sha, "b".repeat(40));
+        // Two live refs refuse, naming both and the way out.
+        let e = ls_remote_ref(url, &["feature", "feature/2"], "github:o/r@feature/2/x.vyrn", |_, _| {
+            Ok("c".repeat(40))
+        })
+        .unwrap_err();
+        assert!(e.contains("`feature`"), "{e}");
+        assert!(e.contains("`feature/2`"), "{e}");
+        assert!(e.contains("@ref="), "{e}");
+        // None lives: the shortest reading's failure is what is reported.
+        let e = ls_remote_ref(url, &["main", "main/dev"], "spec", |_, r| {
+            Err(format!("cannot resolve ref `{r}`"))
+        })
+        .unwrap_err();
+        assert!(e.contains("cannot resolve ref `main`"), "{e}");
+    }
+
+    #[test]
+    fn fetch_refuses_non_https_and_option_looking_urls() {
+        // A lock file is data; a crafted URL must never become a curl option,
+        // and a plaintext remote is never fetched. `file://` alone joins
+        // https in the allowed set — a local pin, still sha-gated — so the
+        // option-shaped spellings are what this test pins to refusal.
+        for url in [
+            "http://x.dev/m.vyrn",
+            "-K/etc/passwd",
+            "--output=/tmp/evil",
+            "ftp://x.dev/m.vyrn",
+        ] {
+            let e = fetch(url).unwrap_err();
+            assert!(e.contains("refusing to fetch"), "{url}: {e}");
+        }
     }
 
     #[test]

@@ -566,17 +566,17 @@ mod tests {
     /// `RESERVED` in the same stroke. `RESERVED_VIEWS` kept it, so every user
     /// function called `get` handed back a value that owned nothing, and a
     /// `Slots<String>` read through `std/slots` leaked with no diagnostic. This
-    /// is the check that was missing, moved here with the rows.
+    /// is the check that was missing, moved here with the rows. `atSet` — the
+    /// one row a store reaches as `Stmt::IndexSet` rather than a call — is
+    /// reserved like its read half `at`: nothing stops a user from DECLARING
+    /// `fn atSet(..)` and calling it free-form, and the row's lend facts would
+    /// then attach to it by spelling alone.
     #[test]
     fn every_seeded_name_is_reserved_or_unspellable() {
         for f in all() {
             let n = f.name.as_str();
             assert!(
-                // `atSet` is the one row keyed by IMPL METHOD rather than by
-                // call: a store reaches it as `Stmt::IndexSet`, and no lowering
-                // makes a call of that name. `at` is reserved and is the pair's
-                // read half.
-                n == "atSet" || n.starts_with('@') || crate::checker::RESERVED.contains(&n),
+                n.starts_with('@') || crate::checker::RESERVED.contains(&n),
                 "`{n}` has a seeded contract but is neither reserved nor \
                  unspellable, so a user function of that name would inherit it"
             );

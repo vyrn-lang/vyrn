@@ -121,9 +121,11 @@ test("every import line compiles", async () => {
 // ---------------------------------------------------------------------------
 
 /// `resolve_to_url` in `compiler/vyrn-cli/src/remote.rs`, in JavaScript. The
-/// three rules are four lines each and have not moved since RFC-0010 M4; what
-/// they cannot do without the network is turn a floating ref into a commit, and
-/// `<sha>` stands where `git ls-remote` would answer.
+/// rules are four lines each and have not moved since RFC-0010 M4, bar the
+/// explicit `@ref=<ref>/<path>` form the compiler grew for refs whose own
+/// name carries a `/`; what they cannot do without the network is turn a
+/// floating ref into a commit, and `<sha>` stands where `git ls-remote` would
+/// answer.
 ///
 /// Throws with the compiler's own words for anything that is not a specifier,
 /// so a malformed one fails this gate with the message a user would get.
@@ -135,10 +137,23 @@ export function resolveToUrl(spec) {
     if (at < 0) throw new Error("github specifier needs `@ref`");
     const ownerRepo = rest.slice(0, at);
     const after = rest.slice(at + 1);
-    const slash = after.indexOf("/");
-    if (slash < 0) throw new Error("github specifier needs a file path");
-    const ref = after.slice(0, slash);
-    const filePath = after.slice(slash);
+    // The ref and the file path share their `/`, so a branch named
+    // `feature/2/api` before `/src/x.vyrn` reads as ref `feature` — and
+    // may BE ref `feature`. `@ref=<ref>/<path>` names both sides outright;
+    // without it every `/` boundary is a candidate ref, tried shortest-first:
+    // the reading the specifier always used to get.
+    let ref, filePath;
+    if (after.startsWith("ref=")) {
+      const slash = after.indexOf("/");
+      if (slash < 0) throw new Error("`@ref=<ref>/<path>` needs the file path after the ref");
+      ref = after.slice(4, slash);
+      filePath = after.slice(slash);
+    } else {
+      const slash = after.indexOf("/");
+      if (slash < 0) throw new Error("github specifier needs a file path");
+      ref = after.slice(0, slash);
+      filePath = after.slice(slash);
+    }
     const sha = /^[0-9a-fA-F]{40}$/.test(ref) ? ref : "<sha>";
     return `https://raw.githubusercontent.com/${ownerRepo}/${sha}${filePath}`;
   }
@@ -197,4 +212,8 @@ test("the grammar refuses what the compiler refuses", () => {
   assert.equal(resolveToUrl("gist:u/abc123/f.vyrn"), "https://gist.githubusercontent.com/u/abc123/raw/f.vyrn");
   assert.equal(resolveToUrl("gist:u/abc123@rev9/f.vyrn"), "https://gist.githubusercontent.com/u/abc123/raw/rev9/f.vyrn");
   assert.equal(resolveToUrl("https://x.dev/m.vyrn"), "https://x.dev/m.vyrn");
+  // The explicit form says where the ref ends, so a ref whose own name
+  // carries a `/` needs no guessing — remote.rs's own unit test, mirrored.
+  assert.equal(resolveToUrl(`github:o/r@ref=${sha}/src/x.vyrn`), `https://raw.githubusercontent.com/o/r/${sha}/src/x.vyrn`);
+  assert.throws(() => resolveToUrl("github:o/r@ref=main"), /needs the file path/);
 });

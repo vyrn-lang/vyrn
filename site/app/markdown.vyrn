@@ -26,7 +26,7 @@
 ///     (`site/app/hl.vyrn` is a generator), and an RFC is read at export time, so
 ///     the two cannot meet. The corpus also tags thirteen languages. Escaped and
 ///     marked with its tag is what an RFC block gets.
-import { substring, split, trim, toLower, lines, joinWith, fromBytesOr, indexOf } from "std/strings"
+import { substring, trim, toLower, lines, joinWith, fromBytesOr, indexOf } from "std/strings"
 import { contains } from "std/strpred"
 import { startsWith } from "std/strpred"
 import { escapeHtml } from "./code"
@@ -330,18 +330,66 @@ fn takeTable(ls: Array<String>, i: Int64, known: Array<Int64>) -> Result<Taken, 
 }
 
 /// The cells of one row, without the empty ones the leading and trailing pipe
-/// produce.
+/// produce. A `\|` is a pipe in the cell's content, not a separator — GFM's
+/// rule, and it holds inside a code span too, where CommonMark's own backslash
+/// rule does not reach. A `\\` is an escaped backslash, so `\\|` still splits.
 fn cellsOf(row: String) -> Array<String> {
-    let parts = split(row, "|")
-    let mut out: Array<String> = []
+    let raw = bytes(row)
+    let mut parts: Array<String> = []
+    let mut cell = ""
     let mut i = 0
-    while i < parts.length {
-        let first = i == 0 && trim(parts[i]).byteLength == 0
-        let last = i == parts.length - 1 && trim(parts[i]).byteLength == 0
-        if !first && !last {
-            out.push(trim(parts[i]))
+    while i < raw.length {
+        // Rows carry prose: multi-byte characters are ordinary, and a byte-
+        // stepped `substring` would land inside one and trap. The width of
+        // the character at `i` comes off its first byte (UTF-8's self-
+        // describing lengths).
+        let b = raw[i]
+        let w = if b < 128 {
+            1
+        } else if b < 224 {
+            2
+        } else if b < 240 {
+            3
+        } else {
+            4
         }
-        i = i + 1
+        if b == 124 {
+            parts.push(trim(cell))
+            cell = ""
+            i = i + 1
+        } else if b == 92 && i + 1 < raw.length {
+            // The backslash keeps the character after it; when that character
+            // is the pipe, what lands in the cell is the pipe itself. The
+            // character's full width rides along — slicing one byte past a
+            // multi-byte start would land inside it.
+            let nb = raw[i + 1]
+            let nw = if nb < 128 {
+                1
+            } else if nb < 224 {
+                2
+            } else if nb < 240 {
+                3
+            } else {
+                4
+            }
+            cell = cell + if nb == 124 { "|" } else { substring(row, i, i + 1 + nw) }
+            i = i + 1 + nw
+        } else {
+            cell = cell + substring(row, i, i + w)
+            i = i + w
+        }
+    }
+    parts.push(trim(cell))
+    // The leading pipe made parts[0] empty and the trailing one made the last
+    // part empty; an empty cell between two pipes stays.
+    let mut out: Array<String> = []
+    let mut j = 0
+    while j < parts.length {
+        let edge = (j == 0 || j == parts.length - 1) && parts[j].byteLength == 0
+        if !edge {
+            out.push(parts[j].copy())
+        }
+        j = j + 1
     }
     return out
 }
@@ -855,6 +903,20 @@ fn mentioned(text: String) -> String {
         parts.push(n.toString())
     }
     return joinWith(parts, " ")
+}
+
+test "an escaped pipe is content, not a separator" {
+    // RFC-0045's operator row, verbatim. Splitting on every pipe byte cut it
+    // into six garbled cells and published them; the escape is GFM's, and it
+    // reaches inside a code span, where CommonMark's own backslash rule does
+    // not.
+    assertEq(renderOk("| op | name |\n|----|------|\n| `a \\| b` | or |"),
+        "<div class=\"scroller\"><table><thead><tr><th>op</th><th>name</th></tr></thead><tbody><tr><td><code>a | b</code></td><td>or</td></tr></tbody></table></div>")
+    // Outside a code span too, and RFC-0083's doubled escape.
+    assertEq(renderOk("| x |\n|---|\n| a \\| b \\|\\| c |"),
+        "<div class=\"scroller\"><table><thead><tr><th>x</th></tr></thead><tbody><tr><td>a | b || c</td></tr></tbody></table></div>")
+    // An escaped backslash is not an escape: `\\|` still separates.
+    assertEq(joinWith(cellsOf("| a \\\\| b |"), ";"), "a \\;b")
 }
 
 test "a link out of an RFC lands where that file is read from" {

@@ -459,6 +459,13 @@ pub fn render_type_decl(t: &TypeDecl, types: &HashMap<String, TypeDecl>) -> Stri
                 out.push_str(&render_field_type(&t.name, &fld.name, &fld.ty, types));
             }
             out.push_str(" }");
+            // A cross-field `where` stays on the record decl (the parser keeps
+            // it there), so dropping it here handed generators a source text
+            // whose re-emission silently lost the validation.
+            if let Some(pred) = &t.predicate {
+                out.push_str(" where ");
+                out.push_str(&crate::checker::pred_summary(pred));
+            }
         }
         Type::Enum(variants) => {
             let rendered: Vec<String> = variants
@@ -578,6 +585,21 @@ mod tests {
         assert_eq!(
             render_type_decl(&d, &t),
             "export type User = { name: String where value.byteLength >= 3, age: Int64 }"
+        );
+    }
+
+    /// A cross-field `where` stays on the record decl (the parser keeps it
+    /// there), so the rendered source must keep it too — the old output handed
+    /// generators a type whose re-emission silently lost the validation.
+    #[test]
+    fn renders_record_cross_field_where() {
+        let (d, t) = decl(
+            "export type R = { lo: Int64, hi: Int64 } where value.lo < value.hi\n",
+            "R",
+        );
+        assert_eq!(
+            render_type_decl(&d, &t),
+            "export type R = { lo: Int64, hi: Int64 } where value.lo < value.hi"
         );
     }
 

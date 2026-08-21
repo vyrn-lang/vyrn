@@ -677,7 +677,7 @@ fn std_vyx_unit_tests_run_green() {
         "std/vyx unit tests failed:\n{combined}"
     );
     assert!(
-        combined.contains("48 passed, 0 failed"),
+        combined.contains("54 passed, 0 failed"),
         "expected 48 green tests:\n{combined}"
     );
 }

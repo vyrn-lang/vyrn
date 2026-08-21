@@ -806,7 +806,8 @@ fn fence_signature(hover: &str) -> String {
 fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
     let p: HoverParams = serde_json::from_value(params).ok()?;
     let uri = &p.text_document_position_params.text_document.uri;
-    let (line, col) = to_frontend(&p.text_document_position_params.position);
+    let text = doc_text(server, uri)?;
+    let (line, col) = to_frontend(&text, &p.text_document_position_params.position);
     // RFC-0033: a request inside a generator input file (`.vyx`) is answered
     // against the synthesized module at the mapped generated position. RFC-0042:
     // when nothing resolves (the cursor is on a class token inside a string, not an
@@ -870,7 +871,8 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
 fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoDefinitionResponse> {
     let p: GotoDefinitionParams = serde_json::from_value(params).ok()?;
     let uri = &p.text_document_position_params.text_document.uri;
-    let (line, col) = to_frontend(&p.text_document_position_params.position);
+    let text = doc_text(server, uri)?;
+    let (line, col) = to_frontend(&text, &p.text_document_position_params.position);
     // RFC-0033: from a `.vyx` template expression, resolve through the
     // synthesized module. Only an IMPORTED declaration (with a real source file)
     // is a useful jump target — a binding local to the synthesized module has no
@@ -919,9 +921,10 @@ fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoD
         // `.vyx` request the target is inside the synthesized module (no file).
         None => home_uri?,
     };
+    let target_text = doc_text(server, &target_uri).unwrap_or_default();
     Some(GotoDefinitionResponse::Scalar(Location {
         uri: target_uri,
-        range: lsp_range(r.target_line, r.target_col, r.target_end_col),
+        range: lsp_range(&target_text, r.target_line, r.target_col, r.target_end_col),
     }))
 }
 
@@ -1102,7 +1105,8 @@ fn handle_document_highlight(
 ) -> Option<Vec<DocumentHighlight>> {
     let p: DocumentHighlightParams = serde_json::from_value(params).ok()?;
     let uri = &p.text_document_position_params.text_document.uri;
-    let (line, col) = to_frontend(&p.text_document_position_params.position);
+    let text = doc_text(server, uri).unwrap_or_default();
+    let (line, col) = to_frontend(&text, &p.text_document_position_params.position);
     let refs = if is_vyrn_uri(uri) {
         let (analysis, _) = lookup(server, uri)?;
         references(analysis, line, col)
@@ -1112,7 +1116,7 @@ fn handle_document_highlight(
     Some(
         refs.into_iter()
             .map(|r| DocumentHighlight {
-                range: lsp_range(r.line, r.col, r.end_col),
+                range: lsp_range(&text, r.line, r.col, r.end_col),
                 kind: Some(if r.write {
                     DocumentHighlightKind::WRITE
                 } else {
@@ -1189,7 +1193,8 @@ fn vyx_highlights(server: &Server, vyx_uri: &Url, line: usize, col: usize) -> Ve
 fn handle_completion(server: &Server, params: serde_json::Value) -> Option<CompletionResponse> {
     let p: CompletionParams = serde_json::from_value(params).ok()?;
     let uri = &p.text_document_position.text_document.uri;
-    let (line, col) = to_frontend(&p.text_document_position.position);
+    let raw = doc_text(server, uri)?;
+    let (line, col) = to_frontend(&raw, &p.text_document_position.position);
     if !is_vyrn_uri(uri) {
         return vyx_completion(server, uri, line, col);
     }
@@ -1197,27 +1202,21 @@ fn handle_completion(server: &Server, params: serde_json::Value) -> Option<Compl
     // A `.foo` member access → context-aware completions for the receiver's type
     // (e.g. `arr.` → push/at/pop/length). Otherwise → all top-level
     // symbols; the client filters by the prefix the user typed.
-    let raw = server.docs.get(uri);
     // RFC-0020 M1 / RFC-0042: inside a string literal whose expected type is a
     // finite string type, offer its language (`t("` → every key); whose expected
     // type is a sequence type (`theme.cls("…")` → `Tw`), offer the class alphabet
     // as token-in-sequence replacements. Falls back to member / top-level.
-    if is_string_literal_context(raw, line, col) {
-        if let (Some(src), Some(cls)) = (
-            raw,
-            raw.and_then(|s| class_completions(analysis, s, line, col)),
-        ) {
-            return Some(class_completion_response(src, line, col, cls));
+    if is_string_literal_context(Some(&raw), line, col) {
+        if let Some(cls) = class_completions(analysis, &raw, line, col) {
+            return Some(class_completion_response(&raw, line, col, cls));
         }
-        let items = raw
-            .map(|src| string_literal_completions(analysis, src, line, col))
-            .unwrap_or_default()
+        let items = string_literal_completions(analysis, &raw, line, col)
             .into_iter()
             .map(to_completion_item)
             .collect();
         return Some(CompletionResponse::Array(items));
     }
-    let mut items: Vec<CompletionItem> = if is_member_context(raw, line, col) {
+    let mut items: Vec<CompletionItem> = if is_member_context(Some(&raw), line, col) {
         member_completions(analysis, line, col)
     } else {
         completions(analysis)
@@ -1228,7 +1227,7 @@ fn handle_completion(server: &Server, params: serde_json::Value) -> Option<Compl
     // RFC-0071 M4: at module scope in a page (or any file a role attaches a
     // contract to), the contract's members come first — they are the thing you
     // are there to write, and each inserts its full declaration.
-    if !is_member_context(raw, line, col) {
+    if !is_member_context(Some(&raw), line, col) {
         let mut members = contract_completion_items(server, uri, line, col);
         members.append(&mut items);
         items = members;
@@ -1256,7 +1255,7 @@ fn vyx_completion(
         .or_else(|| uri_path(uri).and_then(|p| std::fs::read_to_string(p).ok()))?;
     match templates::classify(&raw, line, col) {
         VyxCursor::TagName { prefix, start_col } => {
-            Some(tag_name_completion(uri, &prefix, line, start_col, col))
+            Some(tag_name_completion(uri, &raw, &prefix, line, start_col, col))
         }
         VyxCursor::AttrName {
             tag,
@@ -1265,6 +1264,7 @@ fn vyx_completion(
             start_col,
         } => Some(attr_name_completion(
             uri,
+            &raw,
             &tag,
             is_component,
             line,
@@ -1274,7 +1274,7 @@ fn vyx_completion(
         VyxCursor::EventName {
             prefix: _,
             start_col,
-        } => Some(event_name_completion(line, start_col, col)),
+        } => Some(event_name_completion(&raw, line, start_col, col)),
         VyxCursor::ClassValue {
             token: _,
             start_col,
@@ -1331,12 +1331,13 @@ fn vyx_completion(
 /// document's plain symbols. Each item replaces the partial tag name.
 fn tag_name_completion(
     uri: &Url,
+    raw: &str,
     prefix: &str,
     line: usize,
     start_col: usize,
     col: usize,
 ) -> CompletionResponse {
-    let range = replace_range(line, start_col, col);
+    let range = replace_range(raw, line, start_col, col);
     let mut items: Vec<CompletionItem> = Vec::new();
     if let Some((dir, self_name)) = vyx_dir_and_name(uri) {
         for name in templates::sibling_components(&dir, &self_name) {
@@ -1370,13 +1371,14 @@ fn tag_name_completion(
 /// element offers global + per-element HTML attributes and the `v-*` directives.
 fn attr_name_completion(
     uri: &Url,
+    raw: &str,
     tag: &str,
     is_component: bool,
     line: usize,
     start_col: usize,
     col: usize,
 ) -> CompletionResponse {
-    let range = replace_range(line, start_col, col);
+    let range = replace_range(raw, line, start_col, col);
     let mut items: Vec<CompletionItem> = Vec::new();
     if is_component {
         if let Some((dir, _)) = vyx_dir_and_name(uri) {
@@ -1419,9 +1421,9 @@ fn attr_name_completion(
 }
 
 /// `@event` completion: the DOM events the runtime dispatches.
-fn event_name_completion(line: usize, start_col: usize, col: usize) -> CompletionResponse {
+fn event_name_completion(raw: &str, line: usize, start_col: usize, col: usize) -> CompletionResponse {
     // Replace from the `@` (start_col) so the inserted `@click` keeps the sigil.
-    let range = replace_range(line, start_col, col);
+    let range = replace_range(raw, line, start_col, col);
     let items = templates::EVENTS
         .iter()
         .map(|e| {
@@ -1445,7 +1447,7 @@ fn class_token_response(
     alphabet: Vec<Completion>,
 ) -> CompletionResponse {
     let prefix = line_slice(raw, line, start_col, col);
-    let range = replace_range(line, start_col, col);
+    let range = replace_range(raw, line, start_col, col);
     let items = alphabet
         .into_iter()
         .filter(|c| c.label.starts_with(&prefix))
@@ -1500,17 +1502,19 @@ fn line_slice(raw: &str, line: usize, start_col: usize, col: usize) -> String {
 }
 
 /// A zero-width-safe LSP range on `line` (1-based) from `start_col`..`col`
-/// (1-based, exclusive) — the span a completion `textEdit` replaces.
-fn replace_range(line: usize, start_col: usize, col: usize) -> Range {
+/// (1-based char columns in `raw`, exclusive) — the span a completion `textEdit`
+/// replaces, sent as UTF-16 units.
+fn replace_range(raw: &str, line: usize, start_col: usize, col: usize) -> Range {
     let l = line.saturating_sub(1) as u32;
+    let line_text = line_of_text(raw, l as usize);
     Range {
         start: Position {
             line: l,
-            character: start_col.saturating_sub(1) as u32,
+            character: char_col_to_utf16(line_text, start_col.saturating_sub(1)),
         },
         end: Position {
             line: l,
-            character: col.saturating_sub(1) as u32,
+            character: char_col_to_utf16(line_text, col.saturating_sub(1)),
         },
     }
 }
@@ -1776,11 +1780,12 @@ fn handle_document_symbol(
 ) -> Option<DocumentSymbolResponse> {
     let p: DocumentSymbolParams = serde_json::from_value(params).ok()?;
     let (analysis, _uri) = lookup(server, &p.text_document.uri)?;
+    let text = doc_text(server, &p.text_document.uri).unwrap_or_default();
     let symbols: Vec<DocumentSymbol> = analysis
         .symbols
         .iter()
         .filter(|s| s.file.is_none())
-        .filter_map(to_document_symbol)
+        .filter_map(|s| to_document_symbol(s, &text))
         .collect();
     Some(DocumentSymbolResponse::Nested(symbols))
 }
@@ -1807,9 +1812,11 @@ fn handle_formatting(server: &Server, params: serde_json::Value) -> Option<Vec<T
 /// A `Range` covering the entire `text` (start of the document to just past its
 /// last character), so a single edit replaces everything.
 fn whole_document_range(text: &str) -> Range {
-    // LSP lines are 0-based; the end position is the line/character just after the
-    // last content. Counting `\n`s gives the last line index; the final line's
-    // length is its char count.
+    // LSP lines are 0-based; the end position is the line/character just after
+    // the last content. Counting `\n`s gives the last line index; the final
+    // line's length is its UTF-16 code-unit length — what the client reads. An
+    // astral-plane char (emoji, CJK ext-B) is 2 units and 1 char; counting chars
+    // here used to end the format edit short and duplicate the tail on save.
     let mut last_line = 0u32;
     let mut last_line_len = 0u32;
     for ch in text.chars() {
@@ -1817,7 +1824,7 @@ fn whole_document_range(text: &str) -> Range {
             last_line += 1;
             last_line_len = 0;
         } else {
-            last_line_len += 1;
+            last_line_len += ch.len_utf16() as u32;
         }
     }
     Range {
@@ -1910,7 +1917,8 @@ fn handle_semantic_tokens_full(
 ) -> Option<SemanticTokensResult> {
     let p: SemanticTokensParams = serde_json::from_value(params).ok()?;
     let toks = document_sem_tokens(server, &p.text_document.uri)?;
-    Some(SemanticTokensResult::Tokens(encode_tokens(toks)))
+    let text = doc_text(server, &p.text_document.uri).unwrap_or_default();
+    Some(SemanticTokensResult::Tokens(encode_tokens(toks, &text)))
 }
 
 /// `textDocument/semanticTokens/range`: the same classification, filtered to the
@@ -1925,7 +1933,8 @@ fn handle_semantic_tokens_range(
     let start = (p.range.start.line + 1) as usize;
     let end = (p.range.end.line + 1) as usize;
     toks.retain(|t| t.line >= start && t.line <= end);
-    Some(SemanticTokensRangeResult::Tokens(encode_tokens(toks)))
+    let text = doc_text(server, &p.text_document.uri).unwrap_or_default();
+    Some(SemanticTokensRangeResult::Tokens(encode_tokens(toks, &text)))
 }
 
 /// The classified tokens for `uri`: from the cached analysis for a `.vyrn`
@@ -1955,24 +1964,33 @@ fn handle_inlay_hint(server: &Server, params: serde_json::Value) -> Option<Vec<I
         return Some(vyx_type_hints(server, &p.text_document.uri, from, to));
     }
     let (analysis, _) = lookup(server, &p.text_document.uri)?;
+    let src = doc_text(server, &p.text_document.uri);
     let mut hints: Vec<InlayHint> = vyrn_frontend::inlay_hints(analysis)
         .into_iter()
         .filter(|h| h.line >= from && h.line <= to)
-        .map(|h| InlayHint {
-            position: Position {
-                line: h.line.saturating_sub(1) as u32,
-                character: h.col.saturating_sub(1) as u32,
-            },
-            label: InlayHintLabel::String(h.label),
-            kind: None,
-            text_edits: None,
-            tooltip: None,
-            padding_left: Some(true),
-            padding_right: None,
-            data: None,
+        .map(|h| {
+            // The move label's column leaves the frontend as a char column and
+            // goes on the wire as UTF-16 units.
+            let line_text = src
+                .as_deref()
+                .map(|t| line_of_text(t, h.line.saturating_sub(1)))
+                .unwrap_or("");
+            InlayHint {
+                position: Position {
+                    line: h.line.saturating_sub(1) as u32,
+                    character: char_col_to_utf16(line_text, h.col.saturating_sub(1)),
+                },
+                label: InlayHintLabel::String(h.label),
+                kind: None,
+                text_edits: None,
+                tooltip: None,
+                padding_left: Some(true),
+                padding_right: None,
+                data: None,
+            }
         })
         .collect();
-    if let Some(src) = server.docs.get(&p.text_document.uri) {
+    if let Some(src) = src.as_deref() {
         hints.extend(type_hints(analysis, src, from, to));
     }
     Some(hints)
@@ -2001,7 +2019,7 @@ fn type_hints(analysis: &Analysis, src: &str, from: usize, to: usize) -> Vec<Inl
         let Some(label) = type_hint_label(b, line, b.end_col) else {
             continue;
         };
-        out.push(type_hint_at(b.line, b.end_col, label));
+        out.push(type_hint_at(line, b.line, b.end_col, label));
     }
     out
 }
@@ -2028,12 +2046,13 @@ fn type_hint_label(b: &vyrn_frontend::LocalBinding, line: &str, end_col: usize) 
     Some(label)
 }
 
-/// One type hint, drawn just past a name at 1-based `(line, end_col)`.
-fn type_hint_at(line: usize, end_col: usize, label: String) -> InlayHint {
+/// One type hint, drawn just past a name at 1-based `(line, end_col)` — char
+/// columns in `line_text`, sent as UTF-16 units.
+fn type_hint_at(line_text: &str, line: usize, end_col: usize, label: String) -> InlayHint {
     InlayHint {
         position: Position {
             line: (line - 1) as u32,
-            character: (end_col - 1) as u32,
+            character: char_col_to_utf16(line_text, end_col - 1),
         },
         label: InlayHintLabel::String(format!(": {label}")),
         kind: Some(InlayHintKind::TYPE),
@@ -2128,7 +2147,7 @@ fn vyx_type_hints(server: &Server, vyx_uri: &Url, from: usize, to: usize) -> Vec
             let Some(label) = type_hint_label(b, vyx_line, col) else {
                 continue;
             };
-            out.push(type_hint_at(region.origin.line, col, label));
+            out.push(type_hint_at(vyx_line, region.origin.line, col, label));
         }
     }
     // Overlapping regions (rare) could double-emit a position; keep one per spot.
@@ -2201,15 +2220,19 @@ fn spells_type(line: &str, end_col: usize, ty: &str) -> bool {
 
 /// Delta-encode classified tokens into the LSP wire form. Tokens are sorted by
 /// (line, col) and encoded as the required `[Δline, Δstart, len, type, mods]`
-/// quintuples (0-based positions).
-fn encode_tokens(mut toks: Vec<vyrn_frontend::SemToken>) -> SemanticTokens {
+/// quintuples (0-based UTF-16 positions, converted from the frontend's char
+/// columns through `text`'s lines).
+fn encode_tokens(mut toks: Vec<vyrn_frontend::SemToken>, text: &str) -> SemanticTokens {
     toks.sort_by_key(|t| (t.line, t.col));
     let mut data = Vec::with_capacity(toks.len());
     let mut prev_line = 0u32;
     let mut prev_col = 0u32;
     for t in toks {
         let line = t.line.saturating_sub(1) as u32;
-        let col = t.col.saturating_sub(1) as u32;
+        let line_text = line_of_text(text, line as usize);
+        let start = t.col.saturating_sub(1);
+        let col = char_col_to_utf16(line_text, start);
+        let len = char_col_to_utf16(line_text, start + t.len) - col;
         let delta_line = line.saturating_sub(prev_line);
         let delta_start = if delta_line == 0 {
             col.saturating_sub(prev_col)
@@ -2219,7 +2242,7 @@ fn encode_tokens(mut toks: Vec<vyrn_frontend::SemToken>) -> SemanticTokens {
         data.push(SemanticToken {
             delta_line,
             delta_start,
-            length: t.len as u32,
+            length: len,
             token_type: sem_type_index(t.kind),
             token_modifiers_bitset: sem_mods_bits(t.mods),
         });
@@ -2335,7 +2358,7 @@ fn align_expr_span(vyx_line: &str, origin_col: usize, gen_line: &str) -> Option<
 /// Field/Param/Local never appear in the top-level index; they are dropped
 /// defensively (the match must stay exhaustive). `col == 0` means "whole line"
 /// and `lsp_range` maps it to character 0.
-fn to_document_symbol(sym: &vyrn_frontend::Symbol) -> Option<DocumentSymbol> {
+fn to_document_symbol(sym: &vyrn_frontend::Symbol, text: &str) -> Option<DocumentSymbol> {
     let kind = match sym.kind {
         SymbolKind::Function => lsp_types::SymbolKind::FUNCTION,
         SymbolKind::Method => lsp_types::SymbolKind::METHOD,
@@ -2345,7 +2368,7 @@ fn to_document_symbol(sym: &vyrn_frontend::Symbol) -> Option<DocumentSymbol> {
         SymbolKind::Global => lsp_types::SymbolKind::VARIABLE,
         SymbolKind::Field | SymbolKind::Param | SymbolKind::Local => return None,
     };
-    let range = lsp_range(sym.line, sym.col, sym.end_col);
+    let range = lsp_range(text, sym.line, sym.col, sym.end_col);
     let detail = if sym.detail.is_empty() {
         None
     } else {
@@ -2375,26 +2398,27 @@ fn is_member_context(text: Option<&String>, line: usize, col: usize) -> bool {
         Some(l) => l,
         None => return false,
     };
-    // `col` is 1-based; the char just before the cursor is at 0-based index
-    // `col - 2` in the line. Walk left, skipping the partial identifier the user
-    // is typing (alnum/underscore), then any spaces.
-    let bytes = line_text.as_bytes();
+    // `col` is 1-based in CHARS (the frontend convention), so walk left over
+    // chars — indexing bytes with a char column lands mid-UTF-8 after any
+    // non-ASCII receiver (`café.`) and silently drops member completions.
+    let chars: Vec<char> = line_text.chars().collect();
     let mut i = col.saturating_sub(2);
-    // Skip the partial member name (e.g. the `pu` in `arr.pu`).
-    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-        i = i.wrapping_sub(1);
-        if i == usize::MAX {
+    // Skip the partial member name (e.g. the `pu` in `arr.pu`). Vyrn identifiers
+    // are unicode (the lexer takes any alphabetic char), so skip them as chars.
+    while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+        if i == 0 {
             return false;
         }
+        i -= 1;
     }
     // Skip spaces between the dot and the partial name.
-    while i < bytes.len() && bytes[i] == b' ' {
-        i = i.wrapping_sub(1);
-        if i == usize::MAX {
+    while i < chars.len() && chars[i] == ' ' {
+        if i == 0 {
             return false;
         }
+        i -= 1;
     }
-    i < bytes.len() && bytes[i] == b'.'
+    i < chars.len() && chars[i] == '.'
 }
 
 /// Whether the 1-based `(line, col)` cursor is inside a double-quoted string
@@ -2634,9 +2658,10 @@ fn contract_member_definition(
     let m = ctx.view.member(&name)?;
     let target =
         Url::from_file_path(ctx.view.file.replace('/', std::path::MAIN_SEPARATOR_STR)).ok()?;
+    let target_text = doc_text(server, &target).unwrap_or_default();
     Some(GotoDefinitionResponse::Scalar(Location {
         uri: target,
-        range: lsp_range(m.line, m.col, m.end_col),
+        range: lsp_range(&target_text, m.line, m.col, m.end_col),
     }))
 }
 
@@ -2656,8 +2681,9 @@ fn handle_code_action(
     let uri = &p.text_document.uri;
     let ctx = contract_ctx(server, uri)?;
     let mut out = Vec::new();
+    let text = doc_text(server, uri).unwrap_or_default();
     for fix in vyrn_frontend::contracts::contract_fixes(&ctx.view, &ctx.source) {
-        let range = lsp_range(fix.line + ctx.line_offset, fix.col, fix.end_col);
+        let range = lsp_range(&text, fix.line + ctx.line_offset, fix.col, fix.end_col);
         if !ranges_overlap(&range, &p.range) {
             continue;
         }
@@ -2703,25 +2729,69 @@ fn ranges_overlap(a: &Range, b: &Range) -> bool {
     key(&a.start) <= key(&b.end) && key(&b.start) <= key(&a.end)
 }
 
-/// LSP 0-based position → frontend 1-based (line, col).
-fn to_frontend(pos: &Position) -> (usize, usize) {
-    ((pos.line + 1) as usize, (pos.character + 1) as usize)
+/// LSP positions are UTF-16 code units (the default `positionEncoding`, which
+/// this server does not renegotiate), while the frontend's columns count Unicode
+/// chars. The two diverge on any line carrying an astral-plane character (emoji,
+/// CJK ext-B — 2 UTF-16 units, 1 char), so every crossing of the LSP/frontend
+/// boundary converts through the target line's text.
+
+/// The UTF-16 offset of 0-based char column `char_col` in `line` (clamped to the
+/// line's end).
+pub(crate) fn char_col_to_utf16(line: &str, char_col: usize) -> u32 {
+    line.chars()
+        .take(char_col)
+        .map(|c| c.len_utf16() as u32)
+        .sum()
 }
 
-/// Frontend 1-based (line, col, end_col) → LSP 0-based `Range`. A col of 0 means
-/// "whole line, unknown column" → a zero-length range at the line start (mirrors
-/// `publish()`).
-fn lsp_range(line: usize, col: usize, end_col: usize) -> Range {
+/// The 0-based char column of UTF-16 offset `units` in `line` (clamped: past the
+/// end, or inside a surrogate pair, lands on the nearest char boundary).
+pub(crate) fn utf16_to_char_col(line: &str, units: u32) -> usize {
+    let mut seen = 0u32;
+    for (idx, c) in line.chars().enumerate() {
+        if seen >= units {
+            return idx;
+        }
+        seen += c.len_utf16() as u32;
+    }
+    line.chars().count()
+}
+
+/// The 0-based `line`-th line of `text`, or "" when out of range.
+pub(crate) fn line_of_text(text: &str, line: usize) -> &str {
+    text.lines().nth(line).unwrap_or("")
+}
+
+/// The live text of `uri`: the open buffer, else the file on disk.
+fn doc_text(server: &Server, uri: &Url) -> Option<String> {
+    server
+        .docs
+        .get(uri)
+        .cloned()
+        .or_else(|| uri_path(uri).and_then(|p| std::fs::read_to_string(p).ok()))
+}
+
+/// LSP 0-based UTF-16 position → frontend 1-based (line, col in chars).
+fn to_frontend(text: &str, pos: &Position) -> (usize, usize) {
+    let col = utf16_to_char_col(line_of_text(text, pos.line as usize), pos.character);
+    ((pos.line + 1) as usize, col + 1)
+}
+
+/// Frontend 1-based (line, col, end_col) IN `text`'s char columns → LSP 0-based
+/// UTF-16 `Range`. A col of 0 means "whole line, unknown column" → a zero-length
+/// range at the line start (mirrors [`publish`]).
+fn lsp_range(text: &str, line: usize, col: usize, end_col: usize) -> Range {
     let l = line.saturating_sub(1) as u32;
+    let line_text = line_of_text(text, l as usize);
     let c = if col == 0 {
         0
     } else {
-        col.saturating_sub(1) as u32
+        char_col_to_utf16(line_text, col - 1)
     };
     let ec = if end_col == 0 {
         c
     } else {
-        end_col.saturating_sub(1) as u32
+        char_col_to_utf16(line_text, end_col - 1)
     };
     Range {
         start: Position {
@@ -3182,7 +3252,8 @@ fn rename_target(
     if !is_vyrn_uri(uri) {
         return Err("rename works on a `.vyrn` declaration; a `.vyx` is a generator input".into());
     }
-    let (line, col) = to_frontend(&pos.position);
+    let text = doc_text(server, uri).ok_or_else(|| "this document is not open".to_string())?;
+    let (line, col) = to_frontend(&text, &pos.position);
     let path = uri_path(uri).ok_or_else(|| "this document has no file path".to_string())?;
     let (analysis, _) = lookup(server, uri).ok_or_else(|| {
         "this document has not been analyzed yet — save it once and try again".to_string()
@@ -3199,7 +3270,8 @@ fn handle_prepare_rename(
     let p: TextDocumentPositionParams =
         serde_json::from_value(params).map_err(|e| e.to_string())?;
     let (target, _) = rename_target(server, &p)?;
-    Ok(rename::prepare(&target))
+    let text = doc_text(server, &p.text_document.uri).unwrap_or_default();
+    Ok(rename::prepare(&target, &text))
 }
 
 /// `textDocument/rename` — the edit, spanning SOURCE files only.
@@ -3221,8 +3293,10 @@ fn handle_rename(server: &Server, params: serde_json::Value) -> Result<Workspace
     let path = uri_path(&uri).ok_or_else(|| "this document has no file path".to_string())?;
     let maps = all_mapped_symbols(server, &path);
     let (analysis, _) = lookup(server, &uri).ok_or_else(|| "no analysis".to_string())?;
+    let decl_text = doc_text(server, &uri).unwrap_or_default();
     rename::workspace_edit(
         &target,
+        &decl_text,
         &p.new_name,
         &maps,
         analysis,
@@ -3534,15 +3608,17 @@ fn publish(
             let line = d.line.saturating_sub(1) as u32;
             // col == 0 means "whole line / unknown column" → squiggle the whole
             // line (start 0 .. line length). Otherwise a precise token range
-            // (end_col == 0 → a single character/point).
+            // (end_col == 0 → a single character/point). Columns leave the
+            // frontend as chars and go on the wire as UTF-16 units.
+            let line_text = line_of_text(source, line as usize);
             let (start_char, end_char) = if d.col == 0 {
-                (0, line_char_len(source, d.line.saturating_sub(1)))
+                (0, line_utf16_len(source, d.line.saturating_sub(1)))
             } else {
-                let s = d.col.saturating_sub(1) as u32;
+                let s = char_col_to_utf16(line_text, d.col.saturating_sub(1));
                 let e = if d.end_col == 0 {
                     s
                 } else {
-                    d.end_col.saturating_sub(1) as u32
+                    char_col_to_utf16(line_text, d.end_col.saturating_sub(1))
                 };
                 (s, e)
             };
@@ -3591,16 +3667,14 @@ fn publish(
         )));
 }
 
-/// The character length of line `line_idx` (0-based) in `source`, or 0 if out
-/// of range. Uses `str::lines`, so a trailing `\r`/`\n` is not counted — this is
-/// the visible line length. (LSP positions are UTF-16 code units; for the
-/// *end* of a whole-line squiggle this is a cosmetic detail the client clamps
-/// to the line end, and Vyrn sources are overwhelmingly ASCII.)
-fn line_char_len(source: &str, line_idx: usize) -> u32 {
+/// The UTF-16 length of line `line_idx` (0-based) in `source`, or 0 if out of
+/// range. Uses `str::lines`, so a trailing `\r`/`\n` is not counted — this is
+/// the visible line length (an LSP client clamps an end-of-line position to it).
+fn line_utf16_len(source: &str, line_idx: usize) -> u32 {
     source
         .lines()
         .nth(line_idx)
-        .map(|l| l.chars().count() as u32)
+        .map(|l| l.chars().map(char::len_utf16).sum::<usize>() as u32)
         .unwrap_or(0)
 }
 // ---------------------------------------------------------------------------
@@ -3986,5 +4060,94 @@ mod tests {
         assert_eq!(label, "{ A(Int64) | B }", "the arms, as hover writes them");
         assert_eq!(label, vyrn_frontend::type_to_string(&ty), "one renderer");
         assert_ne!(label, ty.to_string(), "`Display` drops the payloads");
+    }
+
+    // ------------------------------------------------------------------
+    // UTF-16 ↔ char column conversion (LSP positions are UTF-16 code units;
+    // the frontend counts chars — they diverge on every astral-plane char).
+    // ------------------------------------------------------------------
+
+    /// `show("🎉 done", here)` — the emoji is 1 char and 2 UTF-16 units, so
+    /// every column past it differs by one between the two conventions.
+    const EMOJI_LINE: &str = "show(\"🎉 done\", here)";
+
+    #[test]
+    fn utf16_and_char_columns_round_trip_through_an_astral_char() {
+        for (char_col, units) in [(0usize, 0u32), (5, 5), (6, 7), (15, 16), (20, 21)] {
+            assert_eq!(char_col_to_utf16(EMOJI_LINE, char_col), units);
+            assert_eq!(utf16_to_char_col(EMOJI_LINE, units), char_col);
+        }
+        // A unit INSIDE the surrogate pair clamps to the pair's own char.
+        assert_eq!(utf16_to_char_col(EMOJI_LINE, 6), 5);
+        // Past the line end clamps to the line length.
+        assert_eq!(
+            utf16_to_char_col(EMOJI_LINE, 999),
+            EMOJI_LINE.chars().count()
+        );
+    }
+
+    #[test]
+    fn an_inbound_utf16_position_lands_on_the_right_char() {
+        // The client sends UTF-16 offset 16 for `here`'s `h` — char col 15,
+        // which the frontend reads as 1-based col 16.
+        let pos = Position {
+            line: 0,
+            character: 16,
+        };
+        assert_eq!(to_frontend(EMOJI_LINE, &pos), (1, 16));
+    }
+
+    #[test]
+    fn an_outbound_range_leaves_in_utf16_units() {
+        // `let s = "🎉"` — the string literal spans chars 9..11, units 9..12.
+        let text = "let s = \"🎉\"";
+        let r = lsp_range(text, 1, 10, 12);
+        assert_eq!(r.start.character, 9);
+        assert_eq!(r.end.character, 12, "the emoji counts as two units");
+    }
+
+    #[test]
+    fn whole_document_range_ends_at_the_utf16_end_of_the_last_line() {
+        let text = "let a = 1\nshow(\"🎉\")";
+        let r = whole_document_range(text);
+        assert_eq!(r.end.line, 1);
+        // Last line is `show("🎉")`: 9 chars, 10 UTF-16 units. Counting chars
+        // used to end the format edit one unit short per emoji and duplicate
+        // the tail on save.
+        assert_eq!(r.end.character, 10);
+    }
+
+    #[test]
+    fn semantic_token_lengths_are_utf16_units() {
+        // One token covering `"🎉x"` on its line: 4 chars, 5 units.
+        let text = "let s = \"🎉x\"";
+        let toks = vec![vyrn_frontend::SemToken {
+            line: 1,
+            col: 9,
+            len: 4,
+            kind: SemKind::Variable,
+            mods: SemMods::default(),
+        }];
+        let encoded = encode_tokens(toks, text);
+        assert_eq!(encoded.data.len(), 1);
+        assert_eq!(encoded.data[0].delta_start, 8);
+        assert_eq!(encoded.data[0].length, 5);
+    }
+
+    #[test]
+    fn member_context_survives_a_non_ascii_receiver() {
+        // `café.` — the old byte-indexed walk landed on a continuation byte of
+        // `é` and silently withheld member completions.
+        let cafedot = String::from("café.");
+        assert!(is_member_context(Some(&cafedot), 1, 6));
+        let partial = String::from("café.pu");
+        assert!(is_member_context(Some(&partial), 1, 8));
+        let noreceiver = String::from("café");
+        assert!(!is_member_context(Some(&noreceiver), 1, 5));
+        // The ASCII cases behave exactly as before.
+        let ascii = String::from("arr.pu");
+        assert!(is_member_context(Some(&ascii), 1, 7));
+        let plain = String::from("let x = 1");
+        assert!(!is_member_context(Some(&plain), 1, 10));
     }
 }

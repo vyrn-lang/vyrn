@@ -1417,7 +1417,7 @@ fn std_ui_unit_tests_run_green() {
         "std/ui unit tests failed:\n{combined}"
     );
     assert!(
-        combined.contains("9 passed, 0 failed"),
-        "expected 9 green tests:\n{combined}"
+        combined.contains("10 passed, 0 failed"),
+        "expected 10 green tests:\n{combined}"
     );
 }

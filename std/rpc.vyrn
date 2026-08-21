@@ -862,7 +862,11 @@ gen fn rpcValidateAll(mods: Array<RpcModule>) -> String {
             return err
         }
     }
-    return rpcTypeCollision(mods)
+    let typeClash = rpcTypeCollision(mods)
+    if typeClash != "" {
+        return typeClash
+    }
+    return rpcQualifiedCollision(mods)
 }
 
 /// One type name the directory defines: the canonical declaration that defines
@@ -942,6 +946,48 @@ fn rpcQualified(rel: String, name: String) -> String {
         }
     }
     return out + capFirst(name)
+}
+
+/// The first pair of procedures whose DERIVED flat names collide, as an error
+/// naming both sources; "" when every qualified name is distinct.
+///
+/// `rpcQualified` camel-joins the api-relative module path and the export name,
+/// and camel joining is not injective: segment boundaries vanish in the humps,
+/// so `a/b.vyrn` exporting `c` and `a.vyrn` exporting `bC` both qualify to
+/// `aBC`. Both spellings are ordinary legal names — checked, not forbidden —
+/// because otherwise `rpc`/`clientInProcess` emit one handler/stub twice and
+/// the generated module dies on a duplicate definition far from either cause.
+gen fn rpcQualifiedCollision(mods: Array<RpcModule>) -> String {
+    let mut quals: Array<String> = []
+    let mut keys: Array<String> = []
+    for m in mods {
+        let iface = moduleInterface(m.modPath)
+        for f in iface.functions {
+            quals.push(rpcQualified(m.rel, f.name))
+            keys.push(m.rel + "/" + f.name)
+        }
+    }
+    return rpcQualClash(quals, keys)
+}
+
+/// The pairwise scan over already-derived names, split out so the collision
+/// wording is testable without a module interface.
+fn rpcQualClash(quals: Array<String>, keys: Array<String>) -> String {
+    let mut i = 0
+    while i < quals.length {
+        let mut j = i + 1
+        while j < quals.length {
+            if quals[i] == quals[j] {
+                return reportHere(
+                    Error,
+                    "procedures `\{keys[i]}` and `\{keys[j]}` both derive the flat name `\{quals[i]}` — camel-joining a module path and an export name is not unique, so rename one of them",
+                )
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return ""
 }
 
 /// The derived wire facts of one procedure, for its symbol map entry
@@ -1403,4 +1449,27 @@ export gen fn clientInProcess(dir: String) -> String {
         mi = mi + 1
     }
     return out
+}
+
+// ---- tests (pure helpers; the generated modules are golden-pinned in Rust) --
+
+test "rpcQualified camel-joins the relative path and the export name" {
+    assertEq(rpcQualified("orders/refund", "run"), "ordersRefundRun")
+    assertEq(rpcQualified("pastes", "list"), "pastesList")
+}
+
+test "distinct module/export pairs can derive one qualified name" {
+    // `a/b` exporting `c` and `a` exporting `bC` both camel-join to `aBC` —
+    // the collision rpcValidateAll reports, instead of letting the generated
+    // module die on a duplicate definition far from either cause.
+    assertEq(rpcQualified("a/b", "c"), "aBC")
+    assertEq(rpcQualified("a", "bC"), "aBC")
+}
+
+test "rpcQualClash names both sources of one derived name" {
+    let msg = rpcQualClash(["aBC", "aBC"], ["a/b/c", "a/bC"])
+    assert(msg.contains("`a/b/c` and `a/bC`"))
+    assert(msg.contains("both derive the flat name `aBC`"))
+    // Distinct derived names pass.
+    assertEq(rpcQualClash(["aB", "aC"], ["a/b", "a/c"]), "")
 }

@@ -80,6 +80,24 @@ fn offline(args: &[String]) -> bool {
     args.iter().any(|a| a == "--offline") || std::env::var("VYRN_OFFLINE").is_ok()
 }
 
+/// Whether `--version` / `-V` names THIS program: only when it appears among
+/// the leading options, before the subcommand or file argument. After that it
+/// belongs to whatever is being run — `vyrn run app.vyrn --version` asks the
+/// app's version, and trailing args reach the program's `args()`.
+fn wants_version(args: &[String]) -> bool {
+    args.iter()
+        .skip(1)
+        .take_while(|a| a.starts_with('-'))
+        .any(|a| a == "--version" || a == "-V")
+}
+
+/// Whether the environment forbids the network. `--offline` normalizes into
+/// `VYRN_OFFLINE` before any command runs, so the env var alone is the whole
+/// question — the same answer [`crate::make_resolver`] builds resolvers with.
+fn env_offline() -> bool {
+    std::env::var("VYRN_OFFLINE").is_ok()
+}
+
 /// `--deny-warnings` flag or `VYRN_DENY_WARNINGS=1` (RFC-0071 M2b): a load that
 /// produced warnings fails instead of proceeding — the switch CI opts into so a
 /// build that compiled with something left to say cannot quietly pass.
@@ -312,7 +330,11 @@ fn real_main() -> ExitCode {
     // broken install. The string is the crate's own `version`, so the binary and
     // the release archive's `VERSION` file cannot drift — the release workflow
     // checks the tag against this line before it builds anything.
-    if args.iter().skip(1).any(|a| a == "--version" || a == "-V") {
+    //
+    // Only BEFORE the subcommand or file argument: `vyrn run app.vyrn
+    // --version` hands the flag to the program being run, whose version it is,
+    // not ours.
+    if wants_version(&args) {
         println!("vyrn {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
     }
@@ -636,6 +658,13 @@ fn load_options(root: &str) -> vyrn_frontend::loader::LoadOptions {
 
 /// `vyrn new <name>` — scaffold vyrn.json + src/main.vyrn + .gitignore.
 fn scaffold(name: &str) -> ExitCode {
+    // The name is interpolated raw into vyrn.json and src/main.vyrn; a quote,
+    // a backslash or a control character would write a manifest no later
+    // command can parse, with `vyrn new` long gone from the picture.
+    if name.contains('"') || name.contains('\\') || name.chars().any(char::is_control) {
+        eprintln!("error: project name cannot contain `\"`, `\\`, or control characters");
+        return ExitCode::FAILURE;
+    }
     let root = Path::new(name);
     if root.exists() {
         eprintln!("error: `{name}` already exists");
@@ -2657,7 +2686,7 @@ fn make_resolver(root_key: &str) -> remote::RemoteResolver {
     remote::RemoteResolver {
         lock: std::cell::RefCell::new(load_lock(lock_path)),
         project_dir,
-        offline: std::env::var("VYRN_OFFLINE").is_ok(),
+        offline: env_offline(),
     }
 }
 
@@ -2905,7 +2934,7 @@ fn insert_copy(text: &str, line: usize, path: &str) -> Result<String, String> {
         if before_ok && after_ok {
             hits.push(at);
         }
-        from = at + 1;
+        from = at + path.len();
     }
     match hits.len() {
         1 => {
@@ -3093,6 +3122,14 @@ fn add(rest: &[String], _offline: bool) -> ExitCode {
 /// build must not stop the three platforms it did ship.
 fn update_tool(name: &str, version: &str, lock: &mut remote::Lock) -> Result<(), String> {
     use vyrn_frontend::toolpin;
+    // The command exists to fetch; offline it can only refuse, before it
+    // touches the lock (the retain below would already have dropped pins).
+    if env_offline() {
+        return Err(format!(
+            "{name} {version} must be fetched from the network, and --offline / \
+             VYRN_OFFLINE forbids it"
+        ));
+    }
     // A version bump must not leave the old version's lines behind: they would
     // read as pins nothing points at, and `vyrn vendor` would keep copying them.
     lock.entries
@@ -3165,6 +3202,15 @@ fn verify_tool(
         // platforms the lock does cover and the command that adds one.
         return toolpin::pinned_tool(project_dir, lock, name, version).map(|_| ());
     };
+    if env_offline() {
+        // The same refusal the resolver gives a locked miss: the pin is fine,
+        // the bytes are simply not on this machine and the network is off.
+        return Err(format!(
+            "`{spec}` is locked (sha256 {sha}) but not cached, and this is an \
+             offline build — run once online, `vyrn vendor`, or drop any copy \
+             of the file with that hash into the cache"
+        ));
+    }
     println!("fetching {name} {version} for {platform}");
     let bytes = remote::fetch(&url)?;
     let got = remote::sha256_hex(&bytes);
@@ -3262,7 +3308,7 @@ fn update(alias: Option<&str>, locked: bool) -> ExitCode {
     let resolver = remote::RemoteResolver {
         lock: std::cell::RefCell::new(lock),
         project_dir,
-        offline: false,
+        offline: env_offline(),
     };
     for (_, spec) in &targets {
         if let Err(e) = vyrn_frontend::loader::ModuleResolver::read(&resolver, spec) {
@@ -3343,6 +3389,33 @@ fn vendor(check: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// `s` as a JSON string literal, quotes included.
+///
+/// Rust's `Debug` escapes (`\u{1}`) are NOT valid JSON — `\u` must be followed
+/// by exactly four hex digits — so a manifest rewritten through [`json_pretty`]
+/// with Debug escapes would be unreadable to every later command. Short forms
+/// where JSON defines one, `\u00xx` for every other control character, and
+/// nothing else escaped: any codepoint above `0x1F` may stand as itself.
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0C}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Pretty-print a Json value (4-space indent, stable key order).
 fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
     use vyrn_frontend::schema::Json;
@@ -3358,7 +3431,7 @@ fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
                 format!("{n}")
             }
         }
-        Json::Str(s) => format!("{s:?}"),
+        Json::Str(s) => json_string(s),
         Json::Arr(items) => {
             if items.is_empty() {
                 return "[]".into();
@@ -3375,7 +3448,7 @@ fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
             }
             let inner: Vec<String> = fields
                 .iter()
-                .map(|(k, v)| format!("{pad}{k:?}: {}", json_pretty(v, depth + 1)))
+                .map(|(k, v)| format!("{pad}{}: {}", json_string(k), json_pretty(v, depth + 1)))
                 .collect();
             format!("{{\n{}\n{close}}}", inner.join(",\n"))
         }
@@ -3817,12 +3890,14 @@ fn bench_native(
     let shim_path = out_path.with_extension("shim.c");
     if let Err(e) = std::fs::write(&ll_path, ir) {
         eprintln!("error: cannot write {}: {e}", ll_path.display());
+        let _ = std::fs::remove_dir_all(&dir);
         return (ExitCode::FAILURE, None);
     }
     let mut shim = runtime_shim();
     shim.push_str(&extern_trap_stubs(&program));
     if let Err(e) = std::fs::write(&shim_path, &shim) {
         eprintln!("error: cannot write {}: {e}", shim_path.display());
+        let _ = std::fs::remove_dir_all(&dir);
         return (ExitCode::FAILURE, None);
     }
     let clang = match find_clang() {
@@ -3832,6 +3907,7 @@ fn bench_native(
                 "error: could not find `clang`. Install LLVM and put clang on PATH, \
                  or set the CLANG environment variable to its full path."
             );
+            let _ = std::fs::remove_dir_all(&dir);
             return (ExitCode::FAILURE, None);
         }
     };
@@ -3842,10 +3918,12 @@ fn bench_native(
         Ok(s) if s.success() => {}
         Ok(s) => {
             eprintln!("error: clang exited with {s}");
+            let _ = std::fs::remove_dir_all(&dir);
             return (ExitCode::FAILURE, None);
         }
         Err(e) => {
             eprintln!("error: failed to run clang ({}): {e}", clang.display());
+            let _ = std::fs::remove_dir_all(&dir);
             return (ExitCode::FAILURE, None);
         }
     }
@@ -4463,8 +4541,12 @@ struct DevAssets {
 }
 
 /// Resolve a GET path to a static file per the locked precedence, or `None` if
-/// no static asset matches (so the request falls through to `handle`). Rejects
-/// any path containing a `..` segment (no traversal out of a root).
+/// no static asset matches (so the request falls through to `handle`). No
+/// traversal out of a root: `..` segments are refused on the raw path AND on
+/// the backslash-normalized form, absolute and drive-letter targets are
+/// refused (`Path::join` would replace the base for those), and the join is
+/// confirmed by canonicalizing both sides — the last word over symlinks and
+/// any separator trick the string checks missed.
 fn dev_static_path(path: &str, assets: &DevAssets) -> Option<PathBuf> {
     // Strip a query string; work on the raw path.
     let raw = path.split('?').next().unwrap_or(path);
@@ -4476,19 +4558,42 @@ fn dev_static_path(path: &str, assets: &DevAssets) -> Option<PathBuf> {
     }
     if let Some(name) = raw.strip_prefix("/vyrn-runtime/") {
         if !name.is_empty() {
-            let p = Path::new(&assets.web_dir).join(name);
-            return p.is_file().then_some(p);
+            return file_under(Path::new(&assets.web_dir), &safe_rel(name)?);
         }
         return None;
     }
     // Public dir: `/` → index.html, else the path under public/.
     let rel = if raw == "/" {
-        "index.html"
+        "index.html".to_string()
     } else {
-        raw.trim_start_matches('/')
+        raw.trim_start_matches('/').to_string()
     };
-    let p = assets.public_dir.join(rel);
-    p.is_file().then_some(p)
+    file_under(&assets.public_dir, &safe_rel(&rel)?)
+}
+
+/// Normalize a request path into a relative path that cannot escape by
+/// itself: backslashes become `/` (a Windows separator the `..` filter never
+/// saw), and absolute or drive-letter forms (`/C:/…`, `C:\…`) are refused,
+/// because [`Path::join`] replaces its base for those.
+fn safe_rel(name: &str) -> Option<String> {
+    let norm = name.replace('\\', "/");
+    if norm.starts_with('/') || norm.split('/').any(|seg| seg == "..") {
+        return None;
+    }
+    let b = norm.as_bytes();
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        return None;
+    }
+    Some(norm)
+}
+
+/// Join `root` with a checked relative path, then prove the result stayed
+/// inside: canonicalize both and require the prefix. Returns the joined path.
+fn file_under(root: &Path, rel: &str) -> Option<PathBuf> {
+    let p = root.join(rel);
+    let croot = root.canonicalize().ok()?;
+    let cp = p.canonicalize().ok()?;
+    cp.starts_with(croot).then_some(p)
 }
 
 /// The `Content-Type` for a static asset, by extension.
@@ -4540,7 +4645,13 @@ fn dev_serve_one(
             match std::fs::read(&file) {
                 Ok(bytes) => {
                     eprintln!("{} {} -> 200 (static)", req.method, req.path);
-                    write_response(stream, 200, dev_content_type(&file), &bytes);
+                    if req.method == "HEAD" {
+                        // RFC 9110 §9.3.2: HEAD sends the headers GET would,
+                        // true Content-Length included, and no body.
+                        write_head_response(stream, 200, dev_content_type(&file), bytes.len());
+                    } else {
+                        write_response(stream, 200, dev_content_type(&file), &bytes);
+                    }
                 }
                 Err(_) => {
                     eprintln!("{} {} -> 500", req.method, req.path);
@@ -5120,6 +5231,25 @@ fn write_response(stream: &mut std::net::TcpStream, status: i64, content_type: &
     write_response_vary(stream, status, content_type, "", &[], body)
 }
 
+/// The HEAD shape of [`write_response`]: the status line and headers GET
+/// would send, the length GET would declare, and no body (RFC 9110 §9.3.2 —
+/// strict clients read body bytes after a HEAD as the next response's head).
+/// Errors ignored, for the same reason as [`write_response`].
+fn write_head_response(
+    stream: &mut std::net::TcpStream,
+    status: i64,
+    content_type: &str,
+    len: usize,
+) {
+    use std::io::Write;
+    let header = format!(
+        "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n",
+        reason_phrase(status)
+    );
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.flush();
+}
+
 /// [`write_response`] plus a `Vary` field (RFC-0072 M4) and the response's own
 /// header map (RFC-0074 M2). `vary` empty writes no header at all, so a response
 /// that does not negotiate stays byte-identical to what this host wrote before
@@ -5493,5 +5623,87 @@ mod tests {
             );
             assert!(args.iter().any(|a| a == "-O2"), "{t:?} lost -O2");
         }
+    }
+
+    /// `δata` starts with a two-byte character, so advancing the search
+    /// window one byte per miss used to reslice mid-character and panic with
+    /// "byte index is not a char boundary". Non-ASCII identifiers are legal —
+    /// the lexer accepts any `is_alphabetic` char — so the fix must be
+    /// byte-exact, not ASCII-only.
+    #[test]
+    fn insert_copy_survives_an_identifier_starting_with_a_multibyte_char() {
+        let text = "let δata = read()\nprint(δata)\n";
+        let fixed = insert_copy(text, 2, "δata").unwrap();
+        assert_eq!(fixed, "let δata = read()\nprint(δata.copy())\n");
+    }
+
+    #[test]
+    fn insert_copy_still_counts_whole_occurrences_only() {
+        // Two candidates on one line: the diagnostic cannot say which, and
+        // guessing is the failure this tool exists to avoid.
+        let e = insert_copy("let a = f(a)\n", 1, "a").unwrap_err();
+        assert!(e.contains("2 times"), "{e}");
+    }
+
+    #[test]
+    fn json_pretty_emits_json_escapes_not_rust_debug_escapes() {
+        use vyrn_frontend::schema::Json;
+        let doc = Json::Obj(vec![(
+            "ke\u{1}y".to_string(),
+            Json::Str("a\u{1}b\"c\\d\ne".to_string()),
+        )]);
+        let out = json_pretty(&doc, 0);
+        assert!(out.contains("\\u0001"), "{out}");
+        assert!(out.contains("\\\""), "{out}");
+        assert!(out.contains("\\\\"), "{out}");
+        assert!(out.contains("\\n"), "{out}");
+        assert!(!out.contains("\\u{"), "{out}");
+        // What it prints must parse back to the same value — the manifest a
+        // command writes is one every later command reads.
+        assert_eq!(vyrn_frontend::schema::parse_json(&out).unwrap(), doc);
+    }
+
+    #[test]
+    fn version_flag_counts_only_before_a_positional_argument() {
+        let args = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        assert!(wants_version(&args(&["vyrn", "--version"])));
+        assert!(wants_version(&args(&["vyrn", "-V"])));
+        // A leading option does not end the scan.
+        assert!(wants_version(&args(&["vyrn", "--version", "run", "x.vyrn"])));
+        // But a positional does: the flag belongs to the program being run.
+        assert!(!wants_version(&args(&["vyrn", "run", "app.vyrn", "--version"])));
+        assert!(!wants_version(&args(&["vyrn", "run", "app.vyrn", "-V"])));
+        assert!(!wants_version(&args(&["vyrn", "app.vyrn", "--version"])));
+    }
+
+    #[test]
+    fn dev_static_paths_cannot_escape_their_root() {
+        let dir = std::env::temp_dir().join("vyrn-dev-static-test");
+        std::fs::create_dir_all(dir.join("public")).unwrap();
+        std::fs::write(dir.join("public/index.html"), b"<html>").unwrap();
+        std::fs::write(dir.join("secret.txt"), b"s").unwrap();
+        std::fs::write(dir.join("rt.js"), b"").unwrap();
+        let assets = DevAssets {
+            public_dir: dir.join("public"),
+            web_dir: dir.to_string_lossy().into_owned(),
+            wasm: dir.join("client.wasm"),
+        };
+        let go = |p: &str| dev_static_path(p, &assets);
+        assert_eq!(go("/"), Some(dir.join("public").join("index.html")));
+        assert_eq!(go("/vyrn-runtime/rt.js"), Some(dir.join("rt.js")));
+        // Traversal, in either separator, is refused rather than resolved.
+        for bad in [
+            "/../secret.txt",
+            "/..\\secret.txt",
+            "/vyrn-runtime/../secret.txt",
+            "/vyrn-runtime/..\\secret.txt",
+        ] {
+            assert_eq!(go(bad), None, "{bad}");
+        }
+        // A drive-letter target must not let `Path::join` replace the root.
+        for bad in ["/C:/Windows/win.ini", "/vyrn-runtime/C:\\Windows\\win.ini"] {
+            assert_eq!(go(bad), None, "{bad}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

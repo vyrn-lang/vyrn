@@ -84,6 +84,12 @@ fn rfcOf(name: String) -> FactsRfc {
     if substring(name, 0, 4) != "RFC-" {
         return FactsRfc { number: 0, title: "" }
     }
+    // The slug is required: `RFC-0123.md` has no byte 9 for one to start at,
+    // and the stem below would read past its own end. A name without the `-`
+    // that opens a slug is dropped like any other non-conforming name.
+    if name.byteLength < 12 || substring(name, 8, 9) != "-" {
+        return FactsRfc { number: 0, title: "" }
+    }
     let stem = substring(name, 9, name.byteLength - 3)
     let mut title = ""
     for word in split(stem, "-") {
@@ -224,6 +230,9 @@ test "an RFC file name yields its number and its title" {
 test "a name that is not an RFC is dropped" {
     assertEq(rfcOf("README.md").number, 0)
     assertEq(rfcOf("RFC-0091-memory-model.txt").number, 0)
+    // No slug: the stem would read backwards, so the name is dropped rather
+    // than trapped on.
+    assertEq(rfcOf("RFC-0123.md").number, 0)
 }
 
 test "a release field keeps what a tag is made of and drops the rest" {

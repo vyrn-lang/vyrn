@@ -699,6 +699,13 @@ fn vyxParseAttrs(ba: Array<UInt8>, i: Int64, e: Int64, srcFile: String) -> VyxAt
             while k < e && (vyxIsIdent(ba[k]) || ba[k] == '-') {
                 k = k + 1
             }
+            if k == nameStart {
+                // A byte that cannot start an attribute name (the `.` of an
+                // event modifier, a ref shorthand `#`, a stray `,`) would leave
+                // `j == k` below: the loop never advances and every iteration
+                // pushes another empty attribute — the build never finishes.
+                return VyxAttrs { attrs: attrs, next: j, selfClose: false, err: vyxErr(srcFile, attrLine, "an attribute name is expected here — a name is letters, digits, `_` or `-`, optionally led by `@` or `:`") }
+            }
             let name = vyxSlice(ba, nameStart, k)
             // Skip whitespace before a possible `=`.
             let mut m = k
@@ -996,24 +1003,43 @@ fn vyxProcessElemInner(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: c
 
 /// Group a flat sibling list into the control-flow AST.
 ///
-/// **It takes the list.** Every element goes to `vyxProcessElem`, which takes
-/// the node, and a `VyxNode` refers to itself so there is no `.copy()` to hand
-/// over instead. A `read` parameter here said the caller still owned nodes this
-/// function had already given away.
+/// **It takes the list.** Every node reaches `vyxProcessElem` — which takes the
+/// node — by `swapRemove(0)`, so what moves is an owned temporary rather than
+/// a projection of the list this frame owns: handing `nodes[k]` over directly
+/// would leave the list releasing a buffer the callee already freed. Nodes the
+/// grouping drops (whitespace between `v-if` branches, orphan `v-else*`) die
+/// as owned locals instead of staying in the list for its release. A `read`
+/// parameter here said the caller still owned nodes this function had already
+/// given away.
 fn vyxGroupNodes(nodes: consume Array<VyxNode>, srcFile: String) -> VyxGroup {
     let mut out: Array<VyxNode> = []
     let mut err = ""
-    let mut i = 0
-    while i < nodes.length {
-        let n = nodes[i]
+    // One consuming pass, no lookahead: every node arrives as an OWNED `n`
+    // (`for … in consume`), so handing it to `vyxProcessElem` is a move rather
+    // than an alias of the list this frame releases. The v-if chain is a
+    // running accumulator instead of a rescan: a head opens it, `v-else-if`
+    // appends while it is open, `v-else` closes it, any other node (or the end
+    // of the siblings) flushes it.
+    let mut conds: Array<String> = []
+    let mut condLines: Array<Int64> = []
+    let mut condCols: Array<Int64> = []
+    let mut bodies: Array<VyxBody> = []
+    let mut elseBody = VyxBody { nodes: [] }
+    let mut hasElse = false
+    let mut open = false
+    for n in consume nodes {
         if vyxElemHasDir(n, "v-if") {
-            // Start an if-chain. The head element is the first branch.
-            let mut conds: Array<String> = []
-            let mut condLines: Array<Int64> = []
-            let mut condCols: Array<Int64> = []
-            let mut bodies: Array<VyxBody> = []
-            let mut elseBody = VyxBody { nodes: [] }
-            let mut hasElse = false
+            if open {
+                // A head right after a dangling chain starts a new one.
+                out.push(VNIf(conds, condLines, condCols, bodies, elseBody, hasElse))
+                conds = []
+                condLines = []
+                condCols = []
+                bodies = []
+                elseBody = VyxBody { nodes: [] }
+                hasElse = false
+            }
+            open = true
             let vif = vyxAttrsOf(n)
             let d = vyxDir(vif, "v-if")
             conds.push(consume d.value)
@@ -1022,47 +1048,55 @@ fn vyxGroupNodes(nodes: consume Array<VyxNode>, srcFile: String) -> VyxGroup {
             let p0 = vyxProcessElem(n, srcFile)
             err = err + p0.err
             bodies.push(VyxBody { nodes: [consume p0.node] })
-            // Consume following siblings (skipping whitespace-only text) that carry
-            // v-else-if / v-else.
-            let mut k = i + 1
-            let mut chaining = true
-            while chaining && k < nodes.length {
-                if vyxIsWsText(nodes[k]) {
-                    k = k + 1
-                } else if vyxElemHasDir(nodes[k], "v-else-if") {
-                    let de = vyxDir(vyxAttrsOf(nodes[k]), "v-else-if")
-                    conds.push(consume de.value)
-                    condLines.push(de.line)
-                    condCols.push(de.col)
-                    let pe = vyxProcessElem(nodes[k], srcFile)
-                    err = err + pe.err
-                    bodies.push(VyxBody { nodes: [consume pe.node] })
-                    k = k + 1
-                } else if vyxElemHasDir(nodes[k], "v-else") {
-                    let pl = vyxProcessElem(nodes[k], srcFile)
-                    err = err + pl.err
-                    elseBody = VyxBody { nodes: [consume pl.node] }
-                    hasElse = true
-                    k = k + 1
-                    chaining = false
-                } else {
-                    chaining = false
-                }
-            }
+        } else if open && vyxIsWsText(n) {
+            // Whitespace between branches belongs to no branch; the old scan
+            // skipped it without emitting, so it dies here as an owned local.
+        } else if open && vyxElemHasDir(n, "v-else-if") {
+            let de = vyxDir(vyxAttrsOf(n), "v-else-if")
+            conds.push(consume de.value)
+            condLines.push(de.line)
+            condCols.push(de.col)
+            let pe = vyxProcessElem(n, srcFile)
+            err = err + pe.err
+            bodies.push(VyxBody { nodes: [consume pe.node] })
+        } else if open && vyxElemHasDir(n, "v-else") {
+            let pl = vyxProcessElem(n, srcFile)
+            err = err + pl.err
+            elseBody = VyxBody { nodes: [consume pl.node] }
+            hasElse = true
             out.push(VNIf(conds, condLines, condCols, bodies, elseBody, hasElse))
-            i = k
-        } else if vyxElemHasDir(n, "v-else-if") {
-            err = err + vyxErr(srcFile, vyxElemLine(n), "this `v-else-if` follows no `v-if` — the two must be siblings, with nothing between them")
-            i = i + 1
-        } else if vyxElemHasDir(n, "v-else") {
-            err = err + vyxErr(srcFile, vyxElemLine(n), "this `v-else` follows no `v-if` — the two must be siblings, with nothing between them")
-            i = i + 1
+            conds = []
+            condLines = []
+            condCols = []
+            bodies = []
+            elseBody = VyxBody { nodes: [] }
+            hasElse = false
+            open = false
         } else {
-            let p = vyxProcessElem(n, srcFile)
-            err = err + p.err
-            out.push(consume p.node)
-            i = i + 1
+            if open {
+                // Anything else ends the chain before it is handled itself.
+                out.push(VNIf(conds, condLines, condCols, bodies, elseBody, hasElse))
+                conds = []
+                condLines = []
+                condCols = []
+                bodies = []
+                elseBody = VyxBody { nodes: [] }
+                hasElse = false
+                open = false
+            }
+            if vyxElemHasDir(n, "v-else-if") {
+                err = err + vyxErr(srcFile, vyxElemLine(n), "this `v-else-if` follows no `v-if` — the two must be siblings, with nothing between them")
+            } else if vyxElemHasDir(n, "v-else") {
+                err = err + vyxErr(srcFile, vyxElemLine(n), "this `v-else` follows no `v-if` — the two must be siblings, with nothing between them")
+            } else {
+                let p = vyxProcessElem(n, srcFile)
+                err = err + p.err
+                out.push(consume p.node)
+            }
         }
+    }
+    if open {
+        out.push(VNIf(conds, condLines, condCols, bodies, elseBody, hasElse))
     }
     return VyxGroup { nodes: out, err: err }
 }
@@ -1097,8 +1131,18 @@ fn vyxElemLine(n: VyxNode) -> Int64 {
 // Section extraction + script parsing.
 // ===========================================================================
 
-/// A section's content bounds within the file (`found=false` when absent).
-type VyxSection = { found: Bool, start: Int64, end: Int64 }
+/// A section's content bounds within the file. `found=false` covers TWO cases —
+/// the section is absent, or it OPENS but never closes (an unterminated string
+/// or comment swallowed the real closing tag). `openAt` distinguishes them: -1
+/// when no `<name>` open tag exists, its offset otherwise, so a caller can name
+/// the unterminated case instead of silently dropping the whole section.
+type VyxSection = { found: Bool, start: Int64, end: Int64, openAt: Int64 }
+
+/// Whether the section opened but never closed (`vyxSection`'s `found=false`
+/// also covers a genuine absence — see the type).
+fn vyxSectionUnclosed(sec: VyxSection) -> Bool {
+    return sec.found == false && sec.openAt >= 0
+}
 
 /// The content bounds of `<name> … </name>` in `ba` (between the open tag's `>`
 /// and the closing tag's `<`), found by a scanner that knows the section's own
@@ -1129,7 +1173,7 @@ fn vyxSectionAvoid(ba: Array<UInt8>, name: String, isCode: Bool, avoidS: Int64, 
         }
     }
     if openAt < 0 {
-        return VyxSection { found: false, start: 0, end: 0 }
+        return VyxSection { found: false, start: 0, end: 0, openAt: 0 - 1 }
     }
     let contentStart = openAt + name.byteLength + 2
     let closeAt = if isCode {
@@ -1138,9 +1182,9 @@ fn vyxSectionAvoid(ba: Array<UInt8>, name: String, isCode: Bool, avoidS: Int64, 
         vyxScanFindMarkup(ba, name, contentStart)
     }
     if closeAt < 0 {
-        return VyxSection { found: false, start: 0, end: 0 }
+        return VyxSection { found: false, start: 0, end: 0, openAt: openAt }
     }
-    return VyxSection { found: true, start: contentStart, end: closeAt }
+    return VyxSection { found: true, start: contentStart, end: closeAt, openAt: openAt }
 }
 
 /// The parsed `<script>` section: props (parallel name/type arrays), rebased
@@ -1608,9 +1652,15 @@ export type VyxTemplate = { nodes: Array<VyxNode>, err: String }
 export gen fn vyxParseTemplate(source: String) -> VyxTemplate {
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
+    if vyxSectionUnclosed(scriptSec) {
+        return VyxTemplate { nodes: [], err: "the <script> section is never closed — an unterminated string or /* … */ comment swallows the closing tag" }
+    }
     // The same avoid-range `vyxCompileComponent` uses, so a literal `<template>`
     // inside a helper string never claims the section here either.
     let templateSec = vyxSectionAvoid(ba, "template", false, scriptSec.start, scriptSec.end)
+    if vyxSectionUnclosed(templateSec) {
+        return VyxTemplate { nodes: [], err: "the <template> section is never closed — an unterminated comment or unclosed element swallows the closing tag" }
+    }
     if templateSec.found == false {
         return VyxTemplate { nodes: [], err: "no <template> section" }
     }
@@ -1631,11 +1681,23 @@ export gen fn vyxCompileComponent(compName: String, source: String, dir: String)
     // path this component was read from), and the anchor every diagnostic below
     // reports at.
     let srcPath = dir + "/" + compName + ".vyx"
+    if vyxIsIdentifier(fnName) == false {
+        // `My-Widget.vyx` would otherwise emit `export fn my-Widget(` and
+        // `404.vyx` an `export fn 404(` — a lexer error in the synthesized
+        // module, far from the cause. Name the stem here instead.
+        return vyxCompErr(compName, fnName, srcPath, vyxErr(srcPath, 0, "`\{compName}.vyx` does not spell a legal view-function name — a component file's stem is one identifier (letters, digits or `_`, not digit-first), so rename the file"))
+    }
 
     let scriptSec = vyxSection(ba, "script", true)
+    if vyxSectionUnclosed(scriptSec) {
+        return vyxCompErr(compName, fnName, srcPath, vyxErr(srcPath, vyxLineAt(ba, scriptSec.openAt), "the `<script>` section is never closed — an unterminated string or `/* … */` comment swallows the closing `</script>`"))
+    }
     // The template open tag skips the script section's range, so a literal
     // `<template>` inside a helper string never claims the section.
     let templateSec = vyxSectionAvoid(ba, "template", false, scriptSec.start, scriptSec.end)
+    if vyxSectionUnclosed(templateSec) {
+        return vyxCompErr(compName, fnName, srcPath, vyxErr(srcPath, vyxLineAt(ba, templateSec.openAt), "the `<template>` section is never closed — an unterminated comment or unclosed element swallows the closing `</template>`"))
+    }
     if templateSec.found == false {
         return vyxCompErr(compName, fnName, srcPath, vyxErr(srcPath, 0, "this component has no `<template>` section — a component's view is the one element inside it"))
     }
@@ -1675,12 +1737,12 @@ export gen fn vyxCompileComponent(compName: String, source: String, dir: String)
     if parsed.err != "" {
         return vyxCompErr(compName, fnName, srcPath, parsed.err)
     }
-    let grouped = vyxGroupNodes(parsed.nodes, srcPath)
+    let grouped = vyxGroupNodes(consume parsed.nodes, srcPath)
     if grouped.err != "" {
         return vyxCompErr(compName, fnName, srcPath, grouped.err)
     }
     // Exactly one root element (whitespace-only text is already dropped).
-    let roots = vyxElementRoots(grouped.nodes)
+    let roots = vyxElementRoots(consume grouped.nodes)
     if roots.length == 0 {
         return vyxCompErr(compName, fnName, srcPath, vyxErr(srcPath, 0, "this component's `<template>` holds no element — a component's view is exactly one root element"))
     }
@@ -2350,6 +2412,12 @@ fn vyxEmitEvent(a: VyxAttr, src: String) -> VyxEventEmit {
         return VyxEventEmit { code: "On(" + vyxStrLit(a.name) + ", \"\", \"\")", err: vyxErr(src, a.line, "`@\{a.name}` names no handler — the text before `(` must be one identifier"), hasArg: false, argLine: a.line, argCol: a.col }
     }
     let closeParen = vyxFindLast(sb, bytes(")"), paren)
+    if closeParen < 0 {
+        // Slicing to a missing `)` would yield "" and silently compile a
+        // zero-argument handler; the malformed forms above are named, so is
+        // this one.
+        return VyxEventEmit { code: "On(" + vyxStrLit(a.name) + ", \"\", \"\")", err: vyxErr(src, a.line, "`@\{a.name}` has an unterminated `(` — write `@\{a.name}=\"handler\"` or `@\{a.name}=\"handler(arg)\"`"), hasArg: false, argLine: a.line, argCol: a.col }
+    }
     let argExpr = trim(vyxSlice(sb, paren + 1, closeParen))
     if argExpr.byteLength == 0 {
         return VyxEventEmit { code: "On(" + vyxStrLit(a.name) + ", " + vyxStrLit(handler) + ", \"\")", err: "", hasArg: false, argLine: a.line, argCol: a.col }
@@ -2889,30 +2957,65 @@ gen fn vyxFinish(comps: consume Array<VyxComp>, err: String, dir: String, themed
     return vyxBuildModule(comps, themed, theme)
 }
 
+/// The one sentence about a `.vyx` source that cannot be read, spelled once.
+/// Swallowing the OS reason into "" made an unreadable file report `no
+/// `<template>` section`, pointing the developer at the wrong fix.
+fn vyxCannotRead(path: String, why: String) -> String {
+    return "std/vyx cannot read `\{path}`: \{why}"
+}
+
+/// A directory listing plus the OS reason when it failed — a match arm is one
+/// expression, so the gen bodies below carry both out of the match this way
+/// instead of swallowing the error into an empty scan.
+type VyxDirRead = { entries: Array<String>, err: String }
+
+gen fn vyxReadDir(dir: String) -> VyxDirRead {
+    return match listDir(dir) {
+        Ok(ns) => VyxDirRead { entries: ns, err: "" },
+        Err(err) => VyxDirRead { entries: [], err: err },
+    }
+}
+
+/// A file's source plus the OS reason when it could not be read (same trick —
+/// the error travels instead of becoming "").
+type VyxFileRead = { src: String, err: String }
+
+gen fn vyxReadFileOf(path: String) -> VyxFileRead {
+    return match readFile(path) {
+        Ok(v) => VyxFileRead { src: v, err: "" },
+        Err(e) => VyxFileRead { src: "", err: e },
+    }
+}
+
 /// `components(dir)` — compile every `<Name>.vyx` file under `dir` into ONE module
 /// exporting one view function per component. `class="…"` emits an unchecked
 /// `Cls(…)` (backward-compatible, unchanged). Reach for `componentsThemed` to
 /// compile-check classes against a theme.
 export gen fn components(dir: String) -> String {
-    let entries = match listDir(dir) {
-        Ok(ns) => ns,
-        Err(err) => [],
+    let listed = vyxReadDir(dir)
+    if listed.err != "" {
+        return reportHere(Error, vyxCannotRead(dir, listed.err))
     }
     let mut comps: Array<VyxComp> = []
     let mut err = ""
-    for name in entries {
+    for name in listed.entries {
         if name.endsWith(".vyx") {
             let nb = bytes(name)
             let stem = vyxSlice(nb, 0, nb.length - 4)
-            let src = match readFile(dir + "/" + name) {
-                Ok(v) => v,
-                Err(e) => "",
+            let path = dir + "/" + name
+            // A read failure is its own diagnostic, not an empty component:
+            // compiling "" here reported `no `<template>` section` for a file
+            // the generator never saw.
+            let read = vyxReadFileOf(path)
+            if read.err != "" {
+                err = err + reportHere(Error, vyxCannotRead(path, read.err))
+            } else {
+                let comp = vyxCompileComponent(stem, read.src, dir)
+                if comp.err != "" {
+                    err = err + comp.err
+                }
+                comps.push(comp)
             }
-            let comp = vyxCompileComponent(stem, src, dir)
-            if comp.err != "" {
-                err = err + comp.err
-            }
-            comps.push(comp)
         }
     }
     return vyxFinish(comps, err, dir, false, "")
@@ -2926,25 +3029,27 @@ export gen fn components(dir: String) -> String {
 /// `Tw` at runtime. `theme` resolves relative to the importing module, exactly
 /// like `dir`.
 export gen fn componentsThemed(dir: String, theme: String) -> String {
-    let entries = match listDir(dir) {
-        Ok(ns) => ns,
-        Err(err) => [],
+    let listed = vyxReadDir(dir)
+    if listed.err != "" {
+        return reportHere(Error, vyxCannotRead(dir, listed.err))
     }
     let mut comps: Array<VyxComp> = []
     let mut err = ""
-    for name in entries {
+    for name in listed.entries {
         if name.endsWith(".vyx") {
             let nb = bytes(name)
             let stem = vyxSlice(nb, 0, nb.length - 4)
-            let src = match readFile(dir + "/" + name) {
-                Ok(v) => v,
-                Err(e) => "",
+            let path = dir + "/" + name
+            let read = vyxReadFileOf(path)
+            if read.err != "" {
+                err = err + reportHere(Error, vyxCannotRead(path, read.err))
+            } else {
+                let comp = vyxCompileComponent(stem, read.src, dir)
+                if comp.err != "" {
+                    err = err + comp.err
+                }
+                comps.push(comp)
             }
-            let comp = vyxCompileComponent(stem, src, dir)
-            if comp.err != "" {
-                err = err + comp.err
-            }
-            comps.push(comp)
         }
     }
     return vyxFinish(comps, err, dir, true, theme)
@@ -3265,9 +3370,20 @@ fn vyxDeclParamTypes(t: String) -> Array<String> {
     let mut i = open
     while i < tb.length {
         let b = tb[i]
+        // The `>` of a `->` return arrow is not a generic closer — the same
+        // miscount class `vyxHasTopComma` documents for comparison operators.
+        // Counting it closed the list mid-way and dropped every parameter after
+        // a fn-typed one (`head(cb: fn(Data) -> String, g: Int64)`).
+        let closes = if b == ')' || b == ']' {
+            true
+        } else if b == '>' {
+            tb[i - 1] != '-'
+        } else {
+            false
+        }
         if b == '(' || b == '<' || b == '[' {
             depth = depth + 1
-        } else if b == ')' || b == '>' || b == ']' {
+        } else if closes {
             depth = depth - 1
             if depth == 0 {
                 let part = trim(vyxSlice(tb, start, i))
@@ -3351,8 +3467,8 @@ fn vyxRetOfDecl(t: String) -> String {
 export gen fn vyxPageShape(source: String) -> VyxPageShape {
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
-    if scriptSec.found == false {
-        return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadLazy: false, loadRet: "", layoutNone: false, err: "" }
+    if vyxSectionUnclosed(scriptSec) {
+        return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadLazy: false, loadRet: "", layoutNone: false, err: reportHere(Error, "the `<script>` section is never closed — an unterminated string or `/* … */` comment swallows the closing `</script>`, so the page's params and loader are unknown") }
     }
     let bad = vyxImportsFirstViolation(ba, scriptSec.start, scriptSec.end, "params")
     if bad > 0 {
@@ -4142,6 +4258,12 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
     let templateSec = vyxSectionAvoid(ba, "template", false, scriptSec.start, scriptSec.end)
+    if vyxSectionUnclosed(scriptSec) {
+        return reportHere(Error, "this page's `<script>` section is never closed — an unterminated string or `/* … */` comment swallows the closing `</script>`")
+    }
+    if vyxSectionUnclosed(templateSec) {
+        return reportHere(Error, "this page's `<template>` section is never closed — an unterminated comment or unclosed element swallows the closing `</template>`")
+    }
     if templateSec.found == false {
         return reportHere(Error, "this page has no `<template>` section — a page's view is the one element inside it")
     }
@@ -4397,46 +4519,39 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
 /// would escape the declared inputs. `std/ui`'s `pages` imports this per `.vyx`
 /// page: `import * as p<n> from vyxPage("routes/foo.vyx")`.
 export gen fn vyxPage(vyxPath: String) -> String {
-    let src = match readFile(vyxPath) {
-        Ok(v) => v,
-        Err(e) => "",
+    let read = vyxReadFileOf(vyxPath)
+    if read.err != "" {
+        return reportHere(Error, vyxCannotRead(vyxPath, read.err))
     }
-    let dir = vyxDirOf(vyxPath)
     // RFC-0048 §2: thread the real route-file path so origins target it directly.
-    return vyxBuildPageModuleAt(src, vyxPath, dir, false, "")
+    return vyxBuildPageModuleAt(read.src, vyxPath, vyxDirOf(vyxPath), false, "")
 }
 
 /// `vyxPageThemed(vyxPath, theme)` — the themed variant (RFC-0036): the page
 /// body's classes are compile-checked against `theme`.
 export gen fn vyxPageThemed(vyxPath: String, theme: String) -> String {
-    let src = match readFile(vyxPath) {
-        Ok(v) => v,
-        Err(e) => "",
+    return match readFile(vyxPath) {
+        Ok(v) => vyxBuildPageModuleAt(v, vyxPath, vyxDirOf(vyxPath), true, theme),
+        Err(e) => reportHere(Error, vyxCannotRead(vyxPath, e)),
     }
-    let dir = vyxDirOf(vyxPath)
-    return vyxBuildPageModuleAt(src, vyxPath, dir, true, theme)
 }
 
 /// `vyxPageClient(vyxPath)` — the CLIENT-bundle variant (RFC-0069 §1): the same
 /// page compilation with `load` (and its dead imports) stripped and no head/title,
 /// so `std/ui`'s `pagesClient` can render the page from its props on a soft nav.
 export gen fn vyxPageClient(vyxPath: String) -> String {
-    let src = match readFile(vyxPath) {
-        Ok(v) => v,
-        Err(e) => "",
+    return match readFile(vyxPath) {
+        Ok(v) => vyxBuildPageClientModuleAt(v, vyxPath, vyxDirOf(vyxPath), false, ""),
+        Err(e) => reportHere(Error, vyxCannotRead(vyxPath, e)),
     }
-    let dir = vyxDirOf(vyxPath)
-    return vyxBuildPageClientModuleAt(src, vyxPath, dir, false, "")
 }
 
 /// `vyxPageClientThemed(vyxPath, theme)` — the themed client variant (RFC-0069 §1).
 export gen fn vyxPageClientThemed(vyxPath: String, theme: String) -> String {
-    let src = match readFile(vyxPath) {
-        Ok(v) => v,
-        Err(e) => "",
+    return match readFile(vyxPath) {
+        Ok(v) => vyxBuildPageClientModuleAt(v, vyxPath, vyxDirOf(vyxPath), true, theme),
+        Err(e) => reportHere(Error, vyxCannotRead(vyxPath, e)),
     }
-    let dir = vyxDirOf(vyxPath)
-    return vyxBuildPageClientModuleAt(src, vyxPath, dir, true, theme)
 }
 
 /// The directory portion of `path` (everything before the last `/`), so relative
@@ -4471,6 +4586,12 @@ export gen fn vyxBuildLayoutModuleAt(source: String, srcPath: String, dir: Strin
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
     let templateSec = vyxSectionAvoid(ba, "template", false, scriptSec.start, scriptSec.end)
+    if vyxSectionUnclosed(scriptSec) {
+        return reportHere(Error, "this layout's `<script>` section is never closed — an unterminated string or `/* … */` comment swallows the closing `</script>`")
+    }
+    if vyxSectionUnclosed(templateSec) {
+        return reportHere(Error, "this layout's `<template>` section is never closed — an unterminated comment or unclosed element swallows the closing `</template>`")
+    }
     if templateSec.found == false {
         return reportHere(Error, "this layout has no `<template>` section — a layout's view is the one element inside it")
     }
@@ -4513,21 +4634,19 @@ export gen fn vyxBuildLayoutModuleAt(source: String, srcPath: String, dir: Strin
 /// `vyxLayout(vyxPath)` — synthesize a `.vyx` layout module (RFC-0041 §1). A
 /// `gen fn` (its `readFile` is comptime-only).
 export gen fn vyxLayout(vyxPath: String) -> String {
-    let src = match readFile(vyxPath) {
-        Ok(v) => v,
-        Err(e) => "",
+    return match readFile(vyxPath) {
+        Ok(v) => vyxBuildLayoutModuleAt(v, vyxPath, vyxDirOf(vyxPath), false, ""),
+        Err(e) => reportHere(Error, vyxCannotRead(vyxPath, e)),
     }
-    return vyxBuildLayoutModuleAt(src, vyxPath, vyxDirOf(vyxPath), false, "")
 }
 
 /// `vyxLayoutThemed(vyxPath, theme)` — the themed layout variant (RFC-0036): the
 /// layout's template classes are compile-checked against `theme`.
 export gen fn vyxLayoutThemed(vyxPath: String, theme: String) -> String {
-    let src = match readFile(vyxPath) {
-        Ok(v) => v,
-        Err(e) => "",
+    return match readFile(vyxPath) {
+        Ok(v) => vyxBuildLayoutModuleAt(v, vyxPath, vyxDirOf(vyxPath), true, theme),
+        Err(e) => reportHere(Error, vyxCannotRead(vyxPath, e)),
     }
-    return vyxBuildLayoutModuleAt(src, vyxPath, vyxDirOf(vyxPath), true, theme)
 }
 
 // ===========================================================================
@@ -4552,6 +4671,12 @@ export gen fn vyxBuildErrorModuleAt(source: String, srcPath: String, dir: String
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
     let templateSec = vyxSectionAvoid(ba, "template", false, scriptSec.start, scriptSec.end)
+    if vyxSectionUnclosed(scriptSec) {
+        return reportHere(Error, "this error page's `<script>` section is never closed — an unterminated string or `/* … */` comment swallows the closing `</script>`")
+    }
+    if vyxSectionUnclosed(templateSec) {
+        return reportHere(Error, "this error page's `<template>` section is never closed — an unterminated comment or unclosed element swallows the closing `</template>`")
+    }
     if templateSec.found == false {
         return reportHere(Error, "this error page has no `<template>` section — its view is the one element inside it")
     }
@@ -4587,20 +4712,18 @@ export gen fn vyxBuildErrorModuleAt(source: String, srcPath: String, dir: String
 
 /// `vyxError(vyxPath)` — synthesize a `.vyx` error-page module (RFC-0041 §3).
 export gen fn vyxError(vyxPath: String) -> String {
-    let src = match readFile(vyxPath) {
-        Ok(v) => v,
-        Err(e) => "",
+    return match readFile(vyxPath) {
+        Ok(v) => vyxBuildErrorModuleAt(v, vyxPath, vyxDirOf(vyxPath), false, ""),
+        Err(e) => reportHere(Error, vyxCannotRead(vyxPath, e)),
     }
-    return vyxBuildErrorModuleAt(src, vyxPath, vyxDirOf(vyxPath), false, "")
 }
 
 /// `vyxErrorThemed(vyxPath, theme)` — the themed error-page variant (RFC-0036).
 export gen fn vyxErrorThemed(vyxPath: String, theme: String) -> String {
-    let src = match readFile(vyxPath) {
-        Ok(v) => v,
-        Err(e) => "",
+    return match readFile(vyxPath) {
+        Ok(v) => vyxBuildErrorModuleAt(v, vyxPath, vyxDirOf(vyxPath), true, theme),
+        Err(e) => reportHere(Error, vyxCannotRead(vyxPath, e)),
     }
-    return vyxBuildErrorModuleAt(src, vyxPath, vyxDirOf(vyxPath), true, theme)
 }
 
 // ===========================================================================
@@ -5029,4 +5152,61 @@ test "a static .vyx page needs no Params" {
     let out = vyxBuildPageModule(src, "./routes", false, "")
     assert(out.contains("export fn page() -> Html"))
     assertEq(out.contains("export type Params"), false)
+}
+
+// ---- audit regressions: every trigger terminates or diagnoses ---------------
+
+test "an attribute starting a non-identifier byte is a named diagnostic, not a hang" {
+    // Each shape used to leave the name scan consuming zero bytes: `j == k`
+    // never advanced and every iteration pushed another empty attribute — the
+    // comptime build never finished.
+    let triggers = ["<template><div #app>x</div></template>", "<template><button @click.stop=\"go()\">x</button></template>", "<template><a href=\"/x\",rel=\"y\">x</a></template>", "<template><li *ngIf>x</li></template>"]
+    for src in triggers {
+        let comp = vyxCompileComponent("Bad", src, "./c")
+        assert(comp.err.contains("an attribute name is expected"))
+    }
+}
+
+test "an unterminated `(` in an event value is a named diagnostic" {
+    // `save(` used to slice to "" and silently compile a zero-argument handler.
+    let src = "<template><button @click=\"save(item.id\">x</button></template>"
+    let comp = vyxCompileComponent("Btn", src, "./c")
+    let out = vyxBuildModule([comp], false, "")
+    assert(out.contains("`@click` has an unterminated `(`"))
+}
+
+test "a component stem that is not an identifier is named, not emitted" {
+    // `My-Widget` used to emit `export fn my-Widget(` — a lexer error in the
+    // synthesized module, far from the cause; `404` an `export fn 404(`.
+    let hyphen = vyxCompileComponent("My-Widget", "<template><p>x</p></template>", "./c")
+    assert(hyphen.err.contains("does not spell a legal view-function name"))
+    let digit = vyxCompileComponent("404", "<template><p>x</p></template>", "./c")
+    assert(digit.err.contains("does not spell a legal view-function name"))
+}
+
+test "the -> of a fn-typed parameter does not end the parameter list" {
+    // Counting the `>` of `->` as a generic closer truncated after the fn-typed
+    // parameter and dropped `g` entirely (headTypes drives vyxHeadArgsOk).
+    let ts = vyxDeclParamTypes("fn head(cb: fn(Data) -> String, g: Int64)")
+    assertEq(ts.length, 2)
+    assertEq(ts[0], "fn(Data) -> String")
+    assertEq(ts[1], "Int64")
+}
+
+test "an unterminated block comment in script is diagnosed, not dropped" {
+    // The scanner hunts `*/` to the end of the file, misses the real
+    // `</script>`, and the whole section used to vanish silently — the view
+    // compiled with no props and failed later on unknown identifiers.
+    let src = "<script>\n/* never closed\nprops { x: Int64 }\n</script>\n<template><li>{{ x }}</li></template>"
+    let ba = bytes(src)
+    let s = vyxSection(ba, "script", true)
+    assert(vyxSectionUnclosed(s))
+    let comp = vyxCompileComponent("C", src, "./c")
+    assert(comp.err.contains("`<script>` section is never closed"))
+}
+
+test "an unterminated template comment is diagnosed, not 'no template'" {
+    let src = "<template><p>a</p><!-- never closed</template>"
+    let comp = vyxCompileComponent("C", src, "./c")
+    assert(comp.err.contains("`<template>` section is never closed"))
 }

@@ -249,12 +249,25 @@ from the contract's reflection: `resolve` (`(root, field, args) -> the encoded
 value, or why not`) and `schema`, the type graph the projection is checked
 against.
 
-**Every root field the operation selects** (RFC-0085 M3). Each is resolved and
-completed on its own, so one of them faulting leaves the others in `data` and
-puts its own message in `errors` at its own path. `data` goes `null` only when
-a fault climbs past a NON-NULL root field — which this generator's own SDL
-never declares, since a root field is nullable by construction precisely so a
-sibling's answer survives.
+**Validation runs before execution.** The whole selection tree is checked
+against the type graph first (`gqlValidate`); a document with an undeclared
+field, a stray argument, or a selection on a scalar is refused as one request
+fault — `{"errors":[{"message": ..}]}` alone, no `data`, no `path` — and no
+procedure runs. A destructive `mut fn` therefore cannot be reached by a
+malformed document.
+
+**Every root field a VALID document selects** (RFC-0085 M3). Each is resolved
+and completed on its own, so one of them faulting leaves the others in `data`
+and puts its own message in `errors` at its own path; the faults that can still
+reach this per-field shape are the resolver's own (an argument that fails its
+`fromJson`). `data` goes `null` only when such a fault climbs past a NON-NULL
+root field — which this generator's own SDL never declares, since a root field
+is nullable by construction precisely so a sibling's answer survives.
+
+The SDL's `_placeholder` member for empty field lists is baked into the type
+graph too, so `{ _placeholder }` on an empty query root answers end-to-end
+(`data._placeholder: null`) instead of being accepted by the document and
+refused by the executor.
 
 ## graphqlServer
 

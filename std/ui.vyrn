@@ -1314,6 +1314,28 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
     }
 }
 
+/// A file's source plus the OS reason when it could not be read — a match arm
+/// is one expression, so the error travels instead of becoming "" (which made
+/// an unreadable `.vyx` reflect as a page with no params and no loader).
+type UiFileRead = { src: String, err: String }
+
+gen fn uiReadVyx(path: String) -> UiFileRead {
+    return match readFile(path) {
+        Ok(v) => UiFileRead { src: v, err: "" },
+        Err(e) => UiFileRead { src: "", err: e },
+    }
+}
+
+/// A directory listing plus the OS reason when it failed (same trick).
+type UiDirRead = { entries: Array<String>, err: String }
+
+gen fn uiReadDirOf(dir: String) -> UiDirRead {
+    return match listDir(dir) {
+        Ok(ns) => UiDirRead { entries: ns, err: "" },
+        Err(err) => UiDirRead { entries: [], err: err },
+    }
+}
+
 /// Reflect a `.vyx` PAGE (RFC-0039 §4): read the file, learn its `params`/loader
 /// shape via std/vyx's `vyxPageShape`, and validate it against the route segments
 /// exactly as `uiInspectPage` does for a `.vyrn` page. A `gen fn` (it `readFile`s
@@ -1323,10 +1345,14 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
     // the diagnostic anchor.
     let srcPath = modPath + ".vyx"
     let dyns = uiDynNamesOf(segs)
-    let src = match readFile(modPath + ".vyx") {
-        Ok(v) => v,
-        Err(e) => "",
+    let read = uiReadVyx(srcPath)
+    if read.err != "" {
+        // A read failure is its own diagnostic: compiling "" here made the page
+        // reflect as having no params and no loader, and the build failed later
+        // on a missing `page` export.
+        return uiPageErr(modPath, segs, dirPrefix, dyns, uiPageErrAt(srcPath, "std/ui cannot read `\{srcPath}`: \{read.err}"))
     }
+    let src = read.src
     let shape = vyxPageShape(src)
     // RFC-0071: the page's PUBLIC surface — its `export fn` declarations —
     // checked against the `Page` contract. A `.vyx` file is not a module, so the
@@ -1348,7 +1374,6 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
     } else {
         ""
     }
-
     // dynTypes + Params/segment agreement (mirrors uiInspectPage).
     let mut dynTypes: Array<String> = []
     for d in dyns {
@@ -1478,22 +1503,22 @@ gen fn uiIsDir(path: String) -> Bool {
 type UiChrome = { modPath: String, dirPrefix: Array<String> }
 
 /// The result of a directory scan: route pages plus the `layout.vyx` / `error.vyx`
-/// chrome files (which are NOT routes).
-type UiScan = { pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors: Array<UiChrome> }
+/// chrome files (which are NOT routes). `err` carries the OS reason when a
+/// directory could not be listed — swallowing it into an empty scan made an
+/// unreadable tree report `no page modules under …`, pointing at the wrong fix.
+type UiScan = { pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors: Array<UiChrome>, err: String }
 
 /// Recursively scan `dir` (accumulating the route-segment `prefix`) into the pages
 /// AND chrome (`layout.vyx`/`error.vyx`) it and its subdirectories contain. A
 /// `gen fn` (calls `listDir` + the inspectors, all generation-only) so codegen
 /// never lowers it. `layout`/`error` `.vyx` files are chrome, not routes.
 gen fn uiScanAll(dir: String, prefix: Array<String>) -> UiScan {
-    let entries = match listDir(dir) {
-        Ok(ns) => ns,
-        Err(err) => [],
-    }
+    let listed = uiReadDirOf(dir)
+    let mut scanErr = listed.err
     let mut pages: Array<UiPageInfo> = []
     let mut layouts: Array<UiChrome> = []
     let mut errors: Array<UiChrome> = []
-    for name in entries {
+    for name in listed.entries {
         if name.endsWith(".vyrn") {
             let st = uiStem(name)
             let modPath = dir + "/" + st
@@ -1513,6 +1538,7 @@ gen fn uiScanAll(dir: String, prefix: Array<String>) -> UiScan {
             let sub = dir + "/" + name
             if uiIsDir(sub) {
                 let kid = uiScanAll(sub, uiAppendStr(prefix, name))
+                scanErr = scanErr + kid.err
                 for p in kid.pages {
                     pages.push(p.copy())
                 }
@@ -1525,7 +1551,7 @@ gen fn uiScanAll(dir: String, prefix: Array<String>) -> UiScan {
             }
         }
     }
-    return UiScan { pages: pages, layouts: layouts, errors: errors }
+    return UiScan { pages: pages, layouts: layouts, errors: errors, err: scanErr }
 }
 
 /// Whether `a` is a (non-strict) prefix of `b` — the ancestor test for chrome.
@@ -2471,8 +2497,9 @@ gen fn uiEmitMountable(pages: Array<UiPageInfo>) -> String {
 }
 
 /// The page indices ordered for dispatch: fewer dynamic segments first, so a
-/// fully-static route always wins over a dynamic one at the same depth.
-gen fn uiDispatchOrder(pages: Array<UiPageInfo>) -> Array<Int64> {
+/// fully-static route always wins over a dynamic one at the same depth. Pure (no
+/// comptime builtins), so the client/server parity test below can walk it.
+fn uiDispatchOrder(pages: Array<UiPageInfo>) -> Array<Int64> {
     let mut order: Array<Int64> = []
     let mut want = 0
     let mut maxDyn = 0
@@ -2504,12 +2531,15 @@ export gen fn pages(dir: String) -> String {
     let scan = uiScanAll(dir, [])
     let infos = scan.pages
     if infos.length == 0 {
+        if scan.err != "" {
+            return reportHere(Error, "std/ui cannot read `\{dir}`: \{scan.err}")
+        }
         return reportHere(
             Error,
             "no page modules under `\{dir}` — a page is a `.vyrn` or `.vyx` file in that directory, and its path is its route",
         )
     }
-    let mut err = ""
+    let mut err = scan.err
     for p in infos {
         err = err + p.err
     }
@@ -2528,12 +2558,15 @@ export gen fn pagesThemed(dir: String, theme: String) -> String {
     let scan = uiScanAll(dir, [])
     let infos = scan.pages
     if infos.length == 0 {
+        if scan.err != "" {
+            return reportHere(Error, "std/ui cannot read `\{dir}`: \{scan.err}")
+        }
         return reportHere(
             Error,
             "no page modules under `\{dir}` — a page is a `.vyrn` or `.vyx` file in that directory, and its path is its route",
         )
     }
-    let mut err = ""
+    let mut err = scan.err
     for p in infos {
         err = err + p.err
     }
@@ -2724,17 +2757,19 @@ gen fn uiEmitResolvePage(pages: Array<UiPageInfo>) -> String {
     }
     out = out + "export fn resolvePage(path: String) -> String {\n"
     out = out + "    let segs = uiClientSegments(path)\n"
-    i = 0
-    while i < pages.length {
-        if uiClientRenderable(pages[i]) {
-            let idx = i.toString()
-            let hd = if pages[i].hasLoad { "true" } else { "false" }
+    // The server dispatches static-before-dynamic (`route` walks
+    // `uiDispatchOrder`); the client match chain walks the SAME order, or a
+    // catch-all `[slug].vyx` listed before `about.vyx` would answer a soft nav
+    // to /about while the server renders the static page.
+    for order in uiDispatchOrder(pages) {
+        if uiClientRenderable(pages[order]) {
+            let idx = order.toString()
+            let hd = if pages[order].hasLoad { "true" } else { "false" }
             // RFC-0070: `lazy` tells the navigator to paint the skeleton instantly
             // (then fetch + fill), vs a blocking data fetch for a non-lazy data page.
-            let lz = if pages[i].loadLazy { "true" } else { "false" }
-            out = out + "    if uiClientMatch" + idx + "(segs) {\n        return uiResolveHit(" + hd + ", " + lz + ", " + uiStrLit(uiPageId(pages[i])) + ", " + uiResolveTitleExpr(pages[i], idx) + ")\n    }\n"
+            let lz = if pages[order].loadLazy { "true" } else { "false" }
+            out = out + "    if uiClientMatch" + idx + "(segs) {\n        return uiResolveHit(" + hd + ", " + lz + ", " + uiStrLit(uiPageId(pages[order])) + ", " + uiResolveTitleExpr(pages[order], idx) + ")\n    }\n"
         }
-        i = i + 1
     }
     out = out + "    return uiResolveMiss()\n}\n"
     return out
@@ -2808,12 +2843,15 @@ export gen fn pagesClient(dir: String) -> String {
     let scan = uiScanAll(dir, [])
     let infos = scan.pages
     if infos.length == 0 {
+        if scan.err != "" {
+            return reportHere(Error, "std/ui cannot read `\{dir}`: \{scan.err}")
+        }
         return reportHere(
             Error,
             "no page modules under `\{dir}` — a page is a `.vyrn` or `.vyx` file in that directory, and its path is its route",
         )
     }
-    let mut err = ""
+    let mut err = scan.err
     for p in infos {
         err = err + p.err
     }
@@ -2830,12 +2868,15 @@ export gen fn pagesClientThemed(dir: String, theme: String) -> String {
     let scan = uiScanAll(dir, [])
     let infos = scan.pages
     if infos.length == 0 {
+        if scan.err != "" {
+            return reportHere(Error, "std/ui cannot read `\{dir}`: \{scan.err}")
+        }
         return reportHere(
             Error,
             "no page modules under `\{dir}` — a page is a `.vyrn` or `.vyx` file in that directory, and its path is its route",
         )
     }
-    let mut err = ""
+    let mut err = scan.err
     for p in infos {
         err = err + p.err
     }
@@ -2943,4 +2984,18 @@ test "uiStem and route mapping" {
     assertEq(uiStem("[id].vyrn"), "[id]")
     assertEq(uiRouteSegsFor(["items"], "index").length, 1)
     assertEq(uiRouteSegsFor(["items"], "[id]").length, 2)
+}
+
+test "dispatch order answers a static route before a catch-all at the same depth" {
+    // The server router (`route`), the wire table (`routes()`) and — since the
+    // client bundle learned the same rule — the `resolvePage` match chain all
+    // walk this ONE order. `[slug].vyx` typically lists before `about.vyx`, so
+    // raw listDir order would let the catch-all shadow /about on a soft nav
+    // while the server renders the static page.
+    let about = UiPageInfo { modPath: "routes/about", segs: ["about"], urlPattern: "/about", dynNames: [], dynTypes: [], hasLoad: false, hasData: false, dataRunner: "", loadHasParams: false, loadLazy: false, hasRespond: false, isVyx: true, pageArity: 0, paramsModule: "", dirPrefix: [], loadKind: "", layoutNone: false, err: "" }
+    let catchAll = UiPageInfo { modPath: "routes/[slug]", segs: ["[slug]"], urlPattern: "/:slug", dynNames: ["slug"], dynTypes: ["String"], hasLoad: false, hasData: false, dataRunner: "", loadHasParams: false, loadLazy: false, hasRespond: false, isVyx: true, pageArity: 0, paramsModule: "", dirPrefix: [], loadKind: "", layoutNone: false, err: "" }
+    let order = uiDispatchOrder([catchAll, about])
+    assertEq(order.length, 2)
+    assertEq(order[0], 1)
+    assertEq(order[1], 0)
 }

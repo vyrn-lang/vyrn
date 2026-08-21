@@ -1138,7 +1138,14 @@ pub fn check_inst_depth<'a>(
         };
         let mut shown = a.to_string();
         if shown.len() > 80 {
-            shown.truncate(80);
+            // The display string may hold multi-byte characters (the lexer
+            // accepts Unicode identifiers): back up to a char boundary before
+            // cutting, or `truncate` panics mid-character.
+            let mut cut = 80;
+            while !shown.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            shown.truncate(cut);
             shown.push_str("...");
         }
         return Err(format!(
@@ -2196,9 +2203,17 @@ pub fn emit(program: &Program) -> Result<String, String> {
     }
     out.push_str("  %r = call i64 @vyrn_main()\n");
     // Flush and close the log file after running (before returning the code).
+    // A failed fopen left the handle null (bad path, unwritable directory):
+    // fclose(NULL) is UB, so the close is guarded and the program degrades
+    // silently, exactly as the interpreter does on an unopenable log file.
     if file_sink {
         out.push_str("  %lfc = load ptr, ptr @__vyrn_log_file\n");
+        out.push_str("  %lfopen = icmp ne ptr %lfc, null\n");
+        out.push_str("  br i1 %lfopen, label %log.close, label %log.done\n");
+        out.push_str("log.close:\n");
         out.push_str("  %ignore = call i32 @fclose(ptr %lfc)\n");
+        out.push_str("  br label %log.done\n");
+        out.push_str("log.done:\n");
     }
     out.push_str("  %m = and i64 %r, 255\n");
     out.push_str("  %c = trunc i64 %m to i32\n");
@@ -5086,6 +5101,15 @@ impl<'a> Gen<'a> {
                     Type::Array(inner) => {
                         let elem = *inner;
                         let ell = self.llt(&elem);
+                        let (iv, _) = self.gen_expr(index)?;
+                        self.expect.push(elem.clone());
+                        let r = self.gen_expr(value);
+                        self.expect.pop();
+                        let (v, vty) = r?;
+                        let (v, _) = self.coerce(v, &vty, &elem)?;
+                        // The header is loaded only after the index and value
+                        // ran: either may `modify` the array, and the bounds
+                        // check must trust the post-mutation len.
                         let hdr = self.fresh_tmp();
                         let data = self.fresh_tmp();
                         let len = self.fresh_tmp();
@@ -5094,12 +5118,6 @@ impl<'a> Gen<'a> {
                             "{data} = extractvalue {{ ptr, i64, i64 }} {hdr}, 0"
                         ));
                         self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {hdr}, 1"));
-                        let (iv, _) = self.gen_expr(index)?;
-                        self.expect.push(elem.clone());
-                        let r = self.gen_expr(value);
-                        self.expect.pop();
-                        let (v, vty) = r?;
-                        let (v, _) = self.coerce(v, &vty, &elem)?;
                         let oob = self.fresh_tmp();
                         self.emit(format!("{oob} = icmp uge i64 {iv}, {len}"));
                         self.emit_term(format!("br i1 {oob}, label %{bad_l}, label %{ok_l}"));
@@ -5117,8 +5135,8 @@ impl<'a> Gen<'a> {
                         } else {
                             Vec::new()
                         };
-                        self.emit(format!("store {ell} {v}, ptr {ep}"));
                         self.free_snap(&snap);
+                        self.emit(format!("store {ell} {v}, ptr {ep}"));
                         Ok(())
                     }
                     // `sa[i] = v` (RFC-0056): store into the live buffer (inline
@@ -5126,13 +5144,16 @@ impl<'a> Gen<'a> {
                     Type::SmallArray(inner, n) => {
                         let elem = *inner;
                         let ell = self.llt(&elem);
-                        let (base, len, _cap, _data) = self.sa_slot_base(&slot, &elem, n);
                         let (iv, _) = self.gen_expr(index)?;
                         self.expect.push(elem.clone());
                         let r = self.gen_expr(value);
                         self.expect.pop();
                         let (v, vty) = r?;
                         let (v, _) = self.coerce(v, &vty, &elem)?;
+                        // Base/len are read only after the index and value ran:
+                        // either may `modify` the array, and the bounds check
+                        // must trust the post-mutation len.
+                        let (base, len, _cap, _data) = self.sa_slot_base(&slot, &elem, n);
                         let oob = self.fresh_tmp();
                         self.emit(format!("{oob} = icmp uge i64 {iv}, {len}"));
                         self.emit_term(format!("br i1 {oob}, label %{bad_l}, label %{ok_l}"));
@@ -7698,7 +7719,7 @@ impl<'a> Gen<'a> {
         // …and the structural identity of exactly what was just spelled, for
         // [`struct_key`]'s reason: `drain_ho` dedups on this symbol, and both
         // halves of the readable spelling are lossy (`mangle_ty` collapses every
-        // record to `Rec`; `sanitize` maps every non-alphanumeric to `_`).
+        // record to `Rec`; `sanitize` collapses every non-ASCII-alphanumeric).
         let targets: Vec<&str> = bindings.iter().map(|b| b.target_sym.as_str()).collect();
         sym.push_str(&format!("_h{}", struct_key(&(&type_args, &targets))));
         self.ho_instances.push(HoInst {
@@ -8152,6 +8173,17 @@ impl<'a> Gen<'a> {
         // be allocas of the outer frame.
         let saved_append_ok = std::mem::take(&mut self.append_ok);
         let saved_str_append = std::mem::take(&mut self.str_append);
+        // The lifted body is a function that OUTLIVES the lexical site: a
+        // lambda written inside `region { .. }` may be called outside any
+        // region, so its String allocations must route to `malloc`, not bake in
+        // the arena (`str_alloc` compiles the routing in from this flag).
+        let saved_region_depth = self.region_depth;
+        self.region_depth = 0;
+        // The stream/hole bookkeeping is per-function too: `tmp` resets below,
+        // so alloca names collide with the enclosing body's — a colliding name
+        // would let an outer loop's closer resolve the wrong element type.
+        let saved_stream = std::mem::take(&mut self.stream_slots);
+        let saved_holes = std::mem::take(&mut self.hole_slots);
         self.tmp = 0;
         self.label = 0;
 
@@ -8235,6 +8267,9 @@ impl<'a> Gen<'a> {
         self.fn_bindings = saved_bindings;
         self.append_ok = saved_append_ok;
         self.str_append = saved_str_append;
+        self.stream_slots = saved_stream;
+        self.hole_slots = saved_holes;
+        self.region_depth = saved_region_depth;
 
         self.lambda_defs.push((sym.clone(), def));
         Ok((sym, ret_ty))
@@ -8847,7 +8882,15 @@ impl<'a> Gen<'a> {
             out.push_str(a);
             out.push('\n');
         }
+        // Same one-frame-of-the-budget instrumentation [`Gen::function`] emits:
+        // a specialization that calls itself re-enters `gen_ho_call` and lands
+        // back HERE, so without it a runaway recursion segfaults natively where
+        // the interpreter traps with the call-depth error.
+        out.push_str("  call void @__vyrn_call_enter()\n");
         for b in &self.body {
+            if b.trim_start().starts_with("ret ") || b.trim_start() == "ret void" {
+                out.push_str("  call void @__vyrn_call_exit()\n");
+            }
             out.push_str(b);
             out.push('\n');
         }
@@ -9475,9 +9518,26 @@ impl<'a> Gen<'a> {
                         self.emit(format!("{stream} = load ptr, ptr @__vyrn_log_file"))
                     }
                 }
-                self.emit(format!(
-                    "call i32 (ptr, ptr, ...) @fprintf(ptr {stream}, ptr @.fmt.log, ptr {lvl}, ptr {logv}, ptr {msgv})"
-                ));
+                // A failed fopen left the handle null: fprintf(NULL, …) would
+                // crash, so the record is skipped and the program degrades
+                // silently, as the interpreter does.
+                if matches!(self.log_sink, LogSink::File(_)) {
+                    let open_l = self.fresh_label("log.open");
+                    let done_l = self.fresh_label("log.done");
+                    let live = self.fresh_tmp();
+                    self.emit(format!("{live} = icmp ne ptr {stream}, null"));
+                    self.emit_term(format!("br i1 {live}, label %{open_l}, label %{done_l}"));
+                    self.emit_label(&open_l);
+                    self.emit(format!(
+                        "call i32 (ptr, ptr, ...) @fprintf(ptr {stream}, ptr @.fmt.log, ptr {lvl}, ptr {logv}, ptr {msgv})"
+                    ));
+                    self.emit_term(format!("br label %{done_l}"));
+                    self.emit_label(&done_l);
+                } else {
+                    self.emit(format!(
+                        "call i32 (ptr, ptr, ...) @fprintf(ptr {stream}, ptr @.fmt.log, ptr {lvl}, ptr {logv}, ptr {msgv})"
+                    ));
+                }
             }
             return Ok(("".into(), Type::Unit));
         }
@@ -10281,12 +10341,27 @@ impl<'a> Gen<'a> {
             self.expect.pop();
             let (v, vty) = r?;
             let (v, _) = self.coerce(v, &vty, &elem)?;
+            // The header is read only AFTER the element ran: the element
+            // expression may `modify` the receiver (`a.push(takeLast(a))`),
+            // and the push must trust the post-mutation len/cap the way the
+            // interpreter reads the live slot. A receiver that is not a plain
+            // variable cannot be aliased by the element expression, so its
+            // snapshot in `av` is still current.
+            let hdr = match &args[0] {
+                Expr::Var { name, .. } if self.lookup(name).is_some() => {
+                    let (slot, _) = self.lookup(name).unwrap();
+                    let fresh = self.fresh_tmp();
+                    self.emit(format!("{fresh} = load {{ ptr, i64, i64 }}, ptr {slot}"));
+                    fresh
+                }
+                _ => av.clone(),
+            };
             let data = self.fresh_tmp();
             let len = self.fresh_tmp();
             let cap = self.fresh_tmp();
-            self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {av}, 0"));
-            self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {av}, 1"));
-            self.emit(format!("{cap} = extractvalue {{ ptr, i64, i64 }} {av}, 2"));
+            self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {hdr}, 0"));
+            self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {hdr}, 1"));
+            self.emit(format!("{cap} = extractvalue {{ ptr, i64, i64 }} {hdr}, 2"));
             let full = self.fresh_tmp();
             self.emit(format!("{full} = icmp eq i64 {len}, {cap}"));
             let grow_l = self.fresh_label("push.grow");
@@ -10840,8 +10915,11 @@ impl<'a> Gen<'a> {
                 let elem = *inner;
                 let ell = self.llt(&elem);
                 let sa_ll = self.sa_ll(&elem, n);
-                let (base, len, _cap, _data) = self.sa_slot_base(&slot, &elem, n);
+                // The index is evaluated BEFORE the base/len are read: it may
+                // `modify` the array, and the bounds check must trust the
+                // post-mutation len.
                 let (iv, _) = self.gen_expr(&args[1])?;
+                let (base, len, _cap, _data) = self.sa_slot_base(&slot, &elem, n);
                 let bad_l = self.fresh_label("saswap.oob");
                 let ok_l = self.fresh_label("saswap.ok");
                 let oob = self.fresh_tmp();
@@ -10872,6 +10950,10 @@ impl<'a> Gen<'a> {
                 other => return Err(format!("`swapRemove` needs an Array, found {other:?}")),
             };
             let ell = self.llt(&elem);
+            // The index is evaluated BEFORE the header is loaded: it may
+            // `modify` the array, and the bounds check must trust the
+            // post-mutation len.
+            let (iv, _) = self.gen_expr(&args[1])?;
             let hdr = self.fresh_tmp();
             let data = self.fresh_tmp();
             let len = self.fresh_tmp();
@@ -10880,7 +10962,6 @@ impl<'a> Gen<'a> {
                 "{data} = extractvalue {{ ptr, i64, i64 }} {hdr}, 0"
             ));
             self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {hdr}, 1"));
-            let (iv, _) = self.gen_expr(&args[1])?;
             let bad_l = self.fresh_label("swap.oob");
             let ok_l = self.fresh_label("swap.ok");
             let oob = self.fresh_tmp();
@@ -13371,16 +13452,24 @@ fn enum_ll(arity: usize) -> String {
 }
 
 /// Make an identifier safe to embed in an LLVM local name.
+///
+/// Unquoted LLVM identifiers are ASCII-only (`[A-Za-z$._0-9]`), but the lexer
+/// accepts Unicode alphabetic identifiers — so a non-ASCII letter or digit is
+/// escaped as `_uXXXX_` (its code point in hex) instead of passing through and
+/// producing IR that clang/llc reject with a parse error. Other characters
+/// collapse to `_`, as before.
 fn sanitize(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            out.push(c);
+        } else if c.is_alphanumeric() {
+            out.push_str(&format!("_u{:04X}_", c as u32));
+        } else {
+            out.push('_');
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -16648,6 +16737,85 @@ mod tests {
             free_calls(&ir),
             RUNTIME_FREES + 2,
             "two drops, two frees: {ir}"
+        );
+    }
+
+    #[test]
+    fn push_rereads_the_header_after_the_element_expression() {
+        // `a.push(takeLast(a))`: the element expression `modify`-mutates the
+        // receiver (takeLast pops), so the push must read the header AFTER it
+        // ran — the interpreter reads the live slot, and native must publish
+        // the same len. The old order snapshotted the header first and grew
+        // off the stale length.
+        let src = "fn takeLast(xs: modify Array<Int64>) -> Int64 { \
+                   return match xs.pop() { Some(x) => x, None => 0 } } \
+                   fn main() -> Int64 { let mut a: Array<Int64> = [10, 20, 30] \
+                   a.push(takeLast(a)) return a.length }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        let start = ir.find("define i64 @vyrn_main(").expect("main present");
+        let body = &ir[start..];
+        let elem = body.find("@vyrn_takeLast").expect("element call emitted");
+        assert!(
+            body[elem..]
+                .contains("load { ptr, i64, i64 }, ptr %a.addr"),
+            "the header is re-read from the binding's slot after the element \
+             expression ran:\n{body}"
+        );
+    }
+
+    #[test]
+    fn lifted_lambda_does_not_bake_in_the_enclosing_region() {
+        // A lifted lambda is a function of its own: even when it is written
+        // lexically inside `region { .. }`, its String allocations must route
+        // to malloc, not bake in the arena at lift time — the arena dies with
+        // the region, and (since the checker now refuses storing region-heap
+        // values into bindings that outlive one) nothing pins the lambda's
+        // lifetime to the region it was written in.
+        let src = "fn main() -> Int64 { \
+                   region { let g: fn(Int64) -> String = |y| \"b\" + y.toString() \
+                   print(g(1)) } return 0 }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        let mut checked = 0;
+        let mut rest = ir.as_str();
+        while let Some(pos) = rest.find("define") {
+            let end = rest[pos..]
+                .find("\n}\n")
+                .map(|e| pos + e)
+                .unwrap_or(rest.len());
+            let def = &rest[pos..end];
+            if def.contains("@__vyrn_lambda_") && def.contains("@__vyrn_str_concat") {
+                checked += 1;
+                assert!(
+                    !def.contains("@__vyrn_region_alloc"),
+                    "lambda baked in arena routing:\n{def}"
+                );
+                assert!(def.contains("@__vyrn_malloc"), "heap allocation:\n{def}");
+            }
+            rest = &rest[end..];
+        }
+        assert!(checked > 0, "expected a concatenating lifted lambda");
+    }
+
+    #[test]
+    fn ho_specializations_pay_the_call_depth_budget() {
+        // A specialization that recurses through its own `fn` parameter lands
+        // back in the same define, so it needs the same enter/exit hooks
+        // [`Gen::function`] emits — otherwise runaway recursion segfaults
+        // natively where the interpreter traps.
+        let src = "fn twice(x: Int64, g: fn(Int64) -> Int64) -> Int64 { return g(g(x)) } \
+                   fn inc(x: Int64) -> Int64 { return x + 1 } \
+                   fn main() -> Int64 { return twice(1, inc) }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        let start = ir.find("define i64 @vyrn_twice__ho").expect("specialization present");
+        let end = ir[start..].find("\n}\n").expect("definition closes");
+        let def = &ir[start..start + end];
+        assert!(
+            def.contains("call void @__vyrn_call_enter()"),
+            "prologue takes a frame of the budget:\n{def}"
+        );
+        assert!(
+            def.contains("call void @__vyrn_call_exit()"),
+            "the ret gives the frame back:\n{def}"
         );
     }
 }

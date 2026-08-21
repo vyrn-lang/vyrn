@@ -6,8 +6,9 @@
 //!
 //! The plan, validated by hand before any of this was written (RFC-0076 §M1
 //! validation): clear `is_gen`, synthesize a `main` that calls the generator
-//! with the constant arguments and prints the result, compile that to wasm, and
-//! take stdout as the module source. Both routes hashed identically.
+//! with the constant arguments and prints the result between two sentinel
+//! lines, compile that to wasm, and take the framed span of stdout as the
+//! module source. Both routes hashed identically.
 //!
 //! Why swapping engines is safe here at all: the sacred invariant is that
 //! interp == native == wasm, byte-identical including traps, proven over every
@@ -59,6 +60,17 @@ use vyrn_frontend::interp::{CodePiece, GenInputs, GenOutput, GenRead};
 /// them (comptime purity forbids it), so their only effect here is to decline a
 /// module that merely CONTAINS one somewhere.
 const UNSERVED: &[&str] = &["writeFile", "writeAtomic", "renameFile", "fsyncFile"];
+
+/// The wrapper frames the generated source between these two lines
+/// ([`wrapper_program`]), so the generator's own compile-time `print` output —
+/// which the interpreter routes to the compiler process's stdout and never
+/// into the source — can be split off instead of folded into the emitted
+/// module. Exactly one of each must appear in the guest's stdout; any other
+/// count means the guest wrote a marker itself (or the artifact predates the
+/// framing), which this path cannot disentangle and so declines to the
+/// interpreter.
+const RESULT_BEGIN: &str = "<<vyrn-genwasm-result>>";
+const RESULT_END: &str = "<<vyrn-genwasm-result-end>>";
 
 /// Install the wasm generation engine (RFC-0076). Called once from `main`.
 pub fn install() {
@@ -181,10 +193,6 @@ fn run(
         compile_to_wasm(&key, &wrapper)
     })?;
     trace("run", t.elapsed());
-    // `print` appends a newline; the generator's own source did not have it.
-    if source.ends_with('\n') {
-        source.pop();
-    }
     if source.len() > inputs.max_output {
         return Err(EngineError::Failed(format!(
             "generator output exceeds the {} byte cap",
@@ -330,6 +338,11 @@ fn wrapper_program(program: &Program) -> Option<Program> {
             },
             then_block: Block {
                 stmts: vec![
+                    // The result travels framed between two marker lines
+                    // (RESULT_BEGIN/RESULT_END) so `run_wasm` can split the
+                    // generator's own compile-time `print` output off it; see
+                    // `unframe_result`.
+                    Stmt::Expr(call("print", vec![Expr::Str(RESULT_BEGIN.into())])),
                     Stmt::Expr(call(
                         "print",
                         vec![call(
@@ -337,6 +350,7 @@ fn wrapper_program(program: &Program) -> Option<Program> {
                             (0..f.params.len()).map(|i| argv(i + 1)).collect(),
                         )],
                     )),
+                    Stmt::Expr(call("print", vec![Expr::Str(RESULT_END.into())])),
                     Stmt::Return {
                         value: Some(Expr::Int(0)),
                         line: 0,
@@ -373,6 +387,46 @@ fn wrapper_program(program: &Program) -> Option<Program> {
     // all cover them like any other function).
     reflect_entries(&mut p)?;
     Some(p)
+}
+
+/// Split the guest's stdout into its compile-time prints and the generated
+/// source, using the framing [`wrapper_program`] emits: any prints, one begin
+/// marker line, the source, one end marker line.
+///
+/// The interpreter keeps a generator's own `print` calls out of its result by
+/// construction (they go to the compiler process's stdout), so this path must
+/// too — before this split they were folded into the emitted module and the two
+/// engines silently disagreed. Any deviation from exactly one of each marker is
+/// a guest that wrote a marker itself, or an artifact compiled before the
+/// framing existed; both decline to the interpreter rather than guess.
+fn unframe_result(stdout: &[u8]) -> Result<(Vec<u8>, Vec<u8>), &'static str> {
+    let locate = |marker: &str| -> Vec<usize> {
+        let m = marker.as_bytes();
+        if stdout.len() < m.len() {
+            return Vec::new();
+        }
+        (0..=stdout.len() - m.len())
+            .filter(|i| &stdout[*i..*i + m.len()] == m)
+            .collect()
+    };
+    let begins = locate(RESULT_BEGIN);
+    let ends = locate(RESULT_END);
+    if begins.len() != 1 || ends.len() != 1 {
+        return Err("the guest did not frame its result exactly once");
+    }
+    let (begin, end) = (begins[0], ends[0]);
+    if begin >= end {
+        return Err("the guest framed its result backwards");
+    }
+    // Each `print` appends exactly one newline: one inside the frame, one after
+    // the closing marker. Anything else is not the shape the wrapper emits.
+    let Some(source) = stdout[begin + RESULT_BEGIN.len()..end].strip_suffix(b"\n") else {
+        return Err("the framed result does not end where the wrapper put it");
+    };
+    if stdout[end + RESULT_END.len()..] != b"\n" {
+        return Err("the framed result does not end where the wrapper put it");
+    }
+    Ok((stdout[..begin].to_vec(), source.to_vec()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1231,7 +1285,8 @@ fn module_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String,
     CACHE.get_or_init(Default::default)
 }
 
-/// Compile (once) and run, returning what the guest wrote to stdout.
+/// Compile (once) and run, returning the generated source the guest framed on
+/// stdout.
 ///
 /// Three tiers, cheapest first: this process's modules, then the artifacts a
 /// previous process left on disk, then clang plus cranelift.
@@ -1336,7 +1391,7 @@ fn run_hosted(
     }
 }
 
-/// Instantiate the module and return what it wrote to stdout.
+/// Instantiate the module and return the generated source it framed on stdout.
 ///
 /// Embedded rather than spawned, and that is not an optimization: measured, the
 /// wasmtime CLI's process launch is ~106 ms and precompiling does not reduce it,
@@ -1817,13 +1872,70 @@ fn run_wasm(
     streams
         .drained()
         .map_err(|e| EngineError::Failed(e.to_string()))?;
-    String::from_utf8(streams.stdout)
+    // The wrapper framed the result between two marker lines; everything ahead
+    // of the frame is the generator's own compile-time `print` output, which
+    // routes to the compiler process's stdout exactly as the interpreter's
+    // `print` does (vyrn_out! → println!) and never enters the source.
+    let (prints, source) = match unframe_result(&streams.stdout) {
+        Ok(framed) => framed,
+        Err(why) => return Err(decline(why)),
+    };
+    if !prints.is_empty() {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        let _ = out.write_all(&prints);
+        let _ = out.flush();
+    }
+    String::from_utf8(source)
         .map_err(|_| EngineError::Failed("generator emitted invalid UTF-8".into()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The framing `wrapper_program` emits, as the guest's stdout carries it:
+    /// any compile-time prints, one begin marker line, the source, one end
+    /// marker line — each `print` having appended its newline.
+    fn framed(prints: &str, source: &str) -> Vec<u8> {
+        format!("{prints}{RESULT_BEGIN}\n{source}\n{RESULT_END}\n").into_bytes()
+    }
+
+    /// A generator that prints while it generates must not have those bytes
+    /// folded into the emitted module: they split off and route to the host,
+    /// which is what the interpreter does with them (vyrn_out! → println!).
+    #[test]
+    fn a_generators_own_prints_never_enter_the_source() {
+        let (prints, source) =
+            unframe_result(&framed("debug\n", "fn f() -> Int64 { return 1 }"))
+                .expect("the wrapper's own framing unframes");
+        assert_eq!(prints, b"debug\n");
+        assert_eq!(source, b"fn f() -> Int64 { return 1 }");
+
+        // The common case: a generator that printed nothing.
+        let (prints, source) = unframe_result(&framed("", "fn g() -> Str { return \"\" }"))
+            .expect("an unprinted frame still unframes");
+        assert!(prints.is_empty());
+        assert_eq!(source, b"fn g() -> Str { return \"\" }");
+    }
+
+    /// A guest that writes a marker itself (or an artifact compiled before the
+    /// framing existed) cannot be split with confidence, so it declines to the
+    /// interpreter — which keeps prints out of the source by construction.
+    #[test]
+    fn stdout_that_does_not_frame_exactly_once_is_declined() {
+        // An artifact from before the framing: bare result, no markers.
+        assert!(unframe_result(b"fn f() -> Int64 { return 1 }\n").is_err());
+        // The generator echoed a marker of its own: two begins.
+        let echoed = framed(&format!("x{RESULT_BEGIN}\n"), "fn f() -> Int64 { return 1 }");
+        assert!(unframe_result(&echoed).is_err());
+        // The RESULT itself contains a marker: two ends once framed.
+        let inside = framed(
+            "",
+            &format!("fn f() -> Str {{ return \"{RESULT_END}\" }}"),
+        );
+        assert!(unframe_result(&inside).is_err());
+    }
 
     /// `load_artifact` maps its bytes in as native code, so what it will and will
     /// not deserialize IS that `unsafe` block's soundness argument. It used to

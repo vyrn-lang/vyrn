@@ -70,7 +70,11 @@ else
   # per_page=1 gives the newest release INCLUDING pre-releases, which
   # /releases/latest deliberately hides — and every alpha is a pre-release.
   # One release in the response means one "tag_name", so this stays a sed.
-  json=$(fetch "$API/repos/$REPO/releases?per_page=1") || json=''
+  # A failed fetch (offline, proxy, GitHub down) and an empty listing are
+  # different situations with different advice; keep them apart.
+  json=$(fetch "$API/repos/$REPO/releases?per_page=1") ||
+    die "cannot reach GitHub ($API) to list releases for $REPO.
+  Check your network or proxy settings and try again."
   tag=$(printf '%s' "$json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
   [ -n "$tag" ] || die "no release has been published for $REPO yet.
   Build from source instead:

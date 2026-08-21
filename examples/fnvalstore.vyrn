@@ -105,9 +105,12 @@ fn greet(u: User) -> String {
 
 /// The captured value is a RECORD (`tag`): the lambda flows into `onUser`, whose
 /// `cb` param is then stored — so the stored fn-value's capture block is a
-/// non-scalar record, boxed by value at the store site.
+/// non-scalar record, boxed by value at the store site. A stored callee may
+/// keep the lambda past this call, so the capture must be an owned copy of the
+/// read parameter rather than a borrow of this frame's `tag`.
 fn onUserTagged(k: String, tag: User) {
-    onUser(k, |u| print("\{tag.name}#\{tag.id} -> \{u.name}#\{u.id}"))
+    let t = tag.copy()
+    onUser(k, |u| print("\{t.name}#\{t.id} -> \{u.name}#\{u.id}"))
 }
 
 /// A named function stored as a value (the empty-payload variant).

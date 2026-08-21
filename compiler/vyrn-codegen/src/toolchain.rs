@@ -514,6 +514,7 @@ typedef struct VTask {
     void (*thunk)(void*);
     void* frame;
     HANDLE done; /* manual-reset event, signaled when the task completed */
+    volatile LONG flag; /* fallback completion flag, used only if `done` is NULL */
     struct VTask* prev;
     struct VTask* next;
     int listed;
@@ -521,13 +522,20 @@ typedef struct VTask {
 static DWORD WINAPI __vyrn_task_main(LPVOID p) {
     VTask* t = (VTask*)p;
     t->thunk(t->frame);
-    SetEvent(t->done);
+    if (t->done) SetEvent(t->done); else InterlockedExchange(&t->flag, 1);
     return 0;
 }
 static SRWLOCK __vyrn_task_lock = SRWLOCK_INIT;
 static void __vyrn_tasks_acquire(void) { AcquireSRWLockExclusive(&__vyrn_task_lock); }
 static void __vyrn_tasks_release(void) { ReleaseSRWLockExclusive(&__vyrn_task_lock); }
-static void __vyrn_task_wait(VTask* t) { WaitForSingleObject(t->done, INFINITE); }
+static void __vyrn_task_wait(VTask* t) {
+    if (t->done) { WaitForSingleObject(t->done, INFINITE); return; }
+    /* CreateEvent failed at spawn (handle exhaustion). WaitForSingleObject on
+       NULL returns WAIT_FAILED immediately, which reads as "already done" and
+       lets release free the frame while the worker is still writing it. Poll
+       the flag the worker sets instead — slow, but never wrong. */
+    while (!InterlockedCompareExchange(&t->flag, 0, 0)) Sleep(1);
+}
 #else
 #include <pthread.h>
 typedef struct VTask {
@@ -586,6 +594,7 @@ void* __vyrn_spawn(void (*thunk)(void*), void* frame) {
     t->listed = 0;
 #ifdef _WIN32
     t->done = CreateEvent(0, TRUE, FALSE, 0);
+    t->flag = 0;
 #else
     pthread_mutex_init(&t->mu, 0);
     pthread_cond_init(&t->cv, 0);
@@ -638,7 +647,7 @@ void __vyrn_task_release(void* task) {
     __vyrn_task_wait(t);
     __vyrn_task_unlist(t);
 #ifdef _WIN32
-    CloseHandle(t->done);
+    if (t->done) CloseHandle(t->done);
 #else
     pthread_cond_destroy(&t->cv);
     pthread_mutex_destroy(&t->mu);
@@ -793,8 +802,13 @@ pub fn tools_wasi_sysroot_from(start: &Path) -> Option<std::path::PathBuf> {
         if !tools.is_dir() {
             continue;
         }
-        let mut hits: Vec<std::path::PathBuf> = std::fs::read_dir(&tools)
-            .ok()?
+        // A `tools/` directory that passes `is_dir()` but cannot be listed (an
+        // ACL denial, a race with deletion) is skipped, not fatal: ending the
+        // walk here would hide a valid tool installed at a higher ancestor.
+        let Ok(entries) = std::fs::read_dir(&tools) else {
+            continue;
+        };
+        let mut hits: Vec<std::path::PathBuf> = entries
             .flatten()
             .map(|e| e.path())
             .filter(|p| {
@@ -963,13 +977,16 @@ fn discovered_wasmtime_from(start: &Path) -> Option<PathBuf> {
         if !tools.is_dir() {
             continue;
         }
-        let mut hits: Vec<PathBuf> = std::fs::read_dir(&tools)
-            .ok()?
+        // Same rule as the sysroot walk: an unlistable `tools/` is skipped, not
+        // fatal — the walk continues at the ancestors above it.
+        let Ok(entries) = std::fs::read_dir(&tools) else {
+            continue;
+        };
+        let hits: Vec<PathBuf> = entries
             .flatten()
             .map(|e| e.path().join(exe))
             .filter(|p| p.exists())
             .collect();
-        hits.sort();
         if let Some(hit) = hits.into_iter().next() {
             return Some(hit);
         }
@@ -1127,8 +1144,8 @@ fn discover_clang() -> Option<(PathBuf, String, &'static str)> {
 /// a memory map that can disagree with itself. `vyrn-genwasm` adds the cranelift
 /// half on top and keeps its own artifact cache for that.
 ///
-/// Cached on disk keyed by the shim source, the base address and the compiler
-/// (see [`shim_key`]), because it is
+/// Cached on disk keyed by the shim source, the base address, the compiler and
+/// the sysroot/builtins the link reads (see [`shim_key`]), because it is
 /// byte-identical for every consumer and costs ~600 ms to produce. `None` is
 /// always "no split build available", never an error: a missing toolchain, or a
 /// shim that will not compile, means the caller falls back to the shape it had.
@@ -1136,23 +1153,38 @@ fn discover_clang() -> Option<(PathBuf, String, &'static str)> {
 /// its own module through the direct backend, so nothing links this shim against
 /// the `vyrn_gen` namespace and nothing defines `-DVYRN_GEN_HOST`.
 /// The shim's cache-key filename: the shim source, the base address it is told
-/// to put its frames at, and the compiler that turns the first into a module at
-/// the second.
+/// to put its frames at, the compiler that turns the first into a module at the
+/// second, and the sysroot and builtins archive that link consumes.
 ///
-/// The compiler is there because RFC-0102 Exhibit 5 says a cache key that omits
-/// an input is a cache that serves a stale answer: upgrade clang, and before M3
-/// the key still hit and the build linked a shim the new compiler never saw.
+/// The last two are there for the same reason the compiler is: RFC-0102 Exhibit
+/// 5 says a cache key that omits an input is a cache that serves a stale
+/// answer. The compiled shim embeds whatever wasi-libc the sysroot supplied and
+/// links the builtins archive, so upgrade the sysroot and a key that omits them
+/// still hits — every subsequent split build links a shim the new libc never
+/// saw until `~/.vyrn/cache/shim` is cleared by hand.
 ///
-/// It enters as a hash of the version line rather than as the line, because a
-/// key is a FILENAME and a clang version line carries spaces, parentheses and —
-/// on upstream builds — a URL. Sixteen hex digits of it, which is what the
-/// module cache already spends on a source hash.
-fn shim_key(clang_version: &str) -> String {
+/// Each enters as a hash rather than as itself, because a key is a FILENAME: a
+/// clang version line carries spaces, parentheses and — on upstream builds — a
+/// URL, and the two paths are long and slash-laden. Sixteen hex digits each,
+/// which is what the module cache already spends on a source hash.
+fn shim_key(clang_version: &str, sysroot: &Path, builtins: &Path) -> String {
     format!(
-        "shim-{}-{}-{}.wasm",
+        "shim-{}-{}-{}-{}.wasm",
         vyrn_frontend::hash::sha256_hex(runtime_shim().as_bytes()),
         crate::wasm::SHIM_BASE,
         shim_key_clang_component(clang_version),
+        shim_key_sysroot_component(sysroot, builtins),
+    )
+}
+
+/// The component [`shim_key`] gives the resolved sysroot and builtins archive,
+/// exposed beside [`shim_key_clang_component`] so a check can say the key
+/// CONTAINS them rather than just that it changed.
+fn shim_key_sysroot_component(sysroot: &Path, builtins: &Path) -> String {
+    let both = format!("{}\u{1}{}", sysroot.display(), builtins.display());
+    format!(
+        "sysroot{}",
+        &vyrn_frontend::hash::sha256_hex(both.as_bytes())[..16]
     )
 }
 
@@ -1166,25 +1198,21 @@ pub fn shim_key_clang_component(clang_version: &str) -> String {
 }
 
 pub fn shim_wasm() -> Option<PathBuf> {
-    // The compiler is read BEFORE the cache is consulted, because it is part of
-    // the key (RFC-0102 M3, Exhibit 5). It costs nothing new: the probe is
-    // memoized, and a miss needs clang anyway.
+    // Every input the key names is read BEFORE the cache is consulted, because
+    // a key computed from half its inputs is a cache that serves a stale answer
+    // (RFC-0102 M3, Exhibit 5). It costs nothing new: the clang probe is
+    // memoized, and a miss needs all of them anyway.
     let (clang, version, _) = clang_from()?;
-    let key = shim_key(&version);
+    let exe = std::env::current_exe().ok()?;
+    let start = exe.parent()?;
+    let sysroot = find_wasi_sysroot_from(start)?;
+    let builtins = find_wasi_builtins_from(start, &sysroot)?;
+    let key = shim_key(&version, &sysroot, &builtins);
     let dir = shim_cache_dir();
     let out = dir.join(&key);
     if out.exists() {
         return Some(out);
     }
-
-    // The pin is a project's, and this function is given no project: the running
-    // executable is what step 3 already walked up from, so the pin is read from
-    // the same place. Steps 1 and 3 are byte-identical to what this did before
-    // RFC-0102 M2.
-    let exe = std::env::current_exe().ok()?;
-    let start = exe.parent()?;
-    let sysroot = find_wasi_sysroot_from(start)?;
-    let builtins = find_wasi_builtins_from(start, &sysroot)?;
     std::fs::create_dir_all(&dir).ok()?;
     let src = dir.join(format!("{key}.c"));
     std::fs::write(&src, runtime_shim()).ok()?;
@@ -1300,6 +1328,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(root.join("tools"));
         assert!(tools_wasi_sysroot_from(&bare).is_none());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RFC-0102 Exhibit 5, applied to the inputs that came after clang: the
+    /// compiled shim embeds the sysroot's wasi-libc and links the builtins
+    /// archive, so a key that omits them serves a shim the upgraded sysroot
+    /// never saw. Repointing either must move the key, exactly as upgrading
+    /// clang does.
+    #[test]
+    fn the_shim_key_moves_when_the_sysroot_or_builtins_move() {
+        let v25 = Path::new("/tools/wasi-sysroot-25.0");
+        let v26 = Path::new("/tools/wasi-sysroot-26.0");
+        let lib = Path::new("/tools/libclang_rt.builtins-wasm32.a");
+        let other = Path::new("/tools/other/libclang_rt.builtins-wasm32.a");
+
+        let key = shim_key("clang version 1", v25, lib);
+        assert_ne!(key, shim_key("clang version 1", v26, lib), "sysroot moves it");
+        assert_ne!(key, shim_key("clang version 1", v25, other), "builtins move it");
+        // The components are IN the key, not merely represented by it.
+        assert!(key.contains(&shim_key_clang_component("clang version 1")));
+        assert!(key.contains(&shim_key_sysroot_component(v25, lib)));
     }
 
     /// The trap stub is assembled from the two facts' OWNERS — this crate's

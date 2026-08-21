@@ -117,19 +117,45 @@ thread_local! {
         std::cell::RefCell::new((0, HashMap::new()));
 }
 
-/// A cheap hash over everything a function body may refer to by name: every type
-/// declaration and every function signature. Bodies are deliberately excluded —
-/// that is the whole point, since a body edit must not invalidate other modules.
+/// A cheap hash over everything a function body may refer to by name: every
+/// type declaration, every function signature, every module-state binding's
+/// type, every enum variant payload, every protocol method signature, and
+/// every impl head. Bodies are deliberately excluded — that is the whole
+/// point, since a body edit must not invalidate other modules.
 fn signature_fingerprint(
     types: &HashMap<String, TypeDecl>,
     sigs: &HashMap<String, (Vec<Type>, Type)>,
+    globals: &[crate::ast::GlobalDecl],
+    variants: &HashMap<String, VariantInfo>,
+    protocol_methods: &HashMap<String, Vec<(String, crate::ast::MethodSig)>>,
+    impl_heads: &HashMap<(String, String), (usize, String)>,
 ) -> u64 {
-    let mut parts: Vec<String> = Vec::with_capacity(types.len() + sigs.len());
+    let mut parts: Vec<String> =
+        Vec::with_capacity(types.len() + sigs.len() + globals.len() + impl_heads.len());
     for (n, t) in types {
         parts.push(format!("t{n}={:?}|{:?}", t.base, t.predicate));
     }
     for (n, (ps, r)) in sigs {
         parts.push(format!("f{n}={ps:?}->{r:?}"));
+    }
+    // A body reads more than types and signatures: a `match` over an enum
+    // consults the variant payloads, a global read consults its binding's
+    // type, a method call consults the protocol's signature, and an impl
+    // head decides whether that call dispatches at all. Each folds in as a
+    // cheap Debug/format string, exactly like the `t=`/`f=` entries.
+    for g in globals {
+        parts.push(format!("g{}={:?}|{:?}", g.name, g.ty, g.mutable));
+    }
+    for (n, v) in variants {
+        parts.push(format!("v{n}={:?}|{:?}", v.enum_name, v.payload));
+    }
+    for (n, entries) in protocol_methods {
+        for (p, sig) in entries {
+            parts.push(format!("m{n}={p}|{sig:?}"));
+        }
+    }
+    for ((proto, key), (line, name)) in impl_heads {
+        parts.push(format!("i{proto}/{key}={name}@{line}"));
     }
     parts.sort_unstable();
     let mut h: u64 = 0xcbf29ce484222325;
@@ -263,6 +289,10 @@ pub const RESERVED: &[&str] = &[
     "UInt16",
     "UInt32",
     "UInt64",
+    // RFC-0091: `atSet` is the store projection's surface name (`r[i] = v`
+    // looks one up), dispatched before user functions exactly like `at` —
+    // so a user `fn atSet` would be silently unreachable.
+    "atSet",
 ];
 
 /// The names RFC-0094 M2 took out of [`RESERVED`], and the `std/` module each
@@ -511,6 +541,36 @@ fn check_accum_inner(
             caps.insert(m.name.clone(), cs);
         }
     }
+    // Parameter capabilities indexed by the canonical `fn(..) -> R` a STORED
+    // function value carries (RFC-0037/0093). A `Type::Fn` carries no
+    // capabilities of its own, so calling `h(s)` through an fn-typed binding
+    // looks the signature up here and applies the same region-consume guard
+    // the named path applies at its call site. Keyed on the Debug text of the
+    // signature type; when two declarations share one, `consume` wins (the
+    // guard refuses, and refusing is the sound side).
+    let mut caps_by_sig: HashMap<String, Vec<Capability>> = HashMap::new();
+    for f in &program.functions {
+        let key = format!(
+            "{:?}",
+            Type::Fn(
+                f.params.iter().map(|p| p.ty.clone()).collect(),
+                Box::new(f.ret.clone()),
+            )
+        );
+        let cs: Vec<Capability> = f.params.iter().map(|p| p.capability).collect();
+        match caps_by_sig.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut o) => {
+                for (c, n) in o.get_mut().iter_mut().zip(&cs) {
+                    if *n == Capability::Consume {
+                        *c = *n;
+                    }
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(cs);
+            }
+        }
+    }
 
     // Which functions are "spawn-safe" — pure enough to run as a concurrent task:
     // no I/O (`print`), no shared-mutable-state ops (`cell`/`set`/`release`), no
@@ -589,10 +649,35 @@ fn check_accum_inner(
 
     // Protocol registries (RFC-0002 §5): map each method name to its protocol +
     // signature, and record which (protocol, type-key) pairs are implemented.
-    let mut protocol_methods: HashMap<String, (String, MethodSig)> = HashMap::new();
+    let mut protocol_methods: HashMap<String, Vec<(String, MethodSig)>> = HashMap::new();
     for p in &program.protocols {
         for m in &p.methods {
-            protocol_methods.insert(m.name.clone(), (p.name.clone(), m.clone()));
+            protocol_methods
+                .entry(m.name.clone())
+                .or_default()
+                .push((p.name.clone(), m.clone()));
+        }
+    }
+    // A top-level function sharing a protocol method's SURFACE name could
+    // never run: `call` dispatches method names to their impls before free
+    // functions, so `frob(5)` would silently be `recv.frob(5)` and this
+    // declaration dead weight. Named at the declaration, the way an impl
+    // providing a method its protocol does not declare is.
+    for f in &program.functions {
+        if protocol_methods.contains_key(f.name.as_str()) {
+            let owners: Vec<&str> = protocol_methods[f.name.as_str()]
+                .iter()
+                .map(|(p, _)| p.as_str())
+                .collect();
+            out.push(cerr_at!(
+                f.line,
+                f.name_span(),
+                "`{}` collides with protocol {}'s method of the same name — \
+                 method names dispatch to impls before free functions, so this \
+                 declaration could never run",
+                f.name,
+                owners.join(", ")
+            ));
         }
     }
     // Associated types per protocol (RFC-0080 M2). The checker's whole interest
@@ -897,6 +982,7 @@ fn check_accum_inner(
     let checker = Checker {
         sigs: &sigs,
         caps: &caps,
+        caps_by_sig: &caps_by_sig,
         spawn_safe: &spawn_safe,
         types: &types,
         contracts: &contracts,
@@ -915,6 +1001,7 @@ fn check_accum_inner(
         in_test: RefCell::new(false),
         in_bench: RefCell::new(false),
         in_gen: RefCell::new(false),
+        stmt_line: RefCell::new(0),
         extern_fns: &extern_fns,
         gen_fns: &gen_fns,
         cur_fn: RefCell::new(String::new()),
@@ -1004,7 +1091,14 @@ fn check_accum_inner(
     //    (preserving the historical single-error `check()` surface) and leaves
     //    the rest in the sink, which we drain here.
     // Only meaningful when reuse was asked for; computed once for the whole pass.
-    let sig_fp = reuse.map(|_| signature_fingerprint(&types, &sigs));
+    let sig_fp = reuse.map(|_| signature_fingerprint(
+        &types,
+        &sigs,
+        &program.globals,
+        &variants,
+        &protocol_methods,
+        &impl_heads,
+    ));
 
     for f in &program.functions {
         // Reusable only if this function's module is known AND unchanged.
@@ -1497,6 +1591,11 @@ struct Checker<'a> {
     sigs: &'a HashMap<String, (Vec<Type>, Type)>,
     /// Each function's parameter capabilities (for `modify` call-site checks).
     caps: &'a HashMap<String, Vec<Capability>>,
+    /// Parameter capabilities indexed by the canonical `fn(..) -> R` a stored
+    /// function value carries (RFC-0037/0093): a call through an fn-typed
+    /// binding reads its consume discipline here, since a `Type::Fn` carries
+    /// none of its own.
+    caps_by_sig: &'a HashMap<String, Vec<Capability>>,
     /// Functions that may be run as a concurrent task (`spawn`) — isolated/pure.
     spawn_safe: &'a std::collections::HashSet<String>,
     types: &'a HashMap<String, TypeDecl>,
@@ -1509,7 +1608,7 @@ struct Checker<'a> {
     /// Every function's type-parameter bounds: fn -> (param -> bounds).
     all_bounds: &'a HashMap<String, HashMap<String, Vec<String>>>,
     /// Protocol methods (RFC-0002 §5): method name -> (protocol, signature).
-    protocol_methods: &'a HashMap<String, (String, MethodSig)>,
+    protocol_methods: &'a HashMap<String, Vec<(String, MethodSig)>>,
     /// Implemented (protocol, type-key) pairs, for dispatch and bound checking.
     impls: &'a std::collections::HashSet<(String, String)>,
     /// Every `impl` block, for resolving a `place` projection by receiver type
@@ -1559,6 +1658,11 @@ struct Checker<'a> {
     /// which is also what keeps them out of any backend (gen fn bodies are never
     /// emitted).
     in_gen: RefCell<bool>,
+    /// The line of the statement currently being checked (best effort). The
+    /// literal `Expr` variants carry no line of their own, so a range error on
+    /// one (`let x: Int8 = 300`) would otherwise report line 0; this is the
+    /// enclosing statement's answer, updated at every [`Self::stmt`] entry.
+    stmt_line: RefCell<usize>,
     /// True while checking the body of a `for`/`while`/`while let` loop
     /// (RFC-0060). `break`/`continue` are legal only when this is set; elsewhere
     /// they are a checker error. Saved/restored around each loop body and reset
@@ -1749,11 +1853,20 @@ impl<'a> Checker<'a> {
     /// Structural, because a record whose field is a declared container cannot
     /// be copied field by field either: the compiler would duplicate the field
     /// and the declared `release` would then run over both copies.
-    fn declared_owned_in(&self, ty: &Type, depth: usize) -> Option<String> {
-        if depth > 8 {
-            return None;
-        }
+    ///
+    /// The descent is unbounded, guarded against cycles by the set of
+    /// type-keys already visited — the old fixed depth-8 cap gave up exactly
+    /// where `copy`'s structural refusal does not, so an owned container nine
+    /// wrappers down was silently copyable.
+    fn declared_owned_in(
+        &self,
+        ty: &Type,
+        seen: &mut std::collections::HashSet<String>,
+    ) -> Option<String> {
         if let Some(k) = crate::types::type_key(ty) {
+            if !seen.insert(k.clone()) {
+                return None;
+            }
             if self
                 .impls
                 .contains(&(crate::types::OWNED.to_string(), k.clone()))
@@ -1761,7 +1874,7 @@ impl<'a> Checker<'a> {
                 return Some(k);
             }
         }
-        let deeper = |t: &Type| self.declared_owned_in(t, depth + 1);
+        let mut deeper = |t: &Type| self.declared_owned_in(t, seen);
         match self.base(ty) {
             Type::Option(t)
             | Type::ArrayN(t, _)
@@ -1773,7 +1886,9 @@ impl<'a> Checker<'a> {
             Type::Result(a, b) => deeper(&a).or_else(|| deeper(&b)),
             Type::Map(k, v) => deeper(&k).or_else(|| deeper(&v)),
             Type::Record(fs) => fs.iter().find_map(|f| deeper(&f.ty)),
-            Type::Enum(vs) => vs.iter().find_map(|v| v.payload.iter().find_map(&deeper)),
+            Type::Enum(vs) => vs
+                .iter()
+                .find_map(|v| v.payload.iter().find_map(|p| deeper(p))),
             _ => None,
         }
     }
@@ -1801,7 +1916,10 @@ impl<'a> Checker<'a> {
                 | Type::ArrayN(i, _)
                 | Type::SmallArray(i, _)
                 | Type::Task(i)
-                | Type::Partial(i) => walk(i, types, seen),
+                | Type::Partial(i)
+                // A `lazy T` field stores a T (forced on read), so a stream
+                // behind it is exactly the storage the scope rule forbids.
+                | Type::Lazy(i) => walk(i, types, seen),
                 Type::Result(a, b) | Type::Map(a, b) | Type::Merge(a, b) => {
                     walk(a, types, seen) || walk(b, types, seen)
                 }
@@ -2341,6 +2459,10 @@ impl<'a> Checker<'a> {
             // `Stream<T>` (RFC-0075) — the root-position case the guard above
             // lets through; its element type is validated like any other.
             Type::Stream(inner) => self.ensure_type_exists(inner, line)?,
+            // A `lazy T` field defers T's evaluation, not T's validation
+            // (RFC-0085 M4a): the thunk stores a T, so every type it names
+            // must exist and every storage rule a T obeys applies through it.
+            Type::Lazy(inner) => self.ensure_type_exists(inner, line)?,
             // `SmallArray<T, N>` (RFC-0056): the inline capacity is bounded
             // `1 <= N <= 64` (keeps the worst-case stack/inline footprint sane),
             // and the element type must be a real type (not a stray integer).
@@ -2782,7 +2904,10 @@ impl<'a> Checker<'a> {
             // has no key at all (RFC-0084 M1). The base is still consulted so a
             // plain alias (`type Meters = Int64`) keeps satisfying the impl on
             // what it aliases, which is how this read before.
-            _ if self.protocol_methods.values().any(|(p, _)| p == bound)
+            _ if self
+                .protocol_methods
+                .values()
+                .any(|entries| entries.iter().any(|(p, _)| p == bound))
                 || self.impls.iter().any(|(p, _)| p == bound) =>
             {
                 [crate::types::type_key(ty), crate::types::type_key(&base)]
@@ -2894,6 +3019,8 @@ impl<'a> Checker<'a> {
         // Ready-so-far names (the earlier globals) grow as we go.
         let mut ready: HashSet<String> = HashSet::new();
         for g in &program.globals {
+            // A literal initializer's range error names the global's line.
+            *self.stmt_line.borrow_mut() = g.line;
             let bty = (|| -> Result<Type, Diagnostic> {
                 // Initializer restrictions (walked before typing so the messages
                 // are precise): no user/extern call, no later-global read.
@@ -3111,6 +3238,9 @@ impl<'a> Checker<'a> {
     }
 
     fn stmt(&self, stmt: &Stmt, ret: &Type, scope: &mut Scope) -> Result<bool, Diagnostic> {
+        // The literal `Expr` variants carry no line, so a range error on one
+        // is attributed to the statement being checked (see `stmt_source_line`).
+        *self.stmt_line.borrow_mut() = stmt_source_line(stmt);
         match stmt {
             Stmt::Let {
                 name,
@@ -3816,7 +3946,7 @@ impl<'a> Checker<'a> {
                         Ok(t)
                     } else {
                         Err(cerr!(
-                            0,
+                            *self.stmt_line.borrow(),
                             "integer literal {} does not fit {} (its range is {})",
                             render_int_literal(*n),
                             intn_name(bits, signed),
@@ -3833,7 +3963,7 @@ impl<'a> Checker<'a> {
                     // minus one. See [`Checker::record_desugar`].
                     if *n < 0 && !desugaring() {
                         Err(cerr!(
-                            0,
+                            *self.stmt_line.borrow(),
                             "integer literal {} exceeds Int64's maximum \
                              (9223372036854775807); only `UInt64` can hold it — \
                              annotate the binding (`let x: UInt64 = ...`)",
@@ -3857,7 +3987,7 @@ impl<'a> Checker<'a> {
                             Ok(t)
                         } else {
                             Err(cerr!(
-                                0,
+                                *self.stmt_line.borrow(),
                                 "byte literal {} does not fit {} (its range is {})",
                                 render_int_literal(v),
                                 intn_name(bits, signed),
@@ -4221,6 +4351,18 @@ impl<'a> Checker<'a> {
                     .sigs
                     .get(name)
                     .ok_or_else(|| cerr!(line, "cannot spawn unknown function `{name}`"))?;
+                // A `gen fn`'s body is never emitted by any backend (that is
+                // what keeps `Code` out of them), so a task could not run it
+                // even though a pure generator passes every spawn-safety test
+                // below. Same refusal the function-value position makes.
+                if self.gen_fns.contains(name) {
+                    return Err(cerr!(
+                        line,
+                        "cannot `spawn {name}(..)`: a `gen fn` runs at \
+                         generation time and cannot be spawned — its body is \
+                         never emitted (RFC-0021)"
+                    ));
+                }
                 if !self.spawn_safe.contains(name) {
                     return Err(cerr!(
                         line,
@@ -5750,6 +5892,15 @@ impl<'a> Checker<'a> {
                         args.len()
                     ));
                 }
+                // RFC-0093's region rule reaches through a stored value too:
+                // a `Type::Fn` carries no capabilities, so the signature's
+                // consume discipline rides in `caps_by_sig`, keyed on the
+                // canonical `fn(..) -> R` this binding holds. Without it,
+                // `h(s)` inside a `region` handed an arena string to a
+                // `consume`-taking callee the direct form refuses.
+                let sig_caps = self
+                    .caps_by_sig
+                    .get(&format!("{:?}", Type::Fn(ptys.clone(), ret.clone())));
                 for (i, (arg, pty)) in args.iter().zip(&ptys).enumerate() {
                     let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
                     if !self.coercible(&aty, pty) {
@@ -5760,6 +5911,9 @@ impl<'a> Checker<'a> {
                         ));
                     }
                     self.prove_coercion(arg, pty, line)?;
+                    if sig_caps.and_then(|cs| cs.get(i)) == Some(&Capability::Consume) {
+                        self.region_consume_guard(name, i, &aty, line)?;
+                    }
                 }
                 // RFC-0037 effect collection: a call through a STORED value (any
                 // fn-typed binding that is not a v1 parameter — the params frame
@@ -7001,7 +7155,8 @@ impl<'a> Checker<'a> {
                     return self.call(&mangled, args, line, scope, expected, fn_ret);
                 }
             }
-            if let Some(declared) = self.declared_owned_in(&t, 0) {
+            let mut owned_seen = std::collections::HashSet::new();
+            if let Some(declared) = self.declared_owned_in(&t, &mut owned_seen) {
                 return Err(cerr!(
                     line,
                     "`copy` cannot copy `{declared}`: it declares `impl Owned for \
@@ -7446,12 +7601,40 @@ impl<'a> Checker<'a> {
         // Dispatch to the impl for the receiver's type. Inside a generic bounded
         // by the protocol the receiver is a type parameter — allow the call and
         // use the protocol's declared signature (dispatch is deferred to codegen).
-        if let Some((proto, sig)) = self.protocol_methods.get(name).cloned() {
+        if let Some(candidates) = self.protocol_methods.get(name).cloned() {
             if args.is_empty() {
                 return Err(cerr!(line, "`{name}` needs a `self` receiver"));
             }
             // Key on the raw (non-decayed) receiver type so enums keep their name.
             let recv = self.expr(&args[0], scope, None, fn_ret)?;
+            // Several linked protocols may declare the same method name; the
+            // receiver's type picks between them (the impl table is the
+            // authority). No impl for the receiver keeps every candidate, so
+            // the per-protocol path below reports in its own words.
+            let (proto, sig) = {
+                let key = crate::types::type_key(&recv);
+                let matching: Vec<_> = candidates
+                    .iter()
+                    .filter(|(p, _)| key.as_ref().map_or(false, |k| {
+                        self.impls.contains(&(p.clone(), k.clone()))
+                    }))
+                    .collect();
+                match matching.len() {
+                    1 => matching[0].clone(),
+                    0 => candidates[0].clone(),
+                    _ => {
+                        return Err(cerr!(
+                            line,
+                            "`{name}` is ambiguous: protocols {} all implement it for this receiver",
+                            matching
+                                .iter()
+                                .map(|(p, _)| p.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                }
+            };
             if let Type::Param(t) = &recv {
                 if self.param_has_bound(t, &proto) {
                     // The receiver is a type variable, so the impl is not selected
@@ -7558,7 +7741,13 @@ impl<'a> Checker<'a> {
                 if matches!(pty, Type::Fn(..)) {
                     continue;
                 }
-                let aty = self.expr(arg, scope, None, fn_ret)?;
+                // The parameter type is the expectation, exactly as the
+                // concrete path below passes it: a bare `None`/`Ok`/`Err`/`[]`
+                // argument types FROM the parameter (`unwrapOr(Ok(1), 5)`
+                // against `r: Result<T, String>`), and the unify then binds
+                // whatever parameter the literal left open.
+                let want = crate::types::substitute(pty, &subst);
+                let aty = self.expr(arg, scope, Some(&want), fn_ret)?;
                 self.unify(pty, &aty, &mut subst, line)?;
                 atys[i] = aty;
             }
@@ -7634,7 +7823,7 @@ impl<'a> Checker<'a> {
                 .iter()
                 .map(|p| crate::types::substitute(p, &subst))
                 .chain(std::iter::once(rty.clone()))
-                .any(|t| has_nested_wrap(&t));
+                .any(|t| has_nested_wrap(&t, self.types));
             if nested {
                 return Err(cerr!(
                     line,
@@ -7836,13 +8025,18 @@ impl<'a> Checker<'a> {
                             ptys.len()
                         ));
                     }
+                    // Contravariant, like the named-function arm below: the
+                    // value's own parameter type must accept whatever the
+                    // callee will pass. Checking the reverse direction too let
+                    // the callee pass a NARROWER record than the value reads
+                    // — a missing field at dispatch.
                     for (a, b) in vptys.iter().zip(&ptys) {
                         let b = &self.solve_fn_param(b, a, subst, line);
-                        if !self.assignable(a, b) && !self.assignable(b, a) {
+                        if !self.assignable(b, a) {
                             return Err(cerr!(
                                 line,
-                                "`{vn}` has parameter type {a}, but `{callee}` \
-                                 expects {b}"
+                                "`{vn}` expects a {a} argument, but `{callee}` \
+                                 will pass it {b}"
                             ));
                         }
                     }
@@ -7917,17 +8111,19 @@ impl<'a> Checker<'a> {
                         ptys.len()
                     ));
                 }
+                // Contravariant (see the Var arm above): the value's declared
+                // parameter type must accept what the callee will pass.
                 for (a, b) in vptys.iter().zip(&ptys) {
                     // A type parameter that occurs ONLY inside this `fn`
                     // parameter's own parameter list is solved from the value's
                     // declared types, exactly as a bare name solves it
                     // (RFC-0071 M2b).
                     let b = &self.solve_fn_param(b, a, subst, line);
-                    if !self.assignable(a, b) && !self.assignable(b, a) {
+                    if !self.assignable(b, a) {
                         return Err(cerr!(
                             line,
-                            "this function value has parameter type {a}, \
-                             but `{callee}` expects {b}"
+                            "this function value expects a {a} argument, \
+                             but `{callee}` will pass it {b}"
                         ));
                     }
                 }
@@ -8761,17 +8957,60 @@ fn type_mentions_self(ty: &Type) -> bool {
 /// Apply `f` to `ty` and to every type nested inside it.
 /// Whether a type contains a directly nested `Option`/`Result` (the v0.1
 /// prohibition), anywhere inside it.
-fn has_nested_wrap(ty: &Type) -> bool {
-    let wrapped = |t: &Type| matches!(t, Type::Option(_) | Type::Result(..));
+fn has_nested_wrap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
+    // `wrapped` resolves too: a transparent alias IS the Option/Result it
+    // names everywhere else (`resolve_scrutinee`, `assignable`), so
+    // `type M = Option<Int64>` cannot launder a nesting past the ban either.
+    let wrapped = |t: &Type| {
+        matches!(
+            crate::types::resolve(t, types),
+            Type::Option(_) | Type::Result(..)
+        )
+    };
     match ty {
-        Type::Option(t) => wrapped(t) || has_nested_wrap(t),
-        Type::Result(a, b) => wrapped(a) || wrapped(b) || has_nested_wrap(a) || has_nested_wrap(b),
-        Type::Array(t) | Type::ArrayN(t, _) | Type::SmallArray(t, _) | Type::Task(t) => {
-            has_nested_wrap(t)
+        Type::Option(t) => wrapped(t) || has_nested_wrap(t, types),
+        Type::Result(a, b) => {
+            wrapped(a)
+                || wrapped(b)
+                || has_nested_wrap(a, types)
+                || has_nested_wrap(b, types)
         }
-        Type::Map(k, v) => has_nested_wrap(k) || has_nested_wrap(v),
-        Type::Record(fs) => fs.iter().any(|f| has_nested_wrap(&f.ty)),
+        Type::Array(t) | Type::ArrayN(t, _) | Type::SmallArray(t, _) | Type::Task(t) => {
+            has_nested_wrap(t, types)
+        }
+        Type::Map(k, v) => has_nested_wrap(k, types) || has_nested_wrap(v, types),
+        Type::Record(fs) => fs.iter().any(|f| has_nested_wrap(&f.ty, types)),
+        // A named type reaches here only unresolved (a generic parameter's
+        // bound, or a depth-capped `resolve`); descend when naming it made a
+        // difference, and stop when it did not — that is the cycle guard.
+        Type::Named(_) | Type::App(..) => {
+            let r = crate::types::resolve(ty, types);
+            &r != ty && has_nested_wrap(&r, types)
+        }
         _ => false,
+    }
+}
+
+/// The line of the statement a literal's range error is attributed to. The
+/// literal `Expr` variants carry no line of their own ([`Expr::line`] answers
+/// 0 for them), so the checker records the enclosing statement's line as it
+/// walks and the three range diagnostics report that.
+fn stmt_source_line(s: &Stmt) -> usize {
+    match s {
+        Stmt::Let { line, .. }
+        | Stmt::Assign { line, .. }
+        | Stmt::SetField { line, .. }
+        | Stmt::IndexSet { line, .. }
+        | Stmt::Return { line, .. }
+        | Stmt::Break { line }
+        | Stmt::Continue { line }
+        | Stmt::If { line, .. }
+        | Stmt::IfLet { line, .. }
+        | Stmt::While { line, .. }
+        | Stmt::ForIn { line, .. }
+        | Stmt::Drop { line, .. }
+        | Stmt::Region { line, .. } => *line,
+        Stmt::Expr(e) => e.line(),
     }
 }
 
@@ -8909,6 +9148,13 @@ fn expr_contains_spawn(e: &Expr) -> bool {
                 || else_branch.as_ref().is_some_and(|e| expr_contains_spawn(e))
         }
         Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_contains_spawn(v)),
+        // A spawn hides from the comptime-purity probe just as well behind a
+        // lambda literal as behind a call — the generator can invoke the
+        // stored value at generation time (`calls_expr` descends here too).
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(e) => expr_contains_spawn(e),
+            LambdaBody::Block(b) => contains_spawn(b),
+        },
         _ => false,
     }
 }
@@ -13793,5 +14039,167 @@ mod tests {
              let a = map(xs, |x| x * 2)\n let b = map(xs, twice)\n return 0 }",
         );
         assert!(ok.is_ok(), "{ok:?}");
+    }
+
+    // ---- audit fixes -------------------------------------------------------
+
+    /// A fn value's parameter check is contravariant, like the named-function
+    /// arm: the value must accept whatever the callee passes. The old
+    /// either-direction check let `apply` hand `g` a `P` where `g` reads `Q`'s
+    /// `y` — a missing field at dispatch.
+    #[test]
+    fn a_fn_value_parameter_rejects_a_narrower_record() {
+        let src = "type P = { x: Int64 } \
+                   type Q = { x: Int64, y: Int64 } \
+                   fn g(v: Q) -> Int64 { return v.y } \
+                   fn apply(f: fn(P) -> Int64, p: P) -> Int64 { return f(p) } \
+                   fn main() -> Int64 { let h: fn(Q) -> Int64 = g \
+                   return apply(h, P { x: 1 }) }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("will pass it"), "{e}");
+        // The sound direction keeps working: the value takes the wider `Q`,
+        // the callee passes a `Q`.
+        let ok = check_src(
+            "type P = { x: Int64 } \
+             type Q = { x: Int64, y: Int64 } \
+             fn g(v: Q) -> Int64 { return v.y } \
+             fn apply(f: fn(Q) -> Int64, q: Q) -> Int64 { return f(q) } \
+             fn main() -> Int64 { let h: fn(Q) -> Int64 = g \
+             return apply(h, Q { x: 1, y: 2 }) }",
+        );
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+
+    /// `lazy T` is a stored T (RFC-0085 M4a): the type it names must exist,
+    /// and the storage rules a T obeys reach through the thunk.
+    #[test]
+    fn a_lazy_field_must_name_a_real_type() {
+        let e = check_src(
+            "type Bad = { f: lazy NoSuchType } fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("unknown type `NoSuchType`"), "{e}");
+    }
+
+    /// A pure `gen fn` passes every spawn-safety test, but no backend emits
+    /// its body — spawning it would reference a function nothing lowered.
+    #[test]
+    fn spawn_refuses_a_gen_fn() {
+        let e = check_src(
+            "gen fn five() -> Int64 { return 5 } \
+             fn main() -> Int64 { let t = spawn five() return t.join() }",
+        )
+        .unwrap_err();
+        assert!(e.contains("cannot `spawn five(..)`"), "{e}");
+    }
+
+    /// A generic call passes its parameter type as the argument's expectation,
+    /// exactly as the concrete path does — so a context-dependent literal
+    /// (`Ok(1)`) types from the parameter instead of failing to infer.
+    #[test]
+    fn a_generic_call_types_a_literal_from_its_parameter() {
+        let src = "fn unwrapOr<T>(r: Result<T, String>, d: T) -> T { \
+                   return match r { Ok(v) => v, Err(m) => d } } \
+                   fn main() -> Int64 { return unwrapOr(Ok(1), 5) }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    /// The comptime-purity probe descends into lambda bodies: a spawn behind
+    /// a stored lambda is a spawn the generator can run.
+    #[test]
+    fn comptime_purity_sees_a_spawn_inside_a_lambda() {
+        let src = "fn sq(x: Int64) -> Int64 { return x * x } \
+                   fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(2) } \
+                   gen fn g() -> String { \
+                   let n = apply(|x| { let t = spawn sq(x) return t.join() }) \
+                   return \"\" } \
+                   fn main() -> Int64 { return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("not comptime-pure"), "{e}");
+    }
+
+    /// A literal carries no line of its own, so its range error names the
+    /// statement being checked — not line 0.
+    #[test]
+    fn literal_range_errors_point_at_the_binding_line() {
+        let e = check_src(
+            "fn main() -> Int64 {\n    let q = 0\n    let x: Int8 = 300\n    return 0\n}",
+        )
+        .unwrap_err();
+        assert!(e.contains("line 3"), "{e}");
+        assert!(!e.contains("line 0"), "{e}");
+    }
+
+    /// `lazy T` is a stored T (RFC-0085 M4a): the storage rules a T obeys
+    /// reach through the thunk, so a stream behind one is refused.
+    #[test]
+    fn a_lazy_field_may_not_hold_a_stream() {
+        let e = check_src(
+            "type B = { f: lazy Stream<Int64> } fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("nothing may store it"), "{e}");
+    }
+
+    /// A transparent alias IS the Option it names, so `Option<M>` for
+    /// `type M = Option<Int64>` is the nested wrap the v0.1 rule refuses when
+    /// written directly.
+    #[test]
+    fn a_transparent_alias_cannot_launder_a_nested_option() {
+        let src = "type M = Option<Int64> \
+                   fn wrap<T>(x: T) -> Option<T> { return Some(x) } \
+                   fn main() -> Int64 { let m: M = None let w = wrap(m) return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("nested Option/Result"), "{e}");
+    }
+
+    /// The owned-container walk under `copy` is unbounded (cycle-guarded): an
+    /// `impl Owned` type twelve wrappers deep is still refused, because a
+    /// structural copy would run its `release` over two owners.
+    #[test]
+    fn copy_finds_an_owned_container_past_eight_wrappers() {
+        let mut decls = String::from(
+            "protocol Owned { fn release(self) } \
+             type Ring = { buf: Array<Int64> } \
+             impl Owned for Ring { fn release(self) { print(1) } } \
+             type W0 = { r: Ring }",
+        );
+        for i in 1..12 {
+            decls.push_str(&format!(" type W{i} = {{ w: W{} }}", i - 1));
+        }
+        let src = format!(
+            "{decls} fn f(x: W11) -> Int64 {{ let q = x.copy() return 0 }} \
+             fn main() -> Int64 {{ return 0 }}"
+        );
+        let e = check_src(&src).unwrap_err();
+        assert!(e.contains("`copy` cannot copy `Ring`"), "{e}");
+    }
+
+    /// Method names dispatch to impls before free functions, so a top-level
+    /// fn sharing a protocol method's surface name could never run — named at
+    /// the declaration now.
+    #[test]
+    fn a_top_level_fn_may_not_take_a_protocol_methods_name() {
+        let src = "type T = { v: Int64 } \
+                   protocol P { fn frob(self) -> Int64 } \
+                   impl P for T { fn frob(self) -> Int64 { return self.v } } \
+                   fn frob(x: Int64) -> Int64 { return x * 2 } \
+                   fn main() -> Int64 { return frob(5) }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("could never run"), "{e}");
+    }
+
+    /// RFC-0093 through a stored value: `h(s)` inside a `region` with a
+    /// consume-taking `h` is refused exactly like the direct `keep(s)`.
+    #[test]
+    fn rejects_a_consume_handover_through_a_stored_fn_value() {
+        let src = "let mut kept: Array<String> = [] \
+                   fn keep(s: consume String) -> Int64 { kept.push(s) return 0 } \
+                   fn main() -> Int64 { \
+                       let h: fn(String) -> Int64 = keep \
+                       region { h(\"a\" + \"b\") } \
+                       return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("which is `consume`, inside a `region`"), "{e}");
     }
 }

@@ -29,7 +29,7 @@ import { pages } from "std/ui"
 import { route, rootPath, philosophyPath, whyVyrnPath, comparePath, installPath, editorsPath, docsEditorsPath, releasesPath, docsPath, explorePath, guidePath, playPath, backstagePath, backstageBenchmarksPath, hrefDocsStd, hrefGuide, hrefBackstageRfcs, hrefExplore } from pages("./app/routes")
 import { published, navRows, hrefOf, upTo } from "./app/nav"
 import { rfcPages, rfcSlug } from "./app/backstage"
-import { historyIsFixture, historyPath, historyCommand } from "./app/history"
+import { historyIsFixture, historyPath, historyCommand, historyError } from "./app/history"
 import { apiModules, apiEntries, apiHref, importLine } from "./app/docs"
 import { chapterSlugs, chapterHref } from "./app/guide"
 import { searchRows } from "./app/stdgraph"
@@ -531,12 +531,21 @@ fn written(outDir: String, source: String, name: String, body: String) -> Int64 
 /// The velocity charts on `/backstage` are drawn from the repository's own
 /// history, and history is not in the working tree: RFC-0014 gives this program
 /// `readFile` and `listDir`, and there is no git behind either. So the site
-/// workflow runs `scripts/site-history.py` before this program, and this
 /// program refuses to publish without what it wrote. A committed fixture keeps
 /// the tests below runnable on a clone that has never run the script, and this
 /// check is what keeps that fixture out of a published page — the failure mode
 /// being ruled out is a chart that is drawn, is wrong, and says nothing.
+///
+/// A file that IS there but does not parse refuses for its own reason: a
+/// truncated write from the script would otherwise publish empty charts, which
+/// is the same silence by another name.
 fn missingHistory() -> Bool {
+    let broken = historyError()
+    if broken.byteLength > 0 {
+        print("FAIL \{historyPath()}: does not parse — \{broken}")
+        print("     Run: \{historyCommand()}")
+        return true
+    }
     if !historyIsFixture() {
         return false
     }

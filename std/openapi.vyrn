@@ -13,8 +13,11 @@
 ///   - `openapi: "3.1.0"`, `info` (title from the contract's module base name,
 ///     a deterministic `version`);
 ///   - one `paths` entry per procedure IN DECLARATION ORDER, describing the
-///     `POST /rpc/<proc>` surface `std/rpc` serves: a `requestBody` `$ref` to the
-///     request type's schema, a `200` `$ref` to the response type's schema, and
+///     `POST /rpc/<proc>` surface `std/rpc` serves: a `requestBody` `$ref` to
+///     the request type's schema WHEN the parameter names one of the contract's
+///     types (the permissive `{}` for a bare type — a `$ref` to a component
+///     `components/schemas` never emits would dangle), a `200` `$ref` to the
+///     response type's schema, and
 ///     the `422` request-validation Issues shape (`std/rpc`'s validation status);
 ///   - `components/schemas`, one entry per type in the RFC-0031 reachable
 ///     closure (SORTED by name, so imported wire types appear deterministically),
@@ -188,13 +191,27 @@ fn oaResponseSchema(f: FnInfo, iface: ModuleInterface) -> String {
     return "{}"
 }
 
+/// The request `schema` object for a procedure's one parameter: a `$ref` when
+/// the spelling names one of the contract's exported types, the permissive `{}`
+/// for a bare type. The guard mirrors [`oaResponseSchema`] on the response side:
+/// `components/schemas` is built from the closure's types only, so an unguarded
+/// `$ref` to a builtin like `Int64` produced a reference nothing resolved.
+fn oaRequestSchema(spelling: String, typeNames: Array<String>) -> String {
+    if includes(typeNames, spelling) {
+        return "{\"$ref\":\"#/components/schemas/" + spelling + "\"}"
+    }
+    return "{}"
+}
+
 /// One procedure's baked `paths` VALUE (compact JSON, no key): the `{"post":{…}}`
-/// object with a `requestBody` `$ref` (for a 1-param procedure), a `200` `$ref`,
-/// and the `422` Issues shape. Parsed into the document tree at runtime.
+/// object with a `requestBody` (for a 1-param procedure, `$ref`-ed only when the
+/// parameter names a contract type), a `200` `$ref`, and the `422` Issues shape.
+/// Parsed into the document tree at runtime.
 fn oaPathValue(f: FnInfo, iface: ModuleInterface) -> String {
     let mut body = "{\"post\":{\"operationId\":\"" + f.name + "\","
     if f.params.length == 1 {
-        body = body + "\"requestBody\":{\"required\":true,\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/" + f.params[0].spelling + "\"}}}},"
+        body = body + "\"requestBody\":{\"required\":true,\"content\":{\"application/json\":{\"schema\":"
+        + oaRequestSchema(f.params[0].spelling, oaTypeNames(iface)) + "}}},"
     }
     body = body + "\"responses\":{"
     body = body + "\"200\":{\"description\":\"success\",\"content\":{\"application/json\":{\"schema\":" + oaResponseSchema(f, iface) + "}}},"
@@ -297,6 +314,12 @@ test "oaSorted orders names" {
     assertEq(s[0], "AddBookReq")
     assertEq(s[1], "Book")
     assertEq(s[2], "TagCounts")
+}
+
+test "a request schema refs contract types and falls back inline for bare ones" {
+    assertEq(oaRequestSchema("Book", ["Book"]), "{\"$ref\":\"#/components/schemas/Book\"}")
+    assertEq(oaRequestSchema("Int64", ["Book"]), "{}")
+    assertEq(oaRequestSchema("Book", []), "{}")
 }
 
 test "oaEscBody escapes quotes and backslashes for a Vyrn literal" {

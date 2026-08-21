@@ -395,8 +395,10 @@ pub fn iterate_impl_by_key<'a>(
 
 /// Extract the `(min, max)` inclusive numeric bounds a validated type's `where`
 /// predicate implies (RFC-0003 reflection). Recognizes `value >=/> N`,
-/// `value <=/< N` in either operand order, and `&&` conjunctions. Anything else
-/// (e.g. `value % 2 == 0`) contributes no bound.
+/// `value <=/< N` in either operand order, and `&&` conjunctions. `N` may be a
+/// negated literal (`value >= -5` parses as `Unary::Neg` over the literal) or a
+/// byte literal (RFC-0057). Anything else (e.g. `value % 2 == 0`) contributes
+/// no bound.
 pub fn predicate_bounds(pred: &Expr) -> (Option<i64>, Option<i64>) {
     if let Expr::Binary { op, lhs, rhs, .. } = pred {
         if *op == BinOp::And {
@@ -404,20 +406,23 @@ pub fn predicate_bounds(pred: &Expr) -> (Option<i64>, Option<i64>) {
             let (r0, r1) = predicate_bounds(rhs);
             return (l0.or(r0), l1.or(r1));
         }
-        // `value OP n` or `n OP value` → normalize to `value OP n`. `n` may be a
-        // byte literal (RFC-0057), e.g. `type Digit = UInt8 where value >= '0'`.
+        // `value OP n` or `n OP value` → normalize to `value OP n`, reading `n`
+        // through [`int_lit`] so a negated literal counts like the parser
+        // spelled it.
         let (normalized, n) = match (&**lhs, &**rhs) {
-            (l, Expr::Int(n)) if is_value(l) => (*op, *n),
-            (l, Expr::Byte(b)) if is_value(l) => (*op, *b as i64),
-            (Expr::Int(n), r) if is_value(r) => (flip(*op), *n),
-            (Expr::Byte(b), r) if is_value(r) => (flip(*op), *b as i64),
+            (l, r) if is_value(l) => (*op, int_lit(r)),
+            (l, r) if is_value(r) => (flip(*op), int_lit(l)),
             _ => return (None, None),
         };
+        let Some(n) = n else { return (None, None) };
         return match normalized {
             BinOp::GtEq => (Some(n), None),
-            BinOp::Gt => (Some(n + 1), None),
+            // An exclusive bound steps to its inclusive neighbor; the step
+            // saturates at the `i64` edges, which is correct for an inclusive
+            // bound (nothing beyond the edge was representable anyway).
+            BinOp::Gt => (Some(n.saturating_add(1)), None),
             BinOp::LtEq => (None, Some(n)),
-            BinOp::Lt => (None, Some(n - 1)),
+            BinOp::Lt => (None, Some(n.saturating_sub(1))),
             _ => (None, None),
         };
     }
@@ -1951,6 +1956,17 @@ mod json_schema_tests {
         assert_eq!(
             schema_of("type Temp = Float64 where value >= -273.15", "Temp"),
             "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"number\",\"minimum\":-273.15}"
+        );
+    }
+
+    #[test]
+    fn negative_integer_bound_is_captured() {
+        // `value >= -5` parses as Unary(Neg, Int); `predicate_bounds` unwraps
+        // the negation like `num_lit` does for floats — the old reflection saw
+        // no literal and reported no minimum at all.
+        assert_eq!(
+            schema_of("type Debt = Int64 where value >= -5 && value <= 5", "Debt"),
+            "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"integer\",\"minimum\":-5,\"maximum\":5}"
         );
     }
 

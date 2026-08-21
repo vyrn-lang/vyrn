@@ -209,58 +209,52 @@ test "the projection omits every field the query did not select" {
     assert(body.contains("\"id\"") == false)
 }
 
-test "an undeclared field is a GraphQL error naming it, at its own path" {
+test "an undeclared field is a request fault — validation runs before anything executes" {
     assertEq(
         reply("{ shelved }"),
-        "{\"errors\":[{\"message\":\"Cannot query field `shelved` on type `Query`.\","
-        + "\"path\":[\"shelved\"]}],\"data\":{\"shelved\":null}}",
+        "{\"errors\":[{\"message\":\"Cannot query field `shelved` on type `Query`.\"}]}",
     )
 }
 
-test "a sibling root field answers beside a failing one — M3's partial data" {
+test "one invalid root field refuses the whole document before any of it answers" {
     let body = reply("{ browse { books { title } } nope }")
-    // `browse` answered, in the same reply that reports `nope`.
-    assert(body.contains("\"title\":\"SICP\""))
-    assert(body.contains("\"nope\":null"))
+    // `nope` fails document validation, so `browse` never ran: errors alone,
+    // with no partial data beside them.
+    assert(body.contains("\"title\":\"SICP\"") == false)
     assert(body.contains("\"message\":\"Cannot query field `nope` on type `Query`.\""))
-    assert(body.contains("\"path\":[\"nope\"]"))
-    // `data` is an object, not null: nothing said the `null` could not sit at
-    // `nope`'s position, so it did.
+    assert(body.contains("\"data\"") == false)
+}
+
+test "a selection below a scalar field is refused before the list is walked" {
+    let body = reply("{ browse { books { title { nope } } } }")
+    // One request fault for the document — not one per element of `books`,
+    // and no null-climbing, because nothing executed.
+    assert(
+        body.contains(
+            "\"message\":\"Field `title` must not have a selection since type `Title` has no subfields.\"",
+        ),
+    )
+    assert(body.contains("\"path\"") == false)
+    assert(body.contains("\"data\"") == false)
+}
+
+test "a selection on a byId scalar is a request fault — the procedure never runs" {
+    // `title` is a leaf; asking it for subfields fails document validation,
+    // so `byId` is not invoked and the reply carries no `data` at all.
+    let body = reply("{ byId(input: { id: 1 }) { Ok { title { deep } } } }")
+    assert(body.contains("must not have a selection since type `Title` has no subfields."))
+    assert(body.contains("\"data\"") == false)
+}
+
+test "a resolver-owned fault keeps its path and its siblings answer" {
+    // Validation passes — `id` simply is not a declared argument — so the
+    // document EXECUTES, and the fault belongs to the resolver: it gets its
+    // own path and the sibling field still answers beside it.
+    let body = reply("{ byId(id: 1) { Ok { title } } browse { books { title } } }")
+    assert(body.contains("\"message\":\"Unknown argument `id` on field `byId`.\""))
+    assert(body.contains("\"path\":[\"byId\"]"))
+    assert(body.contains("\"title\":\"SICP\""))
     assert(body.contains("\"data\":null") == false)
-}
-
-test "a path names a field AND a list index" {
-    let body = reply("{ browse { books { title { nope } } } }")
-    assert(body.contains("\"path\":[\"browse\",\"books\",0,\"title\"]"))
-    // One per element, each at its own index — the fault repeats down the list.
-    assert(body.contains("\"path\":[\"browse\",\"books\",1,\"title\"]"))
-}
-
-test "the null climbs past the list and stops at the nullable root field" {
-    // `title` is `Title!`, the element is `Book!` and `books` is `[Book!]!`, so
-    // the `null` cannot sit at any of the three. `browse` is nullable and takes it.
-    let body = reply("{ browse { books { title { nope } } } }")
-    assert(body.contains("\"data\":{\"browse\":null}"))
-}
-
-test "the null stops at a nullable ancestor below the root" {
-    // `Ok` is nullable — `BookResult` is a tagged union and exactly one arm is
-    // non-null at a time — so the climb ends there and `byId` still answers.
-    assertEq(
-        reply("{ byId(input: { id: 2 }) { Ok { title { nope } } } }"),
-        "{\"errors\":[{\"message\":\"Field `title` must not have a selection since type "
-        + "`Title` has no subfields.\",\"path\":[\"byId\",\"Ok\",\"title\"]}],"
-        + "\"data\":{\"byId\":{\"Ok\":null}}}",
-    )
-}
-
-test "a climb with nowhere left to stop makes `data` itself null" {
-    // The shape shelf cannot produce: a NON-NULL root field. See `topSchema`.
-    assertEq(
-        gqlAnswer("{ book { title { nope } } }", topResolve, topSchema).body,
-        "{\"errors\":[{\"message\":\"Field `title` must not have a selection since type "
-        + "`Title` has no subfields.\",\"path\":[\"book\",\"title\"]}],\"data\":null}",
-    )
 }
 
 test "an argument reaches the procedure and the right record comes back" {
@@ -271,7 +265,8 @@ test "an argument reaches the procedure and the right record comes back" {
     // The argument is decoded by the SAME `fromJson` a POSTed body goes through,
     // so `BookId = Int64 where value >= 0` refuses this without a second rule.
     assert(reply("{ byId(input: { id: -1 }) { Ok { title } } }").contains("invalid argument"))
-    // An argument the field does not declare is named, not ignored.
+    // An argument the field does not declare is named, not ignored. This fault
+    // belongs to the resolver, so it keeps its position and its siblings answer.
     assertEq(
         reply("{ byId(id: 1) { Ok { title } } }"),
         "{\"errors\":[{\"message\":\"Unknown argument `id` on field `byId`.\","
@@ -286,15 +281,14 @@ test "an alias renames the answer and nothing else" {
     )
 }
 
-test "a selected member the value lacks is an error naming it — M1's first hole" {
+test "an undeclared member field is refused against the type graph, not the value" {
     // M1 answered `{"books":[{"nope":null}, ..]}` here and said so in its own
-    // section: `toJson` omits a `None` `Option`, so absence in the value and
-    // absence from the schema were the same observation. Asserting the message is
-    // the only way to see that closed. M3 answers the `null` AND the message —
-    // the difference is that the reply now says which one happened, and where.
+    // section; M3 answered the `null` AND named it, per element. Validation
+    // now refuses the document up front: `nope` is not a field of `Book`, so
+    // no resolver ever runs.
     let body = reply("{ browse { books { nope } } }")
     assert(body.contains("\"message\":\"Cannot query field `nope` on type `Book`.\""))
-    assert(body.contains("\"path\":[\"browse\",\"books\",2,\"nope\"]"))
+    assert(body.contains("\"data\"") == false)
 }
 
 test "a selection on a scalar is refused — M1's second hole" {

@@ -93,7 +93,8 @@ jobs:
             target: x86_64-pc-windows-msvc
             bin: vyrn.exe
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: The tag and the crate version must agree
         shell: bash
@@ -256,7 +257,8 @@ jobs:
           printf 'Content-Length: %d\r\n\r\n%s' "${#body}" "$body" | "$lsp" > init.out
           grep -q '"capabilities"' init.out || { echo "vyrn-lsp did not answer initialize:" >&2; cat init.out >&2; exit 1; }
 
-      - uses: actions/upload-artifact@v4
+      # actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: vyrn-${{ matrix.name }}
           path: |
@@ -273,7 +275,8 @@ jobs:
     # `vyrn-lsp`, and that ships in the per-platform archives above.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: The tag and the extension version must agree
         shell: bash
@@ -313,7 +316,8 @@ jobs:
           npm run package -- -o "../../vyrn-vscode-${GITHUB_REF_NAME#v}.vsix"
           ls -l ../../vyrn-vscode-*.vsix
 
-      - uses: actions/upload-artifact@v4
+      # actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: vyrn-vscode
           path: vyrn-vscode-*.vsix
@@ -324,8 +328,10 @@ jobs:
     needs: [build, vsix]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      # actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           path: dist
           merge-multiple: true

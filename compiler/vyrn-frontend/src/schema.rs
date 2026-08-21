@@ -243,6 +243,15 @@ impl P<'_> {
                     }
                 }
                 Some(c) => {
+                    // A raw control byte (< 0x20) is invalid in a JSON string
+                    // (RFC 8259 §7) — the same rule codec.rs enforces on its
+                    // own parser.
+                    if c < '\u{20}' {
+                        return Err(format!(
+                            "control character in string at offset {}",
+                            self.i
+                        ));
+                    }
                     out.push(c);
                     self.i += 1;
                 }
@@ -561,7 +570,16 @@ fn convert(
         "string" => {
             let mut clauses: Vec<Expr> = Vec::new();
             if let Some(Json::Num(n)) = schema.get("minLength") {
-                clauses.push(len_cmp(BinOp::GtEq, *n as i64));
+                // Lengths are whole numbers, so a fractional minimum ceils
+                // (`2.5` admits length ≥ 3, and truncating toward zero would
+                // import a type weaker than its schema); a negative one cannot
+                // be honored at all — hard error, never a vacuous clause.
+                if *n < 0.0 {
+                    return Err(format!(
+                        "{module}: type `{name}`: `minLength` {n} is negative"
+                    ));
+                }
+                clauses.push(len_cmp(BinOp::GtEq, n.ceil() as i64));
             }
             if let Some(Json::Num(n)) = schema.get("maxLength") {
                 clauses.push(len_cmp(BinOp::LtEq, *n as i64));
@@ -594,7 +612,7 @@ fn convert(
                             return Err(format!(
                                 "{module}: type `{name}`: unsupported `allOf` member \
                                  (only `{{\"pattern\": ..}}` entries)"
-                            ))
+                            ));
                         }
                     }
                 }
@@ -663,12 +681,35 @@ fn convert(
             }
             let props = match schema.get("properties") {
                 Some(Json::Obj(props)) => props.clone(),
-                _ => Vec::new(),
+                // Present but not an object is a typo, and reading it as "no
+                // fields" would import a type weaker than its schema.
+                Some(_) => {
+                    return Err(format!(
+                        "{module}: type `{name}`: `properties` must be an object"
+                    ));
+                }
+                None => Vec::new(),
             };
             let required: Vec<&str> = match schema.get("required") {
                 Some(Json::Arr(names)) => names.iter().filter_map(|n| n.as_str()).collect(),
                 _ => Vec::new(),
             };
+            // A `required` entry naming no property is a presence check this
+            // record cannot carry (decode ignores unknown fields), so it would
+            // silently weaken the schema into nothing.
+            let dangling: Vec<&str> = required
+                .iter()
+                .copied()
+                .filter(|r| !props.iter().any(|(k, _)| k == *r))
+                .collect();
+            if !dangling.is_empty() {
+                return Err(format!(
+                    "{module}: type `{name}`: `required` names `{}`, but `properties` \
+                     does not define {}",
+                    dangling.join("`, `"),
+                    if dangling.len() == 1 { "it" } else { "them" }
+                ));
+            }
             let mut rec_fields = Vec::new();
             for (fname, fschema) in &props {
                 let sub_name = format!("{name}.{fname}");
@@ -871,15 +912,24 @@ fn num_expr(n: f64, is_int: bool, module: &str, name: &str, key: &str) -> Result
                 "{module}: type `{name}`: `{key}` {n} is not an integer but the type is"
             ));
         }
-        Ok(if n < 0.0 {
-            Expr::Unary {
-                op: UnOp::Neg,
-                expr: Box::new(Expr::Int(-n as i64)),
-                line: 1,
+        // Negate in Rust arithmetic, NOT through the AST: the old
+        // `Expr::Int(-n as i64)` under a `Unary::Neg` had two defects. Rust
+        // unary minus binds tighter than `as`, so `-n` saturated at
+        // `i64::MAX` and a minimum of exactly `i64::MIN` came out one too
+        // high; and the synthesized `Unary::Neg` hid the literal from
+        // reflection (`predicate_bounds`). The one value whose negation
+        // overflows IS `i64::MIN`, which is already correct for an inclusive
+        // minimum — emitted as a plain negative literal.
+        Ok(Expr::Int(if n < 0.0 {
+            let a = -n;
+            if a >= 9223372036854775808.0 {
+                i64::MIN
+            } else {
+                -(a as i64)
             }
         } else {
-            Expr::Int(n as i64)
-        })
+            n as i64
+        }))
     } else if n < 0.0 {
         Ok(Expr::Unary {
             op: UnOp::Neg,
@@ -1314,5 +1364,77 @@ mod tests {
             crate::types::json_schema_string(&reimported["Byte"], &reimported),
             "sized-int schema round-trip must be exact"
         );
+    }
+
+    /// A raw control byte inside a string literal is invalid JSON (RFC 8259
+    /// §7) — the same rule codec.rs enforces — so a manifest carrying one is
+    /// refused with a named error, not silently accepted.
+    #[test]
+    fn a_raw_control_byte_in_a_string_is_refused() {
+        assert!(parse_json("\"ok \\u0001 escaped\"").is_ok());
+        let e = parse_json("\"bad \u{1} raw\"").unwrap_err();
+        assert!(e.contains("control character"), "{e}");
+    }
+
+    /// A fractional `minLength` ceils (lengths are whole numbers: `2.5` means
+    /// ≥ 3), and a negative one is a hard error — an imported type is never
+    /// silently weaker than its schema.
+    #[test]
+    fn fractional_min_length_ceils_and_negative_is_an_error() {
+        let decls = synth(r#"{"title": "S", "type": "string", "minLength": 2.5}"#);
+        let pred = crate::checker::pred_summary(decls[0].predicate.as_ref().unwrap());
+        assert_eq!(pred, "value.byteLength >= 3");
+
+        let e = synthesize(
+            r#"{"title": "S", "type": "string", "minLength": -1}"#,
+            None,
+            "t.json",
+        )
+        .unwrap_err();
+        assert!(e.contains("`minLength` -1 is negative"), "{e}");
+    }
+
+    /// Malformed `properties` and `required` entries naming no property are
+    /// hard errors: the old code read a non-object `properties` as "no fields"
+    /// and dropped dangling `required` names, importing `{}` for a schema that
+    /// said something entirely different.
+    #[test]
+    fn malformed_properties_and_dangling_required_are_hard_errors() {
+        let e = synthesize(
+            r#"{"title": "X", "type": "object", "properties": [1, 2]}"#,
+            None,
+            "t.json",
+        )
+        .unwrap_err();
+        assert!(e.contains("`properties` must be an object"), "{e}");
+
+        let e = synthesize(
+            r#"{"title": "X", "type": "object",
+                "properties": {"a": {"type": "boolean"}},
+                "required": ["a", "ghost", "phantom"]}"#,
+            None,
+            "t.json",
+        )
+        .unwrap_err();
+        assert!(e.contains("`ghost`, `phantom`"), "{e}");
+    }
+
+    /// A minimum of exactly `i64::MIN` bounds at `i64::MIN`: the old
+    /// `Expr::Int(-n as i64)` under a `Unary::Neg` saturated `-n` at
+    /// `i64::MAX` (Rust unary minus binds tighter than `as`) and imported
+    /// `value >= -9223372036854775807`, rejecting the one value the schema
+    /// admits at the boundary. The bound is now a plain negative literal,
+    /// which reflection (`predicate_bounds`) reads too.
+    #[test]
+    fn an_i64_min_minimum_bounds_at_i64_min() {
+        let decls = synth(
+            r#"{"title": "T", "type": "integer", "minimum": -9223372036854775808}"#,
+        );
+        let pred = crate::checker::pred_summary(decls[0].predicate.as_ref().unwrap());
+        assert_eq!(pred, "value >= -9223372036854775808");
+        // And the ordinary negative case keeps its exact value.
+        let decls = synth(r#"{"title": "T", "type": "integer", "minimum": -5}"#);
+        let pred = crate::checker::pred_summary(decls[0].predicate.as_ref().unwrap());
+        assert_eq!(pred, "value >= -5");
     }
 }

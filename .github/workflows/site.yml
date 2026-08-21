@@ -49,10 +49,12 @@ on:
     # One daily run, as a safety net for a missed trigger.
     - cron: '17 6 * * *'
 
+# Least privilege, per job. The build job compiles and runs PR-supplied code,
+# and pull_request runs take this file from the merge ref — a PR can ship its
+# own copy of it — so the workflow-wide grant stops at reads. pages/id-token
+# are declared on the deploy job alone, which never runs on a pull request.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # One deployment at a time; a superseded build is not worth publishing. Keyed by
 # ref rather than a bare `pages`, so a pull-request build cannot cancel the
@@ -71,8 +73,15 @@ jobs:
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          # For workflow_run events github.sha is the default branch's CURRENT
+          # head, not the commit the CI run validated: push A then B quickly and
+          # this fires on A's green run while HEAD is already B. Check out the
+          # sha CI actually passed. On every other event the expression is empty
+          # and checkout falls back to github.sha, as before.
+          ref: ${{ github.event.workflow_run.head_sha }}
           # The whole history, and the tags with it. The backstage draws the
           # project's pulse — commits and merged pull requests per day, when
           # each design record arrived, when each release was tagged — and the
@@ -237,7 +246,8 @@ jobs:
         # that has one. A glob, so the next file lands in CI by being written.
         run: node --test "site/test/*.test.mjs"
 
-      - uses: actions/upload-pages-artifact@v3
+        # actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa
         # Nothing to upload from a pull request — the build IS the check there.
         if: github.event_name != 'pull_request'
         with:
@@ -248,9 +258,14 @@ jobs:
     # A pull request builds the site and runs its tests; it does not publish it.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - id: deploy
-        uses: actions/deploy-pages@v4
+        # actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e
