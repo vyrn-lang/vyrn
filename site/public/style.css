@@ -778,6 +778,11 @@ h1 code, h2 code, h3 code, h4 code {
  * way the masthead nav does, and draws no bar doing it. */
 .page.docs > .subnav {
   grid-column: 1 / 13;
+  /* Row ONE, explicitly: the shell's panes pin themselves to the sheet's
+   * first row, so an auto-placed full-width row lands after their 60-row
+   * span — below the whole sidebar, which is where it painted. The subnav
+   * takes row 1 and the panes start at row 2. */
+  grid-row: 1;
   display: flex; gap: var(--s3); align-items: center;
   min-height: 44px;
   border-bottom: 1px solid var(--hair);
@@ -791,6 +796,7 @@ h1 code, h2 code, h3 code, h4 code {
   color: var(--ink);
   box-shadow: inset 0 -2px 0 var(--accent);
 }
+.page.docs > .docstree, .page.docs > .onpage { grid-row: 2 / span 60; }
 
 /* THE PAGE MENU: the split half of Copy page. A `<details>`, so it opens and
  * closes with no script; each row is an action with its one-line reason. */
