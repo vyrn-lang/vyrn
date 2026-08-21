@@ -122,6 +122,11 @@ fn standing() -> String {
              rule forbids. The parity claim is made where it can be shown: on the
              landing page, by a check that runs. -->
         <span>{{ exampleCount() }} examples, {{ backendCount() }} backends</span>
+        <!-- The changelog. It was a masthead row until M3's third round: four nav
+             names beat five, and a reader who wants to know what changed is
+             looking down the page and not up at it. The index's `Latest release`
+             section and the install page are the other two doors. -->
+        <a href="/releases.html"><Icon name="bytesize:tag"/> Releases</a>
         <!-- Two glyphs, one of each kind, and the difference is the whole a11y
              rule (RFC-0107 M3). The mark beside the words is DECORATION: it
              renders `aria-hidden`, because a screen reader that announced it

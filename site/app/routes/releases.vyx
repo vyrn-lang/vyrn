@@ -1,12 +1,24 @@
 <script>
-// GET /releases — what is published, and what has landed since (RFC-0106 M3).
+// GET /releases — the changelog: what is published, and what has landed since
+// (RFC-0106 M3).
+//
+// IT DOES NOT INSTALL ANYTHING. This page used to carry a `curl … | sh` block of
+// its own, which was one platform's command on a page that is not about
+// platforms, and a second copy of the thing `/install` exists to be. One link
+// takes its place (RFC-0106 M3, third round). The page is now what its name says:
+// the latest version at the top with the stat tiles and the highlights, then
+// every release ever tagged.
+//
+// It is also NOT IN THE MASTHEAD any more. Four nav names beat five, and nobody
+// navigates to a changelog before they have installed anything — so it is reached
+// from the index's own `Latest release` section, from `/install`, and from the
+// footer of every page.
 //
 // The newest tag is BAKED: `site/release.txt` is refreshed from the GitHub
-// listing before every build of this site, and read here through `../repo`.
+// listing before every build of this site, and read here through `../repo`,
+// which reconciles it against the repository's own tags and takes the newer.
 // Nothing on this page is written by hand — not the tag, not the date, not
-// whether it is a pre-release, which is the tag's own suffix. `fresh.js` asks
-// the same listing once a visit and says so, in the notice under the heading, if
-// a newer release has appeared since this page was built.
+// whether it is a pre-release, which is the tag's own suffix.
 //
 // FOUR STAT TILES, AND NOT ONE OF THEM IS TYPED. Each is arithmetic over a file
 // something else wrote: the pull requests are summed out of
@@ -26,7 +38,6 @@
 // today and a link to the record itself.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
-import { shellHtml } from "../code"
 import { hasRelease, releaseTag, releaseDate, releasePre, releaseUrl, releaseUrlOf, exampleCount, stdCount, backendCount } from "../repo"
 import { Release, ArrivalRow, releaseRows, arrivalList, days, testBlockCount, testFileCount } from "../history"
 import { feedName } from "../feed"
@@ -56,12 +67,6 @@ fn standing() -> String {
     }
     let kind = if releasePre() { "a pre-release" } else { "a stable release" }
     return "Published " + releaseDate() + " as " + kind + "."
-}
-
-/// Installing and upgrading are the same command: neither installer takes a
-/// version, and both resolve the newest release themselves.
-fn upgrade() -> String {
-    return "curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | sh"
 }
 
 /// Merged pull requests since the baked tag, summed out of the history the
@@ -123,11 +128,8 @@ fn kindOf(tag: String) -> String {
                 <p class="eyebrow">Releases · {{ kindOf(releaseTag()) }}</p>
                 <h1 class="display">{{ headline() }}</h1>
                 <p class="lede">{{ standing() }} The language changes without a deprecation period.</p>
-                <div class="cmd" data-copy>
-                    <code v-html="shellHtml(upgrade())"></code>
-                    <button type="button" data-copy-btn aria-label="Copy the upgrade command">Copy</button>
-                </div>
-                <p class="eyebrow">Upgrading is the same line. <a :href="releaseUrl()">Notes and downloads</a> · <a :href="feedHref()">Feed</a></p>
+                <p class="ctarow"><a class="cta" href="/install.html">Install or upgrade</a></p>
+                <p class="eyebrow"><a :href="releaseUrl()">Notes and downloads</a> · <a :href="feedHref()">Feed</a></p>
             </div>
 
             <div>

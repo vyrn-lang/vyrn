@@ -132,14 +132,21 @@ export fn upTo(path: String) -> String {
     return repeat("../", split(published(path), "/").length - 1)
 }
 
-/// The navigation: FIVE groups, in reading order (RFC-0106 M1).
+/// The navigation: FOUR groups, in reading order (RFC-0106 M1, trimmed in M3).
 ///
 /// It was nine flat rows with no hierarchy — 718px of links showing 343px of
 /// itself on a phone, with a hidden scrollbar and nothing on the page saying so
-/// (RFC-0106 M0, checklist row 30). Five names a reader already knows, and the
-/// four routes that left the row are not gone: `/install` is the persistent
+/// (RFC-0106 M0, checklist row 30). Four names a reader already knows, and the
+/// five routes that left the row are not gone: `/install` is the persistent
 /// button below, `/compare` is reached from the index teaser and from the book,
 /// `/why-vyrn` from the index, and the editors page from the book.
+///
+/// `/releases` IS THE FIFTH, and it left in M3's third round. A changelog is not
+/// a place anybody navigates to before they have installed anything, and it was
+/// taking a permanent quarter of the row from the four pages that are. It is
+/// reached from the index's own `Latest release` section, from the install page,
+/// and from the footer of every page — three doors, none of them in the row a
+/// reader scans on arrival.
 ///
 /// TWO OF THESE ARE LABEL CHANGES AND NOT PATH CHANGES, and the reason is in
 /// M0's redirect map. `Docs` is the book, which lives at `/guide`; `Reference`
@@ -153,7 +160,6 @@ export fn navRows() -> Array<NavRow> {
         NavRow { href: hrefOf("/guide"), label: "Docs" },
         NavRow { href: hrefOf("/docs"), label: "Reference" },
         NavRow { href: hrefOf("/explore"), label: "Explore" },
-        NavRow { href: hrefOf("/releases"), label: "Releases" },
         NavRow { href: hrefOf("/play"), label: "Play" },
     ]
 }
@@ -194,9 +200,9 @@ test "a page's climb back to the root is its own depth and nothing else" {
     assertEq(upTo("/docs/std/json"), "../../")
 }
 
-test "the navigation is five groups, and two of them are relabelled paths" {
+test "the navigation is four groups, and two of them are relabelled paths" {
     let rows = navRows()
-    assertEq(rows.length, 5)
+    assertEq(rows.length, 4)
     // The label a reader sees, against the path it goes to. These two pairs are
     // the whole of M0's label decision, and a change to either of them is a
     // change to what 284 and 227 content links mean.
@@ -204,12 +210,13 @@ test "the navigation is five groups, and two of them are relabelled paths" {
     assertEq(rows[0].href, "/guide.html")
     assertEq(rows[1].label, "Reference")
     assertEq(rows[1].href, "/docs.html")
-    // The four routes that left the row are not in it under another name.
+    // The five routes that left the row are not in it under another name.
     for row in rows {
         assert(row.href != hrefOf("/install"))
         assert(row.href != hrefOf("/compare"))
         assert(row.href != hrefOf("/why-vyrn"))
         assert(row.href != hrefOf("/docs/editors"))
+        assert(row.href != hrefOf("/releases"))
     }
 }
 
