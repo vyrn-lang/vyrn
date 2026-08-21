@@ -106,7 +106,23 @@ async function writeClipboard(text) {
     await navigator.clipboard.writeText(text);
     return true;
   } catch (err) {
-    return false;
+    // The async API refuses in more situations than a reader can see — the
+    // document briefly unfocused, an embedding policy — while the selection
+    // path still works there. The fallback is the old way, tried second.
+    try {
+      const box = document.createElement("textarea");
+      box.value = text;
+      box.setAttribute("readonly", "");
+      box.style.position = "fixed";
+      box.style.left = "-9999px";
+      document.body.append(box);
+      box.select();
+      const ok = document.execCommand("copy");
+      box.remove();
+      return ok;
+    } catch (err2) {
+      return false;
+    }
   }
 }
 

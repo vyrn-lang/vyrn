@@ -16,7 +16,7 @@ import { inlineCode } from "../../code"
 // THE DOCS SHELL (RFC-0106 M4). The same three panes the reference wears: the
 // book's contents on the left, this chapter's sections on the right, the chapter
 // before and after at the foot.
-import { TreeGroup, guideTree, docSubnav } from "../../docshell"
+import { TreeGroup, guideTree } from "../../docshell"
 params { chapter: String }
 
 /// One chapter, with the number the rail prints beside it.
@@ -53,21 +53,15 @@ fn sectionHref(s: Section) -> String {
 fn claudeHref(slug: String, title: String) -> String {
     return askClaudeUrl(chapterHref(slug), title)
 }
-
-/// The subnav row, with this section marked.
-fn subnav() -> String {
-    return docSubnav("guide")
-}
 </script>
 
 <template>
 <main class="page docs">
-    <nav class="subnav" aria-label="Documentation sections" v-html="subnav()"></nav>
     <aside class="docstree">
         <details class="treebox">
             <summary>The guide</summary>
             <div class="treegroup" v-for="g in tree(data.chapter.slug)" :key="g.name">
-                <p class="eyebrow">{{ g.name }}</p>
+                <p class="eyebrow"><span class="slot" v-html="g.icon"></span>{{ g.name }}</p>
                 <a v-for="r in g.rows" :key="r.href" :href="r.href" :aria-current="r.here">{{ r.label }}</a>
             </div>
         </details>
@@ -78,7 +72,7 @@ fn subnav() -> String {
             <a href="/guide.html">Docs</a>
             <span>Chapter {{ data.n }} of {{ chapters().length }}</span>
         </nav>
-        <p class="docutils">
+        <div class="docutils">
             <!-- A LINK to the file the export writes beside this page;
                  `widgets.js` turns a press into a clipboard write when the
                  browser has a clipboard. Without script it is the file. -->
@@ -90,7 +84,7 @@ fn subnav() -> String {
                     <a :href="claudeHref(data.chapter.slug, data.chapter.title)" rel="noopener"><span>Open in Claude</span><span class="d">Ask Claude about this page</span></a>
                 </div>
             </details>
-        </p>
+        </div>
     </div>
 
     <section class="hero">

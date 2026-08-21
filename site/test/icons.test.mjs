@@ -23,7 +23,24 @@ import path from "node:path";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const routes = path.join(here, "..", "app", "routes");
+const app = path.join(here, "..", "app");
 const out = path.join(here, "..", "..", "out");
+
+/// The SECOND lawful source (RFC-0106 M4 follow-up): a module may import
+/// glyphs through the `icons("<collection>", "<names>")` generator — the docs
+/// shell does, for its tree-group headers and the subnav. Same pinned
+/// collection, same generator, counted here so the audit still closes.
+async function generatorNames() {
+  const names = new Set();
+  for (const e of await readdir(app, { withFileTypes: true })) {
+    if (!e.name.endsWith(".vyrn")) continue;
+    const src = await readFile(path.join(app, e.name), "utf8");
+    for (const m of src.matchAll(/icons\("([a-z0-9-]+)",\s*"([^"]+)"\)/g)) {
+      for (const n of m[2].trim().split(/\s+/)) names.add(`${m[1]}:${n}`);
+    }
+  }
+  return names;
+}
 
 /// The shell every consumer page wears. Its footer link is the marker: the
 /// backstage builds a masthead of its own and wears none of this.
@@ -112,11 +129,22 @@ test("each page carries exactly the glyphs its templates name", async () => {
     const wearsShell = html.includes(SHELL_MARK);
     const expected = (wearsShell ? shell : []).concat(own[path.basename(p)] || []);
     if (wearsShell) shellPages += 1;
-    assert.equal(
-      glyphsIn(html).length,
-      expected.length,
-      `${path.relative(out, p)} carries ${glyphsIn(html).length} glyphs, its templates name ${expected.length}`,
-    );
+    if (html.includes('class="page docs')) {
+      // A docs-shell page also draws the generator-imported glyphs — subnav
+      // rows and tree-group headers, a count the tree's own shape decides.
+      // The floor is the templates' own count; the global test below still
+      // refuses any body no source named.
+      assert.ok(
+        glyphsIn(html).length >= expected.length,
+        `${path.relative(out, p)} carries ${glyphsIn(html).length} glyphs, fewer than the ${expected.length} its templates name`,
+      );
+    } else {
+      assert.equal(
+        glyphsIn(html).length,
+        expected.length,
+        `${path.relative(out, p)} carries ${glyphsIn(html).length} glyphs, its templates name ${expected.length}`,
+      );
+    }
   }
   assert.ok(shellPages > 50, `only ${shellPages} pages wear the shell`);
 });
@@ -129,6 +157,7 @@ test("the export carries no glyph the templates did not name", async () => {
   for (const t of await templates(routes)) {
     for (const tag of tagsOf(await readFile(t, "utf8"))) named.add(tag.name);
   }
+  for (const n of await generatorNames()) named.add(n);
   const drawn = new Set();
   for (const p of await htmlFiles(out)) {
     for (const g of glyphsIn(await readFile(p, "utf8"))) drawn.add(g.body);

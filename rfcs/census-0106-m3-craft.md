@@ -573,3 +573,28 @@ because the 320px row has zero slack (the footer carries the repo link). One
 collision en route: the panel was first classed `.menu`, which the masthead's
 disclosure already owns at `display: contents` — a zero-width dropdown found
 by measuring the open panel in the live DOM.
+
+**R11 (orchestrator, the user's five rows on the docs chrome).** (1) The
+masthead is the viewport's: it moved outside `#root` with the search overlay
+and skip link, under a boxless `.shell` root, so the bar and its border run
+the whole window and the framed plate begins beneath it — the backstage keeps
+its own. (2) Tree rows hang off a hairline rail, indented under their group,
+the current page's accent segment on the rail itself. (3) `user-select: none`
+on every control caption — dragging across Copy page selected its word.
+(4) Category glyphs, through the front door: `docshell` imports them from the
+`icons()` generator — the same pinned collection the `<Icon>` tag reads — for
+the tree-group headers and the subnav rows; the icon audit learned the second
+lawful source and still closes the count exactly. (5) granted.
+
+**R12 (orchestrator, the user's three rows on the bars).** (1) A full-width
+bar's content starts where the sheet starts: the masthead and subnav indent
+their first item to the sidebar's edge with `max(gut, (100% − sheet)/2 + gut)`
+— `100%`, never `100vw`, so the scrollbar stays out of the arithmetic.
+(2) The frame verticals are gone: with two full-window bars above, two
+full-height hairlines crossed under them and fought the shell's rails;
+alignment is the bars' own indentation now. (3) "Copy page broken", root
+cause at last: the utility row was a `<p>`, and a `<details>` cannot live in
+a paragraph — the parser auto-closes it, so the menu half was thrown out as a
+sibling and the split control rendered in pieces. A `<div>` holds both; the
+halves share a seam; and `writeClipboard` gained the selection-path fallback
+for the contexts where the async API refuses.

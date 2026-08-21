@@ -163,6 +163,9 @@
    * number: `#root`'s padding, and the negative offset that lets a section's
    * hairline reach the page edge instead of stopping inside it. */
   --gut: var(--s4);
+  /* The content sheet's width, named once: #root caps to it, and the
+   * full-width bars indent their content to its edge. */
+  --sheet: 1232px;
 
   /* TEXT ROLES AND THEIR WIDTH. Three roles, and the role decides the width —
    * not the element. Read this before changing any `max-width` on text.
@@ -462,13 +465,12 @@ h1 code, h2 code, h3 code, h4 code {
    ------------------------ */
 
 #root {
-  max-width: 1232px;
+  max-width: var(--sheet);
   margin: 0 auto;
-  /* THE PAGE IS A PLATE (RFC-0106 M3, ninth round): two full-height hairlines
-   * frame the content column, the reference site's quietest structural device.
-   * The section seams already bleed by `--gut` to this border box, so every
-   * seam lands exactly on the frame. */
-  border-inline: 1px solid var(--hair);
+  /* NO FRAME LINES ANY MORE (user, M4 follow-up): with the masthead and the
+   * subnav running the full window, two full-height verticals crossed under
+   * them and fought the docs shell's own rails. Alignment is carried by the
+   * bars indenting their content to the sheet's edge instead. */
   padding: 0 var(--gut) var(--s6);
   display: grid;
   /* `minmax(0, 1fr)`, not `1fr`. A `1fr` track is `minmax(auto, 1fr)`, so its
@@ -501,6 +503,8 @@ h1 code, h2 code, h3 code, h4 code {
  * spans the whole sheet including the rail's margin, so it says so from inside
  * the same selector. */
 #root > .masthead, #root > .foot { grid-column: 1 / 13; }
+/* The overlay's own children moved out with the masthead; nothing about them
+ * was grid-placed, so nothing else changes. */
 
 /* ONE HEADER, 64px AT EVERY WIDTH — declared, so a 44px target fits and no
  * control can grow the row. It was 152px at 375px (RFC-0106 M1, row 31). */
@@ -508,6 +512,21 @@ h1 code, h2 code, h3 code, h4 code {
   display: flex; align-items: center; gap: var(--s2);
   min-height: 64px; padding: var(--s1) 0;
   border-bottom: 1px solid var(--rule);
+}
+/* THE CONSUMER MASTHEAD IS THE VIEWPORT'S: it sits outside `#root` now, so
+ * the bar and its border run the whole window and the framed plate begins
+ * under it — the reference site's own shape. The backstage masthead stays
+ * inside its root and keeps the old geometry. */
+.shell { display: contents; }
+/* A full-width bar's CONTENT starts where the sheet starts (user row 1): the
+ * reference site's masthead and subnav both hang their first item over the
+ * sidebar's left edge, not the window's. `100%` and not `100vw`, so the
+ * scrollbar never enters the arithmetic. */
+.shell > .masthead, .subnav {
+  padding-inline: max(var(--gut), calc((100% - var(--sheet)) / 2 + var(--gut)));
+}
+.shell > .masthead { padding-block: var(--s1); }
+.masthead {
   /* CHROME IS SANS, CODE IS MONO (RFC-0106 M3, eighth round). Every control
    * and label on the site was monospace, so the whole page read as terminal
    * output and no amount of case could quiet it. Mono is reserved for what is
@@ -773,30 +792,25 @@ h1 code, h2 code, h3 code, h4 code {
 .page.docs > .onpage { grid-column: 11 / 13; }
 
 /* THE DOCS SUBNAV: the reference site's second header — the documentation's
- * areas in one quiet row under the masthead, spanning the sheet, current area
- * marked with the masthead's own underline device. It scrolls on a phone the
- * way the masthead nav does, and draws no bar doing it. */
-.page.docs > .subnav {
-  grid-column: 1 / 13;
-  /* Row ONE, explicitly: the shell's panes pin themselves to the sheet's
-   * first row, so an auto-placed full-width row lands after their 60-row
-   * span — below the whole sidebar, which is where it painted. The subnav
-   * takes row 1 and the panes start at row 2. */
-  grid-row: 1;
+ * areas in one quiet row under the masthead, the full width of the window
+ * exactly as the masthead is. The export stamps it under `</header>` the way
+ * it stamps the navigation marker, so it lives OUTSIDE the framed plate and
+ * the frame begins beneath it. It scrolls on a phone the way the masthead nav
+ * does, and draws no bar doing it. */
+.subnav {
   display: flex; gap: var(--s3); align-items: center;
   min-height: 44px;
   border-bottom: 1px solid var(--hair);
   font: 500 var(--t-mono)/1 var(--sans);
   overflow-x: auto; scrollbar-width: none; white-space: nowrap;
 }
-.page.docs > .subnav::-webkit-scrollbar { display: none; }
-.page.docs > .subnav a { color: var(--muted); text-decoration: none; padding: 14px 0; transition: color 140ms var(--expo); }
-.page.docs > .subnav a:hover { color: var(--ink); }
-.page.docs > .subnav a[aria-current] {
+.subnav::-webkit-scrollbar { display: none; }
+.subnav a { color: var(--muted); text-decoration: none; padding: 14px 0; transition: color 140ms var(--expo); }
+.subnav a:hover { color: var(--ink); }
+.subnav a[aria-current] {
   color: var(--ink);
   box-shadow: inset 0 -2px 0 var(--accent);
 }
-.page.docs > .docstree, .page.docs > .onpage { grid-row: 2 / span 60; }
 
 /* THE PAGE MENU: the split half of Copy page. A `<details>`, so it opens and
  * closes with no script; each row is an action with its one-line reason. */
@@ -864,6 +878,12 @@ h1 code, h2 code, h3 code, h4 code {
 }
 .docstree a:hover, .onpage a:hover, .onpage a:focus-visible { color: var(--accent); }
 
+/* ROWS ARE INDENTED UNDER THEIR GROUP, along a rail (user row 2): the
+ * reference site's tree hangs its rows off a hairline, and the current page's
+ * accent segment sits ON that rail rather than floating in a flat list. */
+.docstree .treegroup > a { margin-left: 0; padding-left: 13px; border-left: 1px solid var(--hair); }
+.docstree .treegroup > a[aria-current="page"] { border-left: 2px solid var(--accent); padding-left: 12px; box-shadow: none; }
+
 /* THE PLACE MARKER, and it is the sheet's own selection device rather than a
  * fourth one. The install picker's selected segment is a lighter fill and an
  * inset shadow (RFC-0106 M3, fourth round, K4); a shadow takes no space, so the
@@ -879,7 +899,14 @@ h1 code, h2 code, h3 code, h4 code {
 /* A sidebar group header is a chapter heading, not a kicker: the reference
  * site's tree speaks bold sans over quiet sans rows, and small-caps mono here
  * made the whole pane read as a file listing. */
-.treegroup > .eyebrow { margin: 0 0 4px; font: 600 var(--t-mono)/1.6 var(--sans); letter-spacing: 0; text-transform: none; color: var(--ink); }
+.treegroup > .eyebrow { margin: 0 0 4px; font: 600 var(--t-mono)/1.6 var(--sans); letter-spacing: 0; text-transform: none; color: var(--ink); display: flex; align-items: center; gap: 7px; }
+.treegroup > .eyebrow svg { width: 14px; height: 14px; color: var(--muted); }
+.subnav a { display: inline-flex; align-items: center; gap: 7px; }
+.subnav svg { width: 14px; height: 14px; }
+
+/* A control's caption is not prose (user row 3): dragging across Copy page
+ * selected its word instead of pressing it. */
+button, .btn, summary, .ostabs label { user-select: none; }
 
 /* The doc page's header row: crumbs left, the page's tools right, one line —
  * where the notice box and the button paragraph used to spend 90px between
@@ -890,6 +917,11 @@ h1 code, h2 code, h3 code, h4 code {
 .docutils > a:not(.btn) { color: var(--muted); text-decoration: none; transition: color 140ms var(--expo); }
 .docutils > a:not(.btn):hover { color: var(--accent); }
 .docutils .btn { min-height: 32px; padding: 6px 12px; text-decoration: none; }
+/* ONE SPLIT CONTROL, not a button floating near a chevron: the menu half
+ * joins the button it extends, sharing the seam — the reference site's own
+ * split-button anatomy. */
+.docutils .btn + .pagemenu { margin-left: calc(-1 * var(--s2) - 1px); }
+.docutils .btn + .pagemenu > summary { border-left: 0; }
 
 /* A reading page is not a landing: its sections breathe at half the landing's
  * rhythm, or the title floats 76px from its own first paragraph — and its
@@ -1545,6 +1577,12 @@ details.disc > p { max-width: var(--wide); }
   border-top: 1px solid var(--rule);
 }
 .band h2 { font-size: var(--t-h2); margin-bottom: var(--s2); }
+/* A DOCS SECTION'S SEAM STAYS IN ITS COLUMN (user: "content body borders
+ * conflict"): a full-bleed seam under a three-pane shell crosses the tree's
+ * rail and the right pane's margin, and three lines meeting at three angles
+ * read as a defect. The reference site divides docs sections inside the
+ * reading column and nowhere else. */
+.page.docs .band::before { left: 0; right: 0; }
 /* A kicker sits 8px over a heading and 24px over anything else. It was 8, 16 or
  * 32 depending on which page you were on (RFC-0106 M3, second round). */
 .band > .eyebrow + :not(h2) { margin-top: var(--s3); }

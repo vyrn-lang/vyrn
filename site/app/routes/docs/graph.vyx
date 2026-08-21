@@ -38,21 +38,15 @@ fn pager() -> Pager {
 fn graphStyle() -> String {
     return "min-width:" + graphWidth().toString() + "px"
 }
-
-/// The subnav row, with this section marked.
-fn subnav() -> String {
-    return docSubnav("graph")
-}
 </script>
 
 <template>
 <main class="page docs">
-    <nav class="subnav" aria-label="Documentation sections" v-html="subnav()"></nav>
     <aside class="docstree">
         <details class="treebox">
             <summary>Reference</summary>
             <div class="treegroup" v-for="g in tree()" :key="g.name">
-                <p class="eyebrow">{{ g.name }}</p>
+                <p class="eyebrow"><span class="slot" v-html="g.icon"></span>{{ g.name }}</p>
                 <a v-for="r in g.rows" :key="r.href" :href="r.href" :aria-current="r.here">{{ r.label }}</a>
             </div>
         </details>

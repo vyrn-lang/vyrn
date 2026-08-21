@@ -44,11 +44,16 @@ fn standing() -> String {
 </script>
 
 <template>
-<div id="root">
-    <!-- The first thing a keyboard reaches. A reference page puts a masthead
-         and a 23-link rail in front of the prose, and this jumps all of it. -->
-    <a class="skip" href="#main">Skip to content</a>
-    <header class="masthead">
+<!-- One root, no box: the layout language wants a single root element, and
+     `display: contents` keeps the masthead a viewport-level bar. -->
+<div class="shell">
+<!-- THE HEADER IS THE VIEWPORT'S (RFC-0106 M4 follow-up, user row 1): the
+     masthead and its border-bottom span the whole window, the reference
+     site's own shape, and the framed 1232px plate begins under it. Only the
+     backstage keeps its masthead inside its root, because it wears its own
+     shell. -->
+<a class="skip" href="#main">Skip to content</a>
+<header class="masthead">
         <a href="/index.html" class="wordmark">vyrn</a>
         <!-- THE FIVE GROUPS, AND THE DISCLOSURE THAT IS ONE ONLY ON A PHONE
              (RFC-0106 M1).
@@ -119,6 +124,7 @@ fn standing() -> String {
          next Tab went back to the masthead the reader had just skipped. This
          anchor has a box, has no size, and sits out of the grid flow, so focus
          lands here and the next Tab is the first link in the content. -->
+<div id="root">
     <div id="main" class="skip-target" tabindex="-1"></div>
     <slot/>
     <footer class="foot">
@@ -149,5 +155,6 @@ fn standing() -> String {
         <a href="/backstage.html" data-nav="hard"><Icon name="codex:checklist"/> Backstage — the design record</a>
         <span>{{ standing() }}</span>
     </footer>
+</div>
 </div>
 </template>

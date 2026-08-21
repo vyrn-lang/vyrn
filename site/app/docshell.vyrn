@@ -24,6 +24,12 @@
 import { ApiModule, apiGroups, apiHref } from "./docs"
 import { Chapter, chapters, chapterHref, chapterNumber, chapterTag } from "./guide"
 import { indexOf, substring } from "std/strings"
+// The glyphs beside group names and subnav rows — the same pinned collection
+// the `<Icon>` tag reads, through the same generator, so the sidebar cannot
+// carry a glyph the provider does not know.
+import { book, bookmark, file, archive, link, settings, activity, code } from icons("bytesize", "book bookmark file archive link settings activity code")
+import { Html, toHtmlString } from "std/html"
+import { icons, iconAttrs } from "std/icons"
 
 /// One row of the sidebar: where it goes, what it is called, and whether it is
 /// the page being read. `here` is `"page"` or "" — the value of `aria-current`,
@@ -32,7 +38,7 @@ export type TreeRow = { href: String, label: String, here: String }
 
 /// A named run of rows. The reference has four (the library's own groups); the
 /// book has one.
-export type TreeGroup = { name: String, rows: Array<TreeRow> }
+export type TreeGroup = { name: String, rows: Array<TreeRow>, icon: String }
 
 /// The link at the foot of the content: the page before this one in the tree and
 /// the page after it. An empty `href` means there is none, which is true at both
@@ -43,6 +49,25 @@ export type Pager = { prevHref: String, prevLabel: String, nextHref: String, nex
 /// carries no href, because a link to the page you are on is a link that does
 /// nothing.
 export type Crumb = { href: String, label: String }
+
+/// One glyph, drawn to the string a template splices with `v-html`. The glyph
+/// is decoration beside a printed name, so it ships as the collection drew it.
+fn draw(g: consume Html) -> String {
+    return toHtmlString(iconAttrs(g, "", "", ""))
+}
+
+/// The glyph for a group's name. A name with no glyph gets none — decoration
+/// is optional, rows are not.
+fn glyphOf(name: String) -> String {
+    if name == "Reference" { return draw(book()) }
+    if name == "The guide" { return draw(book()) }
+    if name == "Chapters" { return draw(bookmark()) }
+    if name == "Text and bytes" { return draw(file()) }
+    if name == "Data" { return draw(archive()) }
+    if name == "Web" { return draw(link()) }
+    if name == "Programs and tools" { return draw(settings()) }
+    return ""
+}
 
 /// `"page"` when `a` and `b` name the same page, and "" when they do not.
 fn mark(a: String, b: String) -> String {
@@ -61,13 +86,13 @@ export fn docsTree(current: String) -> Array<TreeGroup> {
         TreeRow { href: "/docs/graph.html", label: "The import graph", here: mark(current, "graph") },
         TreeRow { href: "/docs/editors.html", label: "Editors", here: mark(current, "editors") },
     ]
-    let mut out: Array<TreeGroup> = [TreeGroup { name: "Reference", rows: rows.copy() }]
+    let mut out: Array<TreeGroup> = [TreeGroup { name: "Reference", rows: rows.copy(), icon: glyphOf("Reference") }]
     for g in apiGroups() {
         let mut got: Array<TreeRow> = []
         for m in g.modules {
             got.push(TreeRow { href: apiHref(m.name), label: "std/" + m.name, here: mark(current, m.name) })
         }
-        out.push(TreeGroup { name: g.name.copy(), rows: got.copy() })
+        out.push(TreeGroup { name: g.name.copy(), rows: got.copy(), icon: glyphOf(g.name) })
     }
     return out
 }
@@ -76,12 +101,12 @@ export fn docsTree(current: String) -> Array<TreeGroup> {
 /// number the rail has always printed beside it.
 export fn guideTree(current: String) -> Array<TreeGroup> {
     let mut top: Array<TreeRow> = [TreeRow { href: "/guide.html", label: "Overview", here: mark(current, "index") }]
-    let mut out: Array<TreeGroup> = [TreeGroup { name: "The guide", rows: top.copy() }]
+    let mut out: Array<TreeGroup> = [TreeGroup { name: "The guide", rows: top.copy(), icon: glyphOf("The guide") }]
     let mut rows: Array<TreeRow> = []
     for c in chapters() {
         rows.push(TreeRow { href: chapterHref(c.slug), label: chapterTag(chapterNumber(c.slug)) + "  " + c.title, here: mark(current, c.slug) })
     }
-    out.push(TreeGroup { name: "Chapters", rows: rows.copy() })
+    out.push(TreeGroup { name: "Chapters", rows: rows.copy(), icon: glyphOf("Chapters") })
     return out
 }
 
@@ -205,10 +230,14 @@ export fn docSubnav(current: String) -> String {
         ["editors", "/docs/editors.html", "Editors"],
         ["graph", "/docs/graph.html", "Import graph"],
     ]
+    let looks = [draw(book()), draw(code()), draw(settings()), draw(activity())]
     let mut out = ""
-    for it in items {
+    let mut i = 0
+    while i < items.length {
+        let it = items[i]
         let markAttr = if it[0] == current { " aria-current=\"true\"" } else { "" }
-        out = out + "<a href=\"" + it[1] + "\"" + markAttr + ">" + it[2] + "</a>"
+        out = out + "<a href=\"" + it[1] + "\"" + markAttr + ">" + looks[i] + it[2] + "</a>"
+        i = i + 1
     }
     return out
 }

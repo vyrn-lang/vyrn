@@ -32,6 +32,7 @@ import { rfcPages, rfcSlug } from "./app/backstage"
 import { historyIsFixture, historyPath, historyCommand, releaseRows } from "./app/history"
 import { releaseTag } from "./app/repo"
 import { demoIsFixture, demoPath, demoCommand } from "./app/demo"
+import { docSubnav } from "./app/docshell"
 import { apiModules, apiEntries, apiHref, importLine } from "./app/docs"
 import { chapterSlugs, chapterHref } from "./app/guide"
 import { searchRows } from "./app/stdgraph"
@@ -238,6 +239,59 @@ fn markCurrent(html: String, path: String) -> String {
 /// nowhere else, so the 160 leaf pages compute the font sizes they computed
 /// before — the constraint M0 wrote down, held by an attribute that is either on
 /// a document or not, and checked by `isLanding` below.
+/// The documentation's area band, stamped under the header exactly as the
+/// navigation marker is stamped, and for the same reason: the layout is shared
+/// by every page and is not told which route it renders — the export is. A
+/// path outside the documentation gets no band, so the index and the install
+/// page stay as they are, and the backstage never reaches this pass.
+fn withSubnav(html: String, path: String) -> String {
+    let key = subnavKey(path)
+    if key.byteLength == 0 {
+        return html.copy()
+    }
+    let band = "<nav class=\"subnav\" aria-label=\"Documentation sections\">" + docSubnav(key) + "</nav>"
+    return match indexOf(html, "</header>") {
+        Some(at) => substring(html, 0, at + 9) + band + substring(html, at + 9, html.byteLength),
+        None => html.copy(),
+    }
+}
+
+/// Which documentation area a path belongs to, or "" for none. The two named
+/// pages go first: `/docs/editors` is under `/docs` and must not read as the
+/// reference.
+fn subnavKey(path: String) -> String {
+    if path == "/docs/editors" {
+        return "editors"
+    }
+    if path == "/docs/graph" {
+        return "graph"
+    }
+    if startsWith(path, "/guide") {
+        return "guide"
+    }
+    if startsWith(path, "/docs") {
+        return "reference"
+    }
+    return ""
+}
+
+test "the documentation band is stamped under the header, and only there" {
+    let shell = "<header class=\"masthead\">nav</header><main>body</main>"
+    let stamped = withSubnav(shell, "/docs/std/json")
+    assert(has(stamped, "</header><nav class=\"subnav\""))
+    assertEq(countOf(stamped, "aria-current=\"true\""), 1)
+    assert(has(stamped, "href=\"/docs.html\" aria-current"))
+    // The two named pages outrank their prefix, the book is the book, and a
+    // consumer page outside the documentation is left alone.
+    assertEq(subnavKey("/docs/editors"), "editors")
+    assertEq(subnavKey("/docs/graph"), "graph")
+    assertEq(subnavKey("/guide/ownership"), "guide")
+    assertEq(subnavKey("/docs"), "reference")
+    assertEq(subnavKey("/"), "")
+    assertEq(subnavKey("/install"), "")
+    assertEq(withSubnav(shell, "/install"), shell)
+}
+
 fn withLang(html: String, path: String) -> String {
     let attrs = if isLanding(path) { "<html lang=\"en\" data-landing>" } else { "<html lang=\"en\">" }
     return match indexOf(html, "<html>") {
@@ -474,7 +528,7 @@ fn exportPath(outDir: String, path: String) -> Int64 {
         print("FAIL \{path} -> \{doc.status}")
         return 1
     }
-    let document = relativize(withRedirect(withCards(withFeed(withIcon(withLang(markCurrent(doc.body, path), path))), path), path), path)
+    let document = relativize(withRedirect(withCards(withFeed(withIcon(withLang(withSubnav(markCurrent(doc.body, path), path), path))), path), path), path)
     let mut bad = emit("\{outDir}/\{name}", document)
     if isBackstage(path) {
         print("\{path} -> \{name} (\{doc.body.byteLength} bytes)")

@@ -30,7 +30,7 @@ import { mdUrl, askClaudeUrl } from "../../../pagemd"
 // THE DOCS SHELL (RFC-0106 M4). The left column is the whole reference, in the
 // library's own groups; the right is this page's own headings; the foot is the
 // module before and the module after, in the order the sidebar prints them.
-import { TreeGroup, Pager, docsTree, pagerFor, docSubnav } from "../../../docshell"
+import { TreeGroup, Pager, docsTree, pagerFor } from "../../../docshell"
 params { module: String }
 
 /// One module's whole page: its name, its header prose, and its exports.
@@ -137,16 +137,10 @@ fn pager(m: String) -> Pager {
 fn claudeHref(m: String) -> String {
     return askClaudeUrl(apiHref(m), "std/" + m)
 }
-
-/// The subnav row, with this section marked.
-fn subnav() -> String {
-    return docSubnav("reference")
-}
 </script>
 
 <template>
 <main class="page docs docpage">
-    <nav class="subnav" aria-label="Documentation sections" v-html="subnav()"></nav>
     <!-- THE LEFT PANE: the whole reference, in the library's own four groups,
          with this module marked. It replaced a rail that listed only this
          module's exports — furniture that told a reader where they were IN the
@@ -161,7 +155,7 @@ fn subnav() -> String {
         <details class="treebox">
             <summary>Reference</summary>
             <div class="treegroup" v-for="g in tree(data.name)" :key="g.name">
-                <p class="eyebrow">{{ g.name }}</p>
+                <p class="eyebrow"><span class="slot" v-html="g.icon"></span>{{ g.name }}</p>
                 <a v-for="r in g.rows" :key="r.href" :href="r.href" :aria-current="r.here">{{ r.label }}</a>
             </div>
         </details>
@@ -177,7 +171,7 @@ fn subnav() -> String {
             <a href="/docs.html#std">std</a>
             <span>{{ data.name }}</span>
         </nav>
-        <p class="docutils">
+        <div class="docutils">
             <a :href="apiSource(data.name)">Source</a>
             <a class="btn" :href="mdUrl(apiHref(data.name))" data-copy-md>Copy page</a>
             <details class="pagemenu">
@@ -187,7 +181,7 @@ fn subnav() -> String {
                     <a :href="claudeHref(data.name)" rel="noopener"><span>Open in Claude</span><span class="d">Ask Claude about this page</span></a>
                 </div>
             </details>
-        </p>
+        </div>
     </div>
 
     <section class="hero">
