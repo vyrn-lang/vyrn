@@ -243,7 +243,11 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.vyrn/tools
-          key: vyrn-nextest-${{ matrix.os }}-${{ hashFiles('vyrn.lock') }}
+          # `-v2-`: the audit added the `.vyrn-sha` certification marker to
+          # unpacked tool directories, and a pre-marker cache restores as a
+          # hit the resolver then treats as absent. The bump makes those
+          # caches miss once, so the populate step lays certified copies.
+          key: vyrn-nextest-v2-${{ matrix.os }}-${{ hashFiles('vyrn.lock') }}
       - name: Formatting gate
         # First, because it is seconds and its fix is mechanical — a reader gets
         # the verdict before the build spends five minutes.
@@ -529,7 +533,8 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.vyrn/tools
-          key: vyrn-tools-${{ hashFiles('vyrn.lock') }}
+          # `-v2-` for the same marker reason as the nextest cache above.
+          key: vyrn-tools-v2-${{ hashFiles('vyrn.lock') }}
       - name: Build vyrn
         working-directory: compiler
         run: cargo build --quiet -p vyrn-cli
