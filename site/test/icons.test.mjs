@@ -30,7 +30,16 @@ const out = path.join(here, "..", "..", "out");
 const SHELL = "layout.vyx";
 const SHELL_MARK = "Source on GitHub";
 /// The route templates that carry tags of their own, and the pages they make.
-const PAGE_TAGS = { "install.vyx": "install.html", "index.vyx": "index.html" };
+///
+/// KEYED BY THE PATH UNDER `routes/`, NOT BY THE FILE NAME (RFC-0106 M4). The
+/// reference landing gained four glyphs, and it is `docs/index.vyx` — a second
+/// `index.vyx`, which is what a directory of routes has one of per directory.
+/// The old basename key put two different templates under one name.
+const PAGE_TAGS = {
+  "install.vyx": "install.html",
+  "index.vyx": "index.html",
+  "docs/index.vyx": "docs.html",
+};
 
 /// Every `<Icon .../>` in a template, as `{ name, label }`.
 function tagsOf(src) {
@@ -58,6 +67,12 @@ async function htmlFiles(dir) {
   return found;
 }
 
+/// A template's path under `routes/`, with forward slashes on every platform —
+/// the key `PAGE_TAGS` uses.
+function rel(p) {
+  return path.relative(routes, p).split(path.sep).join("/");
+}
+
 async function templates(dir) {
   const found = [];
   for (const e of await readdir(dir, { withFileTypes: true })) {
@@ -71,7 +86,7 @@ async function templates(dir) {
 test("every template carrying tags is one this gate maps to pages", async () => {
   const carrying = [];
   for (const t of await templates(routes)) {
-    if (tagsOf(await readFile(t, "utf8")).length > 0) carrying.push(path.basename(t));
+    if (tagsOf(await readFile(t, "utf8")).length > 0) carrying.push(rel(t));
   }
   carrying.sort();
   assert.deepEqual(

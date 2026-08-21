@@ -1,0 +1,104 @@
+<script>
+// GET /docs/graph — the standard library's import graph, on a page of its own.
+//
+// IT WAS 25,347 OF THE REFERENCE LANDING'S 52,815 BYTES (RFC-0106 M3, deferred
+// row H4). One inline `<svg>` with a path per import and a group per module is
+// the single heaviest artefact the site draws, and it sat under the module list
+// on the page every reader of the reference arrives at — so every one of them
+// downloaded the drawing whether or not they scrolled to it.
+//
+// M0's ceiling for that landing is 40,000 bytes. The two honest ways to meet it
+// were to fetch the drawing on demand or to give it its own URL; this is the
+// second, because it is also the better page. A reader who wants the graph wants
+// to look at it, and it now has the whole column, a caption that can say what
+// the geometry means, and a link a reader can send to somebody.
+//
+// Nothing about the drawing changed. `site/app/stdgraph.vyrn` computes every
+// coordinate in Vyrn while the site is built, and `widgets.js` lights one
+// module's wires on hover exactly as it did on the landing.
+import { Head } from "std/ui"
+import { pageHeadOf } from "../../nav"
+import { GraphNode, GraphEdge, searchRows, graphNodes, graphEdges, graphViewBox, graphWidth, edgeCount, leafCount } from "../../stdgraph"
+import { TreeGroup, Pager, docsTree, pagerFor } from "../../docshell"
+
+export fn head() -> Head {
+    return pageHeadOf("/docs/graph")
+}
+
+fn tree() -> Array<TreeGroup> {
+    return docsTree("graph")
+}
+
+fn pager() -> Pager {
+    return pagerFor(tree())
+}
+
+/// The width the graph needs, as a style. Below it the drawing scrolls inside
+/// its own box; the page never scrolls sideways.
+fn graphStyle() -> String {
+    return "min-width:" + graphWidth().toString() + "px"
+}
+</script>
+
+<template>
+<main class="page docs">
+    <aside class="docstree">
+        <details class="treebox">
+            <summary>Reference</summary>
+            <div class="treegroup" v-for="g in tree()" :key="g.name">
+                <p class="eyebrow">{{ g.name }}</p>
+                <a v-for="r in g.rows" :key="r.href" :href="r.href" :aria-current="r.here">{{ r.label }}</a>
+            </div>
+        </details>
+    </aside>
+
+    <nav class="crumbs" aria-label="Breadcrumb">
+        <a href="/docs.html">Reference</a>
+        <span>The import graph</span>
+    </nav>
+
+    <section class="hero">
+        <h1 class="display">{{ edgeCount() }} imports between {{ searchRows().length }} modules</h1>
+        <p class="lede">Every wire is an <code>import</code> line in <code>std/</code>, read while this page was built. {{ leafCount() }} modules import nothing else in the library.</p>
+    </section>
+
+    <section class="band" id="graph">
+        <p class="eyebrow">The graph</p>
+        <h2>The library, as it depends on itself</h2>
+        <p>A module sits in the column after the deepest thing it imports, so the drawing reads left to right: nothing on the left needs anything on the right. Point at a module to light its wires.</p>
+        <div class="plate">
+            <div class="plate-head">
+                <span class="pill">Built</span>
+                <span class="eyebrow">point at a module to light its wires</span>
+            </div>
+            <div class="stage scroller">
+                <!-- `role="group"` and not `role="img"` (RFC-0105 M4). Every node
+                     is a link, so every node is a tab stop; under `role="img"`
+                     those stops were present in the tab order and absent from the
+                     accessibility tree, which is the worst of both. -->
+                <svg class="graph" :viewBox="graphViewBox()" :style="graphStyle()" role="group" aria-label="The import graph of the standard library. Every module is a link, named with what it imports and what imports it.">
+                    <path class="wire" v-for="e in graphEdges()" :key="e.id" :d="e.d" :data-from="e.from" :data-to="e.to"/>
+                    <g class="node" v-for="n in graphNodes()" :key="n.name" :data-m="n.name" :data-uses="n.uses" :data-usedby="n.usedBy">
+                        <a :href="n.href" :aria-label="n.label">
+                            <rect :x="n.hx" :y="n.hy" :width="n.w" height="18" class="hit"/>
+                            <circle :cx="n.x" :cy="n.y" r="3"/>
+                            <text :x="n.tx" :y="n.ty">{{ n.name }}</text>
+                        </a>
+                    </g>
+                </svg>
+            </div>
+            <p class="cap">Read from the <code>import</code> lines of <code>std/*.vyrn</code>. An import inside a code quote is a string, not a wire.</p>
+        </div>
+    </section>
+
+    <nav class="pager" aria-label="Reference">
+        <a class="prev" v-if="pager().prevHref.byteLength > 0" :href="pager().prevHref"><span class="eyebrow">Previous</span>{{ pager().prevLabel }}</a>
+        <a class="next" v-if="pager().nextHref.byteLength > 0" :href="pager().nextHref"><span class="eyebrow">Next</span>{{ pager().nextLabel }}</a>
+    </nav>
+
+    <aside class="onpage">
+        <p class="eyebrow">On this page</p>
+        <a href="#graph">The library, as it depends on itself</a>
+    </aside>
+</main>
+</template>

@@ -26,7 +26,7 @@
 ///
 /// Every other route publishes flat, for the same reason (see `app/nav.vyrn`).
 import { pages } from "std/ui"
-import { route, rootPath, philosophyPath, whyVyrnPath, comparePath, installPath, editorsPath, docsEditorsPath, releasesPath, docsPath, explorePath, guidePath, playPath, backstagePath, backstageBenchmarksPath, hrefDocsStd, hrefGuide, hrefBackstageRfcs, hrefExplore } from pages("./app/routes")
+import { route, rootPath, philosophyPath, whyVyrnPath, comparePath, installPath, editorsPath, docsEditorsPath, docsGraphPath, releasesPath, docsPath, explorePath, guidePath, playPath, backstagePath, backstageBenchmarksPath, hrefDocsStd, hrefGuide, hrefBackstageRfcs, hrefExplore } from pages("./app/routes")
 import { published, navRows, hrefOf, upTo } from "./app/nav"
 import { rfcPages, rfcSlug } from "./app/backstage"
 import { historyIsFixture, historyPath, historyCommand, releaseRows } from "./app/history"
@@ -52,7 +52,7 @@ import { startsWith } from "std/strpred"
 /// a module added to `std/` is exported here on the next build with nothing
 /// written by hand.
 fn sitePaths() -> Array<String> {
-    let mut out: Array<String> = [rootPath(), whyVyrnPath(), comparePath(), installPath(), docsEditorsPath(), releasesPath(), docsPath(), guidePath(), explorePath(), playPath()]
+    let mut out: Array<String> = [rootPath(), whyVyrnPath(), comparePath(), installPath(), docsEditorsPath(), docsGraphPath(), releasesPath(), docsPath(), guidePath(), explorePath(), playPath()]
     // The two old paths, as stubs. They are routes like any other — a document
     // and a payload — and they are published for the reason `redirects()` below
     // gives (RFC-0106 M1).
@@ -166,6 +166,12 @@ fn currentNav(path: String) -> String {
         return hrefOf("/install")
     }
     if startsWith(path, "/docs/std/") {
+        return hrefOf("/docs")
+    }
+    // `/docs/graph` is the reference's own drawing, moved off the landing by
+    // RFC-0106 M4. It marks Reference, which is the row its URL and its group
+    // both name — unlike the page below it.
+    if path == "/docs/graph" {
         return hrefOf("/docs")
     }
     if startsWith(path, "/docs/") {

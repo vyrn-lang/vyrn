@@ -26,23 +26,41 @@ import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { shellHtml } from "../../code"
 import { features, steps, implHref, extensionDir, serverDir } from "../../editors"
+// THE DOCS SHELL (RFC-0106 M4). This page's URL is under the reference, so it
+// wears the reference's own sidebar and its own pager.
+import { TreeGroup, Pager, docsTree, pagerFor } from "../../docshell"
 
 export fn head() -> Head {
     return pageHeadOf("/docs/editors")
 }
+
+fn tree() -> Array<TreeGroup> {
+    return docsTree("editors")
+}
+
+fn pager() -> Pager {
+    return pagerFor(tree())
+}
 </script>
 
 <template>
-<main class="page">
-    <aside class="rail">
-        <a href="#what"><span class="n">01</span>what you get</a>
-        <a href="#features"><span class="n">02</span>every feature</a>
-        <a href="#get"><span class="n">03</span>how to get it</a>
-        <a href="#other"><span class="n">04</span>other editors</a>
+<main class="page docs">
+    <aside class="docstree">
+        <details class="treebox">
+            <summary>Reference</summary>
+            <div class="treegroup" v-for="g in tree()" :key="g.name">
+                <p class="eyebrow">{{ g.name }}</p>
+                <a v-for="r in g.rows" :key="r.href" :href="r.href" :aria-current="r.here">{{ r.label }}</a>
+            </div>
+        </details>
     </aside>
 
+    <nav class="crumbs" aria-label="Breadcrumb">
+        <a href="/docs.html">Reference</a>
+        <span>Editors</span>
+    </nav>
+
     <section class="hero" id="what">
-        <p class="eyebrow">Editors</p>
         <h1 class="display">One extension, one server</h1>
         <p class="lede">VS Code support ships in this repository: a client of about five hundred lines of plain JavaScript, and <code>vyrn-lsp</code>, which answers every question about the language by calling the same compiler front end <code>vyrn check</code> calls. That is the whole of it — there is no second analyzer to disagree with the first, and an error in your editor is the error your build will print.</p>
         <p class="notice">It is not on a marketplace yet. Every release publishes the extension as a single <code>.vsix</code> — one file for every platform, because the extension is JavaScript and the only half with an architecture is the server, which ships in the platform archive beside <code>vyrn</code>.</p>
@@ -94,5 +112,18 @@ export fn head() -> Head {
         <p>There is one extension and it is the one above. But <code>vyrn-lsp</code> is an ordinary language server that speaks JSON-RPC over stdin and stdout, and knows nothing about VS Code: any editor with a generic LSP client can start the binary and get the whole table above except the lenses, which are the client's own drawing. There is no socket mode and no port to connect to — a client that cannot spawn a process cannot use it.</p>
         <p>The rest of what the VS Code extension contributes is data any editor can read: the grammar is TextMate JSON, and the snippets are one flat file.</p>
     </section>
+
+    <nav class="pager" aria-label="Reference">
+        <a class="prev" v-if="pager().prevHref.byteLength > 0" :href="pager().prevHref"><span class="eyebrow">Previous</span>{{ pager().prevLabel }}</a>
+        <a class="next" v-if="pager().nextHref.byteLength > 0" :href="pager().nextHref"><span class="eyebrow">Next</span>{{ pager().nextLabel }}</a>
+    </nav>
+
+    <aside class="onpage">
+        <p class="eyebrow">On this page</p>
+        <a href="#what">What you get</a>
+        <a href="#features">Every feature</a>
+        <a href="#get">How to get it</a>
+        <a href="#other">Other editors</a>
+    </aside>
 </main>
 </template>

@@ -1,0 +1,190 @@
+/// The documentation shell (RFC-0106 M4).
+///
+/// Three pages carried three different partial layouts: a reference module page
+/// had an export index in the left rail, a guide chapter had the book's contents
+/// in the same rail, and `/docs/editors` had four numbered section links. None of
+/// the three could tell a reader where the page sat in the whole of the
+/// documentation, and none had a way forward: a reader who finished `std/json`
+/// had the browser's Back button and nothing else.
+///
+/// So there is one shell now, and this file is the half of it that is data. The
+/// other half is `.page.docs` in `site/public/style.css`, which is three columns:
+/// the tree on the left, the content in the middle, "On this page" on the right.
+///
+/// EVERY ROW IS GENERATED. The reference tree is `apiGroups()`, the same
+/// generator the reference landing renders; the book's tree is `chapters()`, the
+/// same one `/guide` renders. A module added to `std/` or a chapter added to the
+/// book is in the sidebar of every page of its section on the next build, with
+/// nothing written here.
+///
+/// The pager is derived from the tree rather than from a second list, and that is
+/// the point of `pagerFor`: it takes the groups the sidebar was BUILT from and
+/// finds the marked row's neighbours in reading order. A prev/next that came from
+/// its own table could point somewhere the sidebar does not.
+import { ApiModule, apiGroups, apiHref } from "./docs"
+import { Chapter, chapters, chapterHref, chapterNumber, chapterTag } from "./guide"
+
+/// One row of the sidebar: where it goes, what it is called, and whether it is
+/// the page being read. `here` is `"page"` or "" — the value of `aria-current`,
+/// where "" is the attribute's own way of saying "not this one".
+export type TreeRow = { href: String, label: String, here: String }
+
+/// A named run of rows. The reference has four (the library's own groups); the
+/// book has one.
+export type TreeGroup = { name: String, rows: Array<TreeRow> }
+
+/// The link at the foot of the content: the page before this one in the tree and
+/// the page after it. An empty `href` means there is none, which is true at both
+/// ends of every section.
+export type Pager = { prevHref: String, prevLabel: String, nextHref: String, nextLabel: String }
+
+/// One step of the breadcrumb above the h1. The last one is the page itself and
+/// carries no href, because a link to the page you are on is a link that does
+/// nothing.
+export type Crumb = { href: String, label: String }
+
+/// `"page"` when `a` and `b` name the same page, and "" when they do not.
+fn mark(a: String, b: String) -> String {
+    return if a == b { "page" } else { "" }
+}
+
+/// The reference's sidebar: the three pages that are the reference itself, then
+/// every module in the library's own four groups.
+///
+/// `current` is a module name — `"json"` — or one of the three page keys
+/// `"index"`, `"graph"` and `"editors"`, so one function serves all four kinds of
+/// page under `/docs`.
+export fn docsTree(current: String) -> Array<TreeGroup> {
+    let mut rows: Array<TreeRow> = [
+        TreeRow { href: "/docs.html", label: "Overview", here: mark(current, "index") },
+        TreeRow { href: "/docs/graph.html", label: "The import graph", here: mark(current, "graph") },
+        TreeRow { href: "/docs/editors.html", label: "Editors", here: mark(current, "editors") },
+    ]
+    let mut out: Array<TreeGroup> = [TreeGroup { name: "Reference", rows: rows.copy() }]
+    for g in apiGroups() {
+        let mut got: Array<TreeRow> = []
+        for m in g.modules {
+            got.push(TreeRow { href: apiHref(m.name), label: "std/" + m.name, here: mark(current, m.name) })
+        }
+        out.push(TreeGroup { name: g.name.copy(), rows: got.copy() })
+    }
+    return out
+}
+
+/// The book's sidebar: the landing, then every chapter in reading order with the
+/// number the rail has always printed beside it.
+export fn guideTree(current: String) -> Array<TreeGroup> {
+    let mut top: Array<TreeRow> = [TreeRow { href: "/guide.html", label: "Overview", here: mark(current, "index") }]
+    let mut out: Array<TreeGroup> = [TreeGroup { name: "The guide", rows: top.copy() }]
+    let mut rows: Array<TreeRow> = []
+    for c in chapters() {
+        rows.push(TreeRow { href: chapterHref(c.slug), label: chapterTag(chapterNumber(c.slug)) + "  " + c.title, here: mark(current, c.slug) })
+    }
+    out.push(TreeGroup { name: "Chapters", rows: rows.copy() })
+    return out
+}
+
+/// The pager for whichever tree it is handed: the marked row's neighbours, read
+/// across the groups in the order the sidebar prints them.
+///
+/// A tree with nothing marked — the two landings — answers with two empty hrefs,
+/// and the template draws nothing.
+export fn pagerFor(groups: Array<TreeGroup>) -> Pager {
+    let mut flat: Array<TreeRow> = []
+    for g in groups {
+        for r in g.rows {
+            flat.push(TreeRow { href: r.href.copy(), label: r.label.copy(), here: r.here.copy() })
+        }
+    }
+    let mut at = 0 - 1
+    let mut i = 0
+    while i < flat.length {
+        if flat[i].here == "page" {
+            at = i
+        }
+        i = i + 1
+    }
+    if at < 0 {
+        return Pager { prevHref: "", prevLabel: "", nextHref: "", nextLabel: "" }
+    }
+    let back = at - 1
+    let ahead = at + 1
+    return Pager {
+        prevHref: if back >= 0 { flat[back].href.copy() } else { "" },
+        prevLabel: if back >= 0 { flat[back].label.copy() } else { "" },
+        nextHref: if ahead < flat.length { flat[ahead].href.copy() } else { "" },
+        nextLabel: if ahead < flat.length { flat[ahead].label.copy() } else { "" },
+    }
+}
+
+/// How many pages a tree holds. The templates print it under the sidebar, and
+/// the tests below check the two trees cover their sections.
+export fn treeSize(groups: Array<TreeGroup>) -> Int64 {
+    let mut n = 0
+    for g in groups {
+        n = n + g.rows.length
+    }
+    return n
+}
+
+test "the reference tree carries every module the library documents, once" {
+    let tree = docsTree("json")
+    let mut modules = 0
+    for g in tree {
+        if g.name != "Reference" {
+            modules = modules + g.rows.length
+        }
+    }
+    let mut all = 0
+    for g in apiGroups() {
+        all = all + g.modules.length
+    }
+    assertEq(modules, all)
+    assertEq(treeSize(tree), all + 3)
+}
+
+test "exactly one row is marked, and it is the page that asked" {
+    for tree in [docsTree("json"), docsTree("editors"), guideTree("ownership")] {
+        let mut marked = 0
+        for g in tree {
+            for r in g.rows {
+                if r.here == "page" {
+                    marked = marked + 1
+                }
+            }
+        }
+        assertEq(marked, 1)
+    }
+    // A landing marks its own Overview row, so the tree always says where the
+    // reader is — including on the page the tree hangs off.
+    assertEq(docsTree("index")[0].rows[0].here, "page")
+    assertEq(guideTree("index")[0].rows[0].here, "page")
+    // And a name no section has marks nothing rather than marking the first row.
+    let none = pagerFor(docsTree("nope"))
+    assertEq(none.prevHref, "")
+    assertEq(none.nextHref, "")
+}
+
+test "the pager walks the tree the sidebar prints" {
+    // The first page of the reference has no previous, and the row after it is
+    // the graph — which is the sidebar's own second row.
+    let first = pagerFor(docsTree("index"))
+    assertEq(first.prevHref, "")
+    assertEq(first.nextHref, "/docs/graph.html")
+    // A module in the middle has both, and both are rows of the tree.
+    let mid = pagerFor(docsTree("json"))
+    assert(mid.prevHref.byteLength > 0)
+    assert(mid.nextHref.byteLength > 0)
+    // The book's first chapter follows its own overview.
+    let book = guideTree(chapters()[0].slug)
+    let start = pagerFor(book)
+    assertEq(start.prevHref, "/guide.html")
+    // And the last chapter is the end of the book.
+    let end = pagerFor(guideTree(chapters()[chapters().length - 1].slug))
+    assertEq(end.nextHref, "")
+    assert(end.prevHref.byteLength > 0)
+}
+
+test "the book's tree covers the book" {
+    assertEq(treeSize(guideTree("index")), chapters().length + 1)
+}

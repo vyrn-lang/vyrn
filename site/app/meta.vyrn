@@ -36,6 +36,7 @@ export fn pageMetas() -> Array<PageMeta> {
         PageMeta { path: "/compare", title: "Compare — Vyrn", blurb: "Vyrn against C, Rust and node on eight Benchmarks Game programs, with every raw reading published." },
         PageMeta { path: "/why-vyrn", title: "Why Vyrn — Vyrn", blurb: "Intent over mechanism: state what must be true of a value, and what a function does with its argument. And the six things Vyrn refuses." },
         PageMeta { path: "/docs/editors", title: "Editors — Vyrn", blurb: "One VS Code extension and one language server, both in this repository, both answering from the compiler front end itself." },
+        PageMeta { path: "/docs/graph", title: "The import graph — Vyrn", blurb: "Every import between the standard library's modules, drawn from the import lines themselves while the page was built." },
     ]
 }
 
@@ -58,7 +59,10 @@ export fn hasMeta(path: String) -> Bool {
 
 test "every row is a consumer path with a sentence on it" {
     let all = pageMetas()
-    assertEq(all.length, 10)
+    // Eleven since RFC-0106 M4: the import graph left the reference landing and
+    // became a page, so it names itself here like every other page a reader can
+    // share.
+    assertEq(all.length, 11)
     for m in all {
         assert(startsWith(m.path, "/"))
         assert(m.title.byteLength > 0)
