@@ -24,7 +24,7 @@
 /// module added to `std/` is in it on the next build.
 import { moduleDeps } from "./deps"
 import { depUses, depUsedBy, depDepth, depExamples } from moduleDeps("../../std", "../../examples")
-import { ApiModule, ApiEntry, apiModules, apiEntries, apiHref } from "./docs"
+import { ApiModule, ApiEntry, ApiGroup, apiModules, apiGroups, apiEntries, apiHref } from "./docs"
 import { joinWith, toLower, substring } from "std/strings"
 import { escapeHtml } from "./code"
 
@@ -84,6 +84,37 @@ export fn searchRows() -> Array<SearchRow> {
                 q: toLower(m.name + " " + joined + " " + plainText(m.summary)),
                 e: joined,
             })
+    }
+    return out
+}
+
+/// One named group of index rows (RFC-0106 M3). The reference landing prints
+/// the groups; the search filters the rows inside them, and a group whose rows
+/// are all hidden hides itself in the sheet with `:has`.
+export type SearchGroup = { name: String, rows: Array<SearchRow> }
+
+/// The index, in `docs.vyrn`'s groups and in its order.
+export fn searchGroups() -> Array<SearchGroup> {
+    let rows = searchRows()
+    let mut out: Array<SearchGroup> = []
+    for g in apiGroups() {
+        let mut got: Array<SearchRow> = []
+        for m in g.modules {
+            for r in rows {
+                if r.name == m.name {
+                    got.push(SearchRow {
+                            name: r.name.copy(),
+                            href: r.href.copy(),
+                            summary: r.summary.copy(),
+                            count: r.count,
+                            exports: r.exports.copy(),
+                            q: r.q.copy(),
+                            e: r.e.copy(),
+                        })
+                }
+            }
+        }
+        out.push(SearchGroup { name: g.name.copy(), rows: got.copy() })
     }
     return out
 }

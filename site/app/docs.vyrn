@@ -47,6 +47,63 @@ export fn apiModules() -> Array<ApiModule> {
     return out
 }
 
+/// One named group of the reference index, and the modules in it (RFC-0106 M3).
+export type ApiGroup = { name: String, modules: Array<ApiModule> }
+
+/// The group a module belongs to.
+///
+/// THIS IS THE ONE EDITORIAL LINE IN THE REFERENCE, and it is a decision rather
+/// than an oversight. The LIST is generated — `apiModules()` reads `std/` — so a
+/// new module can never be missing from the page; what a table cannot do is know
+/// that `jsonread` is data and `tw` is web. A name this function has not heard
+/// of lands in the last group, visibly, which is the failure a reader can see
+/// and a maintainer can fix; `docs.vyrn`'s own test asserts that the groups
+/// still add up to every module `std/` has.
+fn groupOf(m: String) -> String {
+    let text = ["strings", "strpred", "text", "scan", "codecs", "hash", "num"]
+    let data = ["json", "jsonread", "jsondec", "von", "arrays", "math", "slots", "stream", "storage", "random", "symbolmap"]
+    let web = ["http", "rpc", "connect", "openapi", "graphql", "html", "ui", "vyx", "vyx-hints", "tw", "icons", "i18n"]
+    for n in text {
+        if n == m {
+            return "Text and bytes"
+        }
+    }
+    for n in data {
+        if n == m {
+            return "Data"
+        }
+    }
+    for n in web {
+        if n == m {
+            return "Web"
+        }
+    }
+    return "Programs and tools"
+}
+
+/// The group names, in the order the page prints them.
+fn groupNames() -> Array<String> {
+    return ["Text and bytes", "Data", "Web", "Programs and tools"]
+}
+
+/// Every documented module, in named groups. A group with nothing in it is not
+/// emitted, so the page never prints a heading over an empty column.
+export fn apiGroups() -> Array<ApiGroup> {
+    let mut out: Array<ApiGroup> = []
+    for g in groupNames() {
+        let mut mods: Array<ApiModule> = []
+        for m in apiModules() {
+            if groupOf(m.name) == g {
+                mods.push(ApiModule { name: m.name.copy(), summary: m.summary.copy(), count: m.count })
+            }
+        }
+        if mods.length > 0 {
+            out.push(ApiGroup { name: g.copy(), modules: mods.copy() })
+        }
+    }
+    return out
+}
+
 /// Whether `m` names a module the reference covers.
 export fn apiKnown(m: String) -> Bool {
     for name in docModules() {
@@ -206,6 +263,19 @@ test "a summary does not repeat the module's own name" {
     assertEq(shorten("json", "std/json — the value tree."), "the value tree.")
     assertEq(shorten("json", "std/json (RFC-0059) — the value tree."), "(RFC-0059) — the value tree.")
     assertEq(shorten("fallible", "`Fallible` — the protocol."), "`Fallible` — the protocol.")
+}
+
+test "the groups hold every module, once" {
+    let mut seen = 0
+    for g in apiGroups() {
+        assert(g.name.byteLength > 0)
+        assert(g.modules.length > 0)
+        seen = seen + g.modules.length
+    }
+    // Every module `std/` has is in exactly one group. A new module nobody
+    // classified still lands in the last group, so this cannot fail by
+    // forgetting one — only by a group listing a name twice.
+    assertEq(seen, apiModules().length)
 }
 
 test "a module page and its source are one link each" {
