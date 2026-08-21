@@ -559,3 +559,17 @@ holding five sentences — a page that was mostly its own margins. It is a docs
 page now: the book's tree with Overview marked, the claim with the how-to-read
 sentence folded into its lede, the 13-chapter grid immediately after, and one
 compact note about the programs. 2,600px of page became 1,680.
+
+**R10 (orchestrator, from the user's Copy-page anatomy).** The reference
+site's docs chrome, taken where it is honest: a docs subnav row under the
+masthead naming the four areas (one generated function, current marked with
+the masthead's own underline device), the Copy-page control split into button
+plus `<details>` menu — View as Markdown and Open in Claude, both real
+because every documentation page publishes a markdown twin and
+`askClaudeUrl` hands claude.ai the twin's absolute URL — and the reference
+landing converted to the shell it had somehow missed. Not taken: the MCP
+menu items, because this site has no MCP server, and a masthead GitHub icon,
+because the 320px row has zero slack (the footer carries the repo link). One
+collision en route: the panel was first classed `.menu`, which the masthead's
+disclosure already owns at `display: contents` — a zero-width dropdown found
+by measuring the open panel in the live DOM.

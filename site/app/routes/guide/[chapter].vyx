@@ -11,12 +11,12 @@
 import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
 import { pageHead } from "../../nav"
 import { Chapter, Section, chapters, chapterOf, chapterKnown, chapterNumber, chapterTag, chapterHref, chapterNavHtml, sectionBody, sectionEyebrow } from "../../guide"
-import { mdUrl } from "../../pagemd"
+import { mdUrl, askClaudeUrl } from "../../pagemd"
 import { inlineCode } from "../../code"
 // THE DOCS SHELL (RFC-0106 M4). The same three panes the reference wears: the
 // book's contents on the left, this chapter's sections on the right, the chapter
 // before and after at the foot.
-import { TreeGroup, guideTree } from "../../docshell"
+import { TreeGroup, guideTree, docSubnav } from "../../docshell"
 params { chapter: String }
 
 /// One chapter, with the number the rail prints beside it.
@@ -48,10 +48,21 @@ fn tree(here: String) -> Array<TreeGroup> {
 fn sectionHref(s: Section) -> String {
     return "#" + s.anchor
 }
+
+/// The Open-in-Claude link for this chapter.
+fn claudeHref(slug: String, title: String) -> String {
+    return askClaudeUrl(chapterHref(slug), title)
+}
+
+/// The subnav row, with this section marked.
+fn subnav() -> String {
+    return docSubnav("guide")
+}
 </script>
 
 <template>
 <main class="page docs">
+    <nav class="subnav" aria-label="Documentation sections" v-html="subnav()"></nav>
     <aside class="docstree">
         <details class="treebox">
             <summary>The guide</summary>
@@ -72,6 +83,13 @@ fn sectionHref(s: Section) -> String {
                  `widgets.js` turns a press into a clipboard write when the
                  browser has a clipboard. Without script it is the file. -->
             <a class="btn" :href="mdUrl(chapterHref(data.chapter.slug))" data-copy-md>Copy page</a>
+            <details class="pagemenu">
+                <summary aria-label="More page actions">▾</summary>
+                <div class="acts">
+                    <a :href="mdUrl(chapterHref(data.chapter.slug))"><span>View as Markdown</span><span class="d">This page as plain text</span></a>
+                    <a :href="claudeHref(data.chapter.slug, data.chapter.title)" rel="noopener"><span>Open in Claude</span><span class="d">Ask Claude about this page</span></a>
+                </div>
+            </details>
         </p>
     </div>
 

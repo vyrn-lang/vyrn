@@ -26,11 +26,11 @@ import { examplesUsing, usesOfModule, usedByModule } from "../../../stdgraph"
 import { blob } from "../../../repo"
 import { Head, PageError, ParamQuery, noHead, notFound, paramQuery } from "std/ui"
 import { pageHead } from "../../../nav"
-import { mdUrl } from "../../../pagemd"
+import { mdUrl, askClaudeUrl } from "../../../pagemd"
 // THE DOCS SHELL (RFC-0106 M4). The left column is the whole reference, in the
 // library's own groups; the right is this page's own headings; the foot is the
 // module before and the module after, in the order the sidebar prints them.
-import { TreeGroup, Pager, docsTree, pagerFor } from "../../../docshell"
+import { TreeGroup, Pager, docsTree, pagerFor, docSubnav } from "../../../docshell"
 params { module: String }
 
 /// One module's whole page: its name, its header prose, and its exports.
@@ -132,10 +132,21 @@ fn tree(m: String) -> Array<TreeGroup> {
 fn pager(m: String) -> Pager {
     return pagerFor(docsTree(m))
 }
+
+/// The Open-in-Claude link for this module's page.
+fn claudeHref(m: String) -> String {
+    return askClaudeUrl(apiHref(m), "std/" + m)
+}
+
+/// The subnav row, with this section marked.
+fn subnav() -> String {
+    return docSubnav("reference")
+}
 </script>
 
 <template>
 <main class="page docs docpage">
+    <nav class="subnav" aria-label="Documentation sections" v-html="subnav()"></nav>
     <!-- THE LEFT PANE: the whole reference, in the library's own four groups,
          with this module marked. It replaced a rail that listed only this
          module's exports — furniture that told a reader where they were IN the
@@ -169,6 +180,13 @@ fn pager(m: String) -> Pager {
         <p class="docutils">
             <a :href="apiSource(data.name)">Source</a>
             <a class="btn" :href="mdUrl(apiHref(data.name))" data-copy-md>Copy page</a>
+            <details class="pagemenu">
+                <summary aria-label="More page actions">▾</summary>
+                <div class="acts">
+                    <a :href="mdUrl(apiHref(data.name))"><span>View as Markdown</span><span class="d">This page as plain text</span></a>
+                    <a :href="claudeHref(data.name)" rel="noopener"><span>Open in Claude</span><span class="d">Ask Claude about this page</span></a>
+                </div>
+            </details>
         </p>
     </div>
 

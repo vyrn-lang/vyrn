@@ -14,7 +14,7 @@ import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { Chapter, chapters, chapterHref, chapterNumber, chapterTag, blockCount } from "../../guide"
 import { inlineCode } from "../../code"
-import { TreeGroup, guideTree } from "../../docshell"
+import { TreeGroup, guideTree, docSubnav } from "../../docshell"
 
 export fn head() -> Head {
     return pageHeadOf("/guide")
@@ -29,10 +29,16 @@ fn tagOf(c: Chapter) -> String {
 fn tree() -> Array<TreeGroup> {
     return guideTree("index")
 }
+
+/// The subnav row, with this section marked.
+fn subnav() -> String {
+    return docSubnav("guide")
+}
 </script>
 
 <template>
 <main class="page docs docpage">
+    <nav class="subnav" aria-label="Documentation sections" v-html="subnav()"></nav>
     <aside class="docstree">
         <details class="treebox">
             <summary>The guide</summary>

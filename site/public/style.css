@@ -772,6 +772,55 @@ h1 code, h2 code, h3 code, h4 code {
 .page.docs > .docstree { grid-column: 1 / 3; }
 .page.docs > .onpage { grid-column: 11 / 13; }
 
+/* THE DOCS SUBNAV: the reference site's second header — the documentation's
+ * areas in one quiet row under the masthead, spanning the sheet, current area
+ * marked with the masthead's own underline device. It scrolls on a phone the
+ * way the masthead nav does, and draws no bar doing it. */
+.page.docs > .subnav {
+  grid-column: 1 / 13;
+  display: flex; gap: var(--s3); align-items: center;
+  min-height: 44px;
+  border-bottom: 1px solid var(--hair);
+  font: 500 var(--t-mono)/1 var(--sans);
+  overflow-x: auto; scrollbar-width: none; white-space: nowrap;
+}
+.page.docs > .subnav::-webkit-scrollbar { display: none; }
+.page.docs > .subnav a { color: var(--muted); text-decoration: none; padding: 14px 0; transition: color 140ms var(--expo); }
+.page.docs > .subnav a:hover { color: var(--ink); }
+.page.docs > .subnav a[aria-current] {
+  color: var(--ink);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* THE PAGE MENU: the split half of Copy page. A `<details>`, so it opens and
+ * closes with no script; each row is an action with its one-line reason. */
+.pagemenu { position: relative; display: inline-flex; }
+.pagemenu > summary {
+  list-style: none; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 32px; min-width: 32px;
+  border: 1px solid var(--hair);
+  background: color-mix(in oklab, var(--ink) 4%, transparent);
+  color: var(--muted);
+  transition: color 140ms var(--expo), border-color 140ms var(--expo);
+}
+.pagemenu > summary::-webkit-details-marker { display: none; }
+.pagemenu > summary:hover { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 55%, transparent); }
+.pagemenu[open] > summary { color: var(--ink); }
+.pagemenu .acts {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 30;
+  width: 19rem;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  padding: 4px;
+}
+.pagemenu .acts a {
+  display: block; padding: 8px 10px; text-decoration: none; color: var(--ink);
+  font: 500 var(--t-mono)/1.5 var(--sans);
+}
+.pagemenu .acts a:hover { background: color-mix(in oklab, var(--ink) 5%, transparent); }
+.pagemenu .acts a .d { display: block; font-weight: 400; font-size: var(--t-key); color: var(--n2); }
+
 .docstree, .onpage {
   grid-row: 1 / span 60;
   align-self: start;

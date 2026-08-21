@@ -28,7 +28,7 @@ import { shellHtml } from "../../code"
 import { features, steps, implHref, extensionDir, serverDir } from "../../editors"
 // THE DOCS SHELL (RFC-0106 M4). This page's URL is under the reference, so it
 // wears the reference's own sidebar and its own pager.
-import { TreeGroup, Pager, docsTree, pagerFor } from "../../docshell"
+import { TreeGroup, Pager, docsTree, pagerFor , docSubnav} from "../../docshell"
 
 export fn head() -> Head {
     return pageHeadOf("/docs/editors")
@@ -41,10 +41,16 @@ fn tree() -> Array<TreeGroup> {
 fn pager() -> Pager {
     return pagerFor(tree())
 }
+
+/// The subnav row, with this section marked.
+fn subnav() -> String {
+    return docSubnav("editors")
+}
 </script>
 
 <template>
 <main class="page docs">
+    <nav class="subnav" aria-label="Documentation sections" v-html="subnav()"></nav>
     <aside class="docstree">
         <details class="treebox">
             <summary>Reference</summary>

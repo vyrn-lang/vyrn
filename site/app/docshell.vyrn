@@ -23,6 +23,7 @@
 /// its own table could point somewhere the sidebar does not.
 import { ApiModule, apiGroups, apiHref } from "./docs"
 import { Chapter, chapters, chapterHref, chapterNumber, chapterTag } from "./guide"
+import { indexOf, substring } from "std/strings"
 
 /// One row of the sidebar: where it goes, what it is called, and whether it is
 /// the page being read. `here` is `"page"` or "" — the value of `aria-current`,
@@ -187,4 +188,63 @@ test "the pager walks the tree the sidebar prints" {
 
 test "the book's tree covers the book" {
     assertEq(treeSize(guideTree("index")), chapters().length + 1)
+}
+
+// ---------------------------------------------------------------------------
+// The docs subnav — the row under the masthead naming the documentation's
+// areas, the reference site's second header. One function, so a page cannot
+// invent an area the others do not print.
+// ---------------------------------------------------------------------------
+
+/// The subnav's rows, with the current area marked. `current` is one of the
+/// keys `"guide"`, `"reference"`, `"editors"`, `"graph"`.
+export fn docSubnav(current: String) -> String {
+    let items = [
+        ["guide", "/guide.html", "Guide"],
+        ["reference", "/docs.html", "Reference"],
+        ["editors", "/docs/editors.html", "Editors"],
+        ["graph", "/docs/graph.html", "Import graph"],
+    ]
+    let mut out = ""
+    for it in items {
+        let markAttr = if it[0] == current { " aria-current=\"true\"" } else { "" }
+        out = out + "<a href=\"" + it[1] + "\"" + markAttr + ">" + it[2] + "</a>"
+    }
+    return out
+}
+
+/// How many times `needle` occurs in `s` — the test's own counter.
+fn timesIn(s: String, needle: String) -> Int64 {
+    let mut n = 0
+    let mut at = 0
+    while at + needle.byteLength <= s.byteLength {
+        if let Some(i) = indexOf(substring(s, at, s.byteLength), needle) {
+            n = n + 1
+            at = at + i + needle.byteLength
+        } else {
+            return n
+        }
+    }
+    return n
+}
+
+test "the subnav names four areas and marks exactly one" {
+    let html = docSubnav("reference")
+    assert(has(html, "/guide.html"))
+    assert(has(html, "/docs.html"))
+    assert(has(html, "/docs/editors.html"))
+    assert(has(html, "/docs/graph.html"))
+    // One marked row, and it is the one asked for.
+    assertEq(timesIn(html, "aria-current"), 1)
+    assert(has(html, "/docs.html\" aria-current"))
+    // An unknown key marks nothing rather than trapping.
+    assertEq(timesIn(docSubnav("nope"), "aria-current"), 0)
+}
+
+/// Whether `needle` occurs in `s`.
+fn has(s: String, needle: String) -> Bool {
+    if let Some(i) = indexOf(s, needle) {
+        return i >= 0
+    }
+    return false
 }
