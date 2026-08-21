@@ -831,6 +831,8 @@ function armHeroEditor(root) {
   const runBtn = $("[data-play-run]", root);
   const src = $("[data-play-src]", root);
   const status = $("[data-play-status]", root);
+  const resetBtn = $("[data-play-reset]", root);
+  const outPane = $("[data-play-out]", root);
   if (!runBtn || !src) return;
   let armed = false;
 
@@ -848,7 +850,23 @@ function armHeroEditor(root) {
         mountPlay(root, { onReady: () => thenRun && runBtn.click() });
       },
       (err) => {
+        // HONEST WHEN IT CANNOT RUN (RFC-0106 M3, fourth round). This used to
+        // set the status line and stop: the output pane still said `Not run
+        // yet.`, the textarea stayed editable, and the Run button stayed live
+        // over an editor with no compiler behind it. Now the pane says what
+        // happened and where to go, the box goes back to read-only, and the two
+        // controls are disabled — the same shape as `mountPlay`'s own failure.
         if (status) status.textContent = "The compiler did not load";
+        if (outPane) {
+          outPane.textContent = "";
+          const el = document.createElement("span");
+          el.className = "stderr";
+          el.textContent = "The compiler did not load, so nothing here can run. Every program on this page is on /play too.";
+          outPane.append(el);
+        }
+        src.setAttribute("readonly", "readonly");
+        runBtn.disabled = true;
+        if (resetBtn) resetBtn.disabled = true;
         console.error("the hero editor did not load", err);
       }
     );
@@ -858,6 +876,9 @@ function armHeroEditor(root) {
   // and it is the row the a11y checklist asks for. Both are `once`.
   root.addEventListener("pointerenter", () => arm(false), { once: true });
   root.addEventListener("focusin", () => arm(false), { once: true });
+  // `Reset` before the editor is mounted arms it, so the button is never a
+  // control that does nothing. `mountPlay` binds the real handler after.
+  if (resetBtn) resetBtn.addEventListener("click", () => arm(false));
   // Bound BEFORE `mountPlay` adds its own, so the first press arms and the
   // replayed press runs. A press while the module is in flight is a no-op in
   // `mountPlay`'s own handler, which is why readiness has to drive the replay.
@@ -881,7 +902,8 @@ function armHeroEditor(root) {
 
 function demoWidget(root) {
   const steps = $$("[data-step]", root);
-  if (steps.length < 2) return;
+  const panes = $$("[data-pane]", root);
+  if (steps.length < 2 || panes.length !== steps.length) return;
 
   const bar = document.createElement("div");
   bar.className = "controls demobar";
@@ -899,14 +921,26 @@ function demoWidget(root) {
   root.prepend(bar);
 
   // The list of titles STAYS (RFC-0106 M3). It used to set `hidden` on six of
-  // seven, which threw the outline away with the detail; the class collapses a
-  // step to its title instead, and `.stepped` is what tells the sheet a script
-  // is driving — with no script no step is `.on` and every one is open.
+  // seven, which threw the outline away with the detail; every row is on the
+  // page and `.stepped` is what tells the sheet a script is driving — with no
+  // script no step is `.on`, every pane is open, and the sheet's `.stepped`
+  // rules match nothing.
+  //
+  // TWO LISTS, ONE INDEX (fourth round): the nth row and the nth pane are
+  // marked together, and the guard above refuses to drive them at all unless
+  // there is exactly one pane per step. `aria-current` is on the row rather than
+  // announced from the counter, so the marked step is the marked step for a
+  // screen reader too.
   root.classList.add("stepped");
   let at = 0;
   const show = (i) => {
     at = (i + steps.length) % steps.length;
-    steps.forEach((s, k) => s.classList.toggle("on", k === at));
+    steps.forEach((s, k) => {
+      s.classList.toggle("on", k === at);
+      if (k === at) s.setAttribute("aria-current", "step");
+      else s.removeAttribute("aria-current");
+    });
+    panes.forEach((p, k) => p.classList.toggle("on", k === at));
     count.textContent = at + 1 + " / " + steps.length;
     back.disabled = at === 0;
     next.textContent = at === steps.length - 1 ? "Replay" : "Next";

@@ -114,7 +114,22 @@
   --t-note: 0.95rem; --t-meta: 0.92rem; --t-matrix: 0.9rem; --t-cap: 0.85rem;
   --t-mark: 15px; --t-cmd: 14px; --t-code: 13.5px; --t-code-s: 12.5px;
   --t-mono: 13px; --t-eyebrow: 12px; --t-key: 11px; --t-tick: 10px;
-  --t-axis: 9px;
+
+  /* THE TWO STEPS THAT ARE NOT PIXELS (RFC-0106 M3, fourth round).
+   *
+   * Text inside a `viewBox` is drawn in USER UNITS and scaled with the picture,
+   * so a token's number here is not what a reader gets. Measured on the shipped
+   * tree, at `--t-axis: 9px` and `--t-key: 11px`: the index's bar strip painted
+   * its labels at 6.6 and 8.0 px on a 1280px desktop, `/compare`'s five bar
+   * charts at 3.0 and 3.6 px on a phone, and the backstage's pulse at 3.0. Every
+   * chart on the site was under 12px and most were under 9.
+   *
+   * The scale is the container's width over the viewBox's, and two rules below
+   * bound it — `max-width` so no chart is ever drawn LARGER than its own units,
+   * and a scroller under 900px so none is ever drawn smaller than 0.77 of them.
+   * Inside that band these two numbers are 12.4 to 18.1 px of real text, which
+   * is the claim `svg.chart` carries and the sweep measures. */
+  --t-svg: 18px; --t-svg-s: 17px;
 
   /* Nine sizes are NOT steps — four mono numerals sized to one widget's box,
    * `.bignum`'s ramp, one cell's `0.78rem`, three shares of a context. */
@@ -509,6 +524,48 @@ h1 code, h2 code, h3 code, h4 code {
 [data-js] .theme { margin-left: auto; }
 [data-js] .theme:hover, [data-js] .find:hover { color: var(--ink); border-color: var(--accent); }
 
+/* THE SEARCH CONTROL LOOKS LIKE A FIELD ON A DESKTOP (RFC-0106 M3, fourth
+ * round). It was a 83px icon-and-word button, which is a control a reader has to
+ * recognize rather than read; the reference site ships a wide field with its
+ * placeholder and its shortcut visible, and that half is worth taking.
+ *
+ * IT IS STILL A BUTTON. A real `<input>` here would be a second search field
+ * that has to hand its keystrokes to the overlay's own — two fields, one query,
+ * and a no-script page with a text box that does nothing. This is a button that
+ * opens a dialog, and it says so: `aria-label` is the accessible name, so the
+ * placeholder text and the `/` chip are decoration a screen reader never
+ * announces twice.
+ *
+ * ONLY ABOVE 1024px, and that is deliberate rather than shy. The masthead row
+ * fits at 320px with ZERO pixels to spare (RFC-0106 M3, second round, I3), and
+ * the phone band's rules are what bought that. So the wide form is added where
+ * the row has slack and the two narrower forms below are exactly what they
+ * were: icon and word to 1023px, icon alone to 640px. */
+@media (min-width: 1024px) {
+  [data-js] .find {
+    width: 17rem; justify-content: flex-start; gap: var(--s1);
+    padding: 0 var(--s1) 0 var(--s2);
+  }
+  .find .word {
+    flex: 1; text-align: left; text-transform: none;
+    letter-spacing: 0; color: var(--n2);
+  }
+  .find .key {
+    border: 1px solid var(--rule); padding: 2px 7px;
+    font: var(--t-key)/1.4 var(--mono); color: var(--n2);
+  }
+  [data-js] .find:hover .key { border-color: var(--accent); }
+}
+/* Below the wide form the chip and the rest of the placeholder are not shown at
+ * all: at 1023px and under the control is the word `Search`, and at 640px and
+ * under the glyph alone. A keyboard hint on a phone is noise, and a 17rem field
+ * at 768px is the header-row overflow three milestones spent fixing. */
+.find .key, .find .hint { display: none; }
+@media (min-width: 1024px) {
+  .find .key { display: inline-flex; }
+  .find .hint { display: inline; }
+}
+
 /* `.theme`'s own auto margin is for the backstage masthead, which has no
  * wrapper; inside this one it would push the two apart. */
 .tools { display: flex; align-items: center; gap: var(--s2); margin-left: auto; }
@@ -848,8 +905,17 @@ pre.code {
 .play.heroplay .editor textarea { height: auto; min-height: 0; }
 /* THE OUTPUT PANE GROWS INTO THE COLUMN (RFC-0106 M3). It was `max-height: 9em`
  * against a fixed editor, so the plate ended well above the column beside it. */
-.heroplay .out { flex: 1; min-height: 4.5em; max-height: none; overflow: auto; }
+.heroplay .out { flex: 1; min-height: 6em; max-height: none; overflow: auto; }
 .heroplay .plate-head { border-bottom: 1px solid var(--rule); }
+/* The keyboard hint and the reset control, both of which only mean anything with
+ * a script: `[data-js]` is on the root once `theme.js` has run, and the shell
+ * gates the theme and search controls the same way. */
+.keyhint, .btn.jsonly { display: none; }
+[data-js] .keyhint { display: inline-flex; align-items: center; gap: 4px; }
+[data-js] .btn.jsonly { display: inline-flex; }
+/* A keyboard shortcut is not a hint on a phone. Written with the same attribute
+ * as the rule it overrides, so specificity decides nothing by accident. */
+@media (max-width: 640px) { [data-js] .keyhint { display: none; } }
 
 /* Facts, as chips. Four short truths a reader can take at a glance, and every
  * one of them is checkable on another page — which is why none of them is a
@@ -921,38 +987,89 @@ pre.code {
 /* ONE UNIT, NOT TWO (RFC-0106 M3, second round). The tile row and the command
  * box it selects were 24px apart and different widths, so the tiles read as
  * chips floating over an unrelated block. They are a segmented control joined
- * to its own output now: equal columns, shared borders, and the pane's top
- * border sitting ON the tile row's bottom one. */
-.ostabs { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
+ * to its own output: equal columns, one divider between them, and the command
+ * box's own top border as the row's bottom edge.
+ *
+ * EVERY EDGE IS EXACTLY ONE HAIRLINE, AND NOTHING OVERLAPS (fourth round). It
+ * used to build the unit out of four borders per label, `border-left: 0` on the
+ * siblings, and then `margin-left: -1px` plus `margin-top: -1px` to pull the
+ * checked tile and the command box back over the borders they doubled. Two
+ * negative margins over subpixel grid columns is a lottery: at a 523px container
+ * an `1fr` column is 261.5px, so a shifted 1px border straddles two device
+ * pixels and paints as two half-covered ones — visibly THINNER and lighter than
+ * its neighbours, differently at 1x and at 2x, and only on the selected tile,
+ * which is the one a reader is looking at.
+ *
+ * So the row draws its own box, the divider is a single border on one side of
+ * one element, and the selection is an INSET SHADOW rather than a border colour.
+ * A shadow takes no space, so nothing has to be pulled back over anything: three
+ * of them, top and both sides, leaving the tile open at the bottom into the
+ * command box it selects. */
+.ostabs { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); border: 1px solid var(--rule); border-bottom: 0; }
 .ostabs label {
   display: flex; align-items: center; justify-content: center;
   min-height: 48px; padding: 9px var(--s2); cursor: pointer;
-  border: 1px solid var(--rule);
   font: var(--t-eyebrow)/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase;
   color: var(--muted);
 }
-.ostabs label + label { border-left: 0; }
+.ostabs label + label { border-left: 1px solid var(--rule); }
 .ostabs label:hover { color: var(--ink); }
 .ospane { display: none; text-align: left; }
-.ospane .cmd { margin-top: -1px; }
+/* The command box IS the tab row's bottom edge, so the two touch: `.cmd`'s own
+ * 16px top margin would put the unit back in two pieces, which is the defect the
+ * second round closed. It used to be pulled back with `margin-top: -1px` over
+ * the row's own bottom border; the row has no bottom border now, so the box's
+ * top border is the join and nothing overlaps. */
+.ospane .cmd { margin-top: 0; }
 /* The "view the install script" line under the command it fetches. A label that
  * FOLLOWS a block needs the gap the kicker rule gives one that precedes it. */
 .ospane > .eyebrow { margin-top: var(--s2); margin-bottom: 0; }
 
+/* FIVE PAIRS, FOR TWO CONTROLS (RFC-0106 M3, fourth round). The install page's
+ * picker uses the first two and the index's code showcase uses all five, and
+ * they are one selector list on purpose: the site has ONE tab control, and a
+ * second implementation of it is what the second round deleted. */
 .picker input:nth-of-type(1):checked ~ .ostabs > :nth-child(1),
-.picker input:nth-of-type(2):checked ~ .ostabs > :nth-child(2) {
-  color: var(--accent); border-color: var(--accent); position: relative; z-index: 1;
+.picker input:nth-of-type(2):checked ~ .ostabs > :nth-child(2),
+.picker input:nth-of-type(3):checked ~ .ostabs > :nth-child(3),
+.picker input:nth-of-type(4):checked ~ .ostabs > :nth-child(4),
+.picker input:nth-of-type(5):checked ~ .ostabs > :nth-child(5) {
+  color: var(--accent);
   background: color-mix(in oklab, var(--accent) var(--code-wash), transparent);
+  box-shadow: inset 0 1px 0 0 var(--accent), inset 1px 0 0 0 var(--accent), inset -1px 0 0 0 var(--accent);
 }
-/* A checked tile keeps its own left border even when a sibling dropped one. */
-.picker input:nth-of-type(2):checked ~ .ostabs > :nth-child(2) { border-left-width: 1px; margin-left: -1px; }
 .picker input:nth-of-type(1):checked ~ .ospanes > :nth-child(1),
-.picker input:nth-of-type(2):checked ~ .ospanes > :nth-child(2) { display: block; }
+.picker input:nth-of-type(2):checked ~ .ospanes > :nth-child(2),
+.picker input:nth-of-type(3):checked ~ .ospanes > :nth-child(3),
+.picker input:nth-of-type(4):checked ~ .ospanes > :nth-child(4),
+.picker input:nth-of-type(5):checked ~ .ospanes > :nth-child(5) { display: block; }
 /* The input is off-screen, so the focus ring is drawn on the label instead. */
 .picker input:nth-of-type(1):focus-visible ~ .ostabs > :nth-child(1),
-.picker input:nth-of-type(2):focus-visible ~ .ostabs > :nth-child(2) {
+.picker input:nth-of-type(2):focus-visible ~ .ostabs > :nth-child(2),
+.picker input:nth-of-type(3):focus-visible ~ .ostabs > :nth-child(3),
+.picker input:nth-of-type(4):focus-visible ~ .ostabs > :nth-child(4),
+.picker input:nth-of-type(5):focus-visible ~ .ostabs > :nth-child(5) {
   outline: 2px solid var(--accent); outline-offset: 2px;
 }
+
+/* A SHOWCASE PANE: a program, and one line under it (RFC-0106 M3, fourth round).
+ * The pane is the tab row's own output box, so it carries the border the command
+ * box carries on `/install` — one hairline, and the tab above it opens into it.
+ * The code scrolls sideways inside the pane rather than wrapping, which is the
+ * rule every code block on this site follows. */
+.ospane.showcase { border: 1px solid var(--rule); }
+.ospane.showcase .code { margin: 0; border: 0; }
+.ospane.showcase .cap { border-top: 1px solid var(--hair); }
+
+/* THE REFERENCE TEASER. Four named groups across the row, two modules under
+ * each, and the export count right-aligned so the numbers form a column. */
+.modteaser { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--s3) var(--s2); }
+.modteaser > li { min-width: 0; }
+.modteaser > li > .eyebrow { padding-bottom: var(--s1); border-bottom: 1px solid var(--rule); }
+.modteaser a { display: flex; justify-content: space-between; gap: var(--s1); align-items: baseline; padding: 6px 0; text-decoration: none; border-bottom: 1px solid var(--hair); }
+.modteaser a:hover { color: var(--accent); }
+.modteaser code { font-size: var(--t-mono); }
+.modteaser span { font: var(--t-key)/1.4 var(--mono); color: var(--n2); }
 
 /* A LIST THAT IS A GRID (RFC-0106 M3). Short rows down two columns: half the
  * height, and `columns` keeps the reading order a two-track grid would not. */
@@ -971,35 +1088,74 @@ pre.code {
  * 278px column (RFC-0106 M3) — so in a row, it wraps. */
 .ctarow .cta { white-space: normal; }
 
-/* THE RECORDED DEMO. Every step is in the document; the script hides all but
- * one and adds the counter. So the list is numbered and readable with no script
- * at all, and the hidden steps below are only ever hidden BY the script. */
-.demo .steps { margin: 0; padding: 0 0 0 var(--s3); }
-.demo .steps > li { padding: var(--s2) 0; }
+/* THE RECORDED DEMO: A NUMBERED LIST OF STEPS, AND THE OUTPUT OF ONE OF THEM
+ * (RFC-0106 M3, fourth round).
+ *
+ * WHAT WAS WRONG, and it was a layout that only broke in the state a reader
+ * actually sees. Each `li` was its own 2fr/3fr grid, with the step's output in
+ * the second column — a shape drawn for the no-script case, where all seven
+ * steps are open and each one reads as a row of "typed | came back". Under the
+ * script exactly ONE step is open, so that grid painted a two-line command in
+ * column 1, its output floating top-right of the same row, and the other six
+ * steps as flat full-width title bars underneath. The card looked broken because
+ * it was: one geometry serving two states, and correct in the rarer one.
+ *
+ * The CARD is the split now, not the row. The list of seven is column 1 and is
+ * always whole — number, title, command — and the output is column 2, stretched
+ * to the card's height. That reads the same in both states: with no script every
+ * pane is stacked in column 2 under its own title, and with the script one pane
+ * is shown and the row that selects it is marked. */
+.demo { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); align-items: stretch; }
+.demo .demobar { grid-column: 1 / -1; display: flex; align-items: center; gap: var(--s2); padding: var(--s1) var(--s2); border-bottom: 1px solid var(--hair); }
+.demo .demobar .eyebrow { margin: 0; }
+
+.demo .steps { list-style: none; margin: 0; padding: 0; counter-reset: step; border-right: 1px solid var(--hair); }
+/* Each row: the number in its own 2ch column, the title and the command in the
+ * second. `align-content: start` so a row with no command does not stretch its
+ * own contents apart — two of the seven steps are not commands (the file
+ * listing is walked and the edit is a file), and they are title rows on purpose. */
+.demo .steps > li { counter-increment: step; display: grid; grid-template-columns: 2ch minmax(0, 1fr); gap: 0 var(--s2); align-content: start; padding: var(--s2); }
+.demo .steps > li::before { content: counter(step); grid-column: 1; grid-row: 1 / span 2; font: var(--t-key)/1.7 var(--mono); color: var(--n2); }
 .demo .steps > li + li { border-top: 1px solid var(--hair); }
-.demo .steps h3 { font-size: var(--t-h4); }
-.demo .steps p { color: var(--muted); font-size: var(--t-meta); margin-top: var(--s1); }
-.demo .steps .out { max-height: 22em; }
+.demo .steps h3 { grid-column: 2; font-size: var(--t-h4); }
+.demo .steps .cmd { grid-column: 2; margin-top: var(--s1); }
 
-/* A STEP IS A SPLIT (RFC-0106 M3): what you type on the left, what came back on
- * the right. The markup order is unchanged and two column assignments do it. */
-.demo .steps > li { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 0 var(--s4); align-items: start; padding: var(--s3) 0; }
-.demo .steps > li > :not(.out) { grid-column: 1; }
-.demo .steps > li > .out { grid-column: 2; grid-row: 1 / span 3; margin-top: 0; }
-@media (max-width: 1024px) {
-  .demo .steps > li { grid-template-columns: minmax(0, 1fr); }
-  .demo .steps > li > .out { grid-column: 1; grid-row: auto; margin-top: var(--s2); }
-}
+.demo .panes { min-width: 0; padding: var(--s2); display: flex; flex-direction: column; gap: var(--s3); }
+.demo .pane { min-width: 0; display: flex; flex-direction: column; }
+.demo .pane > .eyebrow { margin-bottom: var(--s1); }
+/* The output takes the slack, so the pane is the card's height and a long
+ * listing scrolls inside it rather than growing the card. `margin-top: 0`
+ * because it is the first thing in its own box here, not a block after prose. */
+/* The output is as tall as what it printed, with a floor so a one-line step and
+ * a twenty-line one do not resize the card, and a ceiling so the longest one
+ * scrolls instead. It does NOT take the pane's slack: at `flex: 1` a one-line
+ * output made a 600px empty terminal and pushed its own note to the bottom of
+ * the card, 500px from the thing it is about. */
+.demo .pane .out { flex: 0 1 auto; min-height: 9em; max-height: 34em; margin-top: 0; overflow: auto; }
+/* NOT `.note` (RFC-0106 M3, fourth round). The census counts `.note` and
+ * `.notice` as the sheet's two ways of saying something beside the claim, and
+ * M0's rule is at most one per plate — seven of them in one card took the index
+ * from one to eight. This is the step's own line, not a disclosure about it. */
+.demo .pane .stepnote { color: var(--muted); font-size: var(--t-meta); margin-top: var(--s2); }
 
-/* WITH SCRIPT THE LIST STAYS AND ONE STEP IS OPEN. `.stepped` is added by
- * `widgets.js`, so with no script nothing here matches and every step is open.
- * A stepper that hides six of seven TITLES has thrown the outline away. */
-.demo.stepped .steps > li:not(.on) > :not(h3) { display: none; }
-.demo.stepped .steps > li:not(.on) { padding: var(--s1) 0; cursor: pointer; }
+/* WITH SCRIPT, ONE PANE. `.stepped` is added by `widgets.js`, so with no script
+ * nothing below matches: every pane is on the page under its own title, which is
+ * the fallback and not a degraded copy of one. */
+.demo.stepped .pane { display: none; }
+.demo.stepped .pane.on { display: flex; flex: 1; }
+/* The pane's title is the row that is marked, so it is not printed twice. */
+.demo.stepped .pane > .eyebrow { display: none; }
+.demo.stepped .steps > li { cursor: pointer; }
+.demo.stepped .steps > li.on { background: color-mix(in oklab, var(--accent) var(--code-wash), transparent); box-shadow: inset 3px 0 0 var(--accent); }
+.demo.stepped .steps > li.on::before { color: var(--accent); }
 .demo.stepped .steps > li:not(.on) h3 { color: var(--muted); font-weight: 500; }
 .demo.stepped .steps > li:not(.on):hover h3 { color: var(--ink); }
-.demo .demobar { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s2); }
-.demo .demobar .eyebrow { margin: 0; }
+
+/* One column on a phone, and the list keeps its own rule as a bottom edge. */
+@media (max-width: 900px) {
+  .demo { grid-template-columns: minmax(0, 1fr); }
+  .demo .steps { border-right: 0; border-bottom: 1px solid var(--hair); }
+}
 
 /* A caption that IS a disclosure. THE RULE says the claim is inline and the
  * method is one click away, so the method sits in a `<details>` and the
@@ -1112,7 +1268,44 @@ details.disc > p { max-width: var(--wide); }
    Charts
    ------------------------ */
 
-svg.chart { display: block; width: 100%; height: auto; }
+/* A CHART IS NEVER DRAWN BIGGER THAN ITS OWN UNITS (RFC-0106 M3, fourth round).
+ *
+ * `width: 100%` alone means the scale is whatever the container is: 1.07 in a
+ * full band, 0.73 in a split column, 0.33 on a phone. Text scales with it, so
+ * the same token painted 18px in one place and 3px in another. `max-width` is
+ * the ceiling — a chart at its natural size or smaller, never stretched — and
+ * the media query further down is the floor. Between them the scale sits in
+ * [0.73, 1.0] and the two `--t-svg` steps are real pixels a reader can read.
+ *
+ * The numbers are the viewBox widths the generators emit: 904 for a bar chart
+ * (`chart.vyrn`), 700 for the radar and the citation ring, 440 for the status
+ * strip, 726 for the import graph. A generator that emits a new width adds a
+ * line here, and the sweep's 12px assertion is what says so if it does not. */
+svg.chart { display: block; width: 100%; height: auto; max-width: 904px; }
+svg.chart.radar, svg.chart.cites { max-width: 700px; }
+svg.chart.strip { max-width: 440px; }
+svg.graph { max-width: 726px; }
+
+/* AND NEVER SMALLER THAN 0.71 OF THEM, WHICH IS WHERE 12px LIVES.
+ *
+ * The floor is `12 / 18` of each viewBox's width — the scale at which the
+ * smaller of the two `--t-svg` steps still paints 12 real pixels — so a chart in
+ * a container narrower than that scrolls inside its own `.stage` instead of
+ * shrinking. That is the sheet's own rule for a block wider than its column
+ * (RFC-0105 M4 row 28), and `.barstrip` on the index has had it since M2 with
+ * the reason written in general terms; every OTHER chart on the site kept
+ * shrinking, down to 3.0px on a phone.
+ *
+ * NOT IN A MEDIA QUERY, and that is the correction the measurement forced: with
+ * the floor inside the phone block, a 700px window fell between the two — no
+ * floor, and 11.4px on six charts. The width that matters is the CONTAINER's,
+ * which a media query cannot see; a `min-width` can. At 1280 no container on the
+ * site is under its own floor, so nothing scrolls on a desktop. */
+.stage { overflow-x: auto; }
+svg.chart { min-width: 640px; }
+svg.chart.radar, svg.chart.cites { min-width: 500px; }
+svg.chart.strip { min-width: 320px; }
+svg.graph { min-width: 520px; }
 /* A replay grows a bar's WIDTH from its own left edge. It is NOT a transform:
  * `transform-box` defaults to `view-box` on SVG, so `transform-origin: left`
  * meant the viewBox's left edge, and scaling slid every bar in from x=0 — the
@@ -1132,10 +1325,10 @@ svg.chart g.row:hover .bar.focal { fill-opacity: 0.5; }
  * under the data, and it starts at zero on every chart. */
 svg.chart .axis line { stroke: currentColor; stroke-opacity: 0.12; stroke-width: 1; }
 svg.chart .axis line:first-of-type { stroke-opacity: 0.28; }
-svg.chart .axis text { font-size: var(--t-axis); fill: var(--n2); }
+svg.chart .axis text { font-size: var(--t-svg-s); fill: var(--n2); }
 svg.chart a text { text-decoration: underline; text-decoration-color: transparent; transition: text-decoration-color 160ms var(--expo); }
 svg.chart g.row:hover a text { text-decoration-color: var(--accent); fill: var(--accent); }
-svg.chart text { font-family: var(--mono); font-size: var(--t-key); fill: var(--muted); }
+svg.chart text { font-family: var(--mono); font-size: var(--t-svg); fill: var(--muted); }
 svg.chart text.val { fill: var(--ink); }
 svg.chart .cell { transition: fill-opacity 450ms ease-out; }
 
@@ -1165,8 +1358,8 @@ svg.chart.radar .ring { fill: none; stroke: currentColor; stroke-opacity: 0.13; 
 /* One ring is not decoration: it is the language the chart is normalized to. */
 svg.chart.radar .ring.base { stroke-opacity: 0.45; stroke-dasharray: 3 3; }
 svg.chart.radar .axis line { stroke: currentColor; stroke-opacity: 0.1; stroke-width: 1; }
-svg.chart.radar .axis text { font-size: var(--t-axis); fill: var(--n2); }
-svg.chart.radar .names text { font-family: var(--mono); font-size: var(--t-tick); fill: var(--n2); }
+svg.chart.radar .axis text { font-size: var(--t-svg-s); fill: var(--n2); }
+svg.chart.radar .names text { font-family: var(--mono); font-size: var(--t-svg-s); fill: var(--n2); }
 svg.chart.radar .names text.lit { fill: var(--accent); font-weight: 600; }
 svg.chart.radar .wedge { fill: transparent; }
 svg.chart.radar g.series polygon { fill: currentColor; fill-opacity: 0.07; stroke: currentColor; stroke-width: 2; stroke-linejoin: round; }
@@ -1568,7 +1761,7 @@ pre.doccode {
 svg.graph { display: block; height: auto; }
 svg.graph .wire { fill: none; stroke: currentColor; stroke-opacity: 0.16; stroke-width: 1; }
 svg.graph circle { fill: var(--accent); fill-opacity: 0.55; }
-svg.graph text { font-family: var(--mono); font-size: var(--t-key); fill: var(--muted); }
+svg.graph text { font-family: var(--mono); font-size: var(--t-svg); fill: var(--muted); }
 svg.graph .hit { fill: transparent; }
 svg.graph a { text-decoration: none; }
 /* A node is a link, so a keyboard reaches it, so it has to SHOW that it has been
@@ -1775,7 +1968,12 @@ svg.graph .node.on circle { fill-opacity: 1; }
 .play .diag .at { color: var(--muted); margin-right: var(--s2); }
 .play .diag .note { display: block; color: var(--muted); }
 
-.play .out { margin: var(--s2); white-space: pre-wrap; }
+/* A PANE THAT DOES NOT JUMP BETWEEN STATES (RFC-0106 M3, fourth round). Idle is
+ * one line, `…` is one, and a run is two lines of output plus the exit row — so
+ * the box grew and shrank under the reader on every press. `min-height` holds
+ * the common case; anything longer scrolls in `.heroplay`, where the pane has
+ * the column's slack, and grows on `/play`, where the plate is the page. */
+.play .out { margin: var(--s2); white-space: pre-wrap; min-height: 6em; }
 .play .out .stdout { color: var(--ink); }
 .play .out .stderr { color: var(--danger); }
 .play .out .exit { margin-top: var(--s1); color: var(--muted); }
@@ -1852,14 +2050,6 @@ kbd {
   .rail a { white-space: nowrap; display: inline-flex; align-items: center; min-height: 44px; }
   .rail { padding: var(--s1) 0; }
 
-  /* A FIVE-BAR STRIP AT ITS OWN SIZE, INSIDE A SCROLLER (RFC-0106 M2).
-   * `svg.chart` is `width: 100%`, so a 904-unit viewBox in a 343px column
-   * scales every glyph by 0.38 and a 9px axis label paints at 3.4px. The
-   * sheet's own rule for a block wider than the column is that the BLOCK
-   * scrolls, not the page (RFC-0105 M4 row 28), and it is the rule that keeps
-   * the numbers beside the bars they belong to. */
-  .barstrip .stage { overflow-x: auto; }
-  .barstrip svg.chart { min-width: 904px; }
 
   /* A command is read before it is copied. At this width the button took two
    * thirds of the row and left the command a 120px window on 885px of text, so
@@ -2004,16 +2194,16 @@ svg.chart.pulse .bars.commits rect { fill-opacity: 0.65; }
 svg.chart.pulse .bars.prs rect { fill-opacity: 0.32; }
 svg.chart.pulse .bars rect:hover { fill-opacity: 1; }
 svg.chart.pulse .axis line { stroke: currentColor; stroke-opacity: 0.28; stroke-width: 1; }
-svg.chart.pulse .axis text { font-family: var(--mono); font-size: var(--t-axis); fill: var(--n2); text-anchor: middle; }
+svg.chart.pulse .axis text { font-family: var(--mono); font-size: var(--t-svg-s); fill: var(--n2); text-anchor: middle; }
 /* A release is the one thing on this chart that is not a count, so it is a
  * hairline through the panel rather than another filled shape. */
 svg.chart.pulse .releases line { stroke: var(--st-part); stroke-width: 1; stroke-dasharray: 2 3; }
-svg.chart.pulse .releases text { font-family: var(--mono); font-size: var(--t-axis); fill: var(--st-part); text-anchor: middle; }
+svg.chart.pulse .releases text { font-family: var(--mono); font-size: var(--t-svg-s); fill: var(--st-part); text-anchor: middle; }
 
 /* The arrivals: the cumulative corpus, banded by what each record became. The
  * bands carry the same four tones as everything else on the page. */
 svg.chart.arrivals polygon { fill-opacity: 0.75; stroke: var(--paper); stroke-width: 0.5; }
-svg.chart.arrivals .axis text { font-family: var(--mono); font-size: var(--t-axis); fill: var(--n2); text-anchor: middle; }
+svg.chart.arrivals .axis text { font-family: var(--mono); font-size: var(--t-svg-s); fill: var(--n2); text-anchor: middle; }
 
 /* 01 — the strip. One square per record, sized by the file and centred in its
  * slot. It is not stretched to the plate: a cell is a measurement, and a
@@ -2039,7 +2229,7 @@ svg.chart.statusbar .seg { fill-opacity: 0.8; }
  * argues with itself this much. Pointing at one record raises its own. */
 svg.chart.cites { max-width: 40rem; margin: 0 auto; }
 svg.chart.cites .chord { fill: none; stroke: currentColor; stroke-opacity: 0.09; stroke-width: 1; transition: stroke-opacity 160ms var(--expo); }
-svg.chart.cites .tick { font-family: var(--mono); font-size: var(--t-axis); fill: var(--n2); }
+svg.chart.cites .tick { font-family: var(--mono); font-size: var(--t-svg-s); fill: var(--n2); }
 svg.chart.cites .hit { fill: transparent; }
 svg.chart.cites .dot { fill-opacity: 0.65; }
 svg.chart.cites a { text-decoration: none; }

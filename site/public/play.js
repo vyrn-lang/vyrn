@@ -131,8 +131,12 @@ export function mountPlay(root, opts = {}) {
   const status = $("[data-play-status]", root);
   const runBtn = $("[data-play-run]", root);
   const shareBtn = $("[data-play-share]", root);
+  const resetBtn = $("[data-play-reset]", root);
   const picker = $("[data-play-pick]", root);
   if (!input || !layer || !runBtn) return;
+  // The idle line this pane started with, so `Reset` puts back what the page
+  // said rather than a sentence written twice — once here and once in a template.
+  const idleText = outPane.textContent.trim() || "Not run yet.";
 
   stopWorker();
 
@@ -335,10 +339,17 @@ export function mountPlay(root, opts = {}) {
   // Controls
   // -----------------------------------------------------------------------
 
+  // WHAT `Reset` PUTS BACK (RFC-0106 M3, fourth round). The program this editor
+  // started from: the example the picker holds, the program a shared link
+  // carried, or — on the index's hero — the snippet the page was built with. An
+  // editor a reader can type into with no way back is one they stop typing into.
+  let original = input.value;
+
   function load(id) {
     const e = examples.get(id);
     if (!e) return;
     input.value = e.src;
+    original = e.src;
     if (stdin) stdin.value = e.stdin;
     if (stdinBox) stdinBox.open = e.stdin.length > 0;
     edited();
@@ -369,6 +380,20 @@ export function mountPlay(root, opts = {}) {
 
   runBtn.addEventListener("click", run);
 
+  if (resetBtn) {
+    resetBtn.addEventListener("click", () => {
+      stopWorker();
+      input.value = original;
+      input.focus();
+      edited();
+      say(idleText, "dim");
+      if (play) {
+        runBtn.disabled = false;
+        status.textContent = "Ready";
+      }
+    });
+  }
+
   if (picker) {
     picker.addEventListener("change", () => {
       load(picker.value);
@@ -390,6 +415,9 @@ export function mountPlay(root, opts = {}) {
   const fromLink = sourceFromHash();
   if (fromLink !== null) {
     input.value = fromLink;
+    // A shared link IS the original here: `Reset` goes back to the program the
+    // link carried, not to whatever the picker happened to hold.
+    original = fromLink;
     if (picker) picker.value = "";
   } else if (picker && picker.value) {
     load(picker.value);

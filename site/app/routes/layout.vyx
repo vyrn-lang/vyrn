@@ -82,7 +82,13 @@ fn standing() -> String {
                  the theme button, because without script it would take focus
                  and do nothing — the `<noscript>` below says where to go
                  instead. -->
-            <button type="button" class="find" data-find-open aria-label="Search this site. Press slash."><Icon name="bytesize:search"/> <span class="word">Search</span></button>
+            <!-- THREE FORMS OF ONE CONTROL, and the two narrow ones are what
+                 they were (RFC-0106 M3, fourth round). `.word` is the word that
+                 goes at phone widths; `.hint` is the rest of the placeholder and
+                 the `/` chip, which the sheet only shows above 1024px, where the
+                 row has room. The accessible name is the `aria-label` either
+                 way, so none of this text is announced twice. -->
+            <button type="button" class="find" data-find-open aria-label="Search this site. Press slash."><Icon name="bytesize:search"/> <span class="word">Search<span class="hint"> docs, reference…</span></span> <kbd class="key">/</kbd></button>
             <span class="slot" v-html="installCta()"></span>
             <span class="slot" v-html="themeControl()"></span>
         </div>
