@@ -1,13 +1,16 @@
 # RFC-0106 — A Consumer Page Is Scanned, Not Read
 
-- **Status:** **M2 shipped: the index and install.** See
-  [M0 — as landed](#m0--as-landed) for the census, the ceilings every later
-  milestone is held to, and four things the measurements contradict in the
-  design below, [M1 — as landed](#m1--as-landed) for the eight items, the three
-  defects M1 found in its own earlier commits, and the two ceilings it cannot
-  meet, and [M2 — as landed](#m2--as-landed) for the two rebuilt pages, the
+- **Status:** **M3 shipped: the section rhythm, releases, and the reference
+  landing.** See [M0 — as landed](#m0--as-landed) for the census, the ceilings
+  every later milestone is held to, and four things the measurements contradict
+  in the design below, [M1 — as landed](#m1--as-landed) for the eight items, the
+  three defects M1 found in its own earlier commits, and the two ceilings it
+  cannot meet, [M2 — as landed](#m2--as-landed) for the two rebuilt pages, the
   recorded demo, and the page-weight ceiling M1 recorded as out of reach and M2
-  met. Milestones below; a milestone that fails its gate says so in this file.
+  met, and [M3 — as landed](#m3--as-landed) for the one spacing token every
+  section on the site now obeys, the geometry assertions that hold it, and the
+  19,610 gzipped bytes of design record that stopped being a download.
+  Milestones below; a milestone that fails its gate says so in this file.
 - **Depends on:** RFC-0105 (the site this redesigns — its two-front split,
   theme, accessibility checklist, and gates all survive and bind this work),
   RFC-0104 (the benchmark data the index will show), RFC-0107 (the icons the
@@ -122,8 +125,12 @@ demo. Gate: index page-weight inside M0's budget with the playground lazy;
 outputs in the demo are real and version-stamped; **screenshots to the user
 before merge**. **Gate met** — [M2 — as landed](#m2--as-landed).
 
-**M3 — reference landing and releases.** Gate: word counts inside ceilings;
-stat tiles computable, no hand-written number; RSS validates.
+**M3 — reference landing and releases**, widened by the user to the site's
+spacing as a whole: one section rhythm, two section patterns, and the index and
+install tightened against them. Gate: word counts inside ceilings; stat tiles
+computable, no hand-written number; the feed reachable from a page; section
+geometry asserted in a browser rather than looked at. **Gate met** —
+[M3 — as landed](#m3--as-landed).
 
 **M4 — compare matrix, why-Vyrn, guide landing grid, editors compression.**
 Gate: every matrix cell links to proof; word counts inside ceilings.
@@ -1250,6 +1257,372 @@ at `/` with the fragment dropped:
 `/why-vyrn` is M4's page and three of its sentences moved by one clause each.
 That is the milestone reaching outside its ground, and it is recorded here
 rather than left for M4 to discover.
+
+## M3 — as landed
+
+The milestone the RFC's own plan calls "reference landing and releases", widened
+before it started by the user's reading of the same reference site the design
+section takes its argument from: "Bun's one looks times more cleaner, compact,
+without loads of text but information dense. Also our website has issues with
+spacings/paddings and so on. Also old pages not updated." The first sentence is
+THE RULE, which this file already had. The second is a defect nobody had
+measured. The third is the milestone.
+
+Every number below was produced by running something: `scripts/site-history.py`
+and `scripts/site-demo.py`, then `site/export.vyrn`, then
+`scripts/site-census.py` over the tree it wrote, then `node --test
+site/test/*.test.mjs`, then a headless browser and a scripted geometry sweep
+against the same tree served over HTTP at five widths in both palettes.
+
+### The spacing defect, as a number
+
+`.band` was `padding: var(--s6) 0 0` with `margin-top: var(--s6)`. Read that as
+a reader sees it: **64px of nothing, then the hairline, then 64px more, then the
+heading — and zero under the previous section's last block.** The seam sat hard
+against one side and floated 64px off the other, on every consumer page, and
+`.hero` had its own unrelated pair (64 top, 48 bottom). Nine pages, three
+spacing regimes, and the "ocean of whitespace" was not one number being too big.
+It was the asymmetry.
+
+**One token replaces all of it.**
+
+```css
+--sect: clamp(32px, 4.5vw, 56px);
+
+.band { padding: var(--sect) 0; border-top: 1px solid var(--rule); }
+.hero { padding: var(--sect) 0; }
+```
+
+Sections TOUCH. The hairline is the seam, with the same air on both sides of it,
+and **no section carries a vertical margin anywhere on the site** — which is the
+half that cannot be re-broken by a page adding a `margin-top` in passing, because
+the geometry assertion below counts them.
+
+`clamp` IS the desktop/phone pair the brief asked for, in one declaration rather
+than a token declared twice: 32px on a phone (the 4.5vw term floors below 711px),
+56px from 1244px up, a straight ramp between, and no step at a breakpoint. That
+is the first deviation from the brief and it is the shape of the answer rather
+than a different answer.
+
+### Two section patterns, and every consumer section is one of them
+
+|  | Class | Left | Right |
+|---|---|---|---|
+| **Split** | `.band.split` | `.say` — kicker, 2-6 word heading, at most two short sentences, one link | the artifact |
+| **Full** | `.band` | heading row, then a dense grid or one artifact | |
+
+`.split` is `minmax(0, 2fr) minmax(0, 3fr)` with a `var(--s5)` gap, one column
+below 1024px, in the markup's order — no `order` anywhere, so the reading order
+and the DOM order are the same object. Three rules make it hold:
+
+- **`.split > *, .split > * > :first-child { margin-top: 0 }`.** Every block on
+  this site that can be an artifact — `.plate`, `.cards`, `.specs`, `.steps` —
+  carries a top margin for the case where it FOLLOWS prose. At the top of a
+  column there is no prose above it, and that margin is a dead strip. It was
+  measured: with `align-items: stretch` on the index hero and `.plate`'s
+  `margin-top: 32px` still applied, the editor column was **642px against the
+  674px beside it**. The rule takes it to 0.
+- **`.split > .say > p { max-width: var(--measure) }`.** Two sentences set to
+  88ch beside a chart is the paragraph an artifact was supposed to replace.
+- **`.split .specs { grid-template-columns: repeat(2, 1fr) }`.** Four stat tiles
+  in a column are 2x2, not 3+1: `auto-fit` measures the track and not the count,
+  and the fourth tile fell to a row of its own where it read as a stray.
+
+**`.hero.split` stays 1fr/1fr and that is deliberate.** 2fr of a 1216px sheet is
+486px, and a 67px display headline in 486px is four lines of two words. The
+index's hero keeps the split M2 shipped; what M3 changed there is
+`align-items: stretch` plus `.heroplay { display: flex }` and
+`.heroplay .out { flex: 1 }`, so the **output pane grows into whatever the left
+column leaves** instead of the plate ending 32px above it.
+
+### The geometry, asserted rather than looked at
+
+A sweep runs in the browser over ten exported pages at 320, 375, 700, 767 and
+1280px, measuring computed boxes. Not DOM presence: every figure here is
+`getBoundingClientRect` and `getComputedStyle` on the real layout.
+
+| Assertion | Result |
+|---|---|
+| every `main > section` on a page has the same padding pair | pass — `56/56` at 1280, `35/35` at 767, `32/32` at 700 and below, on all ten |
+| no section carries a vertical margin | pass — **0 of 52 sections**, ten pages, five widths |
+| no section taller than its content plus its padding, x1.25 | pass — the worst ratio anywhere is **1.023** (`/play`, whose editor is `46vh`); the four M3 pages run 1.000 to 1.008 |
+| the masthead is 64px at every width | pass — ten pages, five widths |
+| no empty grid cell | pass — 0, over `.cards`, `.modgrid`, `.specs`, `.twocol` and `.plain` |
+| prose no wider than its role allows | pass — the widest paragraph anywhere is **806px**, which is `--wide` (88ch, the sheet's INTRO role). The 999-1001px readings the sweep also returns are `.cap` elements, whose role is LABEL and whose declared width is their block's |
+| no element wider than its own container outside a scroller | pass on the four M3 pages at all five widths |
+| the body never scrolls sideways | **fail at 320 and 375, and not this milestone's** — see below |
+
+**The one failure, and the proof it is inherited.** At 375px the document is
+379px; at 320px it is **also 379px**. `/compare.html`, which M3 did not touch,
+reports the same 379 at both. It is the masthead's `.tools` row — M1 recorded it
+at 320px, M2 measured it at 375px and assigned the fix to M4 on the grounds that
+every fix is a decision about which control loses its word. M3 adds one figure to
+that arithmetic: **the overflow is a constant 379px and does not depend on the
+viewport at all**, so the row is not shrinking below 379 and the fix has to
+remove or wrap something.
+
+### The index and install, tightened
+
+- **The hero editor fills its column.** `.heroplay .out` was `max-height: 9em`
+  against a fixed editor. It is `flex: 1` with a `4.5em` floor now, and the two
+  hero columns measure **674px and 674px**. M2's own claim survives unchanged:
+  the content still ends at **794px** of an 800px viewport under the 64px
+  masthead.
+- **The bench section is a Split.** Kicker, `As quick as C`, one sentence and one
+  link on the left; the five bars on the right. The `.notice` under the plate is
+  gone — the link that was in it is the section's own call to action now, which
+  is one fewer `.note`/`.notice` on the page and one fewer line of furniture.
+- **The four pillar cards were already equal height** — they are grid items in a
+  stretched row — so the brief's "equal height" needed no change. The whitespace
+  inside a card is `.cards p { flex: 1 }` bottom-aligning the command, which is
+  the alignment and not an orphan. Recorded rather than "fixed".
+- **The seven-step demo is Bun's layout, and it cost one line of JavaScript.**
+  Each step is a grid: title, command and note in a 2fr column, the recorded
+  output in a 3fr column beside them, stacking below 1024px. With script, the
+  stepper no longer sets `hidden` on six of seven steps — it toggles a class, and
+  the sheet collapses an inactive step **to its title**. So the seven-title
+  outline is always on the page and one step is open, which is the thing a
+  reader scans. `widgets.js` adds `.stepped` to the plate, so with no script
+  nothing matches and all seven are open, exactly as before.
+  Verified in the browser: `1 / 7`; Next to `2 / 7`; ArrowLeft from the first
+  wraps to `7 / 7` with Next reading `Replay`; Back disabled at the first step;
+  the counter still `aria-live="polite"`; seven titles visible at every step;
+  **zero `hidden` attributes**. A click on a collapsed step opens it — pointer
+  only, and deliberately: Back, Next and the arrow keys already reach every step,
+  so it adds no function a keyboard cannot do.
+
+### Install, rebuilt on the reference's shape
+
+The user sent the reference's install page mid-milestone, so this page got a
+second brief: a centred hero, an OS selector, ONE visible command.
+
+**The picker is three radio buttons and no JavaScript at all.** A `<fieldset>`
+with a `<legend>` — the native group, with the name three loose radios and three
+labels do not have. The inputs are visually hidden and come first in the markup,
+so `:checked ~` reaches both the labels and the panes, and **selection is by
+position**: `.picker input:nth-of-type(n):checked ~ .ospanes > :nth-child(n)`.
+The sheet never spells a platform's name, and a fourth platform is one `<label>`,
+one `<div>` and one line of CSS. Verified in the browser with the script running
+and with the mechanism inspected: `0--` at rest, `--2` after a press on Windows,
+`-1-` after Linux, and the command text changes with it.
+
+The three inputs are written out rather than looped, and the reason is a language
+one worth recording: only the first carries `checked`, `v-for` has no way to put
+an attribute on one iteration, and a bound value cannot express it either —
+`checked=""` is still checked in HTML.
+
+What else moved: the version badge is the kicker (`INSTALL · v0.1.0-alpha.1`),
+the two reassurance lines are one lede, the checksum sentence is one `.eyebrow`
+under the command with the release-notes link in it, and **uninstall, pinning a
+version, checking by hand and the source build are one `<details>` called
+Advanced**. The page ends in `Build something`: one command and four links.
+Nothing invented — there is still no `brew` line, no `apt` line and no `winget`
+line, because there is still no formula, no package and no manifest.
+
+The `.tiles` ruleset that styled the three tiles this replaced is **deleted**: it
+had one user on the whole site and the picker is not it.
+
+### Releases
+
+**Four stat tiles, and not one of them is typed.** Each is arithmetic over a file
+something else wrote:
+
+| Tile | Where it comes from |
+|---|---|
+| `106` pull requests merged since | summed out of `site/data/history.json` over the days after the baked tag's date |
+| `604` test blocks in `82` files | counted by `scripts/site-history.py` the way CI's own floor counts them |
+| `171` examples on `3` engines each | `app/facts.vyrn` over `examples/`, and `backendCount()` |
+| `38` standard library modules | `app/facts.vyrn` over `std/` |
+
+**Two tiles the brief asked for are not here, and that is the second deviation.**
+The brief proposed platform count and asset count. A release's ARCHIVES and the
+platforms they were built for live in the release on GitHub, and this repository
+holds a tag and a date (`site/release.txt`) and nothing else about a release —
+the feed says the same thing, in the same words, about release notes. A tile is a
+number a reader trusts. A number nobody can recompute does not get one, so those
+two are a link to the release page in the table instead.
+
+**The highlights are the design records since the tag, for the same reason.**
+Release notes are written on GitHub and are not in this tree, so the two-column
+list under the tiles is every record that arrived after the tag — nine of them,
+newest first, each with the status it holds today and a link to the record.
+`arrivalList()` already had all of it; this page is its second reader.
+
+Below: a table of every release (version, date, kind, and a link to that tag's
+archives and `SHA256SUMS`), from `history.json`'s own tag list. And **the feed is
+on the page** — `<link rel="alternate">` has pointed at `releases.xml` since M1
+and no document had ever named it, which is a feed a person could not find.
+
+`repo.vyrn` grew `releaseUrlOf(tag)`; `releaseUrl()` is one call to it now.
+
+**One thing a local build shows and a published one does not.** `site/release.txt`
+is refreshed from the GitHub listing by `.github/workflows/site.yml` before every
+build; a checkout has whatever was committed. So on this machine the hero says
+`v0.1.0-alpha.1` while the table, which reads git's own tags, lists
+`v0.1.0-alpha.2` above it — and `fresh.js` puts the drift on the page in a
+`role="status"` line, which is exactly what it is for. In CI the two agree.
+
+### The reference landing
+
+The module list was **38 full-width rows** of `name | count | sentence`: 38 lines
+of scrolling to answer "is there one for X". It is a three-column grid under four
+small-caps group headings now, and every row in it is generated —
+`apiGroups()` reads `std/`, so a module added tomorrow is on this page on the
+next build.
+
+**The group names are the one editorial line, and that is the third deviation.**
+The brief says no hand-maintained duplicate list, and there is none: the LIST is
+`apiModules()`. What a generated table cannot know is that `jsonread` is data and
+`tw` is web, so `groupOf(m)` in `app/docs.vyrn` names three sets and defaults to
+`Programs and tools` — a module nobody classified lands in a visible group rather
+than vanishing. `docs.vyrn`'s own test asserts the groups add up to
+`apiModules().length`, so the failure mode that remains is a name listed twice
+and not a name forgotten.
+
+The rows keep their `data-q` and `data-e`, so M1's search still filters them
+where they sit; `widgets.js` was not touched for it. A group whose rows are all
+filtered out **hides its own heading** — `.modgroup:not(:has(li:not([hidden])))`
+— because the script hides rows and knows nothing about groups. Each summary is
+clamped to two lines: the whole sentence is still in the document for a screen
+reader and for the search, and the module's own page has it in full.
+
+The rest of the page: the search moved into the hero as its right column, the
+`01 —` / `02 —` numbering left the section kickers, the two-paragraph "a book and
+a registry" section folded into the `Elsewhere` split, and the `.note` class came
+off the module summaries. **That last one alone took `/docs` from 42 `.note`
+elements to 1** — M0 measured 40 of the site's 103 on this page, and they were
+one CSS class on a generated row.
+
+### The stylesheet stopped being a download
+
+The sheet is 48% comment prose: which defect a rule closes, which checklist row
+it answers, what was measured before it. M0 gave it **90,000 bytes raw and 27,000
+gzipped**, and M2 landed at 89,272 / 27,170 — about 700 bytes of headroom. A
+global section system does not fit in 700 bytes. Trimming M3's own comments to
+half their length got the sheet to 95,818 / 29,120, which is still over both, and
+`/` to **57,315 gzipped against a 55,000 ceiling**.
+
+Raising two ceilings was the cheap answer. The honest one is that **the design
+record is not the page's payload**, and this site already applies that rule to
+JavaScript: the navigator pair is deferred, the playground moved to `/play`.
+
+So `site/export.vyrn` strips CSS comments on the way to `out/style.css`. This is
+the fourth deviation, and it is a change the brief did not ask for. It is not
+minification: no name is shortened, no rule is merged, no whitespace inside a
+declaration moves. Comments go, the blank lines they leave behind go with them,
+and the scanner is **string-aware**, because `content: "/*"` is a legal
+declaration and a scanner that did not know it would eat the rest of the file —
+there is a test for exactly that case.
+
+| | Raw | Gzipped |
+|---|---:|---:|
+| `site/public/style.css`, the source | 96,957 | 29,561 |
+| `out/style.css`, what a reader fetches | **48,709** | **9,563** |
+| M0's ceiling | 90,000 | 27,000 |
+
+**19,610 gzipped bytes, off every page of the site**, and it is prose no browser
+was ever going to render. `site/test/typescale.test.mjs` measures both ceilings
+against the shipped form now; the source keeps no byte ceiling of its own, on
+purpose — a comment budget is a budget on explaining yourself, and that was never
+what the numbers were for. `contrast.test.mjs` still reads the source, and its
+note that the copy is "byte for byte" is corrected in place.
+
+Cold first load, gzipped, counting the document and every asset a browser fetches
+without an interaction:
+
+| Page | M2 | M3 | Ceiling |
+|---|---:|---:|---:|
+| `/` | 53,824 | **36,801** | 55,000 |
+| `/install` | — | **34,565** | 55,000 |
+| `/releases` | — | **34,308** | 55,000 |
+| `/docs` | — | **43,596** | 55,000 |
+
+The shared assets are 31,603 of every one of those, and `widgets.js` is 17,762 of
+the 31,603 — **56% of what every page of this site downloads is one JavaScript
+file**, and the same argument applies to its comments. It is not stripped, and
+the reason is that JavaScript comments are not a regular language a
+forty-line scanner can find the end of. That is the next page-weight item and it
+belongs to M5.
+
+### The numbers, against M0's ceilings
+
+| Page | Words before | Words | Ceiling | Bytes before | Bytes | Ceiling | Cmds | Floor | `.cap` | `.note`/`.notice` before | now | Ceiling |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| index | 257 | **253** | 260 | 17,675 | **17,715** | 30,000 | **12** | 5 | **2** | 2 | **1** | 2 |
+| install | 208 | **197** | 220 | 8,780 | **9,250** | 14,000 | **8** | 8 | **1** | 2 | **2** | 2 |
+| releases | 252 | **181** | 200 | 5,777 | **7,506** | 20,000 | **1** | 1 | **1** | 4 | **2** | 2 |
+| docs (landing) | 907 | **640** | 644 | 54,262 | **52,815** | 40,000 | 0 | 0 | **2** | 42 | **1** | 2 |
+| **all thirteen** | 6,266 | **5,913** | | 229,989 | **230,781** | | 24 | | 44 | 91 | **47** | |
+
+Every word ceiling is met. Of the `.cap` elements on the four pages, **one on
+each is the shell's own**, which is on every page of the site — so `/index` and
+`/docs` carry one caption apiece and `/install` and `/releases` carry none.
+
+**`/docs` is still over M0's byte ceiling: 52,815 against 40,000.** It was 54,262
+before M3 and no milestone has ever met it. The cause is measurable and is not
+prose: **the import graph's inline SVG is 25,347 bytes of the page, 48% of it.**
+Either the graph moves off the landing or the ceiling was set without the graph
+in view; both are decisions, neither is M3's to take alone, and the number is
+here so M4 takes it with the figure in front of it.
+
+### Pages M3 did not touch, and how they took the new rhythm
+
+The rhythm is global, so `/compare`, `/why-vyrn`, `/guide`, `/explore` and
+`/play` render under it without being rewritten. All five pass the sweep at 375,
+767 and 1280: uniform padding, zero section margins, a worst height ratio of
+1.023, and no overflow beyond the inherited masthead one. Three things for M4,
+found by looking rather than by breaking:
+
+1. **`/guide`'s chapter list carries 14 `.note` elements** — the same class on a
+   generated row that `/docs` just shed, one per chapter, against a ceiling of
+   two a page. The fix is the one M3 already made next door.
+2. **`/compare` reports 14 elements wider than their own container at 1280px.**
+   The document does not scroll sideways there, so these are inner blocks
+   without a scroller over them. M0 recorded the page breaking the rule at both
+   audited widths for two unrelated reasons; this is a third figure for the same
+   entry.
+3. **`/philosophy` and `/editors` measure 64 words each** in the census table,
+   because they are redirect stubs now and the table in M0 still names them as
+   pages. The census's `PAGES` list wants `/why-vyrn` and `/docs/editors` in
+   their place; M5 owns it, since M5 is what wires the census into the build.
+
+Two smaller ones fixed in passing, both found by the sweep: a `.cta` inside a
+content row was `white-space: nowrap` inherited from the masthead's Install
+button and painted **286px in a 278px column at 320px** — a CTA in content wraps
+now; and `details.disc > summary` was a **19px** target against the checklist's
+24px floor, everywhere on the site, which is one `min-height` and applies to
+every disclosure this RFC has added since M1.
+
+**And one refusal this record earned on its own.** `app/markdown.vyrn` refuses a
+fenced block in a language it does not know, "so the next language somebody
+reaches for is a decision somebody makes" — its own words. This section quotes
+six CSS declarations, the export failed on `/backstage/rfcs/0106` and printed
+`REFUSED RFC-0106: a fenced code block tagged \`css\``, and `css` is on the list
+now. It renders escaped and unstyled, like `yaml`. The mechanism worked exactly
+as designed: a record could not grow a construct the site renders wrongly without
+somebody being told.
+
+### Gates
+
+- `python scripts/site-history.py`, `python scripts/site-demo.py --vyrn
+  compiler/target/release/vyrn`, then `vyrn run site/export.vyrn out`: **175
+  routes, 12 assets, 50 markdown twins, one index, one feed.**
+- the site's own test loop over `site/export.vyrn` and every module in
+  `site/app/`: **31 blocks declared, 31 ran** — one more than M2, and it is the
+  stylesheet stripper's.
+- `vyrn test site/app/docs.vyrn`: 8 passed, including the new "the groups hold
+  every module, once". `vyrn test site/app/stdgraph.vyrn`: 6 passed.
+- `node --test site/test/*.test.mjs` over the exported tree: **31 tests, 31
+  pass.**
+- `vyrn fmt --check` on `site/app/*.vyrn`, `site/guide/*.vyrn` and
+  `site/export.vyrn`: clean. The four `.vyx` templates are hand-formatted —
+  `vyrn fmt` does not read `.vyx`.
+- `cargo fmt --all --check`: clean. `cargo test --release --workspace`: **1,760
+  passed, 0 failed.** `cargo test --release -p vyrn-cli --test rfc_index`: 4
+  passed.
+- **No compiler change and no `std/` change. Zero Rust files touched.**
+- 48 screenshots, four pages by five widths by two palettes plus a full-length
+  page each, in `shots/` (gitignored).
 
 ## What this RFC does not do
 
