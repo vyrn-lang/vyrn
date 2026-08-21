@@ -40,7 +40,7 @@ import { indexJson, indexName, rows } from "./app/search"
 import { pageMetas, metaOf, hasMeta } from "./app/meta"
 import { mdPaths, mdName, mdUrl, markdownOf } from "./app/pagemd"
 import { feedName, feedUrl, feedXml, feedItemCount } from "./app/feed"
-import { substring, indexOf, split, replace } from "std/strings"
+import { substring, indexOf, split, replace, lines, trim } from "std/strings"
 import { startsWith } from "std/strpred"
 
 /// Every path the site publishes, from the router's own typed URL helpers. A
@@ -511,9 +511,87 @@ fn assets() -> Array<Array<String>> {
 /// what happened now, in the OS's own words where the OS is the one that knows.
 fn copyAsset(outDir: String, source: String, name: String) -> Int64 {
     return match readFile(source) {
-        Ok(body) => written(outDir, source, name, body),
+        Ok(body) => written(outDir, source, name, assetBody(name, body)),
         Err(why) => failed(source, why),
     }
+}
+
+/// What an asset SHIPS as, which is not always what it is written as
+/// (RFC-0106 M3).
+///
+/// `site/public/style.css` is 48% comment prose, and that prose is a design
+/// record: which defect a rule closes, which RFC row it answers, what was
+/// measured before it. It belongs in the repository. It does not belong in the
+/// download every reader of every page pays for — 19,610 gzipped bytes of it,
+/// on a page whose whole first-load budget is 55,000 (RFC-0106 M0).
+///
+/// So the SOURCE keeps its prose and the PUBLISHED sheet does not. This is not
+/// minification: no name is shortened, no rule is merged, no whitespace inside a
+/// declaration moves. Comments are removed and the empty lines they leave behind
+/// go with them, and `site/test/typescale.test.mjs` measures M0's two ceilings
+/// against exactly this form. Nothing else in `assets()` is touched — JavaScript
+/// comments are not a regular language you can strip with a scanner this size.
+fn assetBody(name: String, body: String) -> String {
+    if name == "style.css" {
+        return stripCssComments(body)
+    }
+    return body.copy()
+}
+
+/// A stylesheet without its comments.
+///
+/// STRING-AWARE, because `content: "/*"` is a legal declaration and a scanner
+/// that did not know it would eat the rest of the file. CSS comments do not
+/// nest, so one `*/` closes one `/*` and there is no depth to count.
+fn stripCssComments(css: String) -> String {
+    let mut out = ""
+    let mut keep = 0
+    let mut i = 0
+    let mut quote: UInt8 = 0
+    while i < css.byteLength {
+        let c = css[i]
+        if quote != 0 {
+            if c == 92 && i + 1 < css.byteLength {
+                i = i + 2
+                continue
+            }
+            if c == quote {
+                quote = 0
+            }
+            i = i + 1
+            continue
+        }
+        if c == '"' || c == 39 {
+            quote = c
+            i = i + 1
+            continue
+        }
+        if c == '/' && i + 1 < css.byteLength && css[i + 1] == '*' {
+            out = out + substring(css, keep, i)
+            i = i + 2
+            while i + 1 < css.byteLength && !(css[i] == '*' && css[i + 1] == '/') {
+                i = i + 1
+            }
+            i = i + 2
+            keep = i
+            continue
+        }
+        i = i + 1
+    }
+    out = out + substring(css, keep, css.byteLength)
+    return withoutBlankLines(out)
+}
+
+/// The lines a removed comment leaves behind. A comment on its own line leaves
+/// its newline and its indentation, and there are nine hundred of them.
+fn withoutBlankLines(text: String) -> String {
+    let mut out = ""
+    for line in lines(text) {
+        if trim(line).byteLength > 0 {
+            out = out + line + "\n"
+        }
+    }
+    return out
 }
 
 /// The write half of `copyAsset`, once the read has succeeded. A file that read
@@ -1005,6 +1083,33 @@ test "the display type step reaches nine pages and no leaf page" {
     // landing: it is a leaf, and it keeps the documentation scale.
     assert(!isLanding("/docs/editors"))
     assert(isLanding("/docs"))
+}
+
+test "the published stylesheet keeps every rule and none of the prose" {
+    // RFC-0106 M3. The source carries the design record; the download does not.
+    assertEq(stripCssComments(".a { color: red }\n"), ".a { color: red }\n")
+    assertEq(stripCssComments("/* why */\n.a { color: red }\n"), ".a { color: red }\n")
+    assertEq(stripCssComments(".a { /* why */ color: red }\n"), ".a {  color: red }\n")
+    // A `/*` inside a string is a string, not a comment. A scanner that missed
+    // this would eat the rest of the sheet and publish a blank page.
+    assertEq(stripCssComments(".a::before { content: \"/*\" }\n"), ".a::before { content: \"/*\" }\n")
+    assertEq(stripCssComments(".a::before { content: '*/' }\n/* g */\n.b { top: 0 }\n"), ".a::before { content: '*/' }\n.b { top: 0 }\n")
+    // Only the stylesheet. A module whose comments say what a function is for
+    // ships them, because nothing here can parse JavaScript.
+    assertEq(assetBody("theme.js", "// keep\n"), "// keep\n")
+
+    // And on the real file: every selector survives, every comment leaves.
+    let sheet = match readFile("site/public/style.css") {
+        Ok(text) => text,
+        Err(why) => "",
+    }
+    if sheet.byteLength > 0 {
+        let shipped = assetBody("style.css", sheet)
+        assert(shipped.byteLength < sheet.byteLength)
+        assert(has(shipped, ".band { padding: var(--sect) 0;"))
+        assert(!has(shipped, "/*"))
+        assert(!has(shipped, "*/"))
+    }
 }
 
 test "every published document points at an icon this export writes" {
