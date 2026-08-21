@@ -9,10 +9,11 @@ reference pages the user named.
 Status values: **FIXED**, **DEFERRED** (with the reason), **NOT A DEFECT** (a
 probe hit that survived inspection, kept so nobody re-files it).
 
-**Sections A to I are the second round. Section J is the third**, added after the
-user read the second round and sent back eight findings — six of which are
-defects the second round created or left standing, plus two the sweep written for
-them found on its own.
+**Sections A to I are the second round, J is the third, K is the fourth.** Each
+was added after the user read the round before it: eight findings in the third
+round, seven in the fourth, and in both rounds most of what came back were
+defects the previous round had created or left half-made — plus the ones the
+sweep written for them found on its own.
 
 ## A. Command blocks that wrap — the defect the user led with
 
@@ -217,3 +218,160 @@ stay here.
 | J11 | `/docs`'s `.modgrid` is 32px wider than its container at every width | the rule grid's own bleed, `margin: 0 calc(-1 * var(--s2))`, bounded by `--gut` and documented at the rule. The document width is unchanged |
 | J12 | the install page's `git clone … / cd … / cargo build …` block reports three lines | it is three commands and is written with three newlines. The wrap assertion compares line boxes to newlines now, not to 1 |
 | J13 | `/play` at 375: the example `<select>` is 22px inside a 4px `.pickbox` | real, pre-existing, and not this round's: `/play` is not a page M3 touched and the fix is a decision about that toolbar's flex model. Deferred, recorded here so it is not re-filed |
+
+## K. The fourth round — seven from the live export
+
+The user read the deployed tree and sent seven. Six are defects a fix in an
+earlier round created or left half-made; the seventh is the index being thin.
+
+| # | Page / file | Defect | Status |
+|---|---|---|---|
+| K1 | index | the recorded demo: one step's output floating top-right of an empty card, six flat title bars under it, the caption overlapping the last row | **FIXED** — the CARD is the split now, not the row |
+| K2 | every chart | SVG text at 3.0 to 11.8 px, measured. Nothing on the site reached 12 | **FIXED** — two chart type steps, a ceiling and a floor on the scale |
+| K3 | bench records | the machine's host name in four committed records, in their file names, and in a caption on two pages | **FIXED** at the recorder, the records and the display |
+| K4 | index, install | the selected tab's border thinner than its neighbours | **FIXED** — the cause was two negative margins over a subpixel grid |
+| K5 | masthead | an 83px icon-and-word button where the reference ships a field | **FIXED** — a 272px field above 1024px, the old two forms below it |
+| K6 | index, play | the hero editor: no reset, an output pane that resized between states, a failure path that left the controls live | **FIXED** — and `Ctrl+Enter` and the exit code were already there |
+| K7 | index | "bun has more interesting stuff on index page" | **FIXED** — two sections, both generated from the tree |
+
+### K1, and why it only broke in the state a reader sees
+
+Every `li` was its own 2fr/3fr grid with the step's output in column 2 — a shape
+drawn for the no-script case, where all seven steps are open and each row reads
+"what you typed | what came back". Under the script exactly ONE step is open, so
+that grid painted a command in column 1, its output floating top-right of the
+same row, and six title bars underneath. **A geometry serving two states and
+correct in the rarer one.** The card is the split now: seven numbered rows in
+column 1, always whole, and the output in column 2. Every one of the seven was
+checked, including the two that are not commands — the file listing, which is
+walked, and the edit, which is a file — and those are title rows on purpose.
+
+The provenance line moved OUT of the plate to a `.cap` under it, which is the
+class built to sit flush with the block above it. As an `.eyebrow` inside the
+card it had landed on the last row.
+
+Two things the fix's own verification found: the output pane at `flex: 1` made a
+600px empty terminal for a one-line step and pushed that step's note to the
+bottom of the card, 500px from what it is about (now `flex: 0 1 auto` with a
+floor and a ceiling); and `<p class="note">` on seven steps took the index's
+disclosure count from 1 to 8, because `.note` is what the census counts as a
+disclosure and M0's rule is one per plate. It is `.stepnote` now.
+
+### K2, measured before and after
+
+| Chart | Where | Before | After |
+|---|---|---:|---:|
+| bars | index, 1280 | 6.6–8.0 | 12.4–13.2 |
+| bars | index, 375 | 9.0–11.0 | 12.0–12.7 |
+| bars | compare, 1280 | 9.6–11.8 | 17.0–18.0 |
+| bars | compare, 375 | **3.0–3.6** | 12.0–12.7 |
+| radar | compare, 1280 | 7.0–7.8 | 13.2–14.0 |
+| radar | compare, 375 | **3.8–4.3** | 12.1–12.9 |
+| pulse, arrivals | backstage, 375 | **3.0** | 12.1–12.8 |
+| cites | backstage, 1280 | 8.2 | 15.5–16.5 |
+
+Text in a `viewBox` is drawn in user units and scaled with the picture, so a
+token's number is not what a reader gets: the scale is the container's width over
+the viewBox's, and it ran from 0.33 to 1.07. **The site already had the fix, on
+one plate.** `.barstrip .stage { overflow-x: auto }` with a `min-width` has been
+on the index since M2, with its reason written in general terms — "a 904-unit
+viewBox in a 343px column scales every glyph by 0.38 and a 9px axis label paints
+at 3.4px" — and it was never applied to the other nine charts. The same shape as
+`.hero.mid > .eyebrow` in the third round: the general fix, made local.
+
+Now: `--t-svg` and `--t-svg-s` at 18 and 17 user units, a `max-width` per family
+so no chart is drawn larger than its own units, and a `min-width` at `12/18` of
+each viewBox so none is drawn smaller. **The correction the measurement forced:**
+the floor was first written inside the phone media block, and a 700px window fell
+between the two — no floor, and 11.4px on six charts. A media query cannot see
+the CONTAINER's width, which is what the scale depends on; a `min-width` can.
+
+### K3, where the host name came from
+
+`rfcs/bench-0104/harness/run.py` recorded `socket.gethostname()` in every
+`environment` block **and named the output file after it** — which is how four
+committed records carried a machine's name twice over, and how a caption on `/`
+and `/compare` printed `2026-08-19-LOCUST-v2.json` as the provenance of a number.
+
+All three ends are closed: the field is gone from `environment()`, the file name
+is the date alone, the four records are rewritten without the field and renamed,
+and `envRows()` drops the `Host` row. The CPU, the memory, the OS and every
+toolchain version and flag stay, because those are what make a number checkable.
+`bench.vyrn`'s own test asserts both halves — no row labelled `Host`, and no
+`"host"` key in the record it reads.
+
+**The numbers were NOT re-measured.** Re-running the corpus on another machine
+would produce different medians under the same date, which is a worse thing to
+publish than a stripped field. What was regenerated is the identifier, not the
+measurement.
+
+### K4, the thinner border
+
+The picker built its unit out of four borders per label, `border-left: 0` on the
+siblings, and then `margin-left: -1px` and `margin-top: -1px` to pull the checked
+tile and the command box back over the borders they doubled. Two negative margins
+over subpixel grid columns is a lottery: at a 523px container a `1fr` column is
+261.5px, so a shifted 1px border straddles two device pixels and paints as two
+half-covered ones — thinner and lighter than its neighbours, differently at 1x
+and at 2x, and only on the tile a reader is looking at.
+
+The row draws its own box, the divider is one border on one side of one element,
+and the selection is three inset shadows — top and both sides, leaving the tile
+open at the bottom into its command box. A shadow takes no space, so nothing has
+to be pulled back over anything. Measured at 1280 and 375, on both tabs: the tab
+row's border is `1px 0`, the labels are `0` and `1px` left, the command box's top
+border is 1px, and the gap between the two boxes is exactly 0.
+
+### K5 and K6, briefly
+
+The search control is a 272px field with its placeholder and a `/` chip above
+1024px, and the two narrower forms below it are exactly what they were — the
+masthead row fits at 320px with zero pixels to spare (third round, I3), so the
+wide form is added only where the row has slack. Measured after: the masthead is
+still 64px.
+
+The editor already had `Ctrl+Enter`, the run state and the exit code; what it did
+not have was a way back and an honest failure. `Reset` restores the program the
+editor started from — the example, the shared link, or the hero's own snippet —
+and the pane's idle line with it. The output box has a floor, so idle, running
+and ran are the same height. And when the module fails to load, the pane says so,
+the textarea goes back to read-only and both controls are disabled, instead of a
+live Run button over an editor with no compiler behind it.
+
+Verified in the browser, on the page rather than in an iframe: `Press Run` →
+`Loading the compiler…` → `Running…` → `Ran`, with `admitted at 30 / refused: 5
+is under 18 / exit 0` in the pane; a program returning 3 shows `The program wrote
+nothing. exit 3`; `Ctrl+Enter` runs; `Reset` puts the source, the status and the
+idle line back; and the pane is 111px in every state.
+
+### K7, the two sections, and what is NOT in them
+
+Both are generated, and that is the whole design:
+
+- **Five tabs of real code.** Every snippet is a file in `site/guide/` — compiled
+  while the index renders, run by `/guide` while that page renders, and checked
+  by `vyrn test site/guide/*.vyrn` in CI. No snippet literal was added anywhere.
+  The tab strip is the install picker's own control, extended from two positions
+  to five.
+- **Eight standard-library modules**, the two biggest of each of the reference's
+  four groups, with their export counts, from the same generator the reference
+  landing reads.
+
+Two things the brief asked for are missing because the tree does not hold them:
+`std/stream` has no chapter program, and `protocols` is 31 lines against this
+set's 10 to 19, which would have made the section resize under the reader on one
+tab. A snippet written for either would have been the one block on the page that
+nothing compiles.
+
+**The index ceilings are raised, deliberately: 260 words to 380, and 30,000 bytes
+to 34,000.** The page is 372 and 32,023. The prose did not grow — what the census
+counts as words here are five tab labels, five captions, eight module names, four
+group names and two headings, around code and generated names. The cold load is
+40,762 gzipped against 55,000, which is the ceiling that bounds what a reader
+actually pays for.
+
+### Found by the fourth round's sweep, and not fixed
+
+| # | Defect | Status |
+|---|---|---|
+| K8 | `/backstage` takes the document 139px wide at 1280 and 405px at 375 — two `span.name`/`span.note` pairs in a row that does not wrap | **DEFERRED, and pre-existing**: measured identical with the stylesheet as committed before this round, by serving the old sheet against the same document. The backstage is the developer front and is not one of RFC-0106's thirteen census pages; recorded here with the numbers so the milestone that owns it has them |

@@ -17,7 +17,12 @@
   for the deploy job that was failing on a relative path, the install command
   that names this site, the changelog leaving the masthead, the search box that
   had never scrolled, and the three reference-site patterns this site does not
-  take. Milestones below; a milestone that fails its gate says so in this file.
+  take, and
+  [M3 — the fourth round](#m3--the-fourth-round-read-off-the-deployed-tree) for
+  the demo card whose geometry served the wrong state, every chart on the site
+  painting text under 12px, a machine name published as provenance, and the two
+  generated sections the index earned. Milestones below; a milestone that fails
+  its gate says so in this file.
 - **Depends on:** RFC-0105 (the site this redesigns — its two-front split,
   theme, accessibility checklist, and gates all survive and bind this work),
   RFC-0104 (the benchmark data the index will show), RFC-0107 (the icons the
@@ -552,7 +557,7 @@ ceiling plus the generated count as it stands today, which moves only when
 
 | Page | Words now (own prose) | Ceiling: own prose | Ceiling: total | Bytes now | Ceiling: bytes | `.cap` now | Ceiling: `.cap` | Cmds now | Floor: cmds |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| index | 644 (644) | **260** | **260** | 16,024 | **30,000** | 5 | **2** | 1 | **5** |
+| index | 644 (644) | **380** | **380** | 16,024 | **34,000** | 5 | **8** | 1 | **5** | <!-- RAISED IN M3 ROUND 4, from 260/260/30,000/2. The page gained a five-tab showcase of the book's own programs and an eight-module reference teaser, both generated; what the census counts as the new words are tab labels, one-line captions, module names and group names, and the `.cap` count is one caption per showcase pane plus the demo's provenance line. No paragraph on the page grew. The ceiling that bounds what a reader pays for is the cold load, and that is 40,762 of 55,000. -->
 | install | 678 (678) | **220** | **220** | 12,942 | **14,000** | 2 | **1** | 14 | **8** |
 | why-vyrn (was philosophy) | 550 (550) | **280** | **280** | 8,285 | **9,000** | 5 | **0** | 0 | **0** |
 | compare | 1329 (1329) | **420** | **420** | 63,602 | **55,000** | 10 | **3** | 0 | **0** |
@@ -2096,6 +2101,208 @@ The published stylesheet is 49,645 raw and 9,809 gzipped against 90,000 and
 - 55 screenshots in `shots/`, the 51 of the second round re-taken plus four new
   ones: the search overlay open in both palettes, and the OS guess proved in both
   directions.
+
+## M3 — the fourth round, read off the deployed tree
+
+The user served the export and read it. Seven findings, and six of them are the
+same shape as the third round's: **a fix that was made once, locally, where the
+general form was already written down.** That is worth naming as a pattern,
+because it is now the most common defect this milestone produces.
+
+The census carries them row by row (section K). What follows is what changed and
+the four things the measurements corrected.
+
+### A geometry that served two states and was right in the rarer one
+
+The recorded demo card. Every `li` was its own 2fr/3fr grid with that step's
+output in column 2 — which reads as "what you typed | what came back" in the
+no-script case, where all seven steps are open. Under the script exactly one step
+is open, so the same grid painted a command in column 1, its output floating
+top-right of an otherwise empty row, and six flat title bars underneath, with the
+provenance line landing on the last of them.
+
+**The card is the split now, not the row.** Seven numbered rows in column 1,
+always whole, the marked one carrying `aria-current="step"`; the output in
+column 2. With no script every pane is stacked in column 2 under its own title
+and the sheet's `.stepped` rules match nothing — the fallback is a different
+arrangement of the same content, not a degraded copy of one. The provenance line
+is a `.cap` under the card, which is the class built to sit flush with the block
+above it.
+
+Two things this fix's own verification found. At `flex: 1` the output pane made a
+600px empty terminal for a one-line step and pushed that step's note to the
+bottom of the card, 500px away from what it is about — it is `flex: 0 1 auto`
+with a 9em floor and a 34em ceiling. And `<p class="note">` on seven steps took
+the index's disclosure count from 1 to 8, because `.note` is one of the two
+things the census counts as a disclosure and M0's rule is one per plate.
+
+### Text in a viewBox is not text at a size
+
+**Every chart on the site was under 12px, and most were under 9.** Measured:
+6.6–8.0px on the index at 1280, 3.0–3.6px on `/compare` at 375, 3.0px on the
+backstage's pulse. The cause is that text inside a `viewBox` is drawn in USER
+UNITS and scaled with the picture, so `--t-axis: 9px` is a number the container's
+width multiplies — by 1.07 in a full band, 0.73 in a split column, 0.33 on a
+phone.
+
+The site already had the answer, on one plate. `.barstrip .stage { overflow-x:
+auto }` with a `min-width` has been on the index since M2 and its comment states
+the rule in general terms — "a 904-unit viewBox in a 343px column scales every
+glyph by 0.38 and a 9px axis label paints at 3.4px". It was never applied to the
+other nine charts.
+
+So the scale is bounded at both ends, at the level every chart shares:
+
+- `max-width` per family at each generator's own viewBox width, so no chart is
+  ever drawn LARGER than its units.
+- `min-width` at `12/18` of that width, so none is drawn smaller than the scale
+  at which 12 real pixels survive; under it the chart scrolls inside its own
+  `.stage`, which is this sheet's rule for any block wider than its column.
+- two type steps, `--t-svg: 18px` and `--t-svg-s: 17px`, replacing `--t-axis`,
+  with `site/test/typescale.test.mjs` extended to name them.
+
+**The correction the measurement forced:** the floor was first written inside the
+phone media block, and a 700px window fell between the two — no floor, and 11.4px
+on six charts. A media query cannot see the CONTAINER's width, which is the only
+thing the scale depends on. A `min-width` can, so the rule is unconditional and
+at 1280 no container on the site is under its own floor.
+
+Every chart is 12.0 to 18.1px now, and the sweep asserts it: **no `text` in any
+`svg.chart` or `svg.graph` under 12 effective pixels, on thirteen pages at five
+widths.**
+
+### A machine's name is not part of a measurement
+
+`rfcs/bench-0104/harness/run.py` recorded `socket.gethostname()` in every
+`environment` block **and named the output file after it**. So four committed
+records carried a machine's name twice over, and the caption under the index's
+bar strip and `/compare`'s tables published it as the provenance of a number.
+
+Closed at all three ends: the field is gone from `environment()`, the file name
+is the date alone, the four records are rewritten without it and renamed, and
+`envRows()` drops the `Host` row. Everything that makes a number checkable stays
+— CPU, cores, memory, OS, clang, rustc, node, python, the compiler's commit,
+wasmtime's version and sha256, and every flag. `bench.vyrn`'s test asserts both
+halves: no row labelled `Host`, and no `"host"` key in the record it reads.
+
+**The numbers were not re-measured, and that is deliberate.** Re-running the
+corpus on another machine would publish different medians under the same date,
+which is a worse thing to ship than a stripped identifier. What was regenerated
+is the identifier, not the measurement.
+
+### A hairline that was thinner than its neighbours
+
+The picker built its unit out of four borders per label, `border-left: 0` on the
+siblings, and two negative margins to pull the checked tile and the command box
+back over the borders they doubled. Over subpixel grid columns that is a lottery:
+at a 523px container a `1fr` column is 261.5px, so a shifted 1px border straddles
+two device pixels and paints as two half-covered ones — thinner and lighter than
+its neighbours, differently at 1x and at 2x, and only on the tile a reader is
+looking at.
+
+The row draws its own box, the divider is one border on one side of one element,
+and the selection is three inset shadows — top and both sides, so the tile stays
+open at the bottom into the command box it selects. **A shadow takes no space, so
+nothing has to be pulled back over anything.** Measured on both tabs at 1280 and
+375: tab row `1px 0`, labels `0` and `1px` left, command box top border 1px, and
+the gap between the two boxes exactly 0.
+
+### The masthead search, widened where the row has room
+
+It was an 83px icon-and-word button. It is a 272px field with its placeholder and
+a `/` chip above 1024px, and **exactly what it was below that** — the word alone
+to 1023px, the glyph alone to 640px. That split is not timidity: the masthead row
+fits at 320px with zero pixels to spare (second round, I3), and the phone band's
+rules are what bought that. Measured after: the masthead is still 64px.
+
+It is still a BUTTON. A real `<input>` there would be a second search field that
+has to hand its keystrokes to the overlay's own — two fields, one query, and a
+no-script page with a text box that does nothing. `aria-label` remains the
+accessible name, so the placeholder and the chip are never announced twice.
+
+### The hero editor, finished rather than rebuilt
+
+Most of what the brief asked for was already there: `Ctrl+Enter` runs, the status
+line says `Press Run` → `Loading the compiler…` → `Running…` → `Ran` (or `Did not
+compile`, or `Stopped` after the five-second kill), and the exit code prints under
+the output with `stdout` and `stderr` kept apart. What was missing:
+
+- **A way back.** `Reset` restores the program the editor started from — the
+  picked example, the program a shared link carried, or the hero's own snippet —
+  and the pane's idle line with it.
+- **A pane that does not resize.** Idle is one line, `…` is one, a run is three;
+  the box grew and shrank on every press. A floor holds the common case.
+- **An honest failure.** When the module does not load, the pane says so, the
+  textarea goes back to read-only and both controls are disabled — instead of a
+  live Run button over an editor with no compiler behind it.
+
+Verified on the page: `Ran` with `admitted at 30 / refused: 5 is under 18 / exit
+0`; a program returning 3 shows `The program wrote nothing. exit 3`; `Ctrl+Enter`
+runs; `Reset` restores; the pane is 111px in every state.
+
+### Two sections the index earned, both computed
+
+The user asked for more substance and had already set the bound: take good ideas,
+not everything. Both new sections are generated from the tree, and neither adds a
+snippet anybody has to keep true.
+
+**Five tabs of real code.** Every snippet is a file in `site/guide/` — so it is
+compiled while the index renders, RUN by `/guide` while that page renders, and
+checked by `vyrn test site/guide/*.vyrn` in CI. The index reads them through
+`site/app/guide.vyrn` rather than calling the generator itself, because the
+generator's cache is keyed on its argument string and a second call site with a
+different `../` prefix would generate a second module whose exports collide
+program-wide. The tab strip is the install page's own picker, extended from two
+positions to five — one tab control on this site, which is what the second round
+established when it deleted the other one.
+
+**Eight standard-library modules**, the two biggest of each of the reference's
+four groups with their export counts, from the same generator the reference
+landing reads. "Notable" would have been a list somebody maintains; biggest by
+export count is a fact, and the same instruction that asked for the grid forbade
+hand-listing it.
+
+Two things the brief named are not there, because the tree does not hold them:
+`std/stream` has no chapter program, and `protocols` is 31 lines against this
+set's 10 to 19, which would have resized the section under the reader on one tab.
+
+### The ceilings, raised on purpose
+
+**The index goes from 260 words to 380 and from 30,000 bytes to 34,000.** It
+measures 372 and 32,023. No paragraph on the page grew: what the census counts
+here are five tab labels, five one-line captions, eight module names, four group
+names and two headings, wrapped around code and generated names. The ceiling that
+bounds what a reader actually pays for is the cold load, and that is unchanged in
+kind: 40,762 gzipped against 55,000.
+
+### The numbers, fourth round
+
+| Page | Words | Ceiling | Bytes | Ceiling | Cold load, gzipped | Ceiling |
+|---|---:|---:|---:|---:|---:|---:|
+| index | **372** | 380 | 32,023 | 34,000 | **40,762** | 55,000 |
+| install | **210** | 220 | 8,943 | 14,000 | **34,716** | 55,000 |
+| releases | **168** | 200 | 6,699 | 20,000 | **34,298** | 55,000 |
+| docs (landing) | **642** | 644 | 53,131 | 40,000 | **43,736** | 55,000 |
+
+The published stylesheet is 52,951 raw and 10,325 gzipped against 90,000 and
+27,000. Every page gained two words, and they are the search field's placeholder.
+
+### Gates, fourth round
+
+- `vyrn run site/export.vyrn out`: **175 routes, 13 assets**.
+- the site's own loop: **196 test blocks declared, 196 ran**.
+- `node --test site/test/*.test.mjs`: **31 tests, 31 pass**, including the type
+  scale, which now names the two chart steps.
+- `vyrn fmt --check`: clean.
+- the sweep, at **1280, 767, 700, 375 and 320 over thirteen pages — 65 page-width
+  pairs**: no horizontal overflow, no wrapped command line, no inter-element gap
+  under 8px, and **no chart text under 12 effective pixels**, which is the
+  assertion this round adds.
+- one defect the sweep found and did not fix: `/backstage` overflows by 139px at
+  1280 and 405px at 375. Measured identical against the stylesheet as committed
+  before this round, by serving the old sheet under the same document — it is
+  pre-existing, it is the developer front, and it is not one of this RFC's
+  thirteen census pages. Census K8 has the numbers.
 
 ## What this RFC does not do
 
