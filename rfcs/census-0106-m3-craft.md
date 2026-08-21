@@ -552,3 +552,10 @@ Copy page), a reading page's sections breathe at half the landing rhythm, and
 `pre.code[data-lang]` draws the reference site's header bar from the attribute
 the markdown renderer already writes — the guide's program plates already
 carried their filename head and needed nothing.
+
+**R9 (orchestrator, from the user's own crop).** `/guide`'s landing missed the
+shell entirely: the old numbered mono rail, and three landing-rhythm bands
+holding five sentences — a page that was mostly its own margins. It is a docs
+page now: the book's tree with Overview marked, the claim with the how-to-read
+sentence folded into its lede, the 13-chapter grid immediately after, and one
+compact note about the programs. 2,600px of page became 1,680.
