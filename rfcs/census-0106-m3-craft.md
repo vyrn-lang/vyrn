@@ -446,3 +446,11 @@ Against the reference hero one more time:
 |---|---|---|
 | P1 | The page | Two full-height hairlines frame a 1232px content column — the reference site's quietest structural device; the section seams already bled to this exact border box |
 | P2 | Install cluster | "Install Vyrn <tag>" label above the command (the version is the link), the shell's real prompt in the accent (`$` sh, `>` PowerShell, as pseudo so Copy never captures it), Copy's divider gone, tabs and "Other ways to install →" on one row |
+
+## Q. The tenth round — three components the user cropped
+
+| # | Element | Defect | Fix |
+|---|---|---|---|
+| Q1 | Demo step commands | The eighth round's command fill leaked into the borderless step lines — a wash strip inside every row, fighting the active row's own wash | `background: none` on step commands and on the pane output; the card's ground is the terminal's ground |
+| Q2 | OS switch | Two detached chips | One pill: a single bordered container, quiet word segments, selection a lighter fill inside it — the reference switch. `.tabrow` added so the link out never enters the container; the picker's sibling selectors route through it |
+| Q3 | Hero editor | The code floated as a lighter washed box inset in the plate — a box in a box by background | One surface: head, code and output split by hairlines only. The override needed three classes; `.play .editor pre.hl` is declared later and an equal-specificity rule loses — the sheet's own documented trap, hit again |

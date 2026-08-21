@@ -234,8 +234,10 @@ fn pillarCmd(i: Int64) -> String {
                             </div>
                         </div>
                     </div>
-                    <div class="ostabs">
-                        <label v-for="p in installTargets()" :key="p.id" :for="osId(p)">{{ p.name }}</label>
+                    <div class="tabrow">
+                        <div class="ostabs">
+                            <label v-for="p in installTargets()" :key="p.id" :for="osId(p)">{{ p.name }}</label>
+                        </div>
                         <a class="tablink" href="/install.html">Other ways to install</a>
                     </div>
                 </fieldset>
@@ -366,8 +368,10 @@ fn pillarCmd(i: Int64) -> String {
                 <input class="sr-only" type="radio" name="tab" id="tab-html"/>
                 <input class="sr-only" type="radio" name="tab" id="tab-gen"/>
                 <input class="sr-only" type="radio" name="tab" id="tab-bench"/>
-                <div class="ostabs">
-                    <label v-for="t in tabs()" :key="t.id" :for="tabId(t)">{{ t.label }}</label>
+                <div class="tabrow">
+                    <div class="ostabs">
+                        <label v-for="t in tabs()" :key="t.id" :for="tabId(t)">{{ t.label }}</label>
+                    </div>
                 </div>
                 <div class="ospanes">
                     <div class="ospane showcase" v-for="t in tabs()" :key="t.id">

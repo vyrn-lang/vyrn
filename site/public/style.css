@@ -953,7 +953,15 @@ pre.code {
 @media (max-width: 1024px) { .hero.split { grid-template-columns: minmax(0, 1fr); } }
 .hero.split > div { min-width: 0; }
 .heroplay { display: flex; flex-direction: column; }
-.heroplay .editor { flex: 0 0 auto; }
+/* ONE SURFACE (RFC-0106 M3, tenth round). The editor floated as a lighter
+ * washed box inset inside the plate — a box in a box by background instead of
+ * border. The plate is the terminal: head, code and output are one surface
+ * split by hairlines, which is the reference site's card anatomy. */
+.heroplay .editor { flex: 0 0 auto; margin: 0; }
+/* Three classes, same reason as the textarea height above: `.play .editor
+ * pre.hl` is declared later, so an equal-specificity override loses. */
+.play.heroplay .editor pre.hl { background: none; }
+.heroplay .out { margin: 0; border-left: 0; border-top: 1px solid var(--hair); background: none; }
 
 /* The hero editor is the playground's own box at a height that leaves room for
  * the output under it. `52vh` is right on a page that IS an editor and wrong on
@@ -1063,17 +1071,25 @@ pre.code {
  * the control voice already defined, selection carried by the accent, and the
  * row sits wherever the markup puts it — under the command in the index hero
  * (the reference front page's order), above it on `/install`. */
-.ostabs { display: flex; flex-wrap: wrap; gap: var(--s1); margin: 0 0 var(--s2); }
-.ospanes + .ostabs { margin: var(--s2) 0 0; }
-.hero.mid .ostabs { justify-content: center; }
+/* ONE PILL, NOT TWO CHIPS (tenth round). The reference switch is a single
+ * container whose segments are quiet words; selection is a lighter fill
+ * inside it. `.tabrow` holds the pill and, on the index hero, the one link
+ * out — it exists so the pill can be `inline-flex` without the link entering
+ * the container. */
+.tabrow { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin: 0 0 var(--s2); }
+.ospanes + .tabrow { margin: var(--s2) 0 0; }
+.hero.mid .tabrow { justify-content: center; }
+.ostabs {
+  display: inline-flex; flex-wrap: wrap; gap: 3px; padding: 3px;
+  border: 1px solid var(--hair);
+  background: color-mix(in oklab, var(--ink) 3%, transparent);
+}
 .ostabs label {
   display: inline-flex; align-items: center; justify-content: center;
-  min-height: 36px; padding: 7px 12px; cursor: pointer;
+  min-height: 30px; padding: 5px 12px; cursor: pointer;
   font: 500 var(--t-mono)/1 var(--sans);
   color: var(--muted);
-  border: 1px solid var(--hair);
-  background: color-mix(in oklab, var(--ink) 4%, transparent);
-  transition: color 140ms var(--expo), border-color 140ms var(--expo), background 140ms var(--expo);
+  transition: color 140ms var(--expo), background 140ms var(--expo);
 }
 .ostabs label:hover { color: var(--ink); }
 .ospane { display: none; text-align: left; }
@@ -1087,14 +1103,14 @@ pre.code {
 .cmdlabel { font: 600 var(--t-cmd)/1.4 var(--sans); margin: var(--s4) 0 calc(-1 * var(--s1)); }
 .cmdlabel a { color: inherit; text-decoration: none; color: var(--accent); }
 .cmdlabel a:hover { text-decoration: underline; text-underline-offset: 3px; }
-.ostabs .tablink {
-  margin-left: auto; align-self: center;
+.tabrow .tablink {
+  margin-left: auto;
   font: 500 var(--t-mono)/1 var(--sans);
   color: var(--muted); text-decoration: none;
   transition: color 140ms var(--expo);
 }
-.ostabs .tablink::after { content: " \2192"; }
-.ostabs .tablink:hover { color: var(--accent); }
+.tabrow .tablink::after { content: " \2192"; }
+.tabrow .tablink:hover { color: var(--accent); }
 /* The "view the install script" line under the command it fetches. A label that
  * FOLLOWS a block needs the gap the kicker rule gives one that precedes it. */
 .ospane > .eyebrow { margin-top: var(--s2); margin-bottom: 0; }
@@ -1103,14 +1119,13 @@ pre.code {
  * picker uses the first two and the index's code showcase uses all five, and
  * they are one selector list on purpose: the site has ONE tab control, and a
  * second implementation of it is what the second round deleted. */
-.picker input:nth-of-type(1):checked ~ .ostabs > :nth-child(1),
-.picker input:nth-of-type(2):checked ~ .ostabs > :nth-child(2),
-.picker input:nth-of-type(3):checked ~ .ostabs > :nth-child(3),
-.picker input:nth-of-type(4):checked ~ .ostabs > :nth-child(4),
-.picker input:nth-of-type(5):checked ~ .ostabs > :nth-child(5) {
-  color: var(--accent);
-  background: color-mix(in oklab, var(--accent) var(--code-wash), transparent);
-  border-color: color-mix(in oklab, var(--accent) 55%, transparent);
+.picker input:nth-of-type(1):checked ~ .tabrow .ostabs > :nth-child(1),
+.picker input:nth-of-type(2):checked ~ .tabrow .ostabs > :nth-child(2),
+.picker input:nth-of-type(3):checked ~ .tabrow .ostabs > :nth-child(3),
+.picker input:nth-of-type(4):checked ~ .tabrow .ostabs > :nth-child(4),
+.picker input:nth-of-type(5):checked ~ .tabrow .ostabs > :nth-child(5) {
+  color: var(--ink);
+  background: color-mix(in oklab, var(--ink) 9%, transparent);
 }
 .picker input:nth-of-type(1):checked ~ .ospanes > :nth-child(1),
 .picker input:nth-of-type(2):checked ~ .ospanes > :nth-child(2),
@@ -1118,11 +1133,11 @@ pre.code {
 .picker input:nth-of-type(4):checked ~ .ospanes > :nth-child(4),
 .picker input:nth-of-type(5):checked ~ .ospanes > :nth-child(5) { display: block; }
 /* The input is off-screen, so the focus ring is drawn on the label instead. */
-.picker input:nth-of-type(1):focus-visible ~ .ostabs > :nth-child(1),
-.picker input:nth-of-type(2):focus-visible ~ .ostabs > :nth-child(2),
-.picker input:nth-of-type(3):focus-visible ~ .ostabs > :nth-child(3),
-.picker input:nth-of-type(4):focus-visible ~ .ostabs > :nth-child(4),
-.picker input:nth-of-type(5):focus-visible ~ .ostabs > :nth-child(5) {
+.picker input:nth-of-type(1):focus-visible ~ .tabrow .ostabs > :nth-child(1),
+.picker input:nth-of-type(2):focus-visible ~ .tabrow .ostabs > :nth-child(2),
+.picker input:nth-of-type(3):focus-visible ~ .tabrow .ostabs > :nth-child(3),
+.picker input:nth-of-type(4):focus-visible ~ .tabrow .ostabs > :nth-child(4),
+.picker input:nth-of-type(5):focus-visible ~ .tabrow .ostabs > :nth-child(5) {
   outline: 2px solid var(--accent); outline-offset: 2px;
 }
 
@@ -1202,7 +1217,7 @@ pre.code {
 /* A step's command is a line, not a plate: seven bordered boxes inside seven
  * bordered rows inside a bordered card was most of the "looks broken". The
  * prompt glyph does the framing a border did. */
-.demo .steps .cmd { grid-column: 2; margin-top: 2px; border: 0; }
+.demo .steps .cmd { grid-column: 2; margin-top: 2px; border: 0; background: none; }
 .demo .steps .cmd code { padding: 2px 0; }
 .demo .steps .cmd code::before { content: "$ "; color: var(--n2); }
 
@@ -1217,7 +1232,9 @@ pre.code {
  * scrolls instead. It does NOT take the pane's slack: at `flex: 1` a one-line
  * output made a 600px empty terminal and pushed its own note to the bottom of
  * the card, 500px from the thing it is about. */
-.demo .pane .out { flex: 0 1 auto; min-height: 9em; max-height: 34em; margin-top: 0; overflow: auto; }
+/* The pane is the terminal; its output is plain quoted text on the card's own
+ * ground, not a second washed box inside it. */
+.demo .pane .out { flex: 0 1 auto; min-height: 9em; max-height: 34em; margin-top: 0; overflow: auto; background: none; border-left: 0; padding: var(--s1) 0 0; }
 /* NOT `.note` (RFC-0106 M3, fourth round). The census counts `.note` and
  * `.notice` as the sheet's two ways of saying something beside the claim, and
  * M0's rule is at most one per plate — seven of them in one card took the index

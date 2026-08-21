@@ -116,8 +116,10 @@ fn scriptHref(p: InstallTarget) -> String {
                 <legend class="sr-only">Operating system</legend>
                 <input class="sr-only" type="radio" name="os" id="os-unix" checked="checked" data-os="unix"/>
                 <input class="sr-only" type="radio" name="os" id="os-windows" data-os="windows"/>
-                <div class="ostabs">
-                    <label v-for="p in installTargets()" :key="p.id" :for="osId(p)">{{ p.name }}</label>
+                <div class="tabrow">
+                    <div class="ostabs">
+                        <label v-for="p in installTargets()" :key="p.id" :for="osId(p)">{{ p.name }}</label>
+                    </div>
                 </div>
                 <div class="ospanes">
                     <div class="ospane" v-for="p in installTargets()" :key="p.id">
