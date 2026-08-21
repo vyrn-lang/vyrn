@@ -62,19 +62,22 @@ fn sectionHref(s: Section) -> String {
         </details>
     </aside>
 
-    <nav class="crumbs" aria-label="Breadcrumb">
-        <a href="/guide.html">Docs</a>
-        <span>Chapter {{ data.n }} of {{ chapters().length }}</span>
-    </nav>
+    <div class="crumbrow">
+        <nav class="crumbs" aria-label="Breadcrumb">
+            <a href="/guide.html">Docs</a>
+            <span>Chapter {{ data.n }} of {{ chapters().length }}</span>
+        </nav>
+        <p class="docutils">
+            <!-- A LINK to the file the export writes beside this page;
+                 `widgets.js` turns a press into a clipboard write when the
+                 browser has a clipboard. Without script it is the file. -->
+            <a class="btn" :href="mdUrl(chapterHref(data.chapter.slug))" data-copy-md>Copy page</a>
+        </p>
+    </div>
 
     <section class="hero">
         <h1 class="display">{{ data.chapter.title }}</h1>
         <p class="lede" v-html="inlineCode(data.chapter.lede)"></p>
-        <!-- The chapter as markdown (RFC-0106 M1). It is a LINK, to the file the
-             export writes beside this page, and `widgets.js` turns a press into a
-             clipboard write when the browser has a clipboard to write to. Without
-             script it is what it looks like: a link to the file. -->
-        <p><a class="btn" :href="mdUrl(chapterHref(data.chapter.slug))" data-copy-md>Copy as Markdown</a></p>
     </section>
 
     <section class="band" v-for="s in data.chapter.sections" :key="s.anchor" :id="s.anchor">

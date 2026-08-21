@@ -821,7 +821,39 @@ h1 code, h2 code, h3 code, h4 code {
 .onpage a.on { color: var(--ink); }
 
 .treegroup + .treegroup { margin-top: var(--s2); }
-.treegroup > .eyebrow { margin: 0 0 4px; }
+/* A sidebar group header is a chapter heading, not a kicker: the reference
+ * site's tree speaks bold sans over quiet sans rows, and small-caps mono here
+ * made the whole pane read as a file listing. */
+.treegroup > .eyebrow { margin: 0 0 4px; font: 600 var(--t-mono)/1.6 var(--sans); letter-spacing: 0; text-transform: none; color: var(--ink); }
+
+/* The doc page's header row: crumbs left, the page's tools right, one line —
+ * where the notice box and the button paragraph used to spend 90px between
+ * the title and the prose. */
+.crumbrow { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+.crumbrow .crumbs { flex: 1; min-width: 0; }
+.docutils { display: flex; align-items: center; gap: var(--s2); margin: 0; font: 500 var(--t-mono)/1 var(--sans); }
+.docutils > a:not(.btn) { color: var(--muted); text-decoration: none; transition: color 140ms var(--expo); }
+.docutils > a:not(.btn):hover { color: var(--accent); }
+.docutils .btn { min-height: 32px; padding: 6px 12px; text-decoration: none; }
+
+/* A reading page is not a landing: its sections breathe at half the landing's
+ * rhythm, or the title floats 76px from its own first paragraph. */
+.docpage .hero { padding: var(--s4) 0 var(--s2); }
+.docpage .band { padding: var(--s4) 0; }
+
+/* THE TITLED CODE BLOCK, from the attribute the renderer already writes:
+ * `data-lang` becomes the reference site's header bar — name left, one
+ * hairline under it — at zero markup cost. Blocks without a language (a
+ * signature, a plain quote) stay bare on purpose. */
+pre.code[data-lang] { position: relative; padding-top: calc(var(--s2) + 30px); }
+pre.code[data-lang]::before {
+  content: attr(data-lang);
+  position: absolute; top: 0; left: 0; right: 0;
+  padding: 6px var(--s2);
+  font: var(--t-key)/1.5 var(--mono);
+  color: var(--n2);
+  border-bottom: 1px solid var(--hair);
+}
 /* ABOVE 1024px THE TREE IS NOT A DISCLOSURE. `<details>` carries no `open` in
  * the markup — the masthead's Menu is written the same way and for the same
  * reason: `open` is an attribute a stylesheet cannot remove, so the element is

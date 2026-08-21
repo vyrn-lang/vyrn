@@ -156,21 +156,25 @@ fn pager(m: String) -> Pager {
         </details>
     </aside>
 
-    <nav class="crumbs" aria-label="Breadcrumb">
-        <a href="/docs.html">Reference</a>
-        <a href="/docs.html#std">std</a>
-        <span>{{ data.name }}</span>
-    </nav>
+    <!-- One utility row, the reference site's own header anatomy: the crumbs
+         on the left, the page's two tools as quiet controls on the right. The
+         notice box and the button paragraph this replaces were 90px of chrome
+         between the title and the prose. -->
+    <div class="crumbrow">
+        <nav class="crumbs" aria-label="Breadcrumb">
+            <a href="/docs.html">Reference</a>
+            <a href="/docs.html#std">std</a>
+            <span>{{ data.name }}</span>
+        </nav>
+        <p class="docutils">
+            <a :href="apiSource(data.name)">Source</a>
+            <a class="btn" :href="mdUrl(apiHref(data.name))" data-copy-md>Copy page</a>
+        </p>
+    </div>
 
     <section class="hero">
         <h1 class="display">std/{{ data.name }}</h1>
         <p class="lede">{{ exportCount(data.entries.length) }}, read off <code>std/{{ data.name }}.vyrn</code> by the compiler's own lexer while this page was built.</p>
-        <p class="notice"><a :href="apiSource(data.name)">Read the source</a> — the one thing this site does not host.</p>
-        <!-- The module as markdown (RFC-0106 M1): the same exports, the same
-             signatures, the same prose, in the shape a reader pastes somewhere.
-             A link to the file the export writes beside this page; `widgets.js`
-             turns a press into a clipboard write where there is a clipboard. -->
-        <p><a class="btn" :href="mdUrl(apiHref(data.name))" data-copy-md>Copy as Markdown</a></p>
     </section>
 
     <section class="band" id="about">

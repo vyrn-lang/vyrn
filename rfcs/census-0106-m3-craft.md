@@ -542,3 +542,13 @@ the base `code { overflow-wrap: anywhere }` and the phone block's
 merely landed near a line end. The base rule is `break-word` now and the phone
 `break-all` is deleted: the one genuinely-too-wide token still breaks, and
 every other chip moves whole. Verified on `/docs/std/json` at a true 375.
+
+**R8 (orchestrator, against the reference docs side-by-side).** The shell
+landed in the pre-eighth-round voice: small-caps mono sidebar group headers, a
+notice box plus a button paragraph spending 90px between the title and the
+prose, and no titled code blocks. The group headers speak bold sans now, the
+page's tools are one quiet `.docutils` row beside the breadcrumb (Source ·
+Copy page), a reading page's sections breathe at half the landing rhythm, and
+`pre.code[data-lang]` draws the reference site's header bar from the attribute
+the markdown renderer already writes — the guide's program plates already
+carried their filename head and needed nothing.
