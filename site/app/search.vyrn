@@ -206,8 +206,9 @@ test "the index covers every section, and the counts are the census's" {
             rel = rel + 1
         }
     }
-    // Ten consumer pages, thirteen chapters, and a row per chapter section.
-    assertEq(docs, 10 + chapterSlugs().length + sectionCount())
+    // Eleven consumer pages (the import graph joined in M4), thirteen
+    // chapters, and a row per chapter section.
+    assertEq(docs, 11 + chapterSlugs().length + sectionCount())
     // A module and each of its exports.
     assertEq(ref, apiModules().length + exportCount())
     assertEq(pkg, packages().length)
