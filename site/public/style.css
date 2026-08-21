@@ -43,6 +43,15 @@
   --accent: var(--navy);
   --field: 18, 50, 88;
 
+  /* THE SCRIM UNDER THE SEARCH OVERLAY, AND WHY IT IS ITS OWN TOKEN
+   * (RFC-0106 M3, third round). It was `color-mix(… var(--n0) 45% …)`, and
+   * `--n0` is the INK: it is near-black in this block and near-white in the two
+   * below it, so the dialog that dimmed the page in light mode washed it WHITE
+   * in dark mode. A scrim does one job in both palettes — it darkens what is
+   * behind it — so it is not a neutral-ramp alias. It is darker and more opaque
+   * in dark mode, where the page under it is already dark. */
+  --scrim: oklch(0.18 0.004 60 / 0.45);
+
   /* Syntax colour, and the two ownership lanes. Tokens rather than literals on
    * the rules below, for one reason: a palette that lives in one block can be
    * MEASURED, and `site/test/contrast.test.mjs` measures it. A colour written
@@ -208,6 +217,7 @@
     --danger: oklch(0.72 0.17 25.33);
     --amber: oklch(0.8 0.15 70.08);
     --field: 79, 227, 242;
+    --scrim: oklch(0.08 0.004 60 / 0.72);
     --syn-kw: var(--cyan);
     --syn-str: oklch(0.78 0.1 150);
     --syn-com: var(--n1);
@@ -232,6 +242,7 @@
   --danger: oklch(0.72 0.17 25.33);
   --amber: oklch(0.8 0.15 70.08);
   --field: 79, 227, 242;
+  --scrim: oklch(0.08 0.004 60 / 0.72);
   --syn-kw: var(--cyan);
   --syn-str: oklch(0.78 0.1 150);
   --syn-com: var(--n1);
@@ -506,17 +517,24 @@ h1 code, h2 code, h3 code, h4 code {
 /* THE SEARCH OVERLAY (RFC-0106 M1). A sheet near the top, not a centred box: a
  * list belongs under the field that filters it. The index is fetched on the
  * first open, so these rules are all it costs a page that never opens. */
-.findbox { position: fixed; inset: 0; z-index: 200; background: color-mix(in oklab, var(--n0) 45%, transparent); display: flex; justify-content: center; padding: var(--s5) var(--s2); }
+.findbox { position: fixed; inset: 0; z-index: 200; background: var(--scrim); display: flex; justify-content: center; padding: var(--s5) var(--s2); }
 .findbox[hidden] { display: none; }
 .findpanel { width: 100%; max-width: 44rem; max-height: 70vh; display: flex; flex-direction: column; background: var(--paper); border: 1px solid var(--accent); }
-.findpanel input { font: var(--t-lede)/1.4 var(--sans); padding: var(--s2); border: 0; border-bottom: 1px solid var(--rule); background: none; color: var(--ink); }
+.findpanel input { font: var(--t-lede)/1.4 var(--sans); padding: var(--s2); border: 0; border-bottom: 1px solid var(--rule); background: none; color: var(--ink); flex: 0 0 auto; }
 .findpanel input:focus-visible { outline-offset: -2px; }
-.findpanel [data-search-results] { overflow-y: auto; }
+/* THE RESULT LIST IS THE PART THAT SCROLLS (RFC-0106 M3, third round). This rule
+ * named `[data-search-results]` and the markup carries `data-find-results`, so
+ * for three milestones nothing in the panel scrolled: forty results ran out of
+ * a 70vh box, the last thirty were unreachable with the mouse, and the arrow
+ * keys walked a selection off the bottom edge into nothing. `min-height: 0` is
+ * the other half — a flex item will not shrink below its content without it, so
+ * `overflow-y` alone would have had nothing to overflow. */
+.findpanel [data-find-results] { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 .findpanel .sect { font: var(--t-eyebrow)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); padding: var(--s2) var(--s2) var(--s1); border-top: 1px solid var(--hair); }
 .findpanel .hit { display: block; padding: var(--s1) var(--s2); min-height: 44px; text-decoration: none; color: var(--ink); }
 .findpanel .hit .d { display: block; color: var(--muted); font-size: var(--t-meta); }
 .findpanel .hit[aria-selected="true"] { background: color-mix(in oklab, var(--accent) 12%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
-.findpanel .cap { border: 0; padding: var(--s1) var(--s2); }
+.findpanel .cap { border: 0; padding: var(--s1) var(--s2); flex: 0 0 auto; }
 
 /* The one call to action (RFC-0106 M1). The only filled thing in the header,
  * because there is one of it. */
@@ -884,17 +902,20 @@ pre.code {
  * measure than a ragged-right one, not the container's. */
 .hero.mid .lede { max-width: 32rem; margin-left: auto; margin-right: auto; }
 .hero.mid .cmd { text-align: left; }
-.hero.mid > .eyebrow { margin-top: var(--s2); }
 
-/* THE OS PICKER: THREE RADIO BUTTONS, NO SCRIPT, NO ID IN THIS SHEET.
+/* THE OS PICKER: TWO RADIO BUTTONS, NO SCRIPT, NO ID IN THIS SHEET.
  *
  * The inputs are visually hidden and come first in the markup, so `:checked ~`
  * reaches both the labels and the panes. Selection is BY POSITION — the nth
  * input drives the nth label and the nth pane — so the sheet never spells a
- * platform's name and a fourth platform is one more `<label>`, one more `<div>`
+ * platform's name and a third target is one more `<label>`, one more `<div>`
  * and one more line here. There is no JavaScript for it at all, and a keyboard
  * gets a native radio group, arrows included. The `<fieldset>` IS that group
- * and its `<legend>` is its name; the default border and padding come off. */
+ * and its `<legend>` is its name; the default border and padding come off.
+ *
+ * TWO, because there are two commands: `install.sh` through a POSIX shell and
+ * `install.ps1` through PowerShell. Three tiles meant macOS and Linux showed a
+ * reader the same line twice (RFC-0106 M3, third round). */
 .picker { margin: var(--s4) 0 var(--s2); border: 0; padding: 0; min-width: 0; }
 
 /* ONE UNIT, NOT TWO (RFC-0106 M3, second round). The tile row and the command
@@ -914,23 +935,22 @@ pre.code {
 .ostabs label:hover { color: var(--ink); }
 .ospane { display: none; text-align: left; }
 .ospane .cmd { margin-top: -1px; }
+/* The "view the install script" line under the command it fetches. A label that
+ * FOLLOWS a block needs the gap the kicker rule gives one that precedes it. */
+.ospane > .eyebrow { margin-top: var(--s2); margin-bottom: 0; }
 
 .picker input:nth-of-type(1):checked ~ .ostabs > :nth-child(1),
-.picker input:nth-of-type(2):checked ~ .ostabs > :nth-child(2),
-.picker input:nth-of-type(3):checked ~ .ostabs > :nth-child(3) {
+.picker input:nth-of-type(2):checked ~ .ostabs > :nth-child(2) {
   color: var(--accent); border-color: var(--accent); position: relative; z-index: 1;
   background: color-mix(in oklab, var(--accent) var(--code-wash), transparent);
 }
 /* A checked tile keeps its own left border even when a sibling dropped one. */
-.picker input:nth-of-type(2):checked ~ .ostabs > :nth-child(2),
-.picker input:nth-of-type(3):checked ~ .ostabs > :nth-child(3) { border-left-width: 1px; margin-left: -1px; }
+.picker input:nth-of-type(2):checked ~ .ostabs > :nth-child(2) { border-left-width: 1px; margin-left: -1px; }
 .picker input:nth-of-type(1):checked ~ .ospanes > :nth-child(1),
-.picker input:nth-of-type(2):checked ~ .ospanes > :nth-child(2),
-.picker input:nth-of-type(3):checked ~ .ospanes > :nth-child(3) { display: block; }
+.picker input:nth-of-type(2):checked ~ .ospanes > :nth-child(2) { display: block; }
 /* The input is off-screen, so the focus ring is drawn on the label instead. */
 .picker input:nth-of-type(1):focus-visible ~ .ostabs > :nth-child(1),
-.picker input:nth-of-type(2):focus-visible ~ .ostabs > :nth-child(2),
-.picker input:nth-of-type(3):focus-visible ~ .ostabs > :nth-child(3) {
+.picker input:nth-of-type(2):focus-visible ~ .ostabs > :nth-child(2) {
   outline: 2px solid var(--accent); outline-offset: 2px;
 }
 
@@ -1018,13 +1038,52 @@ details.disc > p { max-width: var(--wide); }
  * 32 depending on which page you were on (RFC-0106 M3, second round). */
 .band > .eyebrow + :not(h2) { margin-top: var(--s3); }
 
+/* AND A LABEL THAT FOLLOWS A BLOCK IS NOT A KICKER (RFC-0106 M3, third round).
+ *
+ * `.eyebrow` is `margin: 0 0 8px` — it is written to sit OVER something. Used
+ * as a footnote under a command box or a stat grid it inherited that zero, so
+ * its first line sat flat on the border above it: the releases page had
+ * `Upgrading is the same line.` touching the bottom edge of the command block,
+ * and the same hole was patched once, locally, with `.hero.mid > .eyebrow`.
+ * One rule for all three section shapes instead, and it is 16px because these
+ * are captions of the block above them and not the heading of a new one. */
+.band > * + .eyebrow,
+.hero > * + .eyebrow,
+.say > * + .eyebrow { margin-top: var(--s2); }
+
+/* AND PROSE AFTER A BLOCK, AND A BLOCK AFTER PROSE, take the rhythm's own gap.
+ *
+ * The same hole, one element along. A `<p>` has no top margin in this sheet —
+ * the section patterns give every block its own — so a paragraph written between
+ * two artifacts sat flat against both of them. Measured with the gap sweep, at
+ * 1280 and at 375: `/compare`'s radar section had `The chart, as a table.`
+ * touching the bottom border of the plate above it and the top border of the
+ * table below it, and `/editors` had the same pair. `.cap` is EXEMPT because it
+ * is built to sit flush — it carries its own `border-top` and padding, and that
+ * rule is what says it belongs to the block above it. */
+.band > * + p:not(.cap, .eyebrow) { margin-top: var(--s3); }
+.band > p + .scroller,
+.band > p + table { margin-top: var(--s3); }
+/* And the other side of a caption: `.cap` is flush with the block ABOVE it, so
+ * whatever comes after it starts a new subject and needs the gap. Measured on
+ * `/explore/shelf`, where three `<h3>`s sat on the caption's last line. */
+.band > .cap + :not(.cap) { margin-top: var(--s3); }
+
 .split { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: var(--s5); align-items: start; }
 @media (max-width: 1024px) { .split { grid-template-columns: minmax(0, 1fr); gap: var(--s4); } }
 
 /* Every block that can be an artifact carries a top margin for the case where it
  * FOLLOWS prose. At the top of a column there is no prose above it, and that
- * margin is the dead strip that starts a right column below its own sentence. */
-.split > *, .split > * > :first-child { margin-top: 0; }
+ * margin is the dead strip that starts a right column below its own sentence.
+ *
+ * THE CLASS IS WRITTEN TWICE ON PURPOSE (RFC-0106 M3, third round). At one class
+ * this rule is specificity (0,1,0) and it lost to every `element.class` selector
+ * in the sheet — `ul.plain` is (0,1,1) — so the reset silently did not reach the
+ * one block it is most often applied to. Measured on the index's new release
+ * section: the highlight list started 24px BELOW the kicker in the column beside
+ * it, which is the exact dead strip this rule was written to remove, on three
+ * pages. Order cannot fix it: a lower-specificity rule loses wherever it sits. */
+.split.split > *, .split.split > * > :first-child { margin-top: 0; }
 
 /* Four stat tiles in a split's column are 2x2, not 3+1: `auto-fit` measures the
  * track and not the count, so the fourth tile fell to a row of its own and the
