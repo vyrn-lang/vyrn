@@ -3136,8 +3136,19 @@ impl MoveCheck<'_> {
             Stmt::Region { body, .. } => {
                 let mut inner = consumed.clone();
                 let div = self.block(body, &mut inner, scope);
+                // Consumption of an OUTER binding inside the region survives
+                // it — that is the use-after-move the propagation exists for.
+                // A binding the region DECLARES dies with the region, and its
+                // record must die too: propagated by name, `drop s` on a
+                // region-local `s` marked an unrelated later `s` — a match
+                // arm's payload binding, in the corpus — as already consumed.
+                let mut local = std::collections::HashSet::new();
+                declared_in(body, &mut local);
                 for (k, v) in inner {
-                    consumed.or_insert(k, v);
+                    let root = k.split('.').next().unwrap_or(&k).to_string();
+                    if !local.contains(&root) {
+                        consumed.or_insert(k, v);
+                    }
                 }
                 Ok(div)
             }
@@ -4764,6 +4775,52 @@ fn menu(line: usize, message: String, fixes: Vec<String>) -> Diagnostic {
 }
 
 /// The payload names a `match` pattern binds.
+/// Every name a block's statements DECLARE, at any depth — the bindings that
+/// cannot outlive it. Match-arm binders live in expressions and are scoped by
+/// `arm_binders`; statement-level declarations are what a region's consumption
+/// propagation must filter on.
+fn declared_in(block: &crate::ast::Block, out: &mut std::collections::HashSet<String>) {
+    for s in &block.stmts {
+        match s {
+            crate::ast::Stmt::Let { name, .. } => {
+                out.insert(name.clone());
+            }
+            crate::ast::Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                declared_in(then_block, out);
+                if let Some(e) = else_block {
+                    declared_in(e, out);
+                }
+            }
+            crate::ast::Stmt::IfLet {
+                pattern,
+                then_block,
+                else_block,
+                ..
+            } => {
+                for b in pattern_bindings(pattern) {
+                    out.insert(b.to_string());
+                }
+                declared_in(then_block, out);
+                if let Some(e) = else_block {
+                    declared_in(e, out);
+                }
+            }
+            crate::ast::Stmt::While { body, .. } | crate::ast::Stmt::Region { body, .. } => {
+                declared_in(body, out);
+            }
+            crate::ast::Stmt::ForIn { var, body, .. } => {
+                out.insert(var.clone());
+                declared_in(body, out);
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn pattern_bindings(p: &Pattern) -> Vec<&str> {
     match p {
         Pattern::Some(b) | Pattern::Ok(b) | Pattern::Err(b) => vec![b],

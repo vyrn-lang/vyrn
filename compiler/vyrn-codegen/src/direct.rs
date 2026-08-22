@@ -15542,11 +15542,17 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
             b.ins(&Instruction::Br(1)).ins(&Instruction::End); // none
                                                                // Both ways of answering None land here, and both leave the line
                                                                // buffer with no owner. The EOF exit at the top lands here too,
-                                                               // before any buffer exists — `buf` is then still 0, which `free`
-                                                               // refuses.
+                                                               // before any buffer exists — `buf` is then still 0, and the load
+                                                               // inside `str_hdr` would read at `0 - SHDR`, far out of bounds,
+                                                               // before `free` could refuse anything. Free only a real buffer;
+                                                               // an empty line never reaches this arm (the `\n` case answers
+                                                               // Some above), so nothing owned is skipped.
+            b.ins(&Instruction::LocalGet(buf));
+            b.ins(&Instruction::If(BlockType::Empty));
             b.ins(&Instruction::LocalGet(buf));
             str_hdr(b);
             b.ins(&Instruction::Call(free));
+            b.ins(&Instruction::End);
             sum2_write(b, &sum2, 0, None);
             b.ins(&Instruction::End); // fin
         },
