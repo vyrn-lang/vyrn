@@ -759,6 +759,20 @@ function railSpy() {
 // One listener for the life of the document. `boot` runs again after every soft
 // navigation, and re-registering here would stack a listener per page.
 addEventListener("scroll", markRail, { passive: true });
+
+// A `<details>` menu holds itself open until its summary is pressed again —
+// the platform's rule, and the wrong one for a dropdown: a click anywhere
+// else, or Escape, closes it (user). Document-level and bound once, like the
+// listeners above.
+addEventListener("click", (e) => {
+  for (const m of $$(".pagemenu[open]")) {
+    if (!m.contains(e.target)) m.open = false;
+  }
+});
+addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  for (const m of $$(".pagemenu[open]")) m.open = false;
+});
 addEventListener("resize", markRail, { passive: true });
 
 // ---------------------------------------------------------------------------
