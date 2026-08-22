@@ -84,10 +84,12 @@ fn mark(a: String, b: String) -> String {
 /// `"index"`, `"graph"` and `"editors"`, so one function serves all four kinds of
 /// page under `/docs`.
 export fn docsTree(current: String) -> Array<TreeGroup> {
-    // No "Reference" group of area rows any more: the subnav owns the areas,
-    // and printing Overview, the graph and Editors here as well marked one
-    // page in three places (the user counted them).
-    let mut out: Array<TreeGroup> = []
+    // No Overview row (the subnav's Reference IS that door), but the import
+    // graph left the subnav and lives here — it is the reference's own
+    // drawing (user: "Import graph can be on the reference's index").
+    let mut top: Array<TreeRow> = []
+    top.push(TreeRow { href: "/docs/graph.html", label: "The import graph", here: mark(current, "graph") })
+    let mut out: Array<TreeGroup> = [TreeGroup { name: "Reference", rows: top.copy(), icon: drawNamed("activity") }]
     for g in apiGroups() {
         let mut got: Array<TreeRow> = []
         for m in g.modules {
@@ -107,7 +109,13 @@ export fn guideTree(current: String) -> Array<TreeGroup> {
     for c in chapters() {
         rows.push(TreeRow { href: chapterHref(c.slug), label: chapterTag(chapterNumber(c.slug)) + "  " + c.title, here: mark(current, c.slug) })
     }
-    return [TreeGroup { name: "Chapters", rows: rows.copy(), icon: drawNamed("bookmark") }]
+    // Editors moved under the guide (user): setting up an editor is a thing a
+    // READER does, and the page's own group was always the book.
+    let mut setup: Array<TreeRow> = []
+    setup.push(TreeRow { href: "/docs/editors.html", label: "Editors", here: mark(current, "editors") })
+    let mut out: Array<TreeGroup> = [TreeGroup { name: "Chapters", rows: rows.copy(), icon: drawNamed("bookmark") }]
+    out.push(TreeGroup { name: "Setup", rows: setup.copy(), icon: drawNamed("settings") })
+    return out
 }
 
 /// The pager for whichever tree it is handed: the marked row's neighbours, read
@@ -166,7 +174,8 @@ test "the reference tree carries every module the library documents, once" {
         all = all + g.modules.length
     }
     assertEq(modules, all)
-    assertEq(treeSize(tree), all)
+    // Plus the graph row, the reference's own drawing.
+    assertEq(treeSize(tree), all + 1)
 }
 
 test "exactly one row is marked, and it is the page that asked" {
@@ -215,14 +224,18 @@ test "the pager walks the tree the sidebar prints" {
     let book = guideTree(chapters()[0].slug)
     let start = pagerFor(book)
     assertEq(start.prevHref, "")
-    // And the last chapter is the end of the book.
-    let end = pagerFor(guideTree(chapters()[chapters().length - 1].slug))
+    // The book's last chapter walks on into Setup: Editors follows it.
+    let end2 = pagerFor(guideTree(chapters()[chapters().length - 1].slug))
+    assertEq(end2.nextHref, "/docs/editors.html")
+    // And Editors is the section's very end.
+    let end = pagerFor(guideTree("editors"))
     assertEq(end.nextHref, "")
     assert(end.prevHref.byteLength > 0)
 }
 
 test "the book's tree covers the book" {
-    assertEq(treeSize(guideTree("index")), chapters().length)
+    // Chapters plus the Setup group's one row.
+    assertEq(treeSize(guideTree("index")), chapters().length + 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -237,8 +250,6 @@ export fn docSubnav(current: String) -> String {
     let items = [
         ["guide", "/guide.html", "Guide", "book"],
         ["reference", "/docs.html", "Reference", "code"],
-        ["editors", "/docs/editors.html", "Editors", "settings"],
-        ["graph", "/docs/graph.html", "Import graph", "activity"],
     ]
     let mut out = ""
     for it in items {
@@ -263,12 +274,10 @@ fn timesIn(s: String, needle: String) -> Int64 {
     return n
 }
 
-test "the subnav names four areas and marks exactly one" {
+test "the subnav names two areas and marks exactly one" {
     let html = docSubnav("reference")
     assert(has(html, "/guide.html"))
     assert(has(html, "/docs.html"))
-    assert(has(html, "/docs/editors.html"))
-    assert(has(html, "/docs/graph.html"))
     // One marked row, and it is the one asked for.
     assertEq(timesIn(html, "aria-current"), 1)
     assert(has(html, "/docs.html\" aria-current"))

@@ -2161,10 +2161,24 @@ pre.doccode::-webkit-scrollbar { display: none; }
 
 /* A program in the book. The plate says BUILT and not "live": it ran once,
  * while the page was built, and the output under it is what it printed then. */
+/* COMPACT, AND RUNNABLE WHERE IT STANDS (user): a guide block is the hero
+ * editor's anatomy at reading density — smaller code, tighter head, the
+ * built output in the run pane until a live run replaces it. */
 .plate.block { margin-top: var(--s4); }
-.plate.block pre.code { padding: var(--s2); }
-.plate.block .out { margin: 0; border-left: 0; border-top: 1px solid var(--hair); }
+.plate.block .plate-head { min-height: 36px; }
+.plate.block .plate-head .btn { min-height: 28px; padding: 4px 10px; }
+.plate.block pre.code { padding: 12px var(--s2); font-size: var(--t-code-s); line-height: 1.6; }
+.plate.block .out { margin: 0; border-left: 0; border-top: 1px solid var(--hair); max-height: 16em; overflow: auto; scrollbar-width: none; }
+.plate.block .out::-webkit-scrollbar { display: none; }
 .plate.block .cap a { color: inherit; }
+/* The runnable half: the editor is flush in the plate, sized by its own rows
+ * (`.play .editor textarea`'s 52vh is the playground page's, and is declared
+ * later — three classes outrank it, the hero's own trick). */
+.plate.block.play .editor { margin: 0; }
+.plate.block.play .editor pre.hl { background: none; padding: 12px var(--s2); font-size: var(--t-code-s); line-height: 1.6; }
+.play.plate.block .editor textarea { height: auto; min-height: 0; resize: none; padding: 12px var(--s2); font-size: var(--t-code-s); line-height: 1.6; }
+.plate.block.play .editor pre, .plate.block.play .editor textarea { scrollbar-width: none; border: 1px solid transparent; }
+.plate.block.play .editor pre::-webkit-scrollbar, .plate.block.play .editor textarea::-webkit-scrollbar { display: none; }
 .plate-head .btn { text-decoration: none; }
 
 /* Previous and next, at the foot of every page under the docs shell. Each link

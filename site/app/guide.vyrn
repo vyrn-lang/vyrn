@@ -145,24 +145,56 @@ export fn blockOf(id: String) -> Block {
 /// The pill says BUILT and not "live". The program ran once, while this page was
 /// built, and the output below it is what it wrote then. A control that claimed
 /// to run it now would be a picture of a run, and this site does not ship those.
+/// `s` with the three HTML metacharacters escaped — the textarea's payload.
+fn escapeSrc(s: String) -> String {
+    return replace(replace(replace(s, "&", "&amp;"), "<", "&lt;"), ">", "&gt;")
+}
+
+/// How many lines `s` holds — the textarea's own height, so a block is as
+/// tall as its program and not a viewport fraction.
+fn lineCount(s: String) -> Int64 {
+    let mut n = 1
+    for b in bytes(s) {
+        if b == '\n' {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+/// A RUNNABLE block wears the hero editor's own anatomy (user: "runnable in
+/// place instead of a playground link"): the highlighted layer, the read-only
+/// textarea `mountPlay` unlocks on the first press, and the built output
+/// standing in the run pane until a live run replaces it. A block the
+/// playground cannot take (a generator needing its importer) stays a plain
+/// plate.
 fn blockHtml(b: Block) -> String {
-    let mut out = "<div class=\"plate block\">"
-    out = out + "<div class=\"plate-head\"><span class=\"pill\">Built</span>"
-    out = out + "<span class=\"eyebrow\">site/guide/" + b.id + ".vyrn</span><span class=\"spacer\"></span>"
-    if b.play.byteLength > 0 {
-        out = out + "<a class=\"btn\" href=\"" + b.play + "\">Run it in the playground</a>"
+    if b.play.byteLength == 0 {
+        let mut plain = "<div class=\"plate block\">"
+        plain = plain + "<div class=\"plate-head\"><span class=\"eyebrow\">site/guide/" + b.id + ".vyrn</span></div>"
+        plain = plain + "<pre class=\"code\">" + joinWith(b.lines, "\n") + "</pre>"
+        if b.output.byteLength > 0 {
+            plain = plain + "<div class=\"out\">" + terminalHtml(b.output) + "</div>"
+        }
+        plain = plain + "<p class=\"cap\">Compiled while this page was built, and imported by the block above. "
+        return plain + "<a href=\"" + b.source + "\">The file in the repository</a>.</p></div>"
     }
-    out = out + "</div>"
-    out = out + "<pre class=\"code\">" + joinWith(b.lines, "\n") + "</pre>"
+    let src = blockSource(b.id)
+    let mut out = "<div class=\"plate block play\" data-widget=\"playhero\">"
+    out = out + "<div class=\"plate-head\"><span class=\"eyebrow\">site/guide/" + b.id + ".vyrn</span>"
+    out = out + "<span class=\"spacer\"></span><span class=\"eyebrow\" data-play-status>Built</span>"
+    out = out + "<button type=\"button\" class=\"btn jsonly\" data-play-reset>Reset</button>"
+    out = out + "<button type=\"button\" class=\"btn primary jsonly\" data-play-run title=\"Ctrl+Enter\">Run</button></div>"
+    out = out + "<div class=\"editor\" data-play-editor>"
+    out = out + "<pre class=\"code hl\" aria-hidden=\"true\"><code data-play-hl>" + joinWith(b.lines, "\n") + "</code></pre>"
+    out = out + "<textarea data-play-src readonly=\"readonly\" rows=\"" + lineCount(src).toString() + "\" spellcheck=\"false\" autocapitalize=\"off\" autocorrect=\"off\" autocomplete=\"off\" wrap=\"off\" aria-label=\"Vyrn source, editable after the first press\">" + escapeSrc(src) + "</textarea></div>"
+    out = out + "<div class=\"diags\" data-play-diags hidden=\"hidden\" aria-live=\"polite\"></div>"
     if b.output.byteLength > 0 {
-        out = out + "<div class=\"out\">" + terminalHtml(b.output) + "</div>"
-    }
-    out = out + "<p class=\"cap\">"
-    if b.output.byteLength > 0 {
-        out = out + "Compiled and run while this page was built. "
+        out = out + "<div class=\"out\" data-play-out aria-live=\"polite\">" + terminalHtml(b.output) + "</div>"
     } else {
-        out = out + "Compiled while this page was built, and imported by the block above. "
+        out = out + "<div class=\"out\" data-play-out aria-live=\"polite\"><span class=\"dim\">Prints nothing.</span></div>"
     }
+    out = out + "<p class=\"cap\">Built and run while this page was built; Run runs it here. "
     return out + "<a href=\"" + b.source + "\">The file in the repository</a>.</p></div>"
 }
 

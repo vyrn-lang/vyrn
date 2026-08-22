@@ -622,3 +622,14 @@ page marks Docs in the masthead now, one marker per bar. The crumb row is one
 line by construction: the crumbs shrink and ellipsize before the row wraps.
 And the right pane joined the scroll spy — the margin rail's own moving
 marker, on the shell's "On this page".
+
+**R15 (orchestrator, the user's three rows).** (1) Guide blocks are the hero
+editor's own anatomy at reading density: smaller code, tighter head, the
+built output standing in the run pane until a live in-place run replaces it —
+"Run it in the playground" is retired; the playground remains for the
+non-runnable blocks' world. Verified live: Run on a chapter block loads the
+compiler and prints `exit 0` where the built output stood. (2) The subnav is
+two honest areas — Guide and Reference; Editors joined the guide's tree under
+Setup (setting up an editor is a reader's task), and the import graph joined
+the reference's tree as its own drawing. (3) The guide's content rewrite is
+its own milestone, recorded in the RFC as M5's opening item.

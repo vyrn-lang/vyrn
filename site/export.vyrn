@@ -263,10 +263,10 @@ fn withSubnav(html: String, path: String) -> String {
 /// reference.
 fn subnavKey(path: String) -> String {
     if path == "/docs/editors" {
-        return "editors"
+        return "guide"
     }
     if path == "/docs/graph" {
-        return "graph"
+        return "reference"
     }
     if startsWith(path, "/guide") {
         return "guide"
