@@ -926,7 +926,10 @@ h1 code, h2 code, h3 code, h4 code {
  * indented sans rows, the current one's accent segment on the rail, and an
  * export NAME keeps the code face — smaller and muted, a name not a chip. */
 .onpage a { padding: 3px var(--s1) 3px 12px; margin-left: 0; border-left: 1px solid var(--hair); }
-.onpage a.on { border-left: 2px solid var(--accent); padding-left: 11px; }
+/* The marked row keeps the EXACT geometry of its neighbours: the accent
+ * segment is the same 1px border plus an inset shadow beside it — a
+ * border-width change moved the row a pixel and read as an offset. */
+.onpage a.on { border-left: 1px solid var(--accent); box-shadow: inset 1px 0 0 var(--accent); }
 .onpage a code, .onpage code { background: none; border: 0; padding: 0; font-size: var(--t-mono); color: inherit; }
 
 .treegroup + .treegroup { margin-top: var(--s2); }
