@@ -17,6 +17,7 @@ import { inlineCode } from "../../code"
 // book's contents on the left, this chapter's sections on the right, the chapter
 // before and after at the foot.
 import { TreeGroup, guideTree } from "../../docshell"
+import { Icon } from "../../icons"
 params { chapter: String }
 
 /// One chapter, with the number the rail prints beside it.
@@ -80,8 +81,9 @@ fn claudeHref(slug: String, title: String) -> String {
             <details class="pagemenu">
                 <summary aria-label="More page actions">▾</summary>
                 <div class="acts">
-                    <a :href="mdUrl(chapterHref(data.chapter.slug))"><span>View as Markdown</span><span class="d">This page as plain text</span></a>
-                    <a :href="claudeHref(data.chapter.slug, data.chapter.title)" rel="noopener"><span>Open in Claude</span><span class="d">Ask Claude about this page</span></a>
+                    <a :href="mdUrl(chapterHref(data.chapter.slug))" data-copy-md><span class="ic"><Icon name="bytesize:clipboard"/></span><span class="t"><span>Copy page</span><span class="d">Markdown, ready to paste into an LLM</span></span></a>
+                    <a :href="mdUrl(chapterHref(data.chapter.slug))"><span class="ic"><Icon name="bytesize:file"/></span><span class="t"><span>View as Markdown</span><span class="d">This page as plain text</span></span></a>
+                    <a :href="claudeHref(data.chapter.slug, data.chapter.title)" rel="noopener"><span class="ic"><Icon name="bytesize:external"/></span><span class="t"><span>Open in Claude</span><span class="d">Ask Claude about this page</span></span></a>
                 </div>
             </details>
         </div>

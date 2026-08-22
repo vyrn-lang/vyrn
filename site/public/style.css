@@ -835,11 +835,34 @@ h1 code, h2 code, h3 code, h4 code {
   padding: 4px;
 }
 .pagemenu .acts a {
-  display: block; padding: 8px 10px; text-decoration: none; color: var(--ink);
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 8px 10px; text-decoration: none; color: var(--ink);
   font: 500 var(--t-mono)/1.5 var(--sans);
 }
 .pagemenu .acts a:hover { background: color-mix(in oklab, var(--ink) 5%, transparent); }
 .pagemenu .acts a .d { display: block; font-weight: 400; font-size: var(--t-key); color: var(--n2); }
+/* The row's glyph, boxed the reference site's way. */
+.pagemenu .acts .ic {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; margin-top: 2px;
+  border: 1px solid var(--hair);
+}
+.pagemenu .acts .ic svg { width: 15px; height: 15px; }
+.pagemenu .acts .t { min-width: 0; }
+
+/* THE SPLIT OPENS WITH MOTION (user row 2): the chevron turns over, the panel
+ * arrives from the button instead of appearing, and hovering EITHER half
+ * lights the shared seam — the halves overlap by a pixel and the hovered one
+ * lifts. Stilled under prefers-reduced-motion. */
+.pagemenu > summary { transition: color 140ms var(--expo), border-color 140ms var(--expo), transform 200ms var(--expo); }
+.pagemenu[open] > summary { transform: rotate(180deg); }
+.pagemenu .acts { animation: menuin 160ms var(--expo); }
+@keyframes menuin { from { opacity: 0; translate: 0 -6px; } }
+@media (prefers-reduced-motion: reduce) {
+  .pagemenu[open] > summary { transform: none; }
+  .pagemenu .acts { animation: none; }
+}
+.docutils .btn:hover, .pagemenu > summary:hover { position: relative; z-index: 1; }
 
 .docstree, .onpage {
   grid-row: 1 / span 60;
@@ -894,6 +917,12 @@ h1 code, h2 code, h3 code, h4 code {
   box-shadow: inset 2px 0 0 var(--accent);
 }
 .onpage a.on { color: var(--ink); }
+/* The right pane hangs its rows off the same rail the tree uses (user row 6):
+ * indented sans rows, the current one's accent segment on the rail, and an
+ * export NAME keeps the code face — smaller and muted, a name not a chip. */
+.onpage a { padding: 3px var(--s1) 3px 12px; margin-left: 0; border-left: 1px solid var(--hair); }
+.onpage a.on { border-left: 2px solid var(--accent); padding-left: 11px; }
+.onpage a code, .onpage code { background: none; border: 0; padding: 0; font-size: var(--t-mono); color: inherit; }
 
 .treegroup + .treegroup { margin-top: var(--s2); }
 /* A sidebar group header is a chapter heading, not a kicker: the reference
@@ -921,7 +950,6 @@ button, .btn, summary, .ostabs label { user-select: none; }
  * joins the button it extends, sharing the seam — the reference site's own
  * split-button anatomy. */
 .docutils .btn + .pagemenu { margin-left: calc(-1 * var(--s2) - 1px); }
-.docutils .btn + .pagemenu > summary { border-left: 0; }
 
 /* A reading page is not a landing: its sections breathe at half the landing's
  * rhythm, or the title floats 76px from its own first paragraph — and its
@@ -1373,7 +1401,9 @@ pre.code::-webkit-scrollbar { display: none; }
   min-height: 30px; padding: 5px 12px; cursor: pointer;
   font: 500 var(--t-mono)/1 var(--sans);
   color: var(--muted);
-  transition: color 140ms var(--expo), background 140ms var(--expo);
+  /* 200ms with the ease curve: the selection crossfades between segments
+   * rather than snapping (user row 4). */
+  transition: color 200ms var(--expo), background 200ms var(--expo);
 }
 .ostabs label:hover { color: var(--ink); }
 .ospane { display: none; text-align: left; }

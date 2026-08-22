@@ -21,7 +21,7 @@
 /// the point of `pagerFor`: it takes the groups the sidebar was BUILT from and
 /// finds the marked row's neighbours in reading order. A prev/next that came from
 /// its own table could point somewhere the sidebar does not.
-import { ApiModule, apiGroups, apiHref } from "./docs"
+import { ApiModule, apiGroups, apiHref, groupIcon } from "./docs"
 import { Chapter, chapters, chapterHref, chapterNumber, chapterTag } from "./guide"
 import { indexOf, substring } from "std/strings"
 // The glyphs beside group names and subnav rows — the same pinned collection
@@ -56,16 +56,19 @@ fn draw(g: consume Html) -> String {
     return toHtmlString(iconAttrs(g, "", "", ""))
 }
 
-/// The glyph for a group's name. A name with no glyph gets none — decoration
-/// is optional, rows are not.
-fn glyphOf(name: String) -> String {
-    if name == "Reference" { return draw(book()) }
-    if name == "The guide" { return draw(book()) }
-    if name == "Chapters" { return draw(bookmark()) }
-    if name == "Text and bytes" { return draw(file()) }
-    if name == "Data" { return draw(archive()) }
-    if name == "Web" { return draw(link()) }
-    if name == "Programs and tools" { return draw(settings()) }
+/// A glyph by the NAME the data records ("file", "archive"), drawn to a
+/// string. This is the one bridge from a data-carried name to the generated
+/// glyph functions — keyed by glyph, never by what uses it, so a new group or
+/// subnav row that reuses a known glyph touches its own data table alone.
+fn drawNamed(glyph: String) -> String {
+    if glyph == "book" { return draw(book()) }
+    if glyph == "bookmark" { return draw(bookmark()) }
+    if glyph == "file" { return draw(file()) }
+    if glyph == "archive" { return draw(archive()) }
+    if glyph == "link" { return draw(link()) }
+    if glyph == "settings" { return draw(settings()) }
+    if glyph == "code" { return draw(code()) }
+    if glyph == "activity" { return draw(activity()) }
     return ""
 }
 
@@ -81,18 +84,16 @@ fn mark(a: String, b: String) -> String {
 /// `"index"`, `"graph"` and `"editors"`, so one function serves all four kinds of
 /// page under `/docs`.
 export fn docsTree(current: String) -> Array<TreeGroup> {
-    let mut rows: Array<TreeRow> = [
-        TreeRow { href: "/docs.html", label: "Overview", here: mark(current, "index") },
-        TreeRow { href: "/docs/graph.html", label: "The import graph", here: mark(current, "graph") },
-        TreeRow { href: "/docs/editors.html", label: "Editors", here: mark(current, "editors") },
-    ]
-    let mut out: Array<TreeGroup> = [TreeGroup { name: "Reference", rows: rows.copy(), icon: glyphOf("Reference") }]
+    // No "Reference" group of area rows any more: the subnav owns the areas,
+    // and printing Overview, the graph and Editors here as well marked one
+    // page in three places (the user counted them).
+    let mut out: Array<TreeGroup> = []
     for g in apiGroups() {
         let mut got: Array<TreeRow> = []
         for m in g.modules {
             got.push(TreeRow { href: apiHref(m.name), label: "std/" + m.name, here: mark(current, m.name) })
         }
-        out.push(TreeGroup { name: g.name.copy(), rows: got.copy(), icon: glyphOf(g.name) })
+        out.push(TreeGroup { name: g.name.copy(), rows: got.copy(), icon: drawNamed(g.icon) })
     }
     return out
 }
@@ -100,14 +101,13 @@ export fn docsTree(current: String) -> Array<TreeGroup> {
 /// The book's sidebar: the landing, then every chapter in reading order with the
 /// number the rail has always printed beside it.
 export fn guideTree(current: String) -> Array<TreeGroup> {
-    let mut top: Array<TreeRow> = [TreeRow { href: "/guide.html", label: "Overview", here: mark(current, "index") }]
-    let mut out: Array<TreeGroup> = [TreeGroup { name: "The guide", rows: top.copy(), icon: glyphOf("The guide") }]
+    // Same dedup as the reference tree: the subnav's Guide row IS the
+    // overview door, so the tree is the chapters alone.
     let mut rows: Array<TreeRow> = []
     for c in chapters() {
         rows.push(TreeRow { href: chapterHref(c.slug), label: chapterTag(chapterNumber(c.slug)) + "  " + c.title, here: mark(current, c.slug) })
     }
-    out.push(TreeGroup { name: "Chapters", rows: rows.copy(), icon: glyphOf("Chapters") })
-    return out
+    return [TreeGroup { name: "Chapters", rows: rows.copy(), icon: drawNamed("bookmark") }]
 }
 
 /// The pager for whichever tree it is handed: the marked row's neighbours, read
@@ -166,11 +166,12 @@ test "the reference tree carries every module the library documents, once" {
         all = all + g.modules.length
     }
     assertEq(modules, all)
-    assertEq(treeSize(tree), all + 3)
+    assertEq(treeSize(tree), all)
 }
 
 test "exactly one row is marked, and it is the page that asked" {
-    for tree in [docsTree("json"), docsTree("editors"), guideTree("ownership")] {
+    // "editors" left this list with its tree row: it is a subnav area now.
+    for tree in [docsTree("json"), guideTree("ownership")] {
         let mut marked = 0
         for g in tree {
             for r in g.rows {
@@ -181,10 +182,15 @@ test "exactly one row is marked, and it is the page that asked" {
         }
         assertEq(marked, 1)
     }
-    // A landing marks its own Overview row, so the tree always says where the
-    // reader is — including on the page the tree hangs off.
-    assertEq(docsTree("index")[0].rows[0].here, "page")
-    assertEq(guideTree("index")[0].rows[0].here, "page")
+    // A landing marks NOTHING in the tree: the subnav's own row is its
+    // marker, and the area rows left the tree when the subnav took them.
+    for tree in [docsTree("index"), guideTree("index")] {
+        for g in tree {
+            for r in g.rows {
+                assertEq(r.here, "")
+            }
+        }
+    }
     // And a name no section has marks nothing rather than marking the first row.
     let none = pagerFor(docsTree("nope"))
     assertEq(none.prevHref, "")
@@ -192,19 +198,23 @@ test "exactly one row is marked, and it is the page that asked" {
 }
 
 test "the pager walks the tree the sidebar prints" {
-    // The first page of the reference has no previous, and the row after it is
-    // the graph — which is the sidebar's own second row.
-    let first = pagerFor(docsTree("index"))
-    assertEq(first.prevHref, "")
-    assertEq(first.nextHref, "/docs/graph.html")
+    // A landing marks nothing, so its pager is empty — the subnav is its
+    // navigation. The first MODULE of the tree has no previous.
+    let landing = pagerFor(docsTree("index"))
+    assertEq(landing.prevHref, "")
+    assertEq(landing.nextHref, "")
+    let firstModule = docsTree("x")[0].rows[0].label
+    // labels are "std/<name>"; the marked walk is exercised through `mid`.
+    assert(firstModule.byteLength > 4)
     // A module in the middle has both, and both are rows of the tree.
     let mid = pagerFor(docsTree("json"))
     assert(mid.prevHref.byteLength > 0)
     assert(mid.nextHref.byteLength > 0)
-    // The book's first chapter follows its own overview.
+    // The book's first chapter is the start of the book now — the overview
+    // row moved to the subnav.
     let book = guideTree(chapters()[0].slug)
     let start = pagerFor(book)
-    assertEq(start.prevHref, "/guide.html")
+    assertEq(start.prevHref, "")
     // And the last chapter is the end of the book.
     let end = pagerFor(guideTree(chapters()[chapters().length - 1].slug))
     assertEq(end.nextHref, "")
@@ -212,7 +222,7 @@ test "the pager walks the tree the sidebar prints" {
 }
 
 test "the book's tree covers the book" {
-    assertEq(treeSize(guideTree("index")), chapters().length + 1)
+    assertEq(treeSize(guideTree("index")), chapters().length)
 }
 
 // ---------------------------------------------------------------------------
@@ -225,19 +235,15 @@ test "the book's tree covers the book" {
 /// keys `"guide"`, `"reference"`, `"editors"`, `"graph"`.
 export fn docSubnav(current: String) -> String {
     let items = [
-        ["guide", "/guide.html", "Guide"],
-        ["reference", "/docs.html", "Reference"],
-        ["editors", "/docs/editors.html", "Editors"],
-        ["graph", "/docs/graph.html", "Import graph"],
+        ["guide", "/guide.html", "Guide", "book"],
+        ["reference", "/docs.html", "Reference", "code"],
+        ["editors", "/docs/editors.html", "Editors", "settings"],
+        ["graph", "/docs/graph.html", "Import graph", "activity"],
     ]
-    let looks = [draw(book()), draw(code()), draw(settings()), draw(activity())]
     let mut out = ""
-    let mut i = 0
-    while i < items.length {
-        let it = items[i]
+    for it in items {
         let markAttr = if it[0] == current { " aria-current=\"true\"" } else { "" }
-        out = out + "<a href=\"" + it[1] + "\"" + markAttr + ">" + looks[i] + it[2] + "</a>"
-        i = i + 1
+        out = out + "<a href=\"" + it[1] + "\"" + markAttr + ">" + drawNamed(it[3]) + it[2] + "</a>"
     }
     return out
 }

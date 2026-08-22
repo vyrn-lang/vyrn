@@ -57,6 +57,10 @@ const PAGE_TAGS = {
   "index.vyx": "index.html",
   "docs/index.vyx": "docs.html",
 };
+/// Templates that make MANY pages, all of them docs-shell pages the per-page
+/// assertion already treats as a floor: their tags join the named set, and no
+/// single page can be their key.
+const DOCS_TAGS = ["docs/std/[module].vyx", "guide/[chapter].vyx"];
 
 /// Every `<Icon .../>` in a template, as `{ name, label }`.
 function tagsOf(src) {
@@ -108,7 +112,7 @@ test("every template carrying tags is one this gate maps to pages", async () => 
   carrying.sort();
   assert.deepEqual(
     carrying,
-    [SHELL, ...Object.keys(PAGE_TAGS)].sort(),
+    [SHELL, ...Object.keys(PAGE_TAGS), ...DOCS_TAGS].sort(),
     "a template gained `<Icon>` tags and this file does not know which pages it makes — add it to PAGE_TAGS",
   );
 });

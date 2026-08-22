@@ -249,7 +249,7 @@ fn withSubnav(html: String, path: String) -> String {
     if key.byteLength == 0 {
         return html.copy()
     }
-    let band = "<nav class=\"subnav\" aria-label=\"Documentation sections\">" + docSubnav(key) + "</nav>"
+    let band = "<nav class=\"subnav\" data-nav-swap=\"subnav\" aria-label=\"Documentation sections\">" + docSubnav(key) + "</nav>"
     return match indexOf(html, "</header>") {
         Some(at) => substring(html, 0, at + 9) + band + substring(html, at + 9, html.byteLength),
         None => html.copy(),

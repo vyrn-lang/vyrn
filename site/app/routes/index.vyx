@@ -175,7 +175,7 @@ fn teaserGroups() -> Array<ApiGroup> {
                 }
             }
         }
-        out.push(ApiGroup { name: g.name.copy(), modules: top.copy() })
+        out.push(ApiGroup { name: g.name.copy(), modules: top.copy(), icon: g.icon.copy() })
     }
     return out
 }

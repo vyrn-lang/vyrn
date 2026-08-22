@@ -237,10 +237,44 @@ function isNavUi(node) {
   return node.nodeType === 1 && node.hasAttribute("data-vyrn-nav-ui");
 }
 
+// Shell bands a page carries OUTSIDE <main> — a docs subnav, say — opt into
+// the swap with `data-nav-swap="<key>"`. Each key is reconciled to the
+// incoming document: replaced when both sides have it, removed when only the
+// live side does, and inserted before <main> when only the incoming side does.
+// Without the attribute nothing outside <main> is ever touched, which is the
+// contract above.
+function reconcileShellBands(newDoc, liveMain) {
+  const keyed = (root) => {
+    const map = new Map();
+    for (const el of root.querySelectorAll("[data-nav-swap]")) {
+      map.set(el.getAttribute("data-nav-swap"), el);
+    }
+    return map;
+  };
+  const live = keyed(document);
+  const incoming = keyed(newDoc);
+  for (const [key, el] of live) {
+    const next = incoming.get(key);
+    if (next) el.replaceWith(document.importNode(next, true));
+    else el.remove();
+  }
+  for (const [key, el] of incoming) {
+    if (live.has(key)) continue;
+    // Where the shell puts such bands: after the page header when there is
+    // one (the band must not become a child of the content grid), before
+    // <main> otherwise.
+    const header = document.querySelector("body header");
+    const node = document.importNode(el, true);
+    if (header) header.after(node);
+    else liveMain.before(node);
+  }
+}
+
 function replaceContent(newDoc) {
   const liveMain = document.querySelector("main");
   const newMain = newDoc.querySelector("main");
   if (liveMain && newMain) {
+    reconcileShellBands(newDoc, liveMain);
     liveMain.replaceWith(document.importNode(newMain, true));
     return;
   }

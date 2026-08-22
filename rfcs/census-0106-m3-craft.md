@@ -598,3 +598,20 @@ a paragraph — the parser auto-closes it, so the menu half was thrown out as a
 sibling and the split control rendered in pieces. A `<div>` holds both; the
 halves share a seam; and `writeClipboard` gained the selection-path fallback
 for the contexts where the async API refuses.
+
+**R13 (orchestrator, the user's six rows).** (1) The page menu wears the
+reference anatomy: three honest rows — Copy page, View as Markdown, Open in
+Claude — each with a boxed glyph through the `<Icon>` tag. (2) The split
+control animates: the chevron turns over, the panel arrives from the button,
+either half's hover lifts it over the shared seam; stilled under
+prefers-reduced-motion. (3) The duplicate markers are structural: the tree's
+area rows (Overview, the graph, Editors) left for the subnav that owns them,
+so one page marks in one place per surface. (4) The pill's selection
+crossfades at 200ms on the ease curve. (5) Icons are data now: the reference
+group table in `docs.vyrn` carries each group's glyph name, the subnav table
+its own, and `drawNamed` is the one bridge from a data name to the generated
+glyph — keyed by glyph, never by consumer. A glyph named `export` cannot be
+generated (it collides with the keyword when the module is emitted) — a
+`std/icons` gap worth its own row. (6) The right pane hangs off the tree's
+own rail: indented rows, accent segment for the current heading, export
+names in the code face but muted and unboxed.
