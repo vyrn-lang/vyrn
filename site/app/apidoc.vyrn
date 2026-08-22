@@ -209,38 +209,50 @@ gen fn headerDoc(toks: Array<Token>) -> String {
 // spans. Everything else is rendered as the text it is.
 // ---------------------------------------------------------------------------
 
-/// `s` with each `**pair**` emphasised. An unpaired marker stays the text it is.
-fn boldHtml(s: String) -> String {
-    let parts = split(s, "**")
-    let mut out = ""
-    let mut i = 0
-    while i < parts.length {
-        if i % 2 == 1 && i + 1 < parts.length {
-            out = out + "<strong>" + parts[i] + "</strong>"
-        } else if i % 2 == 1 {
-            out = out + "**" + parts[i]
-        } else {
-            out = out + parts[i]
-        }
-        i = i + 1
-    }
-    return out
-}
-
 /// `escaped` with every `` `span` `` turned into a `<code>` and every `**pair**`
 /// emphasised. A marker inside a code span is text, because a code span is read
 /// first.
+///
+/// THE STRONG PASS RUNS ACROSS THE WHOLE LINE, not within each plain fragment.
+/// A strong span often wraps a code span — ``**`chars` are retired**`` — so its
+/// opener and its closer sit in different fragments, and pairing them per
+/// fragment left both as the literal `**` the reader saw (user report). The
+/// markers are counted first: they pair off in order, and when the count is odd
+/// the LAST one stays the text it is, which is what the old code did for an
+/// unpaired marker.
 fn tickHtml(escaped: String) -> String {
     let parts = split(escaped, "`")
-    let mut out = ""
+    let mut markers = 0
     let mut i = 0
+    while i < parts.length {
+        let code = i % 2 == 1 && i + 1 < parts.length
+        if !code {
+            markers = markers + split(parts[i], "**").length - 1
+        }
+        i = i + 1
+    }
+    let mut out = ""
+    let mut seen = 0
+    i = 0
     while i < parts.length {
         if i % 2 == 1 && i + 1 < parts.length {
             out = out + "<code>" + parts[i] + "</code>"
-        } else if i % 2 == 1 {
-            out = out + "`" + boldHtml(parts[i])
         } else {
-            out = out + boldHtml(parts[i])
+            let piece = if i % 2 == 1 { "`" + parts[i] } else { parts[i].copy() }
+            let bits = split(piece, "**")
+            let mut j = 0
+            while j < bits.length {
+                out = out + bits[j]
+                if j + 1 < bits.length {
+                    if seen == markers - 1 && markers % 2 == 1 {
+                        out = out + "**"
+                    } else {
+                        out = out + if seen % 2 == 0 { "<strong>" } else { "</strong>" }
+                    }
+                    seen = seen + 1
+                }
+                j = j + 1
+            }
         }
         i = i + 1
     }
@@ -553,6 +565,12 @@ test "a list item wraps onto the next line, however far it is indented" {
 
 test "an emphasised pair is emphasis and a lone marker is text" {
     assertEq(inlineHtml("**loud** and `**quiet**`"), "<strong>loud</strong> and <code>**quiet**</code>")
+    // A strong span that WRAPS code spans: the opener and the closer sit in
+    // different plain fragments, and still pair (user report, std/text intro).
+    assertEq(inlineHtml("a **`chars` and `colAt` are retired** now"), "a <strong><code>chars</code> and <code>colAt</code> are retired</strong> now")
+    // An odd marker count leaves the last marker as text, wherever it falls.
+    assertEq(inlineHtml("**a `b`"), "**a <code>b</code>")
+    assertEq(inlineHtml("**one** and ** alone"), "<strong>one</strong> and ** alone")
     assertEq(inlineHtml("2 ** 3"), "2 ** 3")
 }
 
