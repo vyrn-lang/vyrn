@@ -2730,6 +2730,26 @@ Four more user directions on rounds 3-4's work:
   (a native `title` clips), the status bar's items centre on one line, and
   the crossfade fired once `@view-transition` left the media query — Chrome
   ignores it nested; reduced motion now opts out of the animation instead.
+- **Round 12 — eleven items, and a name collision under them.** Sashes
+  between every pane (drag to resize; the sizes persist). Directories:
+  folders, nested paths, collapse, rename and delete cascading to children,
+  the breadcrumb reading the path. Drag from the explorer into an editor
+  group, and back out of the split into the first strip — one `sendTo(name,
+  to, from, index)` under both, so a tab moves anywhere a pointer can put it.
+  The project downloads as a real zip written by hand (stored entries,
+  CRC-32 table, central directory), and files upload back in. The session —
+  open tabs, the split, the focused group, the pane sizes — restores on the
+  next visit beside the files. The keys are IntelliJ's: Ctrl+D, Ctrl+Y,
+  Ctrl+/, Ctrl+Shift+arrows, Shift+F10, Ctrl+F4, Alt+arrows, Alt+Insert,
+  Shift+F6, each named in the menu that offers it. Icons everywhere as masks
+  in the control's own ink, panes as rounded islands on chrome, the redundant
+  FILES header gone, the code tight under the breadcrumb, and the masthead
+  given a `view-transition-name` so 64px and 40px MORPH rather than snap.
+  THE COLLISION: the split state was a class named `split`, which is also the
+  site's own two-column helper — it injected a 48px grid gap that ate 200px
+  of the window and shrank the explorer to a fifth of its height (the user's
+  screenshot). Renamed `splitview`; a state class on a shared sheet needs a
+  name nothing else wants.
 - The Git Bash quoted heredoc EATS A BACKSLASH: `\n` in a here-document
   reached Python as `
 ` and round 4 shipped two raw newlines inside

@@ -2887,7 +2887,24 @@ body:has(.page.play.ide) .masthead a,
 body:has(.page.play.ide) .masthead button,
 body:has(.page.play.ide) .masthead summary,
 body:has(.page.play.ide) .masthead .wordmark { min-height: 30px; }
-.idewrap { --chrome: color-mix(in oklab, var(--ink) 5%, var(--paper)); --chromeline: color-mix(in oklab, var(--ink) 11%, var(--paper)); display: grid; grid-template-columns: 14rem minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto auto; border: 1px solid var(--rule); border-top: 0; height: calc(100dvh - var(--mast, 64px)); min-height: 30rem; }
+/* ISLANDS (user, after the IDE's own new look): every pane is a rounded
+ * island on one shade of chrome, with 6px sash tracks between them that the
+ * pointer can drag. The sizes are custom properties the shell writes and
+ * persists. */
+.idewrap { --chrome: color-mix(in oklab, var(--ink) 6%, var(--paper)); --chromeline: color-mix(in oklab, var(--ink) 12%, var(--paper)); --side-w: 224px; --panel-h: 200px; --split-a: 1fr; --split-b: 1fr; display: grid; gap: 0; align-items: stretch; grid-template-columns: var(--side-w) 6px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 6px var(--panel-h) auto; padding: 6px; background: var(--chrome); height: calc(100dvh - var(--mast, 64px)); min-height: 30rem; box-sizing: border-box; }
+.idewrap.splitview { grid-template-columns: var(--side-w) 6px minmax(0, var(--split-a)) 6px minmax(0, var(--split-b)); }
+.idewrap > .ideside, .idewrap > .idemain, .idewrap > .idepanel { border: 1px solid var(--chromeline); border-radius: 8px; overflow: hidden; background: var(--paper); }
+.sash { position: relative; }
+.sash.v { cursor: col-resize; }
+.sash.h { cursor: row-resize; }
+.sash::after { content: ""; position: absolute; inset: 0; margin: auto; background: var(--accent); opacity: 0; transition: opacity 120ms; }
+.sash.v::after { width: 2px; }
+.sash.h::after { height: 2px; }
+.sash:hover::after, .idewrap.resizing .sash::after { opacity: 0.6; }
+.idewrap.resizing { cursor: inherit; user-select: none; }
+.sash[data-play-sash="side"] { grid-row: 1 / 4; grid-column: 2; }
+.sash[data-play-sash="split"] { grid-row: 1; grid-column: 4; }
+.sash[data-play-sash="panel"] { grid-row: 2; grid-column: 3 / -1; }
 /* An editor's window has no footer under it and no margin around it (user):
  * the shell's foot and the sheet's bottom padding leave with it, and About
  * sits below the fold for whoever scrolls. The masthead stays — 64px of it,
@@ -2895,24 +2912,24 @@ body:has(.page.play.ide) .masthead .wordmark { min-height: 30px; }
 #root:has(.page.play.ide) { max-width: none; padding: 0; }
 #root:has(.page.play.ide) .foot { display: none; }
 .page.play.ide .idewrap { border-inline: 0; }
-.ideside { grid-row: 1 / 3; grid-column: 1; border-right: 1px solid var(--chromeline); background: var(--chrome); overflow-y: auto; padding-bottom: var(--s2); }
+.ideside { grid-row: 1 / 4; grid-column: 1; overflow-y: auto; padding-bottom: var(--s2); display: flex; flex-direction: column; }
 .sidehead { margin: 0; padding: 10px var(--s2) 8px; font: var(--t-eyebrow)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); display: flex; align-items: center; }
-.sideact { margin-left: auto; border: 0; background: none; cursor: pointer; color: var(--muted); font: var(--t-mono)/1 var(--mono); padding: 0 2px; }
-.sideact:hover { color: var(--ink); }
+.sideacts { margin-left: auto; display: inline-flex; gap: 2px; }
+.sideact { border: 0; background: none; cursor: pointer; color: var(--muted); width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; }
+.sideact:hover { color: var(--ink); background: color-mix(in oklab, var(--ink) 9%, transparent); }
+.filetree { flex: 1 1 auto; }
+.filetree .cap { padding: var(--s1) var(--s2); }
 .newname { display: block; width: calc(100% - var(--s2) * 2); margin: 2px var(--s2); border: 1px solid var(--accent); background: var(--paper); color: var(--ink); font: var(--t-code-s)/1.5 var(--mono); padding: 2px 6px; }
 .newname:focus-visible { outline: 0; }
 .sidetree summary { list-style: none; cursor: pointer; padding: 5px var(--s2) 4px; font: var(--t-eyebrow)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink); display: flex; align-items: center; gap: 5px; }
 .sidetree summary::-webkit-details-marker { display: none; }
 .sidetree .tw { display: inline-block; transition: transform 160ms var(--expo, ease); color: var(--muted); }
 .sidetree[open] .tw { transform: rotate(90deg); }
-.idefile { position: relative; display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; border: 0; background: none; cursor: pointer; padding: 3px var(--s2) 3px calc(var(--s2) + 16px); font: var(--t-code-s)/1.5 var(--mono); color: var(--muted); }
-/* The indent guide the tree draws, and a document glyph per file — masked so
- * it takes the row's own ink. */
-.idefile::before { content: ""; flex: 0 0 auto; width: 11px; height: 12px; background: currentColor; mask: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 14" fill="none" stroke="black" stroke-width="1.4"><path d="M2 1h5l3 3v9H2z"/><path d="M7 1v3h3"/></svg>') center / contain no-repeat; opacity: 0.75; }
-.sidetree > .idefile { box-shadow: inset 17px 0 0 -16px var(--chromeline); }
+.idefile { position: relative; display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; border: 0; background: none; cursor: pointer; padding: 3px var(--s2) 3px calc(var(--s1) + var(--depth, 0) * 14px); font: var(--t-code-s)/1.5 var(--mono); color: var(--muted); }
+.idefile.dir { color: var(--ink); }
 .idefile:hover { color: var(--ink); background: color-mix(in oklab, var(--accent) 8%, transparent); }
 .idefile[aria-current="true"] { color: var(--ink); background: color-mix(in oklab, var(--accent) 16%, transparent); box-shadow: inset 2px 0 0 var(--accent); }
-.idemain { grid-row: 1; grid-column: 2; display: flex; flex-direction: column; min-height: 0; }
+.idemain { grid-row: 1; grid-column: 3; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .idebar { display: flex; align-items: center; gap: 2px; padding: 0 var(--s1) 0 0; border-bottom: 1px solid var(--chromeline); background: var(--chrome); }
 .idebar .spacer, .idestatus .spacer { flex: 1 1 auto; }
 /* The open files, rendered by play.js: the active tab wears the paper and the
@@ -2961,7 +2978,7 @@ body:has(.page.play.ide) .masthead .wordmark { min-height: 30px; }
 .ide .minimap { position: absolute; inset: 0 0 0 auto; width: 92px; overflow: hidden; cursor: pointer; user-select: none; }
 .ide .mmtext { margin: 0; padding: 2px 4px; font: var(--t-minimap)/1 var(--mono); letter-spacing: 0; color: color-mix(in oklab, var(--muted) 80%, transparent); white-space: pre; overflow: hidden; }
 .ide .mmview { position: absolute; left: 0; right: 0; background: color-mix(in oklab, var(--accent) 14%, transparent); pointer-events: none; }
-.idepanel { grid-row: 2; grid-column: 2; border-top: 1px solid var(--chromeline); display: flex; flex-direction: column; max-height: 16rem; overflow-y: auto; }
+.idepanel { grid-row: 3; grid-column: 3 / -1; display: flex; flex-direction: column; min-height: 0; overflow-y: auto; }
 .paneltabs { display: flex; gap: 2px; padding: 0 var(--s1); border-bottom: 1px solid var(--chromeline); background: var(--chrome); }
 .ptab { border: 0; background: none; cursor: pointer; padding: 8px 10px 7px; font: var(--t-eyebrow)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
 .ptab:hover { color: var(--ink); }
@@ -2975,7 +2992,7 @@ body:has(.page.play.ide) .masthead .wordmark { min-height: 30px; }
 .pane textarea:focus-visible { outline: 1px solid color-mix(in oklab, var(--accent) 45%, transparent); outline-offset: -1px; }
 /* The status bar: the one filled band on the page, because it is the one an
  * editor is recognised by. Small, mono, and every item on it is a fact. */
-.idestatus { grid-row: 3; grid-column: 1 / -1; display: flex; align-items: center; gap: var(--s3); padding: 4px var(--s2); background: var(--chrome); color: var(--muted); border-top: 1px solid var(--chromeline); font: var(--t-key)/1.4 var(--mono); }
+.idestatus { grid-row: 4; grid-column: 1 / -1; display: flex; align-items: center; gap: var(--s3); padding: 6px var(--s1) 0; color: var(--muted); font: var(--t-key)/1.4 var(--mono); }
 .idestatus > span { display: inline-flex; align-items: center; line-height: 1; }
 .idestatus .stat { text-transform: uppercase; letter-spacing: 0.08em; }
 .idestatus .errs { gap: 4px; }
@@ -2985,10 +3002,9 @@ body:has(.page.play.ide) .masthead .wordmark { min-height: 30px; }
 .idehelp { position: relative; cursor: help; border: 1px solid color-mix(in oklab, var(--muted) 55%, transparent); border-radius: 50%; width: 15px; height: 15px; display: inline-flex; align-items: center; justify-content: center; font-size: var(--t-key); }
 .idehelp .tipbox { position: absolute; left: -4px; bottom: calc(100% + 8px); width: 26rem; max-width: 80vw; padding: var(--s1) var(--s2); background: var(--paper); color: var(--muted); border: 1px solid var(--rule); box-shadow: 0 8px 28px color-mix(in oklab, var(--ink) 18%, transparent); font: var(--t-meta)/1.6 var(--sans); letter-spacing: normal; text-transform: none; white-space: normal; display: none; z-index: 40; }
 .idehelp:hover .tipbox, .idehelp:focus-visible .tipbox, .idehelp:focus .tipbox { display: block; }
-.idewrap.split { grid-template-columns: 14rem minmax(0, 1fr) minmax(0, 1fr); }
-.idewrap.split .idepanel { grid-column: 2 / 4; }
-.idemain.second { grid-row: 1; grid-column: 3; display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--chromeline); }
-.idewrap.split .idestatus { grid-column: 1 / -1; }
+
+.idemain.second { grid-column: 5; }
+.idemain.dropzone { box-shadow: inset 0 0 0 1px var(--accent); }
 /* While a tab is being carried: the ghost under the pointer, and the hint
  * over the editor's right third where dropping CREATES the split. */
 .tabghost { position: fixed; z-index: 60; pointer-events: none; padding: 6px 10px; font: var(--t-eyebrow)/1 var(--mono); color: var(--ink); background: var(--paper); border: 1px solid var(--accent); opacity: 0.9; }
@@ -3020,3 +3036,42 @@ body:has(.page.play.ide) .masthead .wordmark { min-height: 30px; }
 @media (prefers-reduced-motion: reduce) {
   ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; }
 }
+
+/* ---------------------------------------------------------------------------
+ * The editor's icons (round 12, user: "use icons"): masks in the control's
+ * own ink, named by `data-ico`. A mask, not an <svg>, so the export's glyph
+ * census (which counts `std/icons` drawings) is not involved and a button's
+ * label can change without disturbing its glyph.
+ * ------------------------------------------------------------------------- */
+[data-ico]::before { content: ""; display: inline-block; flex: 0 0 auto; width: 14px; height: 14px; background: currentColor; mask: var(--ico) center / contain no-repeat; vertical-align: -2px; }
+.tname[data-ico]::before { width: 12px; height: 12px; margin-right: 6px; opacity: 0.8; }
+.idefile[data-ico]::before { width: 13px; height: 13px; opacity: 0.8; }
+[data-ico="play"] { --ico: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14"><path d="M4 2.2v9.6L11.5 7z" fill="black"/></svg>'); }
+[data-ico="link"] { --ico: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none" stroke="black" stroke-width="1.5" stroke-linecap="round"><path d="M6 8.5a3 3 0 0 0 4.2 0l1.6-1.6a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M8 5.5a3 3 0 0 0-4.2 0L2.2 7.1a3 3 0 0 0 4.2 4.2l.9-.9"/></svg>'); }
+[data-ico="file"] { --ico: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none" stroke="black" stroke-width="1.4"><path d="M3 1.5h5l3 3v8H3z"/><path d="M8 1.5v3h3"/></svg>'); }
+[data-ico="file-plus"] { --ico: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none" stroke="black" stroke-width="1.4" stroke-linecap="round"><path d="M3 1.5h5l3 3v8H3z"/><path d="M8 1.5v3h3"/><path d="M7 6.5v4M5 8.5h4"/></svg>'); }
+[data-ico="folder"] { --ico: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none" stroke="black" stroke-width="1.4" stroke-linejoin="round"><path d="M1.5 3.5h4l1.5 1.5h5.5v6.5h-11z"/></svg>'); }
+[data-ico="folder-open"] { --ico: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none" stroke="black" stroke-width="1.4" stroke-linejoin="round"><path d="M1.5 3.5h4l1.5 1.5h5.5v1.5"/><path d="M1.5 11.5l1.5-5h10l-1.5 5z"/></svg>'); }
+[data-ico="folder-plus"] { --ico: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none" stroke="black" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"><path d="M1.5 3.5h4l1.5 1.5h5.5v6.5h-11z"/><path d="M7 6.5v3.5M5.25 8.25h3.5"/></svg>'); }
+[data-ico="upload"] { --ico: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none" stroke="black" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 10V2.5M3.8 5.7L7 2.5l3.2 3.2"/><path d="M2 11.5h10"/></svg>'); }
+[data-ico="download"] { --ico: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none" stroke="black" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 2v7.5M3.8 6.3L7 9.5l3.2-3.2"/><path d="M2 11.5h10"/></svg>'); }
+[data-ico="close"] { --ico: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none" stroke="black" stroke-width="1.5" stroke-linecap="round"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7"/></svg>'); }
+[data-ico="home"] { --ico: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none" stroke="black" stroke-width="1.4" stroke-linejoin="round"><path d="M2 7l5-5 5 5"/><path d="M3.5 6v6h7V6"/></svg>'); }
+[data-ico="check"] { --ico: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none" stroke="black" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 7.5l3 3 6-6"/></svg>'); }
+/* Icon buttons: square, quiet, stateful. */
+.btn.ib { width: 28px; height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+.btn.ib[data-state="busy"]::before { animation: idepulse 900ms ease-in-out infinite; }
+.btn.ib[data-state="done"] { --ico: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none" stroke="black" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 7.5l3 3 6-6"/></svg>'); color: var(--accent); }
+@keyframes idepulse { 50% { opacity: 0.35; } }
+.tclose { padding: 0 8px 0 2px !important; }
+.tclose::before { width: 10px; height: 10px; }
+.ctxmenu .mi { display: flex; align-items: center; gap: var(--s3); }
+.ctxmenu .mk { margin-left: auto; color: var(--muted); font: var(--t-key)/1 var(--mono); }
+
+/* The code starts close under the crumbs (user: "weird spacing"). */
+.ide .editor pre.hl, .ide .editor textarea, .ide .editor .gutter { padding-top: 6px; }
+.ide .editor .gutter { padding-bottom: 6px; }
+
+/* The masthead MORPHS between pages instead of snapping — it is a named
+ * view-transition group, so its 64px and its 40px animate into each other. */
+.masthead { view-transition-name: masthead; }

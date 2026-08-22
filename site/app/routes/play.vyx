@@ -41,19 +41,25 @@ fn examples() -> Array<Example> {
          owns its children: the editor's window is a grid of its own. -->
     <div class="idewrap">
         <aside class="ideside" aria-label="Files">
-            <p class="sidehead">Explorer<button type="button" class="sideact" data-play-newfile aria-label="New file" title="New file">＋</button></p>
-            <details class="sidetree" open="open">
-                <summary><span class="tw" aria-hidden="true">▸</span>files</summary>
-                <div data-play-files></div>
-            </details>
+            <p class="sidehead">Explorer
+                <span class="sideacts">
+                    <button type="button" class="sideact" data-play-newfile aria-label="New file (Alt+Insert)" title="New file (Alt+Insert)" data-ico="file-plus"></button>
+                    <button type="button" class="sideact" data-play-newfolder aria-label="New folder" title="New folder" data-ico="folder-plus"></button>
+                    <button type="button" class="sideact" data-play-upload aria-label="Upload files" title="Upload files" data-ico="upload"></button>
+                    <button type="button" class="sideact" data-play-download aria-label="Download project (zip)" title="Download project (zip)" data-ico="download"></button>
+                </span>
+            </p>
+            <div class="filetree" data-play-files></div>
+            <input type="file" multiple hidden="hidden" data-play-uploadinput accept=".vyrn,.txt,.md,.json"/>
         </aside>
+        <div class="sash v" data-play-sash="side" aria-hidden="true"></div>
 
         <div class="idemain">
             <div class="idebar">
                 <span class="idetabs" data-play-tabs></span>
                 <span class="spacer"></span>
-                <button type="button" class="btn" data-play-share>Copy link</button>
-                <button type="button" class="btn primary" data-play-run disabled="disabled" title="Ctrl+Enter">Run</button>
+                <button type="button" class="btn ib" data-play-share aria-label="Copy link" title="Copy link" data-ico="link"></button>
+                <button type="button" class="btn ib primary" data-play-run disabled="disabled" aria-label="Run (Shift+F10)" title="Run (Shift+F10)" data-ico="play"></button>
             </div>
             <div class="idecrumbs" data-play-crumbs aria-hidden="true">files</div>
 
@@ -82,6 +88,7 @@ fn examples() -> Array<Example> {
             </div>
         </div>
 
+        <div class="sash h" data-play-sash="panel" aria-hidden="true"></div>
         <div class="idepanel">
             <div class="paneltabs" role="tablist" aria-label="Panel">
                 <button type="button" class="ptab" data-play-ptab="problems">Problems<span class="badge" data-play-badge hidden="hidden"></span></button>
@@ -117,7 +124,7 @@ fn examples() -> Array<Example> {
             <span>Spaces: 2</span>
             <span>UTF-8</span>
             <span>Vyrn</span>
-            <span>Ctrl+↵ Run</span>
+            <span>Shift+F10 Run</span>
         </div>
     </div>
 
