@@ -944,9 +944,11 @@ button, .btn, summary, .ostabs label { user-select: none; }
  * the title and the prose. */
 /* ONE LINE (user): the crumbs shrink and ellipsize before the row ever
  * wraps — the tools' place is the row's right end, on the crumbs' own line. */
-.crumbrow { display: flex; align-items: center; gap: var(--s2); }
-.crumbrow .crumbs { flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.crumbrow .crumbs { flex: 1; min-width: 0; }
+/* The 48px of air above the header belongs to the ROW: on the crumbs alone
+ * it pushed their text a line below the buttons beside them — one flex row
+ * that read as two (the user drew the two lines). */
+.crumbrow { display: flex; align-items: center; gap: var(--s2); padding-top: var(--s5); }
+.crumbrow .crumbs { flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-top: 0; }
 .docutils { display: flex; align-items: center; gap: var(--s2); margin: 0; font: 500 var(--t-mono)/1 var(--sans); }
 .docutils > a:not(.btn) { color: var(--muted); text-decoration: none; transition: color 140ms var(--expo); }
 .docutils > a:not(.btn):hover { color: var(--accent); }
