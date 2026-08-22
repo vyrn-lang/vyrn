@@ -159,6 +159,11 @@ export function mountPlay(root, opts = {}) {
   /// literal, on the way to typing the closing quote — has no spans, and the
   /// overlay falls back to plain text so the reader never sees the editor go
   /// blank under the caret.
+  // Which editor group the compiler reads: the frame (a second, split group
+  // exists on /play) points this at the focused one; alone, it is the one
+  // textarea this mount owns.
+  let srcHost = () => input;
+
   function paint() {
     const src = input.value;
     let spans = [];
@@ -209,17 +214,18 @@ export function mountPlay(root, opts = {}) {
   }
 
   function caretToLine(line) {
-    const lines = input.value.split("\n");
+    const host = srcHost();
+    const lines = host.value.split("\n");
     let at = 0;
     for (let i = 0; i < Math.min(line - 1, lines.length); i++) at += lines[i].length + 1;
-    input.focus();
-    input.setSelectionRange(at, at);
+    host.focus();
+    host.setSelectionRange(at, at);
   }
 
   function recheck() {
     if (!play) return;
     try {
-      showDiagnostics(play.check(input.value).diagnostics);
+      showDiagnostics(play.check(srcHost().value).diagnostics);
     } catch (err) {
       // The checker recurses over the syntax tree, and a program nested deep
       // enough can exhaust the engine's stack here too. Say so instead of
@@ -332,7 +338,7 @@ export function mountPlay(root, opts = {}) {
       finish("Stopped");
     }, RUN_LIMIT_MS);
 
-    worker.postMessage({ src: input.value, stdin: stdin ? stdin.value : "", now: Date.now() });
+    worker.postMessage({ src: srcHost().value, stdin: stdin ? stdin.value : "", now: Date.now() });
   }
 
   // -----------------------------------------------------------------------
@@ -398,22 +404,19 @@ export function mountPlay(root, opts = {}) {
     picker.addEventListener("change", () => {
       load(picker.value);
       history.replaceState(null, "", location.pathname);
-      syncFrame();
     });
   }
 
-  // -----------------------------------------------------------------------
-  // The editor window's frame (RFC-0106 M5 rounds 4-5). Hooks the /play page
-  // carries and the hero editors do not, each queried and silently absent
-  // elsewhere. Round 5 makes the frame BEHAVE like the editor it resembles
-  // (user): explorer rows open TABS, every tab keeps its own buffer of edits
-  // with a dirty mark and a close button, Enter keeps the line's indentation
-  // (one level deeper after `{`), the gutter numbers the lines that exist and
-  // Ln/Col is the caret. Everything reflects real state.
+  // =========================================================================
+  // The editor shell (RFC-0106 M5, rounds 4-11). Everything below exists only
+  // on /play — every hook is queried and silently absent on the hero editors —
+  // and everything is REAL: files persist in localStorage and reopen on the
+  // next visit, the examples are templates a file is created FROM, tabs
+  // reorder by drag and split into a second live editor group, context menus
+  // do what their words say, and the status bar's numbers are measurements.
+  // =========================================================================
   const gutter = $("[data-play-gutter]", root);
   const lncol = $("[data-play-lncol]", root);
-  const files = $$("[data-play-file]", root);
-  const tabsBox = $("[data-play-tabs]", root);
   const crumbs = $("[data-play-crumbs]", root);
   const curline = $("[data-play-curline]", root);
   const minimap = $("[data-play-minimap]", root);
@@ -424,159 +427,16 @@ export function mountPlay(root, opts = {}) {
   const badge = $("[data-play-badge]", root);
   const errsEl = $("[data-play-errs]", root);
   const noprob = $("[data-play-noprob]", root);
+  const tabsBox = $("[data-play-tabs]", root);
+  const filesBox = $("[data-play-files]", root);
+  const welcomeEl = $("[data-play-welcome]", root);
+  const wrapEl = $(".idewrap", root);
 
-  // One buffer per open file: the text as the reader left it. `__shared` is
-  // the tab a `#c=` link opens, and its baseline is the link's own program.
-  const buffers = new Map();
-  let tabs = [];
-  let active = null;
-
-  function exampleSrc(id) {
-    const e = examples.get(id);
-    return e ? e.src : "";
-  }
-
-  function baselineOf(id) {
-    return id === "__shared" ? sharedBaseline : exampleSrc(id);
-  }
-  let sharedBaseline = "";
-
-  function renderTabs() {
-    if (crumbs) {
-      const t = tabs.find((x) => x.id === active);
-      crumbs.textContent = t ? "examples \u203a " + t.name : "examples";
-    }
-    if (!tabsBox) return;
-    tabsBox.textContent = "";
-    for (const t of tabs) {
-      const box = document.createElement("span");
-      box.className = "itab" + (t.id === active ? " on" : "");
-      const held = buffers.get(t.id);
-      if (held !== undefined && held !== baselineOf(t.id)) box.classList.add("dirty");
-      const name = document.createElement("button");
-      name.type = "button";
-      name.className = "tname";
-      name.textContent = t.name;
-      name.addEventListener("click", () => activate(t.id));
-      const close = document.createElement("button");
-      close.type = "button";
-      close.className = "tclose";
-      close.setAttribute("aria-label", "Close " + t.name);
-      close.textContent = "\u00d7";
-      close.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        closeTab(t.id);
-      });
-      box.append(name, close);
-      tabsBox.append(box);
-    }
-  }
-
-  function stash() {
-    if (active !== null) buffers.set(active, input.value);
-  }
-
-  function activate(id) {
-    stash();
-    active = id;
-    const held = buffers.get(id);
-    input.value = held !== undefined ? held : baselineOf(id);
-    // `Reset` puts back the tab's own baseline, not another tab's.
-    original = baselineOf(id);
-    const e = examples.get(id);
-    if (stdin) stdin.value = e ? e.stdin : "";
-    if (stdinBox) stdinBox.open = Boolean(e && e.stdin.length > 0);
-    edited();
-    renderTabs();
-    syncFrame();
-  }
-
-  function openFile(id, name) {
-    if (!tabs.some((t) => t.id === id)) tabs.push({ id, name });
-    activate(id);
-  }
-
-  function closeTab(id) {
-    const at = tabs.findIndex((t) => t.id === id);
-    tabs.splice(at, 1);
-    buffers.delete(id);
-    if (active === id) {
-      active = null;
-      const next = tabs[at] || tabs[at - 1];
-      if (next) activate(next.id);
-      else if (files.length) openFile(files[0].dataset.playFile, files[0].textContent);
-      else {
-        input.value = "";
-        edited();
-      }
-    }
-    renderTabs();
-  }
-
-  function syncFrame() {
-    if (gutter) {
-      const n = input.value.split("\n").length;
-      if (gutter.childElementCount !== n) {
-        gutter.textContent = "";
-        for (let i = 1; i <= n; i++) {
-          const d = document.createElement("span");
-          d.textContent = i;
-          gutter.append(d);
-        }
-      }
-      gutter.scrollTop = input.scrollTop;
-    }
-    const caretBefore = input.value.slice(0, input.selectionStart).split("\n");
-    const caretLine = caretBefore.length;
-    if (lncol) {
-      lncol.textContent = "Ln " + caretLine + ", Col " + (caretBefore[caretBefore.length - 1].length + 1);
-    }
-    if (curline) {
-      // The tint sits where the caret's line sits: the textarea's own line
-      // height and padding are the geometry, so the two cannot drift.
-      const cs = getComputedStyle(input);
-      const lh = parseFloat(cs.lineHeight);
-      const padTop = parseFloat(cs.paddingTop);
-      curline.style.top = padTop + (caretLine - 1) * lh - input.scrollTop + "px";
-      curline.style.height = lh + "px";
-    }
-    if (gutter) {
-      const kids = gutter.children;
-      for (let i = 0; i < kids.length; i++) kids[i].classList.toggle("on", i + 1 === caretLine);
-    }
-    if (files.length) {
-      for (const f of files) {
-        if (f.dataset.playFile === active) f.setAttribute("aria-current", "true");
-        else f.removeAttribute("aria-current");
-      }
-    }
-    if (mmtext) {
-      // The minimap is the program itself, two pixels a line; the viewport
-      // block is drawn from the textarea's own scroll geometry.
-      if (mmtext.textContent !== input.value) mmtext.textContent = input.value;
-      if (mmview) {
-        const mapH = mmtext.scrollHeight;
-        mmview.style.top = (input.scrollTop / input.scrollHeight) * mapH + "px";
-        mmview.style.height = Math.max(12, (input.clientHeight / input.scrollHeight) * mapH) + "px";
-      }
-    }
-  }
-
-  /// The panel shows one pane; the tabs are buttons and the run moves the
-  /// selection itself: problems when the compiler produced any, back to
-  /// output when they clear.
+  // ---- the panel's own tabs (present with the shell) ----------------------
   function showPane(k) {
     for (const t of ptabs) t.classList.toggle("on", t.dataset.playPtab === k);
     for (const p of panes) p.hidden = p.dataset.playPane !== k;
   }
-
-  for (const f of files) {
-    f.addEventListener("click", () => {
-      openFile(f.dataset.playFile, f.textContent);
-      history.replaceState(null, "", location.pathname);
-    });
-  }
-
   for (const t of ptabs) t.addEventListener("click", () => showPane(t.dataset.playPtab));
   if (ptabs.length && diagPane) {
     const syncProblems = () => {
@@ -594,95 +454,585 @@ export function mountPlay(root, opts = {}) {
     new MutationObserver(syncProblems).observe(diagPane, { childList: true, attributes: true, attributeFilter: ["hidden"] });
     syncProblems();
   }
-  if (minimap) {
-    const jump = (e) => {
-      const rect = minimap.getBoundingClientRect();
-      const mapH = Math.min(rect.height, mmtext ? mmtext.scrollHeight : rect.height);
-      const frac = Math.max(0, Math.min(1, (e.clientY - rect.top) / mapH));
-      input.scrollTop = frac * input.scrollHeight - input.clientHeight / 2;
-      syncFrame();
-    };
-    minimap.addEventListener("pointerdown", (e) => {
-      jump(e);
-      e.preventDefault();
-    });
-    minimap.addEventListener("pointermove", (e) => {
-      if (e.buttons & 1) jump(e);
-    });
-  }
 
-  if (gutter || lncol || files.length || tabsBox) {
-    input.addEventListener("input", () => {
-      if (tabsBox && active !== null) {
-        buffers.set(active, input.value);
-        const on = tabsBox.querySelector(".itab.on");
-        if (on) on.classList.toggle("dirty", input.value !== baselineOf(active));
+  if (tabsBox && filesBox && wrapEl) {
+    // ---- files: named, persisted, yours -----------------------------------
+    const STORE = "vyrn.play.files.v1";
+    let userFiles = new Map();
+    try {
+      userFiles = new Map(JSON.parse(localStorage.getItem(STORE) || "[]").map((f) => [f.name, f.text]));
+    } catch (err) {
+      userFiles = new Map();
+    }
+    let saveTimer = 0;
+    function persist() {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => {
+        try {
+          localStorage.setItem(STORE, JSON.stringify([...userFiles].map(([name, text]) => ({ name, text }))));
+        } catch (err) {
+          /* a full or absent store loses persistence, never the session */
+        }
+      }, 150);
+    }
+    function freshName(base) {
+      if (!userFiles.has(base)) return base;
+      const stem = base.replace(/\.vyrn$/, "");
+      for (let i = 2; ; i++) {
+        const name = stem + "-" + i + ".vyrn";
+        if (!userFiles.has(name)) return name;
       }
-      syncFrame();
-    });
-    input.addEventListener("keyup", syncFrame);
-    input.addEventListener("click", syncFrame);
-    input.addEventListener("scroll", () => {
-      if (gutter) gutter.scrollTop = input.scrollTop;
-      if (curline) syncFrame();
-      if (mmview && mmtext) {
-        const mapH = mmtext.scrollHeight;
-        mmview.style.top = (input.scrollTop / input.scrollHeight) * mapH + "px";
-      }
-    });
-    if (resetBtn) resetBtn.addEventListener("click", () => setTimeout(() => {
-      if (tabsBox && active !== null) buffers.set(active, input.value);
-      renderTabs();
-      syncFrame();
-    }));
+    }
 
-    // Enter keeps the line's indentation, one level deeper after an opening
-    // brace — and a `}` already under the caret gets its own dedented line.
-    // `setRangeText` fires no input event, so the one listener above is
-    // invoked by hand through a synthetic one.
-    input.addEventListener("keydown", (e) => {
-      if (e.key !== "Enter" || e.isComposing) return;
-      e.preventDefault();
-      const at = input.selectionStart;
-      const before = input.value.slice(0, at);
-      const line = before.slice(before.lastIndexOf("\n") + 1);
-      const indent = (line.match(/^ */) || [""])[0];
-      const opened = /\{\s*$/.test(line);
-      const closingNext = input.value.slice(input.selectionEnd).startsWith("}");
-      let insert = "\n" + indent + (opened ? "  " : "");
-      if (opened && closingNext) insert += "\n" + indent;
-      const caret = at + 1 + indent.length + (opened ? 2 : 0);
-      input.setRangeText(insert, at, input.selectionEnd, "end");
-      input.selectionStart = input.selectionEnd = caret;
-      input.dispatchEvent(new Event("input", { bubbles: true }));
+    // ---- editor groups ----------------------------------------------------
+    const WELCOME = "__welcome";
+    function makeGroup(els) {
+      return Object.assign({ tabs: [], active: null }, els);
+    }
+    const gA = makeGroup({
+      strip: tabsBox,
+      input,
+      layer,
+      gutter,
+      curline,
+      editorEl: editor,
     });
+    let gB = null;
+    let focusedG = gA;
+    srcHost = () => focusedG.input;
 
-    // The first tab. A `#c=` link opens as its own file; the tail of this
-    // mount handles the hash AFTER this block runs, so the frame waits a
-    // microtask and reads what it decided.
-    queueMicrotask(() => {
-      if (!tabsBox) {
-        syncFrame();
+    function labelOf(name) {
+      return name === WELCOME ? "Welcome" : name;
+    }
+    function contentOf(name) {
+      return userFiles.get(name) || "";
+    }
+
+    function paintG(g) {
+      if (g === gA) {
+        paint();
         return;
       }
-      if (location.hash.startsWith("#c=") && input.value) {
-        sharedBaseline = input.value;
-        buffers.set("__shared", input.value);
-        tabs.push({ id: "__shared", name: "shared.vyrn" });
-        active = "__shared";
-        renderTabs();
-        syncFrame();
-      } else if (files.length) {
-        openFile(files[0].dataset.playFile, files[0].textContent);
+      let spans = [];
+      if (play) {
+        try {
+          const t = play.tokens(g.input.value);
+          if (t.spans) spans = t.spans;
+        } catch (err) {
+          spans = [];
+        }
+      }
+      g.layer.innerHTML = highlight(g.input.value, spans);
+      const pre = g.layer.parentElement;
+      pre.scrollTop = g.input.scrollTop;
+      pre.scrollLeft = g.input.scrollLeft;
+    }
+
+    function syncG(g) {
+      if (g.gutter) {
+        const n = g.input.value.split("\n").length;
+        if (g.gutter.childElementCount !== n) {
+          g.gutter.textContent = "";
+          for (let i = 1; i <= n; i++) {
+            const d = document.createElement("span");
+            d.textContent = i;
+            g.gutter.append(d);
+          }
+        }
+        g.gutter.scrollTop = g.input.scrollTop;
+      }
+      const before = g.input.value.slice(0, g.input.selectionStart).split("\n");
+      const line = before.length;
+      if (g.gutter) {
+        const kids = g.gutter.children;
+        for (let i = 0; i < kids.length; i++) kids[i].classList.toggle("on", i + 1 === line);
+      }
+      if (g.curline) {
+        const cs = getComputedStyle(g.input);
+        const lh = parseFloat(cs.lineHeight);
+        g.curline.style.top = parseFloat(cs.paddingTop) + (line - 1) * lh - g.input.scrollTop + "px";
+        g.curline.style.height = lh + "px";
+      }
+      if (g === focusedG && lncol) {
+        lncol.textContent = "Ln " + line + ", Col " + (before[before.length - 1].length + 1);
+      }
+      if (g === gA && mmtext) {
+        if (mmtext.textContent !== g.input.value) mmtext.textContent = g.input.value;
+        if (mmview) {
+          const mapH = mmtext.scrollHeight;
+          mmview.style.top = (g.input.scrollTop / g.input.scrollHeight) * mapH + "px";
+          mmview.style.height = Math.max(12, (g.input.clientHeight / g.input.scrollHeight) * mapH) + "px";
+        }
+      }
+    }
+
+    function syncChrome() {
+      if (crumbs) crumbs.textContent = focusedG.active ? "files › " + labelOf(focusedG.active) : "files";
+      renderFiles();
+    }
+
+    function welcomeShown() {
+      return gA.active === WELCOME;
+    }
+    function applyWelcome() {
+      const on = welcomeShown();
+      if (welcomeEl) welcomeEl.hidden = !on;
+      gA.editorEl.hidden = on;
+    }
+    // Running the Welcome view would run nothing: the press opens no worker.
+    runBtn.addEventListener(
+      "click",
+      (e) => {
+        if (focusedG === gA && welcomeShown()) e.stopImmediatePropagation();
+      },
+      { capture: true },
+    );
+
+    function activateIn(g, name) {
+      if (g === gB && name === WELCOME) return;
+      if (!g.tabs.includes(name)) g.tabs.push(name);
+      g.active = name;
+      focusedG = g;
+      if (name !== WELCOME) {
+        g.input.value = contentOf(name);
+        paintG(g);
+        clearTimeout(checkTimer);
+        checkTimer = setTimeout(recheck, CHECK_DELAY_MS);
+      }
+      if (g === gA) applyWelcome();
+      renderTabsG(gA);
+      if (gB) renderTabsG(gB);
+      syncG(g);
+      syncChrome();
+    }
+
+    function closeIn(g, name) {
+      const at = g.tabs.indexOf(name);
+      if (at < 0) return;
+      g.tabs.splice(at, 1);
+      if (g.active === name) {
+        const next = g.tabs[at] || g.tabs[at - 1];
+        if (next) activateIn(g, next);
+        else if (g === gB) unsplit();
+        else activateIn(gA, WELCOME);
       } else {
-        syncFrame();
+        renderTabsG(g);
+      }
+      if (g === gB && gB && !gB.tabs.length) unsplit();
+    }
+
+    // ---- the second group: a real editor, built when a tab is sent right --
+    function ensureSplit() {
+      if (gB) return gB;
+      const wrap = document.createElement("div");
+      wrap.className = "idemain second";
+      wrap.innerHTML =
+        '<div class="idebar"><span class="idetabs"></span><span class="spacer"></span></div>' +
+        '<div class="editor"><div class="curline" aria-hidden="true"></div><div class="gutter" aria-hidden="true"></div>' +
+        '<pre class="code hl" aria-hidden="true"><code></code></pre>' +
+        '<textarea spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" wrap="off" aria-label="Vyrn source, second editor group"></textarea></div>';
+      $(".idemain", root).after(wrap);
+      wrapEl.classList.add("split");
+      gB = makeGroup({
+        strip: $(".idetabs", wrap),
+        input: $("textarea", wrap),
+        layer: $("code", wrap),
+        gutter: $(".gutter", wrap),
+        curline: $(".curline", wrap),
+        editorEl: $(".editor", wrap),
+        wrap,
+      });
+      bindGroup(gB);
+      return gB;
+    }
+    function unsplit() {
+      if (!gB) return;
+      gB.wrap.remove();
+      wrapEl.classList.remove("split");
+      gB = null;
+      focusedG = gA;
+      if (!gA.active) activateIn(gA, WELCOME);
+      syncChrome();
+    }
+
+    // ---- one binding for any group's editor -------------------------------
+    function bindGroup(g) {
+      g.input.addEventListener("focus", () => {
+        focusedG = g;
+        syncG(g);
+        syncChrome();
+      });
+      g.input.addEventListener("input", () => {
+        if (g.active && g.active !== WELCOME) {
+          userFiles.set(g.active, g.input.value);
+          persist();
+        }
+        if (g !== gA) {
+          paintG(g);
+          clearTimeout(checkTimer);
+          checkTimer = setTimeout(recheck, CHECK_DELAY_MS);
+        }
+        syncG(g);
+      });
+      ["keyup", "click"].forEach((ev) => g.input.addEventListener(ev, () => syncG(g)));
+      g.input.addEventListener("scroll", () => {
+        if (g.gutter) g.gutter.scrollTop = g.input.scrollTop;
+        const pre = g.layer.parentElement;
+        pre.scrollTop = g.input.scrollTop;
+        pre.scrollLeft = g.input.scrollLeft;
+        syncG(g);
+      });
+      // Enter keeps the line's indentation, one level deeper after `{`; a `}`
+      // under the caret gets its own dedented line. Tab is two spaces (the
+      // core binds Tab on group A; the second group gets it here).
+      g.input.addEventListener("keydown", (e) => {
+        if (e.key === "Tab" && g !== gA) {
+          e.preventDefault();
+          g.input.setRangeText("  ", g.input.selectionStart, g.input.selectionEnd, "end");
+          g.input.dispatchEvent(new Event("input", { bubbles: true }));
+          return;
+        }
+        if (e.key !== "Enter" || e.isComposing) return;
+        e.preventDefault();
+        const at = g.input.selectionStart;
+        const before = g.input.value.slice(0, at);
+        const line = before.slice(before.lastIndexOf("\n") + 1);
+        const indent = (line.match(/^ */) || [""])[0];
+        const opened = /\{\s*$/.test(line);
+        const closingNext = g.input.value.slice(g.input.selectionEnd).startsWith("}");
+        let insert = "\n" + indent + (opened ? "  " : "");
+        if (opened && closingNext) insert += "\n" + indent;
+        const caret = at + 1 + indent.length + (opened ? 2 : 0);
+        g.input.setRangeText(insert, at, g.input.selectionEnd, "end");
+        g.input.selectionStart = g.input.selectionEnd = caret;
+        g.input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    }
+    bindGroup(gA);
+    // Group A's core paint runs on its own input listener; recheck rides it.
+
+    // ---- context menus ----------------------------------------------------
+    let menuEl = null;
+    function closeMenu() {
+      if (menuEl) {
+        menuEl.remove();
+        menuEl = null;
+      }
+    }
+    function openMenu(x, y, items) {
+      closeMenu();
+      menuEl = document.createElement("div");
+      menuEl.className = "ctxmenu";
+      menuEl.setAttribute("role", "menu");
+      for (const it of items) {
+        if (it === "-") {
+          const hr = document.createElement("div");
+          hr.className = "sep";
+          menuEl.append(hr);
+          continue;
+        }
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "mi";
+        b.setAttribute("role", "menuitem");
+        b.textContent = it.label;
+        b.addEventListener("click", () => {
+          closeMenu();
+          it.act();
+        });
+        menuEl.append(b);
+      }
+      document.body.append(menuEl);
+      const r = menuEl.getBoundingClientRect();
+      menuEl.style.left = Math.min(x, innerWidth - r.width - 6) + "px";
+      menuEl.style.top = Math.min(y, innerHeight - r.height - 6) + "px";
+    }
+    addEventListener("pointerdown", (e) => {
+      if (menuEl && !menuEl.contains(e.target)) closeMenu();
+    });
+    addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeMenu();
+    });
+
+    // ---- tabs: rendered, reorderable, sendable ----------------------------
+    let drag = null;
+    function renderTabsG(g) {
+      g.strip.textContent = "";
+      for (const name of g.tabs) {
+        const box = document.createElement("span");
+        box.className = "itab" + (name === g.active ? " on" : "");
+        box.dataset.name = name;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "tname";
+        btn.textContent = labelOf(name);
+        btn.addEventListener("pointerdown", (e) => beginDrag(e, g, name));
+        btn.addEventListener("click", () => {
+          if (!drag || !drag.moved) activateIn(g, name);
+        });
+        btn.addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          const items = [
+            { label: "Close", act: () => closeIn(g, name) },
+            { label: "Close others", act: () => { g.tabs = [name]; activateIn(g, name); } },
+          ];
+          if (name !== WELCOME) {
+            items.push("-");
+            if (g === gA) items.push({ label: "Split right", act: () => sendRight(name) });
+            else items.push({ label: "Move left", act: () => { closeIn(gB, name); activateIn(gA, name); } });
+            items.push({ label: "Move to new window", act: () => window.open(location.pathname + "#c=" + encodeSource(contentOf(name)), "_blank") });
+          }
+          openMenu(e.clientX, e.clientY, items);
+        });
+        const close = document.createElement("button");
+        close.type = "button";
+        close.className = "tclose";
+        close.setAttribute("aria-label", "Close " + labelOf(name));
+        close.textContent = "\u00d7";
+        close.addEventListener("click", (e) => {
+          e.stopPropagation();
+          closeIn(g, name);
+        });
+        box.append(btn, close);
+        g.strip.append(box);
+      }
+    }
+    function sendRight(name) {
+      const from = gA.tabs.includes(name) ? gA : gB;
+      ensureSplit();
+      if (from === gA) {
+        const at = gA.tabs.indexOf(name);
+        gA.tabs.splice(at, 1);
+        if (gA.active === name) gA.active = gA.tabs[at] || gA.tabs[at - 1] || null;
+        if (!gA.active) {
+          gA.active = WELCOME;
+          gA.tabs.push(WELCOME);
+        }
+        activateIn(gA, gA.active);
+      }
+      activateIn(gB, name);
+    }
+    function beginDrag(e, g, name) {
+      if (e.button !== 0) return;
+      const sx = e.clientX;
+      const sy = e.clientY;
+      drag = { g, name, moved: false, ghost: null };
+      const move = (ev) => {
+        if (!drag.moved && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 5) return;
+        if (!drag.moved) {
+          drag.moved = true;
+          drag.ghost = document.createElement("span");
+          drag.ghost.className = "tabghost";
+          drag.ghost.textContent = labelOf(name);
+          document.body.append(drag.ghost);
+          wrapEl.classList.add("dragging");
+        }
+        drag.ghost.style.left = ev.clientX + 8 + "px";
+        drag.ghost.style.top = ev.clientY + 8 + "px";
+        // Reorder live inside whichever strip the pointer is over.
+        for (const grp of gB ? [gA, gB] : [gA]) {
+          const r = grp.strip.getBoundingClientRect();
+          if (ev.clientY < r.top - 6 || ev.clientY > r.bottom + 14 || ev.clientX < r.left || ev.clientX > r.right + 60) continue;
+          const from = drag.g.tabs.indexOf(name);
+          if (from < 0) continue;
+          let to = grp.tabs.length;
+          for (let i = 0; i < grp.strip.children.length; i++) {
+            const cr = grp.strip.children[i].getBoundingClientRect();
+            if (ev.clientX < cr.left + cr.width / 2) {
+              to = i;
+              break;
+            }
+          }
+          if (grp === drag.g) {
+            if (to === from || to === from + 1) break;
+            drag.g.tabs.splice(from, 1);
+            drag.g.tabs.splice(to > from ? to - 1 : to, 0, name);
+            renderTabsG(drag.g);
+          } else if (name !== WELCOME) {
+            drag.g.tabs.splice(from, 1);
+            if (drag.g.active === name) drag.g.active = drag.g.tabs[0] || null;
+            grp.tabs.splice(to, 0, name);
+            const was = drag.g;
+            drag.g = grp;
+            if (was === gA && !gA.active) {
+              gA.active = WELCOME;
+              gA.tabs.push(WELCOME);
+              applyWelcome();
+            }
+            renderTabsG(gA);
+            if (gB) renderTabsG(gB);
+          }
+          break;
+        }
+        // The right third of the last group's editor, with no split yet: the
+        // drop that CREATES the split, hinted while the pointer is there.
+        const er = gA.editorEl.getBoundingClientRect();
+        const inSplitZone = !gB && name !== WELCOME && ev.clientX > er.left + er.width * 0.66 && ev.clientY > er.top && ev.clientY < er.bottom;
+        wrapEl.classList.toggle("splitzone", inSplitZone);
+        drag.split = inSplitZone;
+      };
+      const up = () => {
+        removeEventListener("pointermove", move);
+        removeEventListener("pointerup", up);
+        wrapEl.classList.remove("dragging", "splitzone");
+        if (drag && drag.ghost) drag.ghost.remove();
+        if (drag && drag.moved) {
+          if (drag.split) sendRight(name);
+          else activateIn(drag.g, name);
+        }
+        setTimeout(() => (drag = null));
+      };
+      addEventListener("pointermove", move);
+      addEventListener("pointerup", up);
+    }
+
+    // ---- the explorer: your files, with the editor's own menus ------------
+    function renderFiles() {
+      filesBox.textContent = "";
+      for (const name of userFiles.keys()) {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "idefile";
+        row.textContent = name;
+        if (focusedG.active === name) row.setAttribute("aria-current", "true");
+        row.addEventListener("click", () => activateIn(focusedG === gB ? gB : gA, name));
+        row.addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          openMenu(e.clientX, e.clientY, [
+            { label: "Open", act: () => activateIn(gA, name) },
+            { label: "Open to the side", act: () => sendRight(name) },
+            "-",
+            { label: "Rename", act: () => renameInline(row, name) },
+            { label: "Delete", act: () => removeFile(name) },
+            "-",
+            { label: "Move to new window", act: () => window.open(location.pathname + "#c=" + encodeSource(contentOf(name)), "_blank") },
+          ]);
+        });
+        filesBox.append(row);
+      }
+    }
+    function removeFile(name) {
+      userFiles.delete(name);
+      persist();
+      for (const g of gB ? [gA, gB] : [gA]) if (g.tabs.includes(name)) closeIn(g, name);
+      renderFiles();
+    }
+    function renameInline(row, name) {
+      const field = document.createElement("input");
+      field.className = "newname";
+      field.value = name;
+      row.replaceWith(field);
+      field.focus();
+      field.setSelectionRange(0, name.replace(/\.vyrn$/, "").length);
+      const done = (commit) => {
+        let next = field.value.trim();
+        if (commit && next && next !== name) {
+          if (!next.endsWith(".vyrn")) next += ".vyrn";
+          next = freshName(next);
+          const text = userFiles.get(name);
+          const rebuilt = new Map();
+          for (const [k, v] of userFiles) rebuilt.set(k === name ? next : k, k === name ? text : v);
+          userFiles = rebuilt;
+          persist();
+          for (const g of gB ? [gA, gB] : [gA]) {
+            const i = g.tabs.indexOf(name);
+            if (i >= 0) g.tabs[i] = next;
+            if (g.active === name) g.active = next;
+          }
+          renderTabsG(gA);
+          if (gB) renderTabsG(gB);
+        }
+        syncChrome();
+      };
+      field.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") done(true);
+        if (e.key === "Escape") done(false);
+      });
+      field.addEventListener("blur", () => done(true));
+    }
+    function newFileInline() {
+      const field = document.createElement("input");
+      field.className = "newname";
+      field.value = "untitled.vyrn";
+      filesBox.append(field);
+      field.focus();
+      field.setSelectionRange(0, "untitled".length);
+      let settled = false;
+      const done = (commit) => {
+        if (settled) return;
+        settled = true;
+        let name = field.value.trim();
+        field.remove();
+        if (!commit || !name) {
+          renderFiles();
+          return;
+        }
+        if (!name.endsWith(".vyrn")) name += ".vyrn";
+        name = freshName(name);
+        userFiles.set(name, "");
+        persist();
+        activateIn(focusedG === gB ? gB : gA, name);
+      };
+      field.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") done(true);
+        if (e.key === "Escape") done(false);
+      });
+      field.addEventListener("blur", () => done(true));
+    }
+    for (const b of $$("[data-play-newfile]", root)) b.addEventListener("click", newFileInline);
+
+    // ---- the Welcome view's templates: a file is created FROM one ---------
+    for (const b of $$("[data-play-tpl]", root)) {
+      b.addEventListener("click", () => {
+        const id = b.dataset.playTpl;
+        const e = examples.get(id);
+        if (!e) return;
+        const name = freshName(id + ".vyrn");
+        userFiles.set(name, e.src);
+        persist();
+        if (stdin && e.stdin) stdin.value = e.stdin;
+        activateIn(gA, name);
+      });
+    }
+
+    // ---- first light ------------------------------------------------------
+    // The core's own tail decides what a `#c=` link puts in the textarea; the
+    // shell reads its decision one microtask later.
+    queueMicrotask(() => {
+      if (location.hash.startsWith("#c=") && input.value) {
+        const name = freshName("shared.vyrn");
+        userFiles.set(name, input.value);
+        persist();
+        activateIn(gA, name);
+      } else if (userFiles.size) {
+        activateIn(gA, userFiles.keys().next().value);
+      } else {
+        activateIn(gA, WELCOME);
       }
     });
+
+    // ---- the minimap scrolls the window it draws --------------------------
+    if (minimap) {
+      const jump = (e) => {
+        const rect = minimap.getBoundingClientRect();
+        const mapH = Math.min(rect.height, mmtext ? mmtext.scrollHeight : rect.height);
+        const frac = Math.max(0, Math.min(1, (e.clientY - rect.top) / mapH));
+        gA.input.scrollTop = frac * gA.input.scrollHeight - gA.input.clientHeight / 2;
+        syncG(gA);
+      };
+      minimap.addEventListener("pointerdown", (e) => {
+        jump(e);
+        e.preventDefault();
+      });
+      minimap.addEventListener("pointermove", (e) => {
+        if (e.buttons & 1) jump(e);
+      });
+    }
   }
 
   if (shareBtn) {
     shareBtn.addEventListener("click", async () => {
-      const url = location.origin + location.pathname + "#c=" + encodeSource(input.value);
+      const url = location.origin + location.pathname + "#c=" + encodeSource(srcHost().value);
       history.replaceState(null, "", url);
       shareBtn.textContent = (await writeClipboard(url)) ? "Copied" : "In the URL";
       setTimeout(() => (shareBtn.textContent = "Copy link"), 1600);

@@ -2716,6 +2716,20 @@ Four more user directions on rounds 3-4's work:
   navigation to and from the editor is a 170ms crossfade: cross-document view
   transitions, the platform's own mechanism — no script, skipped for readers
   who asked for reduced motion, an ordinary navigation elsewhere.
+- **Round 11 — the editor, not a picture of one** (user: "no context menus
+  and many more, do it properly"). Files are YOURS now: created from the
+  explorer's inline-name flow or the Welcome view, renamed and deleted from a
+  real context menu, autosaved to localStorage and reopened on the next
+  visit. The examples left the explorer for the Welcome view, where they are
+  TEMPLATES a file is created from — which is what an example is. Tabs
+  reorder by pointer drag with a ghost, and dragging one to the editor's
+  right third — or "Open to the side" — creates a SECOND live editor group:
+  its own tabs, gutter, current line, and the same lexer's highlighting;
+  `Run`, the diagnostics and the share link follow the focused group through
+  one `srcHost` hook in the core. The (?)'s four sentences are real markup
+  (a native `title` clips), the status bar's items centre on one line, and
+  the crossfade fired once `@view-transition` left the media query — Chrome
+  ignores it nested; reduced motion now opts out of the animation instead.
 - The Git Bash quoted heredoc EATS A BACKSLASH: `\n` in a here-document
   reached Python as `
 ` and round 4 shipped two raw newlines inside

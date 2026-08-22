@@ -2896,7 +2896,11 @@ body:has(.page.play.ide) .masthead .wordmark { min-height: 30px; }
 #root:has(.page.play.ide) .foot { display: none; }
 .page.play.ide .idewrap { border-inline: 0; }
 .ideside { grid-row: 1 / 3; grid-column: 1; border-right: 1px solid var(--chromeline); background: var(--chrome); overflow-y: auto; padding-bottom: var(--s2); }
-.sidehead { margin: 0; padding: 10px var(--s2) 8px; font: var(--t-eyebrow)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); }
+.sidehead { margin: 0; padding: 10px var(--s2) 8px; font: var(--t-eyebrow)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); display: flex; align-items: center; }
+.sideact { margin-left: auto; border: 0; background: none; cursor: pointer; color: var(--muted); font: var(--t-mono)/1 var(--mono); padding: 0 2px; }
+.sideact:hover { color: var(--ink); }
+.newname { display: block; width: calc(100% - var(--s2) * 2); margin: 2px var(--s2); border: 1px solid var(--accent); background: var(--paper); color: var(--ink); font: var(--t-code-s)/1.5 var(--mono); padding: 2px 6px; }
+.newname:focus-visible { outline: 0; }
 .sidetree summary { list-style: none; cursor: pointer; padding: 5px var(--s2) 4px; font: var(--t-eyebrow)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink); display: flex; align-items: center; gap: 5px; }
 .sidetree summary::-webkit-details-marker { display: none; }
 .sidetree .tw { display: inline-block; transition: transform 160ms var(--expo, ease); color: var(--muted); }
@@ -2941,6 +2945,17 @@ body:has(.page.play.ide) .masthead .wordmark { min-height: 30px; }
  * the window: a ring around the whole editor said nothing (user). The caret
  * and the current line are the focus evidence. */
 .ide .editor textarea:focus, .ide .editor textarea:focus-visible { outline: 0; }
+.welcome { flex: 1 1 auto; overflow-y: auto; padding: var(--s4) var(--s4) var(--s3); }
+.welcome h2 { margin: var(--s1) 0 var(--s1); font: 600 var(--t-h3)/1.2 var(--sans); }
+.welcome .wnote { margin: 0 0 var(--s3); color: var(--muted); max-width: 44rem; }
+.welcome .eyebrow { margin: var(--s3) 0 var(--s1); }
+.welcome .eyebrow:first-child { margin-top: 0; }
+.tplgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); gap: var(--s1); max-width: 56rem; }
+.tpl { display: block; text-align: left; border: 1px solid var(--rule); background: color-mix(in oklab, var(--plate) 40%, transparent); cursor: pointer; padding: 10px var(--s2); }
+.tpl:hover { border-color: color-mix(in oklab, var(--accent) 55%, transparent); }
+.tpl .tn { display: block; font: var(--t-code-s)/1.4 var(--mono); color: var(--ink); }
+.tpl .d { display: block; margin-top: 2px; color: var(--muted); font: var(--t-meta)/1.4 var(--sans); }
+.tpl.new { max-width: 18rem; margin-bottom: var(--s1); }
 .ide .curline { position: absolute; left: 0; right: 92px; background: color-mix(in oklab, var(--ink) 4%, transparent); pointer-events: none; }
 .ide .editor .gutter span.on { color: var(--ink); }
 .ide .minimap { position: absolute; inset: 0 0 0 auto; width: 92px; overflow: hidden; cursor: pointer; user-select: none; }
@@ -2961,12 +2976,32 @@ body:has(.page.play.ide) .masthead .wordmark { min-height: 30px; }
 /* The status bar: the one filled band on the page, because it is the one an
  * editor is recognised by. Small, mono, and every item on it is a fact. */
 .idestatus { grid-row: 3; grid-column: 1 / -1; display: flex; align-items: center; gap: var(--s3); padding: 4px var(--s2); background: var(--chrome); color: var(--muted); border-top: 1px solid var(--chromeline); font: var(--t-key)/1.4 var(--mono); }
-.idestatus .eyebrow { color: var(--muted); }
-.idestatus .errs { display: inline-flex; gap: 4px; align-items: center; }
+.idestatus > span { display: inline-flex; align-items: center; line-height: 1; }
+.idestatus .stat { text-transform: uppercase; letter-spacing: 0.08em; }
+.idestatus .errs { gap: 4px; }
 /* The one place the page explains itself: a (?) on the status bar whose
  * title is four sentences. Hover or focus it; there is no section to scroll
  * to, because an editor's window has nothing under it (user). */
-.idehelp { cursor: help; border: 1px solid color-mix(in oklab, var(--muted) 55%, transparent); border-radius: 50%; width: 15px; height: 15px; display: inline-flex; align-items: center; justify-content: center; font-size: var(--t-key); }
+.idehelp { position: relative; cursor: help; border: 1px solid color-mix(in oklab, var(--muted) 55%, transparent); border-radius: 50%; width: 15px; height: 15px; display: inline-flex; align-items: center; justify-content: center; font-size: var(--t-key); }
+.idehelp .tipbox { position: absolute; left: -4px; bottom: calc(100% + 8px); width: 26rem; max-width: 80vw; padding: var(--s1) var(--s2); background: var(--paper); color: var(--muted); border: 1px solid var(--rule); box-shadow: 0 8px 28px color-mix(in oklab, var(--ink) 18%, transparent); font: var(--t-meta)/1.6 var(--sans); letter-spacing: normal; text-transform: none; white-space: normal; display: none; z-index: 40; }
+.idehelp:hover .tipbox, .idehelp:focus-visible .tipbox, .idehelp:focus .tipbox { display: block; }
+.idewrap.split { grid-template-columns: 14rem minmax(0, 1fr) minmax(0, 1fr); }
+.idewrap.split .idepanel { grid-column: 2 / 4; }
+.idemain.second { grid-row: 1; grid-column: 3; display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--chromeline); }
+.idewrap.split .idestatus { grid-column: 1 / -1; }
+/* While a tab is being carried: the ghost under the pointer, and the hint
+ * over the editor's right third where dropping CREATES the split. */
+.tabghost { position: fixed; z-index: 60; pointer-events: none; padding: 6px 10px; font: var(--t-eyebrow)/1 var(--mono); color: var(--ink); background: var(--paper); border: 1px solid var(--accent); opacity: 0.9; }
+.idewrap.dragging { cursor: grabbing; }
+.idewrap.dragging .idemain .editor::after { content: ""; position: absolute; inset: 0; }
+.idewrap.splitzone .idemain:not(.second) .editor::after { background: color-mix(in oklab, var(--accent) 12%, transparent); inset: 0 0 0 66%; border-left: 1px dashed var(--accent); }
+
+/* Context menus: the editor's own, themed, closed by a press anywhere else. */
+.ctxmenu { position: fixed; z-index: 70; min-width: 12rem; background: var(--paper); border: 1px solid var(--rule); box-shadow: 0 10px 30px color-mix(in oklab, var(--ink) 22%, transparent); padding: 4px; }
+.ctxmenu .mi { display: block; width: 100%; text-align: left; border: 0; background: none; cursor: pointer; padding: 6px 10px; font: var(--t-meta)/1.3 var(--sans); color: var(--ink); }
+.ctxmenu .mi:hover { background: color-mix(in oklab, var(--accent) 12%, transparent); }
+.ctxmenu .sep { height: 1px; margin: 4px 6px; background: var(--hair); }
+
 @media (max-width: 900px) {
   .idewrap { grid-template-columns: 1fr; height: auto; }
   .ideside { display: none; }
@@ -2980,7 +3015,8 @@ body:has(.page.play.ide) .masthead .wordmark { min-height: 30px; }
  * the platform's own mechanism: no script, and a browser without them (or a
  * reader who asked for reduced motion) simply navigates.
  * ------------------------------------------------------------------------- */
-@media (prefers-reduced-motion: no-preference) {
-  @view-transition { navigation: auto; }
-  ::view-transition-old(root), ::view-transition-new(root) { animation-duration: 170ms; }
+@view-transition { navigation: auto; }
+::view-transition-old(root), ::view-transition-new(root) { animation-duration: 220ms; animation-timing-function: ease; }
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; }
 }

@@ -6,22 +6,19 @@
 // and what the program prints. All three come from the same Rust the `vyrn`
 // binary is built from, so the page cannot disagree with the compiler.
 //
-// THE PAGE IS AN EDITOR'S WINDOW (RFC-0106 M5 rounds 3-8, user: "like
-// vscode", refined against the editor itself): an explorer whose rows open
-// TABS, each tab keeping its own buffer with a dirty mark and a close button;
-// a breadcrumb row naming the open file; a line-number gutter; a minimap that
-// is the program at two pixels a line, with the viewport drawn on it; a panel
-// with REAL tabs — Problems with its count, Output, Input — that switches
-// itself to what a run produced; and a quiet status bar carrying the compiler
-// status, the problem count, the caret, and the editor's facts. Every element
-// is real, because a control that does nothing is a picture of an editor.
-// What the page has to SAY about itself is four sentences on the status bar's
-// (?) — an editor's window has nothing under it.
+// THE PAGE IS AN EDITOR (RFC-0106 M5, rounds 3-11 — the user held it to the
+// real one until it behaved like it): files are YOURS — created, renamed,
+// deleted, persisted in this browser and reopened on the next visit; the
+// examples are TEMPLATES on the Welcome view that a file is created from;
+// tabs reorder by drag and split into a second live editor group; the
+// explorer and the tabs carry real context menus; the panel's tabs follow the
+// run; and the status bar's numbers are measurements. Nothing here is a
+// picture of a control.
 //
 // EVERYTHING ON THIS PAGE IS MARKUP THE EXPORT WROTE. The examples are Vyrn
 // data rendered into hidden `<pre>` blocks, escaped by the template, and
 // `play.js` reads them back with `textContent`. Every `data-play-*` element is
-// `play.js`'s contract; the frame's own hooks are queried and silently absent
+// `play.js`'s contract; the shell's own hooks are queried and silently absent
 // on the hero editors.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
@@ -44,10 +41,10 @@ fn examples() -> Array<Example> {
          owns its children: the editor's window is a grid of its own. -->
     <div class="idewrap">
         <aside class="ideside" aria-label="Files">
-            <p class="sidehead">Explorer</p>
+            <p class="sidehead">Explorer<button type="button" class="sideact" data-play-newfile aria-label="New file" title="New file">＋</button></p>
             <details class="sidetree" open="open">
-                <summary><span class="tw" aria-hidden="true">▸</span>examples</summary>
-                <button type="button" class="idefile" v-for="e in examples()" :key="e.id" :data-play-file="e.id" :title="e.title">{{ e.id }}.vyrn</button>
+                <summary><span class="tw" aria-hidden="true">▸</span>files</summary>
+                <div data-play-files></div>
             </details>
         </aside>
 
@@ -55,22 +52,29 @@ fn examples() -> Array<Example> {
             <div class="idebar">
                 <span class="idetabs" data-play-tabs></span>
                 <span class="spacer"></span>
-                <button type="button" class="btn" data-play-reset>Reset</button>
                 <button type="button" class="btn" data-play-share>Copy link</button>
                 <button type="button" class="btn primary" data-play-run disabled="disabled" title="Ctrl+Enter">Run</button>
             </div>
-            <div class="idecrumbs" data-play-crumbs aria-hidden="true">examples</div>
+            <div class="idecrumbs" data-play-crumbs aria-hidden="true">files</div>
+
+            <!-- The Welcome view: where the examples live now, as templates a
+                 file is created FROM (user). Shown when no file is open. -->
+            <div class="welcome" data-play-welcome hidden="hidden">
+                <p class="eyebrow">Start</p>
+                <h2>Type Vyrn. Run it here.</h2>
+                <p class="wnote">The compiler front end runs in this tab as WebAssembly. Files live in this browser and are here when you come back.</p>
+                <button type="button" class="tpl new" data-play-newfile><span class="tn">New file</span><span class="d">An empty .vyrn, named by you</span></button>
+                <p class="eyebrow">Templates</p>
+                <div class="tplgrid">
+                    <button type="button" class="tpl" v-for="e in examples()" :key="e.id" :data-play-tpl="e.id"><span class="tn">{{ e.id }}.vyrn</span><span class="d">{{ e.title }}</span></button>
+                </div>
+            </div>
 
             <div class="editor" data-play-editor>
-                <!-- The line the caret is on, tinted the way every editor
-                     tints it — positioned from the caret and the textarea's
-                     own metrics. -->
                 <div class="curline" data-play-curline aria-hidden="true"></div>
                 <div class="gutter" data-play-gutter aria-hidden="true"></div>
                 <pre class="code hl" aria-hidden="true"><code data-play-hl></code></pre>
                 <textarea data-play-src spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" wrap="off" aria-label="Vyrn source"></textarea>
-                <!-- The minimap: the program itself at two pixels a line, and
-                     the viewport drawn over it. Pressing it scrolls there. -->
                 <div class="minimap" data-play-minimap aria-hidden="true">
                     <pre class="mmtext" data-play-mmtext></pre>
                     <div class="mmview" data-play-mmview></div>
@@ -79,9 +83,6 @@ fn examples() -> Array<Example> {
         </div>
 
         <div class="idepanel">
-            <!-- The panel's own tab row, and each tab is real: Problems wears
-                 the count a run produced and the panel switches ITSELF to what
-                 the run answered with. -->
             <div class="paneltabs" role="tablist" aria-label="Panel">
                 <button type="button" class="ptab" data-play-ptab="problems">Problems<span class="badge" data-play-badge hidden="hidden"></span></button>
                 <button type="button" class="ptab on" data-play-ptab="output">Output</button>
@@ -105,8 +106,11 @@ fn examples() -> Array<Example> {
         </div>
 
         <div class="idestatus">
-            <span class="idehelp" tabindex="0" role="note" aria-label="About this playground" title="The compiler front end runs in this tab as WebAssembly — the same tree-walking interpreter `vyrn run` uses — and nothing is uploaded. A program is stopped after five seconds, recursion stops near 466 calls (the worker's stack; the compiler's own limit is 1,000), and the tab has no filesystem and no arguments. One file runs, plus std/, which is embedded; a relative import has nowhere to resolve to and says so.">?</span>
-            <span class="eyebrow" data-play-status>Loading the compiler…</span>
+            <!-- The page's four sentences about itself, as REAL markup on
+                 hover or focus — a native title clips and cannot wrap safely
+                 (user). -->
+            <span class="idehelp" tabindex="0" aria-describedby="playtip">?<span class="tipbox" id="playtip" role="tooltip">The compiler front end runs in this tab as WebAssembly — the same tree-walking interpreter <code>vyrn run</code> uses — and nothing is uploaded. A program is stopped after five seconds, and recursion stops near 466 calls: the worker's stack, where the compiler's own limit is 1,000. The tab has no filesystem and no arguments. One file runs, plus <code>std/</code>, which is embedded — a relative import has nowhere to resolve to and says so.</span></span>
+            <span class="stat" data-play-status>Loading the compiler…</span>
             <span class="errs"><span aria-hidden="true">⊗</span> <span data-play-errs>0</span></span>
             <span class="spacer"></span>
             <span data-play-lncol>Ln 1, Col 1</span>
