@@ -307,11 +307,26 @@ function syncNavMark(newDoc) {
   }
 }
 
+// A soft navigation replaces the content in place, so the platform's
+// CROSS-document transition never runs — the fix for a shell band that
+// changes size between pages (the playground's title-bar masthead) is a
+// SAME-document one around the swap. Absent support, or a reader who asked
+// for less motion, gets the swap unwrapped.
+function withTransition(swap) {
+  if (!document.startViewTransition || matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    swap();
+    return;
+  }
+  document.startViewTransition(swap);
+}
+
 function applyDocument(newDoc) {
-  swapHead(newDoc);
-  syncNavMark(newDoc);
-  replaceContent(newDoc);
-  syncIslands();
+  withTransition(() => {
+    swapHead(newDoc);
+    syncNavMark(newDoc);
+    replaceContent(newDoc);
+    syncIslands();
+  });
 }
 
 // ---------------------------------------------------------------------------

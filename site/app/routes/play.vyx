@@ -47,6 +47,9 @@ fn examples() -> Array<Example> {
                     <button type="button" class="sideact" data-play-newfolder aria-label="New folder" title="New folder" data-ico="folder-plus"></button>
                     <button type="button" class="sideact" data-play-upload aria-label="Upload files" title="Upload files" data-ico="upload"></button>
                     <button type="button" class="sideact" data-play-download aria-label="Download project (zip)" title="Download project (zip)" data-ico="download"></button>
+                    <!-- A link to the WHOLE project, beside the project's other
+                         actions — it belonged to no single editor group. -->
+                    <button type="button" class="sideact" data-play-share aria-label="Copy a link to this project" title="Copy a link to this project" data-ico="link"></button>
                 </span>
             </p>
             <div class="filetree" data-play-files></div>
@@ -58,7 +61,6 @@ fn examples() -> Array<Example> {
             <div class="idebar">
                 <span class="idetabs" data-play-tabs></span>
                 <span class="spacer"></span>
-                <button type="button" class="btn ib" data-play-share aria-label="Copy link" title="Copy link" data-ico="link"></button>
                 <button type="button" class="btn ib primary" data-play-run disabled="disabled" aria-label="Run (Shift+F10)" title="Run (Shift+F10)" data-ico="play"></button>
             </div>
             <div class="idecrumbs" data-play-crumbs aria-hidden="true">files</div>

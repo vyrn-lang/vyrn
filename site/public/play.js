@@ -175,6 +175,13 @@ export function mountPlay(root, opts = {}) {
   // exists on /play) points this at the focused one; alone, it is the one
   // textarea this mount owns.
   let srcHost = () => input;
+  // The shell sets this; the core calls it the moment the compiler lands, so
+  // every editor group repaints with real spans and the Run buttons settle.
+  let onPlayReady = null;
+  // What the share button copies. The shell replaces it with the WHOLE
+  // project (user); a hero editor has no project, so the core's one-file
+  // link stands.
+  let shareHash = null;
 
   function paint() {
     const src = input.value;
@@ -533,12 +540,27 @@ export function mountPlay(root, opts = {}) {
     function makeGroup(els) {
       return Object.assign({ tabs: [], active: null }, els);
     }
-    const gA = makeGroup({ strip: tabsBox, input, layer, gutter, curline, editorEl: editor, main: $(".idemain", root) });
+    const gA = makeGroup({ strip: tabsBox, input, layer, gutter, curline, editorEl: editor, main: $(".idemain", root), runBtn, minimap, mmtext, mmview });
     let gB = null;
     let focusedG = gA;
     srcHost = () => focusedG.input;
 
     const labelOf = (name) => (name === WELCOME ? "Welcome" : name.slice(name.lastIndexOf("/") + 1));
+    /// Which Run buttons are pressable: the compiler has to be there, and the
+    /// group has to hold a file — the Welcome view runs nothing (user).
+    function updateRunState() {
+      const busy = runBtn.dataset.state === "busy";
+      for (const g of groups()) {
+        if (!g.runBtn) continue;
+        const want = !play || busy || !g.active || g.active === WELCOME;
+        // WRITTEN ONLY WHEN IT CHANGES. The observer below watches the core's
+        // own Run button, and an unconditional write to it is a mutation that
+        // re-enters this function for ever — the loop that froze the tab.
+        if (g.runBtn.disabled !== want) g.runBtn.disabled = want;
+      }
+    }
+    // The core disables its own Run while a program runs; the split's follows.
+    new MutationObserver(updateRunState).observe(runBtn, { attributes: true, attributeFilter: ["disabled", "data-state"] });
     const contentOf = (name) => userFiles.get(name) || "";
     const groups = () => (gB ? [gA, gB] : [gA]);
 
@@ -588,12 +610,12 @@ export function mountPlay(root, opts = {}) {
         g.curline.style.height = lh + "px";
       }
       if (g === focusedG && lncol) lncol.textContent = "Ln " + line + ", Col " + (before[before.length - 1].length + 1);
-      if (g === gA && mmtext) {
-        if (mmtext.textContent !== g.input.value) mmtext.textContent = g.input.value;
-        if (mmview) {
-          const mapH = mmtext.scrollHeight;
-          mmview.style.top = (g.input.scrollTop / g.input.scrollHeight) * mapH + "px";
-          mmview.style.height = Math.max(12, (g.input.clientHeight / g.input.scrollHeight) * mapH) + "px";
+      if (g.mmtext) {
+        if (g.mmtext.textContent !== g.input.value) g.mmtext.textContent = g.input.value;
+        if (g.mmview) {
+          const mapH = g.mmtext.scrollHeight;
+          g.mmview.style.top = (g.input.scrollTop / g.input.scrollHeight) * mapH + "px";
+          g.mmview.style.height = Math.max(12, (g.input.clientHeight / g.input.scrollHeight) * mapH) + "px";
         }
       }
     }
@@ -634,6 +656,7 @@ export function mountPlay(root, opts = {}) {
       for (const grp of groups()) renderTabsG(grp);
       syncG(g);
       syncChrome();
+      updateRunState();
     }
 
     function closeIn(g, name) {
@@ -661,11 +684,13 @@ export function mountPlay(root, opts = {}) {
       const wrap = document.createElement("div");
       wrap.className = "idemain second";
       wrap.innerHTML =
-        '<div class="idebar"><span class="idetabs"></span><span class="spacer"></span></div>' +
+        '<div class="idebar"><span class="idetabs"></span><span class="spacer"></span>' +
+        '<button type="button" class="btn ib primary" data-ico="play" disabled="disabled" aria-label="Run (Shift+F10)" title="Run (Shift+F10)"></button></div>' +
         '<div class="idecrumbs" aria-hidden="true"></div>' +
         '<div class="editor"><div class="curline" aria-hidden="true"></div><div class="gutter" aria-hidden="true"></div>' +
         '<pre class="code hl" aria-hidden="true"><code></code></pre>' +
-        '<textarea spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" wrap="off" aria-label="Vyrn source, second editor group"></textarea></div>';
+        '<textarea spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" wrap="off" aria-label="Vyrn source, second editor group"></textarea>' +
+        '<div class="minimap" aria-hidden="true"><pre class="mmtext"></pre><div class="mmview"></div></div></div>';
       gA.main.after(sash, wrap);
       wrapEl.classList.add("splitview");
       gB = makeGroup({
@@ -678,9 +703,20 @@ export function mountPlay(root, opts = {}) {
         crumbs: $(".idecrumbs", wrap),
         main: wrap,
         sash,
+        runBtn: $(".btn.ib", wrap),
+        minimap: $(".minimap", wrap),
+        mmtext: $(".mmtext", wrap),
+        mmview: $(".mmview", wrap),
       });
       bindGroup(gB);
       bindSash(sash);
+      bindMinimap(gB);
+      // The split's Run is the same run, on the group that asked for it.
+      gB.runBtn.addEventListener("click", () => {
+        focusedG = gB;
+        runBtn.click();
+      });
+      updateRunState();
       return gB;
     }
     function unsplit() {
@@ -891,6 +927,21 @@ export function mountPlay(root, opts = {}) {
         }
         drag.ghost.style.left = ev.clientX + 8 + "px";
         drag.ghost.style.top = ev.clientY + 8 + "px";
+        // A folder row under the pointer takes the file (user: explorer
+        // drag and drop) — checked before the editor groups, because the
+        // explorer is not one.
+        const over = document.elementFromPoint(ev.clientX, ev.clientY);
+        const dirRow = over && over.closest ? over.closest(".idefile.dir") : null;
+        const rootDrop = !dirRow && over && over.closest && over.closest(".ideside");
+        dropDir = dirRow ? dirRow.dataset.path : rootDrop ? "" : null;
+        for (const r of $$(".idefile.dir", root)) r.classList.toggle("dropinto", r === dirRow);
+        if (dropDir !== null) {
+          for (const grp of groups()) grp.main.classList.remove("dropzone");
+          wrapEl.classList.remove("splitzone");
+          drag.target = null;
+          drag.split = false;
+          return;
+        }
         const g = groupAt(ev.clientX, ev.clientY);
         drag.target = g;
         drag.index = -1;
@@ -929,11 +980,14 @@ export function mountPlay(root, opts = {}) {
         wrapEl.classList.remove("dragging", "splitzone");
         for (const grp of groups()) grp.main.classList.remove("dropzone");
         if (drag && drag.ghost) drag.ghost.remove();
+        for (const r of $$(".idefile.dir", root)) r.classList.remove("dropinto");
         if (drag && drag.moved) {
-          if (drag.split) sendTo(name, ensureSplit(), fromG);
+          if (dropDir !== null && name !== WELCOME) moveInto(name, dropDir);
+          else if (drag.split) sendTo(name, ensureSplit(), fromG);
           else if (drag.target) sendTo(name, drag.target, fromG, drag.index);
           else if (fromG) activateIn(fromG, name);
         }
+        dropDir = null;
         setTimeout(() => (drag = null));
       };
       addEventListener("pointermove", move);
@@ -1042,6 +1096,7 @@ export function mountPlay(root, opts = {}) {
           const row = document.createElement("button");
           row.type = "button";
           row.className = "idefile" + (node.dir ? " dir" : "");
+          row.dataset.path = node.name;
           row.style.setProperty("--depth", depth);
           row.dataset.ico = node.dir ? (collapsed.has(node.name) ? "folder" : "folder-open") : "file";
           row.append(document.createTextNode(labelOf(node.name)));
@@ -1322,27 +1377,114 @@ export function mountPlay(root, opts = {}) {
     for (const el of $$("[data-play-sash]", root)) bindSash(el);
     applyLayout();
 
+    // ---- a link that carries the whole project ---------------------------
+    // `#p=` is base64url of the project's own JSON: every file, and which
+    // one was open. `#c=` (one program) still opens, because links written
+    // before this exist and a link that stops working is a broken promise.
+    shareHash = () => {
+      const payload = { v: 1, files: [...userFiles], open: focusedG.active === WELCOME ? null : focusedG.active };
+      return "p=" + encodeSource(JSON.stringify(payload));
+    };
+    function projectFromHash() {
+      if (!location.hash.startsWith("#p=")) return null;
+      try {
+        const json = decodeSource(location.hash.slice(3));
+        const payload = JSON.parse(json);
+        return payload && Array.isArray(payload.files) ? payload : null;
+      } catch (err) {
+        return null;
+      }
+    }
+
+    // ---- the explorer's drops: a file into a folder, an OS file in -------
+    function moveInto(name, dir) {
+      const base = labelOf(name);
+      const to = freshName((dir ? dir + "/" : "") + base);
+      if (to === name) return;
+      renamePath(name, to, false);
+      renderFiles();
+    }
+    let dropDir = null;
+    async function takeFiles(list, dir) {
+      let last = null;
+      for (const f of list) {
+        if (!f.name) continue;
+        const name = freshName((dir ? dir + "/" : "") + f.name);
+        userFiles.set(name, await f.text());
+        last = name;
+      }
+      persistFiles();
+      if (last) activateIn(focusedG === gB ? gB : gA, last);
+      else renderFiles();
+    }
+    const sideEl = $(".ideside", root);
+    if (sideEl) {
+      sideEl.addEventListener("dragover", (e) => {
+        if (!e.dataTransfer || ![...e.dataTransfer.types].includes("Files")) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+        const row = e.target.closest ? e.target.closest(".idefile.dir") : null;
+        for (const r of $$(".idefile.dir", root)) r.classList.toggle("dropinto", r === row);
+        sideEl.classList.add("dropping");
+      });
+      sideEl.addEventListener("dragleave", (e) => {
+        if (e.target === sideEl) sideEl.classList.remove("dropping");
+      });
+      sideEl.addEventListener("drop", (e) => {
+        if (!e.dataTransfer || !e.dataTransfer.files.length) return;
+        e.preventDefault();
+        sideEl.classList.remove("dropping");
+        const row = e.target.closest ? e.target.closest(".idefile.dir") : null;
+        for (const r of $$(".idefile.dir", root)) r.classList.remove("dropinto");
+        takeFiles(e.dataTransfer.files, row ? row.dataset.path : "");
+      });
+    }
+
+    // A file opened before the compiler landed was drawn with no spans; the
+    // core calls this the moment it lands, and every group is redrawn.
+    onPlayReady = () => {
+      for (const g of groups()) {
+        paintG(g);
+        syncG(g);
+      }
+      updateRunState();
+    };
+
     // ---- the minimap scrolls the window it draws --------------------------
-    if (minimap) {
+    function bindMinimap(g) {
+      if (!g.minimap) return;
       const jump = (e) => {
-        const rect = minimap.getBoundingClientRect();
-        const mapH = Math.min(rect.height, mmtext ? mmtext.scrollHeight : rect.height);
+        const rect = g.minimap.getBoundingClientRect();
+        const mapH = Math.min(rect.height, g.mmtext ? g.mmtext.scrollHeight : rect.height);
         const frac = Math.max(0, Math.min(1, (e.clientY - rect.top) / mapH));
-        gA.input.scrollTop = frac * gA.input.scrollHeight - gA.input.clientHeight / 2;
-        syncG(gA);
+        g.input.scrollTop = frac * g.input.scrollHeight - g.input.clientHeight / 2;
+        syncG(g);
       };
-      minimap.addEventListener("pointerdown", (e) => {
+      g.minimap.addEventListener("pointerdown", (e) => {
         jump(e);
         e.preventDefault();
       });
-      minimap.addEventListener("pointermove", (e) => {
+      g.minimap.addEventListener("pointermove", (e) => {
         if (e.buttons & 1) jump(e);
       });
     }
+    bindMinimap(gA);
 
     // ---- first light: the session comes back ------------------------------
     queueMicrotask(() => {
       const session = read(KEY_SESSION, null);
+      const project = projectFromHash();
+      if (project) {
+        let open = null;
+        for (const [name, text] of project.files) {
+          const fresh = freshName(name);
+          userFiles.set(fresh, text);
+          if (name === project.open) open = fresh;
+        }
+        persistFiles();
+        activateIn(gA, open || (project.files[0] && freshName(project.files[0][0])) || WELCOME);
+        return;
+      }
       if (location.hash.startsWith("#c=") && input.value) {
         const name = freshName("shared.vyrn");
         userFiles.set(name, input.value);
@@ -1375,7 +1517,7 @@ export function mountPlay(root, opts = {}) {
 
   if (shareBtn) {
     shareBtn.addEventListener("click", async () => {
-      const url = location.origin + location.pathname + "#c=" + encodeSource(srcHost().value);
+      const url = location.origin + location.pathname + "#" + (shareHash ? shareHash() : "c=" + encodeSource(srcHost().value));
       history.replaceState(null, "", url);
       setLabel(shareBtn, (await writeClipboard(url)) ? "Copied" : "In the URL", "done");
       setTimeout(() => setLabel(shareBtn, "Copy link", "idle"), 1600);
@@ -1402,6 +1544,7 @@ export function mountPlay(root, opts = {}) {
       runBtn.disabled = false;
       status.textContent = "Ready";
       edited();
+      if (onPlayReady) onPlayReady();
       // The index's hero editor is armed on first interaction and mounted then
       // (RFC-0106 M2), so the press that armed it arrives before anything can
       // run. `onReady` is how that press is honoured rather than swallowed.

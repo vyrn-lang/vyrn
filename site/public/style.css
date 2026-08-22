@@ -2878,15 +2878,26 @@ details.fallback td:first-child { white-space: nowrap; }
 /* On /play the masthead compresses to a title bar's height — the editor's
  * own chrome scale (user) — and one knob carries the height into the
  * window's geometry. */
-body:has(.page.play.ide) { --mast: 40px; }
-body:has(.page.play.ide) .masthead { min-height: var(--mast); padding-block: 2px; }
+/* THE TITLE-BAR MASTHEAD ARRIVES BY ANIMATION (user: "still just shrinks").
+ * The site navigates for real between pages, so the compact state written
+ * into the new document's first paint has nothing to animate from. It is a
+ * class `widgets.js` adds one frame after paint instead: the row starts at
+ * its full height and shrinks into the editor's chrome, and the window's own
+ * height follows the same token. */
+body.idecompact { --mast: 40px; }
+.masthead { transition: min-height 260ms var(--expo), padding-block 260ms var(--expo); }
+.idewrap { transition: height 260ms var(--expo); }
+@media (prefers-reduced-motion: reduce) {
+  .masthead, .idewrap { transition: none; }
+}
+body.idecompact .masthead { min-height: var(--mast); padding-block: 2px; }
 /* The 44px touch minimum is the row's height (the blanket rule on every
  * masthead control); the title bar trades it for the editor's scale on this
  * one page. */
-body:has(.page.play.ide) .masthead a,
-body:has(.page.play.ide) .masthead button,
-body:has(.page.play.ide) .masthead summary,
-body:has(.page.play.ide) .masthead .wordmark { min-height: 30px; }
+body.idecompact .masthead a,
+body.idecompact .masthead button,
+body.idecompact .masthead summary,
+body.idecompact .masthead .wordmark { min-height: 30px; }
 /* ISLANDS (user, after the IDE's own new look): every pane is a rounded
  * island on one shade of chrome, with 6px sash tracks between them that the
  * pointer can drag. The sizes are custom properties the shell writes and
@@ -3065,6 +3076,9 @@ body:has(.page.play.ide) .masthead .wordmark { min-height: 30px; }
 @keyframes idepulse { 50% { opacity: 0.35; } }
 .tclose { padding: 0 8px 0 2px !important; }
 .tclose::before { width: 10px; height: 10px; }
+/* A folder taking a drop, and the explorer taking files from the desktop. */
+.idefile.dropinto { background: color-mix(in oklab, var(--accent) 18%, transparent); color: var(--ink); }
+.ideside.dropping { box-shadow: inset 0 0 0 1px var(--accent); }
 .ctxmenu .mi { display: flex; align-items: center; gap: var(--s3); }
 .ctxmenu .mk { margin-left: auto; color: var(--muted); font: var(--t-key)/1 var(--mono); }
 
@@ -3075,3 +3089,4 @@ body:has(.page.play.ide) .masthead .wordmark { min-height: 30px; }
 /* The masthead MORPHS between pages instead of snapping — it is a named
  * view-transition group, so its 64px and its 40px animate into each other. */
 .masthead { view-transition-name: masthead; }
+::view-transition-group(masthead) { animation-duration: 260ms; animation-timing-function: var(--expo, ease); }

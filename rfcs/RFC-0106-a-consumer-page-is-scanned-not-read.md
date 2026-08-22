@@ -2750,6 +2750,25 @@ Four more user directions on rounds 3-4's work:
   of the window and shrank the explorer to a fifth of its height (the user's
   screenshot). Renamed `splitview`; a state class on a shared sheet needs a
   name nothing else wants.
+- **Round 13 — five more, and two causes worth keeping.** The share link
+  carries the WHOLE project now (`#p=` is base64url of every file plus which
+  was open; `#c=` still opens, because links written before it exist), and it
+  moved to the explorer's own actions, where the project's other verbs are —
+  it belonged to no single editor group. Run is per group and pressable only
+  where it can run: the compiler has to be loaded and the group has to hold a
+  file, so the Welcome view's Run is dark and the split has a Run of its own.
+  The minimap belongs to a group rather than to the page, so the split has
+  one. Files drag onto folder rows to move, and files dropped from the
+  desktop land in the folder under the pointer. THE HIGHLIGHT GAP: a file
+  opened before the wasm landed was drawn with no spans and never redrawn —
+  the core now tells the shell the moment the compiler is there, and every
+  group repaints. THE HEADER MORPH: the site navigates for real between
+  pages, so the compact masthead was the new document's FIRST PAINT and had
+  nothing to animate from; it is a class added one frame after paint now, and
+  the row shrinks into the editor's chrome (a hidden tab, which runs no
+  animation frames at all, gets it immediately). En route, an infinite loop:
+  the run-state observer watched the button it also wrote, and an
+  unconditional write froze the renderer — writes go through a guard now.
 - The Git Bash quoted heredoc EATS A BACKSLASH: `\n` in a here-document
   reached Python as `
 ` and round 4 shipped two raw newlines inside

@@ -1029,7 +1029,25 @@ function demoWidget(root) {
 
 // ---------------------------------------------------------------------------
 
+/// The playground's title-bar masthead, applied AFTER the first paint so the
+/// row animates into it rather than arriving already small (user). A page
+/// that is not the editor takes the class off, which is what makes a soft
+/// navigation back out animate too.
+function markEditorChrome() {
+  const editor = Boolean($(".page.play.ide"));
+  if (!editor) {
+    document.body.classList.remove("idecompact");
+    return;
+  }
+  const compact = () => document.body.classList.add("idecompact");
+  // A hidden tab runs no animation frames at all, and the class would wait
+  // for a paint that never comes — there is nothing to animate there anyway.
+  if (document.visibilityState === "hidden") compact();
+  else requestAnimationFrame(() => requestAnimationFrame(compact));
+}
+
 function boot() {
+  markEditorChrome();
   copyButtons();
   copyPageButtons();
   markCopyable();
