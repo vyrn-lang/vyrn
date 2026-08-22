@@ -232,20 +232,55 @@ pub fn unpack_tool(sha: &str, bytes: &[u8]) -> Result<PathBuf, String> {
             return Err(format!("cannot run tar: {e}"));
         }
     }
-    // Staged, then renamed: two builds may unpack the same tool at once, and a
-    // reader must never see half an archive.
-    if std::fs::rename(&stage, &out).is_err() {
-        if verified(&out, sha) {
+    // The place-and-certify window below is SERIALIZED per hash. Without a
+    // gate, the loser of a race can watch the winner's rename land but its
+    // marker not yet be written, judge `out` uncertified, and delete the
+    // winner's freshly renamed directory out from under it. A `.gate` file held
+    // across check → rename → marker means one process at a time decides what
+    // `out` holds. A holder that dies inside the window leaves its gate behind;
+    // after a bounded wait this process gives up gating and races the old way
+    // rather than deadlock forever.
+    let gate = tools_dir().join(format!("{sha}.gate"));
+    let mut gated = false;
+    for _ in 0..600 {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&gate)
+        {
+            Ok(_) => {
+                // Gate held: this process alone decides what `out` holds
+                // until the gate file is removed.
+                gated = true;
+                break;
+            }
+            Err(_) => break, // no gate possible here; race tolerantly below
+        }
+    }
+    let placed = place_staged_tool(&stage, &out, sha);
+    if gated {
+        let _ = std::fs::remove_file(&gate);
+    }
+    placed?;
+    Ok(out)
+}
+
+/// Move the staged copy to `out` and write the certification marker, replacing
+/// an uncertified directory if one holds the name. Caller serializes per hash —
+/// see [`unpack_tool`].
+fn place_staged_tool(stage: &Path, out: &Path, sha: &str) -> Result<(), String> {
+    if std::fs::rename(stage, out).is_err() {
+        if verified(out, sha) {
             // Another process placed the same bytes first; ours is redundant.
-            let _ = std::fs::remove_dir_all(&stage);
+            let _ = std::fs::remove_dir_all(stage);
         } else {
             // An uncertified directory holds the name — an interrupted unpack,
             // a hand-made one, or a pre-marker layout. Replace it with the
             // staged copy, which is the one this process built and can certify.
-            let _ = std::fs::remove_dir_all(&out);
-            if std::fs::rename(&stage, &out).is_err() {
-                let _ = std::fs::remove_dir_all(&stage);
-                return Err(format!("cannot place the unpacked tool at {}", slash(&out)));
+            let _ = std::fs::remove_dir_all(out);
+            if std::fs::rename(stage, out).is_err() {
+                let _ = std::fs::remove_dir_all(stage);
+                return Err(format!("cannot place the unpacked tool at {}", slash(out)));
             }
         }
     }
@@ -253,8 +288,7 @@ pub fn unpack_tool(sha: &str, bytes: &[u8]) -> Result<PathBuf, String> {
     // that finds it can trust everything beside it — "verified on every load",
     // the invariant this module's doc claims.
     std::fs::write(out.join(SHA_MARKER), sha)
-        .map_err(|e| format!("cannot mark {} as verified: {e}", slash(&out)))?;
-    Ok(out)
+        .map_err(|e| format!("cannot mark {} as verified: {e}", slash(out)))
 }
 
 /// The unpacked directory of a pinned tool, resolved through the lock, then the

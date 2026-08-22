@@ -277,7 +277,11 @@ fn fromjson_byte_pins_hold() {
 fn a_declared_impl_in_an_injected_module_is_reached_in_both_link_modes() {
     let dir = std::env::temp_dir().join("vyrn-0096-keys");
     std::fs::create_dir_all(&dir).unwrap();
-    // (file, source, the release the binding must be reclaimed by)
+    // (file, source, the release the binding must be reclaimed by).
+    // ONE key for both link modes: a runtime module's reserved spellings
+    // (`json$Json`) apply however it was linked — hand import or builtin
+    // mention. Bare constructor spellings are program-global, so an unprefixed
+    // hand-imported `Json` sat one consumer enum away from a `JStr` collision.
     let cases = [
         (
             "handonly.vyrn",
@@ -287,7 +291,7 @@ fn a_declared_impl_in_an_injected_module_is_reached_in_both_link_modes() {
              print(emit(v))\n\
              return 0\n\
              }\n",
-            "Owned__Json__release",
+            "Owned__json$Json__release",
         ),
         (
             "both.vyrn",

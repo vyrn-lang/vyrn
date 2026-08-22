@@ -1634,13 +1634,25 @@ impl Parser {
     /// It must be declared before the signatures that name it (see
     /// [`Parser::impl_block`]).
     fn protocol_decl(&mut self) -> Result<ProtocolDecl, Diagnostic> {
+        // Associated-type aliases must not outlive this declaration on ANY
+        // exit path: after a `?` failure recovery moves on to the next
+        // declaration, and a stale alias would silently rewrite its type
+        // names (`program_accum` resets `type_params` per declaration but
+        // never these). So the aliases are restored unconditionally around
+        // the body rather than enumerated at each hand-written bail-out.
+        let outer_aliases = std::mem::take(&mut self.type_aliases);
+        let r = self.protocol_decl_inner();
+        self.type_aliases = outer_aliases;
+        r
+    }
+
+    fn protocol_decl_inner(&mut self) -> Result<ProtocolDecl, Diagnostic> {
         let line = self.line();
         self.eat(&Tok::Protocol)?;
         let name = self.expect_ident()?;
         self.eat(&Tok::LBrace)?;
         let mut methods = Vec::new();
         let mut assoc: Vec<String> = Vec::new();
-        let outer_aliases = std::mem::take(&mut self.type_aliases);
         while *self.peek() != Tok::RBrace {
             let doc = self.take_docs(); // retained on the signature it sits above
             if *self.peek() == Tok::RBrace {
@@ -1651,7 +1663,6 @@ impl Parser {
                 self.advance();
                 let aname = self.expect_ident()?;
                 if *self.peek() == Tok::Eq {
-                    self.type_aliases = outer_aliases;
                     return Err(Diagnostic::error(
                         tline,
                         col,
@@ -1664,7 +1675,6 @@ impl Parser {
                     ));
                 }
                 if !methods.is_empty() {
-                    self.type_aliases = outer_aliases;
                     return Err(Diagnostic::error(
                         tline,
                         col,
@@ -1715,7 +1725,6 @@ impl Parser {
             });
         }
         self.eat(&Tok::RBrace)?;
-        self.type_aliases = outer_aliases;
         Ok(ProtocolDecl {
             exported: false,
             module: None,
@@ -1999,6 +2008,17 @@ impl Parser {
     /// `Type::Param` reaches codegen and lowers to `void` — a smaller function,
     /// not an error. One ordering rule with a diagnostic is the cheaper trade.
     fn impl_block(&mut self) -> Result<ImplBlock, Diagnostic> {
+        // Same discipline as [`Parser::protocol_decl`]: the associated-type
+        // aliases are restored around the whole body, so no `?` exit — from
+        // `impl_method`, `place_member`, or `type_` — can leave a stale alias
+        // behind for whatever declaration error recovery lands on.
+        let outer_aliases = std::mem::take(&mut self.type_aliases);
+        let r = self.impl_block_inner();
+        self.type_aliases = outer_aliases;
+        r
+    }
+
+    fn impl_block_inner(&mut self) -> Result<ImplBlock, Diagnostic> {
         let (line, col) = (self.line(), self.col());
         self.eat(&Tok::Impl)?;
         let (type_params, type_bounds) = self.type_param_binder()?;
@@ -2010,7 +2030,6 @@ impl Parser {
         let mut methods = Vec::new();
         let mut places = Vec::new();
         let mut assoc: Vec<String> = Vec::new();
-        let outer_aliases = std::mem::take(&mut self.type_aliases);
         while *self.peek() != Tok::RBrace {
             self.take_docs(); // method-level docs (not retained yet)
             if *self.peek() == Tok::RBrace {
@@ -2020,11 +2039,11 @@ impl Parser {
                 let (tline, col) = (self.line(), self.col());
                 self.advance();
                 let aname = self.expect_ident()?;
-                // Both bail-outs restore the parser's type scopes first: this
-                // declaration is abandoned, and a stale alias would silently
-                // rewrite a type name in whatever declaration recovery lands on.
+                // Both bail-outs clear the impl's type parameters first: this
+                // declaration is abandoned, and the aliases themselves are the
+                // caller's worry ([`Parser::impl_block`] restores them however
+                // this returns).
                 if !methods.is_empty() {
-                    self.type_aliases = outer_aliases;
                     self.type_params.clear();
                     return Err(Diagnostic::error(
                         tline,
@@ -2038,7 +2057,6 @@ impl Parser {
                     ));
                 }
                 if type_params.contains(&aname) {
-                    self.type_aliases = outer_aliases;
                     self.type_params.clear();
                     return Err(Diagnostic::error(
                         tline,
@@ -2078,7 +2096,6 @@ impl Parser {
         }
         self.eat(&Tok::RBrace)?;
         self.type_params.clear();
-        self.type_aliases = outer_aliases;
         Ok(ImplBlock {
             protocol,
             type_params,
@@ -2476,7 +2493,7 @@ impl Parser {
     }
 
     fn type_decl(&mut self) -> Result<Vec<TypeDecl>, Diagnostic> {
-        let line = self.line();
+        let (line, col) = (self.line(), self.col());
         self.eat(&Tok::Type)?;
         let name = self.expect_ident()?;
 
@@ -2526,7 +2543,21 @@ impl Parser {
         let mut decls = Vec::with_capacity(1 + field_preds.len());
         if !field_preds.is_empty() {
             let Type::Record(fields) = &mut base else {
-                unreachable!("field predicates only collect inside a record type")
+                // An inline refinement was collected, but the outermost `{ .. }`
+                // did not end up the whole base: `type_'s` `&` loop wrapped it in
+                // [`Type::Merge`] or an enum variant payload swallowed it. There is
+                // no single record to hang `Decl.field` on — refused by name rather
+                // than mis-desugared.
+                return Err(Diagnostic::error(
+                    line,
+                    col,
+                    "parse",
+                    format!(
+                        "an inline field `where` refines one record's fields, so the base of \
+                         `type {name}` must be exactly `{{ .. }}` — a merge (`&`) or enum \
+                         variant cannot carry refinements"
+                    ),
+                ));
             };
             for (fname, pred) in field_preds {
                 let synthetic = format!("{name}.{fname}");
@@ -4240,146 +4271,176 @@ impl Parser {
     }
 
     /// Postfix operators `?` and `.field`, binding tighter than unary/binary.
+    ///
+    /// The chain loop is iterative — one call can build a chain of any length —
+    /// but every link still adds one node for the post-parse walks (and drop
+    /// glue) to recurse into, so each postfix edge counts toward
+    /// [`Parser::MAX_NEST`] exactly like the recursive-descent edges do;
+    /// otherwise `a.b.b.…b` grows an unbounded tree while the depth counter
+    /// sits still and the walk aborts the process with no `file:line`.
     fn postfix(&mut self) -> Result<Expr, Diagnostic> {
+        // The chain loop is one recursion frame, so the counter cannot go
+        // through `nest_enter`'s increment/decrement pair per link — that
+        // balances to zero and a chain of any length sits at depth 1. Count
+        // the links locally against the ambient depth instead; `self.depth`
+        // itself stays untouched, so recovery after an error starts clean.
+        let mut links: u32 = 0;
         let mut e = self.primary()?;
-        loop {
-            let line = self.line();
-            match self.peek() {
-                Tok::Question => {
-                    self.advance();
-                    e = Expr::Try {
-                        expr: Box::new(e),
-                        line,
-                    };
-                }
-                Tok::Dot => {
-                    self.advance();
-                    let name = self.expect_ident()?;
-                    if *self.peek() == Tok::LParen {
-                        // Method call `recv.name(args)` is sugar for the free call
-                        // `name(recv, args)` — the receiver becomes the first arg.
-                        self.advance();
-                        let saved = self.no_struct;
-                        self.no_struct = false;
-                        let mut args = vec![e];
-                        while *self.peek() != Tok::RParen {
-                            args.push(self.expr()?);
-                            if *self.peek() == Tok::Comma {
-                                self.advance();
-                            } else {
-                                break;
-                            }
-                        }
-                        self.no_struct = saved;
-                        self.eat(&Tok::RParen)?;
-                        // Method-form builtins ([`METHOD_BUILTINS`]) map to their
-                        // internal spellings: `x.toString()` renders via the
-                        // `@str` machinery and `t.join()` awaits via `@join`. The
-                        // bare free-function forms (`toString(x)`, `join(t)`) never
-                        // reach this arm, so the checker reports them with a
-                        // migration hint.
-                        //
-                        // This is a DEFAULT, not an interception. The parser has no
-                        // types here, so it cannot know whose method was written;
-                        // [`unshadow_method_builtins`] runs once the module's
-                        // declarations are all in and hands the name back to any
-                        // that answers to it.
-                        //
-                        // The pre-table spelling is kept for the type-name arm
-                        // below, which reports what the program WROTE: without it
-                        // `F32x4.anyTrue(m)` — the plausible mistake, since the
-                        // rest of the surface IS on the type name — comes back as
-                        // "`F32x4` has no `@anyTrue`", the internal name leaking
-                        // through two rewrites.
-                        let wrote = name.clone();
-                        let name = match method_builtin(&name) {
-                            Some(internal) => internal.to_string(),
-                            None => name,
-                        };
-                        // `F32x4.splat(x)`, `F32x4.load(xs, i)`, `F32x4.min(a, b)`
-                        // — the receiver is the type NAME, not a value, so it is
-                        // dropped here rather than typed. Handling it in the parser
-                        // is what keeps `F32x4` out of the expression grammar
-                        // entirely: nothing downstream ever sees a bare `F32x4`
-                        // variable to fail to resolve.
-                        //
-                        // The type name is where these live rather than the value
-                        // (`v.min(w)`) because a value-receiver method name is a
-                        // GLOBAL rename in the table above — `min`, `max` and `abs`
-                        // are `std/math` exports, and `math.min(a, b)` arrives here
-                        // in exactly the same shape, so renaming them would break
-                        // it. `lane` is a value method because M1 made it one and
-                        // nothing exports that name. One arm covers every width, so
-                        // M3's `F64x2.*` is a table entry rather than a receiver the
-                        // three backends must decode.
-                        let mut args = args;
-                        let name = match args.first() {
-                            // M3's `I32x4.*` is the table entry M1 predicted, not
-                            // a receiver the three backends have to decode: one
-                            // internal prefix per width, assigned here. M4's
-                            // `F64x2.*` is the third, and it cost this one line.
-                            Some(Expr::Var { name: ty, .. })
-                                if ty == "F32x4" || ty == "I32x4" || ty == "F64x2" =>
-                            {
-                                let pre = match ty.as_str() {
-                                    "F32x4" => "@f32x4",
-                                    "I32x4" => "@i32x4",
-                                    _ => "@f64x2",
-                                };
-                                let mut it = wrote.chars();
-                                let m = match it.next() {
-                                    Some(c) => c.to_uppercase().collect::<String>() + it.as_str(),
-                                    None => name.clone(),
-                                };
-                                args.remove(0);
-                                format!("{pre}{m}")
-                            }
-                            _ => name,
-                        };
-                        e = Expr::Call { name, args, line };
-                    } else if *self.peek() == Tok::LBrace
-                        && !self.no_struct
-                        && matches!(&e, Expr::Var { .. })
-                    {
-                        // Namespace-qualified record construction `ns.Type { .. }`
-                        // (RFC-0027). Plain member access cannot represent it (a
-                        // `Field` followed by `{` is otherwise a parse error), so
-                        // the head must be a bare identifier — a namespace. The
-                        // qualifier rides the struct name as `"ns.Type"`; the
-                        // loader splits on the dot, verifies `ns` is an in-scope
-                        // namespace, and rewrites it to the plain resolved decl,
-                        // so the checker/backends never see a dotted name.
-                        let Expr::Var { name: ns, .. } = e else {
-                            unreachable!()
-                        };
-                        e = self.struct_lit(format!("{ns}.{name}"), line)?;
-                    } else {
-                        // Property / field access `recv.name` (e.g. `arr.length`).
-                        e = Expr::Field {
-                            expr: Box::new(e),
-                            field: name,
-                            line,
-                        };
-                    }
-                }
-                Tok::LBracket => {
-                    // Index `recv[i]` is sugar for the bounds-checked `@at(recv, i)`.
+        while matches!(self.peek(), Tok::Question | Tok::Dot | Tok::LBracket) {
+            links += 1;
+            if self.depth.saturating_add(links) >= Self::MAX_NEST {
+                return Err(Diagnostic::error(
+                    self.line(),
+                    self.col(),
+                    "parse",
+                    format!("nesting exceeds {} levels", Self::MAX_NEST),
+                ));
+            }
+            let r = self.postfix_step(e);
+            e = r?;
+        }
+        Ok(e)
+    }
+
+    /// One postfix edge (`?`, `.field`, `.name(..)`, `[i]`) over `e`. The
+    /// caller has already checked that a postfix token follows and has counted
+    /// the nesting level this link adds.
+    fn postfix_step(&mut self, e: Expr) -> Result<Expr, Diagnostic> {
+        let line = self.line();
+        match self.peek() {
+            Tok::Question => {
+                self.advance();
+                return Ok(Expr::Try {
+                    expr: Box::new(e),
+                    line,
+                });
+            }
+            Tok::Dot => {
+                self.advance();
+                let name = self.expect_ident()?;
+                if *self.peek() == Tok::LParen {
+                    // Method call `recv.name(args)` is sugar for the free call
+                    // `name(recv, args)` — the receiver becomes the first arg.
                     self.advance();
                     let saved = self.no_struct;
                     self.no_struct = false;
-                    let idx = self.expr()?;
+                    let mut args = vec![e];
+                    while *self.peek() != Tok::RParen {
+                        args.push(self.expr()?);
+                        if *self.peek() == Tok::Comma {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
                     self.no_struct = saved;
-                    self.eat(&Tok::RBracket)?;
-                    e = Expr::Call {
-                        name: "@at".to_string(),
-                        args: vec![e, idx],
-                        line,
+                    self.eat(&Tok::RParen)?;
+                    // Method-form builtins ([`METHOD_BUILTINS`]) map to their
+                    // internal spellings: `x.toString()` renders via the
+                    // `@str` machinery and `t.join()` awaits via `@join`. The
+                    // bare free-function forms (`toString(x)`, `join(t)`) never
+                    // reach this arm, so the checker reports them with a
+                    // migration hint.
+                    //
+                    // This is a DEFAULT, not an interception. The parser has no
+                    // types here, so it cannot know whose method was written;
+                    // [`unshadow_method_builtins`] runs once the module's
+                    // declarations are all in and hands the name back to any
+                    // that answers to it.
+                    //
+                    // The pre-table spelling is kept for the type-name arm
+                    // below, which reports what the program WROTE: without it
+                    // `F32x4.anyTrue(m)` — the plausible mistake, since the
+                    // rest of the surface IS on the type name — comes back as
+                    // "`F32x4` has no `@anyTrue`", the internal name leaking
+                    // through two rewrites.
+                    let wrote = name.clone();
+                    let name = match method_builtin(&name) {
+                        Some(internal) => internal.to_string(),
+                        None => name,
                     };
+                    // `F32x4.splat(x)`, `F32x4.load(xs, i)`, `F32x4.min(a, b)`
+                    // — the receiver is the type NAME, not a value, so it is
+                    // dropped here rather than typed. Handling it in the parser
+                    // is what keeps `F32x4` out of the expression grammar
+                    // entirely: nothing downstream ever sees a bare `F32x4`
+                    // variable to fail to resolve.
+                    //
+                    // The type name is where these live rather than the value
+                    // (`v.min(w)`) because a value-receiver method name is a
+                    // GLOBAL rename in the table above — `min`, `max` and `abs`
+                    // are `std/math` exports, and `math.min(a, b)` arrives here
+                    // in exactly the same shape, so renaming them would break
+                    // it. `lane` is a value method because M1 made it one and
+                    // nothing exports that name. One arm covers every width, so
+                    // M3's `F64x2.*` is a table entry rather than a receiver the
+                    // three backends must decode.
+                    let mut args = args;
+                    let name = match args.first() {
+                        // M3's `I32x4.*` is the table entry M1 predicted, not
+                        // a receiver the three backends have to decode: one
+                        // internal prefix per width, assigned here. M4's
+                        // `F64x2.*` is the third, and it cost this one line.
+                        Some(Expr::Var { name: ty, .. })
+                            if ty == "F32x4" || ty == "I32x4" || ty == "F64x2" =>
+                        {
+                            let pre = match ty.as_str() {
+                                "F32x4" => "@f32x4",
+                                "I32x4" => "@i32x4",
+                                _ => "@f64x2",
+                            };
+                            let mut it = wrote.chars();
+                            let m = match it.next() {
+                                Some(c) => c.to_uppercase().collect::<String>() + it.as_str(),
+                                None => name.clone(),
+                            };
+                            args.remove(0);
+                            format!("{pre}{m}")
+                        }
+                        _ => name,
+                    };
+                    return Ok(Expr::Call { name, args, line });
+                } else if *self.peek() == Tok::LBrace
+                    && !self.no_struct
+                    && matches!(&e, Expr::Var { .. })
+                {
+                    // Namespace-qualified record construction `ns.Type { .. }`
+                    // (RFC-0027). Plain member access cannot represent it (a
+                    // `Field` followed by `{` is otherwise a parse error), so
+                    // the head must be a bare identifier — a namespace. The
+                    // qualifier rides the struct name as `"ns.Type"`; the
+                    // loader splits on the dot, verifies `ns` is an in-scope
+                    // namespace, and rewrites it to the plain resolved decl,
+                    // so the checker/backends never see a dotted name.
+                    let Expr::Var { name: ns, .. } = e else {
+                        unreachable!()
+                    };
+                    return self.struct_lit(format!("{ns}.{name}"), line);
+                } else {
+                    // Property / field access `recv.name` (e.g. `arr.length`).
+                    return Ok(Expr::Field {
+                        expr: Box::new(e),
+                        field: name,
+                        line,
+                    });
                 }
-                _ => break,
             }
+            Tok::LBracket => {
+                // Index `recv[i]` is sugar for the bounds-checked `@at(recv, i)`.
+                self.advance();
+                let saved = self.no_struct;
+                self.no_struct = false;
+                let idx = self.expr()?;
+                self.no_struct = saved;
+                self.eat(&Tok::RBracket)?;
+                return Ok(Expr::Call {
+                    name: "@at".to_string(),
+                    args: vec![e, idx],
+                    line,
+                });
+            }
+            _ => Ok(e),
         }
-        Ok(e)
     }
 
     /// Parse a lambda literal (RFC-0023): `|x| expr`, `|x, y| { block }`, or the
@@ -7008,5 +7069,79 @@ impl Unwrap for Int64 { fn get(self) -> Output { return self }  type Output = In
             }
             other => panic!("expected field read, got {other:?}"),
         }
+    }
+
+    // ---- round two: refinements off a plain record, deep postfix chains,
+    //      and associated-type alias leaks ------------------------------
+
+    /// An inline field `where` collected from a record that `type_`'s `&` loop
+    /// then wrapped in a merge used to hit an `unreachable!` — a process abort
+    /// with no diagnostic. It is a parse error now.
+    #[test]
+    fn an_inline_refinement_on_a_merged_record_is_a_diagnostic_not_a_panic() {
+        let src = "type T = { x: Int64 where x > 0 } & { y: Int64 }";
+        let e = parse(lex(src).unwrap()).unwrap_err();
+        assert!(
+            e.message.contains("inline field `where`") && e.message.contains("merge"),
+            "{}",
+            e.message
+        );
+    }
+
+    /// Same panic path through an enum variant: the payload descends through
+    /// `type_` into `record_type`, which still saw the armed collector.
+    #[test]
+    fn an_inline_refinement_in_an_enum_variant_is_a_diagnostic_not_a_panic() {
+        let src = "type T = | Box({ w: Int64 where w > 0 })";
+        let e = parse(lex(src).unwrap()).unwrap_err();
+        assert!(e.message.contains("inline field `where`"), "{}", e.message);
+    }
+
+    /// A postfix chain builds one AST node per link but used to enter none of
+    /// them into the depth counter, so `a.b.b.…b` sailed past [`Parser::MAX_NEST`]
+    /// and aborted the process inside the post-parse walk (and its drop glue).
+    /// Each link counts now.
+    #[test]
+    fn a_deep_postfix_chain_hits_the_nest_guard_not_the_stack() {
+        let body = format!("let x = s{}.b\n return 0", ".b".repeat(1100));
+        let src = format!("fn main() -> Int64 {{ {body} }}");
+        let e = parse(lex(&src).unwrap()).unwrap_err();
+        assert!(e.message.contains("nesting exceeds"), "{}", e.message);
+    }
+
+    /// `fn 9` breaks the protocol AFTER `type Output` installed its alias.
+    /// Recovery then lands on the next declaration, where `Output` must
+    /// resolve as an ordinary named type again — not as the stale
+    /// [`Type::Param`] the broken protocol left behind.
+    #[test]
+    fn a_failed_protocol_does_not_leak_associated_types_into_the_next_decl() {
+        let src = "protocol P { type Output  fn 9() -> Output; }\n\
+                   type Q = Output";
+        let (p, errs) = parse_accum(lex(src).unwrap());
+        assert!(!errs.is_empty(), "the broken protocol is still an error");
+        let q = p.type_decls.iter().find(|d| d.name == "Q").unwrap();
+        assert!(
+            matches!(&q.base, Type::Named(n) if n.as_str() == "Output"),
+            "got {:?}",
+            q.base
+        );
+    }
+
+    /// The identical hole in `impl`: `-> 9` fails a method's return type after
+    /// `type Out` installed its alias, and the next declaration must not
+    /// inherit it.
+    #[test]
+    fn a_failed_impl_does_not_leak_associated_types_into_the_next_decl() {
+        let src = "type R = { x: Int64 }\n\
+                   impl P for R { type Out = Int64  fn bad(self) -> 9 }\n\
+                   type S = Out";
+        let (p, errs) = parse_accum(lex(src).unwrap());
+        assert!(!errs.is_empty(), "the broken impl is still an error");
+        let s = p.type_decls.iter().find(|d| d.name == "S").unwrap();
+        assert!(
+            matches!(&s.base, Type::Named(n) if n.as_str() == "Out"),
+            "got {:?}",
+            s.base
+        );
     }
 }

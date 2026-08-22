@@ -69,6 +69,16 @@ fn standing() -> String {
     return "Published " + releaseDate() + " as " + kind + "."
 }
 
+/// What the first tile measures. With a tag it is the pull requests that
+/// landed after it; with none, the same sum over all of history is exactly
+/// what it claims — an empty date compares `>` against every day.
+fn sinceLabel() -> String {
+    if hasRelease() {
+        return "Since the tag"
+    }
+    return "All time"
+}
+
 /// Merged pull requests since the baked tag, summed out of the history the
 /// script wrote. Dates are ISO, so `>` on the strings is `>` on the days.
 fn prsSince() -> Int64 {
@@ -79,6 +89,16 @@ fn prsSince() -> Int64 {
         }
     }
     return n
+}
+
+/// The eyebrow above the heading. In the nothing-released state there is no
+/// kind to name — an empty tag carries no suffix, so `kindOf` answered
+/// "stable" over a headline saying nothing was released.
+fn eyebrow() -> String {
+    if !hasRelease() {
+        return "Releases"
+    }
+    return "Releases · " + kindOf(releaseTag())
 }
 
 /// The design records that arrived after the tag, newest first. `arrivalList`
@@ -125,7 +145,7 @@ fn kindOf(tag: String) -> String {
              that gets it, what it took to get there on the right. -->
         <section class="hero split" id="status">
             <div class="say">
-                <p class="eyebrow">Releases · {{ kindOf(releaseTag()) }}</p>
+                <p class="eyebrow">{{ eyebrow() }}</p>
                 <h1 class="display">{{ headline() }}</h1>
                 <p class="lede">{{ standing() }} The language changes without a deprecation period.</p>
                 <p class="ctarow"><a class="cta" href="/install.html">Install or upgrade</a></p>
@@ -134,7 +154,7 @@ fn kindOf(tag: String) -> String {
 
             <div>
                 <dl class="specs">
-                    <div><dt>Since the tag</dt><dd>{{ prsSince() }}<small>pull requests merged</small></dd></div>
+                    <div><dt>{{ sinceLabel() }}</dt><dd>{{ prsSince() }}<small>pull requests merged</small></dd></div>
                     <div><dt>Test blocks</dt><dd>{{ testBlockCount() }}<small>in {{ testFileCount() }} files</small></dd></div>
                     <div><dt>Examples</dt><dd>{{ exampleCount() }}<small>on {{ backendCount() }} engines each</small></dd></div>
                     <div><dt>Standard library</dt><dd>{{ stdCount() }}<small>modules, in Vyrn</small></dd></div>

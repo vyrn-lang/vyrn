@@ -1132,6 +1132,17 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
             "this page declares a lazy `data`, and a `.vyrn` page's view is a plain `fn page(…) -> Html` with no `Loading` arm to render — write the page as `.vyx`, or drop `lazy`",
         )
     }
+    // The mirror of the dynamic-route mismatch: a `Param*` query is handed the
+    // route params, and a static route has no segment to build them from.
+    // Named here, rather than as a syntax error inside the generated dispatch
+    // (`runParamQuery(p0.data(), )`).
+    if hasData && loadHasParams && dyns.length == 0 {
+        err = err
+        + uiPageErrAt(
+            srcPath,
+            "route `\{uiUrlPatternOf(segs)}` is static, and this page's `data` takes params — there is no dynamic segment to build `Params` from, so declare `data` without params",
+        )
+    }
     let needParams = dyns.length > 0 || loadHasParams
 
     // dynTypes: each dynamic segment's declared type, parallel to `dyns`.
@@ -1430,6 +1441,16 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
             i = i + 1
         }
     }
+    // The mirror image: a Param* loader on a static route has no segment to
+    // build `Params` from, which would otherwise surface as a syntax error in
+    // the generated dispatch (`runParamQuery(p0.data(), )`).
+    if hasLoad && loadHasParams && dyns.length == 0 {
+        err = err
+        + uiPageErrAt(
+            srcPath,
+            "route `\{uiUrlPatternOf(segs)}` is static, and this page's `data` takes params — there is no dynamic segment to build `Params` from, so declare `data` without params",
+        )
+    }
 
     // page arity: a param loader → page(p, d) = 2; a zero-param loader → page(d) =
     // 1 (RFC-0069 §0); a params-only page → page(p) = 1; a static page → page() = 0.
@@ -1679,9 +1700,10 @@ gen fn uiFixedRuntime() -> String {
     // quote — static Vyrn validated when THIS generator is compiled (a typo here is
     // a diagnostic in std/ui, not a re-lex failure at generation time). Notes on the
     // emitted code: `uiRouteSegments` strips the query and collapses slashes.
-    // Percent-decoding is NOT here — it is `std/codecs:urlDecode`, called at the one
-    // place a segment becomes a value (`uiEmitDynMatch`), so its `None` is the 404
-    // the router already has.
+    // Percent-decoding is NOT here — it is `std/codecs:urlDecode`, called in the
+    // emitted try fn wherever wire bytes are read (a percent-encoded static
+    // literal, or a `String` dynamic segment becoming a value in
+    // `uiEmitDynMatch`), so its `None` is the 404 the router already has.
     return render(vyrn"""fn uiRouteSlice(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
     let mut acc: Array<UInt8> = []
     let mut i = s
@@ -1802,7 +1824,7 @@ fn uiIssuesToError(issues: Array<Issue>) -> PageError {
 /// right and column-exact origins (risk 1) would be meaningless for generated code.
 gen fn uiEmitRoute(p: UiPageInfo, n: Int64, layoutIdxs: Array<Int64>, errorIdx: Int64) -> String {
     let idx = n.toString()
-    let mut out = "//@origin " + p.modPath + ".vyrn:1:1\n"
+    let mut out = "//@origin " + p.modPath + (if p.isVyx { ".vyx" } else { ".vyrn" }) + ":1:1\n"
 
     // uiTry<n>: structural match + dynamic-segment parse → Some(uiRender<n>(args)).
     out = out + uiEmitTryFn(p, idx, "uiTry", "uiRender")
@@ -1818,7 +1840,7 @@ gen fn uiEmitRoute(p: UiPageInfo, n: Int64, layoutIdxs: Array<Int64>, errorIdx: 
 /// only for client-renderable `.vyx` pages.
 gen fn uiEmitDataRoute(p: UiPageInfo, n: Int64, layoutIdxs: Array<Int64>, errorIdx: Int64) -> String {
     let idx = n.toString()
-    let mut out = "//@origin " + p.modPath + ".vyrn:1:1\n"
+    let mut out = "//@origin " + p.modPath + (if p.isVyx { ".vyx" } else { ".vyrn" }) + ":1:1\n"
     out = out + uiEmitTryFn(p, idx, "uiTryData", "uiRenderData")
     out = out + uiEmitDataRender(p, idx, layoutIdxs, errorIdx)
     out = out + "//@origin end\n"
@@ -1835,7 +1857,17 @@ gen fn uiEmitTryFn(p: UiPageInfo, idx: String, tryName: String, renderName: Stri
     let mut i = 0
     for s in p.segs {
         if uiIsDynSeg(s) == false {
-            out = out + "    if segs[" + i.toString() + "] != " + uiStrLit(s) + " {\n        return None\n    }\n"
+            if uiSegNeedsDecode(s) {
+                // A literal the wire can only carry percent-encoded: decode the
+                // request bytes before comparing — the same boundary a `String`
+                // dynamic segment crosses in `uiEmitDynMatch` (wire in, value
+                // out), with an undecodable segment as the same 404.
+                out = out + "    if let Some(v) = urlDecode(segs[" + i.toString() + "]) {\n"
+                out = out + "        if v != " + uiStrLit(s) + " {\n            return None\n        }\n"
+                out = out + "    } else {\n        return None\n    }\n"
+            } else {
+                out = out + "    if segs[" + i.toString() + "] != " + uiStrLit(s) + " {\n        return None\n    }\n"
+            }
         }
         i = i + 1
     }
@@ -1844,6 +1876,39 @@ gen fn uiEmitTryFn(p: UiPageInfo, idx: String, tryName: String, renderName: Stri
     // `String` segment that is not percent-encoded text.
     out = out + "    return " + uiEmitDynMatch(p, 0, idx, renderName) + "\n}\n"
     return out
+}
+
+/// Whether a literal segment's spelling holds any byte outside the unreserved
+/// set (RFC 3986 §2.3) — one a browser can only send percent-encoded, so the
+/// emitted match must decode the wire bytes before comparing them to the
+/// literal, exactly as `uiEmitDynMatch` decodes a `String` segment's bytes
+/// before binding them.
+fn uiSegNeedsDecode(s: String) -> Bool {
+    let b = bytes(s)
+    let mut i = 0
+    while i < b.length {
+        let c = b[i]
+        let plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~'
+        if plain == false {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/// Whether any page claims a static segment whose wire form is percent-encoded —
+/// the one thing (besides a `String` dynamic segment, `uiAnyStrSeg`) that puts
+/// `urlDecode` on the try-fn side of the generated router.
+gen fn uiAnyEncodedStatic(pages: Array<UiPageInfo>) -> Bool {
+    for p in pages {
+        for s in p.segs {
+            if uiIsDynSeg(s) == false && uiSegNeedsDecode(s) {
+                return true
+            }
+        }
+    }
+    return false
 }
 
 /// The nested parse over the dynamic segments (position `k` in `dynNames`),
@@ -2367,11 +2432,13 @@ gen fn uiBuildModule(pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors:
     if anyClientPage {
         out = out + "import { uiWantsData, uiPayload, uiErrorPayload, uiDataResponse, uiDataMiss, uiErrorResponseOf } from \"std/ui\"\n"
     }
-    // The URL boundary's two halves, imported only where a `String` segment makes
-    // them reachable: `urlEncode` in the typed-URL helper, `urlDecode` in the try
-    // fn. A router of only static and `Int64` routes converts nothing (an integer's
-    // spelling is already unreserved) and is emitted exactly as it was before.
-    if uiAnyStrSeg(pages) {
+    // The URL boundary's two halves, imported only where something makes them
+    // reachable: `urlEncode` in the typed-URL helper, `urlDecode` in the try
+    // fn — for a `String` dynamic segment, or a static segment whose spelling
+    // only travels the wire percent-encoded. A router of only plain static and
+    // `Int64` routes converts nothing (an integer's spelling is already
+    // unreserved) and is emitted exactly as it was before.
+    if uiAnyStrSeg(pages) || uiAnyEncodedStatic(pages) {
         out = out + "import { urlDecode, urlEncode } from \"std/codecs\"\n"
     }
 
@@ -2998,4 +3065,18 @@ test "dispatch order answers a static route before a catch-all at the same depth
     assertEq(order.length, 2)
     assertEq(order[0], 1)
     assertEq(order[1], 0)
+}
+
+test "a static segment with reserved bytes is matched decoded, a plain one raw" {
+    // `my page` reaches the router as `my%20page` — browsers percent-encode
+    // every non-unreserved byte — so the emitted match must decode the wire
+    // bytes before comparing, exactly as a `String` dynamic segment is decoded.
+    assert(uiSegNeedsDecode("about") == false)
+    assert(uiSegNeedsDecode("my-page") == false)
+    assert(uiSegNeedsDecode("my page"))
+    assert(uiSegNeedsDecode("café"))
+    let p = UiPageInfo { modPath: "routes/my page", segs: ["about", "my page"], urlPattern: "/about/my page", dynNames: [], dynTypes: [], hasLoad: false, hasData: false, dataRunner: "", loadHasParams: false, loadLazy: false, hasRespond: false, isVyx: false, pageArity: 0, paramsModule: "", dirPrefix: [], loadKind: "", layoutNone: false, err: "" }
+    let out = uiEmitTryFn(p, "0", "uiTry", "uiRender")
+    assert(match indexOf(out, "if segs[0] != ") { Some(_) => true, None => false })
+    assert(match indexOf(out, "urlDecode(segs[1])") { Some(_) => true, None => false })
 }

@@ -98,9 +98,29 @@ fn takeBlock(ls: Array<String>, i: Int64, known: Array<Int64>) -> Result<Taken, 
         return takeIndentedCode(ls, i)
     }
     if startsWith(t, "<") {
-        return Err("a block of raw HTML: " + trim(substring(t, 0, if t.byteLength < 60 { t.byteLength } else { 60 })))
+        return Err("a block of raw HTML: " + trim(substring(t, 0, boundaryCut(t))))
     }
     return takeParagraph(ls, i, known)
+}
+
+/// Where the sixty-byte diagnostic truncation may cut: the largest offset at
+/// or below 60 that is a character boundary, which is 60 whenever that is one.
+///
+/// A fixed offset inside a multi-byte character traps `substring` instead of
+/// returning the Err — RFC prose is full of em dashes, so a refusal naming a
+/// line that had one used to crash the export rather than refuse it. The same
+/// defect in `search.vyrn`'s `oneLine` got `boundaryAt`, and this is its twin:
+/// a UTF-8 continuation byte is `10xxxxxx`, so walking back off those lands on
+/// the lead byte of the character that would have been split.
+fn boundaryCut(t: String) -> Int64 {
+    if t.byteLength <= 60 {
+        return t.byteLength
+    }
+    let mut at = 60
+    while at > 0 && t[at] >= 128 && t[at] < 192 {
+        at = at - 1
+    }
+    return at
 }
 
 /// Whether the line at `i` opens a block that ends the paragraph before it. An
@@ -983,6 +1003,20 @@ test "a construct this renderer does not know fails the build" {
     assertEq(renderOk("``` `x` was removed ```"), "<p><code>`x` was removed</code></p>")
     // And the corpus itself does not trip it.
     assert(!refuses("# A\n\nsome **text** and `code`.\n\n- a\n- b\n"))
+}
+
+test "the raw-HTML refusal cuts on a character, never inside one" {
+    // The diagnostic truncates the offending line at sixty bytes, and RFC
+    // prose is full of em dashes: a cut that landed inside one used to trap
+    // `substring` instead of returning the Err. Fifty-nine ASCII bytes put
+    // the em dash's lead byte at 59, so its continuation bytes straddle 60.
+    let mut line = "<"
+    let mut n = 0
+    while n < 58 {
+        line = line + "a"
+        n = n + 1
+    }
+    assert(refuses(line + "— more"))
 }
 
 /// The rendering, or the trap that says a test wrote something the renderer

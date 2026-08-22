@@ -538,13 +538,24 @@ function invoke(exe, args) {
 }
 
 /**
- * Double-quote a single path/argument for the integrated terminal.
+ * Quote a single path/argument for the integrated terminal: PowerShell rules
+ * (double quotes, backtick escapes) on Windows, POSIX single quotes elsewhere.
  *
  * @param {string} s
  * @returns {string}
  */
 function quote(s) {
-  return `"${s}"`;
+  if (process.platform === "win32") {
+    // The integrated terminal on Windows is PowerShell (the `&` in `invoke`
+    // already assumes it). Inside its double-quoted strings a backtick, a `$`
+    // and a `"` are all live: each is escaped with a backtick, and a literal
+    // backtick doubles. Order matters — the backtick that escapes `"` is
+    // inserted after literal backticks have been doubled.
+    return `"${s.replace(/`/g, "``").replace(/\$/g, "`$").replace(/"/g, '`"')}"`;
+  }
+  // POSIX shells: single quotes keep every byte literal except `'` itself,
+  // which closes the string, is an escaped literal quote, and reopens.
+  return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 function deactivate() {}

@@ -37,11 +37,18 @@ function Fail($msg) { Write-Host "install-test: $msg" -ForegroundColor Red; exit
 
 function Cleanup {
   if ($server -and -not $server.HasExited) { $server.Kill() }
+  $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
   if ($null -ne $savedKind) {
-    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
     $key.SetValue('Path', $savedPath, $savedKind)
-    $key.Close()
+  } else {
+    # No Path value existed under HKCU\Environment before the run: whatever
+    # install.ps1 wrote there IS the temp directory wired into the user's
+    # PATH, so restoring prior state means deleting the value it created.
+    # The $false makes an already-absent value a silent no-op — which is what
+    # a failure before install.ps1 ever touched the registry looks like.
+    $key.DeleteValue('Path', $false)
   }
+  $key.Close()
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
 

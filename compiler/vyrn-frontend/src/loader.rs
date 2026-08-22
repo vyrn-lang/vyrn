@@ -1402,15 +1402,22 @@ fn load_modules(
             .iter()
             .chain(rt.routes.iter().map(|(b, _)| b))
             .any(|b| mentioned.contains(*b));
-        if !wanted {
-            continue;
-        }
         // A missing std root is not an error HERE: the diagnostic for a program
         // that needs the runtime and cannot find it belongs to whoever needs it,
         // not to a scan. Each engine refuses loudly at the call instead.
         let Ok(target) = resolve_spec(rt.spec, &root_key, opts) else {
             continue;
         };
+        // `wanted` gates the FETCH (a builtin's desugar pulled this module in),
+        // never the MARKING below: a module the program imports BY HAND is
+        // linked all the same, and its declarations are program-global — the
+        // reserved spellings apply to it whether it arrived by mention or by
+        // import. Marking only mention-linked modules left a hand-imported
+        // `std/json` with bare `JStr` beside a consumer's own `JStr`, two
+        // enums one variant name apart.
+        if !wanted && !states.contains_key(&target) {
+            continue;
+        }
         // The same rule one step further in, and RFC-0081 M2 is what made it
         // necessary: a spec can RESOLVE against a root that has no such file, and
         // `@str`/`print` mean nearly every program now reaches this loop. A
@@ -2359,13 +2366,18 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         .iter()
         .filter_map(|m| m.injected.map(|p| (m.key.clone(), p)))
         .collect();
-    let mut injected_variants: HashMap<String, HashMap<String, String>> = HashMap::new();
+    // module key -> (RESOLVED enum type spelling -> its variants' renames).
+    // Nested per ENUM so pass 2 can gate the extension on the importer
+    // actually importing that enum, instead of spraying every variant
+    // spelling over every hand importer of any decl of the module.
+    let mut injected_variants: HashMap<String, HashMap<String, HashMap<String, String>>> =
+        HashMap::new();
     for (key, prefix) in &injected {
         let m = modules
             .iter()
             .find(|m| &m.key == key)
             .expect("injected module");
-        let vars = injected_variants.entry(key.clone()).or_default();
+        let by_enum = injected_variants.entry(key.clone()).or_default();
         let mut names: Vec<String> = Vec::new();
         for t in &m.program.type_decls {
             if t.line == 0 {
@@ -2373,6 +2385,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
             }
             names.push(t.name.clone());
             if let Type::Enum(vs) = &t.base {
+                let vars = by_enum.entry(format!("{prefix}{}", t.name)).or_default();
                 for v in vs {
                     vars.insert(v.name.clone(), format!("{prefix}{}", v.name));
                     names.push(v.name.clone());
@@ -2417,6 +2430,17 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
             }
         }
     }
+
+    // Protocol-method surface names across every linked module. Method calls
+    // dispatch to impls BEFORE free functions, so when one of these names is
+    // also an aliased import's original, an argument-bearing call can never
+    // reach the imported decl — it is method sugar (`widget.render()`), not a
+    // forbidden direct use of the original.
+    let method_surface: HashSet<String> = modules
+        .iter()
+        .flat_map(|m| m.program.protocols.iter())
+        .flat_map(|p| p.methods.iter().map(|sig| sig.name.clone()))
+        .collect();
 
     // Pass 1: alias collision checks + decide co-naming renames.
     for m in modules.iter() {
@@ -2493,7 +2517,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
             .filter(|n| n.alias.is_none())
             .map(|n| n.original.as_str())
             .collect();
-        let refs = program_ref_names(&m.program);
+        let (refs, ambiguous_only) = program_ref_kinds(&m.program, true);
         for imp in &m.program.imports {
             for n in &imp.names {
                 if let Some(_alias) = &n.alias {
@@ -2501,6 +2525,15 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                     if !mine.contains(orig)
                         && !bare_imported.contains(orig.as_str())
                         && refs.contains(orig)
+                        // Method-sugar ambiguity (RFC-0022 vs. dispatch):
+                        // when the original's name is a protocol-method
+                        // surface name and the ONLY evidence is an
+                        // argument-bearing call, the use may be
+                        // `widget.render()` — which dispatches to impls
+                        // before any free function and can never reach the
+                        // imported decl. Rejecting it billed a legal method
+                        // call as a forbidden direct use.
+                        && !(ambiguous_only.contains(orig) && method_surface.contains(orig))
                     {
                         errors.push(with_file(
                             Diagnostic::error(
@@ -2590,7 +2623,13 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
             }
         }
         for f in &m.program.functions {
-            if !exported.contains(&f.name) {
+            // An `extern fn` is a host-ABI contract, not a namespace member:
+            // the backends emit the import under the SOURCE spelling and the
+            // JS host supplies it by that exact name (`extern:
+            // { vyrnRpcCall: .. }`). Renaming it severs the contract, so an
+            // extern is never a privacy-rename candidate even when several
+            // modules restate the same one (std/rpc's client stubs do).
+            if !f.is_extern && !exported.contains(&f.name) {
                 privates.push(f.name.clone());
             }
         }
@@ -2660,14 +2699,25 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
             // RFC-0078 M2b: a HAND importer of the injected module follows its
             // variant renames too. Importing an enum brings its variants, and those
             // are references rather than import names, so nothing above reaches
-            // them. Applied per importing module (not program-wide) so a module
-            // that does NOT import `std/json` keeps whatever `JObj` means to it.
+            // them. Gated on importing THE ENUM ITSELF (its resolved spelling):
+            // extending every importer of any decl blanket-rewrote a consumer's
+            // own same-spelled variant (`JStr`) into `json$JStr` — corruption of
+            // a perfectly legal private enum. A module that does NOT import the
+            // enum keeps whatever `JStr` means to it.
             if !imp.names.is_empty() {
-                if let Some(vars) = injected_variants.get(target) {
-                    rewrites
-                        .entry(m.key.clone())
-                        .or_default()
-                        .extend(vars.iter().map(|(k, v)| (k.clone(), v.clone())));
+                if let Some(by_enum) = injected_variants.get(target) {
+                    for n in &imp.names {
+                        let resolved = foreign_renames
+                            .get(&(target.clone(), n.original.clone()))
+                            .cloned()
+                            .unwrap_or_else(|| n.original.clone());
+                        if let Some(vars) = by_enum.get(&resolved) {
+                            rewrites
+                                .entry(m.key.clone())
+                                .or_default()
+                                .extend(vars.iter().map(|(k, v)| (k.clone(), v.clone())));
+                        }
+                    }
                 }
             }
         }
@@ -2703,8 +2753,11 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                     continue;
                 }
                 if let Type::Enum(vs) = &mut t.base {
+                    let Some(by_enum) = vars.get(&t.name) else {
+                        continue;
+                    };
                     for v in vs {
-                        if let Some(r) = vars.get(&v.name) {
+                        if let Some(r) = by_enum.get(&v.name) {
                             v.name = r.clone();
                         }
                     }
@@ -2723,7 +2776,11 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                 .flatten()
                 .map(|(n, _)| n.clone())
                 .collect();
-            rewrite_module_refs(&mut m.program, map, &ns_names);
+            // This module's own variants guard the rewrite (see
+            // [`RW_VARIANTS`]): an alias local or injected spelling that
+            // collides with one must not fold the constructor sites.
+            let variants = own_variant_names(&m.program);
+            rewrite_module_refs(&mut m.program, map, &ns_names, &variants);
         }
         for (imp, target) in m.program.imports.iter_mut().zip(&m.import_targets) {
             for n in &mut imp.names {
@@ -2825,6 +2882,15 @@ impl NsResolver<'_> {
                     m.params.iter().map(|pm| pm.name.clone()).collect();
                 self.walk_type_positions_fn(m, &locals.clone());
                 self.walk_block(&mut m.body, &mut locals);
+            }
+            // `ns.member` uses inside a place projection resolve like any
+            // other reference (RFC-0091 M2: a projection is an ordinary body
+            // the loader just never flattened).
+            for pl in &mut im.places {
+                let mut locals: HashSet<String> =
+                    pl.params.iter().map(|pm| pm.name.clone()).collect();
+                self.walk_type_positions_fn(pl, &locals.clone());
+                self.walk_block(&mut pl.body, &mut locals);
             }
         }
         for t in &mut p.type_decls {
@@ -3279,6 +3345,30 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     // batch into one diagnostic per module pair, at an import site in a real file.
     let mut clashes: Vec<(String, String, String)> = Vec::new();
 
+    // Names EVERY declaration of which is a non-exported `extern fn`, across
+    // two or more modules. Those duplicates are one host-ABI contract restated
+    // per module — std/rpc's generators plant `extern fn vyrnRpcCall` in every
+    // client stub — not a flat-namespace collision: renaming them away would
+    // sever the ABI, so instead they neither clash nor take part in the
+    // foreign-reference check, and the merge keeps a single copy.
+    let mut extern_totals: HashMap<String, (usize, usize)> = HashMap::new();
+    for m in &modules {
+        for f in &m.program.functions {
+            if !f.exported {
+                let e = extern_totals.entry(f.name.clone()).or_default();
+                e.0 += 1;
+                if f.is_extern {
+                    e.1 += 1;
+                }
+            }
+        }
+    }
+    let shared_externs: HashSet<String> = extern_totals
+        .into_iter()
+        .filter(|(_, (total, ext))| *ext == *total && *total >= 2)
+        .map(|(name, _)| name)
+        .collect();
+
     let mut register =
         |name: &str, module: &str, exported: bool, clashes: &mut Vec<(String, String, String)>| {
             // A reserved name never enters the flat namespace, and the reason is
@@ -3323,6 +3413,9 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
             // Impl-flattened methods carry mangled names (`P__Key__m`) that
             // cannot collide with user identifiers; register them anyway so
             // duplicate impls across modules collide loudly here.
+            if shared_externs.contains(&f.name) {
+                continue;
+            }
             register(&f.name, &m.key, f.exported, &mut clashes);
         }
         for p in &m.program.protocols {
@@ -3457,6 +3550,18 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
             .iter()
             .filter_map(|d| owner.get(d.as_str()).map(|(md, _)| md.as_str()))
             .collect();
+        // This module's own `extern fn` declarations (RFC-0012). A shared one
+        // (`shared_externs`) never entered the flat namespace, so without this
+        // set a stub calling its own `vyrnRpcCall` would read as an un-imported
+        // foreign reference. An extern declared here is a local host call by
+        // definition.
+        let my_externs: HashSet<&str> = m
+            .program
+            .functions
+            .iter()
+            .filter(|f| f.is_extern && !f.exported)
+            .map(|f| f.name.as_str())
+            .collect();
         let check_name = |name: &str, line: usize, what: &str, errors: &mut Vec<Diagnostic>| {
             // Resolve constructors/methods to their OWNING declarations. Either
             // map can hold several candidates — same-named protocol methods or
@@ -3464,6 +3569,11 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
             // use must pick one — so every candidate is tried before the use is
             // called foreign.
             let mut candidates: Vec<&(String, String)> = Vec::new();
+            // A private `extern fn` of THIS module resolves to its own copy,
+            // whatever the flat namespace decided about its name.
+            if my_externs.contains(name) {
+                return;
+            }
             if let Some(vs) = variant_enum.get(name) {
                 candidates.extend(vs);
             }
@@ -3565,6 +3675,21 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
             for n in type_names(&imp.ty) {
                 check_name(&n, imp.line, "type", &mut errors);
             }
+            // A projection's body is checked like any function's: a foreign
+            // reference inside it must be imported too.
+            for pl in &imp.places {
+                for c in fn_body_ref_names(pl) {
+                    check_name(&c.0, c.1, "function", &mut errors);
+                }
+                for p in &pl.params {
+                    for n in type_names(&p.ty) {
+                        check_name(&n, pl.line, "type", &mut errors);
+                    }
+                }
+                for n in type_names(&pl.ret) {
+                    check_name(&n, pl.line, "type", &mut errors);
+                }
+            }
         }
     }
 
@@ -3607,7 +3732,21 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     }
     let mut program = merged.expect("root module was loaded");
     program.type_decls.extend(extra_types);
-    program.functions.extend(extra_fns);
+    // One host-ABI declaration per shared-extern name (`shared_externs`): the
+    // modules carried identical copies, and emitting the wasm import twice
+    // would be pure waste. The root's copy (already in `program.functions`)
+    // or the first import order wins; they are interchangeable by definition.
+    let mut seen_externs: HashSet<String> = program
+        .functions
+        .iter()
+        .filter(|f| f.is_extern && !f.exported)
+        .map(|f| f.name.clone())
+        .collect();
+    program.functions.extend(
+        extra_fns
+            .into_iter()
+            .filter(|f| !(f.is_extern && !f.exported && !seen_externs.insert(f.name.clone()))),
+    );
     program.protocols.extend(extra_protocols);
     program.contracts.extend(extra_contracts);
     program.impls.extend(extra_impls);
@@ -3884,7 +4023,7 @@ fn scope_stmt(s: &Stmt, locals: &mut HashSet<String>, out: &mut Vec<(String, usi
             scope_block(body, &mut inner, out);
         }
         Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
-        Stmt::Expr(e) => scope_expr(e, 0, locals, out),
+        Stmt::Expr(e) => scope_expr(e, e.line(), locals, out),
         Stmt::Region { body, .. } => {
             let mut inner = locals.clone();
             scope_block(body, &mut inner, out);
@@ -3911,6 +4050,18 @@ fn scope_expr(e: &Expr, line: usize, locals: &HashSet<String>, out: &mut Vec<(St
                 }
             } else if !locals.contains(name) {
                 out.push((name.clone(), *line));
+                // `f(x)` is also exactly what method sugar `x.f()` arrives
+                // as. When the caller asked for it (`program_ref_kinds`),
+                // count this occurrence so a name seen ONLY here can be told
+                // apart from one that also appears as a variable, a type, or
+                // a zero-argument call — those cannot be method dispatch.
+                if !args.is_empty() {
+                    SCOPE_AMB.with(|a| {
+                        if let Some(amb) = a.borrow_mut().as_mut() {
+                            *amb.entry(name.clone()).or_default() += 1;
+                        }
+                    });
+                }
             }
             for a in args {
                 scope_expr(a, *line, locals, out);
@@ -4081,6 +4232,30 @@ fn ren<'a>(map: &'a HashMap<String, String>, n: &'a str) -> String {
     map.get(n).cloned().unwrap_or_else(|| n.to_string())
 }
 
+thread_local! {
+    /// The enum variant names the module a [`rewrite_module_refs`] call is
+    /// currently walking declares itself. A call spelled `V(x)` or a `match`
+    /// pattern `V(..)` whose `V` is one of these CONSTRUCTS the module's own
+    /// enum — it is not a reference to a same-spelled declaration, and
+    /// renaming it there corrupted variant constructions inside the renamed
+    /// module (a global/protocol may share a variant's spelling; a fn or type
+    /// cannot). Carried in a thread-local so the recursive rewrite family
+    /// keeps its signatures; set by [`rewrite_module_refs`], read by
+    /// [`rewrite_expr`].
+    static RW_VARIANTS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+/// Every enum variant name `p` declares itself.
+fn own_variant_names(p: &Program) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for t in &p.type_decls {
+        if let Type::Enum(vs) = &t.base {
+            out.extend(vs.iter().map(|v| v.name.clone()));
+        }
+    }
+    out
+}
+
 /// Rewrite every referenced type name in `ty` through `map`.
 fn rewrite_type(ty: &mut Type, map: &HashMap<String, String>) {
     match ty {
@@ -4153,7 +4328,7 @@ fn rewrite_type(ty: &mut Type, map: &HashMap<String, String>) {
 /// is the pass that folds them back. One rewriter, so a generated program and an
 /// imported one resolve names by the same code.
 pub(crate) fn rewrite_names(p: &mut Program, map: &HashMap<String, String>) {
-    rewrite_module_refs(p, map, &HashSet::new());
+    rewrite_module_refs(p, map, &HashSet::new(), &HashSet::new());
 }
 
 fn rewrite_expr(
@@ -4167,7 +4342,10 @@ fn rewrite_expr(
             let ns_receiver =
                 matches!(args.first(), Some(Expr::Var { name: h, .. }) if ns.contains(h));
             let shadowed = locals.contains(name);
-            if !ns_receiver && !shadowed {
+            // A constructor of THIS module's own enum (see [`RW_VARIANTS`])
+            // is reached by this spelling, not by any declaration's name.
+            let ctor = RW_VARIANTS.with(|v| v.borrow().contains(name.as_str()));
+            if !ns_receiver && !shadowed && !ctor {
                 *name = ren(map, name);
             }
             for a in args {
@@ -4210,7 +4388,12 @@ fn rewrite_expr(
             for arm in arms {
                 let mut inner = locals.clone();
                 if let Pattern::Variant(v, binds) = &mut arm.pattern {
-                    *v = ren(map, v);
+                    // A `match` arm always constructs — never a declaration
+                    // reference (see [`RW_VARIANTS`]).
+                    let ctor = RW_VARIANTS.with(|w| w.borrow().contains(v.as_str()));
+                    if !ctor {
+                        *v = ren(map, v);
+                    }
                     for b in binds {
                         inner.insert(b.clone());
                     }
@@ -4396,10 +4579,18 @@ fn rewrite_function(f: &mut Function, map: &HashMap<String, String>, ns: &HashSe
 /// program through `map`. Declaration names are left alone — a separate step
 /// renames a decl when a foreign name must be freed for a co-named local stub.
 /// `ns` is the module's namespace-binding names (see [`rewrite_expr`]).
-fn rewrite_module_refs(p: &mut Program, map: &HashMap<String, String>, ns: &HashSet<String>) {
+fn rewrite_module_refs(
+    p: &mut Program,
+    map: &HashMap<String, String>,
+    ns: &HashSet<String>,
+    variants: &HashSet<String>,
+) {
     if map.is_empty() {
         return;
     }
+    // The variant guard rides a thread-local so the recursive rewrite family
+    // keeps its signatures (see [`RW_VARIANTS`]).
+    RW_VARIANTS.with(|v| *v.borrow_mut() = variants.clone());
     for f in &mut p.functions {
         rewrite_function(f, map, ns);
     }
@@ -4408,6 +4599,14 @@ fn rewrite_module_refs(p: &mut Program, map: &HashMap<String, String>, ns: &Hash
         rewrite_type(&mut im.ty, map);
         for m in &mut im.methods {
             rewrite_function(m, map, ns);
+        }
+        // A `place` projection is never flattened into `Program::functions`
+        // (RFC-0091 M2), so without this walk a rename never reached its
+        // body: `place nth(..) { yield self.vals[clamp(i)] }` kept calling
+        // `clamp` after clamp was renamed, and an alias folding skipped the
+        // projection's prologue entirely.
+        for pl in &mut im.places {
+            rewrite_function(pl, map, ns);
         }
     }
     for t in &mut p.type_decls {
@@ -4466,6 +4665,9 @@ fn rewrite_module_refs(p: &mut Program, map: &HashMap<String, String>, ns: &Hash
     for b in &mut p.benches {
         rewrite_block(&mut b.body, map, ns, &mut HashSet::new());
     }
+    RW_VARIANTS.with(|v| {
+        v.borrow_mut().clear();
+    });
 }
 
 // Every reference name (types and expression callees/variables/variants) used
@@ -4483,10 +4685,25 @@ thread_local! {
     /// walking, so [`scope_expr`] can tell method sugar (`ns.f(x)`, recorded
     /// qualified) from a flat call of the same spelling (recorded bare).
     static SCOPE_NS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// While [`program_ref_kinds`] walks, every name recorded as an
+    /// argument-bearing call callee lands here with its occurrence count. A
+    /// call spelled `f(x)` may be protocol-method sugar (`x.f()` arrives as
+    /// exactly that call), so such evidence alone cannot prove a flat foreign
+    /// use of `f`. `None` while other walkers run.
+    static SCOPE_AMB: RefCell<Option<HashMap<String, usize>>> = const { RefCell::new(None) };
 }
 
 fn program_ref_names(p: &Program) -> HashSet<String> {
+    program_ref_kinds(p, false).0
+}
+
+/// [`program_ref_names`] plus the set of names whose EVERY occurrence was an
+/// argument-bearing call callee. With `split_ambiguous` the walk also counts
+/// occurrences per name, so a caller can tell "only ever a plausible method
+/// dispatch" from "also a variable, a type, or a zero-argument call".
+fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, HashSet<String>) {
     let mut out: HashSet<String> = HashSet::new();
+    let mut totals: HashMap<String, usize> = HashMap::new();
     // The walker tells method sugar (`ns.f(x)`) from a flat `f(x)` by whether
     // the receiver names one of THIS module's namespaces, so the set travels
     // through the same thread-local the walker reads.
@@ -4497,60 +4714,106 @@ fn program_ref_names(p: &Program) -> HashSet<String> {
             .filter_map(|i| i.namespace.clone())
             .collect()
     });
+    SCOPE_AMB.with(|s| {
+        *s.borrow_mut() = split_ambiguous.then(HashMap::new);
+    });
     fn add_scoped_block<I: Iterator<Item = String>>(
         b: &Block,
         params: I,
         out: &mut HashSet<String>,
+        totals: &mut HashMap<String, usize>,
     ) {
         let mut locals: HashSet<String> = params.collect();
         let mut refs = Vec::new();
         scope_block(b, &mut locals, &mut refs);
         for (n, _) in refs {
+            *totals.entry(n.clone()).or_default() += 1;
             out.insert(n);
         }
     }
-    let add_type = |t: &Type, out: &mut HashSet<String>| {
+    let add_type = |t: &Type, out: &mut HashSet<String>, totals: &mut HashMap<String, usize>| {
         for n in type_names(t) {
+            *totals.entry(n.clone()).or_default() += 1;
             out.insert(n);
         }
     };
     for f in &p.functions {
         for pm in &f.params {
-            add_type(&pm.ty, &mut out);
+            add_type(&pm.ty, &mut out, &mut totals);
         }
-        add_type(&f.ret, &mut out);
-        add_scoped_block(&f.body, f.params.iter().map(|p| p.name.clone()), &mut out);
+        add_type(&f.ret, &mut out, &mut totals);
+        add_scoped_block(
+            &f.body,
+            f.params.iter().map(|p| p.name.clone()),
+            &mut out,
+            &mut totals,
+        );
     }
     for im in &p.impls {
+        *totals.entry(im.protocol.clone()).or_default() += 1;
         out.insert(im.protocol.clone());
-        add_type(&im.ty, &mut out);
+        add_type(&im.ty, &mut out, &mut totals);
         for m in &im.methods {
             for pm in &m.params {
-                add_type(&pm.ty, &mut out);
+                add_type(&pm.ty, &mut out, &mut totals);
             }
-            add_type(&m.ret, &mut out);
-            add_scoped_block(&m.body, m.params.iter().map(|p| p.name.clone()), &mut out);
+            add_type(&m.ret, &mut out, &mut totals);
+            add_scoped_block(
+                &m.body,
+                m.params.iter().map(|p| p.name.clone()),
+                &mut out,
+                &mut totals,
+            );
+        }
+        // A `place` projection is never flattened into `Program::functions`
+        // (RFC-0091 M2), so without this walk its references hid from the
+        // RFC-0022 check — and from every rename below.
+        for pl in &im.places {
+            for pm in &pl.params {
+                add_type(&pm.ty, &mut out, &mut totals);
+            }
+            add_type(&pl.ret, &mut out, &mut totals);
+            add_scoped_block(
+                &pl.body,
+                pl.params.iter().map(|p| p.name.clone()),
+                &mut out,
+                &mut totals,
+            );
         }
     }
     for t in &p.type_decls {
-        add_type(&t.base, &mut out);
+        add_type(&t.base, &mut out, &mut totals);
     }
     for g in &p.globals {
         if let Some(t) = &g.ty {
-            add_type(t, &mut out);
+            add_type(t, &mut out, &mut totals);
         }
     }
     for t in &p.tests {
-        add_scoped_block(&t.body, std::iter::empty(), &mut out);
+        add_scoped_block(&t.body, std::iter::empty(), &mut out, &mut totals);
     }
     for b in &p.benches {
-        add_scoped_block(&b.body, std::iter::empty(), &mut out);
+        add_scoped_block(&b.body, std::iter::empty(), &mut out, &mut totals);
     }
     // Method sugar recorded the qualified spelling under its namespace; a
     // flat use of the same spelling stays bare. The walker knew which was
     // which through `SCOPE_NS`, set above and cleared here.
     SCOPE_NS.with(|s| s.borrow_mut().clear());
-    out
+    let amb = SCOPE_AMB.with(|s| s.borrow_mut().take().unwrap_or_default());
+    // Ambiguity-only names STAY in `out`: removing them here would silence
+    // every consumer, including the RFC-0022 hidden-original check that must
+    // still fire when the name is not a protocol-method surface spelling. The
+    // set travels alongside so the one caller with the method-surface context
+    // can apply the narrower skip itself.
+    let mut ambiguous_only = HashSet::new();
+    if split_ambiguous {
+        for (n, c) in amb {
+            if totals.get(&n).copied() == Some(c) {
+                ambiguous_only.insert(n);
+            }
+        }
+    }
+    (out, ambiguous_only)
 }
 
 /// Rename a top-level *declaration* (its defining name) from `from` to `to` in
@@ -4572,6 +4835,18 @@ fn rename_decl_in_module(p: &mut Program, from: &str, to: &str, ns: &HashSet<Str
             pr.name = to.to_string();
         }
     }
+    let own_variants = own_variant_names(p);
+    // When the spelling being renamed IS one of this module's own enum
+    // variants — an injected module's reserved-spelling pass renaming `JStr`
+    // to `json$JStr` — the variant positions are the TARGETS of the rename
+    // and must follow it. The guard exists for the other direction: a
+    // non-variant decl (a private global, a protocol) sharing a variant's
+    // spelling, whose rename must leave the constructions alone.
+    let protected = if own_variants.contains(from) {
+        HashSet::new()
+    } else {
+        own_variants
+    };
     for c in &mut p.contracts {
         if c.name == from {
             c.name = to.to_string();
@@ -4584,7 +4859,7 @@ fn rename_decl_in_module(p: &mut Program, from: &str, to: &str, ns: &HashSet<Str
     }
     let map: HashMap<String, String> =
         std::iter::once((from.to_string(), to.to_string())).collect();
-    rewrite_module_refs(p, &map, ns);
+    rewrite_module_refs(p, &map, ns, &protected);
 }
 
 #[cfg(test)]
@@ -4724,6 +4999,7 @@ mod tests {
             "std/strpred.vyrn",
             include_str!("../../../std/strpred.vyrn"),
         ),
+        ("std/hash.vyrn", include_str!("../../../std/hash.vyrn")),
     ];
 
     fn run_multi(root: &str, files: &[(&str, &str)]) -> Result<i64, String> {
@@ -5676,6 +5952,116 @@ mod tests {
                     fn main() -> Int64 { return 0 }";
         let e = load_err(root, &[("a.vyrn", a), ("b.vyrn", b)]);
         assert!(e.contains("bound twice"), "{e}");
+    }
+    // ---- round-two regressions --------------------------------------------
+
+    #[test]
+    fn bare_expression_statement_diagnoses_at_its_own_line() {
+        // A side-effect statement's references used to be seeded with line 0,
+        // so an un-imported foreign call reported at the top of the module
+        // instead of at the call site.
+        let lib = "export fn other() -> Int64 { return 1 }";
+        let root = "import { helper } from \"./lib\"\n\
+                    fn main() -> Int64 {\n\
+                        helper()\n\
+                        other()\n\
+                        return 0\n\
+                    }";
+        let ds = load(root, "main.vyrn", &opts(), &map(&[("lib.vyrn", lib)]))
+            .expect_err("expected a load error");
+        let hit = ds
+            .iter()
+            .find(|d| d.message.contains("`other`") && d.message.contains("not imported"));
+        let d = hit.expect("the un-imported reference must be diagnosed");
+        assert_eq!(d.line, 4, "diagnostic must sit on the call site: {d:?}");
+    }
+
+    #[test]
+    fn shared_private_externs_keep_their_host_abi_spelling() {
+        // Two stub modules restating the same private `extern fn` are one
+        // host-ABI contract, not a collision: neither may be renamed (the
+        // backends emit the import under the SOURCE spelling and the JS host
+        // supplies it by that name), the merged program keeps a single copy,
+        // and each stub calls its own without an import.
+        let rpc_a = "extern fn vyrnRpcCall(x: Int64) -> Int64 \
+                     export fn pingA(x: Int64) -> Int64 { return vyrnRpcCall(x) }";
+        let rpc_b = "extern fn vyrnRpcCall(x: Int64) -> Int64 \
+                     export fn pingB(x: Int64) -> Int64 { return vyrnRpcCall(x) }";
+        let root = "import { pingA } from \"./rpc_a\" \
+                    import { pingB } from \"./rpc_b\" \
+                    fn main() -> Int64 { return 0 }";
+        let program = load(
+            root,
+            "main.vyrn",
+            &opts(),
+            &map(&[("rpc_a.vyrn", rpc_a), ("rpc_b.vyrn", rpc_b)]),
+        )
+        .unwrap();
+        let externs: Vec<&str> = program
+            .functions
+            .iter()
+            .filter(|f| f.is_extern)
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(externs, vec!["vyrnRpcCall"], "one copy, source spelling");
+    }
+
+    #[test]
+    fn aliased_import_does_not_reject_a_protocol_method_call() {
+        // `widget.render()` arrives as the call `render(widget)` — exactly the
+        // shape of a forbidden direct use of an aliased import's original.
+        // When `render` is also a protocol-method surface name, that call
+        // dispatches to impls BEFORE any free function and can never reach the
+        // imported decl, so the hidden-original check must not fire.
+        let ui = "export fn render(w: Int64) -> Int64 { return w }";
+        let gfx = "export protocol P { fn render(self) -> Int64 } \
+                   export type G = { v: Int64 } \
+                   impl P for G { fn render(self) -> Int64 { return self.v } }";
+        let root = "import { render as draw } from \"./ui\" \
+                    import { G } from \"./gfx\" \
+                    fn main() -> Int64 { let g: G = G { v: 3 } return g.render() }";
+        let loaded = load(
+            root,
+            "main.vyrn",
+            &opts(),
+            &map(&[("ui.vyrn", ui), ("gfx.vyrn", gfx)]),
+        );
+        assert!(
+            loaded.is_ok(),
+            "a method-sugar call must not read as a direct use: {:?}",
+            loaded
+                .err()
+                .map(|ds| ds.iter().map(|d| d.message.clone()).collect::<Vec<_>>())
+        );
+    }
+
+    #[test]
+    fn hand_import_of_a_non_enum_decl_keeps_own_variant_spellings() {
+        // Importing ANY decl of an injected module used to spray ALL of its
+        // variant renames over the importer — corrupting a legal private enum
+        // whose variant happens to share a spelling (`JStr`). The renames ride
+        // on importing THE ENUM itself; importing only `emit` leaves the
+        // consumer's own `JStr` alone.
+        let root = "import { emit } from \"std/json\" \
+                    type T = | JStr(Int64) | JEnd \
+                    fn main() -> Int64 { \
+                        let t: T = JStr(41) \
+                        return match t { JStr(n) => n, JEnd => 0 } \
+                    }";
+        assert_eq!(run_multi(root, RT_FILES).unwrap(), 41);
+    }
+
+    #[test]
+    fn importing_the_injected_enum_still_folds_its_variants() {
+        // The other half of the gate: an importer of the enum itself follows
+        // the variant renames, so its own same-spelled variant is NOT created
+        // and the folded constructor runs std/json's code.
+        let root = "import { Json, emit } from \"std/json\" \
+                    fn main() -> Int64 { \
+                        let j: Json = JStr(\"hi\") \
+                        return if emit(j).byteLength == 4 { 1 } else { 0 } \
+                    }";
+        assert_eq!(run_multi(root, RT_FILES).unwrap(), 1);
     }
 }
 

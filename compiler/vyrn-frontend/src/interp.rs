@@ -587,6 +587,19 @@ pub fn gen_code_splice(val: &Val, ctx: i64) -> Result<Vec<CodePiece>, String> {
     })
 }
 
+/// Shortest-roundtrip float digits as PLAIN decimal text. Rust's `Display`
+/// formatting never uses an exponent (`Debug` switches to scientific notation
+/// for magnitudes ≥ 1e16 or < 1e-4, which the Vyrn lexer cannot read), and an
+/// integral value gets `.0` appended so the text lexes as a float literal
+/// (`digits '.' digits`) rather than an integer.
+fn splice_float(digits: String) -> String {
+    if digits.contains('.') {
+        digits
+    } else {
+        format!("{digits}.0")
+    }
+}
+
 /// Apply the RFC-0054 splice rule for a value in a hole of grammatical context
 /// `ctx` (`0` expression, `1` identifier fragment, `2` standalone identifier /
 /// type), yielding the code pieces to splice. A `String` is DATA, never code:
@@ -612,8 +625,8 @@ fn code_splice(val: &Val, ctx: i64) -> Result<Vec<CodePiece>, Ctrl> {
             // `NaN`/`inf` do not lex as Vyrn numbers (there is no literal for
             // either), so a computed non-finite value fails here, at the
             // boundary — not downstream as a module that cannot parse.
-            Val::Float(f) if f.is_finite() => text(format!("{f:?}")),
-            Val::Float32(f) if f.is_finite() => text(format!("{f:?}")),
+            Val::Float(f) if f.is_finite() => text(splice_float(format!("{f}"))),
+            Val::Float32(f) if f.is_finite() => text(splice_float(format!("{f}"))),
             Val::Float(f) => {
                 Err(format!("cannot splice non-finite float {f} into a code quote").into())
             }
@@ -7116,6 +7129,12 @@ mod tests {
                     "std/num.vyrn".to_string(),
                     include_str!("../../../std/num.vyrn").to_string(),
                 ),
+                // RFC-0078 M4b(2) follow-on: `jsonread`'s duplicate-key set
+                // hashes keys, so `std/hash` is part of the reader's closure.
+                (
+                    "std/hash.vyrn".to_string(),
+                    include_str!("../../../std/hash.vyrn").to_string(),
+                ),
             ]
             .into_iter()
             .collect(),
@@ -7963,10 +7982,25 @@ mod tests {
             }
             assert!(code_splice(&Val::Float32(v as f32), 0).is_err());
         }
-        // Finite floats still splice (Debug formatting, shortest round-trip).
+        // Finite floats splice as plain decimal, shortest round-trip: never the
+        // scientific notation Debug emits past 1e16 / below 1e-4 (the lexer
+        // accepts no exponent), and always with a fraction so it lexes as a
+        // float literal rather than an integer.
         assert_eq!(
             code_splice(&Val::Float(1.5), 0).unwrap(),
             vec![CodePiece::Text("1.5".to_string())]
+        );
+        assert_eq!(
+            code_splice(&Val::Float(1e20), 0).unwrap(),
+            vec![CodePiece::Text("100000000000000000000.0".to_string())]
+        );
+        assert_eq!(
+            code_splice(&Val::Float(1e-7), 0).unwrap(),
+            vec![CodePiece::Text("0.0000001".to_string())]
+        );
+        assert_eq!(
+            code_splice(&Val::Float32(2.0f32), 0).unwrap(),
+            vec![CodePiece::Text("2.0".to_string())]
         );
     }
 

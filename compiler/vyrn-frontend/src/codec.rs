@@ -25,7 +25,7 @@
 //! trapping.
 
 use crate::ast::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ---------------------------------------------------------------------------
 // exact-integer JSON value
@@ -193,7 +193,11 @@ impl Parser<'_> {
     fn obj(&mut self) -> Result<JsonV, ParseError> {
         self.i += 1; // '{'
         let mut out = Vec::new();
-        self.ws();
+        // Names seen so far — a side-set, so the duplicate check below stays
+        // linear. This parser reads attacker-influenced files (`vyrn.json` is
+        // found by walking UP from the working directory), and an O(n²) scan
+        // over ~100k keys is a hang on every command run under such a file.
+        let mut seen = HashSet::new();
         if self.b.get(self.i) == Some(&b'}') {
             self.i += 1;
             return Ok(JsonV::Obj(out));
@@ -223,7 +227,7 @@ impl Parser<'_> {
             // parser's role is to agree with the shipped reader: `std/jsonread`
             // and [`crate::schema`] refuse a duplicate outright, so first-wins
             // `JsonV::get` never gets the chance to hide one.
-            if out.iter().any(|(prev, _)| prev == &k) {
+            if !seen.insert(k.clone()) {
                 return Err(ParseError(format!(
                     "`{k}` is defined twice at position {}",
                     self.i

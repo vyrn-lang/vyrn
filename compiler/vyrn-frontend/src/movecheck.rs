@@ -542,6 +542,7 @@ fn run(program: &Program, want: Want) -> Run {
         lambda_escapes: RefCell::new(Vec::new()),
         arm_binders: RefCell::new(Vec::new()),
         call_keeps: std::cell::Cell::new(None),
+        continue_seen: std::cell::Cell::new(false),
         sites: (want == Want::Sites).then(|| RefCell::new(Vec::new())),
         nodes: RefCell::new(Scopes::new(HashMap::new())),
         lets: (want == Want::Lets).then(|| RefCell::new(HashMap::new())),
@@ -735,6 +736,14 @@ struct MoveCheck<'a> {
     /// escapes when the parameter is `consume`, because a kept closure's
     /// captures leave the frame with it (RFC-0037).
     call_keeps: std::cell::Cell<Option<bool>>,
+    /// Set when the walk under a loop body reached a `continue`. `continue`
+    /// starts the NEXT iteration rather than leaving the loop, so it must not
+    /// count as the divergence [`MoveCheck::check_loop_reuse`] may skip on —
+    /// a body every path of which LEAVES (`break`/`return`/`panic`) runs at
+    /// most once; one that continues does not. Each loop saves and resets it
+    /// around its body walk, so an inner loop's `continue` stays the inner
+    /// loop's.
+    continue_seen: std::cell::Cell<bool>,
     /// Where recorded [`OwningSite`]s go, or `None` on the ordinary check path —
     /// which is what keeps a build and a keystroke paying for nothing.
     sites: Option<RefCell<Vec<OwningSite>>>,
@@ -1893,7 +1902,31 @@ impl MoveCheck<'_> {
         // caller still holds. [`place_path`] answers `None` at the `@at(..)`
         // call, so `element_path` is what reaches it.
         let Some((root, path)) = place_path(arg).or_else(|| element_path(arg)) else {
-            return Ok(());
+            // An `if`/`match` expression yields one of its arm values, and
+            // that value IS a projection of a place this frame may own —
+            // `sink(if c { d.title } else { "" })` hands `d`'s field to a
+            // `consume` parameter exactly as the direct spelling would. Each
+            // arm answers the question its own spelling gets.
+            return match arg {
+                Expr::IfExpr {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    self.check_handover(then_branch, callee, line)?;
+                    match else_branch {
+                        Some(b) => self.check_handover(b, callee, line),
+                        None => Ok(()),
+                    }
+                }
+                Expr::Match { arms, .. } => {
+                    for a in arms {
+                        self.check_handover(&a.body, callee, line)?;
+                    }
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
         };
         if path != root && self.is_module_state(&root) {
             return Err(menu(
@@ -2856,7 +2889,15 @@ impl MoveCheck<'_> {
             }
             // `break`/`continue` (RFC-0060) consume nothing but terminate the
             // path — code after them in the same block is unreachable.
-            Stmt::Break { .. } | Stmt::Continue { .. } => Ok(true),
+            Stmt::Break { .. } => Ok(true),
+            // A `continue` also diverges here, but it jumps to the NEXT
+            // iteration: the loop body re-runs. Marking it is what stops the
+            // loop arms from counting it as the "runs at most once"
+            // divergence that skips the next-iteration reuse check.
+            Stmt::Continue { .. } => {
+                self.continue_seen.set(true);
+                Ok(true)
+            }
             Stmt::If {
                 cond,
                 then_block,
@@ -2985,8 +3026,14 @@ impl MoveCheck<'_> {
                 // in-loop map and run the same next-iteration check.
                 let mut body_c = consumed.clone();
                 self.expr(cond, &mut body_c, scope)?;
+                let outer_continue = self.continue_seen.replace(false);
                 let body_div = self.block(body, &mut body_c, scope);
-                self.check_loop_reuse(consumed, &body_c, scope, body_div)?;
+                // A `continue` reaches the top again, so a consumption on its
+                // path is still a next-iteration reuse; only a body every
+                // path of which LEAVES the loop runs at most once.
+                let leaves_loop = body_div && !self.continue_seen.get();
+                self.continue_seen.set(outer_continue);
+                self.check_loop_reuse(consumed, &body_c, scope, leaves_loop)?;
                 for (k, v) in body_c {
                     consumed.or_insert(k, v);
                 }
@@ -3072,12 +3119,18 @@ impl MoveCheck<'_> {
                 if key != 0 {
                     self.nodes.borrow_mut().bind(var, key);
                 }
+                let outer_continue = self.continue_seen.replace(false);
                 let body_div = self.block(body, &mut body_c, scope);
                 self.exit();
                 // The loop variable is fresh on every iteration, so a move of it
                 // is not a move of anything the enclosing scope can still name.
                 body_c.remove(var);
-                self.check_loop_reuse(consumed, &body_c, scope, body_div)?;
+                // A `continue` reaches the top of the NEXT iteration, so it is
+                // not the runs-at-most-once divergence the reuse check may
+                // skip on — see the `while` arm.
+                let leaves_loop = body_div && !self.continue_seen.get();
+                self.continue_seen.set(outer_continue);
+                self.check_loop_reuse(consumed, &body_c, scope, leaves_loop)?;
                 for (k, v) in body_c {
                     consumed.or_insert(k, v);
                 }
@@ -3188,6 +3241,34 @@ impl MoveCheck<'_> {
                             format!(
                                 "delete the `drop` — the place that owns it releases it \
                                  (RFC-0089 rule 4)"
+                            ),
+                        ],
+                    ));
+                }
+                // A PARTIAL take left a hole in the binding (RFC-0093): the
+                // taken place belongs to whoever received it, and `drop`
+                // reclaims storage BY TYPE — it cannot be told to skip the
+                // places a take handed away. Dropping here would free what
+                // the receiver still holds, so the spelling is refused.
+                if let Some((path, c)) = consumed
+                    .overlapping(name)
+                    .find(|(k, c)| k.as_str() != name && c.hole)
+                {
+                    return Err(menu(
+                        *line,
+                        format!(
+                            "`{name}` may not be dropped — `{path}` was taken out of it on \
+                             line {}, and `drop` releases the whole binding",
+                            c.line
+                        ),
+                        vec![
+                            format!(
+                                "write `{path}` back before the `drop`, so the binding is \
+                                 whole again"
+                            ),
+                            format!(
+                                "delete the `drop` — the parts still here are released when \
+                                 the block exits"
                             ),
                         ],
                     ));
@@ -3365,7 +3446,15 @@ impl MoveCheck<'_> {
             return Ok(());
         }
         for (k, c) in body_c {
-            if !consumed.contains_key(k) && Self::in_scope(scope, k) {
+            // RFC-0093 keys a take of a projection by its dotted PATH, but
+            // the frames of `scope` hold binding NAMES: after `consume
+            // er.node`, `k` is `"er.node"`, which no frame contains, so a
+            // full-path test silently skipped every partial take. Membership
+            // is asked of the key's ROOT — but a key carrying a `[` is
+            // RFC-0082's place desugar, one binding and not a path, and it
+            // relates to nothing but itself (the same sentence [`under`]
+            // says).
+            if !k.contains('[') && !consumed.contains_key(k) && Self::in_scope(scope, root_of(k)) {
                 let (line, consumer) = (c.line, &c.by);
                 return Err(menu(
                     line,
@@ -3715,7 +3804,8 @@ impl MoveCheck<'_> {
                 // parameter owns what it is handed and can store it, and a
                 // stored closure's captures leave the frame with it. Only a
                 // parameter that provably borrows keeps the old fast path.
-                let escapes = self.call_keeps.replace(None).unwrap_or(true);
+                let outer_keeps = self.call_keeps.replace(None);
+                let escapes = outer_keeps.unwrap_or(true);
                 self.lambda_escapes.borrow_mut().push(escapes);
                 scope.push(HashSet::new());
                 self.enter();
@@ -3731,12 +3821,36 @@ impl MoveCheck<'_> {
                 let r = match body {
                     LambdaBody::Expr(inner) => self.expr(inner, consumed, scope),
                     LambdaBody::Block(b) => {
-                        self.block(b, consumed, scope);
+                        // A CLONE, like every other nested block's. Sharing
+                        // the enclosing map by `&mut` let a shadowing `let`
+                        // inside the block run `revive` on it and erase the
+                        // outer binding's consumption record — the exact bug
+                        // `Stmt::Region`'s clone fixed.
+                        let mut inner = consumed.clone();
+                        self.block(b, &mut inner, scope);
+                        // Consumption of an OUTER binding inside the lambda
+                        // survives it; anything the lambda's own frame
+                        // declares — its parameters and its lets — dies with
+                        // the frame.
+                        let mut local = std::collections::HashSet::new();
+                        local.extend(params.iter().cloned());
+                        declared_in(b, &mut local);
+                        for (k, v) in inner {
+                            let root = k.split('.').next().unwrap_or(&k).to_string();
+                            if !local.contains(&root) {
+                                consumed.or_insert(k, v);
+                            }
+                        }
                         Ok(())
                     }
                 };
                 self.lambda_base.borrow_mut().pop();
                 self.lambda_escapes.borrow_mut().pop();
+                // Whatever the body's nested walks left in the cell, the
+                // enclosing context's answer is restored: a lambda walked as
+                // one argument must not decide whether a SIBLING lambda in a
+                // later argument of the same call escapes.
+                self.call_keeps.set(outer_keeps);
                 self.exit();
                 scope.pop();
                 r
@@ -4946,6 +5060,84 @@ mod tests {
         assert!(e.contains("inside a loop"), "{e}");
     }
 
+    #[test]
+    fn rejects_drop_after_a_partial_take() {
+        // F2-049: the taken field belongs to whoever received it, and `drop`
+        // reclaims storage by TYPE — freeing the whole binding here frees
+        // what the receiver still holds.
+        let src = "type T = { id: Int64, name: String }; \
+                   fn main() -> Int64 { let t = T { id: 1, name: \"n\" }; \
+                                      consume t.name; drop t; return 0; }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("may not be dropped"), "{e}");
+    }
+
+    #[test]
+    fn rejects_consume_before_a_trailing_continue() {
+        // F2-052: `continue` starts the NEXT iteration, so the body re-runs —
+        // it is not the runs-at-most-once divergence the reuse check skips on.
+        let src = "type T = { id: Int64 }; \
+                   fn take(t: consume T) -> Int64 { return t.id; } \
+                   fn main() -> Int64 { let x = T { id: 1 }; \
+                                      for i in [1, 2] { let a = take(x); continue; } \
+                                      return 0; }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("inside a loop"), "{e}");
+    }
+
+    #[test]
+    fn rejects_partial_take_repeated_across_iterations() {
+        // F2-053: a take of a projection is keyed by its dotted PATH, which
+        // no scope frame contains — the reuse check must ask the key's ROOT.
+        let src = "type T = { node: String, rest: Int64 }; \
+                   fn main() -> Int64 { let er = T { node: \"n\", rest: 0 }; \
+                                      for i in [1, 2] { consume er.node } return 0; }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("inside a loop"), "{e}");
+    }
+
+    #[test]
+    fn allows_partial_take_of_the_loop_variable() {
+        // The loop variable is fresh every iteration, so taking a projection
+        // of it each turn is legal — the root of `u.name` is not in scope and
+        // the reuse check must keep skipping it.
+        let src = "type E = { name: String, id: Int64 }; \
+                   fn main() -> Int64 { let mut out = 0; \
+                                      let xs = [E { name: \"a\", id: 1 }, E { name: \"b\", id: 2 }]; \
+                                      for u in consume xs { consume u.name } return out; }";
+        assert!(run(src).is_ok());
+    }
+
+    #[test]
+    fn lambda_block_shadowing_let_does_not_revive_a_moved_binding() {
+        // F2-051: a lambda block body shares the enclosing map no more — a
+        // shadowing `let` inside it must not erase the outer consumption.
+        let src = "type T = { id: Int64 }; \
+                   fn make() -> T { return T { id: 1 }; } \
+                   fn take(t: consume T) -> Int64 { return t.id; } \
+                   fn main() -> Int64 { let s = make(); let n = take(s); \
+                                      let g = |x| { let s = 0; x + s }; \
+                                      return g(n) + take(s); }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("already consumed"), "{e}");
+    }
+
+    #[test]
+    fn rejects_if_expr_arm_handing_a_field_to_a_consume_param() {
+        // F2-050: the value an `if` expression yields is a projection of a
+        // place this frame owns, and it answers the same question its direct
+        // spelling would.
+        let src = "type T = { title: String, id: Int64 }; \
+                   fn sink(s: consume String) -> Int64 { return 0; } \
+                   fn main() -> Int64 { let d = T { title: \"t\", id: 1 }; \
+                                      let r = sink(if 1 > 0 { d.title } else { \"\" }); \
+                                      return r; }";
+        let e = run(src).unwrap_err();
+        assert!(
+            e.contains("may not be passed to a `consume` parameter"),
+            "{e}"
+        );
+    }
     #[test]
     fn spawn_applies_consume_capabilities() {
         // `spawn take(x)` moves x across the task boundary; a second use is a

@@ -142,15 +142,23 @@ pub fn read(gen_source: &str) -> Vec<MappedSymbol> {
 }
 
 /// Whether `file` is the origin file `key` names, comparing as the loader keys
-/// modules: slash-normalized, case-insensitively on the first character (a
-/// Windows drive letter reaches the LSP in either case).
+/// modules: slash-normalized, and case-insensitively on Windows — the whole
+/// path, not just the drive letter. `OriginMaps::norm_path_key` lowercases
+/// every LSP-side key (`file:///n%3A/…` arrives lower-cased), while loader- and
+/// `read_dir`-resolved paths keep the case on disk; a comparison that folded
+/// only the first character emptied every match whose directory or file name
+/// carried an uppercase letter below the drive.
 pub fn same_file(a: &str, b: &str) -> bool {
     let norm = |s: &str| {
         let s = s.replace('\\', "/");
-        let mut c = s.chars();
-        match c.next() {
-            Some(d) => d.to_ascii_lowercase().to_string() + c.as_str(),
-            None => s,
+        if cfg!(windows) {
+            s.to_lowercase()
+        } else {
+            let mut c = s.chars();
+            match c.next() {
+                Some(d) => d.to_ascii_lowercase().to_string() + c.as_str(),
+                None => s,
+            }
         }
     };
     norm(a) == norm(b)
@@ -193,5 +201,18 @@ export fn symbolMapClientApi() -> String {\n    return \"{\\\"module\\\":\\\"cli
         assert!(same_file("N:/lang/a.vyrn", "n:/lang/a.vyrn"));
         assert!(same_file("N:\\lang\\a.vyrn", "N:/lang/a.vyrn"));
         assert!(!same_file("N:/lang/a.vyrn", "N:/lang/b.vyrn"));
+        // On Windows the WHOLE path folds, matching `norm_path_key`: an LSP
+        // key lowercased wholesale still matches the case the loader and
+        // `read_dir` keep on disk.
+        if cfg!(windows) {
+            assert!(same_file(
+                "n:/dev/myapp/server/api/pastes.vyrn",
+                "N:/Dev/MyApp/Server/Api/Pastes.vyrn"
+            ));
+            assert!(!same_file(
+                "n:/dev/myapp/server/api/users.vyrn",
+                "N:/Dev/MyApp/Server/Api/Pastes.vyrn"
+            ));
+        }
     }
 }

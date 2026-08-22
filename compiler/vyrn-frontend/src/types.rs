@@ -486,9 +486,11 @@ pub fn predicate_length_bounds(pred: &Expr) -> (Option<i64>, Option<i64>) {
         if let Some(n) = n {
             return match norm {
                 BinOp::GtEq => (Some(n), None),
-                BinOp::Gt => (Some(n + 1), None),
+                // The same saturating step `predicate_bounds` takes: a literal
+                // at the `i64` edge must not overflow the reflection.
+                BinOp::Gt => (Some(n.saturating_add(1)), None),
                 BinOp::LtEq => (None, Some(n)),
-                BinOp::Lt => (None, Some(n - 1)),
+                BinOp::Lt => (None, Some(n.saturating_sub(1))),
                 _ => (None, None),
             };
         }
@@ -957,9 +959,9 @@ fn collect_string_constraints(pred: &Expr, out: &mut Vec<(String, String)>) -> b
     };
     match (norm, lit) {
         (BinOp::GtEq, Some(n)) => push_true(out, "minLength", n.to_string()),
-        (BinOp::Gt, Some(n)) => push_true(out, "minLength", (n + 1).to_string()),
+        (BinOp::Gt, Some(n)) => push_true(out, "minLength", n.saturating_add(1).to_string()),
         (BinOp::LtEq, Some(n)) => push_true(out, "maxLength", n.to_string()),
-        (BinOp::Lt, Some(n)) => push_true(out, "maxLength", (n - 1).to_string()),
+        (BinOp::Lt, Some(n)) => push_true(out, "maxLength", n.saturating_sub(1).to_string()),
         _ => false,
     }
 }
@@ -2010,6 +2012,20 @@ mod json_schema_tests {
         assert_eq!(
             schema_of("type S = String where value.byteLength > 2", "S"),
             "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"string\",\"minLength\":3}"
+        );
+    }
+
+    #[test]
+    fn exclusive_length_bound_at_the_i64_edge_saturates() {
+        // The step to an inclusive bound saturates at the `i64` edges, like
+        // `predicate_bounds`' numeric step — an extreme literal must not
+        // overflow the reflection.
+        assert_eq!(
+            schema_of(
+                "type Edge = String where value.byteLength > 9223372036854775807",
+                "Edge"
+            ),
+            "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"string\",\"minLength\":9223372036854775807}"
         );
     }
 

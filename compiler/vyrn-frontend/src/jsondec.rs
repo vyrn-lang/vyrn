@@ -891,6 +891,10 @@ mod tests {
                     "std/num.vyrn".to_string(),
                     include_str!("../../../std/num.vyrn").to_string(),
                 ),
+                (
+                    "std/hash.vyrn".to_string(),
+                    include_str!("../../../std/hash.vyrn").to_string(),
+                ),
             ]
             .into_iter()
             .collect(),

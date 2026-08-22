@@ -421,7 +421,11 @@ pub fn inline(f: &Function, recv: &Expr, args: &[Expr], line: usize) -> Result<P
     map.insert("self".to_string(), recv.clone());
     for (p, a) in f.params[1..].iter().zip(args) {
         let uses = count_uses(&body, &p.name);
-        if uses == 1 && !is_under_loop(&body, &p.name) {
+        // A use inside a lambda body evaluates lazily — once per INVOCATION.
+        // Substituting the caller's expression there re-runs it on every call
+        // of the lambda, so only an EAGER use counts as "exactly once".
+        if uses == 1 && uses_outside_lambdas(&body, &p.name) == 1 && !is_under_loop(&body, &p.name)
+        {
             map.insert(p.name.clone(), a.clone());
         } else {
             let tmp = format!("@p{tag}.{}", p.name);
@@ -815,6 +819,23 @@ fn count_uses(b: &Block, name: &str) -> usize {
     n
 }
 
+/// How many times `name` is read OUTSIDE any lambda body in `b`. A read under
+/// a lambda runs once per invocation of that lambda, so it never counts as the
+/// single eager use that lets an argument substitute in place — such an
+/// argument binds a temporary, exactly like one used twice.
+fn uses_outside_lambdas(b: &Block, name: &str) -> usize {
+    let mut probe = b.clone();
+    walk_block(&mut probe, &mut |e: &mut Expr| {
+        if let Expr::Lambda { body, .. } = e {
+            // The walk sees a node after its children, so every nested body
+            // has already had its reads counted by the time its enclosing
+            // lambda is blanked here.
+            *body = LambdaBody::Block(Block { stmts: Vec::new() });
+        }
+    });
+    count_uses(&probe, name)
+}
+
 fn count_block(b: &mut Block, name: &str, n: &mut usize, _m: &HashMap<String, Expr>) {
     let mut counter = |e: &mut Expr| {
         if matches!(e, Expr::Var { name: v, .. } if v == name) {
@@ -1162,6 +1183,46 @@ mod tests {
         assert_eq!(name, "@at");
         assert!(matches!(&args[0], Expr::Field { field, .. } if field == "data"));
         assert_eq!(args[1], idx, "the index substituted in place");
+    }
+
+    /// The once-only contract is about EAGER evaluation. A parameter whose
+    /// single use sits INSIDE a lambda body runs once per invocation of that
+    /// lambda, so substituting the caller's expression in place would
+    /// re-evaluate it on every call — it must bind a temporary like any
+    /// multiply-used argument.
+    #[test]
+    fn an_argument_used_only_under_a_lambda_binds_a_temporary() {
+        let p = parse(
+            "type Ring = { data: Array<Int64> }\n\
+             impl Index for Ring {\n\
+                 place at(read self, i: Int64) -> Int64 {\n\
+                     let g = |k| self.data[i]\n\
+                     yield g(0)\n\
+                 }\n\
+             }\n\
+             fn main() { print(1) }\n",
+        );
+        let f = lookup(&p, &Type::Named("Ring".into()), "at").unwrap();
+        let pr = inline(
+            f,
+            &Expr::Var {
+                name: "r".into(),
+                line: 5,
+            },
+            &[Expr::Var {
+                name: "side".into(),
+                line: 5,
+            }],
+            5,
+        )
+        .unwrap();
+        assert!(
+            pr.prologue
+                .iter()
+                .any(|s| matches!(s, Stmt::Let { name, .. } if name.starts_with("@p"))),
+            "a lambda-lazy use must hoist the argument into a temporary: {:?}",
+            pr.prologue
+        );
     }
 
     /// The load-bearing half of [`site`]: a builtin container has no user

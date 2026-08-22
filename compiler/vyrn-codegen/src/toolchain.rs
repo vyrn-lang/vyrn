@@ -965,7 +965,9 @@ pub fn find_wasmtime_from(start: &Path) -> Option<PathBuf> {
 }
 
 /// The dev-tree wasmtime: the first `tools/wasmtime-*/wasmtime` found walking up
-/// from `start`. Step 3 of the order — consulted only when nothing is pinned.
+/// from `start` (sorted, so the pick is deterministic when several versions are
+/// unpacked side by side). Step 3 of the order — consulted only when nothing is
+/// pinned.
 fn discovered_wasmtime_from(start: &Path) -> Option<PathBuf> {
     let exe = if cfg!(windows) {
         "wasmtime.exe"
@@ -982,11 +984,12 @@ fn discovered_wasmtime_from(start: &Path) -> Option<PathBuf> {
         let Ok(entries) = std::fs::read_dir(&tools) else {
             continue;
         };
-        let hits: Vec<PathBuf> = entries
+        let mut hits: Vec<PathBuf> = entries
             .flatten()
             .map(|e| e.path().join(exe))
             .filter(|p| p.exists())
             .collect();
+        hits.sort();
         if let Some(hit) = hits.into_iter().next() {
             return Some(hit);
         }

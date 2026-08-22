@@ -20,8 +20,9 @@
 # else needs baking, because the install commands name no version: both
 # installers resolve the newest release themselves.
 #
-# If this file is ever stale, `site/public/fresh.js` says so on the page: it asks
-# the same listing once a visit and, when the newest tag is not the one below,
-# writes one line saying a newer release exists.
+# A stale copy is not announced anywhere: RFC-0106 M3 deleted the run-time
+# notice and `site/public/fresh.js` with it. The workflow's daily run keeps
+# this file fresh; a fork or an outage bakes the last tag anyone recorded, and
+# the pages render it without comment.
 v0.1.0-alpha.2
 2026-08-18

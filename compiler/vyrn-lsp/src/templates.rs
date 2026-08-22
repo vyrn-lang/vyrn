@@ -65,7 +65,9 @@ pub fn classify(text: &str, line: usize, col: usize) -> VyxCursor {
 
 /// The index of the `<` beginning the open (non-closing, non-comment) tag that
 /// encloses `offset`, or `None` if the cursor is in template text. Quote state is
-/// tracked so a `>` inside an attribute value does not close the tag.
+/// tracked so a `>` inside an attribute value does not close the tag, and HTML
+/// comments are skipped wholesale so nothing inside one — an apostrophe
+/// (`don't`) included — poisons that quote state.
 fn enclosing_open_tag(chars: &[char], offset: usize) -> Option<usize> {
     let mut in_tag: Option<usize> = None; // Some(start) while inside `<...>`
     let mut is_open = false; // the current tag is an element open tag
@@ -76,6 +78,21 @@ fn enclosing_open_tag(chars: &[char], offset: usize) -> Option<usize> {
         match in_tag {
             None => {
                 if c == '<' {
+                    if chars.get(i + 1) == Some(&'!')
+                        && chars.get(i + 2) == Some(&'-')
+                        && chars.get(i + 3) == Some(&'-')
+                    {
+                        // A comment carries no markup: jump past its `-->` (or
+                        // the cursor, when the comment is still open there).
+                        let mut j = i + 4;
+                        while j + 2 < offset
+                            && !(chars[j] == '-' && chars[j + 1] == '-' && chars[j + 2] == '>')
+                        {
+                            j += 1;
+                        }
+                        i = if j + 2 < offset { j + 3 } else { offset };
+                        continue;
+                    }
                     let nxt = chars.get(i + 1).copied();
                     is_open = nxt != Some('/') && nxt != Some('!');
                     in_tag = Some(i);
@@ -518,5 +535,17 @@ mod tests {
             classify(spaced, 1, 16),
             VyxCursor::AttrName { .. }
         ));
+    }
+
+    /// `<!-- don't -->` before the element: the apostrophe used to open a quote
+    /// that swallowed the tag's real quotes, so every completion after the
+    /// comment died.
+    #[test]
+    fn an_apostrophe_inside_an_html_comment_does_not_poison_the_tag_scan() {
+        let vyx = "<!-- don't panic -->\n<div class=\"x\"";
+        assert!(matches!(classify(vyx, 2, 13), VyxCursor::ClassValue { .. }));
+        // Attribute naming after a closed value still works past a comment.
+        let named = "<!-- it's fine -->\n<div ";
+        assert!(matches!(classify(named, 2, 6), VyxCursor::AttrName { .. }));
     }
 }

@@ -62,9 +62,9 @@
 # Two changes, and the smaller-looking one is the bigger:
 #
 #   1. The old `test` job is now `test` (fmt + the workspace suite) and `checks`
-#      (bench, LSP, node, docs, install), which run at the same time. Two jobs
-#      and not three — a third was measured on paper and does not move the pole,
-#      which is now the workspace suite.
+#      (bench, LSP, genwasm, node, docs, install), which run at the same time.
+#      Two jobs and not three — a third was measured on paper and does not move
+#      the pole, which is now the workspace suite.
 #   2. `checks` builds vyrn `--release`. `bench --check` runs every bench body
 #      under the INTERPRETER, so the interpreter's own speed IS that step, and a
 #      debug interpreter is 4-7x slower per bench. Over the corpus on one
@@ -312,7 +312,7 @@ jobs:
         run: cargo nextest run --no-fail-fast --status-level fail
 
   checks:
-    name: checks (bench, LSP, docs, install) — ${{ matrix.os }}
+    name: checks (bench, LSP, genwasm, docs, install) — ${{ matrix.os }}
     # THE OTHER HALF OF THE OLD `test` JOB, and the reason it is a job rather
     # than more steps: everything here is independent of the workspace suite, and
     # a step can only wait its turn. The old job ran fmt, the workspace suite,
@@ -351,6 +351,7 @@ jobs:
           workspaces: |
             compiler
             compiler/vyrn-lsp
+            compiler/vyrn-genwasm
           # Its own slot: this job builds vyrn-cli in RELEASE and the test job
           # builds it in debug, and one slot holding both target trees would be
           # twice the size for two jobs that never read each other's half.
@@ -430,6 +431,18 @@ jobs:
         # crate, not running it — which is also why it belongs in the job that is
         # not the critical path.
         run: cargo test --quiet --manifest-path vyrn-lsp/Cargo.toml
+      - name: genwasm tests (excluded crate)
+        working-directory: compiler
+        # The same shape as the LSP step above, for the same reason:
+        # `vyrn-genwasm` is excluded from the workspace (its embedded wasmtime
+        # is heavy), so no other job compiles it as a test target — `gen-engine`
+        # drives the generation engine end-to-end through `vyrn-cli`, but the
+        # crate's own `#[cfg(test)]` unit tests compiled and ran nowhere. They
+        # belong beside the crate they sit next to in the exclude list, on all
+        # four platforms; the wasmtime tree they drag in is why their target
+        # dir joined this job's `workspaces` above rather than paying a cold
+        # build on every run.
+        run: cargo test --quiet --manifest-path vyrn-genwasm/Cargo.toml
       - name: Browser runtime tests (web/) and the extension's own
         # The zero-dependency JavaScript beside the compiler gets the same gate.
         # node:test is in the runner's Node already, so this adds no install.

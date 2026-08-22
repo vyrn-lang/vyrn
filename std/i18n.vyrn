@@ -28,6 +28,8 @@
 /// ICU subset (v1): plain text; `{name}` (String); `{n, plural, one {…} few {…}
 /// many {…} other {…}}` (Int64, `#` = the number, `other` required); `{k,
 /// select, a {…} other {…}}` (a finite string type of the branch names).
+/// Argument names may not start with `__` — that prefix is reserved for the
+/// generated code's own locals (`__acc`); scanArgs refuses such a message.
 /// Apostrophe quoting: `''` = a literal apostrophe, `'{'` / `'}'` = literal
 /// braces. Numbers/bools/null in a locale file, and nested plural/select inside a
 /// branch, are unsupported and fail generation with a load diagnostic.
@@ -39,7 +41,7 @@ import { parseJson } from "std/jsonread"
 // listContains, and manual-join copies now live once in std.
 import { joinWith, substring, fromBytesOr, trim } from "std/strings"
 import { includes } from "std/arrays"
-import { contains, endsWith } from "std/strpred"
+import { contains, endsWith, startsWith } from "std/strpred"
 // Generator diagnostics (RFC-0099): a locale fault fails the load in this
 // generator's own wording, anchored in the locale file it came out of.
 import { report, reportHere, Severity } from "std/diag"
@@ -504,6 +506,14 @@ gen fn argError(msg: String) -> ArgScan {
     return ArgScan { ok: false, error: msg.copy(), names: [], kinds: [], branches: [] }
 }
 
+/// Whether an ICU argument name lands in generated code's reserved namespace:
+/// compiled bodies accumulate into a local spelled `__acc`, so an argument
+/// using the double-underscore prefix would collide with it (scanArgs refuses
+/// such a message; buildKeyFns never emits it).
+fn argReserved(name: String) -> Bool {
+    return startsWith(name, "__")
+}
+
 /// Sorted, comma-joined selector names (so the signature is order-independent).
 gen fn joinSortedSelectors(br: Branches) -> String {
     let mut names: Array<String> = []
@@ -545,6 +555,9 @@ gen fn scanArgs(msg: String) -> ArgScan {
             let close = matchBrace(ba, i, e)
             let parts = splitTopCommas(ba, i + 1, close - 1)
             if parts.length == 1 {
+                if argReserved(parts[0]) {
+                    return argError("argument name `\{parts[0]}` uses the reserved `__` prefix — rename the argument")
+                }
                 names.push(parts[0].copy())
                 kinds.push("string")
                 branches.push("")
@@ -555,6 +568,9 @@ gen fn scanArgs(msg: String) -> ArgScan {
                     // The branch blob is everything after "name, kw,".
                     let blob = branchBlob(ba, blobStart, close - 1)
                     let br = parseBranches(blob)
+                    if argReserved(parts[0]) {
+                        return argError("argument name `\{parts[0]}` uses the reserved `__` prefix — rename the argument")
+                    }
                     names.push(parts[0].copy())
                     if kw == "plural" {
                         kinds.push("plural")
@@ -758,13 +774,15 @@ gen fn pluralCondition(tag: String, cat: String, v: String) -> String {
 
 // ===========================================================================
 // Body compiler — compile one message (for one locale) into Vyrn statements
-// that append to a local `acc`. Returns "" on error (checked via scanArgs first,
-// so by the time we compile, the message is well-formed).
+// that append to a local `__acc`. Returns "" on error (checked via scanArgs
+// first, so by the time we compile, the message is well-formed).
 // ===========================================================================
 
-/// The compiled statements building `acc` for `msg`, at indentation `ind`.
+/// The compiled statements building `__acc` for `msg`, at indentation `ind`.
 /// `pluralVar` names the number arg when compiling inside a plural branch (so `#`
-/// resolves); it is "" at the top level and inside select branches.
+/// resolves); it is "" at the top level and inside select branches. The
+/// accumulator spells the reserved `__` prefix (`argReserved`) so an ICU argument
+/// can never shadow it.
 gen fn compileBody(msg: String, tag: String, ind: String, pluralVar: String) -> String {
     let ba = bytes(msg)
     let e = ba.length
@@ -773,7 +791,7 @@ gen fn compileBody(msg: String, tag: String, ind: String, pluralVar: String) -> 
     while i < e {
         let lit = readLiteral(ba, i, e, pluralVar != "")
         if lit.text.byteLength > 0 {
-            code = code + ind + "acc = acc + " + strLit(lit.text) + "\n"
+            code = code + ind + "__acc = __acc + " + strLit(lit.text) + "\n"
         }
         i = lit.next
         if i >= e {
@@ -781,7 +799,7 @@ gen fn compileBody(msg: String, tag: String, ind: String, pluralVar: String) -> 
         } else {
             let b = ba[i]
             if b == '#' && pluralVar != "" {
-                code = code + ind + "acc = acc + " + pluralVar + ".toString()\n"
+                code = code + ind + "__acc = __acc + " + pluralVar + ".toString()\n"
                 i = i + 1
             } else if b == '}' {
                 i = i + 1
@@ -789,7 +807,7 @@ gen fn compileBody(msg: String, tag: String, ind: String, pluralVar: String) -> 
                 let close = matchBrace(ba, i, e)
                 let parts = splitTopCommas(ba, i + 1, close - 1)
                 if parts.length == 1 {
-                    code = code + ind + "acc = acc + " + parts[0] + "\n"
+                    code = code + ind + "__acc = __acc + " + parts[0] + "\n"
                 } else {
                     let argName = parts[0]
                     let kw = parts[1]
@@ -816,7 +834,9 @@ gen fn compilePlural(br: Branches, tag: String, ind: String, argName: String) ->
     let cats = pluralCategories(tag)
     let inner = ind + "    "
     let mut code = ""
-    // Exact `=N` selectors take priority (checked before categories).
+    // Exact `=N` selectors take priority (checked before categories). CLDR
+    // spells `=N` as shorthand for `n = N`, and operand `n` is the ABSOLUTE
+    // value — so `-3` must match `=3`, exactly like the categories below.
     let mut clauses: Array<String> = []
     let mut bodies: Array<String> = []
     let mut i = 0
@@ -824,7 +844,7 @@ gen fn compilePlural(br: Branches, tag: String, ind: String, argName: String) ->
         let sel = br.branches[i].selector
         if sel.byteLength >= 1 && bytes(sel)[0] == '=' {
             let n = substring(sel, 1, sel.byteLength)
-            clauses.push(argName + " == " + n)
+            clauses.push(pluralAbs(argName) + " == " + n)
             bodies.push(compileBody(br.branches[i].text, tag, inner, argName))
         }
         i = i + 1
@@ -1343,9 +1363,9 @@ gen fn buildKeyFns(key: String, baseVal: String, tags: Array<String>, datas: Arr
         let vi = entryIndex(d, key)
         let msg = d.entries[vi].value
         out = out + "fn " + fnName + "__" + upperFirst(tag) + params + " -> String {\n"
-        out = out + "    let mut acc = \"\"\n"
+        out = out + "    let mut __acc = \"\"\n"
         out = out + compileBody(msg, tag, "    ", "")
-        out = out + "    return acc\n}\n"
+        out = out + "    return __acc\n}\n"
         li = li + 1
     }
 

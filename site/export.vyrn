@@ -31,7 +31,7 @@ import { published, navRows, hrefOf, upTo } from "./app/nav"
 import { rfcPages, rfcSlug } from "./app/backstage"
 import { historyIsFixture, historyPath, historyCommand, releaseRows, historyError } from "./app/history"
 import { releaseTag } from "./app/repo"
-import { demoIsFixture, demoPath, demoCommand } from "./app/demo"
+import { demoIsFixture, demoPath, demoCommand, demoError } from "./app/demo"
 import { apiModules, apiEntries, apiHref, importLine } from "./app/docs"
 import { chapterSlugs, chapterHref } from "./app/guide"
 import { searchRows } from "./app/stdgraph"
@@ -580,6 +580,14 @@ fn stripCssComments(css: String) -> String {
             while i + 1 < css.byteLength && !(css[i] == '*' && css[i + 1] == '/') {
                 i = i + 1
             }
+            // An UNTERMINATED comment runs to the end of the sheet: a merge
+            // artifact or a partial paste is enough. The scan above exits with
+            // `i` on the last byte, so advancing two more would push `keep`
+            // past the end and trap the closing substring — instead the rest
+            // is dropped and the sheet scanned so far is what ships.
+            if i + 1 >= css.byteLength {
+                return withoutBlankLines(out)
+            }
             i = i + 2
             keep = i
             continue
@@ -652,7 +660,18 @@ fn missingHistory() -> Bool {
 /// and says nothing about it. The committed fixture keeps the tests runnable on
 /// a clone that has never recorded anything, and this check is what keeps that
 /// fixture off a published page.
+///
+/// A recording that IS there but does not parse refuses for its own reason,
+/// through `demoError`: a truncated write from the script would otherwise
+/// publish an empty widget and a stamp that names no build, which is the same
+/// silence by another name.
 fn missingDemo() -> Bool {
+    let broken = demoError()
+    if broken.byteLength > 0 {
+        print("FAIL \{demoPath()}: does not parse — \{broken}")
+        print("     Run: \{demoCommand()}")
+        return true
+    }
     if !demoIsFixture() {
         return false
     }
@@ -1139,6 +1158,10 @@ test "the published stylesheet keeps every rule and none of the prose" {
     // this would eat the rest of the sheet and publish a blank page.
     assertEq(stripCssComments(".a::before { content: \"/*\" }\n"), ".a::before { content: \"/*\" }\n")
     assertEq(stripCssComments(".a::before { content: '*/' }\n/* g */\n.b { top: 0 }\n"), ".a::before { content: '*/' }\n.b { top: 0 }\n")
+    // And an UNTERMINATED `/*` drops to the end of the sheet instead of
+    // walking the keep mark past the last byte and trapping the closing
+    // substring — a merge artifact refuses nothing, it just loses the rest.
+    assertEq(stripCssComments(".a { color: red }\n/* merge artifact"), ".a { color: red }\n")
     // Only the stylesheet. A module whose comments say what a function is for
     // ships them, because nothing here can parse JavaScript.
     assertEq(assetBody("theme.js", "// keep\n"), "// keep\n")

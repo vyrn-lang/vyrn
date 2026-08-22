@@ -21,8 +21,8 @@
 /// And one thing the code does NOT do, so no row claims it: `.von` files get the
 /// Vyrn grammar and nothing else. The client's document selector names `vyrn`
 /// and `vyx` only, so a `.von` buffer is coloured and never analyzed.
-import { blob } from "./repo"
-import { startsWith } from "std/strpred"
+import { blob, installTargets } from "./repo"
+import { startsWith, contains } from "std/strpred"
 
 /// One thing the editor does: what it is called, what a reader gets from it,
 /// the repository file that implements it, and the declaration inside that file.
@@ -168,6 +168,12 @@ export fn features() -> Array<Feature> {
 /// publishes is a `.vsix` file, and the two halves of the editor story arrive
 /// from two different assets of the same release.
 ///
+/// THE COMMANDS ARE NOT WRITTEN HERE. `installTargets()` in `./repo` is the one
+/// place they exist (RFC-0106 M3, third round): this page, the index hero and
+/// `/install` all teach the same two lines, and the pre-M3 URLs that stood here
+/// named a hosting detail after every other page had been taught the site's own
+/// origin. A second copy would be a second place for them to disagree.
+///
 /// The split is the point. The extension is JavaScript and has no architecture,
 /// so ONE `.vsix` serves every platform. The half that does have an architecture
 /// is `vyrn-lsp`, and it ships in the per-platform archive beside `vyrn` — which
@@ -178,8 +184,8 @@ export fn steps() -> Array<Step> {
     return [
         Step {
             title: "Install the toolchain, which carries the server",
-            command: "curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | sh",
-            what: "The archive holds <code>vyrn-lsp</code> beside <code>vyrn</code>, and the installer puts both in <code>~/.vyrn/bin</code>. On Windows the line is <code>irm https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.ps1 | iex</code>. If you already ran either, you already have the server.",
+            command: installTargets()[0].cmd,
+            what: "The archive holds <code>vyrn-lsp</code> beside <code>vyrn</code>, and the installer puts both in <code>~/.vyrn/bin</code>. On Windows the line is <code>" + installTargets()[1].cmd + "</code>. If you already ran either, you already have the server.",
         },
         Step {
             title: "Download the .vsix from the newest release and install it",
@@ -232,4 +238,14 @@ test "each step says what it leaves you with" {
         assert(s.command.byteLength > 0)
         assert(s.what.byteLength > 0)
     }
+}
+
+test "the install step teaches the one command repo.vyrn owns" {
+    // RFC-0106 M3's third round moved the install commands onto the site's own
+    // origin and into `installTargets()`; the copy that stood here kept naming
+    // `raw.githubusercontent.com` and taught `/docs/editors` a different line
+    // than `/install` pastes. Both come from the one place now.
+    let targets = installTargets()
+    assertEq(steps()[0].command, targets[0].cmd)
+    assert(contains(steps()[0].what, targets[1].cmd))
 }

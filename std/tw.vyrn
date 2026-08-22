@@ -237,6 +237,19 @@ fn twAddEntry(entries: modify Array<TwEntry>, key: String, value: String) -> Str
     return ""
 }
 
+/// A string leaf is accepted at any depth BELOW a top-level key — but a scalar
+/// DIRECTLY under a family (`{"colors": "brand"}`, `{"safelist": "row"}`) would
+/// flatten to a DOTLESS entry (`colors`) that no axis reads (`twAxisOf` matches
+/// the dotted prefix) and no unknown-key check catches (the head IS a known
+/// family), so the whole family silently contributes nothing. That violates the
+/// malformed-theme contract above: refuse it, naming the offender.
+fn twAddLeaf(prefix: String, s: String, entries: modify Array<TwEntry>) -> String {
+    if contains(prefix, ".") == false {
+        return "the top-level key `\{prefix}` must map to an object (or, for `safelist`, an array of strings), not a single value"
+    }
+    return twAddEntry(entries, prefix, s)
+}
+
 /// Flatten one array element `it` at `key.idx`: it MUST be a string.
 fn twFlattenElem(prefix: String, idx: Int64, it: Json, entries: modify Array<TwEntry>) -> String {
     return match it {
@@ -281,7 +294,7 @@ fn twFlatten(prefix: String, j: Json, entries: modify Array<TwEntry>) -> String 
     return match j {
         JObj(fields) => twFlattenObj(prefix, fields, entries),
         JArr(items) => twFlattenArr(prefix, items, entries),
-        JStr(s) => twAddEntry(entries, prefix, s),
+        JStr(s) => twAddLeaf(prefix, s, entries),
         JNull => twUnsupported(),
         JBool(b) => twUnsupported(),
         JNum(n) => twUnsupported(),
@@ -928,6 +941,14 @@ test "twParseTheme flattens nested keys with dots" {
 test "twParseTheme rejects a non-string leaf" {
     let t = twParseTheme("{ \"spacing\": { \"2\": 8 } }")
     assertEq(t.ok, false)
+}
+
+test "a scalar directly under a top-level family is refused, not silently ignored" {
+    let t = twParseTheme("{ \"colors\": \"#fff\", \"spacing\": { \"2\": \"0.5rem\" } }")
+    assertEq(t.ok, false)
+    assert(contains(t.error, "`colors`"))
+    let s = twParseTheme("{ \"safelist\": \"row\" }")
+    assertEq(s.ok, false)
 }
 
 test "twAxisOf dashes color shade paths and keeps theme order" {

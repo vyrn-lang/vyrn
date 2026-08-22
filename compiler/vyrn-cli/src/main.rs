@@ -322,9 +322,13 @@ fn real_main() -> ExitCode {
         args.drain(i..=i + 1);
     }
     // `emit-gen --maps` (RFC-0073 M1) — drained here, like `--offline`, so the
-    // "this command takes no extra arguments" check below still holds.
+    // "this command takes no extra arguments" check below still holds. Never
+    // out of `run`'s tail: everything past the subcommand and file is the
+    // program's own `args()` (RFC-0014), and `--maps` may be one of them.
     let want_maps = args.iter().any(|a| a == "--maps");
-    args.retain(|a| a != "--maps");
+    if args.get(1).map(|a| a.as_str()) != Some("run") {
+        args.retain(|a| a != "--maps");
+    }
     // `--version` / `-V`, before the usage screen: the published alpha printed
     // usage and exited 2 for both, which is what a package manager reads as a
     // broken install. The string is the crate's own `version`, so the binary and
@@ -379,9 +383,11 @@ fn real_main() -> ExitCode {
     }
     if cmd == "routes" {
         let json = args[2..].iter().any(|a| a == "--json");
-        let file = args
-            .get(2)
-            .filter(|a| !a.starts_with('-'))
+        // The file is the FIRST positional anywhere after the subcommand, not
+        // only slot 2: `vyrn routes --json app.vyrn` names a file too.
+        let file = args[2..]
+            .iter()
+            .find(|a| !a.starts_with('-'))
             .map(|s| s.as_str());
         return routes_cmd(file, json);
     }
@@ -544,7 +550,12 @@ fn emit_gen(path: &str, source: &str, maps: bool) -> ExitCode {
     let opts = load_options(&root_key);
     let resolver = make_resolver(&root_key);
     let result = vyrn_frontend::loader::generated_modules(source, &root_key, &opts, &resolver);
-    let _ = save_lock(&resolver);
+    // Pins are kept even when the run itself fails — fetched is pinned. But a
+    // pin the disk refused fails the command: fetched remotes must land in
+    // vyrn.lock or nothing here was reproducible.
+    if let Err(code) = save_lock(&resolver) {
+        return code;
+    }
     match result {
         Ok(mods) => {
             if mods.is_empty() {
@@ -985,7 +996,11 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
     let opts = load_options(&root_key);
     let resolver = make_resolver(&root_key);
     let result = vyrn_frontend::loader::generated_modules(&source, &root_key, &opts, &resolver);
-    let _ = save_lock(&resolver);
+    // Same policy as load_program: pins survive a failed run, and a pin the
+    // disk refuses fails this command rather than leaving the remote unpinned.
+    if let Err(code) = save_lock(&resolver) {
+        return code;
+    }
     let mods = match result {
         Ok(m) => m,
         Err(diags) => {
@@ -2441,9 +2456,13 @@ fn closure_doc_modules(root_file: &str, with_std: bool) -> Result<Vec<DocModule>
                 .unwrap_or_default()
         });
 
-    let graph = match vyrn_frontend::loader::module_graph_with_sources(
-        &source, &root_key, &opts, &resolver,
-    ) {
+    let result =
+        vyrn_frontend::loader::module_graph_with_sources(&source, &root_key, &opts, &resolver);
+    // Pins are kept even when the run itself fails — fetched is pinned. But a
+    // pin the disk refused fails the command rather than leaving the remote
+    // unpinned under a quiet exit.
+    save_lock(&resolver)?;
+    let graph = match result {
         Ok(g) => g,
         Err(diags) => {
             for d in &diags {
@@ -2453,7 +2472,6 @@ fn closure_doc_modules(root_file: &str, with_std: bool) -> Result<Vec<DocModule>
             return Err(ExitCode::FAILURE);
         }
     };
-    let _ = save_lock(&resolver);
 
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -3303,6 +3321,16 @@ fn update(alias: Option<&str>, locked: bool) -> ExitCode {
             lock.entries.remove(spec);
             lock.dirty = true;
             println!("re-resolving `{name}` ({spec})");
+        } else if !lock.entries.contains_key(spec) {
+            // `--locked` resolves nothing the lock does not already pin. Letting
+            // an unpinned spec reach the resolver would fetch it over the
+            // network and report success — exactly what the flag exists to
+            // refuse (the pinned specs below verify their hashes on the way).
+            eprintln!(
+                "error: `{name}` ({spec}) is not pinned in vyrn.lock — run \
+                 `vyrn update {name}` once online to pin it"
+            );
+            return ExitCode::FAILURE;
         }
     }
     let resolver = remote::RemoteResolver {
@@ -4639,6 +4667,12 @@ fn dev_serve_one(
             return;
         }
     };
+    // The browser-origin gate runs before anything else — static assets
+    // included: a cross-site page gets nothing from this server at all.
+    if let Some(body) = cross_origin_body(&req) {
+        write_cross_origin_refusal(stream, &req.method, &req.path, &body);
+        return;
+    }
     // Static assets: GET (or HEAD) only, so nothing shadows a POST /rpc/*.
     if req.method == "GET" || req.method == "HEAD" {
         if let Some(file) = dev_static_path(&req.path, assets) {
@@ -4692,6 +4726,87 @@ fn dev_serve_one(
     }
 }
 
+/// The value of a lowercased request-header name.
+fn request_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, v)| v.as_str())
+}
+
+/// Whether `host` names the loopback interface this server bound. Anything else
+/// is a DNS-rebinding page aiming its own domain at 127.0.0.1 — the socket is
+/// local either way, so the peer address cannot tell them apart.
+fn loopback_host(host: &str) -> bool {
+    // Strip the port; an IPv6 literal keeps its brackets (`[::1]:8080`).
+    let bare = if let Some(rest) = host.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((h, _)) => h,
+            None => return false,
+        }
+    } else {
+        host.split(':').next().unwrap_or(host)
+    };
+    matches!(bare, "localhost" | "127.0.0.1" | "::1")
+}
+
+/// Whether `origin`'s authority is `host`. A browser writes the same
+/// non-default port in both places (`http://localhost:8080` ↔ `Host:
+/// localhost:8080`), so the authorities compare directly.
+fn origin_is_host(origin: &str, host: &str) -> bool {
+    let rest = origin.split_once("://").map(|(_, r)| r).unwrap_or(origin);
+    rest.split(['/', '?', '#'])
+        .next()
+        .is_some_and(|a| a.eq_ignore_ascii_case(host))
+}
+
+/// The browser-origin gate every served request passes before Vyrn's `handle`.
+///
+/// Binding the loopback interface scopes the server to this machine's PROCESSES,
+/// not this machine's programs: any web page can drive the visitor's browser at
+/// `http://localhost:8080` — reading responses needs CORS, but writing never did
+/// (a cross-site form POST, a no-cors `fetch`, a WebSocket handshake), and a
+/// hijacked socket answers with the app's own authority. Two checks close that
+/// door, applied ahead of everything else so the 101 upgrade path is covered:
+///
+/// - **Host** must name the loopback host the server bound, which refuses a
+///   rebound domain before anything else runs.
+/// - **Origin**, when a client sent one, must name the same authority as Host.
+///   Browsers attach it to every cross-site request and every WebSocket
+///   handshake, so the mismatch is exactly the cross-site case; a client that
+///   sends no Origin — `curl`, scripts, the test harnesses — is not a page and
+///   has no site to be cross of, so it passes, upgrade or not.
+///
+/// The `Some` answer is the refusal body.
+fn cross_origin_body(req: &vyrn_frontend::interp::ServeRequest) -> Option<String> {
+    let Some(host) = request_header(&req.headers, "host") else {
+        return Some("request without a Host header".to_string());
+    };
+    if !loopback_host(host) {
+        return Some(format!(
+            "host `{host}` is not this server's loopback address"
+        ));
+    }
+    match request_header(&req.headers, "origin") {
+        Some(o) if !origin_is_host(o, host) => {
+            Some(format!("cross-origin request from `{o}` refused"))
+        }
+        _ => None,
+    }
+}
+
+/// Answer a gate refusal the way every other rejection leaves this host: logged,
+/// plain-text 403, connection closed by [`write_response`].
+fn write_cross_origin_refusal(
+    stream: &mut std::net::TcpStream,
+    method: &str,
+    path: &str,
+    body: &str,
+) {
+    eprintln!("{method} {path} -> 403 ({body})");
+    write_response(stream, 403, "text/plain", b"cross-origin request refused");
+}
+
 /// Why a request never reached Vyrn.
 enum ParseError {
     /// Malformed request line/headers → 400.
@@ -4714,6 +4829,12 @@ fn serve_one(
     use vyrn_frontend::interp::{ServeAnswer, ServeCall};
     match parse_request(stream) {
         Ok(req) => {
+            // The same browser-origin gate `dev` answers through, ahead of
+            // `handle` — the 101 upgrade path included.
+            if let Some(body) = cross_origin_body(&req) {
+                write_cross_origin_refusal(stream, &req.method, &req.path, &body);
+                return;
+            }
             let method = req.method.clone();
             let path = req.path.clone();
             match call_handle(ServeCall::Handle(req)) {
@@ -5283,9 +5404,17 @@ fn write_response_vary(
     for (name, value) in headers {
         extra.push_str(&format!("{name}: {value}\r\n"));
     }
+    // RFC 9110 §8.6: a server MUST NOT send Content-Length in a 204 — the
+    // status itself means there is no content, so there is no length to
+    // declare. (The stream-teardown 204 arrives here through
+    // [`write_response`].)
+    let length_line = if status == 204 {
+        String::new()
+    } else {
+        format!("Content-Length: {}\r\n", body.len())
+    };
     let header = format!(
-        "HTTP/1.1 {status} {reason}\r\n{type_line}{vary_line}{extra}Content-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
+        "HTTP/1.1 {status} {reason}\r\n{type_line}{vary_line}{extra}{length_line}Connection: close\r\n\r\n"
     );
     let _ = stream.write_all(header.as_bytes());
     let _ = stream.write_all(body);
@@ -5715,5 +5844,64 @@ mod tests {
             assert_eq!(go(bad), None, "{bad}");
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cross_origin_gate_refuses_foreign_pages_and_rebound_hosts() {
+        // F2-071: a loopback bind does not stop another site's page from
+        // driving the visitor's browser at this server.
+        let req = |headers: &[(&str, &str)]| vyrn_frontend::interp::ServeRequest {
+            method: "GET".to_string(),
+            path: "/rpc/x".to_string(),
+            headers: headers
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.to_string()))
+                .collect(),
+            body: String::new(),
+        };
+        let ok = req(&[("host", "localhost:8080")]);
+        assert_eq!(cross_origin_body(&ok), None);
+        let same = req(&[
+            ("host", "localhost:8080"),
+            ("origin", "http://localhost:8080"),
+        ]);
+        assert_eq!(cross_origin_body(&same), None);
+        // A cross-site POST (browser always attaches Origin) is refused.
+        let csrf = req(&[
+            ("host", "127.0.0.1:8080"),
+            ("origin", "https://evil.example"),
+        ]);
+        assert!(cross_origin_body(&csrf).is_some());
+        // A rebound domain resolves to 127.0.0.1; only Host names it apart.
+        let rebound = req(&[("host", "evil.example:8080")]);
+        assert!(cross_origin_body(&rebound).is_some());
+        // A WebSocket handshake WITHOUT Origin passes: the gate's business is
+        // cross-SITE requests, and a client that sends no Origin (curl, the
+        // test harnesses, any non-browser) has no site to be cross of. The
+        // same-origin upgrade below stays allowed too.
+        let ws = req(&[
+            ("host", "localhost:8080"),
+            ("upgrade", "websocket"),
+            ("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ=="),
+        ]);
+        assert_eq!(cross_origin_body(&ws), None);
+        let ws_same = req(&[
+            ("host", "localhost:8080"),
+            ("upgrade", "websocket"),
+            ("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ=="),
+            ("origin", "http://localhost:8080"),
+        ]);
+        assert_eq!(cross_origin_body(&ws_same), None);
+    }
+
+    #[test]
+    fn loopback_host_strips_ports_and_ipv6_brackets() {
+        assert!(loopback_host("localhost"));
+        assert!(loopback_host("localhost:8080"));
+        assert!(loopback_host("127.0.0.1:1"));
+        assert!(loopback_host("[::1]:8080"));
+        for foreign in ["", ":8080", "evil.example", "evil.example:8080", "[::1"] {
+            assert!(!loopback_host(foreign), "{foreign}");
+        }
     }
 }

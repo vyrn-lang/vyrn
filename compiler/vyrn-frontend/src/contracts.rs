@@ -578,7 +578,18 @@ fn shape_of(m: &ContractMember) -> ContractShape {
             optional: default.is_some(),
             variadic: false,
             line: m.line,
-            snippet: format!("export let {}: {} = $0", m.name, ty),
+            // `export let` does not exist (RFC-0029 — module state is
+            // module-private), so the completion must offer what actually
+            // satisfies the member: the accessor function that rule
+            // prescribes, which is also what `shape_matches` accepts.
+            snippet: if *ty == Type::Unit {
+                format!("export fn {}() {{\n    $0\n}}", m.name)
+            } else {
+                format!(
+                    "export fn {name}() -> {ty} {{\n    return $0\n}}",
+                    name = m.name
+                )
+            },
         },
         ContractMemberKind::Fn {
             params,
@@ -1036,14 +1047,15 @@ impl ExportSig {
 
 /// Whether an export satisfies a shape — `std/contract:matchesSignature`.
 fn shape_matches(shape: &ContractShape, e: &ExportSig) -> bool {
+    // A `let` member is satisfied by the RFC-0029 accessor — an arity-0 `fn`
+    // returning the member's type — which is the same rule
+    // `std/contract:matchIndex` applies, and what the completion snippet for a
+    // Value shape offers.
     if shape.kind != "fn" {
-        return false;
+        return e.params.is_empty() && type_matches(&shape.ret, &e.ret);
     }
     if shape.variadic {
         return type_matches(&shape.ret, &e.ret);
-    }
-    if shape.params.len() != e.params.len() {
-        return false;
     }
     shape
         .params

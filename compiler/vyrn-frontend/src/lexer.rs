@@ -894,10 +894,19 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
                                     line_start = i;
                                 }
                                 '"' => {
-                                    // Skip a nested string, respecting its escapes.
+                                    // Skip a nested string, respecting its escapes —
+                                    // and its raw newlines (RFC-0007 allows them),
+                                    // which must keep `line` and `line_start` current
+                                    // exactly as the newline arm above does.
                                     i += 1;
                                     while i < chars.len() && chars[i] != '"' {
-                                        i += if chars[i] == '\\' { 2 } else { 1 };
+                                        if chars[i] == '\n' {
+                                            line += 1;
+                                            i += 1;
+                                            line_start = i;
+                                        } else {
+                                            i += if chars[i] == '\\' { 2 } else { 1 };
+                                        }
                                     }
                                     if i >= chars.len() {
                                         return Err(Diagnostic::error(
@@ -1303,6 +1312,17 @@ mod tests {
             "{:?}",
             toks[0].tok
         );
+    }
+
+    #[test]
+    fn hole_nested_string_newlines_keep_line_counting_current() {
+        // A raw newline inside a NESTED string in a `\{ .. }` hole must
+        // advance `line` exactly like the hole's own newline arm does;
+        // otherwise every later diagnostic (and the Eof column) lands too
+        // high. RFC-0007 strings may hold raw newlines.
+        let toks = lex("let\n\"\\{ \"x\ny\" }\"\nlet").unwrap();
+        assert_eq!(toks[2].line, 4, "counting resumes correctly after the hole");
+        assert_eq!(toks.last().unwrap().line, 4);
     }
 
     #[test]

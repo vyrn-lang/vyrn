@@ -231,10 +231,16 @@ struct Wanted {
 /// declaration's own name, for modules that import it directly, and one derived
 /// name per generated symbol standing for it.
 ///
-/// The map is filtered to the declaration's own `(name, line)` — the agreement
+/// The map is filtered to the declaration's own `(name, file)` — the agreement
 /// M1 put under test, where the client's stub and the server's handler name the
-/// same declaration at the same place, is what makes both reachable from one
-/// cursor.
+/// same declaration, is what makes both reachable from one cursor. The BAKED
+/// ORIGIN LINE is deliberately not required to match `target.line`: it is a
+/// snapshot taken when the generating root last ran, and an edit above the
+/// declaration in the open buffer moves the live line without regenerating
+/// anything. Requiring equality turned that ordinary drift into a silent
+/// partial rename; the derived names hang off the declaration's NAME, never its
+/// line, and a module cannot declare two same-named top-level items for the
+/// file match to be ambiguous.
 fn wanted(target: &Target, new: &str, maps: &[MappedSymbol]) -> Result<Vec<Wanted>, String> {
     let mut out = vec![Wanted {
         old: target.name.clone(),
@@ -243,7 +249,7 @@ fn wanted(target: &Target, new: &str, maps: &[MappedSymbol]) -> Result<Vec<Wante
         generated: false,
     }];
     for m in maps {
-        if m.decl != target.name || m.line != target.line || !same_file(&m.file, &target.file) {
+        if m.decl != target.name || !same_file(&m.file, &target.file) {
             continue;
         }
         if let Some(w) = out.iter_mut().find(|w| w.old == m.name) {
@@ -345,11 +351,14 @@ impl Reaches {
 /// specifier resolves to one module; a generator's consteval string arguments
 /// resolve to the module(s) or directory it mounts. Anything unresolvable pins
 /// nothing — an import whose target cannot be proven must not widen the sets.
+/// `overlays` is every open buffer, so the mounted-module scan reads what the
+/// user is typing rather than what was last saved.
 fn reaches(
     imports: &[ImportDecl],
     importer: Option<&str>,
     target_file: &str,
     opts: &vyrn_frontend::loader::LoadOptions,
+    overlays: &HashMap<String, String>,
 ) -> Reaches {
     let mut r = Reaches::default();
     let resolve = |spec: &str| -> Option<String> {
@@ -367,6 +376,10 @@ fn reaches(
                 .collect(),
         };
         let exact = targets.iter().any(|t| same_file(t, target_file));
+        // Whether a generator import reaches the declaring module at all:
+        // pinning it exactly, covering it through a directory argument, or
+        // mounting a module that imports it.
+        let mut pins = exact;
         match &imp.source {
             ImportSource::Path(_) => {
                 if exact {
@@ -376,27 +389,33 @@ fn reaches(
                 }
             }
             ImportSource::Generator { .. } => {
+                pins = exact
+                    || targets.iter().any(|t| covers_dir(t, target_file))
+                    || targets
+                        .iter()
+                        .any(|t| mounts_import(t, target_file, opts, overlays));
                 if let Some(ns) = &imp.namespace {
                     if exact {
                         r.exact_gen_ns.push(ns.clone());
-                    } else if targets.iter().any(|t| covers_dir(t, target_file)) {
-                        r.dir_gen_ns.push(ns.clone());
-                    } else if targets.iter().any(|t| mounts_import(t, target_file, opts)) {
-                        // The RE-EMITTED reach: `client("./server/api")` emits
-                        // stubs whose signatures name the wire types the api
-                        // modules import — one level of indirection the path
-                        // prefix cannot see. A generator qualifies for derived
-                        // spellings when a module it mounts imports the
-                        // declaring file directly.
+                    } else if pins {
+                        // The directory and RE-EMITTED reaches:
+                        // `client("./server/api")` covers everything under the
+                        // argument's directory, and emits stubs whose
+                        // signatures name the wire types the api modules
+                        // import — one level of indirection the path prefix
+                        // cannot see.
                         r.dir_gen_ns.push(ns.clone());
                     }
                 }
             }
         }
-        // A directory covers only derived spellings; a bare name needs the
-        // module pinned exactly.
+        // A selective binding from a GENERATOR import names either the
+        // declaration itself (`http()` re-exports under its own name) or its
+        // derived spelling — and both live only in generated modules, so any
+        // proven reach pins the binding. A plain path still needs the module
+        // pinned exactly; an import aimed elsewhere pins nothing.
         for n in &imp.names {
-            r.flats.push((n.local().to_string(), exact));
+            r.flats.push((n.local().to_string(), pins));
         }
     }
     r
@@ -408,11 +427,15 @@ fn reaches(
 /// Reads the real tree: the unit fixtures use paths that exist nowhere, and
 /// for them this is simply `false`, which is the un-transitive answer they
 /// assert. Capped, and one level only on purpose: a generator emits from the
-/// modules it mounts, not from their whole import closure.
+/// modules it mounts, not from their whole import closure. An OPEN buffer is
+/// read in place of its file, so an import the user just added — unsaved —
+/// still proves the reach instead of silently defeating it (every other reader
+/// in this request prefers overlays for the same reason).
 fn mounts_import(
     resolved: &str,
     target_file: &str,
     opts: &vyrn_frontend::loader::LoadOptions,
+    overlays: &HashMap<String, String>,
 ) -> bool {
     let stem = resolved.strip_suffix(".vyrn").unwrap_or(resolved);
     let mut mounted: Vec<String> = Vec::new();
@@ -428,8 +451,13 @@ fn mounts_import(
         }
     }
     for file in mounted {
-        let Ok(text) = std::fs::read_to_string(&file) else {
-            continue;
+        let key = vyrn_frontend::origin::OriginMaps::norm_path_key(&file);
+        let text = match overlays.get(&key) {
+            Some(t) => t.clone(),
+            None => match std::fs::read_to_string(&file) {
+                Ok(t) => t,
+                Err(_) => continue,
+            },
         };
         let Ok(tokens) = vyrn_frontend::lexer::lex(&text) else {
             continue;
@@ -454,16 +482,20 @@ fn mounts_import(
 /// guess's extension is stripped before the prefix check — a real file target
 /// never gets here (the exact match ran first).
 fn covers_dir(resolved: &str, target_file: &str) -> bool {
-    // The same normalization [`same_file`] applies, drive letter included: a
-    // target that arrives as `c:/...` off a file URL must still be covered by
-    // a directory resolved as `C:/...` — the mismatch that silently emptied
-    // every reach on Windows.
+    // The same normalization [`same_file`] applies: slash-normalized and, on
+    // Windows, lowercased over the WHOLE path — `norm_path_key` lowercases
+    // every LSP-side key, so folding only the drive letter emptied every
+    // directory reach whose argument kept the case on disk.
     let norm = |p: &str| {
         let s = p.replace('\\', "/");
-        let mut c = s.chars();
-        let s = match c.next() {
-            Some(d) => d.to_ascii_lowercase().to_string() + c.as_str(),
-            None => s,
+        let s = if cfg!(windows) {
+            s.to_lowercase()
+        } else {
+            let mut c = s.chars();
+            match c.next() {
+                Some(d) => d.to_ascii_lowercase().to_string() + c.as_str(),
+                None => s,
+            }
         };
         s.trim_matches('/').to_string()
     };
@@ -531,7 +563,13 @@ pub fn workspace_edit(
             .to_file_path()
             .ok()
             .map(|p| p.to_string_lossy().replace('\\', "/"));
-        let reach = reaches(&program.imports, importer.as_deref(), &target.file, opts);
+        let reach = reaches(
+            &program.imports,
+            importer.as_deref(),
+            &target.file,
+            opts,
+            overlays,
+        );
         if reach.is_empty() {
             continue;
         }
@@ -632,8 +670,13 @@ fn candidates(
     };
     let root = crate::app_root_for(dir);
     let mut files = Vec::new();
-    crate::collect_sources(&root, 0, MAX_RENAME_FILES, &["vyrn", "vyx"], &mut files);
-    if files.len() >= MAX_RENAME_FILES {
+    // One element past the cap: the walk stopping at exactly the cap means it
+    // reached everything, and only a project with MORE sources than the walk
+    // can carry is refused. Refusing at `>=` made a project of exactly
+    // {MAX_RENAME_FILES} sources — fully walked, nothing missed — lose
+    // cross-boundary rename forever.
+    crate::collect_sources(&root, 0, MAX_RENAME_FILES + 1, &["vyrn", "vyx"], &mut files);
+    if files.len() > MAX_RENAME_FILES {
         return Err(format!(
             "this project has more than {MAX_RENAME_FILES} source files under {} — \
              rename cannot promise to reach every call site, so it has changed nothing",
@@ -822,7 +865,13 @@ fn f() -> Int64 {\n    other.listPastes()\n    return store.listPastes()\n}\n";
             ns_import("p", gen("http", "./server/pastes")),
             ns_import("u", gen("http", "./server/users")),
         ];
-        let r = reaches(&imports, Some("/proj/src/root.vyrn"), PASTES, &opts());
+        let r = reaches(
+            &imports,
+            Some("/proj/src/root.vyrn"),
+            PASTES,
+            &opts(),
+            &HashMap::new(),
+        );
         let direct = Wanted {
             old: "create".to_string(),
             new: "add".to_string(),
@@ -848,7 +897,13 @@ fn f() -> Int64 {\n    other.listPastes()\n    return store.listPastes()\n}\n";
         // `server/pastes.vyrn`, a sibling `./server/api` never covers, and the
         // test failed against its own fixture until this file was its own.
         let inside = "/proj/src/server/api/pastes.vyrn";
-        let r = reaches(&imports, Some("/proj/src/root.vyrn"), inside, &opts());
+        let r = reaches(
+            &imports,
+            Some("/proj/src/root.vyrn"),
+            inside,
+            &opts(),
+            &HashMap::new(),
+        );
         let direct = Wanted {
             old: "create".to_string(),
             new: "add".to_string(),
@@ -877,9 +932,16 @@ fn f() -> Int64 {\n    other.listPastes()\n    return store.listPastes()\n}\n";
             Some("/proj/src/root.vyrn"),
             PASTES,
             &opts(),
+            &HashMap::new(),
         );
         assert!(!both.bare_is_ours("create"));
-        let one = reaches(&[pinned], Some("/proj/src/root.vyrn"), PASTES, &opts());
+        let one = reaches(
+            &[pinned],
+            Some("/proj/src/root.vyrn"),
+            PASTES,
+            &opts(),
+            &HashMap::new(),
+        );
         assert!(one.bare_is_ours("create"));
         // A namespace import binds no flat names.
         let ns_only = reaches(
@@ -887,6 +949,7 @@ fn f() -> Int64 {\n    other.listPastes()\n    return store.listPastes()\n}\n";
             Some("/proj/src/root.vyrn"),
             PASTES,
             &opts(),
+            &HashMap::new(),
         );
         assert!(!ns_only.bare_is_ours("create"));
     }
@@ -897,7 +960,13 @@ fn f() -> Int64 {\n    other.listPastes()\n    return store.listPastes()\n}\n";
             flat_import(&["create"], ImportSource::Path("./server/elsewhere".into())),
             ns_import("g", gen("http", "../outside/app")),
         ];
-        let r = reaches(&imports, Some("/proj/src/root.vyrn"), PASTES, &opts());
+        let r = reaches(
+            &imports,
+            Some("/proj/src/root.vyrn"),
+            PASTES,
+            &opts(),
+            &HashMap::new(),
+        );
         let direct = Wanted {
             old: "create".to_string(),
             new: "add".to_string(),
@@ -920,5 +989,78 @@ fn f() -> Int64 {\n    other.listPastes()\n    return store.listPastes()\n}\n";
         assert!(!covers_dir("/p/server/api", "/p/server/api.vyrn"));
         assert!(!covers_dir("/p/server/api", "/p/server/api2/pastes.vyrn"));
         assert!(!covers_dir("/p/other", "/p/server/pastes.vyrn"));
+    }
+
+    /// `import { pastesCreate } from client("./server/api")` — a selective
+    /// binding from a DIRECTORY-mounting generator. The spelling lives only in
+    /// the generated module, so a proven reach of the mount pins the binding;
+    /// requiring the declaring file pinned exactly dropped every bare use of
+    /// the derived name from the rename.
+    #[test]
+    fn a_directory_generators_selective_binding_pins_its_bare_uses() {
+        let imports = vec![flat_import(
+            &["pastesCreate"],
+            gen("client", "./server/api"),
+        )];
+        let inside = "/proj/src/server/api/pastes.vyrn";
+        let r = reaches(
+            &imports,
+            Some("/proj/src/root.vyrn"),
+            inside,
+            &opts(),
+            &HashMap::new(),
+        );
+        assert!(
+            r.bare_is_ours("pastesCreate"),
+            "one supplier, and it provably reaches the declaring module"
+        );
+        // Two suppliers of the spelling stay unresolved, as ever.
+        let both = vec![
+            flat_import(&["pastesCreate"], gen("client", "./server/api")),
+            flat_import(&["pastesCreate"], ImportSource::Path("./elsewhere".into())),
+        ];
+        let r = reaches(
+            &both,
+            Some("/proj/src/root.vyrn"),
+            inside,
+            &opts(),
+            &HashMap::new(),
+        );
+        assert!(!r.bare_is_ours("pastesCreate"));
+    }
+
+    /// An edit above `create` since its root last generated moves the live
+    /// line while the map's baked origin line lags. The generated spellings
+    /// hang off the declaration's NAME and file — never its line — so the
+    /// drift must admit the entry, not silently drop it (the symptom was a
+    /// rename that reached some importing files and not others).
+    #[test]
+    fn a_map_line_that_drifts_from_the_live_buffer_still_admits_the_spelling() {
+        let target = Target {
+            file: "/proj/src/server/pastes.vyrn".to_string(),
+            name: "create".to_string(),
+            line: 30,
+            col: 4,
+            end_col: 10,
+        };
+        let maps = vec![MappedSymbol {
+            name: "pastesCreate".to_string(),
+            file: "/proj/src/server/pastes.vyrn".to_string(),
+            line: 28,
+            col: 4,
+            decl: "create".to_string(),
+            derived: Vec::new(),
+        }];
+        let out = wanted(&target, "add", &maps).expect("the name derives");
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1].old, "pastesCreate");
+        assert_eq!(out[1].new, "pastesAdd");
+        // A map aimed at ANOTHER file still contributes nothing.
+        let elsewhere = vec![MappedSymbol {
+            file: "/proj/src/server/users.vyrn".to_string(),
+            ..maps[0].clone()
+        }];
+        let out = wanted(&target, "add", &elsewhere).expect("the direct spelling always is");
+        assert_eq!(out.len(), 1, "only the declaration's own name");
     }
 }

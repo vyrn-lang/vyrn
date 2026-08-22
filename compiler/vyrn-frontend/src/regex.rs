@@ -69,6 +69,8 @@ struct ReParser<'a> {
     i: usize,
     /// Cumulative structural expansion so far, charged by [`ReParser::counted`].
     expanded: usize,
+    /// Current nesting depth, charged by [`ReParser::alt`] (one `(` per level).
+    depth: usize,
 }
 
 /// Total structural-expansion budget for counted repetition. `{m}` copies its
@@ -77,6 +79,13 @@ struct ReParser<'a> {
 /// clones against this running budget, so a pathological pattern is a clean
 /// compile error instead of an OOM/hang in `vyrn check`.
 const EXPANSION_BUDGET: usize = 16_384;
+
+/// Recursion budget for nested groups: `alt → concat → quant → atom → alt`
+/// recurses once per `(` (and [`Nfa::frag`] then walks the same tree shape), so
+/// a generated pattern with thousands of parens is a clean compile error here
+/// instead of a native stack overflow in `vyrn check`. Real patterns nest a
+/// handful of levels deep; this is orders of magnitude above any of them.
+const PARSE_DEPTH_BUDGET: usize = 250;
 
 /// Number of nodes in a parsed [`Re`] tree — the unit [`EXPANSION_BUDGET`]
 /// charges a copied subtree at.
@@ -94,6 +103,7 @@ impl<'a> ReParser<'a> {
             b: pat.as_bytes(),
             i: 0,
             expanded: 0,
+            depth: 0,
         };
         let re = p.alt()?;
         if p.i < p.b.len() {
@@ -104,6 +114,13 @@ impl<'a> ReParser<'a> {
     }
 
     fn alt(&mut self) -> Result<Re, String> {
+        self.depth += 1;
+        if self.depth > PARSE_DEPTH_BUDGET {
+            // The parser is discarded on error, so no need to unwind `depth`.
+            return Err(format!(
+                "pattern nests more than {PARSE_DEPTH_BUDGET} levels deep"
+            ));
+        }
         let mut branches = vec![self.concat()?];
         while self.i < self.b.len() && self.b[self.i] == b'|' {
             self.i += 1;
@@ -283,7 +300,9 @@ fn parse_atom(b: &[u8], i: usize) -> Result<(ByteClass, usize), String> {
     }
 }
 
-/// A `\d`/`\w`/`\s` shorthand (and their negations), or an escaped literal.
+/// A `\d`/`\w`/`\s` shorthand (and their negations), a control-character
+/// escape (`\t \n \v \f \r` — ECMA-262's IdentityEscape excludes these, so
+/// they never mean the bare letter), or an escaped literal.
 fn escape_class(e: u8) -> ByteClass {
     let mut cl = ByteClass::empty();
     match e {
@@ -316,6 +335,11 @@ fn escape_class(e: u8) -> ByteClass {
             }
             return cl.negated();
         }
+        b'n' => cl.set(b'\n'),
+        b'r' => cl.set(b'\r'),
+        b't' => cl.set(b'\t'),
+        b'f' => cl.set(0x0c),
+        b'v' => cl.set(0x0b),
         // Any other escaped byte is that literal (`\.`, `\*`, `\\`, `\[`, …).
         other => cl.set(other),
     }
@@ -1124,6 +1148,15 @@ pub fn compile(pattern: &str) -> Result<Dfa, String> {
     })
 }
 
+/// Ceiling on the DFA states subset construction may materialise.
+/// `EXPANSION_BUDGET` bounds the *NFA*; determinisation can still blow up
+/// exponentially on top of a small one (`(a|b)*a(a|b){20}` parses to ~30 nodes
+/// and ~70 NFA states yet needs Θ(2²¹) DFA states), so the number of interned
+/// subsets is capped too — a pathological pattern is a clean compile error
+/// instead of a multi-gigabyte table and a hang/OOM in `vyrn check`. Real
+/// refinement DFAs live two orders of magnitude below it.
+const DFA_STATE_BUDGET: usize = 8_192;
+
 fn compile_uncached(pattern: &str) -> Result<Dfa, String> {
     let re = ReParser::parse(pattern)?;
     let nfa = Nfa::build(&re);
@@ -1152,7 +1185,15 @@ fn compile_uncached(pattern: &str) -> Result<Dfa, String> {
 
     let mut processed = 0usize;
     while processed < sets.len() {
-        let cur = sets[processed].clone();
+        if processed >= DFA_STATE_BUDGET {
+            return Err(format!(
+                "pattern compiles past the maximum ({DFA_STATE_BUDGET} DFA states)"
+            ));
+        }
+        // Take (not clone): this slot is never read again, so the retained
+        // working set is freed as soon as its row is emitted — only the
+        // interned key in `index` keeps a copy alive.
+        let cur = std::mem::take(&mut sets[processed]);
         let dfa_state = processed as u32;
         // Grow the per-state rows.
         if table.len() < (dfa_state as usize + 1) * 256 {
@@ -1177,12 +1218,11 @@ fn compile_uncached(pattern: &str) -> Result<Dfa, String> {
         }
         processed += 1;
     }
-    // Final grow (last states may have been interned late).
+    // Final grow (last states may have been interned late). Acceptance was
+    // already recorded per state in the loop above — every interned set is
+    // processed before the loop exits, and taken slots are empty now.
     table.resize(sets.len() * 256, 0);
     accepting.resize(sets.len(), false);
-    for (i, set) in sets.iter().enumerate() {
-        accepting[i] = set.contains(&nfa.accept);
-    }
 
     Ok(Dfa {
         start,
@@ -1245,6 +1285,28 @@ mod tests {
     fn escaped_metachars_are_literal() {
         assert!(m("a\\.b", "a.b"));
         assert!(!m("a\\.b", "axb"));
+    }
+
+    #[test]
+    fn control_escapes_mean_control_characters() {
+        // ECMA-262: `\t \n \r \f \v` are character escapes, never IdentityEscape,
+        // so `\n` matches LF — not the letter `n` (the `[^\n]` idiom for "no
+        // newline" silently inverted without this).
+        assert!(m("\\n", "\n"));
+        assert!(!m("\\n", "n"));
+        assert!(m("\\t", "\t"));
+        assert!(!m("\\t", "t"));
+        assert!(m("\\r", "\r"));
+        assert!(!m("\\r", "r"));
+        assert!(m("\\f", "\u{0c}"));
+        assert!(!m("\\f", "f"));
+        assert!(m("\\v", "\u{0b}"));
+        assert!(!m("\\v", "v"));
+        // Inside a class too, and the negated-class idiom works as intended.
+        assert!(m("[\\n\\t]", "\n"));
+        assert!(!m("[\\n]", "n"));
+        assert!(m("[^\\n]*", "no newline here"));
+        assert!(!m("[^\\n]*", "a\nb"));
     }
 
     #[test]
@@ -1318,6 +1380,31 @@ mod tests {
         assert!(e.contains("past the maximum"), "message: {e}");
         // Just inside the budget still compiles.
         assert!(compile("(a{200}){40}").is_ok());
+    }
+
+    #[test]
+    fn deeply_nested_groups_hit_the_depth_budget() {
+        // A few hundred groups are fine (real patterns nest a handful deep).
+        let ok = format!("{}{}", "(".repeat(100), ")".repeat(100));
+        assert!(compile(&ok).is_ok());
+        // A generated pattern with thousands of parens is a clean compile
+        // error, not a native stack overflow in `vyrn check`.
+        let deep = format!("{}{}", "(".repeat(1000), ")".repeat(1000));
+        let e = compile(&deep).unwrap_err();
+        assert!(e.contains("deep"), "message: {e}");
+    }
+
+    #[test]
+    fn exponential_subset_construction_hits_the_state_budget() {
+        // ~30 nodes / ~70 NFA states — far under every structural budget — yet
+        // its DFA needs Θ(2²¹) states to track which trailing position holds the
+        // distinguished `a`. The state ceiling turns that into a clean compile
+        // error instead of a multi-gigabyte table and a hang/OOM.
+        let e = compile("(a|b)*a(a|b){20}").unwrap_err();
+        assert!(e.contains("DFA states"), "message: {e}");
+        // Real-world sized DFAs still compile.
+        assert!(compile("[0-9a-f]{40}").is_ok());
+        assert!(compile("nav\\.(home|about|settings)\\.label").is_ok());
     }
 
     #[test]

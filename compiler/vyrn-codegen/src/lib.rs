@@ -1931,7 +1931,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         let sym = if f.name == "main" {
             "vyrn_main".to_string()
         } else {
-            format!("vyrn_{}", f.name)
+            fn_sym(&f.name)
         };
         observe::note_inst(observe::Site::Native, &f.name, &[]);
         let mut gen = Gen::new(
@@ -3047,7 +3047,7 @@ impl<'a> Gen<'a> {
             ));
         }
         let t = self.fresh_tmp();
-        self.emit(format!("{t} = call ptr @vyrn_{f}(double {d})"));
+        self.emit(format!("{t} = call ptr @{}(double {d})", fn_sym(f)));
         Ok(t)
     }
 
@@ -3729,7 +3729,7 @@ impl<'a> Gen<'a> {
             .cloned()
             .unwrap_or(Type::Unit);
         let ll = self.llt(&pty);
-        self.emit(format!("call void @vyrn_{f}({ll} {v})"));
+        self.emit(format!("call void @{}({ll} {v})", fn_sym(&f)));
         Ok(())
     }
 
@@ -4768,7 +4768,7 @@ impl<'a> Gen<'a> {
                 let ll = self.llt(&pty);
                 let v = self.fresh_tmp();
                 self.emit(format!("{v} = load {ll}, ptr {slot}"));
-                self.emit(format!("call void @vyrn_{f}({ll} {v})"));
+                self.emit(format!("call void @{}({ll} {v})", fn_sym(&f)));
                 // RFC-0096: the payload boxes are the enum's own storage, and
                 // the declaration cannot reach them. Errors swallowed for the
                 // reason above: a drop this cannot emit is a leak, never a
@@ -5161,6 +5161,21 @@ impl<'a> Gen<'a> {
                         self.emit_label(&ok_l);
                         let ep = self.fresh_tmp();
                         self.emit(format!("{ep} = getelementptr {ell}, ptr {base}, i64 {iv}"));
+                        // Rule 4 through an element, exactly as the `Array` arm
+                        // above: the binding owns what its elements hold, so
+                        // storing over one releases the old one. Without this,
+                        // `sa[i] = other` abandoned the displaced element's
+                        // buffer — reclaimed neither here nor at drop, which
+                        // releases only the slots' current contents.
+                        let snap = if self.slot_owns(&slot)
+                            && !vyrn_frontend::movecheck::mentions_place(value, name)
+                            && !vyrn_frontend::movecheck::mentions_place(index, name)
+                        {
+                            self.snap_old(&ep, &elem)
+                        } else {
+                            Vec::new()
+                        };
+                        self.free_snap(&snap);
                         self.emit(format!("store {ell} {v}, ptr {ep}"));
                         Ok(())
                     }
@@ -7707,7 +7722,7 @@ impl<'a> Gen<'a> {
             .iter()
             .map(|tp| call_subst.get(tp).cloned().unwrap_or(Type::Unit))
             .collect();
-        let mut sym = format!("vyrn_{name}__ho");
+        let mut sym = format!("{}__ho", fn_sym(name.as_str()));
         for ta in &type_args {
             sym.push('_');
             sym.push_str(&mangle_ty(ta));
@@ -7827,7 +7842,7 @@ impl<'a> Gen<'a> {
                 }
                 // A named top-level function: call it directly, no captures.
                 let ret = self.ret_types.get(vn).cloned().unwrap_or(Type::Unit);
-                Ok((format!("vyrn_{vn}"), Vec::new(), ret))
+                Ok((fn_sym(vn), Vec::new(), ret))
             }
             // Any other expression of `fn` type (RFC-0037): a field read, an
             // element, a call's result. The value it produces is the same
@@ -8184,6 +8199,11 @@ impl<'a> Gen<'a> {
         // would let an outer loop's closer resolve the wrong element type.
         let saved_stream = std::mem::take(&mut self.stream_slots);
         let saved_holes = std::mem::take(&mut self.hole_slots);
+        // A lifted body is a different function with a different boundary: the
+        // enclosing expression's expected types say nothing about it (and
+        // `construct_fnval_lambda` has already taken this stack away across
+        // the lift), so it starts empty and re-states its own below.
+        let saved_expect = std::mem::take(&mut self.expect);
         self.tmp = 0;
         self.label = 0;
 
@@ -8209,7 +8229,19 @@ impl<'a> Gen<'a> {
         // Body: an expression yields the return value; a block returns via `return`.
         let ret_ty = match body {
             LambdaBody::Expr(e) => {
+                // The body's value is produced AT the lambda's return type, so
+                // the expected type is re-stated here: without the push, a body
+                // that is itself a lambda literal sees no expected function
+                // signature at all (the stack was taken above) and the inner
+                // lift fails with a spurious internal error.
+                let pushed = want_ret.is_some();
+                if let Some(r) = &want_ret {
+                    self.expect.push(r.clone());
+                }
                 let (v, vty) = self.gen_expr(e)?;
+                if pushed {
+                    self.expect.pop();
+                }
                 let ret = want_ret.clone().unwrap_or(vty.clone());
                 self.fn_ret = ret.clone();
                 if self.llt(&ret) == "void" {
@@ -8269,6 +8301,7 @@ impl<'a> Gen<'a> {
         self.str_append = saved_str_append;
         self.stream_slots = saved_stream;
         self.hole_slots = saved_holes;
+        self.expect = saved_expect;
         self.region_depth = saved_region_depth;
 
         self.lambda_defs.push((sym.clone(), def));
@@ -8439,13 +8472,7 @@ impl<'a> Gen<'a> {
         let sig = self
             .expected_fn_sig()
             .unwrap_or_else(|| Type::Fn(tgt_params.clone(), Box::new(tgt_ret.clone())));
-        let tag = self.register_fnval(
-            &sig,
-            format!("vyrn_{name}"),
-            Vec::new(),
-            tgt_params,
-            tgt_ret,
-        );
+        let tag = self.register_fnval(&sig, fn_sym(name), Vec::new(), tgt_params, tgt_ret);
         Ok((self.fnval_aggregate(tag, "0"), sig))
     }
 
@@ -11592,7 +11619,7 @@ impl<'a> Gen<'a> {
             };
             arg_ops.push(format!("{} {v}", self.llt(&pty)));
         }
-        let sym = format!("vyrn_{name}");
+        let sym = fn_sym(name);
         let ret = self.ret_types.get(name).cloned().unwrap_or(Type::Int);
         let retll = self.llt(&ret);
         if retll == "void" {
@@ -11624,8 +11651,27 @@ impl<'a> Gen<'a> {
     /// symbol, so spawn sites of the same callee share one thunk (deduped by
     /// the `lambda_defs` driver).
     fn gen_spawn(&mut self, name: &str, args: &[Expr]) -> Result<(String, Type), String> {
-        let (sym, arg_vals, ret_ty) = self.prep_spawn_target(name, args)?;
+        let (sym, arg_vals, arg_tys, ret_ty) = self.prep_spawn_target(name, args)?;
         let retll = self.llt(&ret_ty);
+        // Copy every heap-owning argument OUT into fresh `malloc`'d storage
+        // before it is stored into the frame. The frame is heap and outlives
+        // this block, but a value's BUFFER does not follow the frame: inside a
+        // `region` a String's bytes come from the arena, and
+        // `__vyrn_region_exit` frees every block at the closing brace — while
+        // the worker may only run after it. The interpreter hands the callee
+        // its own value, so the frame holds an owned copy and never a pointer
+        // into storage this block is about to reclaim. `deep_copy` is that
+        // walk; the region flag is forced to 0 around it so a String's fresh
+        // buffer is `malloc`'d rather than routed into the very arena the exit
+        // frees (`str_alloc` compiles the routing in from this flag — the same
+        // rule the lifted-lambda body compiles in).
+        let saved_region_depth = self.region_depth;
+        self.region_depth = 0;
+        let mut owned_vals: Vec<String> = Vec::with_capacity(arg_vals.len());
+        for ((_, v), ty) in arg_vals.iter().zip(&arg_tys) {
+            owned_vals.push(self.deep_copy(v, ty)?);
+        }
+        self.region_depth = saved_region_depth;
         // Frame layout: { result, args... } — result first so `join` loads it
         // straight off the frame pointer. A Unit task has no result slot.
         let mut fields: Vec<String> = Vec::new();
@@ -11642,13 +11688,13 @@ impl<'a> Gen<'a> {
              ({frame_ty}, ptr null, i32 1) to i64))"
         ));
         let base = usize::from(retll != "void");
-        for (i, (ll, v)) in arg_vals.iter().enumerate() {
+        for (i, ((ll, _), cv)) in arg_vals.iter().zip(&owned_vals).enumerate() {
             let p = self.fresh_tmp();
             self.emit(format!(
                 "{p} = getelementptr {frame_ty}, ptr {frame}, i32 0, i32 {}",
                 base + i
             ));
-            self.emit(format!("store {ll} {v}, ptr {p}"));
+            self.emit(format!("store {ll} {cv}, ptr {p}"));
         }
 
         let tsym = format!("__vyrn_task_{sym}");
@@ -11682,14 +11728,15 @@ impl<'a> Gen<'a> {
     /// Resolve a spawn callee exactly as `gen_call` would: evaluate and coerce
     /// each argument to its (substituted) parameter type, solve + register a
     /// generic instantiation when the callee is generic, and return the callee
-    /// symbol, the `(llvm type, value)` argument pairs, and the concrete return
-    /// type. `modify` parameters and externs cannot appear — the checker only
-    /// admits isolated (spawn-safe) callees.
+    /// symbol, the `(llvm type, value)` argument pairs, each argument's concrete
+    /// parameter type, and the concrete return type. `modify` parameters and
+    /// externs cannot appear — the checker only admits isolated (spawn-safe)
+    /// callees.
     fn prep_spawn_target(
         &mut self,
         name: &str,
         args: &[Expr],
-    ) -> Result<(String, Vec<(String, String)>, Type), String> {
+    ) -> Result<(String, Vec<(String, String)>, Vec<Type>, Type), String> {
         let callee = self.funcs.get(name).copied();
         if let Some(callee) = callee.filter(|c| !c.type_params.is_empty()) {
             // Generic callee — mirror gen_call's instantiation solving.
@@ -11721,29 +11768,32 @@ impl<'a> Gen<'a> {
                 .collect();
             let sym = mangle_name(name, &type_args);
             let mut pairs = Vec::new();
+            let mut ptys: Vec<Type> = Vec::new();
             for ((p, v), aty) in callee.params.iter().zip(arg_vals).zip(&arg_tys) {
                 let pty = vyrn_frontend::types::substitute(&p.ty, &call_subst);
                 let (v, cty) = self.coerce(v, aty, &pty)?;
+                ptys.push(cty.clone());
                 pairs.push((self.llt(&cty), v));
             }
             self.instantiations.push((name.to_string(), type_args));
             let ret_ty = vyrn_frontend::types::substitute(&callee.ret, &call_subst);
-            return Ok((sym, pairs, ret_ty));
+            return Ok((sym, pairs, ptys, ret_ty));
         }
-        // Ordinary callee.
         let params = self.param_types.get(name).cloned().unwrap_or_default();
         let mut pairs = Vec::new();
+        let mut ptys: Vec<Type> = Vec::new();
         for (i, a) in args.iter().enumerate() {
             let (v, vty) = self.gen_expr(a)?;
             let (v, pty) = match params.get(i) {
                 Some(p) => self.coerce_flow(v, a, &vty, p)?,
-                None => (v, vty),
+                None => (v, vty.clone()),
             };
+            ptys.push(pty.clone());
             pairs.push((self.llt(&pty), v));
         }
-        let sym = format!("vyrn_{name}");
+        let sym = fn_sym(name);
         let ret = self.ret_types.get(name).cloned().unwrap_or(Type::Int);
-        Ok((sym, pairs, ret))
+        Ok((sym, pairs, ptys, ret))
     }
 
     /// Emit a real call to an `extern` import (RFC-0012). Each argument is
@@ -13062,7 +13112,8 @@ fn struct_key(x: &impl std::fmt::Debug) -> String {
 fn mangle_name(name: &str, type_args: &[Type]) -> String {
     let parts: Vec<String> = type_args.iter().map(mangle_ty).collect();
     format!(
-        "vyrn_{name}__{}_h{}",
+        "{}__{}_h{}",
+        fn_sym(name),
         parts.join("_"),
         struct_key(&type_args)
     )
@@ -13461,9 +13512,13 @@ fn enum_ll(arity: usize) -> String {
 /// producing IR that clang/llc reject with a parse error. Other characters
 /// collapse to `_`, as before.
 fn sanitize(name: &str) -> String {
+    // `$` passes through: the runtime-module reserved spellings (`json$emit`,
+    // `num$f64Str`) are built on it — the loader's own defence, and a character
+    // every object format here (LLVM IR, wasm) accepts in a symbol. Everything
+    // non-ASCII still escapes; the pre-fix hazard was `fn héllo`, not `$`.
     let mut out = String::with_capacity(name.len());
     for c in name.chars() {
-        if c.is_ascii_alphanumeric() || c == '_' {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
             out.push(c);
         } else if c.is_alphanumeric() {
             out.push_str(&format!("_u{:04X}_", c as u32));
@@ -13472,6 +13527,16 @@ fn sanitize(name: &str) -> String {
         }
     }
     out
+}
+
+/// The LLVM symbol for a top-level Vyrn function: `vyrn_<name>`, sanitized.
+///
+/// One spelling rather than seven: the `define` and every call site, fnval
+/// variant and mangle that names a top-level function go through here, so a
+/// non-ASCII identifier escapes identically on both sides of a call and no
+/// raw `format!("vyrn_{name}")` can drift back in. See [`sanitize`].
+fn fn_sym(name: &str) -> String {
+    format!("vyrn_{}", sanitize(name))
 }
 
 #[cfg(test)]
@@ -14491,6 +14556,69 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- round-two audit fixes -------------------------------------------
+
+    /// A non-ASCII identifier reaches the IR escaped (`_uXXXX_`), never raw:
+    /// unquoted LLVM identifiers are ASCII-only, and a raw `é` produced a
+    /// module clang/llc reject with a parse error while the interpreter ran
+    /// the same program.
+    #[test]
+    fn a_non_ascii_name_is_escaped_in_the_symbol() {
+        let src = "fn héllo(n: Int64) -> Int64 { return n } \
+                   fn main() -> Int64 { return héllo(1) }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(
+            ir.contains("define i64 @vyrn_h_u00E9_llo("),
+            "escaped define missing:\n{ir}"
+        );
+        assert!(ir.contains("call i64 @vyrn_h_u00E9_llo(i64"), "{ir}");
+        assert!(!ir.contains("@vyrn_héllo"), "raw name in the IR: {ir}");
+    }
+
+    /// A lifted lambda is generated at ITS OWN expected signature, not the
+    /// ambient one: the expect stack is taken across the lift and restored
+    /// after, so consecutive lifts cannot see each other's (or the caller's)
+    /// expectation. RFC-0037 defers fn-types that RETURN fn-values, so the
+    /// reachable shape is two annotated lambdas with different signatures in
+    /// one block — the second lift must not answer the first's expectation.
+    #[test]
+    fn a_lifted_lambda_body_sees_the_expected_signature() {
+        // A lifted lambda is generated at ITS OWN expected signature: the
+        // expect stack is taken across the lift and restored after, so two
+        // consecutive lifts cannot answer each other's expectation. The two
+        // signatures differ in PARAMETER, which is what the bodies are typed
+        // from; RFC-0037 defers the fn-returning-fn shape outright.
+        let src = "fn main() -> Int64 {                    let a: fn(Int64) -> Int64 = |x| x + 1; \
+                   let b: fn(String) -> Int64 = |s| s.byteLength; \
+                   return a(1) + b(\"ab\") }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        // Two lifted lambdas, two signatures.
+        assert_eq!(ir.matches("@__vyrn_lambda_").count() >= 4, true, "{ir}");
+        assert!(ir.contains("define i64 @__vyrn_lambda_"), "{ir}");
+    }
+
+    /// A task frame outlives its spawning block, so a String argument whose
+    /// bytes are arena-owned must be copied into `malloc`'d storage at the
+    /// spawn: the region exit frees the arena before the worker may run. Each
+    /// spawn site now costs two `__vyrn_malloc`s in main — the frame AND the
+    /// argument copy — where only the frame used to be.
+    #[test]
+    fn spawn_arguments_are_copied_out_of_the_region() {
+        let src = "fn work(s: String) -> Int64 { return s.byteLength } \
+                   fn main() -> Int64 { \
+                   let mut t: Task<Int64> = spawn work(\"\") \
+                   region { t = spawn work(\"a\" + \"b\") } return t.join() }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        let start = ir.find("define i64 @vyrn_main(").expect("main present");
+        let body = &ir[start..];
+        let body = &body[..body.find("\n}\n").expect("unterminated body")];
+        assert_eq!(
+            body.matches("call ptr @__vyrn_malloc").count(),
+            4,
+            "argument copied out beside each frame:\n{body}"
+        );
     }
 
     // ---- input I/O (RFC-0014) -------------------------------------------
