@@ -2603,6 +2603,33 @@ Five user directions in one message, all landed:
 - The typescale gate caught the round's one literal: the registry row's name
   size is `--t-h5` now, not `1.05rem`.
 
+## M5 — the fourth round: the frame that makes an editor read as one
+
+Round 3's playground was three stacked boxes and the user said so ("isn't even
+close"); the registry was "walls of text and cringe elements"; and both pages
+sat beside two dead columns.
+
+- **The dead gutter named.** `.page > *` spans grid columns 3-13 — columns 1-2
+  are the old rail's. A rail-less page now spans the sheet: the registry
+  centres a 54rem column in it, the editor owns all of it.
+- **The editor's window.** What was missing was the FRAME: an explorer
+  ("Examples", one row per example file — pressing one loads it), a tab strip,
+  a line-number gutter on the code's own grid, a panel whose tab strip
+  REFLECTS the run (`Problems` joins it when the compiler produced any — CSS
+  `:has` on the pane's own `hidden`, the one source of that state), and a
+  filled accent status bar whose every item is a fact: engine, caret Ln/Col,
+  Spaces: 2, UTF-8, the run key. `play.js` grew three hooks (`data-play-file`,
+  `data-play-gutter`, `data-play-lncol`), queried and silently absent on the
+  hero editors. Verified by pressing: fib.vyrn from the explorer ran to 610,
+  and a program with a bad keyword surfaced the Problems tab.
+- **The registry, compact.** Name, kind as plain text, one sentence, two
+  numbers — the install command and the mechanism live on the package pages,
+  and the side cards are one sentence with a link to `/tooling/projects`.
+- A shell heredoc turned two `"
+"` literals into raw newlines inside
+  `play.js` strings on the way in — the page's own console named the parse
+  error, and `node --check` did not (it parses the CommonJS goal).
+
 ## What this RFC does not do
 
 - No JavaScript framework, no CSS framework, no analytics, no dependency.

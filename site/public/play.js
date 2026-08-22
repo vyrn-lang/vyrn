@@ -398,7 +398,63 @@ export function mountPlay(root, opts = {}) {
     picker.addEventListener("change", () => {
       load(picker.value);
       history.replaceState(null, "", location.pathname);
+      syncFrame();
     });
+  }
+
+  // -----------------------------------------------------------------------
+  // The editor window's frame (RFC-0106 M5 round 4). Three hooks the /play
+  // page carries and the hero editors do not, each queried and silently
+  // absent elsewhere: the explorer's file rows load the example they name,
+  // the gutter numbers the lines that exist, and the status bar's Ln/Col is
+  // the caret. Everything here reflects real state — the frame is an editor,
+  // not a picture of one.
+  const gutter = $("[data-play-gutter]", root);
+  const lncol = $("[data-play-lncol]", root);
+  const files = $$("[data-play-file]", root);
+
+  function syncFrame() {
+    if (gutter) {
+      const n = input.value.split("\n").length;
+      if (gutter.childElementCount !== n) {
+        gutter.textContent = "";
+        for (let i = 1; i <= n; i++) {
+          const d = document.createElement("span");
+          d.textContent = i;
+          gutter.append(d);
+        }
+      }
+      gutter.scrollTop = input.scrollTop;
+    }
+    if (lncol) {
+      const before = input.value.slice(0, input.selectionStart).split("\n");
+      lncol.textContent = "Ln " + before.length + ", Col " + (before[before.length - 1].length + 1);
+    }
+    if (files.length && picker) {
+      for (const f of files) {
+        if (f.dataset.playFile === picker.value) f.setAttribute("aria-current", "true");
+        else f.removeAttribute("aria-current");
+      }
+    }
+  }
+
+  for (const f of files) {
+    f.addEventListener("click", () => {
+      if (picker) picker.value = f.dataset.playFile;
+      load(f.dataset.playFile);
+      history.replaceState(null, "", location.pathname);
+      syncFrame();
+    });
+  }
+  if (gutter || lncol || files.length) {
+    input.addEventListener("input", syncFrame);
+    input.addEventListener("keyup", syncFrame);
+    input.addEventListener("click", syncFrame);
+    input.addEventListener("scroll", () => {
+      if (gutter) gutter.scrollTop = input.scrollTop;
+    });
+    if (resetBtn) resetBtn.addEventListener("click", () => setTimeout(syncFrame));
+    syncFrame();
   }
 
   if (shareBtn) {

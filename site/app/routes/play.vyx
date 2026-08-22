@@ -6,17 +6,21 @@
 // and what the program prints. All three come from the same Rust the `vyrn`
 // binary is built from, so the page cannot disagree with the compiler.
 //
-// THE PAGE WEARS AN EDITOR'S SHAPE (RFC-0106 M5 round 3, user: "like vscode"):
-// a toolbar with the file's controls, the editor filling the window, a docked
-// panel for problems and output, and a status bar naming the engine. The prose
-// the old page led with lives behind "About this playground" — a reader came
-// here to type, not to read.
+// THE PAGE IS AN EDITOR'S WINDOW (RFC-0106 M5 rounds 3-4, user: "like
+// vscode" — and the first cut "wasn't even close", so this one carries the
+// frame that makes an editor read as one): an explorer listing the example
+// files, a tab strip over the editor, a line-number gutter, a docked panel
+// whose tabs reflect what the run produced, and a filled status bar with the
+// engine and the caret position. Every element is real — an explorer row
+// loads that file, the gutter counts the lines that exist, Ln/Col is the
+// caret — because a control that does nothing is a picture of an editor.
 //
-// EVERYTHING ON THIS PAGE IS MARKUP THE EXPORT WROTE. The examples are Vyrn data
-// rendered into hidden `<pre>` blocks, escaped by the template, and `play.js`
-// reads them back with `textContent`. Nothing here is a JavaScript string
-// holding a program. Every `data-play-*` element is `play.js`'s contract and
-// survives the redesign unchanged.
+// EVERYTHING ON THIS PAGE IS MARKUP THE EXPORT WROTE. The examples are Vyrn
+// data rendered into hidden `<pre>` blocks, escaped by the template, and
+// `play.js` reads them back with `textContent`. Every `data-play-*` element is
+// `play.js`'s contract; the frame's own hooks (`data-play-file`,
+// `data-play-gutter`, `data-play-lncol`) are queried and silently absent on
+// the hero editors.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
 import { playExamples, Example } from "../play"
@@ -35,53 +39,63 @@ fn examples() -> Array<Example> {
     <h1 class="sr-only">Playground</h1>
 
     <!-- One box, because `main.page` is `display: contents` and the shell grid
-         owns its children: the IDE's own column layout needs a box of its own. -->
+         owns its children: the editor's window is a grid of its own. -->
     <div class="idewrap">
+        <aside class="ideside" aria-label="Files">
+            <p class="sidehead">Explorer</p>
+            <p class="sidesect">Examples</p>
+            <button type="button" class="idefile" v-for="e in examples()" :key="e.id" :data-play-file="e.id" :title="e.title">{{ e.id }}.vyrn</button>
+        </aside>
 
-    <div class="idebar">
-        <span class="idetab"><span class="dot" aria-hidden="true"></span>main.vyrn</span>
-        <label class="pickbox">
-            <span class="sr-only">Example</span>
-            <select data-play-pick>
-                <option v-for="e in examples()" :key="e.id" :value="e.id">{{ e.title }}</option>
-            </select>
-        </label>
-        <span class="spacer"></span>
-        <span class="eyebrow" data-play-status>Loading the compiler…</span>
-        <button type="button" class="btn" data-play-reset>Reset</button>
-        <button type="button" class="btn" data-play-share>Copy link</button>
-        <button type="button" class="btn primary" data-play-run disabled="disabled" title="Ctrl+Enter">Run</button>
-    </div>
+        <div class="idemain">
+            <div class="idebar">
+                <span class="idetab">main.vyrn</span>
+                <label class="sr-only">Example
+                    <select data-play-pick>
+                        <option v-for="e in examples()" :key="e.id" :value="e.id">{{ e.title }}</option>
+                    </select>
+                </label>
+                <span class="spacer"></span>
+                <span class="eyebrow" data-play-status>Loading the compiler…</span>
+                <button type="button" class="btn" data-play-reset>Reset</button>
+                <button type="button" class="btn" data-play-share>Copy link</button>
+                <button type="button" class="btn primary" data-play-run disabled="disabled" title="Ctrl+Enter">Run</button>
+            </div>
 
-    <div class="editor" data-play-editor>
-        <pre class="code hl" aria-hidden="true"><code data-play-hl></code></pre>
-        <textarea data-play-src spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" wrap="off" aria-label="Vyrn source"></textarea>
-    </div>
+            <div class="editor" data-play-editor>
+                <div class="gutter" data-play-gutter aria-hidden="true"></div>
+                <pre class="code hl" aria-hidden="true"><code data-play-hl></code></pre>
+                <textarea data-play-src spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" wrap="off" aria-label="Vyrn source"></textarea>
+            </div>
+        </div>
 
-    <div class="idepanel">
-        <details class="stdinbox" data-play-stdin-box>
-            <summary>Standard input</summary>
-            <textarea data-play-stdin spellcheck="false" aria-label="Standard input"></textarea>
-            <p class="cap">These lines reach <code>readLine()</code>, one per call. At the end of them it answers <code>None</code>, exactly as a pipe does.</p>
-        </details>
+        <div class="idepanel">
+            <!-- The strip reflects the run: Problems appears when the compiler
+                 has any (play.js unhides the pane; `:has` reads that), Output
+                 is always there. State, not controls. -->
+            <div class="paneltabs" aria-hidden="true"><span class="ptab problems">Problems</span><span class="ptab output">Output</span></div>
 
-        <!-- Both panes are what the status says, and running is a button press
-             with no page load behind it — so without a live region a screen
-             reader is told nothing at all about the result (RFC-0105 M4).
-             Polite, not assertive: the reader asked for this, and it can wait
-             for the sentence they are on. -->
-        <div class="diags" data-play-diags hidden="hidden" aria-live="polite"></div>
+            <details class="stdinbox" data-play-stdin-box>
+                <summary>Standard input</summary>
+                <textarea data-play-stdin spellcheck="false" aria-label="Standard input"></textarea>
+                <p class="cap">These lines reach <code>readLine()</code>, one per call. At the end of them it answers <code>None</code>, exactly as a pipe does.</p>
+            </details>
 
-        <p class="panehead">Output</p>
-        <div class="out" data-play-out aria-live="polite"><span class="dim">Nothing has run yet.</span></div>
-    </div>
+            <!-- Both panes are what the status says, and running is a button press
+                 with no page load behind it — so without a live region a screen
+                 reader is told nothing at all about the result (RFC-0105 M4). -->
+            <div class="diags" data-play-diags hidden="hidden" aria-live="polite"></div>
+            <div class="out" data-play-out aria-live="polite"><span class="dim">Nothing has run yet.</span></div>
+        </div>
 
-    <div class="idestatus">
-        <span>tree-walking interpreter — the reference engine, in this tab</span>
-        <span class="spacer"></span>
-        <span class="keys"><kbd class="key">Ctrl</kbd><kbd class="key">↵</kbd> run · <kbd class="key">Tab</kbd> two spaces</span>
-    </div>
-
+        <div class="idestatus">
+            <span>Vyrn — tree-walking interpreter</span>
+            <span class="spacer"></span>
+            <span data-play-lncol>Ln 1, Col 1</span>
+            <span>Spaces: 2</span>
+            <span>UTF-8</span>
+            <span>Ctrl+↵ Run</span>
+        </div>
     </div>
 
     <details class="ideabout">

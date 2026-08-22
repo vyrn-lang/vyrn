@@ -1,48 +1,38 @@
 <script>
 // GET /explore — the registry: what you can install into a project you did not
-// write (RFC-0105 M2, amended; registry front RFC-0106 M5 round 3).
+// write (RFC-0105 M2; registry front RFC-0106 M5 rounds 3-4).
 //
-// The page wears a REGISTRY's shape now, not a manual's (user: "like npm or
-// crates"): a search field over the index, one row per package with the
-// command that installs it, and the mechanism in a side panel instead of three
-// prose bands. No documentation sidebar — this is not a documentation page.
+// The shape is a package index's (user: "like npm or crates", and the first
+// registry cut drowned it in prose): a search field, a count, and one compact
+// row per package — name, kind, one sentence, two numbers. The install
+// command, the manifest and the mechanism live on the package's own page,
+// which is where a reader who has chosen a package goes next. One line under
+// the list points at the mechanism's page and that is all the prose there is.
 //
 // The search is the reference landing's own scriptless-degrading mechanism:
 // every row carries its lowercased haystack in `data-q`, `widgets.js` filters
 // rows where they stand, and with no script the full index is simply visible.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
-import { Package, packages, addCommand } from "../../packages"
-import { stdCount } from "../../repo"
+import { Package, packages } from "../../packages"
 import { toLower } from "std/strings"
 
 export fn head() -> Head {
     return pageHeadOf("/explore")
 }
 
-/// `1 export`, `14 exports` — how many names the module this package offers
-/// gives you.
-fn unitLabel(p: Package) -> String {
-    return if p.exports == 1 { "1 export" } else { p.exports.toString() + " exports" }
-}
-
-/// The same rule for the dependency count.
-fn depLabel(p: Package) -> String {
-    if p.deps == 0 {
-        return "no dependencies"
-    }
-    return if p.deps == 1 { "1 dependency" } else { p.deps.toString() + " dependencies" }
+/// `1 export · 2 deps` — what a dependency is weighed by, in a row's worth of
+/// space.
+fn numsOf(p: Package) -> String {
+    let ex = if p.exports == 1 { "1 export" } else { p.exports.toString() + " exports" }
+    let deps = if p.deps == 0 { "no deps" } else if p.deps == 1 { "1 dep" } else { p.deps.toString() + " deps" }
+    return ex + " · " + deps
 }
 
 /// The row's search haystack: name, kind, and the summary's words, lowercased —
 /// the same contract the reference's rows carry.
 fn haystack(p: Package) -> String {
     return toLower(p.name + " " + p.kind + " " + p.summary)
-}
-
-/// The command that installs this package.
-fn installLine(p: Package) -> String {
-    return addCommand(p.slug)
 }
 </script>
 
@@ -51,43 +41,27 @@ fn installLine(p: Package) -> String {
     <section class="hero reghead">
         <p class="eyebrow">The registry</p>
         <h1 class="display">{{ packages().length }} packages</h1>
-        <p class="lede">Everything you can pull into a project from outside it, fetched by URL and pinned by hash. The {{ stdCount() }} standard library modules are not here — they arrive with the compiler and live in <a href="/docs.html">the reference</a>.</p>
+        <p class="lede">What you can pull into a project from outside it — fetched by URL, pinned by hash.</p>
         <div class="regsearch">
             <input type="search" data-search-input placeholder="Search packages" autocomplete="off" spellcheck="false" aria-label="Search packages"/>
             <span class="count" data-search-count data-search-noun="package">{{ packages().length }}</span>
         </div>
     </section>
 
-    <section class="band regbody">
+    <section class="band">
         <div data-search-list>
             <ul class="reglist">
                 <li v-for="p in packages()" :key="p.slug" :data-kind="p.kind" :data-q="haystack(p)">
                     <div class="regrow">
                         <a class="name" :href="p.href">{{ p.name }}</a>
-                        <span class="kindpill">{{ p.kind }}</span>
-                        <span class="nums">{{ unitLabel(p) }} · {{ depLabel(p) }}</span>
+                        <span class="kind">{{ p.kind }}</span>
+                        <span class="nums">{{ numsOf(p) }}</span>
                     </div>
                     <span class="d" v-html="p.summary"></span>
-                    <div class="cmd install" data-copy>
-                        <code>{{ installLine(p) }}</code>
-                        <button type="button" data-copy-btn aria-label="Copy the install command">Copy</button>
-                    </div>
                 </li>
             </ul>
-            <p class="cap">Read off <code>examples/</code> while this page was built. A card opens the package's own page: the specifier, the command, and the two files the command writes.</p>
         </div>
-
-        <aside class="regside">
-            <div class="regcard">
-                <p class="eyebrow">how installing works</p>
-                <p>No registry server, no account. A dependency is a URL — <code>github:owner/repo@ref/path.vyrn</code>, <code>gist:</code>, or plain <code>https:</code>. <code>vyrn add</code> fetches it once and pins the sha256 in <code>vyrn.lock</code>; every later load is checked against it, so an upstream that changes under a pinned URL fails the build instead of changing your program.</p>
-                <p>The bytes are cached by content under <code>~/.vyrn</code>. <code>vyrn vendor</code> copies them into your repository and <code>--offline</code> forbids the network outright. <a href="/tooling/projects.html">Projects and dependencies</a> is the whole story.</p>
-            </div>
-            <div class="regcard">
-                <p class="eyebrow">the state of it</p>
-                <p>Nothing is published outside this repository yet, so every package here comes from it — and nothing is listed that does not. The schema is the one a third-party package will use unchanged; when somebody publishes one, it is a row.</p>
-            </div>
-        </aside>
+        <p class="cap">No registry server and no account — a dependency is a URL, and <code>vyrn add</code> pins its sha256 in <code>vyrn.lock</code>. <a href="/tooling/projects.html">How installing works</a>.</p>
     </section>
 </main>
 </template>
