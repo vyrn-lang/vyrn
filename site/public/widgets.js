@@ -1057,6 +1057,15 @@ boot();
     let index = null;
     let loading = null;
     let cursor = -1;
+    // The section filter — "" is All. The row of chips under the field sets
+    // it, and Tab cycles it, which is the whole reason Tab is caught: a
+    // dialog with one field has nothing else for Tab to do.
+    let sect = "";
+    const tabs = $$("[data-find-tabs] [data-sect]", box);
+    // What the note says at rest, kept as markup because the suggestions in
+    // it are pressable. `render` swaps the note's content wholesale, so the
+    // presses are delegated to the note itself and survive every swap.
+    const idle = note.innerHTML;
     // Where focus was when the overlay opened, so it can be given back. A
     // reader who presses `/` in the middle of a reference page and then Esc has
     // to end up where they were and not at the top of the document.
@@ -1105,6 +1114,7 @@ boot();
       const needle = q.toLowerCase();
       const hits = [];
       for (const r of index) {
+        if (sect && r.s !== sect) continue;
         const at = r.t.toLowerCase().indexOf(needle);
         let rank = -1;
         if (at === 0) rank = 0;
@@ -1137,13 +1147,15 @@ boot();
       list.textContent = "";
       cursor = -1;
       if (!q || !index) {
-        if (!q) note.textContent = "Type to search. Esc closes.";
+        if (!q) note.innerHTML = idle;
         return;
       }
       const hits = search(q);
       note.textContent = hits.length
-        ? `${hits.length} result${hits.length === 1 ? "" : "s"}. Arrows to move, Enter to open, Esc to close.`
-        : `Nothing matches "${q}".`;
+        ? `${hits.length} result${hits.length === 1 ? "" : "s"}.`
+        : sect
+          ? `Nothing in ${sect} matches "${q}".`
+          : `Nothing matches "${q}".`;
       let section = null;
       for (const r of hits) {
         if (r.s !== section) {
@@ -1194,12 +1206,32 @@ boot();
       hits[cursor].scrollIntoView({ block: "nearest" });
     }
 
+    /// Point the filter at `v` and redraw. Focus goes back to the field: a
+    /// chip is a way of narrowing what the field finds, not a place to be.
+    function setSect(v) {
+      sect = v;
+      for (const t of tabs) t.classList.toggle("on", t.dataset.sect === v);
+      render(field.value);
+      field.focus();
+    }
+    for (const t of tabs) t.addEventListener("click", () => setSect(t.dataset.sect));
+
+    // A pressed suggestion becomes the query.
+    note.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-try]");
+      if (!b) return;
+      field.value = b.textContent;
+      // Back to All: the suggestions name things from every section, and a
+      // filter left over from an earlier search would empty them.
+      setSect("");
+    });
+
     function open() {
       if (!box.hidden) return;
       cameFrom = document.activeElement;
       box.hidden = false;
       field.value = "";
-      render("");
+      setSect("");
       field.focus();
       load().then(() => render(field.value));
     }
@@ -1237,7 +1269,15 @@ boot();
 
     field.addEventListener("input", () => render(field.value));
     field.addEventListener("keydown", (e) => {
-      if (e.key === "ArrowDown") {
+      if (e.key === "Tab") {
+        // Tab walks the section chips, Shift+Tab walks them backwards —
+        // the pattern the reader's other search dialogs taught them.
+        e.preventDefault();
+        const order = tabs.map((t) => t.dataset.sect);
+        const at = order.indexOf(sect);
+        const step = e.shiftKey ? -1 : 1;
+        setSect(order[(at + step + order.length) % order.length]);
+      } else if (e.key === "ArrowDown") {
         e.preventDefault();
         move(1);
       } else if (e.key === "ArrowUp") {

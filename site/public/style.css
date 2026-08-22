@@ -617,11 +617,25 @@ h1 code, h2 code, h3 code, h4 code {
 /* THE SEARCH OVERLAY (RFC-0106 M1). A sheet near the top, not a centred box: a
  * list belongs under the field that filters it. The index is fetched on the
  * first open, so these rules are all it costs a page that never opens. */
-.findbox { position: fixed; inset: 0; z-index: 200; background: var(--scrim); display: flex; justify-content: center; padding: var(--s5) var(--s2); }
+.findbox { position: fixed; inset: 0; z-index: 200; background: var(--scrim); display: flex; justify-content: center; align-items: flex-start; padding: var(--s5) var(--s2); }
 .findbox[hidden] { display: none; }
-.findpanel { width: 100%; max-width: 44rem; max-height: 70vh; display: flex; flex-direction: column; background: var(--paper); border: 1px solid var(--accent); }
-.findpanel input { font: var(--t-lede)/1.4 var(--sans); padding: var(--s2); border: 0; border-bottom: 1px solid var(--rule); background: none; color: var(--ink); flex: 0 0 auto; }
-.findpanel input:focus-visible { outline-offset: -2px; }
+/* The panel HUGS what it holds — empty is a field, a filter row and one line
+ * of suggestions, and results grow it toward the cap. The stretched-to-70vh
+ * void the first cut shipped came from the flex ground's default
+ * `align-items: stretch`, which sized the panel to the screen and not to its
+ * content. */
+.findpanel { width: 100%; max-width: 44rem; max-height: min(70vh, 34rem); display: flex; flex-direction: column; background: var(--paper); border: 1px solid var(--rule); box-shadow: 0 24px 64px color-mix(in oklab, var(--ink) 22%, transparent); }
+.findrow { display: flex; align-items: center; gap: var(--s1); padding: 0 var(--s2); border-bottom: 1px solid var(--rule); flex: 0 0 auto; }
+.findrow svg { flex: 0 0 auto; color: var(--muted); }
+.findrow input { flex: 1 1 auto; min-width: 0; font: var(--t-lede)/1.4 var(--sans); padding: var(--s2) 0; border: 0; background: none; color: var(--ink); }
+/* The dialog itself is the focus evidence: one field, caret in it. */
+.findrow input:focus-visible { outline: 0; }
+.findtabs { display: flex; align-items: center; gap: 2px; padding: 6px var(--s2); border-bottom: 1px solid var(--hair); flex: 0 0 auto; }
+.findtabs [data-sect] { font: var(--t-meta)/1 var(--mono); color: var(--muted); background: none; border: 0; padding: 5px 8px; cursor: pointer; }
+.findtabs [data-sect]:hover { color: var(--ink); }
+.findtabs [data-sect].on { color: var(--ink); background: color-mix(in oklab, var(--accent) 14%, transparent); }
+.findtabs .keys { margin-left: auto; display: flex; align-items: center; gap: 6px; font: var(--t-meta)/1 var(--sans); color: var(--muted); white-space: nowrap; }
+@media (max-width: 720px) { .findtabs .keys { display: none; } }
 /* THE RESULT LIST IS THE PART THAT SCROLLS (RFC-0106 M3, third round). This rule
  * named `[data-search-results]` and the markup carries `data-find-results`, so
  * for three milestones nothing in the panel scrolled: forty results ran out of
@@ -631,10 +645,12 @@ h1 code, h2 code, h3 code, h4 code {
  * `overflow-y` alone would have had nothing to overflow. */
 .findpanel [data-find-results] { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 .findpanel .sect { font: var(--t-eyebrow)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); padding: var(--s2) var(--s2) var(--s1); border-top: 1px solid var(--hair); }
+.findpanel .sect:first-child { border-top: 0; }
 .findpanel .hit { display: block; padding: var(--s1) var(--s2); min-height: 44px; text-decoration: none; color: var(--ink); }
 .findpanel .hit .d { display: block; color: var(--muted); font-size: var(--t-meta); }
 .findpanel .hit[aria-selected="true"] { background: color-mix(in oklab, var(--accent) 12%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
-.findpanel .cap { border: 0; padding: var(--s1) var(--s2); flex: 0 0 auto; }
+.findpanel .cap { border: 0; padding: var(--s1) var(--s2) var(--s2); flex: 0 0 auto; }
+.findpanel .cap [data-try] { font: inherit; color: var(--ink); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 
 /* The one call to action (RFC-0106 M1). The only filled thing in the header,
  * because there is one of it. */

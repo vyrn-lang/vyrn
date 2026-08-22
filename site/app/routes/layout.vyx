@@ -109,9 +109,21 @@ fn standing() -> String {
          RFC names. -->
     <div class="findbox" data-find hidden>
         <div class="findpanel" role="dialog" aria-modal="true" aria-label="Search">
-            <input type="search" data-find-input placeholder="Search the docs, the reference, packages" autocomplete="off" spellcheck="false" aria-controls="find-results"/>
+            <div class="findrow">
+                <Icon name="bytesize:search"/>
+                <input type="search" data-find-input placeholder="Search the docs, the reference, packages" autocomplete="off" spellcheck="false" aria-controls="find-results"/>
+                <kbd class="key">esc</kbd>
+            </div>
+            <div class="findtabs" data-find-tabs>
+                <button type="button" class="on" data-sect="">All</button>
+                <button type="button" data-sect="Docs">Docs</button>
+                <button type="button" data-sect="Reference">Reference</button>
+                <button type="button" data-sect="Packages">Packages</button>
+                <button type="button" data-sect="Releases">Releases</button>
+                <span class="keys"><kbd class="key">tab</kbd> section <kbd class="key">↑</kbd><kbd class="key">↓</kbd> move <kbd class="key">↵</kbd> open</span>
+            </div>
             <div id="find-results" data-find-results role="listbox" aria-label="Results"></div>
-            <p class="cap" data-find-note>Type to search. Esc closes.</p>
+            <p class="cap" data-find-note>Type to search — try <button type="button" data-try>Map</button>, <button type="button" data-try>readLine</button> or <button type="button" data-try>panic</button>.</p>
         </div>
     </div>
     <noscript>
