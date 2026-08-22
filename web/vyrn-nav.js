@@ -291,8 +291,25 @@ function replaceContent(newDoc) {
 // ---------------------------------------------------------------------------
 // Apply a parsed document to the live one: title/head, content region, islands.
 // ---------------------------------------------------------------------------
+// The masthead persists across a soft navigation, so its `aria-current` marker
+// is frozen at whatever page the session STARTED on unless someone moves it.
+// The fetched document already knows the answer — the export marked it — so the
+// live rows mirror the fetched ones, keyed by `data-key` (user: Docs stayed
+// unmarked after navigating into the documentation).
+function syncNavMark(newDoc) {
+  const marked = new Set();
+  for (const el of newDoc.querySelectorAll("header [data-key][aria-current]")) {
+    marked.add(el.getAttribute("data-key"));
+  }
+  for (const el of document.querySelectorAll("header [data-key]")) {
+    if (marked.has(el.getAttribute("data-key"))) el.setAttribute("aria-current", "page");
+    else el.removeAttribute("aria-current");
+  }
+}
+
 function applyDocument(newDoc) {
   swapHead(newDoc);
+  syncNavMark(newDoc);
   replaceContent(newDoc);
   syncIslands();
 }

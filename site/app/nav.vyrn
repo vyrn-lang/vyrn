@@ -217,7 +217,7 @@ test "the navigation is three groups, and the book keeps its label" {
         assert(row.href != hrefOf("/install"))
         assert(row.href != hrefOf("/compare"))
         assert(row.href != hrefOf("/why-vyrn"))
-        assert(row.href != hrefOf("/docs/editors"))
+        assert(row.href != hrefOf("/tooling/editors"))
         assert(row.href != hrefOf("/releases"))
     }
 }

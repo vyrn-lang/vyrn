@@ -137,7 +137,7 @@ fn commands() -> Array<Command> {
                 <li>
                     <h3><Icon name="bytesize:settings"/> The tools</h3>
                     <p>The driver, the formatter, the language server and the VS Code extension — all in one repository.</p>
-                    <p class="ctarow"><a class="cta" href="/docs/editors.html">Set up your editor</a></p>
+                    <p class="ctarow"><a class="cta" href="/tooling/editors.html">Set up your editor</a></p>
                 </li>
                 <li>
                     <h3><Icon name="bytesize:activity"/> How it fits together</h3>

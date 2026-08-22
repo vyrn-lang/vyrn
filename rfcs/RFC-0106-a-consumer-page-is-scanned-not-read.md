@@ -2536,8 +2536,11 @@ missing from a tree.
   `vyrn why` — every command checked against `vyrn --help` before it was
   written), *Testing and bench* (chapter 10, moved whole), *Projects and
   dependencies* (manifest, lock, toolchain pinning), and Editors at the end of
-  the shelf — the page kept its `/docs/editors` URL and changed groups, the
-  same move M1 made in the other direction.
+  the shelf. The first cut left Editors at `/docs/editors` with only its group
+  changed; the user asked why the path disagreed with the shelf, and it was
+  the right question — the page lives at `/tooling/editors` now, the old path
+  is a stub, and M1's `/editors` stub points at the final home rather than at
+  another stub, which is the chain the stub test's no-loop assertion refuses.
 - **Reference** is unchanged.
 
 ### The moves
@@ -2560,6 +2563,18 @@ four glyphs it had no template for.
   twin path list, which had the same hand-built prefix.
 - The masthead-marks gate refused the stubs before `currentNav` knew the rule.
 - 185 routes against M4's 176: two landings and seven area pages.
+- The area pager walks the TREE, not the chapter chain, so a shelf's
+  hand-listed rows are neighbours too: `/tooling/projects` offers Editors as
+  Next (user caught the asymmetry).
+- The masthead marker now follows a soft navigation: `vyrn-nav.js` mirrors
+  `aria-current` from the fetched document's header, keyed by `data-key` — it
+  had been frozen at whatever page the session started on (user).
+- Merging main surfaced two audit assertions that had never run anywhere:
+  the escaped-pipe cell test expected the table splitter to collapse `\`
+  (the inline pass owns backslash escapes — collapsing twice would halve a
+  run of backslashes twice), and the search-haystack test's witness was a
+  `<script>` the vyx summary has never contained. CI's per-module loop dies
+  at the first red module, alphabetically before both.
 
 ## What this RFC does not do
 

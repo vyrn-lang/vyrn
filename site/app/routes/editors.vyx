@@ -14,7 +14,7 @@ export fn head() -> Head {
 /// Where this stub sends a reader, written once. `export.vyrn` reads the same
 /// function to stamp the canonical and the refresh.
 fn target() -> String {
-    return hrefOf("/docs/editors")
+    return hrefOf("/tooling/editors")
 }
 </script>
 

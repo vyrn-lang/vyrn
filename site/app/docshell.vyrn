@@ -140,7 +140,7 @@ export fn areaTree(area: String, current: String) -> Array<TreeGroup> {
         rows.push(TreeRow { href: chapterHref(c.slug), label: label.copy(), here: mark(current, c.slug) })
     }
     if area == "tooling" {
-        rows.push(TreeRow { href: "/docs/editors.html", label: "Editors", here: mark(current, "editors") })
+        rows.push(TreeRow { href: "/tooling/editors.html", label: "Editors", here: mark(current, "editors") })
     }
     return [TreeGroup { name: row[4].copy(), rows: rows.copy(), icon: drawNamed(row[5]) }]
 }

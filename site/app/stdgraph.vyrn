@@ -403,18 +403,20 @@ test "a summary's tags are not part of what a search matches" {
     // Nor are the entities the escaper wrote: the haystack is the text the
     // reader sees, so a query typed off the page (`option<t`) matches.
     assertEq(plainText("an Option&lt;T&gt; &amp; &quot;q&quot;&#39;s"), "an Option<T> & \"q\"'s")
-    // std/vyx's summary shows `<script>`; that text, not `&lt;script&gt;`, is
-    // what its row is matched on. No row keeps an entity at all.
-    let mut sawScript = false
+    // std/vyx's summary wraps `.vyx` in a code tag; the TEXT, not the tag, is
+    // what its row is matched on. No row keeps an entity at all. (The audit's
+    // witness was `<script>`, which the summary has never contained — the
+    // assertion below had never run when it landed.)
+    let mut sawVyx = false
     for r in searchRows() {
         if r.name == "vyx" {
-            sawScript = contains(r.q, "<script")
+            sawVyx = contains(r.q, ".vyx") && !contains(r.q, "<code>")
         }
         assert(!contains(r.q, "&lt;"))
         assert(!contains(r.q, "&gt;"))
         assert(!contains(r.q, "&amp;"))
     }
-    assert(sawScript)
+    assert(sawVyx)
 }
 
 test "every node sits in a column, and no two share a place" {

@@ -8,10 +8,10 @@
 // "tooling", and 404s every other slug, so one slug has one page.
 import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
 import { pageHead } from "../../nav"
-import { Chapter, Section, chapterArea, chapterCount, chapterOf, chapterKnown, chapterNumber, chapterHref, chapterNavHtml, sectionBody, sectionEyebrow } from "../../guide"
+import { Chapter, Section, chapterArea, chapterCount, chapterOf, chapterKnown, chapterNumber, chapterHref, sectionBody, sectionEyebrow } from "../../guide"
 import { mdUrl, askClaudeUrl } from "../../pagemd"
 import { inlineCode } from "../../code"
-import { TreeGroup, areaTree } from "../../docshell"
+import { TreeGroup, Pager, areaTree, pagerFor } from "../../docshell"
 import { Icon } from "../../icons"
 params { chapter: String }
 
@@ -47,6 +47,12 @@ fn sectionHref(s: Section) -> String {
 /// How many pages this shelf holds.
 fn shelfSize() -> Int64 {
     return chapterCount("tooling")
+}
+
+/// The pages beside this one — FROM THE TREE, not from the chapter chain, so
+/// a shelf's hand-listed rows (Tooling ends with Editors) are neighbours too.
+fn pager(here: String) -> Pager {
+    return pagerFor(tree(here))
 }
 
 /// The Open-in-Claude link for this page.
@@ -96,7 +102,10 @@ fn claudeHref(slug: String, title: String) -> String {
         <div v-html="sectionBody(s)"></div>
     </section>
 
-    <nav class="pager" aria-label="Pages" v-html="chapterNavHtml(data.chapter.slug)"></nav>
+    <nav class="pager" aria-label="Pages">
+        <a class="prev" v-if="pager(data.chapter.slug).prevHref.byteLength > 0" :href="pager(data.chapter.slug).prevHref"><span class="eyebrow">Previous</span>{{ pager(data.chapter.slug).prevLabel }}</a>
+        <a class="next" v-if="pager(data.chapter.slug).nextHref.byteLength > 0" :href="pager(data.chapter.slug).nextHref"><span class="eyebrow">Next</span>{{ pager(data.chapter.slug).nextLabel }}</a>
+    </nav>
 
     <aside class="onpage">
         <p class="eyebrow">On this page</p>

@@ -785,12 +785,23 @@ addEventListener("resize", markRail, { passive: true });
 
 /// Whether the navigation row `href` is the row for `path`.
 ///
-/// A reference page belongs under Docs and a chapter under Guide: a row owns the
-/// subtree named after it. This is the export's `currentNav` rule, in the
-/// language the browser has, and it needs no list of the prefixes — adding a
-/// third section adds nothing here.
+/// A row owns the subtree named after it — and the Docs row owns MORE than its
+/// subtree: it points at `/guide.html` and speaks for the whole documentation,
+/// so the reference, the Web shelf and the Tooling shelf mark it too. That is
+/// the export's `currentNav` rule; the first cut here assumed name-owns-subtree
+/// was the whole rule, and the Docs row went dark on every documentation page
+/// whose path was not under `/guide` (user). The prefixes are joined to the
+/// row's own stem, so any mount point works.
 function navOwns(href, path) {
-  return path === href || path.startsWith(href.replace(/\.html$/, "") + "/");
+  const stem = href.replace(/\.html$/, "");
+  if (path === href || path.startsWith(stem + "/")) return true;
+  if (stem.endsWith("/guide")) {
+    const root = stem.slice(0, -"/guide".length);
+    for (const area of ["/docs", "/web", "/tooling"]) {
+      if (path === root + area + ".html" || path.startsWith(root + area + "/")) return true;
+    }
+  }
+  return false;
 }
 
 /// Freeze the shell's links to the URLs they resolve to on the document that
