@@ -79,7 +79,7 @@ fn claudeHref(slug: String, title: String) -> String {
                  browser has a clipboard. Without script it is the file. -->
             <a class="btn" :href="mdUrl(chapterHref(data.chapter.slug))" data-copy-md>Copy page</a>
             <details class="pagemenu">
-                <summary aria-label="More page actions">▾</summary>
+                <summary aria-label="More page actions"><span class="gl">▾</span></summary>
                 <div class="acts">
                     <a :href="mdUrl(chapterHref(data.chapter.slug))" data-copy-md><span class="ic"><Icon name="bytesize:clipboard"/></span><span class="t"><span>Copy page</span><span class="d">Markdown, ready to paste into an LLM</span></span></a>
                     <a :href="mdUrl(chapterHref(data.chapter.slug))"><span class="ic"><Icon name="bytesize:file"/></span><span class="t"><span>View as Markdown</span><span class="d">This page as plain text</span></span></a>

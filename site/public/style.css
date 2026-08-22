@@ -854,12 +854,14 @@ h1 code, h2 code, h3 code, h4 code {
  * arrives from the button instead of appearing, and hovering EITHER half
  * lights the shared seam — the halves overlap by a pixel and the hovered one
  * lifts. Stilled under prefers-reduced-motion. */
-.pagemenu > summary { transition: color 140ms var(--expo), border-color 140ms var(--expo), transform 200ms var(--expo); }
-.pagemenu[open] > summary { transform: rotate(180deg); }
+.pagemenu > summary { transition: color 140ms var(--expo), border-color 140ms var(--expo); }
+/* The GLYPH turns over, not the button around it (user). */
+.pagemenu > summary .gl { display: inline-block; transition: transform 200ms var(--expo); }
+.pagemenu[open] > summary .gl { transform: rotate(180deg); }
 .pagemenu .acts { animation: menuin 160ms var(--expo); }
 @keyframes menuin { from { opacity: 0; translate: 0 -6px; } }
 @media (prefers-reduced-motion: reduce) {
-  .pagemenu[open] > summary { transform: none; }
+  .pagemenu[open] > summary .gl { transform: none; }
   .pagemenu .acts { animation: none; }
 }
 .docutils .btn:hover, .pagemenu > summary:hover { position: relative; z-index: 1; }
