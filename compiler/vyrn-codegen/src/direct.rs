@@ -9299,6 +9299,19 @@ impl<'p> Fn_<'_, 'p> {
             }
             _ => return unsupported("a stream element of this shape", line),
         }
+        // The step built this Some's payload in a box of its own when the
+        // element does not ride in two words; the binding above copied its own
+        // out, so the box has no owner left. The mirror of `rel_word`'s boxed
+        // arm, minus the walk — the contents now belong to `place`.
+        if self.word2(elem)? == Word::Boxed {
+            let p = b.local(ValType::I32);
+            b.slot(ooff);
+            b.ins(&Instruction::I64Load(at(ol.fields[1])));
+            b.ins(&Instruction::I32WrapI64);
+            b.ins(&Instruction::LocalSet(p));
+            b.ins(&Instruction::LocalGet(p))
+                .ins(&Instruction::Call(self.cx.rt.free));
+        }
         b.ins(&Instruction::I32Const(1));
         b.ins(&Instruction::LocalSet(has));
         b.ins(&Instruction::Else);
@@ -15401,6 +15414,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
     // the DFA decides it here rather than the caller.
     let getbyte = rt.getbyte;
     let str_new = rt.str_new;
+    let free = rt.free;
     rt.next_is(m, rt.read_line);
     m.func(
         &[ValType::I32],
@@ -15464,7 +15478,13 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::MemoryCopy {
                     src_mem: 0,
                     dst_mem: 0,
-                })
+                });
+            // Only this branch frees: the block `buf` names is ours, and the
+            // copy above has already moved its bytes. `str_new` answered the
+            // bytes, SHDR past the base, which is what `str_hdr` recovers.
+            b.ins(&Instruction::LocalGet(buf));
+            str_hdr(b);
+            b.ins(&Instruction::Call(free))
                 .ins(&Instruction::LocalGet(nb))
                 .ins(&Instruction::LocalSet(buf))
                 .ins(&Instruction::End)
@@ -15520,6 +15540,19 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::BrIf(0));
             sum2_write(b, &sum2, 1, Some(buf));
             b.ins(&Instruction::Br(1)).ins(&Instruction::End); // none
+                                                               // Both ways of answering None land here, and both leave the line
+                                                               // buffer with no owner. The EOF exit at the top lands here too,
+                                                               // before any buffer exists — `buf` is then still 0, and the load
+                                                               // inside `str_hdr` would read at `0 - SHDR`, far out of bounds,
+                                                               // before `free` could refuse anything. Free only a real buffer;
+                                                               // an empty line never reaches this arm (the `\n` case answers
+                                                               // Some above), so nothing owned is skipped.
+            b.ins(&Instruction::LocalGet(buf));
+            b.ins(&Instruction::If(BlockType::Empty));
+            b.ins(&Instruction::LocalGet(buf));
+            str_hdr(b);
+            b.ins(&Instruction::Call(free));
+            b.ins(&Instruction::End);
             sum2_write(b, &sum2, 0, None);
             b.ins(&Instruction::End); // fin
         },
@@ -15650,6 +15683,13 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                     src_mem: 0,
                     dst_mem: 0,
                 })
+                // Only this branch frees: the block `buf` names is ours, and
+                // the copy above has already moved its bytes. The base sits
+                // `hdr` in front of the bytes, exactly as both mallocs wrote it.
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::I32Sub)
+                .ins(&Instruction::Call(free))
                 .ins(&Instruction::LocalGet(nb))
                 .ins(&Instruction::LocalSet(buf))
                 .ins(&Instruction::End);
@@ -15674,6 +15714,12 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
             b.slot(8);
             b.ins(&Instruction::Call(fd_read))
                 .ins(&Instruction::If(BlockType::Empty))
+                // A failed read hands back 0, so the buffer built for the
+                // bytes has no owner left. The base is `hdr` below the bytes.
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::I32Sub)
+                .ins(&Instruction::Call(free))
                 .ins(&Instruction::I32Const(0))
                 .ins(&Instruction::LocalSet(buf))
                 .ins(&Instruction::Br(2))
@@ -16347,6 +16393,12 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                     .ins(&Instruction::LocalSet(endp));
                 elem(b);
                 b.ins(&Instruction::End)
+                    // Every name is now a copy of its own; the blob was only
+                    // ever something to split, so this is where its ownership
+                    // ends. The error exit above needs nothing: `gen_slurp`
+                    // branches before the malloc, so there `buf` is still 0.
+                    .ins(&Instruction::LocalGet(buf))
+                    .ins(&Instruction::Call(free))
                     .ins(&Instruction::I64Const(triple.size as i64))
                     .ins(&Instruction::Call(malloc))
                     .ins(&Instruction::LocalTee(boxed))

@@ -21,6 +21,13 @@ fn max(a: Int64, b: Int64) -> Int64
 fn abs(x: Int64) -> Int64
 ```
 
+Absolute value.
+
+`Int64.min` has no positive opposite — the language wraps, so `0 - x` would
+hand the minimum straight back and `abs` would return NEGATIVE. There is no
+exact answer, so it saturates to `Int64.max`, the nearest representable
+magnitude, and the doc says so rather than leaving a trap.
+
 ## clamp
 
 ```vyrn

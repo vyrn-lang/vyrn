@@ -18,24 +18,73 @@
 /// self-contained (they wrap the global `readFile`) and yield the prelude
 /// `LoadResult<T> = Missing | Corrupt(Array<Issue>) | Loaded(T)`.
 ///
+/// The temp name is seeded per call (`randomSeed`, std/random), which makes
+/// concurrent writers safe and leaked temps identifiable; see `writeAtomic`.
+///
 /// **Durability:** `writeAtomic` is CRASH-CONSISTENT (no torn files) but not
 /// power-loss-durable — without an `fsync` the rename may not have reached the
 /// disk when the power dies. `fsyncFile(path)` (a global builtin) is the opt-in
 /// upgrade for the paranoid path (fsync temp → rename → fsync dir); it is left
 /// out of `writeAtomic` because fsync-on-every-save is a latency cost most apps
 /// don't want.
+import { randomSeed } from "std/random"
 
-/// Write `content` to `path` atomically: stream it to a sibling temp
-/// (`<path>.tmp`, same directory so the rename stays intra-device), then rename
-/// the temp over `path`. A failure at the write step leaves `path` UNTOUCHED (the
-/// old data is intact — the tear a bare `writeFile` would cause is gone).
-/// Byte-for-byte a successful `writeAtomic` leaves `path` exactly as `writeFile`
-/// would; only the crash window differs. HOST EFFECT (forbidden in
-/// generators/comptime, cannot cross a `spawn` boundary).
+/// Write `content` to `path` atomically: stream it to a sibling temp (same
+/// directory, so the rename stays intra-device), then rename the temp over
+/// `path`. A failure at the write step leaves `path` UNTOUCHED (the old data is
+/// intact — the tear a bare `writeFile` would cause is gone). Byte-for-byte a
+/// successful `writeAtomic` leaves `path` exactly as `writeFile` would; only
+/// the crash window differs. HOST EFFECT (forbidden in generators/comptime,
+/// cannot cross a `spawn` boundary).
+///
+/// **Concurrency:** the temp carries a per-call seed — `<path>.tmp.<seed>` — so
+/// two processes saving the same target write DIFFERENT temps and each rename
+/// publishes one complete file. A fixed `<path>.tmp` would let concurrent
+/// writers interleave into one torn temp and rename that torn file into place.
+/// Last writer to rename wins; nothing interleaves.
+///
+/// **Leaked temps:** RFC-0044 offers no delete primitive, so a failed RENAME
+/// abandons its own uniquely-named temp on disk. It can never be mistaken for
+/// real data — it is never `<path>` itself, and it is never reused — but a
+/// program that fails saves repeatedly accumulates `<path>.tmp.*` siblings;
+/// clean them out of band.
 export fn writeAtomic(path: String, content: String) -> Result<Bool, String> {
-    let tmp = "\{path}.tmp"
+    let u: UInt64 = UInt64(randomSeed())
+    return writeAtomicTemp("\{path}.tmp.\{u.toString()}", path, content)
+}
+
+/// [`writeAtomic`] with the temp named by the caller — the seam that makes the
+/// rename-failure path reachable from a test.
+fn writeAtomicTemp(tmp: String, path: String, content: String) -> Result<Bool, String> {
     return match writeFile(tmp, content) {
         Ok(done) => renameFile(tmp, path),
         Err(why) => Err(why),
     }
+}
+
+/// The temp name for a call: `<path>.tmp.<seed>`, unique per seed.
+fn tempName(path: String, seed: Int64) -> String {
+    let u: UInt64 = UInt64(seed)
+    return "\{path}.tmp.\{u.toString()}"
+}
+
+test "temp names differ per call, so two writers never share a temp" {
+    assertEq(tempName("state.json", 1), "state.json.tmp.1")
+    assert(tempName("state.json", 2) != tempName("state.json", 1))
+    // A negative seed still yields a usable single-component suffix — the
+    // seed rides as its UInt64 bit pattern, one deterministic spelling per
+    // call.
+    assertEq(tempName("state.json", 0 - 7), "state.json.tmp.18446744073709551609")
+}
+
+test "a failed save reports why and leaves the target untouched" {
+    // Both failure arms: a temp whose directory does not exist fails at the
+    // WRITE, and a written temp whose destination directory does not exist
+    // fails at the RENAME. Neither touches any target; the second leaves
+    // exactly the documented leaked-temp behind (there is no delete to clean
+    // it with).
+    let w = writeAtomicTemp("no/such/dir/state.json.tmp.9", "no/such/dir/state.json", "{}")
+    assert(match w { Ok(b) => false, Err(e) => true })
+    let r = writeAtomicTemp("wa-rename-failure-leak.tmp", "no/such/dir/state.json", "{}")
+    assert(match r { Ok(b) => false, Err(e) => true })
 }

@@ -23,9 +23,12 @@
 //! Reference collection is [`vyrn_frontend::references_to`] over each candidate
 //! file's own tokens, so it is scope-aware within a file and never a textual
 //! search. The candidate set is the project's `.vyrn` files and the `<script>`
-//! bodies of its `.vyx` files, filtered to those that IMPORT either the
-//! declaring module or a generator — the only modules in which either name can
-//! occur, since Vyrn re-exports nothing implicitly.
+//! bodies of its `.vyx` files, filtered to those whose imports provably REACH
+//! the declaring module — a direct path import resolving to it, or a generator
+//! whose argument names the module itself or a directory containing it. An
+//! import aimed at ANOTHER module can supply a different declaration's
+//! same-named procedure, so its namespace qualifies nothing and its flat
+//! bindings never count as bare references.
 //!
 //! Two classes are out of reach, both reported rather than papered over:
 //!
@@ -44,10 +47,10 @@ use std::collections::HashMap;
 
 // The `.vyx` script body, one definition for the whole server: `contracts`
 // delegates to `vyrn_frontend::vyx`, which applies `std/vyx`'s own section rule.
-use crate::contracts::vyx_script;
+use vyrn_frontend::ast::{Expr, ImportDecl, ImportSource};
 
+use crate::contracts::vyx_script;
 use lsp_types::{Position, PrepareRenameResponse, Range, TextEdit, Url, WorkspaceEdit};
-use vyrn_frontend::ast::ImportSource;
 use vyrn_frontend::symbolmap::{same_file, MappedSymbol};
 use vyrn_frontend::{analyze, references, references_to, Analysis, SymbolKind};
 
@@ -141,16 +144,20 @@ pub fn target_at(
 /// inside a comment or a `.vyx` template — and only discovers the server will not
 /// rename it after the user has typed a replacement. With it the refusal, and its
 /// reason, arrive before the box opens.
-pub fn prepare(target: &Target) -> PrepareRenameResponse {
+///
+/// `source` is the declaring file's text: the target's columns are frontend char
+/// columns, the wire wants UTF-16 code units.
+pub fn prepare(target: &Target, source: &str) -> PrepareRenameResponse {
+    let line_text = crate::line_of_text(source, target.line - 1);
     PrepareRenameResponse::RangeWithPlaceholder {
         range: Range {
             start: Position {
                 line: (target.line - 1) as u32,
-                character: (target.col - 1) as u32,
+                character: crate::char_col_to_utf16(line_text, target.col - 1),
             },
             end: Position {
                 line: (target.line - 1) as u32,
-                character: (target.end_col - 1) as u32,
+                character: crate::char_col_to_utf16(line_text, target.end_col - 1),
             },
         },
         placeholder: target.name.clone(),
@@ -261,19 +268,224 @@ fn wanted(target: &Target, new: &str, maps: &[MappedSymbol]) -> Result<Vec<Wante
 }
 
 /// A candidate file, ready to search: its Vyrn body, the line the body starts at
-/// within the file, and the imports that body declares.
+/// within the file, and the file's FULL text — a `<script>` body's columns are
+/// offset into the `.vyx`, whose lines are what a UTF-16 conversion reads.
 struct Candidate {
     uri: Url,
     body: String,
     line_offset: usize,
+    file_text: String,
+}
+
+/// How one candidate file's imports can reach the declaring module.
+///
+/// The split matters because different spellings travel differently: the
+/// declaration's OWN name arrives through an import that pins the module exactly
+/// (a direct `from "./pastes"`, or a per-file generator like
+/// `http("./server/pastes")` re-exporting under its own name), while a DERIVED
+/// name (`pastesCreate`) also arrives through a directory-wide generator
+/// (`client("./server/api")`). An import aimed at another module supplies a
+/// DIFFERENT declaration's same-named procedure and qualifies nothing.
+#[derive(Default)]
+struct Reaches {
+    /// Namespaces of plain path imports pinning the declaring module.
+    direct_ns: Vec<String>,
+    /// Namespaces of generator imports pinning the declaring module exactly.
+    exact_gen_ns: Vec<String>,
+    /// Namespaces of generator imports covering it through a directory argument.
+    dir_gen_ns: Vec<String>,
+    /// Every selective binding `(local name, pins the declaring module)`.
+    flats: Vec<(String, bool)>,
+}
+
+impl Reaches {
+    fn is_empty(&self) -> bool {
+        self.direct_ns.is_empty()
+            && self.exact_gen_ns.is_empty()
+            && self.dir_gen_ns.is_empty()
+            && self.flats.is_empty()
+    }
+
+    /// The qualifiers under which `w` may occur in this file, and whether it may
+    /// occur at all.
+    fn qualifiers(&self, w: &Wanted) -> (bool, Vec<String>) {
+        let mut quals = Vec::new();
+        let mut allowed = false;
+        if w.direct {
+            // A flat selective import (`import { Note } from ...`) reaches the
+            // declaration with no namespace at all: the bare-pinning rule is
+            // what admits it, or every such candidate silently dropped out.
+            allowed |= !self.direct_ns.is_empty()
+                || !self.exact_gen_ns.is_empty()
+                || self.bare_is_ours(&w.old);
+            quals.extend(self.direct_ns.iter().chain(&self.exact_gen_ns).cloned());
+        }
+        if w.generated {
+            allowed |= !self.exact_gen_ns.is_empty() || !self.dir_gen_ns.is_empty();
+            quals.extend(self.exact_gen_ns.iter().chain(&self.dir_gen_ns).cloned());
+        }
+        quals.sort();
+        quals.dedup();
+        (allowed, quals)
+    }
+
+    /// Whether a BARE occurrence of `name` in this file must be the declaration:
+    /// exactly one selective import binds the spelling, and that import pins the
+    /// declaring module. Two suppliers — or one from elsewhere — leave the
+    /// token's owner unresolved; skipping is a missed rename that fails loudly
+    /// at build time, where rewriting would rewire another module's procedure
+    /// silently.
+    fn bare_is_ours(&self, name: &str) -> bool {
+        let suppliers = self.flats.iter().filter(|(n, _)| n == name).count();
+        suppliers == 1 && self.flats.iter().any(|(n, pins)| n == name && *pins)
+    }
+}
+
+/// Where one candidate's imports point, relative to the importing file: a plain
+/// specifier resolves to one module; a generator's consteval string arguments
+/// resolve to the module(s) or directory it mounts. Anything unresolvable pins
+/// nothing — an import whose target cannot be proven must not widen the sets.
+fn reaches(
+    imports: &[ImportDecl],
+    importer: Option<&str>,
+    target_file: &str,
+    opts: &vyrn_frontend::loader::LoadOptions,
+) -> Reaches {
+    let mut r = Reaches::default();
+    let resolve = |spec: &str| -> Option<String> {
+        vyrn_frontend::loader::resolve_spec(spec, importer?, opts).ok()
+    };
+    for imp in imports {
+        let targets: Vec<String> = match &imp.source {
+            ImportSource::Path(spec) => resolve(spec).into_iter().collect(),
+            ImportSource::Generator { args, .. } => args
+                .iter()
+                .filter_map(|a| match a {
+                    Expr::Str(s) => resolve(s),
+                    _ => None,
+                })
+                .collect(),
+        };
+        let exact = targets.iter().any(|t| same_file(t, target_file));
+        match &imp.source {
+            ImportSource::Path(_) => {
+                if exact {
+                    if let Some(ns) = &imp.namespace {
+                        r.direct_ns.push(ns.clone());
+                    }
+                }
+            }
+            ImportSource::Generator { .. } => {
+                if let Some(ns) = &imp.namespace {
+                    if exact {
+                        r.exact_gen_ns.push(ns.clone());
+                    } else if targets.iter().any(|t| covers_dir(t, target_file)) {
+                        r.dir_gen_ns.push(ns.clone());
+                    } else if targets.iter().any(|t| mounts_import(t, target_file, opts)) {
+                        // The RE-EMITTED reach: `client("./server/api")` emits
+                        // stubs whose signatures name the wire types the api
+                        // modules import — one level of indirection the path
+                        // prefix cannot see. A generator qualifies for derived
+                        // spellings when a module it mounts imports the
+                        // declaring file directly.
+                        r.dir_gen_ns.push(ns.clone());
+                    }
+                }
+            }
+        }
+        // A directory covers only derived spellings; a bare name needs the
+        // module pinned exactly.
+        for n in &imp.names {
+            r.flats.push((n.local().to_string(), exact));
+        }
+    }
+    r
+}
+
+/// Whether any module the generator argument `resolved` mounts imports
+/// `target_file` DIRECTLY — the one level of indirection a generated client
+/// adds when it re-emits the wire types its api modules take in signatures.
+/// Reads the real tree: the unit fixtures use paths that exist nowhere, and
+/// for them this is simply `false`, which is the un-transitive answer they
+/// assert. Capped, and one level only on purpose: a generator emits from the
+/// modules it mounts, not from their whole import closure.
+fn mounts_import(
+    resolved: &str,
+    target_file: &str,
+    opts: &vyrn_frontend::loader::LoadOptions,
+) -> bool {
+    let stem = resolved.strip_suffix(".vyrn").unwrap_or(resolved);
+    let mut mounted: Vec<String> = Vec::new();
+    if std::path::Path::new(resolved).is_file() {
+        mounted.push(resolved.to_string());
+    }
+    if let Ok(entries) = std::fs::read_dir(stem) {
+        for e in entries.flatten().take(64) {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "vyrn") {
+                mounted.push(p.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    for file in mounted {
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let Ok(tokens) = vyrn_frontend::lexer::lex(&text) else {
+            continue;
+        };
+        let (program, _) = vyrn_frontend::parser::parse_accum(tokens);
+        for imp in &program.imports {
+            if let ImportSource::Path(spec) = &imp.source {
+                if let Ok(t) = vyrn_frontend::loader::resolve_spec(spec, &file, opts) {
+                    if same_file(&t, target_file) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Whether a resolved target reaches declarations in `target_file` through a
+/// DIRECTORY (`client("./server/api")` mounts every module under `server/api`).
+/// A directory argument resolves as the loader's file guess `<dir>.vyrn`, so the
+/// guess's extension is stripped before the prefix check — a real file target
+/// never gets here (the exact match ran first).
+fn covers_dir(resolved: &str, target_file: &str) -> bool {
+    // The same normalization [`same_file`] applies, drive letter included: a
+    // target that arrives as `c:/...` off a file URL must still be covered by
+    // a directory resolved as `C:/...` — the mismatch that silently emptied
+    // every reach on Windows.
+    let norm = |p: &str| {
+        let s = p.replace('\\', "/");
+        let mut c = s.chars();
+        let s = match c.next() {
+            Some(d) => d.to_ascii_lowercase().to_string() + c.as_str(),
+            None => s,
+        };
+        s.trim_matches('/').to_string()
+    };
+    let t = norm(target_file);
+    let mut d = norm(resolved);
+    if let Some(stem) = d.strip_suffix(".vyrn") {
+        d = stem.to_string();
+    }
+    if d.is_empty() || t == d {
+        return false;
+    }
+    t.starts_with(&d) && t.get(d.len()..).is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Rewrite `wanted` throughout the project and return the edit.
 ///
-/// `overlays` is every open buffer (slash path → text), so an unsaved edit is
-/// renamed as it stands rather than as it was last saved.
+/// `decl_text` is the declaring file's live text (its columns are char columns,
+/// sent as UTF-16 units). `overlays` is every open buffer (slash path → text),
+/// so an unsaved edit is renamed as it stands rather than as it was last saved.
 pub fn workspace_edit(
     target: &Target,
+    decl_text: &str,
     new: &str,
     maps: &[MappedSymbol],
     decl_analysis: &Analysis,
@@ -297,7 +509,7 @@ pub fn workspace_edit(
     let refs = references(decl_analysis, target.line, target.col);
     let edits: Vec<TextEdit> = refs
         .iter()
-        .map(|r| edit_at(r.line, r.col, r.end_col, new, 0))
+        .map(|r| edit_at(decl_text, r.line, r.col, r.end_col, new, 0))
         .collect();
     if !edits.is_empty() {
         changes.insert(decl_uri.clone(), edits);
@@ -312,64 +524,55 @@ pub fn workspace_edit(
         };
         let (program, _) = vyrn_frontend::parser::parse_accum(tokens);
         // Which of the wanted names can occur here at all, and under which
-        // qualifiers. A module that imports neither the declaration nor a
-        // generator cannot mention either spelling, and is not analyzed.
-        let mut direct_ns: Vec<String> = Vec::new();
-        let mut gen_ns: Vec<String> = Vec::new();
-        let mut imports_decl = false;
-        let mut imports_gen = false;
+        // qualifiers — decided per import from where that import POINTS, not
+        // from the mere fact that some generator is imported.
         let importer = cand
             .uri
             .to_file_path()
             .ok()
             .map(|p| p.to_string_lossy().replace('\\', "/"));
-        for imp in &program.imports {
-            match &imp.source {
-                ImportSource::Path(spec) => {
-                    let Some(importer) = importer.as_deref() else {
-                        continue;
-                    };
-                    let Ok(resolved) = vyrn_frontend::loader::resolve_spec(spec, importer, opts)
-                    else {
-                        continue;
-                    };
-                    if !same_file(&resolved, &target.file) {
-                        continue;
-                    }
-                    imports_decl = true;
-                    if let Some(ns) = &imp.namespace {
-                        direct_ns.push(ns.clone());
-                    }
-                }
-                ImportSource::Generator { .. } => {
-                    imports_gen = true;
-                    if let Some(ns) = &imp.namespace {
-                        gen_ns.push(ns.clone());
-                    }
-                }
-            }
-        }
-        if !imports_decl && !imports_gen {
+        let reach = reaches(&program.imports, importer.as_deref(), &target.file, opts);
+        if reach.is_empty() {
             continue;
         }
         let analysis = analyze(&cand.body);
         let mut edits: Vec<TextEdit> = Vec::new();
         for w in &names {
-            let mut quals: Vec<String> = Vec::new();
-            let mut allowed = false;
-            if w.direct && imports_decl {
-                allowed = true;
-                quals.extend(direct_ns.iter().cloned());
-            }
-            if w.generated && imports_gen {
-                allowed = true;
-                quals.extend(gen_ns.iter().cloned());
-            }
+            let (allowed, quals) = reach.qualifiers(w);
             if !allowed {
                 continue;
             }
-            for r in references_to(&analysis, &w.old, &quals) {
-                edits.push(edit_at(r.line, r.col, r.end_col, &w.new, cand.line_offset));
+            // Member occurrences (`ns.create(..)`) are qualified by the
+            // namespaces above. A bare occurrence counts only when this file's
+            // imports pin the spelling to the declaring module — see
+            // [`Reaches::bare_is_ours`].
+            let all = references_to(&analysis, &w.old, &quals);
+            if reach.bare_is_ours(&w.old) {
+                for r in all {
+                    edits.push(edit_at(
+                        &cand.file_text,
+                        r.line,
+                        r.col,
+                        r.end_col,
+                        &w.new,
+                        cand.line_offset,
+                    ));
+                }
+                continue;
+            }
+            let bare = references_to(&analysis, &w.old, &[]);
+            for r in all {
+                if bare.iter().any(|b| b.line == r.line && b.col == r.col) {
+                    continue;
+                }
+                edits.push(edit_at(
+                    &cand.file_text,
+                    r.line,
+                    r.col,
+                    r.end_col,
+                    &w.new,
+                    cand.line_offset,
+                ));
             }
         }
         edits.sort_by_key(|e| (e.range.start.line, e.range.start.character));
@@ -385,18 +588,27 @@ pub fn workspace_edit(
 }
 
 /// One replacement, from a frontend 1-based span plus the body's line offset
-/// within its file.
-fn edit_at(line: usize, col: usize, end_col: usize, new: &str, line_offset: usize) -> TextEdit {
+/// within `file_text`. Columns are char columns of the file's own line, sent as
+/// UTF-16 code units.
+fn edit_at(
+    file_text: &str,
+    line: usize,
+    col: usize,
+    end_col: usize,
+    new: &str,
+    line_offset: usize,
+) -> TextEdit {
     let l = (line + line_offset - 1) as u32;
+    let line_text = crate::line_of_text(file_text, l as usize);
     TextEdit {
         range: Range {
             start: Position {
                 line: l,
-                character: (col - 1) as u32,
+                character: crate::char_col_to_utf16(line_text, col - 1),
             },
             end: Position {
                 line: l,
-                character: (end_col - 1) as u32,
+                character: crate::char_col_to_utf16(line_text, end_col - 1),
             },
         },
         new_text: new.to_string(),
@@ -448,13 +660,15 @@ fn candidates(
                     uri,
                     body,
                     line_offset,
+                    file_text: text,
                 });
             }
         } else {
             out.push(Candidate {
                 uri,
-                body: text,
+                body: text.clone(),
                 line_offset: 0,
+                file_text: text,
             });
         }
     }
@@ -552,5 +766,159 @@ fn f() -> Int64 {\n    other.listPastes()\n    return store.listPastes()\n}\n";
         let refs = references_to(&a, "listPastes", &["store".to_string()]);
         assert_eq!(refs.len(), 1, "{refs:?}");
         assert_eq!(refs[0].line, 5);
+    }
+
+    // ------------------------------------------------------------------
+    // Import-target scoping: a candidate's qualifiers come from where its
+    // imports POINT, so another module's same-named procedure never moves.
+    // ------------------------------------------------------------------
+
+    fn ns_import(ns: &str, source: ImportSource) -> ImportDecl {
+        ImportDecl {
+            names: Vec::new(),
+            namespace: Some(ns.to_string()),
+            source,
+            line: 1,
+        }
+    }
+
+    fn flat_import(names: &[&str], source: ImportSource) -> ImportDecl {
+        ImportDecl {
+            names: names
+                .iter()
+                .map(|n| vyrn_frontend::ast::ImportName {
+                    original: n.to_string(),
+                    alias: None,
+                })
+                .collect(),
+            namespace: None,
+            source,
+            line: 1,
+        }
+    }
+
+    fn opts() -> vyrn_frontend::loader::LoadOptions {
+        // Relative specifiers resolve without any manifest or std root, so the
+        // defaults exercise the same path logic the linker runs.
+        vyrn_frontend::loader::LoadOptions::default()
+    }
+
+    fn gen(name: &str, arg: &str) -> ImportSource {
+        ImportSource::Generator {
+            name: name.to_string(),
+            args: vec![Expr::Str(arg.to_string())],
+            line: 1,
+        }
+    }
+
+    const PASTES: &str = "/proj/src/server/pastes.vyrn";
+
+    /// Renaming pastes' `create` while users.vyrn also declares `create`: the
+    /// `u` namespace (a generator aimed at ANOTHER module) qualifies nothing —
+    /// only the import that pins the declaring module does.
+    #[test]
+    fn a_generator_namespace_qualifies_only_its_own_target_module() {
+        let imports = vec![
+            ns_import("p", gen("http", "./server/pastes")),
+            ns_import("u", gen("http", "./server/users")),
+        ];
+        let r = reaches(&imports, Some("/proj/src/root.vyrn"), PASTES, &opts());
+        let direct = Wanted {
+            old: "create".to_string(),
+            new: "add".to_string(),
+            direct: true,
+            generated: false,
+        };
+        let derived = Wanted {
+            old: "PathCreate".to_string(),
+            new: "PathAdd".to_string(),
+            direct: false,
+            generated: true,
+        };
+        // `http("./server/pastes")` re-exports under the declaration's own
+        // name AND carries derived spellings; `u` supplies neither.
+        assert_eq!(r.qualifiers(&direct), (true, vec!["p".to_string()]));
+        assert_eq!(r.qualifiers(&derived), (true, vec!["p".to_string()]));
+    }
+
+    #[test]
+    fn a_directory_generator_reaches_derived_names_but_not_the_bare_one() {
+        let imports = vec![ns_import("api", gen("client", "./server/api"))];
+        // The target sits INSIDE the mounted directory — `PASTES` is
+        // `server/pastes.vyrn`, a sibling `./server/api` never covers, and the
+        // test failed against its own fixture until this file was its own.
+        let inside = "/proj/src/server/api/pastes.vyrn";
+        let r = reaches(&imports, Some("/proj/src/root.vyrn"), inside, &opts());
+        let direct = Wanted {
+            old: "create".to_string(),
+            new: "add".to_string(),
+            direct: true,
+            generated: false,
+        };
+        let derived = Wanted {
+            old: "pastesCreate".to_string(),
+            new: "pastesAdd".to_string(),
+            direct: false,
+            generated: true,
+        };
+        // `client` exports `pastesCreate`, never the declaration's own name.
+        assert_eq!(r.qualifiers(&direct), (false, Vec::<String>::new()));
+        assert_eq!(r.qualifiers(&derived), (true, vec!["api".to_string()]));
+    }
+
+    #[test]
+    fn a_bare_occurrence_counts_only_when_one_import_pins_the_module() {
+        let pinned = flat_import(&["create"], ImportSource::Path("./server/pastes".into()));
+        let other = flat_import(&["create"], ImportSource::Path("./server/users".into()));
+        // Two suppliers of the spelling: which declaration a bare `create(`
+        // denotes is unresolved, so it must be skipped.
+        let both = reaches(
+            &[pinned.clone(), other],
+            Some("/proj/src/root.vyrn"),
+            PASTES,
+            &opts(),
+        );
+        assert!(!both.bare_is_ours("create"));
+        let one = reaches(&[pinned], Some("/proj/src/root.vyrn"), PASTES, &opts());
+        assert!(one.bare_is_ours("create"));
+        // A namespace import binds no flat names.
+        let ns_only = reaches(
+            &[ns_import("p", ImportSource::Path("./server/pastes".into()))],
+            Some("/proj/src/root.vyrn"),
+            PASTES,
+            &opts(),
+        );
+        assert!(!ns_only.bare_is_ours("create"));
+    }
+
+    #[test]
+    fn an_import_aimed_elsewhere_pins_nothing_and_qualifies_nothing() {
+        let imports = vec![
+            flat_import(&["create"], ImportSource::Path("./server/elsewhere".into())),
+            ns_import("g", gen("http", "../outside/app")),
+        ];
+        let r = reaches(&imports, Some("/proj/src/root.vyrn"), PASTES, &opts());
+        let direct = Wanted {
+            old: "create".to_string(),
+            new: "add".to_string(),
+            direct: true,
+            generated: false,
+        };
+        assert_eq!(r.qualifiers(&direct), (false, Vec::<String>::new()));
+        assert!(!r.bare_is_ours("create"));
+    }
+
+    #[test]
+    fn a_directory_covers_only_its_own_subtree() {
+        // A directory argument resolves as the loader's file guess `<dir>.vyrn`.
+        assert!(covers_dir(
+            "/p/server/api.vyrn",
+            "/p/server/api/pastes.vyrn"
+        ));
+        assert!(covers_dir("/p/server/api", "/p/server/api/pastes.vyrn"));
+        assert!(covers_dir("/p/server/api/", "/p/server/api/deep/x.vyrn"));
+        assert!(!covers_dir("/p/server/api", "/p/server/api.vyrn"));
+        assert!(!covers_dir("/p/server/api", "/p/server/api2/pastes.vyrn"));
+        assert!(!covers_dir("/p/other", "/p/server/pastes.vyrn"));
     }
 }

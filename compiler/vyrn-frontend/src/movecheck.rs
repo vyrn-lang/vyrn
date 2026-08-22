@@ -540,7 +540,8 @@ fn run(program: &Program, want: Want) -> Run {
         ret: RefCell::new(Type::Unit),
         lambda_base: RefCell::new(Vec::new()),
         lambda_escapes: RefCell::new(Vec::new()),
-        at_call_site: std::cell::Cell::new(false),
+        arm_binders: RefCell::new(Vec::new()),
+        call_keeps: std::cell::Cell::new(None),
         sites: (want == Want::Sites).then(|| RefCell::new(Vec::new())),
         nodes: RefCell::new(Scopes::new(HashMap::new())),
         lets: (want == Want::Lets).then(|| RefCell::new(HashMap::new())),
@@ -721,11 +722,19 @@ struct MoveCheck<'a> {
     /// lambda (a `map`/`filter` argument) borrows freely and a stored one may
     /// not. Parallel to `lambda_base`.
     lambda_escapes: RefCell<Vec<bool>>,
-    /// Set for the duration of one call argument that IS a lambda. A lambda
-    /// written directly at a call site is consumed by that call and cannot
-    /// outlive it; a lambda anywhere else is stored, and RFC-0037's
-    /// defunctionalization makes it a value that can outlive the frame.
-    at_call_site: std::cell::Cell<bool>,
+    /// The pattern binders of each open `match`/`if let` arm, innermost last.
+    /// A binder over an owned scrutinee binds a [`Borrow::Projection`], but the
+    /// fact it names is not "this frame still owns the aggregate" — the
+    /// scrutinee handed the payload up and the arm's value carries it out. A
+    /// `let t = d.title` binds the same row with the dangerous meaning, so
+    /// [`MoveCheck::check_handover`] tells them apart by this mark.
+    arm_binders: RefCell<Vec<HashSet<String>>>,
+    /// Set while one call argument is being walked, to whether the callee may
+    /// KEEP a `fn` value it is handed. A lambda anywhere but a call argument
+    /// can be stored and outlive the frame; one at a call argument still
+    /// escapes when the parameter is `consume`, because a kept closure's
+    /// captures leave the frame with it (RFC-0037).
+    call_keeps: std::cell::Cell<Option<bool>>,
     /// Where recorded [`OwningSite`]s go, or `None` on the ordinary check path —
     /// which is what keeps a build and a keystroke paying for nothing.
     sites: Option<RefCell<Vec<OwningSite>>>,
@@ -1848,20 +1857,29 @@ impl MoveCheck<'_> {
     /// [`linear`] walk refuses a second hand-over first; rule 1's menu offers
     /// `.copy()`, which a stream has no answer for.
     ///
-    /// Module state is asked one line later, by
-    /// [`MoveCheck::reject_consume_global`], and keeps its own sentence: a global
-    /// is nobody's borrow, so this reading answers `None` for it.
+    /// Module state spelled as a WHOLE keeps its own sentence one line later,
+    /// by [`MoveCheck::reject_consume_global`]; spelled as a projection
+    /// (`sink(g.title)`) it is refused here, because the callee would free a
+    /// buffer the module reads again forever.
     ///
-    /// **A [`Borrow::Projection`] of a place this frame owns is recorded and not
-    /// refused**, which is the same boundary the sibling exit draws: a variant
-    /// constructor holds what it is given for as long as the value lives, and the
-    /// `constructs` arm of [`MoveCheck::expr`] records that rather than refusing
-    /// it, because refusing it is a corpus migration and not this rule. The two
-    /// exits are the same shape — `El(tag, withKey(attrs, k), kids)` in
-    /// `std/html` drains an owned node through both in one expression — so they
-    /// keep the same verdict until one migration moves them together. What is
-    /// refused here is the narrower and unambiguous fact: the root belongs to
-    /// somebody else, so no frame below may free it.
+    /// **A field or element path of a place this frame OWNS is refused.** The
+    /// constructor analogy this exit used to lean on does not hold here: a
+    /// variant constructor RETAINS what it is given, so the caller stopping its
+    /// releases costs a leak — safe; a `consume` parameter DISPOSES of what it
+    /// is given, so the caller keeping its releases costs a double free (a
+    /// record's release walks every place, so `d`'s block exit frees the very
+    /// buffer the callee already freed). The language's answer for giving up a
+    /// field is the prefix take (`consume d.title`), which [`check_take`] and
+    /// [`MoveCheck::hole`] record so the release walk skips the place — the
+    /// menu names it first. An ELEMENT has no take ([`check_take`] refuses
+    /// one), so its menu offers `.copy()` and the `swapRemove` spelling.
+    ///
+    /// A name BOUND to a projection keeps its verdict when it is a match or
+    /// `if let` binder over an owned scrutinee: the binder is keyed to the
+    /// scrutinee's row and the arm records the hand-off, and `std/html`'s
+    /// `keyed` drain depends on it. The same row on an ordinary `let`
+    /// (`let t = d.title`) means the frame still owns the aggregate, so handing
+    /// `t` to a `consume` parameter is refused like the spelling it hides.
     fn check_handover(&self, arg: &Expr, callee: &str, line: usize) -> Result<(), Diagnostic> {
         let Some(ty) = self.type_of(arg) else {
             return Ok(());
@@ -1877,21 +1895,96 @@ impl MoveCheck<'_> {
         let Some((root, path)) = place_path(arg).or_else(|| element_path(arg)) else {
             return Ok(());
         };
-        let Some(b) = self.borrow_of(&root) else {
-            return Ok(());
-        };
-        if matches!(b, Borrow::Projection) {
-            return Ok(());
+        if path != root && self.is_module_state(&root) {
+            return Err(menu(
+                line,
+                format!(
+                    "`{path}` may not be passed to a `consume` parameter via `{}(..)` — \
+                     it is module state, which nothing may take",
+                    crate::parser::method_surface(callee)
+                ),
+                vec![format!(
+                    "`{path}.copy()` — the callee releases what it is handed"
+                )],
+            ));
         }
-        Err(menu(
+        match self.borrow_of(&root) {
+            // A whole place this frame owns is the move the caller records.
+            None if path == root => Ok(()),
+            None => Err(self.refuse_projected_arg(arg, callee, &root, &path, line)),
+            // A binder over an owned scrutinee gave the payload up with the arm.
+            Some(Borrow::Projection) if path == root && self.arm_binder(&root) => Ok(()),
+            Some(Borrow::Projection) => {
+                Err(self.refuse_projected_arg(arg, callee, &root, &path, line))
+            }
+            Some(b) => Err(menu(
+                line,
+                format!(
+                    "`{path}` may not be passed to a `consume` parameter via `{}(..)` — it is {}",
+                    crate::parser::method_surface(callee),
+                    b.what(&path)
+                ),
+                self.fixes_here(&b, &root, &path),
+            )),
+        }
+    }
+
+    /// The refusal a projected argument to a `consume` parameter gets.
+    ///
+    /// An element has no take ([`check_take`] refuses one), so its menu names
+    /// the two spellings that exist for it instead of a prefix take.
+    fn refuse_projected_arg(
+        &self,
+        arg: &Expr,
+        callee: &str,
+        root: &str,
+        path: &str,
+        line: usize,
+    ) -> Diagnostic {
+        let fixes = if place_path(arg).is_none() {
+            vec![
+                format!("`{path}.copy()` — the callee owns its copy"),
+                format!(
+                    "`{root}.swapRemove(..)` returns the element and leaves the container \
+                     one shorter"
+                ),
+            ]
+        } else {
+            self.fixes_here(&Borrow::Projection, root, path)
+        };
+        menu(
             line,
             format!(
                 "`{path}` may not be passed to a `consume` parameter via `{}(..)` — it is {}",
                 crate::parser::method_surface(callee),
-                b.what(&path)
+                Borrow::Projection.what(path)
             ),
-            self.fixes_here(&b, &root, &path),
-        ))
+            fixes,
+        )
+    }
+
+    /// Whether `name` is a pattern binder of the innermost open arm.
+    fn arm_binder(&self, name: &str) -> bool {
+        self.arm_binders
+            .borrow()
+            .last()
+            .is_some_and(|s| s.contains(name))
+    }
+
+    /// Whether the callee may KEEP a `fn` value passed as argument `i` — the
+    /// question a lambda written at a call argument has to answer, because a
+    /// kept closure outlives the call and its captures leave the frame with it.
+    ///
+    /// A declared capability answers for a program function, a seeded row for a
+    /// builtin. Facts unknown (no declaration, no row) answer YES: the safe
+    /// direction is refusing an author once, never dangling a capture.
+    fn callee_keeps(&self, callee: &str, i: usize) -> bool {
+        match self.caps.get(callee).and_then(|c| c.get(i)) {
+            Some(cap) => *cap == Capability::Consume,
+            None => {
+                crate::prelude::capability(callee, i).map_or(true, |cap| cap == Capability::Consume)
+            }
+        }
     }
 
     /// Rule 3: a function returns an owned value, always.
@@ -2859,7 +2952,13 @@ impl MoveCheck<'_> {
                         self.nodes.borrow_mut().bind(b, key);
                     }
                 }
+                let binders: HashSet<String> = pattern_bindings(pattern)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect();
+                self.arm_binders.borrow_mut().push(binders);
                 let then_div = self.block(then_block, &mut then_c, scope);
+                self.arm_binders.borrow_mut().pop();
                 self.exit();
                 scope.pop();
                 let mut else_c = consumed.clone();
@@ -3030,7 +3129,29 @@ impl MoveCheck<'_> {
                 .map(|_| matches!(e, Expr::Call { name, .. } if crate::ast::is_panic(name))),
             // A `region` is an ordinary nested block for move checking; it
             // diverges iff its body does (a `break` inside it exits the loop).
-            Stmt::Region { body, .. } => Ok(self.block(body, consumed, scope)),
+            // Its map is a CLONE, like every other nested block's. Sharing it
+            // by `&mut` let a shadowing `let` inside the region run `revive`
+            // on the ENCLOSING map and erase the outer binding's consumption
+            // record — a use-after-move after the region then compiled.
+            Stmt::Region { body, .. } => {
+                let mut inner = consumed.clone();
+                let div = self.block(body, &mut inner, scope);
+                // Consumption of an OUTER binding inside the region survives
+                // it — that is the use-after-move the propagation exists for.
+                // A binding the region DECLARES dies with the region, and its
+                // record must die too: propagated by name, `drop s` on a
+                // region-local `s` marked an unrelated later `s` — a match
+                // arm's payload binding, in the corpus — as already consumed.
+                let mut local = std::collections::HashSet::new();
+                declared_in(body, &mut local);
+                for (k, v) in inner {
+                    let root = k.split('.').next().unwrap_or(&k).to_string();
+                    if !local.contains(&root) {
+                        consumed.or_insert(k, v);
+                    }
+                }
+                Ok(div)
+            }
             // `drop name;` consumes the binding: using it afterward is a
             // use-after-drop, caught by the same machinery as `consume`.
             Stmt::Drop { name, line } => {
@@ -3126,10 +3247,11 @@ impl MoveCheck<'_> {
         let Some(&inside) = self.lambda_base.borrow().last() else {
             return;
         };
-        // A lambda written straight at a call site cannot outlive the call, so it
-        // borrows and this block keeps the value — the same condition
-        // `check_capture` applies to rule 2. A STORED one is a value under
-        // RFC-0037 and can outlive the frame.
+        // A lambda whose callee provably only borrows it cannot outlive the
+        // call, so it borrows and this block keeps the value — the same
+        // condition `check_capture` applies to rule 2. A STORED one, and one
+        // handed to a callee that may keep it, is a value under RFC-0037 and
+        // can outlive the frame.
         if !self
             .lambda_escapes
             .borrow()
@@ -3186,10 +3308,13 @@ impl MoveCheck<'_> {
 
     /// RFC-0089 rule 2 at a capture: an ESCAPING closure may not hold a borrow.
     ///
-    /// A lambda written directly as a call argument (`map(xs, |x| ..)`) does not
-    /// outlive the call, so it borrows freely — that is the common case and the
-    /// rule leaves it alone. A lambda that is stored is a value under RFC-0037's
-    /// defunctionalization, and a borrow inside one has no lifetime to stand on.
+    /// A lambda whose callee provably only borrows it (`map(xs, |x| ..)`, where
+    /// `map`'s parameter is a plain borrow) does not outlive the call, so it
+    /// borrows freely — that is the common case and the rule leaves it alone.
+    /// A lambda that is stored, or handed to a callee that may KEEP it (a
+    /// `consume fn` parameter can store what it owns), is a value under
+    /// RFC-0037's defunctionalization, and a borrow inside one has no lifetime
+    /// to stand on.
     fn check_capture(&self, name: &str, line: usize) -> Result<(), Diagnostic> {
         let Some(&inside) = self.lambda_base.borrow().last() else {
             return Ok(());
@@ -3357,6 +3482,9 @@ impl MoveCheck<'_> {
             // A literal's operands are places too: `Ring { slots: xs }` puts `xs`
             // where the record owns it, exactly as an argument does.
             Expr::StructLit { name, fields, line } => {
+                // A literal RETAINS what it is given, so a lambda inside one
+                // escapes whatever the enclosing call would have done with it.
+                let outer = self.call_keeps.replace(Some(true));
                 for (f, v) in fields {
                     self.site("literal", *line, v, None);
                     self.expr(v, consumed, scope)?;
@@ -3368,14 +3496,17 @@ impl MoveCheck<'_> {
                         consumed,
                     )?;
                 }
+                self.call_keeps.set(outer);
                 Ok(())
             }
             Expr::TryConstruct { name, args, line } => {
+                let outer = self.call_keeps.replace(Some(true));
                 for a in args {
                     self.site("literal", *line, a, None);
                     self.expr(a, consumed, scope)?;
                     let _ = self.store(a, &|| format!("`{name}`"), *line, true, consumed)?;
                 }
+                self.call_keeps.set(outer);
                 Ok(())
             }
             Expr::Match {
@@ -3422,7 +3553,11 @@ impl MoveCheck<'_> {
                     // Asked HERE, one scope in, because the question is about the
                     // binders and this is where they are bound.
                     self.note_arm_value(&arm.body, *line, &binders);
+                    self.arm_binders
+                        .borrow_mut()
+                        .push(binders.iter().map(|b| b.to_string()).collect());
                     let r = self.expr(&arm.body, &mut c, scope);
+                    self.arm_binders.borrow_mut().pop();
                     self.exit();
                     r?;
                     scope.pop();
@@ -3470,9 +3605,9 @@ impl MoveCheck<'_> {
                 // so passing the same variable to two `consume` params is caught.
                 for (i, arg) in args.iter().enumerate() {
                     self.site("arg", *line, arg, None);
-                    self.at_call_site.set(true);
+                    self.call_keeps.set(Some(self.callee_keeps(name, i)));
                     let r = self.expr(arg, consumed, scope);
-                    self.at_call_site.set(false);
+                    self.call_keeps.set(None);
                     r?;
                     self.note_handover(arg, name, i, *line);
                     self.note_arg_temp(arg, name, i, *line);
@@ -3537,6 +3672,9 @@ impl MoveCheck<'_> {
                 Ok(())
             }
             Expr::ArrayLit { elems, line } => {
+                // A literal RETAINS what it is given, so a lambda inside one
+                // escapes whatever the enclosing call would have done with it.
+                let outer = self.call_keeps.replace(Some(true));
                 for e in elems {
                     self.site("literal", *line, e, None);
                     self.expr(e, consumed, scope)?;
@@ -3548,9 +3686,11 @@ impl MoveCheck<'_> {
                         consumed,
                     )?;
                 }
+                self.call_keeps.set(outer);
                 Ok(())
             }
             Expr::MapLit { entries, line } => {
+                let outer = self.call_keeps.replace(Some(true));
                 for (k, v) in entries {
                     self.expr(k, consumed, scope)?;
                     self.site("literal", *line, v, None);
@@ -3560,6 +3700,7 @@ impl MoveCheck<'_> {
                     let _ =
                         self.store(v, &|| "the map literal".to_string(), *line, true, consumed)?;
                 }
+                self.call_keeps.set(outer);
                 Ok(())
             }
             // A lambda body (RFC-0023): its untyped params are fresh locals; walk
@@ -3568,7 +3709,13 @@ impl MoveCheck<'_> {
             // so a reference to one that was already consumed surfaces the standard
             // use-after-consume error here too.
             Expr::Lambda { params, body, .. } => {
-                let escapes = !self.at_call_site.replace(false);
+                // A lambda that is not a call argument can be stored and
+                // outlive the frame. One written AT a call argument still
+                // escapes when the callee may keep it: a `consume fn`
+                // parameter owns what it is handed and can store it, and a
+                // stored closure's captures leave the frame with it. Only a
+                // parameter that provably borrows keeps the old fast path.
+                let escapes = self.call_keeps.replace(None).unwrap_or(true);
                 self.lambda_escapes.borrow_mut().push(escapes);
                 scope.push(HashSet::new());
                 self.enter();
@@ -4101,7 +4248,20 @@ mod linear {
             }
             if moved.1 {
                 acc.disposed = true;
-                acc.doubled = stmts[i + 1..].iter().any(|s| stmt_mentions(s, name));
+                // The probe walks the REACHABLE rest: a statement after a
+                // diverging one is unreachable and [`MoveCheck::block`] never
+                // checks it, so a mention there is not a second disposal.
+                let mut doubled = false;
+                for s in &stmts[i + 1..] {
+                    if stmt_mentions(s, name) {
+                        doubled = true;
+                        break;
+                    }
+                    if diverges(std::slice::from_ref(s)) {
+                        break;
+                    }
+                }
+                acc.doubled = doubled;
                 // The disposal settles `disposed`, but the caller's branch merge
                 // still needs to know whether anything falls out of this list —
                 // `if c { close(s) return 1 }` disposes AND diverges, and reading
@@ -4460,6 +4620,13 @@ fn reads(e: &Expr) -> Vec<String> {
 }
 
 /// Every function name called anywhere in `e`.
+///
+/// The walk is what marks a lender's FORWARDERS: a call nested inside an
+/// aggregate (`return R { name: pick(a) }`, `return [pick(a)]`) forwards the
+/// lender's result exactly as a bare `return pick(a)` does, so the literal,
+/// constructor, take, spawn and operator forms descend like the call arm. A
+/// form missed here leaves its wrapper unmarked, and the wrapper's caller then
+/// releases storage the lender's own caller still owns.
 fn calls_in(e: &Expr, out: &mut Vec<String>) {
     if let Expr::Call { name, .. } = e {
         out.push(name.clone());
@@ -4485,13 +4652,32 @@ fn calls_in(e: &Expr, out: &mut Vec<String>) {
                 calls_in(b, out);
             }
         }
-        Expr::Call { args, .. } => {
+        Expr::Call { args, .. }
+        | Expr::Spawn { args, .. }
+        | Expr::TryConstruct { args, .. }
+        | Expr::ArrayLit { elems: args, .. } => {
             for a in args {
                 calls_in(a, out);
             }
         }
         Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
             calls_in(expr, out)
+        }
+        Expr::Consume { place, .. } => calls_in(place, out),
+        Expr::Binary { lhs, rhs, .. } => {
+            calls_in(lhs, out);
+            calls_in(rhs, out);
+        }
+        Expr::StructLit { fields, .. } => {
+            for (_, v) in fields {
+                calls_in(v, out);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                calls_in(k, out);
+                calls_in(v, out);
+            }
         }
         _ => {}
     }
@@ -4589,6 +4775,52 @@ fn menu(line: usize, message: String, fixes: Vec<String>) -> Diagnostic {
 }
 
 /// The payload names a `match` pattern binds.
+/// Every name a block's statements DECLARE, at any depth — the bindings that
+/// cannot outlive it. Match-arm binders live in expressions and are scoped by
+/// `arm_binders`; statement-level declarations are what a region's consumption
+/// propagation must filter on.
+fn declared_in(block: &crate::ast::Block, out: &mut std::collections::HashSet<String>) {
+    for s in &block.stmts {
+        match s {
+            crate::ast::Stmt::Let { name, .. } => {
+                out.insert(name.clone());
+            }
+            crate::ast::Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                declared_in(then_block, out);
+                if let Some(e) = else_block {
+                    declared_in(e, out);
+                }
+            }
+            crate::ast::Stmt::IfLet {
+                pattern,
+                then_block,
+                else_block,
+                ..
+            } => {
+                for b in pattern_bindings(pattern) {
+                    out.insert(b.to_string());
+                }
+                declared_in(then_block, out);
+                if let Some(e) = else_block {
+                    declared_in(e, out);
+                }
+            }
+            crate::ast::Stmt::While { body, .. } | crate::ast::Stmt::Region { body, .. } => {
+                declared_in(body, out);
+            }
+            crate::ast::Stmt::ForIn { var, body, .. } => {
+                out.insert(var.clone());
+                declared_in(body, out);
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn pattern_bindings(p: &Pattern) -> Vec<&str> {
     match p {
         Pattern::Some(b) | Pattern::Ok(b) | Pattern::Err(b) => vec![b],
@@ -5388,11 +5620,13 @@ mod tests {
         assert!(e.contains("fix: `for r in consume ns`"), "{e}");
     }
 
-    /// What the rule does NOT refuse, and why each one is deliberate.
+    /// What the rule refuses past a borrowed root, and the one projected shape
+    /// it still waves through.
     #[test]
-    fn the_third_exit_stops_where_the_others_stop() {
+    fn the_third_exit_refuses_a_projected_argument() {
         const DECLS: &str = "type Bag = { xs: Array<Int64> } \
                              let g: Array<Int64> = [1] \
+                             let gb: Bag = Bag { xs: [1] } \
                              fn take(xs: consume Array<Int64>) -> Int64 \
                              { let n = xs.length drop xs return n } ";
         let go = |body: &str| {
@@ -5401,18 +5635,43 @@ mod tests {
             ))
         };
 
-        // A projection of a place THIS frame owns is recorded and not refused,
-        // which is where the sibling exit — a variant constructor holding what it
-        // is given — also stops. `std/html`'s `keyed` drains an owned node
-        // through both in one expression.
-        assert!(go("let b = Bag { xs: [1] } return take(b.xs)").is_ok());
-        // Module state keeps its own sentence: it is nobody's borrow, and the
-        // reason it may not be taken is not that somebody else owns it.
+        // A field of a place THIS frame owns used to pass silently: the callee
+        // dropped the array and the record's release freed the same buffer
+        // again. Refused, with the prefix take — the spelling whose check_take
+        // + hole record the hand-off — first in the menu.
+        let e = go("let b = Bag { xs: [1] } return take(b.xs)").unwrap_err();
+        assert!(e.contains("`b.xs` may not be passed"), "{e}");
+        assert!(e.contains("fix: `consume b.xs`"), "{e}");
+        // And the take spelling compiles.
+        assert!(go("let b = Bag { xs: [1] } let ys = consume b.xs return take(ys)").is_ok());
+        // An element of an owned container is the same fact; it has no take, so
+        // the menu names the two spellings that exist for it.
+        let e = go("let nn: Array<Array<Int64>> = [[1]] return take(nn[0])").unwrap_err();
+        assert!(e.contains("`nn[0]` may not be passed"), "{e}");
+        assert!(e.contains("fix: `nn[0].copy()`"), "{e}");
+        // A projection of module state keeps RFC-0013's sentence.
+        let e = go("return take(gb.xs)").unwrap_err();
+        assert!(
+            e.contains("`gb.xs` may not be passed to a `consume` parameter")
+                && e.contains("module state"),
+            "{e}"
+        );
+        // Module state as a WHOLE keeps its own sentence at the call arm.
         let e = go("return take(g)").unwrap_err();
         assert!(
             e.contains("module state `g` may not be passed to a `consume` parameter"),
             "{e}"
         );
+        // A binder over an OWNED scrutinee is the one projected shape still
+        // waved through: it is keyed to the scrutinee's row and the arm records
+        // the hand-off, which is the drain `std/html`'s `keyed` is written as.
+        assert!(go("let o: Option<Array<Int64>> = Some([1]) \
+             return match o { Some(v) => take(v), None => 0 }")
+        .is_ok());
+        // An ordinary `let` of the same projection is refused like the spelling
+        // it hides: the frame still owns the aggregate.
+        let e = go("let d = Bag { xs: [1] } let t = d.xs return take(t)").unwrap_err();
+        assert!(e.contains("`t` may not be passed"), "{e}");
         // A linear type answers with its own obligation and never reaches this
         // rule — the menu here offers `.copy()`, which a stream has no answer
         // for. Handing a stream PARAMETER on is how a stream is disposed
@@ -5424,6 +5683,87 @@ mod tests {
                  fn main() -> Int64 { return 0 }"
         )
         .is_ok());
+    }
+
+    /// A lambda handed to a callee that may KEEP it escapes, so its captures
+    /// are checked like a stored closure's (RFC-0037). A `consume fn`
+    /// parameter owns what it is handed and can store it; storing one whose
+    /// capture borrows the frame leaves the capture dangling.
+    #[test]
+    fn a_lambda_at_a_consume_parameter_escapes() {
+        let e = run(
+            "fn reg(f: consume fn(Int64) -> Int64) -> Int64 { return f(0) } \
+             fn go(q: read String) -> Int64 { return reg(|n| n + q.byteLength) } \
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("may not be captured by a closure that outlives this call"),
+            "{e}"
+        );
+        // An owned capture is safe: the closure takes it along, and the block
+        // releases nothing it gave up.
+        assert!(run(
+            "fn reg(f: consume fn(Int64) -> Int64) -> Int64 { return f(0) } \
+             fn go() -> Int64 { let s = \"a\" + \"b\" return reg(|n| n + s.byteLength) } \
+             fn main() -> Int64 { return 0 }"
+        )
+        .is_ok());
+        // The fast path survives: a parameter that provably borrows keeps the
+        // non-escaping assumption, which is every `map`-style call.
+        assert!(
+            run("fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(0) } \
+             fn go(q: read String) -> Int64 { return apply(|n| n + q.byteLength) } \
+             fn main() -> Int64 { return 0 }")
+            .is_ok()
+        );
+    }
+
+    /// A lender forwarded through an AGGREGATE is still a lender: `calls_in`
+    /// has to see through the literal, or the wrapper goes unmarked and its
+    /// caller reclaims storage the lender's own caller still owns.
+    #[test]
+    fn a_lender_forwarded_through_an_aggregate_is_still_marked_lending() {
+        let src = "type R = { name: String } \
+                   fn pick(xs: Array<String>) -> String \
+                   { for x in xs { return if true { x } else { \"\" } } return \"\" } \
+                   fn g(a: Array<String>) -> R { return R { name: pick(a) } } \
+                   fn h(a: Array<String>) -> Array<String> { return [pick(a)] } \
+                   fn main() -> Int64 { let arr: Array<String> = [\"a\" + \"b\"] \
+                   let r = g(arr) let s2 = h(arr) \
+                   return r.name.byteLength + s2[0].byteLength }";
+        let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
+        assert!(super::check(&program).is_ok());
+        assert!(
+            super::ownership(&program).values().all(|r| {
+                let fc = r.from_call.as_deref();
+                (fc != Some("g") && fc != Some("h")) || r.gone.is_some()
+            }),
+            "a lender forwarded through an aggregate must never be reclaimed by its caller"
+        );
+    }
+
+    /// A shadowing `let` inside a region revives only the region's own map: the
+    /// outer binding's consumption record must survive the region, or the
+    /// use-after-move after it compiles.
+    #[test]
+    fn a_region_let_does_not_revive_the_outer_binding() {
+        let src = "fn sink(t: consume String) -> Int64 { drop t return 0 } \
+                   fn main() -> Int64 { let x = \"a\" + \"b\" let n = sink(x) \
+                   region { let x = 9 } return x.byteLength + n }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("already consumed"), "{e}");
+    }
+
+    /// The linear walk reads unreachable code the way [`MoveCheck::block`] does:
+    /// a mention after a diverging statement is not a second disposal.
+    #[test]
+    fn a_mention_in_unreachable_code_is_not_a_second_disposal() {
+        assert!(stream("let s = feed() close(s) return 0 close(s)").is_ok());
+        assert!(stream("let s = feed() close(s) panic(\"gone\") close(s)").is_ok());
+        // A REACHABLE second disposal is still refused.
+        let e = stream("let s = feed() close(s) let n = 0 close(s) return 0").unwrap_err();
+        assert!(e.contains("disposed more than once"), "{e}");
     }
 
     /// `spawn f(x)` moves its arguments exactly as a direct call does, so it asks
@@ -5543,8 +5883,10 @@ mod tests {
 
     #[test]
     fn an_escaping_closure_may_not_capture_a_borrow() {
-        // A lambda written at a call site does not outlive the call, so it
-        // borrows freely; one that is stored is a value and may not.
+        // A lambda whose callee provably borrows it (`apply`'s parameter is a
+        // plain borrow) does not outlive the call, so it captures freely; one
+        // that is stored, or handed to a `consume fn` parameter that may keep
+        // it, is a value and may not.
         assert!(
             run("fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(1) } \
                      fn go(s: String) -> Int64 { return apply(|n| n + s.byteLength) } \

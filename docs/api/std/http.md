@@ -462,7 +462,11 @@ fn httpInput(ps: Map<String, String>, body: String, numeric: Array<String>) -> S
 ```
 
 The JSON a generated adapter hands `fromJson`: the placeholder bindings as
-object fields, with the request body's own fields after them.
+object fields, with the request body's own fields after them. A body field
+whose name a placeholder already bound is DROPPED: placeholders win
+(documented precedence), and emitting both would put one key in the object
+twice — which `fromJson` rejects outright, turning every such request into
+a guaranteed 422.
 
 A captured segment is text, but the field it binds may not be: `/users/{id}`
 over an `Int64` id must produce `{"id":7}`, not `{"id":"7"}`, or every numeric

@@ -41,6 +41,8 @@ Mapping rules (documented and DUMB on purpose — RFC-0038):
     comes from — an empty query root, or a zero-field record (`type Empty =
     {}`). GraphQL requires an object type to define at least one field, so
     `type Empty {}` is a syntax error that poisons every field referencing it.
+    The executor bakes the same field into its graph and its resolver table,
+    so the field the document invents is one the endpoint answers.
   - a NAME the document would define twice (a contract type called `Query`,
     `Mutation` or `JSON`; a record `Foo` beside a type `FooInput`), or one
     beginning with the introspection-reserved `__`, is REPORTED (RFC-0099)
@@ -243,18 +245,6 @@ RPC, since it is the same decode.
 ```vyrn
 fn gqlAnswer(body: String, resolve: fn(String, String, Array<JsonField>) -> Result<Json, String>, schema: fn(String, String) -> String) -> Response
 ```
-
-Answer one GraphQL request body against the two tables the generator bakes
-from the contract's reflection: `resolve` (`(root, field, args) -> the encoded
-value, or why not`) and `schema`, the type graph the projection is checked
-against.
-
-**Every root field the operation selects** (RFC-0085 M3). Each is resolved and
-completed on its own, so one of them faulting leaves the others in `data` and
-puts its own message in `errors` at its own path. `data` goes `null` only when
-a fault climbs past a NON-NULL root field — which this generator's own SDL
-never declares, since a root field is nullable by construction precisely so a
-sibling's answer survives.
 
 ## graphqlServer
 

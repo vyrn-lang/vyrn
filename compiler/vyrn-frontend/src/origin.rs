@@ -263,11 +263,15 @@ impl OriginMaps {
                 // The region ends on the line before the next directive's own
                 // comment line (a directive at source line M has `gen_line == M + 1`,
                 // so the preceding content ends at `M - 1 == gen_line - 2`), or at
-                // EOF when this is the last directive.
+                // EOF when this is the last directive. Back-to-back directives
+                // leave this one no governed lines; the span clamps to empty
+                // rather than backwards, which is what a consumer of an
+                // inclusive range would read as a negative span.
                 let end = dirs
                     .get(idx + 1)
                     .map(|n| n.gen_line.saturating_sub(2))
-                    .unwrap_or(total);
+                    .unwrap_or(total)
+                    .max(dir.gen_line);
                 out.push(Region {
                     gen_module: banner.clone(),
                     origin: origin.clone(),
@@ -647,6 +651,31 @@ mod tests {
         assert_eq!(regions[0].gen_start_line, 3);
         assert_eq!(regions[0].gen_end_line, 4); // up to the line before `end`
         assert_eq!(regions[0].origin.line, 5);
+    }
+
+    /// Back-to-back directives: the first region has no governed lines, so its
+    /// inclusive span clamps to empty (`end == start`) — never backwards, which
+    /// a forward-mapping consumer would read as a negative range.
+    #[test]
+    fn adjacent_directives_yield_a_well_formed_empty_region() {
+        let banner = "b";
+        let src = "\n//@origin ./a.vyx:1:1\n//@origin ./b.vyx:2:2\nx\n";
+        let mut maps = OriginMaps::new();
+        maps.add_module(banner, src, &ctx(src, ""));
+        let mut regions = maps.regions_for("a.vyx");
+        regions.extend(maps.regions_for("b.vyx"));
+        assert_eq!(regions.len(), 2);
+        assert!(
+            regions.iter().all(|r| r.gen_end_line >= r.gen_start_line),
+            "backwards region: {regions:?}"
+        );
+        // The first directive (line 2) governs nothing: the next sits on line 3.
+        let first = regions
+            .iter()
+            .find(|r| r.origin.file.ends_with("a.vyx"))
+            .unwrap();
+        assert_eq!(first.gen_start_line, 3);
+        assert_eq!(first.gen_end_line, 3);
     }
 
     // ---- `//@diag` / `//@warning` -> diagnostics (RFC-0071 M2b, RFC-0099) --

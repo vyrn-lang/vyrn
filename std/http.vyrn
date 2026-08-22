@@ -710,9 +710,16 @@ fn httpOpenSocket(w: Socket, req: Request, ps: Map<String, String>) -> Response 
         "Connection": "Upgrade",
         "Sec-WebSocket-Accept": accept,
     ]
-    // §4.2.2: the server may only select a subprotocol the client offered.
-    if w.subproto != "" && httpHasToken(httpHeader(req, "sec-websocket-protocol"), w.subproto) {
-        headers["Sec-WebSocket-Protocol"] = w.subproto.copy()
+    // §4.2.2: the server may only select a subprotocol the client offered, and
+    // the selection is FROM THE OFFER: tokens compare case-insensitively like
+    // any header value, but what gets echoed is the CLIENT's spelling. Echoing
+    // our configured spelling could hand back a token the client never sent,
+    // and §4.2.2 requires the client to fail exactly that handshake.
+    if w.subproto != "" {
+        let offered = httpTokenAsOffered(httpHeader(req, "sec-websocket-protocol"), w.subproto)
+        if offered != "" {
+            headers["Sec-WebSocket-Protocol"] = offered
+        }
     }
     serveStream(httpFeed(w.feed, req, ps, 0))
     return Response {
@@ -724,16 +731,26 @@ fn httpOpenSocket(w: Socket, req: Request, ps: Map<String, String>) -> Response 
     }
 }
 
+/// The client's own spelling of `token` in the comma-separated header `value`,
+/// or "" when the token was not offered. Matching is case-insensitive (header
+/// tokens are, RFC 9110 §7.6.1), but the RETURNED spelling is the client's
+/// bytes: RFC 6455 §4.2.2 selects the subprotocol from the offer, and a client
+/// must fail a handshake whose selected subprotocol it did not offer verbatim.
+fn httpTokenAsOffered(value: String, token: String) -> String {
+    for part in split(value, ",") {
+        let t = trim(part)
+        if lowerOf(t) == lowerOf(token) {
+            return t.copy()
+        }
+    }
+    return ""
+}
+
 /// Whether a comma-separated header value lists `token`, case-insensitively.
 /// `Connection: keep-alive, Upgrade` is one field with two tokens, and a browser
 /// sends exactly that.
 fn httpHasToken(value: String, token: String) -> Bool {
-    for part in split(value, ",") {
-        if lowerOf(trim(part)) == lowerOf(token) {
-            return true
-        }
-    }
-    return false
+    return httpTokenAsOffered(value, token) != ""
 }
 
 /// ASCII lowercase. `Connection`'s tokens are case-insensitive (RFC 9110 §7.6.1)
@@ -1314,6 +1331,45 @@ fn httpCheckMount(groups: Array<Array<Route>>, live: Array<Live>, sockets: Array
             }
         }
     }
+    // Within one list the resolution is first-match-wins too: two streams on one
+    // pattern, or two live routes covering the same paths, silently leave the
+    // later entry dead. Same trap as the cross-list checks, so the same panic.
+    let mut si = 0
+    while si < sockets.length {
+        let a = httpWithMethod(httpSocketRoute(sockets[si]), "GET")
+        let mut sj = si + 1
+        while sj < sockets.length {
+            let msg = httpSelfShadow(
+                a,
+                httpWithMethod(httpSocketRoute(sockets[sj]), "GET"),
+                "the stream " + sockets[si].pattern + " (" + sockets[si].derived + ")",
+                "the stream " + sockets[sj].pattern + " (" + sockets[sj].derived + ")",
+            )
+            if msg != "" {
+                panic(msg)
+            }
+            sj = sj + 1
+        }
+        si = si + 1
+    }
+    let mut li = 0
+    while li < live.length {
+        let a = httpWithMethod(httpLiveRoute(live[li]), "GET")
+        let mut lj = li + 1
+        while lj < live.length {
+            let msg = httpSelfShadow(
+                a,
+                httpWithMethod(httpLiveRoute(live[lj]), "GET"),
+                "the stream route " + live[li].pattern + " (" + live[li].derived + ")",
+                "the stream route " + live[lj].pattern + " (" + live[lj].derived + ")",
+            )
+            if msg != "" {
+                panic(msg)
+            }
+            lj = lj + 1
+        }
+        li = li + 1
+    }
     let mut gi = 0
     for g in groups {
         for r in g {
@@ -1336,6 +1392,17 @@ fn httpCheckMount(groups: Array<Array<Route>>, live: Array<Live>, sockets: Array
         }
         gi = gi + 1
     }
+}
+
+/// The shadowing diagnostic when `a` answers everything `b` matches within ONE
+/// mount list — `mount` resolves each list first-match-wins in order, so this is
+/// the same dead-route trap the cross-list checks trap on. "" when `b` stays
+/// reachable.
+fn httpSelfShadow(a: Route, b: Route, aDesc: String, bDesc: String) -> String {
+    if httpSubsumes(a, b) == false {
+        return ""
+    }
+    return "mount: " + bDesc + " is unreachable — " + aDesc + " already answers it"
 }
 
 /// Whether every path `b` matches, `a` matches too — so mounting `a` first leaves
@@ -1371,7 +1438,11 @@ fn httpSubsumes(a: Route, b: Route) -> Bool {
 // ---- the decode input ------------------------------------------------------
 
 /// The JSON a generated adapter hands `fromJson`: the placeholder bindings as
-/// object fields, with the request body's own fields after them.
+/// object fields, with the request body's own fields after them. A body field
+/// whose name a placeholder already bound is DROPPED: placeholders win
+/// (documented precedence), and emitting both would put one key in the object
+/// twice — which `fromJson` rejects outright, turning every such request into
+/// a guaranteed 422.
 ///
 /// A captured segment is text, but the field it binds may not be: `/users/{id}`
 /// over an `Int64` id must produce `{"id":7}`, not `{"id":"7"}`, or every numeric
@@ -1392,10 +1463,25 @@ export fn httpInput(ps: Map<String, String>, body: String, numeric: Array<String
     }
     if body != "" {
         for f in httpBodyFields(body) {
-            fs.push(f)
+            // Placeholders win: a body field repeating a path parameter would
+            // emit its key twice, and duplicate keys are rejected, not merged.
+            if httpHasField(fs, f.key) == false {
+                fs.push(f)
+            }
         }
     }
     return emit(JObj(fs))
+}
+
+/// Whether the input built so far already carries `key` — the placeholder
+/// bindings go in first, so this is the "already bound by the path" test.
+fn httpHasField(fs: Array<JsonField>, key: String) -> Bool {
+    for f in fs {
+        if f.key == key {
+            return true
+        }
+    }
+    return false
 }
 
 /// A captured segment as the JSON value its field expects.
@@ -1692,4 +1778,45 @@ export gen fn http(module: String) -> String {
     }
     out = out + symbolMapFn("http(" + module + ")", syms)
     return out
+}
+
+// ---- tests (pure helpers; the generated modules are golden-pinned in Rust) --
+
+test "httpInput lets a placeholder win over a body field of the same name" {
+    // POST /users/{id} with body {"id":9}: emitting both fields puts the key
+    // `id` in the object twice, and fromJson rejects a duplicate key outright —
+    // a guaranteed 422. Placeholders win, so the body copy is dropped.
+    let ps: Map<String, String> = ["id": "7"]
+    let numeric: Array<String> = ["id"]
+    assertEq(httpInput(ps, "{\"id\":9,\"name\":\"x\"}", numeric), "{\"id\":7,\"name\":\"x\"}")
+    // A body without repeats is appended after the bindings, unchanged.
+    assertEq(httpInput(ps, "{\"name\":\"x\"}", numeric), "{\"id\":7,\"name\":\"x\"}")
+    // No placeholders: the body IS the input, untouched.
+    assertEq(httpInput([:], "{\"a\":1}", []), "{\"a\":1}")
+}
+
+test "the subprotocol echo is the client's own spelling" {
+    // §4.2.2: matching reads the offer case-insensitively (header tokens are),
+    // but the echo is the CLIENT's bytes — a configured `chat.v1` offered as
+    // `Chat.v1` must be answered with `Chat.v1`, or the client fails the
+    // handshake for selecting a subprotocol it never offered.
+    assertEq(httpTokenAsOffered("Chat.v1", "chat.v1"), "Chat.v1")
+    assertEq(httpTokenAsOffered("chat.v1", "chat.v1"), "chat.v1")
+    assertEq(httpTokenAsOffered("gzip, Chat.v1", "chat.v1"), "Chat.v1")
+    assertEq(httpTokenAsOffered("other.v2", "chat.v1"), "")
+    assertEq(httpTokenAsOffered("", "chat.v1"), "")
+    // Presence stays the case-insensitive question it always was.
+    assert(httpHasToken("Chat.v1", "chat.v1"))
+}
+
+test "two mounts on one pattern shadow within their own list" {
+    // mount() resolves each list first-match-wins IN ORDER, so two sse("/e", ..)
+    // mounts leave the second dead — the same trap the cross-list checks panic
+    // on, now checked inside the lists too.
+    let a = httpWithMethod(httpRoute("/e", httpNoRun, "sseOne"), "GET")
+    let b = httpWithMethod(httpRoute("/e", httpNoRun, "sseTwo"), "GET")
+    assert(httpSelfShadow(a, b, "the stream /e (sseOne)", "the stream /e (sseTwo)") != "")
+    // A distinct pattern stays reachable.
+    let x = httpWithMethod(httpRoute("/x", httpNoRun, "sseTwo"), "GET")
+    assertEq(httpSelfShadow(a, x, "a", "b"), "")
 }

@@ -157,7 +157,7 @@ fn harnessCommand() -> String {
         <section class="band" id="work">
             <p class="eyebrow">04 — the work</p>
             <h2>What the causes turned into</h2>
-            <p>A benchmark that loses is a diagnosis with a program attached. These are the ten items the measurements produced — each one a fixable cause named above, none of them in the measuring milestone's own scope.</p>
+            <p>A benchmark that loses is a diagnosis with a program attached. These are the eleven items the measurements produced — each one a fixable cause named above, none of them in the measuring milestone's own scope.</p>
             <ol class="plain">
                 <li v-for="w in workItems()" :key="w"><span class="note">{{ w }}</span></li>
             </ol>

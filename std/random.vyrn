@@ -72,14 +72,57 @@ export fn nextInt(rng: Rng) -> Draw {
 /// A draw in the inclusive range `[lo, hi]` (returns `lo` if the range is empty).
 /// Uses unsigned modulo reduction over the full 64-bit output — a slight low-bias
 /// for very wide ranges, acceptable for v1 (sampling/tests, not cryptography).
+///
+/// The span is computed UNSIGNED: the count of values in `[lo, hi]` runs up to
+/// 2^64 — one past what `Int64` can hold, and `hi - lo + 1` in `Int64` wraps to
+/// 0 for the full range, trapping the modulo below. Even `UInt64` cannot name
+/// 2^64, so a span that wraps to 0 IS the full range, where every 64-bit draw
+/// already lands inside it and the reduction is skipped.
 export fn nextInRange(rng: Rng, lo: Int64, hi: Int64) -> Draw {
     if hi <= lo {
         return Draw { value: lo, rng: rng }
     }
-    let span = hi - lo + 1
+    let span: UInt64 = (UInt64(hi) - UInt64(lo)) + 1
     let d = nextInt(rng)
     // Reduce the (possibly "negative" as Int64) 64-bit output unsigned so the
-    // result always lands in `[0, span)` — then offset into `[lo, hi]`.
-    let u: UInt64 = UInt64(d.value) % UInt64(span)
+    // result always lands in `[0, span)` — then offset into `[lo, hi]`. The
+    // offset add is allowed to wrap: for the full range `lo + u` crosses the
+    // sign boundary exactly as the value it names does.
+    let u: UInt64 = if span == 0 { UInt64(d.value) } else { UInt64(d.value) % span }
     return Draw { value: lo + Int64(u), rng: d.rng }
+}
+
+/// `Int64`'s minimum, spelled through its `UInt64` bit pattern: 2^63 is one past
+/// what an `Int64` literal can name, and the language wraps rather than clamps.
+fn int64Min() -> Int64 {
+    // The literal needs a `UInt64` binding: checked in return position it
+    // would be ranged against `Int64` and refused, one past its maximum.
+    let bits: UInt64 = 9223372036854775808
+    return Int64(bits)
+}
+
+test "nextInRange covers the full Int64 range without trapping" {
+    // span = 2^64, unrepresentable in Int64 AND UInt64 — the call that wrapped
+    // the old span to 0 and died of a remainder-by-zero.
+    let d = nextInRange(seededRng(42), int64Min(), 9223372036854775807)
+    assertEq(d.value, 4456085495900499605)
+    assertEq(d.rng.state, 0 - 7046029254386353089)
+}
+
+test "nextInRange stays deterministic and in range on wide spans" {
+    // A span past Int64's positive range but not the full one, pinned.
+    assertEq(
+        nextInRange(seededRng(7), int64Min(), 9223372036854775806).value,
+        0 - 2032282435962401321,
+    )
+    // A small range, pinned (the modulo path the wide spans share).
+    assertEq(nextInRange(seededRng(42), 1, 6).value, 2)
+    // Every draw lands inside the range it was asked for.
+    let mut d = nextInRange(seededRng(1), 0 - 1000000, 1000000)
+    let mut i = 0
+    while i < 32 {
+        assert(d.value >= 0 - 1000000 && d.value <= 1000000)
+        d = nextInRange(d.rng, 0 - 1000000, 1000000)
+        i = i + 1
+    }
 }

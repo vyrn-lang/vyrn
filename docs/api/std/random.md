@@ -81,3 +81,9 @@ fn nextInRange(rng: Rng, lo: Int64, hi: Int64) -> Draw
 A draw in the inclusive range `[lo, hi]` (returns `lo` if the range is empty).
 Uses unsigned modulo reduction over the full 64-bit output — a slight low-bias
 for very wide ranges, acceptable for v1 (sampling/tests, not cryptography).
+
+The span is computed UNSIGNED: the count of values in `[lo, hi]` runs up to
+2^64 — one past what `Int64` can hold, and `hi - lo + 1` in `Int64` wraps to
+0 for the full range, trapping the modulo below. Even `UInt64` cannot name
+2^64, so a span that wraps to 0 IS the full range, where every 64-bit draw
+already lands inside it and the reduction is skipped.

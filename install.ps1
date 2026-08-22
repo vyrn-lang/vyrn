@@ -44,10 +44,13 @@ if ($env:VYRN_VERSION) {
 } else {
   # per_page=1 gives the newest release INCLUDING pre-releases, which
   # /releases/latest deliberately hides — and every alpha is a pre-release.
+  # A failed call (offline, proxy, GitHub down) and an empty listing are
+  # different situations with different advice; keep them apart.
   try {
     $releases = @(Invoke-RestMethod -Uri "$api/repos/$repo/releases?per_page=1" -Headers @{ 'User-Agent' = 'vyrn-install' })
   } catch {
-    $releases = @()
+    Die "cannot reach GitHub ($api) to list releases for $repo.
+  Check your network or proxy settings and try again."
   }
   if ($releases.Count -eq 0 -or -not $releases[0].tag_name) {
     Die "no release has been published for $repo yet.
@@ -129,11 +132,36 @@ try {
 Write-Host "installed $dir\bin\vyrn.exe"
 
 $binDir = Join-Path $dir 'bin'
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-if (-not $userPath) { $userPath = '' }
-if (($userPath -split ';') -notcontains $binDir) {
-  [Environment]::SetEnvironmentVariable('Path', ($userPath.TrimEnd(';') + ';' + $binDir).TrimStart(';'), 'User')
-  Write-Host "added $binDir to your user PATH - open a new terminal to pick it up"
+# Read and write the raw registry value. [Environment]::GetEnvironmentVariable
+# hands back REG_EXPAND_SZ already expanded and SetEnvironmentVariable writes
+# the expansion back as REG_SZ, baking entries like %USERPROFILE%\bin into
+# literal paths. Reading unexpanded and writing with the value's own kind keeps
+# that indirection alive.
+$key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+try {
+  $userPath = [string]$key.GetValue('Path', '',
+    [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+  if (($userPath -split ';') -notcontains $binDir) {
+    try { $kind = $key.GetValueKind('Path') } catch {
+      $kind = [Microsoft.Win32.RegistryValueKind]::ExpandString   # no Path yet
+    }
+    $key.SetValue('Path', ($userPath.TrimEnd(';') + ';' + $binDir).TrimStart(';'), $kind)
+    # The raw write skips the WM_SETTINGCHANGE broadcast SetEnvironmentVariable
+    # used to do, so running shells would not learn about the new PATH until
+    # logoff. Ask explicitly; HWND_BROADCAST, WM_SETTINGCHANGE.
+    if (-not ('Win32.Env' -as [type])) {
+      Add-Type -Namespace Win32 -Name Env -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@
+    }
+    $res = [UIntPtr]::Zero
+    [Win32.Env]::SendMessageTimeout([IntPtr]0xffff, 0x001A, [UIntPtr]::Zero,
+      'Environment', 2, 5000, [ref]$res) | Out-Null
+    Write-Host "added $binDir to your user PATH - open a new terminal to pick it up"
+  }
+} finally {
+  $key.Close()
 }
 
 Write-Host ""

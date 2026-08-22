@@ -15,13 +15,16 @@
 /// committed: it is derived, and a derived file in the tree is a file that goes
 /// stale between the day it was written and the day somebody reads it.
 ///
-/// AND IF IT IS NOT THERE. The export REFUSES (`site/export.vyrn` checks before
-/// it renders anything, and prints the command above). What it does NOT do is
-/// draw an empty chart, which is the failure mode this whole site is built
-/// against. The fixture below is for the tests only: `site/data/history.fixture.json`
-/// is five days of made-up history, committed, so `vyrn test site/export.vyrn`
-/// runs on a clone that has never run the script — and the export's own
-/// preflight is what stops that fixture from ever reaching a published page.
+/// AND IF IT IS NOT THERE — OR IS THERE AND BROKEN. The export REFUSES
+/// (`site/export.vyrn` checks before it renders anything, and prints the
+/// command above; a file that exists but does not parse refuses the same way,
+/// through `historyError`, because a truncated write is the same silence).
+/// What it does NOT do is draw an empty chart, which is the failure mode this
+/// whole site is built against. The fixture below is for the tests only:
+/// `site/data/history.fixture.json` is five days of made-up history,
+/// committed, so `vyrn test site/export.vyrn` runs on a clone that has never
+/// run the script — and the export's own preflight is what stops that fixture
+/// from ever reaching a published page.
 import { Json, JsonField } from "std/json"
 import { parseJson } from "std/jsonread"
 import { joinWith, substring } from "std/strings"
@@ -82,6 +85,7 @@ export fn historyIsFixture() -> Bool {
 
 let mut loaded = false
 let mut fromFixture = false
+let mut corrupt = ""
 let mut dayRows: Array<Day> = []
 let mut arrivals: Array<Arrival> = []
 let mut releases: Array<Release> = []
@@ -102,7 +106,19 @@ fn loadHistory() {
     }
     let src = if real.byteLength > 0 { real.copy() } else { fixtureText() }
     fromFixture = real.byteLength == 0
-    let fields = match parseJson(src) {
+    let parsed = parseJson(src)
+    // A source that has bytes but does not parse is named, not swallowed: the
+    // export stops on `historyError` rather than drawing charts from nothing.
+    // Only a source with no bytes at all — no real file and no fixture — is
+    // the documented "nothing yet" state, and passes through silently.
+    corrupt = match parsed {
+        Ok(j) => "",
+        Err(why) => why.copy(),
+    }
+    if src.byteLength == 0 {
+        corrupt = ""
+    }
+    let fields = match parsed {
         Ok(j) => fieldsOf(j),
         Err(why) => [],
     }
@@ -123,6 +139,14 @@ fn loadHistory() {
     testFiles = numberAt(tests, "files")
     commitTotal = numberAt(fields, "commits")
     prTotal = numberAt(fields, "prs")
+}
+
+/// Why the charts cannot be drawn, or "" when they can. A source that is
+/// there but does not parse is named here, and the export refuses on it —
+/// an empty chart is the one thing this module must never publish.
+export fn historyError() -> String {
+    loadHistory()
+    return corrupt.copy()
 }
 
 /// The fixture's text, or nothing at all — which is a page with empty charts,
@@ -772,5 +796,26 @@ test "the bands stack to the whole corpus, and each one is a closed shape" {
         assert(row.tag.byteLength == 8)
         assert(row.date.byteLength == 10)
         assert(row.band.byteLength > 0)
+    }
+}
+
+test "a source that does not parse is refused, never drawn empty" {
+    // The contract has three states, and only two of them draw: a real file
+    // draws the repository, a missing one draws the fixture, and a BROKEN one
+    // draws nothing — `historyError` names it and the export stops. Only a
+    // source with no bytes at all passes through silently, as the documented
+    // "nothing yet" page.
+    assert(parses("{\"days\":[],\"commits\":0,\"prs\":0}"))
+    assert(!parses("{\"days\":["))
+    assert(!parses(""))
+    // And whatever this tree loaded, it was one of the two drawing states.
+    assertEq(historyError(), "")
+}
+
+/// Whether `src` parses as JSON at all — the check behind `historyError`.
+fn parses(src: String) -> Bool {
+    return match parseJson(src) {
+        Ok(j) => true,
+        Err(why) => false,
     }
 }

@@ -169,16 +169,41 @@ fn slash(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
 
+/// The file an unpacked tool directory carries recording which sha it holds,
+/// written only after the archive is fully placed. The tools directory is
+/// content-addressed storage any process running as the user can write, so a
+/// directory that is there but does not certify itself is treated as absent.
+const SHA_MARKER: &str = ".vyrn-sha";
+
+/// A lock sha the tools directory will store: lowercase hex, full width. The
+/// sha joins into a path everywhere below, so it is validated before any join —
+/// a corrupt or hand-edited lock must refuse, never traverse.
+fn is_sha256(sha: &str) -> bool {
+    sha.len() == 64 && sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Whether `dir` is a completed unpack of `sha`: present, and carrying the
+/// marker [`unpack_tool`] writes last.
+fn verified(dir: &Path, sha: &str) -> bool {
+    std::fs::read_to_string(dir.join(SHA_MARKER))
+        .map_or(false, |recorded| recorded.trim_end() == sha)
+}
+
 /// Unpack a verified archive to `~/.vyrn/tools/<sha>/`, or return it if it is
-/// already there.
+/// already there and certifies itself (see [`verified`]).
 ///
 /// Unpacking shells out to `tar`, for the reason `curl` and `git` are already
 /// spawned: the tool is ubiquitous — Windows 10 and later, every Linux userland,
 /// macOS — and a crate for it would cost more than it buys. `tar -xf` sniffs the
 /// format, so one call covers `.tar.gz`, `.tar.xz` and `.zip`.
 pub fn unpack_tool(sha: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    if !is_sha256(sha) {
+        return Err(format!(
+            "`{sha}` is not a sha256 digest — the tools directory is keyed by content hash"
+        ));
+    }
     let out = tools_dir().join(sha);
-    if out.is_dir() {
+    if verified(&out, sha) {
         return Ok(out);
     }
     let pid = std::process::id();
@@ -210,11 +235,25 @@ pub fn unpack_tool(sha: &str, bytes: &[u8]) -> Result<PathBuf, String> {
     // Staged, then renamed: two builds may unpack the same tool at once, and a
     // reader must never see half an archive.
     if std::fs::rename(&stage, &out).is_err() {
-        let _ = std::fs::remove_dir_all(&stage);
-        if !out.is_dir() {
-            return Err(format!("cannot place the unpacked tool at {}", slash(&out)));
+        if verified(&out, sha) {
+            // Another process placed the same bytes first; ours is redundant.
+            let _ = std::fs::remove_dir_all(&stage);
+        } else {
+            // An uncertified directory holds the name — an interrupted unpack,
+            // a hand-made one, or a pre-marker layout. Replace it with the
+            // staged copy, which is the one this process built and can certify.
+            let _ = std::fs::remove_dir_all(&out);
+            if std::fs::rename(&stage, &out).is_err() {
+                let _ = std::fs::remove_dir_all(&stage);
+                return Err(format!("cannot place the unpacked tool at {}", slash(&out)));
+            }
         }
     }
+    // The marker is written LAST, after the tree is fully in place: a reader
+    // that finds it can trust everything beside it — "verified on every load",
+    // the invariant this module's doc claims.
+    std::fs::write(out.join(SHA_MARKER), sha)
+        .map_err(|e| format!("cannot mark {} as verified: {e}", slash(&out)))?;
     Ok(out)
 }
 
@@ -253,11 +292,23 @@ pub fn pinned_tool(
             "{name} {version} is pinned, and vyrn.lock has no entry for {platform}.\n  \
              Pinned platforms: {covered}.\n  \
              Add one with `vyrn update {name}`{}.",
-            escape_hatch(name)
+            escape_hatch(name),
         ));
     };
+    // The sha joins into a path below, so it is checked before any join: a
+    // corrupt or hand-edited lock refuses rather than reaching outside
+    // ~/.vyrn/tools.
+    if !is_sha256(sha) {
+        return Err(format!(
+            "{name} {version} is pinned with sha `{sha}`, which is not a sha256 digest — \
+             vyrn.lock is corrupt or hand-edited."
+        ));
+    }
     let out = tools_dir().join(sha);
-    if out.is_dir() {
+    // A directory that is there but does not certify itself (no marker: an
+    // interrupted unpack, a hand-made one, a pre-marker layout) is treated as
+    // absent and re-unpacked from the pinned bytes below — never trusted.
+    if verified(&out, sha) {
         return Ok(out);
     }
     match pinned_blob_bytes(project_dir, sha) {
@@ -488,5 +539,59 @@ mod tests {
         // Both refusals name the escape hatch: the integration test asserts it
         // outside its platform branch, and x86_64-linux is where that bit.
         assert!(e.contains("$VYRN_WASMTIME"), "{e}");
+    }
+    /// The sha joins into `~/.vyrn/tools/<sha>/` on every path below, so a
+    /// corrupt or hand-edited lock refuses before any join — it never reaches
+    /// outside the tools directory, and never falls through to the cache.
+    #[test]
+    fn a_lock_sha_that_is_not_a_sha256_refuses_before_any_path_join() {
+        assert!(is_sha256(&"a".repeat(64)));
+        assert!(is_sha256(&"0f".repeat(32)));
+        assert!(
+            !is_sha256(&"A".repeat(64)),
+            "uppercase is not the lock's spelling"
+        );
+        assert!(!is_sha256(&"a".repeat(63)), "short is not full width");
+        assert!(!is_sha256("../../escape"));
+        assert!(!is_sha256(""));
+
+        let dir = std::env::temp_dir().join("vyrn-toolpin-traversal");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut lock = Lock::load(dir.join("vyrn.lock")).unwrap();
+        lock.entries.insert(
+            tool_spec("wasmtime", "9.9.9", &host_platform()),
+            ("https://x.dev/w".into(), "../../escape".into()),
+        );
+        let e = pinned_tool(None, &lock, "wasmtime", "9.9.9").unwrap_err();
+        assert!(e.contains("not a sha256 digest"), "{e}");
+        assert!(e.contains("corrupt or hand-edited"), "{e}");
+    }
+
+    /// A directory in the tools cache is trusted only when it certifies itself:
+    /// the marker `unpack_tool` writes after the archive is fully placed. A
+    /// directory that is merely there — interrupted unpack, hand-made,
+    /// pre-marker layout — reads as absent and gets re-unpacked.
+    #[test]
+    fn an_unpacked_tool_directory_is_trusted_only_when_it_certifies_itself() {
+        let root = std::env::temp_dir().join(format!("vyrn-toolpin-marker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let sha = "b".repeat(64);
+
+        // Not there at all.
+        assert!(!verified(&root, &sha));
+        // There, but uncertified.
+        assert!(std::fs::write(root.join("wasmtime.exe"), b"x").is_ok());
+        assert!(!verified(&root, &sha));
+        // Certified for another sha: still not this one's unpack.
+        assert!(std::fs::write(root.join(SHA_MARKER), &"c".repeat(64)).is_ok());
+        assert!(!verified(&root, &sha));
+        // Certified.
+        assert!(std::fs::write(root.join(SHA_MARKER), format!("{sha}\n")).is_ok());
+        assert!(verified(&root, &sha));
+
+        // And unpack_tool refuses a sha that cannot even form a key.
+        assert!(unpack_tool("../../x", b"bytes").is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -136,24 +136,35 @@ class VyrnExit {
 
 export async function runVyrn(wasmBytes, hooks = {}) {
   let memory; // set after instantiate
-  const dec = new TextDecoder();
+  // One decoder per stream, both decoding in streaming mode: a multi-byte
+  // UTF-8 character split across iovecs must not turn into U+FFFD, and a
+  // single shared decoder's pending state would bleed one stream into the
+  // other.
+  const stdoutDec = new TextDecoder();
+  const stderrDec = new TextDecoder();
   let stdout = "";
   let stderr = "";
 
   // fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) -> errno
   // Decodes the iovec array out of linear memory and appends to the right
-  // stream. wasi-libc buffers internally, so chunks are usually whole lines.
+  // stream. Chunks decode with `{ stream: true }` so a character split across
+  // iovecs carries over instead of becoming U+FFFD; the final flush decode
+  // closes the call boundary, so a truncated tail is still emitted before
+  // this write returns. wasi-libc buffers internally, so chunks are usually
+  // whole lines.
   function fd_write(fd, iovsPtr, iovsLen, nwrittenPtr) {
     if (fd !== 1 && fd !== 2) return ERRNO_BADF;
     const view = new DataView(memory.buffer);
+    const dec = fd === 1 ? stdoutDec : stderrDec;
     let written = 0;
     let text = "";
     for (let i = 0; i < iovsLen; i++) {
       const base = view.getUint32(iovsPtr + i * 8, true);
       const len = view.getUint32(iovsPtr + i * 8 + 4, true);
-      text += dec.decode(new Uint8Array(memory.buffer, base, len));
+      text += dec.decode(new Uint8Array(memory.buffer, base, len), { stream: true });
       written += len;
     }
+    text += dec.decode();
     if (fd === 1) {
       stdout += text;
       if (hooks.onStdout) hooks.onStdout(text);
@@ -380,11 +391,20 @@ export async function runVyrn(wasmBytes, hooks = {}) {
     return ptr;
   };
   // Decode a returned String pointer: scan linear memory for the NUL byte.
-  const decodeCString = (ptr) => {
+  // The scan is bounded at the end of memory — a module that returns a bogus
+  // pointer is a bug to report, not a page to hang. Boundary defense is this
+  // shim's job, so the failure is a catchable Error naming the export.
+  const decodeCString = (ptr, field) => {
     const p = Number(ptr) >>> 0;
     const view = new Uint8Array(memory.buffer);
     let e = p;
-    while (view[e] !== 0) e++;
+    while (e < view.length && view[e] !== 0) e++;
+    if (e >= view.length) {
+      throw new Error(
+        `\`${field}\` returned a String with no NUL terminator before the end ` +
+          `of linear memory — the module handed back a bogus pointer.`
+      );
+    }
     return new TextDecoder().decode(view.subarray(p, e));
   };
 
@@ -448,7 +468,7 @@ export async function runVyrn(wasmBytes, hooks = {}) {
         // was given and `free` writes its list link into the block.
         if (ret === "unit") out = undefined;
         else if (ret === "string") {
-          out = decodeCString(r);
+          out = decodeCString(r, field);
           // A returned String is the CALLER's (RFC-0089 rule 3), and across
           // this boundary the caller is here. The module refuses to compile a
           // lend out of an `export extern fn` — module state, a projection —

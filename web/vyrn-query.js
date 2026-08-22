@@ -51,9 +51,13 @@ export function createQueryClient({ baseUrl = "", staleTime = 0, fetchImpl } = {
   // id `id`, so the pending callback the stub stored under that id runs.
   function dispatch(proc, id, status, body) {
     const name = dispatcherName(proc);
-    if (exportsRef && typeof exportsRef[name] === "function") {
-      exportsRef[name](BigInt(id), BigInt(status), body);
+    if (!exportsRef || typeof exportsRef[name] !== "function") {
+      // A settle arrived but there is nothing to feed it to — `bind` was never
+      // called (the usual order slip), or the module has no dispatcher for it.
+      console.warn(`vyrn-query: no dispatcher \`${name}\` on the module for \`${proc}\` — bind() not called yet?`);
+      return;
     }
+    exportsRef[name](BigInt(id), BigInt(status), body);
   }
 
   function networkFetch(proc, reqJson) {

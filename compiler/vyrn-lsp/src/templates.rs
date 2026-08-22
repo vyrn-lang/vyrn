@@ -131,6 +131,10 @@ fn classify_in_tag(chars: &[char], lt: usize, offset: usize, line: usize) -> Vyx
     let mut word_start = i;
     // The last attribute name token seen (word before `=`), to name a value.
     let mut last_word: Option<(usize, usize)> = None; // (start, end)
+                                                      // The cursor sits just past a CLOSED attribute value (`class="x"|`): that
+                                                      // slot owns no attribute-name completion — one whose textEdit span covers
+                                                      // the value and its closing quote would delete them.
+    let mut closed_value = false;
     let mut j = i;
     while j < offset {
         let c = chars[j];
@@ -139,9 +143,11 @@ fn classify_in_tag(chars: &[char], lt: usize, offset: usize, line: usize) -> Vyx
                 if c == q {
                     in_quote = None;
                     quoted_attr = None;
+                    closed_value = true;
                 }
             }
             None => {
+                closed_value = false;
                 if c == '"' || c == '\'' {
                     in_quote = Some(c);
                     quoted_attr = last_word.map(|(s, e)| chars[s..e].iter().collect::<String>());
@@ -177,6 +183,14 @@ fn classify_in_tag(chars: &[char], lt: usize, offset: usize, line: usize) -> Vyx
         }
         // `:class`, `@event`, `:attr`, `v-if` value expressions are handled by the
         // forward-map expression path, not structural completion.
+        let _ = line;
+        return VyxCursor::Other;
+    }
+
+    // Right past a closed value: not an attribute-name position (the scan's
+    // `word_start` still points just after the OPENING quote, so the "prefix"
+    // would be the value plus the closing quote).
+    if closed_value {
         let _ = line;
         return VyxCursor::Other;
     }
@@ -480,4 +494,29 @@ pub fn component_props(vyx_path: &std::path::Path) -> Vec<Prop> {
         }
     }
     props
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `<div class="x"|` — right past a closed attribute value. The old scan
+    /// classified this as AttrName with the value plus its closing quote as the
+    /// prefix, so accepting any completion deleted them.
+    #[test]
+    fn a_cursor_right_after_a_closed_value_is_no_attribute_name_slot() {
+        let vyx = "<div class=\"x\"";
+        assert_eq!(classify(vyx, 1, 15), VyxCursor::Other);
+        // Same with a self-closing slash after the value.
+        let closed = "<div class=\"x\"/>";
+        assert_eq!(classify(closed, 1, 15), VyxCursor::Other);
+        // Inside the value it is still a class slot.
+        assert!(matches!(classify(vyx, 1, 13), VyxCursor::ClassValue { .. }));
+        // After a space past the value, attribute naming resumes (empty prefix).
+        let spaced = "<div class=\"x\" ";
+        assert!(matches!(
+            classify(spaced, 1, 16),
+            VyxCursor::AttrName { .. }
+        ));
+    }
 }

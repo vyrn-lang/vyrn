@@ -39,11 +39,34 @@ use std::path::{Path, PathBuf};
 /// only in memory, a file that is not there.
 pub fn real_path(path: &str) -> Option<String> {
     let p = Path::new(path).canonicalize().ok()?;
-    Some(
-        p.to_string_lossy()
-            .trim_start_matches(r"\\?\")
-            .replace('\\', "/"),
-    )
+    Some(dos_to_slash(&p.to_string_lossy()))
+}
+
+/// The canonical Windows spelling a path arrives in, made slash-separated and
+/// prefix-free. `canonicalize` yields `\\?\C:\..` for drives — strip the
+/// verbatim prefix — but `\\?\UNC\server\share\..` for network locations, where
+/// stripping only the drive prefix left the literal letters `UNC/` in front of
+/// a string that matches no module key spelling anywhere else. Those spell back
+/// to the `//server/share/..` form every other part of the toolchain uses.
+fn dos_to_slash(s: &str) -> String {
+    let stripped = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!("//{rest}")
+    } else {
+        s.trim_start_matches(r"\\?\").to_string()
+    };
+    stripped.replace('\\', "/")
+}
+
+/// What kind of JSON value `v` is, for a diagnostic that names the mistake.
+fn json_kind(v: &Json) -> &'static str {
+    match v {
+        Json::Null => "null",
+        Json::Bool(_) => "a boolean",
+        Json::Num(_) => "a number",
+        Json::Str(_) => "a string",
+        Json::Arr(_) => "an array",
+        Json::Obj(_) => "an object",
+    }
 }
 
 /// A sibling directory of the running executable's repo root: `$var` if it names
@@ -160,24 +183,43 @@ fn from_doc(doc: Json, slash_dir: String) -> Result<Manifest, String> {
         Some(Json::Str(s)) => Some(s.clone()),
         _ => None,
     };
-    let str_map = |k: &str| -> Vec<(String, String)> {
+    // A present `dependencies`/`toolchain` that is not an object of strings is
+    // REFUSED, not read as empty. The filter_map this replaces silently declared
+    // nothing for `{"dependencies": {"pad": {"ref": "v1"}}}` — and the mistake
+    // surfaced later as an unrelated "cannot resolve import" pointing at the
+    // import, not at the mistyped field. An unreadable policy is not the empty
+    // policy, here exactly as in [`Lock::load`] and the unknown-tool check below.
+    let str_map = |k: &str| -> Result<Vec<(String, String)>, String> {
         match doc.get(k) {
-            Some(Json::Obj(entries)) => entries
-                .iter()
-                .filter_map(|(k, v)| match v {
-                    Json::Str(s) => Some((k.clone(), s.clone())),
-                    _ => None,
-                })
-                .collect(),
-            _ => Vec::new(),
+            None => Ok(Vec::new()),
+            Some(Json::Obj(entries)) => {
+                let mut out = Vec::new();
+                for (name, v) in entries {
+                    match v {
+                        Json::Str(s) => out.push((name.clone(), s.clone())),
+                        other => {
+                            return Err(format!(
+                                "`{k}.{name}` must be a string, found {} — vyrn.json's \
+                                 `{k}` maps names to version strings",
+                                json_kind(other)
+                            ))
+                        }
+                    }
+                }
+                Ok(out)
+            }
+            Some(other) => Err(format!(
+                "`{k}` must be an object of strings, found {}",
+                json_kind(other)
+            )),
         }
     };
-    let dependencies = str_map("dependencies");
+    let dependencies = str_map("dependencies")?;
     // A tool name the table cannot resolve is refused where it is WRITTEN, not
     // where it is looked up: a typo that silently declared nothing would leave
     // the build on PATH with a `toolchain` key in the file saying otherwise,
     // which is the silent fallback RFC-0102 exists to forbid.
-    let toolchain = str_map("toolchain");
+    let toolchain = str_map("toolchain")?;
     for (name, _) in &toolchain {
         if !crate::toolpin::KNOWN_TOOLS.contains(&name.as_str()) {
             return Err(crate::toolpin::unknown_tool(name));
@@ -631,5 +673,52 @@ mod tests {
             .expect("a tool the table cannot resolve is not a manifest this reads");
         assert!(e.contains("unknown tool `wasmtimee`"), "{e}");
         assert!(e.contains("wasmtime, wasi-sysroot, wasi-builtins"), "{e}");
+    }
+
+    /// The filter_map this replaces read `{"dependencies": {"pad": {"ref": ..}}}`
+    /// as NO dependencies, and the mistake surfaced later as an unrelated
+    /// "cannot resolve import" pointing at the import, not at the field. A
+    /// present-but-mistyped map is refused, here exactly as an unknown tool is.
+    #[test]
+    fn a_mistyped_dependencies_or_toolchain_value_stops_the_read() {
+        let parse = |src: &str| crate::schema::parse_json(src).unwrap();
+        let e = from_doc(
+            parse(r#"{"dependencies":{"pad":{"ref":"v1"}}}"#),
+            String::new(),
+        )
+        .err()
+        .expect("an object-of-objects dependencies is not silently nothing");
+        assert!(
+            e.contains("`dependencies.pad`") && e.contains("must be a string"),
+            "{e}"
+        );
+        let e = from_doc(parse(r#"{"dependencies":["pad"]}"#), String::new())
+            .err()
+            .expect("an array of names declares nothing readable");
+        assert!(
+            e.contains("`dependencies` must be an object of strings, found an array"),
+            "{e}"
+        );
+        let e = from_doc(parse(r#"{"toolchain":{"wasmtime":46}}"#), String::new())
+            .err()
+            .expect("a number is not a version string");
+        assert!(
+            e.contains("`toolchain.wasmtime`") && e.contains("found a number"),
+            "{e}"
+        );
+    }
+
+    /// `canonicalize` spells a network location `\\?\UNC\server\share\..`; the
+    /// drive-prefix strip this module used left literal letters `UNC/` in front,
+    /// a string that matched no module key spelling — so audience/artifact rules
+    /// went silently inert for share-hosted projects.
+    #[test]
+    fn a_verbatim_unc_path_spells_back_to_its_share_form() {
+        assert_eq!(
+            dos_to_slash(r"\\?\UNC\server\share\proj"),
+            "//server/share/proj"
+        );
+        assert_eq!(dos_to_slash(r"\\?\C:\repo\proj"), "C:/repo/proj");
+        assert_eq!(dos_to_slash("/already/slashy"), "/already/slashy");
     }
 }

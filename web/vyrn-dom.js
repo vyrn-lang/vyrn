@@ -281,7 +281,7 @@ export async function mount(wasmBytes, mountEl, opts = {}) {
   const effectRegistry = { ...effects };
   const activeEffects = new Map(); // domNode -> { name, cleanup }
   const activeSubs = new Map(); // subKey -> teardown fn
-  const wiredEvents = new Set(); // event types with a delegated root listener
+  const wiredEvents = new Map(); // event type -> the delegated root listener
   let current = null; // the retained root vnode (full-view loop only)
   let rootDom = null; // the single mounted DOM node (patch loop: path [] resolves here)
   let destroyed = false;
@@ -300,8 +300,7 @@ export async function mount(wasmBytes, mountEl, opts = {}) {
   // --- delegated events ---------------------------------------------------
   function ensureDelegated(type) {
     if (wiredEvents.has(type)) return;
-    wiredEvents.add(type);
-    mountEl.addEventListener(type, (ev) => {
+    const listener = (ev) => {
       for (let n = ev.target; n && n !== mountEl.parentNode; n = n.parentNode) {
         if (n.nodeType === 1 && n.hasAttribute(`data-on-${type}`)) {
           const handler = n.getAttribute(`data-on-${type}`);
@@ -316,7 +315,9 @@ export async function mount(wasmBytes, mountEl, opts = {}) {
           return;
         }
       }
-    });
+    };
+    wiredEvents.set(type, listener);
+    mountEl.addEventListener(type, listener);
   }
 
   // --- DOM construction ---------------------------------------------------
@@ -724,6 +725,11 @@ export async function mount(wasmBytes, mountEl, opts = {}) {
         if (typeof info.cleanup === "function") info.cleanup(dom);
       }
       activeEffects.clear();
+      // The delegated listeners pin this instance's exports (and its live
+      // wasm memory) and would dispatch into the dead instance — or double
+      // into a fresh mount on the same element. Take them back off.
+      for (const [type, listener] of wiredEvents) mountEl.removeEventListener(type, listener);
+      wiredEvents.clear();
       mountEl.textContent = "";
     },
   };

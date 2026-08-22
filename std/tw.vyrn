@@ -853,11 +853,34 @@ export fn css() -> String {
 /// synthesize the typed module. Malformed input fails the load with a `std/diag`
 /// report (RFC-0099) naming the offending key, attributed to this call.
 export gen fn tw(theme: String) -> String {
-    let src = match readFile(theme) {
-        Ok(v) => v,
-        Err(err) => "",
+    return twLoaded(theme, readFile(theme))
+}
+
+/// A theme read's two outcomes in one record — the shape that lets a match
+/// arm stay a single expression while the caller still refuses a failed read
+/// BEFORE parsing (a directive string fed to `twParseTheme` would come back
+/// out mislabelled as a theme fault).
+type TwRead = {
+    data: String,
+    err: String,
+}
+
+/// [`tw`] with the theme read handed in — the seam that keeps the cannot-read
+/// diagnostic reachable from a test without file I/O.
+gen fn twLoaded(theme: String, read: Result<String, String>) -> String {
+    // Match arms are single expressions and a gen fn cannot `return` out of
+    // one, so the read result crosses a two-field record: the Err reason rides
+    // beside an empty body, and the cannot-read refusal returns BEFORE any
+    // parse — a directive string fed to the parser would only come back out
+    // mislabelled as a theme fault.
+    let got = match read {
+        Ok(v) => TwRead { data: v.copy(), err: "" },
+        Err(e) => TwRead { data: "", err: e.copy() },
     }
-    let parsed = twParseTheme(src)
+    if got.err != "" {
+        return reportHere(Error, cannotReadTheme(theme, got.err))
+    }
+    let parsed = twParseTheme(got.data)
     if parsed.ok == false {
         return reportHere(Error, "`\{theme}` is not a usable theme — \{parsed.error}")
     }
@@ -876,6 +899,15 @@ export gen fn tw(theme: String) -> String {
     // sole CSS producer), so injection and breakpoint-forgery are structurally
     // impossible rather than prevented by remembering to call each pass here.
     return twBuildModule(parsed, vocab, twAxisOf(parsed, "breakpoints"), twSafelist(parsed))
+}
+
+/// The one sentence about a theme that cannot be READ, spelled once (the
+/// `std/icons` `cannotRead` shape). A missing or unreadable theme.json used to
+/// fall through as `""` and come back out of the parser as a JSON fault —
+/// sending the reader hunting for a syntax error in a file that was never
+/// there.
+fn cannotReadTheme(theme: String, why: String) -> String {
+    return "std/tw cannot read the theme `\{theme}`: \{why} — a theme is a flat theme.json of design tokens"
 }
 
 // ===========================================================================
@@ -905,6 +937,14 @@ test "twAxisOf dashes color shade paths and keeps theme order" {
     assertEq(ax[0].token, "brand-500")
     assertEq(ax[1].token, "brand-600")
     assertEq(ax[2].token, "white")
+}
+
+test "a theme that cannot be read is its own diagnostic, not a parse error" {
+    let out = twLoaded("./missing/theme.json", Err("No such file or directory"))
+    assert(
+        contains(out, "//@diag error - std/tw cannot read the theme `./missing/theme.json`: No such file or directory"),
+    )
+    assert(contains(out, "not a usable theme") == false)
 }
 
 test "twClassSafe accepts utility names and rejects unsafe segments" {

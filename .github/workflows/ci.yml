@@ -134,6 +134,12 @@ on:
       - '**.md'
       - 'editor/**'
 
+# Read-only token for every job here: none of them touches releases, packages
+# or Pages, and pull_request runs execute PR-supplied code (build.rs, test
+# binaries). Workflows that do write declare their scopes where they are used
+# — release.yml at the top, site.yml on its deploy job alone.
+permissions:
+  contents: read
 # Stacked pushes cancel the superseded run — only the newest commit's
 # verdict matters on a branch.
 concurrency:
@@ -204,13 +210,15 @@ jobs:
         # step on `runner.os`.
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Rust cache
         # Unlike actions/cache with a lockfile key (which never re-uploads
         # after the first hit, so every run rebuilt all vyrn-* crates from a
         # stale target), rust-cache refreshes the saved target dir per run
         # and prunes stale artifacts.
-        uses: Swatinem/rust-cache@v2
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           # `compiler` alone now: the LSP crate moved to the `checks` job, and a
           # workspace listed here that this job never builds is a target tree
@@ -231,10 +239,15 @@ jobs:
         #     key would let this job's nextest-only save answer the parity job's
         #     restore as a hit — and its populate step is `if: cache-hit !=
         #     'true'`, so wasmtime would silently never arrive.
-        uses: actions/cache@v4
+        # actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.vyrn/tools
-          key: vyrn-nextest-${{ matrix.os }}-${{ hashFiles('vyrn.lock') }}
+          # `-v2-`: the audit added the `.vyrn-sha` certification marker to
+          # unpacked tool directories, and a pre-marker cache restores as a
+          # hit the resolver then treats as absent. The bump makes those
+          # caches miss once, so the populate step lays certified copies.
+          key: vyrn-nextest-v2-${{ matrix.os }}-${{ hashFiles('vyrn.lock') }}
       - name: Formatting gate
         # First, because it is seconds and its fix is mechanical — a reader gets
         # the verdict before the build spends five minutes.
@@ -329,9 +342,11 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: |
             compiler
@@ -485,9 +500,11 @@ jobs:
     # matrix leg nobody has watched go green is a claim, not a gate.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: compiler
           # Separate cache from the test job — different build graph (only
@@ -512,10 +529,12 @@ jobs:
         # hand-written key this replaces spelled two versions in YAML and could
         # not go stale against a pin it never read. `~/.vyrn/tools/<sha256>/` is
         # what the resolver looks in, so a hit needs no fetch and no unpack.
-        uses: actions/cache@v4
+        # actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.vyrn/tools
-          key: vyrn-tools-${{ hashFiles('vyrn.lock') }}
+          # `-v2-` for the same marker reason as the nextest cache above.
+          key: vyrn-tools-v2-${{ hashFiles('vyrn.lock') }}
       - name: Build vyrn
         working-directory: compiler
         run: cargo build --quiet -p vyrn-cli
@@ -577,9 +596,11 @@ jobs:
     # same reason — both are the expensive tier that proves an invariant.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: compiler
           # Distinct build graph (vyrn-genwasm and its wasmtime tree) — its own
@@ -640,9 +661,11 @@ jobs:
     # `continue-on-error` is deliberately GONE all the same: a step that cannot
     # fail for an unrelated reason either is not worth running.
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: compiler
           # Separate cache slot (only vyrn-cli, and a distinct build graph).
@@ -700,7 +723,8 @@ jobs:
         #   cp baseline.json bench/baseline.json && git commit
         # That is the whole procedure — see the `_readme` in the placeholder.
         if: always()
-        uses: actions/upload-artifact@v4
+        # actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: bench-json
           path: bench/out/*.json

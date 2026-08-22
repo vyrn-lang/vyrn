@@ -106,7 +106,7 @@ pub struct ParseError(pub String);
 /// parity surface — keep it in lockstep with the C shim.
 pub fn parse(src: &str) -> Result<JsonV, ParseError> {
     let b = src.as_bytes();
-    let mut p = Parser { b, i: 0 };
+    let mut p = Parser { b, i: 0, depth: 0 };
     p.ws();
     let v = p.value()?;
     p.ws();
@@ -122,6 +122,11 @@ pub fn parse(src: &str) -> Result<JsonV, ParseError> {
 struct Parser<'a> {
     b: &'a [u8],
     i: usize,
+    /// Objects and arrays currently open — the recursion this parser bounds,
+    /// at the same depth [`crate::schema`] bounds its own recursive-descent
+    /// parser (`MAX_JSON_DEPTH`): a document deeper than that is refused with
+    /// a named error instead of taking the thread stack down.
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -142,8 +147,18 @@ impl Parser<'_> {
     fn value(&mut self) -> Result<JsonV, ParseError> {
         match self.b.get(self.i) {
             None => Err(self.eoi()),
-            Some(b'{') => self.obj(),
-            Some(b'[') => self.arr(),
+            Some(b'{') => {
+                self.nest()?;
+                let v = self.obj();
+                self.depth -= 1;
+                v
+            }
+            Some(b'[') => {
+                self.nest()?;
+                let v = self.arr();
+                self.depth -= 1;
+                v
+            }
             Some(b'"') => Ok(JsonV::Str(self.string()?)),
             Some(b't') => self.lit("true", JsonV::Bool(true)),
             Some(b'f') => self.lit("false", JsonV::Bool(false)),
@@ -151,6 +166,19 @@ impl Parser<'_> {
             Some(c) if *c == b'-' || c.is_ascii_digit() => self.num(),
             Some(_) => Err(self.unexpected()),
         }
+    }
+    /// Enter one enclosing level, or refuse. Every recursive call goes through
+    /// here, so the bound is the parser's and not one caller's.
+    fn nest(&mut self) -> Result<(), ParseError> {
+        self.depth += 1;
+        if self.depth > crate::schema::MAX_JSON_DEPTH {
+            return Err(ParseError(format!(
+                "nested deeper than {} levels at position {}",
+                crate::schema::MAX_JSON_DEPTH,
+                self.i
+            )));
+        }
+        Ok(())
     }
     fn lit(&mut self, word: &str, v: JsonV) -> Result<JsonV, ParseError> {
         for &wb in word.as_bytes() {
@@ -191,6 +219,16 @@ impl Parser<'_> {
             self.i += 1;
             self.ws();
             let v = self.value()?;
+            // A name defined twice is a document with two meanings, and this
+            // parser's role is to agree with the shipped reader: `std/jsonread`
+            // and [`crate::schema`] refuse a duplicate outright, so first-wins
+            // `JsonV::get` never gets the chance to hide one.
+            if out.iter().any(|(prev, _)| prev == &k) {
+                return Err(ParseError(format!(
+                    "`{k}` is defined twice at position {}",
+                    self.i
+                )));
+            }
             out.push((k, v));
             self.ws();
             match self.b.get(self.i) {
@@ -259,10 +297,39 @@ impl Parser<'_> {
                                 };
                                 cp = cp * 16 + h as u32;
                             }
-                            match char::from_u32(cp) {
-                                Some(ch) => out.push(ch),
-                                None => return Err(self.unexpected()),
-                            }
+                            // A surrogate half is not a scalar. A high half
+                            // (D800–DBFF) followed immediately by its low
+                            // escape (DC00–DFFF) combines into one scalar —
+                            // how RFC 8259 §7 spells an astral codepoint, and
+                            // what `std/jsonread` accepts — while a lone or
+                            // unpaired half is refused with the parity wording.
+                            let ch = if (0xd800..=0xdbff).contains(&cp) {
+                                if self.b.get(self.i + 1) != Some(&b'\\')
+                                    || self.b.get(self.i + 2) != Some(&b'u')
+                                {
+                                    return Err(self.unexpected());
+                                }
+                                self.i += 2;
+                                let mut lo: u32 = 0;
+                                for _ in 0..4 {
+                                    self.i += 1;
+                                    let h = match self.b.get(self.i) {
+                                        None => return Err(self.eoi()),
+                                        Some(c) => {
+                                            hex_digit(*c).ok_or_else(|| self.unexpected())?
+                                        }
+                                    };
+                                    lo = lo * 16 + h as u32;
+                                }
+                                if !(0xdc00..=0xdfff).contains(&lo) {
+                                    return Err(self.unexpected());
+                                }
+                                char::from_u32(0x10000 + (cp - 0xd800) * 0x400 + (lo - 0xdc00))
+                                    .unwrap()
+                            } else {
+                                char::from_u32(cp).ok_or_else(|| self.unexpected())?
+                            };
+                            out.push(ch);
                         }
                         Some(_) => return Err(self.unexpected()),
                     }
@@ -288,13 +355,17 @@ impl Parser<'_> {
         if self.b.get(self.i) == Some(&b'-') {
             self.i += 1;
         }
-        // integer part
-        if !matches!(self.b.get(self.i), Some(c) if c.is_ascii_digit()) {
-            return Err(if self.i >= self.b.len() {
-                self.eoi()
-            } else {
-                self.unexpected()
-            });
+        // integer part — the JSON grammar's `0 | [1-9][0-9]*`: a leading zero
+        // (`01`) is two tokens to every strict reader, so it is refused here
+        // rather than silently read as one number.
+        match self.b.get(self.i) {
+            None => return Err(self.eoi()),
+            Some(c) if c.is_ascii_digit() => self.i += 1,
+            Some(_) => return Err(self.unexpected()),
+        }
+        if self.b[self.i - 1] == b'0' && matches!(self.b.get(self.i), Some(c) if c.is_ascii_digit())
+        {
+            return Err(self.unexpected());
         }
         while matches!(self.b.get(self.i), Some(c) if c.is_ascii_digit()) {
             self.i += 1;
@@ -1046,6 +1117,71 @@ mod tests {
         let types = HashMap::new();
         let m = Type::Map(Box::new(Type::Str), Box::new(Type::Int));
         assert_eq!(expected_name(&m, &types), "object");
+    }
+
+    // ---- the exact-integer parser ------------------------------------------
+
+    /// A paired `\uD83D\uDE00` escape IS 😀 — how RFC 8259 §7 spells an astral
+    /// codepoint and what `std/jsonread` decodes — so the parity surface
+    /// decodes it too, and re-escaping round-trips. A lone or unpaired half is
+    /// refused with the same wording as any other bad character.
+    #[test]
+    fn a_surrogate_pair_escape_decodes_and_round_trips() {
+        let face = JsonV::Str("😀".to_string());
+        assert_eq!(parse(r#""😀""#).unwrap(), face);
+        assert_eq!(parse(r#""\ud83d\ude00""#).unwrap(), face);
+        assert_eq!(parse(r#""\uD83D\uDE00""#).unwrap(), face);
+        // Round-trip: the canonical escaper writes the scalar verbatim, and
+        // the pair spelling reads back to the same string.
+        let mut body = String::new();
+        escape_into(&"😀".to_string(), &mut body);
+        assert_eq!(parse(&format!("\"{body}\"")).unwrap(), face);
+
+        for bad in [
+            r#""\ud83d""#,       // high half, nothing follows
+            r#""\ud83dx""#,      // high half, not an escape
+            r#""\ud83d\n""#,     // high half, a different escape
+            r#""\ud83d\u0041""#, // high half, not a low half
+            r#""\ude00""#,       // lone low half
+            r#""\udbff""#,       // lone high half at the top of the range
+        ] {
+            assert!(parse(bad).is_err(), "{bad} parses");
+        }
+    }
+
+    /// The parser recurses once per enclosing `{`/`[`, so an unbounded document
+    /// was a stack overflow — an abort, no diagnostic. The bound is the one
+    /// [`crate::schema`] takes, read from that constant so the two parsers
+    /// cannot drift.
+    #[test]
+    fn a_document_deeper_than_the_limit_is_refused_not_crashed() {
+        let nest = |d: usize| format!("{}{}", "[".repeat(d), "]".repeat(d));
+        assert!(
+            parse(&nest(crate::schema::MAX_JSON_DEPTH)).is_ok(),
+            "at the limit is inside it"
+        );
+        let e = parse(&nest(crate::schema::MAX_JSON_DEPTH + 1)).unwrap_err();
+        assert!(e.0.contains("deeper"), "{e:?}");
+        // Depth is not length: a hundred thousand siblings are fine.
+        assert!(parse(&nest(100_000)).is_err());
+        let wide = format!("[{}]", vec!["1"; 100_000].join(","));
+        assert!(parse(&wide).is_ok());
+    }
+
+    /// The integer grammar is `0 | [1-9][0-9]*` and a name is defined once:
+    /// the two leniencies every strict reader (`std/jsonread`, `crate::schema`)
+    /// refuses, refused here too so this parser stays in lockstep with the
+    /// reader it documents.
+    #[test]
+    fn leading_zeros_and_duplicate_keys_are_refused() {
+        for bad in ["01", "-01", "{\"a\":1,\"a\":2}"] {
+            assert!(parse(bad).is_err(), "{bad} parses");
+        }
+        let e = parse("{\"a\":1,\"a\":2}").unwrap_err();
+        assert!(e.0.contains("`a`"), "names the key: {e:?}");
+        for good in ["0", "-0", "10", "0.5", "{\"a\":1,\"b\":2}"] {
+            assert!(parse(good).is_ok(), "{good} refused");
+        }
     }
 }
 

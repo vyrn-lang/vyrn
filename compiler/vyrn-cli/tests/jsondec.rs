@@ -88,7 +88,7 @@ use vyrn_frontend::hash::sha256_hex;
 
 /// The transcript's SHA-256 (post-swap). Mutation-checked — see the note at the
 /// bottom of this file for which mutations were tried and what each broke.
-const CORPUS_DIGEST: &str = "d94e2486f1539d5f9aced50faa71800d5a9ea6e20439c27bbb5c79d2bfcae852";
+const CORPUS_DIGEST: &str = "7b5c763d82a681935b231d2f6a9f807f110116f84d375422c1e035304b1b377d";
 
 fn repo_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -653,10 +653,12 @@ fn the_decode_corpus_answers_exactly_this() {
         "json.type@: expected one of `Dot`, `Circle`, `Rect`, found object"
     );
     assert_eq!(row("shape", "{\"Rect\":[2,5]}"), "ok {\"Rect\":[2,5]}");
-    // A short tuple payload decodes its missing member against `null`.
+    // A short tuple payload is refused on the wire arity before any member
+    // decodes: the encoder never writes one, so a short array is a shape the
+    // type cannot mean — even when every member would decode `null` happily.
     assert_eq!(
         row("shape", "{\"Rect\":[2]}"),
-        "json.type@Rect[1]: expected integer, found null"
+        "json.type@Rect: expected array of length 2, found array of length 1"
     );
 
     // The three rows RFC-0078's strictness ruling moved, each spelled out.

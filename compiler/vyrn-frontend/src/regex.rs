@@ -67,6 +67,25 @@ enum Re {
 struct ReParser<'a> {
     b: &'a [u8],
     i: usize,
+    /// Cumulative structural expansion so far, charged by [`ReParser::counted`].
+    expanded: usize,
+}
+
+/// Total structural-expansion budget for counted repetition. `{m}` copies its
+/// atom, so nested counts MULTIPLY across levels (`(a{99}){99}` alone is ~10⁴
+/// nodes; one level deeper ~10⁶). Each copy is charged the size of what it
+/// clones against this running budget, so a pathological pattern is a clean
+/// compile error instead of an OOM/hang in `vyrn check`.
+const EXPANSION_BUDGET: usize = 16_384;
+
+/// Number of nodes in a parsed [`Re`] tree — the unit [`EXPANSION_BUDGET`]
+/// charges a copied subtree at.
+fn re_size(re: &Re) -> usize {
+    match re {
+        Re::Empty | Re::Class(_) => 1,
+        Re::Concat(ps) | Re::Alt(ps) => ps.iter().map(re_size).sum::<usize>(),
+        Re::Star(r) | Re::Plus(r) | Re::Opt(r) => re_size(r),
+    }
 }
 
 impl<'a> ReParser<'a> {
@@ -74,6 +93,7 @@ impl<'a> ReParser<'a> {
         let mut p = ReParser {
             b: pat.as_bytes(),
             i: 0,
+            expanded: 0,
         };
         let re = p.alt()?;
         if p.i < p.b.len() {
@@ -159,6 +179,21 @@ impl<'a> ReParser<'a> {
                 return Err(format!("counted repetition `{{{m},{n}}}` has max < min"));
             }
         }
+        // Every copy deep-clones `atom`, so nesting multiplies the counts:
+        // `(a{200}){200}` is ~4·10⁴ nodes, a level deeper ~8·10⁶. Charge the
+        // cumulative budget here, before any of it is materialised.
+        let copies = m as usize
+            + match n {
+                None => 1, // `{m,}` adds one `Star` over the atom
+                Some(n) => (n - m) as usize,
+            };
+        let cost = copies.saturating_mul(re_size(&atom));
+        if self.expanded + cost > EXPANSION_BUDGET {
+            return Err(format!(
+                "counted repetition expands the pattern past the maximum ({EXPANSION_BUDGET} nodes)"
+            ));
+        }
+        self.expanded += cost;
         let mut parts: Vec<Re> = std::iter::repeat_with(|| atom.clone())
             .take(m as usize)
             .collect();
@@ -457,7 +492,7 @@ impl Nfa {
 /// A compiled, deterministic matcher. `table[state * 256 + byte]` is the next
 /// state (the table is complete — a dead state absorbs non-matches), and
 /// `accepting[state]` marks a full-match state.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Dfa {
     pub start: u32,
     pub accepting: Vec<bool>,
@@ -623,6 +658,16 @@ impl Dfa {
                         let mut ns = s.clone();
                         ns.push(b as u8);
                         next.push((t, ns));
+                        // Every entry below extends to at least one DISTINCT
+                        // member (prefixes are distinct and a live state always
+                        // reaches an accept), so a successor list over the cap
+                        // already proves the language exceeds the cap. Without
+                        // this the frontier grows ×width per level until an
+                        // accept finally appears: 16^d prefixes of
+                        // `[0-9a-f]{40}` long before depth 40.
+                        if next.len() > cap {
+                            return None;
+                        }
                     }
                 }
             }
@@ -644,7 +689,39 @@ impl Dfa {
     /// finite sublanguage gives the completion/checking alphabet straight from the
     /// same DFA the compiler validates against (one enumeration, no drift).
     pub fn enumerate_without(&self, exclude: u8, cap: usize) -> Option<Vec<String>> {
-        let acc = self.can_reach_accept();
+        // Reverse reachability over NON-exclude transitions only: `acc[s]`
+        // means an accepting state is reachable from `s` without ever
+        // consuming the excluded byte, i.e. every prefix landing here still
+        // extends to a string this enumeration can actually emit. (The
+        // unrestricted set would admit prefixes whose only route back to an
+        // accept runs through `exclude`, breaking the cap argument below.)
+        let n = self.num_states();
+        let mut rev: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for s in 0..n {
+            for b in 0..256usize {
+                if b as u8 == exclude {
+                    continue;
+                }
+                let t = self.table[s * 256 + b] as usize;
+                rev[t].push(s);
+            }
+        }
+        let mut acc = vec![false; n];
+        let mut stack = Vec::new();
+        for (s, &a) in self.accepting.iter().enumerate() {
+            if a {
+                acc[s] = true;
+                stack.push(s);
+            }
+        }
+        while let Some(t) = stack.pop() {
+            for &s in &rev[t] {
+                if !acc[s] {
+                    acc[s] = true;
+                    stack.push(s);
+                }
+            }
+        }
         let mut out: Vec<Vec<u8>> = Vec::new();
         // BFS by length. Excluding `exclude` prunes the transition that restarts a
         // fresh token, so the residual paths are bounded by the token DFA — the
@@ -672,6 +749,13 @@ impl Dfa {
                         let mut ns = s.clone();
                         ns.push(b as u8);
                         next.push((t, ns));
+                        // Same argument as `enumerate`: every pruned-to-live
+                        // prefix extends to at least one distinct exclude-free
+                        // member, so a successor list over the cap is already
+                        // the answer `None`.
+                        if next.len() > cap {
+                            return None;
+                        }
                     }
                 }
             }
@@ -1223,6 +1307,20 @@ mod tests {
     }
 
     #[test]
+    fn nested_counted_repetition_hits_the_expansion_budget() {
+        // Deep-but-narrow patterns stay fine — the hash-shaped case LSP sees.
+        assert!(compile("[0-9a-f]{40}").is_ok());
+        assert!(compile("([0-9a-f]{2}){10}").is_ok());
+        // Nesting MULTIPLIES the counts (`(a{200}){200}` would be ~4·10⁴
+        // nodes, a level deeper ~8·10⁶), so the product must be a clean
+        // compile error instead of an OOM/hang in `vyrn check`.
+        let e = compile("(a{200}){200}").unwrap_err();
+        assert!(e.contains("past the maximum"), "message: {e}");
+        // Just inside the budget still compiles.
+        assert!(compile("(a{200}){40}").is_ok());
+    }
+
+    #[test]
     fn counted_repetition() {
         assert!(m("a{3}", "aaa"));
         assert!(!m("a{3}", "aa"));
@@ -1311,6 +1409,30 @@ mod tests {
         assert_eq!(dfa("[a-z]+").enumerate(1000), None);
         // Exactly at the cap → Some.
         assert!(dfa("cat|dog|bird").enumerate(3).is_some());
+    }
+
+    #[test]
+    fn enumeration_terminates_on_wide_counted_repetitions() {
+        // `[0-9a-f]{40}` (hash-shaped) holds 16^40 members and every accept
+        // sits at depth 40: a frontier growing ×16 per level would explode
+        // long before the cap or the first accept could stop it. Every live
+        // prefix extends to a distinct member, so the first over-cap
+        // successor list settles the answer immediately.
+        assert_eq!(dfa("[0-9a-f]{40}").enumerate(1000), None);
+        // Below the cap's width everything is still enumerated exactly:
+        // 16² = 256 two-byte members.
+        assert_eq!(
+            dfa("[0-9a-f]{2}").enumerate(1000).map(|v| v.len()),
+            Some(256)
+        );
+        // Same bound for the sequence-alphabet path: `(a|b){3}` has 8
+        // separator-free members — at the cap it enumerates all of them, one
+        // short it bails out as soon as the successor list says so.
+        assert_eq!(
+            dfa("(a|b){3}").enumerate_without(b' ', 8).map(|v| v.len()),
+            Some(8)
+        );
+        assert_eq!(dfa("(a|b){3}").enumerate_without(b' ', 7), None);
     }
 
     #[test]

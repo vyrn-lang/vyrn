@@ -28,7 +28,9 @@ Wire semantics (locked):
     `code: "invalid_argument"` and the Issues carried LOSSLESS in `details`
     (each Issue's key/path/message preserved);
   - an unknown procedure under the service prefix => `{"code":"unimplemented"}`
-    (HTTP 404, Connect's canonical mapping for that code);
+    (HTTP 501 — the protocol maps an EXPLICIT `unimplemented` to Not
+    Implemented; 404 is only what a client infers when a non-200 response
+    carries no code at all);
   - an `Err` return of a `Result` procedure => HTTP 200 with the ordinary
     encoded value (RFC-0024: domain errors are values, not transport errors).
 

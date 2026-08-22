@@ -15,8 +15,11 @@ The emitted `openapiJson()`:
   - `openapi: "3.1.0"`, `info` (title from the contract's module base name,
     a deterministic `version`);
   - one `paths` entry per procedure IN DECLARATION ORDER, describing the
-    `POST /rpc/<proc>` surface `std/rpc` serves: a `requestBody` `$ref` to the
-    request type's schema, a `200` `$ref` to the response type's schema, and
+    `POST /rpc/<proc>` surface `std/rpc` serves: a `requestBody` `$ref` to
+    the request type's schema WHEN the parameter names one of the contract's
+    types (the permissive `{}` for a bare type — a `$ref` to a component
+    `components/schemas` never emits would dangle), a `200` `$ref` to the
+    response type's schema, and
     the `422` request-validation Issues shape (`std/rpc`'s validation status);
   - `components/schemas`, one entry per type in the RFC-0031 reachable
     closure (SORTED by name, so imported wire types appear deterministically),

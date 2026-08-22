@@ -643,9 +643,11 @@ impl Walk<'_> {
     }
 
     /// One payload variant's arm: the payload path is `path.Tag`, and a tuple
-    /// payload's members are `path.Tag[i]` against the wire array's elements —
-    /// a short array decodes its missing members against `null`, which fails there
-    /// rather than silently.
+    /// payload's members are `path.Tag[i]` against the wire array's elements.
+    /// The encoder always writes exactly one element per member, so the arity
+    /// is checked up front — without the check, a short array would decode
+    /// every-`Option` members against `elemAt`'s out-of-range `JNull` and
+    /// succeed as all-`None`, a shape nothing can encode.
     fn payload_arm(&mut self, name: &str, payload: &[Type]) -> Result<String, String> {
         let fpath = self.rd("fieldPath");
         if payload.len() == 1 {
@@ -666,6 +668,7 @@ impl Walk<'_> {
             self.rd("elemAt"),
             self.rd("indexPath"),
         );
+        let arity = payload.len();
         let mut out = format!(
             "        let c = {fpath}(path, \"{name}\")\n\
              \x20       let pv = {val_of}(v)\n\
@@ -674,7 +677,11 @@ impl Walk<'_> {
              \x20           {ptype}(iss, c, \"array\", pk)\n\
              \x20           return out\n\
              \x20       }}\n\
-             \x20       let items = {items_of}(pv)\n"
+             \x20       let items = {items_of}(pv)\n\
+             \x20       if items.length != {arity} {{\n\
+             \x20           {ptype}(iss, c, \"array of length {arity}\", \"array of length \" + items.length.toString())\n\
+             \x20           return out\n\
+             \x20       }}\n"
         );
         let mut guards = Vec::new();
         let mut binds = Vec::new();
@@ -848,5 +855,77 @@ mod tests {
         assert_eq!(unsigned_max(8), "255");
         assert_eq!(unsigned_max(32), "4294967295");
         assert_eq!(unsigned_max(64), "18446744073709551615");
+    }
+
+    /// Run a single-source program that uses `fromJson`, with every runtime
+    /// module the walk injects reachable — the same mapping the interpreter
+    /// tests use, so nothing here can drift from what ships.
+    fn run_json(src: &str) -> Result<i64, String> {
+        let files = crate::loader::MapResolver(
+            [
+                (
+                    "std/json.vyrn".to_string(),
+                    include_str!("../../../std/json.vyrn").to_string(),
+                ),
+                (
+                    "std/codecs.vyrn".to_string(),
+                    include_str!("../../../std/codecs.vyrn").to_string(),
+                ),
+                (
+                    "std/text.vyrn".to_string(),
+                    include_str!("../../../std/text.vyrn").to_string(),
+                ),
+                (
+                    "std/strpred.vyrn".to_string(),
+                    include_str!("../../../std/strpred.vyrn").to_string(),
+                ),
+                (
+                    "std/jsondec.vyrn".to_string(),
+                    include_str!("../../../std/jsondec.vyrn").to_string(),
+                ),
+                (
+                    "std/jsonread.vyrn".to_string(),
+                    include_str!("../../../std/jsonread.vyrn").to_string(),
+                ),
+                (
+                    "std/num.vyrn".to_string(),
+                    include_str!("../../../std/num.vyrn").to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let opts = crate::loader::LoadOptions {
+            std_root: Some("std".into()),
+            ..Default::default()
+        };
+        let program = crate::load(src, "main.vyrn", &opts, &files)
+            .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))?;
+        crate::interp::run(&program)
+    }
+
+    /// A tuple payload whose members are ALL `Option` used to decode a short
+    /// wire array as all-`None`: `elemAt` answers `JNull` past the end and
+    /// `JNull` is a legal `None`, so `{"P":[]}` built a value the encoder can
+    /// never produce. The wire arity is now enforced up front: short AND long
+    /// arrays come back `Invalid` with an issue, while the exact arity still
+    /// decodes.
+    #[test]
+    fn a_tuple_payload_off_the_wire_arity_is_refused_even_all_option() {
+        let src = "type E = | P(Option<Int64>, Option<Int64>) \
+                   fn issues(s: String) -> Int64 { \
+                       return match fromJson(E, s) { \
+                           Valid(_) => 0, \
+                           Invalid(is) => is.length, \
+                       }; } \
+                   fn main() -> Int64 { \
+                       let ok = issues(\"{\\\"P\\\":[null,null]}\") \
+                       if ok != 0 { return 0 - 1 } \
+                       let short = issues(\"{\\\"P\\\":[]}\") \
+                       let long = issues(\"{\\\"P\\\":[null,null,null]}\") \
+                       if short == 0 { return 0 - 2 } \
+                       if long == 0 { return 0 - 3 } \
+                       return 1 }";
+        assert_eq!(run_json(src).unwrap(), 1);
     }
 }

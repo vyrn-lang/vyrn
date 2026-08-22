@@ -166,14 +166,51 @@ export fn hint(
 /// Whether `code` is waived at `line` of `src` — a `vyrn-ignore <code>` marker
 /// on that line or on the one above it.
 export fn waived(src: String, line: Int64, code: String) -> Bool {
-    let marker = "vyrn-ignore \{code}"
-    if contains(lineText(src, line), marker) {
+    if waivesLine(lineText(src, line), code) {
         return true
     }
     if line > 1 {
-        return contains(lineText(src, line - 1), marker)
+        return waivesLine(lineText(src, line - 1), code)
     }
     return false
+}
+
+/// Whether `line` carries a `vyrn-ignore <code>` marker FOR THIS CODE: the
+/// marker occurs and the code is OVER where it ends — end of line or a byte no
+/// code continues with. Codes are letters, digits and `/` `-` `_`, so a space,
+/// a `:` or `-->` ends one; that boundary is what keeps a
+/// `vyrn-ignore lint/x/y` marker from waiving `lint/x`, whose marker is a
+/// prefix of it.
+fn waivesLine(line: String, code: String) -> Bool {
+    let marker = "vyrn-ignore \{code}"
+    let n = line.byteLength
+    let m = marker.byteLength
+    if m == 0 || n < m {
+        return false
+    }
+    let mb = bytes(marker)
+    let mut i = 0
+    while i + m <= n {
+        let mut j = 0
+        while j < m && line[i + j] == mb[j] {
+            j = j + 1
+        }
+        if j == m && continuesCode(line, i + m) == false {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/// Whether the byte at `at` could CONTINUE a rule code.
+fn continuesCode(line: String, at: Int64) -> Bool {
+    if at >= line.byteLength {
+        return false
+    }
+    let b = line[at]
+    return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+    || b == '/' || b == '-' || b == '_'
 }
 
 /// The text of 1-based `line` in `src`, or `""` past the end. The bounds come
@@ -307,6 +344,18 @@ test "a waiver on the line, or the line above, drops that one report" {
     assert(waived(src, 3, "c/d") == false)
     assertEq(hint(noPolicy(), "a/b", Warning, src, "f.vyx", 3, 1, "m"), "")
     assert(hint(noPolicy(), "a/b", Warning, src, "f.vyx", 4, 1, "m") != "")
+}
+
+test "a waiver names its code exactly — prefixes do not leak" {
+    // lint/x's marker is a prefix of lint/x/y's; only the full code waives.
+    let deep = "<!-- vyrn-ignore lint/x/y -->\n<img>\n"
+    assert(waived(deep, 2, "lint/x") == false)
+    assert(waived(deep, 2, "lint/x/y"))
+    // A prefix cut mid-code never matches even where the text occurs.
+    assert(waived("<!-- vyrn-ignore a/b -->", 1, "a") == false)
+    assert(waived("<!-- vyrn-ignore a/b -->", 1, "a/b/c") == false)
+    // Prose after the code is fine: anything but a code byte ends it.
+    assert(waived("<!-- vyrn-ignore lint/x: sanitized upstream -->", 1, "lint/x"))
 }
 
 test "line text is 1-based and ends at the newline" {

@@ -11,8 +11,23 @@ export fn max(a: Int64, b: Int64) -> Int64 {
     return b
 }
 
+/// Absolute value.
+///
+/// `Int64.min` has no positive opposite — the language wraps, so `0 - x` would
+/// hand the minimum straight back and `abs` would return NEGATIVE. There is no
+/// exact answer, so it saturates to `Int64.max`, the nearest representable
+/// magnitude, and the doc says so rather than leaving a trap.
 export fn abs(x: Int64) -> Int64 {
-    if x < 0 { return 0 - x }
+    // 2^63 — the bit pattern of `Int64.min`, which no `Int64` literal can
+    // name. The literal needs a `UInt64` binding: checked in the comparison
+    // directly it would be ranged against `Int64` and refused.
+    let minBits: UInt64 = 9223372036854775808
+    if x == Int64(minBits) {
+        return 9223372036854775807
+    }
+    if x < 0 {
+        return 0 - x
+    }
     return x
 }
 
@@ -95,4 +110,15 @@ test "floorF steps down on the negative side" {
     assertEq(floorF(2.7), 2.0)
     assertEq(floorF(0.0 - 2.7), 0.0 - 3.0)
     assertEq(floorF(0.0 - 3.0), 0.0 - 3.0)
+}
+
+test "abs saturates at the minimum instead of wrapping negative" {
+    assertEq(abs(5), 5)
+    assertEq(abs(0 - 5), 5)
+    assertEq(abs(0), 0)
+    // 0 - Int64.min wraps back to Int64.min; abs must not return a negative.
+    let minBits: UInt64 = 9223372036854775808
+    let least = Int64(minBits)
+    assertEq(abs(least), 9223372036854775807)
+    assert(abs(least) > 0)
 }

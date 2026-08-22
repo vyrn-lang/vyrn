@@ -17,8 +17,8 @@
 //! from the cached [`Analysis`].
 
 use crate::ast::{
-    self, Block, Capability, EnumVariant, Expr, Function, GlobalDecl, MethodSig, ProtocolDecl,
-    Stmt, Type, TypeDecl,
+    self, Block, Capability, EnumVariant, Expr, Function, GlobalDecl, LambdaBody, MethodSig,
+    ProtocolDecl, Stmt, Type, TypeDecl,
 };
 use crate::checker;
 use crate::diagnostics::Diagnostic;
@@ -850,15 +850,20 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
         .find(|t| t.line == line && col >= t.col && col < t.end_col)?;
 
     // Local bindings first (they shadow top-level names). Only those in the
-    // cursor's enclosing function, defined at or before the cursor line.
-    if let Some(fn_line) = enclosing_fn_line(analysis, line) {
-        let local = analysis
-            .locals
-            .iter()
-            .filter(|b| b.fn_line == fn_line && b.name == tok.text && b.line <= line)
-            .max_by_key(|b| b.line);
-        if let Some(b) = local {
-            return Some(local_resolution(analysis, b));
+    // cursor's enclosing function, defined at or before the cursor line. A
+    // member position (`recv.tok`) names a member/field, never a same-named
+    // binding — the rule references() already applies — so it falls through
+    // to the namespace/member branches below instead of being captured here.
+    if !is_member_position(analysis, tok) {
+        if let Some(fn_line) = enclosing_fn_line(analysis, line) {
+            let local = analysis
+                .locals
+                .iter()
+                .filter(|b| b.fn_line == fn_line && b.name == tok.text && b.line <= line)
+                .max_by_key(|b| b.line);
+            if let Some(b) = local {
+                return Some(local_resolution(analysis, b));
+            }
         }
     }
 
@@ -1294,7 +1299,7 @@ pub fn class_completions(
     if !cls_call_arg(source, line, col) {
         return None;
     }
-    let (ty_name, alphabet) = analysis.sequence_string_types.first()?;
+    let (ty_name, alphabet) = sequence_type_at(analysis, source, line, col)?;
     Some(
         alphabet
             .iter()
@@ -1348,6 +1353,28 @@ fn cls_call_arg(source: &str, line: usize, col: usize) -> bool {
     false
 }
 
+/// The sequence string type answering at the cursor's `cls(…)` argument: the
+/// one whose name matches the call's declared parameter type when that is
+/// resolvable ([`expected_string_type`] over `fn_param_types`), so two themes
+/// never blur together; else the first enumerated theme — the single-theme
+/// case, and the only answer when a linked module lowered the `Tw` alias to
+/// its `String` base (why the gate stays on the call shape, not the declared
+/// type).
+fn sequence_type_at(
+    analysis: &Analysis,
+    source: &str,
+    line: usize,
+    col: usize,
+) -> Option<(String, Vec<String>)> {
+    let declared = expected_string_type(analysis, source, line, col);
+    analysis
+        .sequence_string_types
+        .iter()
+        .find(|(n, _)| Some(n) == declared.as_ref())
+        .or_else(|| analysis.sequence_string_types.first())
+        .cloned()
+}
+
 /// RFC-0042: hover text for the class token under the cursor inside a
 /// sequence-typed (`Tw`) `class="…"` / `theme.cls("…")` string. Shows the exact
 /// CSS rule `std/tw` `css()` emits for a utility, or "safelisted (app-styled)" for
@@ -1362,7 +1389,7 @@ pub fn class_token_hover(
     if !cls_call_arg(source, line, col) {
         return None;
     }
-    let (ty_name, alphabet) = analysis.sequence_string_types.first()?;
+    let (ty_name, alphabet) = sequence_type_at(analysis, source, line, col)?;
     let token = class_token_at(source, line, col)?;
     if !alphabet.iter().any(|c| c == &token) {
         return None;
@@ -2269,7 +2296,9 @@ fn index_function_locals(
 
 /// Walk a block recursively, collecting `let` and `for`-in bindings. `if` and
 /// `while` bodies (and `else` blocks) are recursed so bindings inside nested
-/// blocks are indexed at their own line. The checker's `let_types` table fills
+/// blocks are indexed at their own line, and every statement's expressions are
+/// descended ([`collect_lets_expr`]) so `match`-arm pattern binders and lambda
+/// parameters/body lets are indexed too. The checker's `let_types` table fills
 /// in the inferred type for unannotated `let`s (and the element type for
 /// `for`-vars); an annotated `let` keeps its AST annotation (the table holds
 /// the same value). A binding after a same-function error isn't in the table, so
@@ -2287,8 +2316,8 @@ fn collect_lets(
                 name,
                 mutable,
                 ty,
+                value,
                 line,
-                ..
             } => {
                 // Synthetic desugar temporaries (e.g. `ps[]`, from `a[i].f = v`)
                 // are unspellable — they contain characters no real identifier
@@ -2313,9 +2342,14 @@ fn collect_lets(
                     end_col,
                     fn_line,
                 });
+                collect_lets_expr(value, fn_line, tok_info, let_types, out);
             }
             Stmt::ForIn {
-                var, body, line, ..
+                var,
+                iter,
+                body,
+                line,
+                ..
             } => {
                 let (col, end_col) = name_col_on_line(tok_info, var, *line);
                 // The element type is inferred by the checker and retained in
@@ -2330,13 +2364,16 @@ fn collect_lets(
                     end_col,
                     fn_line,
                 });
+                collect_lets_expr(iter, fn_line, tok_info, let_types, out);
                 collect_lets(body, fn_line, tok_info, let_types, out);
             }
             Stmt::If {
+                cond,
                 then_block,
                 else_block,
                 ..
             } => {
+                collect_lets_expr(cond, fn_line, tok_info, let_types, out);
                 collect_lets(then_block, fn_line, tok_info, let_types, out);
                 if let Some(eb) = else_block {
                     collect_lets(eb, fn_line, tok_info, let_types, out);
@@ -2344,6 +2381,7 @@ fn collect_lets(
             }
             Stmt::IfLet {
                 pattern,
+                scrutinee,
                 then_block,
                 else_block,
                 line,
@@ -2365,16 +2403,172 @@ fn collect_lets(
                         fn_line,
                     });
                 }
+                collect_lets_expr(scrutinee, fn_line, tok_info, let_types, out);
                 collect_lets(then_block, fn_line, tok_info, let_types, out);
                 if let Some(eb) = else_block {
                     collect_lets(eb, fn_line, tok_info, let_types, out);
                 }
             }
-            Stmt::While { body, .. } => collect_lets(body, fn_line, tok_info, let_types, out),
-            // Assign/SetField/Return/Drop/Expr reference existing bindings; no new ones.
-            _ => {}
+            Stmt::While { cond, body, .. } => {
+                collect_lets_expr(cond, fn_line, tok_info, let_types, out);
+                collect_lets(body, fn_line, tok_info, let_types, out);
+            }
+            Stmt::Region { body, .. } => collect_lets(body, fn_line, tok_info, let_types, out),
+            // Assign/SetField/IndexSet/Return/Drop/Expr bind nothing themselves —
+            // but their expressions can: a `match` arm's pattern and a lambda
+            // literal both introduce locals, so they are descended.
+            Stmt::Assign { value, .. }
+            | Stmt::SetField { value, .. }
+            | Stmt::Return {
+                value: Some(value), ..
+            } => collect_lets_expr(value, fn_line, tok_info, let_types, out),
+            Stmt::IndexSet { index, value, .. } => {
+                collect_lets_expr(index, fn_line, tok_info, let_types, out);
+                collect_lets_expr(value, fn_line, tok_info, let_types, out);
+            }
+            Stmt::Expr(e) => collect_lets_expr(e, fn_line, tok_info, let_types, out),
+            Stmt::Return { value: None, .. }
+            | Stmt::Break { .. }
+            | Stmt::Continue { .. }
+            | Stmt::Drop { .. } => {}
         }
     }
+}
+
+/// Walk an expression recursively for the bindings it introduces: a `match`
+/// expression's arm patterns bind (like an `if let`), and a lambda literal's
+/// parameters are locals of its body. Every other form just descends.
+fn collect_lets_expr(
+    e: &Expr,
+    fn_line: usize,
+    tok_info: &[TokenInfo],
+    let_types: &std::collections::HashMap<(usize, String), Type>,
+    out: &mut Vec<LocalBinding>,
+) {
+    match e {
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_lets_expr(scrutinee, fn_line, tok_info, let_types, out);
+            for arm in arms {
+                // Arm binders surface like `if let`'s, minus the type: the
+                // checker retains no match-arm payload types. The binder's own
+                // spelling anchors it ([`binder_pos`]); a desugar's
+                // `@`-prefixed binder is unspellable and never surfaces.
+                for b in crate::movecheck::pattern_bindings(&arm.pattern) {
+                    if let Some((line, col, end_col)) = binder_pos(tok_info, b, e.line(), out) {
+                        out.push(LocalBinding {
+                            name: b.to_string(),
+                            kind: LocalKind::Let { mutable: false },
+                            ty: None,
+                            line,
+                            col,
+                            end_col,
+                            fn_line,
+                        });
+                    }
+                }
+                collect_lets_expr(&arm.body, fn_line, tok_info, let_types, out);
+            }
+        }
+        Expr::Lambda { params, body, .. } => {
+            for p in params {
+                // Untyped in the literal — the type flows from the expected
+                // `fn(..)` parameter position — so this is a `let`-shaped
+                // local, never a Param (whose hover unwraps a type).
+                if let Some((line, col, end_col)) = binder_pos(tok_info, p, e.line(), out) {
+                    out.push(LocalBinding {
+                        name: p.clone(),
+                        kind: LocalKind::Let { mutable: false },
+                        ty: None,
+                        line,
+                        col,
+                        end_col,
+                        fn_line,
+                    });
+                }
+            }
+            match body {
+                LambdaBody::Expr(inner) => {
+                    collect_lets_expr(inner, fn_line, tok_info, let_types, out)
+                }
+                LambdaBody::Block(b) => collect_lets(b, fn_line, tok_info, let_types, out),
+            }
+        }
+        Expr::Unary { expr, .. }
+        | Expr::Try { expr, .. }
+        | Expr::Field { expr, .. }
+        | Expr::Consume { place: expr, .. } => {
+            collect_lets_expr(expr, fn_line, tok_info, let_types, out);
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_lets_expr(lhs, fn_line, tok_info, let_types, out);
+            collect_lets_expr(rhs, fn_line, tok_info, let_types, out);
+        }
+        Expr::Call { args, .. } | Expr::Spawn { args, .. } | Expr::TryConstruct { args, .. } => {
+            for a in args {
+                collect_lets_expr(a, fn_line, tok_info, let_types, out);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for (_, v) in fields {
+                collect_lets_expr(v, fn_line, tok_info, let_types, out);
+            }
+        }
+        Expr::ArrayLit { elems, .. } => {
+            for v in elems {
+                collect_lets_expr(v, fn_line, tok_info, let_types, out);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                collect_lets_expr(k, fn_line, tok_info, let_types, out);
+                collect_lets_expr(v, fn_line, tok_info, let_types, out);
+            }
+        }
+        Expr::IfExpr {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_lets_expr(cond, fn_line, tok_info, let_types, out);
+            collect_lets_expr(then_branch, fn_line, tok_info, let_types, out);
+            if let Some(eb) = else_branch {
+                collect_lets_expr(eb, fn_line, tok_info, let_types, out);
+            }
+        }
+        // Leaves: literals and bare variable reads bind nothing.
+        Expr::Int(_)
+        | Expr::Byte(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::Str(_)
+        | Expr::Var { .. } => {}
+    }
+}
+
+/// The source position of a pattern binder (a `match` arm's payload name or a
+/// lambda parameter): the first spelling of the name at or after the match's /
+/// lambda's own line that is not already an indexed binding's recorded spot —
+/// an outer `let m = match o { Some(m) => .. }` on one line owns the earlier
+/// column. The pattern precedes the arm body, so what survives is the binding
+/// site, not a use. `None` when the name is never spelled in source (a
+/// desugar's `@`-prefixed binder), which must not become a phantom local.
+fn binder_pos(
+    tok_info: &[TokenInfo],
+    name: &str,
+    from_line: usize,
+    out: &[LocalBinding],
+) -> Option<(usize, usize, usize)> {
+    tok_info
+        .iter()
+        .filter(|t| t.text == name && t.line >= from_line)
+        .find(|t| {
+            !out.iter()
+                .any(|b| b.name == name && b.line == t.line && b.col == t.col)
+        })
+        .map(|t| (t.line, t.col, t.end_col))
 }
 
 /// Build a [`Resolution`] for a local binding.
@@ -3036,12 +3230,16 @@ pub fn inlay_hints(analysis: &Analysis) -> Vec<InlayHint> {
         let (Some(at), Some(into)) = (m.last_use, m.moved_into.as_ref()) else {
             continue;
         };
-        // The occurrence of the name on the move line. A move is a use, so the
-        // token is there; if the source moved on since the analysis, no hint.
+        // The occurrence of the name on the move line that TAKES the value. A
+        // line can spell the name more than once (`pack(a, g(a))` moves the
+        // second `a`), and the move is the LAST use — so anchor at the last
+        // occurrence, skipping member positions (`recv.field` is never a move
+        // site). If the source moved on since the analysis, no hint.
         let Some(tok) = analysis
             .tokens
             .iter()
-            .find(|t| t.line == at && t.text == m.name)
+            .filter(|t| t.line == at && t.text == m.name && !is_member_position(analysis, t))
+            .last()
         else {
             continue;
         };
@@ -3347,43 +3545,46 @@ pub fn import_spec_at(source: &str, line: usize, col: usize) -> Option<String> {
 fn classify_token(analysis: &Analysis, tok: &TokenInfo) -> Option<(SemKind, SemMods)> {
     let line = tok.line;
 
-    // 1. Local bindings (params / lets / for-vars) shadow everything else.
-    if let Some(fn_line) = enclosing_fn_line(analysis, line) {
-        if let Some(b) = analysis
-            .locals
-            .iter()
-            .filter(|b| b.fn_line == fn_line && b.name == tok.text && b.line <= line)
-            .max_by_key(|b| b.line)
-        {
-            let kind = match b.kind {
-                LocalKind::Param => SemKind::Parameter,
-                LocalKind::Let { .. } | LocalKind::ForVar => SemKind::Variable,
-            };
-            let readonly = matches!(
-                b.kind,
-                LocalKind::Let { mutable: false } | LocalKind::ForVar
-            );
-            let declaration = b.line == tok.line && b.col == tok.col;
-            // RFC-0087 U1: the line where an owning value stops being live — a
-            // move or a `drop`. Marked so the point is visible rather than
-            // inferred by reading the rest of the body.
-            let last_use = !declaration
-                && analysis
-                    .memory
-                    .iter()
-                    .any(|m| m.name == b.name && m.line == b.line && m.last_use == Some(tok.line));
-            return Some((
-                kind,
-                SemMods {
-                    declaration,
-                    readonly,
-                    default_library: false,
-                    last_use,
-                },
-            ));
+    // 1. Local bindings (params / lets / for-vars) shadow everything else —
+    //    but never in member position: `recv.tok` names a member/field, not a
+    //    same-named binding (the rule references() applies), so it falls
+    //    through to the namespace/member branches below.
+    if !is_member_position(analysis, tok) {
+        if let Some(fn_line) = enclosing_fn_line(analysis, line) {
+            if let Some(b) = analysis
+                .locals
+                .iter()
+                .filter(|b| b.fn_line == fn_line && b.name == tok.text && b.line <= line)
+                .max_by_key(|b| b.line)
+            {
+                let kind = match b.kind {
+                    LocalKind::Param => SemKind::Parameter,
+                    LocalKind::Let { .. } | LocalKind::ForVar => SemKind::Variable,
+                };
+                let readonly = matches!(
+                    b.kind,
+                    LocalKind::Let { mutable: false } | LocalKind::ForVar
+                );
+                let declaration = b.line == tok.line && b.col == tok.col;
+                // RFC-0087 U1: the line where an owning value stops being live — a
+                // move or a `drop`. Marked so the point is visible rather than
+                // inferred by reading the rest of the body.
+                let last_use = !declaration
+                    && analysis.memory.iter().any(|m| {
+                        m.name == b.name && m.line == b.line && m.last_use == Some(tok.line)
+                    });
+                return Some((
+                    kind,
+                    SemMods {
+                        declaration,
+                        readonly,
+                        default_library: false,
+                        last_use,
+                    },
+                ));
+            }
         }
     }
-
     // 2. A member access `recv.tok`. First `ns.member` (an in-scope namespace
     //    qualifier); then a record field on a typed receiver → `property`.
     if let Some(recv) = receiver_before_dot(analysis, tok.line, tok.col) {
@@ -4232,5 +4433,122 @@ fn main() -> Int64 {
         let a = analyze("fn main() -> Int64 { let s = nope() return 0 }");
         assert!(!a.diagnostics.is_empty());
         assert!(a.memory.is_empty());
+    }
+    // -----------------------------------------------------------------------
+    // member position never captures a same-named local
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_member_token_hover_and_classify_answer_for_the_field_not_a_local() {
+        // `u.age` is a field access even though a local `age` shadows the
+        // name: hover/go-to-def and semantic classification must answer for
+        // the FIELD (the rule references() already applies), not the local.
+        let src = "type User = { age: Int64 }\n\
+                   fn f(u: User) -> Int64 {\n\
+                   \x20   let age = 3\n\
+                   \x20   return u.age\n\
+                   }\n\
+                   fn main() -> Int64 { return 0 }";
+        let a = analyze(src);
+        assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
+        // Line 4, cursor on `age` in `u.age`.
+        let col = src.lines().nth(3).unwrap().find("u.age").unwrap() + 1 + 2;
+        let r = resolve(&a, 4, col).expect("field access resolves");
+        assert_eq!(r.kind, SymbolKind::Field, "{}", r.hover);
+        assert!(
+            !r.hover.starts_with("let age"),
+            "member captured by the same-named local: {}",
+            r.hover
+        );
+        // Semantic classification agrees: Property, not Variable.
+        let (kind, _) = classify_at(&a, 4, col).expect("classifies");
+        assert_eq!(kind, SemKind::Property);
+        // The control: a plain use of the local still resolves to it.
+        let lcol = src.lines().nth(2).unwrap().find("age").unwrap() + 1;
+        let r = resolve(&a, 3, lcol).expect("local resolves");
+        assert_eq!(r.kind, SymbolKind::Local);
+    }
+
+    #[test]
+    fn match_arm_binders_are_indexed_as_locals() {
+        // The arm's `m` is its own binding: hover on the use inside the arm
+        // must answer for the payload binder, not the outer `m: String`.
+        let src = "fn f(o: Option<Int64>, m: String) -> Int64 {\n\
+                   \x20   return match o {\n\
+                   \x20       Some(m) => m + 1,\n\
+                   \x20       None => 0\n\
+                   \x20   }\n\
+                   }";
+        let a = analyze(src);
+        // Line 3, cursor on the arm body's `m`.
+        let col = src.lines().nth(2).unwrap().find("=> m").unwrap() + 3 + 1;
+        let r = resolve(&a, 3, col).expect("arm use resolves");
+        assert!(
+            r.hover.starts_with("let m") && !r.hover.contains("String"),
+            "arm binder captured by the outer param: {}",
+            r.hover
+        );
+        // The binder anchors at its pattern spelling, so go-to-def lands there.
+        assert_eq!(r.target_line, 3);
+    }
+
+    #[test]
+    fn lambda_params_are_indexed_as_locals() {
+        let src = "fn twice(f: fn(Int64) -> Int64, v: Int64) -> Int64 {\n\
+                   \x20   return f(f(v))\n\
+                   }\n\
+                   fn main() -> Int64 {\n\
+                   \x20   let x = 1\n\
+                   \x20   return twice(|x| x + 1, x)\n\
+                   }";
+        let a = analyze(src);
+        // Line 6: the lambda body's `x` resolves to the lambda's own param
+        // (line 6), not the outer `let x` (line 5).
+        let l6 = src.lines().nth(5).unwrap();
+        let col = l6.find("|x| x").unwrap() + 4 + 1;
+        let r = resolve(&a, 6, col).expect("lambda body use resolves");
+        assert_eq!(r.target_line, 6, "{}", r.hover);
+    }
+
+    #[test]
+    fn class_completions_pick_the_declared_theme_not_the_first() {
+        // Two sequence types are enumerated; the call declares `TwB`, so the
+        // answers come from TwB — never arbitrarily from the first.
+        let src = "type TwA = String where value =~ \"(red|blue)( (red|blue))*\"\n\
+                   type TwB = String where value =~ \"(cat|dog)( (cat|dog))*\"\n\
+                   fn cls(c: TwB) -> Int64 { return 0 }\n\
+                   fn css() -> String { return \".dog{color:brown}\" }\n\
+                   fn main() -> Int64 { return cls(\"dog\") }\n";
+        let a = analyze(src);
+        assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
+        let line = 5;
+        let col = src.lines().nth(4).unwrap().find("\"dog\"").unwrap() + 2;
+        let items = class_completions(&a, src, line, col).expect("completions");
+        assert!(items.iter().any(|c| c.label == "dog"), "{items:?}");
+        assert!(!items.iter().any(|c| c.label == "red"), "{items:?}");
+        // Hover names the type it answered from.
+        let hv = class_token_hover(&a, src, line, col).expect("hover");
+        assert!(hv.contains("`TwB`"), "{hv}");
+    }
+
+    #[test]
+    fn a_move_hint_anchors_at_the_taking_occurrence_on_a_double_use_line() {
+        // Both uses of `a` share line 4; the move is the LAST one (inside
+        // `take`), so the arrow lands after it — not on print's copy.
+        let src = "fn take(s: consume String) -> Int64 { return 1 }\n\
+                   fn main() -> Int64 {\n\
+                   \x20   let a = \"x\" + \"y\"\n\
+                   \x20   print(a); take(a)\n\
+                   \x20   return 0\n\
+                   }";
+        let a = analyze(src);
+        assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
+        let hints = inlay_hints(&a);
+        assert_eq!(hints.len(), 1, "{hints:?}");
+        assert_eq!(hints[0].line, 4);
+        let l4 = src.lines().nth(3).unwrap();
+        // end_col of the last `a` on the line.
+        let expected_col = l4.rfind('a').unwrap() + 2;
+        assert_eq!(hints[0].col, expected_col, "{hints:?}");
     }
 }

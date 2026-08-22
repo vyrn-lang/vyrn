@@ -24,13 +24,24 @@ New-Item -ItemType Directory -Path $rel -Force | Out-Null
 
 $asset = 'vyrn-x86_64-windows.zip'
 $server = $null
-$savedPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+# The same registry round-trip `install.ps1` uses: the .NET env-var API would
+# flatten a REG_EXPAND_SZ Path to REG_SZ on the way back out, so save the raw
+# value and its kind and put back exactly what was there.
+$envKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+$savedPath = [string]$envKey.GetValue('Path', '',
+  [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+try { $savedKind = $envKey.GetValueKind('Path') } catch { $savedKind = $null }
+$envKey.Close()
 
 function Fail($msg) { Write-Host "install-test: $msg" -ForegroundColor Red; exit 1 }
 
 function Cleanup {
   if ($server -and -not $server.HasExited) { $server.Kill() }
-  [Environment]::SetEnvironmentVariable('Path', $savedPath, 'User')
+  if ($null -ne $savedKind) {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    $key.SetValue('Path', $savedPath, $savedKind)
+    $key.Close()
+  }
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
 

@@ -609,8 +609,17 @@ fn code_splice(val: &Val, ctx: i64) -> Result<Vec<CodePiece>, Ctrl> {
             } else {
                 (*v as u64).to_string()
             }),
-            Val::Float(f) => text(format!("{f:?}")),
-            Val::Float32(f) => text(format!("{f:?}")),
+            // `NaN`/`inf` do not lex as Vyrn numbers (there is no literal for
+            // either), so a computed non-finite value fails here, at the
+            // boundary — not downstream as a module that cannot parse.
+            Val::Float(f) if f.is_finite() => text(format!("{f:?}")),
+            Val::Float32(f) if f.is_finite() => text(format!("{f:?}")),
+            Val::Float(f) => {
+                Err(format!("cannot splice non-finite float {f} into a code quote").into())
+            }
+            Val::Float32(f) => {
+                Err(format!("cannot splice non-finite float {f} into a code quote").into())
+            }
             Val::Bool(b) => text(b.to_string()),
             other => Err(format!(
                 "cannot splice {} into a code quote (expected String, number, Bool, or Code)",
@@ -1700,7 +1709,16 @@ fn serve_call(interp: &Interp<'_>, call: ServeCall) -> Result<ServeAnswer, Strin
             let got = interp.stream_next(&mut s);
             match got {
                 Ok(v) => {
-                    *interp.live.borrow_mut() = Some(s);
+                    // A step that called `serveStream` parked a SECOND stream
+                    // while `live` was empty (the "already opened" trap could
+                    // not fire). The newest producer wins; the displaced one
+                    // goes through the same release every other path uses
+                    // instead of being dropped untracked.
+                    if interp.live.borrow().is_some() {
+                        let _ = interp.release_stream(&s);
+                    } else {
+                        *interp.live.borrow_mut() = Some(s);
+                    }
                     match v {
                         None => Ok(ServeAnswer::Frame(None)),
                         Some(Val::Str(f)) => Ok(ServeAnswer::Frame(Some((*f).clone()))),
@@ -7932,6 +7950,27 @@ mod tests {
     }
 
     #[test]
+    fn splice_rejects_non_finite_floats() {
+        // `NaN`/`inf`/`-inf` render as words that do not lex as Vyrn number
+        // literals, so the splice fails with a named error here rather than
+        // emitting a module that cannot parse downstream.
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            match code_splice(&Val::Float(v), 0) {
+                Err(Ctrl::Err(m)) => {
+                    assert!(m.contains("non-finite"), "message: {m}");
+                }
+                other => panic!("expected a non-finite rejection, got {other:?}"),
+            }
+            assert!(code_splice(&Val::Float32(v as f32), 0).is_err());
+        }
+        // Finite floats still splice (Debug formatting, shortest round-trip).
+        assert_eq!(
+            code_splice(&Val::Float(1.5), 0).unwrap(),
+            vec![CodePiece::Text("1.5".to_string())]
+        );
+    }
+
+    #[test]
     fn splice_bad_identifier_names_the_problem() {
         // `a b` (a space) in identifier position is a comptime error.
         let err = code_splice(&Val::Str(std::rc::Rc::new("a b".to_string())), 2).unwrap_err();
@@ -9652,5 +9691,43 @@ mod tests {
                      while i < 100000 { let s = fromStep(i, 1, tick) close(s) i = i + 1 } \
                      return closed }";
         assert_eq!(crate::run(src), Ok(100000));
+    }
+
+    #[test]
+    fn next_step_that_serves_a_new_stream_releases_the_old_one() {
+        // RFC-0074 M3a regression: a pull takes the parked stream OUT of
+        // `live`, so a producer step that calls `serveStream` mid-pull parks a
+        // SECOND stream there without tripping the "already opened" trap.
+        // Storing the pulled stream back unconditionally used to drop that
+        // second stream unreleased; the newest producer now wins and the
+        // displaced one goes through the ordinary release.
+        let src = "fn tick(c: Int64, g: Int64, cl: Bool) -> Option<String> { \
+                   if cl { return None } \
+                   if c == 0 { let xs: Array<String> = [\"second\"] serveStream(fromArray(xs)) return Some(\"first\") } \
+                   return None } \
+                   fn open() -> Unit { serveStream(fromStep(0, 0, tick)) } \
+                   fn main() -> Int64 { return 0 }";
+        let program = crate::check(src).unwrap();
+        let interp = super::new_interp(&program, &[]).unwrap();
+        interp.init_globals(&program).unwrap();
+        // Park the served stream exactly as a `handle` that called
+        // `serveStream` does (RFC-0074 M3a), then drive the host's pulls.
+        interp.call("open", &[]).unwrap();
+        // First pull: the step serves a second stream before answering.
+        match super::serve_call(&interp, super::ServeCall::Next) {
+            Ok(super::ServeAnswer::Frame(Some(f))) => assert_eq!(f, "first"),
+            _ => panic!("expected the first frame"),
+        }
+        // The newcomer must still be live — the pulled stream was released,
+        // not stored back over it — so the NEXT frame comes from it.
+        match super::serve_call(&interp, super::ServeCall::Next) {
+            Ok(super::ServeAnswer::Frame(Some(f))) => assert_eq!(f, "second"),
+            _ => panic!("expected the second stream's frame"),
+        }
+        // And Close releases the survivor cleanly.
+        match super::serve_call(&interp, super::ServeCall::Close) {
+            Ok(super::ServeAnswer::Released) => {}
+            _ => panic!("expected Released"),
+        }
     }
 }

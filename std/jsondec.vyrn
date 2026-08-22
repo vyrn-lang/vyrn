@@ -120,8 +120,9 @@ export fn fieldAt(fs: Array<JsonField>, key: String) -> Json {
     return JNull
 }
 
-/// Element `i`, or `JNull` when the index is past the end — a short tuple
-/// payload decodes its missing members against `null` and fails there.
+/// Element `i`, or `JNull` when the index is past the end. Tuple payloads
+/// never reach this past their own end — the generated decoder checks the
+/// wire arity first, so a short payload is refused before any member decodes.
 export fn elemAt(items: Array<Json>, i: Int64) -> Json {
     if i < 0 || i >= items.length {
         return JNull

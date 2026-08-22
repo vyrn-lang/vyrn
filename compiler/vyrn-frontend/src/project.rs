@@ -396,7 +396,7 @@ pub fn inline(f: &Function, recv: &Expr, args: &[Expr], line: usize) -> Result<P
     // Rename the body's own bindings out of the caller's namespace. A `let n`
     // inside a projection must not capture, or be captured by, a caller's `n`.
     let mut rename: HashMap<String, String> = HashMap::new();
-    collect_bindings(&body, tag, &mut rename);
+    collect_bindings(&mut body, tag, &mut rename);
     if !rename.is_empty() {
         let renames: HashMap<String, Expr> = rename
             .iter()
@@ -700,8 +700,15 @@ fn iterate_loop_build(
 // ---------------------------------------------------------------------------
 
 /// Every binding a projection body introduces, mapped to an unspellable name.
-fn collect_bindings(b: &Block, tag: usize, out: &mut HashMap<String, String>) {
-    for s in &b.stmts {
+///
+/// A lambda's parameters count (RFC-0023). Once the body is inlined they share
+/// the caller's namespace, and [`subst_block`]'s walk reaches straight through
+/// [`Expr::Lambda`] — so a parameter named like a projection parameter was
+/// substituted OVER: under a caller's `r[1]`, `let g = |i| i + 1` became
+/// `|i| 1 + 1` and read the wrong element. Renaming the binder here (and its
+/// uses, through the same map) puts them out of substitution's reach.
+fn collect_bindings(b: &mut Block, tag: usize, out: &mut HashMap<String, String>) {
+    for s in &mut b.stmts {
         match s {
             Stmt::Let { name, .. } => {
                 out.insert(name.clone(), format!("@b{tag}.{name}"));
@@ -731,9 +738,30 @@ fn collect_bindings(b: &Block, tag: usize, out: &mut HashMap<String, String>) {
             _ => {}
         }
     }
+    // The statement walk above never enters an expression, and that is where a
+    // lambda lives (`let g = |i| ..`). One full-expression walk per block picks
+    // them up, nested lambdas included; re-visiting a sub-block's expressions
+    // from both this walk and the recursion re-inserts the same entries, which
+    // is idempotent.
+    walk_block(b, &mut |e: &mut Expr| collect_lambda(e, tag, out));
 }
 
-/// Rewrite the *declaration* side of each binding through `map`.
+fn collect_lambda(e: &mut Expr, tag: usize, out: &mut HashMap<String, String>) {
+    let Expr::Lambda { params, body, .. } = e else {
+        return;
+    };
+    for p in params.iter() {
+        out.insert(p.clone(), format!("@b{tag}.{p}"));
+    }
+    match body {
+        LambdaBody::Expr(inner) => collect_lambda(inner, tag, out),
+        LambdaBody::Block(b) => collect_bindings(b, tag, out),
+    }
+}
+
+/// Rewrite the *declaration* side of each binding through `map` — a lambda's
+/// parameters are declarations too (see [`collect_bindings`]); their USES go
+/// through the same map in [`subst_block`], whose walk reaches the same bodies.
 fn rename_bindings(b: &mut Block, map: &HashMap<String, String>) {
     for s in &mut b.stmts {
         match s {
@@ -767,6 +795,15 @@ fn rename_bindings(b: &mut Block, map: &HashMap<String, String>) {
             _ => {}
         }
     }
+    walk_block(b, &mut |e: &mut Expr| {
+        if let Expr::Lambda { params, .. } = e {
+            for p in params.iter_mut() {
+                if let Some(n) = map.get(p) {
+                    *p = n.clone();
+                }
+            }
+        }
+    });
 }
 
 /// How many times `name` is read in `b`.
@@ -1269,5 +1306,70 @@ mod tests {
         assert!(
             matches!(&pr.prologue[0], Stmt::Let { name, .. } if name.starts_with("@b") && name.ends_with(".j"))
         );
+    }
+
+    /// A lambda parameter named like the projection parameter must be renamed
+    /// out of the caller's namespace before substitution: `count_uses` walks
+    /// through lambdas, so without the rename a single-use parameter was
+    /// substituted IN PLACE inside the lambda body — `r[1]` on
+    /// `let g = |i| i + 1  yield self.data[g(0)]` read `data[2]`, not `data[1]`.
+    #[test]
+    fn a_lambda_parameter_is_renamed_out_of_the_callers_namespace() {
+        let p = parse(
+            "type Ring = { data: Array<Int64> }\n\
+             impl Index for Ring {\n\
+                 place at(read self, i: Int64) -> Int64 {\n\
+                     let g = |i| i + 1\n\
+                     yield self.data[g(0)]\n\
+                 }\n\
+             }\n\
+             fn main() { print(1) }\n",
+        );
+        let f = lookup(&p, &Type::Named("Ring".into()), "at").unwrap();
+        let mut pr = inline(
+            f,
+            &Expr::Var {
+                name: "r".into(),
+                line: 1,
+            },
+            &[Expr::Int(1)],
+            1,
+        )
+        .unwrap();
+        // The lambda owns the only textual use of `i`, so the caller's `1`
+        // binds a temporary (the zero-uses path) instead of substituting in
+        // place INSIDE the lambda body. The yielded place stays `data[g(0)]`,
+        // and `g` still computes from its own argument: `r[1]` reads data[1].
+        assert!(
+            matches!(&pr.place, Expr::Call { name, .. } if name == "@at"),
+            "the yielded place survived inlining"
+        );
+        assert!(
+            pr.prologue.iter().any(
+                |s| matches!(s, Stmt::Let { name, value: Expr::Int(1), .. } if name.starts_with("@p"))
+            ),
+            "the caller's argument binds a temporary, not a capture"
+        );
+        let mut seen_lambda = false;
+        for s in &mut pr.prologue {
+            walk_stmt(s, &mut |e: &mut Expr| match e {
+                Expr::Lambda { params, body, .. } => {
+                    seen_lambda = true;
+                    assert_eq!(params.len(), 1);
+                    assert!(params[0].starts_with("@b"), "binder renamed: {}", params[0]);
+                    if let LambdaBody::Expr(inner) = body {
+                        assert!(
+                            matches!(inner.as_ref(), Expr::Binary { .. }),
+                            "the lambda body still computes from its own binder"
+                        );
+                    }
+                }
+                Expr::Var { name, .. } => {
+                    assert!(name != "i", "a bare lambda-parameter use survived: {name}")
+                }
+                _ => {}
+            });
+        }
+        assert!(seen_lambda, "the lambda should have been walked");
     }
 }

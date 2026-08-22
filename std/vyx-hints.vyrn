@@ -523,28 +523,48 @@ fn vhIsUrlAttr(name: String) -> Bool {
     || name == "ping"
 }
 
-/// Whether a static URL value is a `javascript:` URL. Blanks and control bytes
-/// are stripped first, because `java\tscript:` is one to the browser.
+/// Whether a static URL value is a `javascript:` URL.
+///
+/// Stripped first is exactly what a browser strips before it reads a scheme:
+/// leading/trailing blanks and control bytes trimmed away, and tab/CR/LF
+/// dropped ANYWHERE (`java\tscript:` is one to the browser). An interior SPACE
+/// stays: no browser removes spaces inside the scheme, so `java script:…` is
+/// inert — and reporting it would be a false ERROR, the worst thing an
+/// error-severity rule can do. (A NUL cannot occur in a Vyrn `String` at all,
+/// so there is nothing to strip.)
 fn vhIsJavascriptUrl(value: String) -> Bool {
-    return startsWith(toLower(vhStripBlank(value)), "javascript:")
+    return startsWith(toLower(vhStripForScheme(value)), "javascript:")
 }
 
-fn vhStripBlank(s: String) -> String {
-    let mut out = ""
-    let mut i = 0
+fn vhStripForScheme(s: String) -> String {
     let n = s.byteLength
+    // The ends lose everything a URL parser trims (C0 controls and space).
     let mut start = 0
-    while i < n {
-        if s[i] <= ' ' {
-            if start < i {
-                out = out + vhSlice(s, start, i)
+    while start < n && s[start] <= ' ' {
+        start = start + 1
+    }
+    let mut end = n
+    while end > start && s[end - 1] <= ' ' {
+        end = end - 1
+    }
+    // Inside, only the bytes a browser drops before reading the scheme go;
+    // interior spaces survive and break the scheme, as they break it in the
+    // browser.
+    let mut out = ""
+    let mut seg = start
+    let mut i = start
+    while i < end {
+        let b = s[i]
+        if b == '\t' || b == '\n' || b == '\r' {
+            if seg < i {
+                out = out + vhSlice(s, seg, i)
             }
-            start = i + 1
+            seg = i + 1
         }
         i = i + 1
     }
-    if start < n {
-        out = out + vhSlice(s, start, n)
+    if seg < end {
+        out = out + vhSlice(s, seg, end)
     }
     return out
 }
@@ -761,6 +781,12 @@ test "a literal javascript: URL is an error; http, relative and dynamic are not"
     assert(fires("<a href=\"https://x.test/\">x</a>", "sec/unsafe-url") == false)
     assert(fires("<a :href=\"url\">x</a>", "sec/unsafe-url") == false)
     assert(fires("<p title=\"javascript: the language\">x</p>", "sec/unsafe-url") == false)
+    // An interior space is significant: browsers keep spaces inside the scheme,
+    // so this URL is inert and must not be an ERROR.
+    assert(fires("<a href=\"java script:go()\">x</a>", "sec/unsafe-url") == false)
+    // End blanks still trim away, as a browser trims them.
+    assert(fires("<a href=\" javascript:go()\">x</a>", "sec/unsafe-url"))
+    assert(fires("<a href=\"javascript:go() \">x</a>", "sec/unsafe-url"))
 }
 
 test "v-html fires and can be waived at the line that earns it" {
