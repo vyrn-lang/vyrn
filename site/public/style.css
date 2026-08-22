@@ -871,7 +871,10 @@ h1 code, h2 code, h3 code, h4 code {
   align-self: start;
   position: sticky;
   top: var(--s3);
-  padding-top: var(--s5);
+  /* 24px, not 48 (user): with the subnav band above, three 48px paddings —
+   * both panes and the crumb row — hollowed the whole first band. The three
+   * columns start together, one step under the subnav. */
+  padding-top: var(--s3);
   max-height: calc(100vh - var(--s4));
   overflow-y: auto;
   /* NO BAR AT REST, anywhere on this site (RFC-0106 M3, fifth round, L2). Both
@@ -947,7 +950,7 @@ button, .btn, summary, .ostabs label { user-select: none; }
 /* The 48px of air above the header belongs to the ROW: on the crumbs alone
  * it pushed their text a line below the buttons beside them — one flex row
  * that read as two (the user drew the two lines). */
-.crumbrow { display: flex; align-items: center; gap: var(--s2); padding-top: var(--s5); }
+.crumbrow { display: flex; align-items: center; gap: var(--s2); padding-top: var(--s3); }
 .crumbrow .crumbs { flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-top: 0; }
 .docutils { display: flex; align-items: center; gap: var(--s2); margin: 0; font: 500 var(--t-mono)/1 var(--sans); }
 .docutils > a:not(.btn) { color: var(--muted); text-decoration: none; transition: color 140ms var(--expo); }
