@@ -2686,6 +2686,36 @@ Four more user directions on rounds 3-4's work:
   became the QUIET strip the screenshot shows — the accent-filled bar of
   round 4 was a flare no editor wears; the compiler status moved down onto
   it, where the language server's indicator lives in the original.
+- **Round 9, the design pass** (user: "make the design closer"): what
+  separated the two screenshots was SURFACE LAYERING — the editor keeps its
+  chrome (sidebar, tab strip, panel tab row, status bar) one shade off the
+  ground the code sits on, so the active tab and the editor read as one
+  surface. Two local tokens on the window (`--chrome`, `--chromeline`) carry
+  it in both themes. With them: a current-line tint positioned from the
+  caret and the textarea's own metrics, the caret's gutter number lit, a
+  masked document glyph and an indent guide on every explorer row, the
+  toolbar's buttons gone flat (hover-lit, the way an editor's title-bar
+  actions are), and the minimap floating borderless on the ground.
+- **Round 10:** three finishing cuts (user). The focus ring around the whole
+  window is gone — the base playground's ring rule is `:focus`, not
+  `:focus-visible`, which is why the first removal missed; the caret and the
+  current line are the focus evidence. The masthead compresses to a 40px
+  title bar on `/play` — the blanket 44px touch minimum on every masthead
+  control is the row's real height, traded for the editor's scale on this one
+  page, with one `--mast` knob carrying it into the window's geometry. And
+  navigation to and from the editor is a 170ms crossfade: cross-document view
+  transitions, the platform's own mechanism — no script, skipped for readers
+  who asked for reduced motion, an ordinary navigation elsewhere.
+- **Round 10:** three finishing cuts (user). The focus ring around the whole
+  window is gone — the base playground's ring rule is `:focus`, not
+  `:focus-visible`, which is why the first removal missed; the caret and the
+  current line are the focus evidence. The masthead compresses to a 40px
+  title bar on `/play` — the blanket 44px touch minimum on every masthead
+  control is the row's real height, traded for the editor's scale on this one
+  page, with one `--mast` knob carrying it into the window's geometry. And
+  navigation to and from the editor is a 170ms crossfade: cross-document view
+  transitions, the platform's own mechanism — no script, skipped for readers
+  who asked for reduced motion, an ordinary navigation elsewhere.
 - The Git Bash quoted heredoc EATS A BACKSLASH: `\n` in a here-document
   reached Python as `
 ` and round 4 shipped two raw newlines inside

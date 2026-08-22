@@ -62,6 +62,10 @@ fn examples() -> Array<Example> {
             <div class="idecrumbs" data-play-crumbs aria-hidden="true">examples</div>
 
             <div class="editor" data-play-editor>
+                <!-- The line the caret is on, tinted the way every editor
+                     tints it — positioned from the caret and the textarea's
+                     own metrics. -->
+                <div class="curline" data-play-curline aria-hidden="true"></div>
                 <div class="gutter" data-play-gutter aria-hidden="true"></div>
                 <pre class="code hl" aria-hidden="true"><code data-play-hl></code></pre>
                 <textarea data-play-src spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" wrap="off" aria-label="Vyrn source"></textarea>

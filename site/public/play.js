@@ -415,6 +415,7 @@ export function mountPlay(root, opts = {}) {
   const files = $$("[data-play-file]", root);
   const tabsBox = $("[data-play-tabs]", root);
   const crumbs = $("[data-play-crumbs]", root);
+  const curline = $("[data-play-curline]", root);
   const minimap = $("[data-play-minimap]", root);
   const mmtext = $("[data-play-mmtext]", root);
   const mmview = $("[data-play-mmview]", root);
@@ -525,9 +526,23 @@ export function mountPlay(root, opts = {}) {
       }
       gutter.scrollTop = input.scrollTop;
     }
+    const caretBefore = input.value.slice(0, input.selectionStart).split("\n");
+    const caretLine = caretBefore.length;
     if (lncol) {
-      const before = input.value.slice(0, input.selectionStart).split("\n");
-      lncol.textContent = "Ln " + before.length + ", Col " + (before[before.length - 1].length + 1);
+      lncol.textContent = "Ln " + caretLine + ", Col " + (caretBefore[caretBefore.length - 1].length + 1);
+    }
+    if (curline) {
+      // The tint sits where the caret's line sits: the textarea's own line
+      // height and padding are the geometry, so the two cannot drift.
+      const cs = getComputedStyle(input);
+      const lh = parseFloat(cs.lineHeight);
+      const padTop = parseFloat(cs.paddingTop);
+      curline.style.top = padTop + (caretLine - 1) * lh - input.scrollTop + "px";
+      curline.style.height = lh + "px";
+    }
+    if (gutter) {
+      const kids = gutter.children;
+      for (let i = 0; i < kids.length; i++) kids[i].classList.toggle("on", i + 1 === caretLine);
     }
     if (files.length) {
       for (const f of files) {
@@ -609,6 +624,7 @@ export function mountPlay(root, opts = {}) {
     input.addEventListener("click", syncFrame);
     input.addEventListener("scroll", () => {
       if (gutter) gutter.scrollTop = input.scrollTop;
+      if (curline) syncFrame();
       if (mmview && mmtext) {
         const mapH = mmtext.scrollHeight;
         mmview.style.top = (input.scrollTop / input.scrollHeight) * mapH + "px";
