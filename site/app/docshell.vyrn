@@ -22,7 +22,7 @@
 /// finds the marked row's neighbours in reading order. A prev/next that came from
 /// its own table could point somewhere the sidebar does not.
 import { ApiModule, apiGroups, apiHref, groupIcon } from "./docs"
-import { Chapter, chapters, chapterHref, chapterNumber, chapterTag } from "./guide"
+import { Chapter, areaChapters, chapterHref, chapterNumber, chapterTag } from "./guide"
 import { indexOf, substring } from "std/strings"
 // The glyphs beside group names and subnav rows — the same pinned collection
 // the `<Icon>` tag reads, through the same generator, so the sidebar cannot
@@ -100,22 +100,55 @@ export fn docsTree(current: String) -> Array<TreeGroup> {
     return out
 }
 
-/// The book's sidebar: the landing, then every chapter in reading order with the
-/// number the rail has always printed beside it.
-export fn guideTree(current: String) -> Array<TreeGroup> {
-    // Same dedup as the reference tree: the subnav's Guide row IS the
-    // overview door, so the tree is the chapters alone.
-    let mut rows: Array<TreeRow> = []
-    for c in chapters() {
-        rows.push(TreeRow { href: chapterHref(c.slug), label: chapterTag(chapterNumber(c.slug)) + "  " + c.title, here: mark(current, c.slug) })
+// ---------------------------------------------------------------------------
+// The areas — the subnav's rows, and everything each row implies (RFC-0106 M5).
+// One table: key, landing, label, subnav glyph, tree group name, tree glyph.
+// The subnav is rendered FROM it, and each chaptered area's sidebar is built
+// BY it, so an area cannot appear in one and be missing from the other.
+// ---------------------------------------------------------------------------
+
+/// Every area of the documentation, in subnav order.
+fn areas() -> Array<Array<String>> {
+    return [
+        ["guide", "/guide.html", "Guide", "book", "Chapters", "bookmark"],
+        ["web", "/web.html", "Web", "link", "Pages", "link"],
+        ["tooling", "/tooling.html", "Tooling", "settings", "Pages", "settings"],
+        ["reference", "/docs.html", "Reference", "code", "", ""],
+    ]
+}
+
+/// The row of `areas()` named `key`, or the reference row for an unknown key.
+fn areaRow(key: String) -> Array<String> {
+    for a in areas() {
+        if a[0] == key {
+            return a.copy()
+        }
     }
-    // Editors moved under the guide (user): setting up an editor is a thing a
-    // READER does, and the page's own group was always the book.
-    let mut setup: Array<TreeRow> = []
-    setup.push(TreeRow { href: "/docs/editors.html", label: "Editors", here: mark(current, "editors") })
-    let mut out: Array<TreeGroup> = [TreeGroup { name: "Chapters", rows: rows.copy(), icon: drawNamed("bookmark") }]
-    out.push(TreeGroup { name: "Setup", rows: setup.copy(), icon: drawNamed("settings") })
-    return out
+    return ["", "", "", "", "", ""]
+}
+
+/// One chaptered area's sidebar: its pages in reading order. The guide's rows
+/// keep the two-digit number the book has always printed; the web and tooling
+/// shelves are task pages and carry none. Tooling also lists Editors — the
+/// page kept its `/docs/editors` path when it moved shelves, so its row is the
+/// one row an area adds by hand.
+export fn areaTree(area: String, current: String) -> Array<TreeGroup> {
+    let row = areaRow(area)
+    let mut rows: Array<TreeRow> = []
+    for c in areaChapters(area) {
+        let label = if area == "guide" { chapterTag(chapterNumber(c.slug)) + "  " + c.title } else { c.title.copy() }
+        rows.push(TreeRow { href: chapterHref(c.slug), label: label.copy(), here: mark(current, c.slug) })
+    }
+    if area == "tooling" {
+        rows.push(TreeRow { href: "/docs/editors.html", label: "Editors", here: mark(current, "editors") })
+    }
+    return [TreeGroup { name: row[4].copy(), rows: rows.copy(), icon: drawNamed(row[5]) }]
+}
+
+/// The book's sidebar — the guide area's tree, by its old name, for the pages
+/// that predate the areas.
+export fn guideTree(current: String) -> Array<TreeGroup> {
+    return areaTree("guide", current)
 }
 
 /// The pager for whichever tree it is handed: the marked row's neighbours, read
@@ -221,21 +254,23 @@ test "the pager walks the tree the sidebar prints" {
     assert(mid.nextHref.byteLength > 0)
     // The book's first chapter is the start of the book now — the overview
     // row moved to the subnav.
-    let book = guideTree(chapters()[0].slug)
-    let start = pagerFor(book)
+    let shelf = areaChapters("guide")
+    let start = pagerFor(guideTree(shelf[0].slug))
     assertEq(start.prevHref, "")
-    // The book's last chapter walks on into Setup: Editors follows it.
-    let end2 = pagerFor(guideTree(chapters()[chapters().length - 1].slug))
-    assertEq(end2.nextHref, "/docs/editors.html")
-    // And Editors is the section's very end.
-    let end = pagerFor(guideTree("editors"))
+    // The book ends at its last chapter: Setup left for the tooling area.
+    let end2 = pagerFor(guideTree(shelf[shelf.length - 1].slug))
+    assertEq(end2.nextHref, "")
+    // Editors is the tooling shelf's very end.
+    let end = pagerFor(areaTree("tooling", "editors"))
     assertEq(end.nextHref, "")
     assert(end.prevHref.byteLength > 0)
 }
 
-test "the book's tree covers the book" {
-    // Chapters plus the Setup group's one row.
-    assertEq(treeSize(guideTree("index")), chapters().length + 1)
+test "each area's tree covers its shelf" {
+    assertEq(treeSize(areaTree("guide", "index")), areaChapters("guide").length)
+    assertEq(treeSize(areaTree("web", "index")), areaChapters("web").length)
+    // Tooling adds the one hand-written row: Editors.
+    assertEq(treeSize(areaTree("tooling", "index")), areaChapters("tooling").length + 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -244,15 +279,11 @@ test "the book's tree covers the book" {
 // invent an area the others do not print.
 // ---------------------------------------------------------------------------
 
-/// The subnav's rows, with the current area marked. `current` is one of the
-/// keys `"guide"`, `"reference"`, `"editors"`, `"graph"`.
+/// The subnav's rows — one per area, from the same table the trees are built
+/// from — with the current area marked.
 export fn docSubnav(current: String) -> String {
-    let items = [
-        ["guide", "/guide.html", "Guide", "book"],
-        ["reference", "/docs.html", "Reference", "code"],
-    ]
     let mut out = ""
-    for it in items {
+    for it in areas() {
         let markAttr = if it[0] == current { " aria-current=\"true\"" } else { "" }
         out = out + "<a href=\"" + it[1] + "\"" + markAttr + ">" + drawNamed(it[3]) + it[2] + "</a>"
     }
@@ -274,9 +305,11 @@ fn timesIn(s: String, needle: String) -> Int64 {
     return n
 }
 
-test "the subnav names two areas and marks exactly one" {
+test "the subnav names every area and marks exactly one" {
     let html = docSubnav("reference")
     assert(has(html, "/guide.html"))
+    assert(has(html, "/web.html"))
+    assert(has(html, "/tooling.html"))
     assert(has(html, "/docs.html"))
     // One marked row, and it is the one asked for.
     assertEq(timesIn(html, "aria-current"), 1)

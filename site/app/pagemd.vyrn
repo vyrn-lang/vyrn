@@ -19,7 +19,7 @@
 /// a published document is made relative so that one tree serves from any mount
 /// point; a markdown file that travels has no document to be relative to, so a
 /// `/install.html` in it would resolve against whatever opened it.
-import { chapterOf, chapterSlugs, chapterHref, blockOf, blockSource } from "./guide"
+import { chapterOf, chapterSlugs, chapterHref, chapterArea, blockOf, blockSource } from "./guide"
 import { apiModules, apiEntries, apiIntro, apiHref } from "./docs"
 import { published } from "./nav"
 import { siteOrigin } from "./repo"
@@ -58,7 +58,8 @@ fn swapExtension(name: String, ext: String) -> String {
 export fn mdPaths() -> Array<String> {
     let mut out: Array<String> = []
     for slug in chapterSlugs() {
-        out.push("/guide/\{slug}")
+        // The chapter's area is its directory — `/web/views`, `/tooling/testing`.
+        out.push("/\{chapterArea(slug)}/\{slug}")
     }
     for m in apiModules() {
         out.push("/docs/std/\{m.name}")
@@ -72,6 +73,12 @@ export fn mdPaths() -> Array<String> {
 export fn markdownOf(path: String) -> String {
     if startsWith(path, "/guide/") {
         return chapterMd(substring(path, 7, path.byteLength))
+    }
+    if startsWith(path, "/web/") {
+        return chapterMd(substring(path, 5, path.byteLength))
+    }
+    if startsWith(path, "/tooling/") {
+        return chapterMd(substring(path, 9, path.byteLength))
     }
     if startsWith(path, "/docs/std/") {
         return moduleMd(substring(path, 10, path.byteLength))

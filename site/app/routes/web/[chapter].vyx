@@ -1,30 +1,25 @@
 <script>
-// GET /guide/[chapter] — one chapter of the book.
+// GET /web/[chapter] — one page of the Web area (RFC-0106 M5).
 //
-// The prose is in `site/app/guide.vyrn`; the programs are files in
-// `site/guide/`, imported and CALLED by that module while this page renders. So
-// a block on this page is a program that ran, and its output is what it printed.
-//
-// A String segment binds the slug, and the query returns
-// `Result<ChapterPage, PageError>`, so a slug that is not a chapter renders the
-// themed error page at 404 rather than an empty book.
+// The same shell and the same machinery as a guide chapter: the prose lives in
+// `site/app/guide.vyrn` with the rest of the documentation's pages, and a code
+// block on this page is a program that ran while the page was built. Only the
+// shelf differs — this route answers for the chapters whose `area` is
+// "web", and 404s every other slug, so one slug has one page.
 import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
 import { pageHead } from "../../nav"
 import { Chapter, Section, chapterArea, chapterCount, chapterOf, chapterKnown, chapterNumber, chapterHref, chapterNavHtml, sectionBody, sectionEyebrow } from "../../guide"
 import { mdUrl, askClaudeUrl } from "../../pagemd"
 import { inlineCode } from "../../code"
-// THE DOCS SHELL (RFC-0106 M4). The same three panes the reference wears: the
-// book's contents on the left, this chapter's sections on the right, the chapter
-// before and after at the foot.
-import { TreeGroup, guideTree } from "../../docshell"
+import { TreeGroup, areaTree } from "../../docshell"
 import { Icon } from "../../icons"
 params { chapter: String }
 
-/// One chapter, with the number the rail prints beside it.
+/// One page, with its number on this shelf.
 type ChapterPage = { n: Int64, chapter: Chapter }
 
 export fn head(d: ChapterPage) -> Head {
-    return pageHead(d.chapter.title + " — the Vyrn guide")
+    return pageHead(d.chapter.title + " — Vyrn docs")
 }
 
 export fn data() -> ParamQuery<Params, Result<ChapterPage, PageError>> {
@@ -32,27 +27,29 @@ export fn data() -> ParamQuery<Params, Result<ChapterPage, PageError>> {
 }
 
 fn fetchChapter(p: Params) -> Result<ChapterPage, PageError> {
-    // A slug from another shelf is not this route's page: `/guide/testing` is
-    // a static stub beside this file, and `/tooling/testing` is the page.
-    if !chapterKnown(p.chapter) || chapterArea(p.chapter) != "guide" {
-        return Err(notFound(p.chapter + " is not a chapter of the guide"))
+    if !chapterKnown(p.chapter) || chapterArea(p.chapter) != "web" {
+        return Err(notFound(p.chapter + " is not a page of the web area"))
     }
     return Ok(ChapterPage { n: chapterNumber(p.chapter), chapter: chapterOf(p.chapter) })
 }
 
-/// The sidebar for this page: the book's contents, with this chapter marked.
+/// The sidebar for this page: this shelf, with this page marked.
 fn tree(here: String) -> Array<TreeGroup> {
-    return guideTree(here)
+    return areaTree("web", here)
 }
 
-/// The link to one section of this chapter. A function rather than `"#" + …` in
-/// the template, because a template attribute is delimited by the same quote a
-/// String literal is and `'#'` in Vyrn is a byte.
+/// The link to one section of this page — a function for the reason the guide's
+/// twin gives: `'#'` in Vyrn is a byte.
 fn sectionHref(s: Section) -> String {
     return "#" + s.anchor
 }
 
-/// The Open-in-Claude link for this chapter.
+/// How many pages this shelf holds.
+fn shelfSize() -> Int64 {
+    return chapterCount("web")
+}
+
+/// The Open-in-Claude link for this page.
 fn claudeHref(slug: String, title: String) -> String {
     return askClaudeUrl(chapterHref(slug), title)
 }
@@ -62,7 +59,7 @@ fn claudeHref(slug: String, title: String) -> String {
 <main class="page docs">
     <aside class="docstree">
         <details class="treebox">
-            <summary>The guide</summary>
+            <summary>Web</summary>
             <div class="treegroup" v-for="g in tree(data.chapter.slug)" :key="g.name">
                 <p class="eyebrow"><span class="slot" v-html="g.icon"></span>{{ g.name }}</p>
                 <a v-for="r in g.rows" :key="r.href" :href="r.href" :aria-current="r.here">{{ r.label }}</a>
@@ -72,13 +69,10 @@ fn claudeHref(slug: String, title: String) -> String {
 
     <div class="crumbrow">
         <nav class="crumbs" aria-label="Breadcrumb">
-            <a href="/guide.html">Guide</a>
-            <span>Chapter {{ data.n }} of {{ chapterCount("guide") }}</span>
+            <a href="/web.html">Web</a>
+            <span>Page {{ data.n }} of {{ shelfSize() }}</span>
         </nav>
         <div class="docutils">
-            <!-- A LINK to the file the export writes beside this page;
-                 `widgets.js` turns a press into a clipboard write when the
-                 browser has a clipboard. Without script it is the file. -->
             <a class="btn" :href="mdUrl(chapterHref(data.chapter.slug))" data-copy-md>Copy page</a>
             <details class="pagemenu">
                 <summary aria-label="More page actions"><span class="gl">▾</span></summary>
@@ -102,12 +96,8 @@ fn claudeHref(slug: String, title: String) -> String {
         <div v-html="sectionBody(s)"></div>
     </section>
 
-    <nav class="pager" aria-label="Chapters" v-html="chapterNavHtml(data.chapter.slug)"></nav>
+    <nav class="pager" aria-label="Pages" v-html="chapterNavHtml(data.chapter.slug)"></nav>
 
-    <!-- THE RIGHT PANE: this chapter's own sections, from the same array the
-         `<h2>`s above are rendered from, so the two cannot disagree. Every
-         fragment here is checked against the ids the page carries by the link
-         gate in `site/export.vyrn`. -->
     <aside class="onpage">
         <p class="eyebrow">On this page</p>
         <a v-for="s in data.chapter.sections" :key="s.anchor" :href="sectionHref(s)">{{ s.heading }}</a>

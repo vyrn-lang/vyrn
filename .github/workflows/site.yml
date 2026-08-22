@@ -151,7 +151,7 @@ jobs:
         # RFC-0014 has no way to CREATE a directory, and the reference publishes
         # one page per std module, the guide one per chapter, the backstage one
         # per design record, and the registry one per package.
-        run: mkdir -p out/docs/std out/guide out/backstage/rfcs out/explore
+        run: mkdir -p out/docs/std out/guide out/web out/tooling out/backstage/rfcs out/explore
 
       - name: A minute with Vyrn, recorded
         # AFTER the CLI build, because it runs the binary that step just made,

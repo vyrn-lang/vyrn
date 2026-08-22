@@ -27,7 +27,9 @@ export type PageMeta = { path: String, title: String, blurb: String }
 export fn pageMetas() -> Array<PageMeta> {
     return [
         PageMeta { path: "/", title: "Vyrn — a systems language with the expressiveness of TypeScript", blurb: "Types carry the rules that make a value valid. Ownership is a word you write on a parameter. No garbage collector, three backends, one result." },
-        PageMeta { path: "/guide", title: "Docs — Vyrn", blurb: "The book, in reading order: thirteen chapters whose every code block is a program this site compiles and runs while it builds." },
+        PageMeta { path: "/guide", title: "Docs — Vyrn", blurb: "The book, in reading order: eleven chapters whose every code block is a program this site compiles and runs while it builds." },
+        PageMeta { path: "/web", title: "Web — Vyrn", blurb: "The web stack, page by page: the view tree, single-file components, routes and RPC, styling and icons — all libraries, none of it compiler." },
+        PageMeta { path: "/tooling", title: "Tooling — Vyrn", blurb: "Everything the vyrn binary does: run and build, test and bench, format and document, and the pins that keep a build reproducible." },
         PageMeta { path: "/docs", title: "Reference — Vyrn", blurb: "Every standard library module and every name it exports, read off std/ while the page was built." },
         PageMeta { path: "/explore", title: "Explore — Vyrn", blurb: "The packages you can install, each with the vyrn add line that installs it and the manifest it resolves to." },
         PageMeta { path: "/releases", title: "Releases — Vyrn", blurb: "What is published, whether it is safe to depend on, and how a release is made." },
@@ -62,7 +64,8 @@ test "every row is a consumer path with a sentence on it" {
     // Eleven since RFC-0106 M4: the import graph left the reference landing and
     // became a page, so it names itself here like every other page a reader can
     // share.
-    assertEq(all.length, 11)
+    // Eleven M4 pages plus the Web and Tooling landings (RFC-0106 M5).
+    assertEq(all.length, 13)
     for m in all {
         assert(startsWith(m.path, "/"))
         assert(m.title.byteLength > 0)

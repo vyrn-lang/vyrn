@@ -21,7 +21,7 @@
 // `Result<ModuleDoc, PageError>`, so a name that is not a module renders the
 // themed error page at 404 instead of an empty page.
 import { ApiEntry, apiEntries, apiIntro, apiKnown, apiSource, apiSourceLine, apiTests, apiHref, importLine } from "../../../docs"
-import { Demo, demoFor } from "../../../guide"
+import { Demo, demoFor, chapterHref } from "../../../guide"
 import { examplesUsing, usesOfModule, usedByModule } from "../../../stdgraph"
 import { blob } from "../../../repo"
 import { Head, PageError, ParamQuery, noHead, notFound, paramQuery } from "std/ui"
@@ -121,7 +121,7 @@ fn hasDemo(m: String, e: ApiEntry) -> Bool {
 
 fn demoChapterHref(m: String, e: ApiEntry) -> String {
     let d = demoFor(m, e.name)
-    return "/guide/" + d.chapter + ".html#" + d.section
+    return chapterHref(d.chapter) + "#" + d.section
 }
 
 /// The sidebar for this page: the whole reference, with this module marked.

@@ -40,7 +40,7 @@ export type FindRow = { s: String, t: String, u: String, d: String }
 /// The whole index, in the order the overlay shows it.
 export fn rows() -> Array<FindRow> {
     let mut out: Array<FindRow> = []
-    // Docs: the ten consumer pages, then the book.
+    // Docs: the consumer pages, then every shelf of the documentation.
     for m in pageMetas() {
         out.push(FindRow { s: "Docs", t: m.title.copy(), u: hrefOf(m.path), d: m.blurb.copy() })
     }
@@ -206,9 +206,9 @@ test "the index covers every section, and the counts are the census's" {
             rel = rel + 1
         }
     }
-    // Eleven consumer pages (the import graph joined in M4), thirteen
-    // chapters, and a row per chapter section.
-    assertEq(docs, 11 + chapterSlugs().length + sectionCount())
+    // Thirteen consumer pages (the Web and Tooling landings joined in M5),
+    // eighteen chapters over the three shelves, and a row per section.
+    assertEq(docs, 13 + chapterSlugs().length + sectionCount())
     // A module and each of its exports.
     assertEq(ref, apiModules().length + exportCount())
     assertEq(pkg, packages().length)

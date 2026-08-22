@@ -60,7 +60,7 @@ const PAGE_TAGS = {
 /// Templates that make MANY pages, all of them docs-shell pages the per-page
 /// assertion already treats as a floor: their tags join the named set, and no
 /// single page can be their key.
-const DOCS_TAGS = ["docs/std/[module].vyx", "guide/[chapter].vyx"];
+const DOCS_TAGS = ["docs/std/[module].vyx", "guide/[chapter].vyx", "web/[chapter].vyx", "tooling/[chapter].vyx"];
 
 /// Every `<Icon .../>` in a template, as `{ name, label }`.
 function tagsOf(src) {

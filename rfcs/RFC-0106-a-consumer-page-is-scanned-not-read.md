@@ -2508,6 +2508,59 @@ full-height hairline on the left and a stub that stopped halfway on the right.
 - `/backstage`'s K8 overflow is closed: 1,399px to 1,270px.
 - The census measures the thirteen real pages plus `/docs/graph`.
 
+## M5 — as landed: the documentation splits into areas
+
+The user put two screenshots side by side — our two-row subnav over a single
+thirteen-chapter book, and the reference site's row of areas, each with a
+sidebar of its own — and asked for the same shape: "different categories at
+top and related stuff on each."
+
+### One table, four areas
+
+A `Chapter` now names its **area** — `"guide"`, `"web"` or `"tooling"` — and
+everything else is derived from that one field. `chapterHref` puts the page
+under its area's directory; `chapterNumber`, `prevSlug` and `nextSlug` count
+and chain within a shelf, so a pager never walks a reader out of the area they
+are reading; `areaChapters(area)` is the sidebar, the landing grid, the export's
+route list and the search index, because all four read the same run of the same
+table. The subnav is rendered from `areas()` in `docshell.vyrn` — key, landing,
+label, glyph, tree-group name — and `areaTree(area, current)` builds any
+shelf's sidebar from the same rows, so an area cannot be in the subnav and
+missing from a tree.
+
+- **Guide** keeps the book: eleven chapters, first program to CLI apps.
+- **Web** (`/web/`) is new: *Views and HTML* (the old chapter 12's tree
+  section, with the differ and soft navigation given their own words),
+  *Components: .vyx*, *Routes, RPC and the dev server*, *Styling and icons*.
+- **Tooling** (`/tooling/`) is new: *The CLI* (run/check/build, fmt/doc, and
+  `vyrn why` — every command checked against `vyrn --help` before it was
+  written), *Testing and bench* (chapter 10, moved whole), *Projects and
+  dependencies* (manifest, lock, toolchain pinning), and Editors at the end of
+  the shelf — the page kept its `/docs/editors` URL and changed groups, the
+  same move M1 made in the other direction.
+- **Reference** is unchanged.
+
+### The moves
+
+`/guide/testing` and `/guide/web` retired. Each publishes a stub at its old
+path through the SAME `redirects()` machinery M1 built — refresh, canonical,
+visible link — off one `movedChapters()` table that the stub routes also render
+their body from, so a stub and its refresh cannot point different ways. Two
+rules the gates forced: a stub marks nothing in the masthead (`currentNav`
+answers "" for a redirect path now, where before the rule lived only in the
+test), and a stub wears no subnav band — the icon census caught it carrying
+four glyphs it had no template for.
+
+### What the gates caught
+
+- The reference pages' "used by a program in the guide" link built
+  `"/guide/" + chapter` by hand and 404'd for a block whose chapter moved
+  shelves; the fragment gate named it (`/docs/std/html.html` →
+  `/guide/views.html#html`). It reads `chapterHref` now, as does the markdown
+  twin path list, which had the same hand-built prefix.
+- The masthead-marks gate refused the stubs before `currentNav` knew the rule.
+- 185 routes against M4's 176: two landings and seven area pages.
+
 ## What this RFC does not do
 
 - No JavaScript framework, no CSS framework, no analytics, no dependency.

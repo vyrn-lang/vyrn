@@ -26,16 +26,17 @@ import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { shellHtml } from "../../code"
 import { features, steps, implHref, extensionDir, serverDir } from "../../editors"
-// THE DOCS SHELL (RFC-0106 M4). This page's URL is under the reference, so it
-// wears the reference's own sidebar and its own pager.
-import { TreeGroup, Pager, guideTree, pagerFor , docSubnav} from "../../docshell"
+// THE DOCS SHELL (RFC-0106 M4, re-shelved by M5). The page kept its
+// `/docs/editors` path when the areas arrived, but an editor is a tool, so it
+// sits at the end of the Tooling shelf and wears that shelf's sidebar.
+import { TreeGroup, Pager, areaTree, pagerFor } from "../../docshell"
 
 export fn head() -> Head {
     return pageHeadOf("/docs/editors")
 }
 
 fn tree() -> Array<TreeGroup> {
-    return guideTree("editors")
+    return areaTree("tooling", "editors")
 }
 
 fn pager() -> Pager {
@@ -47,7 +48,7 @@ fn pager() -> Pager {
 <main class="page docs">
     <aside class="docstree">
         <details class="treebox">
-            <summary>The guide</summary>
+            <summary>Tooling</summary>
             <div class="treegroup" v-for="g in tree()" :key="g.name">
                 <p class="eyebrow"><span class="slot" v-html="g.icon"></span>{{ g.name }}</p>
                 <a v-for="r in g.rows" :key="r.href" :href="r.href" :aria-current="r.here">{{ r.label }}</a>
