@@ -21,12 +21,17 @@
 // `Result<ModuleDoc, PageError>`, so a name that is not a module renders the
 // themed error page at 404 instead of an empty page.
 import { ApiEntry, apiEntries, apiIntro, apiKnown, apiSource, apiSourceLine, apiTests, apiHref, importLine } from "../../../docs"
-import { Demo, demoFor } from "../../../guide"
+import { Demo, demoFor, chapterHref } from "../../../guide"
 import { examplesUsing, usesOfModule, usedByModule } from "../../../stdgraph"
 import { blob } from "../../../repo"
 import { Head, PageError, ParamQuery, noHead, notFound, paramQuery } from "std/ui"
 import { pageHead } from "../../../nav"
-import { mdUrl } from "../../../pagemd"
+import { mdUrl, askClaudeUrl } from "../../../pagemd"
+// THE DOCS SHELL (RFC-0106 M4). The left column is the whole reference, in the
+// library's own groups; the right is this page's own headings; the foot is the
+// module before and the module after, in the order the sidebar prints them.
+import { TreeGroup, Pager, docsTree, pagerFor } from "../../../docshell"
+import { Icon } from "../../../icons"
 params { module: String }
 
 /// One module's whole page: its name, its header prose, and its exports.
@@ -116,33 +121,74 @@ fn hasDemo(m: String, e: ApiEntry) -> Bool {
 
 fn demoChapterHref(m: String, e: ApiEntry) -> String {
     let d = demoFor(m, e.name)
-    return "/guide/" + d.chapter + ".html#" + d.section
+    return chapterHref(d.chapter) + "#" + d.section
+}
+
+/// The sidebar for this page: the whole reference, with this module marked.
+fn tree(m: String) -> Array<TreeGroup> {
+    return docsTree(m)
+}
+
+/// The module before and after this one, taken from that same tree.
+fn pager(m: String) -> Pager {
+    return pagerFor(docsTree(m))
+}
+
+/// The Open-in-Claude link for this module's page.
+fn claudeHref(m: String) -> String {
+    return askClaudeUrl(apiHref(m), "std/" + m)
 }
 </script>
 
 <template>
-<main class="page docpage">
-    <!-- The export index IS the rail. It was a full-width band of its own, two
-         horizontal rules and a screen of whitespace around thirteen short names,
-         and it sat far above the entries it indexes while the page's own left
-         margin stood empty. The rail is the furniture this site already has for
-         "where am I in this page": it is sticky, it fills the margin, and
-         `widgets.js` already marks the section a reader is looking at. Here that
-         marker follows the export you are reading. -->
-    <aside class="rail toc">
-        <p class="eyebrow">On this page</p>
-        <a v-for="e in data.entries" :key="e.name" :href="hrefFor(e.name)">{{ e.name }}</a>
+<main class="page docs docpage">
+    <!-- THE LEFT PANE: the whole reference, in the library's own four groups,
+         with this module marked. It replaced a rail that listed only this
+         module's exports — furniture that told a reader where they were IN the
+         page and nothing about where the page sat in the reference. The export
+         index moved to the right pane, where it belongs beside the prose it
+         indexes.
+         `<details open>` and not a `<div>`: the sheet strips the marker and the
+         disclosure behaviour above 1024px, and below it the same markup is the
+         Menu pattern the masthead already uses. One tree, rendered once, and it
+         works with no script at either width. -->
+    <aside class="docstree">
+        <details class="treebox">
+            <summary>Reference</summary>
+            <div class="treegroup" v-for="g in tree(data.name)" :key="g.name">
+                <p class="eyebrow"><span class="slot" v-html="g.icon"></span>{{ g.name }}</p>
+                <a v-for="r in g.rows" :key="r.href" :href="r.href" :aria-current="r.here">{{ r.label }}</a>
+            </div>
+        </details>
     </aside>
+
+    <!-- One utility row, the reference site's own header anatomy: the crumbs
+         on the left, the page's two tools as quiet controls on the right. The
+         notice box and the button paragraph this replaces were 90px of chrome
+         between the title and the prose. -->
+    <div class="crumbrow">
+        <nav class="crumbs" aria-label="Breadcrumb">
+            <a href="/docs.html">Reference</a>
+            <a href="/docs.html#std">std</a>
+            <span>{{ data.name }}</span>
+        </nav>
+        <div class="docutils">
+            <a :href="apiSource(data.name)">Source</a>
+            <a class="btn" :href="mdUrl(apiHref(data.name))" data-copy-md>Copy page</a>
+            <details class="pagemenu">
+                <summary aria-label="More page actions"><span class="gl">▾</span></summary>
+                <div class="acts">
+                    <a :href="mdUrl(apiHref(data.name))" data-copy-md><span class="ic"><Icon name="bytesize:clipboard"/></span><span class="t"><span>Copy page</span><span class="d">Markdown, ready to paste into an LLM</span></span></a>
+                    <a :href="mdUrl(apiHref(data.name))"><span class="ic"><Icon name="bytesize:file"/></span><span class="t"><span>View as Markdown</span><span class="d">This page as plain text</span></span></a>
+                    <a :href="claudeHref(data.name)" rel="noopener"><span class="ic"><Icon name="bytesize:external"/></span><span class="t"><span>Open in Claude</span><span class="d">Ask Claude about this page</span></span></a>
+                </div>
+            </details>
+        </div>
+    </div>
+
     <section class="hero">
-        <p class="eyebrow"><a href="/docs.html">Docs</a> — the standard library</p>
         <h1 class="display">std/{{ data.name }}</h1>
         <p class="lede">{{ exportCount(data.entries.length) }}, read off <code>std/{{ data.name }}.vyrn</code> by the compiler's own lexer while this page was built.</p>
-        <p class="notice"><a :href="apiSource(data.name)">Read the source</a> — the one thing this site does not host.</p>
-        <!-- The module as markdown (RFC-0106 M1): the same exports, the same
-             signatures, the same prose, in the shape a reader pastes somewhere.
-             A link to the file the export writes beside this page; `widgets.js`
-             turns a press into a clipboard write where there is a clipboard. -->
-        <p><a class="btn" :href="mdUrl(apiHref(data.name))" data-copy-md>Copy as Markdown</a></p>
     </section>
 
     <section class="band" id="about">
@@ -169,7 +215,7 @@ fn demoChapterHref(m: String, e: ApiEntry) -> String {
     <section class="band" id="graph">
         <p class="eyebrow">In the graph</p>
         <h2>What it needs, and who needs it</h2>
-        <p>Read from the module's own <code>import</code> lines while this page was built. <a href="/docs.html#graph">The whole graph</a> is on one page.</p>
+        <p>Read from the module's own <code>import</code> lines while this page was built. <a href="/docs/graph.html">The whole graph</a> is on one page.</p>
         <dl class="specs">
             <div>
                 <dt>Imports</dt>
@@ -220,5 +266,25 @@ fn demoChapterHref(m: String, e: ApiEntry) -> String {
         </ul>
         <p class="cap" v-if="samples(data.name).length == 0">No example program imports this module yet.</p>
     </section>
+
+    <nav class="pager" aria-label="Reference">
+        <a class="prev" v-if="pager(data.name).prevHref.byteLength > 0" :href="pager(data.name).prevHref"><span class="eyebrow">Previous</span>{{ pager(data.name).prevLabel }}</a>
+        <a class="next" v-if="pager(data.name).nextHref.byteLength > 0" :href="pager(data.name).nextHref"><span class="eyebrow">Next</span>{{ pager(data.name).nextLabel }}</a>
+    </nav>
+
+    <!-- THE RIGHT PANE: this page's own headings, in document order. It is the
+         export index the left rail used to hold, with the four sections that
+         frame it, and it is a plain list of links in the document — no script is
+         needed for it to exist or to work. `widgets.js` marks the entry a reader
+         is looking at, which is the enhancement and not the feature. -->
+    <aside class="onpage">
+        <p class="eyebrow">On this page</p>
+        <a href="#about">About</a>
+        <a href="#use">The line you copy</a>
+        <a href="#graph">In the graph</a>
+        <a class="sub" v-for="e in data.entries" :key="e.name" :href="hrefFor(e.name)">{{ e.name }}</a>
+        <a href="#tests">What the tests promise</a>
+        <a href="#examples">In use</a>
+    </aside>
 </main>
 </template>

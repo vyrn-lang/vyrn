@@ -158,7 +158,9 @@ export fn upTo(path: String) -> String {
 export fn navRows() -> Array<NavRow> {
     return [
         NavRow { href: hrefOf("/guide"), label: "Docs" },
-        NavRow { href: hrefOf("/docs"), label: "Reference" },
+        // No `Reference` row any more (RFC-0106 M4 follow-up): the docs subnav
+        // owns the documentation's areas, and a masthead row over the same
+        // path marked one page in two bars.
         NavRow { href: hrefOf("/explore"), label: "Explore" },
         NavRow { href: hrefOf("/play"), label: "Play" },
     ]
@@ -200,22 +202,22 @@ test "a page's climb back to the root is its own depth and nothing else" {
     assertEq(upTo("/docs/std/json"), "../../")
 }
 
-test "the navigation is four groups, and two of them are relabelled paths" {
+test "the navigation is three groups, and the book keeps its label" {
     let rows = navRows()
-    assertEq(rows.length, 4)
+    assertEq(rows.length, 3)
     // The label a reader sees, against the path it goes to. These two pairs are
     // the whole of M0's label decision, and a change to either of them is a
     // change to what 284 and 227 content links mean.
     assertEq(rows[0].label, "Docs")
     assertEq(rows[0].href, "/guide.html")
-    assertEq(rows[1].label, "Reference")
-    assertEq(rows[1].href, "/docs.html")
+    assertEq(rows[1].label, "Explore")
+    assertEq(rows[1].href, "/explore.html")
     // The five routes that left the row are not in it under another name.
     for row in rows {
         assert(row.href != hrefOf("/install"))
         assert(row.href != hrefOf("/compare"))
         assert(row.href != hrefOf("/why-vyrn"))
-        assert(row.href != hrefOf("/docs/editors"))
+        assert(row.href != hrefOf("/tooling/editors"))
         assert(row.href != hrefOf("/releases"))
     }
 }

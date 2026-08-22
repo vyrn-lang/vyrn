@@ -19,20 +19,34 @@
 // no fetch, no index file, and a reader with no script still gets every module,
 // its first line and a link. `widgets.js` filters the rows and builds a link per
 // matching export with `createElement` — never by assembling markup out of what
-// was typed. The graph's geometry is computed in Vyrn while this page is built
-// (`site/app/stdgraph.vyrn`), and the script only lights up one module's wires.
+// was typed.
 //
 // There is one module list on this site and it is this one. `/explore` renders
 // packages — a different set, a different shape, and every card goes to that
 // package's own page.
+//
+// THE GRAPH LEFT THIS PAGE IN M4. It was 25,347 of 52,815 bytes against M0's
+// 40,000-byte ceiling — one inline drawing, on the page every reader of the
+// reference lands on, downloaded whether or not they scrolled to it. It is
+// `/docs/graph` now, linked from the area cards below and from every module
+// page's own graph section.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { exampleCount, blob } from "../../repo"
 import { ApiModule, apiModules, apiHref } from "../../docs"
-import { SearchRow, SearchGroup, GraphNode, GraphEdge, searchRows, searchGroups, graphNodes, graphEdges, graphViewBox, graphWidth, edgeCount, leafCount } from "../../stdgraph"
+import { SearchRow, SearchGroup, searchRows, searchGroups, edgeCount, leafCount } from "../../stdgraph"
+import { chapters } from "../../guide"
+import { Icon } from "../../icons"
+import { TreeGroup, docsTree } from "../../docshell"
+
+/// The sidebar: the whole reference, with the Overview marked.
+fn tree() -> Array<TreeGroup> {
+    return docsTree("index")
+}
 
 /// One place to read next, outside this site.
 type Link = { href: String, name: String, what: String }
+
 
 export fn head() -> Head {
     return pageHeadOf("/docs")
@@ -65,12 +79,6 @@ fn links() -> Array<Link> {
 /// say, the sentence carries an ON-SITE link, in the sentence, as a link looks.
 type Command = { name: String, what: String }
 
-/// The width the graph needs, as a style. Below it the drawing scrolls inside
-/// its own box; the page never scrolls sideways.
-fn graphStyle() -> String {
-    return "min-width:" + graphWidth().toString() + "px"
-}
-
 fn commands() -> Array<Command> {
     return [
         Command { name: "vyrn run | check | build | test | bench", what: "Run, type-check, compile, and run the tests and benchmarks written in the file. <a href=\"/guide/getting-started.html#first\">Your first program.</a>" },
@@ -85,12 +93,15 @@ fn commands() -> Array<Command> {
 </script>
 
 <template>
-<main class="page">
-    <aside class="rail">
-        <a href="#std"><span class="n">01</span>std</a>
-        <a href="#graph"><span class="n">02</span>graph</a>
-        <a href="#cli"><span class="n">03</span>cli</a>
-        <a href="#read"><span class="n">04</span>elsewhere</a>
+<main class="page docs docpage">
+    <aside class="docstree">
+        <details class="treebox">
+            <summary>Reference</summary>
+            <div class="treegroup" v-for="g in tree()" :key="g.name">
+                <p class="eyebrow"><span class="slot" v-html="g.icon"></span>{{ g.name }}</p>
+                <a v-for="r in g.rows" :key="r.href" :href="r.href" :aria-current="r.here">{{ r.label }}</a>
+            </div>
+        </details>
     </aside>
         <section class="hero split">
             <div class="say">
@@ -103,6 +114,37 @@ fn commands() -> Array<Command> {
                 <input id="std-q" type="search" autocomplete="off" spellcheck="false" placeholder="parse, Map, schema, byteLength" data-search-input/>
                 <p class="eyebrow" data-search-count aria-live="polite">{{ searchRows().length }} modules</p>
             </div>
+        </section>
+
+        <!-- THE FOUR AREAS (RFC-0106 M4). The page opened on its own module list,
+             which answered "which module does X" and nothing else; a reader who
+             arrived here from a search result could not see that the site also
+             holds the book, the driver and the graph. Each card's line is a count
+             from the generator that builds the page it points at. -->
+        <section class="band" id="areas">
+            <h2>Four places to start</h2>
+            <ul class="cards areas">
+                <li>
+                    <h3><Icon name="bytesize:book"/> The language</h3>
+                    <p>{{ chapters().length }} chapters in reading order. Every code block is a program this site compiled and ran while it built.</p>
+                    <p class="ctarow"><a class="cta" href="/guide.html">Start the book</a></p>
+                </li>
+                <li>
+                    <h3><Icon name="bytesize:code"/> The standard library</h3>
+                    <p>{{ apiModules().length }} modules and {{ exportCount() }} exports, read off <code>std/</code> by the compiler's own lexer.</p>
+                    <p class="ctarow"><a class="cta" href="#std">Browse the modules</a></p>
+                </li>
+                <li>
+                    <h3><Icon name="bytesize:settings"/> The tools</h3>
+                    <p>The driver, the formatter, the language server and the VS Code extension — all in one repository.</p>
+                    <p class="ctarow"><a class="cta" href="/tooling/editors.html">Set up your editor</a></p>
+                </li>
+                <li>
+                    <h3><Icon name="bytesize:activity"/> How it fits together</h3>
+                    <p>{{ edgeCount() }} imports between the modules, drawn from the <code>import</code> lines themselves. {{ leafCount() }} import nothing else.</p>
+                    <p class="ctarow"><a class="cta" href="/docs/graph.html">See the graph</a></p>
+                </li>
+            </ul>
         </section>
 
         <!-- THE WHOLE LIBRARY, IN FOUR GROUPS AND THREE COLUMNS (RFC-0106 M3).
@@ -122,38 +164,6 @@ fn commands() -> Array<Command> {
                         </li>
                     </ul>
                 </div>
-            </div>
-        </section>
-
-        <section class="band" id="graph">
-            <p class="eyebrow">The graph</p>
-            <h2>{{ edgeCount() }} imports between {{ searchRows().length }} modules</h2>
-            <p>Every wire is an <code>import</code> line; {{ leafCount() }} modules import nothing else in <code>std/</code>.</p>
-            <div class="plate">
-                <div class="plate-head">
-                    <span class="pill">Built</span>
-                    <span class="eyebrow">point at a module to light its wires</span>
-                </div>
-                <div class="stage scroller">
-                    <!-- `role="group"` and not `role="img"` (RFC-0105 M4). Every
-                         node is a link, so every node is a tab stop; under
-                         `role="img"` those thirty-seven stops were present in
-                         the tab order and absent from the accessibility tree,
-                         which is the worst of both. The graph is a group of
-                         links now, and each link's name carries the two counts
-                         the highlight draws. -->
-                    <svg class="graph" :viewBox="graphViewBox()" :style="graphStyle()" role="group" aria-label="The import graph of the standard library. Every module is a link, named with what it imports and what imports it.">
-                        <path class="wire" v-for="e in graphEdges()" :key="e.id" :d="e.d" :data-from="e.from" :data-to="e.to"/>
-                        <g class="node" v-for="n in graphNodes()" :key="n.name" :data-m="n.name" :data-uses="n.uses" :data-usedby="n.usedBy">
-                            <a :href="n.href" :aria-label="n.label">
-                                <rect :x="n.hx" :y="n.hy" :width="n.w" height="18" class="hit"/>
-                                <circle :cx="n.x" :cy="n.y" r="3"/>
-                                <text :x="n.tx" :y="n.ty">{{ n.name }}</text>
-                            </a>
-                        </g>
-                    </svg>
-                </div>
-                <p class="cap">Read from the <code>import</code> lines of <code>std/*.vyrn</code>. An import inside a code quote is a string, not a wire.</p>
             </div>
         </section>
 

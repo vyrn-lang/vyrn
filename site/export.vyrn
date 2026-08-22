@@ -22,18 +22,19 @@
 /// page per package. RFC-0014 has `readFile`, `writeFile` and `listDir` and no
 /// way to CREATE a directory, so the caller makes them:
 ///
-///     mkdir -p out/docs/std out/explore
+///     mkdir -p out/docs/std out/guide out/web out/tooling out/backstage/rfcs out/explore
 ///
 /// Every other route publishes flat, for the same reason (see `app/nav.vyrn`).
 import { pages } from "std/ui"
-import { route, rootPath, philosophyPath, whyVyrnPath, comparePath, installPath, editorsPath, docsEditorsPath, releasesPath, docsPath, explorePath, guidePath, playPath, backstagePath, backstageBenchmarksPath, hrefDocsStd, hrefGuide, hrefBackstageRfcs, hrefExplore } from pages("./app/routes")
+import { route, rootPath, philosophyPath, whyVyrnPath, comparePath, installPath, editorsPath, docsEditorsPath, docsGraphPath, releasesPath, docsPath, explorePath, guidePath, webPath, toolingPath, toolingEditorsPath, playPath, backstagePath, backstageBenchmarksPath, hrefDocsStd, hrefGuide, hrefWeb, hrefTooling, hrefBackstageRfcs, hrefExplore } from pages("./app/routes")
 import { published, navRows, hrefOf, upTo } from "./app/nav"
 import { rfcPages, rfcSlug } from "./app/backstage"
 import { historyIsFixture, historyPath, historyCommand, releaseRows, historyError } from "./app/history"
 import { releaseTag } from "./app/repo"
 import { demoIsFixture, demoPath, demoCommand } from "./app/demo"
+import { docSubnav } from "./app/docshell"
 import { apiModules, apiEntries, apiHref, importLine } from "./app/docs"
-import { chapterSlugs, chapterHref } from "./app/guide"
+import { chapterSlugs, chapterHref, chapterArea, movedChapters } from "./app/guide"
 import { searchRows } from "./app/stdgraph"
 import { packages, packageHref, offerOf, addCommand } from "./app/packages"
 import { features } from "./app/editors"
@@ -52,7 +53,7 @@ import { startsWith } from "std/strpred"
 /// a module added to `std/` is exported here on the next build with nothing
 /// written by hand.
 fn sitePaths() -> Array<String> {
-    let mut out: Array<String> = [rootPath(), whyVyrnPath(), comparePath(), installPath(), docsEditorsPath(), releasesPath(), docsPath(), guidePath(), explorePath(), playPath()]
+    let mut out: Array<String> = [rootPath(), whyVyrnPath(), comparePath(), installPath(), toolingEditorsPath(), docsGraphPath(), releasesPath(), docsPath(), guidePath(), webPath(), toolingPath(), explorePath(), playPath()]
     // The two old paths, as stubs. They are routes like any other — a document
     // and a payload — and they are published for the reason `redirects()` below
     // gives (RFC-0106 M1).
@@ -67,9 +68,17 @@ fn sitePaths() -> Array<String> {
     for p in packages() {
         out.push(hrefExplore(p.slug))
     }
-    // The book's chapters come from the book itself, in reading order.
+    // The documentation's pages come from the one chapter table, in reading
+    // order, each through its own area's typed helper.
     for slug in chapterSlugs() {
-        out.push(hrefGuide(slug))
+        let area = chapterArea(slug)
+        if area == "web" {
+            out.push(hrefWeb(slug))
+        } else if area == "tooling" {
+            out.push(hrefTooling(slug))
+        } else {
+            out.push(hrefGuide(slug))
+        }
     }
     out.push(backstagePath())
     // The benchmark dataset (RFC-0104 M3). It is one page and it renders in
@@ -110,7 +119,16 @@ fn recordPaths() -> Array<String> {
 /// reference under 284 content links and `/guide` is the book under 227, and the
 /// nav rows above them are LABELS for exactly that reason.
 fn redirects() -> Array<Array<String>> {
-    return [[philosophyPath(), whyVyrnPath()], [editorsPath(), docsEditorsPath()]]
+    // `/editors` (M1's rename) points at the page's FINAL home, not at the
+    // stub in the middle — a chain of stubs is what the no-loop assertion in
+    // the stub test refuses.
+    let mut out: Array<Array<String>> = [[philosophyPath(), whyVyrnPath()], [editorsPath(), toolingEditorsPath()], [docsEditorsPath(), toolingEditorsPath()]]
+    // The two chapters M5 moved out of the book keep a stub at their old
+    // guide path — same table the stub routes render their link from.
+    for pair in movedChapters() {
+        out.push(pair.copy())
+    }
+    return out
 }
 
 /// The path that replaced `path`, or "" when `path` was not renamed.
@@ -153,6 +171,11 @@ fn payloadName(name: String) -> String {
 /// `/guide/values` — under Guide, and a package page under Explore. Those are
 /// the three rows that own a subtree.
 fn currentNav(path: String) -> String {
+    // A stub is the old name of a page and not a place, so it marks nothing —
+    // the same rule the masthead test states.
+    if redirectTarget(path).byteLength > 0 {
+        return ""
+    }
     let here = hrefOf(path)
     for row in navRows() {
         if row.href == here {
@@ -165,8 +188,16 @@ fn currentNav(path: String) -> String {
     if path == "/install" {
         return hrefOf("/install")
     }
-    if startsWith(path, "/docs/std/") {
-        return hrefOf("/docs")
+    if path == "/docs" || startsWith(path, "/docs/std/") {
+        // The masthead's Reference row retired with the subnav's arrival: the
+        // whole documentation marks Docs, and the subnav says which area.
+        return hrefOf("/guide")
+    }
+    // `/docs/graph` is the reference's own drawing, moved off the landing by
+    // RFC-0106 M4. It marks Reference, which is the row its URL and its group
+    // both name — unlike the page below it.
+    if path == "/docs/graph" {
+        return hrefOf("/guide")
     }
     if startsWith(path, "/docs/") {
         // `/docs/editors` has a URL under the reference and belongs to the BOOK.
@@ -178,6 +209,11 @@ fn currentNav(path: String) -> String {
         return hrefOf("/guide")
     }
     if startsWith(path, "/guide/") {
+        return hrefOf("/guide")
+    }
+    // The Web and Tooling shelves are documentation too, and the masthead has
+    // one word for the whole of it.
+    if startsWith(path, "/web") || startsWith(path, "/tooling") {
         return hrefOf("/guide")
     }
     if startsWith(path, "/explore/") {
@@ -232,6 +268,69 @@ fn markCurrent(html: String, path: String) -> String {
 /// nowhere else, so the 160 leaf pages compute the font sizes they computed
 /// before — the constraint M0 wrote down, held by an attribute that is either on
 /// a document or not, and checked by `isLanding` below.
+/// The documentation's area band, stamped under the header exactly as the
+/// navigation marker is stamped, and for the same reason: the layout is shared
+/// by every page and is not told which route it renders — the export is. A
+/// path outside the documentation gets no band, so the index and the install
+/// page stay as they are, and the backstage never reaches this pass.
+fn withSubnav(html: String, path: String) -> String {
+    // A redirect stub is the old name of a page: it carries its three ways out
+    // and nothing else, so no band is stamped on one.
+    if redirectTarget(path).byteLength > 0 {
+        return html.copy()
+    }
+    let key = subnavKey(path)
+    if key.byteLength == 0 {
+        return html.copy()
+    }
+    let band = "<nav class=\"subnav\" data-nav-swap=\"subnav\" aria-label=\"Documentation sections\">" + docSubnav(key) + "</nav>"
+    return match indexOf(html, "</header>") {
+        Some(at) => substring(html, 0, at + 9) + band + substring(html, at + 9, html.byteLength),
+        None => html.copy(),
+    }
+}
+
+/// Which documentation area a path belongs to, or "" for none. The two named
+/// pages go first: `/docs/editors` is under `/docs` and must not read as the
+/// reference.
+fn subnavKey(path: String) -> String {
+    if path == "/docs/graph" {
+        return "reference"
+    }
+    if startsWith(path, "/guide") {
+        return "guide"
+    }
+    if startsWith(path, "/web") {
+        return "web"
+    }
+    if startsWith(path, "/tooling") {
+        return "tooling"
+    }
+    if startsWith(path, "/docs") {
+        return "reference"
+    }
+    return ""
+}
+
+test "the documentation band is stamped under the header, and only there" {
+    let shell = "<header class=\"masthead\">nav</header><main>body</main>"
+    let stamped = withSubnav(shell, "/docs/std/json")
+    assert(has(stamped, "</header><nav class=\"subnav\""))
+    assertEq(countOf(stamped, "aria-current=\"true\""), 1)
+    assert(has(stamped, "href=\"/docs.html\" aria-current"))
+    // The two named pages outrank their prefix, each shelf keys its own
+    // area, and a consumer page outside the documentation is left alone.
+    assertEq(subnavKey("/tooling/editors"), "tooling")
+    assertEq(subnavKey("/docs/graph"), "reference")
+    assertEq(subnavKey("/guide/ownership"), "guide")
+    assertEq(subnavKey("/web/views"), "web")
+    assertEq(subnavKey("/tooling/projects"), "tooling")
+    assertEq(subnavKey("/docs"), "reference")
+    assertEq(subnavKey("/"), "")
+    assertEq(subnavKey("/install"), "")
+    assertEq(withSubnav(shell, "/install"), shell)
+}
+
 fn withLang(html: String, path: String) -> String {
     let attrs = if isLanding(path) { "<html lang=\"en\" data-landing>" } else { "<html lang=\"en\">" }
     return match indexOf(html, "<html>") {
@@ -468,7 +567,7 @@ fn exportPath(outDir: String, path: String) -> Int64 {
         print("FAIL \{path} -> \{doc.status}")
         return 1
     }
-    let document = relativize(withRedirect(withCards(withFeed(withIcon(withLang(markCurrent(doc.body, path), path))), path), path), path)
+    let document = relativize(withRedirect(withCards(withFeed(withIcon(withLang(withSubnav(markCurrent(doc.body, path), path), path))), path), path), path)
     let mut bad = emit("\{outDir}/\{name}", document)
     if isBackstage(path) {
         print("\{path} -> \{name} (\{doc.body.byteLength} bytes)")
@@ -870,7 +969,9 @@ test "each renamed route publishes a stub that carries the reader to the new one
     // are checked, because a reader might only get one of them — the refresh a
     // browser may be told to decline, the canonical a search engine reads, and
     // the visible link that is all a screen reader has before the hop fires.
-    assertEq(redirects().length, 2)
+    // M1's two renames, M5's two moved chapters, and the editors page's move
+    // to the Tooling shelf.
+    assertEq(redirects().length, 5)
     for pair in redirects() {
         let old = pair[0]
         let to = pair[1]
@@ -896,7 +997,10 @@ test "each renamed route publishes a stub that carries the reader to the new one
     // Both old paths, by name, so a future edit to `redirects()` that drops one
     // fails here rather than passing an empty loop.
     assertEq(redirectTarget("/philosophy"), "/why-vyrn")
-    assertEq(redirectTarget("/editors"), "/docs/editors")
+    assertEq(redirectTarget("/editors"), "/tooling/editors")
+    assertEq(redirectTarget("/docs/editors"), "/tooling/editors")
+    assertEq(redirectTarget("/guide/testing"), "/tooling/testing")
+    assertEq(redirectTarget("/guide/web"), "/web/views")
     assertEq(redirectTarget("/docs"), "")
 }
 
@@ -956,16 +1060,17 @@ test "both fronts carry the theme control, and carry it without a flash" {
     }
 }
 
-test "a reference page marks Reference, an editors page marks Docs, the home page nothing" {
-    // The five rows, and the two that are labels over a path that says something
-    // else (RFC-0106 M1).
-    assertEq(currentNav("/docs"), "/docs.html")
-    assertEq(currentNav("/docs/std/json"), "/docs.html")
+test "every documentation page marks Docs, and the home page nothing" {
+    // One masthead row for the whole documentation; the subnav below it names
+    // the area (RFC-0106 M4 follow-up).
+    assertEq(currentNav("/docs"), "/guide.html")
+    assertEq(currentNav("/docs/std/json"), "/guide.html")
     assertEq(currentNav("/guide"), "/guide.html")
-    // The page whose URL is under the reference and whose GROUP is the book. M0's
-    // map made it so, and this is the line that decides which one the reader is
-    // told about.
-    assertEq(currentNav("/docs/editors"), "/guide.html")
+    // Editors lives on the Tooling shelf now, path and group agreeing (M5).
+    assertEq(currentNav("/tooling/editors"), "/guide.html")
+    // Its two old names are stubs, and a stub marks nothing.
+    assertEq(currentNav("/docs/editors"), "")
+    assertEq(currentNav("/editors"), "")
     // Not a row, and still marked: the persistent button.
     assertEq(currentNav("/install"), "/install.html")
     // Reached from content, so nothing in the masthead claims them.
@@ -976,9 +1081,9 @@ test "a reference page marks Reference, an editors page marks Docs, the home pag
 }
 
 test "the marker lands on the navigation, not on the first link in the body" {
-    let nav = "<a href=\"/docs.html\" data-key=\"/docs.html\">Reference</a>"
+    let nav = "<a href=\"/guide.html\" data-key=\"/guide.html\">Docs</a>"
     let body = "<p>" + nav + "</p>"
-    assertEq(markCurrent(nav + body, "/docs"), "<a href=\"/docs.html\" data-key=\"/docs.html\" aria-current=\"page\">Reference</a>" + body)
+    assertEq(markCurrent(nav + body, "/docs"), "<a href=\"/guide.html\" data-key=\"/guide.html\" aria-current=\"page\">Docs</a>" + body)
     // And it reaches an anchor that carries a third attribute — the call to
     // action does, and it is the only element that can be marked for `/install`.
     let cta = "<a href=\"/install.html\" data-key=\"/install.html\" class=\"cta\">Install</a>"
@@ -1035,6 +1140,9 @@ test "no published document names a root that only one host has" {
     // fails, and so does the next hand-written `<a href="/…">` in the book.
     for path in sitePaths() {
         let doc = publishedDocument(path)
+        if countOf(doc, "=\"/") != countOf(doc, "data-key=\"/") {
+            print("FAIL \{path}: a root-absolute URL survived relativize")
+        }
         assertEq(countOf(doc, "=\"/"), countOf(doc, "data-key=\"/"))
         // An empty href resolves to the page itself: a link that silently does
         // nothing, which is what a careless "strip the slash" would produce.
@@ -1301,10 +1409,16 @@ test "every fragment the site writes lands on an element that is there" {
                     // link, fragment or not. `/play.html` is the one exception,
                     // and it is checked by its own test below.
                     if parts[0] != "/play.html" {
+                        if target < 0 {
+                            print("FAIL \{files[i]}: \{href} names a page this export does not write")
+                        }
                         assert(target >= 0)
                     }
                 }
                 if target >= 0 && parts[0] != "/play.html" {
+                    if !oneOf(parts[1], ids[target]) {
+                        print("FAIL \{files[i]}: \{href} lands on no id of that page")
+                    }
                     assert(oneOf(parts[1], ids[target]))
                     checked = checked + 1
                 }
@@ -1427,15 +1541,18 @@ test "one module list, and the pages that do not render it" {
         assert(has(explore, "href=\"/explore/\{p.slug}.html\""))
         assert(!has(docs, "href=\"/explore/\{p.slug}.html\""))
     }
-    // And the search index is the reference's list: one input, one list, on one
-    // page.
+    // Each front searches its OWN list where it stands — M5's third round gave
+    // the registry a search over its packages (user: a registry front). One
+    // input and one list per page, and neither reaches into the other's index.
     assert(has(docs, "data-search-list"))
-    assert(!has(explore, "data-search-list"))
+    assert(has(explore, "data-search-list"))
     assertEq(countOf(docs, "data-search-input"), 1)
+    assertEq(countOf(explore, "data-search-input"), 1)
     // Every row carries its own haystack, which is what makes the filter a class
     // on a row and not a fetch.
     assertEq(countOf(docs, " data-q=\""), apiModules().length)
     assertEq(countOf(docs, " data-e=\""), apiModules().length)
+    assertEq(countOf(explore, " data-q=\""), packages().length)
 }
 
 /// Whether `path`, read relative to the directory the export runs in, is a file
@@ -1463,7 +1580,7 @@ test "every feature the editors page claims names a file that is in this reposit
     //
     // Relative to the repository root, which is where the export is run from and
     // where `packages.vyrn` reads `examples/*/vyrn.json` from.
-    let html = route(documentRequest(docsEditorsPath())).body
+    let html = route(documentRequest(toolingEditorsPath())).body
     let claimed = attrValues(html, "data-impl")
     // The table is the page's whole middle section: an empty scan would pass
     // every assertion below in silence.
@@ -1474,13 +1591,25 @@ test "every feature the editors page claims names a file that is in this reposit
     }
 }
 
-test "the book publishes one page per chapter, and an unknown chapter is a 404" {
+test "each shelf publishes one page per chapter, and an unknown slug is a 404" {
     for slug in chapterSlugs() {
-        let path = hrefGuide(slug)
+        let area = chapterArea(slug)
+        let path = if area == "web" {
+            hrefWeb(slug)
+        } else if area == "tooling" {
+            hrefTooling(slug)
+        } else {
+            hrefGuide(slug)
+        }
         assertEq(route(documentRequest(path)).status, 200)
         assertEq("/" + published(path), chapterHref(slug))
     }
     assertEq(route(documentRequest("/guide/nope")).status, 404)
+    // A slug from another shelf is not this shelf's page.
+    assertEq(route(documentRequest("/web/values")).status, 404)
+    assertEq(route(documentRequest("/tooling/views")).status, 404)
     assertEq(currentNav("/guide/values"), "/guide.html")
+    assertEq(currentNav("/web/views"), "/guide.html")
+    assertEq(currentNav("/tooling"), "/guide.html")
     assertEq(currentNav("/guide"), "/guide.html")
 }

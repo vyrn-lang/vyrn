@@ -44,11 +44,16 @@ fn standing() -> String {
 </script>
 
 <template>
-<div id="root">
-    <!-- The first thing a keyboard reaches. A reference page puts a masthead
-         and a 23-link rail in front of the prose, and this jumps all of it. -->
-    <a class="skip" href="#main">Skip to content</a>
-    <header class="masthead">
+<!-- One root, no box: the layout language wants a single root element, and
+     `display: contents` keeps the masthead a viewport-level bar. -->
+<div class="shell">
+<!-- THE HEADER IS THE VIEWPORT'S (RFC-0106 M4 follow-up, user row 1): the
+     masthead and its border-bottom span the whole window, the reference
+     site's own shape, and the framed 1232px plate begins under it. Only the
+     backstage keeps its masthead inside its root, because it wears its own
+     shell. -->
+<a class="skip" href="#main">Skip to content</a>
+<header class="masthead">
         <a href="/index.html" class="wordmark">vyrn</a>
         <!-- THE FIVE GROUPS, AND THE DISCLOSURE THAT IS ONE ONLY ON A PHONE
              (RFC-0106 M1).
@@ -104,9 +109,21 @@ fn standing() -> String {
          RFC names. -->
     <div class="findbox" data-find hidden>
         <div class="findpanel" role="dialog" aria-modal="true" aria-label="Search">
-            <input type="search" data-find-input placeholder="Search the docs, the reference, packages" autocomplete="off" spellcheck="false" aria-controls="find-results"/>
+            <div class="findrow">
+                <Icon name="bytesize:search"/>
+                <input type="search" data-find-input placeholder="Search the docs, the reference, packages" autocomplete="off" spellcheck="false" aria-controls="find-results"/>
+                <kbd class="key">esc</kbd>
+            </div>
+            <div class="findtabs" data-find-tabs>
+                <button type="button" class="on" data-sect="">All</button>
+                <button type="button" data-sect="Docs">Docs</button>
+                <button type="button" data-sect="Reference">Reference</button>
+                <button type="button" data-sect="Packages">Packages</button>
+                <button type="button" data-sect="Releases">Releases</button>
+                <span class="keys"><kbd class="key">tab</kbd> section <kbd class="key">↑</kbd><kbd class="key">↓</kbd> move <kbd class="key">↵</kbd> open</span>
+            </div>
             <div id="find-results" data-find-results role="listbox" aria-label="Results"></div>
-            <p class="cap" data-find-note>Type to search. Esc closes.</p>
+            <p class="cap" data-find-note>Type to search — try <button type="button" data-try>Map</button>, <button type="button" data-try>readLine</button> or <button type="button" data-try>panic</button>.</p>
         </div>
     </div>
     <noscript>
@@ -119,6 +136,7 @@ fn standing() -> String {
          next Tab went back to the masthead the reader had just skipped. This
          anchor has a box, has no size, and sits out of the grid flow, so focus
          lands here and the next Tab is the first link in the content. -->
+<div id="root">
     <div id="main" class="skip-target" tabindex="-1"></div>
     <slot/>
     <footer class="foot">
@@ -149,5 +167,6 @@ fn standing() -> String {
         <a href="/backstage.html" data-nav="hard"><Icon name="codex:checklist"/> Backstage — the design record</a>
         <span>{{ standing() }}</span>
     </footer>
+</div>
 </div>
 </template>

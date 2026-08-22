@@ -48,7 +48,7 @@ export fn apiModules() -> Array<ApiModule> {
 }
 
 /// One named group of the reference index, and the modules in it (RFC-0106 M3).
-export type ApiGroup = { name: String, modules: Array<ApiModule> }
+export type ApiGroup = { name: String, modules: Array<ApiModule>, icon: String }
 
 /// The group a module belongs to.
 ///
@@ -82,8 +82,33 @@ fn groupOf(m: String) -> String {
 }
 
 /// The group names, in the order the page prints them.
+/// The groups, each with the glyph the sidebar draws beside its name — the
+/// one table, so a group and its icon are authored in the same row.
+fn groupDefs() -> Array<Array<String>> {
+    return [
+        ["Text and bytes", "file"],
+        ["Data", "archive"],
+        ["Web", "link"],
+        ["Programs and tools", "settings"],
+    ]
+}
+
 fn groupNames() -> Array<String> {
-    return ["Text and bytes", "Data", "Web", "Programs and tools"]
+    let mut out: Array<String> = []
+    for d in groupDefs() {
+        out.push(d[0].copy())
+    }
+    return out
+}
+
+/// The glyph name `groupDefs` records for `name`, or "" for a name it does not.
+export fn groupIcon(name: String) -> String {
+    for d in groupDefs() {
+        if d[0] == name {
+            return d[1].copy()
+        }
+    }
+    return ""
 }
 
 /// Every documented module, in named groups. A group with nothing in it is not
@@ -98,7 +123,7 @@ export fn apiGroups() -> Array<ApiGroup> {
             }
         }
         if mods.length > 0 {
-            out.push(ApiGroup { name: g.copy(), modules: mods.copy() })
+            out.push(ApiGroup { name: g.copy(), modules: mods.copy(), icon: groupIcon(g) })
         }
     }
     return out

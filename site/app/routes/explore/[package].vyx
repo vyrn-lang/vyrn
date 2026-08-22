@@ -1,23 +1,17 @@
 <script>
-// GET /explore/[package] — one package, and the story of installing it
-// (RFC-0105 M2, amended).
+// GET /explore/[package] — one package (RFC-0105 M2; compacted by RFC-0106 M5
+// round 5 — the long-band cut was "overloaded and hardly readable", user).
 //
-// Everything on this page is read off the package's own files while the site
-// compiles: the artifacts from its `vyrn.json`, the module it offers and that
-// module's export names from the source, and the standard library modules it
-// needs from the `import` lines under it.
+// The shape is a package index's page: the identity at the top, the install
+// command and the source in a side card, and the substance — the import line,
+// the exports, the artifacts, the dependencies — as short blocks. The two file
+// SHAPES `vyrn add` writes are behind one `<details>`: they are reference
+// material, and open-by-default they were most of the page.
 //
-// THE SPECIFIER IS THE POINT OF THE PAGE. It is carried in the markup as
-// `data-spec` as well as in the box, and `site/test/importline.test.mjs`
-// re-parses every one of them with the grammar
-// `compiler/vyrn-cli/src/remote.rs` applies. A line that reads like a command
-// and does not resolve is worse than no line: the reader types it, the compiler
-// refuses, and the page was the one that lied.
-//
-// The two file shapes are shapes, not transcripts. The commit `@main` resolves
-// to and the sha256 of the fetched bytes are the two facts a page built from a
-// checkout cannot know, and they are shown as what they are rather than as
-// numbers somebody might copy.
+// Everything here is still read off the package's own files while the site
+// compiles, and THE SPECIFIER IS STILL THE POINT: it is carried in `data-spec`
+// and `site/test/importline.test.mjs` re-parses every one with the grammar
+// `compiler/vyrn-cli/src/remote.rs` applies.
 import { Package, Artifact, PkgLink, Offer, packageKnown, packageOf, packageDeps, packageSource, offerOf, addCommand, manifestShape, lockShape, importFrom, artifactsOf } from "../../packages"
 import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
 import { pageHead } from "../../nav"
@@ -61,94 +55,99 @@ fn buildLabel(d: Package) -> String {
 </script>
 
 <template>
-<main class="page">
-    <aside class="rail">
-        <a href="#use"><span class="n">01</span>install it</a>
-        <a href="#api"><span class="n">02</span>what it gives</a>
-        <a href="#deps"><span class="n">03</span>what it needs</a>
-    </aside>
-
-    <section class="hero">
-        <p class="eyebrow"><a href="/explore.html">Registry</a> — {{ data.kind }}</p>
-        <h1 class="display">{{ data.name }}</h1>
+<main class="page pkg">
+    <!-- The header a package index gives a package (user, off jsr.io): the
+         name at reading size with its badge beside it, the sentence, and the
+         numbers - not a poster. -->
+    <section class="pkghead">
+        <p class="eyebrow"><a href="/explore.html">Registry</a></p>
+        <div class="pkgtitle">
+            <h1>{{ data.name }}</h1>
+            <span class="kindpill">{{ data.kind }}</span>
+        </div>
         <p class="lede" v-html="data.summary"></p>
-        <p class="notice"><a :href="packageSource(data.slug)">Read the source</a> — <code>{{ data.name }}/</code>, the one thing this site does not host.</p>
+        <p class="pkgmeta">{{ unitLabel(data) }} · {{ depLabel(data) }} · <a :href="packageSource(data.slug)">source</a></p>
     </section>
 
-    <section class="band" id="use">
-        <p class="eyebrow">install it</p>
-        <h2>One command</h2>
-        <p>This package is a directory in a public repository, so its specifier is that repository, a ref, and a path. <code>vyrn add</code> fetches it, hashes it, pins it and records the alias — you type this once.</p>
-        <div class="cmd" data-copy>
-            <code :data-spec="offerOf(data.slug).spec">{{ addCommand(data.slug) }}</code>
-            <button type="button" data-copy-btn aria-label="Copy it">Copy</button>
-        </div>
-        <p class="cap">The ref is <code>main</code>, the branch this site is built from, so what is listed below is what you get. Write a tag instead — the releases are on <a href="/releases.html">the releases page</a> — and everything else is the same.</p>
+    <section class="band pkgbody">
+        <div class="pkgmain">
+            <div class="pkgblock" id="api">
+                <p class="eyebrow">overview</p>
+                <p>The specifier names <code>{{ offerOf(data.slug).path }}</code> — the module with the most exports this project does not itself build from. Any other module in the tree takes the same specifier with its own path in it, and each file arrives with a lock line of its own.</p>
+            </div>
 
-        <h3>What it writes</h3>
-        <p>Two files, both in your project. <code>vyrn.json</code> gains the alias, which is the name your <code>import</code> lines use — appended after the keys you already had:</p>
-        <pre class="code">{{ manifestShape(data.slug) }}</pre>
-        <p><code>vyrn.lock</code> gains a line: the specifier, the immutable URL it resolved to, and the sha256 of the bytes. Tab-separated, sorted, one per pinned file. The hash is verified on every load afterwards, so an upstream that changes under a pinned URL fails the build rather than changing your program.</p>
-        <div class="scroller">
-        <pre class="code">{{ lockShape(data.slug) }}</pre>
-        </div>
-        <p class="cap"><code>&lt;commit&gt;</code> is the 40 hex digits <code>main</code> pointed at when you ran it, and <code>&lt;sha256&gt;</code> the 64 hex digits of the bytes it fetched. They are the two facts this page cannot know — nothing has been fetched — and <code>vyrn add</code> writes both.</p>
+            <div class="pkgblock" id="builds">
+                <p class="eyebrow">what it builds</p>
+                <h2>{{ buildLabel(data) }}</h2>
+                <div class="scroller">
+                <table>
+                    <thead>
+                        <tr><th>Artifact</th><th>Entry</th><th>Target</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="a in artifactsOf(data.slug)" :key="a.name">
+                            <td><code>{{ a.name }}</code></td>
+                            <td><code>{{ a.entry }}</code></td>
+                            <td><code>{{ a.target }}</code></td>
+                        </tr>
+                    </tbody>
+                </table>
+                </div>
+                <p class="cap">From <code>{{ data.name }}/vyrn.json</code> — what you get if you clone it rather than depend on it. The target is a capability declaration, not a build flag.</p>
+            </div>
 
-        <h3>Then you import it</h3>
-        <p>The alias is a bare specifier the manifest maps, so the module reads like any other:</p>
-        <div class="cmd" data-copy>
-            <code>{{ importFrom(data.slug) }}</code>
-            <button type="button" data-copy-btn aria-label="Copy it">Copy</button>
+            <div class="pkgblock" id="deps">
+                <p class="eyebrow">what it needs</p>
+                <h2>{{ depLabel(data) }}</h2>
+                <dl class="specs">
+                    <div>
+                        <dt>Depends on</dt>
+                        <dd class="links">
+                            <a v-for="d in packageDeps(data.slug)" :key="d.name" :href="d.href">{{ d.name }}</a>
+                            <span class="none" v-if="data.deps == 0">nothing at all</span>
+                        </dd>
+                    </div>
+                </dl>
+                <p class="cap">Standard library modules and nothing else — each arrives with the compiler, so none is a fetch. Read from the <code>import</code> lines by the compiler's own lexer.</p>
+            </div>
         </div>
-    </section>
 
-    <section class="band" id="api">
-        <p class="eyebrow">what it gives</p>
-        <h2>{{ unitLabel(data) }}</h2>
-        <p>The specifier above names <code>{{ offerOf(data.slug).path }}</code>: the module with the most exports that this project does not itself build from. An entry point is what a project BUILDS; this is what it gives away. Any other module in the tree takes the same specifier with its own path in it.</p>
-        <dl class="specs">
-            <div>
-                <dt>Exports</dt>
-                <dd class="links">
+        <aside class="pkgside">
+            <div class="regcard">
+                <p class="eyebrow">add package</p>
+                <div class="cmd" data-copy>
+                    <code :data-spec="offerOf(data.slug).spec">{{ addCommand(data.slug) }}</code>
+                    <button type="button" data-copy-btn aria-label="Copy it">Copy</button>
+                </div>
+                <p class="cap">Fetches once, pins the sha256 in <code>vyrn.lock</code>, writes the alias into <code>vyrn.json</code>. The ref is <code>main</code>; a <a href="/releases.html">release tag</a> works the same.</p>
+                <details class="writes">
+                    <summary>What the command writes</summary>
+                    <p><code>vyrn.json</code> gains the alias your <code>import</code> lines use:</p>
+                    <pre class="code">{{ manifestShape(data.slug) }}</pre>
+                    <p><code>vyrn.lock</code> gains the pin — the specifier, the immutable URL it resolved to, and the sha256 of the bytes:</p>
+                    <div class="scroller">
+                    <pre class="code">{{ lockShape(data.slug) }}</pre>
+                    </div>
+                    <p class="cap"><code>&lt;commit&gt;</code> and <code>&lt;sha256&gt;</code> are the two facts a page built from a checkout cannot know — <code>vyrn add</code> writes both, and the hash is verified on every load after.</p>
+                </details>
+                <p class="cap"><a href="/tooling/projects.html">How installing works</a>.</p>
+            </div>
+            <div class="regcard">
+                <p class="eyebrow">import</p>
+                <div class="cmd" data-copy>
+                    <code>{{ importFrom(data.slug) }}</code>
+                    <button type="button" data-copy-btn aria-label="Copy it">Copy</button>
+                </div>
+                <p class="cap">The alias is a bare specifier the manifest maps.</p>
+            </div>
+            <div class="regcard">
+                <p class="eyebrow">symbols</p>
+                <p class="syms">
                     <code v-for="e in offerOf(data.slug).exports" :key="e">{{ e }}</code>
-                </dd>
+                </p>
+                <p class="cap">{{ unitLabel(data) }}, read off <code>{{ offerOf(data.slug).path }}</code> while this page was built.</p>
             </div>
-        </dl>
-        <p class="cap">Read off <code>{{ data.name }}/{{ offerOf(data.slug).path }}</code> while this page was built. A relative import inside a fetched module resolves inside the same pinned tree, so what this one reaches arrives with it — each file with a lock line of its own.</p>
-
-        <h3>{{ buildLabel(data) }}</h3>
-        <p>What the project builds, if you clone it rather than depend on it. The target is a capability declaration rather than a build flag: a browser has no filesystem, and no edit to the manifest can give it one.</p>
-        <div class="scroller">
-        <table>
-            <thead>
-                <tr><th>Artifact</th><th>Entry</th><th>Target</th></tr>
-            </thead>
-            <tbody>
-                <tr v-for="a in artifactsOf(data.slug)" :key="a.name">
-                    <td><code>{{ a.name }}</code></td>
-                    <td><code>{{ a.entry }}</code></td>
-                    <td><code>{{ a.target }}</code></td>
-                </tr>
-            </tbody>
-        </table>
-        </div>
-        <p class="cap">Read from <code>{{ data.name }}/vyrn.json</code> while this page was built.</p>
-    </section>
-
-    <section class="band" id="deps">
-        <p class="eyebrow">what it needs</p>
-        <h2>{{ depLabel(data) }}</h2>
-        <p>Standard library modules, and nothing else — this package depends on no registry, because there is none. Every one of them arrives with the compiler, so none of them is a fetch; each link opens its page on the reference.</p>
-        <dl class="specs">
-            <div>
-                <dt>Depends on</dt>
-                <dd class="links">
-                    <a v-for="d in packageDeps(data.slug)" :key="d.name" :href="d.href">{{ d.name }}</a>
-                    <span class="none" v-if="data.deps == 0">nothing at all</span>
-                </dd>
-            </div>
-        </dl>
-        <p class="cap">Read from the <code>import</code> lines under <code>{{ data.name }}/</code> by the compiler's own lexer.</p>
+        </aside>
     </section>
 </main>
 </template>

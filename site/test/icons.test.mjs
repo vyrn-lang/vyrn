@@ -23,14 +23,44 @@ import path from "node:path";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const routes = path.join(here, "..", "app", "routes");
+const app = path.join(here, "..", "app");
 const out = path.join(here, "..", "..", "out");
+
+/// The SECOND lawful source (RFC-0106 M4 follow-up): a module may import
+/// glyphs through the `icons("<collection>", "<names>")` generator — the docs
+/// shell does, for its tree-group headers and the subnav. Same pinned
+/// collection, same generator, counted here so the audit still closes.
+async function generatorNames() {
+  const names = new Set();
+  for (const e of await readdir(app, { withFileTypes: true })) {
+    if (!e.name.endsWith(".vyrn")) continue;
+    const src = await readFile(path.join(app, e.name), "utf8");
+    for (const m of src.matchAll(/icons\("([a-z0-9-]+)",\s*"([^"]+)"\)/g)) {
+      for (const n of m[2].trim().split(/\s+/)) names.add(`${m[1]}:${n}`);
+    }
+  }
+  return names;
+}
 
 /// The shell every consumer page wears. Its footer link is the marker: the
 /// backstage builds a masthead of its own and wears none of this.
 const SHELL = "layout.vyx";
 const SHELL_MARK = "Source on GitHub";
 /// The route templates that carry tags of their own, and the pages they make.
-const PAGE_TAGS = { "install.vyx": "install.html", "index.vyx": "index.html" };
+///
+/// KEYED BY THE PATH UNDER `routes/`, NOT BY THE FILE NAME (RFC-0106 M4). The
+/// reference landing gained four glyphs, and it is `docs/index.vyx` — a second
+/// `index.vyx`, which is what a directory of routes has one of per directory.
+/// The old basename key put two different templates under one name.
+const PAGE_TAGS = {
+  "install.vyx": "install.html",
+  "index.vyx": "index.html",
+  "docs/index.vyx": "docs.html",
+};
+/// Templates that make MANY pages, all of them docs-shell pages the per-page
+/// assertion already treats as a floor: their tags join the named set, and no
+/// single page can be their key.
+const DOCS_TAGS = ["docs/std/[module].vyx", "guide/[chapter].vyx", "web/[chapter].vyx", "tooling/[chapter].vyx"];
 
 /// Every `<Icon .../>` in a template, as `{ name, label }`.
 function tagsOf(src) {
@@ -58,6 +88,12 @@ async function htmlFiles(dir) {
   return found;
 }
 
+/// A template's path under `routes/`, with forward slashes on every platform —
+/// the key `PAGE_TAGS` uses.
+function rel(p) {
+  return path.relative(routes, p).split(path.sep).join("/");
+}
+
 async function templates(dir) {
   const found = [];
   for (const e of await readdir(dir, { withFileTypes: true })) {
@@ -71,12 +107,12 @@ async function templates(dir) {
 test("every template carrying tags is one this gate maps to pages", async () => {
   const carrying = [];
   for (const t of await templates(routes)) {
-    if (tagsOf(await readFile(t, "utf8")).length > 0) carrying.push(path.basename(t));
+    if (tagsOf(await readFile(t, "utf8")).length > 0) carrying.push(rel(t));
   }
   carrying.sort();
   assert.deepEqual(
     carrying,
-    [SHELL, ...Object.keys(PAGE_TAGS)].sort(),
+    [SHELL, ...Object.keys(PAGE_TAGS), ...DOCS_TAGS].sort(),
     "a template gained `<Icon>` tags and this file does not know which pages it makes — add it to PAGE_TAGS",
   );
 });
@@ -97,11 +133,22 @@ test("each page carries exactly the glyphs its templates name", async () => {
     const wearsShell = html.includes(SHELL_MARK);
     const expected = (wearsShell ? shell : []).concat(own[path.basename(p)] || []);
     if (wearsShell) shellPages += 1;
-    assert.equal(
-      glyphsIn(html).length,
-      expected.length,
-      `${path.relative(out, p)} carries ${glyphsIn(html).length} glyphs, its templates name ${expected.length}`,
-    );
+    if (html.includes('class="page docs')) {
+      // A docs-shell page also draws the generator-imported glyphs — subnav
+      // rows and tree-group headers, a count the tree's own shape decides.
+      // The floor is the templates' own count; the global test below still
+      // refuses any body no source named.
+      assert.ok(
+        glyphsIn(html).length >= expected.length,
+        `${path.relative(out, p)} carries ${glyphsIn(html).length} glyphs, fewer than the ${expected.length} its templates name`,
+      );
+    } else {
+      assert.equal(
+        glyphsIn(html).length,
+        expected.length,
+        `${path.relative(out, p)} carries ${glyphsIn(html).length} glyphs, its templates name ${expected.length}`,
+      );
+    }
   }
   assert.ok(shellPages > 50, `only ${shellPages} pages wear the shell`);
 });
@@ -114,6 +161,7 @@ test("the export carries no glyph the templates did not name", async () => {
   for (const t of await templates(routes)) {
     for (const tag of tagsOf(await readFile(t, "utf8"))) named.add(tag.name);
   }
+  for (const n of await generatorNames()) named.add(n);
   const drawn = new Set();
   for (const p of await htmlFiles(out)) {
     for (const g of glyphsIn(await readFile(p, "utf8"))) drawn.add(g.body);

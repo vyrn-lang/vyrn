@@ -1,0 +1,30 @@
+<script>
+// GET /guide/testing — a stub, for a bookmark and a search result (RFC-0106 M5).
+//
+// The page moved to its own area when the book split; `site/export.vyrn` stamps
+// the refresh and the canonical off the same `movedChapters()` table this file
+// reads, so the stub and its refresh cannot point different ways. The visible
+// link is for a reader whose browser declines the refresh.
+import { Head } from "std/ui"
+import { pageHead } from "../../nav"
+import { movedTarget } from "../../guide"
+
+export fn head() -> Head {
+    return pageHead("Moved — Vyrn")
+}
+
+/// Where this stub sends a reader.
+fn target() -> String {
+    return movedTarget("/guide/testing") + ".html"
+}
+</script>
+
+<template>
+<main class="page">
+    <section class="hero">
+        <p class="eyebrow">Moved</p>
+        <h1 class="display">This page has its own shelf now</h1>
+        <p class="lede">Nothing was deleted. <a :href="target()">Read it there</a>.</p>
+    </section>
+</main>
+</template>
