@@ -89,7 +89,7 @@ fn sinceRows() -> Array<ArrivalRow> {
     let mut i = all.length - 1
     while i >= 0 {
         if all[i].date > releaseDate() {
-            out.push(ArrivalRow { tag: all[i].tag.copy(), href: all[i].href.copy(), date: all[i].date.copy(), band: all[i].band.copy() })
+            out.push(ArrivalRow { tag: all[i].tag.copy(), date: all[i].date.copy(), band: all[i].band.copy() })
         }
         i = i - 1
     }
@@ -141,7 +141,7 @@ fn kindOf(tag: String) -> String {
                 </dl>
                 <p class="eyebrow">Design records since the tag</p>
                 <ul class="twocol">
-                    <li v-for="r in sinceRows()" :key="r.tag"><a :href="r.href">{{ r.tag }}</a> <span class="dim">{{ r.band }}</span></li>
+                    <li v-for="r in sinceRows()" :key="r.tag"><strong>{{ r.tag }}</strong> <span class="dim">{{ r.band }}</span></li>
                 </ul>
             </div>
         </section>
@@ -172,7 +172,7 @@ fn kindOf(tag: String) -> String {
             <ul class="plain">
                 <li><strong>The installers take the newest release</strong><span>Pin another with <code>VYRN_VERSION</code>.</span></li>
                 <li><strong>Every example runs on three engines</strong><span>Byte for byte, on every push.</span></li>
-                <li><strong>Verified, not stable</strong><span><a href="/backstage.html">Where every change is argued.</a></span></li>
+                <li><strong>Verified, not stable</strong><span>Every change is argued in a design record in <code>rfcs/</code>, and the parity harness runs before a tag is cut.</span></li>
             </ul>
         </section>
 </main>

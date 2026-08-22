@@ -2769,6 +2769,107 @@ Four more user directions on rounds 3-4's work:
   animation frames at all, gets it immediately). En route, an infinite loop:
   the run-state observer watched the button it also wrote, and an
   unconditional write froze the renderer — writes go through a guard now.
+- **Round 14 — a link is a guest, not an import** (user: "when I open a
+  share link it copies all stuff to my environment"). Round 13's link merged
+  the sender's files into the reader's project, which is how a reader ends up
+  with `hello-2`, `hello-3`, `shared-2`. There are two projects now and one
+  of them is active: the reader's, in this browser, and a BORROWED one a link
+  opens — never written to storage, with a bar over the editor saying what it
+  is and offering the only two answers there are. *Save to my files* merges
+  it under collision-safe names and keeps the reader on the file they were
+  reading; *Close* drops it and puts the reader's own project back untouched.
+  The one-file `#c=` link opens the same way, for the same reason. A Firefox
+  hardened against fingerprinting also names the fonts it refuses to reveal,
+  which the console showed: Consolas now sits behind Cascadia Mono, so a
+  Windows reader under that setting lands on the intended face rather than
+  falling past Menlo to the generic.
+- **Round 15 — the bar goes, the scope stays** (user: the banner appeared in
+  their own project, over one editor group only, and its Close did nothing).
+  Both faults were the same design error: the banner's visibility was STATE,
+  so it could disagree with the scope, and `leaveShared` returned early when
+  nothing was borrowed — leaving a visible bar whose button was dead. There
+  is no bar now. A borrowed project is a project like any other; the
+  explorer's header names which one is open ("Explorer" / "Shared project",
+  in the accent) and carries its two verbs beside the project's others. The
+  label is derived at every render, so it cannot go stale, and the header
+  belongs to the window rather than to the first editor group.
+- **Round 16 — two things the empty case exposed.** An empty buffer was
+  still handed to the checker, which answered honestly: `no \`main\` function
+  found`, over the Welcome view of a project with no files (user). Nothing
+  typed is not a problem, and the guard says so. And a page that was frozen
+  MID-LOAD and restored from the back/forward cache came back half-built —
+  no view, no tabs, "Loading the compiler…" for ever — because a restored
+  page runs no script of its own and the abandoned wasm promise never
+  settles. The compiler's load is restartable now, first light is a function
+  rather than a one-shot microtask, and `pageshow` finishes whichever of the
+  two the restored page is missing.
+- **Round 17 — the masthead's two heights live in two documents.** Adding
+  the compact class after paint animated the arrival at the editor and
+  nothing else, because leaving it is a different document that simply
+  renders at full height (user: it changed in one direction only). The state
+  crosses the navigation now: `widgets.js` writes what this page is to
+  session storage, and `theme.js` — a blocking script in the head, the only
+  code that runs before the first paint — starts the arriving page in the
+  state the last one ended in. The class moved to the root element for the
+  same reason: `<body>` does not exist yet when that script runs. Both
+  directions animate, in every browser, with no view transition involved.
+- **Round 18 — the one-navigation-behind masthead, and the fonts.** Round
+  17's handoff was right and the symptom stayed: nothing on entering the
+  editor, a shrink on leaving it. The cause was round 13's view-transition
+  wrapper. `vyrn-nav.js` is imported the first time a reader POINTS AT a link
+  (which no scripted navigation ever does, which is why every measurement
+  here missed it), so the site soft-navigates; the wrapper made the DOM swap
+  run in a later frame while `nav-end` was announced immediately, so the
+  shell's `boot()` — and every class it derives from the page — ran against
+  the page being replaced. The swap is synchronous again, and the band
+  animates through its own CSS transition, which needs no transition API and
+  works on a hard navigation too. And the font stacks name generics and base
+  faces only: a Firefox hardened against fingerprinting logged a notice for
+  every request for Cascadia Mono, Segoe UI Variable Display and SF Pro
+  Display, on every page. Consolas is Windows's own mono and Menlo is
+  macOS's, which is where two of those were pointing anyway.
+## M5 — rounds 19-25: the measured claims, and two fronts retired
+
+- **The minute, rebuilt** (round 19-20): a terminal window with its own bar and
+  step counter, transcripts coloured in the shell's three voices, source steps
+  coloured by the COMPILER'S OWN LEXER through a build-time generator, steps
+  that explain themselves and walk on a progress bar. The bar is the clock:
+  a `setTimeout` beside a CSS animation is two clocks, and pausing left the
+  bar full while the timer ran on (user). A generator argument resolves
+  relative to the file that IMPORTS it — the path was one directory out and
+  `readFile` failed silently, which is why the first cut drew nothing.
+- **The benchmark section** (rounds 21-23): eight cards, each its own scale,
+  ranked fastest-first, with the result, the memory and the named cause; six
+  on the index and a `/benchmarks` page in the Docs subnav carrying all of
+  them, the radar, the table and the method. The table says what it measures
+  now — a legend and a tone per cell — because a bare `1.35x` does not say
+  which way it points (user). The footer classes are the card's own
+  (`bspeed`, `bram`) after `.verdict`, a site-wide rule at heading size, broke
+  the row: the same collision `.split` caused in the editor.
+- **The showcase** (round 24): "Four ideas" and "Five programs" were one
+  section written twice. One control now — the ideas down the left, the
+  program on the right with its caption, its file and a Docs link into the
+  chapter that teaches it. My merge script sliced at the wrong `<fieldset>`
+  and duplicated 6 KB of the page; the gates did not catch it because it was
+  valid markup, and the user did.
+- **Two fronts retired** (round 25, user): `/backstage`, its hundred record
+  pages and `/backstage/benchmarks` are gone — 187 routes to 80 — and
+  `/compare` is a stub pointing at `/benchmarks` through M1's own mechanism.
+  The release highlights are text rather than links into pages that no longer
+  exist; `backstage.vyrn` survives as the data module `history.vyrn` reads the
+  record index from. I said the removal would bring the stylesheet back under
+  its 90 KB ceiling; it did not, and the measurement says why — those pages
+  wore the sheet's shared rules and owned about eight selectors between them.
+  The raw ceiling is 100 KB with that correction written into the test, and
+  the gzip ceiling is back at its original 27 KB, which is what binds.
+- **The comparison, as a chapter** (round 25, user): `/compare`'s three
+  cross-language plates are Chapter 2 of the book — *Coming from another
+  language* — where a reader trying the language meets them, with prose about
+  the difference instead of a matrix, what the language does not have, and
+  where to go next per background. A `Section` can name a snippet set; it is
+  "" everywhere else, so the book's rule that every illustration is a program
+  this site RAN still holds, and the three quoted languages are quoted.
+
 - The Git Bash quoted heredoc EATS A BACKSLASH: `\n` in a here-document
   reached Python as `
 ` and round 4 shipped two raw newlines inside

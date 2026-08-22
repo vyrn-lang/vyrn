@@ -340,3 +340,49 @@ test "tool output is marked line by line and never coloured as code" {
     assertEq(terminalHtml("a\nb"), "<span class=\"ol\">a</span>\n<span class=\"ol\">b</span>")
     assertEq(terminalHtml("<x>"), "<span class=\"ol\">&lt;x&gt;</span>")
 }
+
+/// One recorded step as a terminal body: the command after a prompt, then the
+/// output it produced.
+///
+/// The colouring is the shell's own vocabulary and nothing more — a prompt is
+/// a prompt, the command is what was typed, and a line naming a path reads as
+/// data. Three classes rather than a lexer, because this is a transcript and
+/// not source: the compiler's own colours belong to code blocks.
+export fn shellOutHtml(cmd: String, out: String) -> String {
+    let mut html = ""
+    if cmd.byteLength > 0 {
+        html = html + "<span class=\"pr\">$</span> <span class=\"cx\">" + escapeHtml(cmd) + "</span>
+"
+    }
+    let mut first = true
+    for line in split(out, "
+") {
+        if !first {
+            html = html + "
+"
+        }
+        first = false
+        html = html + demoLineHtml(line)
+    }
+    return html
+}
+
+/// One line of a recorded transcript.
+fn demoLineHtml(line: String) -> String {
+    if line.byteLength == 0 {
+        return ""
+    }
+    let text = escapeHtml(line)
+    let cls = if hasSlash(line) { "pa" } else { "pl" }
+    return "<span class=\"" + cls + "\">" + text + "</span>"
+}
+
+/// Whether a line names a path — the one thing this transcript dims.
+fn hasSlash(line: String) -> Bool {
+    for b in bytes(line) {
+        if b == '/' {
+            return true
+        }
+    }
+    return false
+}

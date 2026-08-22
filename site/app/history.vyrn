@@ -29,7 +29,7 @@ import { Json, JsonField } from "std/json"
 import { parseJson } from "std/jsonread"
 import { joinWith, substring } from "std/strings"
 import { corpusRecords, toneOf, Record } from "./corpus"
-import { rfcTag, rfcHref } from "./backstage"
+import { rfcTag } from "./backstage"
 
 /// One day of work: the commits made, and how many of them were merged pull
 /// requests.
@@ -51,7 +51,7 @@ export type AxisMark = { id: String, x: String, lx: String, label: String, title
 
 /// One row of the arrivals fallback: a record, when it arrived, and what it is
 /// today.
-export type ArrivalRow = { tag: String, href: String, date: String, band: String }
+export type ArrivalRow = { tag: String, date: String, band: String }
 
 /// One band of the arrivals chart: every record that had this status by the day
 /// the site was built, stacked under the ones above it.
@@ -698,7 +698,6 @@ export fn arrivalList() -> Array<ArrivalRow> {
     while i < rows.length {
         out.push(ArrivalRow {
                 tag: rfcTag(rows[i].number),
-                href: rfcHref(rows[i].number),
                 date: rows[i].date.copy(),
                 band: bandName(tones[i]),
             })

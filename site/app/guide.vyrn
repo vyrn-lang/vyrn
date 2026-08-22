@@ -55,9 +55,15 @@ import { blob } from "./repo"
 /// playground link — empty for a block the playground cannot run on its own.
 export type Block = { id: String, lines: Array<String>, output: String, play: String, source: String }
 
-/// One section of a chapter: an anchor, a heading, paragraphs of HTML, and the
-/// ids of the programs that follow them.
-export type Section = { anchor: String, heading: String, prose: Array<String>, blocks: Array<String> }
+/// One section of a chapter: an anchor, a heading, paragraphs of HTML, the ids
+/// of the programs that follow them, and — for the one chapter that compares
+/// languages — the name of a snippet set to draw beside them.
+///
+/// `specs` is "" everywhere else. The book teaches Vyrn by running Vyrn, and a
+/// section that shows four languages is a different instrument: it is prose
+/// about a difference, and the other three languages are quoted, not run
+/// (RFC-0106 M5).
+export type Section = { anchor: String, heading: String, prose: Array<String>, blocks: Array<String>, specs: String }
 
 /// One chapter: the area it belongs to, the group it sits under in that area's
 /// sidebar, its URL slug, its title, its opening paragraph, and its sections.
@@ -250,7 +256,14 @@ export fn sectionBody(s: Section) -> String {
 // ---------------------------------------------------------------------------
 
 fn section(anchor: String, heading: String, prose: Array<String>, blocks: Array<String>) -> Section {
-    return Section { anchor: anchor.copy(), heading: heading.copy(), prose: prose.copy(), blocks: blocks.copy() }
+    return Section { anchor: anchor.copy(), heading: heading.copy(), prose: prose.copy(), blocks: blocks.copy(), specs: "" }
+}
+
+/// A section whose illustration is the same task in four languages rather than
+/// a program this site ran. `set` names one of `snippets.vyrn`'s three.
+fn compared(anchor: String, heading: String, prose: Array<String>, set: String) -> Section {
+    let none: Array<String> = []
+    return Section { anchor: anchor.copy(), heading: heading.copy(), prose: prose.copy(), blocks: none.copy(), specs: set.copy() }
 }
 
 /// Every chapter, in reading order.
@@ -276,6 +289,43 @@ export fn chapters() -> Array<Chapter> {
                         "A function states the type of each parameter and the type it returns. Nothing is inferred across a function boundary, so a signature is the whole contract.",
                         "<code>\\{ }</code> inside a string puts a value into it. The value is converted where it is written, not by a format string somewhere else.",
                     ], ["firstfn"]),
+            ],
+        },
+        Chapter {
+            area: "guide",
+            group: "First steps",
+            slug: "coming-from",
+            title: "Coming from another language",
+            lede: "What carries over from Rust, TypeScript or Go, what is deliberately different, and what Vyrn does not have at all.",
+            sections: [
+                compared("rules", "A rule about a value", [
+                        "The thing that is most likely to be new is where a RULE lives. In the languages beside it a rule is code somebody has to call — a constructor, a schema object, a validating function — and the type says nothing about whether it ever ran. In Vyrn the rule is part of the type, so `Age` is a number that has passed it.",
+                        "The compiler proves what it can while the program compiles, which is why `Age(30)` costs nothing at run time and `Age(5)` is a compile error rather than a failed check. Input from outside the program is not a constant, so it takes the total form: `Age?(n)` answers <code>Option&lt;Age&gt;</code>, and there is no path that produces an unchecked `Age`.",
+                    ], "types"),
+                compared("intent", "What a function does with its argument", [
+                        "Rust says this with borrows and lifetimes, TypeScript cannot say it at all, and Go says it with a pointer and a comment. Vyrn writes the intent on the parameter as a word: `read`, `modify`, `consume`, `share`.",
+                        "There is no lifetime grammar to learn, because the word is the whole declaration — the compiler decides where the value is released from what the words say. <a href=\"/guide/ownership.html\">Ownership, consume, regions</a> is the chapter that teaches it.",
+                    ], "memory"),
+                compared("failure", "When something fails", [
+                        "There is no null and no exception. An absent value is `Option`, a failure is `Result`, and `?` hands a failure to the caller unchanged — the same three shapes Rust uses, without the conversion traits.",
+                        "A `panic` is for a case that cannot happen, and nothing unwinds: there is no `catch` anywhere in the language, so a panic ends the program rather than becoming somebody else's control flow.",
+                    ], "failure"),
+                section("shapes", "The shapes you already know", [
+                        "A `record` is a struct with named fields and no inheritance. An `enum` is a closed choice with payloads, and `match` covers every case — the compiler counts the arms, so a new variant is a compile error at every site that reads it.",
+                        "Generics are monomorphised, protocols are how a type says what it can do, and a protocol bound is checked at the call rather than at run time. What a TypeScript reader will miss is structural typing: two records with the same fields are two types.",
+                    ], []),
+                section("absent", "What is not here", [
+                        "<strong>No garbage collector.</strong> Memory is released where the ownership words say it is, and <code>vyrn why --memory</code> prints that decision per binding.",
+                        "<strong>No exceptions, no unwinding, no `async` colour.</strong> A program is a program; the runtime that serves HTTP is a library written in the language.",
+                        "<strong>No macros.</strong> A generator is an ordinary Vyrn function that runs while you compile and emits Vyrn — <code>vyrn emit-gen</code> prints exactly what it wrote. <a href=\"/guide/generators.html\">gen fns and generators</a> is the chapter.",
+                        "<strong>No inheritance and no null.</strong> Both are covered above, and neither has a workaround to learn.",
+                    ], []),
+                section("next", "Where to go next", [
+                        "If you write Rust: read <a href=\"/guide/ownership.html\">Ownership</a> first — it is the chapter where this language differs from yours the most, and it is shorter than you expect.",
+                        "If you write TypeScript: read <a href=\"/guide/values.html\">Values and types</a> and then <a href=\"/guide/errors.html\">Errors</a>. Numbers state their width here, and validation is a type rather than a library.",
+                        "If you write Go: read <a href=\"/guide/records.html\">Records, enums, match</a> — the closed enum and exhaustive `match` are what replace the interface-and-type-switch pattern.",
+                        "The <a href=\"/benchmarks.html\">benchmarks</a> answer the other question a reader arrives with, and every reading there is published.",
+                    ], []),
             ],
         },
         Chapter {
@@ -842,8 +892,8 @@ fn stripTags(markup: String) -> String {
 test "every chapter names an area, a slug, a title and at least one section" {
     let all = chapters()
     // Eleven guide chapters, four web pages, three tooling pages (RFC-0106 M5).
-    assertEq(all.length, 18)
-    assertEq(areaChapters("guide").length, 11)
+    assertEq(all.length, 19)
+    assertEq(areaChapters("guide").length, 12)
     assertEq(areaChapters("web").length, 4)
     assertEq(areaChapters("tooling").length, 3)
     for c in all {

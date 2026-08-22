@@ -22,13 +22,12 @@
 /// page per package. RFC-0014 has `readFile`, `writeFile` and `listDir` and no
 /// way to CREATE a directory, so the caller makes them:
 ///
-///     mkdir -p out/docs/std out/guide out/web out/tooling out/backstage/rfcs out/explore
+///     mkdir -p out/docs/std out/guide out/web out/tooling out/explore
 ///
 /// Every other route publishes flat, for the same reason (see `app/nav.vyrn`).
 import { pages } from "std/ui"
-import { route, rootPath, philosophyPath, whyVyrnPath, comparePath, installPath, editorsPath, docsEditorsPath, docsGraphPath, releasesPath, docsPath, explorePath, guidePath, webPath, toolingPath, toolingEditorsPath, playPath, backstagePath, backstageBenchmarksPath, hrefDocsStd, hrefGuide, hrefWeb, hrefTooling, hrefBackstageRfcs, hrefExplore } from pages("./app/routes")
+import { route, rootPath, philosophyPath, whyVyrnPath, comparePath, installPath, editorsPath, docsEditorsPath, docsGraphPath, releasesPath, docsPath, explorePath, guidePath, webPath, toolingPath, toolingEditorsPath, benchmarksPath, playPath, hrefDocsStd, hrefGuide, hrefWeb, hrefTooling, hrefExplore } from pages("./app/routes")
 import { published, navRows, hrefOf, upTo } from "./app/nav"
-import { rfcPages, rfcSlug } from "./app/backstage"
 import { historyIsFixture, historyPath, historyCommand, releaseRows, historyError } from "./app/history"
 import { releaseTag } from "./app/repo"
 import { demoIsFixture, demoPath, demoCommand } from "./app/demo"
@@ -53,7 +52,7 @@ import { startsWith } from "std/strpred"
 /// a module added to `std/` is exported here on the next build with nothing
 /// written by hand.
 fn sitePaths() -> Array<String> {
-    let mut out: Array<String> = [rootPath(), whyVyrnPath(), comparePath(), installPath(), toolingEditorsPath(), docsGraphPath(), releasesPath(), docsPath(), guidePath(), webPath(), toolingPath(), explorePath(), playPath()]
+    let mut out: Array<String> = [rootPath(), whyVyrnPath(), installPath(), toolingEditorsPath(), docsGraphPath(), releasesPath(), docsPath(), guidePath(), webPath(), toolingPath(), benchmarksPath(), explorePath(), playPath()]
     // The two old paths, as stubs. They are routes like any other — a document
     // and a payload — and they are published for the reason `redirects()` below
     // gives (RFC-0106 M1).
@@ -80,31 +79,8 @@ fn sitePaths() -> Array<String> {
             out.push(hrefGuide(slug))
         }
     }
-    out.push(backstagePath())
-    // The benchmark dataset (RFC-0104 M3). It is one page and it renders in
-    // milliseconds, so it belongs in this list rather than beside the hundred
-    // record pages `recordPaths` keeps out of the per-page gates.
-    out.push(backstageBenchmarksPath())
-    return out
-}
 
-/// The backstage's record pages: one per row of `rfcs/README.md`, read the way
-/// the reference is read off `std/` (RFC-0105 M1).
-///
-/// They are a SECOND list, and the reason is measurement rather than taste. The
-/// record is 2.5 MB of markdown; rendering all of it takes 17 seconds, and the
-/// per-page gates below walk every path in `sitePaths()` between six and ten
-/// times. Putting these hundred pages in that list took `vyrn test` on this file
-/// from under a minute to ten. What those gates check is checked on these pages
-/// too, on the EXPORTED tree, by `site/test/basepath.test.mjs` — every link,
-/// every fragment, every mount point — which is the gate that caught the defect
-/// they exist for in the first place. One representative record is checked here
-/// as well, so the stamps are not left to the node run alone.
-fn recordPaths() -> Array<String> {
-    let mut out: Array<String> = []
-    for n in rfcPages() {
-        out.push(hrefBackstageRfcs(rfcSlug(n)))
-    }
+
     return out
 }
 
@@ -122,7 +98,7 @@ fn redirects() -> Array<Array<String>> {
     // `/editors` (M1's rename) points at the page's FINAL home, not at the
     // stub in the middle — a chain of stubs is what the no-loop assertion in
     // the stub test refuses.
-    let mut out: Array<Array<String>> = [[philosophyPath(), whyVyrnPath()], [editorsPath(), toolingEditorsPath()], [docsEditorsPath(), toolingEditorsPath()]]
+    let mut out: Array<Array<String>> = [[philosophyPath(), whyVyrnPath()], [editorsPath(), toolingEditorsPath()], [docsEditorsPath(), toolingEditorsPath()], [comparePath(), benchmarksPath()]]
     // The two chapters M5 moved out of the book keep a stub at their old
     // guide path — same table the stub routes render their link from.
     for pair in movedChapters() {
@@ -139,14 +115,6 @@ fn redirectTarget(path: String) -> String {
         }
     }
     return ""
-}
-
-/// Whether `path` belongs to the backstage rather than the consumer site.
-///
-/// The two fronts differ in exactly one way that matters to this program: a
-/// backstage page hangs off no consumer navigation row, so nothing marks one.
-fn isBackstage(path: String) -> Bool {
-    return startsWith(path, "/backstage")
 }
 
 /// The request for a path's document representation.
@@ -213,7 +181,7 @@ fn currentNav(path: String) -> String {
     }
     // The Web and Tooling shelves are documentation too, and the masthead has
     // one word for the whole of it.
-    if startsWith(path, "/web") || startsWith(path, "/tooling") {
+    if startsWith(path, "/web") || startsWith(path, "/tooling") || startsWith(path, "/benchmarks") {
         return hrefOf("/guide")
     }
     if startsWith(path, "/explore/") {
@@ -309,6 +277,9 @@ fn subnavKey(path: String) -> String {
     if startsWith(path, "/docs") {
         return "reference"
     }
+    if startsWith(path, "/benchmarks") {
+        return "benchmarks"
+    }
     return ""
 }
 
@@ -325,6 +296,7 @@ test "the documentation band is stamped under the header, and only there" {
     assertEq(subnavKey("/guide/ownership"), "guide")
     assertEq(subnavKey("/web/views"), "web")
     assertEq(subnavKey("/tooling/projects"), "tooling")
+    assertEq(subnavKey("/benchmarks"), "benchmarks")
     assertEq(subnavKey("/docs"), "reference")
     assertEq(subnavKey("/"), "")
     assertEq(subnavKey("/install"), "")
@@ -349,10 +321,10 @@ fn withLang(html: String, path: String) -> String {
 /// strings are cheaper than a rule with four exceptions, and M2 to M4 add to a
 /// list without re-deriving a predicate.
 fn landingPaths() -> Array<String> {
-    return [rootPath(), installPath(), whyVyrnPath(), comparePath(), releasesPath(), guidePath(), docsPath(), explorePath(), playPath()]
+    return [rootPath(), installPath(), whyVyrnPath(), benchmarksPath(), releasesPath(), guidePath(), docsPath(), explorePath(), playPath()]
 }
 
-/// Whether `path` is one of the nine.
+/// Whether `path` is one of the nine landings.
 fn isLanding(path: String) -> Bool {
     for p in landingPaths() {
         if p == path {
@@ -569,10 +541,6 @@ fn exportPath(outDir: String, path: String) -> Int64 {
     }
     let document = relativize(withRedirect(withCards(withFeed(withIcon(withLang(withSubnav(markCurrent(doc.body, path), path), path))), path), path), path)
     let mut bad = emit("\{outDir}/\{name}", document)
-    if isBackstage(path) {
-        print("\{path} -> \{name} (\{doc.body.byteLength} bytes)")
-        return bad
-    }
     let data = route(dataRequest(path))
     let json = payloadName(name)
     bad = bad + emit("\{outDir}/\{json}", relativize(data.body, path))
@@ -591,7 +559,6 @@ fn assets() -> Array<Array<String>> {
         ["site/public/style.css", "style.css"],
         ["site/public/theme.js", "theme.js"],
         ["site/public/widgets.js", "widgets.js"],
-        ["site/public/backstage.js", "backstage.js"],
         ["site/public/play.js", "play.js"],
         ["site/public/play-wasm.js", "play-wasm.js"],
         ["site/public/play-worker.js", "play-worker.js"],
@@ -771,9 +738,6 @@ fn main() -> Int64 {
     for path in sitePaths() {
         failures = failures + exportPath(outDir, path)
     }
-    for path in recordPaths() {
-        failures = failures + exportPath(outDir, path)
-    }
     for asset in assets() {
         failures = failures + copyAsset(outDir, asset[0], asset[1])
     }
@@ -786,7 +750,7 @@ fn main() -> Int64 {
         print("export failed: \{failures} file(s)")
         return 1
     }
-    print("exported \{sitePaths().length + recordPaths().length} route(s) and \{assets().length} asset(s) to \{outDir}")
+    print("exported \{sitePaths().length} route(s) and \{assets().length} asset(s) to \{outDir}")
     return 0
 }
 
@@ -959,7 +923,7 @@ test "every published document marks exactly one thing in its masthead" {
         // row, and it is reached from the index's `Latest release` section, from
         // `/install` and from the footer.
         let orphan = path == "/" || path == "/compare" || path == "/why-vyrn" || path == "/releases" || redirectTarget(path).byteLength > 0
-        assertEq(marked, if orphan || isBackstage(path) { 0 } else { 1 })
+        assertEq(marked, if orphan { 0 } else { 1 })
     }
 }
 
@@ -969,9 +933,9 @@ test "each renamed route publishes a stub that carries the reader to the new one
     // are checked, because a reader might only get one of them — the refresh a
     // browser may be told to decline, the canonical a search engine reads, and
     // the visible link that is all a screen reader has before the hop fires.
-    // M1's two renames, M5's two moved chapters, and the editors page's move
-    // to the Tooling shelf.
-    assertEq(redirects().length, 5)
+    // M1's two renames, M5's two moved chapters, the editors page's move to
+    // the Tooling shelf, and `/compare` pointing at the benchmarks.
+    assertEq(redirects().length, 6)
     for pair in redirects() {
         let old = pair[0]
         let to = pair[1]
@@ -1001,36 +965,8 @@ test "each renamed route publishes a stub that carries the reader to the new one
     assertEq(redirectTarget("/docs/editors"), "/tooling/editors")
     assertEq(redirectTarget("/guide/testing"), "/tooling/testing")
     assertEq(redirectTarget("/guide/web"), "/web/views")
+    assertEq(redirectTarget("/compare"), "/benchmarks")
     assertEq(redirectTarget("/docs"), "")
-}
-
-test "no consumer navigation row leads to the backstage" {
-    // RFC-0105 M1's gate, as a test rather than as a promise. The two fronts
-    // meet at one footer link each way and nowhere else.
-    for row in navRows() {
-        assert(!startsWith(row.href, "/backstage"))
-    }
-    assertEq(currentNav(backstagePath()), "")
-    assertEq(currentNav("/backstage/rfcs/0105"), "")
-}
-
-test "the backstage publishes the index and a page for every record" {
-    assert(rfcPages().length > 100)
-    assertEq(recordPaths().length, rfcPages().length)
-    assertEq(recordPaths()[0], "/backstage/rfcs/0001")
-    // One record, rendered the way it publishes: the stamps every document
-    // carries, and no URL that only a root would resolve. The other hundred are
-    // checked on the exported tree by `site/test/basepath.test.mjs` — see
-    // `recordPaths` for why they are not all walked here.
-    let doc = publishedDocument("/backstage/rfcs/0105")
-    assert(has(doc, "<html lang=\"en\">"))
-    assert(has(doc, "<link rel=\"icon\" href=\"../../favicon.svg\" type=\"image/svg+xml\">"))
-    assert(has(doc, "<link rel=\"stylesheet\" href=\"../../style.css\">"))
-    assert(has(doc, "<h1 id=\"rfc-0105--a-site-has-two-audiences\">"))
-    assertEq(countOf(doc, "=\"/"), countOf(doc, "data-key=\"/"))
-    // A number the record does not carry is a 404, not an empty page.
-    assertEq(route(documentRequest("/backstage/rfcs/0066")).status, 404)
-    assertEq(route(documentRequest("/backstage/rfcs/91")).status, 404)
 }
 
 test "both fronts carry the theme control, and carry it without a flash" {
@@ -1046,7 +982,7 @@ test "both fronts carry the theme control, and carry it without a flash" {
     //   - It is in the HEAD, before `<body>` — the same reason.
     //   - The control is ONE button, once, in the system state, and its
     //     accessible name says the state and what the next press does.
-    for path in ["/", "/docs/std/json", "/backstage/rfcs/0105"] {
+    for path in ["/", "/docs/std/json", "/benchmarks"] {
         let doc = publishedDocument(path)
         let up = upTo(path)
         let tag = "<script src=\"" + up + "theme.js\">"
@@ -1191,9 +1127,9 @@ test "the display type step reaches nine pages and no leaf page" {
         assertEq(countOf(doc, "<html lang=\"en\""), 1)
     }
     assertEq(stamped, 9)
-    // The leaf pages, by kind, named rather than left to the loop above: 13 guide
-    // chapters, 37 reference modules, 4 package pages. The 106 design records are
-    // in `recordPaths()`, and one of them is checked below.
+    // The leaf pages, by kind, named rather than left to the loop above: the
+    // book's chapters and the two shelves beside it, 37 reference modules, and
+    // a page per package.
     for slug in chapterSlugs() {
         assert(!isLanding(hrefGuide(slug)))
     }
@@ -1203,7 +1139,6 @@ test "the display type step reaches nine pages and no leaf page" {
     for p in packages() {
         assert(!isLanding(hrefExplore(p.slug)))
     }
-    assert(!has(publishedDocument("/backstage/rfcs/0105"), "data-landing"))
     // The two stubs are not landing pages either. They carry a `.display`
     // heading and three words, and a stub is not where a hero belongs.
     assert(!isLanding("/philosophy"))
@@ -1330,10 +1265,6 @@ test "every page says what it is to a crawler, and no two of the ten say the sam
     assertEq(titleOf(leaf), "std/json — Vyrn")
     assert(has(leaf, "<meta property=\"og:title\" content=\"std/json — Vyrn\">"))
     assert(has(leaf, "<meta property=\"og:type\" content=\"article\">"))
-    // The backstage previews as itself too, off its own head and with no row here.
-    let record = publishedDocument("/backstage/rfcs/0105")
-    assert(has(record, "<meta property=\"og:type\" content=\"article\">"))
-    assert(has(record, "<meta property=\"og:description\" content=\"The Vyrn design record"))
 }
 
 test "a value is read out of one attribute and into another, or it is not there" {

@@ -243,6 +243,14 @@ export function mountPlay(root, opts = {}) {
 
   function recheck() {
     if (!play) return;
+    // NOTHING TYPED IS NOT A PROBLEM. The Welcome view has an empty buffer
+    // and a new file starts as one; asking the checker about either got the
+    // honest answer "no `main` function found", which is a complaint about a
+    // program nobody has written yet (user).
+    if (!srcHost().value.trim()) {
+      showDiagnostics(null);
+      return;
+    }
     try {
       showDiagnostics(play.check(srcHost().value).diagnostics);
     } catch (err) {
@@ -497,12 +505,26 @@ export function mountPlay(root, opts = {}) {
         /* a full or absent store loses persistence, never the session */
       }
     };
-    let userFiles = new Map(read(KEY_FILES, []).map((f) => [f.name, f.text]));
+    // TWO PROJECTS, ONE ACTIVE. `myFiles` is the reader's own, in this
+    // browser; a shared link opens the sender's in a scope of its own, which
+    // is never written to storage — so a link cannot litter the reader's
+    // files, and the reader decides whether to keep it (user).
+    const myFiles = new Map(read(KEY_FILES, []).map((f) => [f.name, f.text]));
+    let userFiles = myFiles;
+    const isShared = () => userFiles !== myFiles;
+    const scopeEl = $("[data-play-scope]", root);
+    function setFiles(map) {
+      if (isShared()) sharedFiles = map;
+      else myFiles.clear(), map.forEach((v, k) => myFiles.set(k, v));
+      userFiles = isShared() ? sharedFiles : myFiles;
+    }
+    let sharedFiles = null;
     const folders = new Set(read(KEY_FOLDERS, []));
     const layout = Object.assign({ side: 224, panel: 200, split: 0.5 }, read(KEY_LAYOUT, {}));
     const collapsed = new Set();
     let saveTimer = 0;
     function persistFiles() {
+      if (isShared()) return;
       clearTimeout(saveTimer);
       saveTimer = setTimeout(() => {
         write(KEY_FILES, [...userFiles].map(([name, text]) => ({ name, text })));
@@ -510,6 +532,7 @@ export function mountPlay(root, opts = {}) {
       }, 150);
     }
     function persistSession() {
+      if (isShared()) return;
       write(KEY_SESSION, {
         a: { tabs: gA.tabs, active: gA.active },
         b: gB ? { tabs: gB.tabs, active: gB.active } : null,
@@ -524,14 +547,15 @@ export function mountPlay(root, opts = {}) {
       write(KEY_LAYOUT, layout);
     }
 
-    function freshName(base) {
-      if (!userFiles.has(base)) return base;
+    function freshName(base, into) {
+      const map = into || userFiles;
+      if (!map.has(base)) return base;
       const m = base.match(/^(.*?)(\.[^./]*)?$/);
       const stem = m[1];
       const ext = m[2] || "";
       for (let i = 2; ; i++) {
         const name = stem + "-" + i + ext;
-        if (!userFiles.has(name)) return name;
+        if (!map.has(name)) return name;
       }
     }
 
@@ -621,6 +645,7 @@ export function mountPlay(root, opts = {}) {
     }
 
     function syncChrome() {
+      if (scopeEl) scopeEl.textContent = isShared() ? "Shared project" : "Explorer";
       if (crumbs) crumbs.textContent = focusedG.active && focusedG.active !== WELCOME ? focusedG.active.split("/").join(" \u203a ") : "Welcome";
       renderFiles();
       persistSession();
@@ -969,8 +994,12 @@ export function mountPlay(root, opts = {}) {
               renderTabsG(g);
             }
           }
-          const er = g.editorEl.getBoundingClientRect();
-          drag.split = !gB && g === gA && name !== WELCOME && ev.clientX > er.left + er.width * 0.66 && ev.clientY > er.top && ev.clientY < er.bottom;
+          // The group's MAIN box, not its editor: the editor is hidden while
+          // the Welcome view is up, so its rectangle is empty and the drop
+          // that creates a split could never be inside it (user: dragging a
+          // tab to a new pane stopped working).
+          const er = g.main.getBoundingClientRect();
+          drag.split = !gB && g === gA && name !== WELCOME && ev.clientX > er.left + er.width * 0.6 && ev.clientY > er.top && ev.clientY < er.bottom;
         }
         wrapEl.classList.toggle("splitzone", drag.split);
       };
@@ -1174,7 +1203,7 @@ export function mountPlay(root, opts = {}) {
       if (isDir) {
         const rebuilt = new Map();
         for (const [k, v] of userFiles) rebuilt.set(k === from || k.startsWith(from + "/") ? to + k.slice(from.length) : k, v);
-        userFiles = rebuilt;
+        setFiles(rebuilt);
         for (const d of [...folders]) if (d === from || d.startsWith(from + "/")) {
           folders.delete(d);
           folders.add(to + d.slice(from.length));
@@ -1187,7 +1216,7 @@ export function mountPlay(root, opts = {}) {
         const text = userFiles.get(from);
         const rebuilt = new Map();
         for (const [k, v] of userFiles) rebuilt.set(k === from ? to : k, k === from ? text : v);
-        userFiles = rebuilt;
+        setFiles(rebuilt);
         for (const g of groups()) {
           const i = g.tabs.indexOf(from);
           if (i >= 0) g.tabs[i] = to;
@@ -1396,6 +1425,54 @@ export function mountPlay(root, opts = {}) {
       }
     }
 
+    /// Open `files` as a shared project: its own scope, its own tabs, and a
+    /// bar saying what it is. Nothing here reaches the reader's storage.
+    function openShared(files, open) {
+      sharedFiles = new Map(files);
+      userFiles = sharedFiles;
+      for (const g of groups()) {
+        g.tabs = [];
+        g.active = null;
+      }
+      if (gB) unsplit();
+      wrapEl.classList.add("shared");
+      const first = open && sharedFiles.has(open) ? open : sharedFiles.keys().next().value;
+      activateIn(gA, first || WELCOME);
+    }
+    /// Leave the shared scope, with or without keeping what it held.
+    function leaveShared(keep) {
+      if (!isShared()) {
+        // Nothing borrowed: the only thing to do is make sure no chrome
+        // says otherwise. The first cut returned here, which is how a
+        // stale bar kept a Close button that did nothing (user).
+        wrapEl.classList.remove("shared");
+        syncChrome();
+        return;
+      }
+      const carried = keep ? [...sharedFiles] : [];
+      let landed = null;
+      const wasOpen = gA.active;
+      sharedFiles = null;
+      userFiles = myFiles;
+      for (const g of groups()) {
+        g.tabs = [];
+        g.active = null;
+      }
+      if (gB) unsplit();
+      for (const [name, text] of carried) {
+        const fresh = freshName(name, myFiles);
+        myFiles.set(fresh, text);
+        if (name === wasOpen) landed = fresh;
+      }
+      if (carried.length) persistFiles();
+      wrapEl.classList.remove("shared");
+      history.replaceState(null, "", location.pathname);
+      const fallback = myFiles.size ? myFiles.keys().next().value : WELCOME;
+      activateIn(gA, landed || fallback);
+    }
+    for (const b of $$("[data-play-keep]", root)) b.addEventListener("click", () => leaveShared(true));
+    for (const b of $$("[data-play-discard]", root)) b.addEventListener("click", () => leaveShared(false));
+
     // ---- the explorer's drops: a file into a folder, an OS file in -------
     function moveInto(name, dir) {
       const base = labelOf(name);
@@ -1471,25 +1548,17 @@ export function mountPlay(root, opts = {}) {
     bindMinimap(gA);
 
     // ---- first light: the session comes back ------------------------------
-    queueMicrotask(() => {
+    function firstLight() {
       const session = read(KEY_SESSION, null);
       const project = projectFromHash();
       if (project) {
-        let open = null;
-        for (const [name, text] of project.files) {
-          const fresh = freshName(name);
-          userFiles.set(fresh, text);
-          if (name === project.open) open = fresh;
-        }
-        persistFiles();
-        activateIn(gA, open || (project.files[0] && freshName(project.files[0][0])) || WELCOME);
+        openShared(project.files, project.open);
         return;
       }
       if (location.hash.startsWith("#c=") && input.value) {
-        const name = freshName("shared.vyrn");
-        userFiles.set(name, input.value);
-        persistFiles();
-        activateIn(gA, name);
+        // One program, from a link written before projects existed: the same
+        // borrowed scope, so it cannot land in the reader's files either.
+        openShared([["shared.vyrn", input.value]], "shared.vyrn");
         return;
       }
       if (session && session.a) {
@@ -1512,6 +1581,16 @@ export function mountPlay(root, opts = {}) {
       }
       if (userFiles.size) activateIn(gA, userFiles.keys().next().value);
       else activateIn(gA, WELCOME);
+    }
+    queueMicrotask(firstLight);
+
+    // A page restored from the back/forward cache runs no script of its own:
+    // whatever it was in the middle of stays half-done. If it came back
+    // without a view, or without a compiler, it is finished here.
+    addEventListener("pageshow", (e) => {
+      if (!e.persisted) return;
+      if (!focusedG.active) firstLight();
+      startCompiler();
     });
   }
 
@@ -1538,8 +1617,17 @@ export function mountPlay(root, opts = {}) {
   }
   paint();
 
-  loadPlay(new URL("play.wasm", import.meta.url)).then(
+  // RESTARTABLE. A page frozen mid-load and restored from the back/forward
+  // cache keeps this promise's corpse: nothing resolves, and the window sits
+  // at "Loading the compiler…" for ever (user, returning to the editor with
+  // no reload). `pageshow` calls this again.
+  let starting = false;
+  function startCompiler() {
+    if (play || starting) return;
+    starting = true;
+    loadPlay(new URL("play.wasm", import.meta.url)).then(
     (api) => {
+      starting = false;
       play = api;
       runBtn.disabled = false;
       status.textContent = "Ready";
@@ -1551,8 +1639,11 @@ export function mountPlay(root, opts = {}) {
       if (opts.onReady) opts.onReady();
     },
     (err) => {
+      starting = false;
       status.textContent = "The compiler did not load";
       say("play.wasm did not load, so nothing here can run: " + err.message, "stderr");
     }
-  );
+    );
+  }
+  startCompiler();
 }

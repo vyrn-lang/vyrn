@@ -138,6 +138,23 @@ fn snippet(id: String, label: String, html: String) -> Snippet {
     return Snippet { id: id.copy(), lang: id.copy(), label: label.copy(), html: html.copy() }
 }
 
+/// The set a chapter section names — the book's one cross-language
+/// instrument (RFC-0106 M5). An unknown name answers with nothing, so a
+/// section that names no set draws none.
+export fn specSet(name: String) -> Array<Snippet> {
+    if name == "types" {
+        return typeSpecs()
+    }
+    if name == "memory" {
+        return memorySpecs()
+    }
+    if name == "failure" {
+        return failureSpecs()
+    }
+    let none: Array<Snippet> = []
+    return none
+}
+
 /// A rule about a value, and a total way to check an untrusted one.
 export fn typeSpecs() -> Array<Snippet> {
     return [

@@ -164,7 +164,7 @@ fn standing() -> String {
              masthead. `data-nav="hard"` because the backstage wears its own
              shell, and a soft navigation would swap the content under this
              masthead and leave the reader in neither section. -->
-        <a href="/backstage.html" data-nav="hard"><Icon name="codex:checklist"/> Backstage — the design record</a>
+        
         <span>{{ standing() }}</span>
     </footer>
 </div>

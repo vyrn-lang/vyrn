@@ -975,18 +975,21 @@ function demoWidget(root) {
   back.type = "button";
   back.textContent = "‹";
   back.setAttribute("aria-label", "Back");
+  const replay = document.createElement("button");
+  replay.type = "button";
+  replay.className = "replay";
+  replay.textContent = "replay";
   const next = document.createElement("button");
   next.type = "button";
   next.textContent = "›";
   next.setAttribute("aria-label", "Next");
-  const count = document.createElement("span");
-  count.className = "eyebrow";
-  // Polite, because the reader pressed the button that changed it.
+  bar.append(back, replay, next);
+  // The controls belong to the terminal they page, under its own window.
+  ($(".term", root) || root).append(bar);
+  // The step's number rides on the window bar, where a terminal puts what it
+  // is showing; polite, because a press is what changes it.
+  const count = $("[data-demo-count]", root) || document.createElement("span");
   count.setAttribute("aria-live", "polite");
-  bar.append(count, back, next);
-  // The controls belong to the pane they page — the bottom of the terminal,
-  // the reference site's own placement — not a toolbar over the whole card.
-  ($(".panes", root) || root).append(bar);
 
   // The list of titles STAYS (RFC-0106 M3). It used to set `hidden` on six of
   // seven, which threw the outline away with the detail; every row is on the
@@ -1009,20 +1012,85 @@ function demoWidget(root) {
       else s.removeAttribute("aria-current");
     });
     panes.forEach((p, k) => p.classList.toggle("on", k === at));
-    count.textContent = at + 1 + " / " + steps.length;
+    count.textContent = pad(at + 1) + " / " + pad(steps.length);
+    // The bar under the marked step is the timer, drawn: it restarts with
+    // every step and is what says the walk is still walking.
+    const tick = $(".tick", steps[at]);
+    if (tick) {
+      tick.style.animation = "none";
+      void tick.offsetWidth;
+      tick.style.animation = "";
+    }
+    arm();
     back.disabled = at === 0;
-    next.textContent = at === steps.length - 1 ? "Replay" : "›";
-    if (at === steps.length - 1) next.removeAttribute("aria-label");
-    else next.setAttribute("aria-label", "Next");
   };
+
+  /// `1` reads as `01` beside `07`: a counter whose width changes is a
+  /// counter that moves the bar it sits on.
+  function pad(n) {
+    return n < 10 ? "0" + n : String(n);
+  }
+
+  // IT WALKS ITSELF (user, against the reference site's own): the point of
+  // the section is the whole minute, and a reader who does nothing should see
+  // it. The pointer over the card pauses it, and any press hands the walk to
+  // the reader for good.
+  //
+  // THE BAR IS THE CLOCK. A `setTimeout` beside a CSS animation is two
+  // clocks: pausing stopped the animation where it stood and cleared the
+  // timeout, and leaving restarted the timeout from zero while the bar
+  // resumed from nine tenths — so the bar sat full for four more seconds and
+  // the step never turned (user). The step turns when its own bar finishes,
+  // which is one clock, and `animation-play-state` pauses it exactly.
+  let walking = !matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let paused = false;
+  function arm() {
+    // Kept as the name the show path calls; the bar restarts itself there.
+  }
+  for (const step of steps) {
+    const tick = $(".tick", step);
+    if (!tick) continue;
+    tick.addEventListener("animationend", () => {
+      if (walking && !paused && step.classList.contains("on")) show(at + 1);
+    });
+  }
+  root.addEventListener("pointerenter", () => {
+    paused = true;
+    root.classList.add("paused");
+  });
+  root.addEventListener("pointerleave", () => {
+    paused = false;
+    root.classList.remove("paused");
+    // A bar that finished while the pointer rested on it turns its step now.
+    const tick = $(".tick", steps[at]);
+    if (walking && tick && tick.getAnimations && tick.getAnimations().length === 0) show(at + 1);
+  });
+  function stopWalking() {
+    walking = false;
+    root.classList.add("held");
+  }
   // Pointer-only, and deliberately: every step is already reachable with Back,
   // Next and the arrow keys, so this adds no function a keyboard cannot do.
-  steps.forEach((s, k) => s.addEventListener("click", () => show(k)));
-  back.addEventListener("click", () => show(at - 1));
-  next.addEventListener("click", () => show(at === steps.length - 1 ? 0 : at + 1));
+  steps.forEach((s, k) => s.addEventListener("click", () => {
+    stopWalking();
+    show(k);
+  }));
+  back.addEventListener("click", () => {
+    stopWalking();
+    show(at - 1);
+  });
+  next.addEventListener("click", () => {
+    stopWalking();
+    show(at + 1);
+  });
+  replay.addEventListener("click", () => {
+    walking = true;
+    root.classList.remove("held");
+    show(0);
+  });
   root.addEventListener("keydown", (e) => {
-    if (e.key === "ArrowRight") return e.preventDefault(), show(at + 1);
-    if (e.key === "ArrowLeft") return e.preventDefault(), show(at - 1);
+    if (e.key === "ArrowRight") return e.preventDefault(), stopWalking(), show(at + 1);
+    if (e.key === "ArrowLeft") return e.preventDefault(), stopWalking(), show(at - 1);
   });
   show(0);
 }
@@ -1035,15 +1103,23 @@ function demoWidget(root) {
 /// navigation back out animate too.
 function markEditorChrome() {
   const editor = Boolean($(".page.play.ide"));
-  if (!editor) {
-    document.body.classList.remove("idecompact");
-    return;
+  const root = document.documentElement;
+  // What the NEXT page starts as, so the change has something to animate
+  // from. `theme.js` reads this before the first paint.
+  try {
+    sessionStorage.setItem("vyrn.mast", editor ? "compact" : "full");
+  } catch (err) {
+    /* a blocked store only costs the handoff */
   }
-  const compact = () => document.body.classList.add("idecompact");
+  // The suite's document has no root element; the class it would carry has
+  // no meaning without one either.
+  const settle = () => root && root.classList.toggle("idecompact", editor);
   // A hidden tab runs no animation frames at all, and the class would wait
   // for a paint that never comes — there is nothing to animate there anyway.
-  if (document.visibilityState === "hidden") compact();
-  else requestAnimationFrame(() => requestAnimationFrame(compact));
+  // The browser suite runs this file in a VM with a minimal document, which
+  // has no frames either.
+  if (document.visibilityState === "hidden" || typeof requestAnimationFrame !== "function") settle();
+  else requestAnimationFrame(() => requestAnimationFrame(settle));
 }
 
 function boot() {

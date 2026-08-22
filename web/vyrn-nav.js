@@ -307,26 +307,20 @@ function syncNavMark(newDoc) {
   }
 }
 
-// A soft navigation replaces the content in place, so the platform's
-// CROSS-document transition never runs — the fix for a shell band that
-// changes size between pages (the playground's title-bar masthead) is a
-// SAME-document one around the swap. Absent support, or a reader who asked
-// for less motion, gets the swap unwrapped.
-function withTransition(swap) {
-  if (!document.startViewTransition || matchMedia("(prefers-reduced-motion: reduce)").matches) {
-    swap();
-    return;
-  }
-  document.startViewTransition(swap);
-}
-
+// THE SWAP IS SYNCHRONOUS, DELIBERATELY. Wrapping it in
+// `document.startViewTransition` was tried and reverted: the transition runs
+// the swap in a later frame while `nav-end` is announced immediately, so
+// every listener that reacts to the new page — the shell's own `boot()` — ran
+// against the old one, and anything it derives from the page (the
+// playground's title-bar masthead) came out a navigation behind. A band that
+// changes size between pages animates through its own CSS transition when
+// the class lands, which needs no transition API and works on a hard
+// navigation too.
 function applyDocument(newDoc) {
-  withTransition(() => {
-    swapHead(newDoc);
-    syncNavMark(newDoc);
-    replaceContent(newDoc);
-    syncIslands();
-  });
+  swapHead(newDoc);
+  syncNavMark(newDoc);
+  replaceContent(newDoc);
+  syncIslands();
 }
 
 // ---------------------------------------------------------------------------

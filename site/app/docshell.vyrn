@@ -114,6 +114,9 @@ fn areas() -> Array<Array<String>> {
         ["web", "/web.html", "Web", "link", "Pages", "link"],
         ["tooling", "/tooling.html", "Tooling", "settings", "Pages", "settings"],
         ["reference", "/docs.html", "Reference", "code", "", ""],
+        // The measured claims are documentation too: a reader deciding
+        // whether to use the language looks for them here (user).
+        ["benchmarks", "/benchmarks.html", "Benchmarks", "activity", "", ""],
     ]
 }
 
@@ -343,6 +346,7 @@ test "the subnav names every area and marks exactly one" {
     assert(has(html, "/web.html"))
     assert(has(html, "/tooling.html"))
     assert(has(html, "/docs.html"))
+    assert(has(html, "/benchmarks.html"))
     // One marked row, and it is the one asked for.
     assertEq(timesIn(html, "aria-current"), 1)
     assert(has(html, "/docs.html\" aria-current"))

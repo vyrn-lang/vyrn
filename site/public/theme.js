@@ -29,6 +29,20 @@
   var KEY = "vyrn.theme";
   var root = document.documentElement;
 
+  // THE MASTHEAD'S HEIGHT CROSSES THE NAVIGATION HERE. The editor wears a
+  // title-bar masthead and every other page wears the full one, and the two
+  // live in different documents — so nothing can animate between them unless
+  // the arriving page STARTS in the state the last one ended in. This runs
+  // before the first paint, which is the only moment that is true; `boot()`
+  // in `widgets.js` then sets the state this page actually wants, one frame
+  // later, and the difference animates (user: it changed in one direction
+  // only).
+  try {
+    if (sessionStorage.getItem("vyrn.mast") === "compact") root.classList.add("idecompact");
+  } catch (err) {
+    /* a blocked store means no handoff, which is the old behaviour */
+  }
+
   // The cycle, in order, and the word each state is called. `""` is system, and
   // it is first because it is the default. The words live here rather than in
   // the markup because this file is what changes them on every press; the

@@ -169,7 +169,15 @@ test("the sheet stays inside M0's byte ceiling, both halves", () => {
   // a budget on explaining yourself, and the reason the numbers existed was
   // never that.
   const shipped = bare.replace(/\n[ \t]*(?=\n)/g, "").replace(/\n{2,}/g, "\n");
-  assert.ok(shipped.length <= 90000, `the published style.css is ${shipped.length} bytes, ceiling 90,000`);
+  // RAISED, AND THE REASON CORRECTED (RFC-0106 M5). The editor's window, the
+  // registry, the benchmark cards and the showcase all landed in this
+  // milestone. I expected removing `/compare` and the backstage to bring this
+  // back down and said so here; it did not, and the measurement is why: those
+  // pages wore the sheet's SHARED rules — the plates, the matrices, the prose
+  // — and owned about eight selectors between them. What binds is the
+  // transfer size below, which is 17.6 KB against a 27 KB ceiling; this
+  // number is a proxy for how much sheet there is to read.
+  assert.ok(shipped.length <= 100000, `the published style.css is ${shipped.length} bytes, ceiling 100,000`);
   const gz = gzipSync(Buffer.from(shipped, "utf8"), { level: 9 }).length;
   assert.ok(gz <= 27000, `the published style.css is ${gz} bytes gzipped (${shipped.length} raw), ceiling 27,000`);
 });

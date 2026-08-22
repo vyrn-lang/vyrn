@@ -1,0 +1,165 @@
+<script>
+// GET /benchmarks — every measured claim the site makes, on one page
+// (RFC-0106 M5 round 22).
+//
+// It stands where two pages used to: `/compare`'s cross-language chart and the
+// backstage's raw dataset. A reader who wants to know whether the language is
+// fast should not have to visit a design record to find out, and a design
+// record should not be the only place the numbers are complete. So the cards
+// the index shows six of are all here, the radar and the table are here, and
+// the method is a section rather than a disclosure at the bottom of somewhere
+// else.
+//
+// NOT ONE FIGURE IS TYPED IN. Everything below is computed in `app/bench.vyrn`
+// from the two committed JSON records, which is the rule the dataset arrived
+// with (RFC-0104) and the reason this page can be a claim at all.
+import { Head } from "std/ui"
+import { pageHeadOf } from "../nav"
+import { programs, contestants, radarBox, radarCx, radarCy, radarRings, radarSpokes, radarLines, tableRows, ratioWay, axisPanels, panelBars, panelNote, panelSpeed, panelMemLine, benchMachine, benchRuns, envRows, Prog, Series, Ring, Spoke, Line, Mark, Reading, Row, Panel, BarRow } from "../bench"
+import { TreeGroup, docSubnav } from "../docshell"
+
+export fn head() -> Head {
+    return pageHeadOf("/benchmarks")
+}
+
+/// Which way a cell's ratio points, against each baseline. A template
+/// attribute is delimited by the same quote a String literal is, and `'c'` in
+/// Vyrn is a byte — so the baseline's name is written here.
+fn wayC(program: String, engine: String) -> String {
+    return ratioWay(program, engine, "c")
+}
+
+fn wayRust(program: String, engine: String) -> String {
+    return ratioWay(program, engine, "rust")
+}
+
+/// The width of one engine's bar, as the percentage the record measured. A
+/// template attribute is delimited by the same quote a String literal is, so
+/// the style string is built here.
+fn barStyle(pct: String) -> String {
+    return "width: " + pct + "%"
+}
+</script>
+
+<template>
+<main class="page benchpage">
+    <section class="hero benchhero">
+        <p class="eyebrow">Measured</p>
+        <h1 class="display">Eight programs, five engines,<br/>one machine, one afternoon.</h1>
+        <p class="lede">The Benchmarks Game programs, written five ways — plain C, safe Rust, plain node, Vyrn native and Vyrn as WebAssembly — run on one machine and published whole. Where Vyrn is behind, the cause is named.</p>
+        <p class="pkgmeta">{{ benchMachine() }} · medians of {{ benchRuns() }}</p>
+    </section>
+
+    <section class="band" id="programs">
+        <p class="eyebrow">program by program</p>
+        <div class="benchgrid">
+            <article class="benchcard" v-for="p in axisPanels()" :key="p.key" :id="p.key">
+                <h3>{{ p.name }}<span class="size">{{ p.n }}</span></h3>
+                <p class="what">{{ panelNote(p.key) }}</p>
+                <ul class="bars">
+                    <li v-for="b in panelBars(p.key)" :key="b.key" :data-tone="b.tone">
+                        <span class="who">{{ b.name }}</span>
+                        <span class="track"><span class="fill" :style="barStyle(b.pct)"></span></span>
+                        <span class="ms">{{ b.ms }}</span>
+                    </li>
+                </ul>
+                <p class="bfoot">
+                    <span class="bspeed">{{ panelSpeed(p.key) }}</span>
+                    <span class="bram">RAM {{ panelMemLine(p.key) }}</span>
+                </p>
+                <p class="bcause">{{ p.label }}</p>
+            </article>
+        </div>
+    </section>
+
+    <section class="band" id="radar">
+        <p class="eyebrow">all of it at once</p>
+        <h2>Further from the centre is slower</h2>
+        <p>One axis per program, one polygon per engine. A small shape is a fast one; a reading past the rim is drawn at the rim with a stroke continuing outward.</p>
+        <div class="plate" data-widget="radar">
+            <div class="plate-head">
+                <span class="eyebrow">rfcs/bench-0104/results/2026-08-19-v2.json</span>
+                <span class="spacer"></span>
+                <div class="controls" role="group" aria-label="Normalize the chart to">
+                    <button type="button" data-norm="c" aria-pressed="true">C = 1</button>
+                    <button type="button" data-norm="rust" aria-pressed="false">Rust = 1</button>
+                </div>
+            </div>
+            <div class="stage">
+                <svg class="chart radar" :viewBox="radarBox()" role="img" aria-label="A radar with one axis per Benchmarks Game program and one polygon per contestant. Every reading it plots is in the table below it.">
+                    <g class="axis">
+                        <polygon v-for="r in radarRings()" :key="r.id" :class="r.tone" :points="r.points"/>
+                        <line v-for="s in radarSpokes()" :key="s.key" :x1="radarCx()" :y1="radarCy()" :x2="s.x" :y2="s.y"/>
+                        <text v-for="r in radarRings()" :key="r.id" :x="radarCx()" :y="r.y" dx="6" dy="-3">{{ r.label }}</text>
+                    </g>
+                    <g class="series" v-for="l in radarLines()" :key="l.key" :data-series="l.key">
+                        <polygon :class="l.tone" :points="l.points" :data-alt="l.alt"/>
+                        <g class="marks" data-norm="c">
+                            <path v-for="m in l.marks" :key="m.id" class="offscale" :d="m.d"><title>{{ l.name }} — {{ m.title }}</title></path>
+                        </g>
+                        <g class="marks" data-norm="rust">
+                            <path v-for="m in l.altMarks" :key="m.id" class="offscale" :d="m.d"><title>{{ l.name }} — {{ m.title }}</title></path>
+                        </g>
+                    </g>
+                    <g class="wedges">
+                        <polygon v-for="s in radarSpokes()" :key="s.key" class="wedge" :points="s.wedge" :data-axis-hit="s.key"><title>{{ s.name }}</title></polygon>
+                    </g>
+                    <g class="names">
+                        <text v-for="s in radarSpokes()" :key="s.key" :x="s.lx" :y="s.ly" :text-anchor="s.anchor" :data-axis-name="s.key">{{ s.name }}</text>
+                    </g>
+                </svg>
+            </div>
+            <div class="serieskeys" role="group" aria-label="Show or hide a contestant">
+                <button type="button" v-for="s in contestants()" :key="s.key" :class="s.tone" :data-series-toggle="s.key" aria-pressed="true">{{ s.name }}</button>
+            </div>
+            <p class="cap">The radial axis is log2 around the baseline — the rim is sixteen times it.</p>
+        </div>
+    </section>
+
+    <section class="band" id="table">
+        <p class="eyebrow">the same thing, as a table</p>
+        <h2>How long each engine took, against C and against Rust</h2>
+        <p>Every cell is a <em>time</em>, divided by the baseline's time on the same program. <b>1.00x is the baseline itself</b>; under 1 is faster than it, over 1 is slower. So <code>0.74x C</code> means three quarters of C's time, and <code>1.35x Rust</code> means a third longer than Rust.</p>
+        <p class="legend"><span class="key ahead">under 1 — faster</span><span class="key level">about 1 — level</span><span class="key behind">over 1 — slower</span></p>
+        <div class="scroller">
+        <table class="matrix bench">
+            <thead>
+                <tr>
+                    <th>Program</th>
+                    <th>N</th>
+                    <th v-for="s in contestants()" :key="s.key"><span :class="s.tone">{{ s.name }}</span></th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr v-for="r in tableRows()" :key="r.key">
+                    <th scope="row">{{ r.name }}</th>
+                    <td class="n">{{ r.n }}</td>
+                    <td v-for="c in r.cells" :key="c.key">
+                        <span class="ms" :data-way="wayC(r.key, c.key)">{{ c.vsC }} C</span>
+                        <span class="norm" :data-way="wayRust(r.key, c.key)">{{ c.vsRust }} Rust</span>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+        </div>
+    </section>
+
+    <section class="band" id="method">
+        <p class="eyebrow">how this was measured</p>
+        <h2>The method, and what it does not claim</h2>
+        <ul class="docprose">
+            <li>Eight of the ten Benchmarks Game programs. The other two are absent because the language cannot express them, which is recorded rather than worked around.</li>
+            <li>The C is plain C11, the Rust is safe and standard-library only, the JavaScript is plain node. No intrinsics and no threads in any of them.</li>
+            <li>All five printed the same bytes before anything was timed.</li>
+            <li>Medians of {{ benchRuns() }} runs, every engine at its own defaults, one machine, one afternoon.</li>
+            <li>CI does not run this harness — it needs clang, rustc, node and wasmtime together — so it is run by hand and the committed JSON is the record.</li>
+            <li>Nothing here claims a trend over time: <code>vyrn bench</code> and the <code>bench</code> blocks are the per-operation instrument, and their baseline is an unseeded placeholder.</li>
+        </ul>
+        <div class="scroller">
+            <table class="matrix">
+                <tr v-for="r in envRows()" :key="r[0]"><th scope="row">{{ r[0] }}</th><td>{{ r[1] }}</td></tr>
+            </table>
+        </div>
+    </section>
+</main>
+</template>

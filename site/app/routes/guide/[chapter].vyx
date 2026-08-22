@@ -12,6 +12,9 @@ import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
 import { pageHead } from "../../nav"
 import { Chapter, Section, chapterArea, chapterCount, chapterOf, chapterKnown, chapterNumber, chapterHref, chapterNavHtml, sectionBody, sectionEyebrow } from "../../guide"
 import { mdUrl, askClaudeUrl } from "../../pagemd"
+// The one chapter that compares languages draws its plates from here; every
+// other section's illustration is a program this site ran.
+import { Snippet, specSet } from "../../snippets"
 import { inlineCode } from "../../code"
 // THE DOCS SHELL (RFC-0106 M4). The same three panes the reference wears: the
 // book's contents on the left, this chapter's sections on the right, the chapter
@@ -100,6 +103,15 @@ fn claudeHref(slug: String, title: String) -> String {
         <p class="eyebrow">{{ sectionEyebrow(data.chapter, s) }}</p>
         <h2>{{ s.heading }}</h2>
         <div v-html="sectionBody(s)"></div>
+        <!-- The same task in four languages, for the chapter a reader opens
+             before they have written any Vyrn. The three others are QUOTED —
+             this site runs Vyrn and does not pretend to run the rest. -->
+        <div class="specrow" v-if="s.specs.byteLength > 0">
+            <figure class="specplate" v-for="n in specSet(s.specs)" :key="n.id">
+                <figcaption>{{ n.label }}</figcaption>
+                <pre class="code" v-html="n.html"></pre>
+            </figure>
+        </div>
     </section>
 
     <nav class="pager" aria-label="Chapters" v-html="chapterNavHtml(data.chapter.slug)"></nav>

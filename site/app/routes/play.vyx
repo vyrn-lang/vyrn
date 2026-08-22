@@ -41,8 +41,15 @@ fn examples() -> Array<Example> {
          owns its children: the editor's window is a grid of its own. -->
     <div class="idewrap">
         <aside class="ideside" aria-label="Files">
-            <p class="sidehead">Explorer
+            <!-- The header names which project is open. A shared link opens
+                 the sender's in a scope of its own — a project like any
+                 other, save that it is not written into the reader's files
+                 until they keep it (user: no bar, and it belongs to the
+                 window, not to one editor group). -->
+            <p class="sidehead"><span data-play-scope>Explorer</span>
                 <span class="sideacts">
+                    <button type="button" class="sideact sharedonly" data-play-keep aria-label="Save this project to my files" title="Save this project to my files" data-ico="download"></button>
+                    <button type="button" class="sideact sharedonly" data-play-discard aria-label="Close the shared project" title="Close the shared project" data-ico="close"></button>
                     <button type="button" class="sideact" data-play-newfile aria-label="New file (Alt+Insert)" title="New file (Alt+Insert)" data-ico="file-plus"></button>
                     <button type="button" class="sideact" data-play-newfolder aria-label="New folder" title="New folder" data-ico="folder-plus"></button>
                     <button type="button" class="sideact" data-play-upload aria-label="Upload files" title="Upload files" data-ico="upload"></button>

@@ -126,14 +126,19 @@ test("each page carries exactly the glyphs its templates name", async () => {
   }
 
   const pages = await htmlFiles(out);
-  assert.ok(pages.length > 100, `the export looks empty: ${pages.length} pages`);
+  // The consumer site's own pages: the design record's hundred left with the
+  // backstage (RFC-0106 M5).
+  assert.ok(pages.length > 60, `the export looks empty: ${pages.length} pages`);
   let shellPages = 0;
   for (const p of pages) {
     const html = await readFile(p, "utf8");
     const wearsShell = html.includes(SHELL_MARK);
     const expected = (wearsShell ? shell : []).concat(own[path.basename(p)] || []);
     if (wearsShell) shellPages += 1;
-    if (html.includes('class="page docs')) {
+    // THE SUBNAV IS WHAT ADDS GLYPHS, not the three-pane shell: the band
+    // carries one per documentation area, and `/benchmarks` wears the band
+    // without wearing the panes (RFC-0106 M5 round 22).
+    if (html.includes('class="page docs') || html.includes('<nav class="subnav"')) {
       // A docs-shell page also draws the generator-imported glyphs — subnav
       // rows and tree-group headers, a count the tree's own shape decides.
       // The floor is the templates' own count; the global test below still
