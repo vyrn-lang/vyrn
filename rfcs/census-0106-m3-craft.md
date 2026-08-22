@@ -615,3 +615,10 @@ generated (it collides with the keyword when the module is emitted) — a
 `std/icons` gap worth its own row. (6) The right pane hangs off the tree's
 own rail: indented rows, accent segment for the current heading, export
 names in the code face but muted and unboxed.
+
+**R14 (orchestrator, three more user rows).** The masthead's Reference row
+retired — the subnav owns the documentation's areas, and every documentation
+page marks Docs in the masthead now, one marker per bar. The crumb row is one
+line by construction: the crumbs shrink and ellipsize before the row wraps.
+And the right pane joined the scroll spy — the margin rail's own moving
+marker, on the shell's "On this page".

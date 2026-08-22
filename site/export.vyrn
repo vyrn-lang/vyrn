@@ -166,14 +166,16 @@ fn currentNav(path: String) -> String {
     if path == "/install" {
         return hrefOf("/install")
     }
-    if startsWith(path, "/docs/std/") {
-        return hrefOf("/docs")
+    if path == "/docs" || startsWith(path, "/docs/std/") {
+        // The masthead's Reference row retired with the subnav's arrival: the
+        // whole documentation marks Docs, and the subnav says which area.
+        return hrefOf("/guide")
     }
     // `/docs/graph` is the reference's own drawing, moved off the landing by
     // RFC-0106 M4. It marks Reference, which is the row its URL and its group
     // both name — unlike the page below it.
     if path == "/docs/graph" {
-        return hrefOf("/docs")
+        return hrefOf("/guide")
     }
     if startsWith(path, "/docs/") {
         // `/docs/editors` has a URL under the reference and belongs to the BOOK.
@@ -1007,11 +1009,11 @@ test "both fronts carry the theme control, and carry it without a flash" {
     }
 }
 
-test "a reference page marks Reference, an editors page marks Docs, the home page nothing" {
-    // The five rows, and the two that are labels over a path that says something
-    // else (RFC-0106 M1).
-    assertEq(currentNav("/docs"), "/docs.html")
-    assertEq(currentNav("/docs/std/json"), "/docs.html")
+test "every documentation page marks Docs, and the home page nothing" {
+    // One masthead row for the whole documentation; the subnav below it names
+    // the area (RFC-0106 M4 follow-up).
+    assertEq(currentNav("/docs"), "/guide.html")
+    assertEq(currentNav("/docs/std/json"), "/guide.html")
     assertEq(currentNav("/guide"), "/guide.html")
     // The page whose URL is under the reference and whose GROUP is the book. M0's
     // map made it so, and this is the line that decides which one the reader is
@@ -1027,9 +1029,9 @@ test "a reference page marks Reference, an editors page marks Docs, the home pag
 }
 
 test "the marker lands on the navigation, not on the first link in the body" {
-    let nav = "<a href=\"/docs.html\" data-key=\"/docs.html\">Reference</a>"
+    let nav = "<a href=\"/guide.html\" data-key=\"/guide.html\">Docs</a>"
     let body = "<p>" + nav + "</p>"
-    assertEq(markCurrent(nav + body, "/docs"), "<a href=\"/docs.html\" data-key=\"/docs.html\" aria-current=\"page\">Reference</a>" + body)
+    assertEq(markCurrent(nav + body, "/docs"), "<a href=\"/guide.html\" data-key=\"/guide.html\" aria-current=\"page\">Docs</a>" + body)
     // And it reaches an anchor that carries a third attribute — the call to
     // action does, and it is the only element that can be marked for `/install`.
     let cta = "<a href=\"/install.html\" data-key=\"/install.html\" class=\"cta\">Install</a>"

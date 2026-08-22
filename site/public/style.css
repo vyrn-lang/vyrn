@@ -940,7 +940,10 @@ button, .btn, summary, .ostabs label { user-select: none; }
 /* The doc page's header row: crumbs left, the page's tools right, one line —
  * where the notice box and the button paragraph used to spend 90px between
  * the title and the prose. */
-.crumbrow { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+/* ONE LINE (user): the crumbs shrink and ellipsize before the row ever
+ * wraps — the tools' place is the row's right end, on the crumbs' own line. */
+.crumbrow { display: flex; align-items: center; gap: var(--s2); }
+.crumbrow .crumbs { flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .crumbrow .crumbs { flex: 1; min-width: 0; }
 .docutils { display: flex; align-items: center; gap: var(--s2); margin: 0; font: 500 var(--t-mono)/1 var(--sans); }
 .docutils > a:not(.btn) { color: var(--muted); text-decoration: none; transition: color 140ms var(--expo); }

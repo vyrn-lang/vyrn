@@ -744,7 +744,10 @@ function keepInRail(link) {
 
 function railSpy() {
   railLinks = [];
-  const rail = $(".rail");
+  // The docs shell's right pane is the same device as the margin rail, and
+  // gets the same moving marker (user: "On this page should highlight the
+  // current section").
+  const rail = $(".rail") || $(".onpage");
   if (!rail) return;
   for (const link of $$('a[href^="#"]', rail)) {
     const section = document.getElementById(decodeURIComponent(link.getAttribute("href").slice(1)));
