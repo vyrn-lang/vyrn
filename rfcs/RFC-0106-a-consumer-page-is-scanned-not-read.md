@@ -2666,6 +2666,26 @@ Four more user directions on rounds 3-4's work:
   page — and About left entirely: what the page has to say about itself is
   four sentences on the status bar's `(?)` title, and the engine label the
   status bar led with is gone. The page does not scroll at all.
+- **Round 7, against jsr.io's package page:** the header at reading size —
+  the name inline with its kind badge, the sentence, one line of numbers —
+  where the poster hero had spent 450px saying one word. The rail is the
+  registry rail jsr taught: *add package*, *import*, *symbols* (the export
+  chips moved out of the main column), with the two file shapes still behind
+  their details. The main column is the overview line and the two tables. The
+  landing's search gained jsr's hint line: `kind:` narrows, an export's name
+  finds its package.
+- **Round 8, against the editor's own screenshot:** the panel got REAL tabs —
+  Problems (count badge), Output, Input (stdin left its details for a pane) —
+  and the run moves the selection itself: a MutationObserver on the diags
+  pane's own `hidden` and children switches to Problems when the compiler
+  produced any and back to Output when they clear, with the count mirrored on
+  the status bar's `⊗`. A breadcrumb row names the open file. The minimap is
+  the program itself at two pixels a line with the viewport drawn from the
+  textarea's scroll geometry — pressing it scrolls there. The explorer's
+  section is a real disclosure with a turning chevron. And the status bar
+  became the QUIET strip the screenshot shows — the accent-filled bar of
+  round 4 was a flare no editor wears; the compiler status moved down onto
+  it, where the language server's indicator lives in the original.
 - The Git Bash quoted heredoc EATS A BACKSLASH: `\n` in a here-document
   reached Python as `
 ` and round 4 shipped two raw newlines inside

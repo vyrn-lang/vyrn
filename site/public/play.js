@@ -414,6 +414,15 @@ export function mountPlay(root, opts = {}) {
   const lncol = $("[data-play-lncol]", root);
   const files = $$("[data-play-file]", root);
   const tabsBox = $("[data-play-tabs]", root);
+  const crumbs = $("[data-play-crumbs]", root);
+  const minimap = $("[data-play-minimap]", root);
+  const mmtext = $("[data-play-mmtext]", root);
+  const mmview = $("[data-play-mmview]", root);
+  const ptabs = $$("[data-play-ptab]", root);
+  const panes = $$("[data-play-pane]", root);
+  const badge = $("[data-play-badge]", root);
+  const errsEl = $("[data-play-errs]", root);
+  const noprob = $("[data-play-noprob]", root);
 
   // One buffer per open file: the text as the reader left it. `__shared` is
   // the tab a `#c=` link opens, and its baseline is the link's own program.
@@ -432,6 +441,10 @@ export function mountPlay(root, opts = {}) {
   let sharedBaseline = "";
 
   function renderTabs() {
+    if (crumbs) {
+      const t = tabs.find((x) => x.id === active);
+      crumbs.textContent = t ? "examples \u203a " + t.name : "examples";
+    }
     if (!tabsBox) return;
     tabsBox.textContent = "";
     for (const t of tabs) {
@@ -522,12 +535,64 @@ export function mountPlay(root, opts = {}) {
         else f.removeAttribute("aria-current");
       }
     }
+    if (mmtext) {
+      // The minimap is the program itself, two pixels a line; the viewport
+      // block is drawn from the textarea's own scroll geometry.
+      if (mmtext.textContent !== input.value) mmtext.textContent = input.value;
+      if (mmview) {
+        const mapH = mmtext.scrollHeight;
+        mmview.style.top = (input.scrollTop / input.scrollHeight) * mapH + "px";
+        mmview.style.height = Math.max(12, (input.clientHeight / input.scrollHeight) * mapH) + "px";
+      }
+    }
+  }
+
+  /// The panel shows one pane; the tabs are buttons and the run moves the
+  /// selection itself: problems when the compiler produced any, back to
+  /// output when they clear.
+  function showPane(k) {
+    for (const t of ptabs) t.classList.toggle("on", t.dataset.playPtab === k);
+    for (const p of panes) p.hidden = p.dataset.playPane !== k;
   }
 
   for (const f of files) {
     f.addEventListener("click", () => {
       openFile(f.dataset.playFile, f.textContent);
       history.replaceState(null, "", location.pathname);
+    });
+  }
+
+  for (const t of ptabs) t.addEventListener("click", () => showPane(t.dataset.playPtab));
+  if (ptabs.length && diagPane) {
+    const syncProblems = () => {
+      const n = diagPane.hidden ? 0 : diagPane.children.length;
+      if (badge) {
+        badge.textContent = n;
+        badge.hidden = n === 0;
+      }
+      if (errsEl) errsEl.textContent = n;
+      if (noprob) noprob.hidden = n > 0;
+      const onProblems = ptabs.some((t) => t.dataset.playPtab === "problems" && t.classList.contains("on"));
+      if (n > 0) showPane("problems");
+      else if (onProblems) showPane("output");
+    };
+    new MutationObserver(syncProblems).observe(diagPane, { childList: true, attributes: true, attributeFilter: ["hidden"] });
+    syncProblems();
+  }
+  if (minimap) {
+    const jump = (e) => {
+      const rect = minimap.getBoundingClientRect();
+      const mapH = Math.min(rect.height, mmtext ? mmtext.scrollHeight : rect.height);
+      const frac = Math.max(0, Math.min(1, (e.clientY - rect.top) / mapH));
+      input.scrollTop = frac * input.scrollHeight - input.clientHeight / 2;
+      syncFrame();
+    };
+    minimap.addEventListener("pointerdown", (e) => {
+      jump(e);
+      e.preventDefault();
+    });
+    minimap.addEventListener("pointermove", (e) => {
+      if (e.buttons & 1) jump(e);
     });
   }
 
@@ -544,6 +609,10 @@ export function mountPlay(root, opts = {}) {
     input.addEventListener("click", syncFrame);
     input.addEventListener("scroll", () => {
       if (gutter) gutter.scrollTop = input.scrollTop;
+      if (mmview && mmtext) {
+        const mapH = mmtext.scrollHeight;
+        mmview.style.top = (input.scrollTop / input.scrollHeight) * mapH + "px";
+      }
     });
     if (resetBtn) resetBtn.addEventListener("click", () => setTimeout(() => {
       if (tabsBox && active !== null) buffers.set(active, input.value);

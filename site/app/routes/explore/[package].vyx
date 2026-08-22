@@ -56,35 +56,24 @@ fn buildLabel(d: Package) -> String {
 
 <template>
 <main class="page pkg">
-    <section class="hero pkghead">
-        <p class="eyebrow"><a href="/explore.html">Registry</a> — {{ data.kind }}</p>
-        <h1 class="display">{{ data.name }}</h1>
+    <!-- The header a package index gives a package (user, off jsr.io): the
+         name at reading size with its badge beside it, the sentence, and the
+         numbers - not a poster. -->
+    <section class="pkghead">
+        <p class="eyebrow"><a href="/explore.html">Registry</a></p>
+        <div class="pkgtitle">
+            <h1>{{ data.name }}</h1>
+            <span class="kindpill">{{ data.kind }}</span>
+        </div>
         <p class="lede" v-html="data.summary"></p>
+        <p class="pkgmeta">{{ unitLabel(data) }} · {{ depLabel(data) }} · <a :href="packageSource(data.slug)">source</a></p>
     </section>
 
     <section class="band pkgbody">
         <div class="pkgmain">
-            <div class="pkgblock" id="use">
-                <p class="eyebrow">import it</p>
-                <p>The alias is a bare specifier the manifest maps, so the module reads like any other:</p>
-                <div class="cmd" data-copy>
-                    <code>{{ importFrom(data.slug) }}</code>
-                    <button type="button" data-copy-btn aria-label="Copy it">Copy</button>
-                </div>
-            </div>
-
             <div class="pkgblock" id="api">
-                <p class="eyebrow">what it gives</p>
-                <h2>{{ unitLabel(data) }}</h2>
-                <dl class="specs">
-                    <div>
-                        <dt>Exports</dt>
-                        <dd class="links">
-                            <code v-for="e in offerOf(data.slug).exports" :key="e">{{ e }}</code>
-                        </dd>
-                    </div>
-                </dl>
-                <p class="cap">Read off <code>{{ data.name }}/{{ offerOf(data.slug).path }}</code> — the module the specifier names — while this page was built. Any other module in the tree takes the same specifier with its own path in it.</p>
+                <p class="eyebrow">overview</p>
+                <p>The specifier names <code>{{ offerOf(data.slug).path }}</code> — the module with the most exports this project does not itself build from. Any other module in the tree takes the same specifier with its own path in it, and each file arrives with a lock line of its own.</p>
             </div>
 
             <div class="pkgblock" id="builds">
@@ -125,12 +114,12 @@ fn buildLabel(d: Package) -> String {
 
         <aside class="pkgside">
             <div class="regcard">
-                <p class="eyebrow">install</p>
+                <p class="eyebrow">add package</p>
                 <div class="cmd" data-copy>
                     <code :data-spec="offerOf(data.slug).spec">{{ addCommand(data.slug) }}</code>
                     <button type="button" data-copy-btn aria-label="Copy it">Copy</button>
                 </div>
-                <p class="cap">Fetches once, pins the sha256 in <code>vyrn.lock</code>, writes the alias into <code>vyrn.json</code>. The ref is <code>main</code>; write a <a href="/releases.html">release tag</a> instead and everything else is the same.</p>
+                <p class="cap">Fetches once, pins the sha256 in <code>vyrn.lock</code>, writes the alias into <code>vyrn.json</code>. The ref is <code>main</code>; a <a href="/releases.html">release tag</a> works the same.</p>
                 <details class="writes">
                     <summary>What the command writes</summary>
                     <p><code>vyrn.json</code> gains the alias your <code>import</code> lines use:</p>
@@ -144,8 +133,19 @@ fn buildLabel(d: Package) -> String {
                 <p class="cap"><a href="/tooling/projects.html">How installing works</a>.</p>
             </div>
             <div class="regcard">
-                <p class="eyebrow">source</p>
-                <p class="cap"><a :href="packageSource(data.slug)">{{ data.name }}/</a> — the one thing this site does not host.</p>
+                <p class="eyebrow">import</p>
+                <div class="cmd" data-copy>
+                    <code>{{ importFrom(data.slug) }}</code>
+                    <button type="button" data-copy-btn aria-label="Copy it">Copy</button>
+                </div>
+                <p class="cap">The alias is a bare specifier the manifest maps.</p>
+            </div>
+            <div class="regcard">
+                <p class="eyebrow">symbols</p>
+                <p class="syms">
+                    <code v-for="e in offerOf(data.slug).exports" :key="e">{{ e }}</code>
+                </p>
+                <p class="cap">{{ unitLabel(data) }}, read off <code>{{ offerOf(data.slug).path }}</code> while this page was built.</p>
             </div>
         </aside>
     </section>

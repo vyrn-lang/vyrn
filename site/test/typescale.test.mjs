@@ -66,6 +66,9 @@ const SCALE = {
   "--t-eyebrow": "12px",
   "--t-key": "11px",
   "--t-tick": "10px",
+  // The playground's minimap: the program as texture, deliberately unreadable
+  // (RFC-0106 M5 round 8).
+  "--t-minimap": "2px",
   // The two chart steps are USER UNITS inside a `viewBox`, not pixels on a
   // screen: what a reader gets is the number times the chart's own scale, which
   // `svg.chart`'s `max-width` and the phone scroller bound to [0.73, 1.0]

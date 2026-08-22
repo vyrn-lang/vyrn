@@ -57,6 +57,7 @@ fn exportsOf(p: Package) -> String {
             <input type="search" data-search-input placeholder="Search — a name, an export, kind:project" autocomplete="off" spellcheck="false" aria-label="Search packages"/>
             <span class="count" data-search-count data-search-noun="package">{{ packages().length }}</span>
         </div>
+        <p class="reghint">Hint: <code>kind:project</code> narrows by kind, and an export's name — <code>addBook</code> — finds the package that offers it.</p>
     </section>
 
     <section class="band">

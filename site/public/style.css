@@ -123,6 +123,8 @@
   --t-note: 0.95rem; --t-meta: 0.92rem; --t-matrix: 0.9rem; --t-cap: 0.85rem;
   --t-mark: 15px; --t-cmd: 14px; --t-code: 13.5px; --t-code-s: 12.5px;
   --t-mono: 13px; --t-eyebrow: 12px; --t-key: 11px; --t-tick: 10px;
+  /* The playground's minimap: the program as texture, deliberately unreadable. */
+  --t-minimap: 2px;
 
   /* THE TWO STEPS THAT ARE NOT PIXELS (RFC-0106 M3, fourth round).
    *
@@ -2836,6 +2838,16 @@ details.fallback td:first-child { white-space: nowrap; }
  * identity, then short blocks; the install command and the source in a side
  * card; the two file shapes behind one details. --- */
 .page.pkg > * { grid-column: 1 / 13; width: 100%; max-width: 64rem; margin-inline: auto; }
+/* The header at reading size (user, off jsr.io): name inline with its badge,
+ * one sentence, one line of numbers — the poster hero left. */
+.pkghead { padding: var(--s4) 0 var(--s3); }
+.pkgtitle { display: flex; align-items: baseline; gap: var(--s2); margin-top: var(--s1); }
+.pkgtitle h1 { margin: 0; font: 700 var(--t-h2)/1.15 var(--sans); letter-spacing: -0.01em; }
+.pkghead .lede { margin: var(--s1) 0 0; }
+.pkgmeta { margin: var(--s2) 0 0; font: var(--t-meta)/1 var(--mono); color: var(--muted); }
+.pkgblock h2 { font: 600 var(--t-h4)/1.3 var(--sans); }
+.pkgside .syms { display: flex; flex-wrap: wrap; gap: 6px; margin: var(--s1) 0 0; }
+.reghint { margin: var(--s1) 0 0; font: var(--t-meta)/1.5 var(--sans); color: var(--muted); }
 .pkgbody { display: grid; grid-template-columns: minmax(0, 1fr) 21rem; gap: var(--s4); align-items: start; }
 @media (max-width: 960px) { .pkgbody { grid-template-columns: 1fr; } }
 /* `minmax(0, 1fr)`, for the sheet's own reason: an implicit `auto` track's
@@ -2869,8 +2881,11 @@ details.fallback td:first-child { white-space: nowrap; }
 .page.play.ide .idewrap { border-inline: 0; }
 .ideside { grid-row: 1 / 3; grid-column: 1; border-right: 1px solid var(--hair); background: color-mix(in oklab, var(--plate) 45%, transparent); overflow-y: auto; padding-bottom: var(--s2); }
 .sidehead { margin: 0; padding: 10px var(--s2) 8px; font: var(--t-eyebrow)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); }
-.sidesect { margin: 0; padding: 6px var(--s2) 4px; font: var(--t-eyebrow)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink); }
-.idefile { display: block; width: 100%; text-align: left; border: 0; background: none; cursor: pointer; padding: 5px var(--s2) 5px calc(var(--s2) + 10px); font: var(--t-code-s)/1.5 var(--mono); color: var(--muted); }
+.sidetree summary { list-style: none; cursor: pointer; padding: 5px var(--s2) 4px; font: var(--t-eyebrow)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink); display: flex; align-items: center; gap: 5px; }
+.sidetree summary::-webkit-details-marker { display: none; }
+.sidetree .tw { display: inline-block; transition: transform 160ms var(--expo, ease); color: var(--muted); }
+.sidetree[open] .tw { transform: rotate(90deg); }
+.idefile { display: block; width: 100%; text-align: left; border: 0; background: none; cursor: pointer; padding: 4px var(--s2) 4px calc(var(--s2) + 18px); font: var(--t-code-s)/1.5 var(--mono); color: var(--muted); }
 .idefile:hover { color: var(--ink); background: color-mix(in oklab, var(--accent) 8%, transparent); }
 .idefile[aria-current="true"] { color: var(--ink); background: color-mix(in oklab, var(--accent) 14%, transparent); box-shadow: inset 2px 0 0 var(--accent); }
 .idemain { grid-row: 1; grid-column: 2; display: flex; flex-direction: column; min-height: 0; }
@@ -2889,7 +2904,9 @@ details.fallback td:first-child { white-space: nowrap; }
 .itab:hover .tclose, .itab.on .tclose { color: var(--muted); }
 .itab .tclose:hover { color: var(--ink); }
 .itab.dirty .tname::after { content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: var(--accent); vertical-align: middle; }
-.idebar .btn { margin-block: 5px; }
+.idebar .btn { margin-block: 4px; padding-block: 4px; font-size: var(--t-key); }
+/* The breadcrumb row, under the tabs: where the open file lives. */
+.idecrumbs { padding: 3px var(--s2); font: var(--t-key)/1.4 var(--mono); color: var(--muted); border-bottom: 1px solid var(--hair); background: var(--paper); }
 .ide .editor { flex: 1 1 auto; min-height: 0; margin: 0; border: 0; }
 .ide .editor textarea { height: 100%; min-height: 0; resize: none; }
 .ide .editor pre.hl { background: none; }
@@ -2897,24 +2914,31 @@ details.fallback td:first-child { white-space: nowrap; }
  * same grid the code sits on, scrolled by the textarea's own offset. */
 .ide .editor .gutter { position: absolute; inset: 0 auto 0 0; width: 3.4rem; overflow: hidden; padding: var(--s2) 10px var(--s2) 0; text-align: right; font: var(--t-code)/1.7 var(--mono); color: color-mix(in oklab, var(--muted) 55%, transparent); background: color-mix(in oklab, var(--plate) 35%, transparent); border-right: 1px solid var(--hair); user-select: none; }
 .ide .editor .gutter span { display: block; }
-.ide .editor pre.hl, .ide .editor textarea { padding-left: 4.2rem; }
+.ide .editor pre.hl, .ide .editor textarea { padding-left: 4.2rem; padding-right: calc(92px + var(--s2)); }
+.ide .minimap { position: absolute; inset: 0 0 0 auto; width: 92px; overflow: hidden; border-left: 1px solid var(--hair); background: color-mix(in oklab, var(--plate) 30%, transparent); cursor: pointer; user-select: none; }
+.ide .mmtext { margin: 0; padding: 2px 4px; font: var(--t-minimap)/1 var(--mono); letter-spacing: 0; color: color-mix(in oklab, var(--muted) 80%, transparent); white-space: pre; overflow: hidden; }
+.ide .mmview { position: absolute; left: 0; right: 0; background: color-mix(in oklab, var(--accent) 14%, transparent); pointer-events: none; }
 .idepanel { grid-row: 2; grid-column: 2; border-top: 1px solid var(--rule); display: flex; flex-direction: column; max-height: 16rem; overflow-y: auto; }
-.paneltabs { display: flex; gap: var(--s2); padding: 7px var(--s2) 6px; border-bottom: 1px solid var(--hair); font: var(--t-eyebrow)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); position: sticky; top: 0; background: var(--paper); }
-.paneltabs .ptab.output { color: var(--ink); box-shadow: 0 10px 0 -8px var(--accent); }
-/* Problems joins the strip only when the compiler produced some — the pane's
- * own `hidden`, which `play.js` toggles, is the one source of that state. */
-.paneltabs .ptab.problems { display: none; }
-.idepanel:has(.diags:not([hidden])) .ptab.problems { display: inline; color: var(--danger, var(--ink)); box-shadow: 0 10px 0 -8px var(--danger, var(--accent)); }
+.paneltabs { display: flex; gap: 2px; padding: 0 var(--s1); border-bottom: 1px solid var(--hair); background: var(--paper); }
+.ptab { border: 0; background: none; cursor: pointer; padding: 8px 10px 7px; font: var(--t-eyebrow)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+.ptab:hover { color: var(--ink); }
+.ptab.on { color: var(--ink); box-shadow: inset 0 -2px 0 var(--accent); }
+.ptab .badge { font: var(--t-key)/1 var(--mono); color: var(--paper); background: var(--danger, var(--accent)); border-radius: 8px; padding: 2px 6px; }
+.pane { min-height: 96px; }
 .ide .diags { margin: var(--s1) var(--s2) 0; }
-.ide .stdinbox { margin: var(--s1) var(--s2) 0; }
-.ide .out { margin: var(--s1) 0 0; border-left: 0; background: none; min-height: 72px; }
+.ide .out { margin: 0; border-left: 0; background: none; min-height: 72px; }
+.pane .cap { padding: var(--s1) var(--s2); margin: 0; }
+.pane textarea { display: block; width: 100%; border: 0; background: none; color: var(--ink); font: var(--t-code-s)/1.6 var(--mono); padding: var(--s1) var(--s2); min-height: 64px; resize: vertical; }
+.pane textarea:focus-visible { outline: 1px solid color-mix(in oklab, var(--accent) 45%, transparent); outline-offset: -1px; }
 /* The status bar: the one filled band on the page, because it is the one an
  * editor is recognised by. Small, mono, and every item on it is a fact. */
-.idestatus { grid-row: 3; grid-column: 1 / -1; display: flex; align-items: center; gap: var(--s3); padding: 4px var(--s2); background: var(--accent); color: var(--paper); font: var(--t-meta)/1.4 var(--mono); }
+.idestatus { grid-row: 3; grid-column: 1 / -1; display: flex; align-items: center; gap: var(--s3); padding: 4px var(--s2); background: color-mix(in oklab, var(--ink) 7%, var(--paper)); color: var(--muted); border-top: 1px solid var(--hair); font: var(--t-key)/1.4 var(--mono); }
+.idestatus .eyebrow { color: var(--muted); }
+.idestatus .errs { display: inline-flex; gap: 4px; align-items: center; }
 /* The one place the page explains itself: a (?) on the status bar whose
  * title is four sentences. Hover or focus it; there is no section to scroll
  * to, because an editor's window has nothing under it (user). */
-.idehelp { cursor: help; border: 1px solid color-mix(in oklab, var(--paper) 55%, transparent); border-radius: 50%; width: 15px; height: 15px; display: inline-flex; align-items: center; justify-content: center; font-size: var(--t-key); }
+.idehelp { cursor: help; border: 1px solid color-mix(in oklab, var(--muted) 55%, transparent); border-radius: 50%; width: 15px; height: 15px; display: inline-flex; align-items: center; justify-content: center; font-size: var(--t-key); }
 @media (max-width: 900px) {
   .idewrap { grid-template-columns: 1fr; height: auto; }
   .ideside { display: none; }
