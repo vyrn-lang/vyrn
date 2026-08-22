@@ -2832,6 +2832,25 @@ details.fallback td:first-child { white-space: nowrap; }
 .regrow .nums { margin-left: auto; font: var(--t-meta)/1 var(--mono); color: var(--muted); white-space: nowrap; }
 .reglist .d { display: block; color: var(--muted); margin-top: 4px; max-width: 60ch; }
 
+/* --- A package's page (round 5 — the long-band cut was "overloaded"): the
+ * identity, then short blocks; the install command and the source in a side
+ * card; the two file shapes behind one details. --- */
+.page.pkg > * { grid-column: 1 / 13; width: 100%; max-width: 64rem; margin-inline: auto; }
+.pkgbody { display: grid; grid-template-columns: minmax(0, 1fr) 21rem; gap: var(--s4); align-items: start; }
+@media (max-width: 960px) { .pkgbody { grid-template-columns: 1fr; } }
+/* `minmax(0, 1fr)`, for the sheet's own reason: an implicit `auto` track's
+ * floor is the widest min-content inside it, and one long `vyrn add` line
+ * pushed both columns over their neighbours. */
+.pkgmain { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s4); }
+.pkgblock h2 { margin: var(--s1) 0 var(--s2); }
+.pkgside { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s2); position: sticky; top: var(--s3); }
+.pkgside .cmd { margin-top: var(--s1); }
+.writes { margin-top: var(--s2); }
+.writes summary { cursor: pointer; color: var(--muted); font: var(--t-meta)/1.4 var(--sans); }
+.writes[open] summary { margin-bottom: var(--s1); }
+.writes p { margin: var(--s1) 0 0; color: var(--muted); font: var(--t-meta)/1.5 var(--sans); }
+.writes pre.code { margin-top: var(--s1); font-size: var(--t-code-s); }
+
 /* --- The playground as an editor's WINDOW (round 4 — the stacked boxes of
  * round 3 "weren't even close"): explorer, tab strip, numbered gutter, docked
  * panel with a state-reflecting tab strip, filled status bar. Spans the whole
@@ -2840,7 +2859,14 @@ details.fallback td:first-child { white-space: nowrap; }
 .page.play.ide > * { grid-column: 1 / 13; }
 /* `main.page` is `display: contents` — the shell grid owns its children — so
  * the window is a grid of its own. */
-.idewrap { display: grid; grid-template-columns: 14rem minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto auto; margin-top: var(--s3); border: 1px solid var(--rule); height: calc(100dvh - 180px); min-height: 30rem; }
+.idewrap { display: grid; grid-template-columns: 14rem minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto auto; border: 1px solid var(--rule); border-top: 0; height: calc(100dvh - 64px); min-height: 30rem; }
+/* An editor's window has no footer under it and no margin around it (user):
+ * the shell's foot and the sheet's bottom padding leave with it, and About
+ * sits below the fold for whoever scrolls. The masthead stays — 64px of it,
+ * which is what the height above subtracts. */
+#root:has(.page.play.ide) { max-width: none; padding: 0; }
+#root:has(.page.play.ide) .foot { display: none; }
+.page.play.ide .idewrap { border-inline: 0; }
 .ideside { grid-row: 1 / 3; grid-column: 1; border-right: 1px solid var(--hair); background: color-mix(in oklab, var(--plate) 45%, transparent); overflow-y: auto; padding-bottom: var(--s2); }
 .sidehead { margin: 0; padding: 10px var(--s2) 8px; font: var(--t-eyebrow)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); }
 .sidesect { margin: 0; padding: 6px var(--s2) 4px; font: var(--t-eyebrow)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink); }
@@ -2850,7 +2876,19 @@ details.fallback td:first-child { white-space: nowrap; }
 .idemain { grid-row: 1; grid-column: 2; display: flex; flex-direction: column; min-height: 0; }
 .idebar { display: flex; align-items: center; gap: var(--s1); padding: 0 var(--s1) 0 0; border-bottom: 1px solid var(--hair); background: color-mix(in oklab, var(--plate) 60%, transparent); }
 .idebar .spacer, .idestatus .spacer { flex: 1 1 auto; }
-.idetab { align-self: stretch; display: inline-flex; align-items: center; padding: 10px 14px; font: var(--t-eyebrow)/1 var(--mono); color: var(--ink); background: var(--paper); border-right: 1px solid var(--hair); box-shadow: inset 0 2px 0 var(--accent); }
+/* The open files, rendered by play.js: the active tab wears the paper and the
+ * accent keyline; a dirty tab wears the dot every editor gives unsaved work.
+ * The close button is real, and closing the last file opens the first. */
+.idetabs { display: flex; align-self: stretch; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.idetabs::-webkit-scrollbar { display: none; }
+.itab { display: inline-flex; align-items: stretch; border-right: 1px solid var(--hair); white-space: nowrap; }
+.itab .tname { border: 0; background: none; cursor: pointer; padding: 10px 4px 10px 14px; font: var(--t-eyebrow)/1 var(--mono); color: var(--muted); }
+.itab.on { background: var(--paper); box-shadow: inset 0 2px 0 var(--accent); }
+.itab.on .tname { color: var(--ink); }
+.itab .tclose { border: 0; background: none; cursor: pointer; padding: 0 10px 0 4px; font: var(--t-meta)/1 var(--mono); color: transparent; }
+.itab:hover .tclose, .itab.on .tclose { color: var(--muted); }
+.itab .tclose:hover { color: var(--ink); }
+.itab.dirty .tname::after { content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: var(--accent); vertical-align: middle; }
 .idebar .btn { margin-block: 5px; }
 .ide .editor { flex: 1 1 auto; min-height: 0; margin: 0; border: 0; }
 .ide .editor textarea { height: 100%; min-height: 0; resize: none; }
@@ -2873,9 +2911,10 @@ details.fallback td:first-child { white-space: nowrap; }
 /* The status bar: the one filled band on the page, because it is the one an
  * editor is recognised by. Small, mono, and every item on it is a fact. */
 .idestatus { grid-row: 3; grid-column: 1 / -1; display: flex; align-items: center; gap: var(--s3); padding: 4px var(--s2); background: var(--accent); color: var(--paper); font: var(--t-meta)/1.4 var(--mono); }
-.ideabout { margin: var(--s3) 0 var(--s4); }
-.ideabout summary { cursor: pointer; color: var(--muted); }
-.ideabout[open] summary { margin-bottom: var(--s2); }
+/* The one place the page explains itself: a (?) on the status bar whose
+ * title is four sentences. Hover or focus it; there is no section to scroll
+ * to, because an editor's window has nothing under it (user). */
+.idehelp { cursor: help; border: 1px solid color-mix(in oklab, var(--paper) 55%, transparent); border-radius: 50%; width: 15px; height: 15px; display: inline-flex; align-items: center; justify-content: center; font-size: var(--t-key); }
 @media (max-width: 900px) {
   .idewrap { grid-template-columns: 1fr; height: auto; }
   .ideside { display: none; }

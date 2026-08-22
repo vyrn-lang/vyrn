@@ -403,15 +403,101 @@ export function mountPlay(root, opts = {}) {
   }
 
   // -----------------------------------------------------------------------
-  // The editor window's frame (RFC-0106 M5 round 4). Three hooks the /play
-  // page carries and the hero editors do not, each queried and silently
-  // absent elsewhere: the explorer's file rows load the example they name,
-  // the gutter numbers the lines that exist, and the status bar's Ln/Col is
-  // the caret. Everything here reflects real state — the frame is an editor,
-  // not a picture of one.
+  // The editor window's frame (RFC-0106 M5 rounds 4-5). Hooks the /play page
+  // carries and the hero editors do not, each queried and silently absent
+  // elsewhere. Round 5 makes the frame BEHAVE like the editor it resembles
+  // (user): explorer rows open TABS, every tab keeps its own buffer of edits
+  // with a dirty mark and a close button, Enter keeps the line's indentation
+  // (one level deeper after `{`), the gutter numbers the lines that exist and
+  // Ln/Col is the caret. Everything reflects real state.
   const gutter = $("[data-play-gutter]", root);
   const lncol = $("[data-play-lncol]", root);
   const files = $$("[data-play-file]", root);
+  const tabsBox = $("[data-play-tabs]", root);
+
+  // One buffer per open file: the text as the reader left it. `__shared` is
+  // the tab a `#c=` link opens, and its baseline is the link's own program.
+  const buffers = new Map();
+  let tabs = [];
+  let active = null;
+
+  function exampleSrc(id) {
+    const e = examples.get(id);
+    return e ? e.src : "";
+  }
+
+  function baselineOf(id) {
+    return id === "__shared" ? sharedBaseline : exampleSrc(id);
+  }
+  let sharedBaseline = "";
+
+  function renderTabs() {
+    if (!tabsBox) return;
+    tabsBox.textContent = "";
+    for (const t of tabs) {
+      const box = document.createElement("span");
+      box.className = "itab" + (t.id === active ? " on" : "");
+      const held = buffers.get(t.id);
+      if (held !== undefined && held !== baselineOf(t.id)) box.classList.add("dirty");
+      const name = document.createElement("button");
+      name.type = "button";
+      name.className = "tname";
+      name.textContent = t.name;
+      name.addEventListener("click", () => activate(t.id));
+      const close = document.createElement("button");
+      close.type = "button";
+      close.className = "tclose";
+      close.setAttribute("aria-label", "Close " + t.name);
+      close.textContent = "\u00d7";
+      close.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        closeTab(t.id);
+      });
+      box.append(name, close);
+      tabsBox.append(box);
+    }
+  }
+
+  function stash() {
+    if (active !== null) buffers.set(active, input.value);
+  }
+
+  function activate(id) {
+    stash();
+    active = id;
+    const held = buffers.get(id);
+    input.value = held !== undefined ? held : baselineOf(id);
+    // `Reset` puts back the tab's own baseline, not another tab's.
+    original = baselineOf(id);
+    const e = examples.get(id);
+    if (stdin) stdin.value = e ? e.stdin : "";
+    if (stdinBox) stdinBox.open = Boolean(e && e.stdin.length > 0);
+    edited();
+    renderTabs();
+    syncFrame();
+  }
+
+  function openFile(id, name) {
+    if (!tabs.some((t) => t.id === id)) tabs.push({ id, name });
+    activate(id);
+  }
+
+  function closeTab(id) {
+    const at = tabs.findIndex((t) => t.id === id);
+    tabs.splice(at, 1);
+    buffers.delete(id);
+    if (active === id) {
+      active = null;
+      const next = tabs[at] || tabs[at - 1];
+      if (next) activate(next.id);
+      else if (files.length) openFile(files[0].dataset.playFile, files[0].textContent);
+      else {
+        input.value = "";
+        edited();
+      }
+    }
+    renderTabs();
+  }
 
   function syncFrame() {
     if (gutter) {
@@ -430,9 +516,9 @@ export function mountPlay(root, opts = {}) {
       const before = input.value.slice(0, input.selectionStart).split("\n");
       lncol.textContent = "Ln " + before.length + ", Col " + (before[before.length - 1].length + 1);
     }
-    if (files.length && picker) {
+    if (files.length) {
       for (const f of files) {
-        if (f.dataset.playFile === picker.value) f.setAttribute("aria-current", "true");
+        if (f.dataset.playFile === active) f.setAttribute("aria-current", "true");
         else f.removeAttribute("aria-current");
       }
     }
@@ -440,21 +526,73 @@ export function mountPlay(root, opts = {}) {
 
   for (const f of files) {
     f.addEventListener("click", () => {
-      if (picker) picker.value = f.dataset.playFile;
-      load(f.dataset.playFile);
+      openFile(f.dataset.playFile, f.textContent);
       history.replaceState(null, "", location.pathname);
-      syncFrame();
     });
   }
-  if (gutter || lncol || files.length) {
-    input.addEventListener("input", syncFrame);
+
+  if (gutter || lncol || files.length || tabsBox) {
+    input.addEventListener("input", () => {
+      if (tabsBox && active !== null) {
+        buffers.set(active, input.value);
+        const on = tabsBox.querySelector(".itab.on");
+        if (on) on.classList.toggle("dirty", input.value !== baselineOf(active));
+      }
+      syncFrame();
+    });
     input.addEventListener("keyup", syncFrame);
     input.addEventListener("click", syncFrame);
     input.addEventListener("scroll", () => {
       if (gutter) gutter.scrollTop = input.scrollTop;
     });
-    if (resetBtn) resetBtn.addEventListener("click", () => setTimeout(syncFrame));
-    syncFrame();
+    if (resetBtn) resetBtn.addEventListener("click", () => setTimeout(() => {
+      if (tabsBox && active !== null) buffers.set(active, input.value);
+      renderTabs();
+      syncFrame();
+    }));
+
+    // Enter keeps the line's indentation, one level deeper after an opening
+    // brace — and a `}` already under the caret gets its own dedented line.
+    // `setRangeText` fires no input event, so the one listener above is
+    // invoked by hand through a synthetic one.
+    input.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || e.isComposing) return;
+      e.preventDefault();
+      const at = input.selectionStart;
+      const before = input.value.slice(0, at);
+      const line = before.slice(before.lastIndexOf("\n") + 1);
+      const indent = (line.match(/^ */) || [""])[0];
+      const opened = /\{\s*$/.test(line);
+      const closingNext = input.value.slice(input.selectionEnd).startsWith("}");
+      let insert = "\n" + indent + (opened ? "  " : "");
+      if (opened && closingNext) insert += "\n" + indent;
+      const caret = at + 1 + indent.length + (opened ? 2 : 0);
+      input.setRangeText(insert, at, input.selectionEnd, "end");
+      input.selectionStart = input.selectionEnd = caret;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    // The first tab. A `#c=` link opens as its own file; the tail of this
+    // mount handles the hash AFTER this block runs, so the frame waits a
+    // microtask and reads what it decided.
+    queueMicrotask(() => {
+      if (!tabsBox) {
+        syncFrame();
+        return;
+      }
+      if (location.hash.startsWith("#c=") && input.value) {
+        sharedBaseline = input.value;
+        buffers.set("__shared", input.value);
+        tabs.push({ id: "__shared", name: "shared.vyrn" });
+        active = "__shared";
+        renderTabs();
+        syncFrame();
+      } else if (files.length) {
+        openFile(files[0].dataset.playFile, files[0].textContent);
+      } else {
+        syncFrame();
+      }
+    });
   }
 
   if (shareBtn) {

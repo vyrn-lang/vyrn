@@ -2630,6 +2630,48 @@ sat beside two dead columns.
   `play.js` strings on the way in — the page's own console named the parse
   error, and `node --check` did not (it parses the CommonJS goal).
 
+## M5 — the fifth round: the editor behaves, the search understands, the package page breathes
+
+Four more user directions on rounds 3-4's work:
+
+- **The editor works like the editor it resembles.** Explorer rows open TABS:
+  each holds its own buffer of edits, wears the dirty dot when its text
+  differs from its file, and closes from its own button (closing the last
+  opens the first). A `#c=` link opens as `shared.vyrn` with the link's
+  program as its baseline. Enter keeps the line's indentation, one level
+  deeper after `{`, and a `}` under the caret gets its own dedented line.
+  The static tab and the `<select>` picker left the page — the explorer and
+  the strip are the picker now. All of it verified by driving: edits survived
+  a tab round-trip, closing the active tab activated its neighbour, Enter
+  indented.
+- **Full page, no footer.** The window sits flush under the 64px masthead and
+  ends at the viewport's floor; the shell's foot and the sheet's bottom
+  padding leave with it (`#root:has(.page.play.ide)`). About sits below the
+  fold.
+- **The search grew qualifiers and export matching**: `kind:project` narrows
+  by a row's kind, free text matches the haystack OR an export name — a
+  search for `addBook` finds the package whose module exports `AddBookReq`,
+  chip shown. On the reference the chips stay links; on the registry they are
+  plain, because a package page has no per-export anchor to land on.
+- **The package page breathes**: identity at the top, four short blocks
+  (import / gives / builds / needs), install and source in a sticky side
+  card, and the two file shapes `vyrn add` writes behind one closed
+  `<details>` — open-by-default they were most of the page.
+- **Round 6, on the user's screenshots:** the package page's columns
+  overlapped — `.pkgmain` and `.pkgside` were inner grids with implicit
+  `auto` tracks, whose floor is the widest min-content inside them, and one
+  long `vyrn add` line pushed both over their neighbours; `minmax(0, 1fr)`,
+  for the sheet's own documented reason. The editor takes the whole window
+  now — the sheet's `max-width` and padding leave with the footer on that one
+  page — and About left entirely: what the page has to say about itself is
+  four sentences on the status bar's `(?)` title, and the engine label the
+  status bar led with is gone. The page does not scroll at all.
+- The Git Bash quoted heredoc EATS A BACKSLASH: `\n` in a here-document
+  reached Python as `
+` and round 4 shipped two raw newlines inside
+  `play.js` string literals. Backslash-bearing edits go through script files
+  now, not heredocs.
+
 ## What this RFC does not do
 
 - No JavaScript framework, no CSS framework, no analytics, no dependency.

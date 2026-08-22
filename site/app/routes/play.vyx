@@ -8,12 +8,15 @@
 //
 // THE PAGE IS AN EDITOR'S WINDOW (RFC-0106 M5 rounds 3-4, user: "like
 // vscode" — and the first cut "wasn't even close", so this one carries the
-// frame that makes an editor read as one): an explorer listing the example
-// files, a tab strip over the editor, a line-number gutter, a docked panel
-// whose tabs reflect what the run produced, and a filled status bar with the
-// engine and the caret position. Every element is real — an explorer row
-// loads that file, the gutter counts the lines that exist, Ln/Col is the
-// caret — because a control that does nothing is a picture of an editor.
+// frame AND the behaviour that make an editor read as one): an explorer whose
+// rows open TABS, each tab keeping its own buffer of edits with a dirty mark
+// and a close button; a line-number gutter; Enter that keeps the line's
+// indentation; a docked panel whose tabs reflect what the run produced; and a
+// filled status bar whose items are the caret position and the editor's
+// facts. Every element is real, because a control that does nothing is a
+// picture of an editor. What the page has to SAY about itself is four
+// sentences on the status bar's (?) — the About section below the window
+// went with the footer (user): an editor's window has nothing under it.
 //
 // EVERYTHING ON THIS PAGE IS MARKUP THE EXPORT WROTE. The examples are Vyrn
 // data rendered into hidden `<pre>` blocks, escaped by the template, and
@@ -49,12 +52,11 @@ fn examples() -> Array<Example> {
 
         <div class="idemain">
             <div class="idebar">
-                <span class="idetab">main.vyrn</span>
-                <label class="sr-only">Example
-                    <select data-play-pick>
-                        <option v-for="e in examples()" :key="e.id" :value="e.id">{{ e.title }}</option>
-                    </select>
-                </label>
+                <!-- The open files. `play.js` renders one tab per file the
+                     explorer opened, with its dirty mark and its close button —
+                     each tab holds its own buffer of edits, exactly as the
+                     editor this page resembles does. -->
+                <span class="idetabs" data-play-tabs></span>
                 <span class="spacer"></span>
                 <span class="eyebrow" data-play-status>Loading the compiler…</span>
                 <button type="button" class="btn" data-play-reset>Reset</button>
@@ -89,7 +91,7 @@ fn examples() -> Array<Example> {
         </div>
 
         <div class="idestatus">
-            <span>Vyrn — tree-walking interpreter</span>
+            <span class="idehelp" tabindex="0" role="note" aria-label="About this playground" title="The compiler front end runs in this tab as WebAssembly — the same tree-walking interpreter `vyrn run` uses — and nothing is uploaded. A program is stopped after five seconds, recursion stops near 466 calls (the worker's stack; the compiler's own limit is 1,000), and the tab has no filesystem and no arguments. One file runs, plus std/, which is embedded; a relative import has nowhere to resolve to and says so.">?</span>
             <span class="spacer"></span>
             <span data-play-lncol>Ln 1, Col 1</span>
             <span>Spaces: 2</span>
@@ -97,21 +99,6 @@ fn examples() -> Array<Example> {
             <span>Ctrl+↵ Run</span>
         </div>
     </div>
-
-    <details class="ideabout">
-        <summary>About this playground</summary>
-        <p class="notice" data-play-note>This is the <strong>tree-walking interpreter</strong> — the reference semantics, the same engine <code>vyrn run</code> uses, compiled to WebAssembly and running in this tab. The native and WebAssembly backends are checked against it byte for byte by the parity harness. Nothing is uploaded, nothing is stored, and there is no server behind this page. Colour comes from the compiler's own lexer, not from a second one written in JavaScript.</p>
-        <dl class="nongoals">
-            <dt>What runs</dt>
-            <dd>One file, plus <code>std/</code>, which is embedded in the module. A relative import has nowhere to resolve to and says so.</dd>
-            <dt>What refuses</dt>
-            <dd><code>readFile</code>, <code>writeFile</code> and <code>listDir</code> answer with the same <code>Err</code> the compiler defines everywhere else — <code>cannot read `x`</code>, <code>cannot write `x`</code> — because a tab has no filesystem. <code>args()</code> is empty. The clock is read once, when the run starts.</dd>
-            <dt>How deep it recurses</dt>
-            <dd>The interpreter's limit is 1,000 nested calls, and it is the same number in every backend. A browser gives out before that: 466 to 468 here, measured by binary search against this page's own worker, because the engine puts every WebAssembly call on a native stack a worker gets half of. Past that the page says so, and says whose ceiling it was — <code>vyrn run</code> takes the same program to 1,000.</dd>
-            <dt>How long it may run</dt>
-            <dd>Five seconds. The program runs in a Web Worker, and terminating one is the only way to stop running WebAssembly — so a program that loops forever is stopped rather than asked to stop.</dd>
-        </dl>
-    </details>
 
     <div hidden="hidden" data-play-examples>
         <pre v-for="e in examples()" :key="e.id" :data-play-example="e.id">{{ e.src }}</pre>

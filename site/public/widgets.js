@@ -606,16 +606,23 @@ function matchingExports(row, q, limit) {
   return hits.slice(0, limit);
 }
 
-/// A row's list of matched exports, each one a link to that export's anchor on
-/// the module's own page.
+/// A row's list of matched exports — each a link to the export's anchor on the
+/// module's own page where the row names one (`data-m`, the reference), and a
+/// plain chip where it does not (the registry: a package page has no per-export
+/// anchors to land on, and a link that scrolls nowhere is worse than a chip).
 function exportHits(row, names) {
   const box = document.createElement("span");
   box.className = "hits";
   for (const name of names) {
-    const a = document.createElement("a");
-    a.href = new URL("docs/std/" + row.dataset.m + ".html#e-" + name, SITE).href;
-    a.textContent = name;
-    box.appendChild(a);
+    let chip;
+    if (row.dataset.m) {
+      chip = document.createElement("a");
+      chip.href = new URL("docs/std/" + row.dataset.m + ".html#e-" + name, SITE).href;
+    } else {
+      chip = document.createElement("span");
+    }
+    chip.textContent = name;
+    box.appendChild(chip);
   }
   return box;
 }
@@ -633,31 +640,37 @@ function moduleSearch() {
   const hasExports = rows.some((r) => r.dataset.e);
 
   const apply = () => {
-    const q = input.value.trim().toLowerCase();
+    // `kind:project` narrows by a row's own kind; what is left matches the
+    // haystack OR an export name, so a search for a NAME finds the thing that
+    // offers it even when nothing else on the row says so.
+    const terms = input.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const kinds = terms.filter((t) => t.startsWith("kind:")).map((t) => t.slice(5)).filter(Boolean);
+    const q = terms.filter((t) => !t.startsWith("kind:")).join(" ");
     let shown = 0;
     let hits = 0;
     for (const row of rows) {
       const old = $(".hits", row);
       if (old) old.remove();
-      const match = q.length === 0 || (row.dataset.q || "").includes(q);
+      const kindOk = kinds.length === 0 || kinds.includes((row.dataset.kind || "").toLowerCase());
+      const names = q.length === 0 ? [] : matchingExports(row, q, 10);
+      const match = kindOk && (q.length === 0 || (row.dataset.q || "").includes(q) || names.length > 0);
       row.hidden = !match;
       if (!match) continue;
       shown += 1;
       if (q.length === 0) continue;
-      // Ten is enough to show WHICH names matched; the module page has them all.
-      const names = matchingExports(row, q, 10);
+      // Ten is enough to show WHICH names matched; the row's own page has them all.
       hits += names.length;
       if (names.length) row.appendChild(exportHits(row, names));
     }
     if (!count) return;
-    if (q.length === 0) {
+    if (terms.length === 0) {
       count.textContent = total + " " + noun + "s";
     } else if (shown === 0) {
-      count.textContent = "no " + noun + " matches " + q;
+      count.textContent = "no " + noun + " matches " + input.value.trim();
     } else {
       // Export hits only exist where rows carry them — the registry's rows
       // are packages and say nothing about exports.
-      const tail = hasExports ? ", " + hits + (hits === 1 ? " export" : " exports") : "";
+      const tail = hasExports && hits > 0 ? ", " + hits + (hits === 1 ? " export" : " exports") : "";
       count.textContent = shown + (shown === 1 ? " " + noun : " " + noun + "s") + tail;
     }
   };

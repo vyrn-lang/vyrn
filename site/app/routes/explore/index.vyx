@@ -14,7 +14,7 @@
 // rows where they stand, and with no script the full index is simply visible.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
-import { Package, packages } from "../../packages"
+import { Package, packages, offerOf } from "../../packages"
 import { toLower } from "std/strings"
 
 export fn head() -> Head {
@@ -34,6 +34,17 @@ fn numsOf(p: Package) -> String {
 fn haystack(p: Package) -> String {
     return toLower(p.name + " " + p.kind + " " + p.summary)
 }
+
+/// The offered module's export names, space-joined — `data-e`, so a search
+/// for a NAME finds the package that offers it, the way the reference's
+/// search finds a module by its exports.
+fn exportsOf(p: Package) -> String {
+    let mut out = ""
+    for e in offerOf(p.slug).exports {
+        out = out + if out.byteLength == 0 { e.copy() } else { " " + e }
+    }
+    return out
+}
 </script>
 
 <template>
@@ -43,7 +54,7 @@ fn haystack(p: Package) -> String {
         <h1 class="display">{{ packages().length }} packages</h1>
         <p class="lede">What you can pull into a project from outside it — fetched by URL, pinned by hash.</p>
         <div class="regsearch">
-            <input type="search" data-search-input placeholder="Search packages" autocomplete="off" spellcheck="false" aria-label="Search packages"/>
+            <input type="search" data-search-input placeholder="Search — a name, an export, kind:project" autocomplete="off" spellcheck="false" aria-label="Search packages"/>
             <span class="count" data-search-count data-search-noun="package">{{ packages().length }}</span>
         </div>
     </section>
@@ -51,7 +62,7 @@ fn haystack(p: Package) -> String {
     <section class="band">
         <div data-search-list>
             <ul class="reglist">
-                <li v-for="p in packages()" :key="p.slug" :data-kind="p.kind" :data-q="haystack(p)">
+                <li v-for="p in packages()" :key="p.slug" :data-kind="p.kind" :data-q="haystack(p)" :data-e="exportsOf(p)">
                     <div class="regrow">
                         <a class="name" :href="p.href">{{ p.name }}</a>
                         <span class="kind">{{ p.kind }}</span>
