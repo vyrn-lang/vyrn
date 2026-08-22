@@ -6,7 +6,7 @@
 // so a page added there appears here with nothing written twice.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
-import { Chapter, areaChapters, chapterHref } from "../../guide"
+import { Chapter, areaGroups, groupChapters, chapterHref } from "../../guide"
 import { inlineCode } from "../../code"
 import { TreeGroup, areaTree } from "../../docshell"
 
@@ -14,9 +14,14 @@ export fn head() -> Head {
     return pageHeadOf("/web")
 }
 
-/// This shelf's pages.
-fn shelf() -> Array<Chapter> {
-    return areaChapters("web")
+/// This shelf's groups — the same named runs the sidebar prints.
+fn groups() -> Array<String> {
+    return areaGroups("web")
+}
+
+/// One group's pages.
+fn of(g: String) -> Array<Chapter> {
+    return groupChapters("web", g)
 }
 
 /// The sidebar, with nothing marked: the subnav's own row is this landing's
@@ -45,12 +50,15 @@ fn tree() -> Array<TreeGroup> {
     </section>
 
     <section class="band" id="pages">
-        <ul class="modgrid chapters">
-            <li v-for="c in shelf()" :key="c.slug">
-                <a :href="chapterHref(c.slug)">{{ c.title }}</a>
-                <span class="d" v-html="inlineCode(c.lede)"></span>
-            </li>
-        </ul>
+        <div class="chapgroup" v-for="g in groups()" :key="g">
+            <p class="eyebrow">{{ g }}</p>
+            <ul class="modgrid chapters">
+                <li v-for="c in of(g)" :key="c.slug">
+                    <a :href="chapterHref(c.slug)">{{ c.title }}</a>
+                    <span class="d" v-html="inlineCode(c.lede)"></span>
+                </li>
+            </ul>
+        </div>
     </section>
 </main>
 </template>

@@ -2801,3 +2801,62 @@ details.fallback summary:hover { color: var(--accent); }
 details.fallback[open] summary { margin-bottom: var(--s2); }
 details.fallback td { font: var(--t-eyebrow)/1.6 var(--mono); color: var(--muted); }
 details.fallback td:first-child { white-space: nowrap; }
+
+/* ---------------------------------------------------------------------------
+ * RFC-0106 M5 round 3 (user): the shelves read as named groups, the registry
+ * wears a registry's shape, and the playground wears an editor's.
+ * ------------------------------------------------------------------------- */
+
+/* A shelf landing's groups — the same named runs the sidebar prints. */
+.chapgroup { margin-top: var(--s4); }
+.chapgroup:first-child { margin-top: 0; }
+.chapgroup > .eyebrow { margin-bottom: var(--s2); }
+
+/* --- The registry (npm/crates register: search over an index, one row per
+ * package, the mechanism at the side). --- */
+.regsearch { display: flex; align-items: center; gap: var(--s1); margin-top: var(--s3); max-width: 36rem; padding: 0 var(--s2); border: 1px solid var(--rule); background: color-mix(in oklab, var(--plate) 45%, transparent); }
+.regsearch input { flex: 1 1 auto; min-width: 0; border: 0; background: none; color: var(--ink); font: var(--t-lede)/1.4 var(--sans); padding: 10px 0; }
+.regsearch input:focus-visible { outline: 0; }
+.regsearch .count { font: var(--t-meta)/1 var(--mono); color: var(--muted); }
+.regbody { display: grid; grid-template-columns: minmax(0, 1fr) 20rem; gap: var(--s4); align-items: start; }
+@media (max-width: 960px) { .regbody { grid-template-columns: 1fr; } }
+.reglist { list-style: none; margin: 0; padding: 0; border: 1px solid var(--rule); }
+.reglist > li { display: block; padding: var(--s2); border-top: 1px solid var(--hair); }
+.reglist > li:first-child { border-top: 0; }
+/* `display: block` above outranks the [hidden] default; the search relies on it. */
+.reglist > li[hidden] { display: none; }
+.regrow { display: flex; align-items: baseline; gap: var(--s1); flex-wrap: wrap; }
+.regrow .name { font: 600 var(--t-h5)/1.4 var(--sans); text-decoration: none; }
+.regrow .nums { margin-left: auto; font: var(--t-meta)/1 var(--mono); color: var(--muted); white-space: nowrap; }
+.reglist .d { display: block; color: var(--muted); margin-top: 4px; max-width: 60ch; }
+.reglist .cmd { margin-top: var(--s1); }
+.regside { display: grid; gap: var(--s2); }
+.regcard { border: 1px solid var(--rule); background: color-mix(in oklab, var(--plate) 40%, transparent); padding: var(--s2); }
+.regcard p { margin: var(--s1) 0 0; color: var(--muted); }
+.regcard .eyebrow { margin: 0; }
+
+/* --- The playground as an editor: toolbar, editor, docked panel, status
+ * bar. Every data-play-* element keeps its identity; only the furniture
+ * changed. --- */
+/* `main.page` is `display: contents` — the shell grid owns its children — so
+ * the editor column is a box of its own inside the grid. */
+.idewrap { display: flex; flex-direction: column; margin-top: var(--s3); }
+@media (min-width: 900px) { .idewrap { min-height: calc(100dvh - 190px); } }
+.idebar { display: flex; align-items: center; gap: var(--s1); padding: 0 var(--s1); border: 1px solid var(--rule); background: color-mix(in oklab, var(--plate) 60%, transparent); }
+.idebar .spacer, .idestatus .spacer { flex: 1 1 auto; }
+.idetab { display: inline-flex; align-items: center; gap: 7px; align-self: stretch; padding: 10px 12px; font: var(--t-eyebrow)/1 var(--mono); color: var(--ink); background: var(--paper); border-right: 1px solid var(--hair); box-shadow: inset 0 2px 0 var(--accent); }
+.idetab .dot { width: 7px; height: 7px; border-radius: 50%; background: color-mix(in oklab, var(--accent) 70%, transparent); }
+.idebar .btn { margin-block: 6px; }
+.ide .editor { flex: 1 1 auto; min-height: 0; margin: 0; border: 1px solid var(--rule); border-top: 0; }
+.ide .editor textarea { height: 100%; min-height: 320px; resize: none; }
+.ide .editor pre.hl { background: none; }
+.idepanel { border: 1px solid var(--rule); border-top: 0; }
+.idepanel .panehead { margin: 0; padding: var(--s1) var(--s2) 0; font: var(--t-eyebrow)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); }
+.ide .diags { margin: var(--s1) var(--s2) 0; }
+.ide .stdinbox { margin: var(--s1) var(--s2) 0; }
+.ide .out { margin: var(--s1) 0 0; border-left: 0; background: none; min-height: 96px; max-height: 30vh; overflow: auto; }
+.idestatus { display: flex; align-items: center; gap: var(--s2); padding: 5px var(--s2); border: 1px solid var(--rule); border-top: 1px solid var(--hair); background: color-mix(in oklab, var(--accent) 9%, transparent); font: var(--t-meta)/1 var(--mono); color: var(--muted); }
+.idestatus .keys { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.ideabout { margin: var(--s3) 0 var(--s4); }
+.ideabout summary { cursor: pointer; color: var(--muted); }
+.ideabout[open] summary { margin-bottom: var(--s2); }

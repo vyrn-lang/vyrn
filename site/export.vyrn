@@ -1541,15 +1541,18 @@ test "one module list, and the pages that do not render it" {
         assert(has(explore, "href=\"/explore/\{p.slug}.html\""))
         assert(!has(docs, "href=\"/explore/\{p.slug}.html\""))
     }
-    // And the search index is the reference's list: one input, one list, on one
-    // page.
+    // Each front searches its OWN list where it stands — M5's third round gave
+    // the registry a search over its packages (user: a registry front). One
+    // input and one list per page, and neither reaches into the other's index.
     assert(has(docs, "data-search-list"))
-    assert(!has(explore, "data-search-list"))
+    assert(has(explore, "data-search-list"))
     assertEq(countOf(docs, "data-search-input"), 1)
+    assertEq(countOf(explore, "data-search-input"), 1)
     // Every row carries its own haystack, which is what makes the filter a class
     // on a row and not a fetch.
     assertEq(countOf(docs, " data-q=\""), apiModules().length)
     assertEq(countOf(docs, " data-e=\""), apiModules().length)
+    assertEq(countOf(explore, " data-q=\""), packages().length)
 }
 
 /// Whether `path`, read relative to the directory the export runs in, is a file

@@ -2576,6 +2576,33 @@ four glyphs it had no template for.
   `<script>` the vyx summary has never contained. CI's per-module loop dies
   at the first red module, alphabetically before both.
 
+## M5 — the third round: named groups, a registry front, an editor
+
+Five user directions in one message, all landed:
+
+- **The shelves read as named groups.** A `group` field on the chapter table;
+  the sidebar, the landing grids and a contiguity test read it. The guide is
+  *First steps / The memory model / Abstractions / Programs*; Web is *The page
+  / The server* (styling moved ahead of server so the runs stay contiguous);
+  Tooling is *Commands / Workspace*. The two-digit numbers are gone — a
+  category names what a run of pages is about, which a prefix never did.
+- **Explore is a registry** (user: "like npm or crates"): a search field over
+  the index — the reference landing's own scriptless-degrading `data-q`
+  mechanism, with a `data-search-noun` so the count says "packages" — one row
+  per package with its `vyrn add` line and a Copy button, the mechanism in
+  side cards, the numbered rail deleted. The one-module-list gate now states
+  the real invariant: each front searches its own list, and neither links into
+  the other's.
+- **Play is an editor** (user: "like vscode"): toolbar with a `main.vyrn` tab
+  and the run controls, the editor filling the window, a docked panel for
+  problems, stdin and output, a status bar naming the engine. The prose lives
+  behind "About this playground". Every `data-play-*` element survived
+  unchanged, and the redesign was verified by pressing Run in the page.
+  `main.page` is `display: contents` — the shell grid owns its children — so
+  the IDE's column is one `.idewrap` box inside the grid.
+- The typescale gate caught the round's one literal: the registry row's name
+  size is `--t-h5` now, not `1.05rem`.
+
 ## What this RFC does not do
 
 - No JavaScript framework, no CSS framework, no analytics, no dependency.

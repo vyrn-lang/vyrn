@@ -22,7 +22,7 @@
 /// finds the marked row's neighbours in reading order. A prev/next that came from
 /// its own table could point somewhere the sidebar does not.
 import { ApiModule, apiGroups, apiHref, groupIcon } from "./docs"
-import { Chapter, areaChapters, chapterHref, chapterNumber, chapterTag } from "./guide"
+import { Chapter, areaChapters, areaGroups, groupChapters, chapterHref } from "./guide"
 import { indexOf, substring } from "std/strings"
 // The glyphs beside group names and subnav rows — the same pinned collection
 // the `<Icon>` tag reads, through the same generator, so the sidebar cannot
@@ -127,22 +127,44 @@ fn areaRow(key: String) -> Array<String> {
     return ["", "", "", "", "", ""]
 }
 
-/// One chaptered area's sidebar: its pages in reading order. The guide's rows
-/// keep the two-digit number the book has always printed; the web and tooling
-/// shelves are task pages and carry none. Tooling also lists Editors — the
-/// page kept its `/docs/editors` path when it moved shelves, so its row is the
-/// one row an area adds by hand.
+/// The glyph beside one shelf group's name. One table for every area, keyed by
+/// the group alone — a group name is unique across the shelves.
+fn shelfGroupIcon(group: String) -> String {
+    let table = [
+        ["First steps", "book"],
+        ["The memory model", "archive"],
+        ["Abstractions", "code"],
+        ["Programs", "activity"],
+        ["The page", "file"],
+        ["The server", "link"],
+        ["Commands", "settings"],
+        ["Workspace", "bookmark"],
+    ]
+    for row in table {
+        if row[0] == group {
+            return row[1].copy()
+        }
+    }
+    return "file"
+}
+
+/// One chaptered area's sidebar: the shelf's named groups, each with its pages
+/// in reading order. No numbers — a category names what a run of pages is
+/// about, which a two-digit prefix never did (user). Tooling's Workspace group
+/// also lists Editors, the one row an area adds by hand.
 export fn areaTree(area: String, current: String) -> Array<TreeGroup> {
-    let row = areaRow(area)
-    let mut rows: Array<TreeRow> = []
-    for c in areaChapters(area) {
-        let label = if area == "guide" { chapterTag(chapterNumber(c.slug)) + "  " + c.title } else { c.title.copy() }
-        rows.push(TreeRow { href: chapterHref(c.slug), label: label.copy(), here: mark(current, c.slug) })
+    let mut out: Array<TreeGroup> = []
+    for g in areaGroups(area) {
+        let mut rows: Array<TreeRow> = []
+        for c in groupChapters(area, g) {
+            rows.push(TreeRow { href: chapterHref(c.slug), label: c.title.copy(), here: mark(current, c.slug) })
+        }
+        if area == "tooling" && g == "Workspace" {
+            rows.push(TreeRow { href: "/tooling/editors.html", label: "Editors", here: mark(current, "editors") })
+        }
+        out.push(TreeGroup { name: g.copy(), rows: rows.copy(), icon: drawNamed(shelfGroupIcon(g)) })
     }
-    if area == "tooling" {
-        rows.push(TreeRow { href: "/tooling/editors.html", label: "Editors", here: mark(current, "editors") })
-    }
-    return [TreeGroup { name: row[4].copy(), rows: rows.copy(), icon: drawNamed(row[5]) }]
+    return out
 }
 
 /// The book's sidebar — the guide area's tree, by its old name, for the pages
@@ -266,11 +288,21 @@ test "the pager walks the tree the sidebar prints" {
     assert(end.prevHref.byteLength > 0)
 }
 
-test "each area's tree covers its shelf" {
+test "each area's tree covers its shelf, in its named groups" {
     assertEq(treeSize(areaTree("guide", "index")), areaChapters("guide").length)
     assertEq(treeSize(areaTree("web", "index")), areaChapters("web").length)
-    // Tooling adds the one hand-written row: Editors.
+    // Tooling adds the one hand-written row: Editors, in Workspace.
     assertEq(treeSize(areaTree("tooling", "index")), areaChapters("tooling").length + 1)
+    // The groups are the shelf's own, and every group prints at least one row.
+    assertEq(areaTree("guide", "index").length, areaGroups("guide").length)
+    for g in areaTree("guide", "index") {
+        assert(g.rows.length > 0)
+        assert(g.name.byteLength > 0)
+    }
+    let tooling = areaTree("tooling", "editors")
+    let last = tooling[tooling.length - 1]
+    assertEq(last.name, "Workspace")
+    assertEq(last.rows[last.rows.length - 1].label, "Editors")
 }
 
 // ---------------------------------------------------------------------------

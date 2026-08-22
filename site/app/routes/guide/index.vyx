@@ -12,7 +12,7 @@
 // grid, one note about the programs.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
-import { Chapter, areaChapters, chapterHref, chapterNumber, chapterTag, blockCount } from "../../guide"
+import { Chapter, areaChapters, areaGroups, groupChapters, chapterHref, blockCount } from "../../guide"
 import { inlineCode } from "../../code"
 import { TreeGroup, guideTree } from "../../docshell"
 
@@ -20,14 +20,14 @@ export fn head() -> Head {
     return pageHeadOf("/guide")
 }
 
-/// The book's chapters — the guide shelf of the one chapter table.
-fn shelf() -> Array<Chapter> {
-    return areaChapters("guide")
+/// The book's groups — the same named runs the sidebar prints.
+fn groups() -> Array<String> {
+    return areaGroups("guide")
 }
 
-/// The chapter's number, as the tree and the list print it.
-fn tagOf(c: Chapter) -> String {
-    return chapterTag(chapterNumber(c.slug))
+/// One group's chapters.
+fn of(g: String) -> Array<Chapter> {
+    return groupChapters("guide", g)
 }
 
 /// The sidebar: the book's contents, with the Overview marked.
@@ -55,13 +55,15 @@ fn tree() -> Array<TreeGroup> {
     </section>
 
     <section class="band" id="chapters">
-        <ul class="modgrid chapters">
-            <li v-for="c in shelf()" :key="c.slug">
-                <a :href="chapterHref(c.slug)">{{ c.title }}</a>
-                <span class="count">{{ tagOf(c) }}</span>
-                <span class="d" v-html="inlineCode(c.lede)"></span>
-            </li>
-        </ul>
+        <div class="chapgroup" v-for="g in groups()" :key="g">
+            <p class="eyebrow">{{ g }}</p>
+            <ul class="modgrid chapters">
+                <li v-for="c in of(g)" :key="c.slug">
+                    <a :href="chapterHref(c.slug)">{{ c.title }}</a>
+                    <span class="d" v-html="inlineCode(c.lede)"></span>
+                </li>
+            </ul>
+        </div>
     </section>
 
     <section class="band" id="run">

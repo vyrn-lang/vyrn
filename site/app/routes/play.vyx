@@ -6,16 +6,17 @@
 // and what the program prints. All three come from the same Rust the `vyrn`
 // binary is built from, so the page cannot disagree with the compiler.
 //
-// The pill says RUNNING and not BUILT, and it is the opposite of the guide's for
-// the same reason the guide's is honest: a guide block ran once while the page
-// was built, and this one runs when the reader presses the button. The caption
-// says which engine — the tree-walking interpreter, which is the reference every
-// other backend is checked against.
+// THE PAGE WEARS AN EDITOR'S SHAPE (RFC-0106 M5 round 3, user: "like vscode"):
+// a toolbar with the file's controls, the editor filling the window, a docked
+// panel for problems and output, and a status bar naming the engine. The prose
+// the old page led with lives behind "About this playground" — a reader came
+// here to type, not to read.
 //
 // EVERYTHING ON THIS PAGE IS MARKUP THE EXPORT WROTE. The examples are Vyrn data
 // rendered into hidden `<pre>` blocks, escaped by the template, and `play.js`
 // reads them back with `textContent`. Nothing here is a JavaScript string
-// holding a program.
+// holding a program. Every `data-play-*` element is `play.js`'s contract and
+// survives the redesign unchanged.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
 import { playExamples, Example } from "../play"
@@ -30,54 +31,62 @@ fn examples() -> Array<Example> {
 </script>
 
 <template>
-<main class="page play" data-widget="play">
-    <section class="hero">
-        <p class="eyebrow">Playground</p>
-        <h1 class="display">Type Vyrn. Run it here.</h1>
-        <p class="lede">The compiler's front end is compiled to WebAssembly and runs in this tab. Nothing is uploaded, nothing is stored, and there is no server behind this page.</p>
-    </section>
+<main class="page play ide" data-widget="play">
+    <h1 class="sr-only">Playground</h1>
 
-    <section class="band">
-        <div class="plate" data-play-plate>
-            <div class="plate-head">
-                <span class="eyebrow" data-play-status>Loading the compiler…</span>
-                <span class="spacer"></span>
-                <label class="pickbox">
-                    <span class="sr-only">Example</span>
-                    <select data-play-pick>
-                        <option v-for="e in examples()" :key="e.id" :value="e.id">{{ e.title }}</option>
-                    </select>
-                </label>
-                <button type="button" class="btn" data-play-reset>Reset</button>
-                <button type="button" class="btn" data-play-share>Copy link</button>
-                <button type="button" class="btn primary" data-play-run disabled="disabled">Run</button>
-            </div>
+    <!-- One box, because `main.page` is `display: contents` and the shell grid
+         owns its children: the IDE's own column layout needs a box of its own. -->
+    <div class="idewrap">
 
-            <div class="editor" data-play-editor>
-                <pre class="code hl" aria-hidden="true"><code data-play-hl></code></pre>
-                <textarea data-play-src spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" wrap="off" aria-label="Vyrn source"></textarea>
-            </div>
+    <div class="idebar">
+        <span class="idetab"><span class="dot" aria-hidden="true"></span>main.vyrn</span>
+        <label class="pickbox">
+            <span class="sr-only">Example</span>
+            <select data-play-pick>
+                <option v-for="e in examples()" :key="e.id" :value="e.id">{{ e.title }}</option>
+            </select>
+        </label>
+        <span class="spacer"></span>
+        <span class="eyebrow" data-play-status>Loading the compiler…</span>
+        <button type="button" class="btn" data-play-reset>Reset</button>
+        <button type="button" class="btn" data-play-share>Copy link</button>
+        <button type="button" class="btn primary" data-play-run disabled="disabled" title="Ctrl+Enter">Run</button>
+    </div>
 
-            <p class="cap">Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to run. <kbd>Tab</kbd> inserts two spaces. Colour comes from the compiler's own lexer, not from a second one written in JavaScript.</p>
+    <div class="editor" data-play-editor>
+        <pre class="code hl" aria-hidden="true"><code data-play-hl></code></pre>
+        <textarea data-play-src spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" wrap="off" aria-label="Vyrn source"></textarea>
+    </div>
 
-            <details class="stdinbox" data-play-stdin-box>
-                <summary>Standard input</summary>
-                <textarea data-play-stdin spellcheck="false" aria-label="Standard input"></textarea>
-                <p class="cap">These lines reach <code>readLine()</code>, one per call. At the end of them it answers <code>None</code>, exactly as a pipe does.</p>
-            </details>
+    <div class="idepanel">
+        <details class="stdinbox" data-play-stdin-box>
+            <summary>Standard input</summary>
+            <textarea data-play-stdin spellcheck="false" aria-label="Standard input"></textarea>
+            <p class="cap">These lines reach <code>readLine()</code>, one per call. At the end of them it answers <code>None</code>, exactly as a pipe does.</p>
+        </details>
 
-            <!-- Both panes are what RUNNING says, and running is a button press
-                 with no page load behind it — so without a live region a screen
-                 reader is told nothing at all about the result (RFC-0105 M4).
-                 Polite, not assertive: the reader asked for this, and it can
-                 wait for the sentence they are on. -->
-            <div class="diags" data-play-diags hidden="hidden" aria-live="polite"></div>
+        <!-- Both panes are what the status says, and running is a button press
+             with no page load behind it — so without a live region a screen
+             reader is told nothing at all about the result (RFC-0105 M4).
+             Polite, not assertive: the reader asked for this, and it can wait
+             for the sentence they are on. -->
+        <div class="diags" data-play-diags hidden="hidden" aria-live="polite"></div>
 
-            <div class="out" data-play-out aria-live="polite"><span class="dim">Nothing has run yet.</span></div>
-        </div>
+        <p class="panehead">Output</p>
+        <div class="out" data-play-out aria-live="polite"><span class="dim">Nothing has run yet.</span></div>
+    </div>
 
-        <p class="notice" data-play-note>This is the <strong>tree-walking interpreter</strong> — the reference semantics, the same engine <code>vyrn run</code> uses, compiled to WebAssembly and running in this tab. The native and WebAssembly backends are checked against it byte for byte by the parity harness.</p>
+    <div class="idestatus">
+        <span>tree-walking interpreter — the reference engine, in this tab</span>
+        <span class="spacer"></span>
+        <span class="keys"><kbd class="key">Ctrl</kbd><kbd class="key">↵</kbd> run · <kbd class="key">Tab</kbd> two spaces</span>
+    </div>
 
+    </div>
+
+    <details class="ideabout">
+        <summary>About this playground</summary>
+        <p class="notice" data-play-note>This is the <strong>tree-walking interpreter</strong> — the reference semantics, the same engine <code>vyrn run</code> uses, compiled to WebAssembly and running in this tab. The native and WebAssembly backends are checked against it byte for byte by the parity harness. Nothing is uploaded, nothing is stored, and there is no server behind this page. Colour comes from the compiler's own lexer, not from a second one written in JavaScript.</p>
         <dl class="nongoals">
             <dt>What runs</dt>
             <dd>One file, plus <code>std/</code>, which is embedded in the module. A relative import has nowhere to resolve to and says so.</dd>
@@ -88,7 +97,7 @@ fn examples() -> Array<Example> {
             <dt>How long it may run</dt>
             <dd>Five seconds. The program runs in a Web Worker, and terminating one is the only way to stop running WebAssembly — so a program that loops forever is stopped rather than asked to stop.</dd>
         </dl>
-    </section>
+    </details>
 
     <div hidden="hidden" data-play-examples>
         <pre v-for="e in examples()" :key="e.id" :data-play-example="e.id">{{ e.src }}</pre>

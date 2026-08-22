@@ -627,6 +627,10 @@ function moduleSearch() {
   if (!input || !list) return;
   const rows = $$("li", list);
   const total = rows.length;
+  // What one row is called — "module" on the reference, "package" on the
+  // registry — and whether any row carries export names to count.
+  const noun = count?.dataset.searchNoun || "module";
+  const hasExports = rows.some((r) => r.dataset.e);
 
   const apply = () => {
     const q = input.value.trim().toLowerCase();
@@ -647,11 +651,14 @@ function moduleSearch() {
     }
     if (!count) return;
     if (q.length === 0) {
-      count.textContent = total + " modules";
+      count.textContent = total + " " + noun + "s";
     } else if (shown === 0) {
-      count.textContent = "no module matches " + q;
+      count.textContent = "no " + noun + " matches " + q;
     } else {
-      count.textContent = shown + (shown === 1 ? " module" : " modules") + ", " + hits + (hits === 1 ? " export" : " exports");
+      // Export hits only exist where rows carry them — the registry's rows
+      // are packages and say nothing about exports.
+      const tail = hasExports ? ", " + hits + (hits === 1 ? " export" : " exports") : "";
+      count.textContent = shown + (shown === 1 ? " " + noun : " " + noun + "s") + tail;
     }
   };
 
