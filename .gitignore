@@ -12,6 +12,12 @@ examples/data/*.tmp.txt
 # (`.store.json` targets and their transient `.store.json.tmp` siblings)
 examples/data/*.store.json
 examples/data/*.store.json.tmp
+# The one temp `std/storage.vyrn`'s own test CANNOT clean up. It proves that a
+# rename onto a missing directory fails and leaves the written temp behind, and
+# the language has no delete to remove it with — so the leak is the assertion.
+# It lands in the crate the std suite runs from, and it reached a commit once
+# (`wa-rename-failure-leak.tmp`, two bytes of `{}`) before this line existed.
+wa-rename-failure-leak.tmp
 # Runtime store written by the `examples/bin` pastebin (persistence dogfood) —
 # app data, not source. The DIRECTORY must exist in a fresh clone (`writeFile`
 # does not create parents, and the language has no mkdir yet), so .gitkeep is

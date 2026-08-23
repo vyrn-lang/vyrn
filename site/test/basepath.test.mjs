@@ -48,11 +48,15 @@ const pages = files.filter((f) => f.endsWith(".html"));
 // The export must have run. A gate that quietly passes on an empty directory is
 // the gate that let this defect out in the first place.
 test("the export is there to check", () => {
-  // 59 consumer pages, and one per design record plus the backstage index
+  // The consumer site's own pages.
   // (RFC-0105 M1). A floor rather than a count: both halves grow by a file.
-  assert.ok(pages.length >= 160, `expected the exported tree in out/, found ${pages.length} page(s) — run: vyrn run site/export.vyrn out`);
-  assert.ok(pages.includes("backstage.html"), "the backstage index is missing");
-  assert.ok(pages.filter((p) => p.startsWith("backstage/rfcs/")).length > 100, "the design record is missing");
+  // 79 and not 160: the design record's hundred pages left the published site
+  // with the backstage (RFC-0106 M5). The floor is what the consumer site
+  // itself carries.
+  assert.ok(pages.length >= 70, `expected the exported tree in out/, found ${pages.length} page(s) — run: vyrn run site/export.vyrn out`);
+  // The design record left the published site with the backstage; its files
+  // are still in `rfcs/` (RFC-0106 M5).
+  assert.ok(!pages.includes("backstage.html"), "the backstage was removed and should not be exported");
   for (const f of ["style.css", "widgets.js", "vyrn-nav.js", "favicon.svg", "play.wasm", "play-worker.js"])
     assert.ok(files.includes(f), `out/${f} is missing`);
 });
@@ -100,18 +104,9 @@ for (const prefix of PREFIXES) {
         // construction; what it CARRIES is prose HTML, and that has to be
         // relative to the same page or a soft navigation renders dead links
         // where a full load renders live ones.
-        //
-        // A backstage page has NO payload, and that is checked rather than
-        // skipped: the section loads no script, every link into and out of it is
-        // a full load, and a payload would be a second copy of a whole rendered
-        // design record that nothing would ever fetch (RFC-0105 M1).
         const payload = await fetch(`${base}/${page.slice(0, -5)}.data.json`);
-        if (page.startsWith("backstage")) {
-          assert.equal(payload.status, 404, `${page}: the backstage publishes no payload`);
-        } else {
-          assert.equal(payload.status, 200, `${page}: no payload beside it`);
-          assert.doesNotMatch(await payload.text(), / (?:href|src)=\\"\//, `${page}: its payload names a root`);
-        }
+        assert.equal(payload.status, 200, `${page}: no payload beside it`);
+        assert.doesNotMatch(await payload.text(), / (?:href|src)=\\"\//, `${page}: its payload names a root`);
 
         for (const name of ["href", "src"]) {
           for (const value of attr(html, name)) {

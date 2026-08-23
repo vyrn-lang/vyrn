@@ -938,8 +938,15 @@ test "an escaped pipe is content, not a separator" {
     // Outside a code span too, and RFC-0083's doubled escape.
     assertEq(renderOk("| x |\n|---|\n| a \\| b \\|\\| c |"),
         "<div class=\"scroller\"><table><thead><tr><th>x</th></tr></thead><tbody><tr><td>a | b || c</td></tr></tbody></table></div>")
-    // An escaped backslash is not an escape: `\\|` still separates.
-    assertEq(joinWith(cellsOf("| a \\\\| b |"), ";"), "a \\;b")
+    // An escaped backslash is not an escape: `\\|` still separates. The cell
+    // keeps BOTH bytes — the inline pass owns backslash escapes, and running
+    // them in the splitter as well would halve a run of backslashes twice.
+    // The reader sees one, and the rendered row is the assertion that proves
+    // it. (The audit wrote this line expecting the splitter to collapse, and
+    // never ran it.)
+    assertEq(joinWith(cellsOf("| a \\\\| b |"), ";"), "a \\\\;b")
+    assertEq(renderOk("| x | y |\n|---|---|\n| a \\\\| b |"),
+        "<div class=\"scroller\"><table><thead><tr><th>x</th><th>y</th></tr></thead><tbody><tr><td>a \\</td><td>b</td></tr></tbody></table></div>")
 }
 
 test "a link out of an RFC lands where that file is read from" {

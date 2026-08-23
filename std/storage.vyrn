@@ -83,6 +83,10 @@ test "a failed save reports why and leaves the target untouched" {
     // fails at the RENAME. Neither touches any target; the second leaves
     // exactly the documented leaked-temp behind (there is no delete to clean
     // it with).
+    //
+    // THAT LEAK LANDS IN THE DIRECTORY THE SUITE RUNS FROM, and it once reached
+    // a commit. The name is fixed and single so it can be ignored rather than
+    // multiplied — `.gitignore` carries the entry and says why.
     let w = writeAtomicTemp("no/such/dir/state.json.tmp.9", "no/such/dir/state.json", "{}")
     assert(match w { Ok(b) => false, Err(e) => true })
     let r = writeAtomicTemp("wa-rename-failure-leak.tmp", "no/such/dir/state.json", "{}")

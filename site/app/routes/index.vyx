@@ -16,7 +16,7 @@
 // a page that OFFERS one. Without script the same markup is a coloured code
 // block with a link to `/play`.
 import { Head } from "std/ui"
-import { pageHeadOf } from "../nav"
+import { pageHeadOf, hrefOf } from "../nav"
 import { vyrnHtml, vyrnSource } from "../snippets"
 import { shellHtml } from "../code"
 import { hasRelease, releaseTag, releaseDate, releasePre, InstallTarget, installTargets, stdCount } from "../repo"
@@ -32,15 +32,21 @@ import { ArrivalRow, arrivalList } from "../history"
 // load-bearing: the generator's cache is keyed on its argument string, so a
 // second call site naming the directory with a different `../` prefix would
 // generate a second module whose exports collide with the first program-wide.
-import { Block, blockOf } from "../guide"
+import { Block, blockOf, chapterOfBlock, sectionOfBlock, chapterHref } from "../guide"
 // The reference's own module list, from the same generator the reference page
 // reads. Nine names on this page and thirty-eight on that one, and neither list
 // is typed by hand.
 import { ApiGroup, ApiModule, apiGroups, apiHref } from "../docs"
 import { joinWith } from "std/strings"
 import { heroBars, heroBarsBox, heroBarsGrid, heroBarsPlot, heroBench, barLeft, barRight, barRow, barText, Bar, Grid } from "../chart"
-import { envRows } from "../bench"
+import { envRows, frontPanels, panelBars, panelNote, panelSpeed, panelMemLine, benchMachine, benchRuns, Panel, BarRow } from "../bench"
 import { demoSteps, demoVersion, demoRecorded, DemoStep } from "../demo"
+import { shellOutHtml } from "../code"
+// The two steps whose output is a FILE arrive already coloured by the
+// compiler's own lexer (`demohl.vyrn` runs it at compile time); the rest are
+// transcripts, which `shellOutHtml` speaks.
+import { demoCode } from "../demohl"
+import { demoHl } from demoCode("../../data/demo.json")
 import { Icon } from "../icons"
 
 /// The id of the snippet the hero runs. One name, two halves: the coloured
@@ -90,7 +96,7 @@ fn highlights() -> Array<ArrivalRow> {
     let mut i = all.length - 1
     while i >= 0 && out.length < 3 {
         if all[i].date > releaseDate() {
-            out.push(ArrivalRow { tag: all[i].tag.copy(), href: all[i].href.copy(), date: all[i].date.copy(), band: all[i].band.copy() })
+            out.push(ArrivalRow { tag: all[i].tag.copy(), date: all[i].date.copy(), band: all[i].band.copy() })
         }
         i = i - 1
     }
@@ -114,12 +120,23 @@ type Tab = { id: String, label: String, block: String, caption: String }
 
 fn tabs() -> Array<Tab> {
     return [
-        Tab { id: "types", label: "Types", block: "validated", caption: "The rule is part of the type." },
-        Tab { id: "records", label: "Records", block: "records", caption: "A shape, and no inheritance." },
-        Tab { id: "html", label: "HTML", block: "html", caption: "A view is a function." },
-        Tab { id: "gen", label: "Generators", block: "genuse", caption: "It runs while you compile." },
-        Tab { id: "bench", label: "Benchmarks", block: "benches", caption: "The timer is in the language." },
+        Tab { id: "types", label: "Types carry rules", block: "validated", caption: "The rule is part of the type, and the compiler proves what it can." },
+        Tab { id: "own", label: "Ownership is a word", block: "regions", caption: "read, modify, consume, share — written on the parameter, and no lifetimes." },
+        Tab { id: "records", label: "Records and enums", block: "records", caption: "A shape, a choice, and no inheritance." },
+        Tab { id: "html", label: "A view is a function", block: "html", caption: "The server renders the tree; the browser gets the same one." },
+        Tab { id: "gen", label: "Generators are libraries", block: "genuse", caption: "It runs while you compile, and emits Vyrn." },
+        Tab { id: "bench", label: "The timer is in the language", block: "benches", caption: "A bench block is a body the timer runs, beside the code it is about." },
     ]
+}
+
+/// The chapter that teaches this panel's idea — the block's own chapter, so a
+/// program moved between chapters takes its link with it.
+fn tabDocs(t: Tab) -> String {
+    let slug = chapterOfBlock(t.block)
+    if slug.byteLength == 0 {
+        return hrefOf("/guide")
+    }
+    return chapterHref(slug) + "#" + sectionOfBlock(t.block)
 }
 
 /// The radio that selects one tab's pane, matching the install page's picker.
@@ -175,7 +192,7 @@ fn teaserGroups() -> Array<ApiGroup> {
                 }
             }
         }
-        out.push(ApiGroup { name: g.name.copy(), modules: top.copy() })
+        out.push(ApiGroup { name: g.name.copy(), modules: top.copy(), icon: g.icon.copy() })
     }
     return out
 }
@@ -188,18 +205,20 @@ fn allModules() -> String {
 /// The four pillar commands, coloured. They are indexed rather than looped
 /// because the cards around them are written out one by one: `<Icon>` is a
 /// generation-time provider and `:name` is refused at the tag (RFC-0107 M1), so
-/// four cards with four glyphs are four elements.
-fn pillarCmd(i: Int64) -> String {
-    // SHORT, AND STILL REAL. A card is 280px wide and a command does not wrap
-    // (RFC-0106 M3, second round), so a 49-character line would be a 40px
-    // window on it. Every one of these runs as written.
-    let all = [
-        "vyrn check main.vyrn",
-        "vyrn why --memory main.vyrn",
-        "vyrn build main.vyrn --target wasm",
-        "vyrn emit-gen main.vyrn",
-    ]
-    return shellHtml(all[i])
+
+/// One step's terminal body: the compiler's own colours when the step printed
+/// a file, the shell's three voices when it printed a transcript.
+fn stepHtml(s: DemoStep) -> String {
+    let source = demoHl(s.id)
+    if source.byteLength > 0 {
+        return source
+    }
+    return shellOutHtml(s.cmd, s.out)
+}
+
+/// The width of one engine's bar, as the percentage the record measured.
+fn barStyle(pct: String) -> String {
+    return "width: " + pct + "%"
 }
 </script>
 
@@ -273,115 +292,86 @@ fn pillarCmd(i: Int64) -> String {
             </div>
         </section>
 
-        <!-- SPLIT (RFC-0106 M3): the claim and its link on the left, the chart
-             on the right. The section is exactly as tall as the chart plus the
-             rhythm's padding, which is the geometry rule this milestone asserts
-             in the browser rather than eyeballs. -->
-        <section class="band split" id="speed">
-            <div class="say">
+        <!-- EIGHT PROGRAMS, EIGHT CARDS (RFC-0106 M5 round 21, against the
+             reference site's own benchmark page). One chart of one program
+             said "as quick as C" and showed a single kernel; the record holds
+             eight, each with its engines, its peak memory and — where Vyrn is
+             behind — the cause somebody named. A card is its own scale, so a
+             400ms program and a 3s one are both readable. -->
+        <section class="band" id="speed">
+            <div class="benchhead">
                 <p class="eyebrow"><Icon name="bytesize:activity"/> Measured</p>
-                <h2>As quick as C</h2>
-                <p><code>{{ heroBench() }}</code>, one of eight. Five of the rest are slower than Rust, each with a named cause.</p>
-                <p class="ctarow"><a class="cta" href="/compare.html#numbers">All eight, and the causes</a></p>
+                <h2 class="display">Eight programs, five engines,<br/>one afternoon on one machine.</h2>
+                <p class="lede">The Benchmarks Game programs, run against C, Rust and node, with the WebAssembly build beside them. Every number below came out of that run — the ones where Vyrn is behind carry the reason.</p>
+                <p class="ctarow"><a class="cta" href="/benchmarks.html">The benchmarks page</a></p>
             </div>
-            <div class="plate barstrip" data-widget="bars">
-                <div class="stage">
-                    <svg class="chart" :viewBox="heroBarsBox()" role="group" aria-label="Five engines running the same numeric kernel, fastest first">
-<g class="axis">
-                            <line v-for="g in heroBarsGrid()" :key="g.id" :x1="g.x" y1="0" :x2="g.x" :y2="heroBarsPlot()"/>
-                            <text v-for="g in heroBarsGrid()" :key="g.id" :x="g.x" :y="heroBarsPlot()" dy="16" text-anchor="middle">{{ g.label }}</text>
-                        </g>
-                        <g class="row" v-for="b in heroBars()" :key="b.id">
-                            <title>{{ b.title }}</title>
-                            <rect class="hit" x="0" :y="b.hy" :width="barRight()" :height="barRow()"/>
-                            <rect :class="b.tone" :x="barLeft()" :y="b.y" :width="b.w" height="20" fill="currentColor" fill-opacity="0.28"/>
-                            <!-- The row NAME is a label and not a link. Every
-                                 other bar chart on this site links each row at
-                                 its own source, and an `<a>` inside an `<svg>`
-                                 has no CSS box for padding to grow — five rows
-                                 were five sub-24px targets (RFC-0105 M4 row 29),
-                                 all five pointing at the one page the notice
-                                 under this plate already names. -->
-                            <text x="0" :y="b.y" :dy="barText()">{{ b.label }}</text>
-                            <text :x="barRight()" :y="b.y" :dy="barText()" text-anchor="end" class="val">{{ b.value }}</text>
-                        </g>
-                    </svg>
-                </div>
-                <details class="disc">
-                    <summary>The machine, and the method</summary>
-                    <!-- Inside a `.scroller`, like every other wide block on
-                         this site: at 375px the environment rows are 769px and
-                         a table with no scroller over it takes the document
-                         sideways with it (RFC-0105 M4 rows 26 and 28). -->
-                    <div class="scroller">
-                        <table class="matrix">
-                            <tr v-for="r in envRows()" :key="r[0]"><th scope="row">{{ r[0] }}</th><td>{{ r[1] }}</td></tr>
-                        </table>
-                    </div>
-                </details>
+
+            <div class="benchgrid">
+                <article class="benchcard" v-for="p in frontPanels()" :key="p.key">
+                    <h3>{{ p.name }}<span class="size">{{ p.n }}</span></h3>
+                    <p class="what">{{ panelNote(p.key) }}</p>
+                    <ul class="bars">
+                        <li v-for="b in panelBars(p.key)" :key="b.key" :data-tone="b.tone">
+                            <span class="who">{{ b.name }}</span>
+                            <span class="track"><span class="fill" :style="barStyle(b.pct)"></span></span>
+                            <span class="ms">{{ b.ms }}</span>
+                        </li>
+                    </ul>
+                    <p class="bfoot">
+                        <span class="bspeed">{{ panelSpeed(p.key) }}</span>
+                        <span class="bram">RAM {{ panelMemLine(p.key) }}</span>
+                    </p>
+                    <p class="bcause">{{ p.label }}</p>
+                </article>
             </div>
+
+            <p class="cap benchcap">{{ benchMachine() }} · medians of {{ benchRuns() }} · every engine at its own defaults · <a href="/benchmarks.html">all eight programs, the table and the radar →</a></p>
         </section>
 
-        <section class="band" id="what">
-            <p class="eyebrow">Four ideas</p>
-            <!-- FOUR CARDS, WRITTEN OUT. A `v-for` cannot carry `<Icon>`: a
-                 provider tag takes static attributes and `:name` binds an
-                 expression, which RFC-0107 M1 refuses at the tag. Four cards
-                 that differ in every field are four cards. -->
-            <ul class="cards">
-                <li>
-                    <h3><Icon name="bytesize:checkmark"/> Types carry rules</h3>
-                    <p>A check you cannot forget to write.</p>
-                    <div class="cmd" data-copy><code v-html="pillarCmd(0)"></code><button type="button" data-copy-btn aria-label="Copy the check command">Copy</button></div>
-                </li>
-                <li>
-                    <h3><Icon name="bytesize:lock"/> Ownership is a word</h3>
-                    <p><code>read</code>, <code>modify</code>, <code>consume</code>, <code>share</code>. No lifetimes.</p>
-                    <div class="cmd" data-copy><code v-html="pillarCmd(1)"></code><button type="button" data-copy-btn aria-label="Copy the memory command">Copy</button></div>
-                </li>
-                <li>
-                    <h3><Icon name="bytesize:lightning"/> One program, three engines</h3>
-                    <p>CI fails unless all three agree, byte for byte.</p>
-                    <div class="cmd" data-copy><code v-html="pillarCmd(2)"></code><button type="button" data-copy-btn aria-label="Copy the build command">Copy</button></div>
-                </li>
-                <li>
-                    <h3><Icon name="bytesize:code"/> Generators are libraries</h3>
-                    <p>It runs while you compile and emits Vyrn.</p>
-                    <div class="cmd" data-copy><code v-html="pillarCmd(3)"></code><button type="button" data-copy-btn aria-label="Copy the emit-gen command">Copy</button></div>
-                </li>
-            </ul>
-        </section>
+        <!-- ONE SHOWCASE, NOT TWO SECTIONS (RFC-0106 M5 round 24, against
+             the reference site's own). Four cards said what the language
+             believes and five tabs showed the code; they were the same
+             section written twice. The idea is the row a reader picks and the
+             program is what answers — every one of them compiled by this
+             build, from `site/guide/`.
 
-        <!-- FIVE TABS OF REAL CODE (RFC-0106 M3, fourth round). Same control as
-             the install page's OS picker — radio buttons, `:checked ~`, no
-             script — and the same reason: a reader with JavaScript switched off
-             gets a working tab strip, and a keyboard gets a native radio group.
-             The inputs are written out because only the first carries `checked`
-             and `v-for` has no way to put an attribute on one iteration. -->
-        <section class="band" id="code">
-            <p class="eyebrow">Five programs, compiled by this build</p>
-            <h2>The parts you reach for</h2>
-            <fieldset class="picker">
+             SCRIPTLESS, like the install page's picker: radios and
+             `:checked ~`, so a reader with no JavaScript gets a working list
+             and a keyboard gets a native radio group. The inputs are written
+             out because only the first carries `checked` and `v-for` cannot
+             put an attribute on one iteration. -->
+        <section class="band" id="ideas">
+            <div class="showhead">
+                <p class="eyebrow"><Icon name="bytesize:lightning"/> The ideas, in code</p>
+                <h2 class="display">Six ideas. Six programs<br/>this build compiled.</h2>
+                <p class="lede">Every panel is a file in this repository, coloured by the compiler's own lexer while the page was built, with the chapter that teaches it one press away.</p>
+            </div>
+            <fieldset class="picker showcase">
                 <legend class="sr-only">Language feature</legend>
                 <input class="sr-only" type="radio" name="tab" id="tab-types" checked="checked"/>
+                <input class="sr-only" type="radio" name="tab" id="tab-own"/>
                 <input class="sr-only" type="radio" name="tab" id="tab-records"/>
                 <input class="sr-only" type="radio" name="tab" id="tab-html"/>
                 <input class="sr-only" type="radio" name="tab" id="tab-gen"/>
                 <input class="sr-only" type="radio" name="tab" id="tab-bench"/>
-                <div class="tabrow">
-                    <div class="ostabs">
+                <div class="showgrid">
+                    <div class="showlist">
                         <label v-for="t in tabs()" :key="t.id" :for="tabId(t)">{{ t.label }}</label>
                     </div>
-                </div>
-                <div class="ospanes">
-                    <div class="ospane showcase" v-for="t in tabs()" :key="t.id">
-                        <pre class="code"><code v-html="tabCode(t)"></code></pre>
-                        <p class="cap">{{ t.caption }} <a :href="tabFile(t)">{{ tabPath(t) }}</a><span v-if="tabPlay(t).byteLength > 0"> · <a :href="tabPlay(t)">Run it</a></span></p>
+                    <div class="showpanes">
+                        <div class="showpane" v-for="t in tabs()" :key="t.id">
+                            <div class="showbar">
+                                <span class="what">{{ t.caption }}</span>
+                                <a class="docs" :href="tabDocs(t)">Docs →</a>
+                            </div>
+                            <p class="file">{{ tabPath(t) }}</p>
+                            <pre class="code"><code v-html="tabCode(t)"></code></pre>
+                            <p class="cap"><a :href="tabFile(t)">The file in the repository</a><span v-if="tabPlay(t).byteLength > 0"> · <a :href="tabPlay(t)">Run it in the playground</a></span></p>
+                        </div>
                     </div>
                 </div>
             </fieldset>
         </section>
-
         <!-- THE REFERENCE, TEASED (RFC-0106 M3, fourth round). Eight names and
              their export counts, read off `std/` by the same generator the
              reference landing reads — so a module added tomorrow can appear here
@@ -403,6 +393,10 @@ fn pillarCmd(i: Int64) -> String {
 
         <section class="band" id="minute">
             <p class="eyebrow"><Icon name="bytesize:play"/> A minute with Vyrn</p>
+            <div class="minutehead">
+                <h2 class="display">One binary,<br/>from new to shipped.</h2>
+                <p class="lede">Write, check, test and build with the same tool. Every step below is a real command with its real output — press one, or watch it walk.</p>
+            </div>
             <!-- Every line of output below came out of the real binary, recorded
                  by `scripts/site-demo.py` before this page was rendered. Without
                  script all seven steps are on the page at once. -->
@@ -412,18 +406,31 @@ fn pillarCmd(i: Int64) -> String {
                  shape that only worked in the state nobody sees, with all seven
                  open. `widgets.js` marks the nth row and the nth pane; with no
                  script every pane is on the page under its own title. -->
-            <div class="plate demo" data-widget="demo">
+            <div class="demo" data-widget="demo">
                 <ol class="steps">
                     <li v-for="s in demoSteps()" :key="s.id" :data-step="s.id">
                         <h3>{{ s.title }}</h3>
                         <div class="cmd" v-if="s.cmd.byteLength > 0"><code v-html="shellHtml(s.cmd)"></code></div>
+                        <!-- The note rides WITH its step now, the way the
+                             reference site carries it: the marked row explains
+                             itself, and the rest are a table of contents. -->
+                        <p class="stepnote">{{ s.note }}</p>
+                        <span class="tick" aria-hidden="true"></span>
                     </li>
                 </ol>
-                <div class="panes">
-                    <div class="pane" v-for="s in demoSteps()" :key="s.id" :data-pane="s.id">
-                        <p class="eyebrow">{{ s.title }}</p>
-                        <pre class="out">{{ s.out }}</pre>
-                        <p class="stepnote">{{ s.note }}</p>
+                <!-- A terminal, drawn as one: the window's own bar with its
+                     path and the step's number, and output coloured by
+                     `shellOutHtml` — a prompt is a prompt, a path is a path. -->
+                <div class="term">
+                    <div class="termbar" aria-hidden="true">
+                        <span class="lights"><i></i><i></i><i></i></span>
+                        <span class="where">~/demo — vyrn</span>
+                        <span class="counter" data-demo-count></span>
+                    </div>
+                    <div class="panes">
+                        <div class="pane" v-for="s in demoSteps()" :key="s.id" :data-pane="s.id">
+                            <pre class="out" v-html="stepHtml(s)"></pre>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -431,7 +438,7 @@ fn pillarCmd(i: Int64) -> String {
                  the class built to sit flush under the block it is about; as an
                  `.eyebrow` inside the plate it landed on top of the last step's
                  row. -->
-            <p class="cap">Recorded by running <code>{{ demoVersion() }}</code> on <code>{{ demoRecorded() }}</code>.</p>
+            <p class="cap minutecap">Recorded by running <code>{{ demoVersion() }}</code> on <code>{{ demoRecorded() }}</code>. Hover to pause.</p>
         </section>
 
         <!-- LATEST RELEASE (RFC-0106 M3, third round). `Releases` left the
@@ -454,7 +461,7 @@ fn pillarCmd(i: Int64) -> String {
                 <p class="ctarow"><a class="cta" href="/releases.html">Releases</a></p>
             </div>
             <ul class="plain">
-                <li v-for="r in highlights()" :key="r.tag"><strong><a :href="r.href">{{ r.tag }}</a></strong><span>{{ r.band }}</span></li>
+                <li v-for="r in highlights()" :key="r.tag"><strong>{{ r.tag }}</strong><span>{{ r.band }}</span></li>
             </ul>
         </section>
 </main>

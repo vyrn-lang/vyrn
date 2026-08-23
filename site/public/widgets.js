@@ -106,7 +106,23 @@ async function writeClipboard(text) {
     await navigator.clipboard.writeText(text);
     return true;
   } catch (err) {
-    return false;
+    // The async API refuses in more situations than a reader can see — the
+    // document briefly unfocused, an embedding policy — while the selection
+    // path still works there. The fallback is the old way, tried second.
+    try {
+      const box = document.createElement("textarea");
+      box.value = text;
+      box.setAttribute("readonly", "");
+      box.style.position = "fixed";
+      box.style.left = "-9999px";
+      document.body.append(box);
+      box.select();
+      const ok = document.execCommand("copy");
+      box.remove();
+      return ok;
+    } catch (err2) {
+      return false;
+    }
   }
 }
 
@@ -590,16 +606,23 @@ function matchingExports(row, q, limit) {
   return hits.slice(0, limit);
 }
 
-/// A row's list of matched exports, each one a link to that export's anchor on
-/// the module's own page.
+/// A row's list of matched exports — each a link to the export's anchor on the
+/// module's own page where the row names one (`data-m`, the reference), and a
+/// plain chip where it does not (the registry: a package page has no per-export
+/// anchors to land on, and a link that scrolls nowhere is worse than a chip).
 function exportHits(row, names) {
   const box = document.createElement("span");
   box.className = "hits";
   for (const name of names) {
-    const a = document.createElement("a");
-    a.href = new URL("docs/std/" + row.dataset.m + ".html#e-" + name, SITE).href;
-    a.textContent = name;
-    box.appendChild(a);
+    let chip;
+    if (row.dataset.m) {
+      chip = document.createElement("a");
+      chip.href = new URL("docs/std/" + row.dataset.m + ".html#e-" + name, SITE).href;
+    } else {
+      chip = document.createElement("span");
+    }
+    chip.textContent = name;
+    box.appendChild(chip);
   }
   return box;
 }
@@ -611,31 +634,44 @@ function moduleSearch() {
   if (!input || !list) return;
   const rows = $$("li", list);
   const total = rows.length;
+  // What one row is called — "module" on the reference, "package" on the
+  // registry — and whether any row carries export names to count.
+  const noun = count?.dataset.searchNoun || "module";
+  const hasExports = rows.some((r) => r.dataset.e);
 
   const apply = () => {
-    const q = input.value.trim().toLowerCase();
+    // `kind:project` narrows by a row's own kind; what is left matches the
+    // haystack OR an export name, so a search for a NAME finds the thing that
+    // offers it even when nothing else on the row says so.
+    const terms = input.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const kinds = terms.filter((t) => t.startsWith("kind:")).map((t) => t.slice(5)).filter(Boolean);
+    const q = terms.filter((t) => !t.startsWith("kind:")).join(" ");
     let shown = 0;
     let hits = 0;
     for (const row of rows) {
       const old = $(".hits", row);
       if (old) old.remove();
-      const match = q.length === 0 || (row.dataset.q || "").includes(q);
+      const kindOk = kinds.length === 0 || kinds.includes((row.dataset.kind || "").toLowerCase());
+      const names = q.length === 0 ? [] : matchingExports(row, q, 10);
+      const match = kindOk && (q.length === 0 || (row.dataset.q || "").includes(q) || names.length > 0);
       row.hidden = !match;
       if (!match) continue;
       shown += 1;
       if (q.length === 0) continue;
-      // Ten is enough to show WHICH names matched; the module page has them all.
-      const names = matchingExports(row, q, 10);
+      // Ten is enough to show WHICH names matched; the row's own page has them all.
       hits += names.length;
       if (names.length) row.appendChild(exportHits(row, names));
     }
     if (!count) return;
-    if (q.length === 0) {
-      count.textContent = total + " modules";
+    if (terms.length === 0) {
+      count.textContent = total + " " + noun + "s";
     } else if (shown === 0) {
-      count.textContent = "no module matches " + q;
+      count.textContent = "no " + noun + " matches " + input.value.trim();
     } else {
-      count.textContent = shown + (shown === 1 ? " module" : " modules") + ", " + hits + (hits === 1 ? " export" : " exports");
+      // Export hits only exist where rows carry them — the registry's rows
+      // are packages and say nothing about exports.
+      const tail = hasExports && hits > 0 ? ", " + hits + (hits === 1 ? " export" : " exports") : "";
+      count.textContent = shown + (shown === 1 ? " " + noun : " " + noun + "s") + tail;
     }
   };
 
@@ -728,7 +764,10 @@ function keepInRail(link) {
 
 function railSpy() {
   railLinks = [];
-  const rail = $(".rail");
+  // The docs shell's right pane is the same device as the margin rail, and
+  // gets the same moving marker (user: "On this page should highlight the
+  // current section").
+  const rail = $(".rail") || $(".onpage");
   if (!rail) return;
   for (const link of $$('a[href^="#"]', rail)) {
     const section = document.getElementById(decodeURIComponent(link.getAttribute("href").slice(1)));
@@ -740,6 +779,20 @@ function railSpy() {
 // One listener for the life of the document. `boot` runs again after every soft
 // navigation, and re-registering here would stack a listener per page.
 addEventListener("scroll", markRail, { passive: true });
+
+// A `<details>` menu holds itself open until its summary is pressed again —
+// the platform's rule, and the wrong one for a dropdown: a click anywhere
+// else, or Escape, closes it (user). Document-level and bound once, like the
+// listeners above.
+addEventListener("click", (e) => {
+  for (const m of $$(".pagemenu[open]")) {
+    if (!m.contains(e.target)) m.open = false;
+  }
+});
+addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  for (const m of $$(".pagemenu[open]")) m.open = false;
+});
 addEventListener("resize", markRail, { passive: true });
 
 // ---------------------------------------------------------------------------
@@ -752,12 +805,23 @@ addEventListener("resize", markRail, { passive: true });
 
 /// Whether the navigation row `href` is the row for `path`.
 ///
-/// A reference page belongs under Docs and a chapter under Guide: a row owns the
-/// subtree named after it. This is the export's `currentNav` rule, in the
-/// language the browser has, and it needs no list of the prefixes — adding a
-/// third section adds nothing here.
+/// A row owns the subtree named after it — and the Docs row owns MORE than its
+/// subtree: it points at `/guide.html` and speaks for the whole documentation,
+/// so the reference, the Web shelf and the Tooling shelf mark it too. That is
+/// the export's `currentNav` rule; the first cut here assumed name-owns-subtree
+/// was the whole rule, and the Docs row went dark on every documentation page
+/// whose path was not under `/guide` (user). The prefixes are joined to the
+/// row's own stem, so any mount point works.
 function navOwns(href, path) {
-  return path === href || path.startsWith(href.replace(/\.html$/, "") + "/");
+  const stem = href.replace(/\.html$/, "");
+  if (path === href || path.startsWith(stem + "/")) return true;
+  if (stem.endsWith("/guide")) {
+    const root = stem.slice(0, -"/guide".length);
+    for (const area of ["/docs", "/web", "/tooling"]) {
+      if (path === root + area + ".html" || path.startsWith(root + area + "/")) return true;
+    }
+  }
+  return false;
 }
 
 /// Freeze the shell's links to the URLs they resolve to on the document that
@@ -911,18 +975,21 @@ function demoWidget(root) {
   back.type = "button";
   back.textContent = "‹";
   back.setAttribute("aria-label", "Back");
+  const replay = document.createElement("button");
+  replay.type = "button";
+  replay.className = "replay";
+  replay.textContent = "replay";
   const next = document.createElement("button");
   next.type = "button";
   next.textContent = "›";
   next.setAttribute("aria-label", "Next");
-  const count = document.createElement("span");
-  count.className = "eyebrow";
-  // Polite, because the reader pressed the button that changed it.
+  bar.append(back, replay, next);
+  // The controls belong to the terminal they page, under its own window.
+  ($(".term", root) || root).append(bar);
+  // The step's number rides on the window bar, where a terminal puts what it
+  // is showing; polite, because a press is what changes it.
+  const count = $("[data-demo-count]", root) || document.createElement("span");
   count.setAttribute("aria-live", "polite");
-  bar.append(count, back, next);
-  // The controls belong to the pane they page — the bottom of the terminal,
-  // the reference site's own placement — not a toolbar over the whole card.
-  ($(".panes", root) || root).append(bar);
 
   // The list of titles STAYS (RFC-0106 M3). It used to set `hidden` on six of
   // seven, which threw the outline away with the detail; every row is on the
@@ -945,27 +1012,118 @@ function demoWidget(root) {
       else s.removeAttribute("aria-current");
     });
     panes.forEach((p, k) => p.classList.toggle("on", k === at));
-    count.textContent = at + 1 + " / " + steps.length;
+    count.textContent = pad(at + 1) + " / " + pad(steps.length);
+    // The bar under the marked step is the timer, drawn: it restarts with
+    // every step and is what says the walk is still walking.
+    const tick = $(".tick", steps[at]);
+    if (tick) {
+      tick.style.animation = "none";
+      void tick.offsetWidth;
+      tick.style.animation = "";
+    }
+    arm();
     back.disabled = at === 0;
-    next.textContent = at === steps.length - 1 ? "Replay" : "›";
-    if (at === steps.length - 1) next.removeAttribute("aria-label");
-    else next.setAttribute("aria-label", "Next");
   };
+
+  /// `1` reads as `01` beside `07`: a counter whose width changes is a
+  /// counter that moves the bar it sits on.
+  function pad(n) {
+    return n < 10 ? "0" + n : String(n);
+  }
+
+  // IT WALKS ITSELF (user, against the reference site's own): the point of
+  // the section is the whole minute, and a reader who does nothing should see
+  // it. The pointer over the card pauses it, and any press hands the walk to
+  // the reader for good.
+  //
+  // THE BAR IS THE CLOCK. A `setTimeout` beside a CSS animation is two
+  // clocks: pausing stopped the animation where it stood and cleared the
+  // timeout, and leaving restarted the timeout from zero while the bar
+  // resumed from nine tenths — so the bar sat full for four more seconds and
+  // the step never turned (user). The step turns when its own bar finishes,
+  // which is one clock, and `animation-play-state` pauses it exactly.
+  let walking = !matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let paused = false;
+  function arm() {
+    // Kept as the name the show path calls; the bar restarts itself there.
+  }
+  for (const step of steps) {
+    const tick = $(".tick", step);
+    if (!tick) continue;
+    tick.addEventListener("animationend", () => {
+      if (walking && !paused && step.classList.contains("on")) show(at + 1);
+    });
+  }
+  root.addEventListener("pointerenter", () => {
+    paused = true;
+    root.classList.add("paused");
+  });
+  root.addEventListener("pointerleave", () => {
+    paused = false;
+    root.classList.remove("paused");
+    // A bar that finished while the pointer rested on it turns its step now.
+    const tick = $(".tick", steps[at]);
+    if (walking && tick && tick.getAnimations && tick.getAnimations().length === 0) show(at + 1);
+  });
+  function stopWalking() {
+    walking = false;
+    root.classList.add("held");
+  }
   // Pointer-only, and deliberately: every step is already reachable with Back,
   // Next and the arrow keys, so this adds no function a keyboard cannot do.
-  steps.forEach((s, k) => s.addEventListener("click", () => show(k)));
-  back.addEventListener("click", () => show(at - 1));
-  next.addEventListener("click", () => show(at === steps.length - 1 ? 0 : at + 1));
+  steps.forEach((s, k) => s.addEventListener("click", () => {
+    stopWalking();
+    show(k);
+  }));
+  back.addEventListener("click", () => {
+    stopWalking();
+    show(at - 1);
+  });
+  next.addEventListener("click", () => {
+    stopWalking();
+    show(at + 1);
+  });
+  replay.addEventListener("click", () => {
+    walking = true;
+    root.classList.remove("held");
+    show(0);
+  });
   root.addEventListener("keydown", (e) => {
-    if (e.key === "ArrowRight") return e.preventDefault(), show(at + 1);
-    if (e.key === "ArrowLeft") return e.preventDefault(), show(at - 1);
+    if (e.key === "ArrowRight") return e.preventDefault(), stopWalking(), show(at + 1);
+    if (e.key === "ArrowLeft") return e.preventDefault(), stopWalking(), show(at - 1);
   });
   show(0);
 }
 
 // ---------------------------------------------------------------------------
 
+/// The playground's title-bar masthead, applied AFTER the first paint so the
+/// row animates into it rather than arriving already small (user). A page
+/// that is not the editor takes the class off, which is what makes a soft
+/// navigation back out animate too.
+function markEditorChrome() {
+  const editor = Boolean($(".page.play.ide"));
+  const root = document.documentElement;
+  // What the NEXT page starts as, so the change has something to animate
+  // from. `theme.js` reads this before the first paint.
+  try {
+    sessionStorage.setItem("vyrn.mast", editor ? "compact" : "full");
+  } catch (err) {
+    /* a blocked store only costs the handoff */
+  }
+  // The suite's document has no root element; the class it would carry has
+  // no meaning without one either.
+  const settle = () => root && root.classList.toggle("idecompact", editor);
+  // A hidden tab runs no animation frames at all, and the class would wait
+  // for a paint that never comes — there is nothing to animate there anyway.
+  // The browser suite runs this file in a VM with a minimal document, which
+  // has no frames either.
+  if (document.visibilityState === "hidden" || typeof requestAnimationFrame !== "function") settle();
+  else requestAnimationFrame(() => requestAnimationFrame(settle));
+}
+
 function boot() {
+  markEditorChrome();
   copyButtons();
   copyPageButtons();
   markCopyable();
@@ -1024,6 +1182,15 @@ boot();
     let index = null;
     let loading = null;
     let cursor = -1;
+    // The section filter — "" is All. The row of chips under the field sets
+    // it, and Tab cycles it, which is the whole reason Tab is caught: a
+    // dialog with one field has nothing else for Tab to do.
+    let sect = "";
+    const tabs = $$("[data-find-tabs] [data-sect]", box);
+    // What the note says at rest, kept as markup because the suggestions in
+    // it are pressable. `render` swaps the note's content wholesale, so the
+    // presses are delegated to the note itself and survive every swap.
+    const idle = note.innerHTML;
     // Where focus was when the overlay opened, so it can be given back. A
     // reader who presses `/` in the middle of a reference page and then Esc has
     // to end up where they were and not at the top of the document.
@@ -1072,6 +1239,7 @@ boot();
       const needle = q.toLowerCase();
       const hits = [];
       for (const r of index) {
+        if (sect && r.s !== sect) continue;
         const at = r.t.toLowerCase().indexOf(needle);
         let rank = -1;
         if (at === 0) rank = 0;
@@ -1104,13 +1272,15 @@ boot();
       list.textContent = "";
       cursor = -1;
       if (!q || !index) {
-        if (!q) note.textContent = "Type to search. Esc closes.";
+        if (!q) note.innerHTML = idle;
         return;
       }
       const hits = search(q);
       note.textContent = hits.length
-        ? `${hits.length} result${hits.length === 1 ? "" : "s"}. Arrows to move, Enter to open, Esc to close.`
-        : `Nothing matches "${q}".`;
+        ? `${hits.length} result${hits.length === 1 ? "" : "s"}.`
+        : sect
+          ? `Nothing in ${sect} matches "${q}".`
+          : `Nothing matches "${q}".`;
       let section = null;
       for (const r of hits) {
         if (r.s !== section) {
@@ -1161,12 +1331,32 @@ boot();
       hits[cursor].scrollIntoView({ block: "nearest" });
     }
 
+    /// Point the filter at `v` and redraw. Focus goes back to the field: a
+    /// chip is a way of narrowing what the field finds, not a place to be.
+    function setSect(v) {
+      sect = v;
+      for (const t of tabs) t.classList.toggle("on", t.dataset.sect === v);
+      render(field.value);
+      field.focus();
+    }
+    for (const t of tabs) t.addEventListener("click", () => setSect(t.dataset.sect));
+
+    // A pressed suggestion becomes the query.
+    note.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-try]");
+      if (!b) return;
+      field.value = b.textContent;
+      // Back to All: the suggestions name things from every section, and a
+      // filter left over from an earlier search would empty them.
+      setSect("");
+    });
+
     function open() {
       if (!box.hidden) return;
       cameFrom = document.activeElement;
       box.hidden = false;
       field.value = "";
-      render("");
+      setSect("");
       field.focus();
       load().then(() => render(field.value));
     }
@@ -1204,7 +1394,15 @@ boot();
 
     field.addEventListener("input", () => render(field.value));
     field.addEventListener("keydown", (e) => {
-      if (e.key === "ArrowDown") {
+      if (e.key === "Tab") {
+        // Tab walks the section chips, Shift+Tab walks them backwards —
+        // the pattern the reader's other search dialogs taught them.
+        e.preventDefault();
+        const order = tabs.map((t) => t.dataset.sect);
+        const at = order.indexOf(sect);
+        const step = e.shiftKey ? -1 : 1;
+        setSect(order[(at + step + order.length) % order.length]);
+      } else if (e.key === "ArrowDown") {
         e.preventDefault();
         move(1);
       } else if (e.key === "ArrowUp") {

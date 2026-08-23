@@ -10,8 +10,17 @@
 // themed error page at 404 rather than an empty book.
 import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
 import { pageHead } from "../../nav"
-import { Chapter, Section, chapters, chapterOf, chapterKnown, chapterNumber, chapterTag, chapterHref, chapterNavHtml, sectionBody, sectionEyebrow } from "../../guide"
-import { mdUrl } from "../../pagemd"
+import { Chapter, Section, chapterArea, chapterCount, chapterOf, chapterKnown, chapterNumber, chapterHref, chapterNavHtml, sectionBody, sectionEyebrow } from "../../guide"
+import { mdUrl, askClaudeUrl } from "../../pagemd"
+// The one chapter that compares languages draws its plates from here; every
+// other section's illustration is a program this site ran.
+import { Snippet, specSet } from "../../snippets"
+import { inlineCode } from "../../code"
+// THE DOCS SHELL (RFC-0106 M4). The same three panes the reference wears: the
+// book's contents on the left, this chapter's sections on the right, the chapter
+// before and after at the foot.
+import { TreeGroup, guideTree } from "../../docshell"
+import { Icon } from "../../icons"
 params { chapter: String }
 
 /// One chapter, with the number the rail prints beside it.
@@ -26,59 +35,94 @@ export fn data() -> ParamQuery<Params, Result<ChapterPage, PageError>> {
 }
 
 fn fetchChapter(p: Params) -> Result<ChapterPage, PageError> {
-    if !chapterKnown(p.chapter) {
+    // A slug from another shelf is not this route's page: `/guide/testing` is
+    // a static stub beside this file, and `/tooling/testing` is the page.
+    if !chapterKnown(p.chapter) || chapterArea(p.chapter) != "guide" {
         return Err(notFound(p.chapter + " is not a chapter of the guide"))
     }
     return Ok(ChapterPage { n: chapterNumber(p.chapter), chapter: chapterOf(p.chapter) })
 }
 
-/// One rail row: a chapter of the book, and whether it is the one being read.
-type RailRow = { href: String, tag: String, title: String, here: String }
+/// The sidebar for this page: the book's contents, with this chapter marked.
+fn tree(here: String) -> Array<TreeGroup> {
+    return guideTree(here)
+}
 
-/// The rail is the book's contents, with the chapter you are on marked. It is
-/// the same furniture the reference pages use for their export index.
-fn railRows(here: String) -> Array<RailRow> {
-    let mut out: Array<RailRow> = []
-    let mut n = 1
-    for c in chapters() {
-        out.push(RailRow {
-                href: chapterHref(c.slug),
-                tag: chapterTag(n),
-                title: c.title.copy(),
-                // `aria-current="page"` marks the reader's place. An empty value
-                // is "not current", which is what the attribute means.
-                here: if c.slug == here { "page" } else { "" },
-            })
-        n = n + 1
-    }
-    return out
+/// The link to one section of this chapter. A function rather than `"#" + …` in
+/// the template, because a template attribute is delimited by the same quote a
+/// String literal is and `'#'` in Vyrn is a byte.
+fn sectionHref(s: Section) -> String {
+    return "#" + s.anchor
+}
+
+/// The Open-in-Claude link for this chapter.
+fn claudeHref(slug: String, title: String) -> String {
+    return askClaudeUrl(chapterHref(slug), title)
 }
 </script>
 
 <template>
-<main class="page">
-    <aside class="rail toc">
-        <p class="eyebrow">The guide</p>
-        <a v-for="r in railRows(data.chapter.slug)" :key="r.href" :href="r.href" :aria-current="r.here"><span class="n">{{ r.tag }}</span>{{ r.title }}</a>
+<main class="page docs">
+    <aside class="docstree">
+        <details class="treebox">
+            <summary>The guide</summary>
+            <div class="treegroup" v-for="g in tree(data.chapter.slug)" :key="g.name">
+                <p class="eyebrow"><span class="slot" v-html="g.icon"></span>{{ g.name }}</p>
+                <a v-for="r in g.rows" :key="r.href" :href="r.href" :aria-current="r.here">{{ r.label }}</a>
+            </div>
+        </details>
     </aside>
 
+    <div class="crumbrow">
+        <nav class="crumbs" aria-label="Breadcrumb">
+            <a href="/guide.html">Guide</a>
+            <span>Chapter {{ data.n }} of {{ chapterCount("guide") }}</span>
+        </nav>
+        <div class="docutils">
+            <!-- A LINK to the file the export writes beside this page;
+                 `widgets.js` turns a press into a clipboard write when the
+                 browser has a clipboard. Without script it is the file. -->
+            <a class="btn" :href="mdUrl(chapterHref(data.chapter.slug))" data-copy-md>Copy page</a>
+            <details class="pagemenu">
+                <summary aria-label="More page actions"><span class="gl">▾</span></summary>
+                <div class="acts">
+                    <a :href="mdUrl(chapterHref(data.chapter.slug))" data-copy-md><span class="ic"><Icon name="bytesize:clipboard"/></span><span class="t"><span>Copy page</span><span class="d">Markdown, ready to paste into an LLM</span></span></a>
+                    <a :href="mdUrl(chapterHref(data.chapter.slug))"><span class="ic"><Icon name="bytesize:file"/></span><span class="t"><span>View as Markdown</span><span class="d">This page as plain text</span></span></a>
+                    <a :href="claudeHref(data.chapter.slug, data.chapter.title)" rel="noopener"><span class="ic"><Icon name="bytesize:external"/></span><span class="t"><span>Open in Claude</span><span class="d">Ask Claude about this page</span></span></a>
+                </div>
+            </details>
+        </div>
+    </div>
+
     <section class="hero">
-        <p class="eyebrow"><a href="/guide.html">The guide</a> — chapter {{ data.n }} of {{ chapters().length }}</p>
         <h1 class="display">{{ data.chapter.title }}</h1>
-        <p class="lede">{{ data.chapter.lede }}</p>
-        <!-- The chapter as markdown (RFC-0106 M1). It is a LINK, to the file the
-             export writes beside this page, and `widgets.js` turns a press into a
-             clipboard write when the browser has a clipboard to write to. Without
-             script it is what it looks like: a link to the file. -->
-        <p><a class="btn" :href="mdUrl(chapterHref(data.chapter.slug))" data-copy-md>Copy as Markdown</a></p>
+        <p class="lede" v-html="inlineCode(data.chapter.lede)"></p>
     </section>
 
     <section class="band" v-for="s in data.chapter.sections" :key="s.anchor" :id="s.anchor">
         <p class="eyebrow">{{ sectionEyebrow(data.chapter, s) }}</p>
         <h2>{{ s.heading }}</h2>
         <div v-html="sectionBody(s)"></div>
+        <!-- The same task in four languages, for the chapter a reader opens
+             before they have written any Vyrn. The three others are QUOTED —
+             this site runs Vyrn and does not pretend to run the rest. -->
+        <div class="specrow" v-if="s.specs.byteLength > 0">
+            <figure class="specplate" v-for="n in specSet(s.specs)" :key="n.id">
+                <figcaption>{{ n.label }}</figcaption>
+                <pre class="code" v-html="n.html"></pre>
+            </figure>
+        </div>
     </section>
 
-    <nav class="chapternav" aria-label="Chapters" v-html="chapterNavHtml(data.chapter.slug)"></nav>
+    <nav class="pager" aria-label="Chapters" v-html="chapterNavHtml(data.chapter.slug)"></nav>
+
+    <!-- THE RIGHT PANE: this chapter's own sections, from the same array the
+         `<h2>`s above are rendered from, so the two cannot disagree. Every
+         fragment here is checked against the ids the page carries by the link
+         gate in `site/export.vyrn`. -->
+    <aside class="onpage">
+        <p class="eyebrow">On this page</p>
+        <a v-for="s in data.chapter.sections" :key="s.anchor" :href="sectionHref(s)">{{ s.heading }}</a>
+    </aside>
 </main>
 </template>

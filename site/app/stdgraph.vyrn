@@ -178,24 +178,54 @@ export fn exportTotal() -> Int64 {
 // ---------------------------------------------------------------------------
 
 /// The deepest layer any module sits in.
+/// THE DRAWING ASKED THE SAME QUESTIONS ONCE PER WIRE. `rowOf` walked a whole
+/// layer, `layer` walked every module, and `tallest` called `deepest()` in its
+/// loop CONDITION — so the graph recomputed the entire layout for each of its
+/// forty-odd nodes and each of its wires. `/docs/graph` was 6.7 s of the
+/// export's 95 s, more than any reference page. The layout is a pure function
+/// of the module set, so it is computed once (RFC-0029 module state).
+let mut depthCache: Map<String, Int64> = [:]
+
+fn depthOf(name: String) -> Int64 {
+    if let Some(hit) = depthCache[name] {
+        return hit
+    }
+    let d = depDepth(name)
+    depthCache[name.copy()] = d
+    return d
+}
+
+let mut deepestCache = 0 - 1
+
 fn deepest() -> Int64 {
+    if deepestCache >= 0 {
+        return deepestCache
+    }
     let mut d = 0
     for m in apiModules() {
-        if depDepth(m.name) > d {
-            d = depDepth(m.name)
+        if depthOf(m.name) > d {
+            d = depthOf(m.name)
         }
     }
+    deepestCache = d
     return d
 }
 
 /// The modules of one layer, in the order the reference lists them.
+let mut layers: Map<String, Array<String>> = [:]
+
 fn layer(d: Int64) -> Array<String> {
+    let key = d.toString()
+    if let Some(hit) = layers[key] {
+        return hit.copy()
+    }
     let mut out: Array<String> = []
     for m in apiModules() {
-        if depDepth(m.name) == d {
+        if depthOf(m.name) == d {
             out.push(m.name.copy())
         }
     }
+    layers[key.copy()] = out.copy()
     return out
 }
 
@@ -203,7 +233,8 @@ fn layer(d: Int64) -> Array<String> {
 fn tallest() -> Int64 {
     let mut n = 0
     let mut d = 0
-    while d <= deepest() {
+    let last = deepest()
+    while d <= last {
         if layer(d).length > n {
             n = layer(d).length
         }
@@ -241,20 +272,27 @@ fn labelWidth(name: String) -> Int64 {
 }
 
 /// The layer a module sits in, and its row inside that layer.
+let mut rowIndex: Map<String, Int64> = [:]
+
 fn rowOf(name: String) -> Int64 {
+    if let Some(hit) = rowIndex[name] {
+        return hit
+    }
     let mut i = 0
-    for m in layer(depDepth(name)) {
+    for m in layer(depthOf(name)) {
         if m == name {
+            rowIndex[name.copy()] = i
             return i
         }
         i = i + 1
     }
+    rowIndex[name.copy()] = 0
     return 0
 }
 
 /// The x of a module's dot: the left edge of its label.
 fn nodeX(name: String) -> Int64 {
-    return columnX(depDepth(name))
+    return columnX(depthOf(name))
 }
 
 /// The y of a module's dot.
@@ -403,18 +441,20 @@ test "a summary's tags are not part of what a search matches" {
     // Nor are the entities the escaper wrote: the haystack is the text the
     // reader sees, so a query typed off the page (`option<t`) matches.
     assertEq(plainText("an Option&lt;T&gt; &amp; &quot;q&quot;&#39;s"), "an Option<T> & \"q\"'s")
-    // std/vyx's summary shows `<script>`; that text, not `&lt;script&gt;`, is
-    // what its row is matched on. No row keeps an entity at all.
-    let mut sawScript = false
+    // std/vyx's summary wraps `.vyx` in a code tag; the TEXT, not the tag, is
+    // what its row is matched on. No row keeps an entity at all. (The audit's
+    // witness was `<script>`, which the summary has never contained — the
+    // assertion below had never run when it landed.)
+    let mut sawVyx = false
     for r in searchRows() {
         if r.name == "vyx" {
-            sawScript = contains(r.q, "<script")
+            sawVyx = contains(r.q, ".vyx") && !contains(r.q, "<code>")
         }
         assert(!contains(r.q, "&lt;"))
         assert(!contains(r.q, "&gt;"))
         assert(!contains(r.q, "&amp;"))
     }
-    assert(sawScript)
+    assert(sawVyx)
 }
 
 test "every node sits in a column, and no two share a place" {

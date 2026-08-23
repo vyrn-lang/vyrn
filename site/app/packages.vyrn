@@ -76,13 +76,19 @@ fn examplesDir() -> String {
 /// one applied here: what makes a directory a PROJECT is that it holds a
 /// `vyrn.json`, so the manifest read is the test. `examples/data` is a directory
 /// and is not a project, and no rule about names had to know that.
+let mut slugs: Array<String> = []
+
 export fn projectSlugs() -> Array<String> {
+    if slugs.length > 0 {
+        return slugs.copy()
+    }
     let mut out: Array<String> = []
     for entry in listing(examplesDir()) {
         if manifestText(entry).byteLength > 0 {
             out.push(entry.copy())
         }
     }
+    slugs = out.copy()
     return out
 }
 
@@ -94,12 +100,29 @@ fn listing(dir: String) -> Array<String> {
     }
 }
 
-/// A project's manifest, verbatim, or `""` when the directory holds none.
-export fn manifestText(slug: String) -> String {
-    return match readFile(examplesDir() + "/" + slug + "/vyrn.json") {
+/// EVERY FILE THIS MODULE READS, READ ONCE. The registry pages ask the same
+/// questions of the same handful of files over and over — `packages()` walks
+/// every slug, `packageOf` asks three more functions about it, and each of them
+/// opened the file again. Rendering the six `/explore` pages was 12 s of the
+/// export's 95 s. Module state (RFC-0029), the same as `bench.vyrn` and
+/// `history.vyrn` do it.
+let mut files: Map<String, String> = [:]
+
+fn fileText(path: String) -> String {
+    if let Some(hit) = files[path] {
+        return hit.copy()
+    }
+    let body = match readFile(path) {
         Ok(text) => text.copy(),
         Err(why) => "",
     }
+    files[path.copy()] = body.copy()
+    return body
+}
+
+/// A project's manifest, verbatim, or `""` when the directory holds none.
+export fn manifestText(slug: String) -> String {
+    return fileText(examplesDir() + "/" + slug + "/vyrn.json")
 }
 
 /// Whether `slug` names a package this site publishes a page for.
@@ -108,11 +131,17 @@ export fn packageKnown(slug: String) -> Bool {
 }
 
 /// Every package in the registry, in listing order.
+let mut registry: Array<Package> = []
+
 export fn packages() -> Array<Package> {
+    if registry.length > 0 {
+        return registry.copy()
+    }
     let mut out: Array<Package> = []
     for slug in projectSlugs() {
         out.push(packageOf(slug))
     }
+    registry = out.copy()
     return out
 }
 
@@ -178,10 +207,7 @@ fn summaryOf(slug: String) -> String {
 /// read as far as the header goes: the first line that is not a doc comment ends
 /// it.
 fn headerOf(path: String) -> String {
-    let src = match readFile(path) {
-        Ok(text) => text.copy(),
-        Err(why) => "",
-    }
+    let src = fileText(path)
     let mut out = ""
     for line in lines(src) {
         let text = trim(line)
@@ -283,10 +309,7 @@ fn hasDot(entry: String) -> Bool {
 /// word `export` in column 1 of a string, and no file under `examples/` writes
 /// one. The test below is what says so.
 export fn exportNames(path: String) -> Array<String> {
-    let src = match readFile(path) {
-        Ok(text) => text.copy(),
-        Err(why) => "",
-    }
+    let src = fileText(path)
     let mut out: Array<String> = []
     for line in lines(src) {
         if startsWith(line, "export ") {

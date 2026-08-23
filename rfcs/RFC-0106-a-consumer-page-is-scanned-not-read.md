@@ -144,8 +144,14 @@ computable, no hand-written number; the feed reachable from a page; section
 geometry asserted in a browser rather than looked at. **Gate met** —
 [M3 — as landed](#m3--as-landed).
 
-**M4 — compare matrix, why-Vyrn, guide landing grid, editors compression.**
-Gate: every matrix cell links to proof; word counts inside ceilings.
+**M4 — the docs shell**, widened by the user from "compare matrix, why-Vyrn,
+guide landing grid, editors compression" to the thing those pages had in common:
+one three-pane layout for every documentation page, the reference landing as area
+cards with the import graph moved off it, and the old pages brought under the
+register M3's eleven rounds defined. Gate: every documentation page wears one
+shell whose every row is generated; `/docs` inside M0's byte ceiling; zero
+overflow and no visible scrollbar at rest at 1280 and 375. **Gate met** —
+[M4 — as landed](#m4--as-landed).
 
 **M5 — enforcement.** Word and byte budgets wired into the export for every
 consumer page; mobile rows added to the standing checklist and verified; the
@@ -559,16 +565,17 @@ ceiling plus the generated count as it stands today, which moves only when
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | index | 644 (644) | **380** | **380** | 16,024 | **34,000** | 5 | **8** | 1 | **5** | <!-- RAISED IN M3 ROUND 4, from 260/260/30,000/2. The page gained a five-tab showcase of the book's own programs and an eight-module reference teaser, both generated; what the census counts as the new words are tab labels, one-line captions, module names and group names, and the `.cap` count is one caption per showcase pane plus the demo's provenance line. No paragraph on the page grew. The ceiling that bounds what a reader pays for is the cold load, and that is 40,762 of 55,000. -->
 | install | 678 (678) | **220** | **220** | 12,942 | **14,000** | 2 | **1** | 14 | **8** |
-| why-vyrn (was philosophy) | 550 (550) | **280** | **280** | 8,285 | **9,000** | 5 | **0** | 0 | **0** |
+| why-vyrn (was philosophy) | 550 (550) | **280** | **280** | 8,285 | **9,000** | 5 | **2** | 0 | **0** | <!-- `.cap` RAISED IN M4, from 0 to 2, and the reason is the SHELL rather than the page: M1's search overlay carries a `.cap` ("Type to search. Esc closes.") on all 174 documents, so every ceiling in this column has a floor of 1 that was written before the overlay existed. The page's own one is the capability plate's provenance line. The word ceiling is NOT raised: 540 against 280 is a prose diet M4 did not do, and M5 fails on it. -->
 | compare | 1329 (1329) | **420** | **420** | 63,602 | **55,000** | 10 | **3** | 0 | **0** |
 | releases | 235 (235) | **200** | **200** | 3,754 | **20,000** | 0 | **1** | 0 | **1** |
-| guide (landing) | 643 (300) | **180** | **523** | 7,393 | **9,000** | 0 | **0** | 0 | **0** |
-| guide/ownership | 330 (330) | **380** | **380** | 11,592 | **13,000** | 2 | **1** | 0 | **0** |
-| docs (landing) | 872 (428) | **200** | **644** | 50,174 | **40,000** | 3 | **1** | 0 | **0** |
-| docs/std/json | 786 (424) | **150** | **512** | 14,722 | **16,000** | 9 | **1** | 1 | **1** |
-| explore (landing) | 477 (401) | **160** | **236** | 6,158 | **8,000** | 1 | **1** | 0 | **0** |
+| guide (landing) | 643 (300) | **180** | **580** | 7,393 | **10,000** | 0 | **1** | 0 | **0** | <!-- RAISED IN M4, from 523/9,000/0. The chapter list is `.modgrid` now and the page is under the docs family; the extra words are the thirteen ledes rendered in full where `.modlist` clamped them, and the `.cap` is the shell's own noscript line. No paragraph on the page grew — two were cut. -->
+| guide/ownership | 330 (330) | **380** | **380** | 11,592 | **15,000** | 2 | **3** | 0 | **0** | <!-- BYTES RAISED IN M4, from 13,000, and `.cap` from 1 to 3. The docs shell adds a fourteen-row sidebar, a breadcrumb and a pager to every chapter: generated navigation, not prose. Gzipped 4.9 KB. -->
+| docs (landing) | 872 (428) | **200** | **700** | 50,174 | **40,000** | 3 | **1** | 0 | **0** | <!-- WORDS RAISED IN M4, from 644. The page gained four area cards; the bytes did NOT move and are met for the first time — 29,231 against 40,000, because the import graph is `/docs/graph` now. -->
+| docs/graph | — | — | **260** | — | **40,000** | — | **2** | — | **0** | <!-- NEW IN M4. The import graph, off the reference landing. The byte ceiling is the landing's own, because the page now carries what the landing carried. -->
+| docs/std/json | 786 (424) | **150** | **900** | 14,722 | **24,000** | 9 | **10** | 1 | **1** | <!-- RAISED IN M4, from 512/16,000/1. The 41-row reference sidebar is 60 of the new words and 5 KB of the new bytes, and it is navigation the page did not have. The `.cap` ceiling is raised to what a generated reference page IS: one provenance line per export — `std/json.vyrn, line 41` — which is the line THE RULE exists to require, one per entry rather than one per plate. -->
+| explore (landing) | 477 (401) | **160** | **236** | 6,158 | **8,000** | 1 | **2** | 0 | **0** | <!-- `.cap` RAISED IN M4, from 1 to 2, for the shell's overlay caption — see the why-vyrn row. The word ceiling is NOT raised: M4 took the page from 496 to 407 against 236, and the rest is M5's. -->
 | explore/shelf | 482 (469) | **200** | **213** | 8,167 | **8,000** | 5 | **1** | 2 | **2** |
-| editors | 704 (704) | **200** | **200** | 17,356 | **10,000** | 2 | **1** | 3 | **3** |
+| docs/editors (was editors) | 704 (704) | **200** | **800** | 17,356 | **26,000** | 2 | **3** | 3 | **3** | <!-- RAISED IN M4, from 200/10,000/1. Two things: the census row had been measuring the `/editors` REDIRECT STUB, 66 words, so this page's real 723 had never been counted; and the docs shell adds the same 41-row sidebar. -->
 | play | 340 (340) | **120** | **120** | 8,064 | **9,000** | 2 | **1** | 0 | **0** |
 | **all thirteen** | **8070 (6832)** | **2970** | **4208** | 228,233 | 241,000 | 46 | **14** | 21 | **20** |
 
@@ -2335,6 +2342,539 @@ places. Census section L carries the entries; the changes:
 - Cut outright: the hero chips row (it restated the headline two inches below
   it) and the editor's Ctrl+Enter chip (now the Run button's title; the
   shortcut itself is unchanged).
+
+## M4 — as landed
+
+The milestone the RFC's own line called "compare matrix, why-Vyrn, guide landing
+grid, editors compression". The user widened it before it started, to the thing
+those four pages had in common and none of them had: **the documentation had no
+shell.** A reference module page, a guide chapter and the editors page each wore
+their own partial furniture, and not one of them could say where the page sat in
+the whole.
+
+### The docs shell
+
+One layout, three panes, on every documentation page — `/docs/std/*` (37 pages),
+`/guide/*` (13), `/docs/editors` and the new `/docs/graph`.
+
+- **Left: the section's tree.** The reference's is `apiGroups()`, the generator
+  the reference landing renders; the book's is `chapters()`, the generator
+  `/guide` renders. Nothing is hand-listed, so a module added to `std/` or a
+  chapter added to the book is in the sidebar of every page of its section on the
+  next build. The page being read is marked with `aria-current="page"`.
+- **Centre: a one-line breadcrumb, then the content.** `Reference / std / json`,
+  `Docs / Chapter 4 of 13`. Every step but the last is a link, because a link to
+  the page you are on is a link that does nothing. It replaced three different
+  `.eyebrow` lines that each half-named the section and half-said something else.
+- **Right: "On this page".** The page's own headings, from the same array the
+  `<h2>`s are rendered from. It is a plain list of links in the document — no
+  script is needed for it to exist or to work; `widgets.js` marking the entry a
+  reader is looking at is the enhancement.
+- **Foot: previous and next.** Derived from the tree the sidebar was built from,
+  by `pagerFor(groups)` — not from a second table, which could point somewhere
+  the sidebar does not. `.chapternav` became `.pager`: one name for one
+  component, now that the reference has the same foot the book had.
+
+`site/app/docshell.vyrn` is the data half, 200 lines including its own tests;
+`.page.docs` in the stylesheet is the other half.
+
+**The one thing that had to be measured rather than reasoned about.** A pane
+spans the whole column, so it takes `grid-row: 1 / span 60` — and under
+`display: contents`, which is what every other page on this site is, those sixty
+rows are the SHEET's rows, the same grid the masthead and the footer are
+auto-placed into. Both of those span all twelve columns, so neither could fit
+beside the rails and both were pushed past them: on the first build the masthead
+painted at **y=928, under a sidebar**, with the page's own content starting at
+y=992. `grid-template-columns: subgrid` is the exact tool — the shell takes the
+sheet's twelve column tracks, so the rail still lines up with the rule grid and
+the section seams, and keeps its own rows, which is the only thing it needed to
+stop sharing.
+
+**On a phone the panes change shape rather than shrink.** The tree becomes the
+masthead's own disclosure — a `<summary>` over the full width, shut until
+pressed — and the right pane is not shown at all: a sidebar of the page's own
+headings helps a reader scan a two-metre column with a mouse; on one column it is
+a second copy of the page above the page. The `<details>` carries no `open` in
+the markup, exactly as `.menu` does not, because `open` is an attribute a
+stylesheet cannot remove: the element is shut by default and the desktop block
+forces it open. Everything works with no JavaScript at either width.
+
+### The reference landing
+
+**Four area cards above the module grid**, each an icon through the existing
+`<Icon>` provider, a title, one generated line and an arrow-link: the book
+(`chapters().length`), the library (`apiModules().length` and its export total),
+the tools, and the graph (`edgeCount()`, `leafCount()`). The page had opened on
+its own module list, which answers "which module does X" and nothing else — a
+reader arriving from a search result could not see that this site also holds a
+book, a driver and a graph.
+
+**The import graph moved to `/docs/graph`.** M3 deferred this as row H4 with the
+numbers: the landing was 52,815 bytes against M0's 40,000 and the inline `<svg>`
+was 25,347 of them, downloaded by every reader of the reference whether or not
+they scrolled to it. It is **29,231 now** — under the ceiling, honestly, with the
+drawing on a page that gives it the whole column and a URL a reader can send to
+somebody. Nothing about the drawing changed.
+
+### The old pages, under the register
+
+| Page | What it was | What was done |
+|---|---|---|
+| `/compare` | census K3/H3: "14 blocks wider than their container at 1280" | **Already closed by M3's `.scroller` work** — re-measured at 1280 and 375, zero elements outside their scroll container, document width equals the viewport. The three `.notice` blocks of method above the engine chart became one `<details>`, which is M0's own rule for a method note |
+| `/guide` landing | 14 `.note` elements, `.modlist` rows | The chapter list is `.modgrid` — the component `/docs` already uses — so thirteen `class="note"` ledes became thirteen `.d` rows. **14 disclosures to 1**, and the one left is the shell's `<noscript>`, which every page carries |
+| `/explore` | 5 `.note`, 496 words | `.pkgs .note` → `.pkgs .d`, the same correction. **5 to 1**, 496 words to 407 |
+| `/why-vyrn` | 6 `.cap`, 4 `.note`/`.notice` | Four of the six `.cap` were the capability panes' own claim, carrying two inline styles that undid `.cap`'s border and padding — the tell that they were never captions. **6 to 2, 4 to 1** |
+| `/backstage` | census K8: the document 139px wide at 1280, 405px at 375 | `.legend.statuses li` was `display: flex`, so each row was ONE item of a four-column grid holding four flex children and the template described a grid nothing was in. `display: contents` — **1,399px to 1,270px, zero overflow at both widths.** Nothing else on the backstage changed |
+
+### The census list, and the two rows that named a stub
+
+`scripts/site-census.py` still measured `/philosophy` and `/editors`, which M1
+turned into redirect stubs — so two of its thirteen rows had been reporting **66
+words of "this page moved"** as the page itself. `/why-vyrn` is 540 words and
+`/docs/editors` is 786; neither had ever been counted. The list names the pages
+now, and `/docs/graph` joins them: fourteen rows.
+
+### The numbers
+
+| Page | Words | Ceiling | Bytes | Ceiling | `.cap` | Ceiling | `.note`/`.notice` |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| index | 358 | 380 | 31,965 | 34,000 | 8 | 8 | 1 |
+| install | 210 | 220 | 9,002 | 14,000 | 1 | 1 | 1 |
+| why-vyrn | **540** | 280 ✗ | 10,343 | 9,000 ✗ | **2** | 2 | **1** |
+| compare | **1,198** | 420 ✗ | 65,324 | 55,000 ✗ | 11 | 3 ✗ | **9** |
+| releases | 168 | 200 | 6,699 | 20,000 | 1 | 1 | 1 |
+| guide (landing) | **571** | 580 | 9,421 | 10,000 | 1 | 1 | **1** |
+| guide/ownership | 362 | 380 | 14,512 | 15,000 | 3 | 3 | 1 |
+| docs (landing) | 685 | 700 | **29,231** | 40,000 | 1 | 1 | 1 |
+| docs/graph | 217 | 260 | 35,502 | 40,000 | 2 | 2 | 1 |
+| docs/std/json | **880** | 900 | **22,588** | 24,000 | 10 | 10 | 2 |
+| explore (landing) | **407** | 236 ✗ | 7,830 | 8,000 | 2 | 2 | **1** |
+| explore/shelf | 501 | 213 ✗ | 10,764 | 8,000 ✗ | 6 | 1 ✗ | 2 |
+| docs/editors | **786** | 800 | **24,414** | 26,000 | 3 | 3 | 7 |
+| play | 359 | 120 ✗ | 10,513 | 9,000 ✗ | 3 | 1 ✗ | 2 |
+
+**Six ceilings are raised here, and each is the shell's own cost.** The three
+panes add roughly sixty words and five kilobytes of navigation furniture to every
+page that wears them — 41 tree rows on a reference page, 14 on a chapter, plus a
+breadcrumb, a pager and two rail headings. That is generated navigation, not
+prose: `docs/std/json`'s own prose did not move, and its gzipped weight went from
+5.3 KB to 6.0 KB. The raised rows are `guide (landing)` 523→580 and 9,000→10,000,
+`guide/ownership` 13,000→15,000, `docs (landing)` 644→700, `docs/std/json`
+512→900 and 16,000→24,000, `docs/editors` 200→800 and 10,000→26,000, and
+`/docs/graph` is new at 260 words and 40,000 bytes — the same byte ceiling the
+reference landing has, because it now carries what that landing carried.
+
+**The `.cap` ceilings on the two reference pages are raised to what they are, and
+that is honest rather than met.** `docs/std/json` carries one `.cap` per export —
+"std/json.vyrn, line 41" — which is the provenance line THE RULE exists to
+require, one per entry rather than one per plate. A page of ten generated entries
+has ten of them by construction.
+
+**And every `.cap` ceiling in M0's table has a floor of 1 that M0 could not have
+known about.** M1's search overlay ships a `.cap` — "Type to search. Esc closes."
+— in the shell of all 174 documents. `/why-vyrn`'s ceiling was **0** and the page
+carries two: the overlay's, and the capability plate's own provenance line. Both
+that row and `/explore`'s are raised by exactly one, and the reason is recorded
+at the row.
+
+**Four rows are still over, marked ✗ above, and M4 did not re-ceiling them.**
+`/compare` at 1,198 words against 420, `/explore/shelf` at 501 against 213,
+`/play` at 359 against 120, and `/why-vyrn` at 540 against 280. M4 cut where its
+scope reached — compare lost 150 words to a disclosure, explore 89, why-vyrn 15 —
+and what is left on each is a prose diet on a page this milestone's scope named
+only for its register defects. Recorded rather than quietly re-ceilinged: **M5
+owns the budgets, and these four are what M5 will fail on.**
+
+### Found by the verification, and fixed
+
+Six defects the verification found that nobody had filed, all in census section R:
+a `pre.code` on `/explore/shelf` and a `pre.doccode` on `/docs/std/json` still
+drew a scrollbar at rest, five rounds after L2 said none should; the area cards'
+`minmax(360px, 1fr)` floor is a HARD floor, so it took `/docs` 12px wider than a
+375px screen; the editors table broke `analyze_document` across two lines
+mid-word once the content column narrowed; and the icons gate keyed its
+template-to-page map by file NAME, which stopped being unique the moment a second
+`index.vyx` carried a glyph. The sixth was found by LOOKING at a 2x crop, which
+is the only thing that could have found it: the right pane carried a
+`border-left`, and the two panes are different heights, so the sheet drew a
+full-height hairline on the left and a stub that stopped halfway on the right.
+
+### Gate
+
+- Every documentation page wears one shell, and every row in it is generated.
+- `/docs` is 29,231 bytes against M0's 40,000, with the graph on its own page.
+- Zero horizontal overflow and zero visible scrollbar at rest, on all fifteen
+  pages at 1280 and at 375, measured in a browser against the exported tree.
+- `/backstage`'s K8 overflow is closed: 1,399px to 1,270px.
+- The census measures the thirteen real pages plus `/docs/graph`.
+
+## M5 — as landed: the documentation splits into areas
+
+The user put two screenshots side by side — our two-row subnav over a single
+thirteen-chapter book, and the reference site's row of areas, each with a
+sidebar of its own — and asked for the same shape: "different categories at
+top and related stuff on each."
+
+### One table, four areas
+
+A `Chapter` now names its **area** — `"guide"`, `"web"` or `"tooling"` — and
+everything else is derived from that one field. `chapterHref` puts the page
+under its area's directory; `chapterNumber`, `prevSlug` and `nextSlug` count
+and chain within a shelf, so a pager never walks a reader out of the area they
+are reading; `areaChapters(area)` is the sidebar, the landing grid, the export's
+route list and the search index, because all four read the same run of the same
+table. The subnav is rendered from `areas()` in `docshell.vyrn` — key, landing,
+label, glyph, tree-group name — and `areaTree(area, current)` builds any
+shelf's sidebar from the same rows, so an area cannot be in the subnav and
+missing from a tree.
+
+- **Guide** keeps the book: eleven chapters, first program to CLI apps.
+- **Web** (`/web/`) is new: *Views and HTML* (the old chapter 12's tree
+  section, with the differ and soft navigation given their own words),
+  *Components: .vyx*, *Routes, RPC and the dev server*, *Styling and icons*.
+- **Tooling** (`/tooling/`) is new: *The CLI* (run/check/build, fmt/doc, and
+  `vyrn why` — every command checked against `vyrn --help` before it was
+  written), *Testing and bench* (chapter 10, moved whole), *Projects and
+  dependencies* (manifest, lock, toolchain pinning), and Editors at the end of
+  the shelf. The first cut left Editors at `/docs/editors` with only its group
+  changed; the user asked why the path disagreed with the shelf, and it was
+  the right question — the page lives at `/tooling/editors` now, the old path
+  is a stub, and M1's `/editors` stub points at the final home rather than at
+  another stub, which is the chain the stub test's no-loop assertion refuses.
+- **Reference** is unchanged.
+
+### The moves
+
+`/guide/testing` and `/guide/web` retired. Each publishes a stub at its old
+path through the SAME `redirects()` machinery M1 built — refresh, canonical,
+visible link — off one `movedChapters()` table that the stub routes also render
+their body from, so a stub and its refresh cannot point different ways. Two
+rules the gates forced: a stub marks nothing in the masthead (`currentNav`
+answers "" for a redirect path now, where before the rule lived only in the
+test), and a stub wears no subnav band — the icon census caught it carrying
+four glyphs it had no template for.
+
+### What the gates caught
+
+- The reference pages' "used by a program in the guide" link built
+  `"/guide/" + chapter` by hand and 404'd for a block whose chapter moved
+  shelves; the fragment gate named it (`/docs/std/html.html` →
+  `/guide/views.html#html`). It reads `chapterHref` now, as does the markdown
+  twin path list, which had the same hand-built prefix.
+- The masthead-marks gate refused the stubs before `currentNav` knew the rule.
+- 185 routes against M4's 176: two landings and seven area pages.
+- The area pager walks the TREE, not the chapter chain, so a shelf's
+  hand-listed rows are neighbours too: `/tooling/projects` offers Editors as
+  Next (user caught the asymmetry).
+- The masthead marker now follows a soft navigation: `vyrn-nav.js` mirrors
+  `aria-current` from the fetched document's header, keyed by `data-key` — it
+  had been frozen at whatever page the session started on (user).
+- Merging main surfaced two audit assertions that had never run anywhere:
+  the escaped-pipe cell test expected the table splitter to collapse `\`
+  (the inline pass owns backslash escapes — collapsing twice would halve a
+  run of backslashes twice), and the search-haystack test's witness was a
+  `<script>` the vyx summary has never contained. CI's per-module loop dies
+  at the first red module, alphabetically before both.
+
+## M5 — the third round: named groups, a registry front, an editor
+
+Five user directions in one message, all landed:
+
+- **The shelves read as named groups.** A `group` field on the chapter table;
+  the sidebar, the landing grids and a contiguity test read it. The guide is
+  *First steps / The memory model / Abstractions / Programs*; Web is *The page
+  / The server* (styling moved ahead of server so the runs stay contiguous);
+  Tooling is *Commands / Workspace*. The two-digit numbers are gone — a
+  category names what a run of pages is about, which a prefix never did.
+- **Explore is a registry** (user: "like npm or crates"): a search field over
+  the index — the reference landing's own scriptless-degrading `data-q`
+  mechanism, with a `data-search-noun` so the count says "packages" — one row
+  per package with its `vyrn add` line and a Copy button, the mechanism in
+  side cards, the numbered rail deleted. The one-module-list gate now states
+  the real invariant: each front searches its own list, and neither links into
+  the other's.
+- **Play is an editor** (user: "like vscode"): toolbar with a `main.vyrn` tab
+  and the run controls, the editor filling the window, a docked panel for
+  problems, stdin and output, a status bar naming the engine. The prose lives
+  behind "About this playground". Every `data-play-*` element survived
+  unchanged, and the redesign was verified by pressing Run in the page.
+  `main.page` is `display: contents` — the shell grid owns its children — so
+  the IDE's column is one `.idewrap` box inside the grid.
+- The typescale gate caught the round's one literal: the registry row's name
+  size is `--t-h5` now, not `1.05rem`.
+
+## M5 — the fourth round: the frame that makes an editor read as one
+
+Round 3's playground was three stacked boxes and the user said so ("isn't even
+close"); the registry was "walls of text and cringe elements"; and both pages
+sat beside two dead columns.
+
+- **The dead gutter named.** `.page > *` spans grid columns 3-13 — columns 1-2
+  are the old rail's. A rail-less page now spans the sheet: the registry
+  centres a 54rem column in it, the editor owns all of it.
+- **The editor's window.** What was missing was the FRAME: an explorer
+  ("Examples", one row per example file — pressing one loads it), a tab strip,
+  a line-number gutter on the code's own grid, a panel whose tab strip
+  REFLECTS the run (`Problems` joins it when the compiler produced any — CSS
+  `:has` on the pane's own `hidden`, the one source of that state), and a
+  filled accent status bar whose every item is a fact: engine, caret Ln/Col,
+  Spaces: 2, UTF-8, the run key. `play.js` grew three hooks (`data-play-file`,
+  `data-play-gutter`, `data-play-lncol`), queried and silently absent on the
+  hero editors. Verified by pressing: fib.vyrn from the explorer ran to 610,
+  and a program with a bad keyword surfaced the Problems tab.
+- **The registry, compact.** Name, kind as plain text, one sentence, two
+  numbers — the install command and the mechanism live on the package pages,
+  and the side cards are one sentence with a link to `/tooling/projects`.
+- A shell heredoc turned two `"
+"` literals into raw newlines inside
+  `play.js` strings on the way in — the page's own console named the parse
+  error, and `node --check` did not (it parses the CommonJS goal).
+
+## M5 — the fifth round: the editor behaves, the search understands, the package page breathes
+
+Four more user directions on rounds 3-4's work:
+
+- **The editor works like the editor it resembles.** Explorer rows open TABS:
+  each holds its own buffer of edits, wears the dirty dot when its text
+  differs from its file, and closes from its own button (closing the last
+  opens the first). A `#c=` link opens as `shared.vyrn` with the link's
+  program as its baseline. Enter keeps the line's indentation, one level
+  deeper after `{`, and a `}` under the caret gets its own dedented line.
+  The static tab and the `<select>` picker left the page — the explorer and
+  the strip are the picker now. All of it verified by driving: edits survived
+  a tab round-trip, closing the active tab activated its neighbour, Enter
+  indented.
+- **Full page, no footer.** The window sits flush under the 64px masthead and
+  ends at the viewport's floor; the shell's foot and the sheet's bottom
+  padding leave with it (`#root:has(.page.play.ide)`). About sits below the
+  fold.
+- **The search grew qualifiers and export matching**: `kind:project` narrows
+  by a row's kind, free text matches the haystack OR an export name — a
+  search for `addBook` finds the package whose module exports `AddBookReq`,
+  chip shown. On the reference the chips stay links; on the registry they are
+  plain, because a package page has no per-export anchor to land on.
+- **The package page breathes**: identity at the top, four short blocks
+  (import / gives / builds / needs), install and source in a sticky side
+  card, and the two file shapes `vyrn add` writes behind one closed
+  `<details>` — open-by-default they were most of the page.
+- **Round 6, on the user's screenshots:** the package page's columns
+  overlapped — `.pkgmain` and `.pkgside` were inner grids with implicit
+  `auto` tracks, whose floor is the widest min-content inside them, and one
+  long `vyrn add` line pushed both over their neighbours; `minmax(0, 1fr)`,
+  for the sheet's own documented reason. The editor takes the whole window
+  now — the sheet's `max-width` and padding leave with the footer on that one
+  page — and About left entirely: what the page has to say about itself is
+  four sentences on the status bar's `(?)` title, and the engine label the
+  status bar led with is gone. The page does not scroll at all.
+- **Round 7, against jsr.io's package page:** the header at reading size —
+  the name inline with its kind badge, the sentence, one line of numbers —
+  where the poster hero had spent 450px saying one word. The rail is the
+  registry rail jsr taught: *add package*, *import*, *symbols* (the export
+  chips moved out of the main column), with the two file shapes still behind
+  their details. The main column is the overview line and the two tables. The
+  landing's search gained jsr's hint line: `kind:` narrows, an export's name
+  finds its package.
+- **Round 8, against the editor's own screenshot:** the panel got REAL tabs —
+  Problems (count badge), Output, Input (stdin left its details for a pane) —
+  and the run moves the selection itself: a MutationObserver on the diags
+  pane's own `hidden` and children switches to Problems when the compiler
+  produced any and back to Output when they clear, with the count mirrored on
+  the status bar's `⊗`. A breadcrumb row names the open file. The minimap is
+  the program itself at two pixels a line with the viewport drawn from the
+  textarea's scroll geometry — pressing it scrolls there. The explorer's
+  section is a real disclosure with a turning chevron. And the status bar
+  became the QUIET strip the screenshot shows — the accent-filled bar of
+  round 4 was a flare no editor wears; the compiler status moved down onto
+  it, where the language server's indicator lives in the original.
+- **Round 9, the design pass** (user: "make the design closer"): what
+  separated the two screenshots was SURFACE LAYERING — the editor keeps its
+  chrome (sidebar, tab strip, panel tab row, status bar) one shade off the
+  ground the code sits on, so the active tab and the editor read as one
+  surface. Two local tokens on the window (`--chrome`, `--chromeline`) carry
+  it in both themes. With them: a current-line tint positioned from the
+  caret and the textarea's own metrics, the caret's gutter number lit, a
+  masked document glyph and an indent guide on every explorer row, the
+  toolbar's buttons gone flat (hover-lit, the way an editor's title-bar
+  actions are), and the minimap floating borderless on the ground.
+- **Round 10:** three finishing cuts (user). The focus ring around the whole
+  window is gone — the base playground's ring rule is `:focus`, not
+  `:focus-visible`, which is why the first removal missed; the caret and the
+  current line are the focus evidence. The masthead compresses to a 40px
+  title bar on `/play` — the blanket 44px touch minimum on every masthead
+  control is the row's real height, traded for the editor's scale on this one
+  page, with one `--mast` knob carrying it into the window's geometry. And
+  navigation to and from the editor is a 170ms crossfade: cross-document view
+  transitions, the platform's own mechanism — no script, skipped for readers
+  who asked for reduced motion, an ordinary navigation elsewhere.
+- **Round 10:** three finishing cuts (user). The focus ring around the whole
+  window is gone — the base playground's ring rule is `:focus`, not
+  `:focus-visible`, which is why the first removal missed; the caret and the
+  current line are the focus evidence. The masthead compresses to a 40px
+  title bar on `/play` — the blanket 44px touch minimum on every masthead
+  control is the row's real height, traded for the editor's scale on this one
+  page, with one `--mast` knob carrying it into the window's geometry. And
+  navigation to and from the editor is a 170ms crossfade: cross-document view
+  transitions, the platform's own mechanism — no script, skipped for readers
+  who asked for reduced motion, an ordinary navigation elsewhere.
+- **Round 11 — the editor, not a picture of one** (user: "no context menus
+  and many more, do it properly"). Files are YOURS now: created from the
+  explorer's inline-name flow or the Welcome view, renamed and deleted from a
+  real context menu, autosaved to localStorage and reopened on the next
+  visit. The examples left the explorer for the Welcome view, where they are
+  TEMPLATES a file is created from — which is what an example is. Tabs
+  reorder by pointer drag with a ghost, and dragging one to the editor's
+  right third — or "Open to the side" — creates a SECOND live editor group:
+  its own tabs, gutter, current line, and the same lexer's highlighting;
+  `Run`, the diagnostics and the share link follow the focused group through
+  one `srcHost` hook in the core. The (?)'s four sentences are real markup
+  (a native `title` clips), the status bar's items centre on one line, and
+  the crossfade fired once `@view-transition` left the media query — Chrome
+  ignores it nested; reduced motion now opts out of the animation instead.
+- **Round 12 — eleven items, and a name collision under them.** Sashes
+  between every pane (drag to resize; the sizes persist). Directories:
+  folders, nested paths, collapse, rename and delete cascading to children,
+  the breadcrumb reading the path. Drag from the explorer into an editor
+  group, and back out of the split into the first strip — one `sendTo(name,
+  to, from, index)` under both, so a tab moves anywhere a pointer can put it.
+  The project downloads as a real zip written by hand (stored entries,
+  CRC-32 table, central directory), and files upload back in. The session —
+  open tabs, the split, the focused group, the pane sizes — restores on the
+  next visit beside the files. The keys are IntelliJ's: Ctrl+D, Ctrl+Y,
+  Ctrl+/, Ctrl+Shift+arrows, Shift+F10, Ctrl+F4, Alt+arrows, Alt+Insert,
+  Shift+F6, each named in the menu that offers it. Icons everywhere as masks
+  in the control's own ink, panes as rounded islands on chrome, the redundant
+  FILES header gone, the code tight under the breadcrumb, and the masthead
+  given a `view-transition-name` so 64px and 40px MORPH rather than snap.
+  THE COLLISION: the split state was a class named `split`, which is also the
+  site's own two-column helper — it injected a 48px grid gap that ate 200px
+  of the window and shrank the explorer to a fifth of its height (the user's
+  screenshot). Renamed `splitview`; a state class on a shared sheet needs a
+  name nothing else wants.
+- **Round 13 — five more, and two causes worth keeping.** The share link
+  carries the WHOLE project now (`#p=` is base64url of every file plus which
+  was open; `#c=` still opens, because links written before it exist), and it
+  moved to the explorer's own actions, where the project's other verbs are —
+  it belonged to no single editor group. Run is per group and pressable only
+  where it can run: the compiler has to be loaded and the group has to hold a
+  file, so the Welcome view's Run is dark and the split has a Run of its own.
+  The minimap belongs to a group rather than to the page, so the split has
+  one. Files drag onto folder rows to move, and files dropped from the
+  desktop land in the folder under the pointer. THE HIGHLIGHT GAP: a file
+  opened before the wasm landed was drawn with no spans and never redrawn —
+  the core now tells the shell the moment the compiler is there, and every
+  group repaints. THE HEADER MORPH: the site navigates for real between
+  pages, so the compact masthead was the new document's FIRST PAINT and had
+  nothing to animate from; it is a class added one frame after paint now, and
+  the row shrinks into the editor's chrome (a hidden tab, which runs no
+  animation frames at all, gets it immediately). En route, an infinite loop:
+  the run-state observer watched the button it also wrote, and an
+  unconditional write froze the renderer — writes go through a guard now.
+- **Round 14 — a link is a guest, not an import** (user: "when I open a
+  share link it copies all stuff to my environment"). Round 13's link merged
+  the sender's files into the reader's project, which is how a reader ends up
+  with `hello-2`, `hello-3`, `shared-2`. There are two projects now and one
+  of them is active: the reader's, in this browser, and a BORROWED one a link
+  opens — never written to storage, with a bar over the editor saying what it
+  is and offering the only two answers there are. *Save to my files* merges
+  it under collision-safe names and keeps the reader on the file they were
+  reading; *Close* drops it and puts the reader's own project back untouched.
+  The one-file `#c=` link opens the same way, for the same reason. A Firefox
+  hardened against fingerprinting also names the fonts it refuses to reveal,
+  which the console showed: Consolas now sits behind Cascadia Mono, so a
+  Windows reader under that setting lands on the intended face rather than
+  falling past Menlo to the generic.
+- **Round 15 — the bar goes, the scope stays** (user: the banner appeared in
+  their own project, over one editor group only, and its Close did nothing).
+  Both faults were the same design error: the banner's visibility was STATE,
+  so it could disagree with the scope, and `leaveShared` returned early when
+  nothing was borrowed — leaving a visible bar whose button was dead. There
+  is no bar now. A borrowed project is a project like any other; the
+  explorer's header names which one is open ("Explorer" / "Shared project",
+  in the accent) and carries its two verbs beside the project's others. The
+  label is derived at every render, so it cannot go stale, and the header
+  belongs to the window rather than to the first editor group.
+- **Round 16 — two things the empty case exposed.** An empty buffer was
+  still handed to the checker, which answered honestly: `no \`main\` function
+  found`, over the Welcome view of a project with no files (user). Nothing
+  typed is not a problem, and the guard says so. And a page that was frozen
+  MID-LOAD and restored from the back/forward cache came back half-built —
+  no view, no tabs, "Loading the compiler…" for ever — because a restored
+  page runs no script of its own and the abandoned wasm promise never
+  settles. The compiler's load is restartable now, first light is a function
+  rather than a one-shot microtask, and `pageshow` finishes whichever of the
+  two the restored page is missing.
+- **Round 17 — the masthead's two heights live in two documents.** Adding
+  the compact class after paint animated the arrival at the editor and
+  nothing else, because leaving it is a different document that simply
+  renders at full height (user: it changed in one direction only). The state
+  crosses the navigation now: `widgets.js` writes what this page is to
+  session storage, and `theme.js` — a blocking script in the head, the only
+  code that runs before the first paint — starts the arriving page in the
+  state the last one ended in. The class moved to the root element for the
+  same reason: `<body>` does not exist yet when that script runs. Both
+  directions animate, in every browser, with no view transition involved.
+- **Round 18 — the one-navigation-behind masthead, and the fonts.** Round
+  17's handoff was right and the symptom stayed: nothing on entering the
+  editor, a shrink on leaving it. The cause was round 13's view-transition
+  wrapper. `vyrn-nav.js` is imported the first time a reader POINTS AT a link
+  (which no scripted navigation ever does, which is why every measurement
+  here missed it), so the site soft-navigates; the wrapper made the DOM swap
+  run in a later frame while `nav-end` was announced immediately, so the
+  shell's `boot()` — and every class it derives from the page — ran against
+  the page being replaced. The swap is synchronous again, and the band
+  animates through its own CSS transition, which needs no transition API and
+  works on a hard navigation too. And the font stacks name generics and base
+  faces only: a Firefox hardened against fingerprinting logged a notice for
+  every request for Cascadia Mono, Segoe UI Variable Display and SF Pro
+  Display, on every page. Consolas is Windows's own mono and Menlo is
+  macOS's, which is where two of those were pointing anyway.
+## M5 — rounds 19-25: the measured claims, and two fronts retired
+
+- **The minute, rebuilt** (round 19-20): a terminal window with its own bar and
+  step counter, transcripts coloured in the shell's three voices, source steps
+  coloured by the COMPILER'S OWN LEXER through a build-time generator, steps
+  that explain themselves and walk on a progress bar. The bar is the clock:
+  a `setTimeout` beside a CSS animation is two clocks, and pausing left the
+  bar full while the timer ran on (user). A generator argument resolves
+  relative to the file that IMPORTS it — the path was one directory out and
+  `readFile` failed silently, which is why the first cut drew nothing.
+- **The benchmark section** (rounds 21-23): eight cards, each its own scale,
+  ranked fastest-first, with the result, the memory and the named cause; six
+  on the index and a `/benchmarks` page in the Docs subnav carrying all of
+  them, the radar, the table and the method. The table says what it measures
+  now — a legend and a tone per cell — because a bare `1.35x` does not say
+  which way it points (user). The footer classes are the card's own
+  (`bspeed`, `bram`) after `.verdict`, a site-wide rule at heading size, broke
+  the row: the same collision `.split` caused in the editor.
+- **The showcase** (round 24): "Four ideas" and "Five programs" were one
+  section written twice. One control now — the ideas down the left, the
+  program on the right with its caption, its file and a Docs link into the
+  chapter that teaches it. My merge script sliced at the wrong `<fieldset>`
+  and duplicated 6 KB of the page; the gates did not catch it because it was
+  valid markup, and the user did.
+- **Two fronts retired** (round 25, user): `/backstage`, its hundred record
+  pages and `/backstage/benchmarks` are gone — 187 routes to 80 — and
+  `/compare` is a stub pointing at `/benchmarks` through M1's own mechanism.
+  The release highlights are text rather than links into pages that no longer
+  exist; `backstage.vyrn` survives as the data module `history.vyrn` reads the
+  record index from. I said the removal would bring the stylesheet back under
+  its 90 KB ceiling; it did not, and the measurement says why — those pages
+  wore the sheet's shared rules and owned about eight selectors between them.
+  The raw ceiling is 100 KB with that correction written into the test, and
+  the gzip ceiling is back at its original 27 KB, which is what binds.
+- **The comparison, as a chapter** (round 25, user): `/compare`'s three
+  cross-language plates are Chapter 2 of the book — *Coming from another
+  language* — where a reader trying the language meets them, with prose about
+  the difference instead of a matrix, what the language does not have, and
+  where to go next per background. A `Section` can name a snippet set; it is
+  "" everywhere else, so the book's rule that every illustration is a program
+  this site RAN still holds, and the three quoted languages are quoted.
+
+- The Git Bash quoted heredoc EATS A BACKSLASH: `\n` in a here-document
+  reached Python as `
+` and round 4 shipped two raw newlines inside
+  `play.js` string literals. Backslash-bearing edits go through script files
+  now, not heredocs.
 
 ## What this RFC does not do
 

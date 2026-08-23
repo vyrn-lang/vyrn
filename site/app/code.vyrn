@@ -243,6 +243,51 @@ export fn terminalHtml(text: String) -> String {
     return out
 }
 
+/// One line of prose with its backtick spans as `<code>` (RFC-0106 M4).
+///
+/// The book's chapter ledes are markdown and were printed as text: `/guide` and
+/// every chapter page rendered "A record is a shape. An enum is a choice.
+/// `match` covers every case" with the backticks visible, because the lede is
+/// interpolated and the module summaries beside it are not — those come out of
+/// `apidoc.vyrn` already rendered. This is the one markdown construct a lede
+/// uses, and rendering it is cheaper than routing thirteen short strings through
+/// the block-level renderer.
+///
+/// Everything else is escaped, and the escaping happens on both sides of the
+/// backtick, so a lede that ever holds a `<` is still text.
+export fn inlineCode(text: String) -> String {
+    let mut out = ""
+    let mut plain = 0
+    let mut open = 0 - 1
+    let raw = bytes(text)
+    let mut i = 0
+    while i < raw.length {
+        if raw[i] == '`' {
+            if open < 0 {
+                open = i
+            } else {
+                out = out + escapeHtml(substring(text, plain, open)) + "<code>" + escapeHtml(substring(text, open + 1, i)) + "</code>"
+                plain = i + 1
+                open = 0 - 1
+            }
+        }
+        i = i + 1
+    }
+    // An unpaired backtick is a backtick. Nothing here rewrites text it could
+    // not close.
+    return out + escapeHtml(substring(text, plain, text.byteLength))
+}
+
+test "a backtick span becomes code and everything else is escaped" {
+    assertEq(inlineCode("plain"), "plain")
+    assertEq(inlineCode("a `match` b"), "a <code>match</code> b")
+    assertEq(inlineCode("`Option<T>`"), "<code>Option&lt;T&gt;</code>")
+    assertEq(inlineCode("a < b"), "a &lt; b")
+    // Two spans on one line, and a lone backtick that closes nothing.
+    assertEq(inlineCode("`a` and `b`"), "<code>a</code> and <code>b</code>")
+    assertEq(inlineCode("a ` b"), "a ` b")
+}
+
 test "another language uses its own word list" {
     assertEq(highlightWith("func x", goWords()), "<span class=\"k\">func</span> x")
     assertEq(highlightWith("pub struct Age", rustWords()), "<span class=\"k\">pub</span> <span class=\"k\">struct</span> <span class=\"t\">Age</span>")
@@ -294,4 +339,50 @@ test "a shell argument cannot carry markup out of the block" {
 test "tool output is marked line by line and never coloured as code" {
     assertEq(terminalHtml("a\nb"), "<span class=\"ol\">a</span>\n<span class=\"ol\">b</span>")
     assertEq(terminalHtml("<x>"), "<span class=\"ol\">&lt;x&gt;</span>")
+}
+
+/// One recorded step as a terminal body: the command after a prompt, then the
+/// output it produced.
+///
+/// The colouring is the shell's own vocabulary and nothing more — a prompt is
+/// a prompt, the command is what was typed, and a line naming a path reads as
+/// data. Three classes rather than a lexer, because this is a transcript and
+/// not source: the compiler's own colours belong to code blocks.
+export fn shellOutHtml(cmd: String, out: String) -> String {
+    let mut html = ""
+    if cmd.byteLength > 0 {
+        html = html + "<span class=\"pr\">$</span> <span class=\"cx\">" + escapeHtml(cmd) + "</span>
+"
+    }
+    let mut first = true
+    for line in split(out, "
+") {
+        if !first {
+            html = html + "
+"
+        }
+        first = false
+        html = html + demoLineHtml(line)
+    }
+    return html
+}
+
+/// One line of a recorded transcript.
+fn demoLineHtml(line: String) -> String {
+    if line.byteLength == 0 {
+        return ""
+    }
+    let text = escapeHtml(line)
+    let cls = if hasSlash(line) { "pa" } else { "pl" }
+    return "<span class=\"" + cls + "\">" + text + "</span>"
+}
+
+/// Whether a line names a path — the one thing this transcript dims.
+fn hasSlash(line: String) -> Bool {
+    for b in bytes(line) {
+        if b == '/' {
+            return true
+        }
+    }
+    return false
 }

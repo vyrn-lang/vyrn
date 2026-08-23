@@ -183,7 +183,7 @@ fn scriptHref(p: InstallTarget) -> String {
                 <code v-html="shellHtml(firstRun())"></code>
                 <button type="button" data-copy-btn aria-label="Copy the run command">Copy</button>
             </div>
-            <p class="ctarow"><a class="cta" href="/guide/getting-started.html">Quickstart</a> <a class="cta" href="/docs.html">Reference</a> <a class="cta" href="/play.html">Play</a> <a class="cta" href="/docs/editors.html">Editor</a></p>
+            <p class="ctarow"><a class="cta" href="/guide/getting-started.html">Quickstart</a> <a class="cta" href="/docs.html">Reference</a> <a class="cta" href="/play.html">Play</a> <a class="cta" href="/tooling/editors.html">Editor</a></p>
         </section>
 </main>
 </template>

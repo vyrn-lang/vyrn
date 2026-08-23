@@ -22,18 +22,18 @@
 /// page per package. RFC-0014 has `readFile`, `writeFile` and `listDir` and no
 /// way to CREATE a directory, so the caller makes them:
 ///
-///     mkdir -p out/docs/std out/explore
+///     mkdir -p out/docs/std out/guide out/web out/tooling out/explore
 ///
 /// Every other route publishes flat, for the same reason (see `app/nav.vyrn`).
 import { pages } from "std/ui"
-import { route, rootPath, philosophyPath, whyVyrnPath, comparePath, installPath, editorsPath, docsEditorsPath, releasesPath, docsPath, explorePath, guidePath, playPath, backstagePath, backstageBenchmarksPath, hrefDocsStd, hrefGuide, hrefBackstageRfcs, hrefExplore } from pages("./app/routes")
+import { route, rootPath, philosophyPath, whyVyrnPath, comparePath, installPath, editorsPath, docsEditorsPath, docsGraphPath, releasesPath, docsPath, explorePath, guidePath, webPath, toolingPath, toolingEditorsPath, benchmarksPath, playPath, hrefDocsStd, hrefGuide, hrefWeb, hrefTooling, hrefExplore } from pages("./app/routes")
 import { published, navRows, hrefOf, upTo } from "./app/nav"
-import { rfcPages, rfcSlug } from "./app/backstage"
 import { historyIsFixture, historyPath, historyCommand, releaseRows, historyError } from "./app/history"
 import { releaseTag } from "./app/repo"
 import { demoIsFixture, demoPath, demoCommand, demoError } from "./app/demo"
+import { docSubnav } from "./app/docshell"
 import { apiModules, apiEntries, apiHref, importLine } from "./app/docs"
-import { chapterSlugs, chapterHref } from "./app/guide"
+import { chapterSlugs, chapterHref, chapterArea, movedChapters } from "./app/guide"
 import { searchRows } from "./app/stdgraph"
 import { packages, packageHref, offerOf, addCommand } from "./app/packages"
 import { features } from "./app/editors"
@@ -52,7 +52,7 @@ import { startsWith } from "std/strpred"
 /// a module added to `std/` is exported here on the next build with nothing
 /// written by hand.
 fn sitePaths() -> Array<String> {
-    let mut out: Array<String> = [rootPath(), whyVyrnPath(), comparePath(), installPath(), docsEditorsPath(), releasesPath(), docsPath(), guidePath(), explorePath(), playPath()]
+    let mut out: Array<String> = [rootPath(), whyVyrnPath(), installPath(), toolingEditorsPath(), docsGraphPath(), releasesPath(), docsPath(), guidePath(), webPath(), toolingPath(), benchmarksPath(), explorePath(), playPath()]
     // The two old paths, as stubs. They are routes like any other — a document
     // and a payload — and they are published for the reason `redirects()` below
     // gives (RFC-0106 M1).
@@ -67,35 +67,19 @@ fn sitePaths() -> Array<String> {
     for p in packages() {
         out.push(hrefExplore(p.slug))
     }
-    // The book's chapters come from the book itself, in reading order.
+    // The documentation's pages come from the one chapter table, in reading
+    // order, each through its own area's typed helper.
     for slug in chapterSlugs() {
-        out.push(hrefGuide(slug))
+        let area = chapterArea(slug)
+        if area == "web" {
+            out.push(hrefWeb(slug))
+        } else if area == "tooling" {
+            out.push(hrefTooling(slug))
+        } else {
+            out.push(hrefGuide(slug))
+        }
     }
-    out.push(backstagePath())
-    // The benchmark dataset (RFC-0104 M3). It is one page and it renders in
-    // milliseconds, so it belongs in this list rather than beside the hundred
-    // record pages `recordPaths` keeps out of the per-page gates.
-    out.push(backstageBenchmarksPath())
-    return out
-}
 
-/// The backstage's record pages: one per row of `rfcs/README.md`, read the way
-/// the reference is read off `std/` (RFC-0105 M1).
-///
-/// They are a SECOND list, and the reason is measurement rather than taste. The
-/// record is 2.5 MB of markdown; rendering all of it takes 17 seconds, and the
-/// per-page gates below walk every path in `sitePaths()` between six and ten
-/// times. Putting these hundred pages in that list took `vyrn test` on this file
-/// from under a minute to ten. What those gates check is checked on these pages
-/// too, on the EXPORTED tree, by `site/test/basepath.test.mjs` — every link,
-/// every fragment, every mount point — which is the gate that caught the defect
-/// they exist for in the first place. One representative record is checked here
-/// as well, so the stamps are not left to the node run alone.
-fn recordPaths() -> Array<String> {
-    let mut out: Array<String> = []
-    for n in rfcPages() {
-        out.push(hrefBackstageRfcs(rfcSlug(n)))
-    }
     return out
 }
 
@@ -110,7 +94,16 @@ fn recordPaths() -> Array<String> {
 /// reference under 284 content links and `/guide` is the book under 227, and the
 /// nav rows above them are LABELS for exactly that reason.
 fn redirects() -> Array<Array<String>> {
-    return [[philosophyPath(), whyVyrnPath()], [editorsPath(), docsEditorsPath()]]
+    // `/editors` (M1's rename) points at the page's FINAL home, not at the
+    // stub in the middle — a chain of stubs is what the no-loop assertion in
+    // the stub test refuses.
+    let mut out: Array<Array<String>> = [[philosophyPath(), whyVyrnPath()], [editorsPath(), toolingEditorsPath()], [docsEditorsPath(), toolingEditorsPath()], [comparePath(), benchmarksPath()]]
+    // The two chapters M5 moved out of the book keep a stub at their old
+    // guide path — same table the stub routes render their link from.
+    for pair in movedChapters() {
+        out.push(pair.copy())
+    }
+    return out
 }
 
 /// The path that replaced `path`, or "" when `path` was not renamed.
@@ -121,14 +114,6 @@ fn redirectTarget(path: String) -> String {
         }
     }
     return ""
-}
-
-/// Whether `path` belongs to the backstage rather than the consumer site.
-///
-/// The two fronts differ in exactly one way that matters to this program: a
-/// backstage page hangs off no consumer navigation row, so nothing marks one.
-fn isBackstage(path: String) -> Bool {
-    return startsWith(path, "/backstage")
 }
 
 /// The request for a path's document representation.
@@ -153,6 +138,11 @@ fn payloadName(name: String) -> String {
 /// `/guide/values` — under Guide, and a package page under Explore. Those are
 /// the three rows that own a subtree.
 fn currentNav(path: String) -> String {
+    // A stub is the old name of a page and not a place, so it marks nothing —
+    // the same rule the masthead test states.
+    if redirectTarget(path).byteLength > 0 {
+        return ""
+    }
     let here = hrefOf(path)
     for row in navRows() {
         if row.href == here {
@@ -165,8 +155,16 @@ fn currentNav(path: String) -> String {
     if path == "/install" {
         return hrefOf("/install")
     }
-    if startsWith(path, "/docs/std/") {
-        return hrefOf("/docs")
+    if path == "/docs" || startsWith(path, "/docs/std/") {
+        // The masthead's Reference row retired with the subnav's arrival: the
+        // whole documentation marks Docs, and the subnav says which area.
+        return hrefOf("/guide")
+    }
+    // `/docs/graph` is the reference's own drawing, moved off the landing by
+    // RFC-0106 M4. It marks Reference, which is the row its URL and its group
+    // both name — unlike the page below it.
+    if path == "/docs/graph" {
+        return hrefOf("/guide")
     }
     if startsWith(path, "/docs/") {
         // `/docs/editors` has a URL under the reference and belongs to the BOOK.
@@ -178,6 +176,11 @@ fn currentNav(path: String) -> String {
         return hrefOf("/guide")
     }
     if startsWith(path, "/guide/") {
+        return hrefOf("/guide")
+    }
+    // The Web and Tooling shelves are documentation too, and the masthead has
+    // one word for the whole of it.
+    if startsWith(path, "/web") || startsWith(path, "/tooling") || startsWith(path, "/benchmarks") {
         return hrefOf("/guide")
     }
     if startsWith(path, "/explore/") {
@@ -232,6 +235,73 @@ fn markCurrent(html: String, path: String) -> String {
 /// nowhere else, so the 160 leaf pages compute the font sizes they computed
 /// before — the constraint M0 wrote down, held by an attribute that is either on
 /// a document or not, and checked by `isLanding` below.
+/// The documentation's area band, stamped under the header exactly as the
+/// navigation marker is stamped, and for the same reason: the layout is shared
+/// by every page and is not told which route it renders — the export is. A
+/// path outside the documentation gets no band, so the index and the install
+/// page stay as they are, and the backstage never reaches this pass.
+fn withSubnav(html: String, path: String) -> String {
+    // A redirect stub is the old name of a page: it carries its three ways out
+    // and nothing else, so no band is stamped on one.
+    if redirectTarget(path).byteLength > 0 {
+        return html.copy()
+    }
+    let key = subnavKey(path)
+    if key.byteLength == 0 {
+        return html.copy()
+    }
+    let band = "<nav class=\"subnav\" data-nav-swap=\"subnav\" aria-label=\"Documentation sections\">" + docSubnav(key) + "</nav>"
+    return match indexOf(html, "</header>") {
+        Some(at) => substring(html, 0, at + 9) + band + substring(html, at + 9, html.byteLength),
+        None => html.copy(),
+    }
+}
+
+/// Which documentation area a path belongs to, or "" for none. The two named
+/// pages go first: `/docs/editors` is under `/docs` and must not read as the
+/// reference.
+fn subnavKey(path: String) -> String {
+    if path == "/docs/graph" {
+        return "reference"
+    }
+    if startsWith(path, "/guide") {
+        return "guide"
+    }
+    if startsWith(path, "/web") {
+        return "web"
+    }
+    if startsWith(path, "/tooling") {
+        return "tooling"
+    }
+    if startsWith(path, "/docs") {
+        return "reference"
+    }
+    if startsWith(path, "/benchmarks") {
+        return "benchmarks"
+    }
+    return ""
+}
+
+test "the documentation band is stamped under the header, and only there" {
+    let shell = "<header class=\"masthead\">nav</header><main>body</main>"
+    let stamped = withSubnav(shell, "/docs/std/json")
+    assert(has(stamped, "</header><nav class=\"subnav\""))
+    assertEq(countOf(stamped, "aria-current=\"true\""), 1)
+    assert(has(stamped, "href=\"/docs.html\" aria-current"))
+    // The two named pages outrank their prefix, each shelf keys its own
+    // area, and a consumer page outside the documentation is left alone.
+    assertEq(subnavKey("/tooling/editors"), "tooling")
+    assertEq(subnavKey("/docs/graph"), "reference")
+    assertEq(subnavKey("/guide/ownership"), "guide")
+    assertEq(subnavKey("/web/views"), "web")
+    assertEq(subnavKey("/tooling/projects"), "tooling")
+    assertEq(subnavKey("/benchmarks"), "benchmarks")
+    assertEq(subnavKey("/docs"), "reference")
+    assertEq(subnavKey("/"), "")
+    assertEq(subnavKey("/install"), "")
+    assertEq(withSubnav(shell, "/install"), shell)
+}
+
 fn withLang(html: String, path: String) -> String {
     let attrs = if isLanding(path) { "<html lang=\"en\" data-landing>" } else { "<html lang=\"en\">" }
     return match indexOf(html, "<html>") {
@@ -250,10 +320,10 @@ fn withLang(html: String, path: String) -> String {
 /// strings are cheaper than a rule with four exceptions, and M2 to M4 add to a
 /// list without re-deriving a predicate.
 fn landingPaths() -> Array<String> {
-    return [rootPath(), installPath(), whyVyrnPath(), comparePath(), releasesPath(), guidePath(), docsPath(), explorePath(), playPath()]
+    return [rootPath(), installPath(), whyVyrnPath(), benchmarksPath(), releasesPath(), guidePath(), docsPath(), explorePath(), playPath()]
 }
 
-/// Whether `path` is one of the nine.
+/// Whether `path` is one of the nine landings.
 fn isLanding(path: String) -> Bool {
     for p in landingPaths() {
         if p == path {
@@ -463,21 +533,21 @@ fn failed(what: String, why: String) -> Int64 {
 /// it checks the others are present.
 fn exportPath(outDir: String, path: String) -> Int64 {
     let name = published(path)
-    let doc = route(documentRequest(path))
-    if doc.status != 200 {
-        print("FAIL \{path} -> \{doc.status}")
+    let status = documentStatus(path)
+    if status != 200 {
+        print("FAIL \{path} -> \{status}")
         return 1
     }
-    let document = relativize(withRedirect(withCards(withFeed(withIcon(withLang(markCurrent(doc.body, path), path))), path), path), path)
+    // THE SAME PIPELINE THE GATES READ. This function used to spell the stamp
+    // chain out a second time, and the two spellings had already drifted — the
+    // published page carried `withSubnav` and the one every test below asked
+    // for did not. There is one now, and it is `publishedDocument`.
+    let document = publishedDocument(path)
     let mut bad = emit("\{outDir}/\{name}", document)
-    if isBackstage(path) {
-        print("\{path} -> \{name} (\{doc.body.byteLength} bytes)")
-        return bad
-    }
-    let data = route(dataRequest(path))
     let json = payloadName(name)
-    bad = bad + emit("\{outDir}/\{json}", relativize(data.body, path))
-    print("\{path} -> \{name} (\{doc.body.byteLength} bytes) + \{json} (\{data.body.byteLength} bytes)")
+    let payload = relativize(renderedData(path), path)
+    bad = bad + emit("\{outDir}/\{json}", payload)
+    print("\{path} -> \{name} (\{renderedBody(path).byteLength} bytes) + \{json} (\{payload.byteLength} bytes)")
     return bad
 }
 
@@ -492,7 +562,6 @@ fn assets() -> Array<Array<String>> {
         ["site/public/style.css", "style.css"],
         ["site/public/theme.js", "theme.js"],
         ["site/public/widgets.js", "widgets.js"],
-        ["site/public/backstage.js", "backstage.js"],
         ["site/public/play.js", "play.js"],
         ["site/public/play-wasm.js", "play-wasm.js"],
         ["site/public/play-worker.js", "play-worker.js"],
@@ -691,9 +760,6 @@ fn main() -> Int64 {
     for path in sitePaths() {
         failures = failures + exportPath(outDir, path)
     }
-    for path in recordPaths() {
-        failures = failures + exportPath(outDir, path)
-    }
     for asset in assets() {
         failures = failures + copyAsset(outDir, asset[0], asset[1])
     }
@@ -706,7 +772,7 @@ fn main() -> Int64 {
         print("export failed: \{failures} file(s)")
         return 1
     }
-    print("exported \{sitePaths().length + recordPaths().length} route(s) and \{assets().length} asset(s) to \{outDir}")
+    print("exported \{sitePaths().length} route(s) and \{assets().length} asset(s) to \{outDir}")
     return 0
 }
 
@@ -825,7 +891,7 @@ test "every reference link points at the route the router generated" {
 }
 
 test "a module the reference does not cover answers 404, not an empty page" {
-    assertEq(route(documentRequest("/docs/std/nope")).status, 404)
+    assertEq(documentStatus("/docs/std/nope"), 404)
 }
 
 test "every navigation row points at a route that exists" {
@@ -842,8 +908,10 @@ test "every navigation row points at a route that exists" {
 
 test "every route answers 200 as a document and as data" {
     for path in sitePaths() {
-        assertEq(route(documentRequest(path)).status, 200)
-        assertEq(route(dataRequest(path)).status, 200)
+        // Both come from the one render each page gets: `documentStatus` and
+        // `renderedBody` read the same cached answer.
+        assertEq(documentStatus(path), 200)
+        assert(renderedData(path).byteLength > 0)
     }
 }
 
@@ -864,7 +932,7 @@ test "every published document marks exactly one thing in its masthead" {
         targets.push(row.href.copy())
     }
     for path in sitePaths() {
-        let html = markCurrent(route(documentRequest(path)).body, path)
+        let html = markCurrent(renderedBody(path), path)
         let mut marked = 0
         for href in targets {
             marked = marked + countOf(html, "data-key=\"\{href}\" aria-current=\"page\"")
@@ -879,7 +947,7 @@ test "every published document marks exactly one thing in its masthead" {
         // row, and it is reached from the index's `Latest release` section, from
         // `/install` and from the footer.
         let orphan = path == "/" || path == "/compare" || path == "/why-vyrn" || path == "/releases" || redirectTarget(path).byteLength > 0
-        assertEq(marked, if orphan || isBackstage(path) { 0 } else { 1 })
+        assertEq(marked, if orphan { 0 } else { 1 })
     }
 }
 
@@ -889,16 +957,18 @@ test "each renamed route publishes a stub that carries the reader to the new one
     // are checked, because a reader might only get one of them — the refresh a
     // browser may be told to decline, the canonical a search engine reads, and
     // the visible link that is all a screen reader has before the hop fires.
-    assertEq(redirects().length, 2)
+    // M1's two renames, M5's two moved chapters, the editors page's move to
+    // the Tooling shelf, and `/compare` pointing at the benchmarks.
+    assertEq(redirects().length, 6)
     for pair in redirects() {
         let old = pair[0]
         let to = pair[1]
         // The old URL answers, as a document and as a payload.
-        assertEq(route(documentRequest(old)).status, 200)
+        assertEq(documentStatus(old), 200)
         assertEq(route(dataRequest(old)).status, 200)
         // And the page it names answers too — a stub pointing at a 404 is worse
         // than the 404 it replaced.
-        assertEq(route(documentRequest(to)).status, 200)
+        assertEq(documentStatus(to), 200)
         let doc = publishedDocument(old)
         let hop = upTo(old) + published(to)
         assert(has(doc, "<meta http-equiv=\"refresh\" content=\"0; url=\{hop}\">"))
@@ -915,37 +985,12 @@ test "each renamed route publishes a stub that carries the reader to the new one
     // Both old paths, by name, so a future edit to `redirects()` that drops one
     // fails here rather than passing an empty loop.
     assertEq(redirectTarget("/philosophy"), "/why-vyrn")
-    assertEq(redirectTarget("/editors"), "/docs/editors")
+    assertEq(redirectTarget("/editors"), "/tooling/editors")
+    assertEq(redirectTarget("/docs/editors"), "/tooling/editors")
+    assertEq(redirectTarget("/guide/testing"), "/tooling/testing")
+    assertEq(redirectTarget("/guide/web"), "/web/views")
+    assertEq(redirectTarget("/compare"), "/benchmarks")
     assertEq(redirectTarget("/docs"), "")
-}
-
-test "no consumer navigation row leads to the backstage" {
-    // RFC-0105 M1's gate, as a test rather than as a promise. The two fronts
-    // meet at one footer link each way and nowhere else.
-    for row in navRows() {
-        assert(!startsWith(row.href, "/backstage"))
-    }
-    assertEq(currentNav(backstagePath()), "")
-    assertEq(currentNav("/backstage/rfcs/0105"), "")
-}
-
-test "the backstage publishes the index and a page for every record" {
-    assert(rfcPages().length > 100)
-    assertEq(recordPaths().length, rfcPages().length)
-    assertEq(recordPaths()[0], "/backstage/rfcs/0001")
-    // One record, rendered the way it publishes: the stamps every document
-    // carries, and no URL that only a root would resolve. The other hundred are
-    // checked on the exported tree by `site/test/basepath.test.mjs` — see
-    // `recordPaths` for why they are not all walked here.
-    let doc = publishedDocument("/backstage/rfcs/0105")
-    assert(has(doc, "<html lang=\"en\">"))
-    assert(has(doc, "<link rel=\"icon\" href=\"../../favicon.svg\" type=\"image/svg+xml\">"))
-    assert(has(doc, "<link rel=\"stylesheet\" href=\"../../style.css\">"))
-    assert(has(doc, "<h1 id=\"rfc-0105--a-site-has-two-audiences\">"))
-    assertEq(countOf(doc, "=\"/"), countOf(doc, "data-key=\"/"))
-    // A number the record does not carry is a 404, not an empty page.
-    assertEq(route(documentRequest("/backstage/rfcs/0066")).status, 404)
-    assertEq(route(documentRequest("/backstage/rfcs/91")).status, 404)
 }
 
 test "both fronts carry the theme control, and carry it without a flash" {
@@ -961,7 +1006,7 @@ test "both fronts carry the theme control, and carry it without a flash" {
     //   - It is in the HEAD, before `<body>` — the same reason.
     //   - The control is ONE button, once, in the system state, and its
     //     accessible name says the state and what the next press does.
-    for path in ["/", "/docs/std/json", "/backstage/rfcs/0105"] {
+    for path in ["/", "/docs/std/json", "/benchmarks"] {
         let doc = publishedDocument(path)
         let up = upTo(path)
         let tag = "<script src=\"" + up + "theme.js\">"
@@ -975,16 +1020,17 @@ test "both fronts carry the theme control, and carry it without a flash" {
     }
 }
 
-test "a reference page marks Reference, an editors page marks Docs, the home page nothing" {
-    // The five rows, and the two that are labels over a path that says something
-    // else (RFC-0106 M1).
-    assertEq(currentNav("/docs"), "/docs.html")
-    assertEq(currentNav("/docs/std/json"), "/docs.html")
+test "every documentation page marks Docs, and the home page nothing" {
+    // One masthead row for the whole documentation; the subnav below it names
+    // the area (RFC-0106 M4 follow-up).
+    assertEq(currentNav("/docs"), "/guide.html")
+    assertEq(currentNav("/docs/std/json"), "/guide.html")
     assertEq(currentNav("/guide"), "/guide.html")
-    // The page whose URL is under the reference and whose GROUP is the book. M0's
-    // map made it so, and this is the line that decides which one the reader is
-    // told about.
-    assertEq(currentNav("/docs/editors"), "/guide.html")
+    // Editors lives on the Tooling shelf now, path and group agreeing (M5).
+    assertEq(currentNav("/tooling/editors"), "/guide.html")
+    // Its two old names are stubs, and a stub marks nothing.
+    assertEq(currentNav("/docs/editors"), "")
+    assertEq(currentNav("/editors"), "")
     // Not a row, and still marked: the persistent button.
     assertEq(currentNav("/install"), "/install.html")
     // Reached from content, so nothing in the masthead claims them.
@@ -995,9 +1041,9 @@ test "a reference page marks Reference, an editors page marks Docs, the home pag
 }
 
 test "the marker lands on the navigation, not on the first link in the body" {
-    let nav = "<a href=\"/docs.html\" data-key=\"/docs.html\">Reference</a>"
+    let nav = "<a href=\"/guide.html\" data-key=\"/guide.html\">Docs</a>"
     let body = "<p>" + nav + "</p>"
-    assertEq(markCurrent(nav + body, "/docs"), "<a href=\"/docs.html\" data-key=\"/docs.html\" aria-current=\"page\">Reference</a>" + body)
+    assertEq(markCurrent(nav + body, "/docs"), "<a href=\"/guide.html\" data-key=\"/guide.html\" aria-current=\"page\">Docs</a>" + body)
     // And it reaches an anchor that carries a third attribute — the call to
     // action does, and it is the only element that can be marked for `/install`.
     let cta = "<a href=\"/install.html\" data-key=\"/install.html\" class=\"cta\">Install</a>"
@@ -1010,7 +1056,7 @@ test "every name in a module's index points at an export that is on the page" {
     // the reader clicks and the page sits still — so both halves are checked
     // here, on every one of the 34 module pages rather than on a sample.
     for m in apiModules() {
-        let html = route(documentRequest(hrefDocsStd(m.name))).body
+        let html = renderedBody(hrefDocsStd(m.name))
         for e in apiEntries(m.name) {
             assert(has(html, "href=\"#e-\{e.name}\""))
             assert(has(html, "id=\"e-\{e.name}\""))
@@ -1021,9 +1067,69 @@ test "every name in a module's index points at an export that is on the page" {
 /// The document this export actually writes for `path` — every stamp, in the
 /// order `exportPath` applies them. The tests below read this rather than the
 /// router's raw body, because the raw body is not what ships.
+/// Rendered pages, kept between calls (RFC-0029 module state).
+///
+/// THIS IS WHY THE SUITE WAS TWENTY MINUTES. The gates below ask for the same
+/// documents over and over — one test walks every route for its masthead
+/// marker, the next walks them all for their fragments, a third for their
+/// stamps — and each ask re-rendered the page AND re-ran the whole stamp
+/// pipeline through the interpreter. On CI `The site's own tests` was 1392 s
+/// of a 1788 s job, and most of it was the same eighty pages drawn again.
+///
+/// A page is a pure function of the tree here: nothing in a test mutates what
+/// a route answers, so the second ask is the same bytes as the first.
+let mut renderedPages: Map<String, String> = [:]
+
 fn publishedDocument(path: String) -> String {
-    return relativize(withRedirect(withCards(withFeed(withIcon(withLang(markCurrent(route(documentRequest(path)).body, path), path))), path), path), path)
+    if let Some(hit) = renderedPages[path] {
+        return hit.copy()
+    }
+    let doc = relativize(withRedirect(withCards(withFeed(withIcon(withLang(withSubnav(markCurrent(renderedBody(path), path), path), path))), path), path), path)
+    renderedPages[path.copy()] = doc.copy()
+    return doc
 }
+
+/// One route's body, cached the same way — the tests that want the page
+/// BEFORE the stamps ask through here.
+fn renderedBody(path: String) -> String {
+    if let Some(hit) = bodyPages[path] {
+        return hit.copy()
+    }
+    let answer = route(documentRequest(path))
+    bodyPages[path.copy()] = answer.body.copy()
+    docStatus[path.copy()] = answer.status
+    return answer.body.copy()
+}
+
+/// What a route answered with, from the same render its body came from — so a
+/// gate can check the status without drawing the page a second time.
+fn documentStatus(path: String) -> Int64 {
+    if let Some(hit) = docStatus[path] {
+        return hit
+    }
+    let answer = route(documentRequest(path))
+    bodyPages[path.copy()] = answer.body.copy()
+    docStatus[path.copy()] = answer.status
+    return answer.status
+}
+
+let mut docStatus: Map<String, Int64> = [:]
+
+let mut bodyPages: Map<String, String> = [:]
+
+/// The soft-navigation payload, cached the same way and for the same reason:
+/// one gate walks every route as data, and another reads the same payloads
+/// back for their URLs.
+fn renderedData(path: String) -> String {
+    if let Some(hit) = dataPages[path] {
+        return hit.copy()
+    }
+    let body = route(dataRequest(path)).body
+    dataPages[path.copy()] = body.copy()
+    return body
+}
+
+let mut dataPages: Map<String, String> = [:]
 
 /// How many times `needle` occurs in `hay`.
 fn countOf(hay: String, needle: String) -> Int64 {
@@ -1054,13 +1160,16 @@ test "no published document names a root that only one host has" {
     // fails, and so does the next hand-written `<a href="/…">` in the book.
     for path in sitePaths() {
         let doc = publishedDocument(path)
+        if countOf(doc, "=\"/") != countOf(doc, "data-key=\"/") {
+            print("FAIL \{path}: a root-absolute URL survived relativize")
+        }
         assertEq(countOf(doc, "=\"/"), countOf(doc, "data-key=\"/"))
         // An empty href resolves to the page itself: a link that silently does
         // nothing, which is what a careless "strip the slash" would produce.
         assertEq(countOf(doc, " href=\"\""), 0)
         assertEq(countOf(doc, " src=\"\""), 0)
         // And the payload beside it, which carries the book's prose.
-        assertEq(countOf(relativize(route(dataRequest(path)).body, path), "=\\\"/"), 0)
+        assertEq(countOf(relativize(renderedData(path), path), "=\\\"/"), 0)
     }
     // The depth is the page's own, and the two ends of the site prove it.
     assert(has(publishedDocument("/"), "<link rel=\"stylesheet\" href=\"style.css\">"))
@@ -1078,7 +1187,7 @@ test "every published document declares its language" {
     assertEq(withLang("<!doctype html>\n<html>\n<head>", "/docs/std/json"), "<!doctype html>\n<html lang=\"en\">\n<head>")
     // Stamped once, on the document element, and on every page.
     for path in sitePaths() {
-        let html = withLang(route(documentRequest(path)).body, path)
+        let html = withLang(renderedBody(path), path)
         assert(has(html, "<html lang=\"en\""))
         assert(!has(html, "<html>"))
     }
@@ -1102,9 +1211,9 @@ test "the display type step reaches nine pages and no leaf page" {
         assertEq(countOf(doc, "<html lang=\"en\""), 1)
     }
     assertEq(stamped, 9)
-    // The leaf pages, by kind, named rather than left to the loop above: 13 guide
-    // chapters, 37 reference modules, 4 package pages. The 106 design records are
-    // in `recordPaths()`, and one of them is checked below.
+    // The leaf pages, by kind, named rather than left to the loop above: the
+    // book's chapters and the two shelves beside it, 37 reference modules, and
+    // a page per package.
     for slug in chapterSlugs() {
         assert(!isLanding(hrefGuide(slug)))
     }
@@ -1114,7 +1223,6 @@ test "the display type step reaches nine pages and no leaf page" {
     for p in packages() {
         assert(!isLanding(hrefExplore(p.slug)))
     }
-    assert(!has(publishedDocument("/backstage/rfcs/0105"), "data-landing"))
     // The two stubs are not landing pages either. They carry a `.display`
     // heading and three words, and a stub is not where a hero belongs.
     assert(!isLanding("/philosophy"))
@@ -1192,7 +1300,7 @@ test "every published document points at an icon this export writes" {
     }
     assert(copied)
     for path in sitePaths() {
-        let html = withIcon(route(documentRequest(path)).body)
+        let html = withIcon(renderedBody(path))
         assert(has(html, "<link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">"))
     }
 }
@@ -1245,10 +1353,6 @@ test "every page says what it is to a crawler, and no two of the ten say the sam
     assertEq(titleOf(leaf), "std/json — Vyrn")
     assert(has(leaf, "<meta property=\"og:title\" content=\"std/json — Vyrn\">"))
     assert(has(leaf, "<meta property=\"og:type\" content=\"article\">"))
-    // The backstage previews as itself too, off its own head and with no row here.
-    let record = publishedDocument("/backstage/rfcs/0105")
-    assert(has(record, "<meta property=\"og:type\" content=\"article\">"))
-    assert(has(record, "<meta property=\"og:description\" content=\"The Vyrn design record"))
 }
 
 test "a value is read out of one attribute and into another, or it is not there" {
@@ -1295,7 +1399,7 @@ test "every fragment the site writes lands on an element that is there" {
     let mut links: Array<Array<String>> = []
     let mut ids: Array<Array<String>> = []
     for path in sitePaths() {
-        let html = route(documentRequest(path)).body
+        let html = renderedBody(path)
         files.push("/" + published(path))
         links.push(attrValues(html, "href"))
         // Scanned once per page rather than once per link: a page carries up to
@@ -1324,10 +1428,16 @@ test "every fragment the site writes lands on an element that is there" {
                     // link, fragment or not. `/play.html` is the one exception,
                     // and it is checked by its own test below.
                     if parts[0] != "/play.html" {
+                        if target < 0 {
+                            print("FAIL \{files[i]}: \{href} names a page this export does not write")
+                        }
                         assert(target >= 0)
                     }
                 }
                 if target >= 0 && parts[0] != "/play.html" {
+                    if !oneOf(parts[1], ids[target]) {
+                        print("FAIL \{files[i]}: \{href} lands on no id of that page")
+                    }
                     assert(oneOf(parts[1], ids[target]))
                     checked = checked + 1
                 }
@@ -1346,7 +1456,7 @@ test "every playground link carries base64url and nothing else" {
     // no padding. A link that carried a `+` would arrive as a space.
     let mut links = 0
     for path in sitePaths() {
-        for href in attrValues(route(documentRequest(path)).body, "href") {
+        for href in attrValues(renderedBody(path), "href") {
             if startsWith(href, "/play.html#c=") {
                 let code = substring(href, 13, href.byteLength)
                 assert(code.byteLength > 0)
@@ -1368,7 +1478,7 @@ test "every export the search offers has an anchor on the page it points at" {
     // anchor the reference page actually carries.
     let mut names = 0
     for row in searchRows() {
-        let html = route(documentRequest(hrefDocsStd(row.name))).body
+        let html = renderedBody(hrefDocsStd(row.name))
         for name in row.exports {
             assert(has(html, "id=\"e-\{name}\""))
             names = names + 1
@@ -1382,12 +1492,12 @@ test "the registry publishes one page per package, and an unknown name is a 404"
     assert(all.length >= 4)
     for p in all {
         assertEq(packageHref(p.slug), "/" + published(hrefExplore(p.slug)))
-        assertEq(route(documentRequest(hrefExplore(p.slug))).status, 200)
+        assertEq(documentStatus(hrefExplore(p.slug)), 200)
     }
     // A standard library module is not a package: it arrives with the compiler,
     // and the registry publishes nothing for it.
-    assertEq(route(documentRequest("/explore/json")).status, 404)
-    assertEq(route(documentRequest("/explore/nope")).status, 404)
+    assertEq(documentStatus("/explore/json"), 404)
+    assertEq(documentStatus("/explore/nope"), 404)
     assertEq(currentNav("/explore/shelf"), "/explore.html")
     assertEq(currentNav("/explore"), "/explore.html")
 }
@@ -1404,14 +1514,14 @@ test "every reference page carries the import line, and every package page the s
     // `compiler/vyrn-cli/src/remote.rs` applies. It lives there because this
     // program cannot start another one, and it is the gate RFC-0105 M2 asks for.
     for m in apiModules() {
-        let html = route(documentRequest(hrefDocsStd(m.name))).body
+        let html = renderedBody(hrefDocsStd(m.name))
         let line = importLine(m.name)
         assert(startsWith(line, "import { "))
         assert(has(html, "data-import=\"" + escapedQuotes(line) + "\""))
     }
     let mut specs = 0
     for p in packages() {
-        let html = route(documentRequest(hrefExplore(p.slug))).body
+        let html = renderedBody(hrefExplore(p.slug))
         let spec = offerOf(p.slug).spec
         assert(startsWith(spec, "github:"))
         assert(has(html, "data-spec=\"" + escapedQuotes(spec) + "\""))
@@ -1436,8 +1546,8 @@ test "one module list, and the pages that do not render it" {
     // claim is no longer "the two lists lead to different places" but "the
     // registry index does not list a module at all": not one link into
     // `/docs/std/` from it, and not one package page for a module name.
-    let docs = route(documentRequest(docsPath())).body
-    let explore = route(documentRequest(explorePath())).body
+    let docs = renderedBody(docsPath())
+    let explore = renderedBody(explorePath())
     assert(!has(explore, "href=\"/docs/std/"))
     for m in apiModules() {
         assert(has(docs, "href=\"/docs/std/\{m.name}.html\""))
@@ -1450,15 +1560,18 @@ test "one module list, and the pages that do not render it" {
         assert(has(explore, "href=\"/explore/\{p.slug}.html\""))
         assert(!has(docs, "href=\"/explore/\{p.slug}.html\""))
     }
-    // And the search index is the reference's list: one input, one list, on one
-    // page.
+    // Each front searches its OWN list where it stands — M5's third round gave
+    // the registry a search over its packages (user: a registry front). One
+    // input and one list per page, and neither reaches into the other's index.
     assert(has(docs, "data-search-list"))
-    assert(!has(explore, "data-search-list"))
+    assert(has(explore, "data-search-list"))
     assertEq(countOf(docs, "data-search-input"), 1)
+    assertEq(countOf(explore, "data-search-input"), 1)
     // Every row carries its own haystack, which is what makes the filter a class
     // on a row and not a fetch.
     assertEq(countOf(docs, " data-q=\""), apiModules().length)
     assertEq(countOf(docs, " data-e=\""), apiModules().length)
+    assertEq(countOf(explore, " data-q=\""), packages().length)
 }
 
 /// Whether `path`, read relative to the directory the export runs in, is a file
@@ -1486,7 +1599,7 @@ test "every feature the editors page claims names a file that is in this reposit
     //
     // Relative to the repository root, which is where the export is run from and
     // where `packages.vyrn` reads `examples/*/vyrn.json` from.
-    let html = route(documentRequest(docsEditorsPath())).body
+    let html = renderedBody(toolingEditorsPath())
     let claimed = attrValues(html, "data-impl")
     // The table is the page's whole middle section: an empty scan would pass
     // every assertion below in silence.
@@ -1497,13 +1610,25 @@ test "every feature the editors page claims names a file that is in this reposit
     }
 }
 
-test "the book publishes one page per chapter, and an unknown chapter is a 404" {
+test "each shelf publishes one page per chapter, and an unknown slug is a 404" {
     for slug in chapterSlugs() {
-        let path = hrefGuide(slug)
-        assertEq(route(documentRequest(path)).status, 200)
+        let area = chapterArea(slug)
+        let path = if area == "web" {
+            hrefWeb(slug)
+        } else if area == "tooling" {
+            hrefTooling(slug)
+        } else {
+            hrefGuide(slug)
+        }
+        assertEq(documentStatus(path), 200)
         assertEq("/" + published(path), chapterHref(slug))
     }
-    assertEq(route(documentRequest("/guide/nope")).status, 404)
+    assertEq(documentStatus("/guide/nope"), 404)
+    // A slug from another shelf is not this shelf's page.
+    assertEq(documentStatus("/web/values"), 404)
+    assertEq(documentStatus("/tooling/views"), 404)
     assertEq(currentNav("/guide/values"), "/guide.html")
+    assertEq(currentNav("/web/views"), "/guide.html")
+    assertEq(currentNav("/tooling"), "/guide.html")
     assertEq(currentNav("/guide"), "/guide.html")
 }

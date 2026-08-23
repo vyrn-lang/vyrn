@@ -156,12 +156,24 @@ fn microsOf(text: String) -> Int64 {
     }
 }
 
-/// One record's file, read once.
+/// One record's file, read once — now actually once. This function said "read
+/// once" in its comment and read the file on every call, and `programs()` above
+/// it is an EXPORTED accessor the benchmarks template asks for inside every
+/// loop it draws. Rendering `/benchmarks` was 22.3 s of the export's 95.6 s
+/// against 1.3 s for the largest reference page, and this was why: a file read
+/// and two full scans of a JSON record, per ask.
+let mut records: Map<String, String> = [:]
+
 fn recordText(file: String) -> String {
-    return match readFile(file) {
-        Ok(body) => body.copy(),
+    if let Some(hit) = records[file] {
+        return hit.copy()
+    }
+    let body = match readFile(file) {
+        Ok(text) => text.copy(),
         Err(why) => "",
     }
+    records[file.copy()] = body.copy()
+    return body
 }
 
 // ---------------------------------------------------------------------------
@@ -175,7 +187,12 @@ fn recordText(file: String) -> String {
 // ---------------------------------------------------------------------------
 
 /// The eight expressible Benchmarks Game programs, in the record's order.
+let mut progs: Array<Prog> = []
+
 export fn programs() -> Array<Prog> {
+    if progs.length > 0 {
+        return progs.copy()
+    }
     let src = recordText(run1File())
     let results = objectAt(src, "  ", "results")
     let mut out: Array<Prog> = []
@@ -189,6 +206,7 @@ export fn programs() -> Array<Prog> {
                 game: gameHref(p[2]),
             })
     }
+    progs = out.copy()
     return out
 }
 
@@ -733,6 +751,24 @@ fn polygonFor(contestant: String, base: String) -> String {
 }
 
 /// The ratio of `contestant` to `base` on `program`, in hundredths.
+/// Which way a ratio points — `ahead`, `level` or `behind` — so a table of
+/// bare multipliers can say whether 1.35x is good news (user: it was not
+/// clear what the numbers measure). Level is the +/-2% band the record's own
+/// noise makes meaningless.
+export fn ratioWay(program: String, contestant: String, base: String) -> String {
+    let h = ratioOf(program, contestant, base)
+    if h <= 0 {
+        return "level"
+    }
+    if h < 98 {
+        return "ahead"
+    }
+    if h > 102 {
+        return "behind"
+    }
+    return "level"
+}
+
 fn ratioOf(program: String, contestant: String, base: String) -> Int64 {
     return hundredths(medianUs(program, contestant), medianUs(program, base))
 }
@@ -838,6 +874,251 @@ export fn tableRows() -> Array<Row> {
         out.push(Row { key: p.key.copy(), name: p.name.copy(), n: p.n.copy(), game: p.game.copy(), cells: readingsFor(p.key) })
     }
     return out
+}
+
+/// One engine's bar on a card: what it is called, how long it took, and how
+/// much of the card's widest bar that is.
+export type BarRow = { key: String, name: String, tone: String, ms: String, pct: String, mem: String }
+
+/// One program's bars, fastest first, each measured against the slowest of
+/// them — a card is its own scale, which is what makes eight cards readable
+/// side by side (RFC-0106 M5 round 21).
+export fn panelBars(program: String) -> Array<BarRow> {
+    let cells = readingsFor(program)
+    let mut top = 1
+    for c in cells {
+        let us = medianUs(program, c.key)
+        if us > top {
+            top = us
+        }
+    }
+    // Fastest first: a card is a ranking, and the record's own order is the
+    // chart's (C, Rust, node, ours) — which reads as an opinion here.
+    let mut order: Array<Reading> = []
+    for c in cells {
+        order.push(c.copy())
+    }
+    let mut i = 1
+    while i < order.length {
+        let mut j = i
+        while j > 0 && medianUs(program, order[j].key) < medianUs(program, order[j - 1].key) {
+            let hold = order[j].copy()
+            order[j] = order[j - 1].copy()
+            order[j - 1] = hold.copy()
+            j = j - 1
+        }
+        i = i + 1
+    }
+    let mut out: Array<BarRow> = []
+    for c in order {
+        let us = medianUs(program, c.key)
+        out.push(BarRow {
+                key: c.key.copy(),
+                name: c.name.copy(),
+                tone: c.tone.copy(),
+                ms: c.ms.copy(),
+                pct: barPct(us, top),
+                mem: c.mem.copy(),
+            })
+    }
+    return out
+}
+
+/// `us` as a percentage of `top`, to one decimal — the width a bar is given.
+fn barPct(us: Int64, top: Int64) -> String {
+    let tenths = us * 1000 / top
+    let whole = tenths / 10
+    let rest = tenths - whole * 10
+    return whole.toString() + "." + rest.toString()
+}
+
+/// The first six panels — what the index shows before its More card. Eight
+/// cards is a wall; six and a door is a section (user).
+export fn frontPanels() -> Array<Panel> {
+    let all = axisPanels()
+    let mut out: Array<Panel> = []
+    let mut i = 0
+    while i < all.length && i < 6 {
+        out.push(all[i].copy())
+        i = i + 1
+    }
+    return out
+}
+
+/// A card's one line about the program, cut at its first sentence. The record
+/// writes a paragraph for the programs whose size needs defending, and a
+/// paragraph inside a card is the wall this milestone keeps removing (user).
+export fn panelNote(program: String) -> String {
+    for p in programs() {
+        if p.key == program {
+            return firstSentence(p.note)
+        }
+    }
+    return ""
+}
+
+/// Up to the first `. `, with the stop kept.
+fn firstSentence(text: String) -> String {
+    let raw = bytes(text)
+    let mut i = 0
+    while i + 1 < raw.length {
+        if raw[i] == '.' && raw[i + 1] == ' ' {
+            return substring(text, 0, i + 1)
+        }
+        i = i + 1
+    }
+    return text.copy()
+}
+
+/// What the card says about SPEED, in the shape the reader is looking for:
+/// where the language's own build stands against the field.
+///
+/// `fastest of the five` when it wins, `1.36x Rust` when it does not — the
+/// ratio against whichever engine beat it, which is the number a reader would
+/// work out anyway (user, against the reference site's own cards).
+export fn panelSpeed(program: String) -> String {
+    let mut ours = 0
+    let mut best = 0
+    let mut bestName = ""
+    for c in readingsFor(program) {
+        // The WebAssembly build is a different target and not the comparison
+        // this line is about.
+        if c.key == "vyrn-wasm" {
+            continue
+        }
+        let us = medianUs(program, c.key)
+        if us <= 0 {
+            continue
+        }
+        if c.key == "vyrn-native" {
+            ours = us
+        }
+        if best == 0 || us < best {
+            best = us
+            bestName = c.name.copy()
+        }
+    }
+    if ours == 0 || best == 0 {
+        return ""
+    }
+    if ours <= best {
+        return "fastest of the five"
+    }
+    return ratioText(ours * 100 / best) + " " + bestName
+}
+
+/// How much less memory the language's own build needed than the hungriest
+/// engine on the same program — `9x less` — or "" when the record cannot say.
+fn panelMemRatio(program: String) -> String {
+    let mut ours = 0
+    let mut worst = 0
+    for c in readingsFor(program) {
+        let b = cellOf(program, c.key).peakBytes
+        if c.key == "vyrn-native" {
+            ours = b
+        }
+        if b > worst {
+            worst = b
+        }
+    }
+    if ours <= 0 || worst <= ours {
+        return ""
+    }
+    let tenths = worst * 10 / ours
+    let whole = tenths / 10
+    let rest = tenths - whole * 10
+    if rest == 0 {
+        return whole.toString() + "x less"
+    }
+    return whole.toString() + "." + rest.toString() + "x less"
+}
+
+/// What the language's own build needed, and what the hungriest did.
+fn panelMemPair(program: String) -> String {
+    let mut ours = ""
+    let mut oursBytes = 0
+    let mut worstName = ""
+    let mut worstText = ""
+    let mut worst = 0
+    let mut runnerName = ""
+    let mut runnerText = ""
+    let mut runner = 0
+    for c in readingsFor(program) {
+        let b = cellOf(program, c.key).peakBytes
+        if c.key == "vyrn-native" {
+            ours = c.mem.copy()
+            oursBytes = b
+        }
+        if b > worst {
+            runner = worst
+            runnerName = worstName.copy()
+            runnerText = worstText.copy()
+            worst = b
+            worstName = c.name.copy()
+            worstText = c.mem.copy()
+        } else if b > runner {
+            runner = b
+            runnerName = c.name.copy()
+            runnerText = c.mem.copy()
+        }
+    }
+    if ours.byteLength == 0 || worstText.byteLength == 0 {
+        return ""
+    }
+    // WHEN OURS IS THE HUNGRIEST the old line read "2,093.5 MB vs Vyrn native
+    // 2,093.5 MB", which is a sentence about nothing (user). The card says so
+    // instead, and names who is next.
+    if worstName == "Vyrn native" {
+        if runnerText.byteLength == 0 {
+            return ours + " peak"
+        }
+        return ours + " peak — the most here, over " + runnerName + " " + runnerText
+    }
+    return ours + " vs " + worstName + " " + worstText
+}
+
+/// The card's memory line: what the language's own build needed against the
+/// hungriest engine, and how much less that is when it IS less.
+export fn panelMemLine(program: String) -> String {
+    let pair = panelMemPair(program)
+    if pair.byteLength == 0 {
+        return ""
+    }
+    let ratio = panelMemRatio(program)
+    if ratio.byteLength == 0 {
+        return pair
+    }
+    return pair + " · " + ratio
+}
+
+/// The line under a card's bars: what the reading means, in the milestone's
+/// own words, and the memory the fastest engine needed against the hungriest.
+export fn panelFoot(program: String) -> String {
+    let cells = readingsFor(program)
+    if cells.length == 0 {
+        return ""
+    }
+    let mut lean = cells[0].mem.copy()
+    let mut fat = cells[0].mem.copy()
+    let mut fatName = cells[0].name.copy()
+    let mut fatBytes = 0
+    let mut leanBytes = 0
+    for c in cells {
+        let b = cellOf(program, c.key).peakBytes
+        if c.key == "vyrn-native" {
+            lean = c.mem.copy()
+            leanBytes = b
+        }
+        if b > fatBytes {
+            fatBytes = b
+            fat = c.mem.copy()
+            fatName = c.name.copy()
+        }
+    }
+    if leanBytes == 0 || fatBytes <= leanBytes {
+        return ""
+    }
+    return "RAM " + lean + " vs " + fatName + " " + fat
 }
 
 /// The eight axis panels. One is shown at a time; without script the first is

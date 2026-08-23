@@ -78,8 +78,23 @@ test("a navigation row owns the subtree named after it", () => {
   assert.equal(navOwns("/docs.html", "/docs.html"), true);
   assert.equal(navOwns("/docs.html", "/docs/std/json.html"), true);
   assert.equal(navOwns("/guide.html", "/guide/values.html"), true);
-  assert.equal(navOwns("/guide.html", "/docs/std/json.html"), false);
   // A row does not own a page whose name merely starts with its own.
   assert.equal(navOwns("/docs.html", "/docsomething.html"), false);
   assert.equal(navOwns("/explore.html", "/index.html"), false);
+});
+
+test("the Docs row speaks for the whole documentation", () => {
+  // RFC-0106 M5: the row points at /guide.html and owns every area — the
+  // reference, the Web shelf, the Tooling shelf — which is the export's
+  // currentNav rule. The prefixes join the row's own stem, so a mount point
+  // rides along.
+  assert.equal(navOwns("/guide.html", "/docs/std/json.html"), true);
+  assert.equal(navOwns("/guide.html", "/docs.html"), true);
+  assert.equal(navOwns("/guide.html", "/web.html"), true);
+  assert.equal(navOwns("/guide.html", "/web/views.html"), true);
+  assert.equal(navOwns("/guide.html", "/tooling/editors.html"), true);
+  assert.equal(navOwns("/vyrn/guide.html", "/vyrn/tooling/editors.html"), true);
+  // Only the documentation: the registry and the playground stay their own.
+  assert.equal(navOwns("/guide.html", "/explore.html"), false);
+  assert.equal(navOwns("/guide.html", "/webbing.html"), false);
 });

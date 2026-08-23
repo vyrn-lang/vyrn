@@ -237,10 +237,44 @@ function isNavUi(node) {
   return node.nodeType === 1 && node.hasAttribute("data-vyrn-nav-ui");
 }
 
+// Shell bands a page carries OUTSIDE <main> — a docs subnav, say — opt into
+// the swap with `data-nav-swap="<key>"`. Each key is reconciled to the
+// incoming document: replaced when both sides have it, removed when only the
+// live side does, and inserted before <main> when only the incoming side does.
+// Without the attribute nothing outside <main> is ever touched, which is the
+// contract above.
+function reconcileShellBands(newDoc, liveMain) {
+  const keyed = (root) => {
+    const map = new Map();
+    for (const el of root.querySelectorAll("[data-nav-swap]")) {
+      map.set(el.getAttribute("data-nav-swap"), el);
+    }
+    return map;
+  };
+  const live = keyed(document);
+  const incoming = keyed(newDoc);
+  for (const [key, el] of live) {
+    const next = incoming.get(key);
+    if (next) el.replaceWith(document.importNode(next, true));
+    else el.remove();
+  }
+  for (const [key, el] of incoming) {
+    if (live.has(key)) continue;
+    // Where the shell puts such bands: after the page header when there is
+    // one (the band must not become a child of the content grid), before
+    // <main> otherwise.
+    const header = document.querySelector("body header");
+    const node = document.importNode(el, true);
+    if (header) header.after(node);
+    else liveMain.before(node);
+  }
+}
+
 function replaceContent(newDoc) {
   const liveMain = document.querySelector("main");
   const newMain = newDoc.querySelector("main");
   if (liveMain && newMain) {
+    reconcileShellBands(newDoc, liveMain);
     liveMain.replaceWith(document.importNode(newMain, true));
     return;
   }
@@ -257,8 +291,34 @@ function replaceContent(newDoc) {
 // ---------------------------------------------------------------------------
 // Apply a parsed document to the live one: title/head, content region, islands.
 // ---------------------------------------------------------------------------
+// The masthead persists across a soft navigation, so its `aria-current` marker
+// is frozen at whatever page the session STARTED on unless someone moves it.
+// The fetched document already knows the answer — the export marked it — so the
+// live rows mirror the fetched ones, keyed by `data-key` (user: Docs stayed
+// unmarked after navigating into the documentation).
+function syncNavMark(newDoc) {
+  const marked = new Set();
+  for (const el of newDoc.querySelectorAll("header [data-key][aria-current]")) {
+    marked.add(el.getAttribute("data-key"));
+  }
+  for (const el of document.querySelectorAll("header [data-key]")) {
+    if (marked.has(el.getAttribute("data-key"))) el.setAttribute("aria-current", "page");
+    else el.removeAttribute("aria-current");
+  }
+}
+
+// THE SWAP IS SYNCHRONOUS, DELIBERATELY. Wrapping it in
+// `document.startViewTransition` was tried and reverted: the transition runs
+// the swap in a later frame while `nav-end` is announced immediately, so
+// every listener that reacts to the new page — the shell's own `boot()` — ran
+// against the old one, and anything it derives from the page (the
+// playground's title-bar masthead) came out a navigation behind. A band that
+// changes size between pages animates through its own CSS transition when
+// the class lands, which needs no transition API and works on a hard
+// navigation too.
 function applyDocument(newDoc) {
   swapHead(newDoc);
+  syncNavMark(newDoc);
   replaceContent(newDoc);
   syncIslands();
 }

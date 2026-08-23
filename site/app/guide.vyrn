@@ -55,12 +55,24 @@ import { blob } from "./repo"
 /// playground link — empty for a block the playground cannot run on its own.
 export type Block = { id: String, lines: Array<String>, output: String, play: String, source: String }
 
-/// One section of a chapter: an anchor, a heading, paragraphs of HTML, and the
-/// ids of the programs that follow them.
-export type Section = { anchor: String, heading: String, prose: Array<String>, blocks: Array<String> }
+/// One section of a chapter: an anchor, a heading, paragraphs of HTML, the ids
+/// of the programs that follow them, and — for the one chapter that compares
+/// languages — the name of a snippet set to draw beside them.
+///
+/// `specs` is "" everywhere else. The book teaches Vyrn by running Vyrn, and a
+/// section that shows four languages is a different instrument: it is prose
+/// about a difference, and the other three languages are quoted, not run
+/// (RFC-0106 M5).
+export type Section = { anchor: String, heading: String, prose: Array<String>, blocks: Array<String>, specs: String }
 
-/// One chapter: its URL slug, its title, its opening paragraph, and its sections.
-export type Chapter = { slug: String, title: String, lede: String, sections: Array<Section> }
+/// One chapter: the area it belongs to, the group it sits under in that area's
+/// sidebar, its URL slug, its title, its opening paragraph, and its sections.
+/// The area is the subnav row the page sits under — `"guide"`, `"web"` or
+/// `"tooling"` — and it decides the page's path, its number, and which pages
+/// are its neighbours. The group is the named run of rows the sidebar prints it
+/// in; a shelf reads better as a few named runs than as one numbered column
+/// (user).
+export type Chapter = { area: String, group: String, slug: String, title: String, lede: String, sections: Array<Section> }
 
 // ---------------------------------------------------------------------------
 // Running the programs
@@ -145,24 +157,56 @@ export fn blockOf(id: String) -> Block {
 /// The pill says BUILT and not "live". The program ran once, while this page was
 /// built, and the output below it is what it wrote then. A control that claimed
 /// to run it now would be a picture of a run, and this site does not ship those.
+/// `s` with the three HTML metacharacters escaped — the textarea's payload.
+fn escapeSrc(s: String) -> String {
+    return replace(replace(replace(s, "&", "&amp;"), "<", "&lt;"), ">", "&gt;")
+}
+
+/// How many lines `s` holds — the textarea's own height, so a block is as
+/// tall as its program and not a viewport fraction.
+fn lineCount(s: String) -> Int64 {
+    let mut n = 1
+    for b in bytes(s) {
+        if b == '\n' {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+/// A RUNNABLE block wears the hero editor's own anatomy (user: "runnable in
+/// place instead of a playground link"): the highlighted layer, the read-only
+/// textarea `mountPlay` unlocks on the first press, and the built output
+/// standing in the run pane until a live run replaces it. A block the
+/// playground cannot take (a generator needing its importer) stays a plain
+/// plate.
 fn blockHtml(b: Block) -> String {
-    let mut out = "<div class=\"plate block\">"
-    out = out + "<div class=\"plate-head\"><span class=\"pill\">Built</span>"
-    out = out + "<span class=\"eyebrow\">site/guide/" + b.id + ".vyrn</span><span class=\"spacer\"></span>"
-    if b.play.byteLength > 0 {
-        out = out + "<a class=\"btn\" href=\"" + b.play + "\">Run it in the playground</a>"
+    if b.play.byteLength == 0 {
+        let mut plain = "<div class=\"plate block\">"
+        plain = plain + "<div class=\"plate-head\"><span class=\"eyebrow\">site/guide/" + b.id + ".vyrn</span></div>"
+        plain = plain + "<pre class=\"code\">" + joinWith(b.lines, "\n") + "</pre>"
+        if b.output.byteLength > 0 {
+            plain = plain + "<div class=\"out\">" + terminalHtml(b.output) + "</div>"
+        }
+        plain = plain + "<p class=\"cap\">Compiled while this page was built, and imported by the block above. "
+        return plain + "<a href=\"" + b.source + "\">The file in the repository</a>.</p></div>"
     }
-    out = out + "</div>"
-    out = out + "<pre class=\"code\">" + joinWith(b.lines, "\n") + "</pre>"
+    let src = blockSource(b.id)
+    let mut out = "<div class=\"plate block play\" data-widget=\"playhero\">"
+    out = out + "<div class=\"plate-head\"><span class=\"eyebrow\">site/guide/" + b.id + ".vyrn</span>"
+    out = out + "<span class=\"spacer\"></span><span class=\"eyebrow\" data-play-status>Built</span>"
+    out = out + "<button type=\"button\" class=\"btn jsonly\" data-play-reset>Reset</button>"
+    out = out + "<button type=\"button\" class=\"btn primary jsonly\" data-play-run title=\"Ctrl+Enter\">Run</button></div>"
+    out = out + "<div class=\"editor\" data-play-editor>"
+    out = out + "<pre class=\"code hl\" aria-hidden=\"true\"><code data-play-hl>" + joinWith(b.lines, "\n") + "</code></pre>"
+    out = out + "<textarea data-play-src readonly=\"readonly\" rows=\"" + lineCount(src).toString() + "\" spellcheck=\"false\" autocapitalize=\"off\" autocorrect=\"off\" autocomplete=\"off\" wrap=\"off\" aria-label=\"Vyrn source, editable after the first press\">" + escapeSrc(src) + "</textarea></div>"
+    out = out + "<div class=\"diags\" data-play-diags hidden=\"hidden\" aria-live=\"polite\"></div>"
     if b.output.byteLength > 0 {
-        out = out + "<div class=\"out\">" + terminalHtml(b.output) + "</div>"
-    }
-    out = out + "<p class=\"cap\">"
-    if b.output.byteLength > 0 {
-        out = out + "Compiled and run while this page was built. "
+        out = out + "<div class=\"out\" data-play-out aria-live=\"polite\">" + terminalHtml(b.output) + "</div>"
     } else {
-        out = out + "Compiled while this page was built, and imported by the block above. "
+        out = out + "<div class=\"out\" data-play-out aria-live=\"polite\"><span class=\"dim\">Prints nothing.</span></div>"
     }
+    out = out + "<p class=\"cap\">Built and run while this page was built; Run runs it here. "
     return out + "<a href=\"" + b.source + "\">The file in the repository</a>.</p></div>"
 }
 
@@ -212,13 +256,22 @@ export fn sectionBody(s: Section) -> String {
 // ---------------------------------------------------------------------------
 
 fn section(anchor: String, heading: String, prose: Array<String>, blocks: Array<String>) -> Section {
-    return Section { anchor: anchor.copy(), heading: heading.copy(), prose: prose.copy(), blocks: blocks.copy() }
+    return Section { anchor: anchor.copy(), heading: heading.copy(), prose: prose.copy(), blocks: blocks.copy(), specs: "" }
+}
+
+/// A section whose illustration is the same task in four languages rather than
+/// a program this site ran. `set` names one of `snippets.vyrn`'s three.
+fn compared(anchor: String, heading: String, prose: Array<String>, set: String) -> Section {
+    let none: Array<String> = []
+    return Section { anchor: anchor.copy(), heading: heading.copy(), prose: prose.copy(), blocks: none.copy(), specs: set.copy() }
 }
 
 /// Every chapter, in reading order.
 export fn chapters() -> Array<Chapter> {
     return [
         Chapter {
+            area: "guide",
+            group: "First steps",
             slug: "getting-started",
             title: "Getting started",
             lede: "Install the compiler, write one file, run it. Vyrn needs no project file and no build step for a single program.",
@@ -239,6 +292,45 @@ export fn chapters() -> Array<Chapter> {
             ],
         },
         Chapter {
+            area: "guide",
+            group: "First steps",
+            slug: "coming-from",
+            title: "Coming from another language",
+            lede: "What carries over from Rust, TypeScript or Go, what is deliberately different, and what Vyrn does not have at all.",
+            sections: [
+                compared("rules", "A rule about a value", [
+                        "The thing that is most likely to be new is where a RULE lives. In the languages beside it a rule is code somebody has to call — a constructor, a schema object, a validating function — and the type says nothing about whether it ever ran. In Vyrn the rule is part of the type, so `Age` is a number that has passed it.",
+                        "The compiler proves what it can while the program compiles, which is why `Age(30)` costs nothing at run time and `Age(5)` is a compile error rather than a failed check. Input from outside the program is not a constant, so it takes the total form: `Age?(n)` answers <code>Option&lt;Age&gt;</code>, and there is no path that produces an unchecked `Age`.",
+                    ], "types"),
+                compared("intent", "What a function does with its argument", [
+                        "Rust says this with borrows and lifetimes, TypeScript cannot say it at all, and Go says it with a pointer and a comment. Vyrn writes the intent on the parameter as a word: `read`, `modify`, `consume`, `share`.",
+                        "There is no lifetime grammar to learn, because the word is the whole declaration — the compiler decides where the value is released from what the words say. <a href=\"/guide/ownership.html\">Ownership, consume, regions</a> is the chapter that teaches it.",
+                    ], "memory"),
+                compared("failure", "When something fails", [
+                        "There is no null and no exception. An absent value is `Option`, a failure is `Result`, and `?` hands a failure to the caller unchanged — the same three shapes Rust uses, without the conversion traits.",
+                        "A `panic` is for a case that cannot happen, and nothing unwinds: there is no `catch` anywhere in the language, so a panic ends the program rather than becoming somebody else's control flow.",
+                    ], "failure"),
+                section("shapes", "The shapes you already know", [
+                        "A `record` is a struct with named fields and no inheritance. An `enum` is a closed choice with payloads, and `match` covers every case — the compiler counts the arms, so a new variant is a compile error at every site that reads it.",
+                        "Generics are monomorphised, protocols are how a type says what it can do, and a protocol bound is checked at the call rather than at run time. What a TypeScript reader will miss is structural typing: two records with the same fields are two types.",
+                    ], []),
+                section("absent", "What is not here", [
+                        "<strong>No garbage collector.</strong> Memory is released where the ownership words say it is, and <code>vyrn why --memory</code> prints that decision per binding.",
+                        "<strong>No exceptions, no unwinding, no `async` colour.</strong> A program is a program; the runtime that serves HTTP is a library written in the language.",
+                        "<strong>No macros.</strong> A generator is an ordinary Vyrn function that runs while you compile and emits Vyrn — <code>vyrn emit-gen</code> prints exactly what it wrote. <a href=\"/guide/generators.html\">gen fns and generators</a> is the chapter.",
+                        "<strong>No inheritance and no null.</strong> Both are covered above, and neither has a workaround to learn.",
+                    ], []),
+                section("next", "Where to go next", [
+                        "If you write Rust: read <a href=\"/guide/ownership.html\">Ownership</a> first — it is the chapter where this language differs from yours the most, and it is shorter than you expect.",
+                        "If you write TypeScript: read <a href=\"/guide/values.html\">Values and types</a> and then <a href=\"/guide/errors.html\">Errors</a>. Numbers state their width here, and validation is a type rather than a library.",
+                        "If you write Go: read <a href=\"/guide/records.html\">Records, enums, match</a> — the closed enum and exhaustive `match` are what replace the interface-and-type-switch pattern.",
+                        "The <a href=\"/benchmarks.html\">benchmarks</a> answer the other question a reader arrives with, and every reading there is published.",
+                    ], []),
+            ],
+        },
+        Chapter {
+            area: "guide",
+            group: "First steps",
             slug: "values",
             title: "Values and types",
             lede: "Numbers state their width. Text is UTF-8 bytes. A type can carry the rule that makes a value valid, and the compiler checks the rule where it can.",
@@ -259,6 +351,8 @@ export fn chapters() -> Array<Chapter> {
             ],
         },
         Chapter {
+            area: "guide",
+            group: "First steps",
             slug: "records",
             title: "Records, enums, match",
             lede: "A record is a shape. An enum is a choice. `match` covers every case, and the compiler counts them.",
@@ -278,6 +372,8 @@ export fn chapters() -> Array<Chapter> {
             ],
         },
         Chapter {
+            area: "guide",
+            group: "The memory model",
             slug: "ownership",
             title: "Ownership, consume, regions",
             lede: "You write what a function does with a value. The compiler enforces it and frees the memory. There is no collector, no lifetime syntax, and no borrow annotation.",
@@ -295,6 +391,8 @@ export fn chapters() -> Array<Chapter> {
             ],
         },
         Chapter {
+            area: "guide",
+            group: "The memory model",
             slug: "collections",
             title: "Collections and Map",
             lede: "Arrays and maps are subject-first: the value comes before the verb. A lookup answers `Option`, so a missing entry is a case you handle.",
@@ -310,6 +408,8 @@ export fn chapters() -> Array<Chapter> {
             ],
         },
         Chapter {
+            area: "guide",
+            group: "Abstractions",
             slug: "protocols",
             title: "Protocols and generics",
             lede: "A protocol names methods a type can implement. A generic bounded by it is compiled once per concrete type, so dispatch costs nothing at run time.",
@@ -322,6 +422,8 @@ export fn chapters() -> Array<Chapter> {
             ],
         },
         Chapter {
+            area: "guide",
+            group: "Abstractions",
             slug: "functions",
             title: "Function values and closures",
             lede: "A function is a value. Lambdas capture by reading, and every call site is resolved while the program compiles.",
@@ -337,6 +439,8 @@ export fn chapters() -> Array<Chapter> {
             ],
         },
         Chapter {
+            area: "guide",
+            group: "Abstractions",
             slug: "modules",
             title: "Modules and imports",
             lede: "A file is a module. `export` decides what leaves it, and an import names what it takes.",
@@ -349,6 +453,8 @@ export fn chapters() -> Array<Chapter> {
             ],
         },
         Chapter {
+            area: "guide",
+            group: "Programs",
             slug: "generators",
             title: "gen fns and generators",
             lede: "A `gen fn` is ordinary Vyrn that runs while the program compiles and returns Vyrn source. RPC, UI, i18n, OpenAPI and GraphQL are libraries built this way. None of them is a compiler feature.",
@@ -370,21 +476,8 @@ export fn chapters() -> Array<Chapter> {
             ],
         },
         Chapter {
-            slug: "testing",
-            title: "Testing and bench",
-            lede: "Tests and benchmarks live in the file they are about. `vyrn run` and `vyrn build` strip them.",
-            sections: [
-                section("tests", "test blocks", [
-                        "A <code>test</code> block sits beside the code it tests. <code>vyrn test &lt;file&gt;</code> runs the blocks and reports each one; <code>--name</code> selects a subset. <code>assert</code> and <code>assertEq</code> exist inside a test block and nowhere else.",
-                        "A file can hold tests and a <code>main</code> at once. The tests are checked, then stripped, so the program is unchanged by having them.",
-                    ], ["tests"]),
-                section("bench", "bench blocks", [
-                        "A <code>bench</code> block is a body the timer runs. <code>vyrn bench</code> reports the minimum, median and mean over many samples, and it uses the native build, because timing the interpreter would report the wrong thing.",
-                        "<code>blackBox</code> hides a value from the optimizer. Around the input it stops the compiler from precomputing the answer; around the result it keeps the work live. <code>vyrn bench --check</code> runs each body once under the interpreter, which is what CI does.",
-                    ], ["benches"]),
-            ],
-        },
-        Chapter {
+            area: "guide",
+            group: "Programs",
             slug: "errors",
             title: "Errors: panic, Fallible, ?",
             lede: "There is no null and no exception. An absent value is `Option`, a failure is `Result`, and `?` sends a failure to the caller unchanged.",
@@ -401,22 +494,8 @@ export fn chapters() -> Array<Chapter> {
             ],
         },
         Chapter {
-            slug: "web",
-            title: "Web apps",
-            lede: "A view is a function that returns a tree. The server renders it to markup; the browser gets the same tree and a differ applies it.",
-            sections: [
-                section("html", "The view tree", [
-                        "<a href=\"/docs/std/html.html\">std/html</a> builds the tree. <code>toHtmlString</code> renders it for the server. Text is escaped; a tag or attribute NAME is checked rather than escaped, because it lands outside the quotes, so a bad one is refused instead of emitted.",
-                        "The same tree crosses to the browser as JSON, and <code>web/vyrn-dom.js</code> applies the difference between the old tree and the new one. Keys carry list identity.",
-                    ], ["html"]),
-                section("stack", "vyx, ui and rpc", [
-                        "A <code>.vyx</code> file is a single-file component: a <code>&lt;script&gt;</code> block of ordinary Vyrn and a <code>&lt;template&gt;</code> block of markup. <a href=\"/docs/std/vyx.html\">std/vyx</a> compiles it to Vyrn with a generator, so it is not a compiler feature either.",
-                        "<a href=\"/docs/std/ui.html\">std/ui</a> turns a routes directory into one <code>route(req) -&gt; Response</code>, with typed URL helpers per route. This site is built with it: <code>site/export.vyrn</code> calls that function once per path and writes what comes back.",
-                        "<a href=\"/docs/std/rpc.html\">std/rpc</a> is the client and server halves of a typed call, generated from one declaration. <code>vyrn dev</code> builds the client to wasm and serves everything in one process, and <code>vyrn routes</code> prints the resolved table.",
-                    ], []),
-            ],
-        },
-        Chapter {
+            area: "guide",
+            group: "Programs",
             slug: "cli",
             title: "CLI apps",
             lede: "`args()` is the argument list. `std/args` reads flags and options from it, and `std/cli` builds the whole command from a record type.",
@@ -428,6 +507,130 @@ export fn chapters() -> Array<Chapter> {
                 section("cli", "The command line as a type", [
                         "<a href=\"/docs/std/cli.html\">std/cli</a> goes further. Declare a record whose fields are the options, give each field a validated type with its own documentation line, and <code>cli(\"./module\")</code> reflects it into a parser and a help text. No flag name is written twice.",
                         "A parse answers <code>Valid</code> or <code>Invalid</code> with the issues attached to their fields, so a program reports every problem at once instead of the first one.",
+                    ], []),
+            ],
+        },
+        Chapter {
+            area: "web",
+            group: "The page",
+            slug: "views",
+            title: "Views and HTML",
+            lede: "A view is a function that returns a tree. The server renders it to markup; the browser gets the same tree, and a differ applies what changed.",
+            sections: [
+                section("html", "The view tree", [
+                        "<a href=\"/docs/std/html.html\">std/html</a> builds the tree. <code>toHtmlString</code> renders it for the server. Text is escaped; a tag or attribute NAME is checked rather than escaped, because it lands outside the quotes, so a bad one is refused instead of emitted.",
+                        "The same tree crosses to the browser as JSON, and <code>web/vyrn-dom.js</code> applies the difference between the old tree and the new one. Keys carry list identity.",
+                    ], ["html"]),
+                section("twice", "The same tree, twice", [
+                        "One view function serves both sides. The server calls it and writes a document, so the page exists before any script runs and works with none. The browser calls the same function after an event and hands the new tree to the differ, which touches only the nodes that changed.",
+                        "A link between pages does the same in miniature: the next page arrives as a payload, the differ swaps the content, and form drafts and scroll survive. When anything about that goes wrong, the browser navigates for real — the failure mode is a normal page load.",
+                    ], []),
+            ],
+        },
+        Chapter {
+            area: "web",
+            group: "The page",
+            slug: "components",
+            title: "Components: .vyx",
+            lede: "A `.vyx` file is one component: a script block of ordinary Vyrn and a template block of markup. A generator compiles it while the program builds, so it is a library, not a compiler feature.",
+            sections: [
+                section("file", "One file, two blocks", [
+                        "The <code>&lt;script&gt;</code> block is ordinary Vyrn: imports, types, the functions the template calls. The <code>&lt;template&gt;</code> block is the view. <a href=\"/docs/std/vyx.html\">std/vyx</a> compiles the pair to a Vyrn module while the importing program builds, and <code>vyrn emit-gen</code> prints exactly what it wrote.",
+                        "A route component can also export <code>head()</code> for the document's title and <code>data()</code> for what the page needs; the server runs <code>data()</code> and the template renders its answer.",
+                    ], []),
+                section("template", "What a template can say", [
+                        "<code>{{ x }}</code> puts a value into the page, escaped. <code>:href=\"f(x)\"</code> binds an attribute to an expression. <code>v-for</code> repeats an element over an array, and <code>:key</code> tells the differ which repeated element is which. <code>v-html</code> splices markup you built yourself — the escape hatch, for HTML a function already produced.",
+                        "A tag with a capital letter is a component you imported, and its attributes are the props: <code>&lt;Icon name=\"bytesize:search\"/&gt;</code> is a function call written as markup.",
+                    ], []),
+                section("proof", "This site is the test", [
+                        "Every page of this site is a <code>.vyx</code> route compiled by the same generator, including this one. The <a href=\"/docs/std/vyx.html\">reference page</a> lists the whole template surface.",
+                    ], []),
+            ],
+        },
+        Chapter {
+            area: "web",
+            group: "The page",
+            slug: "styling",
+            title: "Styling and icons",
+            lede: "`std/tw` reads the classes your templates use and writes one stylesheet. `std/icons` turns a pinned icon collection into an import, so a glyph is checked like a name.",
+            sections: [
+                section("tw", "Utility classes, compiled", [
+                        "<a href=\"/docs/std/tw.html\">std/tw</a> is a generator: it scans the templates for utility classes — spacing, color, breakpoints — and emits one stylesheet holding only the rules those classes need. Nothing is fetched and nothing unused ships.",
+                    ], []),
+                section("icons", "Icons are imports", [
+                        "<a href=\"/docs/std/icons.html\">std/icons</a> makes a glyph a name: <code>import { book } from icons(\"bytesize\", \"book\")</code> generates one function per glyph from a collection pinned in the lock file. A name the collection does not have fails the build. The <code>&lt;Icon&gt;</code> tag draws them, and every glyph on this site — the search magnifier in the masthead is one — arrives this way.",
+                    ], []),
+            ],
+        },
+        Chapter {
+            area: "web",
+            group: "The server",
+            slug: "server",
+            title: "Routes, RPC and the dev server",
+            lede: "`std/ui` turns a routes directory into one function from request to response. `std/rpc` makes a typed call between the two halves. `vyrn dev` serves both while you work.",
+            sections: [
+                section("routes", "A directory of pages", [
+                        "<a href=\"/docs/std/ui.html\">std/ui</a> reads a <code>routes/</code> directory and generates one <code>route(req) -&gt; Response</code>, with a typed URL helper per route — a link cannot name a page that is not there. A <code>[param].vyx</code> file binds a path segment, and the component decides whether the value is a page or a 404.",
+                        "This site is built with it: <code>site/export.vyrn</code> calls that function once per path and writes what comes back. The same table can be served live with <code>vyrn serve</code> instead.",
+                    ], []),
+                section("rpc", "Typed calls", [
+                        "<a href=\"/docs/std/rpc.html\">std/rpc</a> generates the client and server halves of a call from one declaration. The client half runs in the page as wasm; the server half is a route. An answer is typed too: a rejection carries its validation issues attached to the fields they are about, so a form can show each problem where it belongs.",
+                    ], []),
+                section("dev", "The dev loop", [
+                        "<code>vyrn dev</code> builds the client to wasm and serves the server, the static files and the runtimes in one process. <code>vyrn routes</code> prints the resolved table — every derived, pinned and hand-written path the router mounts, each with its source — which is the first thing to read when a URL does not do what you expected.",
+                    ], []),
+            ],
+        },
+        Chapter {
+            area: "tooling",
+            group: "Commands",
+            slug: "commands",
+            title: "The CLI",
+            lede: "One binary. `vyrn run` needs nothing else on your machine; `vyrn build` writes a native binary; every other task — tests, benchmarks, formatting, docs — is a subcommand.",
+            sections: [
+                section("build", "Run, check, build", [
+                        "<code>vyrn run</code> uses the interpreter and needs nothing installed. <code>vyrn check</code> diagnoses without running. <code>vyrn build</code> writes a native binary and needs <code>clang</code>; <code>vyrn build --target wasm</code> writes a WebAssembly module and needs nothing. The three backends are the same language — the parity harness runs every example on all of them and compares the bytes.",
+                    ], []),
+                section("daily", "Format, document, test", [
+                        "<code>vyrn fmt</code> writes the one canonical layout; it has no style options, and <code>--check</code> is the CI gate. <code>vyrn doc</code> writes Markdown API docs from the <code>///</code> comments, and <code>--verify</code> fails when the committed docs drift from the code. <code>vyrn test</code> and <code>vyrn bench</code> have <a href=\"/tooling/testing.html\">their own page</a>.",
+                    ], []),
+                section("why", "Ask the compiler why", [
+                        "<code>vyrn why &lt;file&gt;</code> answers with a module's audience and every import chain that reaches it. <code>--memory</code> reports, per binding, whether it is reclaimed, how, and the reason when it is not. <code>--capability fs</code> lists every chain that pulls the file system into an artifact. These are the compiler's own analyses printed, not a second implementation.",
+                    ], []),
+            ],
+        },
+        Chapter {
+            area: "tooling",
+            group: "Commands",
+            slug: "testing",
+            title: "Testing and bench",
+            lede: "Tests and benchmarks live in the file they are about. `vyrn run` and `vyrn build` strip them.",
+            sections: [
+                section("tests", "test blocks", [
+                        "A <code>test</code> block sits beside the code it tests. <code>vyrn test &lt;file&gt;</code> runs the blocks and reports each one; <code>--name</code> selects a subset. <code>assert</code> and <code>assertEq</code> exist inside a test block and nowhere else.",
+                        "A file can hold tests and a <code>main</code> at once. The tests are checked, then stripped, so the program is unchanged by having them.",
+                    ], ["tests"]),
+                section("bench", "bench blocks", [
+                        "A <code>bench</code> block is a body the timer runs. <code>vyrn bench</code> reports the minimum, median and mean over many samples, and it uses the native build, because timing the interpreter would report the wrong thing.",
+                        "<code>blackBox</code> hides a value from the optimizer. Around the input it stops the compiler from precomputing the answer; around the result it keeps the work live. <code>vyrn bench --check</code> runs each body once under the interpreter, which is what CI does.",
+                    ], ["benches"]),
+            ],
+        },
+        Chapter {
+            area: "tooling",
+            group: "Workspace",
+            slug: "projects",
+            title: "Projects and dependencies",
+            lede: "A single file needs no project. `vyrn.json` names an entry point and the imports; `vyrn.lock` pins what a build may fetch, down to the compiler's own tools.",
+            sections: [
+                section("manifest", "vyrn.json", [
+                        "<code>vyrn new &lt;name&gt;</code> writes a project: a manifest with a <code>main</code>, and a first file. A program that is one file needs none of this — <code>vyrn run file.vyrn</code> is complete — and a manifest earns its place when imports need names.",
+                    ], []),
+                section("deps", "Dependencies that cannot drift", [
+                        "<code>vyrn add</code> takes a <code>github:</code> or <code>https:</code> specifier and writes it to the manifest; the lock file records the content hash, and every later fetch is verified against it. <code>vyrn vendor</code> copies the sources into the repository, <code>--offline</code> refuses the network entirely, and <code>vyrn update</code> is the only command that moves a pin. A dependency that vanishes upstream still builds, from the cache or the vendor directory.",
+                    ], []),
+                section("toolchain", "The toolchain is pinned too", [
+                        "The manifest's <code>toolchain</code> key and the lock's <code>tool:</code> lines pin the compiler's own tools — the wasm sysroot, the runtime — into <code>~/.vyrn/tools</code>. <code>vyrn update --locked</code> fetches exactly what the lock names, which is what CI does, so a build on a new machine is the build you tested.",
                     ], []),
             ],
         },
@@ -450,7 +653,7 @@ export fn chapterOf(slug: String) -> Chapter {
             return c
         }
     }
-    return Chapter { slug: "", title: "", lede: "", sections: [] }
+    return Chapter { area: "", group: "", slug: "", title: "", lede: "", sections: [] }
 }
 
 /// Whether `slug` names a chapter.
@@ -458,10 +661,64 @@ export fn chapterKnown(slug: String) -> Bool {
     return chapterOf(slug).slug.byteLength > 0
 }
 
-/// The 1-based number of a chapter, or 0.
+/// The chapters of one area, in reading order — the book is `areaChapters("guide")`,
+/// and the Web and Tooling pages are the other two runs of the same list.
+export fn areaChapters(area: String) -> Array<Chapter> {
+    let mut out: Array<Chapter> = []
+    for c in chapters() {
+        if c.area == area {
+            out.push(c.copy())
+        }
+    }
+    return out
+}
+
+/// The distinct groups of one area's shelf, in the order the chapters walk
+/// them. Grouping is contiguous by construction — the test below refuses a
+/// group that stops and starts again.
+export fn areaGroups(area: String) -> Array<String> {
+    let mut out: Array<String> = []
+    for c in areaChapters(area) {
+        let mut known = false
+        for g in out {
+            if g == c.group {
+                known = true
+            }
+        }
+        if !known {
+            out.push(c.group.copy())
+        }
+    }
+    return out
+}
+
+/// The chapters of one group of one area, in reading order.
+export fn groupChapters(area: String, group: String) -> Array<Chapter> {
+    let mut out: Array<Chapter> = []
+    for c in areaChapters(area) {
+        if c.group == group {
+            out.push(c.copy())
+        }
+    }
+    return out
+}
+
+/// The area a chapter belongs to, or "".
+export fn chapterArea(slug: String) -> String {
+    return chapterOf(slug).area
+}
+
+/// How many pages a chapter's area holds — the `of 11` in the breadcrumb.
+export fn chapterCount(area: String) -> Int64 {
+    return areaChapters(area).length
+}
+
+/// The 1-based number of a chapter WITHIN ITS AREA, or 0. The guide's eleventh
+/// page and the tooling area's first are both numbered against their own shelf,
+/// because that is the only count a reader standing in one area can see.
 export fn chapterNumber(slug: String) -> Int64 {
     let mut n = 1
-    for c in chapters() {
+    for c in areaChapters(chapterArea(slug)) {
         if c.slug == slug {
             return n
         }
@@ -475,21 +732,46 @@ export fn chapterTag(n: Int64) -> String {
     return if n < 10 { "0" + n.toString() } else { n.toString() }
 }
 
-/// The page a chapter is published at.
+/// The page a chapter is published at: its area is its directory, so the book
+/// is `/guide/…`, the web pages are `/web/…` and the tooling pages `/tooling/…`.
 export fn chapterHref(slug: String) -> String {
-    return "/guide/" + slug + ".html"
+    return "/" + chapterArea(slug) + "/" + slug + ".html"
 }
 
-/// The chapter before this one, or "" at the start of the book.
+/// The landing of a chapter's area — where its breadcrumb points.
+export fn areaHref(area: String) -> String {
+    return "/" + area + ".html"
+}
+
+/// The two chapters RFC-0106 M5 moved out of the book: the path each page
+/// used to have, and the path that carries it now. `site/export.vyrn` reads
+/// this to publish a redirect stub at each old path, and the guide's own
+/// `[chapter]` route reads it to render the stub's body — one table, so the
+/// stub and its refresh cannot point different ways.
+export fn movedChapters() -> Array<Array<String>> {
+    return [["/guide/testing", "/tooling/testing"], ["/guide/web", "/web/views"]]
+}
+
+/// Where the guide page at `path` went, or "" for a path that never moved.
+export fn movedTarget(path: String) -> String {
+    for pair in movedChapters() {
+        if pair[0] == path {
+            return pair[1].copy()
+        }
+    }
+    return ""
+}
+
+/// The chapter before this one IN ITS AREA, or "" at the start of the shelf.
 export fn prevSlug(slug: String) -> String {
     let n = chapterNumber(slug)
-    return if n > 1 { chapters()[n - 2].slug.copy() } else { "" }
+    return if n > 1 { areaChapters(chapterArea(slug))[n - 2].slug.copy() } else { "" }
 }
 
-/// The chapter after this one, or "" at the end of the book.
+/// The chapter after this one IN ITS AREA, or "" at the end of the shelf.
 export fn nextSlug(slug: String) -> String {
     let n = chapterNumber(slug)
-    let all = chapters()
+    let all = areaChapters(chapterArea(slug))
     return if n > 0 && n < all.length { all[n].slug.copy() } else { "" }
 }
 
@@ -607,9 +889,35 @@ fn stripTags(markup: String) -> String {
     return out + substring(markup, plain, raw.length)
 }
 
-test "every chapter names a slug, a title and at least one section" {
+test "every chapter names an area, a slug, a title and at least one section" {
     let all = chapters()
-    assertEq(all.length, 13)
+    // Eleven guide chapters, four web pages, three tooling pages (RFC-0106 M5).
+    assertEq(all.length, 19)
+    assertEq(areaChapters("guide").length, 12)
+    assertEq(areaChapters("web").length, 4)
+    assertEq(areaChapters("tooling").length, 3)
+    for c in all {
+        assert(c.area == "guide" || c.area == "web" || c.area == "tooling")
+        assert(c.group.byteLength > 0)
+    }
+    // A group is one run of the shelf: once the walk leaves it, it never
+    // returns — the sidebar builds its named runs on that.
+    for area in ["guide", "web", "tooling"] {
+        let mut seen: Array<String> = []
+        let mut last = ""
+        for c in areaChapters(area) {
+            if c.group != last {
+                for g in seen {
+                    assert(g != c.group)
+                }
+                seen.push(c.group.copy())
+                last = c.group.copy()
+            }
+        }
+    }
+    assertEq(areaGroups("guide").length, 4)
+    assertEq(areaGroups("web").length, 2)
+    assertEq(areaGroups("tooling").length, 2)
     for c in all {
         assert(c.slug.byteLength > 0)
         assert(c.title.byteLength > 0)
@@ -623,24 +931,33 @@ test "every chapter names a slug, a title and at least one section" {
     }
 }
 
-test "a slug appears once, and the chain of prev and next covers the book" {
-    let all = chapters()
-    for c in all {
-        assertEq(chapterNumber(c.slug), chapterNumber(c.slug))
+test "a slug appears once, and prev and next chain each area end to end" {
+    for c in chapters() {
         assert(chapterKnown(c.slug))
     }
-    assertEq(prevSlug(all[0].slug), "")
-    assertEq(nextSlug(all[all.length - 1].slug), "")
-    let mut walked = 1
-    let mut here = all[0].slug.copy()
-    while nextSlug(here).byteLength > 0 {
-        let ahead = nextSlug(here)
-        assertEq(prevSlug(ahead), here)
-        here = ahead
-        walked = walked + 1
+    for area in ["guide", "web", "tooling"] {
+        let shelf = areaChapters(area)
+        assertEq(prevSlug(shelf[0].slug), "")
+        assertEq(nextSlug(shelf[shelf.length - 1].slug), "")
+        let mut walked = 1
+        let mut here = shelf[0].slug.copy()
+        while nextSlug(here).byteLength > 0 {
+            let ahead = nextSlug(here)
+            assertEq(prevSlug(ahead), here)
+            here = ahead
+            walked = walked + 1
+        }
+        // The chain never leaves the shelf and never skips a page.
+        assertEq(walked, shelf.length)
     }
-    assertEq(walked, all.length)
     assert(!chapterKnown("nope"))
+    // A page's path is under its area, and a moved path names a page that exists.
+    assertEq(chapterHref("testing"), "/tooling/testing.html")
+    assertEq(chapterHref("values"), "/guide/values.html")
+    for pair in movedChapters() {
+        assert(movedTarget(pair[0]).byteLength > 0)
+    }
+    assertEq(movedTarget("/guide/values"), "")
 }
 
 test "every block the book names is a file the generator read" {

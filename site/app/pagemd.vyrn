@@ -19,12 +19,13 @@
 /// a published document is made relative so that one tree serves from any mount
 /// point; a markdown file that travels has no document to be relative to, so a
 /// `/install.html` in it would resolve against whatever opened it.
-import { chapterOf, chapterSlugs, chapterHref, blockOf, blockSource } from "./guide"
+import { chapterOf, chapterSlugs, chapterHref, chapterArea, blockOf, blockSource } from "./guide"
 import { apiModules, apiEntries, apiIntro, apiHref } from "./docs"
 import { published } from "./nav"
 import { siteOrigin } from "./repo"
 import { substring, indexOf, replace, trimEnd } from "std/strings"
 import { startsWith } from "std/strpred"
+import { urlEncode } from "std/codecs"
 
 /// The markdown beside a page: `/guide/values.html` → `/guide/values.md`.
 ///
@@ -57,7 +58,8 @@ fn swapExtension(name: String, ext: String) -> String {
 export fn mdPaths() -> Array<String> {
     let mut out: Array<String> = []
     for slug in chapterSlugs() {
-        out.push("/guide/\{slug}")
+        // The chapter's area is its directory — `/web/views`, `/tooling/testing`.
+        out.push("/\{chapterArea(slug)}/\{slug}")
     }
     for m in apiModules() {
         out.push("/docs/std/\{m.name}")
@@ -71,6 +73,12 @@ export fn mdPaths() -> Array<String> {
 export fn markdownOf(path: String) -> String {
     if startsWith(path, "/guide/") {
         return chapterMd(substring(path, 7, path.byteLength))
+    }
+    if startsWith(path, "/web/") {
+        return chapterMd(substring(path, 5, path.byteLength))
+    }
+    if startsWith(path, "/tooling/") {
+        return chapterMd(substring(path, 9, path.byteLength))
     }
     if startsWith(path, "/docs/std/") {
         return moduleMd(substring(path, 10, path.byteLength))
@@ -354,4 +362,29 @@ test "a module's markdown carries every export it documents" {
     assert(has(md, "import {"))
     assert(!has(md, "<span"))
     assert(!has(md, "&quot;"))
+}
+
+/// The hand-off link: claude.ai/new with a prompt naming this page's markdown
+/// twin by its absolute URL — the reference site's own "Open in Claude"
+/// device, honest here because the twin is published beside every
+/// documentation page and `siteOrigin()` is where this site actually lives.
+export fn askClaudeUrl(pageHref: String, title: String) -> String {
+    let md = siteOrigin() + substring(mdUrl(pageHref), 1, mdUrl(pageHref).byteLength)
+    return "https://claude.ai/new?q=" + urlEncode("Read " + md + " (the Vyrn documentation page \"" + title + "\") so I can ask questions about it.")
+}
+
+test "the hand-off link carries the twin's absolute URL, encoded" {
+    let url = askClaudeUrl("/docs/std/json.html", "std/json")
+    assert(startsWith(url, "https://claude.ai/new?q=Read%20"))
+    // The origin is in the prompt, percent-encoded, and so is the quoted title.
+    if let Some(i) = indexOf(url, urlEncode(siteOrigin())) {
+        assert(i > 0)
+    } else {
+        assert(false)
+    }
+    if let Some(j) = indexOf(url, urlEncode("\"std/json\"")) {
+        assert(j > 0)
+    } else {
+        assert(false)
+    }
 }

@@ -1,0 +1,363 @@
+/// The documentation shell (RFC-0106 M4).
+///
+/// Three pages carried three different partial layouts: a reference module page
+/// had an export index in the left rail, a guide chapter had the book's contents
+/// in the same rail, and `/docs/editors` had four numbered section links. None of
+/// the three could tell a reader where the page sat in the whole of the
+/// documentation, and none had a way forward: a reader who finished `std/json`
+/// had the browser's Back button and nothing else.
+///
+/// So there is one shell now, and this file is the half of it that is data. The
+/// other half is `.page.docs` in `site/public/style.css`, which is three columns:
+/// the tree on the left, the content in the middle, "On this page" on the right.
+///
+/// EVERY ROW IS GENERATED. The reference tree is `apiGroups()`, the same
+/// generator the reference landing renders; the book's tree is `chapters()`, the
+/// same one `/guide` renders. A module added to `std/` or a chapter added to the
+/// book is in the sidebar of every page of its section on the next build, with
+/// nothing written here.
+///
+/// The pager is derived from the tree rather than from a second list, and that is
+/// the point of `pagerFor`: it takes the groups the sidebar was BUILT from and
+/// finds the marked row's neighbours in reading order. A prev/next that came from
+/// its own table could point somewhere the sidebar does not.
+import { ApiModule, apiGroups, apiHref, groupIcon } from "./docs"
+import { Chapter, areaChapters, areaGroups, groupChapters, chapterHref } from "./guide"
+import { indexOf, substring } from "std/strings"
+// The glyphs beside group names and subnav rows — the same pinned collection
+// the `<Icon>` tag reads, through the same generator, so the sidebar cannot
+// carry a glyph the provider does not know.
+import { book, bookmark, file, archive, link, settings, activity, code } from icons("bytesize", "book bookmark file archive link settings activity code")
+import { Html, toHtmlString } from "std/html"
+import { icons, iconAttrs } from "std/icons"
+
+/// One row of the sidebar: where it goes, what it is called, and whether it is
+/// the page being read. `here` is `"page"` or "" — the value of `aria-current`,
+/// where "" is the attribute's own way of saying "not this one".
+export type TreeRow = { href: String, label: String, here: String }
+
+/// A named run of rows. The reference has four (the library's own groups); the
+/// book has one.
+export type TreeGroup = { name: String, rows: Array<TreeRow>, icon: String }
+
+/// The link at the foot of the content: the page before this one in the tree and
+/// the page after it. An empty `href` means there is none, which is true at both
+/// ends of every section.
+export type Pager = { prevHref: String, prevLabel: String, nextHref: String, nextLabel: String }
+
+/// One step of the breadcrumb above the h1. The last one is the page itself and
+/// carries no href, because a link to the page you are on is a link that does
+/// nothing.
+export type Crumb = { href: String, label: String }
+
+/// One glyph, drawn to the string a template splices with `v-html`. The glyph
+/// is decoration beside a printed name, so it ships as the collection drew it.
+fn draw(g: consume Html) -> String {
+    return toHtmlString(iconAttrs(g, "", "", ""))
+}
+
+/// A glyph by the NAME the data records ("file", "archive"), drawn to a
+/// string. This is the one bridge from a data-carried name to the generated
+/// glyph functions — keyed by glyph, never by what uses it, so a new group or
+/// subnav row that reuses a known glyph touches its own data table alone.
+fn drawNamed(glyph: String) -> String {
+    if glyph == "book" { return draw(book()) }
+    if glyph == "bookmark" { return draw(bookmark()) }
+    if glyph == "file" { return draw(file()) }
+    if glyph == "archive" { return draw(archive()) }
+    if glyph == "link" { return draw(link()) }
+    if glyph == "settings" { return draw(settings()) }
+    if glyph == "code" { return draw(code()) }
+    if glyph == "activity" { return draw(activity()) }
+    return ""
+}
+
+/// `"page"` when `a` and `b` name the same page, and "" when they do not.
+fn mark(a: String, b: String) -> String {
+    return if a == b { "page" } else { "" }
+}
+
+/// The reference's sidebar: the three pages that are the reference itself, then
+/// every module in the library's own four groups.
+///
+/// `current` is a module name — `"json"` — or one of the three page keys
+/// `"index"`, `"graph"` and `"editors"`, so one function serves all four kinds of
+/// page under `/docs`.
+export fn docsTree(current: String) -> Array<TreeGroup> {
+    // No Overview row (the subnav's Reference IS that door), but the import
+    // graph left the subnav and lives here — it is the reference's own
+    // drawing (user: "Import graph can be on the reference's index").
+    let mut top: Array<TreeRow> = []
+    top.push(TreeRow { href: "/docs/graph.html", label: "The import graph", here: mark(current, "graph") })
+    let mut out: Array<TreeGroup> = [TreeGroup { name: "Reference", rows: top.copy(), icon: drawNamed("activity") }]
+    for g in apiGroups() {
+        let mut got: Array<TreeRow> = []
+        for m in g.modules {
+            got.push(TreeRow { href: apiHref(m.name), label: "std/" + m.name, here: mark(current, m.name) })
+        }
+        out.push(TreeGroup { name: g.name.copy(), rows: got.copy(), icon: drawNamed(g.icon) })
+    }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// The areas — the subnav's rows, and everything each row implies (RFC-0106 M5).
+// One table: key, landing, label, subnav glyph, tree group name, tree glyph.
+// The subnav is rendered FROM it, and each chaptered area's sidebar is built
+// BY it, so an area cannot appear in one and be missing from the other.
+// ---------------------------------------------------------------------------
+
+/// Every area of the documentation, in subnav order.
+fn areas() -> Array<Array<String>> {
+    return [
+        ["guide", "/guide.html", "Guide", "book", "Chapters", "bookmark"],
+        ["web", "/web.html", "Web", "link", "Pages", "link"],
+        ["tooling", "/tooling.html", "Tooling", "settings", "Pages", "settings"],
+        ["reference", "/docs.html", "Reference", "code", "", ""],
+        // The measured claims are documentation too: a reader deciding
+        // whether to use the language looks for them here (user).
+        ["benchmarks", "/benchmarks.html", "Benchmarks", "activity", "", ""],
+    ]
+}
+
+/// The row of `areas()` named `key`, or the reference row for an unknown key.
+fn areaRow(key: String) -> Array<String> {
+    for a in areas() {
+        if a[0] == key {
+            return a.copy()
+        }
+    }
+    return ["", "", "", "", "", ""]
+}
+
+/// The glyph beside one shelf group's name. One table for every area, keyed by
+/// the group alone — a group name is unique across the shelves.
+fn shelfGroupIcon(group: String) -> String {
+    let table = [
+        ["First steps", "book"],
+        ["The memory model", "archive"],
+        ["Abstractions", "code"],
+        ["Programs", "activity"],
+        ["The page", "file"],
+        ["The server", "link"],
+        ["Commands", "settings"],
+        ["Workspace", "bookmark"],
+    ]
+    for row in table {
+        if row[0] == group {
+            return row[1].copy()
+        }
+    }
+    return "file"
+}
+
+/// One chaptered area's sidebar: the shelf's named groups, each with its pages
+/// in reading order. No numbers — a category names what a run of pages is
+/// about, which a two-digit prefix never did (user). Tooling's Workspace group
+/// also lists Editors, the one row an area adds by hand.
+export fn areaTree(area: String, current: String) -> Array<TreeGroup> {
+    let mut out: Array<TreeGroup> = []
+    for g in areaGroups(area) {
+        let mut rows: Array<TreeRow> = []
+        for c in groupChapters(area, g) {
+            rows.push(TreeRow { href: chapterHref(c.slug), label: c.title.copy(), here: mark(current, c.slug) })
+        }
+        if area == "tooling" && g == "Workspace" {
+            rows.push(TreeRow { href: "/tooling/editors.html", label: "Editors", here: mark(current, "editors") })
+        }
+        out.push(TreeGroup { name: g.copy(), rows: rows.copy(), icon: drawNamed(shelfGroupIcon(g)) })
+    }
+    return out
+}
+
+/// The book's sidebar — the guide area's tree, by its old name, for the pages
+/// that predate the areas.
+export fn guideTree(current: String) -> Array<TreeGroup> {
+    return areaTree("guide", current)
+}
+
+/// The pager for whichever tree it is handed: the marked row's neighbours, read
+/// across the groups in the order the sidebar prints them.
+///
+/// A tree with nothing marked — the two landings — answers with two empty hrefs,
+/// and the template draws nothing.
+export fn pagerFor(groups: Array<TreeGroup>) -> Pager {
+    let mut flat: Array<TreeRow> = []
+    for g in groups {
+        for r in g.rows {
+            flat.push(TreeRow { href: r.href.copy(), label: r.label.copy(), here: r.here.copy() })
+        }
+    }
+    let mut at = 0 - 1
+    let mut i = 0
+    while i < flat.length {
+        if flat[i].here == "page" {
+            at = i
+        }
+        i = i + 1
+    }
+    if at < 0 {
+        return Pager { prevHref: "", prevLabel: "", nextHref: "", nextLabel: "" }
+    }
+    let back = at - 1
+    let ahead = at + 1
+    return Pager {
+        prevHref: if back >= 0 { flat[back].href.copy() } else { "" },
+        prevLabel: if back >= 0 { flat[back].label.copy() } else { "" },
+        nextHref: if ahead < flat.length { flat[ahead].href.copy() } else { "" },
+        nextLabel: if ahead < flat.length { flat[ahead].label.copy() } else { "" },
+    }
+}
+
+/// How many pages a tree holds. The templates print it under the sidebar, and
+/// the tests below check the two trees cover their sections.
+export fn treeSize(groups: Array<TreeGroup>) -> Int64 {
+    let mut n = 0
+    for g in groups {
+        n = n + g.rows.length
+    }
+    return n
+}
+
+test "the reference tree carries every module the library documents, once" {
+    let tree = docsTree("json")
+    let mut modules = 0
+    for g in tree {
+        if g.name != "Reference" {
+            modules = modules + g.rows.length
+        }
+    }
+    let mut all = 0
+    for g in apiGroups() {
+        all = all + g.modules.length
+    }
+    assertEq(modules, all)
+    // Plus the graph row, the reference's own drawing.
+    assertEq(treeSize(tree), all + 1)
+}
+
+test "exactly one row is marked, and it is the page that asked" {
+    // "editors" left this list with its tree row: it is a subnav area now.
+    for tree in [docsTree("json"), guideTree("ownership")] {
+        let mut marked = 0
+        for g in tree {
+            for r in g.rows {
+                if r.here == "page" {
+                    marked = marked + 1
+                }
+            }
+        }
+        assertEq(marked, 1)
+    }
+    // A landing marks NOTHING in the tree: the subnav's own row is its
+    // marker, and the area rows left the tree when the subnav took them.
+    for tree in [docsTree("index"), guideTree("index")] {
+        for g in tree {
+            for r in g.rows {
+                assertEq(r.here, "")
+            }
+        }
+    }
+    // And a name no section has marks nothing rather than marking the first row.
+    let none = pagerFor(docsTree("nope"))
+    assertEq(none.prevHref, "")
+    assertEq(none.nextHref, "")
+}
+
+test "the pager walks the tree the sidebar prints" {
+    // A landing marks nothing, so its pager is empty — the subnav is its
+    // navigation. The first MODULE of the tree has no previous.
+    let landing = pagerFor(docsTree("index"))
+    assertEq(landing.prevHref, "")
+    assertEq(landing.nextHref, "")
+    let firstModule = docsTree("x")[0].rows[0].label
+    // labels are "std/<name>"; the marked walk is exercised through `mid`.
+    assert(firstModule.byteLength > 4)
+    // A module in the middle has both, and both are rows of the tree.
+    let mid = pagerFor(docsTree("json"))
+    assert(mid.prevHref.byteLength > 0)
+    assert(mid.nextHref.byteLength > 0)
+    // The book's first chapter is the start of the book now — the overview
+    // row moved to the subnav.
+    let shelf = areaChapters("guide")
+    let start = pagerFor(guideTree(shelf[0].slug))
+    assertEq(start.prevHref, "")
+    // The book ends at its last chapter: Setup left for the tooling area.
+    let end2 = pagerFor(guideTree(shelf[shelf.length - 1].slug))
+    assertEq(end2.nextHref, "")
+    // Editors is the tooling shelf's very end.
+    let end = pagerFor(areaTree("tooling", "editors"))
+    assertEq(end.nextHref, "")
+    assert(end.prevHref.byteLength > 0)
+}
+
+test "each area's tree covers its shelf, in its named groups" {
+    assertEq(treeSize(areaTree("guide", "index")), areaChapters("guide").length)
+    assertEq(treeSize(areaTree("web", "index")), areaChapters("web").length)
+    // Tooling adds the one hand-written row: Editors, in Workspace.
+    assertEq(treeSize(areaTree("tooling", "index")), areaChapters("tooling").length + 1)
+    // The groups are the shelf's own, and every group prints at least one row.
+    assertEq(areaTree("guide", "index").length, areaGroups("guide").length)
+    for g in areaTree("guide", "index") {
+        assert(g.rows.length > 0)
+        assert(g.name.byteLength > 0)
+    }
+    let tooling = areaTree("tooling", "editors")
+    let last = tooling[tooling.length - 1]
+    assertEq(last.name, "Workspace")
+    assertEq(last.rows[last.rows.length - 1].label, "Editors")
+}
+
+// ---------------------------------------------------------------------------
+// The docs subnav — the row under the masthead naming the documentation's
+// areas, the reference site's second header. One function, so a page cannot
+// invent an area the others do not print.
+// ---------------------------------------------------------------------------
+
+/// The subnav's rows — one per area, from the same table the trees are built
+/// from — with the current area marked.
+export fn docSubnav(current: String) -> String {
+    let mut out = ""
+    for it in areas() {
+        let markAttr = if it[0] == current { " aria-current=\"true\"" } else { "" }
+        out = out + "<a href=\"" + it[1] + "\"" + markAttr + ">" + drawNamed(it[3]) + it[2] + "</a>"
+    }
+    return out
+}
+
+/// How many times `needle` occurs in `s` — the test's own counter.
+fn timesIn(s: String, needle: String) -> Int64 {
+    let mut n = 0
+    let mut at = 0
+    while at + needle.byteLength <= s.byteLength {
+        if let Some(i) = indexOf(substring(s, at, s.byteLength), needle) {
+            n = n + 1
+            at = at + i + needle.byteLength
+        } else {
+            return n
+        }
+    }
+    return n
+}
+
+test "the subnav names every area and marks exactly one" {
+    let html = docSubnav("reference")
+    assert(has(html, "/guide.html"))
+    assert(has(html, "/web.html"))
+    assert(has(html, "/tooling.html"))
+    assert(has(html, "/docs.html"))
+    assert(has(html, "/benchmarks.html"))
+    // One marked row, and it is the one asked for.
+    assertEq(timesIn(html, "aria-current"), 1)
+    assert(has(html, "/docs.html\" aria-current"))
+    // An unknown key marks nothing rather than trapping.
+    assertEq(timesIn(docSubnav("nope"), "aria-current"), 0)
+}
+
+/// Whether `needle` occurs in `s`.
+fn has(s: String, needle: String) -> Bool {
+    if let Some(i) = indexOf(s, needle) {
+        return i >= 0
+    }
+    return false
+}

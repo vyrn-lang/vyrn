@@ -834,9 +834,16 @@ gen fn compilePlural(br: Branches, tag: String, ind: String, argName: String) ->
     let cats = pluralCategories(tag)
     let inner = ind + "    "
     let mut code = ""
-    // Exact `=N` selectors take priority (checked before categories). CLDR
-    // spells `=N` as shorthand for `n = N`, and operand `n` is the ABSOLUTE
-    // value — so `-3` must match `=3`, exactly like the categories below.
+    // Exact `=N` selectors take priority (checked before categories), and they
+    // match the COUNT ITSELF, not |count|.
+    //
+    // The categories below are absolute because CLDR's operand `n` is defined
+    // that way, and `=N` looks like the same thing written shorter — it is not.
+    // ICU's grammar has two separate selector forms: an explicitValue, compared
+    // against the input number, and a keyword, resolved through the plural
+    // rules. Only the second one has operands. Folding `=N` onto |count| makes
+    // `{n, plural, =1 {one file} other {# files}}` say "one file" for -1, which
+    // is the wrong sentence in every locale.
     let mut clauses: Array<String> = []
     let mut bodies: Array<String> = []
     let mut i = 0
@@ -844,7 +851,7 @@ gen fn compilePlural(br: Branches, tag: String, ind: String, argName: String) ->
         let sel = br.branches[i].selector
         if sel.byteLength >= 1 && bytes(sel)[0] == '=' {
             let n = substring(sel, 1, sel.byteLength)
-            clauses.push(pluralAbs(argName) + " == " + n)
+            clauses.push(argName + " == " + n)
             bodies.push(compileBody(br.branches[i].text, tag, inner, argName))
         }
         i = i + 1
@@ -1515,6 +1522,18 @@ test "plural conditions take the absolute value, so negatives pick the CLDR bran
     let many = pluralCondition("uk", "many", "count")
     assert(many.contains("(if count < 0 { 0 - count } else { count }) % 10 >= 5"))
     assert(many.contains("(if count < 0 { 0 - count } else { count }) % 100 >= 11"))
+}
+
+test "an exact `=N` selector matches the count itself, not its absolute value" {
+    // The CATEGORIES are absolute (CLDR operand `n`); an explicit value is a
+    // different selector form in ICU's grammar and is compared to the input.
+    // `=1` firing on -1 would render "one file" for a count of minus one.
+    let code = compileBody("{n, plural, =1 {one file} other {# files}}", "en", "    ", "")
+    // The explicit selector compares the count as written. Both forms are in
+    // this one message — `en` always emits its `one` CATEGORY too — so the
+    // check is that the explicit clause is the plain one.
+    assert(code.contains("if n == 1"))
+    assert(code.contains("(if n < 0 { 0 - n } else { n }) == 1"))
 }
 
 test "a select selector containing a comma is refused at scan time" {
