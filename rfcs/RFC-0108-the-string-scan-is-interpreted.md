@@ -10,7 +10,16 @@
   a one-shot build), RFC-0029 (module state — the memoisation that closed the
   algorithmic half of this problem).
 - **Evidence (user):** "why it takes so long", "but it shoudn't be SO SLOW",
-  "`Site / build (pull_request) Successful in 10m` isn't it still slow?"
+  "`Site / build (pull_request) Successful in 10m` isn't it still slow?", "can
+  you research native implementations of Strings, data structures in other
+  languages especially where they are fastest. Maybe we need multiple
+  implementations?"
+- **Research:** [`census-strings.md`](census-strings.md) surveys Rust `memchr`,
+  CPython `fastsearch`, Go `bytealg`, StringZilla, V8, Java compact strings, C++
+  SSO and the editor structures, and measures four redesigns they suggested for
+  Vyrn. All four were already handled or were not the problem. Its §4 changes
+  two things in this RFC: the implementation should be SWAR before SIMD, and the
+  algorithm should be several, not one.
 
 ## 1. What happened before this RFC
 
@@ -131,6 +140,29 @@ The smallest version is one primitive: byte-substring search. `indexOf`,
 `lastIndexOf`, `split`, `replace`, `contains`, `startsWith` and `endsWith` are
 all expressible over it, and only `indexOf` needs the native body.
 
+**That one body holds several algorithms.** No fast implementation surveyed in
+[`census-strings.md`](census-strings.md) uses a single one: Rust dispatches on
+needle length and turns its SIMD prefilter off when a heuristic says it is not
+earning its keep, CPython uses a plain loop under five bytes and a Bloom filter
+over the pattern above it, Go counts `IndexByte` false positives and cuts over
+mid-search, StringZilla varies by needle length AND instruction set. The shape
+is always the same: a cheap filter that is sometimes wrong, a fallback with a
+linear guarantee, and a rule for noticing the filter is not paying. Start with
+Boyer-Moore-Horspool skipping plus SWAR candidate finding; add Two-Way only when
+a measured adversarial case demands the guarantee.
+
+**SWAR before SIMD.** Sixty-four-bit integer arithmetic tests eight bytes at a
+time, needs no target features, no runtime detection and no
+`-C target-feature=+simd128` on the wasm build. `memchr` uses exactly this as its
+fallback where no vector unit exists. One body, three backends.
+
+**Multiple implementations are SAFE under the parity gate**, and this is worth
+stating because it is not obvious. Substring search is a pure function: every
+implementation returns the same index for the same input, so the three backends
+may each use a different one without weakening `interp == native == wasm`.
+Contrast float formatting, where an implementation difference is observable and
+parity forbids it.
+
 Three consumers benefit without any of them changing: the `.vyx` compiler, the
 site's render, and `vyrn fmt`. So does every user program that touches text.
 
@@ -156,6 +188,28 @@ any milestone is written.
 cost? If the generator phase is dominated by indexed reads rather than searches,
 the primitive this RFC proposes is the wrong primitive, and the measurement
 above will say so.
+
+## 6b. What the research settled, and what it killed
+
+[`census-strings.md`](census-strings.md) went looking for a data-structure fix
+and did not find one. Four redesigns the survey suggested were measured against
+this repository, and every one was already handled or was not the problem:
+`out = out + piece` is flat across 8x the work (the `Rc::make_mut` accumulator
+already buys what V8's `ConsString` buys), `Map` already carries a hash index
+beside its ordered pairs, `escapeText` runs at about 2 MB/s — real but not
+dominant — and the `bytes()` bridge runs at about 24 MB/s, twelve to sixteen
+times faster than the loops that consume it.
+
+The representations the fastest runtimes carry solve problems Vyrn does not
+have. `ConsString` makes concatenation O(1), which Vyrn's accumulator already
+is. Java's Latin-1/UTF-16 split exists because Java chose UTF-16 in 1995; Vyrn's
+String is UTF-8 bytes by definition. C++'s SSO avoids a heap allocation for a
+value type, and `Rc<String>` already avoids the copy that costs here.
+
+**So the answer to "do we need multiple implementations" is: several algorithms
+behind one function, and exactly one String type.** The only representation
+worth revisiting is a borrowing substring in the shape of V8's `SlicedString`,
+and that is a question about ownership, not about performance.
 
 ## 7. What this RFC is not
 
