@@ -533,17 +533,21 @@ fn failed(what: String, why: String) -> Int64 {
 /// it checks the others are present.
 fn exportPath(outDir: String, path: String) -> Int64 {
     let name = published(path)
-    let doc = route(documentRequest(path))
-    if doc.status != 200 {
-        print("FAIL \{path} -> \{doc.status}")
+    let status = documentStatus(path)
+    if status != 200 {
+        print("FAIL \{path} -> \{status}")
         return 1
     }
-    let document = relativize(withRedirect(withCards(withFeed(withIcon(withLang(withSubnav(markCurrent(doc.body, path), path), path))), path), path), path)
+    // THE SAME PIPELINE THE GATES READ. This function used to spell the stamp
+    // chain out a second time, and the two spellings had already drifted — the
+    // published page carried `withSubnav` and the one every test below asked
+    // for did not. There is one now, and it is `publishedDocument`.
+    let document = publishedDocument(path)
     let mut bad = emit("\{outDir}/\{name}", document)
-    let data = route(dataRequest(path))
     let json = payloadName(name)
-    bad = bad + emit("\{outDir}/\{json}", relativize(data.body, path))
-    print("\{path} -> \{name} (\{doc.body.byteLength} bytes) + \{json} (\{data.body.byteLength} bytes)")
+    let payload = relativize(renderedData(path), path)
+    bad = bad + emit("\{outDir}/\{json}", payload)
+    print("\{path} -> \{name} (\{renderedBody(path).byteLength} bytes) + \{json} (\{payload.byteLength} bytes)")
     return bad
 }
 
@@ -887,7 +891,7 @@ test "every reference link points at the route the router generated" {
 }
 
 test "a module the reference does not cover answers 404, not an empty page" {
-    assertEq(route(documentRequest("/docs/std/nope")).status, 404)
+    assertEq(documentStatus("/docs/std/nope"), 404)
 }
 
 test "every navigation row points at a route that exists" {
@@ -960,11 +964,11 @@ test "each renamed route publishes a stub that carries the reader to the new one
         let old = pair[0]
         let to = pair[1]
         // The old URL answers, as a document and as a payload.
-        assertEq(route(documentRequest(old)).status, 200)
+        assertEq(documentStatus(old), 200)
         assertEq(route(dataRequest(old)).status, 200)
         // And the page it names answers too — a stub pointing at a 404 is worse
         // than the 404 it replaced.
-        assertEq(route(documentRequest(to)).status, 200)
+        assertEq(documentStatus(to), 200)
         let doc = publishedDocument(old)
         let hop = upTo(old) + published(to)
         assert(has(doc, "<meta http-equiv=\"refresh\" content=\"0; url=\{hop}\">"))
@@ -1052,7 +1056,7 @@ test "every name in a module's index points at an export that is on the page" {
     // the reader clicks and the page sits still — so both halves are checked
     // here, on every one of the 34 module pages rather than on a sample.
     for m in apiModules() {
-        let html = route(documentRequest(hrefDocsStd(m.name))).body
+        let html = renderedBody(hrefDocsStd(m.name))
         for e in apiEntries(m.name) {
             assert(has(html, "href=\"#e-\{e.name}\""))
             assert(has(html, "id=\"e-\{e.name}\""))
@@ -1080,7 +1084,7 @@ fn publishedDocument(path: String) -> String {
     if let Some(hit) = renderedPages[path] {
         return hit.copy()
     }
-    let doc = relativize(withRedirect(withCards(withFeed(withIcon(withLang(markCurrent(renderedBody(path), path), path))), path), path), path)
+    let doc = relativize(withRedirect(withCards(withFeed(withIcon(withLang(withSubnav(markCurrent(renderedBody(path), path), path), path))), path), path), path)
     renderedPages[path.copy()] = doc.copy()
     return doc
 }
@@ -1474,7 +1478,7 @@ test "every export the search offers has an anchor on the page it points at" {
     // anchor the reference page actually carries.
     let mut names = 0
     for row in searchRows() {
-        let html = route(documentRequest(hrefDocsStd(row.name))).body
+        let html = renderedBody(hrefDocsStd(row.name))
         for name in row.exports {
             assert(has(html, "id=\"e-\{name}\""))
             names = names + 1
@@ -1488,12 +1492,12 @@ test "the registry publishes one page per package, and an unknown name is a 404"
     assert(all.length >= 4)
     for p in all {
         assertEq(packageHref(p.slug), "/" + published(hrefExplore(p.slug)))
-        assertEq(route(documentRequest(hrefExplore(p.slug))).status, 200)
+        assertEq(documentStatus(hrefExplore(p.slug)), 200)
     }
     // A standard library module is not a package: it arrives with the compiler,
     // and the registry publishes nothing for it.
-    assertEq(route(documentRequest("/explore/json")).status, 404)
-    assertEq(route(documentRequest("/explore/nope")).status, 404)
+    assertEq(documentStatus("/explore/json"), 404)
+    assertEq(documentStatus("/explore/nope"), 404)
     assertEq(currentNav("/explore/shelf"), "/explore.html")
     assertEq(currentNav("/explore"), "/explore.html")
 }
@@ -1510,14 +1514,14 @@ test "every reference page carries the import line, and every package page the s
     // `compiler/vyrn-cli/src/remote.rs` applies. It lives there because this
     // program cannot start another one, and it is the gate RFC-0105 M2 asks for.
     for m in apiModules() {
-        let html = route(documentRequest(hrefDocsStd(m.name))).body
+        let html = renderedBody(hrefDocsStd(m.name))
         let line = importLine(m.name)
         assert(startsWith(line, "import { "))
         assert(has(html, "data-import=\"" + escapedQuotes(line) + "\""))
     }
     let mut specs = 0
     for p in packages() {
-        let html = route(documentRequest(hrefExplore(p.slug))).body
+        let html = renderedBody(hrefExplore(p.slug))
         let spec = offerOf(p.slug).spec
         assert(startsWith(spec, "github:"))
         assert(has(html, "data-spec=\"" + escapedQuotes(spec) + "\""))
@@ -1542,8 +1546,8 @@ test "one module list, and the pages that do not render it" {
     // claim is no longer "the two lists lead to different places" but "the
     // registry index does not list a module at all": not one link into
     // `/docs/std/` from it, and not one package page for a module name.
-    let docs = route(documentRequest(docsPath())).body
-    let explore = route(documentRequest(explorePath())).body
+    let docs = renderedBody(docsPath())
+    let explore = renderedBody(explorePath())
     assert(!has(explore, "href=\"/docs/std/"))
     for m in apiModules() {
         assert(has(docs, "href=\"/docs/std/\{m.name}.html\""))
@@ -1595,7 +1599,7 @@ test "every feature the editors page claims names a file that is in this reposit
     //
     // Relative to the repository root, which is where the export is run from and
     // where `packages.vyrn` reads `examples/*/vyrn.json` from.
-    let html = route(documentRequest(toolingEditorsPath())).body
+    let html = renderedBody(toolingEditorsPath())
     let claimed = attrValues(html, "data-impl")
     // The table is the page's whole middle section: an empty scan would pass
     // every assertion below in silence.
@@ -1616,13 +1620,13 @@ test "each shelf publishes one page per chapter, and an unknown slug is a 404" {
         } else {
             hrefGuide(slug)
         }
-        assertEq(route(documentRequest(path)).status, 200)
+        assertEq(documentStatus(path), 200)
         assertEq("/" + published(path), chapterHref(slug))
     }
-    assertEq(route(documentRequest("/guide/nope")).status, 404)
+    assertEq(documentStatus("/guide/nope"), 404)
     // A slug from another shelf is not this shelf's page.
-    assertEq(route(documentRequest("/web/values")).status, 404)
-    assertEq(route(documentRequest("/tooling/views")).status, 404)
+    assertEq(documentStatus("/web/values"), 404)
+    assertEq(documentStatus("/tooling/views"), 404)
     assertEq(currentNav("/guide/values"), "/guide.html")
     assertEq(currentNav("/web/views"), "/guide.html")
     assertEq(currentNav("/tooling"), "/guide.html")

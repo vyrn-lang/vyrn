@@ -156,12 +156,24 @@ fn microsOf(text: String) -> Int64 {
     }
 }
 
-/// One record's file, read once.
+/// One record's file, read once — now actually once. This function said "read
+/// once" in its comment and read the file on every call, and `programs()` above
+/// it is an EXPORTED accessor the benchmarks template asks for inside every
+/// loop it draws. Rendering `/benchmarks` was 22.3 s of the export's 95.6 s
+/// against 1.3 s for the largest reference page, and this was why: a file read
+/// and two full scans of a JSON record, per ask.
+let mut records: Map<String, String> = [:]
+
 fn recordText(file: String) -> String {
-    return match readFile(file) {
-        Ok(body) => body.copy(),
+    if let Some(hit) = records[file] {
+        return hit.copy()
+    }
+    let body = match readFile(file) {
+        Ok(text) => text.copy(),
         Err(why) => "",
     }
+    records[file.copy()] = body.copy()
+    return body
 }
 
 // ---------------------------------------------------------------------------
@@ -175,7 +187,12 @@ fn recordText(file: String) -> String {
 // ---------------------------------------------------------------------------
 
 /// The eight expressible Benchmarks Game programs, in the record's order.
+let mut progs: Array<Prog> = []
+
 export fn programs() -> Array<Prog> {
+    if progs.length > 0 {
+        return progs.copy()
+    }
     let src = recordText(run1File())
     let results = objectAt(src, "  ", "results")
     let mut out: Array<Prog> = []
@@ -189,6 +206,7 @@ export fn programs() -> Array<Prog> {
                 game: gameHref(p[2]),
             })
     }
+    progs = out.copy()
     return out
 }
 
