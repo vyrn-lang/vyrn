@@ -106,12 +106,113 @@ export fn endsWith(s: String, needle: String) -> Bool {
 /// `std/strings`'s `indexOf` is the same loop returning the offset — this is
 /// spelled out rather than built on it so the module stays a leaf that imports
 /// nothing and reaches no builtin except the byte view.
+/// A prepared needle: for each possible byte, how far a search window may jump
+/// when it ends on that byte. Boyer-Moore-Horspool's bad-character table.
+///
+/// THIS IS THE DATA STRUCTURE, and it is a plain `Array` rather than a record on
+/// purpose. The same loop reading its table out of a record field costs 51.2s
+/// against 49.0s on the site's render — a field lookup per byte is a real
+/// interpreter cost — and binding the field to a local first costs 65.9s,
+/// because reading a field out of a borrowed record copies it, and this is 256
+/// entries. An array passed as an argument is copy-on-write and shares.
+///
+/// EMPTY IS A DECISION, not a missing table. Preparing costs 256 steps and saves
+/// about `n / m`, so a one-byte needle or a short haystack is better scanned
+/// plainly — and `split` on a short string is the commonest call here. Callers
+/// need no second flag: [`findFrom`] reads an empty table as "scan plainly".
+export fn skipTable(needle: String, haystackBytes: Int64) -> Array<Int64> {
+    let nl = needle.byteLength
+    let mut skip: Array<Int64> = []
+    let mut k = 0
+    while k < 256 {
+        skip.push(nl)
+        k = k + 1
+    }
+    let mut j = 0
+    while j < nl - 1 {
+        skip[Int64(needle[j])] = nl - 1 - j
+        j = j + 1
+    }
+    return skip
+}
+
+/// The first occurrence of `needle` at or after `from`, or -1.
+///
+/// THE ONE SCANNING CORE. `indexOf`, `split`, `replace` and `contains` each
+/// carried their own copy of the naive loop, so there were four places to make
+/// fast and four to get right. There is one now, and the caller that searches
+/// the same needle repeatedly prepares one table and carries it through.
+///
+/// With no table: one byte at a time, O(n*m). With one: compare from the END of
+/// the window and, on a mismatch, skip by how far the window's last byte sits
+/// from its rightmost place in the needle — a byte the needle does not hold at
+/// all skips the whole needle, so this steps through roughly `n / m` positions.
+export fn findPlain(s: String, needle: String, from: Int64) -> Int64 {
+    let n = s.byteLength
+    let nl = needle.byteLength
+    if nl == 0 {
+        return from
+    }
+    let mut i = from
+    while i + nl <= n {
+        let mut j = 0
+        while j < nl && s[i + j] == needle[j] {
+            j = j + 1
+        }
+        if j == nl {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+/// Whether preparing a table for `needle` pays over a haystack of that size.
+///
+/// ASKED BEFORE THE TABLE IS BUILT, and that is the whole point. An earlier cut
+/// had `skipTable` answer "not worth it" by returning an EMPTY array, which read
+/// well and allocated on every call — and `std/vyx` asks `contains` about short
+/// strings millions of times while it compiles templates. The generator phase
+/// went from 127.9s to 140.4s on that allocation alone. A dispatch that costs
+/// anything is not a dispatch.
+export fn worthPreparing(needle: String, haystackBytes: Int64) -> Bool {
+    return needle.byteLength >= 2 && haystackBytes >= 512
+}
+
+/// [`findPlain`], but skipping with a table from [`skipTable`].
+export fn findSkipping(s: String, needle: String, from: Int64, skip: Array<Int64>) -> Int64 {
+    let n = s.byteLength
+    let nl = needle.byteLength
+    if nl == 0 {
+        return from
+    }
+    let mut i = from
+    while i + nl <= n {
+        let mut q = nl - 1
+        while q >= 0 && s[i + q] == needle[q] {
+            q = q - 1
+        }
+        if q < 0 {
+            return i
+        }
+        i = i + skip[Int64(s[i + nl - 1])]
+    }
+    return 0 - 1
+}
+
 export fn contains(s: String, needle: String) -> Bool {
     let n = byteLengthV(s)
-    let nl = byteLengthV(needle)
-    if nl > n {
+    if byteLengthV(needle) > n {
         return false
     }
+    if worthPreparing(needle, n) {
+        return findSkipping(s, needle, 0, skipTable(needle, n)) >= 0
+    }
+    // INLINE, not a call to `findPlain`. This is the hottest scan in the
+    // library — `std/vyx` asks it about tag and attribute names millions of
+    // times while it compiles templates — and routing it through one more
+    // frame cost 2.7 per cent of the generator phase on its own.
+    let nl = byteLengthV(needle)
     let mut i = 0
     while i + nl <= n {
         let mut j = 0

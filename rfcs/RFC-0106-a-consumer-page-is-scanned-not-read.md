@@ -1,7 +1,10 @@
 # RFC-0106 — A Consumer Page Is Scanned, Not Read
 
-- **Status:** **M3 shipped: the section rhythm, releases, and the reference
-  landing.** See [M0 — as landed](#m0--as-landed) for the census, the ceilings
+- **Status:** **M0–M5 shipped** (PR #267, merged 2026-08-23). M5's last two
+  rounds are performance, not pages: see
+  [M5 — rounds 26-27](#m5--rounds-26-27-the-job-was-thirty-minutes-because-the-work-was-done-twice).
+  What those rounds could NOT reach is measured and handed to RFC-0108. See
+  [M0 — as landed](#m0--as-landed) for the census, the ceilings
   every later milestone is held to, and four things the measurements contradict
   in the design below, [M1 — as landed](#m1--as-landed) for the eight items, the
   three defects M1 found in its own earlier commits, and the two ceilings it
@@ -2875,6 +2878,53 @@ Four more user directions on rounds 3-4's work:
 ` and round 4 shipped two raw newlines inside
   `play.js` string literals. Backslash-bearing edits go through script files
   now, not heredocs.
+
+## M5 — rounds 26-27: the job was thirty minutes because the work was done twice
+
+The user asked three times, escalating: "why it takes so long", "but it
+shoudn't be SO SLOW", "isn't it still slow?". The Site job was about thirty
+minutes and `The site's own tests` was 1392s of a 1788s run — five times
+everything else combined. None of it was the language being slow. All of it was
+this milestone's own code doing the same work again.
+
+**Round 26 — the pages.** `publishedDocument` rendered the page and re-ran the
+whole stamp pipeline on every call, and the gates ask for the same eighty
+documents over and over: one walks every route for its masthead marker, the next
+for its fragments, a third for its stamps. A page is a pure function of the tree
+here and no test mutates what a route answers, so pages, payloads and statuses
+are cached in module state (RFC-0029), from one render each. Export suite 7m12
+to 3m21.
+
+A first cut of that round replaced `assertEq(route(...).status, 200)` with a
+not-empty-body check to save the render. A 404 page has a body too. The status is
+cached beside the body now and the real assertion is back — same 3m21 either way,
+so the speed had come from caching and not from the weaker gate.
+
+The same round found a real defect. The stamp pipeline was spelled out twice,
+and the two spellings had drifted: `exportPath` applied `withSubnav` and the
+`publishedDocument` every gate reads did not. Thirty-one blocks were asserting
+against a document this site does not publish. There is one pipeline now.
+
+**Round 27 — the modules.** Caching the renders was still treating a symptom, so
+the next step measured per page instead of reasoning about it:
+
+| page | before | after | why |
+| --- | --- | --- | --- |
+| `/benchmarks` | 22.30s | 1.13s | `programs()` is an exported accessor the template asks for inside every loop it draws, and it opened `site/data/run-1.json` and rescanned the whole record each time. Its own helper's doc comment said "read once"; the code read on every call. |
+| `/docs/graph` | 6.71s | under 1s | `rowOf` walked a layer, `layer` walked every module, and `tallest` called `deepest()` in its loop CONDITION — the drawing recomputed its whole layout once per node and once per wire. |
+| six `/explore` | about 12s | about 4s | `packages()` re-read every manifest and source through four accessors that each opened the file. |
+
+Rendering every page 95.6s to 54.7s; the export suite 3m21 to 1m57; the module
+loop 2m19 to 20s serial — which retired the `xargs -P 4` round 26 had added,
+because the cost was never the queue. The published tree is byte-identical
+across both rounds, all 48 files.
+
+**What the rounds could not reach.** Two further fixes were measured and
+rejected rather than shipped: persisting the generator cache across CI runs is
+refused by that cache's design and forcing it would be a supply-chain hole, and
+building the CLI with RFC-0076's `wasm-gen` engine is 20 per cent on the
+generator phase and the saving is eaten by the build step it lengthens. Both
+measurements, and what remains, are RFC-0108.
 
 ## What this RFC does not do
 

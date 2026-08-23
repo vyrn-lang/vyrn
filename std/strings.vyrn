@@ -28,7 +28,7 @@
 /// the FUNCTIONS are on the same line for the ordinary reason: `slice` and the
 /// three predicates are `std/strpred` exports, not builtins, and a caller imports
 /// what it calls.
-import { SliceError, contains, endsWith, slice, startsWith } from "std/strpred"
+import { SliceError, contains, endsWith, findPlain, findSkipping, skipTable, slice, startsWith, worthPreparing } from "std/strpred"
 
 /// `stringFromBytes(b)` where the bytes are KNOWN to be valid UTF-8 — an ASCII
 /// transform of, or an ASCII-boundary slice/rebuild of, already-valid text — so
@@ -109,25 +109,19 @@ fn isAsciiSpace(b: UInt8) -> Bool {
 /// `s`'s), so it is UTF-8-safe: a match only ever lands on a codepoint boundary
 /// because `needle` is itself valid UTF-8.
 export fn indexOf(s: String, needle: String) -> Option<Int64> {
-    let nl = needle.byteLength
-    if nl == 0 {
-        return Some(0)
-    }
-    if nl > s.byteLength {
+    let n = s.byteLength
+    if needle.byteLength > n {
         return None
     }
-    let mut i = 0
-    while i + nl <= s.byteLength {
-        let mut j = 0
-        while j < nl && s[i + j] == needle[j] {
-            j = j + 1
-        }
-        if j == nl {
-            return Some(i)
-        }
-        i = i + 1
+    let at = if worthPreparing(needle, n) {
+        findSkipping(s, needle, 0, skipTable(needle, n))
+    } else {
+        findPlain(s, needle, 0)
     }
-    return None
+    if at < 0 {
+        return None
+    }
+    return Some(at)
 }
 
 /// The byte offset of the LAST occurrence of `needle` in `s`, or `None`. An empty
@@ -166,19 +160,20 @@ export fn split(s: String, sep: String) -> Array<String> {
         out.push(s.copy())
         return out
     }
+    // ONE TABLE FOR EVERY MATCH. A document with hundreds of separators would
+    // otherwise pay the 256 setup steps hundreds of times.
+    let prepared = worthPreparing(sep, s.byteLength)
+    let skip = if prepared { skipTable(sep, s.byteLength) } else { [] }
     let mut start = 0
     let mut i = 0
     while i + sl <= s.byteLength {
-        let mut j = 0
-        while j < sl && s[i + j] == sep[j] {
-            j = j + 1
-        }
-        if j == sl {
-            out.push(slice(s, start, i) ?? panic("split: a cut at a separator match"))
-            start = i + sl
-            i = i + sl
+        let at = if prepared { findSkipping(s, sep, i, skip.copy()) } else { findPlain(s, sep, i) }
+        if at < 0 {
+            i = s.byteLength + 1
         } else {
-            i = i + 1
+            out.push(slice(s, start, at) ?? panic("split: a cut at a separator match"))
+            start = at + sl
+            i = at + sl
         }
     }
     out.push(slice(s, start, s.byteLength) ?? panic("split: the tail after the last separator"))
@@ -299,19 +294,18 @@ export fn replace(s: String, from: String, to: String) -> String {
         return s.copy()
     }
     let mut out = ""
+    let prepared = worthPreparing(from, s.byteLength)
+    let skip = if prepared { skipTable(from, s.byteLength) } else { [] }
     let mut start = 0
     let mut i = 0
     while i + fl <= s.byteLength {
-        let mut j = 0
-        while j < fl && s[i + j] == from[j] {
-            j = j + 1
-        }
-        if j == fl {
-            out = out + (slice(s, start, i) ?? panic("replace: a cut at a needle match")) + to
-            start = i + fl
-            i = i + fl
+        let at = if prepared { findSkipping(s, from, i, skip.copy()) } else { findPlain(s, from, i) }
+        if at < 0 {
+            i = s.byteLength + 1
         } else {
-            i = i + 1
+            out = out + (slice(s, start, at) ?? panic("replace: a cut at a needle match")) + to
+            start = at + fl
+            i = at + fl
         }
     }
     out = out + (slice(s, start, s.byteLength) ?? panic("replace: the tail after the last match"))

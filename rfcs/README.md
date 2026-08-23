@@ -44,7 +44,7 @@ drifts: each header says which milestone landed and what did not, and the
 
 ## The index
 
-106 RFCs, numbered 0001 to 0107, with one gap. **There is no RFC-0066** — the
+107 RFCs, numbered 0001 to 0108, with one gap. **There is no RFC-0066** — the
 number was skipped and never used. The only mention of it in the repository is
 this sentence. Closing the gap would mean renumbering thirty files and breaking
 every cross-reference, so the gap stays.
@@ -161,8 +161,9 @@ claim is true — is written down in the test's own header.
 | [0103](RFC-0103-a-target-is-a-capability-set.md) | A Target Is a Capability Set | Implemented |
 | [0104](RFC-0104-a-benchmark-is-a-claim-about-a-gap.md) | A Benchmark Is a Claim About a Gap | Implemented |
 | [0105](RFC-0105-a-site-has-two-audiences.md) | A Site Has Two Audiences | Implemented |
-| [0106](RFC-0106-a-consumer-page-is-scanned-not-read.md) | A Consumer Page Is Scanned, Not Read | Proposed |
+| [0106](RFC-0106-a-consumer-page-is-scanned-not-read.md) | A Consumer Page Is Scanned, Not Read | Implemented |
 | [0107](RFC-0107-a-template-component-is-a-library.md) | A Template Component Is a Library | Implemented |
+| [0108](RFC-0108-the-string-scan-is-interpreted.md) | The String Scan Is Interpreted | Prototyped; its own question answered no |
 
 ## The other documents here
 
@@ -177,6 +178,7 @@ the same test as the index: a file here that nothing links to fails it.
 | [`NOTES-dogfood-shelf.md`](NOTES-dogfood-shelf.md) | Friction record from writing `examples/shelf`, the full-stack app. |
 | [`NOTES-dogfood-vlog.md`](NOTES-dogfood-vlog.md) | Friction record from writing `examples/vlog.vyrn`, the CLI and text app. |
 | [`census-0106-m3-craft.md`](census-0106-m3-craft.md) | The adversarial re-audit of the consumer pages after RFC-0106 M3's first round was rejected: every defect found, and whether it was fixed or deferred. |
+| [`census-strings.md`](census-strings.md) | How the fastest implementations build strings, and four Vyrn redesigns the measurements killed. Feeds RFC-0108. |
 | [`census-builtins.md`](census-builtins.md) | Measurement of every reserved builtin name. Became RFC-0094. |
 | [`census-call-arguments.md`](census-call-arguments.md) | Measurement of call-argument shapes, then implemented; §9 records what landed. |
 | [`census-regions.md`](census-regions.md) | Measurement of `region { .. }` use. Its recommendation closed two rows of the builtins census. |
