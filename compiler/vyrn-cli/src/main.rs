@@ -4661,6 +4661,11 @@ fn dev_serve_one(
             );
             return;
         }
+        Err(ParseError::TooLarge { method, path }) => {
+            eprintln!("{method} {path} -> 413");
+            write_response(stream, 413, "text/plain", b"request body too large");
+            return;
+        }
         Err(ParseError::Bad) => {
             eprintln!("- - -> 400");
             write_response(stream, 400, "text/plain", b"bad request");
@@ -4747,7 +4752,9 @@ fn loopback_host(host: &str) -> bool {
     } else {
         host.split(':').next().unwrap_or(host)
     };
-    matches!(bare, "localhost" | "127.0.0.1" | "::1")
+    // A host name is case-insensitive (RFC 9110 §4.2.3), so `LOCALHOST` is the
+    // same host and the gate must not refuse it.
+    bare.eq_ignore_ascii_case("localhost") || matches!(bare, "127.0.0.1" | "::1")
 }
 
 /// Whether `origin`'s authority is `host`. A browser writes the same
@@ -4814,7 +4821,24 @@ enum ParseError {
     /// A `Transfer-Encoding: chunked` body (unsupported in v1) → 501. Carries
     /// the parsed method/path so the access line can still be logged.
     Chunked { method: String, path: String },
+    /// A body larger than [`MAX_BODY`] → 413. Carries the parsed method/path
+    /// for the access line, the same way `Chunked` does.
+    TooLarge { method: String, path: String },
 }
+
+/// The largest request body this server will hold, 8 MiB.
+///
+/// The header block has been guarded since RFC-0019, and the BODY was not: the
+/// read loop grew its buffer to whatever `Content-Length` announced, so one
+/// connection could make the process hold an unbounded amount of memory. The
+/// loopback bind and the cross-origin gate do not help here — a script that
+/// sends no `Origin` passes that gate by design, and any process on this
+/// machine can open the socket.
+///
+/// 8 MiB is well past a form post or an RPC call and well under anything that
+/// hurts; a program that needs to receive more than this wants a streaming
+/// upload path, which v1 does not have.
+const MAX_BODY: usize = 8 * 1024 * 1024;
 
 /// Handle one connection: parse the request, call Vyrn's `handle`, write the
 /// response, close. Malformed input answers 400 without reaching Vyrn; a chunked
@@ -4873,6 +4897,10 @@ fn serve_one(
                 "text/plain",
                 b"chunked transfer-encoding not supported",
             );
+        }
+        Err(ParseError::TooLarge { method, path }) => {
+            eprintln!("{method} {path} -> 413");
+            write_response(stream, 413, "text/plain", b"request body too large");
         }
         Err(ParseError::Bad) => {
             eprintln!("- - -> 400");
@@ -4967,6 +4995,14 @@ fn parse_request(
             path: target,
         });
     }
+    // Refused on the ANNOUNCED length, before a byte of the body is read: the
+    // point is not to read it and then complain.
+    if content_length > MAX_BODY {
+        return Err(ParseError::TooLarge {
+            method,
+            path: target,
+        });
+    }
 
     // Body: exactly `content_length` bytes (some already buffered after the
     // header terminator). Absent Content-Length ⇒ no body.
@@ -5016,6 +5052,7 @@ fn reason_phrase(status: i64) -> &'static str {
         405 => "Method Not Allowed",
         409 => "Conflict",
         410 => "Gone",
+        413 => "Content Too Large",
         418 => "I'm a teapot",
         422 => "Unprocessable Entity",
         429 => "Too Many Requests",
@@ -5894,9 +5931,49 @@ mod tests {
         assert_eq!(cross_origin_body(&ws_same), None);
     }
 
+    /// The body cap answers 413 on the ANNOUNCED length, before the body is
+    /// read. Driven over a real socket because that is where it has to work:
+    /// the guard is one comparison, and the thing worth checking is that the
+    /// refusal reaches the wire from the handler that owns this path.
+    #[test]
+    fn an_oversized_body_is_refused_before_it_is_read() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            serve_one(&mut stream, &mut |_call| {
+                panic!("the request reached `handle` — the cap did not hold");
+            });
+        });
+        let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        // A timeout, so a regression here FAILS instead of hanging the suite:
+        // `parse_request` blocks until the header terminator arrives, and a
+        // request that never sends one would otherwise stop the run dead.
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .expect("read timeout");
+        let announced = MAX_BODY + 1;
+        let request = format!(
+            "POST /x HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {announced}\r\n\r\n"
+        );
+        client.write_all(request.as_bytes()).expect("write headers");
+        // Not one byte of the body is sent: the refusal must not wait for it.
+        let mut answer = String::new();
+        client.read_to_string(&mut answer).expect("read");
+        server.join().expect("server thread");
+        assert!(
+            answer.starts_with("HTTP/1.1 413 Content Too Large"),
+            "got: {answer}"
+        );
+    }
+
     #[test]
     fn loopback_host_strips_ports_and_ipv6_brackets() {
         assert!(loopback_host("localhost"));
+        // Case-insensitive: a client may spell the host however it likes.
+        assert!(loopback_host("LOCALHOST"));
+        assert!(loopback_host("LocalHost:8080"));
         assert!(loopback_host("localhost:8080"));
         assert!(loopback_host("127.0.0.1:1"));
         assert!(loopback_host("[::1]:8080"));

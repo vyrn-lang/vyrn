@@ -14923,8 +14923,7 @@ const ERRNO_XDEV: i32 = 75;
 /// added out of turn would renumber every call to it and the module would still
 /// validate (M2e's finding, in a different place).
 fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
-    let (malloc, strlen, utf8valid, concat, free) =
-        (rt.malloc, rt.strlen, rt.utf8valid, rt.concat, rt.free);
+    let (malloc, strlen, utf8valid, concat) = (rt.malloc, rt.strlen, rt.utf8valid, rt.concat);
     let triple = layout::of_ll("{ ptr, i64, i64 }").expect("the growable-array triple");
     let sum2 = layout::of_ll("{ i1, i64, i64 }").expect("the Option/Result shape");
     // RFC-0043's injected clock and seed. The env NAME carries its own `=`, so a
@@ -14980,23 +14979,11 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
 
     // env_get(key) — the value of the environment entry `key` names (`key`
     // includes its `=`), or 0. WASI hands the whole environment over in one go,
-    // so this is `environ_get` plus a prefix scan. Both per-call allocations
-    // are reclaimed here: the pointer array outright, and the environ blob by
-    // way of the answer — a hit is copied into one cached block (`env_prev`,
-    // freed by the next hit), because the blob's own bytes die with its free
-    // and a clock program may poll `nowMillis()` in a loop, where two leaked
-    // blocks per call would grow the heap without bound. The copy stays valid
-    // until the next `env_get`, which is all any caller needs: they parse it
-    // on the spot.
-    let (env_sizes, env_get_i) = (wasi.environ_sizes_get, wasi.environ_get);
-    let starts = rt.starts;
-    // env_get(key) — the value of the environment entry `key` names (`key`
-    // includes its `=`), or 0. WASI hands the whole environment over in one go,
     // so this is `environ_get` plus a prefix scan; nothing caches it, because a
     // clock program makes a handful of calls and the bump allocator's cost for
     // them is a few hundred bytes that nothing can observe.
     //
-    // AUDIT DEFerral (F2-001, env_get leak): the audit flagged the per-call
+    // AUDIT DEFERRAL (F2-001, env_get leak): the audit flagged the per-call
     // ptr-array + blob leak here and a cached-pair rewrite was attempted, but
     // every hand-restructured variant of this body failed wasmtime validation
     // with a stray trailing byte the encoder could not explain. Reverted to
