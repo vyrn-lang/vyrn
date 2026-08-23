@@ -33,13 +33,10 @@ The fallbacks are the same two algorithms nearly everywhere: **Two-Way**
 bad-character skipping for the sublinear common case. CPython layers both, plus
 Sunday's shift.
 
-**Why this matters for Vyrn:** substring search is a *pure function*. Every one
-of these implementations returns the same index for the same input — they differ
-only in how fast they get there. That is exactly the property the
-`interp == native == wasm` parity gate needs, and it means Vyrn can use a
-*different* implementation per backend without weakening the gate. Contrast float
-formatting, where implementation differences are observable and parity forbids
-them.
+**Why this matters for Vyrn:** what these four share is not that they are
+native — it is that none of them is NAIVE. Vyrn's `indexOf` was O(n*m). That is
+the gap the prototype closed, in ordinary Vyrn, and the parity gate never came
+into it because one portable implementation serves all three backends.
 
 ### The wasm question RFC-0108 has to answer anyway
 
@@ -50,9 +47,10 @@ it needs no target features, no runtime detection, and it is portable to every
 backend including the interpreter. It gives a large fraction of the SIMD win
 without any of the ISA machinery.
 
-**Recommendation:** if RFC-0108 proceeds, the first implementation should be
-SWAR, not SIMD. One body, three backends, no feature detection, no `-C
-target-feature=+simd128` requirement on the wasm build.
+**Recommendation, WITHDRAWN — see section 3b.** This paragraph advised SWAR
+before SIMD for a native body. There is no native body: the constraint is that
+nothing is hard-implemented in a backend, and the measured fix needed none. Kept
+so the reasoning is visible, not because it stands.
 
 ---
 
@@ -125,6 +123,25 @@ What remains is **per-operation interpreter overhead, spread across every
 primitive**, of which substring search is between a quarter and a third.
 
 ---
+
+## 3b. The correction that reframed this census
+
+This document was researched under the assumption that the fix would be a native
+body in the compiler. The user refused that: *"I mean multiple data structures,
+not different implementations for different backends, we shoudn't hardimplement
+in backend anything."*
+
+The survey below still holds, but its lesson moves. What the fast implementations
+share is not that they are native - it is that they are NOT NAIVE. Vyrn's
+`indexOf` was O(n*m) with one outer step per byte, and Horspool in ordinary Vyrn
+is nearly 8x on a microbenchmark. The recommendations in section 4 are rewritten
+around that: the algorithm is the lever, and it needs no backend at all.
+
+What getting that 8x into the real workload actually cost is recorded in
+RFC-0108 section 5c. The short version: five shapes were wrong, the worst of
+them made the generator phase 10 per cent SLOWER by allocating in a dispatch,
+and the ownership model - not the algorithm - decided which data structures were
+affordable.
 
 ## 4. Recommendations, in the order they should be tried
 

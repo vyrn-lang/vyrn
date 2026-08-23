@@ -163,7 +163,7 @@ claim is true — is written down in the test's own header.
 | [0105](RFC-0105-a-site-has-two-audiences.md) | A Site Has Two Audiences | Implemented |
 | [0106](RFC-0106-a-consumer-page-is-scanned-not-read.md) | A Consumer Page Is Scanned, Not Read | Implemented |
 | [0107](RFC-0107-a-template-component-is-a-library.md) | A Template Component Is a Library | Implemented |
-| [0108](RFC-0108-the-string-scan-is-interpreted.md) | The String Scan Is Interpreted | Proposed |
+| [0108](RFC-0108-the-string-scan-is-interpreted.md) | The String Scan Is Interpreted | Prototyped; its own question answered no |
 
 ## The other documents here
 

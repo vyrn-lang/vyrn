@@ -1,8 +1,12 @@
 # RFC-0108 — The String Scan Is Interpreted
 
-- **Status:** **Proposed.** Nothing is implemented. The measurements below are
-  real and reproducible; the design is not settled, and §6 names the one
-  question a prototype has to answer before this earns implementation effort.
+- **Status:** **Prototype built and measured; §6's question is ANSWERED, and the
+  answer is no.** The proposal this RFC opened with — a native body in the
+  compiler — was refused by the user on a design ground (§5b) and never built.
+  What was built instead is pure Vyrn, and it is 13% on the render and NEUTRAL
+  on the generator phase, which is the phase that matters. §5c is the honest
+  record of the five shapes that were wrong on the way, and it is the most
+  useful part of this document.
 - **Depends on:** RFC-0094 (builtins as declarations — the direction this RFC
   argues WITH, not against; see §5), RFC-0021 (generators — the comptime
   sandbox, where the same loops run at compile time), RFC-0076 (generators as
@@ -124,7 +128,77 @@ That is worth having and it is **not** the whole problem. This RFC does not
 claim otherwise. The other two thirds are tree building, string concatenation
 and `Map` lookups — also interpreted, and not addressed here.
 
-## 5. The proposal, and the tension with RFC-0094
+## 5b. The direction this RFC opened with was refused
+
+The user's words: *"I mean multiple data structures, not different
+implementations for different backends, we shoudn't hardimplement in backend
+anything."*
+
+That is a design position and it is the right one. §5 below proposed a native
+body in the compiler — three backends, three implementations, `std` no longer
+the single source of truth for what these functions do. The constraint says:
+`std` stays Vyrn, portable, one source of truth, and the lever is DATA
+STRUCTURES the language offers, so the same interpreted code does fewer
+operations.
+
+Under that constraint the fix has to be algorithmic, and there was one sitting in
+plain sight that this RFC had walked past: **`indexOf` was naive**. O(n·m), one
+outer step per byte. Boyer-Moore-Horspool skips up to `m` bytes per step, and it
+is forty lines of ordinary Vyrn:
+
+| | |
+| --- | --- |
+| naive, 20 scans of 86 KB | 1.33s |
+| Horspool, same | **0.17s** |
+
+Nearly 8x, with no compiler change at all. §5 below is kept for the record and is
+**superseded**: the native-body proposal is withdrawn.
+
+## 5c. Getting 8x into the workload: five shapes that were wrong
+
+The microbenchmark says 7.8x. The site render moved 13%. The gap is the whole
+lesson, and every step of it was found by measuring, not by reading:
+
+| shape | what it cost | why |
+| --- | --- | --- |
+| a `Matcher` RECORD holding needle + table | 49.0s to **51.2s** | a field lookup per byte in the compare loop is a real interpreter charge |
+| binding those fields to locals first | to **65.9s** | reading a field out of a BORROWED record copies it, and the table is 256 entries |
+| passing the fields as arguments | to **57.4s** | same copy, at the call instead |
+| `skipTable` returning an EMPTY array to mean "not worth preparing" | generator phase 127.9s to **140.4s** | it reads beautifully and it ALLOCATES on every call — and `std/vyx` asks `contains` about short strings millions of times while compiling templates |
+| routing `contains` through the shared plain scan | a further **2.7%** | one more call frame on the hottest scan in the library |
+
+Two rules fall out of that table, and neither is about string search:
+
+1. **A dispatch that costs anything is not a dispatch.** The cheap path has to be
+   reached without allocating and without an extra frame. `contains` keeps its
+   loop inlined for exactly this reason.
+2. **The ownership model decides which data structures are affordable.** There is
+   no way in Vyrn today to hand a borrowed record's array to a hot loop without
+   copying it, so the shared table is a plain `Array<Int64>` passed as an
+   argument — copy-on-write, and it shares. The prettier record API is not
+   available at this price. That is a finding about the LANGUAGE, and it is the
+   part of this exercise most worth keeping.
+
+### What the prototype is
+
+One scanning core in `std/strpred` — `skipTable`, `findPlain`, `findSkipping`,
+`worthPreparing` — and `indexOf`, `split`, `replace` and `contains` reaching the
+bytes through it instead of each carrying its own copy of the naive loop. `split`
+and `replace` prepare one table and carry it through every match, which is the
+data structure earning its keep: 256 setup steps per CALL rather than per MATCH.
+
+| phase | baseline | prototype |
+| --- | --- | --- |
+| render, warm, median of 3 | 54.5s | **47.6s (13%)** |
+| generator phase, cold | 127.9s | **126.6s (neutral)** |
+
+Verified: 108 needle/haystack pairs agree with the previous `indexOf` including
+UTF-8, empty needles, needles longer than the haystack and overlapping repeats;
+the site renders byte-identical except the two edited modules' own API docs and
+the index that counts exports; `std` and site gates green; three-way parity 40
+passed, 0 failed.
+
+## 5. The proposal, and the tension with RFC-0094 (SUPERSEDED — see §5b)
 
 RFC-0094 M2 deliberately moved `contains`, `startsWith`, `endsWith` and `slice`
 OUT of the reserved builtin list and into `std/strpred`. **This RFC does not ask
@@ -170,7 +244,23 @@ A native body needs three backends to stay honest under the parity gate:
 interpreter, native lowering and wasm lowering. Anything less makes
 `interp == native == wasm` a claim this function does not keep.
 
-## 6. The open question a prototype must answer
+## 6. The open question a prototype must answer — ANSWERED: no
+
+**The `.vyx` compile phase does not benefit.** 126.6s against a 127.9s baseline
+is neutral, and the phase is 110s of the 118s of generator cost. §6 predicted
+this would be the deciding number and it decided against the whole direction:
+template compilation LEXES, walking bytes with indexing, and a faster substring
+search has almost nothing to offer it.
+
+So the ceiling on this line of work is 13% of the render — about 7s of a 632s CI
+job. The prototype is worth keeping because it also deletes three duplicate
+loops and is not slower anywhere, but **nobody should spend more here expecting
+CI to move.** The next honest target is whatever makes the `.vyx` lexer walk
+fewer bytes, and that is a different RFC.
+
+The original text of this section follows.
+
+### As written, before the answer
 
 **Does the `.vyx` compile phase benefit at all?** §4's 26 to 33 per cent is
 measured on the RENDER phase. The generator phase is 110s of the 118s and it is

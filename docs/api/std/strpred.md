@@ -87,10 +87,10 @@ fn endsWith(s: String, needle: String) -> Bool
 
 Does `s` end with `needle`? An empty needle is a suffix of everything.
 
-## contains
+## skipTable
 
 ```vyrn
-fn contains(s: String, needle: String) -> Bool
+fn skipTable(needle: String, haystackBytes: Int64) -> Array<Int64>
 ```
 
 Does `needle` occur anywhere in `s`? An empty needle occurs at 0, so this is
@@ -100,6 +100,67 @@ The naive scan, which is what the builtin is too at these sizes.
 `std/strings`'s `indexOf` is the same loop returning the offset — this is
 spelled out rather than built on it so the module stays a leaf that imports
 nothing and reaches no builtin except the byte view.
+A prepared needle: for each possible byte, how far a search window may jump
+when it ends on that byte. Boyer-Moore-Horspool's bad-character table.
+
+THIS IS THE DATA STRUCTURE, and it is a plain `Array` rather than a record on
+purpose. The same loop reading its table out of a record field costs 51.2s
+against 49.0s on the site's render — a field lookup per byte is a real
+interpreter cost — and binding the field to a local first costs 65.9s,
+because reading a field out of a borrowed record copies it, and this is 256
+entries. An array passed as an argument is copy-on-write and shares.
+
+EMPTY IS A DECISION, not a missing table. Preparing costs 256 steps and saves
+about `n / m`, so a one-byte needle or a short haystack is better scanned
+plainly — and `split` on a short string is the commonest call here. Callers
+need no second flag: [`findFrom`] reads an empty table as "scan plainly".
+
+## findPlain
+
+```vyrn
+fn findPlain(s: String, needle: String, from: Int64) -> Int64
+```
+
+The first occurrence of `needle` at or after `from`, or -1.
+
+THE ONE SCANNING CORE. `indexOf`, `split`, `replace` and `contains` each
+carried their own copy of the naive loop, so there were four places to make
+fast and four to get right. There is one now, and the caller that searches
+the same needle repeatedly prepares one table and carries it through.
+
+With no table: one byte at a time, O(n*m). With one: compare from the END of
+the window and, on a mismatch, skip by how far the window's last byte sits
+from its rightmost place in the needle — a byte the needle does not hold at
+all skips the whole needle, so this steps through roughly `n / m` positions.
+
+## worthPreparing
+
+```vyrn
+fn worthPreparing(needle: String, haystackBytes: Int64) -> Bool
+```
+
+Whether preparing a table for `needle` pays over a haystack of that size.
+
+ASKED BEFORE THE TABLE IS BUILT, and that is the whole point. An earlier cut
+had `skipTable` answer "not worth it" by returning an EMPTY array, which read
+well and allocated on every call — and `std/vyx` asks `contains` about short
+strings millions of times while it compiles templates. The generator phase
+went from 127.9s to 140.4s on that allocation alone. A dispatch that costs
+anything is not a dispatch.
+
+## findSkipping
+
+```vyrn
+fn findSkipping(s: String, needle: String, from: Int64, skip: Array<Int64>) -> Int64
+```
+
+[`findPlain`], but skipping with a table from [`skipTable`].
+
+## contains
+
+```vyrn
+fn contains(s: String, needle: String) -> Bool
+```
 
 ## SliceError
 
