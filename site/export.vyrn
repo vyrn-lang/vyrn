@@ -904,8 +904,10 @@ test "every navigation row points at a route that exists" {
 
 test "every route answers 200 as a document and as data" {
     for path in sitePaths() {
-        assertEq(route(documentRequest(path)).status, 200)
-        assertEq(route(dataRequest(path)).status, 200)
+        // Both come from the one render each page gets: `documentStatus` and
+        // `renderedBody` read the same cached answer.
+        assertEq(documentStatus(path), 200)
+        assert(renderedData(path).byteLength > 0)
     }
 }
 
@@ -926,7 +928,7 @@ test "every published document marks exactly one thing in its masthead" {
         targets.push(row.href.copy())
     }
     for path in sitePaths() {
-        let html = markCurrent(route(documentRequest(path)).body, path)
+        let html = markCurrent(renderedBody(path), path)
         let mut marked = 0
         for href in targets {
             marked = marked + countOf(html, "data-key=\"\{href}\" aria-current=\"page\"")
@@ -1061,9 +1063,69 @@ test "every name in a module's index points at an export that is on the page" {
 /// The document this export actually writes for `path` — every stamp, in the
 /// order `exportPath` applies them. The tests below read this rather than the
 /// router's raw body, because the raw body is not what ships.
+/// Rendered pages, kept between calls (RFC-0029 module state).
+///
+/// THIS IS WHY THE SUITE WAS TWENTY MINUTES. The gates below ask for the same
+/// documents over and over — one test walks every route for its masthead
+/// marker, the next walks them all for their fragments, a third for their
+/// stamps — and each ask re-rendered the page AND re-ran the whole stamp
+/// pipeline through the interpreter. On CI `The site's own tests` was 1392 s
+/// of a 1788 s job, and most of it was the same eighty pages drawn again.
+///
+/// A page is a pure function of the tree here: nothing in a test mutates what
+/// a route answers, so the second ask is the same bytes as the first.
+let mut renderedPages: Map<String, String> = [:]
+
 fn publishedDocument(path: String) -> String {
-    return relativize(withRedirect(withCards(withFeed(withIcon(withLang(markCurrent(route(documentRequest(path)).body, path), path))), path), path), path)
+    if let Some(hit) = renderedPages[path] {
+        return hit.copy()
+    }
+    let doc = relativize(withRedirect(withCards(withFeed(withIcon(withLang(markCurrent(renderedBody(path), path), path))), path), path), path)
+    renderedPages[path.copy()] = doc.copy()
+    return doc
 }
+
+/// One route's body, cached the same way — the tests that want the page
+/// BEFORE the stamps ask through here.
+fn renderedBody(path: String) -> String {
+    if let Some(hit) = bodyPages[path] {
+        return hit.copy()
+    }
+    let answer = route(documentRequest(path))
+    bodyPages[path.copy()] = answer.body.copy()
+    docStatus[path.copy()] = answer.status
+    return answer.body.copy()
+}
+
+/// What a route answered with, from the same render its body came from — so a
+/// gate can check the status without drawing the page a second time.
+fn documentStatus(path: String) -> Int64 {
+    if let Some(hit) = docStatus[path] {
+        return hit
+    }
+    let answer = route(documentRequest(path))
+    bodyPages[path.copy()] = answer.body.copy()
+    docStatus[path.copy()] = answer.status
+    return answer.status
+}
+
+let mut docStatus: Map<String, Int64> = [:]
+
+let mut bodyPages: Map<String, String> = [:]
+
+/// The soft-navigation payload, cached the same way and for the same reason:
+/// one gate walks every route as data, and another reads the same payloads
+/// back for their URLs.
+fn renderedData(path: String) -> String {
+    if let Some(hit) = dataPages[path] {
+        return hit.copy()
+    }
+    let body = route(dataRequest(path)).body
+    dataPages[path.copy()] = body.copy()
+    return body
+}
+
+let mut dataPages: Map<String, String> = [:]
 
 /// How many times `needle` occurs in `hay`.
 fn countOf(hay: String, needle: String) -> Int64 {
@@ -1103,7 +1165,7 @@ test "no published document names a root that only one host has" {
         assertEq(countOf(doc, " href=\"\""), 0)
         assertEq(countOf(doc, " src=\"\""), 0)
         // And the payload beside it, which carries the book's prose.
-        assertEq(countOf(relativize(route(dataRequest(path)).body, path), "=\\\"/"), 0)
+        assertEq(countOf(relativize(renderedData(path), path), "=\\\"/"), 0)
     }
     // The depth is the page's own, and the two ends of the site prove it.
     assert(has(publishedDocument("/"), "<link rel=\"stylesheet\" href=\"style.css\">"))
@@ -1121,7 +1183,7 @@ test "every published document declares its language" {
     assertEq(withLang("<!doctype html>\n<html>\n<head>", "/docs/std/json"), "<!doctype html>\n<html lang=\"en\">\n<head>")
     // Stamped once, on the document element, and on every page.
     for path in sitePaths() {
-        let html = withLang(route(documentRequest(path)).body, path)
+        let html = withLang(renderedBody(path), path)
         assert(has(html, "<html lang=\"en\""))
         assert(!has(html, "<html>"))
     }
@@ -1234,7 +1296,7 @@ test "every published document points at an icon this export writes" {
     }
     assert(copied)
     for path in sitePaths() {
-        let html = withIcon(route(documentRequest(path)).body)
+        let html = withIcon(renderedBody(path))
         assert(has(html, "<link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">"))
     }
 }
@@ -1333,7 +1395,7 @@ test "every fragment the site writes lands on an element that is there" {
     let mut links: Array<Array<String>> = []
     let mut ids: Array<Array<String>> = []
     for path in sitePaths() {
-        let html = route(documentRequest(path)).body
+        let html = renderedBody(path)
         files.push("/" + published(path))
         links.push(attrValues(html, "href"))
         // Scanned once per page rather than once per link: a page carries up to
@@ -1390,7 +1452,7 @@ test "every playground link carries base64url and nothing else" {
     // no padding. A link that carried a `+` would arrive as a space.
     let mut links = 0
     for path in sitePaths() {
-        for href in attrValues(route(documentRequest(path)).body, "href") {
+        for href in attrValues(renderedBody(path), "href") {
             if startsWith(href, "/play.html#c=") {
                 let code = substring(href, 13, href.byteLength)
                 assert(code.byteLength > 0)

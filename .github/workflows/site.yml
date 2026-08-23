@@ -193,22 +193,39 @@ jobs:
         # this loop green. The floor is therefore read off the SOURCE — the same
         # rule `compiler/vyrn-cli/tests/std_suite.rs` applies to `std/` — so a
         # block that stops running fails here with both numbers in the message.
+        # FOUR AT A TIME, AND THE EXPORT FIRST. This step was 1392 s of a
+        # 1788 s job — the slowest thing in the site's CI by a factor of five —
+        # and it was thirty independent `vyrn test` runs standing in a queue.
+        # The export goes first, alone, because it warms the generator cache
+        # under `~/.vyrn`; the modules that follow share it and run four at a
+        # time. The floor is still read off the SOURCE, per file, so a block
+        # that stops being discovered still fails here with both numbers.
         run: |
           set -euo pipefail
           bin=compiler/target/release/vyrn
-          total=0
-          for f in site/export.vyrn site/app/*.vyrn; do
+          check() {
+            f="$1"
             declared=$(grep -c '^test "' "$f" || true)
-            [ "$declared" -eq 0 ] && continue
-            echo "== $f ($declared declared)"
-            out=$("$bin" test "$f" 2>&1) || { echo "$out"; exit 1; }
+            [ "$declared" -eq 0 ] && return 0
+            out=$("$bin" test "$f" 2>&1) || { echo "== $f"; echo "$out"; return 1; }
             ran=$(printf '%s' "$out" | sed -n 's/^\([0-9]*\) passed, 0 failed$/\1/p' | tail -1)
-            [ "${ran:-0}" -ge "$declared" ] ||
-              { echo "$f: $declared blocks declared, ${ran:-0} ran"; echo "$out"; exit 1; }
-            total=$((total + ran))
-          done
+            if [ "${ran:-0}" -lt "$declared" ]; then
+              echo "$f: $declared blocks declared, ${ran:-0} ran"
+              echo "$out"
+              return 1
+            fi
+            echo "ran $f $ran"
+          }
+          export -f check
+          export bin
+          check site/export.vyrn > export.tests.txt || { cat export.tests.txt; exit 1; }
+          printf '%s\n' site/app/*.vyrn | xargs -P 4 -I{} bash -c 'check "$@"' _ {} > module.tests.txt || {
+            cat module.tests.txt
+            exit 1
+          }
+          cat export.tests.txt module.tests.txt
+          total=$(awk '/^ran /{s+=$3} END {print s+0}' export.tests.txt module.tests.txt)
           echo "site: $total test blocks ran"
-
       - name: The guide's programs
         # Every code block in the guide is a file here, and the export imports
         # and CALLS each one while it renders the pages — so a program that does
