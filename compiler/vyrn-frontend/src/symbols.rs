@@ -2452,11 +2452,32 @@ fn collect_lets_expr(
             collect_lets_expr(scrutinee, fn_line, tok_info, let_types, out);
             for arm in arms {
                 // Arm binders surface like `if let`'s, minus the type: the
-                // checker retains no match-arm payload types. The binder's own
-                // spelling anchors it ([`binder_pos`]); a desugar's
-                // `@`-prefixed binder is unspellable and never surfaces.
-                for b in crate::movecheck::pattern_bindings(&arm.pattern) {
-                    if let Some((line, col, end_col)) = binder_pos(tok_info, b, e.line(), out) {
+                // checker retains no match-arm payload types. Each binder's
+                // spelling is anchored on its pattern shape ([`binder_pos`]):
+                // the variant head (and any earlier payload) immediately
+                // precedes it in the token stream, which keeps a same-named
+                // USE in an earlier arm's body from being taken for it. A
+                // desugar's `@`-prefixed binder is unspellable and never
+                // surfaces.
+                let (head, payloads): (Option<&str>, &[String]) = match &arm.pattern {
+                    ast::Pattern::Some(b) => (Some("Some"), std::slice::from_ref(b)),
+                    ast::Pattern::Ok(b) => (Some("Ok"), std::slice::from_ref(b)),
+                    ast::Pattern::Err(b) => (Some("Err"), std::slice::from_ref(b)),
+                    ast::Pattern::Variant(head, payloads) => (Some(head.as_str()), payloads),
+                    ast::Pattern::None | ast::Pattern::Success(_) | ast::Pattern::Failure(_) => {
+                        (None, &[])
+                    }
+                };
+                for (k, b) in payloads.iter().enumerate() {
+                    let prefix: Vec<&str> = match head {
+                        Some(h) => std::iter::once(h)
+                            .chain(payloads[..k].iter().map(String::as_str))
+                            .collect(),
+                        None => Vec::new(),
+                    };
+                    if let Some((line, col, end_col)) =
+                        binder_pos(tok_info, b, &prefix, e.line(), out)
+                    {
                         out.push(LocalBinding {
                             name: b.to_string(),
                             kind: LocalKind::Let { mutable: false },
@@ -2476,7 +2497,7 @@ fn collect_lets_expr(
                 // Untyped in the literal — the type flows from the expected
                 // `fn(..)` parameter position — so this is a `let`-shaped
                 // local, never a Param (whose hover unwraps a type).
-                if let Some((line, col, end_col)) = binder_pos(tok_info, p, e.line(), out) {
+                if let Some((line, col, end_col)) = binder_pos(tok_info, p, &[], e.line(), out) {
                     out.push(LocalBinding {
                         name: p.clone(),
                         kind: LocalKind::Let { mutable: false },
@@ -2550,25 +2571,40 @@ fn collect_lets_expr(
 
 /// The source position of a pattern binder (a `match` arm's payload name or a
 /// lambda parameter): the first spelling of the name at or after the match's /
-/// lambda's own line that is not already an indexed binding's recorded spot —
-/// an outer `let m = match o { Some(m) => .. }` on one line owns the earlier
-/// column. The pattern precedes the arm body, so what survives is the binding
-/// site, not a use. `None` when the name is never spelled in source (a
-/// desugar's `@`-prefixed binder), which must not become a phantom local.
+/// lambda's own line that is not already an indexed binding's recorded spot,
+/// where `prefix` — the idents that must immediately precede the spelling in
+/// the token stream — is what tells a BINDING site from an ordinary use. An
+/// arm binder is always spelled right after its variant head (`Some(m)`), so
+/// a same-named use in an earlier arm's body (`None => len(m)`, `Err(e) =>
+/// log(e)`) cannot be mistaken for it; a lambda's parameters carry no such
+/// trail and keep the empty prefix. The pattern still precedes the arm body,
+/// and an outer `let m = match o { Some(m) => .. }` on one line owns the
+/// earlier column via `out`. `None` when the name is never spelled in source
+/// (a desugar's `@`-prefixed binder), which must not become a phantom local.
 fn binder_pos(
     tok_info: &[TokenInfo],
     name: &str,
+    prefix: &[&str],
     from_line: usize,
     out: &[LocalBinding],
 ) -> Option<(usize, usize, usize)> {
     tok_info
         .iter()
-        .filter(|t| t.text == name && t.line >= from_line)
-        .find(|t| {
+        .enumerate()
+        .filter(|(_, t)| t.text == name && t.line >= from_line)
+        .filter(|(i, _)| {
+            prefix.is_empty()
+                || *i >= prefix.len()
+                    && tok_info[i - prefix.len()..*i]
+                        .iter()
+                        .zip(prefix.iter())
+                        .all(|(t, p)| t.text == *p)
+        })
+        .find(|(_, t)| {
             !out.iter()
                 .any(|b| b.name == name && b.line == t.line && b.col == t.col)
         })
-        .map(|t| (t.line, t.col, t.end_col))
+        .map(|(_, t)| (t.line, t.col, t.end_col))
 }
 
 /// Build a [`Resolution`] for a local binding.
@@ -3283,14 +3319,25 @@ pub struct RefRange {
     pub write: bool,
 }
 
-/// Whether `tok` sits in member position — immediately after a `.` on the same
-/// line (`recv.tok`). Such a token references a member/field, NOT a binding of
-/// the same bare name, so binding highlights must skip it.
+/// Whether `tok` sits in member position — directly preceded by a `.` on the
+/// same line (`recv.tok`). Such a token references a member/field, NOT a
+/// binding of the same bare name, so binding highlights must skip it.
+///
+/// The test is the immediately PRECEDING token, not a zero-gap column check:
+/// the parser reads tokens regardless of spacing, so `u . age` is the same
+/// member access as `u.age` and must classify identically — otherwise a
+/// same-named local is captured again on the spaced spelling. A bare
+/// same-named variable next to one (`u.name + age`) keeps its ordinary
+/// classification: the token before it is `name`, not the dot.
 fn is_member_position(analysis: &Analysis, tok: &TokenInfo) -> bool {
-    analysis
-        .tokens
-        .iter()
-        .any(|d| d.text == "." && d.line == tok.line && d.end_col == tok.col)
+    let mut prev_dot = false;
+    for t in &analysis.tokens {
+        if t.line == tok.line && t.col == tok.col && t.end_col == tok.end_col {
+            return prev_dot;
+        }
+        prev_dot = t.text == "." && t.line == tok.line;
+    }
+    false
 }
 
 /// The local binding [`resolve`] would pick for a use of `name` on `line` inside
@@ -4469,6 +4516,28 @@ fn main() -> Int64 {
         assert_eq!(r.kind, SymbolKind::Local);
     }
 
+    /// `u . age` spaced is the same member access to the parser, so it must
+    /// classify as the FIELD even with a local `age` in scope — the gate
+    /// checks that the preceding TOKEN is a dot, not that the dot touches
+    /// the name with zero gap.
+    #[test]
+    fn a_spaced_member_access_is_still_member_position() {
+        let src = "type User = { age: Int64 }\n\
+                   fn f(u: User) -> Int64 {\n\
+                   \x20   let age = 3\n\
+                   \x20   return u . age\n\
+                   }\n\
+                   fn main() -> Int64 { return 0 }";
+        let a = analyze(src);
+        assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
+        // Line 4, cursor on the `age` spelled after `u . `.
+        let col = src.lines().nth(3).unwrap().find(". age").unwrap() + 3;
+        let r = resolve(&a, 4, col).expect("spaced access resolves");
+        assert_eq!(r.kind, SymbolKind::Field, "{}", r.hover);
+        let (kind, _) = classify_at(&a, 4, col).expect("classifies");
+        assert_eq!(kind, SemKind::Property);
+    }
+
     #[test]
     fn match_arm_binders_are_indexed_as_locals() {
         // The arm's `m` is its own binding: hover on the use inside the arm
@@ -4490,6 +4559,33 @@ fn main() -> Int64 {
         );
         // The binder anchors at its pattern spelling, so go-to-def lands there.
         assert_eq!(r.target_line, 3);
+    }
+
+    /// The `Ok(e)` binder must anchor at ITS pattern spelling — the variant
+    /// head immediately precedes it in the token stream — never at the
+    /// same-named USE in an earlier arm's body (`0 - e`), which used to
+    /// become a phantom binding that stole hover/go-to-def from both arms.
+    #[test]
+    fn an_arm_binder_anchors_at_its_own_pattern_not_an_earlier_arm_use() {
+        let src = "fn main() -> Int64 {\n\
+                   \x20   let r: Result<Int64, Int64> = Ok(2)\n\
+                   \x20   return match r { Err(e) => 0 - e, Ok(e) => e + 1 }\n\
+                   }";
+        let a = analyze(src);
+        assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
+        let mut cols: Vec<usize> = a
+            .locals
+            .iter()
+            .filter(|b| b.name == "e")
+            .map(|b| b.col)
+            .collect();
+        cols.sort();
+        // Line 3 spells `e` four times; only the two pattern payloads bind.
+        let l2 = src.lines().nth(2).unwrap();
+        assert_eq!(
+            cols,
+            vec![l2.find("Err(").unwrap() + 5, l2.find("Ok(").unwrap() + 4]
+        );
     }
 
     #[test]

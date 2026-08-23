@@ -301,8 +301,8 @@ fn std_tw_unit_tests_run_green() {
         "std/tw unit tests failed:\n{combined}"
     );
     assert!(
-        combined.contains("19 passed, 0 failed"),
-        "expected 19 green tests:\n{combined}"
+        combined.contains("20 passed, 0 failed"),
+        "expected 20 green tests:\n{combined}"
     );
 }
 

@@ -23,6 +23,7 @@
 /// is preserved in source order, so deterministic generators can depend on it.
 
 import { Json, JsonField, emit, emitPretty, jsonEq } from "std/json"
+import { fnv1aStr } from "std/hash"
 
 // ===========================================================================
 // Reader — recursive descent over a mutable cursor. Every parse step advances
@@ -382,14 +383,75 @@ fn parseArray(p: modify Parser, depth: Int64) -> Result<Json, String> {
     return Err(errAt(p, "unterminated array"))
 }
 
-/// Whether an object already carries `key` (duplicate-key detection).
-fn hasKey(fields: Array<JsonField>, key: String) -> Bool {
-    for f in fields {
-        if f.key == key {
-            return true
+// ---- duplicate-key detection ----------------------------------------------
+
+/// One parsed object's seen keys: open addressing (linear probing) over
+/// FNV-1a-64 (`std/hash`), power-of-two capacity held as `mask = cap - 1`.
+/// The naive replacement — a scan over the accumulated fields per member —
+/// made an N-key object O(N^2), so one wide untrusted body could pin a
+/// sequential server for minutes. Growing at 70% load keeps probes short and
+/// membership amortized O(1); the table is per-`parseObject`, so nesting is free.
+type KeySet = { keys: Array<String>, slots: Array<Int64>, mask: UInt64 }
+
+fn newKeySet() -> KeySet {
+    return KeySet { keys: [], slots: [0, 0, 0, 0, 0, 0, 0, 0], mask: UInt64(7) }
+}
+
+/// The slot holding `key`, or -1 when absent. `slots[i]` stores the key's
+/// index in `keys` plus one, so 0 marks an empty slot.
+fn ksFind(s: KeySet, key: String) -> Int64 {
+    let mut i = Int64(fnv1aStr(key) & s.mask)
+    while true {
+        if s.slots[i] == 0 {
+            return -1
         }
+        if s.keys[s.slots[i] - 1] == key {
+            return i
+        }
+        i = Int64((UInt64(i) + UInt64(1)) & s.mask)
     }
-    return false
+    return -1
+}
+
+/// Place key index `ki` into `slots`, probing from its hash to the first empty
+/// slot. Shared by insert and rehash.
+fn ksPlace(slots: modify Array<Int64>, key: String, mask: UInt64, ki: Int64) -> Unit {
+    let mut i = Int64(fnv1aStr(key) & mask)
+    while slots[i] != 0 {
+        i = Int64((UInt64(i) + UInt64(1)) & mask)
+    }
+    slots[i] = ki + 1
+}
+
+/// Record `key` in the set. Grows (rehashing every key) BEFORE placing when the
+/// new entry would push load past 70%, so a probe always finds an empty slot;
+/// the rehash loop places the new key too, so it returns early.
+fn ksAdd(s: modify KeySet, key: String) -> Unit {
+    s.keys.push(key.copy())
+    let cap = Int64(s.mask) + 1
+    if Int64(s.keys.length) * 10 > cap * 7 {
+        let mut slots: Array<Int64> = []
+        let newCap = cap * 2
+        let mut n = 0
+        while n < newCap {
+            slots.push(0)
+            n = n + 1
+        }
+        s.mask = UInt64(newCap - 1)
+        let mut ki = 0
+        while ki < s.keys.length {
+            ksPlace(slots, s.keys[ki], s.mask, Int64(ki))
+            ki = ki + 1
+        }
+        s.slots = slots
+        return
+    }
+    // Place directly: probe from the key's hash to the first empty slot.
+    let mut i = Int64(fnv1aStr(key) & s.mask)
+    while s.slots[i] != 0 {
+        i = Int64((UInt64(i) + UInt64(1)) & s.mask)
+    }
+    s.slots[i] = Int64(s.keys.length)
 }
 
 /// Parse a JSON object (the cursor is ON `{`). Commas required, no trailing comma,
@@ -398,6 +460,7 @@ fn hasKey(fields: Array<JsonField>, key: String) -> Bool {
 fn parseObject(p: modify Parser, depth: Int64) -> Result<Json, String> {
     step(p) // {
     let mut fields: Array<JsonField> = []
+    let mut seen = newKeySet()
     skipWs(p)
     if cur(p) == '}' {
         step(p)
@@ -409,7 +472,7 @@ fn parseObject(p: modify Parser, depth: Int64) -> Result<Json, String> {
             return Err(errAt(p, "expected a string key"))
         }
         let key = parseString(p)?
-        if hasKey(fields, key) {
+        if ksFind(seen, key) != -1 {
             return Err(errAt(p, "duplicate object key: " + key))
         }
         skipWs(p)
@@ -419,6 +482,7 @@ fn parseObject(p: modify Parser, depth: Int64) -> Result<Json, String> {
         step(p) // :
         skipWs(p)
         let v = parseValue(p, depth)?
+        ksAdd(seen, key)
         fields.push(JsonField { key: key, value: v })
         skipWs(p)
         let b = cur(p)

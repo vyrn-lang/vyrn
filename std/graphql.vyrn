@@ -768,7 +768,9 @@ export fn gqlRootType(root: String) -> String {
 }
 
 /// One root field for a procedure: `name(input: <Req>Input): <Ret>` (or no args
-/// for a zero-parameter procedure). A `Unit` return maps to `Boolean`.
+/// for a zero-parameter procedure). A `Unit` return maps to `Boolean`, and the
+/// resolver honors it: the procedure runs, then the field resolves `true` —
+/// the same verdict Connect's client gives a Unit procedure (`gqlResolverTable`).
 fn gqlRootField(f: FnInfo, iface: ModuleInterface) -> String {
     let ret = if f.ret == "" { "Boolean" } else { gqlStripBang(gqlRef(f.ret, false, iface)) }
     if f.params.length == 1 {
@@ -1951,6 +1953,28 @@ fn gqlResolverTable(iface: ModuleInterface) -> String {
     out = out + "        Ok(v) => v,\n"
     out = out + "        Err(e) => JNull,\n"
     out = out + "    }\n}\n"
+    // A Unit-returning procedure still publishes as a `Boolean` root field
+    // (`gqlRootField`), so the resolver must answer it — a document selecting
+    // the field is schema-valid and may not deterministically fault. Each one
+    // gets a runner that invokes the procedure, discards the (empty) result,
+    // and resolves `true`, the same verdict Connect's client gives a Unit
+    // procedure (`connectUnify*` => `Valid(true)`).
+    for f in iface.functions {
+        if f.ret == "" {
+            if f.params.length == 1 {
+                out = out + "/// Runs `" + f.name + "` for its Boolean root field: the procedure returns\n"
+                out = out + "/// nothing, so the field resolves to `true` once it has run.\n"
+                out = out + "fn gqlRun_" + f.name + "(input: " + f.params[0].spelling + ") -> Result<Json, String> {\n"
+                out = out + "    " + f.name + "(input)\n"
+            } else {
+                out = out + "/// Runs `" + f.name + "` for its Boolean root field: the procedure returns\n"
+                out = out + "/// nothing, so the field resolves to `true` once it has run.\n"
+                out = out + "fn gqlRun_" + f.name + "() -> Result<Json, String> {\n"
+                out = out + "    " + f.name + "()\n"
+            }
+            out = out + "    return Ok(JBool(true))\n}\n"
+        }
+    }
     out = out + "/// The resolver table, generated from the contract's reflection.\n"
     out = out + "fn gqlResolve(root: String, field: String, args: Array<JsonField>) -> Result<Json, String> {\n"
     // An empty query root's `_placeholder` (`gqlBlock` repairs its SDL body):
@@ -1979,8 +2003,19 @@ fn gqlResolverTable(iface: ModuleInterface) -> String {
 /// declares, call the procedure, encode.
 fn gqlResolverArm(f: FnInfo) -> String {
     if f.ret == "" {
-        return "        return Err(\"Field `" + f.name
-        + "` returns nothing, so there is no value to select from.\")\n"
+        if f.params.length == 0 {
+            let mut out = "        let stray = gqlNoArgs(\"" + f.name + "\", args)\n"
+            out = out + "        if stray != \"\" {\n            return Err(stray)\n        }\n"
+            return out + "        return gqlRun_" + f.name + "()\n"
+        }
+        let reqType = f.params[0].spelling
+        let mut out = "        let arg = gqlArgOf(\"" + f.name + "\", args, \"input\")\n"
+        out = out + "        if arg.err != \"\" {\n            return Err(arg.err)\n        }\n"
+        out = out + "        return match fromJson(" + reqType + ", arg.json) {\n"
+        out = out + "            Valid(input) => gqlRun_" + f.name + "(input),\n"
+        out = out + "            Invalid(issues) => Err(gqlArgError(\"" + f.name + "\", issues)),\n"
+        out = out + "        }\n"
+        return out
     }
     if f.params.length == 0 {
         let mut out = "        let stray = gqlNoArgs(\"" + f.name + "\", args)\n"

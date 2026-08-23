@@ -171,8 +171,13 @@ document.getElementById("load2").addEventListener("click", async () => {
       onStdout: (s) => (out2.textContent += s),
     });
     vyrnExports = r.exports;
-    status2.innerHTML =
-      `<span class="ok">exit ${r.exitCode}</span> · exports: ${Object.keys(vyrnExports).join(", ")}`;
+    // Export names come out of the wasm's own ABI section, so they reach the
+    // page as text nodes, never as markup.
+    status2.textContent = "";
+    const ok = document.createElement("span");
+    ok.className = "ok";
+    ok.textContent = `exit ${r.exitCode}`;
+    status2.append(ok, ` · exports: ${Object.keys(vyrnExports).join(", ")}`);
     document.getElementById("callrow").style.display = "flex";
     document.getElementById("greetrow").style.display = "flex";
   } catch (e) {

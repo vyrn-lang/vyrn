@@ -602,6 +602,30 @@ impl Module {
         }
         drop(ty);
 
+        // Export names share ONE namespace across kinds, and nothing downstream
+        // validates the finished bytes on the direct path. A user `export extern
+        // fn memory` would sit beside the memory export below and make the whole
+        // module invalid — a silent bad artifact — so refuse here, loudly, the
+        // way wasm-ld refuses the same collision as a duplicate-export link
+        // error on the LLVM path.
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for (name, _) in &self.exports {
+            if !seen.insert(name.as_str()) {
+                return Err(format!(
+                    "duplicate export `{name}`\n  \
+                     note: `_start`, `__vyrn_malloc` and `__vyrn_free` are taken by the \
+                     runtime; rename the function"
+                ));
+            }
+        }
+        if !seen.insert("memory") {
+            return Err(
+                "`export extern fn memory` collides with this module's own memory export\n  \
+                 note: export names are one namespace across kinds; rename the function"
+                    .to_string(),
+            );
+        }
+
         let mut exports = ExportSection::new();
         for (name, i) in &self.exports {
             exports.export(name, ExportKind::Func, *i);
@@ -1192,5 +1216,33 @@ mod tests {
         let f = m.func(&[], &[], &[], 0, |_| {});
         m.export("_start", f);
         assert!(m.finish().is_ok());
+    }
+
+    /// Export names share one namespace across kinds. A user `export extern fn
+    /// memory` used to sit beside this module's own memory export and produce
+    /// an invalid module that nothing validated; `finish` refuses it now, the
+    /// way wasm-ld refuses the duplicate on the LLVM path.
+    #[test]
+    fn a_user_export_named_memory_is_refused_not_emitted() {
+        let mut m = Module::new();
+        let f = m.func(&[], &[], &[], 0, |_| {});
+        m.export("memory", f);
+        let e = m
+            .finish()
+            .expect_err("a memory export collision must be refused");
+        assert!(e.contains("memory"), "the refusal names the export: {e}");
+    }
+
+    /// The same namespace rule between two FUNCTION exports: `_start`,
+    /// `__vyrn_malloc` and `__vyrn_free` are runtime-claimed names, and two
+    /// exports of one name are a validation error either way.
+    #[test]
+    fn two_exports_of_one_name_are_refused() {
+        let mut m = Module::new();
+        let a = m.func(&[], &[], &[], 0, |_| {});
+        let b = m.func(&[], &[], &[], 0, |_| {});
+        m.export("_start", a);
+        m.export("_start", b);
+        assert!(m.finish().is_err());
     }
 }

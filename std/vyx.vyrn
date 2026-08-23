@@ -1741,13 +1741,31 @@ export gen fn vyxCompileComponent(compName: String, source: String, dir: String)
     if grouped.err != "" {
         return vyxCompErr(compName, fnName, srcPath, grouped.err)
     }
-    // Exactly one root element (whitespace-only text is already dropped).
+    // Exactly one root element. Whitespace-only text stays insignificant here
+    // as everywhere else; any other top-level node counts toward the rule
+    // instead of vanishing.
     let roots = vyxElementRoots(consume grouped.nodes)
     if roots.length == 0 {
         return vyxCompErr(compName, fnName, srcPath, vyxErr(srcPath, 0, "this component's `<template>` holds no element — a component's view is exactly one root element"))
     }
     if roots.length > 1 {
         return vyxCompErr(compName, fnName, srcPath, vyxErr(srcPath, vyxRootLine(roots), "this component's `<template>` holds more than one root element — wrap them in one element"))
+    }
+    // A lone non-whitespace text run is still "no element" — the view is
+    // exactly one root ELEMENT. Beside that element it was already caught
+    // above as a second root; either way nothing at the template's top level
+    // disappears without a diagnostic.
+    let rootIsText = match roots[0] {
+        VNElem(_, _, _, _, _) => false,
+        VNText(_) => true,
+        VNInterp(_, _, _) => false,
+        VNRaw(_, _, _) => false,
+        VNChildren => false,
+        VNIf(_, _, _, _, _, _) => false,
+        VNFor(_, _, _, _, _, _) => false,
+    }
+    if rootIsText {
+        return vyxCompErr(compName, fnName, srcPath, vyxErr(srcPath, 0, "this component's `<template>` holds no element — a component's view is exactly one root element"))
     }
     // The root MOVES into the component (a `VyxNode` refers to itself, so it
     // has no `copy`), which means the flag that reads it is computed first.
@@ -1775,14 +1793,17 @@ export gen fn vyxCompileComponent(compName: String, source: String, dir: String)
     }
 }
 
-/// The element/component roots among the top-level nodes (a bare interpolation or
-/// control block at the root is not a valid single root).
+/// The root candidates among the top-level nodes: every node kind except
+/// whitespace-only text (a same-line space between block tags is insignificant
+/// at the root, exactly as the parser's whitespace rule intends). Every
+/// candidate counts toward the exactly-one-root rule, so a stray word beside
+/// the element is the loud second-root diagnostic rather than dropped content.
 fn vyxElementRoots(nodes: consume Array<VyxNode>) -> Array<VyxNode> {
     let mut out: Array<VyxNode> = []
     for n in consume nodes {
         let keep = match n {
-            VNElem(t, c, a, k, l) => true,
-            VNText(s) => false,
+            VNText(s) => trim(s).byteLength > 0,
+            VNElem(tag, isComp, attrs, kids, l) => true,
             VNInterp(x, l, c) => true,
             VNRaw(x, l, c) => true,
             VNChildren => true,
@@ -2722,7 +2743,7 @@ gen fn vyxEmitRoot(root: VyxNode, reg: VyxRegistry, src: String) -> VyxEmit {
         VNText(s) => VyxEmit { code: "return text(" + vyxStrLit(s) + ")\n", err: "", imports: "" },
         VNInterp(x, l, c) => VyxEmit { code: vyxRegion("return text((" + x + ").toString())\n", src, l, c), err: "", imports: "" },
         VNRaw(x, l, c) => VyxEmit { code: vyxRegion("return Raw(" + x + ")\n", src, l, c), err: "", imports: "" },
-        VNChildren => VyxEmit { code: "let mut kr: Array<Html> = []\nfor vyxCh in children {\nkr.push(vyxCh)\n}\nreturn el(\"div\", [], kr)\n", err: "", imports: "" },
+        VNChildren => VyxEmit { code: "let mut kr: Array<Html> = []\nfor vyxCh in consume children {\nkr.push(vyxCh)\n}\nreturn el(\"div\", [], kr)\n", err: "", imports: "" },
         VNIf(cc, cl, ccc, bb, ee, hh) => vyxEmitRootWrap(root, reg, src),
         VNFor(v, it, k, bd, l, c) => vyxEmitRootWrap(root, reg, src),
     }
@@ -2936,14 +2957,18 @@ gen fn vyxEmittedInterface(comps: Array<VyxComp>) -> ModuleInterface {
 /// bodies (a comptime-only builtin has no native/wasm lowering, so it may only
 /// appear directly in a generator body), and this is called with the results.
 gen fn vyxFinish(comps: consume Array<VyxComp>, err: String, dir: String, themed: Bool, theme: String) -> String {
+    // A read failure reaches here as `err` with NOTHING in `comps`, so the
+    // diagnostics must be checked before the empty-directory guard — otherwise
+    // a directory of unreadable files reports "no `.vyx` files" and buries the
+    // OS reasons.
+    if err != "" {
+        return err.copy()
+    }
     if comps.length == 0 {
         return reportHere(
             Error,
             "no `.vyx` files under `\{dir}` — a component is a `.vyx` file in that directory",
         )
-    }
-    if err != "" {
-        return err.copy()
     }
     // RFC-0071: the surface this is about to emit, checked against the contract
     // that describes it. An issue is a load diagnostic like any other.
@@ -4855,6 +4880,30 @@ test "multiple roots are rejected" {
     let src = "<template><li>a</li><li>b</li></template>"
     let comp = vyxCompileComponent("Two", src, "./c")
     assert(comp.err.contains("holds more than one root element"))
+}
+
+test "stray text beside the root element is a second root, not dropped content" {
+    let src = "<template><p>a</p>stray</template>"
+    let comp = vyxCompileComponent("Stray", src, "./c")
+    assert(comp.err.contains("holds more than one root element"))
+}
+
+test "a template of only text still reports no element" {
+    let src = "<template>just words</template>"
+    let comp = vyxCompileComponent("Txt", src, "./c")
+    assert(comp.err.contains("holds no element"))
+}
+
+test "a root-level slot splice consumes children" {
+    // A layout whose whole template is `<slot/>` moves the children into its
+    // accumulator, so the emitted loop must consume — the same spelling every
+    // other splice site uses.
+    let src = "<template><slot/></template>"
+    let comp = vyxCompileComponent("Shell", src, "./c")
+    assertEq(comp.err, "")
+    let out = vyxBuildModule([comp], false, "")
+    assert(out.contains("for vyxCh in consume children {"))
+    assert(out.contains("in children {") == false)
 }
 
 test "an unclosed element is rejected" {

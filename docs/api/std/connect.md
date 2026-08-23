@@ -31,6 +31,9 @@ Wire semantics (locked):
     (HTTP 501 — the protocol maps an EXPLICIT `unimplemented` to Not
     Implemented; 404 is only what a client infers when a non-200 response
     carries no code at all);
+  - a KNOWN procedure under the service prefix with a non-POST method =>
+    HTTP 405 `method not allowed` (mirrors `std/rpc`; 501 stays reserved
+    for a procedure the server does not know);
   - an `Err` return of a `Result` procedure => HTTP 200 with the ordinary
     encoded value (RFC-0024: domain errors are values, not transport errors).
 

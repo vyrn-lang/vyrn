@@ -32,9 +32,9 @@ The five conditions RFC-0071 enumerates, all reported and none silent:
 exported FUNCTIONS (RFC-0021 / RFC-0031). `export let` does not exist and is
 not coming: RFC-0029 makes every top-level `let` module-private, and a
 contract member is satisfied by the accessor function that rule already
-prescribes (`export fn head() -> Head`). The `let` member form stays in the
-grammar and is inert — a module can only ever be reported as missing it — so
-the grammar needs no reopening if that rule ever changes.
+prescribes (`export fn head() -> Head`) — never by an `export let`, which
+does not exist. The `let` member form stays in the grammar, so the grammar
+needs no reopening if that rule ever changes.
 
 **Optionality.** Either member form may carry a default (`fn head() -> Head =
 noHead()`), which makes it optional: the module may omit the export and the

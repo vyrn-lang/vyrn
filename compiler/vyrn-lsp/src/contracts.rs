@@ -139,7 +139,11 @@ pub fn vyx_script(text: &str) -> Option<(String, usize)> {
 pub fn ident_at(text: &str, line: usize, col: usize) -> Option<(String, usize, usize)> {
     let src = text.lines().nth(line.checked_sub(1)?)?;
     let chars: Vec<char> = src.chars().collect();
-    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    // The lexer's own identifier class: any alphabetic char opens an
+    // identifier and any alphanumeric continues it (`lexer.rs`). The ASCII-only
+    // version stopped the scan at the first accented letter, so a contract
+    // query on `café` silently found nothing.
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
     let cur = col.saturating_sub(1).min(chars.len());
     let mut start = cur;
     while start > 0 && chars.get(start - 1).is_some_and(|&c| is_ident(c)) {

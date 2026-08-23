@@ -293,7 +293,11 @@ fn declared_audience_of(path: &str, map: &AudienceMap) -> Verdict {
     // An entry point's audience is DECLARED (by the key that names it), so it
     // beats anything read off the path. There is nothing above a composition
     // root for a segment to be nearer than.
-    if let Some((_, a, key)) = map.entries.iter().find(|(p, _, _)| same_path(p, &path)) {
+    if let Some((_, a, key)) = map
+        .entries
+        .iter()
+        .find(|(p, _, _)| same_path(p, &path, &map.base))
+    {
         return Verdict {
             audience: *a,
             reason: Reason::Entry(key.clone()),
@@ -324,14 +328,40 @@ fn declared_audience_of(path: &str, map: &AudienceMap) -> Verdict {
 
 /// Whether two slash paths name the same module. An entry point is spelled
 /// relative to the manifest while a module key may be spelled relative to the
-/// working directory, so a suffix match on a full component boundary is the
-/// honest comparison — the same allowance [`relative_to`] makes.
-pub(crate) fn same_path(a: &str, b: &str) -> bool {
+/// working directory, so the honest comparison reads both against the project
+/// directory `base` and asks whether they land on one file — the same
+/// allowance [`relative_to`] makes. See the body comment for why a bare
+/// component-boundary suffix test (the earlier spelling of this predicate)
+/// was not honest: it matched any file sharing an entry's tail.
+pub(crate) fn same_path(a: &str, b: &str, base: &str) -> bool {
     if a == b {
         return true;
     }
-    let (long, short) = if a.len() > b.len() { (a, b) } else { (b, a) };
-    long.ends_with(short) && long.as_bytes()[long.len() - short.len() - 1] == b'/'
+    // Fold `.`/`..` and any leading slash so whole paths compare whole.
+    let (na, nb) = (join_normalized("", a), join_normalized("", b));
+    if na == nb {
+        return true;
+    }
+    // One spelling may repeat the project directory in front of the other —
+    // an entry point is spelled relative to the manifest while a module key
+    // carries that directory as absolutely or as relatively as the CLI was
+    // handed it. Strip it from whichever side has it; any OTHER divergence is
+    // a different file that merely shares the tail, which this predicate's
+    // earlier component-boundary-suffix spelling wrongly accepted — and an
+    // entry verdict beats path segments, so `screens/main.vyrn` was
+    // pronounced the `main` composition root and exempted from the
+    // cross-audience check entirely.
+    if base.is_empty() {
+        return false;
+    }
+    let dir = join_normalized("", base);
+    if dir.is_empty() {
+        return false;
+    }
+    let d: &str = dir.as_str();
+    let sa = na.strip_prefix(d).and_then(|r| r.strip_prefix('/'));
+    let sb = nb.strip_prefix(d).and_then(|r| r.strip_prefix('/'));
+    sa == Some(nb.as_str()) || sb == Some(na.as_str())
 }
 
 /// The file a module key's audience should be read from — itself for an
@@ -659,5 +689,25 @@ mod tests {
         assert!(widens(Universal, Client));
         assert!(widens(Client, Server));
         assert!(widens(Server, Client));
+    }
+
+    /// The suffix spelling of [`same_path`] pronounced any file sharing an
+    /// entry's tail that entry point — and an entry verdict beats path
+    /// segments, silently exempting the deeper file from the cross-audience
+    /// check. Anchored at `base`, it is nobody's entry.
+    #[test]
+    fn a_file_sharing_an_entrys_tail_is_not_that_entry_point() {
+        // A bare entry spelling (`main.vyrn`) plus any deeper file ending in
+        // `main.vyrn`: the old component-boundary SUFFIX test pronounced that
+        // deeper file the composition root — an entry verdict, which beats
+        // path segments and exempted it from the cross-audience check.
+        let m = from_text(
+            r#"{"main":"main.vyrn","audience":{"server":["server"]}}"#,
+            "",
+        )
+        .unwrap();
+        let v = audience_of("/p/screens/main.vyrn", &m);
+        assert_eq!(v.audience, Audience::Universal);
+        assert_eq!(v.reason, Reason::Default);
     }
 }

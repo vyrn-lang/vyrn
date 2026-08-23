@@ -3946,13 +3946,20 @@ fn collect_css_rules(css: &str, base: usize, class: &str, out: &mut Vec<(usize, 
     let mut i = 0usize;
     let mut sel_start = 0usize;
     while i < b.len() {
-        // Skip comments wholesale (they must not open or close a block).
+        // Skip comments wholesale (they must not open or close a block). A
+        // comment is not selector text: whatever selector was scanned BEFORE
+        // it stays (`.plang /* legacy */ { … }` still matches `.plang`), while
+        // a comment standing alone resets the scan, so its words never leak
+        // into the next rule's selector.
         if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+            let started = !css[sel_start..i].trim().is_empty();
             match css[i + 2..].find("*/") {
                 Some(rel) => i += 2 + rel + 2,
                 None => return,
             }
-            sel_start = i;
+            if !started {
+                sel_start = i;
+            }
             continue;
         }
         if b[i] == b'{' {
@@ -4159,5 +4166,19 @@ mod tests {
         assert!(is_member_context(Some(&ascii), 1, 7));
         let plain = String::from("let x = 1");
         assert!(!is_member_context(Some(&plain), 1, 10));
+    }
+
+    #[test]
+    fn a_selector_before_an_inline_comment_still_matches_its_class() {
+        // The comment between selector and `{` used to reset the scan, so the
+        // rule classified with the comment's tail and the hover lost it.
+        let css = ".plang /* legacy */ { color: red }\n.other { color: blue }\n";
+        let rules = css_rules_for_class(css, "plang");
+        assert_eq!(rules.len(), 1, "{rules:?}");
+        assert_eq!(rules[0].0, 1);
+        assert!(rules[0].1.contains("color: red"), "{}", rules[0].1);
+        // A comment standing alone must not leak into the next selector.
+        let spaced = ".a { x: 1 }\n/* .plang mention */\n.b { y: 2 }\n";
+        assert!(css_rules_for_class(spaced, "plang").is_empty());
     }
 }

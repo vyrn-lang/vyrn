@@ -29,6 +29,9 @@
 ///     (HTTP 501 — the protocol maps an EXPLICIT `unimplemented` to Not
 ///     Implemented; 404 is only what a client infers when a non-200 response
 ///     carries no code at all);
+///   - a KNOWN procedure under the service prefix with a non-POST method =>
+///     HTTP 405 `method not allowed` (mirrors `std/rpc`; 501 stays reserved
+///     for a procedure the server does not know);
 ///   - an `Err` return of a `Result` procedure => HTTP 200 with the ordinary
 ///     encoded value (RFC-0024: domain errors are values, not transport errors).
 ///
@@ -227,15 +230,20 @@ fn connectDispatchFn(f: FnInfo) -> String {
     return out
 }
 
-/// The exported Connect router: `POST /<service>.<Proc>` decode-call-encode, an
-/// unknown procedure under the service prefix => `unimplemented`, and `None`
-/// (not our path) for everything else — so it mounts BESIDE `rpcHandle`.
+/// The exported Connect router: `POST /<service>.<Proc>` decode-call-encode,
+/// a KNOWN procedure under the service prefix with a non-POST method => 405
+/// (the same verdict `std/rpc`'s router gives; the fault is the method, not the
+/// procedure), an unknown procedure under the prefix => `unimplemented`, and
+/// `None` (not our path) for everything else — so it mounts BESIDE `rpcHandle`.
 fn connectRouterFn(iface: ModuleInterface, service: String) -> String {
     let prefix = "/" + service + "."
     let mut out = "export fn connectHandle(req: Request) -> Option<Response> {\n"
     for f in iface.functions {
         let cap = connectCapFirst(f.name)
-        out = out + "    if req.method == \"POST\" && req.path == \"" + prefix + f.name + "\" {\n"
+        out = out + "    if req.path == \"" + prefix + f.name + "\" {\n"
+        out = out + "        if req.method != \"POST\" {\n"
+        out = out + "            return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\", vary: \"\", headers: [:] })\n"
+        out = out + "        }\n"
         out = out + "        return Some(connectDispatch" + cap + "(req.body))\n"
         out = out + "    }\n"
     }

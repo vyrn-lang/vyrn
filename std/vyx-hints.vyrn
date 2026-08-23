@@ -98,25 +98,50 @@ export gen fn vyxHintsConfigured(dir: String, config: String) -> String {
 /// The reports for a directory tree, and how many `.vyx` files earned them.
 type VhScan = { out: String, checked: Int64 }
 
+/// One `listDir`'s two outcomes in one record — the shape that lets a match arm
+/// stay a single expression while the caller refuses a directory it could not
+/// read instead of reporting a clean tree it never saw (the `std/ui`
+/// `UiDirRead` shape).
+type VhDirRead = { names: Array<String>, err: String }
+
+/// One `readFile`'s two outcomes in one record, for the same reason: a `.vyx`
+/// whose read fails must be reported, not counted as checked against an empty
+/// source that parses as nothing and earns no advice (`std/ui`'s
+/// `UiFileRead` shape).
+type VhFileRead = { src: String, err: String }
+
 /// Every `.vyx` under `dir`, RECURSIVELY — a route tree nests (`routes/guide/`,
 /// `routes/docs/std/`), and `std/ui`'s own scan recurses for the same reason. A
-/// checker that read one level would report a clean tree it had not read.
+/// checker that read one level would report a clean tree it had not read. A
+/// directory or component that cannot be read is an ERROR, not a silent zero:
+/// carrying on would tell a project its tree is checked while it is not, the
+/// fault `vyxHintsConfigured` refuses for an unreadable config.
 gen fn vhScan(p: Policy, dir: String) -> VhScan {
-    let entries = match listDir(dir) {
-        Ok(ns) => ns,
-        Err(e) => [],
+    let listed = match listDir(dir) {
+        Ok(ns) => VhDirRead { names: ns, err: "" },
+        Err(e) => VhDirRead { names: [], err: e.copy() },
+    }
+    if listed.err != "" {
+        return VhScan {
+            out: reportHere(Error, "vyx-hints: cannot read the directory `\{dir}`: \{listed.err}"),
+            checked: 0,
+        }
     }
     let mut out = ""
     let mut checked = 0
-    for name in entries {
+    for name in listed.names {
         let path = dir + "/" + name
         if name.endsWith(".vyx") {
-            let src = match readFile(path) {
-                Ok(v) => v,
-                Err(e) => "",
+            let got = match readFile(path) {
+                Ok(v) => VhFileRead { src: v, err: "" },
+                Err(e) => VhFileRead { src: "", err: e },
             }
-            out = out + vhCheck(p, src, path)
-            checked = checked + 1
+            if got.err != "" {
+                out = out + reportHere(Error, "vyx-hints: cannot read the component `\{path}`: \{got.err}")
+            } else {
+                out = out + vhCheck(p, got.src, path)
+                checked = checked + 1
+            }
         } else if vhIsDir(path) {
             let sub = vhScan(p, path)
             out = out + sub.out
@@ -331,7 +356,7 @@ fn vhElem(
         }
         // a11y/dup-id inside a `v-for`. Not a heuristic: the loop body renders
         // once per row, so a STATIC id is duplicated by construction.
-        if a.name == "id" && a.dyn == false && a.value != "" && inFor {
+        if a.name == "id" && a.dyn == false && a.value != "" && (inFor || vhHas(attrs, "v-for")) {
             out = out
             + hint(
                 p,
@@ -807,6 +832,7 @@ test "a positive tabindex fires; 0 and -1 do not" {
 
 test "a static id inside a v-for fires; outside one, or bound, it does not" {
     assert(fires("<ul><li v-for=\"r in rows\" :key=\"r.id\"><b id=\"row\">x</b></li></ul>", "a11y/dup-id"))
+    assert(fires("<ul><li v-for=\"r in rows\" :key=\"r.id\" id=\"row\">x</li></ul>", "a11y/dup-id"))
     assert(fires("<ul><li v-for=\"r in rows\" :key=\"r.id\"><b :id=\"r.id\">x</b></li></ul>", "a11y/dup-id") == false)
     assert(fires("<ul><li><b id=\"row\">x</b></li></ul>", "a11y/dup-id") == false)
 }

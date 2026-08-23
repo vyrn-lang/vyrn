@@ -45,11 +45,20 @@ export fn demoIsFixture() -> Bool {
     return fromFixture
 }
 
+/// Why the widget cannot be drawn, or "" when it can. A recording that is
+/// there but does not parse is named here, and the export refuses on it — an
+/// empty terminal demo is the one thing this module must never publish.
+export fn demoError() -> String {
+    loadDemo()
+    return corrupt.copy()
+}
+
 let mut loaded = false
 let mut fromFixture = false
 let mut stepRows: Array<DemoStep> = []
 let mut version = ""
 let mut recordedOn = ""
+let mut corrupt = ""
 
 /// Read the file, once.
 fn loadDemo() {
@@ -63,7 +72,20 @@ fn loadDemo() {
     }
     let src = if real.byteLength > 0 { real.copy() } else { fixtureText() }
     fromFixture = real.byteLength == 0
-    let fields = match parseJson(src) {
+    let parsed = parseJson(src)
+    // A source that has bytes but does not parse is named, not swallowed: the
+    // export stops on `demoError` rather than publishing an empty widget and
+    // a stamp that names nothing. Only a source with no bytes at all — no
+    // real file and no fixture, reachable from a test alone — passes through,
+    // exactly as `historyError` treats its own inputs.
+    corrupt = match parsed {
+        Ok(j) => "",
+        Err(why) => why.copy(),
+    }
+    if src.byteLength == 0 {
+        corrupt = ""
+    }
+    let fields = match parsed {
         Ok(j) => fieldsOf(j),
         Err(why) => [],
     }
@@ -203,4 +225,23 @@ test "the steps are version-stamped, and the fixture says it is one" {
     assert(demoRecorded().byteLength > 0)
     // Nine bytes of `vyrn X.Y.Z` at the shortest, and the stamp names both.
     assert(demoStamp().byteLength > demoVersion().byteLength + demoRecorded().byteLength)
+}
+
+test "a recording that does not parse is refused, never drawn empty" {
+    // The contract has three states, and only two of them draw: a real file
+    // draws the run, a missing one draws the fixture, and a BROKEN one draws
+    // nothing — `demoError` names it and the export stops. Only a source with
+    // no bytes at all passes through silently.
+    assert(parses("{\"vyrn\":\"v0.0.0\",\"recorded\":\"today\",\"steps\":[]}"))
+    assert(!parses("{\"steps\":["))
+    // And whatever this tree loaded, it was one of the two drawing states.
+    assertEq(demoError(), "")
+}
+
+/// Whether `src` parses as JSON at all — the check behind `demoError`.
+fn parses(src: String) -> Bool {
+    return match parseJson(src) {
+        Ok(j) => true,
+        Err(why) => false,
+    }
 }

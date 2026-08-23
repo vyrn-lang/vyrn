@@ -179,7 +179,7 @@ export async function runVyrn(wasmBytes, hooks = {}) {
   // fd_fdstat_get(fd, buf) -> errno — report a character device (a tty),
   // which is what wasi-libc expects of stdout/stderr; zero flags/rights.
   function fd_fdstat_get(fd, buf) {
-    if (fd > 2) return ERRNO_BADF;
+    if (fd !== 0 && fd !== 1 && fd !== 2) return ERRNO_BADF;
     const view = new DataView(memory.buffer);
     view.setUint8(buf, 2); // filetype: character_device
     view.setUint8(buf + 1, 0);

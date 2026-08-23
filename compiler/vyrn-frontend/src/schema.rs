@@ -90,7 +90,10 @@ struct P<'a> {
 
 impl P<'_> {
     fn ws(&mut self) {
-        while self.i < self.b.len() && self.b[self.i].is_whitespace() {
+        // JSON whitespace is exactly space, tab, LF, CR (RFC 8259 §2);
+        // `char::is_whitespace()` would admit NBSP, U+2028 and friends, so a
+        // manifest those bytes separate would load here and nowhere else.
+        while self.i < self.b.len() && matches!(self.b[self.i], ' ' | '\t' | '\n' | '\r') {
             self.i += 1;
         }
     }
@@ -148,6 +151,11 @@ impl P<'_> {
     fn obj(&mut self) -> Result<Json, String> {
         self.expect('{')?;
         let mut out = Vec::new();
+        // Names seen so far — a side-set, so the duplicate check below stays
+        // linear: `find_manifest` reads a `vyrn.json` found by walking UP from
+        // the working directory on every command, and an O(n²) scan over ~100k
+        // keys is a hang on every invocation under such a file.
+        let mut seen = std::collections::HashSet::new();
         self.ws();
         if self.peek() == Some('}') {
             self.i += 1;
@@ -165,7 +173,7 @@ impl P<'_> {
             // the `$defs` walk below keeps the LAST. Whichever a caller asks,
             // the other one is wrong. Refused where `std/von` and `std/jsonread`
             // refuse it.
-            if out.iter().any(|(prev, _)| prev == &k) {
+            if !seen.insert(k.clone()) {
                 return Err(format!("`{k}` is defined twice at offset {}", self.i));
             }
             out.push((k, v));
@@ -255,15 +263,47 @@ impl P<'_> {
             }
         }
     }
+    /// The JSON number grammar (RFC 8259 §6): `-? (0 | [1-9][0-9]*)` with an
+    /// optional fraction and exponent, each demanding digits of its own. The
+    /// leniencies Rust's own parser accepts — a leading zero (`01`), a bare
+    /// trailing dot (`1.`) — are refused here too, so a manifest or
+    /// `.schema.json` carrying them fails exactly where the strict readers it
+    /// must agree with (`std/jsonread`, [`crate::codec`]) refuse the same bytes.
     fn num(&mut self) -> Result<Json, String> {
         let start = self.i;
         if self.peek() == Some('-') {
             self.i += 1;
         }
-        while self.peek().is_some_and(|c| {
-            c.is_ascii_digit() || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-'
-        }) {
+        let bad = || format!("bad number at offset {start}");
+        match self.peek() {
+            Some('0') => self.i += 1,
+            Some(c) if c.is_ascii_digit() => {
+                while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                    self.i += 1;
+                }
+            }
+            _ => return Err(bad()),
+        }
+        if self.peek() == Some('.') {
             self.i += 1;
+            if !self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                return Err(bad());
+            }
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                self.i += 1;
+            }
+        }
+        if matches!(self.peek(), Some('e') | Some('E')) {
+            self.i += 1;
+            if matches!(self.peek(), Some('+') | Some('-')) {
+                self.i += 1;
+            }
+            if !self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                return Err(bad());
+            }
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                self.i += 1;
+            }
         }
         let text: String = self.b[start..self.i].iter().collect();
         text.parse::<f64>()
@@ -271,10 +311,6 @@ impl P<'_> {
             .map_err(|_| format!("bad number `{text}`"))
     }
 }
-
-// ---------------------------------------------------------------------------
-// schema -> TypeDecl synthesis
-// ---------------------------------------------------------------------------
 
 /// Synthesize the requested types (plus everything they reference through
 /// `$defs` and nested objects) from a JSON Schema document. `module` is the
@@ -534,6 +570,16 @@ fn convert(
             bound("maximum", BinOp::LtEq, &mut clauses)?;
             bound("exclusiveMaximum", BinOp::Lt, &mut clauses)?;
             if let Some(Json::Num(k)) = schema.get("multipleOf") {
+                // JSON Schema requires multipleOf > 0. A zero would import as
+                // `value % 0 == 0` — a predicate that traps on every
+                // validation, turning a malformed schema into a latent
+                // runtime crash instead of the import-time diagnostic this
+                // module's exactly-or-not-at-all doctrine promises.
+                if *k <= 0.0 {
+                    return Err(format!(
+                        "{module}: type `{name}`: `multipleOf` {k} is not positive"
+                    ));
+                }
                 let k = num_expr(*k, is_int, module, name, "multipleOf")?;
                 clauses.push(Expr::Binary {
                     op: BinOp::Eq,
@@ -715,6 +761,24 @@ fn convert(
                 // A constrained (or nested-object) field becomes a synthetic
                 // named type — the mirror of inline `where` refinements, so
                 // the emitter's inlined per-property constraints round-trip.
+                //
+                // Only a REQUIRED one, though: an optional promoted field is
+                // `Option<Parent.field>`, and no Vyrn source spells that — a
+                // field-level `where` would desugar to a helper whose base is
+                // the `Option` itself (refused: "an `Option` alias cannot
+                // have a `where` clause"), and the dotted helper name cannot
+                // be declared or referenced. Rendered source would name a
+                // declaration no source can write, so the combination is
+                // refused here — never imported silently weaker.
+                if (fpred.is_some() || matches!(fty, Type::Record(_)))
+                    && !required.contains(&fname.as_str())
+                {
+                    return Err(format!(
+                        "{module}: type `{name}`: optional property `{fname}` cannot \
+                         carry its own constraints: make it `required` or name the \
+                         shape in `$defs` (Vyrn imports schemas exactly or not at all)"
+                    ));
+                }
                 let fty = if fpred.is_some() || matches!(fty, Type::Record(_)) {
                     nested.push(TypeDecl {
                         name: sub_name.clone(),
@@ -1012,6 +1076,73 @@ mod tests {
             parse_json(r#"{"a":{"x":1},"b":{"x":2}}"#).is_ok(),
             "a repeat in a SIBLING object is a different name"
         );
+    }
+
+    /// The number grammar and the whitespace set are the strict readers' (RFC
+    /// 8259): a leading zero or bare trailing dot is two tokens to
+    /// `std/jsonread` and [`crate::codec`], and NBSP is not whitespace to
+    /// either — so none of them parse here either.
+    #[test]
+    fn numbers_and_whitespace_are_strict_json() {
+        assert_eq!(parse_json("[0, -0.5, 1e2, 17E+3]").unwrap(), {
+            Json::Arr(vec![
+                Json::Num(0.0),
+                Json::Num(-0.5),
+                Json::Num(100.0),
+                Json::Num(17000.0),
+            ])
+        });
+        for bad in [
+            "[01]",
+            "[-007]",
+            "[1.]",
+            "[.5]",
+            "[1e]",
+            "[1e+]",
+            "{ \"a\":1\u{a0}}",
+        ] {
+            let e = parse_json(bad).unwrap_err();
+            assert!(!e.is_empty(), "{bad} parses");
+        }
+    }
+
+    /// A zero divisor imports as `value % 0 == 0` — a predicate that traps on
+    /// every validation. Refused at the boundary instead.
+    #[test]
+    fn a_non_positive_multiple_of_is_a_hard_error() {
+        for k in ["0", "-2"] {
+            let e = synthesize(
+                &format!(r#"{{"title": "T", "type": "integer", "multipleOf": {k}}}"#),
+                None,
+                "t.json",
+            )
+            .unwrap_err();
+            assert!(e.contains("multipleOf"), "{k}: {e}");
+        }
+    }
+
+    /// An optional property with its own constraints would import as
+    /// `Option<Parent.field>` — a shape no Vyrn source can spell (the dotted
+    /// helper is undeclarable, and an `Option` alias cannot carry a `where`),
+    /// so rendered source would name something uncompilable. Exactly-or-not-
+    /// at-all: refused at import.
+    #[test]
+    fn an_optional_constrained_property_is_a_hard_error() {
+        for prop in [
+            r#"{"type": "string", "minLength": 3}"#,
+            r#"{"type": "object", "properties": {"street": {"type": "string"}}}"#,
+        ] {
+            let e = synthesize(
+                &format!(
+                    r#"{{"title": "User", "type": "object",
+                        "properties": {{"nick": {prop}}}}}"#
+                ),
+                None,
+                "t.json",
+            )
+            .unwrap_err();
+            assert!(e.contains("nick"), "{prop}: {e}");
+        }
     }
 
     fn synth(doc: &str) -> Vec<TypeDecl> {

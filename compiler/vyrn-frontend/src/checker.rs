@@ -1856,25 +1856,33 @@ impl<'a> Checker<'a> {
     /// be copied field by field either: the compiler would duplicate the field
     /// and the declared `release` would then run over both copies.
     ///
-    /// The descent is unbounded, guarded against cycles by the set of
-    /// type-keys already visited — the old fixed depth-8 cap gave up exactly
-    /// where `copy`'s structural refusal does not, so an owned container nine
-    /// wrappers down was silently copyable.
+    /// The descent is unbounded, guarded against cycles by the full-shape
+    /// keys of the declaration heads (`Named`/`App`) already visited — the
+    /// old fixed depth-8 cap gave up exactly where `copy`'s structural
+    /// refusal does not, so an owned container nine wrappers down was
+    /// silently copyable.
     fn declared_owned_in(
         &self,
         ty: &Type,
         seen: &mut std::collections::HashSet<String>,
     ) -> Option<String> {
         if let Some(k) = crate::types::type_key(ty) {
-            if !seen.insert(k.clone()) {
-                return None;
-            }
             if self
                 .impls
                 .contains(&(crate::types::OWNED.to_string(), k.clone()))
             {
                 return Some(k);
             }
+        }
+        // Only a declaration carrier can close a cycle — a self-reference
+        // reaches a type only through the head that names it — so only
+        // `Named`/`App` enter `seen`, keyed on their FULL shape. The old
+        // key was the bare constructor (`Option`, `Pair`), shared by every
+        // instantiation: one sibling's `Option<Int64>` claimed it, and a
+        // later sibling's `Option<Ring>` was refused as already seen —
+        // masking the owned container and letting `copy` duplicate it.
+        if matches!(ty, Type::Named(_) | Type::App(..)) && !seen.insert(format!("{ty:?}")) {
+            return None;
         }
         let mut deeper = |t: &Type| self.declared_owned_in(t, seen);
         match self.base(ty) {
@@ -2012,6 +2020,26 @@ impl<'a> Checker<'a> {
     /// Validated types decay to their base (an `Age` is an `Int`), but the
     /// reverse requires explicit construction.
     fn assignable(&self, from: &Type, to: &Type) -> bool {
+        self.assignable_d(from, to, 0)
+    }
+
+    /// Depth cap for [`Self::assignable_d`]: past it the comparison is a
+    /// recursive type revisiting itself, not a width-subtyping question.
+    const MAX_ASSIGNABLE_DEPTH: usize = 64;
+
+    /// [`Self::assignable`] with the descent depth in hand. Structural
+    /// width subtyping walks field by field, and a legal recursive record
+    /// (`type NodeA = { v: Int64, next: Option<NodeA> }`) compared against
+    /// another (`NodeB`) descends `NodeA -> Option<NodeA> -> NodeA`
+    /// forever — mutually recursive transparent aliases diverge the same
+    /// way through their expansion arms. A cycle here has no finite
+    /// witness, so past the cap the answer is simply "not assignable":
+    /// the program gets a type error instead of a stack overflow, the
+    /// same give-up `own::owns_heap` makes.
+    fn assignable_d(&self, from: &Type, to: &Type, depth: usize) -> bool {
+        if depth > Self::MAX_ASSIGNABLE_DEPTH {
+            return false;
+        }
         if from == to {
             return true;
         }
@@ -2033,10 +2061,10 @@ impl<'a> Checker<'a> {
         // signature. The construction site writes the thunk and is meant to see
         // that it is one; only the READ hides it.
         if let Type::Lazy(t) = to {
-            return self.assignable(from, &Type::Fn(Vec::new(), t.clone()));
+            return self.assignable_d(from, &Type::Fn(Vec::new(), t.clone()), depth + 1);
         }
         if let Type::Lazy(t) = from {
-            return self.assignable(&Type::Fn(Vec::new(), t.clone()), to);
+            return self.assignable_d(&Type::Fn(Vec::new(), t.clone()), to, depth + 1);
         }
         // A transparent alias to `Result`/`Option` (RFC-0024, e.g. `type
         // DeleteResult = Result<Bool, String>`) is interchangeable with its
@@ -2057,14 +2085,14 @@ impl<'a> Checker<'a> {
         if let Type::Named(n) = to {
             if let Some(d) = self.types.get(n) {
                 if d.predicate.is_none() && transparent(&d.base) {
-                    return self.assignable(from, &d.base);
+                    return self.assignable_d(from, &d.base, depth + 1);
                 }
             }
         }
         if let Type::Named(n) = from {
             if let Some(d) = self.types.get(n) {
                 if d.predicate.is_none() && transparent(&d.base) {
-                    return self.assignable(&d.base, to);
+                    return self.assignable_d(&d.base, to, depth + 1);
                 }
             }
         }
@@ -2077,23 +2105,23 @@ impl<'a> Checker<'a> {
         }
         // Option/Result are covariant in their payloads (values are immutable).
         if let (Type::Option(a), Type::Option(b)) = (from, to) {
-            return self.assignable(a, b);
+            return self.assignable_d(a, b, depth + 1);
         }
         if let (Type::Result(a, e1), Type::Result(b, e2)) = (from, to) {
-            return self.assignable(a, b) && self.assignable(e1, e2);
+            return self.assignable_d(a, b, depth + 1) && self.assignable_d(e1, e2, depth + 1);
         }
         // A Map is covariant in its value type (keys are always String; values
         // are immutable at a read boundary) — RFC-0028.
         if let (Type::Map(ka, va), Type::Map(kb, vb)) = (from, to) {
-            return self.assignable(ka, kb) && self.assignable(va, vb);
+            return self.assignable_d(ka, kb, depth + 1) && self.assignable_d(va, vb, depth + 1);
         }
         if let (Type::Array(a), Type::Array(b)) = (from, to) {
-            return self.assignable(a, b);
+            return self.assignable_d(a, b, depth + 1);
         }
         // A `SmallArray<T, N>` (RFC-0056) is covariant in `T` and invariant in
         // `N` (the capacity is part of the type — no widening/narrowing).
         if let (Type::SmallArray(a, na), Type::SmallArray(b, nb)) = (from, to) {
-            return na == nb && self.assignable(a, b);
+            return na == nb && self.assignable_d(a, b, depth + 1);
         }
         // `assignable` is the STRICT relation: a predicated named type admits
         // only itself here. Value boundaries use `coercible`, which adds the
@@ -2109,8 +2137,9 @@ impl<'a> Checker<'a> {
         // field `to` requires, with an assignable type. Extra fields are fine.
         if let (Type::Record(ff), Type::Record(tf)) = (&self.base(from), &self.base(to)) {
             return tf.iter().all(|need| {
-                ff.iter()
-                    .any(|have| have.name == need.name && self.assignable(&have.ty, &need.ty))
+                ff.iter().any(|have| {
+                    have.name == need.name && self.assignable_d(&have.ty, &need.ty, depth + 1)
+                })
             });
         }
         false
@@ -3777,33 +3806,59 @@ impl<'a> Checker<'a> {
     /// `String`, an `Array` buffer, a `Task` payload, or a
     /// record/enum/Option/Result that transitively contains one).
     /// Used by the `region` escape guard.
+    ///
+    /// The walk threads a `seen` list of declaration heads, exactly like
+    /// [`Self::contains_stream`]/[`Self::contains_fn`]: a legal recursive
+    /// record (`type Node = { v: Int64, next: Option<Node> }`) re-enters
+    /// itself through its own name, and an unguarded descent overflowed
+    /// the stack the moment such a value was stored inside a `region`.
     fn contains_heap(&self, ty: &Type) -> bool {
-        match self.base(ty) {
-            Type::Str => true,
-            // Array buffers are always malloc'd (never in the region arena), so
-            // only their *contents* can dangle.
-            // A `Stream<T>` is an `Array<T>`'s three words with a malloc'd buffer
-            // (RFC-0075), so it dangles exactly where an array does.
-            Type::Array(inner)
-            | Type::ArrayN(inner, _)
-            | Type::SmallArray(inner, _)
-            | Type::Stream(inner) => self.contains_heap(&inner),
-            // A Map's buffers are malloc'd; its keys are always heap (String) and
-            // its values may be — either way it carries heap (RFC-0028).
-            Type::Map(..) => true,
-            Type::Task(inner) => self.contains_heap(&inner),
-            Type::Record(fs) => fs.iter().any(|f| self.contains_heap(&f.ty)),
-            Type::Enum(vs) => vs
-                .iter()
-                .any(|v| v.payload.iter().any(|p| self.contains_heap(p))),
-            Type::Option(inner) => self.contains_heap(&inner),
-            Type::Result(a, b) => self.contains_heap(&a) || self.contains_heap(&b),
-            // A stored function value (RFC-0037) may hold heap captures
-            // (a snapshotted String/Array/record), so treat it as heap-carrying.
-            // A `lazy T` field is one (RFC-0085 M4a).
-            Type::Fn(..) | Type::Lazy(_) => true,
-            _ => false,
+        fn walk(ty: &Type, types: &HashMap<String, TypeDecl>, seen: &mut Vec<String>) -> bool {
+            match ty {
+                Type::Str => true,
+                // Array buffers are always malloc'd (never in the region arena),
+                // so only their *contents* can dangle.
+                // A `Stream<T>` is an `Array<T>`'s three words with a malloc'd
+                // buffer (RFC-0075), so it dangles exactly where an array does.
+                Type::Array(inner)
+                | Type::ArrayN(inner, _)
+                | Type::SmallArray(inner, _)
+                | Type::Stream(inner)
+                | Type::Task(inner) => walk(inner, types, seen),
+                // A Map's buffers are malloc'd; its keys are always heap (String)
+                // and its values may be — either way it carries heap (RFC-0028).
+                Type::Map(..) => true,
+                Type::Record(fs) => fs.iter().any(|f| walk(&f.ty, types, seen)),
+                Type::Enum(vs) => vs
+                    .iter()
+                    .any(|v| v.payload.iter().any(|p| walk(p, types, seen))),
+                Type::Option(inner) => walk(inner, types, seen),
+                Type::Result(a, b) | Type::Merge(a, b) => {
+                    walk(a, types, seen) || walk(b, types, seen)
+                }
+                Type::Omit(b, _) | Type::Pick(b, _) | Type::Partial(b) => walk(b, types, seen),
+                // A stored function value (RFC-0037) may hold heap captures
+                // (a snapshotted String/Array/record), so treat it as
+                // heap-carrying. A `lazy T` field is one (RFC-0085 M4a).
+                Type::Fn(..) | Type::Lazy(_) => true,
+                Type::Named(n) | Type::App(n, _) => {
+                    let args = match ty {
+                        Type::App(_, a) => a.as_slice(),
+                        _ => &[],
+                    };
+                    args.iter().any(|a| walk(a, types, seen))
+                        || (!seen.iter().any(|s| s == n)
+                            && types.get(n).is_some_and(|d| {
+                                seen.push(n.clone());
+                                let r = walk(&d.base, types, seen);
+                                seen.pop();
+                                r
+                            }))
+                }
+                _ => false,
+            }
         }
+        walk(ty, self.types, &mut Vec::new())
     }
 
     /// The `region` escape guard for a store into the binding `name`: inside a
@@ -4078,6 +4133,23 @@ impl<'a> Checker<'a> {
                 if *op == UnOp::Neg && matches!(**expr, Expr::Int(i64::MIN)) {
                     return Ok(Type::Int);
                 }
+                // A sized annotation accepts its exact minimum written
+                // negated (`let x: Int32 = -2147483648`): the positive
+                // magnitude does not fit (`int_literal_fits` measures
+                // 2147483648 against a max of 2147483647), but the
+                // NEGATION is exactly representable — refusing it made the
+                // minimum of every signed sized type unwritable.
+                if *op == UnOp::Neg {
+                    if let Expr::Int(n) = &**expr {
+                        if let Some(Type::IntN { bits, signed: true }) =
+                            expected.map(|t| self.base(t))
+                        {
+                            if bits < 64 && *n == 1i64 << (bits - 1) {
+                                return Ok(Type::IntN { bits, signed: true });
+                            }
+                        }
+                    }
+                }
                 // The expectation flows through, and it has to: all three unary
                 // operators are type-PRESERVING, so `let a: Float32 = -0.5`
                 // wants its operand checked as a `Float32` exactly as the
@@ -4139,38 +4211,46 @@ impl<'a> Checker<'a> {
             Expr::Binary { op, lhs, rhs, line } => {
                 let mut l = self.base(&self.expr(lhs, scope, None, fn_ret)?);
                 let mut r = self.base(&self.expr(rhs, scope, None, fn_ret)?);
-                // A plain integer literal adapts to a sized sibling operand, so
-                // `x + 5` (x: Int32) and `5 + x` both type-check — but only if it
-                // fits (`x < 300` on a UInt8 would otherwise silently truncate
-                // 300 to 44 in the comparison).
+                // An integer literal adapts to a sized sibling operand, so
+                // `x + 5` (x: Int32), `5 + x` and `x == -5` all type-check —
+                // but only if the VALUE fits (`x < 300` on a UInt8 would
+                // otherwise silently truncate 300 to 44 in the comparison).
+                // A NEGATIVE literal arrives as `Neg(Int(5))`, so its value
+                // is read through [`int_literal_value`] and ranged in
+                // [`int_value_fits`], which covers the negative half of the
+                // type down to its exact minimum.
                 if l == Type::Int {
-                    if let (Expr::Int(n), Type::IntN { bits, signed }) = (&**lhs, &r) {
-                        if !int_literal_fits(*n, *bits, *signed) {
-                            return Err(cerr!(
-                                line,
-                                "integer literal {} does not fit {} \
-                                 (its range is {})",
-                                render_int_literal(*n),
-                                intn_name(*bits, *signed),
-                                intn_range(*bits, *signed),
-                            ));
+                    if let Type::IntN { bits, signed } = &r {
+                        if let Some(v) = int_literal_value(&lhs) {
+                            if !int_value_fits(v, *bits, *signed) {
+                                return Err(cerr!(
+                                    line,
+                                    "integer literal {} does not fit {} \
+                                     (its range is {})",
+                                    v,
+                                    intn_name(*bits, *signed),
+                                    intn_range(*bits, *signed),
+                                ));
+                            }
+                            l = r.clone();
                         }
-                        l = r.clone();
                     }
                 }
                 if r == Type::Int {
-                    if let (Expr::Int(n), Type::IntN { bits, signed }) = (&**rhs, &l) {
-                        if !int_literal_fits(*n, *bits, *signed) {
-                            return Err(cerr!(
-                                line,
-                                "integer literal {} does not fit {} \
-                                 (its range is {})",
-                                render_int_literal(*n),
-                                intn_name(*bits, *signed),
-                                intn_range(*bits, *signed),
-                            ));
+                    if let Type::IntN { bits, signed } = &l {
+                        if let Some(v) = int_literal_value(&rhs) {
+                            if !int_value_fits(v, *bits, *signed) {
+                                return Err(cerr!(
+                                    line,
+                                    "integer literal {} does not fit {} \
+                                     (its range is {})",
+                                    v,
+                                    intn_name(*bits, *signed),
+                                    intn_range(*bits, *signed),
+                                ));
+                            }
+                            r = l.clone();
                         }
-                        r = l.clone();
                     }
                 }
                 // A byte literal (default `UInt8`, RFC-0057) also adapts to an
@@ -4569,17 +4649,24 @@ impl<'a> Checker<'a> {
                 // An unsolved parameter settles nothing, so the first value
                 // answers for it (see [`Checker::mentions_open_param`]).
                 let val_ty = match val_expected {
-                    Some(t) if self.is_open_param(&t) => first_val,
-                    other => other.unwrap_or(first_val),
+                    Some(t) if self.is_open_param(&t) => first_val.clone(),
+                    other => other.unwrap_or_else(|| first_val.clone()),
                 };
-                for (k, v) in entries {
+                for (i, (k, v)) in entries.iter().enumerate() {
                     let kt = self.expr(k, scope, Some(&key_ty), fn_ret)?;
                     if crate::types::resolve(&self.base(&kt), self.types) != Type::Str {
                         return Err(cerr!(line, "a map key must be a String, found {kt}"));
                     }
                     self.prove_coercion(k, &key_ty, *line)?;
                     self.prove_string_interpolation(k, &key_ty, scope, fn_ret, *line)?;
-                    let vt = self.expr(v, scope, Some(&val_ty), fn_ret)?;
+                    // Entry 0's value already ran above (`first_val`);
+                    // re-running it evaluated the expression twice and
+                    // doubled everything its check records.
+                    let vt = if i == 0 {
+                        first_val.clone()
+                    } else {
+                        self.expr(v, scope, Some(&val_ty), fn_ret)?
+                    };
                     if !self.coercible(&vt, &val_ty) {
                         return Err(cerr!(
                             line,
@@ -7483,7 +7570,10 @@ impl<'a> Checker<'a> {
             // either way. It is not the answer there — the payload is (see
             // [`Checker::mentions_open_param`]).
             let inner_expected = inner_expected.filter(|want| !self.is_open_param(want));
-            if matches!(aty, Type::Option(_) | Type::Result(..)) {
+            if matches!(
+                crate::types::resolve(&aty, self.types),
+                Type::Option(_) | Type::Result(..)
+            ) {
                 return Err(cerr!(line, "nested Option/Result is not supported in v0.1"));
             }
             if let Some(want) = &inner_expected {
@@ -7516,7 +7606,10 @@ impl<'a> Checker<'a> {
                 _ => None,
             };
             let aty = self.expr(&args[0], scope, want.as_ref(), fn_ret)?;
-            if matches!(aty, Type::Option(_) | Type::Result(..)) {
+            if matches!(
+                crate::types::resolve(&aty, self.types),
+                Type::Option(_) | Type::Result(..)
+            ) {
                 return Err(cerr!(line, "nested Option/Result is not supported in v0.1"));
             }
             let (mut t, mut e) = match &expected_res {
@@ -7624,6 +7717,37 @@ impl<'a> Checker<'a> {
                     .collect();
                 match matching.len() {
                     1 => matching[0].clone(),
+                    // A bare `Type::Param` has no impl-table entry (`type_key`
+                    // answers `None` for one), so nothing above can have matched.
+                    // The parameter's own bound picks the protocol instead: a
+                    // `<T: Draw>` receiver dispatches through `Draw` even when
+                    // `Draw` is not the first candidate — keying the fall-through
+                    // on `candidates[0]` alone false-rejected every bound that
+                    // was not the first declared protocol.
+                    0 if matches!(&recv, Type::Param(_)) => {
+                        let Type::Param(t) = &recv else {
+                            unreachable!("guarded by the match arm above")
+                        };
+                        let bounded: Vec<_> = candidates
+                            .iter()
+                            .filter(|(p, _)| self.param_has_bound(t, p))
+                            .collect();
+                        match bounded.len() {
+                            1 => bounded[0].clone(),
+                            0 => candidates[0].clone(),
+                            _ => {
+                                return Err(cerr!(
+                                    line,
+                                    "`{name}` is ambiguous: protocols {} all declare it for this receiver",
+                                    bounded
+                                        .iter()
+                                        .map(|(p, _)| p.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ));
+                            }
+                        }
+                    }
                     0 => candidates[0].clone(),
                     _ => {
                         return Err(cerr!(
@@ -7698,7 +7822,105 @@ impl<'a> Checker<'a> {
             match crate::types::type_key(&recv) {
                 Some(key) if self.impls.contains(&(proto.clone(), key.clone())) => {
                     let mangled = crate::types::impl_method_name(&proto, &key, name);
-                    return self.call(&mangled, args, line, scope, expected, fn_ret);
+                    // The receiver above was already checked ONCE; routing the
+                    // whole `args` slice back through `call` evaluated it a
+                    // second time and doubled everything its check records
+                    // (stored function sources, stored calls). Check the
+                    // remaining arguments against the impl method's signature
+                    // directly — exactly as the concrete path below checks its
+                    // arguments.
+                    let (mparams, mret) = self.sigs.get(mangled.as_str()).ok_or_else(|| {
+                        cerr!(
+                            line,
+                            "{recv} does not implement protocol `{proto}` \
+                             (needed for `.{name}(..)`)"
+                        )
+                    })?;
+                    if mparams.len() != args.len() {
+                        return Err(cerr!(
+                            line,
+                            "`{name}` expects {} argument(s), got {}",
+                            mparams.len() - 1,
+                            args.len() - 1
+                        ));
+                    }
+                    let caps = self.caps.get(mangled.as_str());
+                    // The RECEIVER's capability rides at index 0 of the impl
+                    // method's table — the same entry the removed re-`call`
+                    // used to enforce when it re-checked all of `args`. A
+                    // `modify self` method still demands a `mut` binding here,
+                    // exactly as a `modify` parameter does at any other call.
+                    match caps.and_then(|c| c.first()) {
+                        Some(&Capability::Modify) => {
+                            self.check_modify_arg(name, 0, &args[0], &recv, &recv, scope, line)?
+                        }
+                        Some(&Capability::Consume) => {
+                            self.region_consume_guard(name, 0, &recv, line)?
+                        }
+                        _ => {}
+                    }
+                    // The flattened impl method keeps its head's type
+                    // variables (`fn Unwrap__Option__valueOr(f: T)`), so every
+                    // declared slot is read through the substitution the
+                    // receiver (and earlier arguments) solve — the same
+                    // instantiate-then-check the generic-call path does.
+                    let mut solved: HashMap<String, Type> = HashMap::new();
+                    if let Some(rty) = mparams.first() {
+                        crate::types::solve_param(rty, &recv, &mut solved);
+                    }
+                    let expected_of = |pty: &Type, solved: &HashMap<String, Type>| -> Type {
+                        crate::types::substitute(pty, solved)
+                    };
+                    let _checked: Vec<Type> = Vec::with_capacity(args.len() - 1);
+                    for (i, (arg, pty)) in args[1..].iter().zip(&mparams[1..]).enumerate() {
+                        let expected = expected_of(pty, &solved);
+                        // A `fn`-typed parameter goes through the shared helper
+                        // (RFC-0023), as everywhere else.
+                        if let Type::Fn(..) = &expected {
+                            let mut ignored: HashMap<String, Type> = HashMap::new();
+                            self.check_fn_arg(
+                                name,
+                                i + 1,
+                                arg,
+                                &expected,
+                                scope,
+                                fn_ret,
+                                &mut ignored,
+                                line,
+                            )?;
+                            continue;
+                        }
+                        let aty = self.expr(arg, scope, Some(&expected), fn_ret)?;
+                        if !self.coercible(&aty, &expected) {
+                            return Err(cerr!(
+                                line,
+                                "`{name}` argument is {aty}, expected {expected}"
+                            ));
+                        }
+                        self.prove_coercion(arg, &expected, line)?;
+                        self.prove_string_interpolation(arg, &expected, scope, fn_ret, line)?;
+                        crate::types::solve_param(pty, &aty, &mut solved);
+                        match caps.and_then(|c| c.get(i + 1)) {
+                            Some(&Capability::Modify) => {
+                                self.check_modify_arg(name, i + 1, arg, &aty, pty, scope, line)?
+                            }
+                            Some(&Capability::Consume) => {
+                                self.region_consume_guard(name, i + 1, &aty, line)?
+                            }
+                            _ => {}
+                        }
+                    }
+                    // RFC-0101's recording: the lowering's worklist learns this
+                    // specialization from the call node's substitution — the
+                    // entry the removed re-`call` used to write as a side
+                    // effect of checking the receiver twice. Solve the impl
+                    // method's own parameters the way the generic-call path
+                    // would have: receiver first, then every argument's
+                    // checked type against its declared slot.
+                    if let Some(type_params) = self.generics.get(mangled.as_str()) {
+                        note_subst(mangled.as_str(), &solved, type_params);
+                    }
+                    return Ok(crate::types::substitute(&mret, &solved));
                 }
                 _ => {
                     return Err(cerr!(
@@ -7752,6 +7974,13 @@ impl<'a> Checker<'a> {
                 let want = crate::types::substitute(pty, &subst);
                 let aty = self.expr(arg, scope, Some(&want), fn_ret)?;
                 self.unify(pty, &aty, &mut subst, line)?;
+                // The concrete path proves each constant argument against its
+                // (predicated) parameter type at the boundary; the generic path
+                // used to stop at the unify, so `f(0)` against a parameter the
+                // inference had already pinned to a validated type slipped a
+                // provably-false value through to the runtime check.
+                self.prove_coercion(arg, &want, line)?;
+                self.prove_string_interpolation(arg, &want, scope, fn_ret, line)?;
                 atys[i] = aty;
             }
             // Pass 2: each `fn`-typed argument (a lambda, named function, or
@@ -9030,6 +9259,46 @@ fn int_literal_fits(n: i64, bits: u8, signed: bool) -> bool {
     (0..=max).contains(&n)
 }
 
+/// The VALUE an integer-literal expression denotes, unwrapping one unary
+/// `-` (`-5` parses as `Neg(Int(5))`). A bare negative `n` is the lexer's
+/// wrap of a value above `i64::MAX`, so its unsigned reading is what was
+/// written (the same reading [`render_int_literal`] shows). `None` for
+/// anything that is not a literal or its negation.
+fn int_literal_value(e: &Expr) -> Option<i128> {
+    let bare = |n: i64| {
+        if n < 0 {
+            n as u64 as i128
+        } else {
+            i128::from(n)
+        }
+    };
+    match e {
+        Expr::Int(n) => Some(bare(*n)),
+        Expr::Unary {
+            op: UnOp::Neg,
+            expr,
+            ..
+        } => match &**expr {
+            Expr::Int(n) => Some(-bare(*n)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether a literal VALUE (already negated, so wider than any operand's
+/// `i64`) fits the sized type — covering the negative half down to the
+/// exact minimum, which [`int_literal_fits`] cannot see because it only
+/// ever measures a non-negative magnitude.
+fn int_value_fits(v: i128, bits: u8, signed: bool) -> bool {
+    if signed {
+        let shift = 128 - u32::from(bits);
+        (i128::MIN >> shift..=i128::MAX >> shift).contains(&v)
+    } else {
+        (0..(1i128 << bits)).contains(&v)
+    }
+}
+
 /// The user-facing name of a sized integer type (`Int8` … `UInt64`).
 fn intn_name(bits: u8, signed: bool) -> String {
     format!("{}Int{bits}", if signed { "" } else { "U" })
@@ -9802,7 +10071,16 @@ fn global_ref_expr(
         Expr::Binary { lhs, rhs, .. } => {
             global_ref_expr(lhs, globals, local) || global_ref_expr(rhs, globals, local)
         }
-        Expr::Call { args, .. } | Expr::Spawn { args, .. } | Expr::TryConstruct { args, .. } => {
+        // Calling a fn-typed module global READS it (`g(x)` dispatches
+        // through the stored value, exactly like any other use), so the
+        // callee name is a reference too — a generator that only ever
+        // called such a global used to pass the purity walk. A declared
+        // function never collides: functions and module state share one
+        // namespace.
+        Expr::Call { name, args, .. } => {
+            is_global(name) || args.iter().any(|a| global_ref_expr(a, globals, local))
+        }
+        Expr::Spawn { args, .. } | Expr::TryConstruct { args, .. } => {
             args.iter().any(|a| global_ref_expr(a, globals, local))
         }
         Expr::Match {
@@ -14197,5 +14475,100 @@ mod tests {
                        return 0 }";
         let e = check_src(src).unwrap_err();
         assert!(e.contains("which is `consume`, inside a `region`"), "{e}");
+    }
+
+    // ---- round two: recursion guards, sized literals, dispatch -------------
+
+    /// Two DISTINCT legal recursive records compared by width subtyping must
+    /// report a type error — not diverge: the field walk re-enters each side
+    /// through its own head forever unless the descent is capped.
+    #[test]
+    fn recursive_records_compare_to_a_type_error_not_a_crash() {
+        let src = "type NodeA = { v: Int64, next: Option<NodeA> } \
+                   type NodeB = { v: Int64, next: Option<NodeB> } \
+                   fn main() -> Int64 { \
+                       let b: NodeB = NodeA { v: 1, next: None } return 0 }";
+        assert!(check_src(src).is_err());
+    }
+
+    /// A recursive record may still sit inside a `region`: the escape guard's
+    /// heap walk has to terminate on the self-reference and refuse the store
+    /// in its own words. The heap-carrying field sits AFTER the
+    /// self-referential one — exactly where the unguarded walk overflowed
+    /// before ever seeing it.
+    #[test]
+    fn the_region_heap_guard_terminates_on_a_recursive_record() {
+        let src = "type Node = { next: Option<Node>, name: String } \
+                   fn main() -> Int64 { \
+                       let mut out = Node { next: None, name: \"n\" } \
+                       region { out = Node { next: None, name: \"n\" } } \
+                       return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("cannot store a heap value"), "{e}");
+    }
+
+    /// One sibling's `Option<Int64>` used to claim the shared constructor key
+    /// in the owned walk, masking a later sibling's `Option<Ring>` — `copy`
+    /// then duplicated an `impl Owned` container.
+    #[test]
+    fn copy_sees_an_owned_container_behind_a_masked_sibling_option() {
+        let src = "protocol Owned { fn release(self) } \
+                   type Ring = { buf: Array<Int64> } \
+                   impl Owned for Ring { fn release(self) { print(1) } } \
+                   type Holder = { a: Option<Int64>, b: Option<Ring> } \
+                   fn f(h: Holder) -> Int64 { let q = h.copy() return 0 } \
+                   fn main() -> Int64 { return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("`copy` cannot copy"), "{e}");
+    }
+
+    /// The exact minimum of every signed sized type is writable negated: the
+    /// bare magnitude does not fit, but its negation does.
+    #[test]
+    fn sized_int_minimums_are_writable_negated() {
+        let ok = "fn main() -> Int64 { \
+                  let a: Int8 = -128 let b: Int16 = -32768 \
+                  let c: Int32 = -2147483648 return 0 }";
+        assert!(check_src(ok).is_ok());
+        let bad = "fn main() -> Int64 { let a: Int32 = -2147483649 return 0 }";
+        assert!(check_src(bad).is_err());
+    }
+
+    /// A negative literal adapts to a sized sibling exactly as a bare one
+    /// does — down to the type's minimum, and never past it.
+    #[test]
+    fn negative_literals_adapt_to_sized_operands() {
+        let ok = "fn main() -> Int64 { let mut x: Int32 = 0 \
+                  if x == -5 { x = -2147483648 } return 0 }";
+        assert!(check_src(ok).is_ok());
+        let bad = "fn main() -> Int64 { let mut x: Int32 = 0 \
+                   if x == -2147483649 { x = 1 } return 0 }";
+        assert!(check_src(bad).is_err());
+    }
+
+    /// Direct construction cannot launder a nested wrap through a transparent
+    /// alias either: the payload resolves before the prohibition checks it.
+    #[test]
+    fn some_refuses_a_payload_alias_that_names_an_option() {
+        let src = "type M = Option<Int64> \
+                   fn main() -> Int64 { let m: M = None let w = Some(m) return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("nested Option/Result"), "{e}");
+    }
+
+    /// A parameter bounded by a NON-first protocol dispatches through the
+    /// protocol that actually bounds it: several protocols may declare the
+    /// same method name, and a bare `Type::Param` matches none of the impl
+    /// table's entries.
+    #[test]
+    fn a_param_bounded_by_a_later_protocol_dispatches_through_it() {
+        let src = "type T = { v: Int64 } \
+                   protocol P1 { fn frob(self) -> Int64 } \
+                   protocol P2 { fn frob(self) -> Int64 } \
+                   impl P1 for T { fn frob(self) -> Int64 { return self.v } } \
+                   impl P2 for T { fn frob(self) -> Int64 { return self.v } } \
+                   fn g<U: P2>(u: U) -> Int64 { return u.frob() } \
+                   fn main() -> Int64 { return g(T { v: 7 }) }";
+        assert!(check_src(src).is_ok());
     }
 }

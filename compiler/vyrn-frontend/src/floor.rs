@@ -303,7 +303,9 @@ fn refusal(
     while let Some(p) = parent.get(chain[0]) {
         chain.insert(0, p);
     }
-    if chain[0] != artifact.entry && !crate::audience::same_path(chain[0], &artifact.entry) {
+    if chain[0] != artifact.entry
+        && !crate::audience::same_path(chain[0], &artifact.entry, &map.base)
+    {
         chain.insert(0, &artifact.entry);
     }
     let shown: Vec<String> = chain.iter().map(|k| map.display_path(k)).collect();

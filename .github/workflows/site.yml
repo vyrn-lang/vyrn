@@ -13,9 +13,7 @@ name: Site
 #     call to the release listing before the pages render, and the committed
 #     file whenever that call is unavailable. The page then knows its own
 #     version and prints the real install command instead of telling every
-#     reader to build from source. `site/public/fresh.js` still asks the same
-#     listing once a visit, and now says ONE thing with it: that a newer
-#     release exists, when the baked tag is not the newest.
+#     reader to build from source.
 #   - Benchmarks are measured, not gathered: `bench/engines.sh` times one
 #     program on all three engines, and the comparison page publishes the
 #     machine, the date, the version and the command beside the numbers. The
@@ -104,7 +102,8 @@ jobs:
         # is `vyrn test site/export.vyrn`: 32 blocks, most of which render pages,
         # against 175 routes. That number belongs to the interpreter and not to
         # this file, and it is the next thing to attack here.
-        uses: Swatinem/rust-cache@v2
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: |
             compiler
@@ -135,8 +134,7 @@ jobs:
         #
         # It CANNOT fail the build. A rate limit, an outage, or a fork whose
         # token cannot read the API leaves the committed file exactly as it is —
-        # the pages still render, with the last tag anyone recorded, and
-        # `fresh.js` says so in the page when that is not the newest one. The
+        # the pages still render, with the last tag anyone recorded. The
         # export itself never touches the network.
         #
         # The comment header of the file is preserved and the two data lines are

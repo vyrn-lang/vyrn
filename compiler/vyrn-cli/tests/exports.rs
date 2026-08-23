@@ -201,9 +201,13 @@ fn emit_gen_connect_server_shows_the_router_and_dispatchers() {
         "{src}"
     );
     assert!(
-        src.contains("req.method == \"POST\" && req.path == \"/contract.getUser\""),
+        src.contains("if req.path == \"/contract.getUser\""),
         "{src}"
     );
+    // A known procedure with a non-POST method is a 405 (mirrors std/rpc),
+    // not the 501 reserved for an unknown procedure.
+    assert!(src.contains("if req.method != \"POST\""), "{src}");
+    assert!(src.contains("body: \"method not allowed\""), "{src}");
     assert!(
         src.contains("if req.path.startsWith(\"/contract.\")"),
         "unknown-proc prefix:\n{src}"
