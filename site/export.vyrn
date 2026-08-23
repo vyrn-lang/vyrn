@@ -80,7 +80,6 @@ fn sitePaths() -> Array<String> {
         }
     }
 
-
     return out
 }
 
