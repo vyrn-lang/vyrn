@@ -158,13 +158,6 @@ fn standing() -> String {
              the link leaves this site, which no word here says, so it carries a
              `label` and renders as `role="img"` with that name. -->
         <a href="https://github.com/vyrn-lang/vyrn"><Icon name="bytesize:github"/> Source on GitHub <Icon name="bytesize:external" label="opens on github.com"/></a>
-        <!-- The one door to the other front (RFC-0105 M1). It is a footer link
-             and not a navigation row on purpose: a reader deciding whether to
-             use the language is never sent into the design record by the
-             masthead. `data-nav="hard"` because the backstage wears its own
-             shell, and a soft navigation would swap the content under this
-             masthead and leave the reader in neither section. -->
-        
         <span>{{ standing() }}</span>
     </footer>
 </div>
