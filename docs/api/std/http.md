@@ -443,9 +443,21 @@ unreachable route is the kind of thing nobody notices until production. Order
 *within* a group is the author's own, and left alone.
 
 The check runs on every call rather than once, because there is no init hook
-to hang it on and a router is a handful of routes: the scan is O(routes²) over
-a number that is 5 in `examples/bin` and would have to reach the thousands
-before it showed up next to a JSON decode. `vyrn serve` runs `main` at
+to hang it on and a router is a handful of routes: the scan is O(routes²) and
+that number is 5 in `examples/bin`.
+
+**The threshold, measured rather than guessed.** This paragraph used to say
+the count "would have to reach the thousands before it showed up next to a
+JSON decode". It does not. Timed over 500 iterations of the same request: 8
+routes cost 4 µs per request, 64 routes in ONE group cost 33 µs, and 64 routes
+split into two groups of 32 cost 432 µs — the cross-group loop is 32x32
+`httpSubsumes` calls and each splits both patterns into fresh segment arrays.
+So the real threshold is tens of routes, not thousands, and it arrives an
+order of magnitude sooner when the routes are split across groups.
+
+The policy stands for the configurations here, which are small. It is written
+down so that an app with sixty routes knows what it pays, instead of reading
+a number that was never measured. `vyrn serve` runs `main` at
 startup, so an app that touches `handle` there sees the trap at startup, which
 is where it belongs.
 
