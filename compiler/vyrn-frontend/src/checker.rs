@@ -4690,7 +4690,7 @@ impl<'a> Checker<'a> {
                 line,
                 "a lambda `|..|` needs a function type from context: \
                  pass it to a `fn`-typed parameter, or give the binding a function \
-                 type (e.g. `let f: fn(Int64) -> Int64 = |x| x * 2`) (RFC-0037)"
+                 type (e.g. `let f: fn(Int64) -> Int64 = x -> x * 2`) (RFC-0037)"
             )),
         }
     }
@@ -10845,7 +10845,7 @@ mod tests {
         // A loop does not extend into a lambda — a `break` inside is an error.
         let l = check_src(
             "fn ap(f: fn(Int64) -> Int64) -> Int64 { return f(1) } \
-             fn main() -> Int64 { while true { let r = ap(|x| { break }) } return 0 }",
+             fn main() -> Int64 { while true { let r = ap(x -> { break }) } return 0 }",
         )
         .unwrap_err();
         assert!(l.contains("`break` outside a loop"), "{l}");
@@ -10927,7 +10927,7 @@ mod tests {
     #[test]
     fn spawned_function_may_not_take_fn_parameters() {
         let src = "fn hof(f: fn(Int64) -> Int64) -> Int64 { return f(1) }\n\
-             fn main() -> Int64 { let t = spawn hof(|x| x)  return t.join() }";
+             fn main() -> Int64 { let t = spawn hof(x -> x)  return t.join() }";
         let e = check_src(src).unwrap_err();
         assert!(e.contains("may not take function-value parameters"), "{e}");
     }
@@ -13141,7 +13141,7 @@ mod tests {
     fn accepts_lambda_and_named_fn_argument() {
         let src = format!(
             "{TWICE}fn dbl(n: Int64) -> Int64 {{ return n * 2 }}\n\
-             fn main() -> Int64 {{ let a = twice([1, 2], |x| x * 2)  let b = twice([1, 2], dbl)  return 0 }}"
+             fn main() -> Int64 {{ let a = twice([1, 2], x -> x * 2)  let b = twice([1, 2], dbl)  return 0 }}"
         );
         assert!(check_src(&src).is_ok(), "{:?}", check_src(&src));
     }
@@ -13196,24 +13196,24 @@ mod tests {
              fn pick() -> fn(Int64) -> Int64 { return dbl }\n\
              fn main() -> Int64 { let f = pick()  return f(21) }";
         assert!(check_src(ret).is_ok(), "{:?}", check_src(ret));
-        let letb = "fn main() -> Int64 { let g: fn(Int64) -> Int64 = |x| x * 2  return g(3) }";
+        let letb = "fn main() -> Int64 { let g: fn(Int64) -> Int64 = x -> x * 2  return g(3) }";
         assert!(check_src(letb).is_ok(), "{:?}", check_src(letb));
         let rec = "type R = { f: fn(Int64) -> Int64 }\n\
-             fn main() -> Int64 { let r = R { f: |x| x + 1 }  let g = r.f  return g(1) }";
+             fn main() -> Int64 { let r = R { f: x -> x + 1 }  let g = r.f  return g(1) }";
         assert!(check_src(rec).is_ok(), "{:?}", check_src(rec));
         let arr = "fn main() -> Int64 {\n\
              let mut xs: Array<fn(Int64) -> Int64> = []\n\
-             xs.push(|x| x * 2)\n\
+             xs.push(x -> x * 2)\n\
              let f = xs[0]\n\
              return f(4) }";
         assert!(check_src(arr).is_ok(), "{:?}", check_src(arr));
         let opt = "fn main() -> Int64 {\n\
-             let o: Option<fn(Int64) -> Int64> = Some(|x| x - 1)\n\
+             let o: Option<fn(Int64) -> Int64> = Some(x -> x - 1)\n\
              return match o { Some(f) => f(1), None => 0 } }";
         assert!(check_src(opt).is_ok(), "{:?}", check_src(opt));
         let state = "type Middleware = fn(Int64) -> Int64\n\
              let mut chain: Array<Middleware> = []\n\
-             fn add() { chain.push(|x| x + 1) }\n\
+             fn add() { chain.push(x -> x + 1) }\n\
              fn main() -> Int64 { add()  let m = chain[0]  return m(1) }";
         assert!(check_src(state).is_ok(), "{:?}", check_src(state));
         // Composition: value-to-value flow creates no new source and stays legal.
@@ -13226,7 +13226,8 @@ mod tests {
     fn fn_types_still_rejected_where_illegal() {
         // No higher-order-of-higher-order: a stored fn type may not take or
         // return another function value.
-        let hof = "fn main() -> Int64 { let g: fn(fn(Int64) -> Int64) -> Int64 = |x| 0  return 0 }";
+        let hof =
+            "fn main() -> Int64 { let g: fn(fn(Int64) -> Int64) -> Int64 = x -> 0  return 0 }";
         assert!(
             check_src(hof)
                 .unwrap_err()
@@ -13254,7 +13255,7 @@ mod tests {
         // `toJson` rejects fn-typed data with the type named (functions don't
         // go on the wire).
         let wire = "type H = { f: fn(Int64) -> Int64 }\n\
-             fn main() -> Int64 { let h = H { f: |x| x }  let s = toJson(h)  return 0 }";
+             fn main() -> Int64 { let h = H { f: x -> x }  let s = toJson(h)  return 0 }";
         assert!(
             check_src(wire).unwrap_err().contains("cannot encode"),
             "{:?}",
@@ -13264,7 +13265,7 @@ mod tests {
 
     #[test]
     fn lambda_still_needs_a_function_type_from_context() {
-        let src = "fn main() -> Int64 { let g = |x| x * 2  return 0 }";
+        let src = "fn main() -> Int64 { let g = x -> x * 2  return 0 }";
         assert!(
             check_src(src)
                 .unwrap_err()
@@ -13276,8 +13277,9 @@ mod tests {
 
     #[test]
     fn lambda_arity_mismatch_is_rejected() {
-        let src =
-            format!("{TWICE}fn main() -> Int64 {{ let a = twice([1], |x, y| x + y)  return 0 }}");
+        let src = format!(
+            "{TWICE}fn main() -> Int64 {{ let a = twice([1], (x, y) -> x + y)  return 0 }}"
+        );
         assert!(
             check_src(&src).unwrap_err().contains("parameter"),
             "{:?}",
@@ -13288,7 +13290,7 @@ mod tests {
     #[test]
     fn lambda_return_type_mismatch_is_rejected() {
         let src =
-            format!("{TWICE}fn main() -> Int64 {{ let a = twice([1], |x| x > 0)  return 0 }}");
+            format!("{TWICE}fn main() -> Int64 {{ let a = twice([1], x -> x > 0)  return 0 }}");
         let e = check_src(&src).unwrap_err();
         assert!(
             e.contains("returns Bool") || e.contains("expects it to return"),
@@ -13299,7 +13301,7 @@ mod tests {
     #[test]
     fn cannot_assign_to_captured_binding() {
         let src = format!(
-            "{TWICE}fn main() -> Int64 {{ let mut c = 0  let a = twice([1], |x| {{ c = c + x  return c }})  return 0 }}"
+            "{TWICE}fn main() -> Int64 {{ let mut c = 0  let a = twice([1], x -> {{ c = c + x  return c }})  return 0 }}"
         );
         assert!(
             check_src(&src)
@@ -13313,7 +13315,7 @@ mod tests {
     #[test]
     fn cannot_drop_captured_binding() {
         let src = "fn apply(s: String, f: fn(Int64) -> Int64) -> Int64 { return f(1) }\n\
-             fn main() -> Int64 { let name = \"hi\"  let r = apply(name, |x| { drop name  return x })  return 0 }";
+             fn main() -> Int64 { let name = \"hi\"  let r = apply(name, x -> { drop name  return x })  return 0 }";
         assert!(
             check_src(src)
                 .unwrap_err()
@@ -13327,7 +13329,7 @@ mod tests {
     fn cannot_consume_captured_binding() {
         let src = "fn take(s: consume String) -> Int64 { return 1 }\n\
              fn apply(s: String, f: fn(Int64) -> Int64) -> Int64 { return f(1) }\n\
-             fn main() -> Int64 { let name = \"hi\"  let r = apply(name, |x| { let z = take(name)  return x })  return 0 }";
+             fn main() -> Int64 { let name = \"hi\"  let r = apply(name, x -> { let z = take(name)  return x })  return 0 }";
         assert!(
             check_src(src)
                 .unwrap_err()
@@ -13340,7 +13342,7 @@ mod tests {
     #[test]
     fn nested_lambda_literal_is_rejected() {
         let src = format!(
-            "{TWICE}fn main() -> Int64 {{ let a = twice([1], |x| twice([x], |y| y + 1).length)  return 0 }}"
+            "{TWICE}fn main() -> Int64 {{ let a = twice([1], x -> twice([x], y -> y + 1).length)  return 0 }}"
         );
         assert!(
             check_src(&src)
@@ -13355,7 +13357,7 @@ mod tests {
     fn passthrough_fn_param_is_accepted() {
         let src = format!(
             "{TWICE}fn outer(xs: Array<Int64>, g: fn(Int64) -> Int64) -> Array<Int64> {{ return twice(xs, g) }}\n\
-             fn main() -> Int64 {{ let a = outer([1, 2], |x| x + 1)  return 0 }}"
+             fn main() -> Int64 {{ let a = outer([1, 2], x -> x + 1)  return 0 }}"
         );
         assert!(check_src(&src).is_ok(), "{:?}", check_src(&src));
     }
@@ -13366,7 +13368,7 @@ mod tests {
              let mut out: Array<U> = []\n\
              for x in xs { out.push(f(x)) }\n\
              return out }\n\
-             fn main() -> Int64 { let ys: Array<Int64> = [1, 2]  let zs = map(ys, |x| x > 0)  return 0 }";
+             fn main() -> Int64 { let ys: Array<Int64> = [1, 2]  let zs = map(ys, x -> x > 0)  return 0 }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
@@ -13375,7 +13377,7 @@ mod tests {
         // A lambda that reads a global makes the enclosing function non-spawn-safe.
         let src = "let g: Int64 = 5\n\
              fn apply(x: Int64, f: fn(Int64) -> Int64) -> Int64 { return f(x) }\n\
-             fn worker(x: Int64) -> Int64 { return apply(x, |y| y + g) }\n\
+             fn worker(x: Int64) -> Int64 { return apply(x, y -> y + g) }\n\
              fn main() -> Int64 { let t = spawn worker(1)  return t.join() }";
         assert!(
             check_src(src).unwrap_err().contains("not allowed"),
@@ -14314,7 +14316,7 @@ mod tests {
             "fn map<T, U>(xs: Array<T>, f: fn(T) -> U) -> Array<U> { return [] }\n\
              fn twice(n: Int64) -> Int64 { return n * 2 }\n\
              fn main() -> Int64 { let xs: Array<Int64> = [1, 2]\n \
-             let a = map(xs, |x| x * 2)\n let b = map(xs, twice)\n return 0 }",
+             let a = map(xs, x -> x * 2)\n let b = map(xs, twice)\n return 0 }",
         );
         assert!(ok.is_ok(), "{ok:?}");
     }
@@ -14387,7 +14389,7 @@ mod tests {
         let src = "fn sq(x: Int64) -> Int64 { return x * x } \
                    fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(2) } \
                    gen fn g() -> String { \
-                   let n = apply(|x| { let t = spawn sq(x) return t.join() }) \
+                   let n = apply(x -> { let t = spawn sq(x) return t.join() }) \
                    return \"\" } \
                    fn main() -> Int64 { return 0 }";
         let e = check_src(src).unwrap_err();

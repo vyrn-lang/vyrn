@@ -28,11 +28,11 @@ type Middleware = fn(Request) -> Option<Response>
 /// The chain, installed at module-state init: request logging (never answers),
 /// then a guard that answers the /admin prefix outright before any route runs.
 let mut middleware: Array<Middleware> = [
-        |req| {
+    req -> {
         logger("http").info("\{req.method} \{req.path}")
         return None
     },
-        |req| if req.path =~ "/admin.*" {
+    req -> if req.path =~ "/admin.*" {
         Some(Response { status: 403, contentType: "text/plain", body: "forbidden", vary: "", headers: [:] })
     } else {
         None

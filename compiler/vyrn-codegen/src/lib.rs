@@ -14117,7 +14117,7 @@ mod tests {
                 "Lazy",
                 "type Holder<T> = { body: lazy T }\n\
                  fn seven() -> Int64 { return 7 }\n\
-                 fn main() -> Int64 { let h: Holder<Int64> = Holder { body: || seven() }\n\
+                 fn main() -> Int64 { let h: Holder<Int64> = Holder { body: () -> seven() }\n\
                  return h.body }",
             ),
             // A `Task<T>` parameter.
@@ -14243,9 +14243,9 @@ mod tests {
          return out }\n\
          fn dbl(n: Int64) -> Int64 { return n * 2 }\n\
          fn main() -> Int64 {\n\
-             let a = twice([1, 2, 3], |x| x * 2)\n\
+             let a = twice([1, 2, 3], x -> x * 2)\n\
              let off = 10\n\
-             let b = twice([1, 2, 3], |x| x + off)\n\
+             let b = twice([1, 2, 3], x -> x + off)\n\
              let c = twice([1, 2, 3], dbl)\n\
              return 0 }";
 
@@ -14323,14 +14323,14 @@ mod tests {
             let mut out: Array<Int64> = []\n\
             for x in xs { out.push(f(x)) }\n\
             return out }\n\
-        fn makeAdder(n: Int64) -> M { return |x| x + n }\n\
+        fn makeAdder(n: Int64) -> M { return x -> x + n }\n\
         fn main() -> Int64 {\n\
-            let g: fn(Int64) -> Int64 = |x| x * 2\n\
+            let g: fn(Int64) -> Int64 = x -> x * 2\n\
             let h = g\n\
             let named = dbl\n\
-            chain.push(|x| x + 1)\n\
+            chain.push(x -> x + 1)\n\
             chain.push(dbl)\n\
-            let ops = Ops { plus: |x| x + 10, minus: |x| x - 10 }\n\
+            let ops = Ops { plus: x -> x + 10, minus: x -> x - 10 }\n\
             let p = ops.plus\n\
             let o: Option<M> = Some(makeAdder(5))\n\
             let q = match o { Some(f) => f(1), None => 0 }\n\
@@ -14340,7 +14340,7 @@ mod tests {
             let ws = twice([1, 2], chain[1])\n\
             let vs = twice([1, 2], makeAdder(7))\n\
             let d: Def<Int64, Int64> = Def { run: dbl }\n\
-            let dl: Def<Int64, Int64> = Def { run: |x| x + 3 }\n\
+            let dl: Def<Int64, Int64> = Def { run: x -> x + 3 }\n\
             let many: Many<Int64, Int64> = Many { runs: [dbl] }\n\
             let maybe: Maybe<Int64, Int64> = Maybe { run: Some(dbl) }\n\
             let outer: Outer<Int64, Int64> = Outer { inner: Def { run: dbl } }\n\
@@ -14420,7 +14420,7 @@ mod tests {
             let mut out: Array<Int64> = []\n\
             for x in xs { out.push(f(x)) }\n\
             return out }\n\
-            fn main() -> Int64 { let ys = twice([1], |x| x * 2)  return ys[0] }";
+            fn main() -> Int64 { let ys = twice([1], x -> x * 2)  return ys[0] }";
         let ir1 = emit(&check(v1).unwrap()).unwrap();
         let ho_takes_enum = ir1
             .lines()
@@ -14436,7 +14436,7 @@ mod tests {
         // A stored fn type mentioning `T` resolves per instantiation: each
         // concrete signature gets its own dispatcher, all calls direct.
         let src = "fn relay<T>(x: T) -> T {\n\
-             let f: fn(T) -> T = |v| v\n\
+             let f: fn(T) -> T = v -> v\n\
              return f(x) }\n\
              fn main() -> Int64 {\n\
              let n = relay(41)\n\
@@ -14463,7 +14463,7 @@ mod tests {
 
     #[test]
     fn module_state_of_fn_type_initializes_and_reassigns() {
-        let src = "let mut cur: fn(Int64) -> Int64 = |x| x + 1\n\
+        let src = "let mut cur: fn(Int64) -> Int64 = x -> x + 1\n\
              fn dbl(n: Int64) -> Int64 { return n * 2 }\n\
              fn main() -> Int64 { let before = cur(10)  cur = dbl\n\
              return before + cur(10) }";
@@ -14590,8 +14590,9 @@ mod tests {
         // consecutive lifts cannot answer each other's expectation. The two
         // signatures differ in PARAMETER, which is what the bodies are typed
         // from; RFC-0037 defers the fn-returning-fn shape outright.
-        let src = "fn main() -> Int64 {                    let a: fn(Int64) -> Int64 = |x| x + 1; \
-                   let b: fn(String) -> Int64 = |s| s.byteLength; \
+        let src =
+            "fn main() -> Int64 {                    let a: fn(Int64) -> Int64 = x -> x + 1; \
+                   let b: fn(String) -> Int64 = s -> s.byteLength; \
                    return a(1) + b(\"ab\") }";
         let ir = emit(&check(src).unwrap()).unwrap();
         // Two lifted lambdas, two signatures.
@@ -15403,7 +15404,7 @@ mod tests {
         // shallow release is what keeps that pointer from being freed twice —
         // and it is why `s` still leaks and `Gone::Captured` still says so.
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
-                   let s = a + b; let f: fn(Int64) -> Int64 = |x| x + s.byteLength; \
+                   let s = a + b; let f: fn(Int64) -> Int64 = x -> x + s.byteLength; \
                    return f(1); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert_eq!(
@@ -15621,7 +15622,7 @@ mod tests {
     const LMAP: &str = "fn lmap(s: Stream<Int64>, f: fn(Int64) -> Int64) -> Stream<Int64> { \
                         let a = boxStream(s) \
                         let g: fn(Int64) -> Int64 = f \
-                        let step: fn(Int64, Int64, Bool) -> Option<Int64> = |sl, gn, cl| { \
+                        let step: fn(Int64, Int64, Bool) -> Option<Int64> = (sl, gn, cl) -> { \
                         if cl { let src: Stream<Int64> = unboxStream(a) close(src) return None } \
                         let x: Option<Int64> = pullAt(a) \
                         if let Some(v) = x { return Some(g(v)) } return None } \
@@ -16551,7 +16552,7 @@ mod tests {
         // two-word case until RFC-0090 M4 deleted it, so this is the whole of
         // what `payload_boxed` still answers `false` for above one word.
         let src = "type Bump = fn(Int64) -> Int64
-                   fn main() -> Int64 { let n = 7 let f: Bump = |x| x + n
+                   fn main() -> Int64 { let n = 7 let f: Bump = x -> x + n
                    let o: Option<Bump> = Some(f)
                    return match o { Some(g) => g(1), None => 0 } }";
         let ir = emit(&check(src).unwrap()).unwrap();
@@ -16901,7 +16902,7 @@ mod tests {
         // values into bindings that outlive one) nothing pins the lambda's
         // lifetime to the region it was written in.
         let src = "fn main() -> Int64 { \
-                   region { let g: fn(Int64) -> String = |y| \"b\" + y.toString() \
+                   region { let g: fn(Int64) -> String = y -> \"b\" + y.toString() \
                    print(g(1)) } return 0 }";
         let ir = emit(&check(src).unwrap()).unwrap();
         let mut checked = 0;

@@ -555,13 +555,13 @@ mod tests {
         );
         // Lambda pipes tight inside, one space after the closing pipe.
         assert_eq!(
-            f("fn m()->Int64{let a=g(|x|x*2)  return 0}\n"),
-            "fn m() -> Int64 { let a = g(|x| x * 2) return 0 }\n"
+            f("fn m()->Int64{let a=g(x ->x*2)  return 0}\n"),
+            "fn m() -> Int64 { let a = g(x -> x * 2) return 0 }\n"
         );
         // Multi-parameter and zero-parameter forms.
         assert_eq!(
-            f("fn m()->Int64{let a=z(|x,y|x+y)  let b=n(||7)  return 0}\n"),
-            "fn m() -> Int64 { let a = z(|x, y| x + y) let b = n(|| 7) return 0 }\n"
+            f("fn m()->Int64{let a=z((x, y) ->x+y)  let b=n(||7)  return 0}\n"),
+            "fn m() -> Int64 { let a = z((x, y) -> x + y) let b = n(|| 7) return 0 }\n"
         );
     }
 

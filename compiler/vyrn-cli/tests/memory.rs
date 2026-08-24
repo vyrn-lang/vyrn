@@ -307,7 +307,7 @@ fn main() -> Int64 {
     let held = a + b
     let job = spawn score(2)
     let doubled = job.join()
-    let f: Sizer = |x| x + held.byteLength
+    let f: Sizer = x -> x + held.byteLength
     region {
         let arena = a + b
         print(arena)
@@ -1024,7 +1024,7 @@ export extern fn lambdaLoop() {{
     let mut i = 0
     while i < 32 {{
         let k = i
-        let f: Bump = |x| x + k
+        let f: Bump = x -> x + k
         seen = seen + f(i)
         i = i + 1
     }}

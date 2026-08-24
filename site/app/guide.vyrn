@@ -429,7 +429,7 @@ export fn chapters() -> Array<Chapter> {
             lede: "A function is a value. Lambdas capture by reading, and every call site is resolved while the program compiles.",
             sections: [
                 section("lambdas", "Lambdas and higher-order functions", [
-                        "A <code>fn</code>-typed parameter takes a lambda, written <code>|x| expr</code>, or a named function. <code>map</code>, <code>filter</code> and <code>fold</code> in <a href=\"/docs/std/arrays.html\">std/arrays</a> are ordinary generic functions with such a parameter.",
+                        "A <code>fn</code>-typed parameter takes a lambda, written <code>x -&gt; expr</code>, or a named function. Two or more parameters take brackets, <code>(a, b) -&gt; expr</code>, and none at all is <code>() -&gt; expr</code>. <code>map</code>, <code>filter</code> and <code>fold</code> in <a href=\"/docs/std/arrays.html\">std/arrays</a> are ordinary generic functions with such a parameter.",
                         "Every use is monomorphized, so no function value survives to run time in any backend.",
                     ], ["lambdas"]),
                 section("closures", "Stored functions", [

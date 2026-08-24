@@ -464,7 +464,7 @@ fn m2_project(tag: &str) -> PathBuf {
     let dir = project_using(
         tag,
         "http, Policy, Route, GET, POST",
-        "[\n        GET(stamped(\"/{id}\")).cacheFor(60).etag().lastModified(\"at\").notFoundWhen(|why| why == \"no such note\"),\n        \
+        "[\n        GET(stamped(\"/{id}\")).cacheFor(60).etag().lastModified(\"at\").notFoundWhen(why -> why == \"no such note\"),\n        \
          POST(stamped(\"/\")).createdAt(\"/notes/{id}\"),\n    ]",
     );
     write(&dir, "driver.vyrn", DRIVER);

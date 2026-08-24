@@ -2116,7 +2116,7 @@ pub(crate) mod tests {
     fn a_lambda_parameter_shadowing_a_string_is_not_a_string() {
         let src = "fn apply(f: fn(Int64) -> Int64, x: Int64) -> Int64 { return f(x); } \
                    fn main() -> Int64 { let s = \"x\"; print(s); \
-                   return apply(|s| { let t = s + 1; print(t); return t + 1; }, 2); }";
+                   return apply(s -> { let t = s + 1; print(t); return t + 1; }, 2); }";
         assert_eq!(drop_count(src, "main"), 0);
     }
 

@@ -4595,13 +4595,13 @@ fn main() -> Int64 {
                    }\n\
                    fn main() -> Int64 {\n\
                    \x20   let x = 1\n\
-                   \x20   return twice(|x| x + 1, x)\n\
+                   \x20   return twice(x -> x + 1, x)\n\
                    }";
         let a = analyze(src);
         // Line 6: the lambda body's `x` resolves to the lambda's own param
         // (line 6), not the outer `let x` (line 5).
         let l6 = src.lines().nth(5).unwrap();
-        let col = l6.find("|x| x").unwrap() + 4 + 1;
+        let col = l6.find("x -> x").unwrap() + 5 + 1;
         let r = resolve(&a, 6, col).expect("lambda body use resolves");
         assert_eq!(r.target_line, 6, "{}", r.hover);
     }

@@ -10,7 +10,7 @@ fn double(n: Int64) -> Int64 {
 }
 
 fn sum(xs: Array<Int64>) -> Int64 {
-    return fold(xs, 0, |acc, x| acc + x)
+    return fold(xs, 0, (acc, x) -> acc + x)
 }
 
 /// A function whose `fn`-typed parameter is forwarded (pass-through) to another
@@ -23,7 +23,7 @@ fn main() -> Int64 {
     let nums: Array<Int64> = [1, 2, 3, 4, 5]
 
     // A lambda literal passed to a generic higher-order function.
-    let doubled = map(nums, |x| x * 2)
+    let doubled = map(nums, x -> x * 2)
     print(sum(doubled)) // 30
 
     // A named function used as a function value — same monomorphization path.
@@ -32,20 +32,20 @@ fn main() -> Int64 {
 
     // A capture: `bump` is read from the enclosing scope (by value).
     let bump = 100
-    let bumped = map(nums, |x| x + bump)
+    let bumped = map(nums, x -> x + bump)
     print(sum(bumped)) // 515
 
     // filter + fold composed.
-    let evens = filter(nums, |x| x % 2 == 0)
+    let evens = filter(nums, x -> x % 2 == 0)
     print(sum(evens)) // 6
 
     // any / all predicates.
-    if any(nums, |x| x > 4) {
+    if any(nums, x -> x > 4) {
         print(1) // 1
     }
 
     // Pass-through: `mapThenSum` forwards its `fn` parameter to `map`.
-    print(mapThenSum(nums, |x| x * 10)) // 150
+    print(mapThenSum(nums, x -> x * 10)) // 150
 
     return 0
 }

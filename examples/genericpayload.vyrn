@@ -55,9 +55,9 @@ fn nested(p: Choice) -> Cargo {
 type Op = fn(Int64) -> Int64
 
 let ops: Array<Op> = [
-        |x| { return x + 1 },
-        |x| { return x * 2 },
-        |x| { return x - 3 },
+    x -> { return x + 1 },
+    x -> { return x * 2 },
+    x -> { return x - 3 },
 ]
 
 fn runOps(seed: Int64) -> Int64 {

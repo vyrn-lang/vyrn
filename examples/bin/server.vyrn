@@ -30,7 +30,7 @@ type Middleware = fn(Request) -> Option<Response>
 /// The chain, installed at module-state init. Request logging runs for every
 /// request and never answers.
 let mut middleware: Array<Middleware> = [
-        |req| {
+    req -> {
         logger("http").info("\{req.method} \{req.path}")
         return None
     },

@@ -5116,7 +5116,7 @@ mod tests {
                    fn make() -> T { return T { id: 1 }; } \
                    fn take(t: consume T) -> Int64 { return t.id; } \
                    fn main() -> Int64 { let s = make(); let n = take(s); \
-                                      let g = |x| { let s = 0; x + s }; \
+                                      let g = x -> { let s = 0; x + s }; \
                                       return g(n) + take(s); }";
         let e = run(src).unwrap_err();
         assert!(e.contains("already consumed"), "{e}");
@@ -5885,7 +5885,7 @@ mod tests {
     fn a_lambda_at_a_consume_parameter_escapes() {
         let e = run(
             "fn reg(f: consume fn(Int64) -> Int64) -> Int64 { return f(0) } \
-             fn go(q: read String) -> Int64 { return reg(|n| n + q.byteLength) } \
+             fn go(q: read String) -> Int64 { return reg(n -> n + q.byteLength) } \
              fn main() -> Int64 { return 0 }",
         )
         .unwrap_err();
@@ -5897,7 +5897,7 @@ mod tests {
         // releases nothing it gave up.
         assert!(run(
             "fn reg(f: consume fn(Int64) -> Int64) -> Int64 { return f(0) } \
-             fn go() -> Int64 { let s = \"a\" + \"b\" return reg(|n| n + s.byteLength) } \
+             fn go() -> Int64 { let s = \"a\" + \"b\" return reg(n -> n + s.byteLength) } \
              fn main() -> Int64 { return 0 }"
         )
         .is_ok());
@@ -5905,7 +5905,7 @@ mod tests {
         // non-escaping assumption, which is every `map`-style call.
         assert!(
             run("fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(0) } \
-             fn go(q: read String) -> Int64 { return apply(|n| n + q.byteLength) } \
+             fn go(q: read String) -> Int64 { return apply(n -> n + q.byteLength) } \
              fn main() -> Int64 { return 0 }")
             .is_ok()
         );
@@ -6081,11 +6081,11 @@ mod tests {
         // it, is a value and may not.
         assert!(
             run("fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(1) } \
-                     fn go(s: String) -> Int64 { return apply(|n| n + s.byteLength) } \
+                     fn go(s: String) -> Int64 { return apply(n -> n + s.byteLength) } \
                      fn main() -> Int64 { return 0 }")
             .is_ok()
         );
-        let src = "fn go(s: String) -> Int64 { let f = |n| n + s.byteLength return f(1) } \
+        let src = "fn go(s: String) -> Int64 { let f = n -> n + s.byteLength return f(1) } \
                    fn main() -> Int64 { return 0 }";
         let e = run(src).unwrap_err();
         assert!(
@@ -6397,7 +6397,7 @@ mod tests {
         ));
         assert!(moved(
             "fn main() -> Int64 { let n = 1 \
-             let run: fn(Int64, Int64, Bool) -> Option<Int64> = |a, b, c| { return Some(n) } \
+             let run: fn(Int64, Int64, Bool) -> Option<Int64> = (a, b, c) -> { return Some(n) } \
              let s = fromStep(0, 0, run) close(s) return 0 }"
         ));
 
@@ -6524,7 +6524,7 @@ mod tests {
         // The lambda's own parameter resolves in the lambda's frame; `s` does not.
         let src = "fn apply(f: fn(String) -> Int64, x: String) -> Int64 { return f(x) } \
                    fn main() -> Int64 { let s = \"a\" + \"b\" \
-                   return apply(|p| p.byteLength + s.byteLength, \"c\") }";
+                   return apply(p -> p.byteLength + s.byteLength, \"c\") }";
         assert_eq!(kinds(src, "capture"), vec!["String"]);
     }
 

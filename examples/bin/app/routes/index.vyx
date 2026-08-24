@@ -28,7 +28,7 @@ export fn head() -> Head {
 /// is what tells the generator to render-then-fill (RFC-0071 M2b) — nothing is
 /// read out of this body.
 export fn data() -> Lazy<Array<Paste>> {
-    return lazy(query(|| recent().pastes))
+    return lazy(query(() -> recent().pastes))
 }
 
 /// Whether the recent-pastes list is still loading (client soft nav only — the

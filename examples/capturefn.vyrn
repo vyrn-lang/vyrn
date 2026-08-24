@@ -18,7 +18,7 @@ fn negate(n: Int64) -> Int64 {
 
 /// Stored: the lambda becomes a value in a `fn`-typed slot (RFC-0037).
 fn applyAll(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Array<Int64> {
-    let g: fn(Int64) -> Int64 = |n| f(n) + 1
+    let g: fn(Int64) -> Int64 = n -> f(n) + 1
     let mut out: Array<Int64> = []
     let mut i = 0
     while i < xs.length {
@@ -32,7 +32,7 @@ fn applyAll(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Array<Int64> {
 /// zero-cost argument path), capturing a `fn` parameter and an ordinary local
 /// side by side — the capture list is mixed, not uniform.
 fn shiftAll(xs: Array<Int64>, f: fn(Int64) -> Int64, by: Int64) -> Array<Int64> {
-    return map(xs, |n| f(n) + by)
+    return map(xs, n -> f(n) + by)
 }
 
 /// Two DIFFERENT `fn` parameters captured by one lambda.
@@ -41,14 +41,14 @@ fn zipApply(
     f: fn(Int64) -> Int64,
     g: fn(Int64) -> Int64,
 ) -> Array<Int64> {
-    return map(xs, |n| f(n) + g(n))
+    return map(xs, n -> f(n) + g(n))
 }
 
 /// Onward: a lambda over a captured `fn` parameter handed to ANOTHER function's
 /// `fn` parameter rather than called here, so the capture threads through a
 /// second specialization that never learns there was an outer one.
 fn viaOnward(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Array<Int64> {
-    return applyAll(xs, |n| f(n) * 10)
+    return applyAll(xs, n -> f(n) * 10)
 }
 
 fn main() -> Int64 {

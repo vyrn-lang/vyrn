@@ -5698,7 +5698,7 @@ mod tests {
         // GLOBAL — in plain statements and inside lambda bodies alike.
         let lib = "let mut flag = 9 \
                    export fn flip() -> Int64 { let flag = 1 return flag } \
-                   export fn lam() -> Int64 { let g: fn(Int64) -> Int64 = |flag| flag + 1 return g(10) } \
+                   export fn lam() -> Int64 { let g: fn(Int64) -> Int64 = flag -> flag + 1 return g(10) } \
                    export fn peek() -> Int64 { return flag }";
         let root = "import { flip, lam, peek } from \"./lib\" \
                     let mut flag = 7 \

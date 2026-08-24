@@ -121,7 +121,7 @@ fn ranked(m: Map<String, Int64>) -> Array<Entry> {
         }
         i = i + 1
     }
-    return sortBy(es, |e| 0 - e.count)
+    return sortBy(es, e -> 0 - e.count)
 }
 
 /// One frequency table: every fragment of width `k` as a percentage of the

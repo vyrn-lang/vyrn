@@ -77,7 +77,7 @@ fn makeHandlers(cb: consume UserSink) -> Handlers {
 /// but only on the two engines that a test running `vyrn run` never reaches.
 fn wrapSink(n: Int64) -> IntSink {
     let sink: IntSink = double
-    return |m| sink(m + n)
+    return m -> sink(m + n)
 }
 
 type Deferred<P, T> = { run: fn(P) -> T }
@@ -110,7 +110,7 @@ fn greet(u: User) -> String {
 /// read parameter rather than a borrow of this frame's `tag`.
 fn onUserTagged(k: String, tag: User) {
     let t = tag.copy()
-    onUser(k, |u| print("\{t.name}#\{t.id} -> \{u.name}#\{u.id}"))
+    onUser(k, u -> print("\{t.name}#\{t.id} -> \{u.name}#\{u.id}"))
 }
 
 /// A named function stored as a value (the empty-payload variant).
@@ -164,17 +164,17 @@ fn showResult(r: Result<User, String>) {
 
 fn main() -> Int64 {
     // Scalar payload: a fn-param stored into a Map, no capture.
-    onInt("plain", |n| print("plain: \{n}"))
+    onInt("plain", n -> print("plain: \{n}"))
     fireInt("plain", 7) // plain: 7
     fireInt("missing", 0) // no int sink: missing
 
     // Scalar payload with a CAPTURE, stored through the param.
     let base = 100
-    onInt("shifted", |n| print("shifted: \{n + base}"))
+    onInt("shifted", n -> print("shifted: \{n + base}"))
     fireInt("shifted", 5) // shifted: 105
 
     // Record payload (non-scalar): the exact miscompile from the wall note.
-    onUser("save", |u| print("save: \{u.id}/\{u.name}"))
+    onUser("save", u -> print("save: \{u.id}/\{u.name}"))
     fireUser("save", User { id: 1, name: "ada" }) // save: 1/ada
 
     // Record capture stored through the param (non-scalar capture block).
@@ -194,7 +194,7 @@ fn main() -> Int64 {
     fireRes("fetch", Err("timeout")) // err: timeout
 
     // A fn-param stored into an ARRAY, then dispatched from the element binding.
-    pushInt(|n| print("chain-a: \{n}"))
+    pushInt(n -> print("chain-a: \{n}"))
     pushInt(double)
     let mut i = 0
     while i < intChain.length {
@@ -204,14 +204,14 @@ fn main() -> Int64 {
     }
 
     // A fn-param stored into a record FIELD, surviving scope exit.
-    let handlers = makeHandlers(|u| print("field: \{u.name}"))
+    let handlers = makeHandlers(u -> print("field: \{u.name}"))
     let save = handlers.onSave
     save(User { id: 5, name: "cy" }) // field: cy
 
     // Drop a LOCAL map of stored closures: an ordinary Map<String, fn> value,
     // its closures freed with it (drop/leak accounting inherited from the enum).
     let mut local: Map<String, IntSink> = [:]
-    local["a"] = |n| print("local: \{n}")
+    local["a"] = n -> print("local: \{n}")
     match local["a"] {
         Some(cb) => cb(3), // local: 3
         None => print("no local sink"),

@@ -9462,14 +9462,14 @@ mod tests {
     #[test]
     fn lambda_argument_runs() {
         let src =
-            format!("{TWICE}fn main() -> Int64 {{ return sum(twice([1, 2, 3], |x| x * 2)) }}");
+            format!("{TWICE}fn main() -> Int64 {{ return sum(twice([1, 2, 3], x -> x * 2)) }}");
         assert_eq!(run(&src).unwrap(), 12);
     }
 
     #[test]
     fn lambda_captures_by_read() {
         let src = format!(
-            "{TWICE}fn main() -> Int64 {{ let off = 10  return sum(twice([1, 2, 3], |x| x + off)) }}"
+            "{TWICE}fn main() -> Int64 {{ let off = 10  return sum(twice([1, 2, 3], x -> x + off)) }}"
         );
         assert_eq!(run(&src).unwrap(), 36);
     }
@@ -9487,8 +9487,8 @@ mod tests {
     fn passthrough_and_empty_array() {
         let src = format!(
             "{TWICE}fn outer(xs: Array<Int64>, g: fn(Int64) -> Int64) -> Array<Int64> {{ return twice(xs, g) }}\n\
-             fn main() -> Int64 {{ let e: Array<Int64> = []  let z = sum(outer(e, |x| x + 1))\n\
-             let bump = 5  return z + sum(outer([1, 2], |x| x + bump)) }}"
+             fn main() -> Int64 {{ let e: Array<Int64> = []  let z = sum(outer(e, x -> x + 1))\n\
+             let bump = 5  return z + sum(outer([1, 2], x -> x + bump)) }}"
         );
         // empty → 0; outer([1,2], +5) → [6,7] → 13.
         assert_eq!(run(&src).unwrap(), 13);
@@ -9500,7 +9500,7 @@ mod tests {
              let mut out: Array<U> = []  for x in xs { out.push(f(x)) }  return out }\n\
              fn main() -> Int64 {\n\
                  let ys: Array<Int64> = [1, 2, 3]\n\
-                 let zs = map(ys, |x| x * x)\n\
+                 let zs = map(ys, x -> x * x)\n\
                  let mut s = 0  for z in zs { s = s + z }  return s }";
         assert_eq!(run(src).unwrap(), 14);
     }
@@ -9509,7 +9509,7 @@ mod tests {
 
     #[test]
     fn stored_lambda_in_let_runs() {
-        let src = "fn main() -> Int64 { let g: fn(Int64) -> Int64 = |x| x * 2  return g(21) }";
+        let src = "fn main() -> Int64 { let g: fn(Int64) -> Int64 = x -> x * 2  return g(21) }";
         assert_eq!(run(src).unwrap(), 42);
     }
 
@@ -9517,7 +9517,7 @@ mod tests {
     fn stored_capture_survives_scope_exit() {
         // The capture is a by-value snapshot at the lambda's evaluation site —
         // it lives inside the value, so it survives the maker's return.
-        let src = "fn makeAdder(n: Int64) -> fn(Int64) -> Int64 { return |x| x + n }\n\
+        let src = "fn makeAdder(n: Int64) -> fn(Int64) -> Int64 { return x -> x + n }\n\
              fn main() -> Int64 { let add5 = makeAdder(5)  let add7 = makeAdder(7)\n\
              return add5(10) + add7(10) }";
         assert_eq!(run(src).unwrap(), 32);
@@ -9528,7 +9528,7 @@ mod tests {
         // Reassigning the captured binding after the literal is evaluated is
         // never observed (RFC-0023 capture timing, verbatim in storage).
         let src = "fn main() -> Int64 { let mut n = 1\n\
-             let f: fn() -> Int64 = || n\n\
+             let f: fn() -> Int64 = () -> n\n\
              n = 5\n\
              return f() }";
         assert_eq!(run(src).unwrap(), 1);
@@ -9539,14 +9539,14 @@ mod tests {
         let src = "type Ops = { plus: fn(Int64) -> Int64, minus: fn(Int64) -> Int64 }\n\
              fn main() -> Int64 {\n\
              let mut xs: Array<fn(Int64) -> Int64> = []\n\
-             xs.push(|x| x * 2)\n\
-             xs.push(|x| x + 100)\n\
+             xs.push(x -> x * 2)\n\
+             xs.push(x -> x + 100)\n\
              let mut s = 0\n\
              for f in xs { s = s + f(10) }\n\
-             let ops = Ops { plus: |x| x + 1, minus: |x| x - 1 }\n\
+             let ops = Ops { plus: x -> x + 1, minus: x -> x - 1 }\n\
              let p = ops.plus\n\
              let m = ops.minus\n\
-             let o: Option<fn(Int64) -> Int64> = Some(|x| x * x)\n\
+             let o: Option<fn(Int64) -> Int64> = Some(x -> x * x)\n\
              let q = match o { Some(f) => f(3), None => 0 }\n\
              return s + p(5) + m(5) + q }";
         // s = 20 + 110 = 130; p(5)=6; m(5)=4; q=9 → 149.
@@ -9559,7 +9559,7 @@ mod tests {
         // chain matches the RFC's surface: first Some(..) wins.
         let src = "type Middleware = fn(Int64) -> Option<Int64>\n\
              let mut chain: Array<Middleware> = []\n\
-             fn add(threshold: Int64) { chain.push(|x| if x > threshold { Some(x * 10) } else { None }) }\n\
+             fn add(threshold: Int64) { chain.push(x -> if x > threshold { Some(x * 10) } else { None }) }\n\
              fn runAll(x: Int64) -> Int64 {\n\
                  let mut hit = 0 - 1\n\
                  for m in chain {\n\
@@ -9587,7 +9587,7 @@ mod tests {
         // the (interp-dynamic / codegen-specialized) instance.
         let src = format!(
             "{TWICE}fn main() -> Int64 {{ let bump = 3\n\
-             let g: fn(Int64) -> Int64 = |x| x + bump\n\
+             let g: fn(Int64) -> Int64 = x -> x + bump\n\
              return sum(twice([1, 2, 3], g)) }}"
         );
         assert_eq!(run(&src).unwrap(), 15);
@@ -9597,7 +9597,7 @@ mod tests {
     fn stored_closure_reads_module_state_live() {
         // Module state is NOT captured — a read inside the body resolves live.
         let src = "let mut base: Int64 = 1\n\
-             fn main() -> Int64 { let f: fn() -> Int64 = || base\n\
+             fn main() -> Int64 { let f: fn() -> Int64 = () -> base\n\
              base = 41\n\
              return f() + 1 }";
         assert_eq!(run(src).unwrap(), 42);
@@ -9608,7 +9608,7 @@ mod tests {
         // A stored fn type mentioning `T` monomorphizes with the body: each
         // instantiation gets its own signature (and, in codegen, its own enum).
         let src = "fn relay<T>(x: T) -> T {\n\
-             let f: fn(T) -> T = |v| v\n\
+             let f: fn(T) -> T = v -> v\n\
              return f(x) }\n\
              fn main() -> Int64 {\n\
              let n = relay(41)\n\
@@ -9622,7 +9622,7 @@ mod tests {
     fn module_state_of_fn_type_with_init_order() {
         // A directly fn-typed module-state binding (RFC-0029 init order):
         // the initializer lambda is replaced at runtime; reads are live.
-        let src = "let mut cur: fn(Int64) -> Int64 = |x| x + 1\n\
+        let src = "let mut cur: fn(Int64) -> Int64 = x -> x + 1\n\
              fn dbl(n: Int64) -> Int64 { return n * 2 }\n\
              fn main() -> Int64 {\n\
              let before = cur(10)\n\
@@ -9639,7 +9639,7 @@ mod tests {
              let mut out: Array<U> = []  for x in xs { out.push(f(x)) }  return out }\n\
              fn main() -> Int64 {\n\
              let xs: Array<Int64> = [1, 2]\n\
-             let g: fn(Int64) -> Int64 = |x| x * 3\n\
+             let g: fn(Int64) -> Int64 = x -> x * 3\n\
              let ys = map(xs, g)\n\
              return ys[0] + ys[1] }";
         assert_eq!(run(src).unwrap(), 9);
@@ -9647,7 +9647,7 @@ mod tests {
 
     #[test]
     fn trap_inside_stored_closure_has_canonical_wording() {
-        let src = "fn main() -> Int64 { let f: fn(Int64) -> Int64 = |x| 10 / x\n\
+        let src = "fn main() -> Int64 { let f: fn(Int64) -> Int64 = x -> 10 / x\n\
              return f(0) }";
         let err = run(src).unwrap_err();
         assert!(err.contains("division by zero"), "{err}");
@@ -9657,7 +9657,7 @@ mod tests {
     fn stored_lambda_coerces_arguments_to_signature_types() {
         // The declared slot type supplies the parameter coercions: a UInt8
         // parameter wraps exactly as a named callee's would.
-        let src = "fn main() -> Int64 { let f: fn(UInt8) -> Int64 = |b| Int64(b + 200)\n\
+        let src = "fn main() -> Int64 { let f: fn(UInt8) -> Int64 = b -> Int64(b + 200)\n\
              return f(100) }";
         // 100 + 200 wraps at the UInt8 parameter's width: 300 & 0xFF = 44.
         assert_eq!(run(src).unwrap(), 44);
@@ -9769,7 +9769,7 @@ mod tests {
     const LMAP: &str = "fn lmap<T, U>(s: Stream<T>, f: fn(T) -> U) -> Stream<U> { \
                         let a = boxStream(s) \
                         let g: fn(T) -> U = f \
-                        let step: fn(Int64, Int64, Bool) -> Option<U> = |sl, gn, cl| { \
+                        let step: fn(Int64, Int64, Bool) -> Option<U> = (sl, gn, cl) -> { \
                         if cl { let src: Stream<T> = unboxStream(a) close(src) return None } \
                         let x: Option<T> = pullAt(a) \
                         if let Some(v) = x { return Some(g(v)) } return None } \

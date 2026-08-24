@@ -1116,6 +1116,14 @@ impl Parser {
         &self.tokens[self.pos].tok
     }
 
+    /// The token `n` places along, or the last one when that is past the end.
+    ///
+    /// The stream is `Eof`-terminated, so the clamp answers `Eof` rather than
+    /// panicking — which is what a lookahead running off the end wants.
+    fn tok_at(&self, n: usize) -> &Tok {
+        &self.tokens[n.min(self.tokens.len() - 1)].tok
+    }
+
     fn line(&self) -> usize {
         self.tokens[self.pos].line
     }
@@ -4448,14 +4456,45 @@ impl Parser {
     /// token). The parameters are untyped names; their types flow from the
     /// expected `fn(..)` type at the checker. A block body uses `return` like a
     /// function; an expression body is the returned value directly.
+    /// Whether an expression starts here with a lambda's parameters.
+    ///
+    /// Three shapes, and they are Java's: `x -> body`, `(x, y) -> body`, and
+    /// `() -> body`. The arrow is what decides, never the parameters — `(x)` on
+    /// its own is a parenthesised expression and stays one.
+    ///
+    /// The scan is bounded by the parameter list, not by the file. A list is
+    /// names and commas and nothing else, so anything else ends the scan at once
+    /// and the answer is no. That is what keeps a `(` in expression position
+    /// from costing a walk to the end of the token stream.
+    fn at_lambda(&self) -> bool {
+        match self.peek() {
+            Tok::Ident(_) => matches!(self.tok_at(self.pos + 1), Tok::Arrow),
+            Tok::LParen => {
+                let mut k = self.pos + 1;
+                if matches!(self.tok_at(k), Tok::RParen) {
+                    return matches!(self.tok_at(k + 1), Tok::Arrow);
+                }
+                loop {
+                    if !matches!(self.tok_at(k), Tok::Ident(_)) {
+                        return false;
+                    }
+                    k += 1;
+                    match self.tok_at(k) {
+                        Tok::Comma => k += 1,
+                        Tok::RParen => return matches!(self.tok_at(k + 1), Tok::Arrow),
+                        _ => return false,
+                    }
+                }
+            }
+            _ => false,
+        }
+    }
+
     fn lambda(&mut self, line: usize) -> Result<Expr, Diagnostic> {
         let mut params = Vec::new();
-        if *self.peek() == Tok::OrOr {
-            // `||` — an empty parameter list.
+        if *self.peek() == Tok::LParen {
             self.advance();
-        } else {
-            self.eat(&Tok::Pipe)?;
-            while *self.peek() != Tok::Pipe {
+            while *self.peek() != Tok::RParen {
                 params.push(self.expect_ident()?);
                 if *self.peek() == Tok::Comma {
                     self.advance();
@@ -4463,8 +4502,12 @@ impl Parser {
                     break;
                 }
             }
-            self.eat(&Tok::Pipe)?;
+            self.eat(&Tok::RParen)?;
+        } else {
+            // The unparenthesised single parameter, which is the common one.
+            params.push(self.expect_ident()?);
         }
+        self.eat(&Tok::Arrow)?;
         let body = if *self.peek() == Tok::LBrace {
             LambdaBody::Block(self.block()?)
         } else {
@@ -4482,11 +4525,29 @@ impl Parser {
     fn primary(&mut self) -> Result<Expr, Diagnostic> {
         let line = self.line();
         let col = self.col();
-        // A lambda literal (RFC-0023). A bare `|` in expression position opens
-        // one (there is no bitwise-or operator, so `|` never starts an ordinary
-        // expression); an `||` token is the zero-parameter form `|| expr`.
-        if matches!(self.peek(), Tok::Pipe | Tok::OrOr) {
+        // A lambda literal (RFC-0023, spelled Java's way since RFC-0110).
+        // `x -> body`, `(x, y) -> body`, `() -> body`.
+        if self.at_lambda() {
             return self.lambda(line);
+        }
+        // The old spelling, named rather than left to fail as `expected
+        // expression, found Pipe`. A `|` cannot start an expression — it is
+        // infix-only (RFC-0045) — so reaching one here means a lambda written
+        // the way this language used to write them.
+        if matches!(self.peek(), Tok::Pipe | Tok::OrOr) {
+            let empty = matches!(self.peek(), Tok::OrOr);
+            return Err(Diagnostic::error(
+                line,
+                col,
+                "parse",
+                if empty {
+                    "`|| ...` is not a lambda here; a lambda takes its parameters before an arrow\n  fix: `() -> ...`"
+                        .to_string()
+                } else {
+                    "`|x| ...` is not a lambda here; a lambda takes its parameters before an arrow\n  fix: `x -> ...`, or `(x, y) -> ...` for more than one"
+                        .to_string()
+                },
+            ));
         }
         match self.advance() {
             Tok::Int(v) => Ok(Expr::Int(v)),
@@ -6720,7 +6781,7 @@ mod tests {
     fn parses_expression_lambda() {
         let p = parse_src(
             "fn f(g: fn(Int64) -> Int64) -> Int64 { return 0 }\n\
-                           fn main() -> Int64 { let a = f(|x| x * 2)  return 0 }",
+                           fn main() -> Int64 { let a = f(x -> x * 2)  return 0 }",
         );
         match only_arg(&p) {
             Expr::Lambda { params, body, .. } => {
@@ -6735,7 +6796,7 @@ mod tests {
     fn parses_block_and_multiparam_and_niladic_lambda() {
         let p = parse_src(
             "fn f(g: fn(Int64, Int64) -> Int64) -> Int64 { return 0 }\n\
-                           fn main() -> Int64 { let a = f(|x, y| { return x + y })  return 0 }",
+                           fn main() -> Int64 { let a = f((x, y) -> { return x + y })  return 0 }",
         );
         match only_arg(&p) {
             Expr::Lambda { params, body, .. } => {
@@ -6744,10 +6805,10 @@ mod tests {
             }
             other => panic!("expected lambda, got {other:?}"),
         }
-        // `||` is the zero-parameter lambda.
+        // `()` is the empty parameter list.
         let q = parse_src(
             "fn f(g: fn() -> Int64) -> Int64 { return 0 }\n\
-                           fn main() -> Int64 { let a = f(|| 7)  return 0 }",
+                           fn main() -> Int64 { let a = f(() -> 7)  return 0 }",
         );
         match only_arg(&q) {
             Expr::Lambda { params, .. } => assert!(params.is_empty()),
@@ -6760,7 +6821,7 @@ mod tests {
         // `|x| a || b` — the body is the whole `a || b`, not just `a`.
         let p = parse_src(
             "fn f(g: fn(Bool) -> Bool) -> Int64 { return 0 }\n\
-                           fn main() -> Int64 { let a = f(|x| x || false)  return 0 }",
+                           fn main() -> Int64 { let a = f(x -> x || false)  return 0 }",
         );
         match only_arg(&p) {
             Expr::Lambda {

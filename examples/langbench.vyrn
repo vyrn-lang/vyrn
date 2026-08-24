@@ -213,7 +213,7 @@ bench "protocol dispatch, 10000 calls" {
 }
 
 bench "fn-value dispatch, 10000 calls" {
-    blackBox(callN(|x| x * 3 + 1, blackBox(10000)))
+    blackBox(callN(x -> x * 3 + 1, blackBox(10000)))
 }
 
 bench "json emit, 20 x 200-member object" {
@@ -250,7 +250,7 @@ fn main() -> Int64 {
     print(joinWith(ks, ","))
     print(split(joinWith(ks, ","), ",").length)
     print(weighN(Stone { grams: 41 }, 4))
-    print(callN(|x| x * 3 + 1, 4))
+    print(callN(x -> x * 3 + 1, 4))
     print(size(doc(4)))
     print(parseSize(parseJson(emit(doc(4)))))
     return 0
