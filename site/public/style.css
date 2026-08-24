@@ -1696,7 +1696,9 @@ pre.code::-webkit-scrollbar { display: none; }
 .minutecap { border-top: 0; padding-left: 0; padding-right: 0; margin-top: var(--s3); }
 
 .demo { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: var(--s4); align-items: start; }
-@media (max-width: 860px) { .demo { grid-template-columns: 1fr; } }
+/* `.demo` collapses at 900px, in the block further down that also drops the
+ * list's right rule. A second rule here at 860px was DEAD: every width it
+ * covered the 900px block covers too, and that block is later, so it won. */
 
 /* The steps are a list, not a table of boxes: the marked one opens and says
  * what the command does; the rest are the contents of the minute. */
