@@ -261,22 +261,55 @@ long long __vyrn_args_count(void) {
 }
 const char* __vyrn_args_get(long long i) { return __vyrn_argv[i + 1]; }
 
+/* One byte of standard input, or -1 at end. `getchar` is buffered by the C
+   library already, but it is still a call per byte and on some libraries a lock
+   per byte; reverse complement over a 40 MB sequence makes 40 million of them.
+   Reading blocks into our own buffer costs a compare and an index instead, and
+   it is the same shape the wasm runtime's `getbyte` uses, so the two engines
+   read standard input the same way rather than two ways.
+
+   `read` and not `fread`: asked for 4096 bytes from a PIPE, `fread` blocks
+   until it has all 4096 or the writer closes. A program that parks on
+   `readLine()` waiting for one line would then never wake — which is exactly
+   what `the_spawn_handles_go_back_natively` does, and it caught this. `read`
+   hands back whatever has arrived, which is also what the wasm side's `fd_read`
+   does.
+
+   `readLine` is the only reader of fd 0 a Vyrn program has -- `readFile` and
+   `readFileBytes` both take a path -- so nothing else can hold a position in
+   this stream. */
+static unsigned char __vyrn_in_buf[4096];
+static unsigned long long __vyrn_in_len = 0, __vyrn_in_pos = 0;
+static int __vyrn_in_byte(void) {
+    if (__vyrn_in_pos >= __vyrn_in_len) {
+#if defined(_WIN32)
+        int n = _read(0, __vyrn_in_buf, (unsigned)sizeof __vyrn_in_buf);
+#else
+        long n = (long)read(0, __vyrn_in_buf, sizeof __vyrn_in_buf);
+#endif
+        if (n <= 0) return -1;
+        __vyrn_in_len = (unsigned long long)n;
+        __vyrn_in_pos = 0;
+    }
+    return __vyrn_in_buf[__vyrn_in_pos++];
+}
+
 /* readLine: one line from stdin as a malloc'd, NUL-terminated buffer with its
    trailing \r?\n stripped; *outlen is its byte length. Returns NULL at EOF (no
    bytes) and also for a line containing an embedded NUL byte, which cannot live
    in a NUL-terminated Vyrn String (the parity-safe rule, RFC-0014). The codegen
    validates UTF-8 (via the shared DFA); an invalid line reads as None too. */
 char* __vyrn_read_line(unsigned long long* outlen) {
-    int c = getchar();
-    if (c == EOF) return 0;
+    int c = __vyrn_in_byte();
+    if (c < 0) return 0;
     unsigned long long cap = 64, len = 0;
     char* buf = vstr_new(0, cap);
     int had_nul = 0;
-    while (c != EOF && c != '\n') {
+    while (c >= 0 && c != '\n') {
         if (c == 0) had_nul = 1;
         if (len + 2 >= cap) { cap *= 2; buf = vstr_grow(buf, cap); }
         buf[len++] = (char)c;
-        c = getchar();
+        c = __vyrn_in_byte();
     }
     if (len > 0 && buf[len - 1] == '\r') len--;
     vstr_setlen(buf, len);
