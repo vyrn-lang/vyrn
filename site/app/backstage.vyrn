@@ -50,11 +50,6 @@ export fn rfcHref(n: Int64) -> String {
     return hrefOf(rfcPath(n))
 }
 
-/// The backstage's own front page.
-export fn backstageIndexPath() -> String {
-    return "/backstage"
-}
-
 /// The index, in the order `rfcs/README.md` lists it, which is reading order.
 export fn rfcIndex() -> Array<IndexRow> {
     let src = match readFile(rfcsDir() + "/README.md") {
@@ -99,7 +94,7 @@ fn indexRow(line: String) -> IndexRow {
 }
 
 /// The digits of `s` as a number, or 0.
-export fn rfcNumberOf(s: String) -> Int64 {
+fn rfcNumberOf(s: String) -> Int64 {
     let raw = bytes(s)
     if raw.length == 0 {
         return 0
@@ -124,31 +119,6 @@ export fn rfcPages() -> Array<Int64> {
     return out
 }
 
-/// Every number except one: what a record's own page links to.
-///
-/// A record names itself in its own first heading, and a link from a page to
-/// itself is a link that does nothing. Leaving the number out is the whole fix,
-/// and it keeps the renderer ignorant of which page it is rendering.
-export fn rfcPagesExcept(n: Int64) -> Array<Int64> {
-    let mut out: Array<Int64> = []
-    for row in rfcIndex() {
-        if row.number != n {
-            out.push(row.number)
-        }
-    }
-    return out
-}
-
-/// The row for `n`, or number 0 when the index does not carry it.
-export fn rfcRow(n: Int64) -> IndexRow {
-    for row in rfcIndex() {
-        if row.number == n {
-            return row.copy()
-        }
-    }
-    return IndexRow { number: 0, file: "", title: "", status: "" }
-}
-
 /// One record's markdown, or the reason it could not be read. A record the index
 /// names and the directory does not hold fails the export rather than publishing
 /// an empty page.
@@ -156,51 +126,10 @@ export fn rfcBody(row: IndexRow) -> Result<String, String> {
     return readFile(rfcsDir() + "/" + row.file)
 }
 
-/// The record's own file, on GitHub. The site renders the record; it does not
-/// host the repository.
-export fn rfcSource(row: IndexRow) -> String {
-    return "https://github.com/vyrn-lang/vyrn/blob/main/rfcs/" + row.file
-}
-
-/// The head every backstage page shares. The consumer layout supplies the
-/// stylesheet for consumer pages; these pages wear no consumer layout, so they
-/// name it themselves.
-export fn backstageHead(title: String) -> Head {
-    let titled = withTitle(noHead(), title)
-    let sized = withMeta(titled, "viewport", "width=device-width, initial-scale=1")
-    let described = withMeta(sized, "description", "The Vyrn design record: every decision in the language, with the argument that produced it.")
-    // The one script this section loads, and it loads it for the same reason the
-    // consumer layout does: the theme control is a control, and a control needs
-    // its listener. The COLOUR does not come from here — `withThemeBoot` in
-    // `site/export.vyrn` writes it inline in the head of every page on both
-    // fronts, before the first paint and with no request (B3 defect 5). So this
-    // is a module, deferred, like the consumer layout's own.
-    return withModule(withStylesheet(described, "/style.css"), "/theme.js")
-}
-
-/// What goes inside the backstage masthead, marked for the page it is on.
-///
-/// The ELEMENT is in each page's template, because it is a grid item of the
-/// sheet and a wrapper around it would take its place there. What it holds is
-/// written once here: two pages, one navigation.
-export fn backstageNav(current: String) -> String {
-    return "<a href=\"" + hrefOf("/") + "\" class=\"wordmark\" data-nav=\"hard\">vyrn</a><span class=\"pill\">backstage</span><nav class=\"nav\" aria-label=\"Backstage\">" + navLink(hrefOf(backstageIndexPath()), "The record", current == "record") + "</nav>" + themeControl()
-}
-
 /// One backstage navigation link, marked when it is the page being read.
 fn navLink(href: String, label: String, here: Bool) -> String {
     let mark = if here { " aria-current=\"page\"" } else { "" }
     return "<a href=\"" + href + "\"" + mark + ">" + label + "</a>"
-}
-
-/// What goes inside the backstage footer, whose one job is the way back.
-///
-/// `data-nav="hard"` on the way home: the consumer pages carry the soft
-/// navigator, which swaps `<main>` and keeps the masthead it was loaded with. A
-/// soft navigation between the two fronts would leave the reader under the wrong
-/// masthead, which is the one thing this section exists to prevent.
-export fn backstageFooter() -> String {
-    return "<span>The design record. Every decision, with the argument that produced it.</span><a href=\"" + hrefOf("/") + "\" data-nav=\"hard\">Back to the site</a><a href=\"https://github.com/vyrn-lang/vyrn/tree/main/rfcs\">The record in the repository</a>"
 }
 
 test "the index is read from the record, and every row is a record" {
