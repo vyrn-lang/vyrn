@@ -611,6 +611,16 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
             b.ins(&Instruction::Call(init_index));
         }
         b.ins(&Instruction::Call(main));
+        // Whatever `print` left in the standard output buffer, on the way out.
+        // A zero-length write to a descriptor that is not fd 1 flushes and
+        // writes nothing, which is exactly the two things needed here — and it
+        // is why both trap paths need no flush of their own: they write their
+        // message to fd 2 first.
+        b.ins(&Instruction::I32Const(2))
+            .ins(&Instruction::I32Const(0))
+            .ins(&Instruction::I32Const(0))
+            .ins(&Instruction::Call(cx.rt.write_all))
+            .ins(&Instruction::Drop);
         if let Some((at, ..)) = log_open {
             b.ins(&Instruction::I32Const(at as i32))
                 .ins(&Instruction::I32Load(word()))
@@ -12883,6 +12893,13 @@ struct Rt {
     stdin_buf: u32,
     stdin_len: u32,
     stdin_pos: u32,
+    /// The standard output write-behind buffer, and how much of it is filled.
+    /// [`STDIN_BUF`] bytes again. `write_all` is the one place bytes leave this
+    /// module, so it is the one place they can be gathered: one `fd_write` per
+    /// printed line is one syscall per printed line, and fasta prints five
+    /// million of them.
+    stdout_buf: u32,
+    stdout_pos: u32,
 }
 
 /// How much standard input one `fd_read` asks for.
@@ -13005,6 +13022,8 @@ impl Rt {
             stdin_buf: 0,
             stdin_len: 0,
             stdin_pos: 0,
+            stdout_buf: 0,
+            stdout_pos: 0,
         };
         rt.count = table.len() as u32;
         (rt, table)
@@ -13172,6 +13191,8 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     rt.stdin_buf = m.reserve(STDIN_BUF, 4);
     rt.stdin_len = m.reserve(4, 4);
     rt.stdin_pos = m.reserve(4, 4);
+    rt.stdout_buf = m.reserve(STDIN_BUF, 4);
+    rt.stdout_pos = m.reserve(4, 4);
 
     // write_all(fd, ptr, len) -> status — the ONE place bytes leave this module.
     // Zero when every byte arrived, non-zero when the loop gave up.
@@ -13189,54 +13210,147 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     // native shim has checked `wrote != n` since it was written
     // (`__vyrn_write_file`, `toolchain.rs`). Every caller that only prints drops
     // it, exactly as they drop `fd_close`'s errno.
-    let (nw, st) = (4, 5);
+    //
+    // Standard output is GATHERED here, the mirror of standard input being
+    // scattered in `getbyte`: one `fd_write` per printed line is one syscall per
+    // printed line, and fasta prints five million of them. A write to fd 1 that
+    // fits is copied into the buffer and nothing leaves. Anything else -- a
+    // different descriptor, a write too long to buffer, a buffer with no room --
+    // flushes what is waiting FIRST, so order holds against standard error and
+    // against a file. Both trap paths write to fd 2 before they exit, which
+    // flushes on the way out; the ordinary exit flushes in `_start`.
+    let (nw, st, sfd, sptr, slen, buffered) = (4, 5, 6, 7, 8, 9);
+    let (obuf, opos) = (rt.stdout_buf, rt.stdout_pos);
+    // The retry loop, emitted twice: once over the pending buffer and once over
+    // the bytes the caller brought. A helper would need an index in the runtime
+    // table and a call, for twenty instructions.
+    let drain = |b: &mut Frame| {
+        b.ins(&Instruction::Block(BlockType::Empty))
+            .ins(&Instruction::Loop(BlockType::Empty));
+        // Nothing left to write: `st` is still the zero a local starts at.
+        b.ins(&Instruction::LocalGet(2))
+            .ins(&Instruction::I32Eqz)
+            .ins(&Instruction::BrIf(1));
+        b.slot(0)
+            .ins(&Instruction::LocalGet(1))
+            .ins(&Instruction::I32Store(word()));
+        b.slot(4)
+            .ins(&Instruction::LocalGet(2))
+            .ins(&Instruction::I32Store(word()));
+        b.ins(&Instruction::LocalGet(0));
+        b.slot(0);
+        b.ins(&Instruction::I32Const(1));
+        b.slot(8);
+        // A non-zero errno, or a zero-length write, would spin forever.
+        b.ins(&Instruction::Call(fd_write))
+            .ins(&Instruction::LocalTee(st))
+            .ins(&Instruction::BrIf(1));
+        b.slot(8)
+            .ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::LocalTee(nw))
+            .ins(&Instruction::I32Eqz)
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::I32Const(1))
+            .ins(&Instruction::LocalSet(st))
+            .ins(&Instruction::Br(2))
+            .ins(&Instruction::End);
+        b.ins(&Instruction::LocalGet(1))
+            .ins(&Instruction::LocalGet(nw))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::LocalSet(1));
+        b.ins(&Instruction::LocalGet(2))
+            .ins(&Instruction::LocalGet(nw))
+            .ins(&Instruction::I32Sub)
+            .ins(&Instruction::LocalSet(2));
+        b.ins(&Instruction::Br(0))
+            .ins(&Instruction::End)
+            .ins(&Instruction::End);
+    };
     rt.next_is(m, rt.write_all);
     m.func(
         &[ValType::I32, ValType::I32, ValType::I32],
         &[ValType::I32],
-        &[ValType::I32, ValType::I32],
+        &[
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+        ],
         12,
         |b| {
-            b.ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::Loop(BlockType::Empty));
-            // Nothing left to write: `st` is still the zero a local starts at.
-            b.ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::BrIf(1));
-            b.slot(0)
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Store(word()));
-            b.slot(4)
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I32Store(word()));
-            b.ins(&Instruction::LocalGet(0));
-            b.slot(0);
-            b.ins(&Instruction::I32Const(1));
-            b.slot(8);
-            // A non-zero errno, or a zero-length write, would spin forever.
-            b.ins(&Instruction::Call(fd_write))
-                .ins(&Instruction::LocalTee(st))
-                .ins(&Instruction::BrIf(1));
-            b.slot(8)
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalTee(nw))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::LocalSet(st))
-                .ins(&Instruction::Br(2))
-                .ins(&Instruction::End);
+            // `drain` rewrites locals 0..2, so the request is kept whole first.
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::LocalSet(sfd));
             b.ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(nw))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(1));
+                .ins(&Instruction::LocalSet(sptr));
             b.ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::LocalGet(nw))
-                .ins(&Instruction::I32Sub)
+                .ins(&Instruction::LocalSet(slen));
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Eq)
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::I32Const(STDIN_BUF as i32))
+                .ins(&Instruction::I32LtU)
+                .ins(&Instruction::I32And)
+                .ins(&Instruction::LocalSet(buffered));
+            // Flush when bytes are waiting AND this write cannot join them.
+            b.ins(&Instruction::I32Const(opos as i32))
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::I32Eqz);
+            b.ins(&Instruction::LocalGet(buffered))
+                .ins(&Instruction::I32Eqz);
+            b.ins(&Instruction::I32Const(opos as i32))
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::LocalGet(slen))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(STDIN_BUF as i32))
+                .ins(&Instruction::I32GtU)
+                .ins(&Instruction::I32Or)
+                .ins(&Instruction::I32And)
+                .ins(&Instruction::If(BlockType::Empty));
+            b.ins(&Instruction::I32Const(1))
+                .ins(&Instruction::LocalSet(0));
+            b.ins(&Instruction::I32Const(obuf as i32))
+                .ins(&Instruction::LocalSet(1));
+            b.ins(&Instruction::I32Const(opos as i32))
+                .ins(&Instruction::I32Load(word()))
                 .ins(&Instruction::LocalSet(2));
-            b.ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
+            b.ins(&Instruction::I32Const(opos as i32))
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32Store(word()));
+            drain(b);
+            b.ins(&Instruction::End);
+            // Either copy the bytes in, or write them through.
+            b.ins(&Instruction::LocalGet(buffered))
+                .ins(&Instruction::If(BlockType::Empty));
+            b.ins(&Instruction::I32Const(obuf as i32))
+                .ins(&Instruction::I32Const(opos as i32))
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalGet(sptr))
+                .ins(&Instruction::LocalGet(slen))
+                .ins(&Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
+            b.ins(&Instruction::I32Const(opos as i32))
+                .ins(&Instruction::I32Const(opos as i32))
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::LocalGet(slen))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Store(word()));
+            b.ins(&Instruction::Else);
+            b.ins(&Instruction::LocalGet(sfd))
+                .ins(&Instruction::LocalSet(0));
+            b.ins(&Instruction::LocalGet(sptr))
+                .ins(&Instruction::LocalSet(1));
+            b.ins(&Instruction::LocalGet(slen))
+                .ins(&Instruction::LocalSet(2));
+            drain(b);
+            b.ins(&Instruction::End);
             b.ins(&Instruction::LocalGet(st));
         },
     );
