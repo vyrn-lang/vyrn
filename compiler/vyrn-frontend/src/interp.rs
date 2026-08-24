@@ -167,8 +167,82 @@ impl std::hash::BuildHasher for FxBuild {
     }
 }
 
-/// The interpreter's scope frame: identifiers to slots, hashed cheaply.
-type Frame = HashMap<String, Slot, FxBuild>;
+/// The interpreter's scope frame: identifiers to slots.
+///
+/// A `Vec` and a linear scan, not a hash map, and the measurement is the reason.
+/// Counted over `vyrn test site/export.vyrn`, which is the longest step in CI:
+///
+/// ```text
+/// frame probes by frame size, total 652,922,153
+///   size 0:  15,320,274   ( 2.3% cumulative)
+///   size 1: 138,229,088   (23.5%)
+///   size 2:  16,685,143   (26.1%)
+///   size 3: 477,409,293   (99.2%)
+///   size 4+: everything else
+/// ```
+///
+/// 99.2 per cent of probes are into a frame holding three bindings or fewer, and
+/// three quarters into one holding exactly three. Hashing a name to pick a
+/// bucket costs more than comparing three names, and three pairs sit in about
+/// one cache line. The comparison starts with the length, which `str`'s own `==`
+/// does, so names of different lengths cost a load and a compare.
+///
+/// `insert` REPLACES, exactly as the map did: a second `let` of the same name in
+/// one block rebinds rather than shadows, and both compiled backends agree.
+/// Because there are no duplicates, the scan direction cannot change an answer;
+/// it runs backwards because the name just bound is the one most likely read.
+#[derive(Clone, Default)]
+struct Frame {
+    slots: Vec<(String, Slot)>,
+}
+
+impl Frame {
+    fn get(&self, k: &str) -> Option<&Slot> {
+        self.slots
+            .iter()
+            .rev()
+            .find(|(n, _)| n == k)
+            .map(|(_, s)| s)
+    }
+
+    fn get_mut(&mut self, k: &str) -> Option<&mut Slot> {
+        self.slots
+            .iter_mut()
+            .rev()
+            .find(|(n, _)| n == k)
+            .map(|(_, s)| s)
+    }
+
+    fn insert(&mut self, k: String, v: Slot) {
+        if let Some(cur) = self.get_mut(&k) {
+            *cur = v;
+            return;
+        }
+        self.slots.push((k, v));
+    }
+
+    fn len(&self) -> usize {
+        self.slots.len()
+    }
+}
+
+impl FromIterator<(String, Slot)> for Frame {
+    fn from_iter<I: IntoIterator<Item = (String, Slot)>>(it: I) -> Self {
+        let mut f = Frame::default();
+        for (k, v) in it {
+            f.insert(k, v);
+        }
+        f
+    }
+}
+
+impl<'a> IntoIterator for &'a Frame {
+    type Item = &'a (String, Slot);
+    type IntoIter = std::slice::Iter<'a, (String, Slot)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.slots.iter()
+    }
+}
 use std::io::Write as _;
 
 use crate::ast::*;
