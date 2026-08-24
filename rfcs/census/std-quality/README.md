@@ -290,3 +290,29 @@ and `build`. Whatever triggers this needs more of `std/von` than its shape.
 
 Recorded so the next attempt does not repeat the same guess. Still not
 diagnosed.
+
+### Correction: the map primitive already exists
+
+Pattern 4 says "Without a map primitive, every 'is this key present' question
+becomes an O(n) scan", and its conclusion is that "a single sorted-map or
+hash-map type in std would remove the quadratic term from all eleven".
+
+**Vyrn has had `Map<String, V>` since RFC-0028.** It is a language type, not a
+library one: `let m: Map<String, Int64> = ["a": 1, "b": 2]` is in
+`examples/branchtypes.vyrn:40`, and `std/contract` names the type throughout.
+
+Its lookup is keyed, not scanned. `MapVal` at
+`compiler/vyrn-frontend/src/interp.rs:417` holds ordered `pairs` beside an
+`idx: HashMap<String, usize>`, and `get` is `self.idx.get(k).map(..)`. The `Vec`
+exists to keep iteration order deterministic for the parity gate; the `HashMap`
+answers the question.
+
+So the eleven modules do not scan because the language gives them nothing
+better. They scan for their own reasons — age, or a key that is not a String, or
+a loop that grew a second purpose. **Each of the eleven has to be read on its own
+terms**, and the fix is eleven local changes rather than one new type.
+
+This matters because the two conclusions cost differently. "Add a map to std"
+is language work and would have been started on a false premise. "Use the map
+that is already there" is a refactor per module, each one measurable on its own,
+and none of it blocks on a design decision.
