@@ -82,7 +82,7 @@ fn buildLabel(d: Package) -> String {
                 <div class="scroller">
                 <table>
                     <thead>
-                        <tr><th>Artifact</th><th>Entry</th><th>Target</th></tr>
+                        <tr><th scope="col">Artifact</th><th scope="col">Entry</th><th scope="col">Target</th></tr>
                     </thead>
                     <tbody>
                         <tr v-for="a in artifactsOf(data.slug)" :key="a.name">

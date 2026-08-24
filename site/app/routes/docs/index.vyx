@@ -173,7 +173,7 @@ fn commands() -> Array<Command> {
             <div class="scroller">
             <table>
                 <thead>
-                    <tr><th>Command</th><th>What it does</th></tr>
+                    <tr><th scope="col">Command</th><th scope="col">What it does</th></tr>
                 </thead>
                 <tbody>
                     <tr v-for="c in commands()" :key="c.name">

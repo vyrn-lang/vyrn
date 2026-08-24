@@ -125,9 +125,9 @@ fn barStyle(pct: String) -> String {
         <table class="matrix bench">
             <thead>
                 <tr>
-                    <th>Program</th>
-                    <th>N</th>
-                    <th v-for="s in contestants()" :key="s.key"><span :class="s.tone">{{ s.name }}</span></th>
+                    <th scope="col">Program</th>
+                    <th scope="col">N</th>
+                    <th scope="col" v-for="s in contestants()" :key="s.key"><span :class="s.tone">{{ s.name }}</span></th>
                 </tr>
             </thead>
             <tbody>
@@ -157,7 +157,9 @@ fn barStyle(pct: String) -> String {
         </ul>
         <div class="scroller">
             <table class="matrix">
-                <tr v-for="r in envRows()" :key="r[0]"><th scope="row">{{ r[0] }}</th><td>{{ r[1] }}</td></tr>
+                <tbody>
+                    <tr v-for="r in envRows()" :key="r[0]"><th scope="row">{{ r[0] }}</th><td>{{ r[1] }}</td></tr>
+                </tbody>
             </table>
         </div>
     </section>

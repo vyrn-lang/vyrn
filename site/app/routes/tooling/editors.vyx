@@ -99,7 +99,7 @@ fn pager() -> Pager {
         <div class="scroller">
         <table>
             <thead>
-                <tr><th>Feature</th><th>What you get</th><th>Implemented by</th></tr>
+                <tr><th scope="col">Feature</th><th scope="col">What you get</th><th scope="col">Implemented by</th></tr>
             </thead>
             <tbody>
                 <tr v-for="f in features()" :key="f.name" :data-impl="f.path">

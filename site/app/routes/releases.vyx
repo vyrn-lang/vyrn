@@ -151,7 +151,7 @@ fn kindOf(tag: String) -> String {
             <p class="eyebrow">Every release</p>
             <div class="scroller">
                 <table>
-                    <thead><tr><th>Version</th><th>Tagged</th><th>Kind</th><th>Archives</th></tr></thead>
+                    <thead><tr><th scope="col">Version</th><th scope="col">Tagged</th><th scope="col">Kind</th><th scope="col">Archives</th></tr></thead>
                     <tbody>
                         <tr v-for="r in releasesNewestFirst()" :key="r.tag">
                             <td><code>{{ r.tag }}</code></td>
