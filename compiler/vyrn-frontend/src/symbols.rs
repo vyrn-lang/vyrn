@@ -3747,6 +3747,13 @@ struct BuiltinMethod {
 static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod { name: "push", detail: "array.push(value) -> Array<T> — append to a growable array; a statement writes the result back through the receiver" },
     BuiltinMethod { name: "at", detail: "array.at(index) -> T — read an element by index; `array[index]` is the same call" },
+    // RFC-0083's four vector methods. They were in `parser::METHOD_BUILTINS`
+    // and not here, so `v.` offered no completion for them and hovering one
+    // said nothing — the only four method builtins with that gap.
+    BuiltinMethod { name: "lane", detail: "vector.lane(k) -> T — read lane `k` of an `F32x4`, `I32x4`, `F64x2` or mask; `k` is a compile-time constant inside the width" },
+    BuiltinMethod { name: "replaceLane", detail: "vector.replaceLane(k, x) -> Vector — the same vector with lane `k` set to `x`; `k` is a compile-time constant inside the width" },
+    BuiltinMethod { name: "anyTrue", detail: "mask.anyTrue() -> Bool — whether any lane of a comparison mask is set" },
+    BuiltinMethod { name: "allTrue", detail: "mask.allTrue() -> Bool — whether every lane of a comparison mask is set" },
     // RFC-0075. `close` is offered on a `Stream<T>` below; `fromArray` is here
     // for hover only, since it takes an Array and produces the stream.
     BuiltinMethod { name: "fromArray", detail: "fromArray(array) -> Stream<T> — move an array's elements into a linear stream" },
@@ -3873,6 +3880,45 @@ fn builtin_methods_of_shape(ty: &Type) -> Vec<BuiltinMethod> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every method the parser accepts after a dot is a method the editor knows.
+    ///
+    /// `ALL_BUILTIN_METHODS` is a second copy of a list `parser::METHOD_BUILTINS`
+    /// already holds, and it drifted: `lane`, `replaceLane`, `anyTrue` and
+    /// `allTrue` were method builtins with no completion and no hover — the
+    /// language accepted `v.lane(0)` and the editor said nothing about it.
+    ///
+    /// One direction only. This table is deliberately WIDER: it also carries
+    /// free functions that are offered for hover alone — `fromArray` takes an
+    /// array and answers a stream, and the logging verbs are not method calls —
+    /// so a name here that the parser does not route is not a fault.
+    #[test]
+    fn every_method_builtin_the_parser_routes_has_an_entry() {
+        let missing: Vec<&str> = crate::parser::METHOD_BUILTINS
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| !ALL_BUILTIN_METHODS.iter().any(|b| b.name == *name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "method builtins with no hover or completion: {}",
+            missing.join(", ")
+        );
+    }
+
+    /// And every entry says something. A row with an empty detail hovers blank,
+    /// which reads as a broken editor rather than as a missing row.
+    #[test]
+    fn every_builtin_method_entry_describes_itself() {
+        for b in ALL_BUILTIN_METHODS {
+            assert!(
+                b.detail.contains("—") && b.detail.len() > 20,
+                "`{}` has no readable detail: {:?}",
+                b.name,
+                b.detail
+            );
+        }
+    }
 
     /// RFC-0042: a sequence (`Tw`) validated string type's alphabet is enumerated
     /// into `sequence_string_types`; `class_completions` offers it at a `cls("…")`
