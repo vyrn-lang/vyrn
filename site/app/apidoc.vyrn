@@ -341,8 +341,24 @@ gen fn proseHtml(doc: String) -> String {
     let mut rows: Array<String> = []
     let mut fenced = false
     let mut margin = 0
-    for line in split(doc, "\n") {
+    let ls = split(doc, "\n")
+    let mut i = 0
+    while i < ls.length {
+        let line = ls[i]
         let flat = trim(line)
+        // A banner: a run of `=`, the title under it, a run of `=` again. It is
+        // how `std/` names a section of a doc comment, and it used to reach the
+        // published page as a paragraph of equals signs with the title inside.
+        // The title is the heading; the rules on either side are decoration and
+        // are dropped.
+        if !fenced && isBanner(flat) && i + 2 < ls.length && trim(ls[i + 1]).byteLength > 0 && isBanner(trim(ls[i + 2])) {
+            out = out + blockHtml(kind, rows)
+            rows = []
+            kind = ""
+            out = out + "<h3>" + inlineHtml(trim(ls[i + 1])) + "</h3>"
+            i = i + 3
+            continue
+        }
         if startsWith(flat, "```") {
             if fenced {
                 out = out + blockHtml("code", rows)
@@ -386,8 +402,23 @@ gen fn proseHtml(doc: String) -> String {
             kind = "para"
             rows.push(flat.copy())
         }
+        i = i + 1
     }
     return out + blockHtml(kind, rows)
+}
+
+/// Whether `t` is one of the `===` rules a `std/` doc comment draws a section
+/// banner with: nothing on the line but at least three equals signs.
+fn isBanner(t: String) -> Bool {
+    if t.byteLength < 3 {
+        return false
+    }
+    for b in bytes(t) {
+        if b != '=' {
+            return false
+        }
+    }
+    return true
 }
 
 /// The one-line summary for the module list: the first sentence of the header
