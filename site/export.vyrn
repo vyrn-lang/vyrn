@@ -1688,7 +1688,12 @@ test "every page says what it is to a crawler, and no two pages say the same" {
     assert(has(leaf, "<meta property=\"og:title\" content=\"std/json\">"))
     assert(has(leaf, "<meta property=\"og:type\" content=\"article\">"))
     assert(has(leaf, "<meta property=\"article:section\" content=\"Reference\">"))
-    assert(has(leaf, "<meta name=\"description\" content=\"std/json (RFC-0059) —"))
+    // WITHOUT THE CITATION. `std/json`'s own first line reads "std/json
+    // (RFC-0059) — the shared JSON value tree…" and the published card drops the
+    // bracket: a reader cannot follow a design-record number, and the pages that
+    // once served them retired. The source keeps it, and so does `docs/api/`.
+    assert(has(leaf, "<meta name=\"description\" content=\"std/json — the shared JSON"))
+    assert(has(publishedDocument(hrefDocsStd("json")), "RFC-0059") == false)
 }
 
 test "a title fits a search result, and the site name is only in the tab" {
