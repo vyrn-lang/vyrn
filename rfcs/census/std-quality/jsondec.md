@@ -47,3 +47,29 @@ Smallest fix: build the path lazily, only when an issue is actually pushed at th
 ## No finding
 
 No finding: 1, 3, 4, 5, 6, 7, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 25, 26, 27, 28, 29, 30.
+
+---
+
+## Correction, made on verification
+
+The HIGH finding names `fieldAt` as half of a double-copy and cites
+`std/icons.vyrn:729` as the caller paying it. Half of that holds.
+
+**`hasField` and `fieldAt` have no callers.** Not in `std/`, `site/`,
+`examples/`, or the strings any generator emits. They are exported API that
+nothing in this repository uses, so the O(F²) has-then-get pattern the finding
+describes is not being paid by anyone here.
+
+**The copying accessor half is real.** `std/icons.vyrn:729` reaches jsondec
+through `fieldsOf`, which is its only import from the module
+(`std/icons.vyrn:95`), and iterates the fields comparing `f.key` by hand. The
+subtree copy that `fieldsOf` makes is paid, once, for the whole icon document.
+
+So the severity stands on `fieldsOf` alone, and the fix the finding proposes
+should be aimed there. `hasField` and `fieldAt` are a separate question: dead
+exported surface carrying a documented quadratic hazard. Deleting them is a
+public API change and is left to the repository owner.
+
+The general point for the next census: naming a caller is the right discipline,
+and this finding named one. It named a caller of the module rather than a caller
+of the function, and those came apart here.
