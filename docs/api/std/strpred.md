@@ -51,13 +51,25 @@ non-boundary offset in the haystack holds a continuation byte — so a valid
 needle cannot match at a non-boundary offset. The case that looks dangerous is
 unreachable rather than handled.
 
-One measurement worth keeping, since it decided whether the routing was safe to
-take: `byteLengthV` is `bytes(s).length`, which ALLOCATES, and `std/vyx` calls
-these predicates 97 times over a page. Timed with the generator cache off, the
-biggest generator app in the repo went 933 ms -> 951 ms and `examples/vyxdemo`
-went 79 ms -> 76 ms. So the allocation does not matter at these needle sizes and
-the module was left exactly as the equivalence proof wrote it, rather than
-rebuilt on `s.byteLength` for a speed nothing needed.
+**The predicates take their lengths from the `byteLength` FIELD, not from
+`byteLengthV`.** `byteLengthV(s)` is `bytes(s).length`, which allocates a copy
+of the whole string to read a number; `s.byteLength` is `strlen` and folds at
+compile time. Measured per call on a 47-byte haystack: 72.5 ns through the
+allocating form against 4.5 ns through the field, about 16 times.
+
+This paragraph used to say the opposite, and the reason it was wrong is worth
+keeping. It justified the allocation with "`std/vyx` calls these predicates 97
+times over a page", while the comment on `contains` below says vyx asks it
+about tag and attribute names MILLIONS of times. Both sentences were in this
+file. The second is the true one — the first counted something else — and a
+per-call cost of 16 times over millions of calls is not a speed nothing needed.
+
+End to end it is small, because the strings vyx asks about are tag names and
+not templates: the biggest generator app in the repo measured 933 ms against
+951 ms with the generator cache off. Small and free is still worth taking, and
+`bytes(s).length` equals `s.byteLength` by definition, so nothing moves.
+`byteLengthV` stays exported: `byteLength` is a FIELD, and a caller that needs
+the function form has nowhere else to get it.
 
 ## byteLengthV
 
