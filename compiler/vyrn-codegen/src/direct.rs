@@ -12875,7 +12875,24 @@ struct Rt {
     /// MIN_CLASS + 1` words. Zero-filled by `reserve`, which is what an empty
     /// list is.
     heads: u32,
+    /// The standard input read-ahead buffer, and how far into it reading has
+    /// got. [`STDIN_BUF`] bytes, then two words: the count `fd_read` returned
+    /// and the offset of the next byte. Both start at zero, which `reserve`
+    /// gives for free and which reads as "the buffer is spent" — so the first
+    /// `getbyte` fills it.
+    stdin_buf: u32,
+    stdin_len: u32,
+    stdin_pos: u32,
 }
+
+/// How much standard input one `fd_read` asks for.
+///
+/// `readLine` is the only reader of fd 0 in a Vyrn program — `readFileBytes`
+/// takes a path — so there is no second consumer whose position this buffer
+/// could get wrong. Without it every byte cost a WASI syscall: reverse
+/// complement over a 40 MB sequence made 40.7 million of them, and the read path
+/// was 19.56 s of that leg's 20.45 s.
+const STDIN_BUF: u32 = 4096;
 
 /// The bytes in front of every heap block, holding its size class.
 ///
@@ -12985,6 +13002,9 @@ impl Rt {
             region_len: 0,
             region_cap: 0,
             heads: 0,
+            stdin_buf: 0,
+            stdin_len: 0,
+            stdin_pos: 0,
         };
         rt.count = table.len() as u32;
         (rt, table)
@@ -13149,6 +13169,9 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     rt.region_vec = m.reserve(4 * REGION_MAX, 4);
     rt.region_len = m.reserve(4 * REGION_MAX, 4);
     rt.region_cap = m.reserve(4 * REGION_MAX, 4);
+    rt.stdin_buf = m.reserve(STDIN_BUF, 4);
+    rt.stdin_len = m.reserve(4, 4);
+    rt.stdin_pos = m.reserve(4, 4);
 
     // write_all(fd, ptr, len) -> status — the ONE place bytes leave this module.
     // Zero when every byte arrived, non-zero when the loop gave up.
@@ -15391,18 +15414,28 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
     // getbyte() — one byte from stdin, or -1 at EOF (and on any error, which is
     // what `getchar` returning `EOF` covers too).
     //
-    // ponytail: one `fd_read` per byte, where C's `getchar` is buffered. `readLine`
-    // is the only caller and the corpus feeds it a few hundred bytes from a
-    // fixture; a 4 KB buffer here would need its own invalidation story to stay
-    // correct if anything else ever reads fd 0.
+    // Buffered, the way C's `getchar` is. `fd_read` refills [`STDIN_BUF`] bytes
+    // when the buffer is spent and every other call is two loads and a store.
+    // One syscall per byte is what this cost before, which reverse complement
+    // paid 40.7 million times.
     let fd_read = wasi.fd_read;
+    let (sbuf, slen, spos) = (rt.stdin_buf, rt.stdin_len, rt.stdin_pos);
     rt.next_is(m, rt.getbyte);
     m.func(&[], &[ValType::I32], &[], 16, |b| {
-        b.slot(0);
-        b.slot(12);
-        b.ins(&Instruction::I32Store(word()));
+        // Spent? `pos >= len` covers the initial zero-zero state, which is what
+        // `reserve` leaves and what makes the first call a fill.
+        b.ins(&Instruction::I32Const(spos as i32))
+            .ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::I32Const(slen as i32))
+            .ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::I32GeU)
+            .ins(&Instruction::If(BlockType::Empty));
+        // One iovec { buf, len } in the frame, and the count written back.
+        b.slot(0)
+            .ins(&Instruction::I32Const(sbuf as i32))
+            .ins(&Instruction::I32Store(word()));
         b.slot(4)
-            .ins(&Instruction::I32Const(1))
+            .ins(&Instruction::I32Const(STDIN_BUF as i32))
             .ins(&Instruction::I32Store(word()));
         b.slot(8)
             .ins(&Instruction::I32Const(0))
@@ -15411,19 +15444,40 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
         b.slot(0);
         b.ins(&Instruction::I32Const(1));
         b.slot(8);
+        // An error and a zero-length read are the same answer to the caller,
+        // and neither may leave the buffer looking full.
         b.ins(&Instruction::Call(fd_read))
-            .ins(&Instruction::If(BlockType::Result(ValType::I32)));
-        b.ins(&Instruction::I32Const(-1)).ins(&Instruction::Else);
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::I32Const(-1))
+            .ins(&Instruction::Return)
+            .ins(&Instruction::End);
         b.slot(8);
         b.ins(&Instruction::I32Load(word()))
             .ins(&Instruction::I32Eqz)
-            .ins(&Instruction::If(BlockType::Result(ValType::I32)))
+            .ins(&Instruction::If(BlockType::Empty))
             .ins(&Instruction::I32Const(-1))
-            .ins(&Instruction::Else);
-        b.slot(12);
-        b.ins(&Instruction::I32Load8U(byte()))
-            .ins(&Instruction::End)
+            .ins(&Instruction::Return)
             .ins(&Instruction::End);
+        b.ins(&Instruction::I32Const(slen as i32));
+        b.slot(8);
+        b.ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::I32Store(word()));
+        b.ins(&Instruction::I32Const(spos as i32))
+            .ins(&Instruction::I32Const(0))
+            .ins(&Instruction::I32Store(word()))
+            .ins(&Instruction::End);
+        // buf[pos], then pos + 1.
+        b.ins(&Instruction::I32Const(sbuf as i32))
+            .ins(&Instruction::I32Const(spos as i32))
+            .ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::I32Load8U(byte()));
+        b.ins(&Instruction::I32Const(spos as i32))
+            .ins(&Instruction::I32Const(spos as i32))
+            .ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::I32Const(1))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::I32Store(word()));
     });
 
     // read_line(dest) — RFC-0014's `readLine()` as an `Option<String>` written
