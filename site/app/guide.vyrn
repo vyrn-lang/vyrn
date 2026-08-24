@@ -188,7 +188,7 @@ fn blockHtml(b: Block) -> String {
         if b.output.byteLength > 0 {
             plain = plain + "<div class=\"out\">" + terminalHtml(b.output) + "</div>"
         }
-        plain = plain + "<p class=\"cap\">Compiled while this page was built, and imported by the block above. "
+        plain = plain + "<p class=\"cap\">"
         return plain + "<a href=\"" + b.source + "\">The file in the repository</a>.</p></div>"
     }
     let src = blockSource(b.id)
@@ -206,7 +206,7 @@ fn blockHtml(b: Block) -> String {
     } else {
         out = out + "<div class=\"out\" data-play-out aria-live=\"polite\"><span class=\"dim\">Prints nothing.</span></div>"
     }
-    out = out + "<p class=\"cap\">Built and run while this page was built; Run runs it here. "
+    out = out + "<p class=\"cap\">"
     return out + "<a href=\"" + b.source + "\">The file in the repository</a>.</p></div>"
 }
 

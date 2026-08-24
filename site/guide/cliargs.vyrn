@@ -1,5 +1,5 @@
 // `std/args` reads a token list. `cli()` takes the real arguments; `cliOf` takes
-// a list you hand it, which is what a test — and this page — does.
+// a list you hand it, which is what a test does.
 import { cliOf, flag, opt, positionals } from "std/args"
 import { joinWith } from "std/strings"
 
