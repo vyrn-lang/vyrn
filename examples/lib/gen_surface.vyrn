@@ -1,0 +1,9 @@
+/// A generator that uses RFC-0054's surface builtins, and imports nothing.
+///
+/// It exists to be imported by a program that declares its OWN `raw` and
+/// `render`. The four surface builtins are unreserved on purpose, so both
+/// meanings have to coexist in one program: this module means the builtins,
+/// because it declares neither.
+export gen fn surface(tag: String) -> String {
+    return render(raw("export fn tagged() -> String { return \"\{tag}\" }"))
+}

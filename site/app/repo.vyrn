@@ -62,10 +62,12 @@ export fn remoteSpec(path: String) -> String {
 
 /// A file in this repository, served raw at `gitRef`.
 ///
-/// NOT `rawAt`. That name is one of the four surface builtins RFC-0054 leaves
-/// unreserved, and a user function of that name in ANY module of a linked
-/// program shadows it for EVERY module — naming this one `rawAt` stopped
-/// `std/vyx` compiling its own regions.
+/// NOT `rawAt`, and no longer for a compiler reason. Naming it that once broke
+/// `std/vyx`, because a declaration in any module shadowed the RFC-0054 builtin
+/// for every module; that is fixed and `examples/shadowbuiltin.vyrn` pins it.
+/// The name stays `rawFile` because it is the better one: this answers a FILE
+/// at a ref, and the builtin it would have collided with splices code at a
+/// source position.
 export fn rawFile(gitRef: String, path: String) -> String {
     return ghRaw(gitRef, path)
 }

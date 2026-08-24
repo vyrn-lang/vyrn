@@ -1003,6 +1003,8 @@ fn check_accum_inner(
         in_test: RefCell::new(false),
         in_bench: RefCell::new(false),
         in_gen: RefCell::new(false),
+        here: RefCell::new(None),
+        shadows: program.surface_shadows.clone(),
         stmt_line: RefCell::new(0),
         extern_fns: &extern_fns,
         gen_fns: &gen_fns,
@@ -1130,6 +1132,7 @@ fn check_accum_inner(
         // Signature validation (params/return) runs outside `function()`, so make
         // it gen-aware here too — a `Code` type in a `gen fn` signature is legal.
         *checker.in_gen.borrow_mut() = f.is_gen;
+        *checker.here.borrow_mut() = f.module.clone();
         let r = (|| -> Result<(), Diagnostic> {
             for p in &f.params {
                 // A function-value type is legal only on an ordinary function
@@ -1662,6 +1665,22 @@ struct Checker<'a> {
     /// which is also what keeps them out of any backend (gen fn bodies are never
     /// emitted).
     in_gen: RefCell<bool>,
+    /// The module whose body is being checked right now (RFC-0054, corrected).
+    ///
+    /// It exists for ONE question: is a call to `render`/`rawAt`/`raw`/`lex` the
+    /// builtin, or a function of that name this module can see? The four are
+    /// unreserved on purpose, so the answer depends on whose declarations are in
+    /// view — and the old test asked the LINKED PROGRAM, which is a different
+    /// question with a much wider answer. A `fn raw` in any module took the
+    /// builtin away from every module, `std/vyx` included.
+    ///
+    /// The answer itself is [`ast::Program::surface_shadows`], which the loader
+    /// fills: only it sees the `import` lists, and an imported `render` shadows
+    /// just as surely as a declared one.
+    ///
+    /// `None` is the root module, which is how the loader spells it.
+    here: RefCell<Option<String>>,
+    shadows: std::collections::HashSet<(Option<String>, String)>,
     /// The line of the statement currently being checked (best effort). The
     /// literal `Expr` variants carry no line of their own, so a range error on
     /// one (`let x: Int8 = 300`) would otherwise report line 0; this is the
@@ -6446,10 +6465,16 @@ impl<'a> Checker<'a> {
         // are the surface builtins.
         // The surface builtins (`render`/`rawAt`/`raw`/`lex`) are common words, so
         // they are NOT reserved: a user function or binding of the same name wins
-        // (resolved below), and the builtin only applies when nothing shadows it.
-        // The `@`-prefixed desugar names are unspellable, so always intercepted.
-        let is_surface_builtin = matches!(name, "render" | "rawAt" | "raw" | "lex")
-            && self.sigs.get(name).is_none()
+        // and the builtin only applies when nothing shadows it. The `@`-prefixed
+        // desugar names are unspellable, so always intercepted.
+        //
+        // SHADOWED BY WHOM. This asked `self.sigs`, the linked program's flat
+        // table, so one module's `fn raw` disabled the builtin for every module
+        // in the program — including `std/vyx`, which neither imports it nor can
+        // see it. It asks this module now, which is what RFC-0054's wording
+        // always described.
+        let is_surface_builtin = crate::ast::is_surface_builtin(name)
+            && !self.shadows_here(name)
             && self.lookup(scope, name).is_none();
         if matches!(name, "@codeText" | "@codeSplice") || is_surface_builtin {
             if !*self.in_gen.borrow() {
@@ -9106,6 +9131,23 @@ impl<'a> Checker<'a> {
     ///
     /// The module-state read is a LOOKUP and not a copy, which is the whole of
     /// [`Scope`]'s note.
+    /// Does the module being checked declare `name` itself?
+    ///
+    /// The test behind RFC-0054's four unreserved surface builtins. A module
+    /// that declares `raw` means its own `raw`; a module that does not means the
+    /// builtin, whatever some other module of the same program chose to call its
+    /// functions.
+    ///
+    /// An IMPORT shadows as surely as a declaration — naming `render` in an
+    /// `import { .. }` list is as deliberate as writing `fn render`. Getting
+    /// that wrong is what the first attempt at this fix did, and two loader
+    /// tests caught it: a root that imports `render` from a module meant that
+    /// `render`, and was told it was only available during generation.
+    fn shadows_here(&self, name: &str) -> bool {
+        self.shadows
+            .contains(&(self.here.borrow().clone(), name.to_string()))
+    }
+
     fn lookup(&self, scope: &Scope, name: &str) -> Option<Binding> {
         for frame in scope.iter().rev() {
             if let Some(b) = frame.get(name) {

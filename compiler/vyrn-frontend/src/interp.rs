@@ -4965,7 +4965,21 @@ impl<'a> Interp<'a> {
                 // A user function shadows the gen-only surface builtins
                 // (`render`/`rawAt`/`raw`/`lex`) — they are common words and not
                 // reserved, so a same-named user function wins (RFC-0054).
-                let shadowed = matches!(name.as_str(), "render" | "rawAt" | "raw" | "lex")
+                //
+                // THIS TABLE IS FLAT, and that is safe here for a reason worth
+                // writing down rather than rediscovering. The four are legal only
+                // inside a `gen fn`, and a `gen fn` runs in the generation
+                // sandbox, whose program is the generator module's own closure —
+                // so `self.funcs` here holds the generator's declarations and not
+                // the importing program's. The CHECKER's copy of this test was
+                // not so lucky: it ran over the linked program and one module's
+                // `fn raw` disabled the builtin everywhere, which is the defect
+                // `examples/shadowbuiltin.vyrn` pins.
+                //
+                // If the sandbox ever widens to the whole program, this needs the
+                // module test `Checker::shadows_here` performs, and that example
+                // is what will say so.
+                let shadowed = crate::ast::is_surface_builtin(name.as_str())
                     && self.funcs.contains_key(name.as_str());
                 // RFC-0078 M4c: a builtin whose implementation IS a Vyrn function
                 // is a call to it, and nothing else. The loader injected the module

@@ -1557,6 +1557,9 @@ impl Parser {
                 benches,
                 log_level,
                 log_sink,
+                // Filled by the loader once every module is linked: a parse of
+                // one file cannot know what the others declare (RFC-0054).
+                surface_shadows: std::collections::HashSet::new(),
             },
             errors,
         )

@@ -1,7 +1,33 @@
 # A surface builtin shadowed in one module is shadowed in every module
 
-Found while removing a duplicated repository slug, not looked for. One added
-function broke a std module that does not import it.
+**FIXED 2026-08-25.** Pinned by `examples/shadowbuiltin.vyrn`, which is in the
+three-way corpus and fails on the old compiler with the two diagnostics below.
+
+Two things this file got wrong, both found by fixing it:
+
+1. **It is not about exports.** The report below describes an `export fn rawAt`,
+   which is how it was met. A PRIVATE `fn raw` does it too — any declaration of
+   the name, anywhere in the linked program.
+2. **The fix is not only "scope the two lookups".** The checker cannot answer
+   the question alone: `Program::imports` is consumed by the loader and the
+   checker never sees it, so the checker cannot tell a module that IMPORTED
+   `render` from one that merely shares a program with a module declaring it.
+   The first attempt scoped the checker to each module's own declarations and
+   broke two existing loader tests, where a root legitimately imports a
+   function called `render`. An import shadows as surely as a declaration.
+
+What shipped: the loader records `(module, name)` for every module that can SEE
+a declaration of a surface builtin — its own or an imported one — on
+`Program::surface_shadows`, and the checker asks that. The four names live in
+one table, `ast::SURFACE_BUILTINS`, which the loader, the checker and the
+interpreter all read.
+
+The interpreter's copy of the test is still flat, deliberately, and says why at
+the line: the four are legal only inside a `gen fn`, a `gen fn` runs in the
+generation sandbox, and the sandbox's program is the generator module's own
+closure. If that ever widens, `examples/shadowbuiltin.vyrn` is what will say so.
+
+The original report follows, as written.
 
 ## What happened
 

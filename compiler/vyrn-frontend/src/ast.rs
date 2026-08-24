@@ -49,6 +49,20 @@ pub struct Program {
     /// modules); initialized once, in declaration order, before `main`. Every
     /// function sees them as an outermost scope frame below its parameters.
     pub globals: Vec<GlobalDecl>,
+    /// Where each of RFC-0054's surface builtins is shadowed: `(module, name)`
+    /// for every module that can SEE a declaration of `render`/`rawAt`/`raw`/
+    /// `lex` — its own, or one it imported.
+    ///
+    /// The loader fills this and the checker reads it, because the question
+    /// cannot be answered on either side alone. The checker never sees
+    /// `imports` (they are consumed above), and the loader does not resolve
+    /// calls. Asking the linked program instead — which is what both engines
+    /// used to do — makes one module's `fn raw` disable the builtin for every
+    /// module, `std/vyx` included; `examples/shadowbuiltin.vyrn` is that defect.
+    ///
+    /// `None` in the module position is the root module, spelled as the loader
+    /// spells it on [`Function::module`].
+    pub surface_shadows: std::collections::HashSet<(Option<String>, String)>,
     /// The logging threshold ordinal (RFC-0008), set by a `logging { level: X }`
     /// block. A log call below it is dropped at compile time. Defaults to
     /// [`DEFAULT_LOG_LEVEL`] (Info) when there is no config block.
@@ -136,6 +150,26 @@ pub fn is_place_temp(name: &str) -> bool {
 /// The default logging threshold — `Info`: `trace`/`debug` are suppressed unless
 /// a `logging { level: .. }` block lowers it.
 pub const DEFAULT_LOG_LEVEL: usize = 2;
+
+/// The four SURFACE builtins (RFC-0054): the ones spelled as ordinary
+/// identifiers rather than with an unspellable `@` prefix.
+///
+/// They are deliberately NOT reserved — they are common words, and a program
+/// that wants a function called `render` should have one. A module that
+/// declares one means its own; a module that does not means the builtin.
+///
+/// WHOSE DECLARATION COUNTS IS THE WHOLE SUBTLETY. Both engines used to ask
+/// whether the LINKED PROGRAM held a function of the name, which is a different
+/// question with a much wider answer: a two-argument `rawAt` in one module took
+/// the four-argument builtin away from `std/vyx`, in a module that neither
+/// imports nor knows about it. The question is now asked of the calling
+/// module's own scope, which is what the RFC's wording always described.
+pub const SURFACE_BUILTINS: [&str; 4] = ["render", "rawAt", "raw", "lex"];
+
+/// Whether `name` is one of the four surface builtins.
+pub fn is_surface_builtin(name: &str) -> bool {
+    SURFACE_BUILTINS.contains(&name)
+}
 
 /// The five log levels (RFC-0008), in order, lowest first.
 ///
