@@ -359,6 +359,91 @@ fn a_root_private_may_share_a_name_with_an_injected_module_private() {
     );
 }
 
+/// Every private function name of every module the bench harness pulls in, at
+/// once, declared by a program that never imports any of them.
+///
+/// This is the class the two tests above are one instance of. The harness loads
+/// `std/bench`, which brings `std/time`, `std/json` and `std/jsonread` with it,
+/// and for a while a root program that happened to use one of their private
+/// names either failed to compile with an error naming a type it had never
+/// heard of, or — worse — compiled and called the wrong body.
+///
+/// The list is READ OFF THE SOURCE rather than written here, so it grows when
+/// the harness grows. A name added to `std/json` tomorrow is covered tomorrow.
+/// Writing the forty names down would be writing down a list somebody has to
+/// remember to add to, and the defect this guards was invisible for exactly
+/// that kind of reason: the bench corpus tests the compiler against code the
+/// project wrote, and this one is triggered by code the project did not write.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test benching -- --ignored"]
+fn no_private_name_of_an_injected_module_is_reserved() {
+    let mut names: Vec<String> = Vec::new();
+    for module in ["bench", "time", "json", "jsonread"] {
+        let src = std::fs::read_to_string(repo_root().join(format!("std/{module}.vyrn")))
+            .unwrap_or_else(|e| panic!("cannot read std/{module}.vyrn: {e}"));
+        for line in src.lines() {
+            // A private declaration is `fn name(` at column zero; `export fn`
+            // and `gen fn` are indented by their keyword and are not private.
+            let Some(rest) = line.strip_prefix("fn ") else {
+                continue;
+            };
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                names.push(name);
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    assert!(
+        names.len() > 20,
+        "the private-name scan found only {}: the shape of `std/` changed and \
+         this test is no longer reading it",
+        names.len()
+    );
+
+    let mut src = String::new();
+    for (i, n) in names.iter().enumerate() {
+        src.push_str(&format!("fn {n}() -> Int64 {{ return {i} }}\n"));
+    }
+    let calls: Vec<String> = names.iter().map(|n| format!("{n}()")).collect();
+    src.push_str(&format!(
+        "\nfn all() -> Int64 {{ return {} }}\n\nbench \"t\" {{\n\
+         \x20   blackBox(all())\n\
+         }}\n\
+         fn main() -> Int64 {{ print(all()) return 0 }}\n",
+        calls.join(" + ")
+    ));
+
+    let dir = scratch("injected-names");
+    let file = dir.join("b.vyrn");
+    std::fs::write(&file, &src).unwrap();
+    let out = vyrn().arg("bench").arg(&file).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{} of these names is reserved under `vyrn bench`:\n{}\nstderr:\n{}",
+        names.len(),
+        names.join(", "),
+        norm(&out.stderr)
+    );
+    assert!(
+        norm(&out.stdout).contains("\n1 benches\n"),
+        "stdout:\n{}",
+        norm(&out.stdout)
+    );
+}
+
+/// The repository root, for reading `std/` at test time.
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap()
+}
+
 /// The first line of `text` that starts with `needle` (a tiny shape helper so the
 /// smoke test needs no regex crate).
 fn regex_like<'a>(text: &'a str, needle: &str) -> Option<&'a str> {
