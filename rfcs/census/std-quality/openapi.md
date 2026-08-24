@@ -35,3 +35,31 @@ Smallest fix: hoist one `oaTypeNames(iface)` call above the procedure loop. RECO
 ## No finding
 
 No finding: 1, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30.
+
+---
+
+## Note on the proposed fix, added on verification
+
+The finding is sound: `openapiJson()` re-parses baked constants and re-renders
+the whole document on every call, and both in-repo servers pay it per request.
+
+Its first suggested fix does not work. **The generator cannot bake the finished
+string**, because it does not have the values. `std/openapi.vyrn:291` emits the
+text `oaSchema("Name", jsonSchema(Name))`, and `jsonSchema(Name)` resolves
+against a type that exists in the GENERATED module, not in the generator. The
+generator holds the type's name and nothing else, so there is no document for it
+to pretty-print at generation time.
+
+The second suggestion is the reachable one: a lazily initialised binding in the
+generated module, which is ordinary module state under RFC-0029 and not subject
+to comptime purity, because the generated module is not a `gen fn`.
+
+Two things to check before doing it, neither of which this note settles:
+
+1. **Whether anything calls `openapiJson()` from a generator.** Module state is
+   forbidden inside a `gen fn` and inside anything it calls, so a generator
+   reaching this function would make the cache illegal.
+2. **The golden pin.** The emitted document is pinned in a Rust test, so the
+   generated source changing means that fixture is regenerated in the same
+   commit, and the regeneration has to be shown to change only the caching and
+   not one byte of the document.
