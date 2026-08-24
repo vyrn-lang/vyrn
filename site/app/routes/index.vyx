@@ -377,7 +377,7 @@ fn barStyle(pct: String) -> String {
             <p class="eyebrow"><Icon name="bytesize:play"/> A minute with Vyrn</p>
             <div class="minutehead">
                 <h2 class="display">One binary,<br/>from new to shipped.</h2>
-                <p class="lede">Write, check, test and build with the same tool. Every step below is a real command with its real output — press one, or watch it walk.</p>
+                <p class="lede">Write, check, test and build with the same tool. Every step below is a real command with its real output. Press one, or let it run through.</p>
             </div>
             <!-- Every line of output below came out of the real binary, recorded
                  by `scripts/site-demo.py` before this page was rendered. Without
