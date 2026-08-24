@@ -53,3 +53,39 @@ Smallest fix: return `data` unchanged when `indexOf(data, "\r")` finds nothing, 
 ## No finding
 
 No finding: 1, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30.
+
+---
+
+## Note on the mount audit, added on verification
+
+The module states this policy deliberately at `std/http.vyrn:840-842`, so the
+first question is whether the finding is arguing with a decision that was
+already measured. It is not. The decision rests on an estimate, and this census
+is the measurement that contradicts it.
+
+The comment says the check runs per call because "a router is a handful of
+routes: the scan is O(routes²) over a number that is 5 in `examples/bin` and
+would have to reach the **thousands** before it showed up next to a JSON
+decode".
+
+The census measured **64 routes at 432 µs per request**. Not thousands. Two
+orders of magnitude below the threshold the comment predicts, and 432 µs is not
+something that hides next to a JSON decode.
+
+Both halves of the comment can be true at once, and that is the useful reading:
+
+- **For the configurations in this repository the policy is correct.**
+  `examples/bin` has 5 routes and pays microseconds. Nothing here is hurt.
+- **The reason given for the policy does not hold.** A user with 64 routes in
+  two groups pays 432 µs on every request, and the comment tells them they would
+  need thousands before noticing.
+
+So this is not a defect to patch quietly. It is a documented decision whose
+stated justification has been falsified, and the fix is not obvious either: the
+comment is right that there is no init hook to hang a once-only check on, and
+memoizing across calls needs a key for "these are the same groups I already
+audited", which Vyrn has no cheap way to express.
+
+Two things to do, neither of them a performance patch. Correct the comment so it
+states the measured threshold rather than a guess. Then decide whether a router
+wants an init hook, which is a language question and the repository owner's.
