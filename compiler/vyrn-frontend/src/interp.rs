@@ -376,7 +376,16 @@ pub enum Val {
     /// cannot be recycled under a live cache entry.
     Array(std::rc::Rc<Vec<Val>>),
     /// A growable, insertion-ordered dictionary (RFC-0028). See [`MapVal`].
-    Map(MapVal),
+    ///
+    /// Behind an `Rc` for the reason [`Val::Array`] is: reading a binding clones
+    /// the value, and a bare `MapVal` clone copies both the pair vector AND the
+    /// index. So `m[k]` copied the whole table before the O(1) hashed lookup
+    /// ever ran, and every map-heavy program was quadratic under the
+    /// interpreter — 2,000 reads of one key cost 0.15 s against a 1,000-entry
+    /// map and 1.37 s against an 8,000-entry one, for the same 2,000 reads.
+    /// Writes go through `Rc::make_mut`, so a uniquely-owned map is still
+    /// edited in place.
+    Map(std::rc::Rc<MapVal>),
     /// An opaque `Code` fragment (RFC-0054): a sequence of rendered text pieces,
     /// some carrying an origin span. Produced only inside a generation context by
     /// `vyrn"…"` quotes / `raw` / `rawAt`, concatenated by `+`, and consumed by
@@ -533,7 +542,9 @@ fn deep_copy(v: &Val) -> Val {
     match v {
         Val::Str(s) => Val::Str(std::rc::Rc::new(String::clone(s))),
         Val::Array(xs) => Val::Array(std::rc::Rc::new(xs.iter().map(deep_copy).collect())),
-        Val::Map(kv) => Val::Map(kv.iter().map(|(k, x)| (k.clone(), deep_copy(x))).collect()),
+        Val::Map(kv) => Val::Map(std::rc::Rc::new(
+            kv.iter().map(|(k, x)| (k.clone(), deep_copy(x))).collect(),
+        )),
         Val::Record(fs, name) => Val::Record(
             fs.iter().map(|(k, x)| (k.clone(), deep_copy(x))).collect(),
             name.clone(),
@@ -1767,12 +1778,12 @@ fn serve_call(interp: &Interp<'_>, call: ServeCall) -> Result<ServeAnswer, Strin
 /// interpreter, and read the `Response` record back out — the shared body of
 /// [`serve`] (one interpreter) and [`serve_pool`] (one per worker, RFC-0025).
 fn handle_request(interp: &Interp<'_>, req: ServeRequest) -> Result<ServeAnswer, String> {
-    let headers = Val::Map(
+    let headers = Val::Map(std::rc::Rc::new(
         req.headers
             .into_iter()
             .map(|(k, v)| (k, Val::Str(std::rc::Rc::new(v))))
             .collect(),
-    );
+    ));
     let request = Val::Record(
         HashMap::from([
             ("method".to_string(), Val::Str(std::rc::Rc::new(req.method))),
@@ -3760,7 +3771,7 @@ impl<'a> Interp<'a> {
                                 v: Val::Map(pairs), ..
                             }) = frame.get_mut(name)
                             {
-                                pairs.insert((*k).clone(), v);
+                                std::rc::Rc::make_mut(pairs).insert((*k).clone(), v);
                                 return Ok(Flow::Normal);
                             }
                         }
@@ -3768,7 +3779,7 @@ impl<'a> Interp<'a> {
                             v: Val::Map(pairs), ..
                         }) = self.globals.borrow_mut().get_mut(name)
                         {
-                            pairs.insert((*k).clone(), v);
+                            std::rc::Rc::make_mut(pairs).insert((*k).clone(), v);
                             return Ok(Flow::Normal);
                         }
                         return Err(format!("index-assignment to unbound map `{name}`").into());
@@ -4701,14 +4712,16 @@ impl<'a> Interp<'a> {
                             v: Val::Map(pairs), ..
                         }) = frame.get_mut(&recv)
                         {
-                            return Ok(Val::Bool(pairs.remove(key.as_str())));
+                            return Ok(Val::Bool(
+                                std::rc::Rc::make_mut(pairs).remove(key.as_str()),
+                            ));
                         }
                     }
                     if let Some(Slot {
                         v: Val::Map(pairs), ..
                     }) = self.globals.borrow_mut().get_mut(&recv)
                     {
-                        return Ok(Val::Bool(pairs.remove(key.as_str())));
+                        return Ok(Val::Bool(std::rc::Rc::make_mut(pairs).remove(key.as_str())));
                     }
                     return Err("`remove` needs a mutable map binding".into());
                 }
@@ -6045,7 +6058,7 @@ impl<'a> Interp<'a> {
                     let v = self.expr(ve, scope)?;
                     pairs.insert((*k).clone(), v);
                 }
-                Ok(Val::Map(pairs))
+                Ok(Val::Map(std::rc::Rc::new(pairs)))
             }
             // A deterministic fork-join task: the callee is isolated (pure), so
             // running it eagerly here yields the same result any scheduler would.
@@ -6672,10 +6685,10 @@ impl<'a> Interp<'a> {
             // `V` — the boundary re-validation for a predicated value type.
             (Type::Map(_, val), Val::Map(pairs)) => {
                 let mut out = MapVal::default();
-                for (k, v) in pairs.pairs {
-                    out.insert(k, self.coerce(v, val)?);
+                for (k, v) in pairs.pairs.iter() {
+                    out.insert(k.clone(), self.coerce(v.clone(), val)?);
                 }
-                Ok(Val::Map(out))
+                Ok(Val::Map(std::rc::Rc::new(out)))
             }
             // A function value flowing into a stored fn-typed slot (RFC-0037):
             // adopt the slot's signature. A lambda evaluated bare (in a storage
