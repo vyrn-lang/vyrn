@@ -6752,7 +6752,38 @@ impl<'a> Interp<'a> {
     /// canonical `validation failed for \`T\`` when it does not hold. The walk
     /// is exhaustive — record fields, Option/Result payloads, and array
     /// elements are coerced (and therefore validated) recursively.
+    /// The scalar identities, inlined at the call site.
+    ///
+    /// 183,682,210 coercions run over `vyrn test site/export.vyrn` and
+    /// 179,316,749 of them — 97.6 per cent — answer "nothing to do". Getting to
+    /// that answer was three nested calls: `coerce`, `coercion_is_noop`,
+    /// `coercion_is_identity`. This is the first of those three arms, hoisted so
+    /// the common case never makes the calls.
+    ///
+    /// The list is exactly `coercion_is_identity`'s own scalar arm, so this
+    /// cannot answer differently from the walk it skips. A type that is not one
+    /// of these falls through to the real thing.
+    #[inline]
     fn coerce(&self, v: Val, ty: &Type) -> Result<Val, Ctrl> {
+        if matches!(
+            ty,
+            Type::Int
+                | Type::Float
+                | Type::Bool
+                | Type::Str
+                | Type::Unit
+                | Type::F32x4
+                | Type::I32x4
+                | Type::F64x2
+                | Type::Mask32x4
+                | Type::Mask64x2
+        ) {
+            return Ok(v);
+        }
+        self.coerce_walk(v, ty)
+    }
+
+    fn coerce_walk(&self, v: Val, ty: &Type) -> Result<Val, Ctrl> {
         // A container whose element type can neither change a value nor reject
         // one is rebuilt for nothing, and every typed boundary rebuilds it
         // again: `rows[i][j] = v` on an `Array<Array<Int64>>` desugars to a
