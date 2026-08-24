@@ -20,7 +20,6 @@ import { pageHeadOf, hrefOf } from "../nav"
 import { vyrnHtml, vyrnSource } from "../snippets"
 import { shellHtml } from "../code"
 import { hasRelease, releaseTag, releaseDate, releasePre, InstallTarget, installTargets, stdCount } from "../repo"
-import { ArrivalRow, arrivalList } from "../history"
 // THE SHOWCASE READS THE BOOK'S OWN PROGRAMS (RFC-0106 M3, fourth round). Every
 // snippet in these tabs is a FILE in `site/guide/`, which means it is compiled
 // while this page renders, run by `/guide` while that page renders, and checked
@@ -84,23 +83,6 @@ fn standing() -> String {
     }
     let kind = if releasePre() { " as a pre-release." } else { "." }
     return "Published " + releaseDate() + kind
-}
-
-/// The design records that arrived after the tag, newest first, capped at three.
-/// The releases page carries the whole list; this is the teaser (RFC-0106 M3,
-/// third round). Release NOTES are written on GitHub and are not in this
-/// repository, so the honest highlight is the record, with the status it holds.
-fn highlights() -> Array<ArrivalRow> {
-    let all = arrivalList()
-    let mut out: Array<ArrivalRow> = []
-    let mut i = all.length - 1
-    while i >= 0 && out.length < 3 {
-        if all[i].date > releaseDate() {
-            out.push(ArrivalRow { tag: all[i].tag.copy(), date: all[i].date.copy(), band: all[i].band.copy() })
-        }
-        i = i - 1
-    }
-    return out
 }
 
 /// One tab of the showcase: the file in `site/guide/` it shows, the word on the
@@ -344,7 +326,7 @@ fn barStyle(pct: String) -> String {
             <div class="showhead">
                 <p class="eyebrow"><Icon name="bytesize:lightning"/> The ideas, in code</p>
                 <h2 class="display">Six ideas. Six programs<br/>this build compiled.</h2>
-                <p class="lede">Every panel is a file in this repository, coloured by the compiler's own lexer while the page was built, with the chapter that teaches it one press away.</p>
+                <p class="lede">Every panel is a file in this repository, with the chapter that teaches it one press away.</p>
             </div>
             <fieldset class="picker showcase">
                 <legend class="sr-only">Language feature</legend>
@@ -451,7 +433,7 @@ fn barStyle(pct: String) -> String {
              that arrived after the tag, with the status each holds today.
              The section it replaced was a heading and three buttons repeating
              three links already on the page. -->
-        <section class="band split" id="release">
+        <section class="band" id="release">
             <div class="say">
                 <p class="eyebrow">Latest release</p>
                 <h2>{{ headline() }}</h2>
@@ -460,9 +442,6 @@ fn barStyle(pct: String) -> String {
                      budget is 260 and this section put it at 261. -->
                 <p class="ctarow"><a class="cta" href="/releases.html">Releases</a></p>
             </div>
-            <ul class="plain">
-                <li v-for="r in highlights()" :key="r.tag"><strong>{{ r.tag }}</strong><span>{{ r.band }}</span></li>
-            </ul>
         </section>
 </main>
 </template>

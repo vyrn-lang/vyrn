@@ -139,7 +139,7 @@ fn scriptHref(p: InstallTarget) -> String {
             <div class="say">
                 <p class="eyebrow"><Icon name="bytesize:lock"/> Verified</p>
                 <h2>It refuses what it cannot check</h2>
-                <p>Running a stranger's script deserves this much. Read it first: <a href="https://github.com/vyrn-lang/vyrn/blob/main/install.sh">install.sh</a>, <a href="https://github.com/vyrn-lang/vyrn/blob/main/install.ps1">install.ps1</a>.</p>
+                <p>Read the script before you run it: <a href="https://github.com/vyrn-lang/vyrn/blob/main/install.sh">install.sh</a>, <a href="https://github.com/vyrn-lang/vyrn/blob/main/install.ps1">install.ps1</a>.</p>
             </div>
             <ul class="plain">
                 <li><strong>Downloads the release's own <code>SHA256SUMS</code></strong></li>
@@ -168,7 +168,7 @@ fn scriptHref(p: InstallTarget) -> String {
                     <code v-html="shellHtml(uninstall())"></code>
                     <button type="button" data-copy-btn aria-label="Copy the uninstall command">Copy</button>
                 </div>
-                <p>Build from source, for the newest commit or a machine with no archive. Needs a recent Rust toolchain; a native binary needs <code>clang</code> on <code>PATH</code>.</p>
+                <p>Build from source, for the newest commit or a machine with no archive. It needs a recent Rust toolchain, and <code>clang</code> on <code>PATH</code> for a native binary.</p>
                 <div class="cmd" data-copy>
                     <code v-html="shellHtml(sourceBuild())"></code>
                     <button type="button" data-copy-btn aria-label="Copy the build commands">Copy</button>
