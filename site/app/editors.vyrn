@@ -43,6 +43,70 @@ export fn serverDir() -> String {
     return "compiler/vyrn-lsp"
 }
 
+/// The page's own words, one fn per block, beside the data they describe.
+///
+/// The template in `routes/tooling/editors.vyx` renders these and the markdown
+/// twin (`app/pagemd.vyrn`) renders the same ones, so a page and its twin cannot
+/// disagree — the same rule a chapter's prose lives in `app/guide.vyrn` for.
+/// Each string is the markup the template wants: `<code>` and `<strong>`, which
+/// `asMarkdown` turns back into backticks and stars on the way out.
+
+export fn pageTitle() -> String {
+    return "One extension, one server"
+}
+
+export fn lede() -> String {
+    return "VS Code support ships in this repository: a client of about five hundred lines of plain JavaScript, and <code>vyrn-lsp</code>, which answers every question about the language by calling the same compiler front end <code>vyrn check</code> calls. That is the whole of it — there is no second analyzer to disagree with the first, and an error in your editor is the error your build will print."
+}
+
+export fn notice() -> String {
+    return "It is not on a marketplace yet. Every release publishes the extension as a single <code>.vsix</code> — one file for every platform, because the extension is JavaScript and the only half with an architecture is the server, which ships in the platform archive beside <code>vyrn</code>."
+}
+
+export fn featuresHeading() -> String {
+    return "things it does, and where each one lives"
+}
+
+export fn featuresIntro() -> String {
+    return "A feature list is easy to write and easy to inflate, so this one is checked: every row carries the file that implements it, and the site's own tests open every one of those files while the page is exported. A row describing something nobody wrote does not ship — it fails the build."
+}
+
+export fn featuresCap() -> String {
+    return "The link opens the file on GitHub. Most rows name the same one — <code>compiler/vyrn-lsp/src/main.rs</code> — because the server is a single adapter with one handler per request, which is the shape that keeps it maintainable."
+}
+
+export fn featuresNotice() -> String {
+    return "What it does not do: a <code>.von</code> file is coloured by the same grammar and is not analyzed, and the run lenses are on <code>.vyrn</code> files only. Nothing here is a plugin API — the server has no extension points and no configuration beyond where to find the two binaries."
+}
+
+export fn installHeading() -> String {
+    return "Install the toolchain, then the .vsix"
+}
+
+export fn installIntro() -> String {
+    return "The extension lives in <code>" + extensionDir() + "</code> and the server in <code>" + serverDir() + "</code>, which is excluded from the main workspace and built on its own. Both are published: the server inside every platform archive, the extension as one <code>.vsix</code> asset. Building from source is still here, and it is now the path for working on the extension rather than for using it."
+}
+
+export fn installNotice() -> String {
+    return "Two settings, both optional. <code>vyrn.serverPath</code> points at a server binary somewhere else; left empty the extension takes <code>vyrn-lsp</code> off <code>PATH</code>, then the one beside the <code>vyrn</code> that is on <code>PATH</code>, then the repository's own debug build. <code>vyrn.path</code> points at the compiler the run lenses invoke; left empty they take the release build beside your checkout, then the debug build, then <code>cargo run</code>."
+}
+
+export fn installCap() -> String {
+    return "Modules resolve from <code>vyrn.json</code>. Remote imports are pinned in <code>vyrn.lock</code> and cached by sha256 under <code>~/.vyrn</code> — the editor reads that cache and never writes to it, so nothing in your editor can fetch code."
+}
+
+export fn otherHeading() -> String {
+    return "Nothing else is written, and nothing else has to be"
+}
+
+export fn otherIntro() -> String {
+    return "There is one extension and it is the one above. But <code>vyrn-lsp</code> is an ordinary language server that speaks JSON-RPC over stdin and stdout, and knows nothing about VS Code: any editor with a generic LSP client can start the binary and get the whole table above except the lenses, which are the client's own drawing. There is no socket mode and no port to connect to — a client that cannot spawn a process cannot use it."
+}
+
+export fn otherClose() -> String {
+    return "The rest of what the VS Code extension contributes is data any editor can read: the grammar is TextMate JSON, and the snippets are one flat file."
+}
+
 /// Every feature, in the order a reader meets them: the ones that answer while
 /// you type first, then the ones you ask for, then the ones the extension draws
 /// itself.

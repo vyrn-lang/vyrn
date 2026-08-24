@@ -25,7 +25,9 @@
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { shellHtml } from "../../code"
-import { features, steps, implHref, extensionDir, serverDir } from "../../editors"
+import { features, steps, implHref, pageTitle, lede, notice, featuresHeading, featuresIntro, featuresCap, featuresNotice, installHeading, installIntro, installNotice, installCap, otherHeading, otherIntro, otherClose } from "../../editors"
+import { mdUrl, askClaudeUrl } from "../../pagemd"
+import { Icon } from "../../icons"
 // THE DOCS SHELL (RFC-0106 M4, moved home by M5). An editor is a tool, so
 // the page lives at the end of the Tooling shelf — path and sidebar agreeing,
 // where the first cut of M5 moved the sidebar and left the path (user).
@@ -33,6 +35,16 @@ import { TreeGroup, Pager, areaTree, pagerFor } from "../../docshell"
 
 export fn head() -> Head {
     return pageHeadOf("/tooling/editors")
+}
+
+/// This page's own URL, in the form the markdown twin's helpers take.
+fn pageHref() -> String {
+    return "/tooling/editors.html"
+}
+
+/// The Open-in-Claude link for this page.
+fn claudeHref() -> String {
+    return askClaudeUrl(pageHref(), pageTitle())
 }
 
 fn tree() -> Array<TreeGroup> {
@@ -56,21 +68,34 @@ fn pager() -> Pager {
         </details>
     </aside>
 
-    <nav class="crumbs" aria-label="Breadcrumb">
-        <a href="/docs.html">Reference</a>
-        <span>Editors</span>
-    </nav>
+    <div class="crumbrow">
+        <nav class="crumbs" aria-label="Breadcrumb">
+            <a href="/docs.html">Reference</a>
+            <span>Editors</span>
+        </nav>
+        <div class="docutils">
+            <a class="btn" :href="mdUrl(pageHref())" data-copy-md>Copy page</a>
+            <details class="pagemenu">
+                <summary aria-label="More page actions"><span class="gl">▾</span></summary>
+                <div class="acts">
+                    <a :href="mdUrl(pageHref())" data-copy-md><span class="ic"><Icon name="bytesize:clipboard"/></span><span class="t"><span>Copy page</span><span class="d">Markdown, ready to paste into an LLM</span></span></a>
+                    <a :href="mdUrl(pageHref())"><span class="ic"><Icon name="bytesize:file"/></span><span class="t"><span>View as Markdown</span><span class="d">This page as plain text</span></span></a>
+                    <a :href="claudeHref()" rel="noopener"><span class="ic"><Icon name="bytesize:external"/></span><span class="t"><span>Open in Claude</span><span class="d">Ask Claude about this page</span></span></a>
+                </div>
+            </details>
+        </div>
+    </div>
 
     <section class="hero" id="what">
-        <h1 class="display">One extension, one server</h1>
-        <p class="lede">VS Code support ships in this repository: a client of about five hundred lines of plain JavaScript, and <code>vyrn-lsp</code>, which answers every question about the language by calling the same compiler front end <code>vyrn check</code> calls. That is the whole of it — there is no second analyzer to disagree with the first, and an error in your editor is the error your build will print.</p>
-        <p class="notice">It is not on a marketplace yet. Every release publishes the extension as a single <code>.vsix</code> — one file for every platform, because the extension is JavaScript and the only half with an architecture is the server, which ships in the platform archive beside <code>vyrn</code>.</p>
+        <h1 class="display">{{ pageTitle() }}</h1>
+        <p class="lede" v-html="lede()"></p>
+        <p class="notice" v-html="notice()"></p>
     </section>
 
     <section class="band" id="features">
         <p class="eyebrow">every feature</p>
-        <h2>{{ features().length }} things it does, and where each one lives</h2>
-        <p>A feature list is easy to write and easy to inflate, so this one is checked: every row carries the file that implements it, and the site's own tests open every one of those files while the page is exported. A row describing something nobody wrote does not ship — it fails the build.</p>
+        <h2>{{ features().length }} {{ featuresHeading() }}</h2>
+        <p v-html="featuresIntro()"></p>
         <div class="scroller">
         <table>
             <thead>
@@ -85,14 +110,14 @@ fn pager() -> Pager {
             </tbody>
         </table>
         </div>
-        <p class="cap">The link opens the file on GitHub. Most rows name the same one — <code>compiler/vyrn-lsp/src/main.rs</code> — because the server is a single adapter with one handler per request, which is the shape that keeps it maintainable.</p>
-        <p class="notice">What it does not do: a <code>.von</code> file is coloured by the same grammar and is not analyzed, and the run lenses are on <code>.vyrn</code> files only. Nothing here is a plugin API — the server has no extension points and no configuration beyond where to find the two binaries.</p>
+        <p class="cap" v-html="featuresCap()"></p>
+        <p class="notice" v-html="featuresNotice()"></p>
     </section>
 
     <section class="band" id="get">
         <p class="eyebrow">how to get it</p>
-        <h2>Install the toolchain, then the .vsix</h2>
-        <p>The extension lives in <code>{{ extensionDir() }}</code> and the server in <code>{{ serverDir() }}</code>, which is excluded from the main workspace and built on its own. Both are published: the server inside every platform archive, the extension as one <code>.vsix</code> asset. Building from source is still here, and it is now the path for working on the extension rather than for using it.</p>
+        <h2>{{ installHeading() }}</h2>
+        <p v-html="installIntro()"></p>
         <ul class="plain">
             <li v-for="s in steps()" :key="s.title">
                 <strong>{{ s.title }}</strong>
@@ -103,15 +128,15 @@ fn pager() -> Pager {
                 <span class="note" v-html="s.what"></span>
             </li>
         </ul>
-        <p class="notice">Two settings, both optional. <code>vyrn.serverPath</code> points at a server binary somewhere else; left empty the extension takes <code>vyrn-lsp</code> off <code>PATH</code>, then the one beside the <code>vyrn</code> that is on <code>PATH</code>, then the repository's own debug build. <code>vyrn.path</code> points at the compiler the run lenses invoke; left empty they take the release build beside your checkout, then the debug build, then <code>cargo run</code>.</p>
-        <p class="cap">Modules resolve from <code>vyrn.json</code>. Remote imports are pinned in <code>vyrn.lock</code> and cached by sha256 under <code>~/.vyrn</code> — the editor reads that cache and never writes to it, so nothing in your editor can fetch code.</p>
+        <p class="notice" v-html="installNotice()"></p>
+        <p class="cap" v-html="installCap()"></p>
     </section>
 
     <section class="band" id="other">
         <p class="eyebrow">other editors</p>
-        <h2>Nothing else is written, and nothing else has to be</h2>
-        <p>There is one extension and it is the one above. But <code>vyrn-lsp</code> is an ordinary language server that speaks JSON-RPC over stdin and stdout, and knows nothing about VS Code: any editor with a generic LSP client can start the binary and get the whole table above except the lenses, which are the client's own drawing. There is no socket mode and no port to connect to — a client that cannot spawn a process cannot use it.</p>
-        <p>The rest of what the VS Code extension contributes is data any editor can read: the grammar is TextMate JSON, and the snippets are one flat file.</p>
+        <h2>{{ otherHeading() }}</h2>
+        <p v-html="otherIntro()"></p>
+        <p v-html="otherClose()"></p>
     </section>
 
     <nav class="pager" aria-label="Reference">

@@ -515,3 +515,22 @@ test "the graph and the reference agree about what imports what" {
     assert(examplesUsing("json").length > 0)
     assertEq(examplesUsing("nope").length, 0)
 }
+
+/// The graph page's own words, beside the geometry they describe.
+///
+/// The template in `routes/docs/graph.vyx` renders these and the markdown twin
+/// (`app/pagemd.vyrn`) renders the same ones, so a page and its twin cannot
+/// disagree. Each string is the markup the template wants, which `asMarkdown`
+/// turns back into markdown on the way out.
+
+export fn graphLede() -> String {
+    return "Every wire is an <code>import</code> line in <code>std/</code>, read while this page was built. " + leafCount().toString() + " modules import nothing else in the library."
+}
+
+export fn graphIntro() -> String {
+    return "A module sits in the column after the deepest thing it imports, so the drawing reads left to right: nothing on the left needs anything on the right. Point at a module to light its wires."
+}
+
+export fn graphCaption() -> String {
+    return "Read from the <code>import</code> lines of <code>std/*.vyrn</code>. An import inside a code quote is a string, not a wire."
+}
