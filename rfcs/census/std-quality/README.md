@@ -342,3 +342,57 @@ ui, rpc, icons — are blocked on the same thing, which is a decent argument for
 it.
 
 Recorded so nobody removes the guard and calls it a fix.
+
+---
+
+## What is left, after the local fixes were taken
+
+Every finding in this census was read. The ones that could be repaired without a
+decision have been, on branch `fix/byte-column`: four constant tables that were
+rebuilt per call, one predicate family that copied its haystack to read a length,
+one waiver check that walked its source twice, and one symbol builder that could
+collide the modules it exists to keep apart.
+
+**What remains does not divide into thirty-eight module problems. It divides into
+two questions, and both are the repository owner's.**
+
+### Question one: can a read borrow?
+
+Pattern 2 of this rollup, ten modules, the largest measured cost class. Also the
+cause of three of the five benchmark gaps in `rfcs/census/benchmark-gaps.md`, and
+of the five failed shapes recorded in RFC-0108 section 5c. Three findings from
+three directions, none of which saw the others.
+
+The remaining entries under it cannot be fixed locally, because each one is a
+function that must hand a value to something else without copying it:
+`slots.get` copying a payload per read, `contract.matchedMember` copying the whole
+export surface to answer one name query, `jsondec` copying a subtree per accessor
+level, `std/html`'s `diff` copying every unchanged subtree per event.
+
+Written up as RFC-0109, with four candidate designs and the one question it
+leaves open: whether a view can be STORED. The hot loop does not need that. These
+ten modules do.
+
+### Question two: is there anywhere to put work that happens once?
+
+Pattern 3, seven modules, plus `std/openapi` and `std/http` and `std/rpc`
+recomputing per HTTP request. Every one of them wants the same thing and cannot
+have it:
+
+- `std/openapi` cannot bake its document at generation time, because
+  `jsonSchema(Name)` resolves in the generated module and not in the generator
+  that emits the text.
+- `std/http`'s mount audit has, in its own words, "no init hook to hang it on",
+  and memoizing needs a key meaning "the same routes I checked last time".
+- Module state exists under RFC-0029 and answers some of this, but it is refused
+  inside a `gen fn`, which is exactly where several of these live.
+
+So the shape of the answer is a place for once-only work that a generator may
+also use. That is a language question, not eleven library patches.
+
+### The two that are neither
+
+`vyrn bench` cannot measure any program importing `std/von`, which is a compiler
+defect with a twelve-line repro, narrowed but not diagnosed. And `std/num`'s
+float parser is 40 times slower on a large decimal exponent, which is real and is
+its own piece of work with its own correctness corpus, not a performance patch.
