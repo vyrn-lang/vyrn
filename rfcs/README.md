@@ -44,7 +44,7 @@ drifts: each header says which milestone landed and what did not, and the
 
 ## The index
 
-108 RFCs, numbered 0001 to 0109, with one gap. **There is no RFC-0066** — the
+109 RFCs, numbered 0001 to 0110, with one gap. **There is no RFC-0066** — the
 number was skipped and never used. The only mention of it in the repository is
 this sentence. Closing the gap would mean renumbering thirty files and breaking
 every cross-reference, so the gap stays.
@@ -165,6 +165,7 @@ claim is true — is written down in the test's own header.
 | [0107](RFC-0107-a-template-component-is-a-library.md) | A Template Component Is a Library | Implemented |
 | [0108](RFC-0108-the-string-scan-is-interpreted.md) | The String Scan Is Interpreted | Prototyped; its own question answered no |
 | [0109](RFC-0109-a-read-that-does-not-copy.md) | A Read That Does Not Copy | Draft; the problem is measured, the design is not chosen |
+| [0110](RFC-0110-a-lambda-takes-its-parameters-before-an-arrow.md) | A Lambda Takes Its Parameters Before an Arrow | Implemented; `x -> e`, `(a, b) -> e`, `() -> e` |
 
 ## The other documents here
 

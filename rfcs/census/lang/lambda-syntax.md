@@ -426,3 +426,34 @@ Neither counts a match.
 This changes what the census concludes. A migration touching 69 sites across 30
 files is cheap. The tables above cost the change as if it touched thousands.
 Re-read every "what breaks in existing code" cell against 69, not 65842.
+
+---
+
+## Correction, after the change was made
+
+**Decided and shipped as RFC-0110: `x -> e`, `(a, b) -> e`, `() -> e`.**
+
+Two things this file got wrong, both found by building it.
+
+**The `->` conflict is not real.** This file says a `->`-bodied lambda "needs a
+marker that says this is a parameter list, not a type", because `->` already
+means return type. The two arrows never share a context: a return type is
+written where a TYPE is expected and a lambda where an EXPRESSION is expected,
+and no position in the grammar takes both. The type parser never calls the
+expression parser. No marker was needed, and no backtracking: one token of
+lookahead for `x ->`, and for `(a, b) ->` a scan of a list that is names and
+commas and nothing else.
+
+The survey rows are accurate about the other languages. What did not survive was
+the inference from Java's grammar to Vyrn's parser — Java needs a speculative
+parse of `(x)` because `(x)` is a tuple-ish expression there, and in Vyrn it
+cannot be one.
+
+**The work count was wrong by three orders of magnitude.** This file first said
+65,842 lines across 17,466 files. The real figure is 69 sites in 30 files, and
+the migration touched 62 of them plus the Vyrn fixtures embedded in Rust test
+sources. The cause is recorded above: the greps swept `.claude/worktrees/`,
+which holds about seventy full copies of the repository.
+
+The rest of the survey stands, and the `fn(x) { }` row — the one candidate this
+file found needs no lookahead at all — remains the honest runner-up.
