@@ -166,11 +166,45 @@ export fn hint(
 /// Whether `code` is waived at `line` of `src` — a `vyrn-ignore <code>` marker
 /// on that line or on the one above it.
 export fn waived(src: String, line: Int64, code: String) -> Bool {
-    if waivesLine(lineText(src, line), code) {
-        return true
+    // One walk, not two. `lineText` restarts at byte 0 on every call, so asking
+    // it for the reported line and then for the line above walked the whole
+    // source twice for every hint emitted. This keeps the previous line's
+    // bounds as it passes them. The complexity is still O(hints x bytes) — only
+    // a caller that hoists the line index out of its loop removes that, and
+    // that is an API change this does not make.
+    let n = src.byteLength
+    let mut at = 1
+    let mut start = 0
+    let mut prevStart = 0
+    let mut prevEnd = 0
+    let mut havePrev = false
+    let mut i = 0
+    while i < n {
+        if src[i] == '\n' {
+            if at == line {
+                if waivesLine(substring(src, start, i), code) {
+                    return true
+                }
+                if havePrev {
+                    return waivesLine(substring(src, prevStart, prevEnd), code)
+                }
+                return false
+            }
+            prevStart = start
+            prevEnd = i
+            havePrev = true
+            at = at + 1
+            start = i + 1
+        }
+        i = i + 1
     }
-    if line > 1 {
-        return waivesLine(lineText(src, line - 1), code)
+    if at == line {
+        if waivesLine(substring(src, start, n), code) {
+            return true
+        }
+        if havePrev {
+            return waivesLine(substring(src, prevStart, prevEnd), code)
+        }
     }
     return false
 }
@@ -364,4 +398,22 @@ test "line text is 1-based and ends at the newline" {
     assertEq(lineText("a\r\nbb\r\n", 1), "a\r")
     assertEq(lineText("a\nbb", 3), "")
     assertEq(lineText("a\nbb", 0), "")
+}
+
+test "a waiver is honoured on its own line and on the line below it" {
+    // Pins the four positions the one-walk rewrite has to keep: the reported
+    // line itself, the line above it, the first line where there is no line
+    // above, and the last line where there is no trailing newline.
+    let src = "a\nb // vyrn-ignore x/y\nc\nd // vyrn-ignore x/y"
+    assertEq(waived(src, 2, "x/y"), true)
+    assertEq(waived(src, 3, "x/y"), true)
+    assertEq(waived(src, 1, "x/y"), false)
+    assertEq(waived(src, 4, "x/y"), true)
+    assertEq(waived(src, 2, "other"), false)
+}
+
+test "a waiver on line one has no line above to consult" {
+    let src = "a // vyrn-ignore x/y\nb"
+    assertEq(waived(src, 1, "x/y"), true)
+    assertEq(waived(src, 2, "x/y"), true)
 }
