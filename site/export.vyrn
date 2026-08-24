@@ -577,6 +577,17 @@ fn assets() -> Array<Array<String>> {
         // which is this file, so a rename that skipped this line fails there.
         ["install.sh", "install.sh"],
         ["install.ps1", "install.ps1"],
+        // The SAME TWO FILES again, under names a browser will SHOW rather than
+        // save. GitHub Pages types an extension, and it cannot be told otherwise
+        // per request: `.sh` arrives as `application/x-sh` and `.ps1` as
+        // `application/octet-stream`, so the link that says "View the install
+        // script" started a download — the one thing the link exists so a reader
+        // never has to do before reading. A `.txt` name is served as
+        // `text/plain`, which every browser renders as a page of text. The
+        // reader who wants the file still has the originals: the Download link
+        // beside the View link names them, and the install command pipes them.
+        ["install.sh", "install.sh.txt"],
+        ["install.ps1", "install.ps1.txt"],
     ]
 }
 
