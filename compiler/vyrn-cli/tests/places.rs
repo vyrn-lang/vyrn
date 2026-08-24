@@ -529,3 +529,43 @@ fn a_map_read_does_not_copy_the_table() {
          {small:?} for 1,000 — the same 2,000 reads"
     );
 }
+
+/// And once more for a record. `Val::Record` held a bare `HashMap` while
+/// `Array`, `Str` and `Map` were all behind an `Rc`, so passing a record to a
+/// function copied every field — including the fields the callee never looks
+/// at. 200,000 calls of a function that reads ONE field took 0.258 s for a
+/// two-field record and 1.685 s for a sixty-four field one.
+///
+/// A ratio between two programs that differ only in how many fields the record
+/// declares. Both make the same calls and read the same single field. Measured
+/// 6.5x before the fix and 1.0x after — the cost no longer depends on the field
+/// count at all.
+#[test]
+fn passing_a_record_does_not_copy_its_fields() {
+    let dir = std::env::temp_dir().join("vyrn-places");
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = |fields: usize| {
+        let decl: Vec<String> = (0..fields).map(|i| format!("f{i}: Int64")).collect();
+        let init: Vec<String> = (0..fields).map(|i| format!("f{i}: {i}")).collect();
+        format!(
+            "type R = {{ {} }}\n\
+             fn peek(r: R) -> Int64 {{ return r.f0 }}\n\
+             fn main() -> Int64 {{\n\
+             let r = R {{ {} }}\n\
+             let mut acc = 0\n\
+             let mut i = 0\n\
+             while i < 200000 {{ acc = acc + peek(r)  i = i + 1 }}\n\
+             print(acc)\n\
+             return 0\n}}\n",
+            decl.join(", "),
+            init.join(", ")
+        )
+    };
+    let narrow = best_of_3(&dir, "interp-rec-narrow", &prog(2), "0");
+    let wide = best_of_3(&dir, "interp-rec-wide", &prog(64), "0");
+    assert!(
+        wide.as_secs_f64() < 3.0 * narrow.as_secs_f64(),
+        "passing a record is copying its fields: {wide:?} for 64 fields against \
+         {narrow:?} for 2 — the same calls, the same one field read"
+    );
+}

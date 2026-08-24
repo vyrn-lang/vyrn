@@ -362,7 +362,15 @@ pub enum Val {
     /// differently-named type of the same shape dispatches as the type it was
     /// coerced to, which is what the checker told native/wasm. A literal starts
     /// out under its own name, which every boundary is then free to overwrite.
-    Record(HashMap<String, Val>, Option<std::rc::Rc<str>>),
+    ///
+    /// The field map is behind an `Rc` for the reason [`Val::Array`],
+    /// [`Val::Str`] and [`Val::Map`] are: reading a binding clones the value,
+    /// and cloning a bare `HashMap` copies every field. So passing a record to
+    /// a function that reads ONE field cost a copy of all of them — 200,000
+    /// calls took 0.276 s for a two-field record and 1.868 s for a sixty-four
+    /// field one, for the same one field read. Writes go through
+    /// `Rc::make_mut`, so a uniquely owned record is still edited in place.
+    Record(std::rc::Rc<HashMap<String, Val>>, Option<std::rc::Rc<str>>),
     /// A user-enum value (RFC-0002 §4): variant name + payload values.
     Enum(String, Vec<Val>),
     /// A growable array (`Vec`). Used linearly; `push` returns a new value.
@@ -546,7 +554,7 @@ fn deep_copy(v: &Val) -> Val {
             kv.iter().map(|(k, x)| (k.clone(), deep_copy(x))).collect(),
         )),
         Val::Record(fs, name) => Val::Record(
-            fs.iter().map(|(k, x)| (k.clone(), deep_copy(x))).collect(),
+            std::rc::Rc::new(fs.iter().map(|(k, x)| (k.clone(), deep_copy(x))).collect()),
             name.clone(),
         ),
         Val::Option(o) => Val::Option(o.as_ref().map(|b| Box::new(deep_copy(b)))),
@@ -763,7 +771,7 @@ fn lex_tokens(source: &str) -> Vec<Val> {
             r.insert("text".to_string(), Val::Str(std::rc::Rc::new(text)));
             r.insert("line".to_string(), Val::Int(line));
             r.insert("col".to_string(), Val::Int(col));
-            Val::Record(r, None)
+            Val::Record(std::rc::Rc::new(r), None)
         })
         .collect()
 }
@@ -1785,12 +1793,12 @@ fn handle_request(interp: &Interp<'_>, req: ServeRequest) -> Result<ServeAnswer,
             .collect(),
     ));
     let request = Val::Record(
-        HashMap::from([
+        std::rc::Rc::new(HashMap::from([
             ("method".to_string(), Val::Str(std::rc::Rc::new(req.method))),
             ("path".to_string(), Val::Str(std::rc::Rc::new(req.path))),
             ("headers".to_string(), headers),
             ("body".to_string(), Val::Str(std::rc::Rc::new(req.body))),
-        ]),
+        ])),
         None,
     );
     match interp.call("handle", &[request]) {
@@ -3267,7 +3275,7 @@ impl<'a> Interp<'a> {
                 (
                     parent,
                     Box::new(move |s: &mut Slot| match &mut s.v {
-                        Val::Record(map, _) => map
+                        Val::Record(map, _) => std::rc::Rc::make_mut(map)
                             .get_mut(field)
                             .map(|slot| std::mem::replace(slot, Val::Unit)),
                         _ => None,
@@ -3656,7 +3664,9 @@ impl<'a> Interp<'a> {
                                             continue;
                                         };
                                         if let Val::Record(map, _) = &mut slot.v {
-                                            if let Some(cur) = map.get_mut(field) {
+                                            if let Some(cur) =
+                                                std::rc::Rc::make_mut(map).get_mut(field)
+                                            {
                                                 *cur = Val::Unit;
                                             }
                                         }
@@ -3705,7 +3715,7 @@ impl<'a> Interp<'a> {
                         ..
                     }) = frame.get_mut(name)
                     {
-                        map.insert(field.clone(), v);
+                        std::rc::Rc::make_mut(map).insert(field.clone(), v);
                         return Ok(Flow::Normal);
                     }
                 }
@@ -3714,7 +3724,7 @@ impl<'a> Interp<'a> {
                     ..
                 }) = self.globals.borrow_mut().get_mut(name)
                 {
-                    map.insert(field.clone(), v);
+                    std::rc::Rc::make_mut(map).insert(field.clone(), v);
                     return Ok(Flow::Normal);
                 }
                 Err(format!("field assignment to unbound record `{name}`").into())
@@ -5963,7 +5973,10 @@ impl<'a> Interp<'a> {
                 // unannotated `let u = User { .. }` — the one binding `coerce`
                 // never sees — would carry no name while native dispatches on
                 // the inferred one, and the engines would disagree.
-                Ok(Val::Record(map, Some(std::rc::Rc::from(name.as_str()))))
+                Ok(Val::Record(
+                    std::rc::Rc::new(map),
+                    Some(std::rc::Rc::from(name.as_str())),
+                ))
             }
             // `xs.length` on a local Array or Map, read WITHOUT copying `xs` —
             // same reason as the index peephole above. A scan loop mentions it in
@@ -6659,9 +6672,11 @@ impl<'a> Interp<'a> {
             // is where a name is assigned (RFC-0084 M1).
             (Type::Record(fields), Val::Record(mut map, name)) => {
                 for f in fields {
-                    if let Some(fv) = map.remove(&f.name) {
-                        map.insert(f.name.clone(), self.coerce(fv, &f.ty)?);
-                    }
+                    let Some(fv) = map.get(&f.name).cloned() else {
+                        continue;
+                    };
+                    let cv = self.coerce(fv, &f.ty)?;
+                    std::rc::Rc::make_mut(&mut map).insert(f.name.clone(), cv);
                 }
                 Ok(Val::Record(map, name))
             }
