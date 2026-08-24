@@ -246,8 +246,6 @@ const PAIRS = [
   ["the focus ring on a plate", "var(--accent)", PLATE, 3],
   ["the focus ring against the control it rings", "var(--accent)", CONTROL, 3],
   ["the filled call to action's own label", PAPER, "var(--accent)", 4.5],
-  ["an ownership lane (a graphic that carries the argument)", "var(--lane-a)", PAPER, 3],
-  ["the other ownership lane", "var(--lane-b)", PAPER, 3],
   // The benchmark radar's five strokes (RFC-0104 M3). A chart line is a graphic
   // that carries meaning, so 3:1 — and each of these doubles as the legend
   // button's own text, which is why they are also read at 4.5:1 below. They are

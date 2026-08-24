@@ -22,7 +22,6 @@
 
 :root {
   --navy: oklch(0.3153 0.0778 254.59);
-  --teal: oklch(0.5558 0.0959 223.03);
   --cyan: oklch(0.7221 0.1214 214.54);
   --bright: oklch(0.8442 0.1241 204.81);
   /* Failure and a pre-release, one step darker than the ramp they were cut
@@ -77,7 +76,7 @@
    * in dark mode, where the page under it is already dark. */
   --scrim: oklch(0.18 0.004 60 / 0.45);
 
-  /* Syntax colour, and the two ownership lanes. Tokens rather than literals on
+  /* Syntax colour. Tokens rather than literals on
    * the rules below, for one reason: a palette that lives in one block can be
    * MEASURED, and `site/test/contrast.test.mjs` measures it. A colour written
    * on a `.s` rule two hundred lines down is a colour nothing checks. */
@@ -86,8 +85,6 @@
   --syn-com: var(--n1);
   --syn-type: var(--navy);
   --syn-num: var(--amber);
-  --lane-a: var(--teal);
-  --lane-b: var(--amber);
   /* The five lines of the benchmark radar (RFC-0104 M3). Aliases, not new
    * colours: every one of them resolves to a token `site/test/contrast.test.mjs`
    * already measures in both palettes, and adding a sixth hue that passes in
@@ -96,7 +93,7 @@
    * The two Vyrn legs share one hue and differ by a DASH, so the chart is
    * readable with no colour vision at all. */
   --sr-c: var(--n1);
-  --sr-rust: var(--lane-b);
+  --sr-rust: var(--amber);
   --sr-node: var(--syn-str);
   --sr-vyrn: var(--accent);
   /* The four tones the backstage's three pictures share (RFC-0105 M1): the
@@ -282,8 +279,6 @@
     --syn-com: var(--n1);
     --syn-type: var(--bright);
     --syn-num: var(--amber);
-    --lane-a: var(--cyan);
-    --lane-b: var(--amber);
     color-scheme: dark;
   }
 }
@@ -307,8 +302,6 @@
   --syn-com: var(--n1);
   --syn-type: var(--bright);
   --syn-num: var(--amber);
-  --lane-a: var(--cyan);
-  --lane-b: var(--amber);
   color-scheme: dark;
 }
 
