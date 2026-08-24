@@ -30,7 +30,7 @@ const PUBLIC = fileURLToPath(new URL("../public/", import.meta.url));
 // tree — so a prefix that is accidentally treated as one segment fails here.
 const PREFIXES = ["", "/vyrn", "/a/b"];
 
-const TYPES = { ".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".json": "application/json", ".wasm": "application/wasm", ".svg": "image/svg+xml", ".md": "text/markdown", ".xml": "application/rss+xml" };
+const TYPES = { ".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".json": "application/json", ".wasm": "application/wasm", ".svg": "image/svg+xml", ".md": "text/markdown", ".xml": "application/rss+xml", ".txt": "text/plain", ".sh": "application/x-sh", ".ps1": "application/octet-stream" };
 
 async function tree(dir, base = "") {
   const out = [];

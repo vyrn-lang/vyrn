@@ -18,11 +18,23 @@
 // module's wires on hover exactly as it did on the landing.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
-import { GraphNode, GraphEdge, searchRows, graphNodes, graphEdges, graphViewBox, graphWidth, edgeCount, leafCount } from "../../stdgraph"
+import { GraphNode, GraphEdge, searchRows, graphNodes, graphEdges, graphViewBox, graphWidth, edgeCount, leafCount, graphLede, graphIntro, graphCaption } from "../../stdgraph"
+import { mdUrl, askClaudeUrl } from "../../pagemd"
+import { Icon } from "../../icons"
 import { TreeGroup, Pager, docsTree, pagerFor , docSubnav} from "../../docshell"
 
 export fn head() -> Head {
     return pageHeadOf("/docs/graph")
+}
+
+/// This page's own URL, in the form the markdown twin's helpers take.
+fn pageHref() -> String {
+    return "/docs/graph.html"
+}
+
+/// The Open-in-Claude link for this page.
+fn claudeHref() -> String {
+    return askClaudeUrl(pageHref(), "The import graph")
 }
 
 fn tree() -> Array<TreeGroup> {
@@ -52,20 +64,33 @@ fn graphStyle() -> String {
         </details>
     </aside>
 
-    <nav class="crumbs" aria-label="Breadcrumb">
-        <a href="/docs.html">Reference</a>
-        <span>The import graph</span>
-    </nav>
+    <div class="crumbrow">
+        <nav class="crumbs" aria-label="Breadcrumb">
+            <a href="/docs.html">Reference</a>
+            <span>The import graph</span>
+        </nav>
+        <div class="docutils">
+            <a class="btn" :href="mdUrl(pageHref())" data-copy-md>Copy page</a>
+            <details class="pagemenu">
+                <summary aria-label="More page actions"><span class="gl">▾</span></summary>
+                <div class="acts">
+                    <a :href="mdUrl(pageHref())" data-copy-md><span class="ic"><Icon name="bytesize:clipboard"/></span><span class="t"><span>Copy page</span><span class="d">Markdown, ready to paste into an LLM</span></span></a>
+                    <a :href="mdUrl(pageHref())"><span class="ic"><Icon name="bytesize:file"/></span><span class="t"><span>View as Markdown</span><span class="d">This page as plain text</span></span></a>
+                    <a :href="claudeHref()" rel="noopener"><span class="ic"><Icon name="bytesize:external"/></span><span class="t"><span>Open in Claude</span><span class="d">Ask Claude about this page</span></span></a>
+                </div>
+            </details>
+        </div>
+    </div>
 
     <section class="hero">
         <h1 class="display">{{ edgeCount() }} imports between {{ searchRows().length }} modules</h1>
-        <p class="lede">Every wire is an <code>import</code> line in <code>std/</code>, read while this page was built. {{ leafCount() }} modules import nothing else in the library.</p>
+        <p class="lede" v-html="graphLede()"></p>
     </section>
 
     <section class="band" id="graph">
         <p class="eyebrow">The graph</p>
         <h2>The library, as it depends on itself</h2>
-        <p>A module sits in the column after the deepest thing it imports, so the drawing reads left to right: nothing on the left needs anything on the right. Point at a module to light its wires.</p>
+        <p v-html="graphIntro()"></p>
         <div class="plate">
             <div class="plate-head">
                 <span class="pill">Built</span>
@@ -87,7 +112,7 @@ fn graphStyle() -> String {
                     </g>
                 </svg>
             </div>
-            <p class="cap">Read from the <code>import</code> lines of <code>std/*.vyrn</code>. An import inside a code quote is a string, not a wire.</p>
+            <p class="cap" v-html="graphCaption()"></p>
         </div>
     </section>
 

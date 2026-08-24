@@ -7,8 +7,8 @@
 // shelf differs — this route answers for the chapters whose `area` is
 // "web", and 404s every other slug, so one slug has one page.
 import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
-import { pageHead } from "../../nav"
-import { Chapter, Section, chapterArea, chapterCount, chapterOf, chapterKnown, chapterNumber, chapterHref, sectionBody, sectionEyebrow } from "../../guide"
+import { pageHeadWith } from "../../nav"
+import { Chapter, Section, chapterArea, chapterBlurb, chapterCount, chapterOf, chapterKnown, chapterNumber, chapterHref, sectionBody, sectionEyebrow } from "../../guide"
 import { mdUrl, askClaudeUrl } from "../../pagemd"
 import { inlineCode } from "../../code"
 import { TreeGroup, Pager, areaTree, pagerFor } from "../../docshell"
@@ -19,7 +19,7 @@ params { chapter: String }
 type ChapterPage = { n: Int64, chapter: Chapter }
 
 export fn head(d: ChapterPage) -> Head {
-    return pageHead(d.chapter.title + " — Vyrn docs")
+    return pageHeadWith(d.chapter.title + " — Vyrn docs", chapterBlurb(d.chapter.slug))
 }
 
 export fn data() -> ParamQuery<Params, Result<ChapterPage, PageError>> {

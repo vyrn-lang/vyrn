@@ -42,11 +42,14 @@
 /// component boundary can hide (heading level order) are not here, because a
 /// hint that fires when it is not sure is worse than no hint at all.
 ///
-/// Two reports are errors rather than advice — an inline `on*` handler and a
-/// `javascript:` URL. Both are markup the template language already has a
-/// correct spelling for (`@click`), both defeat a content-security policy, and
-/// neither has an honest use. Everything else is a warning, and a project can
-/// move any of them in either direction.
+/// Nine reports are errors rather than advice. Two are markup the template
+/// language already has a correct spelling for — an inline `on*` handler and a
+/// `javascript:` URL. Both defeat a content-security policy, and neither has an
+/// honest use. The other seven are ports from `html-validate`, and each keeps
+/// the severity `html-validate` gives it: `prefer-tbody`, `wcag/h63`,
+/// `no-implicit-input-type`, `no-inline-style`, `no-autoplay`, `void-content`
+/// and `require-sri` all read `"error"` in its presets. Everything else is a
+/// warning, and a project can move any of them in either direction.
 
 import { reportHere, Severity } from "std/diag"
 import { hint, noPolicy, policyOf, Policy } from "std/hints"
@@ -386,6 +389,42 @@ fn vhElem(
                 )
             }
         }
+        // sec/inline-style. `html-validate`'s `no-inline-style`. A `style`
+        // attribute runs only under `style-src 'unsafe-inline'`, and that word
+        // in the policy covers every element on the page, not this one.
+        //
+        // STATIC ONLY. A `:style` carries a computed value — a bar width, a
+        // viewBox — that no class in a sheet can hold, so the rule's own remedy
+        // does not reach it.
+        if a.evt == false && a.dyn == false && a.name == "style" {
+            out = out
+            + hint(
+                p,
+                "sec/inline-style",
+                Error,
+                src,
+                file,
+                a.line,
+                a.col,
+                "`style` is an inline style, so the page needs `style-src 'unsafe-inline'`; move the declarations to a class in the sheet",
+            )
+        }
+        // a11y/autoplay. `html-validate`'s `no-autoplay`, WCAG 1.4.2. Sound the
+        // reader did not ask for, and they must find the page to stop it. Both
+        // spellings count: the attribute is present either way.
+        if a.evt == false && a.name == "autoplay" && (tag == "audio" || tag == "video") {
+            out = out
+            + hint(
+                p,
+                "a11y/autoplay",
+                Error,
+                src,
+                file,
+                a.line,
+                a.col,
+                "`autoplay` starts this `<\{tag}>` before the reader asks; drop it, and let them press play",
+            )
+        }
     }
 
     // --- element-shaped rules ------------------------------------------------
@@ -493,6 +532,88 @@ fn vhElem(
             "`<button>` in a `<form>` submits it by default; write `type=\"button\"` next to the `@click`",
         )
     }
+    // a11y/th-scope. `html-validate`'s `wcag/h63`. A screen reader reads a data
+    // cell together with the header it belongs to. Without `scope` it works that
+    // header out from the table's shape, and it works it out wrong as soon as
+    // the table has a header column as well as a header row.
+    if tag == "th" && vhHas(attrs, "scope") == false {
+        out = out
+        + hint(
+            p,
+            "a11y/th-scope",
+            Error,
+            src,
+            file,
+            aLine,
+            aCol,
+            "`<th>` has no `scope`; write `scope=\"col\"` for a column header or `scope=\"row\"` for a row header",
+        )
+    }
+    // html/input-type. `html-validate`'s `no-implicit-input-type`. An `<input>`
+    // with no `type` is a text box. That is seldom what the author meant, and
+    // the next reader has to know the default to see it.
+    if tag == "input" && vhHas(attrs, "type") == false {
+        out = out
+        + hint(
+            p,
+            "html/input-type",
+            Error,
+            src,
+            file,
+            aLine,
+            aCol,
+            "`<input>` has no `type`, so the browser makes it `text`; write the type you mean",
+        )
+    }
+    // html/prefer-tbody. `html-validate`'s `prefer-tbody`. The browser inserts
+    // the `<tbody>` the markup left out, so the rendered tree is not the written
+    // one and every `table > tr` selector in the sheet misses.
+    if tag == "table" && vhHasDirectRow(kids) {
+        out = out
+        + hint(
+            p,
+            "html/prefer-tbody",
+            Error,
+            src,
+            file,
+            aLine,
+            aCol,
+            "`<table>` holds `<tr>` directly; the browser inserts a `<tbody>` anyway, so write one",
+        )
+    }
+    // html/void-content. A void element takes no children in any parser. `.vyx`
+    // wants the end tag it was given, so `<img>x</img>` parses here and renders
+    // as `<img>x` in a browser: the content leaves the element it was written
+    // in, and any selector or style meant for it misses.
+    if vhIsVoid(tag) && vhHasContent(kids) {
+        out = out
+        + hint(
+            p,
+            "html/void-content",
+            Error,
+            src,
+            file,
+            aLine,
+            aCol,
+            "`<\{tag}>` is a void element and takes no children; write `<\{tag}/>` and put the content after it",
+        )
+    }
+    // sec/require-sri. A script or a sheet from another host runs with this
+    // page's privileges. `integrity` is the hash that stops a tampered payload,
+    // and the host that serves the file publishes it.
+    if vhSriUrlAttr(tag, attrs) != "" && vhHas(attrs, "integrity") == false {
+        out = out
+        + hint(
+            p,
+            "sec/require-sri",
+            Error,
+            src,
+            file,
+            aLine,
+            aCol,
+            "`<\{tag} \{vhSriUrlAttr(tag, attrs)}>` loads from another host with no `integrity`; add the sha384 hash that host publishes",
+        )
+    }
     return out + kidsOut
 }
 
@@ -532,6 +653,67 @@ fn vhIsNameable(tag: String, attrs: Array<VyxAttr>) -> Bool {
     }
     let ty = vhValue(attrs, "type")
     return ty != "hidden" && ty != "submit" && ty != "reset" && ty != "button" && ty != "image"
+}
+
+/// The void elements: the HTML tags that hold no content at all. A NAMED LIST,
+/// like `vhIsHandlerAttr`, because this rule is an error.
+fn vhIsVoid(tag: String) -> Bool {
+    return tag == "area" || tag == "base" || tag == "br" || tag == "col"
+    || tag == "embed" || tag == "hr" || tag == "img" || tag == "input"
+    || tag == "link" || tag == "meta" || tag == "source" || tag == "track"
+    || tag == "wbr"
+}
+
+/// Whether a `<tr>` is a DIRECT child of this element. Read on a `<table>`, so
+/// a row inside the `<thead>`, `<tbody>` or `<tfoot>` it belongs in is a child
+/// of that section and never reaches here.
+fn vhHasDirectRow(kids: Array<VyxNode>) -> Bool {
+    for k in kids {
+        if vhIsRow(k) {
+            return true
+        }
+    }
+    return false
+}
+
+fn vhIsRow(n: VyxNode) -> Bool {
+    return match n {
+        VNElem(tag, isComp, attrs, kids, line) => tag == "tr" && isComp == false,
+        VNText(s) => false,
+        VNInterp(x, line, col) => false,
+        VNRaw(x, line, col) => false,
+        VNChildren => false,
+        VNIf(conds, cl, cc, bodies, els, has) => false,
+        VNFor(v, it, key, body, line, col) => false,
+    }
+}
+
+/// The URL attribute that must carry an `integrity` here, or `""` for an
+/// element that needs none.
+///
+/// `<script src>` and `<link rel="stylesheet" href>`, and only when the URL is
+/// STATIC and names another host. Narrower than `html-validate`, whose `target`
+/// option defaults to `all` and so asks for a hash of a same-origin file the
+/// build itself wrote a moment earlier. A `:src` is a value this library cannot
+/// see, and this rule is an error.
+fn vhSriUrlAttr(tag: String, attrs: Array<VyxAttr>) -> String {
+    if tag == "script" && vhIsExternalUrl(vhValue(attrs, "src")) {
+        return "src"
+    }
+    if tag == "link" && vhValue(attrs, "rel") == "stylesheet"
+    && vhIsExternalUrl(vhValue(attrs, "href"))
+    {
+        return "href"
+    }
+    return ""
+}
+
+/// Whether a static URL names a host other than this page's: a scheme-relative
+/// `//host/…`, or an absolute `http`/`https` URL. A path such as `/style.css`
+/// is this origin and needs no hash.
+fn vhIsExternalUrl(value: String) -> Bool {
+    let s = toLower(trim(value))
+    return startsWith(s, "//") || startsWith(s, "http://") || startsWith(s, "https://")
 }
 
 /// Elements a pointer AND a keyboard can both operate without help.
@@ -869,6 +1051,60 @@ test "a handler button inside a form fires unless it names its type" {
     assert(fires("<form><button type=\"button\" @click=\"add()\">add</button></form>", "a11y/button-type") == false)
     assert(fires("<form><button>submit</button></form>", "a11y/button-type") == false)
     assert(fires("<div><button @click=\"add()\">add</button></div>", "a11y/button-type") == false)
+}
+
+test "a static style attribute is an error; a bound :style is not" {
+    assert(contains(checkOf("<p style=\"color:red\">x</p>"), "//@diag error T.vyx:2:11 sec/inline-style:"))
+    assert(fires("<p :style=\"barStyle(b)\">x</p>", "sec/inline-style") == false)
+    assert(fires("<p class=\"lede\">x</p>", "sec/inline-style") == false)
+}
+
+test "autoplay fires on audio and video only" {
+    assert(fires("<video src=\"/a.mp4\" autoplay=\"autoplay\"></video>", "a11y/autoplay"))
+    assert(fires("<audio src=\"/a.mp3\" :autoplay=\"wanted\"></audio>", "a11y/autoplay"))
+    assert(fires("<video src=\"/a.mp4\" controls=\"controls\"></video>", "a11y/autoplay") == false)
+    assert(fires("<div autoplay=\"autoplay\">x</div>", "a11y/autoplay") == false)
+}
+
+test "a th without scope fires; col, row and a bound scope do not" {
+    assert(fires("<table><thead><tr><th>Name</th></tr></thead></table>", "a11y/th-scope"))
+    assert(fires("<table><thead><tr><th scope=\"col\">Name</th></tr></thead></table>", "a11y/th-scope") == false)
+    assert(fires("<table><tbody><tr><th scope=\"row\">N</th><td>1</td></tr></tbody></table>", "a11y/th-scope") == false)
+    assert(fires("<table><thead><tr><th :scope=\"kind\">N</th></tr></thead></table>", "a11y/th-scope") == false)
+    assert(fires("<table><tbody><tr><td>1</td></tr></tbody></table>", "a11y/th-scope") == false)
+}
+
+test "an input without type fires; any type, static or bound, does not" {
+    assert(fires("<input name=\"q\" id=\"q\"/>", "html/input-type"))
+    assert(fires("<input name=\"q\" id=\"q\" type=\"search\"/>", "html/input-type") == false)
+    assert(fires("<input name=\"q\" id=\"q\" :type=\"kind\"/>", "html/input-type") == false)
+    assert(fires("<textarea id=\"q\"></textarea>", "html/input-type") == false)
+}
+
+test "a tr directly inside a table fires; one inside thead, tbody or tfoot does not" {
+    assert(fires("<table><tr><td>1</td></tr></table>", "html/prefer-tbody"))
+    assert(fires("<table><tbody><tr><td>1</td></tr></tbody></table>", "html/prefer-tbody") == false)
+    assert(fires("<table><thead><tr><th scope=\"col\">N</th></tr></thead></table>", "html/prefer-tbody") == false)
+    assert(fires("<table><tfoot><tr><td>1</td></tr></tfoot></table>", "html/prefer-tbody") == false)
+    assert(fires("<div><table><tbody><tr><td>1</td></tr></tbody></table></div>", "html/prefer-tbody") == false)
+}
+
+test "content inside a void element fires; a self-closed void does not" {
+    assert(fires("<img src=\"/a.png\" alt=\"\" width=\"1\" height=\"1\">cap</img>", "html/void-content"))
+    assert(fires("<img src=\"/a.png\" alt=\"\" width=\"1\" height=\"1\"/>", "html/void-content") == false)
+    assert(fires("<br></br>", "html/void-content") == false)
+    assert(fires("<span>x</span>", "html/void-content") == false)
+}
+
+test "an external script or sheet without integrity fires; a local one does not" {
+    assert(fires("<script src=\"https://cdn.test/a.js\"></script>", "sec/require-sri"))
+    assert(fires("<script src=\"//cdn.test/a.js\"></script>", "sec/require-sri"))
+    assert(fires("<link rel=\"stylesheet\" href=\"https://cdn.test/a.css\"/>", "sec/require-sri"))
+    assert(fires("<script src=\"https://cdn.test/a.js\" integrity=\"sha384-x\"></script>", "sec/require-sri") == false)
+    assert(fires("<script src=\"/app.js\"></script>", "sec/require-sri") == false)
+    assert(fires("<link rel=\"stylesheet\" href=\"/style.css\"/>", "sec/require-sri") == false)
+    assert(fires("<link rel=\"icon\" href=\"https://cdn.test/a.png\"/>", "sec/require-sri") == false)
+    assert(fires("<script :src=\"url\"></script>", "sec/require-sri") == false)
 }
 
 test "a component call is not an HTML element" {

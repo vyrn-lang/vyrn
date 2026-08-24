@@ -1,0 +1,23 @@
+// Every markup rule in `std/vyx-hints`, over every `.vyx` file the site has.
+//
+// A SEPARATE PROGRAM, and not an import in `site/export.vyrn`, for a reason
+// worth writing down: `std/vyx-hints` reaches `std/hints`, which declares
+// `Policy`, and `std/http` declares `Policy` too. A top-level name is
+// program-wide, so the two modules cannot be linked into one program, and the
+// export links `std/http`. Until one of those names changes — an exported name,
+// so somebody's decision — the rules run from here.
+//
+// The rules are errors. `vyrn check site/markup.vyrn` fails the build when a
+// template breaks one, and that is the whole point: `std/vyx-hints` had
+// nineteen rules and one caller, its own tests. A rule nothing runs is a rule
+// the next page can break.
+import { vyxHints } from "std/vyx-hints"
+import * as siteMarkup from vyxHints("./app")
+
+fn main() -> Int64 {
+    // Read so the import cannot be dropped as unused. The number is every `.vyx`
+    // file that was parsed and checked; a file that stops being discovered
+    // shows up here as a smaller number.
+    print(siteMarkup.vyxHintsChecked())
+    return 0
+}

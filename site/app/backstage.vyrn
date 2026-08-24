@@ -19,7 +19,7 @@
 /// is the same bytes through a slower door.
 import { substring, split, trim, lines, padStart } from "std/strings"
 import { startsWith } from "std/strpred"
-import { Head, noHead, withTitle, withMeta, withStylesheet, withScript } from "std/ui"
+import { Head, noHead, withTitle, withMeta, withStylesheet, withModule } from "std/ui"
 import { hrefOf, themeControl } from "./nav"
 
 /// One record, as the index states it.
@@ -170,10 +170,12 @@ export fn backstageHead(title: String) -> Head {
     let sized = withMeta(titled, "viewport", "width=device-width, initial-scale=1")
     let described = withMeta(sized, "description", "The Vyrn design record: every decision in the language, with the argument that produced it.")
     // The one script this section loads, and it loads it for the same reason the
-    // consumer layout does: a theme applied after the first paint is a flash
-    // (RFC-0105 M4). The backstage runs no widgets and no soft navigation; the
-    // theme is not a widget, it is the page's colours.
-    return withScript(withStylesheet(described, "/style.css"), "/theme.js")
+    // consumer layout does: the theme control is a control, and a control needs
+    // its listener. The COLOUR does not come from here — `withThemeBoot` in
+    // `site/export.vyrn` writes it inline in the head of every page on both
+    // fronts, before the first paint and with no request (B3 defect 5). So this
+    // is a module, deferred, like the consumer layout's own.
+    return withModule(withStylesheet(described, "/style.css"), "/theme.js")
 }
 
 /// What goes inside the backstage masthead, marked for the page it is on.

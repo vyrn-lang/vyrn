@@ -573,8 +573,53 @@ fn takeParagraph(ls: Array<String>, i: Int64, known: Array<Int64>) -> Result<Tak
         par.push(trim(ls[k]))
         k = k + 1
     }
+    // A setext underline, and the heading it turns the paragraph above it into.
+    // CommonMark: a run of `=` makes the paragraph an h1, a run of `-` an h2,
+    // and the underline is never text. A run of `=` opens no other block, so
+    // the loop above consumed it and it waits at the paragraph's last line; a
+    // run of `-` is one or two dashes short of a rule (a rule of three or more
+    // ends the paragraph at `k`), so it is checked where it stands.
+    if par.length >= 2 && setextLevel(par[par.length - 1]) > 0 {
+        let mut title: Array<String> = []
+        let mut n = 0
+        while n < par.length - 1 {
+            title.push(par[n].copy())
+            n = n + 1
+        }
+        return setextOf(title, setextLevel(par[par.length - 1]), k, known)
+    }
+    if k < ls.length && setextLevel(trim(ls[k])) > 0 {
+        return setextOf(par, setextLevel(trim(ls[k])), k + 1, known)
+    }
     let body = inlineHtml(joinWith(par, " "), known, false)?
     return Ok(Taken { html: "<p>" + body + "</p>", next: k })
+}
+
+/// The level of the setext heading `t` underlines: `1` for a run of `=`, `2`
+/// for a run of `-`, `0` for anything else, including the empty line.
+fn setextLevel(t: String) -> Int64 {
+    let raw = bytes(t)
+    if raw.length == 0 {
+        return 0
+    }
+    let mark = raw[0]
+    if mark != '=' && mark != '-' {
+        return 0
+    }
+    for b in raw {
+        if b != mark {
+            return 0
+        }
+    }
+    return if mark == '=' { 1 } else { 2 }
+}
+
+/// The paragraph `par` as the level-`level` heading its underline named.
+fn setextOf(par: Array<String>, level: Int64, next: Int64, known: Array<Int64>) -> Result<Taken, String> {
+    let text = trim(joinWith(par, " "))
+    let body = inlineHtml(text, known, false)?
+    let tag = "h" + level.toString()
+    return Ok(Taken { html: "<" + tag + " id=\"" + slugOf(text) + "\">" + body + "</" + tag + ">", next: next })
 }
 
 // ---------------------------------------------------------------------------
@@ -877,6 +922,26 @@ test "a heading carries the anchor a link written for GitHub names" {
     assertEq(slugOf("M0 — as landed"), "m0--as-landed")
     assertEq(slugOf("The `slice` builtin"), "the-slice-builtin")
     assertEq(renderOk("## The design"), "<h2 id=\"the-design\">The design</h2>")
+}
+
+test "a setext underline is a heading, and never text" {
+    // A run of `=` is an h1, a run of `-` an h2, and the title is the line
+    // above — which is where the leak was: the renderer knew ATX alone, so the
+    // underline joined the paragraph above it and was published as text.
+    assertEq(renderOk("Title line\n==========\n\nBody.\n"), "<h1 id=\"title-line\">Title line</h1><p>Body.</p>")
+    assertEq(renderOk("Title line\n----------\n\nBody.\n"), "<h2 id=\"title-line\">Title line</h2><p>Body.</p>")
+    // A rule of three or more dashes under a paragraph is the heading too —
+    // setext wins over the thematic break when both could parse.
+    assertEq(renderOk("Title line\n---\n"), "<h2 id=\"title-line\">Title line</h2>")
+    // With a blank line between, the dashes are the rule they always were.
+    assertEq(renderOk("Title line\n\n---\n"), "<p>Title line</p><hr/>")
+    assertEq(renderOk("The `slice` builtin\n=================="), "<h1 id=\"the-slice-builtin\">The <code>slice</code> builtin</h1>")
+    // A hard-wrapped title is one title.
+    assertEq(renderOk("One title,\ntwo lines\n========="), "<h1 id=\"one-title-two-lines\">One title, two lines</h1>")
+    // A hyphen in prose is not an underline.
+    assertEq(renderOk("a co - op\n"), "<p>a co - op</p>")
+    // A lone underline with nothing above it is not a heading.
+    assertEq(renderOk("===\n"), "<p>===</p>")
 }
 
 test "the inline set is the one the corpus writes" {

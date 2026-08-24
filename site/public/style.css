@@ -25,18 +25,39 @@
   --teal: oklch(0.5558 0.0959 223.03);
   --cyan: oklch(0.7221 0.1214 214.54);
   --bright: oklch(0.8442 0.1241 204.81);
-  --danger: oklch(0.5568 0.2078 25.33);
-  --amber: oklch(0.52 0.1447 70.08);
+  /* Failure and a pre-release, one step darker than the ramp they were cut
+   * from. The paper below is a tinted cream now, and a colour that cleared
+   * 4.5:1 against a near-white does not clear it against a cream — these two
+   * were the tightest pairs in the sheet at 4.60 and 4.96. Measured, not
+   * nudged: `site/test/contrast.test.mjs` reads them from here. */
+  --danger: oklch(0.515 0.2078 25.33);
+  --amber: oklch(0.487 0.1447 70.08);
 
-  /* The light paper sits at 0.955, not 0.975: a near-white ground under
-   * near-black ink read as glare next to the reference site's softer field
-   * (tenth-round user note: "less flashing light"). The ink lifts a step in
-   * trade, so every AA pair keeps its margin. */
-  --n0: oklch(0.21 0.004 60);
-  --n1: oklch(0.42 0.004 60);
-  --n2: oklch(0.505 0.004 60);
-  --n3: oklch(0.905 0.003 60);
-  --n4: oklch(0.955 0.002 60);
+  /* THE LIGHT PAPER IS A PASTEL, NOT A WHITE (B3 defect 5).
+   *
+   * It was 0.955 at 0.002 chroma — a near-white with a hint of warmth in it,
+   * which is a white. The owner asked for a pastel, and the tenth-round note
+   * before it asked for "less flashing light", so this is the same complaint
+   * twice and the first answer did not go far enough.
+   *
+   * It sits at 0.93 lightness and 0.024 chroma on the ramp's own warm hue:
+   * rgb(245, 229, 216), a cream a reader can see is a colour. The plate under
+   * it moves with it — 0.88 at 0.030, rgb(238, 221, 207) — or the furniture
+   * floats on a ground it no longer belongs to.
+   *
+   * EVERY OTHER TOKEN IN THIS BLOCK MOVED BECAUSE THIS ONE DID. Contrast is a
+   * ratio between two colours, so darkening the ground takes a step out of
+   * every pair in the sheet, and the three tightest pairs were 0.10, 0.13 and
+   * 0.32 above AA. The ink drops to 0.20 and the two muted steps drop with it,
+   * `--danger` and `--amber` above are a step darker, and the result is
+   * measured rather than judged: body text reaches 14.68:1 against 7:1, and the
+   * tightest pair in the sheet — an ownership lane, which is a graphic — is
+   * 3.73:1 against 3:1. `site/test/contrast.test.mjs` holds every number. */
+  --n0: oklch(0.2 0.006 60);
+  --n1: oklch(0.4 0.006 60);
+  --n2: oklch(0.475 0.006 60);
+  --n3: oklch(0.88 0.03 60);
+  --n4: oklch(0.93 0.024 60);
 
   --ink: var(--n0);
   --muted: var(--n1);
@@ -130,7 +151,7 @@
   --t-h3: 1.5rem; --t-h4: 1.1rem; --t-h5: 1rem; --t-lede: 1.2rem;
   --t-body: 17px; --t-body-s: 16px;
   --t-note: 0.95rem; --t-meta: 0.92rem; --t-matrix: 0.9rem; --t-cap: 0.85rem;
-  --t-mark: 15px; --t-cmd: 14px; --t-code: 13.5px; --t-code-s: 12.5px;
+  --t-mark: 15px; --t-cmd: 14px; --t-code: 13.5px; --t-code-s: 13px;
   --t-mono: 13px; --t-eyebrow: 12px; --t-key: 11px; --t-tick: 10px;
   /* The playground's minimap: the program as texture, deliberately unreadable. */
   --t-minimap: 2px;
@@ -1007,11 +1028,11 @@ button, .btn, summary, .ostabs label { user-select: none; }
  * `data-lang` becomes the reference site's header bar — name left, one
  * hairline under it — at zero markup cost. Blocks without a language (a
  * signature, a plain quote) stay bare on purpose. */
-pre.code[data-lang] { position: relative; padding-top: calc(var(--s2) + 30px); }
+pre.code[data-lang] { position: relative; padding-top: calc(12px + 24px); }
 pre.code[data-lang]::before {
   content: attr(data-lang);
   position: absolute; top: 0; left: 0; right: 0;
-  padding: 6px var(--s2);
+  padding: 4px var(--s2);
   font: var(--t-key)/1.5 var(--mono);
   color: var(--n2);
   border-bottom: 1px solid var(--hair);
@@ -1186,9 +1207,8 @@ button[aria-pressed="true"], button.on { border-color: var(--accent); color: var
    ------------------------ */
 
 pre.code {
-  margin: var(--s3) 0 0;
-  padding: var(--s2);
-  border: 1px solid var(--hair);
+  margin: var(--s2) 0 0;
+  padding: 12px var(--s2);
   overflow-x: auto;
   /* NO BAR AT REST (RFC-0106 M3, fifth round, L2; the last block that still had
    * one). The hero editor's panes and `.cmd code` were fixed then, and a plain
@@ -1196,7 +1216,7 @@ pre.code {
    * 966px box drew a grey rail under it. Panning is untouched. */
   scrollbar-width: none;
   font-size: var(--t-code);
-  line-height: 1.7;
+  line-height: 1.5;
   background: color-mix(in oklab, var(--plate) 45%, transparent);
   tab-size: 4;
 }
@@ -1221,8 +1241,7 @@ pre.code::-webkit-scrollbar { display: none; }
   margin: var(--s2) 0 0;
   padding: var(--s2);
   border-left: 2px solid color-mix(in oklab, var(--accent) 45%, transparent);
-  background: color-mix(in oklab, var(--plate) 60%, transparent);
-  font: var(--t-code-s)/1.7 var(--mono);
+  font: var(--t-code-s)/1.5 var(--mono);
   color: var(--muted);
   white-space: pre-wrap;
   overflow-x: auto;
@@ -1237,7 +1256,6 @@ pre.code::-webkit-scrollbar { display: none; }
 .cmd {
   display: flex;
   align-items: stretch;
-  border: 1px solid var(--hair);
   background: color-mix(in oklab, var(--plate) 55%, transparent);
   margin-top: var(--s2);
 }
@@ -1248,7 +1266,7 @@ pre.code::-webkit-scrollbar { display: none; }
    * command is the whole command — so the box grew to 800px inside a 288px
    * phone and took the document with it (RFC-0106 M3, second round). */
   min-width: 0;
-  padding: 14px var(--s2);
+  padding: 12px var(--s2);
   font-size: var(--t-cmd);
   overflow-x: auto;
   white-space: pre;
@@ -1713,7 +1731,7 @@ pre.code::-webkit-scrollbar { display: none; }
 .demo .termbar .counter { color: var(--n2); white-space: nowrap; }
 .demo .panes { min-width: 0; flex: 1 1 auto; padding: var(--s2); display: flex; flex-direction: column; }
 .demo .pane { min-width: 0; display: flex; flex-direction: column; }
-.demo .pane .out { flex: 0 1 auto; min-height: 12em; max-height: 30em; margin: 0; overflow: auto; background: none; border-left: 0; padding: 0; font: var(--t-code)/1.7 var(--mono); color: var(--muted); white-space: pre; }
+.demo .pane .out { flex: 0 1 auto; min-height: 12em; max-height: 30em; margin: 0; overflow: auto; background: none; border-left: 0; padding: 0; font: var(--t-code)/1.5 var(--mono); color: var(--muted); white-space: pre; }
 /* A transcript's three voices: the prompt, what was typed, and what came
  * back — a path dimmer than a result, the way a terminal reads. */
 .demo .out .pr { color: var(--accent); }
@@ -2131,6 +2149,16 @@ ol.plain .note { display: block; color: var(--muted); font-size: var(--t-meta); 
  * `.cap` and two inline style overrides that undid `.cap`'s own border and
  * padding, which is the tell that it was never a caption (RFC-0106 M4). */
 .panes .refuses { margin-top: var(--s2); color: var(--muted); font-size: var(--t-meta); }
+/* The capability pane's opening line reads at body size, not at the lede size
+ * the class it shares would give it. It was an inline `style` attribute holding
+ * `1.05rem`, which `sec/inline-style` refuses — an inline declaration means the
+ * page needs `style-src 'unsafe-inline'` — and which named no token, which
+ * `typescale.test.mjs` refuses. `--t-body` is 17px against that 16.8px, so the
+ * rendering moves by a fifth of a pixel and the size now has a name.
+ *
+ * A class of its own rather than `.panes .lede`, because `.panes` also matches
+ * the home page's demo, where this size is not wanted. */
+.panes .lede.pane-lede { font-size: var(--t-body); }
 
 
 /* ------------------------
@@ -2291,14 +2319,14 @@ svg.chart a .cell:hover { fill-opacity: 1 !important; }
  * one left hairline instead of a full border — because it sits INSIDE a
  * paragraph's flow rather than standing on its own. */
 pre.doccode {
-  margin: var(--s3) 0 0;
-  padding: var(--s2);
+  margin: var(--s2) 0 0;
+  padding: 12px var(--s2);
   border-left: 1px solid var(--rule);
   overflow-x: auto;
   /* And no bar at rest, the same as `pre.code` — measured on `/docs/std/json`
    * at 375, where a fenced block inside the module's own prose drew one. */
   scrollbar-width: none;
-  font: var(--t-mono)/1.7 var(--mono);
+  font: var(--t-mono)/1.5 var(--mono);
   tab-size: 4;
 }
 pre.doccode::-webkit-scrollbar { display: none; }
@@ -2333,7 +2361,7 @@ pre.doccode::-webkit-scrollbar { display: none; }
 .plate.block { margin-top: var(--s4); }
 .plate.block .plate-head { min-height: 36px; }
 .plate.block .plate-head .btn { min-height: 28px; padding: 4px 10px; }
-.plate.block pre.code { padding: 12px var(--s2); font-size: var(--t-code-s); line-height: 1.6; }
+.plate.block pre.code { padding: 12px var(--s2); font-size: var(--t-code-s); line-height: 1.5; }
 .plate.block .out { margin: 0; border-left: 0; border-top: 1px solid var(--hair); max-height: 16em; overflow: auto; scrollbar-width: none; }
 .plate.block .out::-webkit-scrollbar { display: none; }
 .plate.block .cap a { color: inherit; }
@@ -2341,8 +2369,8 @@ pre.doccode::-webkit-scrollbar { display: none; }
  * (`.play .editor textarea`'s 52vh is the playground page's, and is declared
  * later — three classes outrank it, the hero's own trick). */
 .plate.block.play .editor { margin: 0; }
-.plate.block.play .editor pre.hl { background: none; padding: 12px var(--s2); font-size: var(--t-code-s); line-height: 1.6; }
-.play.plate.block .editor textarea { height: auto; min-height: 0; resize: none; padding: 12px var(--s2); font-size: var(--t-code-s); line-height: 1.6; }
+.plate.block.play .editor pre.hl { background: none; padding: 12px var(--s2); font-size: var(--t-code-s); line-height: 1.5; }
+.play.plate.block .editor textarea { height: auto; min-height: 0; resize: none; padding: 12px var(--s2); font-size: var(--t-code-s); line-height: 1.5; }
 .plate.block.play .editor pre, .plate.block.play .editor textarea { scrollbar-width: none; border: 1px solid transparent; }
 .plate.block.play .editor pre::-webkit-scrollbar, .plate.block.play .editor textarea::-webkit-scrollbar { display: none; }
 .plate-head .btn { text-decoration: none; }
@@ -2535,7 +2563,7 @@ svg.graph .node.on circle { fill-opacity: 1; }
   margin: 0;
   padding: var(--s2);
   border: 1px solid transparent;
-  font: var(--t-code)/1.7 var(--mono);
+  font: var(--t-code)/1.5 var(--mono);
   tab-size: 2;
   white-space: pre;
   word-break: normal;
@@ -2744,11 +2772,19 @@ kbd {
 
 
   /* A command is read before it is copied. At this width the button took two
-   * thirds of the row and left the command a 120px window on 885px of text, so
-   * the two stack and the command wraps rather than hides. */
-  .cmd { flex-direction: column; align-items: stretch; }
-  .cmd code { padding: var(--s2); }
-  .cmd button { border-left: 0; border-top: 1px solid var(--rule); min-height: 44px; }
+   * thirds of the row and left the command a 120px window on 885px of text.
+   * It stacked instead, which cost 44px of height under every command on the
+   * page. It now OVERLAYS the right end of the row: the command keeps the whole
+   * width and scrolls under it, and the block is one line high again. The
+   * button paints the block's own wash flattened onto the paper, so the text it
+   * covers does not show through it. */
+  .cmd { position: relative; }
+  .cmd code { padding-right: 76px; }
+  .cmd button {
+    position: absolute; top: 0; right: 0; bottom: 0;
+    min-height: 44px; min-width: 68px;
+    background: color-mix(in oklab, var(--plate) 55%, var(--paper));
+  }
 
   /* A finger is not a cursor. */
   button, .btn { padding: 12px 16px; min-height: 44px; }
