@@ -100,7 +100,7 @@ $ grep -n "RFC-0045" std/hash.vyrn
 The job scopes the removal to `site/` and forbids changing Vyrn code. Three
 further reasons to leave them to the owner rather than take them here:
 
-- The source count is roughly 600 `RFC-` mentions across 38 `std/` modules
+- The source count is 629 `RFC-` mentions across 38 `std/` modules
   (`grep -c RFC- std/*.vyrn`), of which about 265 reach a page. Many are load
   bearing sentences (`WRITER (RFC-0059): the emitted openapiJson() no longer …`),
   not detachable citations.
@@ -195,7 +195,7 @@ stop, and no note component was built.
 - `/guide/[chapter]`, `/web/[chapter]`, `/tooling/[chapter]` — the chapter
   shells carry no prose of their own; every word on them comes from
   `site/app/guide.vyrn`, which was edited.
-- `site/guide/*.vyrn` — the 24 runnable programs. Their header comments are read
+- `site/guide/*.vyrn` — the 25 runnable programs. Their header comments are read
   by users and were already two lines each. One edit only:
   `site/guide/cliargs.vyrn:2` dropped the aside "— and this page —".
 
@@ -239,7 +239,7 @@ vyrn run site/export.vyrn out          exported 80 route(s) and 12 asset(s)
 vyrn fmt --check site/app/*.vyrn site/guide/*.vyrn site/export.vyrn   clean
 vyrn test site/export.vyrn             31 passed, 0 failed
 vyrn test site/app/*.vyrn              207 blocks over 29 files, 0 failed
-vyrn test site/guide/*.vyrn            24 files, 0 failed
+vyrn test site/guide/*.vyrn            25 files, 0 failed
 node --test "site/test/*.test.mjs"     tests 31, pass 31, fail 0
 ```
 
