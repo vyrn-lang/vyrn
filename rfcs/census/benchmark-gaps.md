@@ -263,6 +263,28 @@ line protocol.
 — native 0.738 s toward about 0.15 s, taking the leg from 3.8x to about
 1.5-2x. No change to `examples/revcomp.vyrn` required.
 
+**BOTH BUFFERS DONE. The ASCII fast path is not.** Measured on this machine,
+same program, output byte-identical in every case:
+
+| engine | input | before | after |
+| --- | --- | --- | --- |
+| wasm | 2.58 MB | 980 ms | 371 ms |
+| native | 10.3 MB | 225 ms | 120 ms |
+
+The wasm figure is not the 20x this section projected. One syscall per byte was
+96 percent of the READ path, and the read path is not 96 percent of the leg —
+what is left is the code generation cause this census names separately.
+
+Both engines now read standard input the same way, in 4 KB blocks, which is
+half the point: a buffer on one side only would have been a second
+implementation of the same primitive.
+
+`read` and not `fread` on the native side. Asked for a full buffer from a pipe,
+`fread` waits for it to fill or for the writer to close, so a program parked on
+`readLine()` never wakes. `the_spawn_handles_go_back_natively` caught that, and
+it is the reason the wasm side was right first: `fd_read` already hands back
+what has arrived.
+
 ## k-nucleotide
 
 The recorded 174x C / 211x Rust is stale — see
