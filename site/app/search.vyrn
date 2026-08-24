@@ -174,8 +174,17 @@ fn firstIndex(hay: String, needle: String) -> Int64 {
 /// `std/json`'s emitter does the escaping, because a `"` in a signature or a
 /// backslash in a doc line is a broken file and not a broken row (RFC-0059).
 export fn indexJson() -> String {
+    return indexJsonOf(rows())
+}
+
+/// The same index, from rows the caller already has.
+///
+/// `writeIndex` needs the row COUNT for its log line and the JSON for the file.
+/// Calling `rows()` twice built the whole index twice, and `rows()` measured
+/// 740 ms.
+export fn indexJsonOf(all: Array<FindRow>) -> String {
     let mut items: Array<Json> = []
-    for r in rows() {
+    for r in all {
         items.push(JObj([JsonField { key: "s", value: JStr(r.s.copy()) }, JsonField { key: "t", value: JStr(r.t.copy()) }, JsonField { key: "u", value: JStr(r.u.copy()) }, JsonField { key: "d", value: JStr(r.d.copy()) }]))
     }
     return emit(JArr(items))

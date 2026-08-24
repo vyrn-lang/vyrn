@@ -37,7 +37,7 @@ import { chapterSlugs, chapterHref, chapterArea, movedChapters } from "./app/gui
 import { searchRows } from "./app/stdgraph"
 import { packages, packageHref, offerOf, addCommand } from "./app/packages"
 import { features } from "./app/editors"
-import { indexJson, indexName, rows } from "./app/search"
+import { indexJsonOf, indexName, rows } from "./app/search"
 import { pageMetas, metaOf, hasMeta, decodeEntities, blurbLimit, blurbFloor } from "./app/meta"
 import { mdPaths, mdName, mdUrl, markdownOf } from "./app/pagemd"
 import { feedName, feedUrl, feedXml, feedItemCount } from "./app/feed"
@@ -1072,6 +1072,11 @@ fn writeMarkdown(outDir: String, path: String) -> Int64 {
         print("FAIL \{mdName(path)}: no markdown for \{path}")
         return 1
     }
+    // SAYS SO. This loop is 57 files and about seven seconds, and it used to
+    // print nothing at all — so the log showed the last route, then a long
+    // pause, then the search index, and a reader would fairly conclude the
+    // index cost the seven seconds. It costs one.
+    print("\{path} -> \{mdName(path)} (\{md.byteLength} bytes)")
     return emit("\{outDir}/\{mdName(path)}", md)
 }
 
@@ -1096,13 +1101,17 @@ fn writeFeed(outDir: String) -> Int64 {
 /// gzips the written file and asserts the 8,000. Two halves, and a runaway index
 /// fails whichever it reaches first.
 fn writeIndex(outDir: String) -> Int64 {
-    let json = indexJson()
+    // ONE BUILD, NOT TWO. `indexJson()` walks `rows()` and the count line below
+    // used to call `rows()` again, which builds the whole index a second time to
+    // print a number it already had. `rows()` measured 740 ms.
+    let all = rows()
+    let json = indexJsonOf(all)
     if json.byteLength > 80000 {
         print("FAIL \{indexName()}: \{json.byteLength} bytes of index, ceiling 80,000 raw")
         print("     RFC-0106 M0's ceiling is 8,000 gzipped; this is the raw check the export can make.")
         return 1
     }
-    print("\{indexName()} (\{rows().length} entries, \{json.byteLength} bytes)")
+    print("\{indexName()} (\{all.length} entries, \{json.byteLength} bytes)")
     return emit("\{outDir}/\{indexName()}", json)
 }
 
