@@ -20,12 +20,12 @@
 // A String segment binds the module name, and the query returns
 // `Result<ModuleDoc, PageError>`, so a name that is not a module renders the
 // themed error page at 404 instead of an empty page.
-import { ApiEntry, apiEntries, apiIntro, apiKnown, apiSource, apiSourceLine, apiTests, apiHref, importLine } from "../../../docs"
+import { ApiEntry, apiBlurb, apiEntries, apiIntro, apiKnown, apiSource, apiSourceLine, apiTests, apiHref, importLine, exportPhrase } from "../../../docs"
 import { Demo, demoFor, chapterHref } from "../../../guide"
 import { examplesUsing, usesOfModule, usedByModule } from "../../../stdgraph"
 import { blob } from "../../../repo"
 import { Head, PageError, ParamQuery, noHead, notFound, paramQuery } from "std/ui"
-import { pageHead } from "../../../nav"
+import { pageHeadWith } from "../../../nav"
 import { mdUrl, askClaudeUrl } from "../../../pagemd"
 // THE DOCS SHELL (RFC-0106 M4). The left column is the whole reference, in the
 // library's own groups; the right is this page's own headings; the foot is the
@@ -40,7 +40,7 @@ type ModuleDoc = { name: String, intro: String, entries: Array<ApiEntry> }
 /// The document title names the module, because a reader with twelve tabs open
 /// is reading the title, not the page.
 export fn head(d: ModuleDoc) -> Head {
-    return pageHead("std/" + d.name + " — Vyrn")
+    return pageHeadWith("std/" + d.name + " — Vyrn", apiBlurb(d.name))
 }
 
 export fn data() -> ParamQuery<Params, Result<ModuleDoc, PageError>> {
@@ -52,12 +52,6 @@ fn fetchModule(p: Params) -> Result<ModuleDoc, PageError> {
         return Err(notFound("std/" + p.module + " is not a module"))
     }
     return Ok(ModuleDoc { name: p.module.copy(), intro: apiIntro(p.module), entries: apiEntries(p.module) })
-}
-
-/// `1 export`, `44 exports`. A count and its noun disagreeing is the sort of
-/// thing a reader takes as a sign that nothing here was read.
-fn exportCount(n: Int64) -> String {
-    return if n == 1 { "1 export" } else { n.toString() + " exports" }
 }
 
 /// The same rule for the other three counts on this page.
@@ -188,7 +182,7 @@ fn claudeHref(m: String) -> String {
 
     <section class="hero">
         <h1 class="display">std/{{ data.name }}</h1>
-        <p class="lede">{{ exportCount(data.entries.length) }}, from <code>std/{{ data.name }}.vyrn</code>.</p>
+        <p class="lede">{{ exportPhrase(data.entries.length) }}, from <code>std/{{ data.name }}.vyrn</code>.</p>
     </section>
 
     <section class="band" id="about">

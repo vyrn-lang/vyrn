@@ -9,8 +9,8 @@
 // `Result<ChapterPage, PageError>`, so a slug that is not a chapter renders the
 // themed error page at 404 rather than an empty book.
 import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
-import { pageHead } from "../../nav"
-import { Chapter, Section, chapterArea, chapterCount, chapterOf, chapterKnown, chapterNumber, chapterHref, chapterNavHtml, sectionBody, sectionEyebrow } from "../../guide"
+import { pageHeadWith } from "../../nav"
+import { Chapter, Section, chapterArea, chapterBlurb, chapterCount, chapterOf, chapterKnown, chapterNumber, chapterHref, chapterNavHtml, sectionBody, sectionEyebrow } from "../../guide"
 import { mdUrl, askClaudeUrl } from "../../pagemd"
 // The one chapter that compares languages draws its plates from here; every
 // other section's illustration is a program this site ran.
@@ -27,7 +27,7 @@ params { chapter: String }
 type ChapterPage = { n: Int64, chapter: Chapter }
 
 export fn head(d: ChapterPage) -> Head {
-    return pageHead(d.chapter.title + " — the Vyrn guide")
+    return pageHeadWith(d.chapter.title + " — the Vyrn guide", chapterBlurb(d.chapter.slug))
 }
 
 export fn data() -> ParamQuery<Params, Result<ChapterPage, PageError>> {
