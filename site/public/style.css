@@ -2149,6 +2149,16 @@ ol.plain .note { display: block; color: var(--muted); font-size: var(--t-meta); 
  * `.cap` and two inline style overrides that undid `.cap`'s own border and
  * padding, which is the tell that it was never a caption (RFC-0106 M4). */
 .panes .refuses { margin-top: var(--s2); color: var(--muted); font-size: var(--t-meta); }
+/* The capability pane's opening line reads at body size, not at the lede size
+ * the class it shares would give it. It was an inline `style` attribute holding
+ * `1.05rem`, which `sec/inline-style` refuses — an inline declaration means the
+ * page needs `style-src 'unsafe-inline'` — and which named no token, which
+ * `typescale.test.mjs` refuses. `--t-body` is 17px against that 16.8px, so the
+ * rendering moves by a fifth of a pixel and the size now has a name.
+ *
+ * A class of its own rather than `.panes .lede`, because `.panes` also matches
+ * the home page's demo, where this size is not wanted. */
+.panes .lede.pane-lede { font-size: var(--t-body); }
 
 
 /* ------------------------

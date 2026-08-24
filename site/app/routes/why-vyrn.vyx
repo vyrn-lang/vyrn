@@ -119,7 +119,7 @@ fn capabilities() -> Array<Capability> {
                 </div>
                 <div class="stage panes">
                     <div v-for="c in capabilities()" :key="c.id" :data-pane="c.id">
-                        <p class="lede" style="font-size:1.05rem">{{ c.means }}</p>
+                        <p class="lede pane-lede">{{ c.means }}</p>
                         <pre class="code" v-html="c.html"></pre>
                         <!-- `.refuses` AND NOT `.cap` (RFC-0106 M4). What the
                              compiler stops you doing is the pane's own claim —

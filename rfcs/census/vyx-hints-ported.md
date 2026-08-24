@@ -229,3 +229,48 @@ Thirty rules. They fall in three groups, unchanged from the census:
   will fill), and `svg-focusable`, dropped above.
 - One, `no-style-tag`, reads `COMPILE TIME` but sits in none of the README's
   three tables. It is a tag comparison and would port in one line.
+
+---
+
+## The rules now run, which they did not before
+
+`std/vyx-hints` had nineteen rules and one caller: its own test blocks. Nothing
+in the repository ran it over the site, so the twelve older rules were as
+unenforced as the seven new ones. Checked directly: removing a `scope="col"`
+from `site/app/routes/benchmarks.vyx` and running the export still exported
+eighty routes and exited 0.
+
+`site/markup.vyrn` runs every rule over every `.vyx` file under `site/app`, and
+`.github/workflows/site.yml` runs it as its own step. It reports the number of
+files it checked — 61 — so a file that stops being discovered shows up as a
+smaller number rather than as silence. Twenty-six warnings remain, all
+`sec/raw-html`, which was a warning before this work and still is.
+
+**Its own program, not an import in `site/export.vyrn`, and the reason is a
+defect worth its own line.** `std/vyx-hints` reaches `std/hints`, which declares
+`Policy`; `std/http` declares `Policy` too. A top-level name is program-wide, so
+the two modules cannot be linked into one program:
+
+```
+`Policy` is declared by both std/hints.vyrn and std/http.vyrn — a top-level name
+is program-wide, so two linked modules cannot share one
+```
+
+The export links `std/http`, so the rules cannot run from there until one of
+those exported names changes. That is an API decision and it is not taken here.
+
+## The site page that needed a decision, and what it needed instead
+
+The report above left `site/app/routes/why-vyrn.vyx:122` alone —
+`<p class="lede" style="font-size:1.05rem">` — with two options, both of which
+changed how something looks.
+
+There was a third. The declaration is given a class of its own, `.pane-lede`,
+scoped under `.panes` so the home page's demo does not match it, and the size
+names `--t-body` instead of the literal. That is 17px against 16.8px: a fifth of
+a pixel.
+
+The literal had to go anyway. Moving it into the stylesheet unchanged failed
+`site/test/typescale.test.mjs`, which refuses a `font-size` that names no token
+— so the inline attribute had been hiding an unnamed size from a test that
+exists to find them.
