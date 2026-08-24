@@ -501,3 +501,40 @@ which is 61 per cent of the build rather than 82 per cent. `Render every page`,
 this census did not cost them at all.
 
 Re-read part three against these numbers before acting on any ranking in it.
+
+---
+
+## The site export, measured from inside (added after the fact)
+
+The census timed CI steps from the outside. `vyrn run site/export.vyrn out` is
+one of them, and this is where its time goes. Measured on the same machine,
+best of three, after the interpreter changes in
+`rfcs/census/interpreter-value-copies.md` took the whole step from 62.03 s to
+45.47 s.
+
+| phase | seconds | printed? |
+| --- | --- | --- |
+| start-up before the first route line | 10.96 | no |
+| the 80 route pages | about 27 | yes, one line each |
+| the 57 markdown twins | 7.13 | **no** |
+| the search index | about 1.0 | one line, at the end |
+| the feed | under 0.1 | yes |
+
+Two things worth saying.
+
+**The markdown twins are 7.1 seconds and print nothing.** A reader of the log
+sees the last route, then a ten-second pause, then `search.json`, and would
+reasonably conclude the search index costs ten seconds. It costs one. The
+slowest twin is `/docs/std/vyx` at 714 ms and there are 57 of them.
+
+**`writeIndex` builds the index twice.** `site/export.vyrn:815` calls
+`indexJson()`, which calls `rows()`, and `:821` calls `rows()` again to print
+the count. `rows()` measured 740 ms. Passing the array it already has costs one
+line and saves that.
+
+Neither is edited here: `site/` is being changed on two other branches and this
+would collide. Both are small and both are measured.
+
+Phase timings came from a scratch module using `monotonic()` from `std/time`,
+deleted after measuring. The start-up figure is wall time to the first printed
+line, which is the program being compiled — generators included.
