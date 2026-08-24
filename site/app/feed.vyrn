@@ -23,7 +23,7 @@
 /// a field aggregators read. The newest item's own date is the answer to the same
 /// question.
 import { releaseRows } from "./history"
-import { siteOrigin } from "./repo"
+import { siteOrigin, releaseUrlOf } from "./repo"
 import { hrefOf } from "./nav"
 import { escapeHtml } from "./code"
 import { substring, indexOf, split } from "std/strings"
@@ -73,7 +73,7 @@ export fn feedXml() -> String {
 /// has seen the tag once will not show it again when the feed is rebuilt — which
 /// it is, on every push to the main line.
 fn item(tag: String, date: String) -> String {
-    let url = "https://github.com/vyrn-lang/vyrn/releases/tag/\{tag}"
+    let url = releaseUrlOf(tag)
     let kind = if isPre(tag) { "A pre-release" } else { "A stable release" }
     let words = "\{kind}, tagged \{date}. The release page lists one archive per platform and the SHA256SUMS that both installers check them against."
     let mut out = "<item>\n"

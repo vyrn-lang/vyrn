@@ -38,7 +38,7 @@ import { Json, JsonField, copyJson, copyJsonFields } from "std/json"
 import { parseJson } from "std/jsonread"
 import { apiHref, apiKnown, apiModules } from "./docs"
 import { examplesUsing } from "./stdgraph"
-import { blob, remoteSpec } from "./repo"
+import { blob, remoteSpec, rawFile } from "./repo"
 import { hrefOf } from "./nav"
 import { escapeHtml } from "./code"
 import { blurbFrom } from "./meta"
@@ -458,7 +458,7 @@ export fn lockShape(slug: String) -> String {
 
 /// The URL a specifier resolves to, with the commit `git ls-remote` fills in.
 fn rawUrl(slug: String) -> String {
-    return "https://raw.githubusercontent.com/vyrn-lang/vyrn/<commit>/" + examplesDir() + "/" + slug + "/" + offerOf(slug).path
+    return rawFile("<commit>", examplesDir() + "/" + slug + "/" + offerOf(slug).path)
 }
 
 /// The `import` line a reader writes once the package is added: the alias
