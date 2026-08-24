@@ -1,7 +1,17 @@
 # The byte sink — what blocks mandelbrot, and what would unblock it
 
-Status: evidence collected 2026-08-23 against `main`. RECOMMENDATION, NOT A
-DECISION. Nothing here is implemented; this file prices options for the owner.
+Status: **CLOSED. Design A was chosen and built** —
+[RFC-0111](../RFC-0111-a-program-can-write-bytes.md), 2026-08-25.
+`examples/mandelbrot.vyrn` writes the committed fixture's 5,011 bytes on all
+three engines. Both traps this file predicted were real and both are now gated:
+the Windows text-mode one costs exactly two bytes and is pinned by
+`compiler/vyrn-cli/tests/bytesink.rs`, and the browser's decode-before-anyone-
+sees-it cost 3,960 bytes of U+FFFD and is fixed in `web/wasi-min.js`.
+
+A THIRD thing this file did not predict: the parity harness cannot see either
+trap, because it compares runs through a lossy UTF-8 decode and a CRLF-to-LF
+replace, and both halves alter exactly the content at issue. Binary output
+needed a gate of its own. The evidence below is left as written.
 
 ## Why this file exists
 
