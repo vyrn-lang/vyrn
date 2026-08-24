@@ -253,3 +253,40 @@ not.
 **This is a compiler defect, not a standard library defect.** `vyrn bench`
 cannot measure any program that imports `std/von`, which is why this census
 could not measure that module's reader. It is reported, not diagnosed.
+
+### Narrowing the `vyrn bench` defect
+
+Further isolation, all with `compiler/target/release/vyrn`:
+
+**Confirmed.** A file that imports `std/von`, never calls it, and holds one
+trivial bench block fails. The same file under `vyrn build` and `vyrn run`
+succeeds. Removing the import makes the bench pass.
+
+**Not a `gen fn` problem.** The first guess was that `vyrn bench` natively lowers
+comptime-only code that `build` prunes. It does not explain this: `std/vyx` has
+`gen fn` exports and the same trivial bench file importing `vyxParseTemplate`
+passes. `std/hash` passes. Only `std/von` fails.
+
+| import | `vyrn bench` |
+| --- | --- |
+| `std/vyx` (`vyxParseTemplate`) | passes |
+| `std/hash` (`fnv1aStr`) | passes |
+| `std/von` (any export) | ``error: field `toks` missing during coercion`` |
+
+**Where it comes from.** `compiler/vyrn-codegen/src/lib.rs:2817`, inside
+`coerce`, rebuilding one record type into another. For each field of the target
+it searches the source record and errors when the name is absent. So a record
+lacking `toks` is being coerced into one that has it. `VonP` at
+`std/von.vyrn:162` is the only type in the module with that field, and the only
+place it is built is `walkVon` at `std/von.vyrn:732`, which constructs it from a
+`consume Array<VonTok>` parameter and then passes it by value to
+`firstErrorToken` at `std/von.vyrn:757`.
+
+**A guess that was tested and failed.** That shape alone does not reproduce. A
+standalone program with the same structure — a record built from a `consume`
+array parameter, passed by value to a function that reads two of its fields,
+beside a trivial bench block — compiles and benches cleanly under both `bench`
+and `build`. Whatever triggers this needs more of `std/von` than its shape.
+
+Recorded so the next attempt does not repeat the same guess. Still not
+diagnosed.
