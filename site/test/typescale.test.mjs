@@ -61,7 +61,9 @@ const SCALE = {
   "--t-mark": "15px",
   "--t-cmd": "14px",
   "--t-code": "13.5px",
-  "--t-code-s": "12.5px",
+  // 13px and not 12.5: no code block reads below 13px at the default root size,
+  // and this token sizes the guide's plate, the specimen plate and the editor.
+  "--t-code-s": "13px",
   "--t-mono": "13px",
   "--t-eyebrow": "12px",
   "--t-key": "11px",
