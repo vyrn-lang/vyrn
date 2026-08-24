@@ -316,3 +316,29 @@ This matters because the two conclusions cost differently. "Add a map to std"
 is language work and would have been started on a false premise. "Use the map
 that is already there" is a refactor per module, each one measurable on its own,
 and none of it blocks on a design decision.
+
+### Note on pattern 5: the double list cannot be removed in Vyrn today
+
+The obvious repair is to drop the `vhIsDir` guard and let `vhScan` handle a
+non-directory. That would be wrong, and the code says why.
+
+`listDir` answers `Ok(names)` or `Err(text)` and nothing else. A regular file
+lists as an error and an unreadable directory lists as an error, and the two are
+the same value. `vhScan` at `std/vyx-hints.vyrn` treats a failed list as an
+ERROR on purpose — its own comment records the reason: a checker that silently
+skipped an unreadable directory would tell a project its tree is checked while
+it is not. So removing the guard would turn every regular file in the tree into
+a spurious error.
+
+Distinguishing them from the error TEXT is not available either. The project
+single-sources canonical I/O error strings and refuses to depend on operating
+system wording, which is what telling `ENOTDIR` from `EACCES` would require.
+
+So the census's own recommendation is the right shape after all: an entry
+listing that carries a kind. **That is a host capability, not a library change**,
+and it is the repository owner's decision, not something to be slipped in while
+fixing a performance finding. All four modules named in the pattern — vyx-hints,
+ui, rpc, icons — are blocked on the same thing, which is a decent argument for
+it.
+
+Recorded so nobody removes the guard and calls it a fix.
