@@ -19,6 +19,26 @@ vyrn run --profile site/export.vyrn out
 45.5 s, so the flag costs about 24 percent — two clock reads across 4.8 million
 calls.
 
+## It is also 59 percent of the CI step that costs the most
+
+`vyrn test site/export.vyrn` is the Site job's longest step. The CI census
+ranked it first of the changes worth making and could not say what was in it:
+
+> Decide the fate of the Site test suite's runtime in the compiler, not in CI.
+> 1018 s median, 17x the one-minute target, 85% of the Site job. … What remains
+> is interpreter speed on `site/export.vyrn`'s 32 test blocks.
+
+`vyrn test --profile site/export.vyrn` answers it:
+
+| function | calls | self | share |
+| --- | --- | --- | --- |
+| `slice` | 508,664 | 35.155 s | **59.0%** |
+| `findSkipping` | 29,169 | 9.137 s | 15.3% |
+| `findPlain` | 56,631 | 1.286 s | 2.2% |
+
+Two functions are three quarters of the step. The other 1,000-odd share the
+rest.
+
 ## What `slice` is
 
 `std/strpred.vyrn:301`. It was a builtin; RFC-0046 replaced it with Vyrn. The

@@ -427,7 +427,18 @@ fn real_main() -> ExitCode {
         return build(&path, rest);
     }
     if cmd == "test" {
-        return test_cmd(&path, rest);
+        // Armed before the load for the reason `run` and `check` are: a `gen fn`
+        // executes while the program loads, and a `test` block is the third
+        // thing in this project that only ever runs interpreted.
+        if want_profile {
+            vyrn_frontend::prof::start();
+        }
+        let code = test_cmd(&path, rest);
+        if want_profile {
+            let rows = vyrn_frontend::prof::take();
+            eprint!("{}", vyrn_frontend::prof::table(&rows, 25));
+        }
+        return code;
     }
     if cmd == "bench" {
         return bench_cmd(&path, rest);

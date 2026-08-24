@@ -1266,14 +1266,31 @@ pub fn run_tests<F>(
 where
     F: FnMut(&str, &Result<(), String>) + Send,
 {
-    std::thread::scope(|s| {
+    // The tests run on their own stack, so a profile collected in there has to
+    // be handed back the way `on_deep_stack` hands the release trace back.
+    let profiling = crate::prof::on();
+    let rows = std::sync::Mutex::new(Vec::new());
+    let out = std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(INTERP_STACK_BYTES)
-            .spawn_scoped(s, || run_tests_inner(program, filter, on_result))
+            .spawn_scoped(s, || {
+                if profiling {
+                    crate::prof::start();
+                }
+                let r = run_tests_inner(program, filter, on_result);
+                if profiling {
+                    *rows.lock().unwrap() = crate::prof::take();
+                }
+                r
+            })
             .expect("failed to spawn interpreter thread")
             .join()
             .unwrap_or_else(|_| Err("interpreter thread panicked (likely stack overflow)".into()))
-    })
+    });
+    if profiling {
+        crate::prof::adopt(rows.into_inner().unwrap_or_default());
+    }
+    out
 }
 
 fn run_tests_inner<F>(
