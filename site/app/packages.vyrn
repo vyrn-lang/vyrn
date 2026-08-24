@@ -41,6 +41,7 @@ import { examplesUsing } from "./stdgraph"
 import { blob, remoteSpec } from "./repo"
 import { hrefOf } from "./nav"
 import { escapeHtml } from "./code"
+import { blurbFrom } from "./meta"
 import { joinWith, substring, indexOf, trim, replace, lines, split } from "std/strings"
 import { startsWith, endsWith } from "std/strpred"
 
@@ -156,6 +157,17 @@ export fn packageOf(slug: String) -> Package {
         deps: packageDeps(slug).length,
         href: packageHref(slug),
     }
+}
+
+/// What a package page's card and its search result say (RFC-0106 M6).
+///
+/// The package's own summary, which is the first documentation line of the
+/// module `vyrn add` installs, with the package named in front of it. The name
+/// goes in front because a summary is written inside a project and says `The
+/// wire types:` — three of the four projects begin that way, and three cards
+/// that read alike are three cards that say nothing.
+export fn packageBlurb(p: Package) -> String {
+    return blurbFrom(p.name + " — " + p.summary, "")
 }
 
 /// The page one package is published at.

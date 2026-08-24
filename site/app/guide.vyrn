@@ -48,8 +48,9 @@ import * as gValidated from "../guide/validated"
 import { base64Encode } from "std/codecs"
 import { replace, joinWith, substring, trimEnd, toLower } from "std/strings"
 import { startsWith } from "std/strpred"
-import { escapeHtml, terminalHtml } from "./code"
+import { escapeHtml, terminalHtml, inlineCode } from "./code"
 import { blob } from "./repo"
+import { blurbFrom } from "./meta"
 
 /// One program on a page: its id, its coloured lines, what it printed, and the
 /// playground link — empty for a block the playground cannot run on its own.
@@ -654,6 +655,23 @@ export fn chapterOf(slug: String) -> Chapter {
         }
     }
     return Chapter { area: "", group: "", slug: "", title: "", lede: "", sections: [] }
+}
+
+/// What a chapter's card and its search result say: the chapter's own lede,
+/// cut to a card (RFC-0106 M6).
+///
+/// The lede is the sentence under the chapter's title, so a reader who follows
+/// the shared link reads it again at the top of the page and finds the page they
+/// were promised. Nothing is written twice: the chapter states its lede once,
+/// here, and the description is that string with nothing added.
+///
+/// It goes through `inlineCode` and back out again, which is not the round trip
+/// it looks like: a lede writes `vyrn run` in backticks and the page renders
+/// that as a code span, so running the same step the page runs and then dropping
+/// the tags leaves the words a reader SEES. The backticks would otherwise be in
+/// the card.
+export fn chapterBlurb(slug: String) -> String {
+    return blurbFrom(inlineCode(chapterOf(slug).lede), "")
 }
 
 /// Whether `slug` names a chapter.

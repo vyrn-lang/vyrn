@@ -14,6 +14,7 @@ import { startsWith } from "std/strpred"
 import { substring, trimStart, joinWith, indexOf } from "std/strings"
 import { hrefOf } from "./nav"
 import { blob } from "./repo"
+import { blurbFrom } from "./meta"
 
 /// One exported declaration: what it is called, what it is, its signature as
 /// written (already coloured), its `///` prose as HTML, and where it is declared.
@@ -153,6 +154,30 @@ export fn apiEntries(m: String) -> Array<ApiEntry> {
         i = i + 1
     }
     return out
+}
+
+/// `1 export`, `44 exports`. A count and its noun disagreeing is the sort of
+/// thing a reader takes as a sign that nothing here was read.
+export fn exportPhrase(n: Int64) -> String {
+    return if n == 1 { "1 export" } else { n.toString() + " exports" }
+}
+
+/// What a module page's card and its search result say (RFC-0106 M6).
+///
+/// The module's own first documentation line, which is the sentence the page
+/// prints under the heading, with the number of exports after it. The count is
+/// the one fact a summary written for a source file does not carry, and it is
+/// what a reader weighing a module wants first — `docCount` reads it off `std/`,
+/// so it cannot be wrong for a build.
+///
+/// It uses `docSummary` and NOT `ApiModule.summary`: the list shortens a summary
+/// by dropping the module's own name, because the name is printed in the column
+/// beside it, and a card has no column. What is left reads as a fragment.
+export fn apiBlurb(m: String) -> String {
+    if !apiKnown(m) {
+        return ""
+    }
+    return blurbFrom(docSummary(m), " " + exportPhrase(docCount(m)) + ".")
 }
 
 /// The module's header block, as HTML.

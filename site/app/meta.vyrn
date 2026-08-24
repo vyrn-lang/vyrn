@@ -18,7 +18,14 @@
 /// A blurb is one sentence and no more than about 150 bytes, because that is
 /// what a card renders before it truncates. It is not the page's lede: a lede is
 /// read after the reader has arrived, and this is read instead of arriving.
-import { startsWith } from "std/strpred"
+///
+/// THE OTHER SIXTY PAGES ARE DERIVED, not listed (RFC-0106 M6). A chapter, a
+/// reference module and a package each already carry a sentence about
+/// themselves, so `blurbFrom` at the foot of this file turns that sentence into
+/// a description rather than a second one being written here. A page named in
+/// the table is a page nothing else could speak for.
+import { startsWith, endsWith, contains } from "std/strpred"
+import { substring, indexOf, replace, trimEnd } from "std/strings"
 
 /// A page, its title, and what it is.
 export type PageMeta = { path: String, title: String, blurb: String }
@@ -59,6 +66,178 @@ export fn hasMeta(path: String) -> Bool {
     return metaOf(path).title.byteLength > 0
 }
 
+// ---------------------------------------------------------------------------
+// The pages that are not in the table
+// ---------------------------------------------------------------------------
+
+/// The most bytes a description may carry.
+///
+/// A card truncates near here and a search result cuts around the same place, so
+/// a sentence longer than this is written for nobody. ONE number, because every
+/// description shares the ceiling: the rows above are held to it by the test at
+/// the foot of this file, and `blurbFrom` cuts a derived one to it.
+export fn blurbLimit() -> Int64 {
+    return 155
+}
+
+/// The fewest bytes a description may carry and still say anything.
+///
+/// A card renders whatever it is given, so the failure this guards is not a
+/// broken card but an empty one: `One binary.` is a true first sentence and it
+/// describes nothing. `blurbFrom` will not cut a sentence this short, and the
+/// export asserts every published description clears it.
+export fn blurbFloor() -> Int64 {
+    return 50
+}
+
+/// `markup` as one plain sentence with `tail` after it, short enough for a card.
+///
+/// THE SIXTY PAGES THE TABLE ABOVE DOES NOT NAME. Thirteen consumer pages name
+/// themselves in `pageMetas`. The rest of the site is generated — a chapter of
+/// the book, a module of the standard library, a package of the registry — and
+/// every one of those already carries a sentence about itself: the chapter's
+/// lede, the module's first `///` line, the package's summary. This turns one of
+/// those into a description, so a generated page's card says what the page says
+/// and there is no second string to keep in step. Before it, all sixty carried
+/// one paragraph about the language, and a link to `std/json` previewed as a
+/// link to `/guide/values`.
+///
+/// THE PROSE ARRIVES AS HTML, because the page renders it as HTML: a `<code>` in
+/// a doc line, an `&lt;` where the escaper wrote one. An attribute is not
+/// markup, so the tags go and the entities come back.
+///
+/// THE CUT PREFERS A FULL STOP. A description that ends mid-clause reads as a
+/// fault in the site rather than as an abbreviation, so the last sentence that
+/// fits wins. Where that leaves less than `blurbFloor` — `One binary.` opens the
+/// commands chapter — three words are worse than half a limit of text, so the
+/// cut falls back to a word boundary and says so with an ellipsis.
+///
+/// `tail` is text the caller wants kept whichever way the cut goes: the
+/// reference puts a module's export count there, which is the one fact a
+/// summary written for a source file does not have.
+export fn blurbFrom(markup: String, tail: String) -> String {
+    let flat = collapse(decodeEntities(stripTags(markup)))
+    let room = blurbLimit() - tail.byteLength
+    if flat.byteLength <= room {
+        return flat + tail
+    }
+    let stop = lastSentenceEnd(flat, room)
+    if stop >= blurbFloor() {
+        return substring(flat, 0, stop) + tail
+    }
+    // Three bytes for the ellipsis, which is one character.
+    return withoutDanglingJoiner(substring(flat, 0, wordEnd(flat, room - 3))) + "…" + tail
+}
+
+/// `text` without the punctuation that joined it to the words a cut removed.
+///
+/// A cut at a word boundary lands wherever the space is, and the commands
+/// chapter's lede puts one after `docs —`. A description that ends in a dangling
+/// dash or comma reads as a fault in the site. Only a JOINER is dropped: a full
+/// stop ends a sentence and stays.
+fn withoutDanglingJoiner(text: String) -> String {
+    let mut out = trimEnd(text)
+    while out.byteLength > 0 {
+        if endsWith(out, "—") {
+            out = trimEnd(substring(out, 0, out.byteLength - 3))
+        } else if out[out.byteLength - 1] == ',' || out[out.byteLength - 1] == ';' || out[out.byteLength - 1] == ':' {
+            out = trimEnd(substring(out, 0, out.byteLength - 1))
+        } else {
+            return out.copy()
+        }
+    }
+    return out.copy()
+}
+
+/// `markup` with every tag dropped.
+///
+/// The scan for the closing `>` starts AT the `<` it found, not at the front of
+/// what is left: `a > b <code>c</code>` has a bare `>` before the first tag, and
+/// a scan from the front would take the text with it.
+fn stripTags(markup: String) -> String {
+    let mut out = ""
+    let mut rest = markup.copy()
+    while rest.byteLength > 0 {
+        let at = match indexOf(rest, "<") {
+            Some(i) => i,
+            None => 0 - 1,
+        }
+        if at < 0 {
+            return out + rest
+        }
+        out = out + substring(rest, 0, at)
+        let tag = substring(rest, at, rest.byteLength)
+        rest = match indexOf(tag, ">") {
+            Some(close) => substring(tag, close + 1, tag.byteLength),
+            // An unclosed tag takes the rest with it. The input is this site's
+            // own generated markup, so this is truncated output and not a `<`
+            // somebody wrote as text.
+            None => "",
+        }
+    }
+    return out.copy()
+}
+
+/// The five entities this site's escapers write, decoded.
+///
+/// `&amp;` goes LAST, and the order is the whole correctness of doing this with
+/// `replace`: text that reads `&amp;lt;` is an escaped `&lt;` a reader is meant
+/// to SEE, and decoding the ampersand first would turn it into a `<`.
+export fn decodeEntities(text: String) -> String {
+    let lt = replace(text, "&lt;", "<")
+    let gt = replace(lt, "&gt;", ">")
+    let quot = replace(gt, "&quot;", "\"")
+    let apos = replace(quot, "&#39;", "'")
+    return replace(apos, "&amp;", "&")
+}
+
+/// `text` as one line: no newline, and no run of spaces where one was.
+fn collapse(text: String) -> String {
+    return replace(replace(text, "\n", " "), "  ", " ")
+}
+
+/// The offset just past the last sentence-ending full stop at or below `max`,
+/// or 0 when there is none.
+///
+/// A full stop counts only when a space or the end of the text follows it, so
+/// the `.` in `.vyx` and the one in `vyrn.json` are not sentence ends.
+fn lastSentenceEnd(text: String, max: Int64) -> Int64 {
+    let mut best = 0
+    let mut i = 0
+    while i < max && i < text.byteLength {
+        if text[i] == '.' && (i + 1 == text.byteLength || text[i + 1] == ' ') {
+            best = i + 1
+        }
+        i = i + 1
+    }
+    return best
+}
+
+/// The offset to cut `text` at so it is at most `max` bytes and ends on a whole
+/// word.
+///
+/// With no space to cut at it falls back to a character boundary: `substring`
+/// traps on an offset inside a multi-byte character, and this site's prose is
+/// full of em dashes. A UTF-8 continuation byte is `10xxxxxx`, so walking back
+/// off those lands on the lead byte of the character that would have been split.
+fn wordEnd(text: String, max: Int64) -> Int64 {
+    if max >= text.byteLength {
+        return text.byteLength
+    }
+    let mut at = max
+    while at > 0 {
+        if text[at] == ' ' {
+            return at
+        }
+        at = at - 1
+    }
+    let mut boundary = max
+    while boundary > 0 && text[boundary] >= 128 && text[boundary] < 192 {
+        boundary = boundary - 1
+    }
+    return boundary
+}
+
 test "every row is a consumer path with a sentence on it" {
     let all = pageMetas()
     // Eleven since RFC-0106 M4: the import graph left the reference landing and
@@ -69,9 +248,9 @@ test "every row is a consumer path with a sentence on it" {
     for m in all {
         assert(startsWith(m.path, "/"))
         assert(m.title.byteLength > 0)
-        // A card truncates around 150 bytes and a one-word blurb says nothing.
-        assert(m.blurb.byteLength > 40)
-        assert(m.blurb.byteLength <= 160)
+        // A card truncates at `blurbLimit` and a one-word blurb says nothing.
+        assert(m.blurb.byteLength > 50)
+        assert(m.blurb.byteLength <= blurbLimit())
         // One sentence, so it ends in a full stop.
         assertEq(m.blurb[m.blurb.byteLength - 1], '.')
     }
@@ -101,4 +280,48 @@ test "no two rows share a title or a blurb" {
         }
         i = i + 1
     }
+}
+
+test "a derived blurb is plain text, and short enough to be read whole" {
+    // Tags go, the entities the escaper wrote come back, and the sentence is
+    // otherwise the page's own.
+    assertEq(blurbFrom("the <code>Stream&lt;T&gt;</code> combinators, written in Vyrn.", ""), "the Stream<T> combinators, written in Vyrn.")
+    assertEq(decodeEntities("a &amp;lt; b"), "a &lt; b")
+    // A bare `>` before the first tag is text and stays text.
+    assertEq(blurbFrom("a > b <em>c</em>", ""), "a > b c")
+}
+
+test "a long sentence is cut where a reader would stop, not where the byte count runs out" {
+    // Two full sentences fit and the third does not, so the third goes and no
+    // ellipsis is needed: what is left is what the page says.
+    let three = "A gen fn is ordinary Vyrn that runs while the program compiles and returns Vyrn source. RPC, UI, i18n and GraphQL are libraries built this way. None of them is a compiler feature."
+    let cut = blurbFrom(three, "")
+    assert(cut.byteLength <= blurbLimit())
+    assertEq(cut[cut.byteLength - 1], '.')
+    assert(!contains(cut, "None of them"))
+    // A very short opening sentence is not a description, so the cut falls back
+    // to a word boundary and says so.
+    let short = "One binary. vyrn run needs nothing else on your machine, vyrn build writes a native binary, and every other task — tests, benchmarks, formatting, documents — is a subcommand"
+    let fallback = blurbFrom(short, "")
+    assert(fallback.byteLength > blurbLimit() - 20)
+    assert(fallback.byteLength <= blurbLimit())
+    assert(endsWith(fallback, "…"))
+    // The cut lands between words: what is left is a run of the original, and
+    // nothing hangs off the end of it.
+    let stem = substring(fallback, 0, fallback.byteLength - 3)
+    assert(contains(short, stem))
+    assert(stem[stem.byteLength - 1] != ' ')
+    assert(stem[stem.byteLength - 1] != ',')
+    // And nothing dangles in front of it.
+    assertEq(withoutDanglingJoiner("every other task — tests, docs —"), "every other task — tests, docs")
+    assertEq(withoutDanglingJoiner("a sentence."), "a sentence.")
+}
+
+test "the tail survives the cut, because it is the fact the prose does not carry" {
+    let long = "std/symbolmap (RFC-0073 M1) — the shared shape of a generated module&#39;s symbol map: for each exported symbol, the source declaration it stands for, plus any derived facts."
+    let out = blurbFrom(long, " 5 exports.")
+    assert(out.byteLength <= blurbLimit())
+    assert(endsWith(out, " 5 exports."))
+    // Decoded, not carried through as an entity a reader would see.
+    assert(contains(out, "module's symbol map"))
 }
