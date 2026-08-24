@@ -1,0 +1,231 @@
+# Ported: html-validate rules the `.vyx` checker now enforces
+
+Seven rules from `rfcs/census/ui/README.md`, table one ("Already in hand — the
+parsed tree decides. No new input."), now live in `std/vyx-hints.vyrn`. They run
+at compile time, so a defect `html-validate` reports on a rendered page fails
+the build instead.
+
+Read date for every `html-validate` source below: 2026-08-24, branch `master`.
+
+## Severity, and where it came from
+
+`html-validate` sets a severity per preset, not per rule. The preset files hold
+the words. Every rule ported here reads `"error"`, so every port is `Error`.
+
+| Vyrn code | html-validate rule | severity | read at |
+| --- | --- | --- | --- |
+| `html/prefer-tbody` | `prefer-tbody` | `"error"` | `src/config/presets/recommended.ts:66` |
+| `a11y/th-scope` | `wcag/h63` | `"error"` | `src/config/presets/recommended.ts:84`, `a11y.ts:32` |
+| `html/input-type` | `no-implicit-input-type` | `"error"` | `src/config/presets/recommended.ts:52` |
+| `sec/inline-style` | `no-inline-style` | `"error"` | `src/config/presets/recommended.ts:54` |
+| `a11y/autoplay` | `no-autoplay` | `"error"` | `src/config/presets/recommended.ts:45`, `a11y.ts:17` |
+| `html/void-content` | `void-content` | `"error"` | `src/config/presets/recommended.ts:78`, `standard.ts:40` |
+| `sec/require-sri` | `require-sri` | `"error"` | `src/config/presets/document.ts:11` |
+
+Read with `gh api repos/html-validate/html-validate/contents/src/config/presets/<name>.ts`.
+Line numbers are lines of the decoded file.
+
+One difference in kind, worth stating: an `html-validate` `"error"` raises
+`errorCount`; a Vyrn `Error` stops the compile. The severity word is the same
+and the consequence is heavier. A project that wants advice instead writes
+`{"hints": {"html/prefer-tbody": "warning"}}` in its manifest.
+
+## The rules
+
+### `html/prefer-tbody` (Error)
+
+Fires on a `<table>` with a `<tr>` as a direct child. The browser inserts the
+`<tbody>` the markup left out, so the rendered tree is not the written one and
+every `table > tr` selector in the sheet misses.
+
+Does not fire on a `<tr>` inside `<thead>`, `<tbody>` or `<tfoot>` — that row is
+a child of the section, not of the table, so it never reaches the check.
+Reported once per table, at the table, so one waiver covers one table.
+
+`std/vyx-hints.vyrn`, rule at the `tag == "table"` branch; predicate
+`vhHasDirectRow`.
+
+### `a11y/th-scope` (Error)
+
+Fires on a `<th>` with no `scope`. A screen reader reads a data cell with the
+header it belongs to; without `scope` it works that header out from the table's
+shape, and it works it out wrong as soon as a table has a header column as well
+as a header row.
+
+A `:scope="…"` counts as present: `vhHas` reads any spelling. Does not fire on
+`<td>`.
+
+### `html/input-type` (Error)
+
+Fires on an `<input>` with no `type`. Presence only, so `:type="kind"` counts.
+
+### `sec/inline-style` (Error)
+
+Fires on a static `style` attribute.
+
+Deliberately does NOT fire on a bound `:style`. A `:style` carries a computed
+value — a bar width, an SVG `viewBox` — that no class in a sheet can hold, so
+the rule's own remedy does not reach it. `html-validate` has no binding to
+narrow against; Nuxt Hints turns the whole rule off for the same reason, calling
+it unreasonable for a Vue app (`rfcs/census/ui/html-validate-rules.md:101`).
+Narrowing to the static half keeps the half where the remedy exists.
+
+Three bound `:style` sites stand in the tree and are not reported:
+`site/app/routes/benchmarks.vyx:62`, `site/app/routes/docs/graph.vyx:104`,
+`site/app/routes/index.vyx:298`.
+
+### `a11y/autoplay` (Error)
+
+Fires on `autoplay` on `<audio>` or `<video>`, static or bound. `html-validate`
+carries the same element list in the preset line itself
+(`recommended.ts:45`, `include: ["audio", "video"]`). Does not fire on
+`autoplay` on any other tag.
+
+### `html/void-content` (Error)
+
+Fires on a void element with children that are not whitespace. `.vyx` has no
+void-element table of its own: it wants the end tag it was given, so
+`<img>x</img>` parses here and renders as `<img>x` in a browser — the content
+leaves the element it was written in.
+
+Uses a NAMED list of the thirteen void tags, for the reason `vhIsHandlerAttr`
+gives: a rule at error severity may miss and may not guess. `<br></br>` does not
+fire — the children are empty.
+
+### `sec/require-sri` (Error)
+
+Fires on `<script src>` and `<link rel="stylesheet" href>` when the URL is
+static, names another host (`//`, `http://`, `https://`), and there is no
+`integrity`.
+
+Narrower than `html-validate` in two ways, both recorded in the predicate's own
+doc comment:
+
+- `html-validate`'s `target` option defaults to `"all"`
+  (`src/rules/require-sri.ts`, `const defaults`), so it asks for a hash of a
+  same-origin file the build itself wrote a moment earlier. This port checks
+  crossorigin only, the option `html-validate` calls `"crossorigin"` and
+  implements with `/^(?:\w+:\/\/|\/\/)/`.
+- `html-validate` also covers `rel="preload"` and `rel="modulepreload"`
+  (`require-sri.ts`, `supportedRel`). This port covers `stylesheet`.
+
+A `:src` is a value this library cannot see, so it is not reported.
+
+## The eighth rule was dropped: `svg-focusable`
+
+The brief and the census both record `svg-focusable` as forbidding the legacy
+`focusable` attribute on `<svg>` (`rfcs/census/ui/README.md`, table one, and
+`rfcs/census/ui/html-validate-rules.md:74`, "Legacy `focusable` handling").
+
+That is backwards. The rule REQUIRES the attribute. Read at
+<https://html-validate.org/rules/svg-focusable.html> on 2026-08-24: the
+incorrect example is `<svg></svg>` and the error is `<svg> is missing required
+"focusable" attribute`; the correct example is `<svg focusable="false"></svg>`.
+It is an Internet Explorer tab-order workaround.
+
+It is also `"off"` in every preset that names it —
+`src/config/presets/recommended.ts:69` and `a11y.ts:24` both read
+`"svg-focusable": "off"` — which the census records correctly in its overlap
+column ("off in every preset").
+
+A rule that no preset enables, that targets a dead browser, and that would fire
+on every inline `<svg>` in the site is not worth a port. Dropped. Seven, not
+eight.
+
+## Pages changed
+
+Six files. Every change is a `scope="col"` on a header cell or a `<tbody>`
+around rows. No visual change; no new CSS.
+
+| file:line | rule | change |
+| --- | --- | --- |
+| `site/app/routes/benchmarks.vyx:128-130` | `a11y/th-scope` | `scope="col"` on the three `<thead>` headers |
+| `site/app/routes/benchmarks.vyx:159-163` | `html/prefer-tbody` | `<tbody>` around the environment rows |
+| `site/app/routes/docs/index.vyx:176` | `a11y/th-scope` | `scope="col"` on both headers |
+| `site/app/routes/explore/[package].vyx:85` | `a11y/th-scope` | `scope="col"` on all three headers |
+| `site/app/routes/releases.vyx:154` | `a11y/th-scope` | `scope="col"` on all four headers |
+| `site/app/routes/tooling/editors.vyx:102` | `a11y/th-scope` | `scope="col"` on all three headers |
+
+The `<th scope="row">` cells that were already correct
+(`site/app/routes/benchmarks.vyx:135`, `:161`) were left alone.
+
+Measured after the change, by running the checker over the whole tree:
+
+```
+import { vyxHints } from "std/vyx-hints"
+import * as h from vyxHints("./site/app")
+```
+
+One report from the seven new rules remains, and it is the one below.
+
+## Needs a decision
+
+`site/app/routes/why-vyrn.vyx:122` — `sec/inline-style`.
+
+```
+<p class="lede" style="font-size:1.05rem">{{ c.means }}</p>
+```
+
+`.lede` sets `font-size: var(--t-lede)` (`site/public/style.css:1109`). The
+inline declaration overrides it for the four capability panes only.
+
+Two options, and both need a decision that is not the checker's:
+
+1. Add a rule to `site/public/style.css` scoped to the pane, for example
+   `.panes .lede { font-size: 1.05rem; }`. `.panes` is not unique to this page —
+   `site/app/routes/index.vyx:412` carries a `.panes` block too — so this
+   selector reaches markup nobody asked it to reach, and picking a selector that
+   does not needs a class name somebody has to choose.
+2. Drop the inline declaration and let `--t-lede` apply. That is a visual change
+   to four panes.
+
+Left as it stands. The rule was not weakened for it.
+
+## Count against html-validate
+
+Measured over `rfcs/census/ui/html-validate-rules.md`, counting table rows whose
+`when it can be checked` column opens `COMPILE TIME` and whose `Vyrn today`
+column does not open `absent`:
+
+| measure | before | after |
+| --- | --- | --- |
+| rules in the census | 94 | 94 |
+| rules that can be checked at compile time | 41 | 41 |
+| compile-time rules with a Vyrn port | 4 | 11 |
+| compile-time rules with no port | 37 | 30 |
+| rules of all 94 with a Vyrn port | 8 | 15 |
+
+The four that already had a port are `area-alt`, `no-implicit-button-type`,
+`wcag/h36` and `wcag/h37`. The other four counterparts the census records —
+`empty-heading`, `input-missing-label`, `wcag/h30`, `no-dup-id` — sit on
+`EITHER` or `RUN TIME` rows and so are outside the 41.
+
+Two corrections to the census, both measured:
+
+- The README says "9 of 94 rules have a counterpart here". The count is 8. Rows
+  with a `Vyrn today` column that does not open `absent`: `area-alt`,
+  `empty-heading`, `input-missing-label`, `no-implicit-button-type`, `wcag/h30`,
+  `wcag/h36`, `wcag/h37`, `no-dup-id`.
+- The README says "None of the 41 compile-time-capable rules outside that set
+  has a port", which reads as though none of the 41 had one. Four did.
+
+## What is left of the 41
+
+Thirty rules. They fall in three groups, unchanged from the census:
+
+- Fourteen need the raw source spelling the parse tree drops (`attr-case`,
+  `attr-quotes`, `no-dup-attr`, `no-self-closing` and the rest of table three).
+- Eight need one fixed table beside the checker (`element-name`,
+  `no-unknown-elements`, `no-unknown-attributes`, `unrecognized-char-ref`,
+  `deprecated`, `no-deprecated-attr`, `no-raw-characters`, `no-unused-disable`).
+- Seven sit in table one and are still unported: `close-order`,
+  `script-element`, `no-implicit-close` (all three are parse structure, and a
+  template that gets them wrong fails to parse already, so the compiler reports
+  them with a better message than a lint has — `std/vyx-hints.vyrn:187-192`),
+  `no-utf8-bom` (file bytes before parse, which `vhCheck` never sees),
+  `element-required-attributes` (needs the per-element requirement tables that
+  `vhNeedsAlt` hand-codes for one case), `require-csp-nonce` (a nonce is a
+  per-request value, so a template can only ask for an attribute a build step
+  will fill), and `svg-focusable`, dropped above.
+- One, `no-style-tag`, reads `COMPILE TIME` but sits in none of the README's
+  three tables. It is a tag comparison and would port in one line.
