@@ -70,7 +70,7 @@ use vyrn_codegen::toolchain::{extern_trap_stubs, find_clang, runtime_shim};
 /// feature so the default build keeps its zero external dependencies.
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn run --profile [file.vyrn] [args...]   (where the interpreted run spent its time, to stderr; the flag counts only BEFORE the file, so a program can have one of its own)\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
+const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn run --profile [file.vyrn] [args...]   (where the interpreted run spent its time, to stderr; the flag counts only BEFORE the file, so a program can have one of its own)\n       vyrn check --profile [file.vyrn]   (the same, for generation alone: `check` runs every `gen fn` and stops. Needs a cold generator cache to mean anything)\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
        vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact-name>   (every import chain that pulls that capability into the artifact's closure)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
        vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [--locked] [alias] | vyrn vendor [--check] | vyrn deps [artifact]   (deps: every declared artifact's module graph, then the toolchain)\n       vyrn --version   (also -V)";
 
@@ -452,13 +452,29 @@ fn real_main() -> ExitCode {
         }
     };
 
+    // `check` profiles too, and it is the more useful of the two on a program
+    // whose weight is generators: `check` runs every `gen fn` and then stops,
+    // so what it reports is generation and nothing else. The gen cache has to be
+    // cold for that to mean anything — a warm one makes generation free, which
+    // is the point of it.
+    if want_profile && cmd == "check" {
+        vyrn_frontend::prof::start();
+    }
+    let profile_now = |code: ExitCode| -> ExitCode {
+        if want_profile {
+            let rows = vyrn_frontend::prof::take();
+            eprint!("{}", vyrn_frontend::prof::table(&rows, 25));
+        }
+        code
+    };
+
     match cmd {
         "fix" => fix_cmd(path, &source),
         // `check` has to predict `build` about the one thing `build` can fail to
         // FINISH (audit A5.2). Monomorphization is only visible while emitting,
         // so `check` emits and throws the code away, and reports the depth
         // refusal alone — every other codegen error stays `build`'s.
-        "check" => match load_program(path, &source) {
+        "check" => profile_now(match load_program(path, &source) {
             Ok(program) => {
                 let _memo = shared_desugars();
                 match vyrn_codegen::check_instantiations(&program) {
@@ -473,16 +489,21 @@ fn real_main() -> ExitCode {
                 }
             }
             Err(code) => code,
-        },
+        }),
         "run" => {
+            // Armed BEFORE the load, because the load is where generators run.
+            // A `gen fn` is ordinary Vyrn executed by this same interpreter at
+            // compile time, and on a generator-heavy program it is most of the
+            // work — profiling only what happens after `load_program` would miss
+            // it and say nothing was slow.
+            if want_profile {
+                vyrn_frontend::prof::start();
+            }
             let program = match load_program(path, &source) {
                 Ok(p) => p,
                 Err(code) => return code,
             };
             let _memo = shared_desugars();
-            if want_profile {
-                vyrn_frontend::prof::start();
-            }
             let out = vyrn_frontend::interp::run_with_args(&program, &prog_args);
             // The table goes to STDERR, and on the failing path too. A profile is
             // not the program's output — a run whose stdout is piped somewhere
