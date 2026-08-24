@@ -14,7 +14,7 @@
 // as a boundary and `regexredux-1000.expected` sat in the corpus with no
 // program beside it. Every pattern below is a literal of this source, which is
 // the point the census made: nothing here needs a pattern chosen at run time.
-import { compile, count, replaceAll, Regex } from "std/regex"
+import { compile, countMatches, replaceAll, Regex } from "std/regex"
 import { joinWith } from "std/strings"
 
 /// The whole of standard input, lines and all.
@@ -79,7 +79,7 @@ fn main() -> Int64 {
     let cleanLength = sequence.byteLength
 
     for pattern in variants() {
-        print("\{pattern} \{count(compiled(pattern), sequence)}")
+        print("\{pattern} \{countMatches(compiled(pattern), sequence)}")
     }
 
     // The five rewrites, each over the result of the last.

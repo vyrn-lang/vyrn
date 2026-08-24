@@ -72,11 +72,11 @@ import { substring } from "std/strings"
 /// Per-code severity overrides, as parallel arrays (a code and its level word).
 /// Built by [`policyOf`]; [`noPolicy`] is the empty one, under which every rule
 /// runs at the severity its author chose.
-export type Policy = { codes: Array<String>, levels: Array<String> }
+export type HintPolicy = { codes: Array<String>, levels: Array<String> }
 
 /// The empty policy: no override, every rule at its default severity.
-export fn noPolicy() -> Policy {
-    return Policy { codes: [], levels: [] }
+export fn noPolicy() -> HintPolicy {
+    return HintPolicy { codes: [], levels: [] }
 }
 
 /// Read a policy out of `configText`, from its top-level `key`.
@@ -85,7 +85,7 @@ export fn noPolicy() -> Policy {
 /// nothing gets the library's defaults. `Err` when the document does not parse,
 /// when the key is not an object of strings, or when a level word is not `off`,
 /// `warning` or `error`. Report the `Err`; do not fall back to checking nothing.
-export fn policyOf(configText: String, key: String) -> Result<Policy, String> {
+export fn policyOf(configText: String, key: String) -> Result<HintPolicy, String> {
     let doc = parseJson(configText)?
     let mut found = false
     let mut section = JNull
@@ -116,12 +116,12 @@ export fn policyOf(configText: String, key: String) -> Result<Policy, String> {
             )
         }
     }
-    return Ok(Policy { codes: codes, levels: levels })
+    return Ok(HintPolicy { codes: codes, levels: levels })
 }
 
 /// The level `code` runs at under `p`: its configured word, or the word for
 /// `dflt` when the project said nothing about it.
-export fn levelOf(p: Policy, code: String, dflt: Severity) -> String {
+export fn levelOf(p: HintPolicy, code: String, dflt: Severity) -> String {
     let mut i = 0
     while i < p.codes.length {
         if p.codes[i] == code {
@@ -143,7 +143,7 @@ export fn levelOf(p: Policy, code: String, dflt: Severity) -> String {
 /// again. The `code` rides the message, which is RFC-0099's convention until a
 /// consumer for a separate field exists.
 export fn hint(
-    p: Policy,
+    p: HintPolicy,
     code: String,
     dflt: Severity,
     src: String,
@@ -325,7 +325,7 @@ fn stringOf(j: Json) -> String {
 
 /// The policy in `text` under `"hints"`, or the empty one (the `Err` arms are
 /// asserted on separately).
-fn policyOr(text: String) -> Policy {
+fn policyOr(text: String) -> HintPolicy {
     return match policyOf(text, "hints") {
         Ok(v) => v,
         Err(e) => noPolicy(),

@@ -65,10 +65,10 @@ input file's own language spells:
 The count of waivers in a repository is the audit a rule like `sec/raw-html`
 is actually for.
 
-## Policy
+## HintPolicy
 
 ```vyrn
-type Policy = { codes: Array<String>, levels: Array<String> }
+type HintPolicy = { codes: Array<String>, levels: Array<String> }
 ```
 
 Per-code severity overrides, as parallel arrays (a code and its level word).
@@ -78,7 +78,7 @@ runs at the severity its author chose.
 ## noPolicy
 
 ```vyrn
-fn noPolicy() -> Policy
+fn noPolicy() -> HintPolicy
 ```
 
 The empty policy: no override, every rule at its default severity.
@@ -86,7 +86,7 @@ The empty policy: no override, every rule at its default severity.
 ## policyOf
 
 ```vyrn
-fn policyOf(configText: String, key: String) -> Result<Policy, String>
+fn policyOf(configText: String, key: String) -> Result<HintPolicy, String>
 ```
 
 Read a policy out of `configText`, from its top-level `key`.
@@ -99,7 +99,7 @@ when the key is not an object of strings, or when a level word is not `off`,
 ## levelOf
 
 ```vyrn
-fn levelOf(p: Policy, code: String, dflt: Severity) -> String
+fn levelOf(p: HintPolicy, code: String, dflt: Severity) -> String
 ```
 
 The level `code` runs at under `p`: its configured word, or the word for
@@ -108,7 +108,7 @@ The level `code` runs at under `p`: its configured word, or the word for
 ## hint
 
 ```vyrn
-fn hint(p: Policy, code: String, dflt: Severity, src: String, file: String, line: Int64, col: Int64, message: String) -> String
+fn hint(p: HintPolicy, code: String, dflt: Severity, src: String, file: String, line: Int64, col: Int64, message: String) -> String
 ```
 
 One report: the `//@diag` line for it, or `""` when the project turned `code`

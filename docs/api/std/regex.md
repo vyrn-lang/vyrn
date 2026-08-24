@@ -79,10 +79,10 @@ fn find(re: Regex, hay: String, from: Int64) -> Option<Match>
 
 The first match at or after `from`, or `None`.
 
-## count
+## countMatches
 
 ```vyrn
-fn count(re: Regex, hay: String) -> Int64
+fn countMatches(re: Regex, hay: String) -> Int64
 ```
 
 How many non-overlapping matches `re` has in `hay`.

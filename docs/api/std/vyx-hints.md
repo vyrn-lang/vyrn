@@ -80,7 +80,7 @@ is the fault `find_manifest` was hardened against.
 ## vhCheck
 
 ```vyrn
-fn vhCheck(p: Policy, src: String, file: String) -> String
+fn vhCheck(p: HintPolicy, src: String, file: String) -> String
 ```
 
 Every report `src` (the text of the `.vyx` file at `file`) earns.

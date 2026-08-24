@@ -52,7 +52,7 @@
 /// warning, and a project can move any of them in either direction.
 
 import { reportHere, Severity } from "std/diag"
-import { hint, noPolicy, policyOf, Policy } from "std/hints"
+import { hint, noPolicy, policyOf, HintPolicy } from "std/hints"
 import { VyxAttr, VyxBody, VyxNode, vyxParseTemplate } from "std/vyx"
 import { contains, endsWith, slice, startsWith } from "std/strpred"
 import { toLower, trim } from "std/strings"
@@ -119,7 +119,7 @@ type VhFileRead = { src: String, err: String }
 /// directory or component that cannot be read is an ERROR, not a silent zero:
 /// carrying on would tell a project its tree is checked while it is not, the
 /// fault `vyxHintsConfigured` refuses for an unreadable config.
-gen fn vhScan(p: Policy, dir: String) -> VhScan {
+gen fn vhScan(p: HintPolicy, dir: String) -> VhScan {
     let listed = match listDir(dir) {
         Ok(ns) => VhDirRead { names: ns, err: "" },
         Err(e) => VhDirRead { names: [], err: e.copy() },
@@ -165,7 +165,7 @@ gen fn vhIsDir(path: String) -> Bool {
 }
 
 /// A parsed policy, or the refusal that explains why there is none.
-type VhPolicy = { policy: Policy, err: String }
+type VhPolicy = { policy: HintPolicy, err: String }
 
 fn vhPolicy(text: String) -> VhPolicy {
     return match policyOf(text, hintsKey()) {
@@ -185,7 +185,7 @@ fn vhModule(checked: Int64) -> String {
 ///
 /// Exported so a rule set can be tested, and so a third-party library may reuse
 /// these rules under its own configuration rather than fork them.
-export gen fn vhCheck(p: Policy, src: String, file: String) -> String {
+export gen fn vhCheck(p: HintPolicy, src: String, file: String) -> String {
     let t = vyxParseTemplate(src)
     if t.err != "" {
         // The template does not parse. The compile is already failing, with a
@@ -197,7 +197,7 @@ export gen fn vhCheck(p: Policy, src: String, file: String) -> String {
 }
 
 fn vhNodes(
-    p: Policy,
+    p: HintPolicy,
     src: String,
     file: String,
     nodes: Array<VyxNode>,
@@ -213,7 +213,7 @@ fn vhNodes(
 }
 
 fn vhNode(
-    p: Policy,
+    p: HintPolicy,
     src: String,
     file: String,
     n: VyxNode,
@@ -237,7 +237,7 @@ fn vhNode(
 }
 
 fn vhBodies(
-    p: Policy,
+    p: HintPolicy,
     src: String,
     file: String,
     bodies: Array<VyxBody>,
@@ -263,7 +263,7 @@ fn vhBodies(
 // ===========================================================================
 
 fn vhElem(
-    p: Policy,
+    p: HintPolicy,
     src: String,
     file: String,
     tag: String,

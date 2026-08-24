@@ -330,12 +330,12 @@ fn a_waiver_in_the_component_drops_one_report_and_only_that_one() {
 /// `std/vyx-hints` imports — no `std/vyx`, no template parser, no privilege.
 /// Its rules, its codes, its severities and its config key are its own.
 const SQL_HINTS: &str = r#"import { reportHere, Severity } from "std/diag"
-import { hint, noPolicy, policyOf, Policy } from "std/hints"
+import { hint, noPolicy, policyOf, HintPolicy } from "std/hints"
 import { contains, slice } from "std/strpred"
 import { toLower } from "std/strings"
 
 /// A parsed policy, or the refusal that explains why there is none.
-type SqlPolicy = { policy: Policy, err: String }
+type SqlPolicy = { policy: HintPolicy, err: String }
 
 /// `sqlHints(path, config)` — two rules over a `.sql` file, one per line.
 export gen fn sqlHints(path: String, config: String) -> String {

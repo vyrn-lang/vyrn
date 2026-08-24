@@ -608,7 +608,7 @@ export fn find(re: Regex, hay: String, from: Int64) -> Option<Match> {
 /// Non-overlapping and leftmost: a match consumes what it covered, so
 /// `aa` in `aaa` is one match and not two. An empty match advances by one
 /// byte, which is what stops a pattern like `a*` looping forever.
-export fn count(re: Regex, hay: String) -> Int64 {
+export fn countMatches(re: Regex, hay: String) -> Int64 {
     let raw = bytes(hay)
     let mut mark = freshMark(re)
     let mut genBox: Array<Int64> = [0]
@@ -675,9 +675,9 @@ test "a literal is found, counted and replaced" {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
     }
-    assertEq(count(re, "abcabc"), 2)
-    assertEq(count(re, "xxabcyy"), 1)
-    assertEq(count(re, "ab"), 0)
+    assertEq(countMatches(re, "abcabc"), 2)
+    assertEq(countMatches(re, "xxabcyy"), 1)
+    assertEq(countMatches(re, "ab"), 0)
     assertEq(replaceAll(re, "xabcy", "-"), "x-y")
     assertEq(replaceAll(re, "abcabc", ""), "")
 }
@@ -697,17 +697,17 @@ test "a class matches its members and a negated one everything else" {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
     }
-    assertEq(count(re, "acgta"), 3)
+    assertEq(countMatches(re, "acgta"), 3)
     let neg = match compile("[^>]") {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
     }
-    assertEq(count(neg, "a>b>c"), 3)
+    assertEq(countMatches(neg, "a>b>c"), 3)
     let range = match compile("[a-f]") {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
     }
-    assertEq(count(range, "abcxyzf"), 4)
+    assertEq(countMatches(range, "abcxyzf"), 4)
 }
 
 test "the three repeats" {
@@ -715,21 +715,21 @@ test "the three repeats" {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
     }
-    assertEq(count(star, "ac"), 1)
-    assertEq(count(star, "abbbc"), 1)
+    assertEq(countMatches(star, "ac"), 1)
+    assertEq(countMatches(star, "abbbc"), 1)
     let plus = match compile("ab+c") {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
     }
-    assertEq(count(plus, "ac"), 0)
-    assertEq(count(plus, "abc"), 1)
+    assertEq(countMatches(plus, "ac"), 0)
+    assertEq(countMatches(plus, "abc"), 1)
     let opt = match compile("ab?c") {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
     }
-    assertEq(count(opt, "ac"), 1)
-    assertEq(count(opt, "abc"), 1)
-    assertEq(count(opt, "abbc"), 0)
+    assertEq(countMatches(opt, "ac"), 1)
+    assertEq(countMatches(opt, "abc"), 1)
+    assertEq(countMatches(opt, "abbc"), 0)
 }
 
 test "a star is greedy" {
@@ -757,12 +757,12 @@ test "the patterns regex-redux counts" {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
     }
-    assertEq(count(re, dna), 3)
+    assertEq(countMatches(re, dna), 3)
     let cls = match compile("agggtaa[cgt]|[acg]ttaccct") {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
     }
-    assertEq(count(cls, "agggtaacXXcttaccct"), 2)
+    assertEq(countMatches(cls, "agggtaacXXcttaccct"), 2)
 }
 
 test "a group is a term the repeats apply to" {
@@ -770,13 +770,13 @@ test "a group is a term the repeats apply to" {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
     }
-    assertEq(count(re, "ababc"), 1)
-    assertEq(count(re, "c"), 0)
+    assertEq(countMatches(re, "ababc"), 1)
+    assertEq(countMatches(re, "c"), 0)
     let alt = match compile("(a|b)c") {
         Ok(r) => r,
         Err(w) => panic("compile: \{w}"),
     }
-    assertEq(count(alt, "ac bc"), 2)
+    assertEq(countMatches(alt, "ac bc"), 2)
 }
 
 test "find says where, and searching from there finds the next" {
