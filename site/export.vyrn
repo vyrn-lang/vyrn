@@ -242,7 +242,7 @@ fn markCurrent(html: String, path: String) -> String {
 /// navigation marker is stamped, and for the same reason: the layout is shared
 /// by every page and is not told which route it renders — the export is. A
 /// path outside the documentation gets no band, so the index and the install
-/// page stay as they are, and the backstage never reaches this pass.
+/// page stay as they are.
 fn withSubnav(html: String, path: String) -> String {
     // A redirect stub is the old name of a page: it carries its three ways out
     // and nothing else, so no band is stamped on one.
@@ -317,7 +317,7 @@ fn withLang(html: String, path: String) -> String {
 /// "The display type scale goes on nine pages").
 ///
 /// A LIST AND NOT A RULE. Every candidate rule is wrong on one page: "top-level"
-/// admits the two redirect stubs and `/backstage`; "has a `.display` heading"
+/// admits the two redirect stubs; "has a `.display` heading"
 /// admits all 160 leaf pages, which every one of them has; "not under a
 /// directory" admits `/compare` correctly and `/docs/editors` wrongly. Nine
 /// strings are cheaper than a rule with four exceptions, and M2 to M4 add to a
@@ -797,11 +797,11 @@ fn failed(what: String, why: String) -> Int64 {
 /// Export one route: its document and its navigation payload. Returns the number
 /// of failures, so the caller exits non-zero instead of publishing a hole.
 ///
-/// A BACKSTAGE PAGE PUBLISHES NO PAYLOAD. The payload exists for the soft
-/// navigator, and the backstage loads no script at all — it wears its own shell
-/// and every link into or out of it is a full load, deliberately (RFC-0105 M1).
-/// A record's payload would be a second copy of the whole rendered document that
-/// nothing ever fetches: 3.2 MB of the published tree, and half the export's
+/// A PAGE THAT WEARS ITS OWN SHELL PUBLISHES NO PAYLOAD. The payload exists for
+/// the soft navigator; a page that loads no script has every link into or out of
+/// it be a full load, deliberately (RFC-0105 M1). Its payload would be a second
+/// copy of the whole rendered document that nothing ever fetches: 3.2 MB of the
+/// published tree, and half the export's
 /// time. `site/test/basepath.test.mjs` checks that they are absent the same way
 /// it checks the others are present.
 fn exportPath(outDir: String, path: String) -> Int64 {
@@ -975,8 +975,8 @@ fn written(outDir: String, source: String, name: String, body: String) -> Int64 
 
 /// The one input this program is HANDED rather than reads (RFC-0105 M1).
 ///
-/// The velocity charts on `/backstage` are drawn from the repository's own
-/// history, and history is not in the working tree: RFC-0014 gives this program
+/// The release table is drawn from the repository's own history, and history is
+/// not in the working tree: RFC-0014 gives this program
 /// `readFile` and `listDir`, and there is no git behind either. So the site
 /// program refuses to publish without what it wrote. A committed fixture keeps
 /// the tests below runnable on a clone that has never run the script, and this
@@ -1233,8 +1233,7 @@ test "every published document marks exactly one thing in its masthead" {
         // Four kinds of page mark nothing, and each is deliberate: the home page,
         // which is the wordmark's route and not a row; the three pages that are
         // reached from content rather than from the masthead; the two redirect
-        // stubs, which are the old name of a page and not a place; and every
-        // backstage page, which hangs off its own navigation.
+        // stubs, which are the old name of a page and not a place.
         //
         // `/releases` joined the second group in M3's third round: it left the
         // row, and it is reached from the index's `Latest release` section, from
@@ -1286,11 +1285,10 @@ test "each renamed route publishes a stub that carries the reader to the new one
     assertEq(redirectTarget("/docs"), "")
 }
 
-test "both fronts carry the theme control, and carry it without a flash" {
-    // RFC-0105 M4. Three documents, because there are three cases and not two
-    // hundred: a consumer page at the root, a consumer page three deep (the
-    // document-relative rule), and a backstage page, which wears its own shell
-    // and builds its masthead as a string rather than from the layout.
+test "every page carries the theme control, and carries it without a flash" {
+    // RFC-0105 M4. Two documents, because there are two cases and not two
+    // hundred: a page at the root, and a page three deep — the
+    // document-relative rule.
     //
     // What each has to be true of:
     //   - The theme is decided INLINE, in the head, before the first paint and
@@ -1558,11 +1556,10 @@ test "the version the pages feature is the newest one the repository has" {
     if rows.length > 0 {
         assertEq(releaseTag(), rows[rows.length - 1].tag)
     }
-    // And no page may name a tag that is not the newest one. Two pages LIST
-    // every tag on purpose — the release table, and the backstage's own
-    // timeline — so the sweep is over the other nine.
+    // And no page may name a tag that is not the newest one. ONE page lists
+    // every tag on purpose — the release table — so the sweep is over the rest.
     for path in sitePaths() {
-        if path != "/releases" && path != "/backstage" {
+        if path != "/releases" {
             for row in rows {
                 if row.tag != releaseTag() {
                     assert(!has(publishedDocument(path), row.tag))

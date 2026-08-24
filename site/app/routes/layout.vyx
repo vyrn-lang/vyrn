@@ -52,9 +52,7 @@ fn standing() -> String {
 <div class="shell">
 <!-- THE HEADER IS THE VIEWPORT'S (RFC-0106 M4 follow-up, user row 1): the
      masthead and its border-bottom span the whole window, the reference
-     site's own shape, and the framed 1232px plate begins under it. Only the
-     backstage keeps its masthead inside its root, because it wears its own
-     shell. -->
+     site's own shape, and the framed 1232px plate begins under it. -->
 <a class="skip" href="#main">Skip to content</a>
 <header class="masthead">
         <a href="/index.html" class="wordmark">vyrn</a>
@@ -78,8 +76,8 @@ fn standing() -> String {
         </details>
         <!-- The one call to action and the theme control, pushed to the end of
              the row together. Both are strings from `../nav` rather than markup
-             here: the theme control because the backstage builds its masthead as
-             one string and has no host element, and the CTA because the export's
+             here: the theme control because a page that builds its masthead as
+             one string has no host element, and the CTA because the export's
              `aria-current` marker matches on `href` and `data-key` being the
              first two attributes, which a template cannot promise. `.slot` is
              `display: contents`, so `v-html` costs no box either time. -->

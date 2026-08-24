@@ -2,9 +2,9 @@
 // GET /benchmarks — every measured claim the site makes, on one page
 // (RFC-0106 M5 round 22).
 //
-// It stands where two pages used to: `/compare`'s cross-language chart and the
-// backstage's raw dataset. A reader who wants to know whether the language is
-// fast should not have to visit a design record to find out, and a design
+// It stands where two pages used to: `/compare`'s cross-language chart and a
+// second front's raw dataset. A reader who wants to know whether the language
+// is fast should not have to visit a design record to find out, and a design
 // record should not be the only place the numbers are complete. So the cards
 // the index shows six of are all here, the radar and the table are here, and
 // the method is a section rather than a disclosure at the bottom of somewhere

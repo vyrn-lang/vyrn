@@ -84,8 +84,9 @@
   /// The visible word is inside the name, so a reader who says "click System"
   /// to a voice control hits the same button they can see (WCAG 2.5.3).
   ///
-  /// The consumer masthead and the backstage masthead each carry one control,
-  /// and only one of the two is ever in a document.
+  /// The masthead carries one control. The query is `querySelectorAll` and the
+  /// loop is over all of it, because a document with none is the normal case
+  /// for a page that wears its own shell.
   function mark(choice) {
     var buttons = document.querySelectorAll("[data-theme-cycle]");
     for (var i = 0; i < buttons.length; i += 1) {

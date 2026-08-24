@@ -378,7 +378,7 @@ test "every chapter and every module publishes a markdown twin" {
     // A path outside the kinds that have a twin says so rather than answering
     // with an empty document.
     assertEq(markdownOf("/install"), "")
-    assertEq(markdownOf("/backstage/rfcs/0106"), "")
+    assertEq(markdownOf("/nowhere/at/all"), "")
     assert(markdownOf("/tooling/editors").byteLength > 0)
     assert(markdownOf("/docs/graph").byteLength > 0)
 }

@@ -103,8 +103,8 @@ export type NavRow = { href: String, label: String }
 /// marks — cannot exist, because a static page has no reader's choice to mark it
 /// from.
 ///
-/// One definition, two mastheads. The consumer layout puts it in `<template>`
-/// and the backstage builds its masthead as a string; both call this.
+/// One definition, one masthead. It was two — the second front built its
+/// masthead as a string — and the string caller went with that section.
 export fn themeControl() -> String {
     return "<button type=\"button\" class=\"theme\" data-theme-cycle aria-label=\"Theme: System. Press to use Light.\">System</button>"
 }

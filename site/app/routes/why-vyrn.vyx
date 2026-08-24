@@ -13,8 +13,7 @@
 // word produces. The prose around it says the one thing a plate cannot.
 //
 // The design-record plate left with RFC-0105 M1. Counting the records is an
-// argument about how the project works, not about what the language is, and the
-// backstage renders every one of them rather than counting them.
+// argument about how the project works, not about what the language is.
 //
 // The non-goals are the list in README.md's "Not in v1" and RFC-0001's Non-goals
 // section, with the reason each one is refused.

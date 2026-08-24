@@ -28,8 +28,6 @@
 import { Json, JsonField } from "std/json"
 import { parseJson } from "std/jsonread"
 import { joinWith, substring } from "std/strings"
-import { corpusRecords, toneOf, Record } from "./corpus"
-import { rfcTag } from "./backstage"
 
 /// One day of work: the commits made, and how many of them were merged pull
 /// requests.
@@ -40,22 +38,6 @@ export type Arrival = { number: Int64, date: String }
 
 /// One published release, and the day it was tagged.
 export type Release = { tag: String, date: String }
-
-/// One bar of a pulse chart.
-export type VBar = { id: String, x: String, y: String, w: String, h: String, title: String }
-
-/// One label under the pulse, or one release marked on it. `x` is where the
-/// thing IS; `lx` is where its label can be drawn without leaving the drawing,
-/// which is not the same number at either end of an axis.
-export type AxisMark = { id: String, x: String, lx: String, label: String, title: String }
-
-/// One row of the arrivals fallback: a record, when it arrived, and what it is
-/// today.
-export type ArrivalRow = { tag: String, date: String, band: String }
-
-/// One band of the arrivals chart: every record that had this status by the day
-/// the site was built, stacked under the ones above it.
-export type Band = { key: String, name: String, points: String, tone: String, count: Int64 }
 
 // ---------------------------------------------------------------------------
 // The file
@@ -87,12 +69,9 @@ let mut loaded = false
 let mut fromFixture = false
 let mut corrupt = ""
 let mut dayRows: Array<Day> = []
-let mut arrivals: Array<Arrival> = []
 let mut releases: Array<Release> = []
 let mut testBlocks = 0
 let mut testFiles = 0
-let mut commitTotal = 0
-let mut prTotal = 0
 
 /// Read the file, once.
 fn loadHistory() {
@@ -128,7 +107,6 @@ fn loadHistory() {
     }
     for r in arrayAt(fields, "rfcs") {
         let f = fieldsOf(copyJson(r))
-        arrivals.push(Arrival { number: numberAt(f, "n"), date: stringAt(f, "d") })
     }
     for r in arrayAt(fields, "releases") {
         let f = fieldsOf(copyJson(r))
@@ -137,8 +115,6 @@ fn loadHistory() {
     let tests = objectAt(fields, "tests")
     testBlocks = numberAt(tests, "blocks")
     testFiles = numberAt(tests, "files")
-    commitTotal = numberAt(fields, "commits")
-    prTotal = numberAt(fields, "prs")
 }
 
 /// Why the charts cannot be drawn, or "" when they can. A source that is
@@ -277,26 +253,10 @@ export fn days() -> Array<Day> {
     return dayRows.copy()
 }
 
-/// Every design record and the day it arrived.
-export fn arrivalRows() -> Array<Arrival> {
-    loadHistory()
-    return arrivals.copy()
-}
-
 /// Every release, oldest first.
 export fn releaseRows() -> Array<Release> {
     loadHistory()
     return releases.copy()
-}
-
-export fn commitCount() -> Int64 {
-    loadHistory()
-    return commitTotal
-}
-
-export fn prCount() -> Int64 {
-    loadHistory()
-    return prTotal
 }
 
 export fn testBlockCount() -> Int64 {
@@ -309,493 +269,19 @@ export fn testFileCount() -> Int64 {
     return testFiles
 }
 
-/// How many days the history covers.
-export fn dayCount() -> Int64 {
-    loadHistory()
-    return dayRows.length
-}
-
-/// The first day and the last, as the page dates its own charts.
-export fn firstDay() -> String {
-    loadHistory()
-    if dayRows.length == 0 {
-        return ""
-    }
-    return dayRows[0].date.copy()
-}
-
-export fn lastDay() -> String {
-    loadHistory()
-    if dayRows.length == 0 {
-        return ""
-    }
-    return dayRows[dayRows.length - 1].date.copy()
-}
-
-/// The busiest day's commits, which is the top of the pulse's scale.
-fn busiest() -> Int64 {
-    loadHistory()
-    let mut most = 1
-    let mut i = 0
-    while i < dayRows.length {
-        if dayRows[i].commits > most {
-            most = dayRows[i].commits
-        }
-        i = i + 1
-    }
-    return most
-}
-
-/// The busiest day's merged pull requests.
-fn busiestPr() -> Int64 {
-    loadHistory()
-    let mut most = 1
-    let mut i = 0
-    while i < dayRows.length {
-        if dayRows[i].prs > most {
-            most = dayRows[i].prs
-        }
-        i = i + 1
-    }
-    return most
-}
-
-// ---------------------------------------------------------------------------
-// 01 — the pulse
-//
-// One bar per DAY, and not per ISO week, which is what this started as: the
-// history is 36 days long, so a week is six bars and six bars is a table with
-// ambitions. The week is still on the axis — every seventh day from the first
-// commit is labelled — and a release is a marked tick, because "what shipped
-// when" is the question a pulse is read for.
-//
-// Two panels over one axis rather than two scales on one panel. Commits and
-// merged pull requests differ by an order of magnitude, and a second y axis is
-// the standard way to make two unrelated shapes look like one argument.
-// ---------------------------------------------------------------------------
-
-fn pulseWidth() -> Int64 {
-    return 900
-}
-
-/// The commit panel, the pull-request panel, and the axis between them.
-fn commitHeight() -> Int64 {
-    return 120
-}
-
-fn prHeight() -> Int64 {
-    return 60
-}
-
-fn axisGap() -> Int64 {
-    return 22
-}
-
-export fn pulseViewBox() -> String {
-    return "0 0 " + pulseWidth().toString() + " " + (commitHeight() + axisGap() + prHeight() + 18).toString()
-}
-
-/// Where the axis line sits, and where the lower panel starts.
-export fn pulseAxisY() -> String {
-    return commitHeight().toString()
-}
-
-fn prTop() -> Int64 {
-    return commitHeight() + axisGap()
-}
-
-/// The left edge of day `i`, and the width of one day's bar.
-fn dayX(i: Int64) -> Int64 {
-    return pulseWidth() * i / dayCount()
-}
-
-fn dayW() -> Int64 {
-    let w = pulseWidth() / dayCount() - 2
-    if w < 1 {
-        return 1
-    }
-    return w
-}
-
-/// One bar per day: the commits made that day, hanging from the axis.
-export fn commitBars() -> Array<VBar> {
-    let mut out: Array<VBar> = []
-    let mut i = 0
-    for d in days() {
-        let h = commitHeight() * d.commits / busiest()
-        out.push(VBar {
-                id: d.date.copy(),
-                x: dayX(i).toString(),
-                y: (commitHeight() - h).toString(),
-                w: dayW().toString(),
-                h: h.toString(),
-                title: d.date + ": " + countWord(d.commits, "commit", "commits"),
-            })
-        i = i + 1
-    }
-    return out
-}
-
-/// The same days, below the axis: the pull requests merged on each one.
-export fn prBars() -> Array<VBar> {
-    let mut out: Array<VBar> = []
-    let mut i = 0
-    for d in days() {
-        let h = prHeight() * d.prs / busiestPr()
-        out.push(VBar {
-                id: d.date.copy(),
-                x: dayX(i).toString(),
-                y: prTop().toString(),
-                w: dayW().toString(),
-                h: h.toString(),
-                title: d.date + ": " + countWord(d.prs, "merged pull request", "merged pull requests"),
-            })
-        i = i + 1
-    }
-    return out
-}
-
-/// `1 commit` / `4 commits` / `no commits`.
-fn countWord(n: Int64, one: String, many: String) -> String {
-    if n == 0 {
-        return "no " + many
-    }
-    if n == 1 {
-        return "1 " + one
-    }
-    return n.toString() + " " + many
-}
-
-/// Every seventh day from the first commit, labelled with its date. The week
-/// boundary is a fact about a calendar this file does not have; "seven days
-/// since work started" is a fact about the history itself.
-export fn weekMarks() -> Array<AxisMark> {
-    let mut out: Array<AxisMark> = []
-    let mut i = 0
-    for d in days() {
-        if i % 7 == 0 {
-            out.push(AxisMark { id: d.date.copy(), x: dayX(i).toString(), lx: inside(dayX(i), 18).toString(), label: shortDate(d.date), title: d.date.copy() })
-        }
-        i = i + 1
-    }
-    return out
-}
-
-/// Every release, on the day it was tagged.
-export fn releaseMarks() -> Array<AxisMark> {
-    let mut out: Array<AxisMark> = []
-    for r in releaseRows() {
-        let at = dayIndex(r.date)
-        if at >= 0 {
-            let at_x = dayX(at) + dayW() / 2
-            out.push(AxisMark { id: r.tag.copy(), x: at_x.toString(), lx: inside(at_x, 42).toString(), label: r.tag.copy(), title: r.tag + ", published " + r.date })
-        }
-    }
-    return out
-}
-
-/// `x`, moved far enough from either edge that a label centred on it stays in
-/// the drawing. An SVG clips at its viewBox, so the first date and the last
-/// release tag were half a label short of being readable.
-fn inside(x: Int64, margin: Int64) -> Int64 {
-    if x < margin {
-        return margin
-    }
-    if x > pulseWidth() - margin {
-        return pulseWidth() - margin
-    }
-    return x
-}
-
-/// Which day `date` is, or -1 when the history does not reach it. Off the state
-/// itself: every arrival asks, and `days()` hands out a copy.
-fn dayIndex(date: String) -> Int64 {
-    loadHistory()
-    let mut i = 0
-    while i < dayRows.length {
-        if dayRows[i].date == date {
-            return i
-        }
-        i = i + 1
-    }
-    return 0 - 1
-}
-
-/// `2026-08-19` as `08-19`: the year is on the caption, and a 900-unit axis has
-/// room for eleven characters or for five.
-fn shortDate(date: String) -> String {
-    if date.byteLength < 10 {
-        return date.copy()
-    }
-    return substring(date, 5, 10)
-}
-
-// ---------------------------------------------------------------------------
-// 02 — what was designed, and what became of it
-//
-// The cumulative count of design records, by the day each one first appeared —
-// and banded by the status it carries TODAY. The top edge is design velocity;
-// the bands are what that design turned into. Both are read off the same corpus
-// the rest of the page draws, so a record that lands in a different bucket next
-// week moves in this chart too.
-// ---------------------------------------------------------------------------
-
-fn areaWidth() -> Int64 {
-    return 900
-}
-
-fn areaHeight() -> Int64 {
-    return 200
-}
-
-export fn arrivalsViewBox() -> String {
-    return "0 0 " + areaWidth().toString() + " " + (areaHeight() + 20).toString()
-}
-
-/// The tones, bottom band first. Built is at the bottom because it is the band
-/// a reader measures against the axis.
-fn bandKeys() -> Array<Array<String>> {
-    return [
-        ["done", "Implemented"],
-        ["part", "Partly"],
-        ["open", "Draft or proposed"],
-        ["past", "Superseded, or other"],
-    ]
-}
-
-/// The tone every arrival carries today, in the arrivals' own order.
-///
-/// The corpus is walked ONCE, not once per record: `corpusRecords()` hands out
-/// a copy of all 104, and a call inside the loop is 104 of them — the same
-/// mistake, in the same shape, that the ring's coordinates made.
-fn tonesOfArrivals(rows: Array<Arrival>) -> Array<String> {
-    let all = corpusRecords()
-    let mut out: Array<String> = []
-    for a in rows {
-        let mut tone = "past"
-        for r in all {
-            if r.number == a.number {
-                tone = toneOf(r.bucket)
-            }
-        }
-        out.push(tone.copy())
-    }
-    return out
-}
-
-/// How many records of tone `tone` had arrived by day `i`.
-fn arrivedBy(tones: Array<String>, at: Array<Int64>, i: Int64, tone: String) -> Int64 {
-    let mut n = 0
-    let mut k = 0
-    while k < tones.length {
-        if tones[k] == tone && at[k] <= i {
-            n = n + 1
-        }
-        k = k + 1
-    }
-    return n
-}
-
-/// The bands, built once: the page asks for them twice — the drawing, and the
-/// legend that states their counts — and the export renders the page twice.
-let mut bands: Array<Band> = []
-
-/// The four bands, bottom first, each one a closed polygon.
-export fn arrivalBands() -> Array<Band> {
-    if bands.length > 0 {
-        return bands.copy()
-    }
-    let rows = arrivalRows()
-    let tones = tonesOfArrivals(rows.copy())
-    let mut at: Array<Int64> = []
-    for a in rows {
-        at.push(dayIndex(a.date))
-    }
-    let total = rows.length
-    let mut out: Array<Band> = []
-    let mut below: Array<Int64> = []
-    let mut i = 0
-    while i < dayCount() {
-        below.push(0)
-        i = i + 1
-    }
-    for band in bandKeys() {
-        let mut top: Array<Int64> = []
-        let mut count = 0
-        let mut d = 0
-        while d < dayCount() {
-            let n = below[d] + arrivedBy(tones, at, d, band[0])
-            top.push(n)
-            if d == dayCount() - 1 {
-                count = n - below[d]
-            }
-            d = d + 1
-        }
-        out.push(Band {
-                key: band[0].copy(),
-                name: band[1].copy(),
-                points: bandPoints(below, top, total),
-                tone: band[0].copy(),
-                count: count,
-            })
-        below = top.copy()
-    }
-    bands = out.copy()
-    return out
-}
-
-/// One band, as a closed polygon: along its top edge, then back along the one
-/// under it.
-fn bandPoints(below: Array<Int64>, top: Array<Int64>, total: Int64) -> String {
-    let mut parts: Array<String> = []
-    let mut i = 0
-    while i < top.length {
-        parts.push(areaX(i).toString() + "," + areaY(top[i], total).toString())
-        i = i + 1
-    }
-    let mut j = below.length - 1
-    while j >= 0 {
-        parts.push(areaX(j).toString() + "," + areaY(below[j], total).toString())
-        j = j - 1
-    }
-    return joinWith(parts, " ")
-}
-
-fn areaX(i: Int64) -> Int64 {
-    if dayCount() < 2 {
-        return 0
-    }
-    return areaWidth() * i / (dayCount() - 1)
-}
-
-fn areaY(n: Int64, total: Int64) -> Int64 {
-    if total == 0 {
-        return areaHeight()
-    }
-    return areaHeight() - areaHeight() * n / total
-}
-
-/// The same axis under the arrivals chart, so the two charts are read together.
-export fn arrivalMarks() -> Array<AxisMark> {
-    let mut out: Array<AxisMark> = []
-    let mut i = 0
-    for d in days() {
-        if i % 7 == 0 {
-            out.push(AxisMark { id: d.date.copy(), x: areaX(i).toString(), lx: inside(areaX(i), 18).toString(), label: shortDate(d.date), title: d.date.copy() })
-        }
-        i = i + 1
-    }
-    return out
-}
-
-/// Every record, the day it arrived and the band it is in — the arrivals chart
-/// in words, for a reader with no script and for one who wants the dates.
-export fn arrivalList() -> Array<ArrivalRow> {
-    let rows = arrivalRows()
-    let tones = tonesOfArrivals(rows.copy())
-    let mut out: Array<ArrivalRow> = []
-    let mut i = 0
-    while i < rows.length {
-        out.push(ArrivalRow {
-                tag: rfcTag(rows[i].number),
-                date: rows[i].date.copy(),
-                band: bandName(tones[i]),
-            })
-        i = i + 1
-    }
-    return out
-}
-
-/// What a tone is called in the legend.
-fn bandName(tone: String) -> String {
-    for band in bandKeys() {
-        if band[0] == tone {
-            return band[1].copy()
-        }
-    }
-    return tone.copy()
-}
-
-/// How many records had arrived by the end of the first day. The corpus opened
-/// with a batch, and a chart that does not say so invites the reader to read
-/// the step as a bug.
-export fn firstDayRecords() -> Int64 {
-    let mut n = 0
-    for a in arrivalRows() {
-        if a.date == firstDay() {
-            n = n + 1
-        }
-    }
-    return n
-}
-
 test "the history is read, and it is a run of days with work in it" {
-    assert(dayCount() > 4)
-    assertEq(days().length, dayCount())
-    let mut commits = 0
-    let mut prs = 0
+    // What `/releases` depends on: a run of days, each a real date, and pull
+    // requests that never outnumber the commits they are part of.
+    assert(days().length > 4)
     for d in days() {
         assert(d.date.byteLength == 10)
         assert(d.commits >= 0)
         assert(d.prs >= 0)
         // A merged pull request is a commit, so it can never outnumber them.
         assert(d.prs <= d.commits)
-        commits = commits + d.commits
-        prs = prs + d.prs
     }
-    // The totals the file states are the days it lists, added up.
-    assertEq(commits, commitCount())
-    assertEq(prs, prCount())
-    assertEq(firstDay(), days()[0].date)
-    assertEq(lastDay(), days()[dayCount() - 1].date)
     assert(testBlockCount() > 0)
     assert(testFileCount() > 0)
-}
-
-test "the pulse is one bar per day, and no bar leaves its panel" {
-    let bars = commitBars()
-    assertEq(bars.length, dayCount())
-    for b in bars {
-        assert(b.title.byteLength > 10)
-    }
-    // The busiest day fills the panel, and the quietest draws nothing.
-    let mut tallest = 0
-    for b in bars {
-        let h = wholeOf(b.h)
-        assert(h <= 120)
-        if h > tallest {
-            tallest = h
-        }
-    }
-    assertEq(tallest, 120)
-    assertEq(prBars().length, dayCount())
-    // The axis is labelled, and a release lands on a day the pulse draws.
-    assert(weekMarks().length > 0)
-    for m in releaseMarks() {
-        assert(wholeOf(m.x) <= 900)
-        assert(m.label.byteLength > 0)
-    }
-}
-
-test "the bands stack to the whole corpus, and each one is a closed shape" {
-    let bands = arrivalBands()
-    assertEq(bands.length, 4)
-    let mut total = 0
-    for b in bands {
-        total = total + b.count
-        assert(b.points.byteLength > 20)
-    }
-    // Every record that has arrived is in exactly one band on the last day.
-    assertEq(total, arrivalRows().length)
-    assert(firstDayRecords() > 0)
-    // And the list under the chart is the same records, one row each.
-    let list = arrivalList()
-    assertEq(list.length, arrivalRows().length)
-    for row in list {
-        assert(row.tag.byteLength == 8)
-        assert(row.date.byteLength == 10)
-        assert(row.band.byteLength > 0)
-    }
 }
 
 test "a source that does not parse is refused, never drawn empty" {

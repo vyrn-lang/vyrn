@@ -96,23 +96,6 @@
   --sr-rust: var(--amber);
   --sr-node: var(--syn-str);
   --sr-vyrn: var(--accent);
-  /* The four tones the backstage's three pictures share (RFC-0105 M1): the
-   * weight strip, the status bar and the citation ring all colour a record by
-   * the bucket its status fell in. Aliases again, for the radar's reason —
-   * every one resolves to a token `site/test/contrast.test.mjs` already
-   * measures in both palettes.
-   *
-   * `--st-done` names `--amber` and NOT `--accent`, although amber IS the
-   * backstage's accent. A custom property that holds `var(--x)` is substituted
-   * where it is DECLARED, not where it is used: written as `var(--accent)`
-   * here, it resolved against `:root`'s accent and stayed cyan under
-   * `#root.backstage`, which redefines that token. The ring then drew "cites"
-   * in cyan and "cited by" in cyan, which is one colour. Measured in the
-   * browser, not read off the sheet. */
-  --st-done: var(--amber);
-  --st-part: var(--syn-kw);
-  --st-open: var(--syn-str);
-  --st-past: var(--n2);
   /* How much accent an inline code chip carries. Two numbers, because the two
    * themes are not symmetric: the light accent is a dark navy, so one share of
    * it over warm paper is a heavy step, while the dark accent is a bright cyan
@@ -159,8 +142,8 @@
    * so a token's number here is not what a reader gets. Measured on the shipped
    * tree, at `--t-axis: 9px` and `--t-key: 11px`: the index's bar strip painted
    * its labels at 6.6 and 8.0 px on a 1280px desktop, `/compare`'s five bar
-   * charts at 3.0 and 3.6 px on a phone, and the backstage's pulse at 3.0. Every
-   * chart on the site was under 12px and most were under 9.
+   * charts at 3.0 and 3.6 px on a phone. Every chart on the site was under
+   * 12px and most were under 9.
    *
    * The scale is the container's width over the viewBox's, and two rules below
    * bound it — `max-width` so no chart is ever drawn LARGER than its own units,
@@ -538,10 +521,9 @@ h1 code, h2 code, h3 code, h4 code {
   min-height: 64px; padding: var(--s1) 0;
   border-bottom: 1px solid var(--rule);
 }
-/* THE CONSUMER MASTHEAD IS THE VIEWPORT'S: it sits outside `#root` now, so
- * the bar and its border run the whole window and the framed plate begins
- * under it — the reference site's own shape. The backstage masthead stays
- * inside its root and keeps the old geometry. */
+/* THE MASTHEAD IS THE VIEWPORT'S: it sits outside `#root`, so the bar and its
+ * border run the whole window and the framed plate begins under it — the
+ * reference site's own shape. */
 .shell { display: contents; }
 /* A full-width bar's CONTENT starts where the sheet starts (user row 1): the
  * reference site's masthead and subnav both hang their first item over the
@@ -577,9 +559,8 @@ h1 code, h2 code, h3 code, h4 code {
  * declares 64px, so no item in it decides the height. `.find`, the search
  * opener, shares every rule and the same reason for being gated (RFC-0106 M1).
  *
- * `.slot` is the consumer layout's `v-html` host. It has no box, so the button
- * below is the masthead's own flex item in both mastheads — the backstage builds
- * its masthead as one string and has no host element. */
+ * `.slot` is the layout's `v-html` host. It has no box, so the button below is
+ * the masthead's own flex item. */
 .theme, .find { display: none; }
 .masthead .slot { display: contents; }
 [data-js] .theme, [data-js] .find {
@@ -632,8 +613,8 @@ h1 code, h2 code, h3 code, h4 code {
   .find .hint { display: inline; }
 }
 
-/* `.theme`'s own auto margin is for the backstage masthead, which has no
- * wrapper; inside this one it would push the two apart. */
+/* `.theme`'s own auto margin is for a masthead with no wrapper; inside this
+ * one it would push the two apart. */
 .tools { display: flex; align-items: center; gap: var(--s2); margin-left: auto; }
 /* The theme control earns its box on hover; at rest it is a word. */
 .tools .theme { margin-left: 0; border-color: transparent; background: none; }
@@ -2821,167 +2802,6 @@ kbd {
    * upgrade, if a reader ever misses, is a long-press menu, not a taller word. */
   code.copyable { padding: 0.18em 0.34em; }
 }
-
-/* ------------------------
-   The backstage (RFC-0105 M1)
-   
-   A second front, in the same sheet and the same stylesheet. It is told apart
-   by ONE declaration: the accent token. Every rule on this page already reads
-   `--accent` — the wordmark, the rail, the links, the pills, the chart cells —
-   so redefining it on `#root.backstage` turns the whole section amber without
-   a second copy of anything. The badge in the masthead says the word as well,
-   because colour alone is not a label.
-   ------------------------ */
-
-#root.backstage { --accent: var(--amber); }
-.masthead.backstage { border-bottom-width: 2px; border-bottom-color: color-mix(in oklab, var(--accent) 45%, transparent); }
-/* `align-self`, because under 640px the masthead becomes a column with
- * `align-items: stretch` and a badge that fills the row reads as a button. */
-.masthead.backstage .pill { margin-left: 0; align-self: flex-start; color: var(--accent); border-color: color-mix(in oklab, var(--accent) 40%, transparent); }
-.foot.backstage { border-top-color: color-mix(in oklab, var(--accent) 35%, transparent); }
-
-/* The index: a hundred rows, so the number column is fixed and the status is
- * quiet. The whole row is a link target through its two anchors. */
-table.rfcindex td:first-child { font: var(--t-eyebrow)/1.6 var(--mono); white-space: nowrap; width: 7rem; }
-table.rfcindex td:last-child { color: var(--muted); font-size: var(--t-matrix); }
-table.rfcindex tbody tr:hover td { background: color-mix(in oklab, var(--accent) 7%, transparent); }
-table.rfcindex a { text-decoration-color: color-mix(in oklab, var(--accent) 40%, transparent); }
-
-/* A rendered record. The markdown is somebody's argument, at length, so the
- * measure is the reading one and the headings step down hard enough to skim by.
- * `.prose` sets the width; everything here is the parts `.prose` does not have
- * because no other page renders a whole document. */
-.rfcdoc h1 { font-size: var(--t-h1); line-height: 1.15; margin-bottom: var(--s3); }
-.rfcdoc h2 { margin-top: var(--s5); padding-top: var(--s2); border-top: 1px solid var(--rule); }
-.rfcdoc h3 { margin-top: var(--s4); }
-.rfcdoc h4, .rfcdoc h5, .rfcdoc h6 { margin-top: var(--s3); font-size: var(--t-h5); }
-.rfcdoc > ul, .rfcdoc > ol { margin-top: var(--s3); padding-left: var(--s3); }
-.rfcdoc li { margin-top: var(--s1); line-height: 1.65; }
-.rfcdoc li > ul, .rfcdoc li > ol { padding-left: var(--s3); }
-.rfcdoc pre.code { max-width: none; }
-.rfcdoc blockquote {
-  margin: var(--s3) 0 0;
-  padding: var(--s1) 0 var(--s1) var(--s2);
-  border-left: 2px solid color-mix(in oklab, var(--accent) 45%, transparent);
-  color: var(--muted);
-}
-.rfcdoc blockquote > p { margin-top: var(--s1); }
-.rfcdoc hr { border: 0; border-top: 1px solid var(--hair); margin: var(--s5) 0 0; }
-.rfcdoc .scroller { margin-top: var(--s3); }
-.rfcdoc table { min-width: 24rem; }
-.rfcdoc del { color: var(--muted); }
-/* A record is one long document: the prose keeps the reading measure, and the
- * code and the tables get the wide one, because a wrapped `impl` line and a
- * five-column table are worse than a longer box. */
-.prose.rfcdoc { max-width: var(--wide); }
-.rfcdoc > p, .rfcdoc > ul, .rfcdoc > ol, .rfcdoc > blockquote, .rfcdoc > h1, .rfcdoc > h2, .rfcdoc > h3 { max-width: var(--measure); }
-.status { font: var(--t-eyebrow)/1.8 var(--mono); color: var(--muted); margin-top: var(--s2); }
-.status strong { color: var(--ink); letter-spacing: 0.08em; text-transform: uppercase; margin-right: var(--s1); }
-
-/* THE THREE PICTURES ON /backstage (RFC-0105 M1).
- *
- * One tone scale across all three: a record is the same colour in the strip,
- * in the status bar and on the citation ring, so the eye carries the meaning
- * between them. `--st-done` is the section's own accent, which on this page is
- * amber, so the majority bucket is the colour the whole backstage already is.
- * The three buckets that claim nothing about built code share `--st-past` and
- * `--st-open`, and the legend beside the bar carries all six names and counts —
- * colour is never the only thing that says which is which. */
-/* The stat row in the backstage hero: the same specimen grid the home page's
- * hero uses, with the number itself as the link to what proves it. */
-.specs.state dd a { color: inherit; text-decoration-color: color-mix(in oklab, var(--accent) 45%, transparent); }
-.specs.state dd a:hover { color: var(--accent); }
-.specs.state + .cap { margin-top: var(--s2); }
-
-[data-tone="done"] { fill: var(--st-done); }
-[data-tone="part"] { fill: var(--st-part); }
-[data-tone="open"] { fill: var(--st-open); }
-[data-tone="past"] { fill: var(--st-past); }
-
-/* THE TWO VELOCITY CHARTS (RFC-0105 M1). Both are drawn from
- * `site/data/history.json`, which the site workflow writes from git before the
- * export; both state the same numbers in a table or a legend beside them. */
-
-/* The pulse: commits above the axis, merged pull requests below it, one bar per
- * day. The lower panel is the same accent at half strength — it is a SUBSET of
- * the upper one, not a second series, and a second hue would say otherwise. */
-svg.chart.pulse .bars rect { fill: var(--accent); }
-svg.chart.pulse .bars.commits rect { fill-opacity: 0.65; }
-svg.chart.pulse .bars.prs rect { fill-opacity: 0.32; }
-svg.chart.pulse .bars rect:hover { fill-opacity: 1; }
-svg.chart.pulse .axis line { stroke: currentColor; stroke-opacity: 0.28; stroke-width: 1; }
-svg.chart.pulse .axis text { font-family: var(--mono); font-size: var(--t-svg-s); fill: var(--n2); text-anchor: middle; }
-/* A release is the one thing on this chart that is not a count, so it is a
- * hairline through the panel rather than another filled shape. */
-svg.chart.pulse .releases line { stroke: var(--st-part); stroke-width: 1; stroke-dasharray: 2 3; }
-svg.chart.pulse .releases text { font-family: var(--mono); font-size: var(--t-svg-s); fill: var(--st-part); text-anchor: middle; }
-
-/* The arrivals: the cumulative corpus, banded by what each record became. The
- * bands carry the same four tones as everything else on the page. */
-svg.chart.arrivals polygon { fill-opacity: 0.75; stroke: var(--paper); stroke-width: 0.5; }
-svg.chart.arrivals .axis text { font-family: var(--mono); font-size: var(--t-svg-s); fill: var(--n2); text-anchor: middle; }
-
-/* 01 — the strip. One square per record, sized by the file and centred in its
- * slot. It is not stretched to the plate: a cell is a measurement, and a
- * measurement that changes width with the viewport is a decoration. */
-svg.chart.strip { width: 100%; }
-svg.chart.strip .cell { fill-opacity: 0.72; transition: fill-opacity 160ms var(--expo); }
-svg.chart.strip a:hover .cell, svg.chart.strip a:focus-visible .cell { fill-opacity: 1; }
-
-/* 02 — the status bar. One rectangle per bucket, tiling the full width. */
-svg.chart.statusbar { max-width: 100%; }
-svg.chart.statusbar .seg { fill-opacity: 0.8; }
-.legend.statuses { grid-template-columns: auto auto auto minmax(0, 1fr); gap: 6px var(--s2); align-items: baseline; }
-/* THE FOUR COLUMNS ABOVE ONLY EXIST IF THE `<li>` STOPS BEING A BOX
- * (RFC-0106 M3, fourth round, K8; fixed in M4). `.legend li` is `display: flex`,
- * so each row was ONE grid item holding four flex children and the template
- * described a grid nothing was in: six rows landed four-per-row in three
- * `auto` tracks sized to their widest content, and the plate painted 1,148px
- * inside 966. `display: contents` dissolves the row's box and its four spans
- * become the four cells the template was written for — so the last column is
- * the `minmax(0, 1fr)` that wraps, and the row gap is the grid's own. */
-.legend.statuses > li { display: contents; }
-.legend.statuses i.key { width: 14px; height: 14px; align-self: center; }
-.legend.statuses i.key[data-tone="done"] { background: var(--st-done); }
-.legend.statuses i.key[data-tone="part"] { background: var(--st-part); }
-.legend.statuses i.key[data-tone="open"] { background: var(--st-open); }
-.legend.statuses i.key[data-tone="past"] { background: var(--st-past); }
-.legend.statuses .num { color: var(--ink); font-weight: 600; text-align: right; min-width: 2.5ch; }
-.legend.statuses .name { color: var(--ink); }
-
-/* 03 — the citation ring. 723 chords, all of them drawn: at rest they are a
- * density and not a diagram, which is the honest picture of a corpus that
- * argues with itself this much. Pointing at one record raises its own. */
-svg.chart.cites { max-width: 40rem; margin: 0 auto; }
-svg.chart.cites .chord { fill: none; stroke: currentColor; stroke-opacity: 0.09; stroke-width: 1; transition: stroke-opacity 160ms var(--expo); }
-svg.chart.cites .tick { font-family: var(--mono); font-size: var(--t-svg-s); fill: var(--n2); }
-svg.chart.cites .hit { fill: transparent; }
-svg.chart.cites .dot { fill-opacity: 0.65; }
-svg.chart.cites a { text-decoration: none; }
-/* The same call the import graph made: the sheet's focus ring does not draw on
- * an SVG `<a>` in every engine, so the hit circle the node already carries
- * takes it (RFC-0105 M4). */
-svg.chart.cites a:focus { outline: none; }
-svg.chart.cites a:focus-visible .hit { stroke: var(--accent); stroke-width: 2; }
-
-/* One record lit. What it NAMES is the accent; what NAMES it is the second
- * tone, so the two directions cannot be confused for one another. */
-svg.chart.cites.lit .chord { stroke-opacity: 0.03; }
-svg.chart.cites .chord.out { stroke: var(--st-done); stroke-opacity: 0.9; stroke-width: 1.4; }
-svg.chart.cites .chord.in { stroke: var(--st-part); stroke-opacity: 0.8; stroke-width: 1.4; }
-svg.chart.cites.lit .dot { fill-opacity: 0.18; }
-svg.chart.cites .rnode.names .dot, svg.chart.cites .rnode.named .dot { fill-opacity: 1; }
-svg.chart.cites .rnode.on .dot { fill-opacity: 1; r: 5.5; }
-
-/* The list under the ring, which says in words what the chords say — and is
- * the whole picture for a reader with no script. Closed, because it is 104
- * rows; a closed `<details>` keeps its links out of the tab order. */
-details.fallback { margin-top: var(--s3); }
-details.fallback summary { font: var(--t-eyebrow)/1.6 var(--mono); color: var(--muted); cursor: pointer; padding: var(--s1) 0; }
-details.fallback summary:hover { color: var(--accent); }
-details.fallback[open] summary { margin-bottom: var(--s2); }
-details.fallback td { font: var(--t-eyebrow)/1.6 var(--mono); color: var(--muted); }
-details.fallback td:first-child { white-space: nowrap; }
 
 /* ---------------------------------------------------------------------------
  * RFC-0106 M5 round 3 (user): the shelves read as named groups, the registry

@@ -42,8 +42,7 @@ async function generatorNames() {
   return names;
 }
 
-/// The shell every consumer page wears. Its footer link is the marker: the
-/// backstage builds a masthead of its own and wears none of this.
+/// The shell every consumer page wears. Its footer link is the marker.
 const SHELL = "layout.vyx";
 const SHELL_MARK = "Source on GitHub";
 /// The route templates that carry tags of their own, and the pages they make.

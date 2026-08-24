@@ -256,19 +256,6 @@ const PAIRS = [
   ["the Rust line", "var(--sr-rust)", PLATE, 3],
   ["the node line", "var(--sr-node)", PLATE, 3],
   ["the two Vyrn lines", "var(--sr-vyrn)", PLATE, 3],
-  // The backstage's four status tones (RFC-0105 M1): the weight strip, the
-  // status bar and the citation ring all colour a record by its bucket. Same
-  // rule as the radar above — they are aliases, and the pairs are here so an
-  // edit that gives one of them a colour of its own is caught by this file.
-  //
-  // `--st-done` is written as `--amber` rather than `--accent` — see the sheet:
-  // a custom property holding `var(--x)` is substituted where it is declared,
-  // so an accent-derived tone would not follow `#root.backstage`'s own accent.
-  // These pairs measure the four exactly as the backstage paints them.
-  ["the implemented tone", "var(--st-done)", PLATE, 3],
-  ["the partly-built tone", "var(--st-part)", PLATE, 3],
-  ["the open tone (draft, proposed)", "var(--st-open)", PLATE, 3],
-  ["the neutral tone (superseded, other)", "var(--st-past)", PLATE, 3],
   // and as the legend's label text, which is prose and takes the text bar.
   ["a legend label", "var(--sr-c)", PLATE, 4.5],
   ["a legend label (Rust)", "var(--sr-rust)", PLATE, 4.5],

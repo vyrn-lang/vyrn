@@ -29,8 +29,8 @@
 ///
 /// WHERE THE FILES ARE READ. `examples/*/vyrn.json` and the modules under it are
 /// read with `readFile` and `listDir` while the pages render, relative to the
-/// directory the export runs in — the repository root, the same way
-/// `backstage.vyrn` reads `rfcs/`. The export scan is a LINE scan rather than
+/// directory the export runs in — the repository root. The scan is a LINE scan
+/// rather than
 /// the compiler's lexer, because `lex` is only available during generation and
 /// these files are read at render time; the rule it applies is written out in
 /// `exportNames` and pinned by a test.

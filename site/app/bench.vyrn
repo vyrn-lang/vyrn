@@ -2,8 +2,8 @@
 ///
 /// WHERE THE NUMBERS COME FROM. `rfcs/bench-0104/results/2026-08-19-v2.json`
 /// and `-v2-run2.json`, written by `rfcs/bench-0104/harness/run.py`, read here at
-/// export time the way the backstage reads `rfcs/README.md`. Nothing on the two
-/// pages this module feeds is typed in by hand: change the record, rebuild, and
+/// export time. Nothing on the two pages this module feeds is typed in by hand:
+/// change the record, rebuild, and
 /// every chart, ratio and caption moves with it. That is the point — a chart
 /// whose numbers were transcribed is a chart that can disagree with its source.
 ///
@@ -24,13 +24,12 @@
 /// centre ring is an eighth of it, every ring out is a doubling, the rim is
 /// sixteen times it. A value past the rim is drawn AT the rim and carries an
 /// off-scale marker on its spoke; its exact figure is in the table, in the axis
-/// panel and on the backstage page. Three cells are drawn that way with C as the
+/// panel and in the detail table. Three cells are drawn that way with C as the
 /// baseline and four with Rust. None is truncated quietly, and `no cell is ever
 /// silently truncated` below is the test that keeps that true.
 import { indexOf, substring, trim, split, joinWith } from "std/strings"
 import { parseFloat64 } from "std/num"
 import { sin, cos } from "std/math"
-import { hrefOf } from "./nav"
 
 /// One measured cell: one program on one engine, in both recorded runs.
 ///
@@ -83,7 +82,7 @@ export type Reading = { key: String, name: String, tone: String, cpu: String, se
 export type Row = { key: String, name: String, n: String, game: String, cells: Array<Reading> }
 
 /// One axis panel: everything known about one program, shown on focus.
-export type Panel = { key: String, name: String, n: String, note: String, cause: String, label: String, verdict: String, href: String, game: String, cells: Array<Reading> }
+export type Panel = { key: String, name: String, n: String, note: String, cause: String, label: String, verdict: String, game: String, cells: Array<Reading> }
 
 // ---------------------------------------------------------------------------
 // Reading the record
@@ -287,8 +286,8 @@ fn loadCells() {
 }
 
 /// The ten raw readings of one cell, in milliseconds, comma separated. They are
-/// the evidence under a median and the backstage prints them; the consumer page
-/// never does.
+/// the evidence under a median, and the detail table prints them; no chart
+/// does.
 fn rawRuns(cell: String) -> String {
     let list = upTo(after(cell, "\"runs_s\": ["), "]")
     let mut out: Array<String> = []
@@ -367,7 +366,7 @@ fn wholeOf(text: String) -> Int64 {
 /// this set are that small — k-nucleotide's C and Rust legs at ten and eight
 /// milliseconds — and a table claiming a program took no time is worse than a
 /// table admitting the column cannot resolve it. The millisecond figure is a
-/// click away on the backstage either way.
+/// click away in the detail table either way.
 export fn secsOf(us: Int64) -> String {
     if us < 0 {
         return "—"
@@ -1134,7 +1133,6 @@ export fn axisPanels() -> Array<Panel> {
                 cause: causeOf(p.key),
                 label: labelOf(p.key),
                 verdict: verdictOf(p.key),
-                href: hrefOf("/backstage/benchmarks") + "#" + p.key,
                 game: p.game.copy(),
                 cells: readingsFor(p.key),
             })
@@ -1146,9 +1144,9 @@ export fn axisPanels() -> Array<Panel> {
 // The named causes
 //
 // RFC-0104's claim is that every measured deviation is a named defect or a named
-// missing feature. These are M2's own findings, one line each, and the panel
-// links to the backstage page that carries them in full. They are prose and they
-// are written here rather than read from the record, because the record holds
+// missing feature. These are M2's own findings, one line each. They are prose
+// and they are written here rather than read from the record, because the record
+// holds
 // measurements and a cause is a conclusion somebody drew from one.
 // ---------------------------------------------------------------------------
 
@@ -1175,10 +1173,10 @@ fn verdictOf(program: String) -> String {
 /// The cause in a handful of words — the whole of what `/compare` prints about
 /// one program's deviation (RFC-0104 M3 amendment).
 ///
-/// The paragraph it stands for is still written, still sourced, and still one
-/// click away on the backstage. What changed is where it is read: eight
-/// paragraphs of diagnosis under a chart is a page nobody finishes, and a
-/// label plus a link is the same claim at a length that gets read.
+/// The paragraph it stands for is still written and still sourced. What changed
+/// is where it is read: eight paragraphs of diagnosis under a chart is a page
+/// nobody finishes, and a label beside the number is the same claim at a length
+/// that gets read.
 fn labelOf(program: String) -> String {
     for row in causeRows() {
         if row[0] == program {
@@ -1256,7 +1254,7 @@ export fn benchMethod() -> String {
     return textAt(recordText(run1File()), "  ", "method")
 }
 
-/// The environment, row by row, for the backstage. Name and value; the value is
+/// The environment, row by row. Name and value; the value is
 /// the record's own text and nothing here rewrites it.
 export fn envRows() -> Array<Array<String>> {
     let env = envText()
@@ -1318,10 +1316,10 @@ export fn floorRows() -> Array<Reading> {
 }
 
 // ---------------------------------------------------------------------------
-// The backstage's own tables: both runs, cell by cell
+// The detail tables: both runs, cell by cell
 // ---------------------------------------------------------------------------
 
-/// One cell as the backstage prints it: both runs, the drift between them, the
+/// One cell as the detail table prints it: both runs, the drift between them, the
 /// within-run spread, and the ten raw readings the median came from.
 export type Detail = { key: String, name: String, one: String, two: String, drift: String, cpu: String, mem: String, gz: String, make: String, spread: String, noisy: Bool, runs: String }
 
@@ -1683,7 +1681,7 @@ test "the caption names the hardware and the toolchain, and never the machine" {
     assertEq(floorRows()[4].ms, "17.7 ms")
 }
 
-test "both runs are on the backstage, and the drift is computed from them" {
+test "both runs are published, and the drift is computed from them" {
     let rows = detailRows("nbody")
     assertEq(rows.length, 5)
     for r in rows {
@@ -1701,8 +1699,8 @@ test "both runs are on the backstage, and the drift is computed from them" {
 
 test "the published ceiling is dated, and never mixed with the measured rows" {
     // The game's own numbers are a CEILING and not a comparison: a different N,
-    // a different machine, hand-tuned entries. They live on the backstage in
-    // their own table and on no chart — which is what "recorded, not vendored"
+    // a different machine, hand-tuned entries. They live in their own table
+    // and on no chart — which is what "recorded, not vendored"
     // means in RFC-0104's third principle.
     let rows = ceilingRows()
     assertEq(rows.length, 8)
@@ -1755,14 +1753,13 @@ test "every cell carries the five columns the game prints" {
 }
 
 test "a cause on the consumer page is a label and a link, not a paragraph" {
-    // RFC-0104 M3, amended: the diagnosis is still written and still sourced —
-    // it moved to the backstage, and what `/compare` prints is a few words and
-    // the way through to the whole of it.
+    // RFC-0104 M3: the diagnosis is written and sourced, and what the page
+    // prints is a label short enough to scan beside a cause long enough to be
+    // one.
     for p in axisPanels() {
         assert(p.label.byteLength > 0)
         assert(p.label.byteLength < 40)
         assert(p.cause.byteLength > 40)
-        assert(has(p.href, "backstage/benchmarks.html#" + p.key))
     }
     for row in causeRows() {
         assertEq(row.length, 4)
