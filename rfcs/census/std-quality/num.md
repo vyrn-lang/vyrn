@@ -43,3 +43,28 @@ Smallest fix: none available without backend work, since the injection exists so
 ## No finding
 
 No finding: 1, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30.
+
+---
+
+## Note on acting on this, added on verification
+
+Two things temper the HIGH before anyone rewrites a float parser.
+
+**The cost is conditional on the input, not paid per number.** The same
+measurement shows `"12345.678"` at 5.02 µs against `"1e300"` at 202.60 µs. A
+document of ordinary decimals pays the 5 µs figure. The 200 µs is reached by a
+literal with a large decimal exponent, which is rare in the documents this
+repository decodes. The finding is right that `std/jsondec.vyrn:351` routes every
+JSON number through the parser; it is the exponent, not the routing, that costs.
+
+**A float parser is not a place to be quick.** The proposed fix — scaling by
+precomputed table powers over base-10^k limbs — changes the arithmetic that
+decides the last bit of a double. Any attempt needs a differential test against
+a reference across a wide corpus, at minimum: the round-trip property for a
+large set of random doubles, the published hard cases for decimal-to-binary
+conversion, subnormals, the exponent extremes, and every literal already pinned
+in this repository. A parser that is faster and wrong by one unit in the last
+place is a worse outcome than the 200 µs.
+
+Neither point argues against the fix. Both argue that it is its own piece of
+work with its own test corpus, and not a performance patch.
