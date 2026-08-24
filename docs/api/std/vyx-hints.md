@@ -44,11 +44,14 @@ what the author meant (is this PNG a photo or a logo), and a rule that a
 component boundary can hide (heading level order) are not here, because a
 hint that fires when it is not sure is worse than no hint at all.
 
-Two reports are errors rather than advice — an inline `on*` handler and a
-`javascript:` URL. Both are markup the template language already has a
-correct spelling for (`@click`), both defeat a content-security policy, and
-neither has an honest use. Everything else is a warning, and a project can
-move any of them in either direction.
+Nine reports are errors rather than advice. Two are markup the template
+language already has a correct spelling for — an inline `on*` handler and a
+`javascript:` URL. Both defeat a content-security policy, and neither has an
+honest use. The other seven are ports from `html-validate`, and each keeps
+the severity `html-validate` gives it: `prefer-tbody`, `wcag/h63`,
+`no-implicit-input-type`, `no-inline-style`, `no-autoplay`, `void-content`
+and `require-sri` all read `"error"` in its presets. Everything else is a
+warning, and a project can move any of them in either direction.
 
 ## vyxHints
 
