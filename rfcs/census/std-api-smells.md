@@ -1678,3 +1678,42 @@ repeated defect and is in fact a followed rule. The distinguishing evidence was
 a doc comment in a fourth file and a comment in the compiler. Any future census
 of this kind should be told to search for a stated convention before reporting
 consistency as a fault.
+
+## Re-adjudication of all twelve
+
+Every item in section 3 was re-read against the rest of the repository. Eight
+are withdrawn. Each was withdrawn for one of two reasons, and both reasons are
+the same mistake: the census read one function and did not look for the file
+that handles its consequence.
+
+| # | site | verdict | why |
+| --- | --- | --- | --- |
+| 1 | `std/symbolmap.vyrn:93` | **REAL — fixed** | Builds a program-wide symbol, drops bytes above 0x7F, and nothing checks the result. Its own doc says it exists to prevent exactly this collision. |
+| 2 | `std/icons.vyrn:903` | withdrawn | `camel` is lossy, and `std/icons.vyrn:413` catches it: "`{want}` and an earlier glyph in this import both become `{fnName}()`". Detected, named, and reported. |
+| 3 | `std/bench.vyrn:102` | cosmetic | `padRight` pads to a byte width, so a bench label with a multi-byte character misaligns one column. No correctness effect. The doc comment already says it. |
+| 4 | `std/scan.vyrn:144` | withdrawn | Byte columns are the documented convention. See the correction above. |
+| 5 | `std/jsonread.vyrn:77` | withdrawn | Same convention. |
+| 6 | `std/vyx.vyrn:2450` | withdrawn | Same convention; the code comment says "byte offset" in so many words. |
+| 7 | `std/vyx.vyrn:229` | **REAL — fixed** | Documentation defect: promised characters, returned bytes. |
+| 8 | `examples/lib/gen_table.vyrn:63` | withdrawn | Derives a column from byte offsets, which is the convention. |
+| 9 | `std/strings.vyrn:320` | cosmetic | `padStart`/`padEnd`, the public surface of item 3. |
+| 10 | `std/strings.vyrn:376` | cosmetic | `editDistance` over bytes. Affects the ranking of a "did you mean" suggestion, not whether one is offered. |
+| 11 | `std/strings.vyrn:111` | withdrawn | `indexOf` returns a byte offset because a Vyrn String is UTF-8 bytes by definition. That is the string model, not a defect in a function. |
+| 12 | `std/ui.vyrn:714` | withdrawn | `uiSegIdent` is documented MANY-TO-ONE, and `uiHelperCollisions` at `std/ui.vyrn:1669` compares every pair of routes and raises an Error naming both. |
+
+**Two real defects, both fixed. Three cosmetic. Seven withdrawn.**
+
+### What this says about the census method
+
+The prompt asked for callers that already hold the bug, and the subagents found
+functions that lose information. Those are not the same question. A function may
+lose information safely when a second function refuses the result — which is
+what `std/icons` and `std/ui` both do, each with a message written for the
+developer who hits it.
+
+A future census of this kind must be required to answer, for every lossy
+function it reports: what refuses the bad result, and where? An item with no
+answer is a finding. An item whose answer is a file and a line is not.
+
+The one that survived that test, `mapSlug`, survived it exactly: nothing refuses
+its result, and its own documentation says something must.
