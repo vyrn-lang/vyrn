@@ -227,6 +227,8 @@ pub const RESERVED: &[&str] = &[
     "readLine",
     "readFile",
     "writeFile",
+    "writeFileBytes",
+    "writeStdout",
     "renameFile",
     "fsyncFile",
     "readFileBytes",
@@ -6559,6 +6561,73 @@ impl<'a> Checker<'a> {
             }
             return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
         }
+        // RFC-0111: the byte sink. `writeFile` for bytes that are not text —
+        // same create/truncate/write-all, same `Result<Bool, String>`, same
+        // canonical `@.io.writeerr` wording. It exists because a Vyrn `String`
+        // cannot hold a NUL or invalid UTF-8, so a program could compute a
+        // binary artifact and have no way to emit it.
+        if name == "writeFileBytes" {
+            if args.len() != 2 {
+                return Err(cerr!(
+                    line,
+                    "`writeFileBytes` takes 2 arguments (path, bytes), got {}",
+                    args.len()
+                ));
+            }
+            let p = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
+            if matches!(p, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if p != Type::Str {
+                return Err(cerr!(
+                    line,
+                    "`writeFileBytes` needs a String path, found {p}"
+                ));
+            }
+            let want = Type::Array(Box::new(Type::IntN {
+                bits: 8,
+                signed: false,
+            }));
+            let b = self.base(&self.expr(&args[1], scope, Some(&want), fn_ret)?);
+            if matches!(b, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if b != want {
+                return Err(cerr!(
+                    line,
+                    "`writeFileBytes` needs an Array<UInt8>, found {b}"
+                ));
+            }
+            return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
+        }
+        // RFC-0111: `print` for bytes. No result, for `print`'s reason — a
+        // write to a closed stdout is not a condition a Vyrn program can act
+        // on, and inventing one here would make the two output builtins
+        // disagree about whether output can fail.
+        if name == "writeStdout" {
+            if args.len() != 1 {
+                return Err(cerr!(
+                    line,
+                    "`writeStdout` takes 1 argument, got {}",
+                    args.len()
+                ));
+            }
+            let want = Type::Array(Box::new(Type::IntN {
+                bits: 8,
+                signed: false,
+            }));
+            let b = self.base(&self.expr(&args[0], scope, Some(&want), fn_ret)?);
+            if matches!(b, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if b != want {
+                return Err(cerr!(
+                    line,
+                    "`writeStdout` needs an Array<UInt8>, found {b}"
+                ));
+            }
+            return Ok(Type::Unit);
+        }
         // RFC-0044: atomically move `from` over `to` (the host primitive behind
         // `writeAtomic`). Same error shape as `writeFile` — `Result<Bool, String>`
         // with canonical `@.io.*` wording.
@@ -9352,6 +9421,8 @@ const SPAWN_FORBIDDEN: &[&str] = &[
     "readLine",
     "readFile",
     "writeFile",
+    "writeFileBytes",
+    "writeStdout",
     "renameFile",
     "fsyncFile",
     "readFileBytes",
@@ -9477,6 +9548,8 @@ fn contains_spawn(b: &Block) -> bool {
 /// recorded as cache inputs. Logging sinks (`trace`..`error`) are here too.
 const COMPTIME_FORBIDDEN: &[&str] = &[
     "writeFile",
+    "writeFileBytes",
+    "writeStdout",
     "renameFile",
     "fsyncFile",
     "readLine",

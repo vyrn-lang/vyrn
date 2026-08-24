@@ -429,6 +429,14 @@ fn rows() -> Vec<Function> {
             &[],
         ),
         row(
+            "writeFileBytes",
+            &[],
+            &[("p", Read, Str), ("b", Read, u8s())],
+            Type::Result(Box::new(Bool), Box::new(Str)),
+            &[],
+        ),
+        row("writeStdout", &[], &[("b", Read, u8s())], Type::Unit, &[]),
+        row(
             "writeFile",
             &[],
             &[("p", Read, Str), ("s", Read, Str)],
@@ -652,6 +660,8 @@ mod tests {
             ("readFile", "Result<String, String>"),
             ("readFileBytes", "Result<Array<UInt8>, String>"),
             ("writeFile", "Result<Bool, String>"),
+            ("writeFileBytes", "Result<Bool, String>"),
+            ("writeStdout", "Unit"),
             ("renameFile", "Result<Bool, String>"),
             ("fsyncFile", "Result<Bool, String>"),
             ("stringFromBytes", "Result<String, String>"),

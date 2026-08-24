@@ -3188,6 +3188,8 @@ static MACRO_BUILTINS: &[&str] = &[
     "readLine",
     "readFile",
     "writeFile",
+    "writeFileBytes",
+    "writeStdout",
     "renameFile",
     "fsyncFile",
     "readFileBytes",

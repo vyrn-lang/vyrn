@@ -197,6 +197,11 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("readFile", Syscall, "path_open + fd_read"),
     ("readFileBytes", Syscall, "path_open + fd_read, unvalidated"),
     ("writeFile", Syscall, "path_open + fd_write"),
+    // RFC-0111. Both are syscalls for the same reason every other row here
+    // is: nothing in Vyrn can hand bytes to a descriptor. `writeStdout` is
+    // the only output builtin with no result, which it shares with `print`.
+    ("writeFileBytes", Syscall, "path_open + fd_write, unvalidated"),
+    ("writeStdout", Syscall, "fd_write on stdout, unvalidated"),
     ("renameFile", Syscall, "path_rename"),
     ("fsyncFile", Syscall, "fd_sync"),
     ("listDir", Syscall, "fd_readdir"),
@@ -554,7 +559,12 @@ fn the_census_is_the_code() {
     // both rows were a second spelling of something the language already had.
     // `push` and `at` stayed, under the unspellable names `@push` and `@at`,
     // because the method and index forms need them.
-    assert_eq!(found.len(), 89, "the primitive core changed size");
+    //
+    // 89 -> 91 for RFC-0111's `writeFileBytes` and `writeStdout`. Both are new
+    // CAPABILITY and not a second spelling: before them a program could compute
+    // bytes that are not text and had no way to emit them, which is why
+    // `mandelbrot-200.expected` sat in the corpus with no program beside it.
+    assert_eq!(found.len(), 91, "the primitive core changed size");
 }
 
 /// The fourth engine, and nothing asked it anything until now (RFC-0094 M1).

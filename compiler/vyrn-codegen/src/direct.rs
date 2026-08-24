@@ -6788,6 +6788,58 @@ impl<'p> Fn_<'_, 'p> {
                 b.slot(off);
                 return Ok(ty);
             }
+            // RFC-0111: a path and an `Array<UInt8>`, into the same destination
+            // slot `writeFile` uses. The array arrives as a POINTER to its
+            // `{ ptr, len, cap }` record, so the two words are loaded out of it
+            // and pushed separately — the buffer may hold NULs, which is exactly
+            // what the String writer's `strlen` could not have measured.
+            "writeFileBytes" if args.len() == 2 => {
+                let ty = io_builtin_ty(name, 2).expect("writeFileBytes is an I/O builtin");
+                let l = self.layout_of(&ty, line)?;
+                self.expr_as(m, b, &args[0], &Type::Str)?;
+                let bytes = Type::Array(Box::new(Type::IntN {
+                    bits: 8,
+                    signed: false,
+                }));
+                self.expr_as(m, b, &args[1], &bytes)?;
+                let src = self.scratch(b, ValType::I32, 0);
+                let al = self.layout_of(&bytes, line)?;
+                b.ins(&Instruction::LocalSet(src));
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I32Load(word_at(al.fields[0])));
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I64Load(at(al.fields[1])));
+                b.ins(&Instruction::I32WrapI64);
+                let off = b.alloc(l.size, l.align);
+                b.slot(off);
+                b.ins(&Instruction::Call(self.cx.rt.write_file_bytes));
+                b.slot(off);
+                return Ok(ty);
+            }
+            // RFC-0111: `print` for bytes. `write_all` is already the gathered
+            // stdout writer every printed line goes through, so this is that call
+            // with the caller's buffer — same buffering, same ordering against
+            // `print` and against standard error. Its status is dropped, for the
+            // reason `print` drops it.
+            "writeStdout" if args.len() == 1 => {
+                let bytes = Type::Array(Box::new(Type::IntN {
+                    bits: 8,
+                    signed: false,
+                }));
+                self.expr_as(m, b, &args[0], &bytes)?;
+                let src = self.scratch(b, ValType::I32, 0);
+                let al = self.layout_of(&bytes, line)?;
+                b.ins(&Instruction::LocalSet(src));
+                b.ins(&Instruction::I32Const(1));
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I32Load(word_at(al.fields[0])));
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I64Load(at(al.fields[1])));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::Call(self.cx.rt.write_all));
+                b.ins(&Instruction::Drop);
+                return Ok(Type::Unit);
+            }
             // Two strings in, a `Result<Bool, String>` out, through a destination
             // slot — the same shape, so one arm. RFC-0044's `renameFile` differs
             // from `writeFile` only in which runtime function it calls.
@@ -12797,6 +12849,7 @@ struct Rt {
     read_file: u32,
     read_file_bytes: u32,
     write_file: u32,
+    write_file_bytes: u32,
     rename_file: u32,
     fsync_file: u32,
     /// `listDir` (RFC-0021), on the generator path ONLY — the language gives it no
@@ -12988,6 +13041,10 @@ impl Rt {
             err3: slot("err3"),
             read_file: slot("read_file"),
             read_file_bytes: slot("read_file_bytes"),
+            // Declared in EMISSION order: the bytes writer is the real one
+            // and `write_file` is the wrapper that calls it, so it is
+            // emitted second and must be declared second (RFC-0111).
+            write_file_bytes: slot("write_file_bytes"),
             write_file: slot("write_file"),
             rename_file: slot("rename_file"),
             fsync_file: slot("fsync_file"),
@@ -16188,14 +16245,20 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
     // reached on every path there; the close's own errno joins the write's,
     // because a buffered write that only fails at the close failed.
     let write_all = rt.write_all;
-    rt.next_is(m, rt.write_file);
+    // write_file_bytes(path, ptr, len, dest) — RFC-0111.
+    //
+    // THE ONLY FILE WRITER IN THIS BACKEND. `writeFile` and `writeFileBytes`
+    // differ by exactly one `strlen`, so `write_file` below measures its String
+    // and calls this; nothing else duplicates the open/write/close/errno
+    // sequence, which is where a second spelling would have drifted.
+    rt.next_is(m, rt.write_file_bytes);
     m.func(
-        &[ValType::I32, ValType::I32, ValType::I32],
+        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
         &[],
         &[ValType::I32, ValType::I32, ValType::I32],
         0,
         |b| {
-            let (fd, emsg, wst) = (4, 5, 6); // params 0..2, the frame base 3, then ours
+            let (fd, emsg, wst) = (5, 6, 7); // params 0..3, the frame base 4, then ours
             b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
                 .ins(&Instruction::Block(BlockType::Empty)) // 0: err
                 .ins(&Instruction::LocalGet(0))
@@ -16215,8 +16278,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::End)
                 .ins(&Instruction::LocalGet(fd))
                 .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::Call(strlen))
+                .ins(&Instruction::LocalGet(2))
                 .ins(&Instruction::Call(write_all))
                 .ins(&Instruction::LocalSet(wst))
                 .ins(&Instruction::LocalGet(fd))
@@ -16233,23 +16295,43 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::End);
             // `Ok(true)`: the payload is a `Bool`, zero-extended into the word,
             // which is the encoding `build_sum2`'s `Word::Ext` arm produces.
-            b.ins(&Instruction::LocalGet(2))
+            b.ins(&Instruction::LocalGet(3))
                 .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::I32Store8(MemArg {
                     offset: sum2.fields[0] as u64,
                     align: 0,
                     memory_index: 0,
                 }))
-                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::LocalGet(3))
                 .ins(&Instruction::I64Const(1))
                 .ins(&Instruction::I64Store(at(sum2.fields[1])))
-                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::LocalGet(3))
                 .ins(&Instruction::I64Const(0))
                 .ins(&Instruction::I64Store(at(sum2.fields[2])))
                 .ins(&Instruction::Br(1))
                 .ins(&Instruction::End); // err
-            sum2_write_to(b, 2, &sum2, 0, Some(emsg));
+            sum2_write_to(b, 3, &sum2, 0, Some(emsg));
             b.ins(&Instruction::End); // fin
+        },
+    );
+
+    // write_file(path, contents, dest) — the String face of the writer above.
+    // A Vyrn String never holds a NUL, so `strlen` is its whole length; that one
+    // call is the entire difference between the two builtins.
+    let write_file_bytes = rt.write_file_bytes;
+    rt.next_is(m, rt.write_file);
+    m.func(
+        &[ValType::I32, ValType::I32, ValType::I32],
+        &[],
+        &[],
+        0,
+        |b| {
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::Call(strlen))
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::Call(write_file_bytes));
         },
     );
 
@@ -16875,7 +16957,7 @@ fn io_builtin_ty(name: &str, argc: usize) -> Option<Type> {
             signed: false,
         }))),
         ("fsyncFile", 1) => str_err(Type::Bool),
-        ("writeFile", 2) | ("renameFile", 2) => str_err(Type::Bool),
+        ("writeFile", 2) | ("renameFile", 2) | ("writeFileBytes", 2) => str_err(Type::Bool),
         _ => return None,
     })
 }

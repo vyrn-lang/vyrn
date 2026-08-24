@@ -49,6 +49,10 @@ pub const RUNTIME_SHIM_TEMPLATE: &str = r#"
 __declspec(dllimport) int __stdcall MoveFileExA(const char*, const char*, unsigned long);
 __declspec(dllimport) unsigned long __stdcall GetLastError(void);
 #pragma comment(lib, "kernel32")
+/* RFC-0111: `_setmode`/`_fileno` and the `_O_BINARY` flag, for the binary
+   stdout `__vyrn_write_stdout` needs. */
+#include <io.h>
+#include <fcntl.h>
 #define VYRN_MOVEFILE_REPLACE_EXISTING 0x1u
 #define VYRN_ERROR_NOT_SAME_DEVICE 17u
 #endif
@@ -364,6 +368,41 @@ int __vyrn_read_file_bytes(const char* path, char** out, unsigned long long* out
     *out = buf;
     *outlen = len;
     return 0;
+}
+
+/* writeFileBytes (RFC-0111): the same write, with the length passed in rather
+   than found with strlen -- the buffer may hold NULs, which is the whole point.
+   Status 0 ok / 1 io-error. Already "wb", so no newline translation on any
+   platform. */
+int __vyrn_write_file_bytes(const char* path, const char* data, unsigned long long len) {
+    FILE* f = fopen(path, "wb");
+    if (f == 0) return 1;
+    size_t wrote = fwrite(data, 1, (size_t)len, f);
+    int bad = (wrote != (size_t)len);
+    if (fclose(f) != 0) bad = 1;
+    return bad ? 1 : 0;
+}
+
+/* writeStdout (RFC-0111): raw bytes to fd 1, no newline, no formatting.
+
+   THE WINDOWS TRAP. C stdio opens stdout in TEXT mode, where fwrite turns a
+   0x0A into 0x0D 0x0A. For `print` that is the platform's own newline and it is
+   correct. For a packed pixel row it is corruption that no line-ending
+   normalisation can undo, because nothing downstream can tell which 0x0D 0x0A
+   was a real pair of pixels. So stdout goes to binary mode for the write and
+   back afterwards -- back, because a `print` after a `writeStdout` must still
+   get the platform's newline. Every other platform is binary already and the
+   guard compiles to nothing. */
+void __vyrn_write_stdout(const char* data, unsigned long long len) {
+#if defined(_WIN32)
+    fflush(stdout);
+    int prev = _setmode(_fileno(stdout), _O_BINARY);
+#endif
+    fwrite(data, 1, (size_t)len, stdout);
+    fflush(stdout);
+#if defined(_WIN32)
+    if (prev != -1) _setmode(_fileno(stdout), prev);
+#endif
 }
 
 /* writeFile: create/truncate + write all bytes. Status 0 ok / 1 io-error. A

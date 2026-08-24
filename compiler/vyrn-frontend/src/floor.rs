@@ -32,8 +32,9 @@ use crate::diagnostics::Diagnostic;
 /// A way out of the program that some target lacks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
-    /// The filesystem: `readFile`, `readFileBytes`, `writeFile`, `renameFile`,
-    /// `fsyncFile`, and the `logging { sink: file(..) }` declaration.
+    /// The filesystem: `readFile`, `readFileBytes`, `writeFile`,
+    /// `writeFileBytes`, `renameFile`, `fsyncFile`, and the
+    /// `logging { sink: file(..) }` declaration.
     Fs,
     /// Standard input: `readLine`.
     Stdin,
@@ -133,6 +134,7 @@ const CALLS: &[(&str, Capability)] = &[
     ("readFile", Capability::Fs),
     ("readFileBytes", Capability::Fs),
     ("writeFile", Capability::Fs),
+    ("writeFileBytes", Capability::Fs),
     ("renameFile", Capability::Fs),
     ("fsyncFile", Capability::Fs),
     ("readLine", Capability::Stdin),

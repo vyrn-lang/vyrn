@@ -1321,6 +1321,11 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("declare i32 @__vyrn_read_file(ptr, ptr, ptr)\n");
     out.push_str("declare i32 @__vyrn_read_file_bytes(ptr, ptr, ptr)\n");
     out.push_str("declare i32 @__vyrn_write_file(ptr, ptr)\n");
+    // RFC-0111: the byte sink. `write_file_bytes` takes an explicit length
+    // because the buffer may hold NULs, so strlen would stop short of it;
+    // `write_stdout` answers nothing, for the reason `print` answers nothing.
+    out.push_str("declare i32 @__vyrn_write_file_bytes(ptr, ptr, i64)\n");
+    out.push_str("declare void @__vyrn_write_stdout(ptr, i64)\n");
     // RFC-0044: atomic rename + fsync host primitives (implemented in the C shim
     // on every target, like the RFC-0043 clock — wasi lowers to path_rename /
     // fd_sync, so a storage program is a three-way parity citizen).
@@ -9819,6 +9824,71 @@ impl<'a> Gen<'a> {
                 "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_l} ], [ {o2}, %{ok_l} ]"
             ));
             return Ok((r, Type::Result(Box::new(Type::Str), Box::new(Type::Str))));
+        }
+        // RFC-0111: the byte sink. Same status protocol as `writeFile` and the
+        // same error renderer, so the message is byte-identical to the other
+        // engines'. The length is passed because the buffer may hold NULs.
+        if name == "writeFileBytes" {
+            let (path, _) = self.gen_expr(&args[0])?;
+            let (arr, _) = self.gen_expr(&args[1])?;
+            let data = self.fresh_tmp();
+            let len = self.fresh_tmp();
+            self.emit(format!(
+                "{data} = extractvalue {{ ptr, i64, i64 }} {arr}, 0"
+            ));
+            self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {arr}, 1"));
+            let st = self.fresh_tmp();
+            self.emit(format!(
+                "{st} = call i32 @__vyrn_write_file_bytes(ptr {path}, ptr {data}, i64 {len})"
+            ));
+            let isok = self.fresh_tmp();
+            self.emit(format!("{isok} = icmp eq i32 {st}, 0"));
+            let ok_l = self.fresh_label("wfb.ok");
+            let err_l = self.fresh_label("wfb.err");
+            let end_l = self.fresh_label("wfb.end");
+            self.emit_term(format!("br i1 {isok}, label %{ok_l}, label %{err_l}"));
+            self.emit_label(&err_l);
+            let msg = self.fresh_tmp();
+            self.emit(format!("{msg} = call ptr @__vyrn_write_err(ptr {path})"));
+            let ew = self.fresh_tmp();
+            let e0 = self.fresh_tmp();
+            let e1 = self.fresh_tmp();
+            let e2 = self.fresh_tmp();
+            self.emit(format!("{ew} = ptrtoint ptr {msg} to i64"));
+            self.emit(format!(
+                "{e0} = insertvalue {{ i1, i64, i64 }} undef, i1 0, 0"
+            ));
+            self.emit(format!(
+                "{e1} = insertvalue {{ i1, i64, i64 }} {e0}, i64 {ew}, 1"
+            ));
+            self.emit(format!(
+                "{e2} = insertvalue {{ i1, i64, i64 }} {e1}, i64 0, 2"
+            ));
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&ok_l);
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&end_l);
+            let r = self.fresh_tmp();
+            self.emit(format!(
+                "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_l} ], \
+                 [ {{ i1 1, i64 1, i64 0 }}, %{ok_l} ]"
+            ));
+            return Ok((r, Type::Result(Box::new(Type::Bool), Box::new(Type::Str))));
+        }
+        // RFC-0111: `print` for bytes. No status to check — the shim answers
+        // nothing, for the reason `print` answers nothing.
+        if name == "writeStdout" {
+            let (arr, _) = self.gen_expr(&args[0])?;
+            let data = self.fresh_tmp();
+            let len = self.fresh_tmp();
+            self.emit(format!(
+                "{data} = extractvalue {{ ptr, i64, i64 }} {arr}, 0"
+            ));
+            self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {arr}, 1"));
+            self.emit(format!(
+                "call void @__vyrn_write_stdout(ptr {data}, i64 {len})"
+            ));
+            return Ok(("undef".to_string(), Type::Unit));
         }
         if name == "writeFile" {
             let (path, _) = self.gen_expr(&args[0])?;

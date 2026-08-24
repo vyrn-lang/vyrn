@@ -17,7 +17,7 @@
 // ever grows, the instantiate error names the missing function.
 //
 // Usage:
-//   const { exitCode, stdout, stderr, exports } = await runVyrn(bytes, {
+//   const { exitCode, stdout, stdoutRaw, stderr, exports } = await runVyrn(bytes, {
 //     onStdout: line => ..., onStderr: line => ...,   // optional, per-chunk
 //     extern: {                                        // optional (RFC-0012 M1)
 //       jsLog: (msg) => console.log(msg),              //   String param decoded
@@ -144,6 +144,9 @@ export async function runVyrn(wasmBytes, hooks = {}) {
   const stderrDec = new TextDecoder();
   let stdout = "";
   let stderr = "";
+  // Every stdout write, as bytes, in order (RFC-0111). The page joins them
+  // for a caller that wants the file the program actually wrote.
+  const stdoutBytes = [];
 
   // fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) -> errno
   // Decodes the iovec array out of linear memory and appends to the right
@@ -152,25 +155,48 @@ export async function runVyrn(wasmBytes, hooks = {}) {
   // closes the call boundary, so a truncated tail is still emitted before
   // this write returns. wasi-libc buffers internally, so chunks are usually
   // whole lines.
+  //
+  // THE BYTES ARE HANDED OVER TOO (RFC-0111). `writeStdout` exists so a program
+  // can emit bytes that are NOT text — a packed pixel row, a binary PBM — and
+  // decoding those to a string replaces every invalid sequence with U+FFFD
+  // before any consumer sees them. That is silent corruption in the one engine
+  // whose whole job here is to show what the program wrote. So `onStdout` and
+  // `onStderr` receive `(text, bytes)`: `text` is what it always was, and
+  // `bytes` is a COPY of exactly what the module wrote, in order. A caller that
+  // only prints ignores the second argument and behaves as before; a caller
+  // handling binary uses it and never looks at `text`.
+  //
+  // A copy, not a view: `memory.buffer` is detached by any later growth, so a
+  // `Uint8Array` over it is only valid until the next allocation.
   function fd_write(fd, iovsPtr, iovsLen, nwrittenPtr) {
     if (fd !== 1 && fd !== 2) return ERRNO_BADF;
     const view = new DataView(memory.buffer);
     const dec = fd === 1 ? stdoutDec : stderrDec;
     let written = 0;
     let text = "";
+    const parts = [];
     for (let i = 0; i < iovsLen; i++) {
       const base = view.getUint32(iovsPtr + i * 8, true);
       const len = view.getUint32(iovsPtr + i * 8 + 4, true);
-      text += dec.decode(new Uint8Array(memory.buffer, base, len), { stream: true });
+      const raw = new Uint8Array(memory.buffer, base, len);
+      parts.push(raw.slice());
+      text += dec.decode(raw, { stream: true });
       written += len;
     }
     text += dec.decode();
+    const bytes = new Uint8Array(written);
+    let at = 0;
+    for (const p of parts) {
+      bytes.set(p, at);
+      at += p.length;
+    }
     if (fd === 1) {
       stdout += text;
-      if (hooks.onStdout) hooks.onStdout(text);
+      stdoutBytes.push(bytes);
+      if (hooks.onStdout) hooks.onStdout(text, bytes);
     } else {
       stderr += text;
-      if (hooks.onStderr) hooks.onStderr(text);
+      if (hooks.onStderr) hooks.onStderr(text, bytes);
     }
     view.setUint32(nwrittenPtr, written, true);
     return ERRNO_SUCCESS;
@@ -515,5 +541,16 @@ export async function runVyrn(wasmBytes, hooks = {}) {
   // `memory`: the instance's linear memory. `memory.buffer.byteLength` is the
   // only way to see whether the module reclaims what it allocates, which is why
   // nothing saw that it did not (RFC-0077 M6).
-  return { exitCode, stdout, stderr, exports: wrappedExports, memory };
+  // `stdoutRaw` is the whole of standard output as BYTES — what `stdout`
+  // would be if it were not a string. For a text program the two say the
+  // same thing; for one that called `writeStdout` with a packed row, only
+  // this one is faithful (RFC-0111).
+  const total = stdoutBytes.reduce((n, b) => n + b.length, 0);
+  const stdoutRaw = new Uint8Array(total);
+  let rawAt = 0;
+  for (const b of stdoutBytes) {
+    stdoutRaw.set(b, rawAt);
+    rawAt += b.length;
+  }
+  return { exitCode, stdout, stdoutRaw, stderr, exports: wrappedExports, memory };
 }

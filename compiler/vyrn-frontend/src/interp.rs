@@ -297,6 +297,51 @@ macro_rules! vyrn_out {
     }};
 }
 
+/// Raw bytes to stdout: no newline, no formatting, no line buffering promise
+/// beyond what the handle already gives (RFC-0111).
+///
+/// THE PLAYGROUND CANNOT DO THIS FAITHFULLY, and says so rather than pretending.
+/// Its stdout is a `String` shown in a web page, so bytes that are not UTF-8
+/// have no representation there; they arrive as U+FFFD. That is the same class
+/// of limit as the playground having no filesystem — a display surface is not a
+/// byte sink — and it is the only engine where `writeStdout` is lossy. The
+/// interpreter, the native binary and the WASI module all write the bytes.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn vyrn_out_bytes(bytes: &[u8]) {
+    crate::playhost::out_text(&String::from_utf8_lossy(bytes));
+}
+
+/// Raw bytes to stdout (RFC-0111). Shares the process handle with `print`, so
+/// the two interleave in call order.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn vyrn_out_bytes(bytes: &[u8]) {
+    use std::io::Write as _;
+    let out = std::io::stdout();
+    let mut lock = out.lock();
+    let _ = lock.write_all(bytes);
+    let _ = lock.flush();
+}
+
+/// An `Array<UInt8>` as bytes, or a type error naming the builtin that asked.
+///
+/// The checker already refused anything but `Array<UInt8>`, so a mismatch here
+/// is an interpreter bug and not a program's fault — hence the `Err` rather
+/// than a trap a program could catch.
+fn byte_vec(v: &Val, who: &str) -> Result<Vec<u8>, Ctrl> {
+    let Val::Array(items) = v else {
+        return Err(format!("{who} of non-Array {v:?}").into());
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for it in items.iter() {
+        match it {
+            Val::IntN { v, .. } => out.push(*v as u8),
+            Val::Int(n) => out.push(*n as u8),
+            other => return Err(format!("{who} of non-byte element {other:?}").into()),
+        }
+    }
+    Ok(out)
+}
+
 /// One line of log output, kept off stdout (RFC-0008).
 macro_rules! vyrn_err {
     ($($arg:tt)*) => {{
@@ -5514,6 +5559,34 @@ impl<'a> Interp<'a> {
                         };
                         let lit = self.gen_module_interface(&path)?;
                         return self.expr(&lit, scope);
+                    }
+                    // RFC-0111: the byte sink. Same create/truncate/write-all
+                    // as `writeFile` and the same canonical wording, over an
+                    // `Array<UInt8>` that no UTF-8 or NUL rule touches.
+                    "writeFileBytes" => {
+                        let path = match &vals[0] {
+                            Val::Str(s) => s.clone(),
+                            other => {
+                                return Err(format!("writeFileBytes of non-String {other:?}").into())
+                            }
+                        };
+                        let bytes = byte_vec(&vals[1], "writeFileBytes")?;
+                        match std::fs::write(path.as_str(), &bytes) {
+                            Ok(()) => Ok(Val::Result(true, Box::new(Val::Bool(true)))),
+                            Err(_) => Ok(Val::Result(
+                                false,
+                                Box::new(Val::Str(std::rc::Rc::new(crate::trap::io_at(
+                                    "writeerr", &path,
+                                )))),
+                            )),
+                        }
+                    }
+                    // RFC-0111: `print` for bytes — no newline, no formatting,
+                    // no result. The bytes go out exactly as given.
+                    "writeStdout" => {
+                        let bytes = byte_vec(&vals[0], "writeStdout")?;
+                        vyrn_out_bytes(&bytes);
+                        Ok(Val::Unit)
                     }
                     "writeFile" => {
                         let path = match &vals[0] {
