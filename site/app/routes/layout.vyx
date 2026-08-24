@@ -19,14 +19,17 @@ import { exampleCount, backendCount, hasRelease, releaseTag, releasePre } from "
 // has no entry for a `<meta>`. Each page therefore carries the viewport and
 // description meta in its own `head()` — one call to `pageHead`, which builds
 // them from a `Head` value where `withMeta` does exist.
-// `theme.js` is a CLASSIC script and the others are modules, which is the whole
-// reason it is a separate file: a module is deferred, so it runs after the first
-// paint, and a theme applied after the first paint is a flash. This one blocks
-// rendering for four hundred bytes and sets the root attribute before anything
-// is painted (RFC-0105 M4).
+// `theme.js` WAS a classic script, so that it blocked rendering and set the
+// root attribute before the first paint. It blocked on a request to do it, and
+// nothing is painted while that request is in flight — which is the flash it was
+// there to prevent, moved rather than removed (B3 defect 5). The four lines that
+// read the choice are inline in the head now, written by `withThemeBoot` in
+// `site/export.vyrn`, and they need no request at all. What is left in the file
+// is the toggle and its listeners, which run after the paint by definition, so
+// it is a module like every other script here.
 head {
     stylesheet "/style.css"
-    script "/theme.js"
+    module "/theme.js"
     module "/widgets.js"
 }
 

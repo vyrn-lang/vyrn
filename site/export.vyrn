@@ -350,6 +350,57 @@ fn withIcon(html: String) -> String {
     return insertInHead(html, "<link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">")
 }
 
+/// `html` with the two head elements that decide the page's colour before the
+/// browser paints anything: the colour scheme it may use, and the reader's own
+/// choice (B3 defect 5).
+///
+/// WHY THIS IS INLINE AND NOT A FILE. `theme.js` was a classic `<script src>` in
+/// the head. A classic script blocks rendering, which was the point — the root
+/// attribute was on the element before the first paint. But it blocks on a
+/// REQUEST: nothing is painted until that request completes, and on a cold load
+/// the reader looks at the browser's own blank canvas while it does. The theme
+/// is decided from `localStorage`, which needs no request at all, so the four
+/// lines that read it are written here and the file keeps the toggle. The file
+/// is a module now, and is deferred like every other script on the page.
+///
+/// THE META, AND WHAT IT IS FOR. The stylesheet also blocks the first paint, and
+/// until it arrives the browser paints its own canvas — white, because a browser
+/// with no `color-scheme` assumes light. `<meta name="color-scheme">` is the one
+/// element that says otherwise before any CSS is parsed, so a reader whose
+/// system is dark gets a dark canvas in that gap instead of a white one. It is
+/// first in the head for the same reason.
+///
+/// THREE ATTRIBUTES, ALL OF THEM PRE-PAINT.
+///   `data-theme`  the reader's explicit choice; `style.css` reads it.
+///   `idecompact`  the masthead's height, handed over from the last page — see
+///                 `theme.js`, which explains the handoff it used to do here.
+///   `data-js`     unhides the theme control. Set before the first paint, or the
+///                 control appears one frame later and moves the row it is in.
+/// Every one of them is wrong to set after a paint, which is why they are the
+/// piece that moved and the toggle is the piece that stayed.
+fn withThemeBoot(html: String) -> String {
+    let boot = "<script>try{var r=document.documentElement,t=localStorage.getItem(\"vyrn.theme\");if(t===\"light\"||t===\"dark\")r.setAttribute(\"data-theme\",t);if(sessionStorage.getItem(\"vyrn.mast\")===\"compact\")r.classList.add(\"idecompact\");r.setAttribute(\"data-js\",\"on\")}catch(e){document.documentElement.setAttribute(\"data-js\",\"on\")}</script>"
+    return insertAfterCharset(html, "<meta name=\"color-scheme\" content=\"light dark\">" + boot)
+}
+
+/// `html` with `extra` spliced in directly after its `<meta charset>`.
+///
+/// NOT after `<head>`, which is where every other stamp goes. A browser reads
+/// the encoding out of the first 1024 bytes of a document and guesses if it is
+/// not there, and `std/ui` writes the charset after the title rather than first
+/// — so the five stamps above already push it to byte 560, and 380 bytes of
+/// boot script in front of it would leave 55 bytes of margin on a page whose
+/// description is one sentence longer. Nothing about the theme needs to precede
+/// the encoding: the script runs while the head is parsed, which is before any
+/// layout and long before the stylesheet it has to beat.
+fn insertAfterCharset(html: String, extra: String) -> String {
+    let mark = "<meta charset=\"utf-8\">"
+    return match indexOf(html, mark) {
+        Some(at) => substring(html, 0, at + mark.byteLength) + extra + substring(html, at + mark.byteLength, html.byteLength),
+        None => insertInHead(html, extra),
+    }
+}
+
 /// `html` with the releases feed declared (RFC-0106 M1).
 ///
 /// On EVERY page and not only on `/releases`, because a reader who wants the
@@ -1011,18 +1062,33 @@ test "both fronts carry the theme control, and carry it without a flash" {
     // and builds its masthead as a string rather than from the layout.
     //
     // What each has to be true of:
-    //   - `theme.js` is a CLASSIC script, so it blocks rendering and the root
-    //     attribute is set before the first paint. A module would be deferred,
-    //     and a theme applied after the first paint is the flash this prevents.
-    //   - It is in the HEAD, before `<body>` — the same reason.
+    //   - The theme is decided INLINE, in the head, before the first paint and
+    //     with no request. `theme.js` used to do it as a blocking script, which
+    //     traded a flash after the paint for a wait before it (B3 defect 5).
+    //   - The inline piece is the FIRST thing in the head, with the colour
+    //     scheme beside it, so nothing paints ahead of the page's own colour.
+    //   - `theme.js` is a module now: it holds the toggle, and a toggle is a
+    //     control, which is a thing that happens after a paint by definition.
     //   - The control is ONE button, once, in the system state, and its
     //     accessible name says the state and what the next press does.
     for path in ["/", "/docs/std/json", "/benchmarks"] {
         let doc = publishedDocument(path)
         let up = upTo(path)
-        let tag = "<script src=\"" + up + "theme.js\">"
-        assert(!has(doc, "<script type=\"module\" src=\"" + up + "theme.js\">"))
-        assert(has(split(doc, "<body")[0], tag))
+        let head = split(doc, "<body")[0]
+        // The two head elements that decide the colour, in front of the
+        // stylesheet, which is the only other thing in this head that decides
+        // what a reader looks at.
+        let mark = "<meta charset=\"utf-8\">"
+        assert(startsWith(split(doc, mark)[1], "<meta name=\"color-scheme\" content=\"light dark\"><script>"))
+        assertEq(countOf(split(doc, "<link rel=\"stylesheet\"")[0], "color-scheme"), 1)
+        // And the encoding is still inside the window a browser reads it in.
+        assert(split(doc, mark)[0].byteLength < 1024)
+        assert(has(head, "localStorage.getItem(\"vyrn.theme\")"))
+        assert(has(head, "r.setAttribute(\"data-theme\",t)"))
+        assert(has(head, "r.setAttribute(\"data-js\",\"on\")"))
+        // And no blocking request stands between the parse and the paint.
+        assert(!has(doc, "<script src=\"" + up + "theme.js\">"))
+        assert(has(head, "<script type=\"module\" src=\"" + up + "theme.js\">"))
         assertEq(countOf(doc, "data-theme-cycle"), 1)
         assertEq(countOf(doc, "<button type=\"button\" class=\"theme\" data-theme-cycle aria-label=\"Theme: System. Press to use Light.\">System</button>"), 1)
         // One skip link per document, and the anchor it lands on.
@@ -1095,7 +1161,10 @@ fn publishedDocument(path: String) -> String {
     if let Some(hit) = renderedPages[path] {
         return hit.copy()
     }
-    let doc = relativize(withRedirect(withCards(withFeed(withIcon(withLang(withSubnav(markCurrent(renderedBody(path), path), path), path))), path), path), path)
+    // `withThemeBoot` is outermost, and `insertInHead` splices at the top of the
+    // head, so the colour of the page is the first thing in the document. The
+    // stamp order below it is the order they were added in and carries nothing.
+    let doc = relativize(withThemeBoot(withRedirect(withCards(withFeed(withIcon(withLang(withSubnav(markCurrent(renderedBody(path), path), path), path))), path), path)), path)
     renderedPages[path.copy()] = doc.copy()
     return doc
 }
