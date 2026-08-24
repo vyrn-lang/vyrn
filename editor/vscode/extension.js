@@ -157,6 +157,18 @@ function registerRun(context, vsc, lspState) {
             arguments: [document.uri],
           })
         );
+        // Beside it, not instead of it. `vyrn run --profile` runs the program
+        // under the interpreter and prints a flat table of where the time went
+        // (RFC-0108's tooling half). It is one click from the same place Run is
+        // because the question "why is this slow" arrives while you are looking
+        // at the code, and a reader who has to remember a flag asks it less.
+        lenses.push(
+          new vsc.CodeLens(range, {
+            title: "◷ Profile",
+            command: "vyrn.profile",
+            arguments: [document.uri],
+          })
+        );
         // A zero-width match can't happen here (the pattern consumes `fn main(`),
         // but guard against an accidental infinite loop regardless.
         if (mainRe.lastIndex === m.index) mainRe.lastIndex++;
@@ -177,6 +189,15 @@ function registerRun(context, vsc, lspState) {
             new vsc.CodeLens(range, {
               title: "▶ Run all tests",
               command: "vyrn.testAll",
+              arguments: [document.uri],
+            })
+          );
+          // A suite is where a slow test hides, so the profile of a whole run is
+          // more often the useful one than the profile of a single test.
+          lenses.push(
+            new vsc.CodeLens(range, {
+              title: "◷ Profile tests",
+              command: "vyrn.profileTests",
               arguments: [document.uri],
             })
           );
@@ -303,6 +324,22 @@ function registerRun(context, vsc, lspState) {
     ),
     vsc.commands.registerCommand("vyrn.bench", (uri, name) =>
       runVyrn(vsc, uri, (file) => ["bench", file, "--name", unescapeTestName(name)])
+    ),
+    // The profiler (RFC-0108). `--profile` is a flag on the ordinary verbs rather
+    // than a verb of its own, so these are `run`/`test` with one more argument
+    // and nothing else changes — same terminal, same working directory, same
+    // output plus a table on stderr.
+    //
+    // BEFORE THE FILE, and that is not a style choice. Everything past the file
+    // in `vyrn run` is the PROGRAM's own `args()` (RFC-0014), so
+    // `vyrn run app.vyrn --profile` hands the flag to `app.vyrn` and prints no
+    // table — correct, and silent. Written that way here it looked like the
+    // profiler was broken.
+    vsc.commands.registerCommand("vyrn.profile", (uri) =>
+      runVyrn(vsc, uri, (file) => ["run", "--profile", file])
+    ),
+    vsc.commands.registerCommand("vyrn.profileTests", (uri) =>
+      runVyrn(vsc, uri, (file) => ["test", "--profile", file])
     ),
     // "▶ Run dev server" (RFC-0064): `vyrn dev` is manifest-driven (it reads the
     // project's `server`/`client` keys), so this runs it in the manifest
