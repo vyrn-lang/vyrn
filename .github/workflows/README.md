@@ -58,6 +58,23 @@ worth knowing before anyone tries to speed things up.
 the Vyrn interpreter executing test corpora — the site's own test blocks in one
 case, forty parity programs in another. No change to a YAML file reaches it.
 
+**What the site's test step is made of is now known.** Run
+`vyrn test --profile site/export.vyrn` and it answers in one command: `slice`
+from `std/strpred` is 59 percent of it over 508,664 calls, and `findSkipping` is
+another 15. Two functions are three quarters of the step. There is nothing to
+tune in the workflow and the write-up is
+`rfcs/census/slice-is-half-the-site-build.md`.
+
+**There are two bench gates and they check different things.**
+`Bench --check`, in the `checks` job, runs every bench body once under the
+interpreter. It never loads the bench harness at all, so nothing it does
+exercises the native timing path. The `benchmarks` job below does run that path.
+Knowing which is which matters: a defect lived in the harness merge for a long
+time and neither gate saw it, because the corpus is the project's own files and
+the defect was triggered by a name a user picks. `The native bench harness` step
+in the `parity` job is the one that tests that, and it picks the names on
+purpose.
+
 **Read the correction at the end of that file before quoting a number from it.**
 Its medians were sampled across runs that mostly predate a site optimisation, so
 the site figures in the body are roughly twice what the workflow costs today.
