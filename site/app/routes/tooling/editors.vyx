@@ -70,7 +70,7 @@ fn pager() -> Pager {
 
     <div class="crumbrow">
         <nav class="crumbs" aria-label="Breadcrumb">
-            <a href="/docs.html">Reference</a>
+            <a href="/tooling.html">Tooling</a>
             <span>Editors</span>
         </nav>
         <div class="docutils">
@@ -139,7 +139,7 @@ fn pager() -> Pager {
         <p v-html="otherClose()"></p>
     </section>
 
-    <nav class="pager" aria-label="Reference">
+    <nav class="pager" aria-label="Pages">
         <a class="prev" v-if="pager().prevHref.byteLength > 0" :href="pager().prevHref"><span class="eyebrow">Previous</span>{{ pager().prevLabel }}</a>
         <a class="next" v-if="pager().nextHref.byteLength > 0" :href="pager().nextHref"><span class="eyebrow">Next</span>{{ pager().nextLabel }}</a>
     </nav>
