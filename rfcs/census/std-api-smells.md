@@ -1635,3 +1635,46 @@ to answer first: adding character-safe siblings (`charAt`, a character
 slice, a character-width pad) breaks nothing, and every trap in section 2
 stays open until those exist.
 
+
+---
+
+## Correction, made on verification
+
+Four of the twelve live defects in section 3 are not defects. Items 4, 5, 6 and
+7 report that `std/scan`, `std/jsonread` and `std/vyx` advance a column once per
+byte, so a column is wrong on any line holding non-ASCII.
+
+The behaviour is real. The verdict is wrong. **Byte columns are the documented
+convention, chosen deliberately and measured against the compiler.**
+`std/text.vyrn:204-210` states it:
+
+> **The column counts BYTES, not codepoints**, and that was measured off the
+> builtin rather than assumed: both the interpreter (`off - lineStart + 1`) and
+> the shim (a backward walk to the LF) count bytes [...] RFC-0033 origin
+> directives feed a C-style `#line`, where byte columns are the convention
+> anyway.
+
+`compiler/vyrn-codegen/src/direct.rs:14585` carries the same statement on the
+other side. So `std/scan.vyrn:150` and `std/jsonread.vyrn:86` counting bytes are
+CONSISTENT with the language they serve, not broken. Changing them to count
+characters would put the standard library at odds with the interpreter and with
+the `#line` directives the origin machinery emits.
+
+**Item 7 is the one real defect in that group, and it is a documentation defect.**
+`vyxColAt` was documented as "chars since the last LF" while returning
+`colAt`'s byte column. The census found it at the exact address `std/text.vyrn`
+predicts. Fixed in this commit: the doc comment now says bytes and points at the
+measurement.
+
+That leaves 8 live defects, not 12. The remaining eight are unaffected: they
+drop or mis-fold non-ASCII bytes while building an identifier or padding a
+column, which no convention makes correct.
+
+### Why this matters beyond the count
+
+A census cannot tell a deliberate convention from an accident by reading the
+code alone. Four sites did the same thing consistently, which reads as a
+repeated defect and is in fact a followed rule. The distinguishing evidence was
+a doc comment in a fourth file and a comment in the compiler. Any future census
+of this kind should be told to search for a stated convention before reporting
+consistency as a fault.
