@@ -7,12 +7,12 @@
 //!
 //! The cost of that is nine copies of the checkout SHA. The census (item 10)
 //! proposed two composite actions wrapping the two most-repeated pins. This does
-//! not, for a reason found while checking: nothing here updates these pins, and
-//! wrapping them would hide them from the thing that normally would. GitHub's
-//! own updater reads `uses: owner/repo@sha` and rewrites BOTH the SHA and the
-//! `# owner/repo@v4` comment above it; it cannot see through a composite action.
-//! The wrapper would trade a duplication that a test can hold for an update path
-//! that nothing can.
+//! not, and `.github/dependabot.yml` is why: the updater reads
+//! `uses: owner/repo@sha` and rewrites BOTH the SHA and the `# owner/repo@v4`
+//! comment above it, and it cannot see through a composite action. The wrapper
+//! would have traded a duplication a test can hold for an update path nothing
+//! can. When the census was written there was no updater at all, which made the
+//! wrapper look free; adding one is what settled it.
 //!
 //! So this holds the duplication instead. It catches the failure that having
 //! nine copies actually causes — bumping some and not the rest — and the one the

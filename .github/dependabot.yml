@@ -1,0 +1,44 @@
+# Keep the pinned GitHub Actions up to date.
+#
+# WHY THIS FILE EXISTS. Every `uses:` in `.github/workflows/` is pinned to a
+# 40-character commit rather than a tag, because a tag moves and third-party
+# code in CI runs with the repository's token. `compiler/vyrn-cli/tests/action_pins.rs`
+# enforces that. The cost of pinning is that nothing tells you when a pinned
+# action has a security fix, and until now nothing did: the 23 pins were
+# hand-maintained, which in practice means never maintained.
+#
+# Dependabot reads `uses: owner/repo@sha` and rewrites BOTH the SHA and the
+# `# owner/repo@v4` comment above it. That is why the census's proposal — wrap
+# the two most-repeated pins in composite actions — was refused: a composite
+# action hides the pin from the only thing that would update it.
+#
+# WHAT THIS DOES NOT COVER, and deliberately:
+#
+#   - cargo. The workspace pins its dependencies in `Cargo.lock` and the policy
+#     is "builds and tests with no LLVM/clang/sysroot", not "newest crates". A
+#     weekly pull request per crate would be noise against a lockfile nobody
+#     wants moved without a reason.
+#   - npm. The one third-party tool in the release path is `@vscode/vsce`,
+#     pinned by exact version in `editor/vscode/package.json`'s `package`
+#     script so that a contributor running `npm run package` and the release
+#     job use one spelling. That pin is deliberate and Dependabot would fight
+#     it.
+#   - The toolchain. `vyrn.json` pins clang, wasi-sysroot and wasmtime under
+#     RFC-0102, and those are fetched by `vyrn update --locked`, which is the
+#     mechanism that owns them.
+#
+# So: actions only, monthly, grouped. Monthly rather than weekly because an
+# action pin is a supply-chain question and not a feature question, and one
+# grouped pull request a month is a thing a person reads.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: ci
