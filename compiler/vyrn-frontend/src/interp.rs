@@ -2478,6 +2478,27 @@ thread_local! {
     static LINE_STARTS: std::cell::RefCell<
         std::collections::HashMap<usize, (std::rc::Rc<Vec<Val>>, std::rc::Rc<Vec<usize>>)>,
     > = std::cell::RefCell::new(std::collections::HashMap::new());
+
+    /// Arrays already proven to need no coercion, by identity.
+    /// `(array pointer, what noop means for this element type) -> a WEAK handle`.
+    ///
+    /// Weak and not strong, which is the whole design. A strong handle is what
+    /// `LINE_STARTS` holds, and it is right there: a source buffer is read and
+    /// never written. An entry that owns the array a SECOND time turns every
+    /// element store into a copy-on-write clone of the whole row — `rows[i][j] =
+    /// c` went from a name compare per element to a row clone per element, which
+    /// `an_element_store_does_not_restamp_its_row` catches and should.
+    ///
+    /// A weak handle costs mutation nothing: with one strong owner left,
+    /// `Rc::make_mut` disassociates the weak handles and edits in place. That is
+    /// also what makes the entry safe to trust — an upgrade that still succeeds,
+    /// to the same address, proves the allocation was never written since it was
+    /// proven. An upgrade that fails is simply a miss, and a recycled address is
+    /// a miss too, because the check is the upgrade and not the key.
+    #[allow(clippy::type_complexity)]
+    static NOOP_ARRAYS: std::cell::RefCell<
+        std::collections::HashMap<(usize, String), std::rc::Weak<Vec<Val>>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
 impl<'a> Interp<'a> {
@@ -6776,16 +6797,61 @@ impl<'a> Interp<'a> {
             (
                 Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _),
                 Val::Array(items),
-            ) => match self.stamp_only(inner, d) {
+            ) => {
                 // The element type is decided ONCE and the scan is then a name
                 // compare per element. Asking the general question per element
                 // costs two hashed `types` lookups each, which on a 1,600-element
                 // row is most of the store.
-                Some(n) => items
-                    .iter()
-                    .all(|it| matches!(it, Val::Record(_, Some(m)) if **m == *n)),
-                None => items.iter().all(|it| self.coercion_is_noop(inner, it, d)),
-            },
+                let stamp = self.stamp_only(inner, d);
+                let scan = || match stamp {
+                    Some(n) => items
+                        .iter()
+                        .all(|it| matches!(it, Val::Record(_, Some(m)) if **m == *n)),
+                    None => items.iter().all(|it| self.coercion_is_noop(inner, it, d)),
+                };
+                // Even a name compare per element is a scan, and a parser asks
+                // this same question of the same buffer once per helper call —
+                // so an O(n) walk became O(n^2). `std/von`'s reader spent 3.1 s
+                // on a 1,600-element document against 0.055 s in its lexer, and
+                // the difference was this. Memoize the answer on the array's
+                // IDENTITY, the way `lineAt` memoizes its line-start table.
+                //
+                // Only for the two element types a parser's state actually
+                // carries: a stamped record (the token row) and a sized integer
+                // (the source bytes). `Array<Int64>` never reaches here —
+                // `coercion_is_identity` answered above — and an element type
+                // whose answer is not decided by the type alone is left to scan,
+                // because a memo that has to be re-proven is not a memo.
+                let key = match (&stamp, inner.as_ref()) {
+                    (Some(n), _) => Some(format!("r{n}")),
+                    (None, Type::IntN { bits, signed }) => Some(format!("i{bits}{signed}")),
+                    _ => None,
+                };
+                let Some(key) = key else { return scan() };
+                let ptr = std::rc::Rc::as_ptr(items) as usize;
+                let key = (ptr, key);
+                NOOP_ARRAYS.with(|c| {
+                    if let Some(w) = c.borrow().get(&key) {
+                        if w.upgrade()
+                            .is_some_and(|up| std::rc::Rc::as_ptr(&up) as usize == ptr)
+                        {
+                            return true;
+                        }
+                    }
+                    let ok = scan();
+                    if ok {
+                        let mut m = c.borrow_mut();
+                        // ponytail: bounded crudely, the same way `LINE_STARTS`
+                        // is — a program threads a handful of buffers, not
+                        // thousands.
+                        if m.len() > 64 {
+                            m.clear();
+                        }
+                        m.insert(key, std::rc::Rc::downgrade(items));
+                    }
+                    ok
+                })
+            }
             (Type::Option(inner), Val::Option(Some(p))) => self.coercion_is_noop(inner, p, d),
             (Type::Result(ok, err), Val::Result(is_ok, p)) => {
                 self.coercion_is_noop(if *is_ok { ok } else { err }, p, d)
