@@ -1186,7 +1186,11 @@ fn on_deep_stack(f: impl FnOnce() -> Result<i64, String> + Send) -> Result<i64, 
     // one. Nothing is carried unless a caller asked for the trace, which is the
     // corpus gate and nothing else.
     let tracing = crate::own::trace::on();
+    // The profile is per thread for the same reason the trace is, so it makes
+    // the same trip back.
+    let profiling = crate::prof::on();
     let carried = std::sync::Mutex::new(Vec::new());
+    let rows = std::sync::Mutex::new(Vec::new());
     let out = std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(INTERP_STACK_BYTES)
@@ -1194,9 +1198,15 @@ fn on_deep_stack(f: impl FnOnce() -> Result<i64, String> + Send) -> Result<i64, 
                 if tracing {
                     crate::own::trace::start();
                 }
+                if profiling {
+                    crate::prof::start();
+                }
                 let r = f();
                 if tracing {
                     *carried.lock().unwrap() = crate::own::trace::take();
+                }
+                if profiling {
+                    *rows.lock().unwrap() = crate::prof::take();
                 }
                 r
             })
@@ -1206,6 +1216,9 @@ fn on_deep_stack(f: impl FnOnce() -> Result<i64, String> + Send) -> Result<i64, 
     });
     if tracing {
         crate::own::trace::adopt(carried.into_inner().unwrap_or_default());
+    }
+    if profiling {
+        crate::prof::adopt(rows.into_inner().unwrap_or_default());
     }
     out
 }
@@ -2865,10 +2878,20 @@ impl<'a> Interp<'a> {
             }
             self.call_depth.set(d);
         }
+        // The profiler counts what the depth counter counts, and for the same
+        // reason: an `extern` is the host's frame and an unknown name has none.
+        // `None` unless `vyrn run --profile` armed it, which is one thread-local
+        // read per call otherwise.
+        let started = if counted { crate::prof::enter() } else { None };
         let r = self.call_capturing_inner(name, args);
         // Balanced on every path out, including a trap the caller catches: a
         // `test` run calls many bodies in one process, and a depth left behind
-        // would refuse the next one.
+        // would refuse the next one. The profiler's frame is balanced here too,
+        // and it has to be: an unpopped frame charges the trap's whole unwind to
+        // whatever the next call turns out to be.
+        if let Some(t) = started {
+            crate::prof::exit(name, t);
+        }
         if counted {
             self.call_depth.set(self.call_depth.get() - 1);
         }

@@ -70,7 +70,7 @@ use vyrn_codegen::toolchain::{extern_trap_stubs, find_clang, runtime_shim};
 /// feature so the default build keeps its zero external dependencies.
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
+const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn run --profile [file.vyrn] [args...]   (where the interpreted run spent its time, to stderr; the flag counts only BEFORE the file, so a program can have one of its own)\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
        vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact-name>   (every import chain that pulls that capability into the artifact's closure)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
        vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [--locked] [alias] | vyrn vendor [--check] | vyrn deps [artifact]   (deps: every declared artifact's module graph, then the toolchain)\n       vyrn --version   (also -V)";
 
@@ -329,6 +329,23 @@ fn real_main() -> ExitCode {
     if args.get(1).map(|a| a.as_str()) != Some("run") {
         args.retain(|a| a != "--maps");
     }
+    // `--profile` is the CLI's and not the program's, so it counts only BEFORE
+    // the file — the same line `--version` draws one comment down, and for the
+    // same reason: `vyrn run app.vyrn --profile` is a flag for `app.vyrn`.
+    let head = args
+        .iter()
+        .skip(2)
+        .position(|a| !a.starts_with('-'))
+        .map_or(args.len(), |i| i + 2)
+        .max(2.min(args.len()));
+    let at = args
+        .get(2.min(args.len())..head)
+        .and_then(|h| h.iter().position(|a| a == "--profile"));
+    let want_profile = at.is_some();
+    // Removed once, so a program's own `--profile` further along survives.
+    if let Some(i) = at {
+        args.remove(i + 2);
+    }
     // `--version` / `-V`, before the usage screen: the published alpha printed
     // usage and exited 2 for both, which is what a package manager reads as a
     // broken install. The string is the crate's own `version`, so the binary and
@@ -463,7 +480,19 @@ fn real_main() -> ExitCode {
                 Err(code) => return code,
             };
             let _memo = shared_desugars();
-            match vyrn_frontend::interp::run_with_args(&program, &prog_args) {
+            if want_profile {
+                vyrn_frontend::prof::start();
+            }
+            let out = vyrn_frontend::interp::run_with_args(&program, &prog_args);
+            // The table goes to STDERR, and on the failing path too. A profile is
+            // not the program's output — a run whose stdout is piped somewhere
+            // must pipe the same bytes with the flag as without it — and the run
+            // worth profiling is often the one that traps.
+            if want_profile {
+                let rows = vyrn_frontend::prof::take();
+                eprint!("{}", vyrn_frontend::prof::table(&rows, 25));
+            }
+            match out {
                 Ok(code) => {
                     // main's return value becomes the process exit code (0..=255).
                     ExitCode::from((code & 0xff) as u8)
