@@ -25,18 +25,39 @@
   --teal: oklch(0.5558 0.0959 223.03);
   --cyan: oklch(0.7221 0.1214 214.54);
   --bright: oklch(0.8442 0.1241 204.81);
-  --danger: oklch(0.5568 0.2078 25.33);
-  --amber: oklch(0.52 0.1447 70.08);
+  /* Failure and a pre-release, one step darker than the ramp they were cut
+   * from. The paper below is a tinted cream now, and a colour that cleared
+   * 4.5:1 against a near-white does not clear it against a cream — these two
+   * were the tightest pairs in the sheet at 4.60 and 4.96. Measured, not
+   * nudged: `site/test/contrast.test.mjs` reads them from here. */
+  --danger: oklch(0.515 0.2078 25.33);
+  --amber: oklch(0.487 0.1447 70.08);
 
-  /* The light paper sits at 0.955, not 0.975: a near-white ground under
-   * near-black ink read as glare next to the reference site's softer field
-   * (tenth-round user note: "less flashing light"). The ink lifts a step in
-   * trade, so every AA pair keeps its margin. */
-  --n0: oklch(0.21 0.004 60);
-  --n1: oklch(0.42 0.004 60);
-  --n2: oklch(0.505 0.004 60);
-  --n3: oklch(0.905 0.003 60);
-  --n4: oklch(0.955 0.002 60);
+  /* THE LIGHT PAPER IS A PASTEL, NOT A WHITE (B3 defect 5).
+   *
+   * It was 0.955 at 0.002 chroma — a near-white with a hint of warmth in it,
+   * which is a white. The owner asked for a pastel, and the tenth-round note
+   * before it asked for "less flashing light", so this is the same complaint
+   * twice and the first answer did not go far enough.
+   *
+   * It sits at 0.93 lightness and 0.024 chroma on the ramp's own warm hue:
+   * rgb(245, 229, 216), a cream a reader can see is a colour. The plate under
+   * it moves with it — 0.88 at 0.030, rgb(238, 221, 207) — or the furniture
+   * floats on a ground it no longer belongs to.
+   *
+   * EVERY OTHER TOKEN IN THIS BLOCK MOVED BECAUSE THIS ONE DID. Contrast is a
+   * ratio between two colours, so darkening the ground takes a step out of
+   * every pair in the sheet, and the three tightest pairs were 0.10, 0.13 and
+   * 0.32 above AA. The ink drops to 0.20 and the two muted steps drop with it,
+   * `--danger` and `--amber` above are a step darker, and the result is
+   * measured rather than judged: body text reaches 14.68:1 against 7:1, and the
+   * tightest pair in the sheet — an ownership lane, which is a graphic — is
+   * 3.73:1 against 3:1. `site/test/contrast.test.mjs` holds every number. */
+  --n0: oklch(0.2 0.006 60);
+  --n1: oklch(0.4 0.006 60);
+  --n2: oklch(0.475 0.006 60);
+  --n3: oklch(0.88 0.03 60);
+  --n4: oklch(0.93 0.024 60);
 
   --ink: var(--n0);
   --muted: var(--n1);

@@ -13,9 +13,13 @@
 // checker that needs an export cannot run while the palette is being edited,
 // which is the moment it is worth having.
 //
-// WHAT AA ASKS FOR. 4.5:1 for body text, 3:1 for large text and for the
-// non-text parts of a control or a graphic that carries meaning. Each pair below
-// names which of the two it is and why.
+// WHAT THIS ASKS FOR, WHICH IS MORE THAN AA. Body text reaches 7:1, which is
+// AAA and not AA: it is the one thing on the page a reader looks at for minutes
+// at a time, and the light palette went pastel (B3 defect 5), so the pair that
+// carries the most reading is the pair held furthest from the floor. Every other
+// text pair reaches 4.5:1, and a focus ring or a graphic that carries meaning
+// reaches 3:1 — against the element as well as against the page, because a ring
+// a reader cannot find is not a ring. Each pair below names which it is and why.
 //
 // Run: node --test site/test/contrast.test.mjs
 import { test } from "node:test";
@@ -207,15 +211,25 @@ function contrast(fg, bg, theme) {
 // the paper, so that is what is written here.
 const PAPER = "var(--paper)";
 const PLATE = "color-mix(in oklab, var(--plate) 45%, var(--paper))";
+// A command block's wash is 55%, and on a phone the copy button paints that
+// wash flattened onto the paper so the command does not show through it
+// (B3 defect 4). It is a surface a reader reads a word on, so it is measured.
+const CMD = "color-mix(in oklab, var(--plate) 55%, var(--paper))";
+// What a control paints behind itself. The focus ring is offset 2px, so it lands
+// on the page — but a control at the edge of a plate, or a ring a browser draws
+// tight, has to be findable against the control's own fill as well.
+const CONTROL = "color-mix(in oklab, var(--ink) 4%, var(--paper))";
 
 const PAIRS = [
-  // text — 4.5:1
-  ["body text", "var(--ink)", PAPER, 4.5],
-  ["body text on a plate", "var(--ink)", PLATE, 4.5],
+  // body text — 7:1, the AAA bar. See the note at the top of this file.
+  ["body text", "var(--ink)", PAPER, 7],
+  ["body text on a plate", "var(--ink)", PLATE, 7],
+  // every other text — 4.5:1
   ["secondary prose (.lede, .note, .notice)", "var(--muted)", PAPER, 4.5],
   ["secondary prose on a plate", "var(--muted)", PLATE, 4.5],
   ["meta text (.modlist .count, .rail .n, chart axis)", "var(--n2)", PAPER, 4.5],
   ["meta text on a plate (line numbers, .lines .cl.head)", "var(--n2)", PLATE, 4.5],
+  ["the copy button's word, over the command it copies", "var(--n2)", CMD, 4.5],
   ["a link, and every accented heading", "var(--accent)", PAPER, 4.5],
   ["a link on a plate", "var(--accent)", PLATE, 4.5],
   ["failure (.diag.error, .pill, a trap)", "var(--danger)", PAPER, 4.5],
@@ -230,6 +244,8 @@ const PAIRS = [
   // non-text — 3:1
   ["the focus ring", "var(--accent)", PAPER, 3],
   ["the focus ring on a plate", "var(--accent)", PLATE, 3],
+  ["the focus ring against the control it rings", "var(--accent)", CONTROL, 3],
+  ["the filled call to action's own label", PAPER, "var(--accent)", 4.5],
   ["an ownership lane (a graphic that carries the argument)", "var(--lane-a)", PAPER, 3],
   ["the other ownership lane", "var(--lane-b)", PAPER, 3],
   // The benchmark radar's five strokes (RFC-0104 M3). A chart line is a graphic
@@ -263,7 +279,7 @@ const PAIRS = [
 ];
 
 for (const [theme, tokens] of [["light", LIGHT], ["dark", DARK]]) {
-  test(`the ${theme} palette meets WCAG AA`, () => {
+  test(`the ${theme} palette clears 7:1 on body text and 4.5:1 on the rest`, () => {
     const bad = [];
     for (const [what, fg, bg, need] of PAIRS) {
       const got = contrast(fg, bg, tokens);
@@ -272,7 +288,7 @@ for (const [theme, tokens] of [["light", LIGHT], ["dark", DARK]]) {
       if (process.env.VYRN_CONTRAST_TABLE) console.log(`| ${theme} | ${what} | ${got.toFixed(2)}:1 | ${need}:1 |`);
       if (got + 0.005 < need) bad.push(`${what}: ${got.toFixed(2)}:1, needs ${need}:1 (${fg} on ${bg})`);
     }
-    assert.deepEqual(bad, [], `${theme}: ${bad.length} pair(s) below AA\n  ${bad.join("\n  ")}`);
+    assert.deepEqual(bad, [], `${theme}: ${bad.length} pair(s) below the bar\n  ${bad.join("\n  ")}`);
   });
 }
 
