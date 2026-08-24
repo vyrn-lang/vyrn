@@ -1,7 +1,19 @@
 # The regular-expression gap — what blocks regex-redux, and what would unblock it
 
-Status: evidence collected 2026-08-23 against `main`. RECOMMENDATION, NOT A
-DECISION. Nothing here is implemented; this file prices options for the owner.
+Status: **CLOSED. Option 1 was chosen and built** —
+[RFC-0112](../RFC-0112-a-regular-expression-that-searches.md), 2026-08-25.
+`std/regex` is a Thompson NFA written in Vyrn, and `examples/regexredux.vyrn`
+prints the committed fixture — nine counts and three lengths — under all three
+engines.
+
+Option 1 rather than this file's first-ranked Option 2, and for the reason
+Option 2 was ranked first: the generator's value was compile-time pattern
+validation, and every one of regex-redux's fifteen patterns is a literal of its
+own source, so a refusal at run time is a panic on the first line of `main`. The
+generator is a strict addition on top of the walker whenever something wants it,
+because the walker does not change either way. This file's central finding — that
+the parity risk is in the walk and not in the table builder — is what decided it,
+and putting the walk in Vyrn made parity a property rather than a test.
 
 ## Why this file exists
 

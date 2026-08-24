@@ -23,6 +23,7 @@
 - [std/num](std/num.md) — std/num — text -> number, written in Vyrn (RFC-0078 M4a).
 - [std/openapi](std/openapi.md) — std/openapi — the contract as an OpenAPI 3.1 document (RFC-0038), a library
 - [std/random](std/random.md) — std/random — deterministic pseudo-randomness with a host-seeded escape
+- [std/regex](std/regex.md) — A regular expression that SEARCHES — counts, finds and replaces.
 - [std/rpc](std/rpc.md) — std/rpc — Typed RPC as a library (RFC-0019), built entirely on RFC-0021
 - [std/scan](std/scan.md) — std/scan (RFC-0054) — one shared, comment- and string-aware cursor over
 - [std/slots](std/slots.md) — std/slots — a generational slab, written in Vyrn, over `Array` (RFC-0090 M1).

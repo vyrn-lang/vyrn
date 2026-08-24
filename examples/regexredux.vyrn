@@ -1,0 +1,96 @@
+// regex-redux, from the Computer Language Benchmarks Game (RFC-0104 M1).
+//
+// Read a FASTA file on stdin, strip the descriptions and the linefeeds, count
+// nine patterns in the sequence, then rewrite it with five substitutions. Print
+// each pattern with its count, then three lengths: the input, the cleaned
+// sequence, and the sequence after the rewrites.
+//
+//   $ vyrn run examples/regexredux.vyrn < rfcs/bench-0104/fasta-1000.expected
+//   $ vyrn bench examples/regexredux.vyrn
+//
+// THIS PROGRAM IS WHY std/regex EXISTS. `=~` answers one question — does this
+// whole string match this compile-time-constant pattern — and this needs the
+// other three: how many, where, and with what replaced. RFC-0104 recorded that
+// as a boundary and `regexredux-1000.expected` sat in the corpus with no
+// program beside it. Every pattern below is a literal of this source, which is
+// the point the census made: nothing here needs a pattern chosen at run time.
+import { compile, count, replaceAll, Regex } from "std/regex"
+import { joinWith } from "std/strings"
+
+/// The whole of standard input, lines and all.
+///
+/// The game counts the INPUT length including the description lines and the
+/// linefeeds, so this keeps them and the cleaning step below removes them.
+fn readAll() -> String {
+    let mut parts: Array<String> = []
+    while let Some(l) = readLine() {
+        parts.push(l)
+    }
+    return joinWith(parts, "\n") + "\n"
+}
+
+/// The nine patterns the game counts, in its order.
+fn variants() -> Array<String> {
+    return [
+        "agggtaaa|tttaccct",
+        "[cgt]gggtaaa|tttaccc[acg]",
+        "a[act]ggtaaa|tttacc[agt]t",
+        "ag[act]gtaaa|tttac[agt]ct",
+        "agg[act]taaa|ttta[agt]cct",
+        "aggg[acg]aaa|ttt[cgt]ccct",
+        "agggt[cgt]aa|tt[acg]accct",
+        "agggta[cgt]a|t[acg]taccct",
+        "agggtaa[cgt]|[acg]ttaccct",
+    ]
+}
+
+/// The five substitutions, in the game's order: each runs over the output of
+/// the one before it.
+fn substitutions() -> Array<Array<String>> {
+    return [
+        ["tHa[Nt]", "<4>"],
+        ["aND|caN|Ha[DS]|WaS", "<3>"],
+        ["a[NSt]|BY", "<2>"],
+        ["<[^>]*>", "|"],
+        ["\\|[^|][^|]*\\|", "-"],
+    ]
+}
+
+/// Compile, or stop with the pattern that would not.
+///
+/// A pattern here is a literal of this file, so a failure is a bug in this
+/// program or in `std/regex` and never a bad input — which is why it panics
+/// rather than answering a `Result` nobody could act on.
+fn compiled(pattern: String) -> Regex {
+    return match compile(pattern) {
+        Ok(re) => re,
+        Err(why) => panic("`\{pattern}`: \{why}"),
+    }
+}
+
+fn main() -> Int64 {
+    let input = readAll()
+    let inputLength = input.byteLength
+
+    // Remove the FASTA descriptions and every linefeed. One pattern, not two,
+    // because a description runs to the end of its line and the alternation
+    // takes whichever comes first.
+    let sequence = replaceAll(compiled(">[^\n]*\n|\n"), input, "")
+    let cleanLength = sequence.byteLength
+
+    for pattern in variants() {
+        print("\{pattern} \{count(compiled(pattern), sequence)}")
+    }
+
+    // The five rewrites, each over the result of the last.
+    let mut rewritten = sequence.copy()
+    for pair in substitutions() {
+        rewritten = replaceAll(compiled(pair[0]), rewritten, pair[1])
+    }
+
+    print("")
+    print("\{inputLength}")
+    print("\{cleanLength}")
+    print("\{rewritten.byteLength}")
+    return 0
+}
