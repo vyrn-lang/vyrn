@@ -59,7 +59,7 @@ fn graphStyle() -> String {
 
     <section class="hero">
         <h1 class="display">{{ edgeCount() }} imports between {{ searchRows().length }} modules</h1>
-        <p class="lede">Every wire is an <code>import</code> line in <code>std/</code>, read while this page was built. {{ leafCount() }} modules import nothing else in the library.</p>
+        <p class="lede">Every wire is an <code>import</code> line in <code>std/</code>. {{ leafCount() }} modules import nothing else in the library.</p>
     </section>
 
     <section class="band" id="graph">
@@ -87,7 +87,7 @@ fn graphStyle() -> String {
                     </g>
                 </svg>
             </div>
-            <p class="cap">Read from the <code>import</code> lines of <code>std/*.vyrn</code>. An import inside a code quote is a string, not a wire.</p>
+            <p class="cap">Read from the <code>import</code> lines of <code>std/*.vyrn</code>.</p>
         </div>
     </section>
 
