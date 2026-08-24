@@ -66,6 +66,32 @@ run.
 The comment is not wrong about what it measured. It is wrong about what follows,
 and the difference is three orders of magnitude in call count.
 
+## It is written five times
+
+The same byte-at-a-time copy loop appears in fifteen `std/` functions, and five
+of them are the same operation under five names:
+
+| module | function | takes |
+| --- | --- | --- |
+| `std/strpred.vyrn:301` | `slice` | a `String` |
+| `std/vyx.vyrn:180` | `vyxSlice` | `Array<UInt8>` |
+| `std/ui.vyrn:497` | `uiSliceStr` | `Array<UInt8>` |
+| `std/i18n.vyrn:57` | `sliceStr` | `Array<UInt8>` |
+| `std/graphql.vyrn:93` | `gqlSlice` | `Array<UInt8>` |
+
+Four are private, so nothing forced them together and nothing noticed. The other
+ten loops do a related job — `urlEncode`, `urlDecode`, `beforeColon`,
+`afterColon`, `rpcStem`, `cliCapFirst`, `listInsert`, `twiceBy`,
+`gqlEscTripleQuote`, `merge` — and pay the same per-byte price.
+
+A cold `vyrn check` of the vyx demo agrees with the site export from the other
+direction: `vyxSlice` is 13.7 percent of generation and `slice` another 7.0.
+
+They are not merged here. Merging five copies makes one place to fix and does
+not make anything faster, and it adds import edges between generator modules the
+site draws a graph of. It is listed because whatever is decided below has five
+sites and not one.
+
 ## What this is a decision about
 
 `RECOMMENDATION, NOT A DECISION`, and it is a real one because the obvious fix
