@@ -6310,8 +6310,78 @@ impl<'a> Interp<'a> {
         }
     }
 
+    /// Two `Int64`s, which is nearly every operation a Vyrn program performs.
+    ///
+    /// `binop` asks about five vector widths before it reaches this case —
+    /// `F32x4`, `F64x2`, `I32x4` and two masks — and none of them can match an
+    /// `Int`. So every `i + 1` in every loop walked past all five. The patterns
+    /// are disjoint, so asking this one first cannot change an answer, only the
+    /// order the questions are asked in.
+    ///
+    /// The body is MOVED here, not copied. There is one integer arithmetic
+    /// implementation and this is it.
+    #[inline]
+    fn binop_int(&self, op: BinOp, a: i64, b: i64) -> Result<Val, Ctrl> {
+        use BinOp::*;
+        Ok(match op {
+            // Wrapping two's complement — the language's defined overflow
+            // semantics, matching native (and independent of the build
+            // profile; bare `+` would panic in debug and wrap in release).
+            Add => Val::Int(a.wrapping_add(b)),
+            Sub => Val::Int(a.wrapping_sub(b)),
+            Mul => Val::Int(a.wrapping_mul(b)),
+            Div => {
+                if b == 0 {
+                    return Err(crate::trap::DIV_ZERO.into());
+                }
+                if a == i64::MIN && b == -1 {
+                    return Err(crate::trap::DIV_OVERFLOW.into());
+                }
+                Val::Int(a / b)
+            }
+            Rem => {
+                if b == 0 {
+                    return Err(crate::trap::REM_ZERO.into());
+                }
+                // `MIN % -1 == 0` (RFC-0060): NO trap, unlike `MIN / -1`.
+                // `wrapping_rem` yields 0 there; raw `%` would panic on overflow.
+                Val::Int(a.wrapping_rem(b))
+            }
+            Lt => Val::Bool(a < b),
+            LtEq => Val::Bool(a <= b),
+            Gt => Val::Bool(a > b),
+            GtEq => Val::Bool(a >= b),
+            Eq => Val::Bool(a == b),
+            NotEq => Val::Bool(a != b),
+            // Bitwise on the literal `Int` (64-bit, signed): `>>` is
+            // arithmetic. An amount outside 0..64 traps (RFC-0045).
+            BitAnd => Val::Int(a & b),
+            BitOr => Val::Int(a | b),
+            BitXor => Val::Int(a ^ b),
+            Shl => {
+                if b < 0 || b >= 64 {
+                    return Err(crate::trap::SHIFT_RANGE.into());
+                }
+                Val::Int(a.wrapping_shl(b as u32))
+            }
+            Shr => {
+                if b < 0 || b >= 64 {
+                    return Err(crate::trap::SHIFT_RANGE.into());
+                }
+                Val::Int(a >> b)
+            }
+            And | Or | Match => unreachable!("handled above"),
+        })
+    }
+
     fn binop(&self, op: BinOp, l: Val, r: Val) -> Result<Val, Ctrl> {
         use BinOp::*;
+        // Before the vector widths, which cannot match it.
+        if let (Val::Int(a), Val::Int(b)) = (&l, &r) {
+            if !matches!(op, And | Or | Match) {
+                return self.binop_int(op, *a, *b);
+            }
+        }
         // Lane-wise arithmetic (RFC-0083). Four independent `f32` operations in
         // written lane order; the checker admits only these ten operators.
         if let (Val::F32x4(a), Val::F32x4(b)) = (&l, &r) {
@@ -6589,55 +6659,6 @@ impl<'a> Interp<'a> {
             });
         }
         match (l, r) {
-            (Val::Int(a), Val::Int(b)) => Ok(match op {
-                // Wrapping two's complement — the language's defined overflow
-                // semantics, matching native (and independent of the build
-                // profile; bare `+` would panic in debug and wrap in release).
-                Add => Val::Int(a.wrapping_add(b)),
-                Sub => Val::Int(a.wrapping_sub(b)),
-                Mul => Val::Int(a.wrapping_mul(b)),
-                Div => {
-                    if b == 0 {
-                        return Err(crate::trap::DIV_ZERO.into());
-                    }
-                    if a == i64::MIN && b == -1 {
-                        return Err(crate::trap::DIV_OVERFLOW.into());
-                    }
-                    Val::Int(a / b)
-                }
-                Rem => {
-                    if b == 0 {
-                        return Err(crate::trap::REM_ZERO.into());
-                    }
-                    // `MIN % -1 == 0` (RFC-0060): NO trap, unlike `MIN / -1`.
-                    // `wrapping_rem` yields 0 there; raw `%` would panic on overflow.
-                    Val::Int(a.wrapping_rem(b))
-                }
-                Lt => Val::Bool(a < b),
-                LtEq => Val::Bool(a <= b),
-                Gt => Val::Bool(a > b),
-                GtEq => Val::Bool(a >= b),
-                Eq => Val::Bool(a == b),
-                NotEq => Val::Bool(a != b),
-                // Bitwise on the literal `Int` (64-bit, signed): `>>` is
-                // arithmetic. An amount outside 0..64 traps (RFC-0045).
-                BitAnd => Val::Int(a & b),
-                BitOr => Val::Int(a | b),
-                BitXor => Val::Int(a ^ b),
-                Shl => {
-                    if b < 0 || b >= 64 {
-                        return Err(crate::trap::SHIFT_RANGE.into());
-                    }
-                    Val::Int(a.wrapping_shl(b as u32))
-                }
-                Shr => {
-                    if b < 0 || b >= 64 {
-                        return Err(crate::trap::SHIFT_RANGE.into());
-                    }
-                    Val::Int(a >> b)
-                }
-                And | Or | Match => unreachable!("handled above"),
-            }),
             (Val::Float(a), Val::Float(b)) => Ok(match op {
                 Add => Val::Float(a + b),
                 Sub => Val::Float(a - b),
