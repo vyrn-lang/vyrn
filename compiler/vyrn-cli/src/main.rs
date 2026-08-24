@@ -3647,11 +3647,11 @@ fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {
         return bench_check(&program, filter.as_deref());
     }
     if let Some(baseline) = compare {
-        return bench_compare(path, program, filter.as_deref(), &baseline, threshold);
+        return bench_compare(path, filter.as_deref(), &baseline, threshold);
     }
     // `--json` streams the machine-readable report; the default streams the human
     // report. Neither captures the child's stdout.
-    let (code, _) = bench_native(path, program, filter.as_deref(), json, false);
+    let (code, _) = bench_native(path, filter.as_deref(), json, false);
     code
 }
 
@@ -3692,65 +3692,47 @@ fn bench_check(program: &vyrn_frontend::ast::Program, filter: Option<&str>) -> E
 /// NATIVE via clang, and run it so it prints real timings.
 fn bench_native(
     path: &str,
-    mut program: vyrn_frontend::ast::Program,
     filter: Option<&str>,
     json: bool,
     capture: bool,
 ) -> (ExitCode, Option<String>) {
     use vyrn_frontend::ast::{Block, Expr, Function, Stmt, Type};
 
-    // 1. Pull in the harness runtime (`std/bench` + its transitive `std/time`) by
-    //    loading a synthetic root that imports it, then merge every module decl it
-    //    brought (module-tagged, so the synthetic root's own dummy `main` is left
-    //    out) into the user's program — skipping any name the program already has.
-    // Importing `benchOne` loads the whole `std/bench` module, so its `benchMeasure`
-    // / `benchJson` / `BenchResult` (and their transitive `std/time` + `std/json`)
-    // are merged too — the `--json` harness needs them.
-    let runtime_src = "import { benchOne } from \"std/bench\"\nfn main() -> Int64 { return 0 }\n";
-    let rt = match load_program(path, runtime_src) {
+    // 1. Pull in the harness runtime (`std/bench` + its transitive `std/time`
+    //    and `std/json`) by re-reading the user's source with the import
+    //    APPENDED and loading that. Appended, not prepended: every original line
+    //    keeps its number, so a trap inside a bench body still names the right
+    //    line. An import is legal anywhere at top level.
+    //
+    //    This is ONE load on purpose. It used to be two — the user's program,
+    //    plus a synthetic root importing `std/bench` — with the runtime's
+    //    declarations merged in afterwards, "skipping any name the program
+    //    already has". That key was the bare name, so a std module's PRIVATE
+    //    function was dropped whenever the root program happened to declare the
+    //    same name, and the module's own calls then bound to the root's body.
+    //    A program defining its own `twoDecimals` printed `min XX µs`: the
+    //    harness had called the user's function to format its timings, with no
+    //    error. The loader already prevents this (name-privacy auto-rename,
+    //    RFC-0046 §3) but only across modules it can see in a single load, which
+    //    is exactly what the second load hid from it.
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {path}: {e}");
+            return (ExitCode::from(2), None);
+        }
+    };
+    let mut program = match load_program(
+        path,
+        &format!(
+            "{source}
+import {{ benchOne }} from \"std/bench\"
+"
+        ),
+    ) {
         Ok(p) => p,
         Err(code) => return (code, None),
     };
-    let have_fn: std::collections::HashSet<String> =
-        program.functions.iter().map(|f| f.name.clone()).collect();
-    for f in rt.functions {
-        if f.module.is_some() && !have_fn.contains(&f.name) {
-            program.functions.push(f);
-        }
-    }
-    let have_ty: std::collections::HashSet<String> =
-        program.type_decls.iter().map(|t| t.name.clone()).collect();
-    for t in rt.type_decls {
-        if t.module.is_some() && !have_ty.contains(&t.name) {
-            program.type_decls.push(t);
-        }
-    }
-    let have_pr: std::collections::HashSet<String> =
-        program.protocols.iter().map(|p| p.name.clone()).collect();
-    for pr in rt.protocols {
-        if pr.module.is_some() && !have_pr.contains(&pr.name) {
-            program.protocols.push(pr);
-        }
-    }
-    // Impls carry no module tag; dedup by (protocol, implementing type). In
-    // practice the harness runtime defines none, so this loop is empty.
-    let have_im: std::collections::HashSet<(String, String)> = program
-        .impls
-        .iter()
-        .map(|im| (im.protocol.clone(), im.ty.to_string()))
-        .collect();
-    for im in rt.impls {
-        if !have_im.contains(&(im.protocol.clone(), im.ty.to_string())) {
-            program.impls.push(im);
-        }
-    }
-    let have_g: std::collections::HashSet<String> =
-        program.globals.iter().map(|g| g.name.clone()).collect();
-    for g in rt.globals {
-        if g.module.is_some() && !have_g.contains(&g.name) {
-            program.globals.push(g);
-        }
-    }
 
     // 2. Lift each selected root bench body into an ordinary Unit function
     //    `__vyrn_bench_body_<slot>` (declaration order). `blackBox` inside is fine:
@@ -4045,7 +4027,6 @@ fn baseline_is_placeholder(doc: &vyrn_frontend::schema::Json) -> bool {
 /// run against a not-yet-seeded baseline is meaningless, never a failure.
 fn bench_compare(
     path: &str,
-    program: vyrn_frontend::ast::Program,
     filter: Option<&str>,
     baseline_path: &str,
     threshold: f64,
@@ -4080,7 +4061,7 @@ fn bench_compare(
     };
 
     // Run the benches native, capturing the machine-readable report.
-    let (run_code, captured) = bench_native(path, program, filter, true, true);
+    let (run_code, captured) = bench_native(path, filter, true, true);
     let run_json = match captured {
         Some(j) => j,
         None => return run_code, // the run failed; its error already printed

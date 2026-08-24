@@ -85,11 +85,17 @@ compiles and benches cleanly.
 
 ## Why only `vyrn bench`
 
-`compiler/vyrn-cli/src/main.rs:2178` injects `import { parseJson } from
-"std/jsonread"` into the program it is about to run, and the bench harness pulls
-in `benchJson` and `BenchResult` with their transitive `std/time` and
-`std/json`. `vyrn build` injects none of that, so the two modules never meet and
-the collision never forms.
+`bench_native` in `compiler/vyrn-cli/src/main.rs` loaded a synthetic root
+importing `std/bench`, which pulls in `std/time`, `std/json` and `std/jsonread`,
+then merged every declaration that load produced into the user's program —
+"skipping any name the program already has". The key was the bare name. So a std
+module's PRIVATE function was dropped whenever the root program happened to
+declare the same name, and the module's own calls then bound to the root's body.
+
+`vyrn build` and `vyrn run` load once, and a single load already prevents this:
+the loader auto-renames a private declaration whose name appears in another
+module (name-privacy, RFC-0046 §3). The second load is what hid the user's
+program from that rule.
 
 That also means the affected name list is not fixed at twenty-three. It is
 whatever private names the injected modules hold, and it grows when the harness
@@ -102,9 +108,51 @@ A user cannot name a private function `step`, `cur`, `ahead`, `nest` or
 `parseValue` and run a benchmark, and the error they get names a type from a
 module they never imported.
 
-The failure is loud here. Whether a collision of two functions with COMPATIBLE
-record shapes would be caught at all, rather than silently calling the wrong
-body, is the question worth answering next, and this census does not answer it.
-
 Renaming `std/von`'s `errAt` makes the bench pass and is NOT the fix. It moves
 one module out of the way of a hole every user program stands in front of.
+
+## The compatible-shape case is silent, and it corrupts the numbers
+
+The question this census first left open — whether a collision of two functions
+with COMPATIBLE shapes is caught at all — has an answer, and it is worse than the
+loud case.
+
+`std/bench` formats every duration it prints with a private `twoDecimals`. A root
+program declaring its own:
+
+```
+fn twoDecimals(value: Int64, unit: Int64) -> String {
+    return "XX"
+}
+```
+
+benched clean, exit 0, and printed:
+
+```
+bench "slow"   min XX µs   median XX µs   mean XX µs   (464 samples x 16 iters)
+```
+
+The harness called the user's function to format its own timings. No error, no
+warning. The same substitution under `--json` writes the wrong numbers into a
+report, and `--compare` reads that report to decide whether a benchmark
+regressed.
+
+The loud coercion error was the lucky case: it needed the two record shapes to
+disagree. When they agree, the wrong body runs.
+
+## The fix
+
+One load instead of two. `bench_native` re-reads the user's source with
+`import { benchOne } from "std/bench"` APPENDED — appended, not prepended, so
+every original line keeps its number — and loads that. The sixty-line merge is
+deleted. The loader then sees the root program and every injected module
+together, which is the only condition its name-privacy rename needs.
+
+`std/von` benches. So does every one of the twenty-three names. Two regression
+tests in `compiler/vyrn-cli/tests/benching.rs` pin both faces: that a root
+`twoDecimals` no longer formats the report, and that a root `cur` and `step` of
+an unrelated record shape compile.
+
+Both tests are `#[ignore]`d because the native path needs clang. That is worth
+saying plainly: `bench --check`, the face CI runs, never loaded the harness at
+all, so no gate could have caught either defect.

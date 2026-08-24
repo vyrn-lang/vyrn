@@ -265,6 +265,100 @@ fn native_bench_reports_the_expected_shape() {
     );
 }
 
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test benching -- --ignored"]
+fn a_root_function_does_not_replace_a_std_module_private_of_the_same_name() {
+    // The harness formats its own timings with `std/bench`'s private
+    // `twoDecimals`. A root program declaring that name once REPLACED it — the
+    // runtime was loaded separately and merged in by bare name, "skipping any
+    // name the program already has" — and the report printed `min XX µs` with no
+    // error. The load is single now, so the loader's name-privacy rename
+    // (RFC-0046 §3) keeps the two apart.
+    let dir = scratch("private-collision");
+    let file = dir.join("b.vyrn");
+    std::fs::write(
+        &file,
+        "fn twoDecimals(value: Int64, unit: Int64) -> String {
+             return \"XX\"
+         }
+         fn hashTo(n: Int64) -> Int64 {
+             let mut h = 0
+             let mut i = 0
+             while i < n {
+                 h = (h * 31 + i) % 1000000007
+                 i = i + 1
+             }
+             return h
+         }
+         bench \"slow\" { blackBox(hashTo(blackBox(20000))) }
+         fn main() -> Int64 { print(twoDecimals(1, 1)) return 0 }
+",
+    )
+    .unwrap();
+    let out = vyrn().arg("bench").arg(&file).output().unwrap();
+    assert!(
+        out.status.success(),
+        "stderr:
+{}",
+        norm(&out.stderr)
+    );
+    let stdout = norm(&out.stdout);
+    let l = regex_like(&stdout, "bench \"slow\"").expect(&stdout);
+    assert!(
+        !l.contains("XX"),
+        "the root `twoDecimals` formatted the report: {l}"
+    );
+    // 20000 rounds of the recurrence take microseconds on any machine, so the
+    // report goes through `twoDecimals` rather than the bare-`ns` branch. If this
+    // ever fails the bench is too fast and the assertion above proves nothing.
+    assert!(
+        l.contains(" µs") || l.contains(" ms"),
+        "bench too fast to exercise the formatter: {l}"
+    );
+}
+
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test benching -- --ignored"]
+fn a_root_private_may_share_a_name_with_an_injected_module_private() {
+    // The loud face of the same defect. `cur` is private to `std/jsonread`, which
+    // the harness pulls in transitively. A root `cur` taking a DIFFERENT record
+    // shape used to make `vyrn bench` fail with `field `toks` missing during
+    // coercion` — naming a type from a module the program never imported. Twenty
+    // three ordinary names were unusable this way, `step` and `nest` among them.
+    let dir = scratch("loud-collision");
+    let file = dir.join("b.vyrn");
+    std::fs::write(
+        &file,
+        "type MyP = { toks: Array<Int64>, n: Int64 }
+         fn cur(p: MyP) -> Int64 { return p.n }
+         fn step(p: MyP) -> Int64 { return p.toks.length }
+         bench \"t\" {
+             let a = MyP { toks: [1, 2], n: 2 }
+             blackBox(cur(a) + step(a))
+         }
+         fn main() -> Int64 { return 0 }
+",
+    )
+    .unwrap();
+    let out = vyrn().arg("bench").arg(&file).output().unwrap();
+    assert!(
+        out.status.success(),
+        "stderr:
+{}",
+        norm(&out.stderr)
+    );
+    assert!(
+        norm(&out.stdout).contains(
+            "
+1 benches
+"
+        ),
+        "stdout:
+{}",
+        norm(&out.stdout)
+    );
+}
+
 /// The first line of `text` that starts with `needle` (a tiny shape helper so the
 /// smoke test needs no regex crate).
 fn regex_like<'a>(text: &'a str, needle: &str) -> Option<&'a str> {
