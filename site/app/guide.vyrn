@@ -278,12 +278,12 @@ export fn chapters() -> Array<Chapter> {
             sections: [
                 section("install", "Install and check", [
                         "Install the compiler with the script for your platform. The <a href=\"/install.html\">install page</a> has both, and both verify the archive against the release checksums before they unpack anything.",
-                        "Then run a file. <code>vyrn run</code> uses the interpreter, which needs nothing else on your machine. <code>vyrn build</code> writes a native binary and needs <code>clang</code>. <code>vyrn build --target wasm</code> writes a WebAssembly module and needs nothing.",
+                        "Then run a file. <code>vyrn run</code> uses the interpreter and needs nothing else on your machine. <code>vyrn build</code> writes a native binary and needs <code>clang</code>. <code>vyrn build --target wasm</code> writes a WebAssembly module and needs nothing.",
                         "The three backends are the same language. The parity harness runs every example on all three and compares the bytes, so a program that runs under the interpreter runs the same way as a binary.",
                     ], []),
                 section("first", "Your first program", [
                         "A program is a file. <code>main</code> returns the exit code, and <code>print</code> writes one line to standard output.",
-                        "Every program in this book has the same shape: a <code>demo</code> function that answers with the text, and the <code>main</code> that prints it. That is not a language rule. It is how this site proves the book: it imports each program and calls <code>demo</code> while the page is built, so the output under each block is the output that program produced. Follow the run link to open the same source in the playground.",
+                        "Every program in this book has the same shape: a <code>demo</code> function that answers with the text, and the <code>main</code> that prints it. That is not a language rule. Follow the run link to open the same source in the playground.",
                     ], ["hello"]),
                 section("shape", "Functions, parameters, results", [
                         "A function states the type of each parameter and the type it returns. Nothing is inferred across a function boundary, so a signature is the whole contract.",
@@ -299,8 +299,8 @@ export fn chapters() -> Array<Chapter> {
             lede: "What carries over from Rust, TypeScript or Go, what is deliberately different, and what Vyrn does not have at all.",
             sections: [
                 compared("rules", "A rule about a value", [
-                        "The thing that is most likely to be new is where a RULE lives. In the languages beside it a rule is code somebody has to call — a constructor, a schema object, a validating function — and the type says nothing about whether it ever ran. In Vyrn the rule is part of the type, so `Age` is a number that has passed it.",
-                        "The compiler proves what it can while the program compiles, which is why `Age(30)` costs nothing at run time and `Age(5)` is a compile error rather than a failed check. Input from outside the program is not a constant, so it takes the total form: `Age?(n)` answers <code>Option&lt;Age&gt;</code>, and there is no path that produces an unchecked `Age`.",
+                        "The thing that is most likely to be new is where a RULE lives. In the languages beside it a rule is code somebody has to call: a constructor, a schema object, a validating function. The type says nothing about whether it ever ran. In Vyrn the rule is part of the type, so `Age` is a number that has passed it.",
+                        "The compiler proves what it can while the program compiles. So `Age(30)` costs nothing at run time, and `Age(5)` is a compile error rather than a failed check. Input from outside the program is not a constant, so it takes the total form. `Age?(n)` answers <code>Option&lt;Age&gt;</code>, and no path produces an unchecked `Age`.",
                     ], "types"),
                 compared("intent", "What a function does with its argument", [
                         "Rust says this with borrows and lifetimes, TypeScript cannot say it at all, and Go says it with a pointer and a comment. Vyrn writes the intent on the parameter as a word: `read`, `modify`, `consume`, `share`.",
@@ -308,10 +308,10 @@ export fn chapters() -> Array<Chapter> {
                     ], "memory"),
                 compared("failure", "When something fails", [
                         "There is no null and no exception. An absent value is `Option`, a failure is `Result`, and `?` hands a failure to the caller unchanged — the same three shapes Rust uses, without the conversion traits.",
-                        "A `panic` is for a case that cannot happen, and nothing unwinds: there is no `catch` anywhere in the language, so a panic ends the program rather than becoming somebody else's control flow.",
+                        "A `panic` is for a case that cannot happen. Nothing unwinds: there is no `catch` anywhere in the language, so a panic ends the program.",
                     ], "failure"),
                 section("shapes", "The shapes you already know", [
-                        "A `record` is a struct with named fields and no inheritance. An `enum` is a closed choice with payloads, and `match` covers every case — the compiler counts the arms, so a new variant is a compile error at every site that reads it.",
+                        "A `record` is a struct with named fields and no inheritance. An `enum` is a closed choice with payloads, and `match` covers every case. The compiler counts the arms, so a new variant is a compile error at every site that reads it.",
                         "Generics are monomorphised, protocols are how a type says what it can do, and a protocol bound is checked at the call rather than at run time. What a TypeScript reader will miss is structural typing: two records with the same fields are two types.",
                     ], []),
                 section("absent", "What is not here", [
@@ -363,7 +363,7 @@ export fn chapters() -> Array<Chapter> {
                     ], ["records"]),
                 section("enums", "Enums are choices", [
                         "An enum value is exactly one variant, and a variant can carry a payload. There is no tag field to keep in step with a union, because the tag is the type.",
-                        "<code>match</code> must cover every variant. Leave one out and the file does not compile, which is what makes an enum safe to extend: add a variant, and the compiler lists every place that has to answer for it.",
+                        "<code>match</code> must cover every variant. Leave one out and the file does not compile. That is what makes an enum safe to extend: add a variant, and the compiler lists every place that has to answer for it.",
                     ], ["enums"]),
                 section("match", "match is an expression", [
                         "<code>match</code> answers with a value, so a binding takes it directly and there is no mutable slot to fill in each arm.",
@@ -448,7 +448,7 @@ export fn chapters() -> Array<Chapter> {
                 section("imports", "Importing", [
                         "<code>import { a, b } from \"std/strings\"</code> takes two names. <code>import * as math from \"std/math\"</code> takes the module under one name and reaches its exports as <code>math.min</code>.",
                         "A top-level name is program-wide, so two linked modules cannot both export <code>parse</code>. The namespace form is the answer, and the compiler suggests it by name when the collision happens.",
-                        "A remote import — <code>github:</code>, <code>gist:</code> or <code>https:</code> — is pinned in <code>vyrn.lock</code> and cached by sha256 under <code>~/.vyrn</code>. <code>--offline</code> refuses to fetch. <code>vyrn add</code>, <code>vyrn update</code> and <code>vyrn vendor</code> manage them.",
+                        "A remote import names <code>github:</code>, <code>gist:</code> or <code>https:</code>. It is pinned in <code>vyrn.lock</code> and cached under <code>~/.vyrn</code>. <code>--offline</code> refuses to fetch, and <a href=\"/tooling/projects.html\">Projects and dependencies</a> covers the rest.",
                     ], ["imports"]),
             ],
         },
@@ -462,15 +462,15 @@ export fn chapters() -> Array<Chapter> {
                 section("genfn", "A generator writes a module", [
                         "A generator is a function marked <code>gen</code>. It returns a <code>String</code> of Vyrn source. It may read files through <code>readFile</code> and <code>listDir</code>, scoped to the paths its caller passed in, and it may not write, spawn, or reach an <code>extern</code>.",
                         "This one writes a lookup table. It takes no input, so its answer is the same on every machine — which is the property a build has to have.",
-                        "There is no run link on this block. A generator is not a program: it needs the file that imports it, and the playground takes one source. The site imported it while building this page, which is the same proof by another route.",
+                        "There is no run link on this block. A generator is not a program: it needs the file that imports it, and the playground takes one source.",
                     ], ["gentiny"]),
                 section("genimport", "An import can be a call", [
                         "The target of an import can be a call to a generator. The compiler runs the call at load time, caches it, and links the source it returned as an ordinary module. Everything after that is normal Vyrn.",
-                        "<code>vyrn emit-gen &lt;file&gt;</code> prints the source a generator produced. A generator is not magic, and that command is the proof.",
-                        "This page is built the same way. The reference pages you see under <a href=\"/docs.html\">Docs</a> are read off <code>std/</code> by a generator, and the code blocks in this book are read off <code>site/guide/</code> by another.",
+                        "<code>vyrn emit-gen &lt;file&gt;</code> prints the source a generator produced.",
+                        "This page is built the same way. A generator reads <code>std/</code> and writes the <a href=\"/docs.html\">reference pages</a>.",
                     ], ["genuse"]),
                 section("reflection", "Reading a type at compile time", [
-                        "<code>schemaOf(T)</code> reads a validated type's own declaration and answers with its name, its base type, its documentation line and every bound its <code>where</code> clause implies. <code>jsonSchema(T)</code> writes the JSON Schema document from the same facts.",
+                        "<code>schemaOf(T)</code> reads a validated type's own declaration. It answers with the name, the base type, the documentation line and every bound the <code>where</code> clause implies. <code>jsonSchema(T)</code> writes the JSON Schema document from the same facts.",
                         "This is not runtime reflection. Vyrn erases types before the program runs; the compiler computes the answer from the declaration, so the interpreter and the binary agree.",
                     ], ["schema"]),
             ],
@@ -501,11 +501,11 @@ export fn chapters() -> Array<Chapter> {
             lede: "`args()` is the argument list. `std/args` reads flags and options from it, and `std/cli` builds the whole command from a record type.",
             sections: [
                 section("args", "Reading arguments", [
-                        "<a href=\"/docs/std/args.html\">std/args</a> takes a token list. <code>cli()</code> takes the real arguments; <code>cliOf(list)</code> takes a list you supply, which is how a test — and this page — checks the parsing without a process.",
+                        "<a href=\"/docs/std/args.html\">std/args</a> takes a token list. <code>cli()</code> takes the real arguments; <code>cliOf(list)</code> takes a list you supply, which is how a test checks the parsing without a process.",
                         "<code>flag</code> asks whether a token is present. <code>opt</code> reads <code>--name=value</code> and <code>--name value</code>, and answers <code>Option&lt;String&gt;</code>. <code>positionals</code> returns what is left, and <code>rest</code> returns what follows <code>--</code>.",
                     ], ["cliargs"]),
                 section("cli", "The command line as a type", [
-                        "<a href=\"/docs/std/cli.html\">std/cli</a> goes further. Declare a record whose fields are the options, give each field a validated type with its own documentation line, and <code>cli(\"./module\")</code> reflects it into a parser and a help text. No flag name is written twice.",
+                        "<a href=\"/docs/std/cli.html\">std/cli</a> goes further. Declare a record whose fields are the options, and give each field a validated type with its own documentation line. <code>cli(\"./module\")</code> reflects it into a parser and a help text, so no flag name is written twice.",
                         "A parse answers <code>Valid</code> or <code>Invalid</code> with the issues attached to their fields, so a program reports every problem at once instead of the first one.",
                     ], []),
             ],
@@ -518,7 +518,7 @@ export fn chapters() -> Array<Chapter> {
             lede: "A view is a function that returns a tree. The server renders it to markup; the browser gets the same tree, and a differ applies what changed.",
             sections: [
                 section("html", "The view tree", [
-                        "<a href=\"/docs/std/html.html\">std/html</a> builds the tree. <code>toHtmlString</code> renders it for the server. Text is escaped; a tag or attribute NAME is checked rather than escaped, because it lands outside the quotes, so a bad one is refused instead of emitted.",
+                        "<a href=\"/docs/std/html.html\">std/html</a> builds the tree. <code>toHtmlString</code> renders it for the server. Text is escaped. A tag or attribute name lands outside the quotes, so it is checked rather than escaped, and a bad one is refused.",
                         "The same tree crosses to the browser as JSON, and <code>web/vyrn-dom.js</code> applies the difference between the old tree and the new one. Keys carry list identity.",
                     ], ["html"]),
                 section("twice", "The same tree, twice", [
@@ -558,7 +558,7 @@ export fn chapters() -> Array<Chapter> {
                         "<a href=\"/docs/std/tw.html\">std/tw</a> is a generator: it scans the templates for utility classes — spacing, color, breakpoints — and emits one stylesheet holding only the rules those classes need. Nothing is fetched and nothing unused ships.",
                     ], []),
                 section("icons", "Icons are imports", [
-                        "<a href=\"/docs/std/icons.html\">std/icons</a> makes a glyph a name: <code>import { book } from icons(\"bytesize\", \"book\")</code> generates one function per glyph from a collection pinned in the lock file. A name the collection does not have fails the build. The <code>&lt;Icon&gt;</code> tag draws them, and every glyph on this site — the search magnifier in the masthead is one — arrives this way.",
+                        "<a href=\"/docs/std/icons.html\">std/icons</a> makes a glyph a name: <code>import { book } from icons(\"bytesize\", \"book\")</code> generates one function per glyph from a collection pinned in the lock file. A name the collection does not have fails the build. The <code>&lt;Icon&gt;</code> tag draws them.",
                     ], []),
             ],
         },
@@ -570,14 +570,14 @@ export fn chapters() -> Array<Chapter> {
             lede: "`std/ui` turns a routes directory into one function from request to response. `std/rpc` makes a typed call between the two halves. `vyrn dev` serves both while you work.",
             sections: [
                 section("routes", "A directory of pages", [
-                        "<a href=\"/docs/std/ui.html\">std/ui</a> reads a <code>routes/</code> directory and generates one <code>route(req) -&gt; Response</code>, with a typed URL helper per route — a link cannot name a page that is not there. A <code>[param].vyx</code> file binds a path segment, and the component decides whether the value is a page or a 404.",
+                        "<a href=\"/docs/std/ui.html\">std/ui</a> reads a <code>routes/</code> directory and generates one <code>route(req) -&gt; Response</code>. Each route gets a typed URL helper, so a link cannot name a page that is not there. A <code>[param].vyx</code> file binds a path segment, and the component decides whether the value is a page or a 404.",
                         "This site is built with it: <code>site/export.vyrn</code> calls that function once per path and writes what comes back. The same table can be served live with <code>vyrn serve</code> instead.",
                     ], []),
                 section("rpc", "Typed calls", [
                         "<a href=\"/docs/std/rpc.html\">std/rpc</a> generates the client and server halves of a call from one declaration. The client half runs in the page as wasm; the server half is a route. An answer is typed too: a rejection carries its validation issues attached to the fields they are about, so a form can show each problem where it belongs.",
                     ], []),
                 section("dev", "The dev loop", [
-                        "<code>vyrn dev</code> builds the client to wasm and serves the server, the static files and the runtimes in one process. <code>vyrn routes</code> prints the resolved table — every derived, pinned and hand-written path the router mounts, each with its source — which is the first thing to read when a URL does not do what you expected.",
+                        "<code>vyrn dev</code> builds the client to wasm and serves the server, the static files and the runtimes in one process. <code>vyrn routes</code> prints the resolved table: every path the router mounts, each with its source. Read it first when a URL does not do what you expected.",
                     ], []),
             ],
         },
@@ -592,10 +592,10 @@ export fn chapters() -> Array<Chapter> {
                         "<code>vyrn run</code> uses the interpreter and needs nothing installed. <code>vyrn check</code> diagnoses without running. <code>vyrn build</code> writes a native binary and needs <code>clang</code>; <code>vyrn build --target wasm</code> writes a WebAssembly module and needs nothing. The three backends are the same language — the parity harness runs every example on all of them and compares the bytes.",
                     ], []),
                 section("daily", "Format, document, test", [
-                        "<code>vyrn fmt</code> writes the one canonical layout; it has no style options, and <code>--check</code> is the CI gate. <code>vyrn doc</code> writes Markdown API docs from the <code>///</code> comments, and <code>--verify</code> fails when the committed docs drift from the code. <code>vyrn test</code> and <code>vyrn bench</code> have <a href=\"/tooling/testing.html\">their own page</a>.",
+                        "<code>vyrn fmt</code> writes the one canonical layout. It has no style options, and <code>--check</code> is the CI gate. <code>vyrn doc</code> writes Markdown API docs from the <code>///</code> comments, and <code>--verify</code> fails when they drift from the code. <code>vyrn test</code> and <code>vyrn bench</code> have <a href=\"/tooling/testing.html\">their own page</a>.",
                     ], []),
                 section("why", "Ask the compiler why", [
-                        "<code>vyrn why &lt;file&gt;</code> answers with a module's audience and every import chain that reaches it. <code>--memory</code> reports, per binding, whether it is reclaimed, how, and the reason when it is not. <code>--capability fs</code> lists every chain that pulls the file system into an artifact. These are the compiler's own analyses printed, not a second implementation.",
+                        "<code>vyrn why &lt;file&gt;</code> answers with a module's audience and every import chain that reaches it. <code>--memory</code> reports, per binding, whether it is reclaimed, how, and the reason when it is not. <code>--capability fs</code> lists every chain that pulls the file system into an artifact.",
                     ], []),
             ],
         },
@@ -611,7 +611,7 @@ export fn chapters() -> Array<Chapter> {
                         "A file can hold tests and a <code>main</code> at once. The tests are checked, then stripped, so the program is unchanged by having them.",
                     ], ["tests"]),
                 section("bench", "bench blocks", [
-                        "A <code>bench</code> block is a body the timer runs. <code>vyrn bench</code> reports the minimum, median and mean over many samples, and it uses the native build, because timing the interpreter would report the wrong thing.",
+                        "A <code>bench</code> block is a body the timer runs. <code>vyrn bench</code> reports the minimum, median and mean over many samples. It uses the native build, because timing the interpreter would report the wrong thing.",
                         "<code>blackBox</code> hides a value from the optimizer. Around the input it stops the compiler from precomputing the answer; around the result it keeps the work live. <code>vyrn bench --check</code> runs each body once under the interpreter, which is what CI does.",
                     ], ["benches"]),
             ],
@@ -627,10 +627,10 @@ export fn chapters() -> Array<Chapter> {
                         "<code>vyrn new &lt;name&gt;</code> writes a project: a manifest with a <code>main</code>, and a first file. A program that is one file needs none of this — <code>vyrn run file.vyrn</code> is complete — and a manifest earns its place when imports need names.",
                     ], []),
                 section("deps", "Dependencies that cannot drift", [
-                        "<code>vyrn add</code> takes a <code>github:</code> or <code>https:</code> specifier and writes it to the manifest; the lock file records the content hash, and every later fetch is verified against it. <code>vyrn vendor</code> copies the sources into the repository, <code>--offline</code> refuses the network entirely, and <code>vyrn update</code> is the only command that moves a pin. A dependency that vanishes upstream still builds, from the cache or the vendor directory.",
+                        "<code>vyrn add</code> takes a <code>github:</code> or <code>https:</code> specifier and writes it to the manifest. The lock file records the content hash, and every later fetch is verified against it. <code>vyrn vendor</code> copies the sources into the repository, <code>--offline</code> refuses the network, and <code>vyrn update</code> is the only command that moves a pin. A dependency that vanishes upstream still builds.",
                     ], []),
                 section("toolchain", "The toolchain is pinned too", [
-                        "The manifest's <code>toolchain</code> key and the lock's <code>tool:</code> lines pin the compiler's own tools — the wasm sysroot, the runtime — into <code>~/.vyrn/tools</code>. <code>vyrn update --locked</code> fetches exactly what the lock names, which is what CI does, so a build on a new machine is the build you tested.",
+                        "The manifest's <code>toolchain</code> key and the lock's <code>tool:</code> lines pin the compiler's own tools into <code>~/.vyrn/tools</code>. <code>vyrn update --locked</code> fetches exactly what the lock names. CI runs that, so a build on a new machine is the build you tested.",
                     ], []),
             ],
         },
