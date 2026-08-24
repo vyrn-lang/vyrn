@@ -145,7 +145,9 @@ export fn sha1(data: Array<UInt8>) -> Array<UInt8> {
 /// The SHA-1 digest of a String's UTF-8 bytes as lowercase hex — the spelling
 /// RFC 3174 §7.3's test vectors are written in. Read [`sha1`]'s warning first.
 export fn sha1Hex(s: String) -> String {
-    let digits = bytes("0123456789abcdef")
+    // The digit table is read out of the literal rather than materialised with
+    // `bytes()`, which built a fresh 16-element array on every call.
+    let digits = "0123456789abcdef"
     let mut out: Array<UInt8> = []
     for b in sha1(bytes(s)) {
         out.push(digits[Int64(b) / 16])
@@ -170,4 +172,11 @@ fn sha1Rotl5(x: UInt64) -> UInt64 {
 
 fn sha1Rotl30(x: UInt64) -> UInt64 {
     return ((x << 30) | (x >> 2)) & 4294967295
+}
+
+test "sha1Hex matches the published vectors" {
+    // RFC 3174 section 7.3 publishes these. The hex table this reads was
+    // changed; the digest text must not move with it.
+    assertEq(sha1Hex("abc"), "a9993e364706816aba3e25717850c26c9cd0d89d")
+    assertEq(sha1Hex(""), "da39a3ee5e6b4b0d3255bfef95601890afd80709")
 }

@@ -790,7 +790,9 @@ fn indent(n: Int64) -> String {
 
 /// The lowercase 2-digit hex of a byte value 0..255.
 fn hex2(b: Int64) -> String {
-    let db = bytes("0123456789abcdef")
+    // The digit table is read out of the literal rather than materialised with
+    // `bytes()`, which built a fresh 16-element array on every call.
+    let db = "0123456789abcdef"
     let mut out: Array<UInt8> = []
     out.push(db[(b / 16) % 16])
     out.push(db[b % 16])
