@@ -312,6 +312,15 @@ export fn slice(s: String, start: Int64, end: Int64) -> Result<String, SliceErro
     if end < n && (Int64(s[end]) & 192) == 128 {
         return Err(SplitsCharacter(end))
     }
+    // The whole string, which the loop below would rebuild byte by byte for
+    // nothing. `trimStart` and `trimEnd` on text with no space to trim ask for
+    // exactly this, and so does every `substring(s, 0, s.byteLength)`.
+    if start == 0 && end == n {
+        return Ok(s.copy())
+    }
+    if start == end {
+        return Ok("")
+    }
     let mut out: Array<UInt8> = []
     let mut i = start
     while i < end {
