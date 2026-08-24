@@ -31,8 +31,8 @@ The rule in the workflow is exactly one line: a tag containing `-` gets
    git push origin v0.1.0-alpha.1
    ```
 
-3. Watch the run: `gh run watch`. It builds three platforms in parallel, then
-   publishes. The matrix is `fail-fast: true` on purpose — a missing platform is
+3. Watch the run: `gh run watch`. It builds every leg of the matrix in
+   parallel, then publishes. The matrix is `fail-fast: true` on purpose — a missing platform is
    a broken install command for everyone on it, so a partial matrix must never
    reach the publish job.
 4. Check the release page. The install commands in the notes must work.
@@ -42,15 +42,24 @@ run time, so a new release is live the moment the workflow finishes.
 
 ## What gets published
 
-Five assets per release:
+One archive per matrix leg, the editor extension, and a checksum file. Today
+that is six assets:
 
 ```
 vyrn-x86_64-linux.tar.gz
 vyrn-aarch64-linux.tar.gz
 vyrn-aarch64-macos.tar.gz
 vyrn-x86_64-windows.zip
+vyrn-vscode-<version>.vsix
 SHA256SUMS
 ```
+
+**The matrix is the source, not this list.** It is `.github/workflows/release.yml`
+under `strategy.matrix.include`, and the publish step is `gh release create …
+dist/*` — so an added leg becomes an asset without anything here changing. This
+paragraph said "three platforms" and "five assets" while the matrix had four legs
+and the extension had been shipping for some time. Read the file before you
+trust the count.
 
 `aarch64-linux` is not a niche: Docker on an Apple Silicon Mac defaults to
 `linux/arm64`, so without it `install.sh` had nothing to offer inside an

@@ -17,7 +17,7 @@
 /// file the consumer never fetches.
 ///
 /// FOUR SECTIONS, and they are the overlay's headings rather than the source
-/// lists: Docs (the book's chapters, their sections, and the ten consumer
+/// lists: Docs (the book's chapters, their sections, and the consumer
 /// pages), Reference (every module and every name it exports), Packages, and
 /// Releases. A reader types a word, not a provenance.
 import { emit, Json, JsonField } from "std/json"

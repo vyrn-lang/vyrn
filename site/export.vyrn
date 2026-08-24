@@ -492,7 +492,7 @@ fn withFeed(html: String) -> String {
 ///
 /// THE SENTENCE IS THE PAGE'S OWN, and that half is `app/nav.vyrn`'s. Every page
 /// used to carry the same `<meta description>`, so a link to `/install` previewed
-/// as a link to `/compare`; the ten consumer pages take their title and their
+/// as a link to `/compare`; a page in the table takes its title and its
 /// sentence from `app/meta.vyrn` through `pageHeadOf`, which is also where the
 /// search index's Docs rows come from. One table, one author, and this function
 /// cannot disagree with the document it reads.

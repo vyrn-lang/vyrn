@@ -11,9 +11,12 @@
 /// ONE TABLE, THREE CONSUMERS. `site/export.vyrn` stamps the card meta per
 /// route from this table and builds the index's Docs section from the same rows,
 /// so a page's description cannot say one thing to a crawler and another in the
-/// overlay. Ten rows, which is the ten consumer pages the census counted: the
-/// nine landing pages and the one leaf that is not generated from `std/`, a
-/// chapter or a manifest.
+/// overlay. One row per consumer page: the landing pages, and the leaves that
+/// are not generated from `std/`, a chapter or a manifest.
+///
+/// NO COUNT HERE. This sentence said "ten rows" while the table held thirteen,
+/// which is what a number typed beside a list does. `pageMetas().length` is the
+/// count and the tests below read it.
 ///
 /// A blurb is one sentence and no more than about 150 bytes, because that is
 /// what a card renders before it truncates. It is not the page's lede: a lede is
@@ -266,7 +269,7 @@ test "a page with no row says so rather than answering with someone else's" {
 }
 
 test "no two rows share a title or a blurb" {
-    // The defect this table exists to end: ten pages with one description
+    // The defect this table exists to end: every page with one description
     // between them, so every shared link previewed as the same page.
     let all = pageMetas()
     let mut i = 0

@@ -51,13 +51,13 @@ export fn pageHeadWith(title: String, description: String) -> Head {
     return withMeta(sized, "description", description)
 }
 
-/// The head for one of the ten pages `app/meta.vyrn` names: its own title and
-/// its own sentence, from the table (RFC-0106 M1).
+/// The head for a page `app/meta.vyrn` names: its own title and its own
+/// sentence, from the table (RFC-0106 M1).
 ///
 /// THIS IS WHERE THE ONE SHARED DESCRIPTION ENDS. Every page on the site used
 /// `pageHead` above, so 174 documents carried the same paragraph, and a link to
-/// `/install` previewed as a link to `/compare`. The ten consumer pages take
-/// their sentence from the table instead, and `site/export.vyrn` reads the title
+/// `/install` previewed as a link to `/compare`. A page in the table takes
+/// its sentence from there instead, and `site/export.vyrn` reads the title
 /// and the description back out of the document to write the OpenGraph card — so
 /// the tab, the search result, the card and the search overlay's own row are one
 /// string with one author.
