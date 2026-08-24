@@ -121,19 +121,21 @@
       "match": "\\b(?:test|bench)\\b(?=\\s+\")"
     },
     "contextual-keywords": {
-      "comment": "`as` (import aliasing: `{ x as y }`, `* as ns`), `gen fn`, `extern fn` and `lazy` (RFC-0085 M4a field modifier) are CONTEXTUAL — the lexer emits them as plain identifiers and the parser recognizes them only in position (so `let as = 1` / `let gen = 1` stay ordinary bindings, per the parser tests). Match them contextually — `as` only when a name follows it, `gen`/`extern` only directly before `fn`, `lazy` only in a record field's TYPE position (`name: lazy T`) — so a binding named `as`/`gen`/`extern` is never mis-coloured, and `std/ui`'s `lazy(..)` FUNCTION (RFC-0070, lazy pages — a different mechanism one layer up) keeps its call colour. Placed before #keywords/#function-calls/#identifiers so they win the position.",
+      "comment": "`as` (import aliasing: `{ x as y }`, `* as ns`), `gen fn`, `extern fn`, `from`, `logging` and `lazy` (RFC-0085 M4a field modifier) are CONTEXTUAL — the lexer emits them as plain identifiers and the parser recognizes them only in position (so `let as = 1` / `let gen = 1` stay ordinary bindings, per the parser tests). Match them contextually — `as` only when a name follows it, `gen`/`extern` only directly before `fn`, `lazy` only in a record field's TYPE position (`name: lazy T`) — so a binding named `as`/`gen`/`extern` is never mis-coloured, and `std/ui`'s `lazy(..)` FUNCTION (RFC-0070, lazy pages — a different mechanism one layer up) keeps its call colour. Placed before #keywords/#function-calls/#identifiers so they win the position. `from` and `logging` moved here FROM #keywords: neither is a lexer keyword (`keyword_or_ident` in compiler/vyrn-frontend/src/lexer.rs holds 24 names and neither is among them), so `let from = 1` and `let logging = 2` are ordinary bindings that were coloured as reserved words. `from` matches only before the module an import names, which is a string or a generator call; `logging` only before its block's brace. editor/vscode/test/grammar.test.mjs compares the two lists so this cannot drift again.",
       "patterns": [
         { "match": "\\bas\\b(?=\\s+[A-Za-z_])", "name": "keyword.control.vyrn" },
         { "match": "\\b(gen|extern)\\b(?=\\s+fn\\b)", "name": "keyword.control.vyrn" },
         { "match": "(?<=:\\s)lazy\\b(?=\\s+[A-Za-z_])", "name": "keyword.control.vyrn" },
         { "match": "\\bplace\\b(?=\\s+[a-z_][A-Za-z0-9_]*\\s*\\()", "name": "keyword.control.vyrn" },
         { "match": "\\b(read|modify)\\b(?=\\s+self\\b)", "name": "keyword.control.vyrn" },
+        { "match": "\\bfrom\\b(?=\\s*(\\\"|[A-Za-z_][A-Za-z0-9_]*\\s*\\())", "name": "keyword.control.vyrn" },
+        { "match": "\\blogging\\b(?=\\s*\\{)", "name": "keyword.control.vyrn" },
         { "match": "^\\s*yield\\b(?=\\s)", "name": "keyword.control.vyrn" }
       ]
     },
     "keywords": {
       "name": "keyword.control.vyrn",
-      "match": "\\b(fn|let|mut|if|else|while|for|in|drop|protocol|impl|self|return|break|continue|true|false|type|where|match|region|spawn|import|export|from|logging)\\b"
+      "match": "\\b(fn|let|mut|if|else|while|for|in|drop|protocol|impl|self|return|break|continue|true|false|type|where|match|region|spawn|import|export)\\b"
     },
     "function-calls": {
       "comment": "A lowerCamelCase identifier directly before `(` is a function/method call (or the name in `fn name(...)`) — entity.name.function → yellow in Dark+, distinct from plain variables. PascalCase constructors (Circle(1), Some(x)) are NOT matched here: #types is included earlier and wins, keeping variants teal. Keywords are also included earlier, so `if (...)` stays a keyword.",
