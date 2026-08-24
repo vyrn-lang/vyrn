@@ -153,6 +153,18 @@ tests in `compiler/vyrn-cli/tests/benching.rs` pin both faces: that a root
 `twoDecimals` no longer formats the report, and that a root `cur` and `step` of
 an unrelated record shape compile.
 
-Both tests are `#[ignore]`d because the native path needs clang. That is worth
-saying plainly: `bench --check`, the face CI runs, never loaded the harness at
-all, so no gate could have caught either defect.
+Both tests are `#[ignore]`d because the native path needs clang.
+
+Why no gate caught this is worth stating exactly, because the loose version of
+the sentence is wrong. CI has two bench steps. `bench --check` runs on every
+operating system and blocks the build, and it never loaded the harness at all —
+it runs each body under the interpreter against the unmerged program. The
+`benchmarks` job DOES run the native path, `--json` and `--compare` over the
+whole corpus. So the gate existed. It saw nothing because no example under
+`examples/` declares a name that collides with a private of `std/bench`,
+`std/time`, `std/json` or `std/jsonread`, and a defect that only fires on the
+user's choice of name cannot be caught by a corpus of the project's own files.
+
+That is the general shape: the corpus tests the compiler against code the
+project wrote, and this defect is triggered by code the project did not write.
+The two new tests are the first bench tests that pick the name on purpose.
