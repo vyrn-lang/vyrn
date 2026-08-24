@@ -205,6 +205,14 @@ export fn waived(src: String, line: Int64, code: String) -> Bool {
         if havePrev {
             return waivesLine(substring(src, prevStart, prevEnd), code)
         }
+        return false
+    }
+    // `line` is one past a source whose last line has no trailing newline. The
+    // line does not exist, but the one above it is that final segment, and a
+    // waiver there still covers `line`. Found by a differential test against the
+    // two-walk original, not by reasoning: the hand-written cases all missed it.
+    if line > 1 && at == line - 1 {
+        return waivesLine(substring(src, start, n), code)
     }
     return false
 }
@@ -416,4 +424,14 @@ test "a waiver on line one has no line above to consult" {
     let src = "a // vyrn-ignore x/y\nb"
     assertEq(waived(src, 1, "x/y"), true)
     assertEq(waived(src, 2, "x/y"), true)
+}
+
+test "a waiver on a final line with no newline covers the line past the end" {
+    // The case a differential test against the two-walk original caught and
+    // every hand-written case missed: line 2 of a one-line source. The line
+    // does not exist; the waiver on the line above it still applies.
+    assertEq(waived("// vyrn-ignore p/q", 2, "p/q"), true)
+    assertEq(waived("// vyrn-ignore p/q", 3, "p/q"), false)
+    assertEq(waived("a\n// vyrn-ignore p/q", 3, "p/q"), true)
+    assertEq(waived("plain text", 2, "p/q"), false)
 }

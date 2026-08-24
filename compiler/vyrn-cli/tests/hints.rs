@@ -80,7 +80,7 @@ fn unit_tests_green(rel: &str, expected: &str) {
 
 #[test]
 fn std_hints_unit_tests_run_green() {
-    unit_tests_green("std/hints.vyrn", "8 passed, 0 failed");
+    unit_tests_green("std/hints.vyrn", "11 passed, 0 failed");
 }
 
 #[test]
