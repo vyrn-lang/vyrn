@@ -85,7 +85,7 @@ fn commands() -> Array<Command> {
         Command { name: "vyrn fmt --check", what: "The canonical formatter. <code>--check</code> is the CI gate." },
         Command { name: "vyrn doc", what: "Markdown API docs from /// comments. <a href=\"/docs.html#std\">The pages on this site</a> are read off the same declarations." },
         Command { name: "vyrn why <file>", what: "Why the compiler decided what it decided. <code>--memory</code> and <code>--contract</code> narrow it. <a href=\"/guide/ownership.html\">The chapter on ownership.</a>" },
-        Command { name: "vyrn emit-gen <file>", what: "The source a generator produced. A generator is not magic, and this prints it." },
+        Command { name: "vyrn emit-gen <file>", what: "The source a generator produced." },
         Command { name: "vyrn serve | dev | routes", what: "An HTTP host, the development server, and the resolved wire table." },
         Command { name: "vyrn new | add | update | vendor | deps", what: "Projects and modules. Remote imports pin in <code>vyrn.lock</code> and cache by sha256." },
     ]
@@ -107,7 +107,7 @@ fn commands() -> Array<Command> {
             <div class="say">
                 <p class="eyebrow">Reference</p>
                 <h1 class="display">Generated from the source</h1>
-                <p class="lede">{{ apiModules().length }} modules, {{ exportCount() }} exports, read off <code>std/</code> by the compiler's own lexer while this page was built.</p>
+                <p class="lede">{{ apiModules().length }} modules and {{ exportCount() }} exports, read off <code>std/</code> itself.</p>
             </div>
             <div class="finder" data-search>
                 <label class="eyebrow" for="std-q">Search modules and exports</label>
@@ -131,7 +131,7 @@ fn commands() -> Array<Command> {
                 </li>
                 <li>
                     <h3><Icon name="bytesize:code"/> The standard library</h3>
-                    <p>{{ apiModules().length }} modules and {{ exportCount() }} exports, read off <code>std/</code> by the compiler's own lexer.</p>
+                    <p>{{ apiModules().length }} modules and {{ exportCount() }} exports, each with its signatures and its tests.</p>
                     <p class="ctarow"><a class="cta" href="#std">Browse the modules</a></p>
                 </li>
                 <li>
@@ -188,7 +188,7 @@ fn commands() -> Array<Command> {
         <section class="band split" id="read">
             <div class="say">
                 <p class="eyebrow">Elsewhere</p>
-                <h2>Three ways on, three off</h2>
+                <h2>Where to go next</h2>
                 <p><a href="/guide.html">The guide</a> teaches the language in order. <a href="/explore.html">The registry</a> lists what a project pulls in from outside <code>std/</code>.</p>
             </div>
             <ul class="plain">

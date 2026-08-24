@@ -73,7 +73,7 @@ fn buildLabel(d: Package) -> String {
         <div class="pkgmain">
             <div class="pkgblock" id="api">
                 <p class="eyebrow">overview</p>
-                <p>The specifier names <code>{{ offerOf(data.slug).path }}</code> — the module with the most exports this project does not itself build from. Any other module in the tree takes the same specifier with its own path in it, and each file arrives with a lock line of its own.</p>
+                <p>The specifier names <code>{{ offerOf(data.slug).path }}</code>. Any other module in the tree takes the same specifier with its own path in it.</p>
             </div>
 
             <div class="pkgblock" id="builds">
@@ -93,7 +93,7 @@ fn buildLabel(d: Package) -> String {
                     </tbody>
                 </table>
                 </div>
-                <p class="cap">From <code>{{ data.name }}/vyrn.json</code> — what you get if you clone it rather than depend on it. The target is a capability declaration, not a build flag.</p>
+                <p class="cap">From <code>{{ data.name }}/vyrn.json</code> — what you get if you clone it rather than depend on it.</p>
             </div>
 
             <div class="pkgblock" id="deps">
@@ -108,7 +108,7 @@ fn buildLabel(d: Package) -> String {
                         </dd>
                     </div>
                 </dl>
-                <p class="cap">Standard library modules and nothing else — each arrives with the compiler, so none is a fetch. Read from the <code>import</code> lines by the compiler's own lexer.</p>
+                <p class="cap">Standard library modules and nothing else. Each arrives with the compiler, so none is a fetch.</p>
             </div>
         </div>
 
@@ -119,7 +119,6 @@ fn buildLabel(d: Package) -> String {
                     <code :data-spec="offerOf(data.slug).spec">{{ addCommand(data.slug) }}</code>
                     <button type="button" data-copy-btn aria-label="Copy it">Copy</button>
                 </div>
-                <p class="cap">Fetches once, pins the sha256 in <code>vyrn.lock</code>, writes the alias into <code>vyrn.json</code>. The ref is <code>main</code>; a <a href="/releases.html">release tag</a> works the same.</p>
                 <details class="writes">
                     <summary>What the command writes</summary>
                     <p><code>vyrn.json</code> gains the alias your <code>import</code> lines use:</p>
@@ -128,9 +127,9 @@ fn buildLabel(d: Package) -> String {
                     <div class="scroller">
                     <pre class="code">{{ lockShape(data.slug) }}</pre>
                     </div>
-                    <p class="cap"><code>&lt;commit&gt;</code> and <code>&lt;sha256&gt;</code> are the two facts a page built from a checkout cannot know — <code>vyrn add</code> writes both, and the hash is verified on every load after.</p>
+                    <p class="cap"><code>vyrn add</code> writes the commit and the <code>sha256</code>. This page cannot know either.</p>
                 </details>
-                <p class="cap"><a href="/tooling/projects.html">How installing works</a>.</p>
+                <p class="cap">The command pins what it fetched. <a href="/tooling/projects.html">Projects and dependencies</a> explains <code>vyrn.json</code> and <code>vyrn.lock</code>.</p>
             </div>
             <div class="regcard">
                 <p class="eyebrow">import</p>
@@ -145,7 +144,7 @@ fn buildLabel(d: Package) -> String {
                 <p class="syms">
                     <code v-for="e in offerOf(data.slug).exports" :key="e">{{ e }}</code>
                 </p>
-                <p class="cap">{{ unitLabel(data) }}, read off <code>{{ offerOf(data.slug).path }}</code> while this page was built.</p>
+                <p class="cap">{{ unitLabel(data) }}, from <code>{{ offerOf(data.slug).path }}</code>.</p>
             </div>
         </aside>
     </section>

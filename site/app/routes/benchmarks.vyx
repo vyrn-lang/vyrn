@@ -46,7 +46,7 @@ fn barStyle(pct: String) -> String {
     <section class="hero benchhero">
         <p class="eyebrow">Measured</p>
         <h1 class="display">Eight programs, five engines,<br/>one machine, one afternoon.</h1>
-        <p class="lede">The Benchmarks Game programs, written five ways — plain C, safe Rust, plain node, Vyrn native and Vyrn as WebAssembly — run on one machine and published whole. Where Vyrn is behind, the cause is named.</p>
+        <p class="lede">The Benchmarks Game programs, written five ways: plain C, safe Rust, plain node, Vyrn native and Vyrn as WebAssembly. One machine, and every reading published. Where Vyrn is behind, the cause is named.</p>
         <p class="pkgmeta">{{ benchMachine() }} · medians of {{ benchRuns() }}</p>
     </section>
 
@@ -153,7 +153,7 @@ fn barStyle(pct: String) -> String {
             <li>All five printed the same bytes before anything was timed.</li>
             <li>Medians of {{ benchRuns() }} runs, every engine at its own defaults, one machine, one afternoon.</li>
             <li>CI does not run this harness — it needs clang, rustc, node and wasmtime together — so it is run by hand and the committed JSON is the record.</li>
-            <li>Nothing here claims a trend over time: <code>vyrn bench</code> and the <code>bench</code> blocks are the per-operation instrument, and their baseline is an unseeded placeholder.</li>
+            <li>Nothing here claims a trend over time. <a href="/tooling/testing.html">Testing and bench</a> is the per-operation instrument.</li>
         </ul>
         <div class="scroller">
             <table class="matrix">

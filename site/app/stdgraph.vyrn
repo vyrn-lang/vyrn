@@ -524,7 +524,7 @@ test "the graph and the reference agree about what imports what" {
 /// turns back into markdown on the way out.
 
 export fn graphLede() -> String {
-    return "Every wire is an <code>import</code> line in <code>std/</code>, read while this page was built. " + leafCount().toString() + " modules import nothing else in the library."
+    return "Every wire is an <code>import</code> line in <code>std/</code>. " + leafCount().toString() + " modules import nothing else in the library."
 }
 
 export fn graphIntro() -> String {
@@ -532,5 +532,5 @@ export fn graphIntro() -> String {
 }
 
 export fn graphCaption() -> String {
-    return "Read from the <code>import</code> lines of <code>std/*.vyrn</code>. An import inside a code quote is a string, not a wire."
+    return "Read from the <code>import</code> lines of <code>std/*.vyrn</code>."
 }

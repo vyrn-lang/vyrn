@@ -12,7 +12,7 @@
 // grid, one note about the programs.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
-import { Chapter, areaChapters, areaGroups, groupChapters, chapterHref, blockCount } from "../../guide"
+import { Chapter, areaGroups, groupChapters, chapterHref, chapterCount, blockCount } from "../../guide"
 import { inlineCode } from "../../code"
 import { TreeGroup, guideTree } from "../../docshell"
 
@@ -51,7 +51,7 @@ fn tree() -> Array<TreeGroup> {
     <section class="hero">
         <p class="eyebrow">The guide</p>
         <h1 class="display">Learn the language in order</h1>
-        <p class="lede">Eleven chapters, from the first program to a command-line tool, for a developer who knows one other language. They build on each other, so the first read is best in order; the <a href="/docs.html">reference</a> answers one question at a time, and the book answers them in the order they come up. The web stack and the toolchain have shelves of their own: <a href="/web.html">Web</a> and <a href="/tooling.html">Tooling</a>.</p>
+        <p class="lede">{{ chapterCount("guide") }} chapters, from the first program to a command-line tool, for a developer who knows one other language. They build on each other, so read them in order. The web stack and the toolchain have shelves of their own: <a href="/web.html">Web</a> and <a href="/tooling.html">Tooling</a>.</p>
     </section>
 
     <section class="band" id="chapters">
@@ -68,7 +68,7 @@ fn tree() -> Array<TreeGroup> {
 
     <section class="band" id="run">
         <p class="eyebrow">Running the code</p>
-        <p>Every code block in this documentation is a file in <code>site/guide/</code> — {{ blockCount() }} programs, each imported and called while the pages are built, printing what it answered. A program that does not compile fails the build; one that traps fails the export. The run link on a block carries its whole source to the playground, so what you run is what you read.</p>
+        <p>Every code block in this documentation is a file in <code>site/guide/</code>: {{ blockCount() }} programs, each run while the pages were built. The output under a block is what that program printed. The run link carries the whole source to the playground, so what you run is what you read.</p>
     </section>
 </main>
 </template>

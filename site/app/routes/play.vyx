@@ -117,7 +117,7 @@ fn examples() -> Array<Example> {
             </div>
             <div class="pane" data-play-pane="input" hidden="hidden">
                 <textarea data-play-stdin spellcheck="false" aria-label="Standard input"></textarea>
-                <p class="cap">These lines reach <code>readLine()</code>, one per call. At the end of them it answers <code>None</code>, exactly as a pipe does.</p>
+                <p class="cap">These lines reach <code>readLine()</code>, one per call. After the last one it answers <code>None</code>.</p>
             </div>
         </div>
 
@@ -125,7 +125,7 @@ fn examples() -> Array<Example> {
             <!-- The page's four sentences about itself, as REAL markup on
                  hover or focus — a native title clips and cannot wrap safely
                  (user). -->
-            <span class="idehelp" tabindex="0" aria-describedby="playtip">?<span class="tipbox" id="playtip" role="tooltip">The compiler front end runs in this tab as WebAssembly — the same tree-walking interpreter <code>vyrn run</code> uses — and nothing is uploaded. A program is stopped after five seconds, and recursion stops near 466 calls: the worker's stack, where the compiler's own limit is 1,000. The tab has no filesystem and no arguments. One file runs, plus <code>std/</code>, which is embedded — a relative import has nowhere to resolve to and says so.</span></span>
+            <span class="idehelp" tabindex="0" aria-describedby="playtip">?<span class="tipbox" id="playtip" role="tooltip">The compiler runs in this tab as WebAssembly. Nothing is uploaded. A program is stopped after five seconds, and recursion stops near 466 calls. The tab has no filesystem and no arguments. One file runs, plus <code>std/</code>, which is built in.</span></span>
             <span class="stat" data-play-status>Loading the compiler…</span>
             <span class="errs"><span aria-hidden="true">⊗</span> <span data-play-errs>0</span></span>
             <span class="spacer"></span>
