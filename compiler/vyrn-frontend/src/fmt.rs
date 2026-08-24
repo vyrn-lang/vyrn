@@ -61,12 +61,6 @@ struct Roles {
     generic_angle: bool,
     /// A `-` used as a unary prefix (`-x`) rather than a binary subtraction.
     unary_minus: bool,
-    /// A `|` that opens a lambda parameter list (RFC-0023): tight *after* it
-    /// (`|x`), so no space precedes the first parameter.
-    lambda_open: bool,
-    /// A `|` that closes a lambda parameter list (RFC-0023): tight *before* it
-    /// (`x|`), with the normal one space *after* it before the body.
-    lambda_close: bool,
     /// The `*` of a contract's open rule (RFC-0071), `fn *(..) -> ..`: tight
     /// *after* it (`*(`), so it never prints as the binary multiply it lexes as.
     open_rule_star: bool,
@@ -139,11 +133,6 @@ fn compute_roles(items: &[Triv]) -> Vec<Roles> {
             _ => unreachable!("toks holds only Tok items"),
         }
     };
-    let mut in_lambda_params = false;
-    // Whether we are lexically inside a `type` declaration's right-hand side —
-    // its `|`s separate enum variants, never open a lambda (RFC-0037 lambda
-    // positions are expression contexts, which a type RHS is not).
-    let mut in_type_decl = false;
     // How many generic `<` are currently open (balanced by their `>` closes). A
     // closing `>` is a generic bracket ONLY while one is open — otherwise a lone
     // tight `>` (`x>0`, prev = operand) is a comparison, not a stray generic
@@ -155,11 +144,6 @@ fn compute_roles(items: &[Triv]) -> Vec<Roles> {
         let prev = if k > 0 { Some(kind(toks[k - 1])) } else { None };
         let next_idx = toks.get(k + 1).copied();
         let next = next_idx.map(kind);
-        match kind(idx) {
-            Tok::Type => in_type_decl = true,
-            Tok::Fn | Tok::Let | Tok::Return | Tok::Import | Tok::Export => in_type_decl = false,
-            _ => {}
-        }
         match kind(idx) {
             Tok::Lt => {
                 // A generic bracket is tight on both sides in the source; a
@@ -229,32 +213,6 @@ fn compute_roles(items: &[Triv]) -> Vec<Roles> {
                     roles[idx].open_rule_star = true;
                 }
             }
-            // A `|` opening or closing a lambda parameter list. A lambda is a
-            // call argument (RFC-0023: after `(`/`,`) or a storage-position
-            // source (RFC-0037: after `=`, a record/map `:`, a match arm's
-            // `=>`, `return`, or an opening `[`/`{`). Enum-variant `|` also
-            // follows `=`, but only on a `type` declaration's RHS — the
-            // `in_type_decl` guard keeps those unmarked (spaced).
-            Tok::Pipe => {
-                if in_lambda_params {
-                    roles[idx].lambda_close = true;
-                    in_lambda_params = false;
-                } else if matches!(prev, Some(Tok::LParen) | Some(Tok::Comma))
-                    || (!in_type_decl
-                        && matches!(
-                            prev,
-                            Some(Tok::Eq)
-                                | Some(Tok::Colon)
-                                | Some(Tok::FatArrow)
-                                | Some(Tok::Return)
-                                | Some(Tok::LBracket)
-                                | Some(Tok::LBrace)
-                        ))
-                {
-                    roles[idx].lambda_open = true;
-                    in_lambda_params = true;
-                }
-            }
             _ => {}
         }
     }
@@ -271,19 +229,11 @@ fn wants_space(
     prev_generic: bool,
     next_generic: bool,
     prev_unary_minus: bool,
-    prev_lambda_open: bool,
-    next_lambda_close: bool,
     prev_open_rule_star: bool,
 ) -> bool {
     use Tok::*;
     // A contract's open rule is `fn *(..)`, never `fn * (..)`.
     if prev_open_rule_star {
-        return false;
-    }
-    // A lambda parameter list is tight inside (RFC-0023): no space after the
-    // opening `|` and no space before the closing `|` (`|x|`, `|x, y|`). The one
-    // space AFTER the closing `|` (before the body) follows the normal rules.
-    if prev_lambda_open || next_lambda_close {
         return false;
     }
     // No space just inside `(`/`[`.
@@ -433,8 +383,6 @@ fn print(items: &[Triv]) -> String {
                                         roles[p].generic_angle,
                                         roles[idx].generic_angle,
                                         roles[p].unary_minus,
-                                        roles[p].lambda_open,
-                                        roles[idx].lambda_close,
                                         roles[p].open_rule_star,
                                     )
                                 }
