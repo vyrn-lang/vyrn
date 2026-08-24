@@ -118,6 +118,43 @@ more than an untested opinion.
 The second one is the useful negative: the data-representation seam that paid so
 well is now closed. What is left in a 25 ns node is the dispatch.
 
+## Four micro-experiments, and where they stopped
+
+After the research landed, four more changes were tried against the same
+workload. Every one was built both ways and measured in one window.
+
+| change | result |
+| --- | --- |
+| split `Frame` into `names` and `slots` | **4% slower** — reverted |
+| box `Val::Enum`: `Val` 48 to 32 bytes, node return 56 to 40 | **no change** — reverted |
+| outline the cold arms of `expr`, leaving a small hot function | **+1.2%**, then WORSE when a sixth arm was added — reverted |
+| ask about two `Int64`s before the four vector widths in `binop` | **+1.2%** — kept |
+
+Only the last one stayed, and it stayed because it makes the function better
+shaped, not because 1.2 per cent is worth having on its own.
+
+**The `expr` split is the one worth explaining.** `expr` is 1,836 lines in a
+single `match`, and Rust sizes a stack frame for the union of every arm's
+locals — so evaluating `Expr::Int(1)` paid for the largest arm in the language.
+That is a good hypothesis and the measurement half-supported it: 1.2 per cent for
+five arms. Then adding `Expr::Binary` to the hot function made it slower again,
+because the hot function stopped being small.
+
+It was reverted anyway, and for a reason that is not about speed. Moving arms
+means two copies of each, and the copy in the hot function silently wins. A
+later edit to `Expr::Var` in the cold one would do nothing and nothing would say
+so. One per cent does not buy that.
+
+**What the four together say** is that the micro seam is closed. Three
+independent hypotheses about where a 25 ns node goes — the value's width, the
+frame's cache behaviour, the stack frame of the dispatcher — were each tested and
+each came back at or near zero. The cost is not in any one place that can be
+shaved. It is the shape of the thing: a recursive call, a match, and a 56-byte
+`Result` per node, every time the node runs.
+
+That is the case for the option below, and it is why that option is a change of
+shape rather than another shave.
+
 ## The one option still open
 
 **Closure compilation** — walk the AST once and build a tree of Rust closures, so
