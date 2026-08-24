@@ -9527,7 +9527,7 @@ impl<'a> Gen<'a> {
         }
         // Log methods write `[LEVEL] name: msg\n` to stderr via fprintf. Kept off
         // stdout so program output and diagnostics are separable.
-        if matches!(name, "trace" | "debug" | "info" | "warn" | "error") {
+        if vyrn_frontend::ast::is_log_level(name) {
             // Evaluate both args regardless (their side effects must match the
             // interpreter, which also evaluates them), but emit the write only
             // when the level meets the configured threshold (RFC-0008).

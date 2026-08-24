@@ -5266,6 +5266,11 @@ impl<'a> Interp<'a> {
                     // Log methods write `[LEVEL] name: msg` to stderr (kept off
                     // stdout, so program output and logs are separable — the
                     // "where does it print" concern behind RFC-0008).
+                    // NOT `ast::is_log_level(n)`. This match is READ AS DATA:
+                    // `tests/primitives.rs` scans these arms to enumerate every
+                    // builtin the interpreter implements, and compares that to
+                    // RFC-0078's census. A predicate here is invisible to it, so
+                    // five builtins would silently leave the census.
                     "trace" | "debug" | "info" | "warn" | "error" => {
                         // Drop calls below the configured threshold (RFC-0008).
                         if log_level_ordinal(name).unwrap_or(0) >= self.log_level {

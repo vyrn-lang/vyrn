@@ -137,18 +137,40 @@ pub fn is_place_temp(name: &str) -> bool {
 /// a `logging { level: .. }` block lowers it.
 pub const DEFAULT_LOG_LEVEL: usize = 2;
 
+/// The five log levels (RFC-0008), in order, lowest first.
+///
+/// ONE TABLE. These five names were written out in eleven places across three
+/// crates — the ordinal map below, the checker's effect lists, the interpreter's
+/// dispatch, both code generators, and the editor's index. A sixth level added
+/// to some of them and not others is a level that logs but does not count as an
+/// effect, so `spawn` would let it cross a task boundary.
+///
+/// The ORDER is the meaning: the index is the ordinal a `logging { level: .. }`
+/// block compares against, so this is a list and not a set.
+///
+/// THREE SITES DELIBERATELY STILL SPELL THE FIVE OUT, and they are not
+/// duplication:
+///
+/// - `interp.rs`'s dispatch arm and `vyrn-codegen/src/direct.rs`'s two arms are
+///   READ AS DATA by `vyrn-frontend/tests/primitives.rs`, which scans both files
+///   for literals to enumerate what each engine implements and compares that to
+///   RFC-0078's census. A predicate is invisible to a text scan.
+/// - `checker.rs`'s `RESERVED`, `SPAWN_FORBIDDEN` and `COMPTIME_FORBIDDEN` hold
+///   the five among dozens of unrelated names, where splicing a const array in
+///   costs more than it saves. `every_log_level_is_reserved_and_forbidden_where_effects_are`
+///   compares them to this table instead.
+pub const LOG_LEVELS: [&str; 5] = ["trace", "debug", "info", "warn", "error"];
+
+/// Whether `name` is one of the five log levels.
+pub fn is_log_level(name: &str) -> bool {
+    LOG_LEVELS.contains(&name)
+}
+
 /// The ordinal of a log-level name (RFC-0008), `trace` lowest → `error` highest.
 /// Shared by the config-block parser, the interpreter, and the codegen so they
 /// filter identically. Returns `None` for an unknown name.
 pub fn log_level_ordinal(name: &str) -> Option<usize> {
-    match name {
-        "trace" => Some(0),
-        "debug" => Some(1),
-        "info" => Some(2),
-        "warn" => Some(3),
-        "error" => Some(4),
-        _ => None,
-    }
+    LOG_LEVELS.iter().position(|l| *l == name)
 }
 
 /// A top-level module-state binding (RFC-0013): `let [mut] name [: Type] = init`.

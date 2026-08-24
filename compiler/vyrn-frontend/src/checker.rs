@@ -6240,7 +6240,7 @@ impl<'a> Checker<'a> {
         }
         // built-in log methods: <level>(Logger, String) -> Unit. Written
         // subject-first via method sugar: `log.info("..")`.
-        if matches!(name, "trace" | "debug" | "info" | "warn" | "error") {
+        if crate::ast::is_log_level(name) {
             if args.len() != 2 {
                 return Err(cerr!(
                     line,
@@ -10400,6 +10400,57 @@ fn calls_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
 
 #[cfg(test)]
 mod tests {
+
+    /// Every log level is reserved, and every log level is an effect.
+    ///
+    /// `trace`/`debug`/`info`/`warn`/`error` are spelled out inside three long
+    /// lists here — `RESERVED`, `SPAWN_FORBIDDEN`, `COMPTIME_FORBIDDEN` — mixed
+    /// among dozens of unrelated builtin names. They cannot read
+    /// [`ast::LOG_LEVELS`] directly, because splicing a const array into an
+    /// array literal costs more than it saves and would make three readable
+    /// lists unreadable.
+    ///
+    /// So this compares them instead. A sixth level added to `ast::LOG_LEVELS`
+    /// and to the dispatch, but not to these lists, is a level that logs while
+    /// counting as neither an effect nor a reserved word: `spawn` would let it
+    /// cross a task boundary, and a `gen fn` would be allowed to call it at
+    /// compile time.
+    #[test]
+    fn every_log_level_is_reserved_and_forbidden_where_effects_are() {
+        for list in [
+            ("RESERVED", RESERVED),
+            ("SPAWN_FORBIDDEN", SPAWN_FORBIDDEN),
+            ("COMPTIME_FORBIDDEN", COMPTIME_FORBIDDEN),
+        ] {
+            let (what, names) = list;
+            let missing: Vec<&str> = crate::ast::LOG_LEVELS
+                .iter()
+                .copied()
+                .filter(|lvl| !names.contains(lvl))
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "{what} does not hold every log level — missing: {}",
+                missing.join(", ")
+            );
+        }
+    }
+
+    /// The ordinal is the position in the table, and `logging { level: .. }`
+    /// compares against it. Reordering the table silently changes which calls a
+    /// threshold suppresses, so the order is pinned here rather than implied.
+    #[test]
+    fn the_log_level_ordinals_are_the_table_order() {
+        use crate::ast::{log_level_ordinal, DEFAULT_LOG_LEVEL};
+        assert_eq!(log_level_ordinal("trace"), Some(0));
+        assert_eq!(log_level_ordinal("debug"), Some(1));
+        assert_eq!(log_level_ordinal("info"), Some(2));
+        assert_eq!(log_level_ordinal("warn"), Some(3));
+        assert_eq!(log_level_ordinal("error"), Some(4));
+        assert_eq!(log_level_ordinal("shout"), None);
+        // The default suppresses `trace` and `debug` and nothing else.
+        assert_eq!(log_level_ordinal("info"), Some(DEFAULT_LOG_LEVEL));
+    }
     use super::*;
     use crate::{lexer::lex, parser::parse};
 

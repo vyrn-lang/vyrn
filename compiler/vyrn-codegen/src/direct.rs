@@ -6500,6 +6500,9 @@ impl<'p> Fn_<'_, 'p> {
             // (The five spellings are RESERVED by the checker, so no user function
             // can reach this arm — the same reason the textual backend needs no
             // guard either.)
+            // Literal for the same reason as the interpreter's arm:
+            // `primitives.rs` greps THIS FILE for each census name to decide
+            // whether the direct backend covers it.
             "trace" | "debug" | "info" | "warn" | "error" if args.len() == 2 => {
                 self.expr_as(m, b, &args[0], &Type::Logger)?;
                 self.expr_as(m, b, &args[1], &Type::Str)?;
