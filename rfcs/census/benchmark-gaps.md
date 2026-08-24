@@ -394,6 +394,15 @@ every map-heavy program hundreds of times slower under `vyrn run`. Cost: one
 representation change in the interpreter, no frontend or backend impact — the
 compiled engines never had the scan or the clone.
 
+**DONE.** This finding was verified independently and the `Rc` was taken. The
+measurement stands as recorded and was, if anything, understated. `vyrn run`
+on `examples/knucleotide.vyrn` at fasta n = 4000, same machine, same input,
+old binary against new: **35.14 s to 0.82 s, 43x.** The isolated shape — 2,000
+reads of one key — went from 1.371 s against an 8,000-entry map to 0.022 s, and
+from tracking the size of the map to flat. Pinned by
+`a_map_read_does_not_copy_the_table` in `compiler/vyrn-cli/tests/places.rs`,
+which fails on the old interpreter at 7.3x. Three-way parity green at 40.
+
 ### The binary-trees memory, about 2.1 GB
 
 Symptom confirmed at order 18: native peak working set 2093.6 MB, wasm 2093.1
