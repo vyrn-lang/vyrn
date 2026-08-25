@@ -5,9 +5,12 @@
   ownedness (9,925.7 MB → 4.9), Rule N at all three join shapes (215.3 MB →
   one buffer each), R1′ receivers for Strings and containers (313.9 → steady;
   178.9 → 3.8), the untake (423 → 4.1), and the consume-parameter release the
-  untake's own measurement uncovered. Every landing is pinned by a
-  `memory.rs` row that failed first. Still out, recorded in the census: a
-  heap field of a temporary record, and the §26 `ReleasePlan` consolidation.
+  untake's own measurement uncovered, and the temporary-record field —
+  the classification defect where a field of a value nobody owns was called
+  a borrow. Every landing is pinned by a `memory.rs` row that failed first,
+  and the whole corpus runs under the double-free audit on every parity
+  pass. Still out: the §26 `ReleasePlan` consolidation, and full §25
+  free-trace bisimulation.
 - **Evidence:** [rfcs/census/declared-release-does-not-run.md](census/declared-release-does-not-run.md).
 - **Appendix A:** [the algorithm and its proofs](proofs/release-algorithm.md) —
   Part I: the invariant, three soundness theorems, and the assumption each of
