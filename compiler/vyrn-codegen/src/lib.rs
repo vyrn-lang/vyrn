@@ -2393,7 +2393,7 @@ struct Gen<'a> {
     /// `droppable` is keyed by the `Stmt::Let`'s.
     arg_drops: &'a std::collections::HashSet<usize>,
     store_owned: &'a std::collections::HashSet<usize>,
-    edge_releases: &'a std::collections::HashMap<usize, Vec<(String, bool)>>,
+    edge_releases: &'a std::collections::HashMap<usize, Vec<(String, u32)>>,
     /// The registers holding those values, innermost call last. Pushed where the
     /// argument is EVALUATED and taken back where its call ends.
     arg_frees: Vec<(String, Type)>,
@@ -2544,7 +2544,7 @@ impl<'a> Gen<'a> {
         impls: &'a [vyrn_frontend::ast::ImplBlock],
         arg_drops: &'a std::collections::HashSet<usize>,
         store_owned: &'a std::collections::HashSet<usize>,
-        edge_releases: &'a std::collections::HashMap<usize, Vec<(String, bool)>>,
+        edge_releases: &'a std::collections::HashMap<usize, Vec<(String, u32)>>,
         decls: &'a [TypeDecl],
     ) -> Self {
         Gen {
@@ -5337,7 +5337,7 @@ impl<'a> Gen<'a> {
                     .get(&(stmt as *const Stmt as usize))
                     .cloned()
                     .unwrap_or_default();
-                let else_owes = ers.iter().any(|(_, t)| !*t);
+                let else_owes = ers.iter().any(|(_, t)| *t == 1);
                 let then_l = self.fresh_label("then");
                 let end_l = self.fresh_label("endif");
                 let else_l = if else_block.is_some() || else_owes {
@@ -5350,7 +5350,7 @@ impl<'a> Gen<'a> {
                 self.emit_label(&then_l);
                 self.gen_block(then_block)?;
                 if !self.terminated {
-                    self.emit_edge_releases(&ers, true);
+                    self.emit_edge_releases(&ers, 0);
                     self.emit_term(format!("br label %{end_l}"));
                 }
 
@@ -5358,12 +5358,12 @@ impl<'a> Gen<'a> {
                     self.emit_label(&else_l);
                     self.gen_block(eb)?;
                     if !self.terminated {
-                        self.emit_edge_releases(&ers, false);
+                        self.emit_edge_releases(&ers, 1);
                         self.emit_term(format!("br label %{end_l}"));
                     }
                 } else if else_owes {
                     self.emit_label(&else_l);
-                    self.emit_edge_releases(&ers, false);
+                    self.emit_edge_releases(&ers, 1);
                     self.emit_term(format!("br label %{end_l}"));
                 }
 
@@ -6352,7 +6352,10 @@ impl<'a> Gen<'a> {
             self.emit(format!("store {ll} {sv}, ptr {slot}"));
             self.register_drop(key, slot, kind);
         }
-        let r = self.gen_match_body(&sv, &sty, arms);
+        // RFC-0114 Rule N at a match join: the arms that still own what
+        // another arm consumed, keyed by this match expression's address.
+        let ers = self.edge_releases.get(&key).cloned().unwrap_or_default();
+        let r = self.gen_match_body(&sv, &sty, arms, &ers);
         if !self.terminated {
             self.emit_releases(ExitKind::Scrutinee, key);
         }
@@ -6367,12 +6370,13 @@ impl<'a> Gen<'a> {
         sv: &str,
         sty: &Type,
         arms: &[MatchArm],
+        ers: &[(String, u32)],
     ) -> Result<(String, Type), String> {
         let sv = sv.to_string();
         let sty = sty.clone();
         // A user enum dispatches to the switch-based path.
         if let Type::Enum(evs) = self.resolve(&sty) {
-            return self.gen_match_enum(&sv, &evs, arms);
+            return self.gen_match_enum(&sv, &evs, arms, ers);
         }
         // The payload type carried by each arm: for Option<T> the one-arm binds
         // `T`; for Result<T, E> the one-arm binds `T` and the zero-arm binds `E`.
@@ -6390,15 +6394,27 @@ impl<'a> Gen<'a> {
 
         // tag == 1 arm (Some / Ok)
         self.emit_label(&one_l);
-        let one_arm = arms.iter().find(|a| pattern_is_one(&a.pattern)).unwrap();
-        let (one_val, one_t) = self.gen_arm_body(&sv, one_arm, &one_ty)?;
+        let one_ix = arms
+            .iter()
+            .position(|a| pattern_is_one(&a.pattern))
+            .unwrap();
+        let (one_val, one_t) = self.gen_arm_body(&sv, &arms[one_ix], &one_ty)?;
+        if !self.terminated {
+            self.emit_edge_releases(ers, one_ix as u32);
+        }
         let one_end = self.cur_block.clone();
         self.emit_term(format!("br label %{end_l}"));
 
         // tag == 0 arm (None / Err)
         self.emit_label(&zero_l);
-        let zero_arm = arms.iter().find(|a| !pattern_is_one(&a.pattern)).unwrap();
-        let (zero_val, zero_t) = self.gen_arm_body(&sv, zero_arm, &zero_ty)?;
+        let zero_ix = arms
+            .iter()
+            .position(|a| !pattern_is_one(&a.pattern))
+            .unwrap();
+        let (zero_val, zero_t) = self.gen_arm_body(&sv, &arms[zero_ix], &zero_ty)?;
+        if !self.terminated {
+            self.emit_edge_releases(ers, zero_ix as u32);
+        }
         let ty = join_never(one_t, zero_t);
         let zero_end = self.cur_block.clone();
         self.emit_term(format!("br label %{end_l}"));
@@ -6472,6 +6488,7 @@ impl<'a> Gen<'a> {
         sv: &str,
         evs: &[EnumVariant],
         arms: &[MatchArm],
+        ers: &[(String, u32)],
     ) -> Result<(String, Type), String> {
         let arity = evs.iter().map(|v| v.payload.len()).max().unwrap_or(0);
         let ell = enum_ll(arity);
@@ -6506,7 +6523,7 @@ impl<'a> Gen<'a> {
         // line down. Seeding `Unit` reported "no value" for a match that is in
         // value position, which is how an enclosing `phi` got an empty operand.
         let mut ty = Type::Never;
-        for (arm, (idx, lbl)) in arms.iter().zip(&arm_labels) {
+        for (arm_ix, (arm, (idx, lbl))) in arms.iter().zip(&arm_labels).enumerate() {
             self.emit_label(lbl);
             self.scope.push(Vec::new());
             if let Pattern::Variant(_, binds) = &arm.pattern {
@@ -6541,6 +6558,9 @@ impl<'a> Gen<'a> {
                 ty = t;
             }
             self.scope.pop();
+            if !self.terminated {
+                self.emit_edge_releases(ers, arm_ix as u32);
+            }
             let block = self.cur_block.clone();
             self.emit_term(format!("br label %{end_l}"));
             incoming.push((v, block));
@@ -9071,17 +9091,18 @@ impl<'a> Gen<'a> {
     }
 
     /// RFC-0114 Rule N: release the bindings the OTHER branch of this `if`
-    /// consumed, on the edge where they are still this frame's. `on_then` picks
-    /// the edge. A declared `impl Owned` release is skipped: its body is user
+    /// consumed, on the edge where they are still this frame's. `edge` picks
+    /// the edge: 0/1 for an `if`'s then/else, the arm's source index for a
+    /// `match`. A declared `impl Owned` release is skipped: its body is user
     /// code whose timing all three engines must agree on, and an edge is a
     /// place none of them ran it before — the RFC refuses to normalize it.
     /// Inside a `region` the memory is the arena's, as everywhere else.
-    fn emit_edge_releases(&mut self, ers: &[(String, bool)], on_then: bool) {
+    fn emit_edge_releases(&mut self, ers: &[(String, u32)], edge: u32) {
         if self.region_depth != 0 {
             return;
         }
         for (name, t) in ers {
-            if *t != on_then {
+            if *t != edge {
                 continue;
             }
             let Some((slot, ty)) = self.lookup(name) else {

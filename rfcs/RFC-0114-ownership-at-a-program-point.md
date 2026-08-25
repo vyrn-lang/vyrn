@@ -258,7 +258,20 @@ next-iteration reuse rule, so any candidate inside a loop is re-initialized
 each iteration before its `if`. Measured: the conditional-move witness fell
 from 215.3 MB to 3.8 MB over 200,000 rounds; `conditionalMove` in `memory.rs`
 pins it. A declared `impl Owned` release stays off the edge (the thin refusal
-below, unchanged). `match` joins are not yet covered.
+below, unchanged).
+
+**Rule N at `match` joins LANDED too**, with `edge` generalized to the arm's
+source index. Two guards are specific to a match: the binding may be nobody's
+binder (a binder shadows the name), and the scrutinee may not mention it (an
+arm's payload projects into the scrutinee). A non-consuming arm releases only
+when its value cannot alias the binding: no heap in the value, no mention of
+the binding, or a `Binary`/`Unary` body — an operator result is a scalar or a
+fresh concat, and the freshness witness in `interp.rs` executes that claim.
+One implementation lesson worth keeping: `arm_carries_heap` must be asked
+INSIDE the arm's scope, while the binder types exist — asked after the walk
+it degrades to "yes" and the rule silently never fires. The match witness
+measured the same as the `if`: ~210 MB to 3.8 MB. `conditionalMoveMatch`
+pins it on wasm. `if`-expressions (`Expr::IfExpr`) are not yet covered.
 
 The state is per place, per program point: `Owned | Moved | Uninit`, a forward
 dataflow with a join at every merge.

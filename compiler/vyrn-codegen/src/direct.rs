@@ -1118,9 +1118,10 @@ struct Cx<'a> {
     /// `own::fold_store_owned`'s answer, the same set the textual backend
     /// gates on, so the two cannot disagree about a store.
     store_owned: std::collections::HashSet<usize>,
-    /// RFC-0114 Rule N: per `Stmt::If` address, `(name, on_then)` releases on
+    /// RFC-0114 Rule N: per join address (`Stmt::If` / `Expr::Match`), `(name,
+    /// edge)` releases on
     /// the edge the other branch's consume left still-owning.
-    edge_releases: std::collections::HashMap<usize, Vec<(String, bool)>>,
+    edge_releases: std::collections::HashMap<usize, Vec<(String, u32)>>,
     /// The `Owned` table (RFC-0086 M1) — the same one `own` decided with, so a
     /// user type's declared `release` reaches this backend without a second list.
     owned: vyrn_frontend::own::Owned,
@@ -3514,14 +3515,14 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
                 self.block(m, b, then_block)?;
-                self.emit_edge_releases(m, b, &ers, true, *line)?;
+                self.emit_edge_releases(m, b, &ers, 0, *line)?;
                 if let Some(e) = else_block {
                     b.ins(&Instruction::Else);
                     self.block(m, b, e)?;
-                    self.emit_edge_releases(m, b, &ers, false, *line)?;
-                } else if ers.iter().any(|(_, t)| !*t) {
+                    self.emit_edge_releases(m, b, &ers, 1, *line)?;
+                } else if ers.iter().any(|(_, t)| *t == 1) {
                     b.ins(&Instruction::Else);
-                    self.emit_edge_releases(m, b, &ers, false, *line)?;
+                    self.emit_edge_releases(m, b, &ers, 1, *line)?;
                 }
                 self.depth -= 1;
                 b.ins(&Instruction::End);
@@ -5721,15 +5722,15 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        ers: &[(String, bool)],
-        on_then: bool,
+        ers: &[(String, u32)],
+        edge: u32,
         line: usize,
     ) -> Result<(), String> {
         if self.region_depth != 0 {
             return Ok(());
         }
         for (name, t) in ers {
-            if *t != on_then {
+            if *t != edge {
                 continue;
             }
             let Ok((place, ty)) = self.lookup(name, line) else {
@@ -11313,7 +11314,9 @@ impl<'p> Fn_<'_, 'p> {
         }));
         self.depth += 1;
 
-        for arm in arms {
+        // RFC-0114 Rule N at a match join, keyed by this expression's address.
+        let ers = self.cx.edge_releases.get(&key).cloned().unwrap_or_default();
+        for (arm_ix, arm) in arms.iter().enumerate() {
             self.tag_test(b, addr, &sum, &arm.pattern, line)?;
             b.ins(&Instruction::If(BlockType::Empty));
             self.depth += 1;
@@ -11337,6 +11340,7 @@ impl<'p> Fn_<'_, 'p> {
                 None => self.expr_as(m, b, &arm.body, &want)?,
             }
             self.scope.truncate(mark);
+            self.emit_edge_releases(m, b, &ers, arm_ix as u32, line)?;
             let d = self.br_to(out);
             b.ins(&Instruction::Br(d));
 

@@ -507,6 +507,15 @@ const ROWS: &[Row] = &[
               that kept the value is known. 215.3 MB native before; one buffer after",
     },
     Row {
+        export: "conditionalMoveMatch",
+        census: "RFC-0114 Rule N",
+        today: Shape::Steady,
+        why: "Rule N at a match join: one arm consumes, another only reads, the release \
+              sits on the untouched arm's edge (its source index). The guards fail toward \
+              the leak — a binder shadow, a scrutinee mention, or an arm value that could \
+              alias the binding all refuse; a Binary value never can, so it does not",
+    },
+    Row {
         export: "prependLoop",
         census: "§4",
         today: Shape::Steady,
@@ -1530,6 +1539,22 @@ export extern fn conditionalMove() {{
     }} else {{
         seen = seen + Int64(s.byteLength)
     }}
+}}
+
+/// RFC-0114 Rule N at a MATCH join: the same asymmetry, one arm consuming and
+/// one only reading, with the release on the untouched arm's edge — the arm's
+/// source index instead of then/else.
+export extern fn conditionalMoveMatch() {{
+    let s = tag() + tag()
+    seen = seen + match pick(seen) {{
+        Ok(v) => takeIt(consume s) + v,
+        Err(v) => Int64(s.byteLength) - v + v,
+    }}
+}}
+
+fn pick(n: Int64) -> Result<Int64, Int64> {{
+    if n < 0 {{ return Ok(n) }}
+    return Err(n)
 }}
 
 fn main() -> Int64 {{

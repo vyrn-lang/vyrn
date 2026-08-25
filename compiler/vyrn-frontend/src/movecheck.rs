@@ -286,14 +286,16 @@ pub struct StoreEv {
 
 /// RFC-0114 Rule N: an `if` consumed a binding on exactly one branch, both
 /// branches continue to the join, and the other branch still holds the value —
-/// so a release belongs ON THE EDGE that did not consume. `on_then` names the
-/// edge that releases. `own::analyze` folds these against the write events
-/// (every write must be owning) before either backend sees one.
+/// so a release belongs ON THE EDGE that did not consume. `edge` names the
+/// edge that releases: for an `if`, 0 is the then-edge and 1 the else-edge;
+/// for a `match`, the arm's source index. `own::analyze` folds these against
+/// the write events (every write must be owning) before either backend sees
+/// one.
 pub struct EdgeRel {
     pub if_key: usize,
     pub key: usize,
     pub name: String,
-    pub on_then: bool,
+    pub edge: u32,
 }
 
 pub enum EvKind {
@@ -3064,8 +3066,8 @@ impl MoveCheck<'_> {
                 if !then_div && !else_div {
                     if let Some(sink) = &self.edge_releases {
                         let if_key = s as *const Stmt as usize;
-                        for (taker, other, on_then) in
-                            [(&then_c, &else_c, false), (&else_c, &then_c, true)]
+                        for (taker, other, edge) in
+                            [(&then_c, &else_c, 1u32), (&else_c, &then_c, 0u32)]
                         {
                             for (root, bucket) in &taker.0 {
                                 if consumed.0.contains_key(root)
@@ -3086,7 +3088,7 @@ impl MoveCheck<'_> {
                                     if_key,
                                     key,
                                     name: root.clone(),
-                                    on_then,
+                                    edge,
                                 });
                             }
                         }
@@ -3813,7 +3815,9 @@ impl MoveCheck<'_> {
                     k => k,
                 };
                 let base = consumed.clone();
-                let mut merged: Option<Consumed> = None;
+                let mut arm_cs: Vec<Consumed> = Vec::new();
+                let mut all_binders: HashSet<String> = HashSet::new();
+                let mut arm_heap: Vec<bool> = Vec::new();
                 for arm in arms {
                     let mut c = base.clone();
                     scope.push(HashSet::new());
@@ -3830,9 +3834,13 @@ impl MoveCheck<'_> {
                             self.nodes.borrow_mut().bind(b, key);
                         }
                     }
+                    all_binders.extend(binders.iter().cloned());
                     // Asked HERE, one scope in, because the question is about the
                     // binders and this is where they are bound.
                     self.note_arm_value(&arm.body, *line, &binders);
+                    // Asked here too, and kept per arm: the answer needs the
+                    // binder types, which leave with this scope.
+                    arm_heap.push(self.arm_carries_heap(&arm.body));
                     self.arm_binders
                         .borrow_mut()
                         .push(binders.iter().map(|b| b.to_string()).collect());
@@ -3841,6 +3849,70 @@ impl MoveCheck<'_> {
                     self.exit();
                     r?;
                     scope.pop();
+                    arm_cs.push(c);
+                }
+                // RFC-0114 Rule N at a MATCH join: a binding cleanly whole-taken
+                // in some arms and untouched in the rest is released on each
+                // untouched arm's edge — the `if` rule with `edge` = the arm's
+                // source index. Guards, all failing toward the leak: the name is
+                // nobody's binder (a binder shadows it), the scrutinee does not
+                // mention it (an arm's payload projects into the scrutinee), and
+                // an untouched arm either carries no heap out or never mentions
+                // the binding — its value must not alias what the edge frees. An
+                // arm yielding the binding whole is `Gone::Aliased`, which the
+                // fold's veto refuses.
+                if let Some(sink) = &self.edge_releases {
+                    let match_key = e as *const Expr as usize;
+                    let mut roots: Vec<&String> = Vec::new();
+                    for c in &arm_cs {
+                        roots.extend(c.0.keys());
+                    }
+                    roots.sort();
+                    roots.dedup();
+                    for root in roots {
+                        if base.0.contains_key(root)
+                            || all_binders.contains(root.as_str())
+                            || mentions_place(scrutinee, root)
+                        {
+                            continue;
+                        }
+                        let bkey = self.nodes.borrow().get(root).copied().unwrap_or(0);
+                        if bkey == 0 {
+                            continue;
+                        }
+                        let clean = |c: &Consumed| {
+                            c.0.get(root).is_some_and(|b| {
+                                b.len() == 1 && b.get(root).is_some_and(|t| !t.hole)
+                            })
+                        };
+                        let untouched = |c: &Consumed| !c.0.contains_key(root);
+                        if !arm_cs.iter().all(|c| clean(c) || untouched(c))
+                            || !arm_cs.iter().any(|c| clean(c))
+                            || arm_cs.iter().all(|c| clean(c))
+                        {
+                            continue;
+                        }
+                        for (i, (c, arm)) in arm_cs.iter().zip(arms).enumerate() {
+                            // A `Binary`/`Unary` value never aliases an
+                            // operand: comparisons and arithmetic are scalars,
+                            // and a concat is fresh (the freshness witness in
+                            // `interp.rs` executes that claim).
+                            let safe_value = !arm_heap[i]
+                                || matches!(arm.body, Expr::Binary { .. } | Expr::Unary { .. })
+                                || !mentions_place(&arm.body, root);
+                            if untouched(c) && safe_value {
+                                sink.borrow_mut().push(EdgeRel {
+                                    if_key: match_key,
+                                    key: bkey,
+                                    name: root.clone(),
+                                    edge: i as u32,
+                                });
+                            }
+                        }
+                    }
+                }
+                let mut merged: Option<Consumed> = None;
+                for c in arm_cs {
                     match &mut merged {
                         None => merged = Some(c),
                         Some(m) => {

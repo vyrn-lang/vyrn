@@ -1153,9 +1153,11 @@ pub struct Ownership {
     /// and on nothing of their own.
     pub store_owned: std::collections::HashSet<usize>,
     /// RFC-0114 Rule N: per `Stmt::If` address, the bindings to release on one
-    /// edge of the join because the OTHER edge consumed them — `(name, on_then)`,
-    /// where `on_then` is the edge that releases. See [`fold_edge_releases`].
-    pub edge_releases: HashMap<usize, Vec<(String, bool)>>,
+    /// RFC-0114 Rule N: per join address (`Stmt::If` or `Expr::Match`), the
+    /// bindings to release on one edge because another edge consumed them —
+    /// `(name, edge)`, where `edge` is 0/1 for an `if`'s then/else and the
+    /// arm's source index for a `match`. See [`fold_edge_releases`].
+    pub edge_releases: HashMap<usize, Vec<(String, u32)>>,
     /// Functions whose return value transfers heap ownership to the caller,
     /// with the kind of value returned.
     ///
@@ -1304,7 +1306,7 @@ pub fn analyze(program: &Program) -> Ownership {
 /// re-initialized every iteration before the `if` is reached.
 ///
 /// Refusal is the leak direction, which is today's behaviour.
-fn fold_edge_releases(facts: &crate::movecheck::Facts) -> HashMap<usize, Vec<(String, bool)>> {
+fn fold_edge_releases(facts: &crate::movecheck::Facts) -> HashMap<usize, Vec<(String, u32)>> {
     use crate::movecheck::{EvKind, Gone};
     let vetoed: std::collections::HashSet<usize> = facts
         .lets
@@ -1326,14 +1328,14 @@ fn fold_edge_releases(facts: &crate::movecheck::Facts) -> HashMap<usize, Vec<(St
         }
     }
 
-    let mut out: HashMap<usize, Vec<(String, bool)>> = HashMap::new();
+    let mut out: HashMap<usize, Vec<(String, u32)>> = HashMap::new();
     for er in &facts.edge_releases {
         if vetoed.contains(&er.key) || !all_owning.get(&er.key).copied().unwrap_or(false) {
             continue;
         }
         out.entry(er.if_key)
             .or_default()
-            .push((er.name.clone(), er.on_then));
+            .push((er.name.clone(), er.edge));
     }
     // The walker's bucket iteration is hash-ordered; the emitted IR must not be.
     for v in out.values_mut() {
