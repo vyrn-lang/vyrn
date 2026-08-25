@@ -44,7 +44,7 @@ drifts: each header says which milestone landed and what did not, and the
 
 ## The index
 
-112 RFCs, numbered 0001 to 0113, with one gap. **There is no RFC-0066** — the
+113 RFCs, numbered 0001 to 0114, with one gap. **There is no RFC-0066** — the
 number was skipped and never used. The only mention of it in the repository is
 this sentence. Closing the gap would mean renumbering thirty files and breaking
 every cross-reference, so the gap stays.
@@ -169,6 +169,7 @@ claim is true — is written down in the test's own header.
 | [0111](RFC-0111-a-program-can-write-bytes.md) | A Program Can Write Bytes | Implemented; `writeFileBytes`, `writeStdout` — closes the mandelbrot gap |
 | [0112](RFC-0112-a-regular-expression-that-searches.md) | A Regular Expression That Searches | Implemented; `std/regex` in Vyrn — closes the regex-redux gap |
 | [0113](RFC-0113-bytes-takes-a-range.md) | `bytes` Takes a Range | Implemented; `slice` 57% of the site build to 9.2% |
+| [0114](RFC-0114-ownership-at-a-program-point.md) | Ownership At A Program Point | Draft; two leaks are one missing fact, and the interpreter is the engine that has it |
 
 ## The other documents here
 
