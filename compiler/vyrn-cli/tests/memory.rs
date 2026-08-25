@@ -478,6 +478,25 @@ const ROWS: &[Row] = &[
               first append abandons the initializer's buffer",
     },
     Row {
+        export: "temporaryCall",
+        census: "RFC-0114 M1",
+        today: Shape::Leaks,
+        why: "OPEN. A temporary has no binding, and `drop_slots` is keyed on `let`. The \
+              interpreter reclaims it for free — `Val::Str` is an `Rc<String>` — so this \
+              row is also a three-engine divergence that parity cannot see: same program, \
+              same output, 8.5 MB interpreted against 313.9 MB native. Flip to Steady when \
+              RFC-0114 M1 lands",
+    },
+    Row {
+        export: "escapingAccumulator",
+        census: "RFC-0114 M2",
+        today: Shape::Leaks,
+        why: "OPEN. `slot_owns` asks whether the binding is in `drop_slots`, and one whose \
+              value is consumed at the end is not — so no assignment in its life releases \
+              what it replaced. The same loop returning `acc` instead is steady. Flip to \
+              Steady when RFC-0114 M2 lands",
+    },
+    Row {
         export: "prependLoop",
         census: "§4",
         today: Shape::Steady,
@@ -1446,6 +1465,43 @@ let mut kept: Array<String> = []
 export extern fn keptForever() {{
     kept.push(tag() + "!")
     seen = seen + Int64(kept.length)
+}}
+
+/// RFC-0114 M1: a TEMPORARY. `fresh()` returns a String the caller owns, it is
+/// read for its length, and nothing binds it — so `drop_slots`, which is keyed
+/// on `let`, has no row for it and nothing releases it.
+///
+/// The interpreter reclaims this one for free: `Val::Str` is an `Rc<String>`.
+/// The compiled backends carry no refcount and rely on an analysis that is not
+/// asked. Measured on the same program, 20,000 rounds: 8.5 MB interpreted
+/// against 313.9 MB native.
+export extern fn temporaryCall() {{
+    seen = seen + Int64(fresh().byteLength)
+}}
+
+fn fresh() -> String {{
+    return tag() + "!"
+}}
+
+/// RFC-0114 M2: an accumulator whose LAST value escapes. `Gen::slot_owns` asks
+/// whether the binding is in `drop_slots` — the set released at block exit — and
+/// one consumed into a record is not, so no assignment in its life releases what
+/// it replaced. Every intermediate leaks; only the last one is given back, by
+/// `b` at the end of the block.
+///
+/// The same loop with `acc` merely RETURNED is steady, which is what makes this
+/// a defect rather than a cost: 4.2 MB against 9.9 GB over 50,000 calls.
+type Held = {{ s: String }}
+
+export extern fn escapingAccumulator() {{
+    let mut acc = ""
+    let mut i = 0
+    while i < 8 {{
+        acc = acc + tag()
+        i = i + 1
+    }}
+    let b = Held {{ s: consume acc }}
+    seen = seen + Int64(b.s.byteLength)
 }}
 
 fn main() -> Int64 {{

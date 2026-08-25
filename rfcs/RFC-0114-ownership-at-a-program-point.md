@@ -110,28 +110,59 @@ parity.
 `RECOMMENDATION, NOT A DECISION`, but an opinionated one, in the order the two
 halves should land.
 
-### M1 — temporaries. The analysis already knows.
+### M1 — temporaries. The analysis is done; the EMISSION is the work.
 
-The fact M1 needs is `Ownership::owned_fns`, which exists and is exact: RFC-0089
-rule 3 makes a return owned, and `movecheck` refuses the program where it is not.
-So there is no inference to add — only a position to notice.
+This was scoped by trying it, and the answer moved. The channel is not missing.
 
-`own::analyze` records, per function, the expression positions where an owning
-value is produced and NOT taken by anything: not bound, not stored, not returned,
-not handed to a `consume` parameter. Keyed by statement, the way `droppable` is
-keyed by `let`. `Gen::register_drop` is the channel that already exists for the
-per-binding case; this is a second table through the same seam.
+`movecheck` already records every call-argument temporary with a verdict, and
+`ArgVerdict::Released` is exactly the guarantee M1 wants: "a `read` parameter
+that keeps nothing — the caller releases the temporary after the call; rules 2
+and 3 refuse every way the callee could have kept it". The aliasing case has its
+own verdict, `Lent`: "the result points into the argument". `Gen` already carries
+`arg_frees`, and `gen_call` already releases everything pushed to it after the
+call returns. `rfcs/census-call-arguments.md` is the record.
 
-**Codegen must not decide which positions those are.** The walker that decides
-`consume` decides this too, in the same pass, so the two cannot disagree — which
-is the rule `Ownership::fates` was built on ("recorded by the walker that
-decides, so the report and the emission cannot disagree").
+**One line stands between that and the fix**, in `Ownership::arg_drops`:
 
-**Released at the end of the STATEMENT, in reverse creation order.** Not at the
-end of the expression: a callee may hold its borrow for the duration of the call,
-and so may a later operand of the same statement. Statement end is one
-well-defined point after evaluation is complete. Reverse order because one
-temporary may be a view of another.
+```rust
+.filter(|s| {
+    s.verdict == crate::movecheck::ArgVerdict::Released && s.kind == DropKind::FreeStr
+})
+```
+
+`&& s.kind == DropKind::FreeStr` throws away every argument temporary that is not
+a plain String — every record, every array, every declared release. That is why
+`check(make(depth))` leaks a tree.
+
+**Removing it does not work, and the failure says what M1 actually is.** The
+emission side is String-only:
+
+```
+ti3.ll:637:34: error: '%t6' defined with type '{ i64, i64, i64 }' but expected 'ptr'
+  call void @__vyrn_str_free(ptr %t6)
+```
+
+`arg_frees` is a `Vec<String>` of registers and the free site emits
+`@__vyrn_str_free` unconditionally. So the filter is not a redundant guard on a
+precise verdict — it is what keeps the emitter from being handed something it
+cannot free.
+
+So M1 is:
+
+1. `arg_frees` carries the `DropKind` beside the register.
+2. A release-BY-VALUE path. `snap_old` + `free_snap` is the existing pair and it
+   works from a SLOT; an argument temporary is an SSA value with no address, so
+   the buffer extraction has to be reachable from a value.
+3. The same in `direct.rs`, which has its own copy — and the memory suite is what
+   will say so, exactly as it did for the prepend fix.
+4. Then, and only then, drop the `FreeStr` condition.
+
+The order matters: dropping the condition first produces a compile error at best
+and a wrong free at worst.
+
+**Released after the call, which `gen_call` already does.** Statement-end is the
+looser alternative and is not needed here — the verdict is per argument position,
+and the callee is done with the borrow when it returns.
 
 ### M2 — per-store liveness, and no drop flags
 
