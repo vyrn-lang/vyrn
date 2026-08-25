@@ -206,7 +206,7 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("fsyncFile", Syscall, "fd_sync"),
     ("listDir", Syscall, "fd_readdir"),
     // ---- Representation: a view, not an operation ---------------------------
-    ("bytes", View, "String -> Array<UInt8>: what all four runtime modules stand on"),
+    ("bytes", View, "String -> Array<UInt8>, whole or a byte range: what all four runtime modules stand on"),
     ("stringFromBytes", View, "the only Array<UInt8> -> String construction there is"),
     ("floatBits", View, "RFC-0078 M4a: i64.reinterpret_f64, one instruction"),
     ("floatFromBits", View, "RFC-0078 M4a: the other direction"),

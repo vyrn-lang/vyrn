@@ -1,0 +1,30 @@
+// `bytes(s)` and `bytes(s, start, end)` — the whole string, or part of it.
+//
+// The range form exists for a measured reason (RFC-0113). `std/strpred`'s
+// `slice` copied its range a byte at a time in Vyrn, which cost 19.6 µs against
+// this shape's 1.0 µs for the same ninety bytes, and made `slice` 57 per cent of
+// the site build. One call replaced the loop and the site export went from 26.3
+// to 16.3 seconds.
+//
+// It answers BYTES and checks only that the range exists — a caller asking for
+// bytes 1..3 of a multi-byte character gets those two bytes, which is what it
+// asked for. `substring` is the one that answers a String and refuses a boundary
+// inside a character; it is written on top of this.
+import { substring } from "std/strings"
+
+fn main() -> Int64 {
+    let s = "héllo, wörld — a string with multi-byte characters"
+    // The whole string, both arities.
+    print("\{bytes(s).length} \{bytes(s, 0, s.byteLength).length}")
+    // Ranges, including empty and one-byte.
+    print("\{bytes(s, 0, 1).length} \{bytes(s, 3, 3).length} \{bytes(s, 7, 12).length}")
+    // Through the function this was all for.
+    print(substring(s, 0, 6))
+    print(substring(s, 7, 12))
+    print("\{substring(s, 0, s.byteLength).byteLength}")
+    // A byte range that splits a character is fine for `bytes` — it answers
+    // bytes — and refused by `substring`, which answers a String.
+    let mid = bytes(s, 1, 3)
+    print("\{Int64(mid[0])} \{Int64(mid[1])}")
+    return 0
+}

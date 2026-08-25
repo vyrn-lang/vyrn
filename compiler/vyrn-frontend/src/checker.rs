@@ -6809,9 +6809,23 @@ impl<'a> Checker<'a> {
         // M2; `stringFromBytes` is the fallible inverse). `chars` was its pair
         // until M2; it is `std/text`'s declaration now, and `bytes` stays because
         // it is the VIEW every runtime module stands on (`prelude::lends`).
+        // `bytes(s)` — the whole string. `bytes(s, start, end)` — a byte range of
+        // it, half-open, and the reason the second form exists is measured
+        // (RFC-0113): copying a range a byte at a time in Vyrn cost 19.6 µs
+        // where this costs 1.0 µs, and `std/strpred`'s `slice` doing exactly
+        // that was 57 per cent of the site build.
+        //
+        // It does NOT check character boundaries. `bytes` answers BYTES, and a
+        // caller asking for bytes 3..7 of a string means those bytes; `slice` is
+        // the one that cares about characters and checks before it calls. Out of
+        // range still traps, with the wording `s[i]` already uses.
         if name == "bytes" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "`bytes` takes 1 argument, got {}", args.len()));
+            if args.len() != 1 && args.len() != 3 {
+                return Err(cerr!(
+                    line,
+                    "`bytes` takes 1 argument, or 3 with a byte range, got {}",
+                    args.len()
+                ));
             }
             let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
             if matches!(t, Type::Err) {
@@ -6819,6 +6833,12 @@ impl<'a> Checker<'a> {
             }
             if t != Type::Str {
                 return Err(cerr!(line, "`bytes` needs a String, found {t}"));
+            }
+            for a in args.iter().skip(1) {
+                let n = self.base(&self.expr(a, scope, Some(&Type::Int), fn_ret)?);
+                if !matches!(n, Type::Err) && n != Type::Int {
+                    return Err(cerr!(line, "`bytes` needs Int64 offsets, found {n}"));
+                }
             }
             return Ok(Type::Array(Box::new(Type::IntN {
                 bits: 8,

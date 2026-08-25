@@ -433,9 +433,9 @@ entry:
   ret ptr %r
 }
 
-define {ptr, i64, i64} @__vyrn_str_bytes(ptr %s) {
+define {ptr, i64, i64} @__vyrn_str_bytes_range(ptr %s, i64 %start, i64 %end) {
 entry:
-  %len = call i64 @__vyrn_str_len(ptr %s)
+  %len = sub i64 %end, %start
   %data = call ptr @__vyrn_malloc(i64 %len)
   br label %loop
 loop:
@@ -443,7 +443,8 @@ loop:
   %done = icmp uge i64 %i, %len
   br i1 %done, label %ret, label %body
 body:
-  %sp = getelementptr i8, ptr %s, i64 %i
+  %off = add i64 %start, %i
+  %sp = getelementptr i8, ptr %s, i64 %off
   %b = load i8, ptr %sp
   %dp = getelementptr i8, ptr %data, i64 %i
   store i8 %b, ptr %dp
@@ -454,6 +455,16 @@ ret:
   %r1 = insertvalue {ptr, i64, i64} %r0, i64 %len, 1
   %r2 = insertvalue {ptr, i64, i64} %r1, i64 %len, 2
   ret {ptr, i64, i64} %r2
+}
+
+; The whole string is the range 0..len, so there is ONE copy loop here and not
+; two (RFC-0113). The caller of the three-argument form has already been bounds
+; checked by the IR that emits the call.
+define {ptr, i64, i64} @__vyrn_str_bytes(ptr %s) {
+entry:
+  %len = call i64 @__vyrn_str_len(ptr %s)
+  %r = call {ptr, i64, i64} @__vyrn_str_bytes_range(ptr %s, i64 0, i64 %len)
+  ret {ptr, i64, i64} %r
 }
 
 ; (The byte-copy helper was here — the `slice` builtin's copy loop, and `slice`
@@ -9606,17 +9617,54 @@ impl<'a> Gen<'a> {
         // and is now `std/text`'s `charsV` — RFC-0078 M4c.)
         if matches!(name, "bytes") {
             let (v, _) = self.gen_expr(&args[0])?;
-            let helper = "@__vyrn_str_bytes";
-            let t = self.fresh_tmp();
-            self.emit(format!("{t} = call {{ ptr, i64, i64 }} {helper}(ptr {v})"));
-            let elem = if name == "bytes" {
-                Type::IntN {
-                    bits: 8,
-                    signed: false,
-                }
-            } else {
-                Type::Int
+            let elem = Type::IntN {
+                bits: 8,
+                signed: false,
             };
+            let t = self.fresh_tmp();
+            if args.len() == 3 {
+                // The range form (RFC-0113). Bounds are checked HERE rather than
+                // in the helper, because the trap needs the offset that was
+                // wrong and the helper has already turned the pair into a
+                // length. `soob` is the wording `s[i]` uses, so the catalogue
+                // does not grow.
+                let (a, _) = self.gen_expr(&args[1])?;
+                let (b, _) = self.gen_expr(&args[2])?;
+                let len = self.fresh_tmp();
+                self.emit(format!("{len} = call i64 @__vyrn_str_len(ptr {v})"));
+                let lo_bad = self.fresh_tmp();
+                let ord_bad = self.fresh_tmp();
+                let hi_bad = self.fresh_tmp();
+                let bad1 = self.fresh_tmp();
+                let bad = self.fresh_tmp();
+                self.emit(format!("{lo_bad} = icmp slt i64 {a}, 0"));
+                self.emit(format!("{ord_bad} = icmp slt i64 {b}, {a}"));
+                self.emit(format!("{hi_bad} = icmp sgt i64 {b}, {len}"));
+                self.emit(format!("{bad1} = or i1 {lo_bad}, {ord_bad}"));
+                self.emit(format!("{bad} = or i1 {bad1}, {hi_bad}"));
+                let trap_l = self.fresh_label("byr.trap");
+                let ok_l = self.fresh_label("byr.ok");
+                self.emit_term(format!("br i1 {bad}, label %{trap_l}, label %{ok_l}"));
+                self.emit_label(&trap_l);
+                // The offset the interpreter names: the low one when it is
+                // negative or out of order, otherwise the high one.
+                let which = self.fresh_tmp();
+                let pick = self.fresh_tmp();
+                self.emit(format!("{which} = or i1 {lo_bad}, {ord_bad}"));
+                self.emit(format!("{pick} = select i1 {which}, i64 {a}, i64 {b}"));
+                self.emit(format!(
+                    "call void @__vyrn_trap_idx(ptr @.trap.soob, i64 {pick})"
+                ));
+                self.emit_term("unreachable".into());
+                self.emit_label(&ok_l);
+                self.emit(format!(
+                    "{t} = call {{ ptr, i64, i64 }} @__vyrn_str_bytes_range(ptr {v}, i64 {a}, i64 {b})"
+                ));
+            } else {
+                self.emit(format!(
+                    "{t} = call {{ ptr, i64, i64 }} @__vyrn_str_bytes(ptr {v})"
+                ));
+            }
             return Ok((t, Type::Array(Box::new(elem))));
         }
 

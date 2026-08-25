@@ -6702,7 +6702,10 @@ impl<'p> Fn_<'_, 'p> {
             // `bytes(s)` — the string's UTF-8 bytes as an `Array<UInt8>`, i8 stride.
             // A copy, because the array is growable and the string is not: a `push`
             // on the result must not write into the string's storage.
-            "bytes" if args.len() == 1 => {
+            // `bytes(s)` and `bytes(s, start, end)` (RFC-0113). One arm: the
+            // three-argument form differs only in where the copy starts and how
+            // long it is, and `MemoryCopy` does not care which.
+            "bytes" if args.len() == 1 || args.len() == 3 => {
                 let ty = Type::Array(Box::new(Type::IntN {
                     bits: 8,
                     signed: false,
@@ -6712,9 +6715,71 @@ impl<'p> Fn_<'_, 'p> {
                 let s = self.scratch(b, ValType::I32, 0);
                 let n = self.scratch(b, ValType::I32, 1);
                 let buf = self.scratch(b, ValType::I32, 2);
+                let from = self.scratch(b, ValType::I32, 3);
                 let malloc = self.cx.rt.malloc;
                 b.ins(&Instruction::LocalTee(s));
-                str_len(b);
+                if args.len() == 3 {
+                    // `start` and `end` as i32 offsets, bounds checked against
+                    // the string's length before either is used. The wording is
+                    // `s[i]`'s, so the trap catalogue does not grow.
+                    str_len(b);
+                    let len = self.scratch(b, ValType::I32, 4);
+                    b.ins(&Instruction::LocalSet(len));
+                    self.expr_as(m, b, &args[1], &Type::Int)?;
+                    b.ins(&Instruction::I32WrapI64);
+                    b.ins(&Instruction::LocalSet(from));
+                    self.expr_as(m, b, &args[2], &Type::Int)?;
+                    b.ins(&Instruction::I32WrapI64);
+                    let to = self.scratch(b, ValType::I32, 5);
+                    b.ins(&Instruction::LocalSet(to));
+                    // start < 0 || end < start || end > len — one unsigned
+                    // compare would miss the ordering, so all three are written.
+                    let (pre, post, trap) = (
+                        self.cx.rt.msg_soob,
+                        self.cx.rt.msg_oob_end,
+                        self.cx.rt.trap_idx,
+                    );
+                    b.ins(&Instruction::LocalGet(from));
+                    b.ins(&Instruction::I32Const(0));
+                    b.ins(&Instruction::I32LtS);
+                    b.ins(&Instruction::LocalGet(to));
+                    b.ins(&Instruction::LocalGet(from));
+                    b.ins(&Instruction::I32LtS);
+                    b.ins(&Instruction::I32Or);
+                    b.ins(&Instruction::LocalGet(to));
+                    b.ins(&Instruction::LocalGet(len));
+                    b.ins(&Instruction::I32GtS);
+                    b.ins(&Instruction::I32Or);
+                    b.ins(&Instruction::If(BlockType::Empty));
+                    self.depth += 1;
+                    b.ins(&Instruction::I32Const(pre as i32));
+                    // The offset the other two engines name: the low one when it
+                    // is negative or out of order, otherwise the high one.
+                    b.ins(&Instruction::LocalGet(from));
+                    b.ins(&Instruction::I64ExtendI32S);
+                    b.ins(&Instruction::LocalGet(to));
+                    b.ins(&Instruction::I64ExtendI32S);
+                    b.ins(&Instruction::LocalGet(from));
+                    b.ins(&Instruction::I32Const(0));
+                    b.ins(&Instruction::I32LtS);
+                    b.ins(&Instruction::LocalGet(to));
+                    b.ins(&Instruction::LocalGet(from));
+                    b.ins(&Instruction::I32LtS);
+                    b.ins(&Instruction::I32Or);
+                    b.ins(&Instruction::Select);
+                    b.ins(&Instruction::I32Const(post as i32));
+                    b.ins(&Instruction::Call(trap));
+                    b.ins(&Instruction::Unreachable);
+                    self.depth -= 1;
+                    b.ins(&Instruction::End);
+                    b.ins(&Instruction::LocalGet(to));
+                    b.ins(&Instruction::LocalGet(from));
+                    b.ins(&Instruction::I32Sub);
+                } else {
+                    b.ins(&Instruction::I32Const(0));
+                    b.ins(&Instruction::LocalSet(from));
+                    str_len(b);
+                }
                 b.ins(&Instruction::LocalTee(n));
                 // A zero-length string still gets a buffer, so the triple's pointer
                 // is never null — `push` reallocs from it either way.
@@ -6724,6 +6789,8 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Call(malloc));
                 b.ins(&Instruction::LocalTee(buf));
                 b.ins(&Instruction::LocalGet(s));
+                b.ins(&Instruction::LocalGet(from));
+                b.ins(&Instruction::I32Add);
                 b.ins(&Instruction::LocalGet(n));
                 b.ins(&Instruction::MemoryCopy {
                     src_mem: 0,

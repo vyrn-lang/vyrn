@@ -215,6 +215,9 @@ fn rows() -> Vec<Function> {
         // the result is the place at offset 0 of `s` — which is the sentence
         // `place at` writes for `a[i]`, and the declared return type is inert for
         // the reason it is inert there.
+        // One row for both arities: the two offsets are plain `Int64`s and
+        // carry no ownership, so the borrow view is the same either way
+        // (RFC-0113).
         row("bytes", &[], &[("s", Read, Str)], u8s(), &["s", "0"]),
         // Its inverse ALLOCATES, so it is not a view. The two sit side by side on
         // purpose: the old list held one and not the other, and nothing in either

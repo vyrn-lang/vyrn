@@ -1,5 +1,15 @@
 # `slice` is 57 percent of the site build, and the comment above it says otherwise
 
+**FIXED 2026-08-25 — [RFC-0113](../RFC-0113-bytes-takes-a-range.md).** Option 2,
+the one this file ranked second and the one it described as "one language
+addition, and every scanner in `std/` gets it". `bytes` takes a byte range now,
+`slice` calls it once instead of looping, and the numbers below moved:
+`slice` 32.374 s (57.5%) to 1.293 s (9.2%), and the whole export 26.3 s to
+12.75 s. Option 1 stays refused for the reason given here; option 3, the
+interpreted loop's own floor, is still open and still the bigger job.
+
+The evidence below is left as written.
+
 Found in one command, the first time `vyrn run --profile` was pointed at
 anything real.
 

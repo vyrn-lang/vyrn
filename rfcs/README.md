@@ -44,7 +44,7 @@ drifts: each header says which milestone landed and what did not, and the
 
 ## The index
 
-111 RFCs, numbered 0001 to 0112, with one gap. **There is no RFC-0066** — the
+112 RFCs, numbered 0001 to 0113, with one gap. **There is no RFC-0066** — the
 number was skipped and never used. The only mention of it in the repository is
 this sentence. Closing the gap would mean renumbering thirty files and breaking
 every cross-reference, so the gap stays.
@@ -168,6 +168,7 @@ claim is true — is written down in the test's own header.
 | [0110](RFC-0110-a-lambda-takes-its-parameters-before-an-arrow.md) | A Lambda Takes Its Parameters Before an Arrow | Implemented; `x -> e`, `(a, b) -> e`, `() -> e` |
 | [0111](RFC-0111-a-program-can-write-bytes.md) | A Program Can Write Bytes | Implemented; `writeFileBytes`, `writeStdout` — closes the mandelbrot gap |
 | [0112](RFC-0112-a-regular-expression-that-searches.md) | A Regular Expression That Searches | Implemented; `std/regex` in Vyrn — closes the regex-redux gap |
+| [0113](RFC-0113-bytes-takes-a-range.md) | `bytes` Takes a Range | Implemented; `slice` 57% of the site build to 9.2% |
 
 ## The other documents here
 

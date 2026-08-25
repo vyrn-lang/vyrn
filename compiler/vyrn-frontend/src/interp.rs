@@ -5427,16 +5427,34 @@ impl<'a> Interp<'a> {
                     // `bytes` decodes the UTF-8 bytes as UInt8 (RFC-0014 M2) —
                     // the irreducible VIEW every Vyrn string routine is built on.
                     "bytes" => match &vals[0] {
-                        Val::Str(s) => Ok(Val::Array(
-                            s.bytes()
-                                .map(|b| Val::IntN {
-                                    v: b as i64,
-                                    bits: 8,
-                                    signed: false,
-                                })
-                                .collect::<Vec<_>>()
-                                .into(),
-                        )),
+                        Val::Str(s) => {
+                            // The range form (RFC-0113), or the whole string.
+                            let (a, b) = if vals.len() == 3 {
+                                let int = |v: &Val| match v {
+                                    Val::Int(n) => *n,
+                                    Val::IntN { v, .. } => *v,
+                                    _ => -1,
+                                };
+                                (int(&vals[1]), int(&vals[2]))
+                            } else {
+                                (0, s.len() as i64)
+                            };
+                            if a < 0 || b < a || b as usize > s.len() {
+                                let bad = if a < 0 || b < a { a } else { b };
+                                return Err(crate::trap::string_index(bad).into());
+                            }
+                            Ok(Val::Array(
+                                s.as_bytes()[a as usize..b as usize]
+                                    .iter()
+                                    .map(|b| Val::IntN {
+                                        v: *b as i64,
+                                        bits: 8,
+                                        signed: false,
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .into(),
+                            ))
+                        }
                         _ => Err("bytes of non-String".into()),
                     },
                     // (`chars` is `std/text`'s `charsV` — RFC-0078 M4c. Rust's

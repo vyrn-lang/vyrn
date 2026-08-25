@@ -321,13 +321,15 @@ export fn slice(s: String, start: Int64, end: Int64) -> Result<String, SliceErro
     if start == end {
         return Ok("")
     }
-    let mut out: Array<UInt8> = []
-    let mut i = start
-    while i < end {
-        out.push(s[i])
-        i = i + 1
-    }
-    return match stringFromBytes(out) {
+    // The copy, as ONE call (RFC-0113). This was a `while` pushing a byte at a
+    // time into an `Array<UInt8>`, which measured 19.6 µs against this shape's
+    // 1.0 µs for the same ninety bytes — and `slice` doing it was 57 per cent of
+    // the site build.
+    //
+    // Every decision stays here. `bytes` answers bytes and checks only that the
+    // range exists; the bounds and the character boundaries above are this
+    // function's, and they have already run by the time the copy happens.
+    return match stringFromBytes(bytes(s, start, end)) {
         Ok(v) => Ok(v),
         Err(e) => Err(SplitsCharacter(start)),
     }
