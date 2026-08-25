@@ -18,12 +18,12 @@
 //   * `Map` is `Map<String, V>` (RFC-0028) and the only way from bytes to a
 //     `String` is `stringFromBytes`, so every window is an allocation and a
 //     UTF-8 validation.
-//   * `sortBy` orders by an `Int64` key and the game orders by count descending
-//     with ties by fragment, so the fragment order is a hand-written sort.
+//   * `sortWith` (a comparator) orders by count descending with ties by
+//     fragment in one stable pass.
 
 import { toUpper } from "std/strings"
 import { startsWith } from "std/strpred"
-import { sortBy } from "std/arrays"
+import { sortWith } from "std/arrays"
 
 /// The bench N — bases in the synthetic sequence the bench block builds. The
 /// census N comes from stdin instead, so there is no `order` beside it.
@@ -94,13 +94,26 @@ fn fixed3(x: Float64) -> String {
     return "\{whole}.\{frac}"
 }
 
-/// Count descending, ties by fragment ascending.
-///
-/// `sortBy` orders by an `Int64` and is stable, so the fragment order has to be
-/// established first — and no comparator crosses the API, so that pass is a
-/// hand-written insertion sort. Swapping two records inside an array costs three
-/// `.copy()`, because a record read out of an array that owns it may not be
-/// stored back into the same array.
+/// Count descending, ties by fragment ascending — one comparator, one stable
+/// pass. This was two passes until `sortWith` landed: a hand-written insertion
+/// sort for the fragment order (three `.copy()` per swap) and then `sortBy`
+/// on the negated count, because no comparator crossed the API.
+fn byCountThenFrag(a: Entry, b: Entry) -> Int64 {
+    if a.count > b.count {
+        return 0 - 1
+    }
+    if a.count < b.count {
+        return 1
+    }
+    if a.frag < b.frag {
+        return 0 - 1
+    }
+    if a.frag > b.frag {
+        return 1
+    }
+    return 0
+}
+
 fn ranked(m: Map<String, Int64>) -> Array<Entry> {
     let mut es: Array<Entry> = []
     for k in m.keys() {
@@ -110,18 +123,7 @@ fn ranked(m: Map<String, Int64>) -> Array<Entry> {
         }
         es.push(Entry { frag: k, count: c })
     }
-    let mut i = 1
-    while i < es.length {
-        let mut j = i
-        while j > 0 && es[j - 1].frag > es[j].frag {
-            let tmp = es[j - 1].copy()
-            es[j - 1] = es[j].copy()
-            es[j] = tmp
-            j = j - 1
-        }
-        i = i + 1
-    }
-    return sortBy(es, e -> 0 - e.count)
+    return sortWith(es, byCountThenFrag)
 }
 
 /// One frequency table: every fragment of width `k` as a percentage of the

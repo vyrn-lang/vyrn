@@ -67,6 +67,46 @@ export fn includes(xs: Array<String>, x: String) -> Bool {
     return false
 }
 
+/// A stably sorted copy, ordered by a comparator: negative puts `a` before
+/// `b`, positive after, and zero keeps arrival order (insertion sort, so the
+/// sort is stable). "Count descending, ties by fragment" is one comparator
+/// here where `sortBy`'s single `Int64` key needed two passes and a
+/// hand-written one.
+export fn sortWith<T>(xs: Array<T>, cmp: fn(T, T) -> Int64) -> Array<T> {
+    let mut out: Array<T> = []
+    for x in xs {
+        out.push(x)
+    }
+    let mut i = 1
+    while i < out.length {
+        let mut j = i
+        while j > 0 {
+            if cmp(out[j - 1], out[j]) > 0 {
+                let tmp = out[j - 1]
+                out[j - 1] = out[j]
+                out[j] = tmp
+                j = j - 1
+            } else {
+                j = 0
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+test "sortWith orders by the comparator, stably" {
+    let xs: Array<Int64> = [3, 1, 2, 1]
+    let up = sortWith(xs, (a, b) -> a - b)
+    assertEq(up[0], 1)
+    assertEq(up[1], 1)
+    assertEq(up[2], 2)
+    assertEq(up[3], 3)
+    let down = sortWith(xs, (a, b) -> b - a)
+    assertEq(down[0], 3)
+    assertEq(down[3], 1)
+}
+
 /// A stably sorted copy, ascending by an `Int64` key (insertion sort). The key
 /// extractor is an ordinary `fn` parameter, so a lambda, a named function, or
 /// a STORED function value (RFC-0037) all flow in.

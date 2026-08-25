@@ -1209,7 +1209,7 @@ export fn workItems() -> Array<String> {
         "CLOSED — the Map is hashed in all three engines: an FNV index of cap*2 buckets lives beside the insertion-ordered storage and never reorders it, which is how RFC-0028's locked order survives a hash underneath. The shim's map_find, the wasm runtime's, and the interpreter's MapVal all probe instead of scanning.",
         "Byte-slice map keys, so a k-mer window is not a String allocation and a UTF-8 validation per position.",
         "One search per update, so m[k] = m[k] + 1 does not scan the map twice.",
-        "A comparator, or a secondary key, for sortBy, so \"count descending, ties by fragment\" stops being a hand-written insertion sort with three copies per swap.",
+        "CLOSED — std/arrays gained sortWith(xs, cmp): a comparator crosses the API now, so count-descending-ties-by-fragment is one stable pass, and k-nucleotide's hand-written insertion sort with three copies per swap is gone.",
         "A copy into an array that already exists, so .copy() inside a loop stops allocating — 600 ms of fannkuch-redux's 763 ms, measured.",
         "CLOSED — the byte sink shipped as RFC-0111: writeStdout takes packed bytes as they are and writeFileBytes writes them, which is what unblocked mandelbrot's P4 bitmap; fasta and reverse-complement can take the same path.",
         "CLOSED — RFC-0115: xs.reserve(n) makes a known-size build one allocation, and xs.append(ys) is one copy with at most one growth. std/html's per-byte appendBytes loop is one append now; the heapless-element rule keeps the byte copy honest.",
