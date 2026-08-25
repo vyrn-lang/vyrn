@@ -1197,3 +1197,252 @@ The order matters because each artifact is USED by the next, and because steps
 1–3 alone would already have been worth more than Part I: the three defects of
 §8 were all violations of what step 3 preserves.
 
+---
+
+# Part V — Structure
+
+Part IV built the machine and the logic. Part V finds the STRUCTURE that makes
+the invariants obvious in hindsight — the criterion for depth being that after
+seeing it, the earlier theorems stop needing proof and start needing only
+inspection. It is §38. The rest of the part spends that structure: on places
+with holes (§39), on loops and a trip-count-independent bound (§40), on release
+placement as a rewriting system with a unique normal form (§41), on tasks
+(§42), and on what borrows, lifetimes, and RFC-0109's open decision all are
+under this light (§43).
+
+## 38. The Heap Forest Theorem
+
+**Theorem 14 (heap forest).** At every instant of every trace of a
+checker-accepted program, the ownership relation on the live heap is a FOREST:
+every live owned allocation has exactly one parent, which is either a frame
+place (a root) or a slot inside another owned allocation (a container element,
+a boxed payload, a record field), and the parent chains terminate in roots.
+
+*Proof.* By induction on events. `alloc` bills a fresh allocation to exactly
+one place (one parent, a root). `move` re-parents — the old parent loses the
+edge as the new one gains it, atomically, because a store into a place is a
+move and rule 2 refuses storing a borrow, so no event creates a SECOND parent.
+A push into a container transfers billing to the container's interior: still
+one parent, now an interior slot. `free` removes a leaf-ward subtree via the
+release walk, which recurses parent-to-child only. `lend` adds no edge — a
+borrow is not a parent. No other event touches the relation. ∎
+
+Everything earlier re-reads as forest preservation:
+
+- **I₂ (one owner)** — a node has at most one parent. Not an axiom: the shape.
+- **Theorem 1 (no double free)** — a node is deleted through its one parent,
+  once, because after deletion the parent edge is gone.
+- **Theorem 2 (no leak)** — a tree detached from every root is unreachable
+  BY CONSTRUCTION impossible: detachment happens only at `move` (re-attach) or
+  `free` (delete). A leak is precisely a forest violation, which is why every
+  one of this week's defects was a place where the implementation silently
+  dropped a parent edge the model required.
+- **The classification table** — `Alloc` adds a root edge, `Lend` adds none,
+  `Grow` re-uses one, `Move` re-targets one. Four classes because a single
+  edge has four fates.
+- **`vyrn why --memory`** — a printout of the forest's static mirror.
+
+The slogan, which is the deepest sentence in this document: **under the move
+discipline, the heap has the same shape as the context.** Sharing is what
+separates a heap from a tree, and A1–A3 are exactly the rules that refuse
+sharing to persist. Everything this design gets for free — guard-free frees,
+exact liveness, offline-optimal residency — is downstream of the heap being
+forced into the shape the syntax already has.
+
+## 39. The place algebra: paths, holes, partial moves
+
+Part IV's `P` was flat. The implementation is not: `consume head.err` takes a
+FIELD out of a binding, and the verdict that survives is
+`Reclaimed(kind, holes)` with holes as relative paths (own.rs, RFC-0093 M2).
+The model owes that structure a definition.
+
+**Paths.** `π ::= x | π.f | π.k` — a variable, a field, a payload slot. The
+paths of a variable form a finite tree given by its type (finite because
+recursive types BOX, and a box is a heap edge, not a path — the path tree stops
+at the box; the forest continues through it).
+
+**Frontier states.** `σ` assigns states not to variables but to a FRONTIER: an
+antichain of paths covering each variable's tree, each carrying a state. The
+coherence rules:
+
+- Collapse: if every child of a node carries the same state `s ∈ {O, Ø}`, the
+  frontier may replace them with the parent at `s`. A whole binding is the
+  maximally collapsed frontier `{x ↦ O}`.
+- Split: `consume x.f` refines the frontier to expose `x.f`, sets it `Ø`, and
+  leaves the siblings at `O` — the PARTIAL MOVE. The binding's release at R4
+  walks the frontier and releases the `O` leaves only, which is exactly what
+  `Reclaimed(kind, holes)` encodes: the holes are the `Ø` leaves, spelled
+  relative to the root.
+- A store into a field, `x.f = v`, releases the old leaf if `O` (the
+  `fieldOverwrite` row of the memory suite) and sets it `O`.
+- `B` never splits: a projection of a borrow is a borrow, and by A2 it cannot
+  be stored, so a `B` frontier is always the whole variable, transient.
+
+**Theorem 15 (lifting).** Theorems 1–13 hold with `P` replaced by frontier
+leaves, `β` billing leaf-paths, and I₂ as injectivity over leaves.
+
+*Proof.* Every transfer function acts on finitely many leaves; collapse/split
+are state-preserving re-partitions (they neither create nor destroy billing);
+the event cases of Lemma 4 are unchanged leaf-wise. The one new obligation is
+that split and collapse commute with joins — they do, because both are
+determined by the type and the states alone, not by the path taken. ∎
+
+The fixpoint cost revisits once: the place count is now leaves, bounded by the
+type's size, still finite, still height-2 per leaf. Nothing in §16 changes but
+the constant.
+
+## 40. Loops: carried billing, and a bound no trip count can break
+
+Two shapes exhaust what a loop can do with ownership.
+
+**Per-iteration values.** Born and dying inside the body. Their [REL] sits in
+the body; the back edge carries `Ø`; the invariant context of [WHILE] holds
+trivially. One release per iteration, amortized cost 1 against the iteration's
+own `Alloc` — the plan never does catch-up work.
+
+**Loop-carried values.** The accumulator: `O` on the back edge, `O` at entry,
+invariant `O`. The store inside the body is where the PREVIOUS iteration's
+allocation dies (R2) — the release is carried one iteration forward, still
+exactly once per allocation. The swap/rotation family (`tmp = consume a;
+a = consume b; b = consume tmp`) is three moves, zero releases, and the
+frontier tracks it without special cases: billing re-parents three times and
+the forest never gains or loses a node.
+
+**Theorem 16 (frame-live bound).** At every program point, the number of live
+allocations billed to FRAME leaves is at most the number of frontier leaves —
+a static quantity, independent of every trip count.
+
+*Proof.* β restricted to frame leaves is injective into leaves (Theorem 15).
+Everything a loop accumulates beyond that is pushed into a container, and a
+push re-bills the element to the container's INTERIOR — off the frame's
+leaves, inside one allocation the frame owns. ∎
+
+The reading: unbounded state can only live inside containers, and the frame's
+own ledger has static size. That is what makes a useful `why --memory`
+EXTENSION possible: at any point the compiler can print the exact multiset of
+live frame allocations — place, type, and for containers a symbolic size — as
+a sound per-point residency report. Peak residency of a frame is the max over
+points of that report plus the containers' contents; the first half is exact
+and free, the second is where symbolic bounds (sums over trip counts) would
+enter if the project ever wants Hofmann-Jost-style amortized bounds. Theorem 16
+is the reason the split is clean.
+
+## 41. Placement as a rewriting system: the earliest plan is a normal form
+
+Theorem 12 claimed the algorithm finds the earliest placement for silent kinds.
+Part IV proved it exists; the deep statement is that it is CANONICAL.
+
+Work on Ω-derivations. One rewrite rule:
+
+```
+(perm)   S ; [REL p]   ⟶   [REL p] ; S      when p ∉ reads(S), p ∉ writes(S),
+                                             and p's kind is silent
+```
+
+**Theorem 17 (normalization).** (perm) is strongly normalizing and confluent on
+the derivations of a fixed program; every silent [REL] therefore has a unique
+normal position — the earliest point past its place's last use — and the
+algorithm's output IS the normal form.
+
+*Proof.* Termination: each application strictly decreases the [REL]'s position
+index in the derivation, a well-founded measure; distinct [REL]s never block
+each other's measure (moving one does not move another backward). Local
+confluence: two overlapping redexes are either two [REL]s for DIFFERENT places
+crossing the same S — they commute, since neither reads the other's place
+(linearity: no statement uses two places' releases) — or the same [REL] with
+two applicable S's, which compose. Newman's lemma gives confluence; strong
+normalization plus confluence gives the unique normal form. The normal
+position is characterized by the failure of (perm): the first earlier
+statement that reads `p`, i.e. the last use. ∎
+
+Two corollaries worth the section:
+
+- **Theorem 7 re-derived.** Pointwise-minimal residency is now a one-liner: the
+  normal form dominates every other derivation pointwise because every
+  non-normal derivation reaches it by moves that only shrink live ranges.
+- **The observable boundary re-derived.** An observable [REL] is a frozen
+  redex — (perm)'s side condition excludes it — so its position is its
+  declared one, and Theorem 10's impossibility is the statement that some
+  programs need a rewrite the system does not contain. The split of §17 is not
+  a policy; it is the redex condition.
+
+## 42. Tasks: the forest partitions
+
+`spawn` in this language requires the spawned function to be ISOLATED — the
+checker's own wording: "a spawned function must be isolated (pure)", enforced
+by `SPAWN_FORBIDDEN` and the spawn-isolation analysis, with the spawn-`drop`
+hole closed in the hardening arc. Under the model that rule is exactly:
+
+**Theorem 18 (partition).** Each task's billing map has a disjoint domain: an
+allocation is billed to a leaf of exactly one task's frame stack. Arguments
+move in at `spawn` (re-parenting into the task's roots); the result moves out
+at `join`. Hence Theorems 1–17 hold PER TASK, the global heap forest is the
+disjoint union of task forests, and no release in one task can touch another
+task's tree.
+
+*Proof.* Isolation refuses every operation that could carry a handle across
+the boundary outside spawn/join themselves — that is what `SPAWN_FORBIDDEN`
+enumerates — and spawn/join are moves, which re-parent rather than share. β
+disjointness is then an induction identical to Theorem 14's, per task. ∎
+
+The useful direction is the contrapositive: any future weakening of spawn
+isolation (shared state, channels carrying borrows) is a hole in Theorem 18
+BEFORE it is a race — the model says which spawn rules are load-bearing for
+memory, not only for determinism. A channel that MOVES values keeps the
+theorem; anything that lends across tasks breaks the bracketing lemma too
+(Lemma 3 assumed one stack).
+
+## 43. Brackets, lifetimes, and what RFC-0109 is actually asking
+
+Lemma 3 proved lends form a Dyck word against the call stack — every borrow is
+an ANONYMOUS BRACKET, opened at a call, closed at its return, nested by
+construction. That framing turns three superficially different designs into
+one question.
+
+- **A lifetime** (Rust's) is a NAMED bracket: a borrow allowed to close
+  somewhere other than the enclosing call's return, with a name so the checker
+  can still prove nesting. The entire borrow checker is the bracketing lemma,
+  recovered syntactically after syntactic nesting is given up.
+- **An `Rc` slice** (RFC-0109's design C) is a bracket REPLACED BY A COUNTER:
+  nesting is no longer proved, it is counted at runtime — §30's ladder again,
+  paying the concretization gap per handle.
+- **The status quo** (copy at the boundary) is a bracket replaced by a NEW
+  ROOT: the copy is a fresh tree, trivially nested because it is not nested in
+  anything.
+
+So RFC-0109's open decision — "can a view be stored?" — is, in this model's
+terms: **may a bracket outlive its syntactic scope, and if so, who proves the
+nesting?** Three answers: nobody (refuse storage — today), a runtime counter
+(Rc slice — pay per handle), or a name (lifetimes — pay in language
+complexity, the checker grows a second discipline). The model does not choose;
+it prices. What it DOES rule out is the fourth answer nobody says aloud —
+storing an unproven bracket — because that is Theorem 3's counterexample in
+§33, row A2.
+
+And it sharpens the earlier recommendation: RFC-0109's evidence showed the hot
+cases dissolved without views (RFC-0113's range, option D's route-arounds). In
+forest terms: the ten modules wanted to KEEP subtrees, and keeping a subtree
+has an exact, already-legal spelling — move it (re-parent), or copy it (new
+root). A stored borrow is only ever needed when neither is affordable, and the
+benchmarks found that case rare. The bracket lens says why: syntactic nesting
+covers most of what programs do with references, which is the empirical bet
+this whole language made.
+
+## 44. What Part V still does not do
+
+- **Interior mutation of containers while lent.** The model lets a container
+  be lent (`B`) and separately mutated (`modify`), and A6 keeps those apart
+  today because `modify` is treated as `read` in v0.1. The day `modify` grows
+  real in-place mutation of containers, the frontier needs an exclusivity rule
+  (no `B` outstanding across a `modify`), which is a fifth assumption, not a
+  theorem. Named now so it is not discovered as a defect.
+- **The container interior is a multiset, not a modelled tree.** Billing "to
+  the interior" flattens element order and sharing among elements. Sufficient
+  for every theorem here; insufficient the day elements can be lent out by
+  reference (RFC-0109 again).
+- **Symbolic residency bounds** (§40's second half) are sketched, not defined.
+  The exact-frame half is free; the container half is a research feature.
+- **Ω with paths is stated by construction (§39), not written as rules.** The
+  path-aware [LET]/[REL]/split/collapse rules are mechanical to produce and
+  long; they belong to the mechanization (§37 step 2), not to prose.
+

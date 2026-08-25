@@ -20,6 +20,13 @@
   a sharpness table giving each assumption its two-line counterexample, the
   manager-space theorem (the discipline makes the offline optimum
   online-achievable at zero cost — Theorem 13), and the mechanization roadmap.
+  Part V: structure — the Heap Forest Theorem (under the move discipline the
+  heap has the same shape as the context, and every invariant is forest
+  preservation), the place algebra with RFC-0093's holes as its implementation,
+  a trip-count-independent frame-live bound, release placement as a confluent
+  rewriting system whose unique normal form is the earliest plan, task
+  partition from spawn isolation, and borrows/lifetimes/RFC-0109 unified as one
+  question about brackets: who proves the nesting.
 
 ## The gap in one sentence
 
