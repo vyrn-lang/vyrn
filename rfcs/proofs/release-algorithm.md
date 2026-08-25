@@ -1513,10 +1513,22 @@ covers it — the genuine Rule N witness is the both-branches-continue variant,
 which the checker accepts and which leaks identically today. The correction is
 in place at §12.
 
+**A4's first witness exists now.** §24's design landed for the claim that
+carries the double-free risk: `every_claimed_fresh_string_form_is_fresh` (in
+`interp.rs`'s tests) evaluates all three `str_temporary` forms — `@str`,
+`@concat`, String `+` — against held `Rc`s and asserts the result aliases no
+input, with the classifier asserted IN THE SAME LOOP so the claimed set and the
+witnessed set cannot drift. Proved by installing the natural lie — `@str` of a
+String shortcutting to the same `Rc` — and watching it fail with "the result
+ALIASES an input … freeing it as a temporary is a double free". The Grow claim
+stays unwitnessed at this level, deliberately: the interpreter answers it with
+`Rc::make_mut`, whose identity depends on the count, and the compiled behaviour
+is pinned by `memory.rs`'s `selfAppend` row.
+
 **What this verification is NOT.** It samples four assumptions with one probe
-each; it does not mechanize anything (§37 is still the roadmap), and it cannot
-verify A4 — three defects this week are the standing proof that only §24's
-executable witnesses can. The honest summary: every assumption the proofs
+each and one classification claim with one witness; it does not mechanize
+anything (§37 is still the roadmap), and A4's remaining rows — the compiled
+helpers, the `Grow` set — are still only pinned behaviourally. The honest summary: every assumption the proofs
 lean on is enforced by the implementation today, one more strongly than the
 document claimed (A7), and the document was wrong twice in its own favour —
 both errors of attributing to the future what the checker already does.

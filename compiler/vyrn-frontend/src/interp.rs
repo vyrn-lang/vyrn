@@ -7499,6 +7499,121 @@ mod tests {
     };
     use crate::run;
 
+    // ---- RFC-0114 §24/§45: the freshness witnesses ------------------------
+
+    /// The release machinery claims three expression forms ALWAYS answer a
+    /// fresh String allocation: `@str`, `@concat`, and String `+`. Three
+    /// mechanisms lean on that one claim — `own::str_temporary` (the caller
+    /// frees the temporary), the store's `fresh_str` exception (the old buffer
+    /// is released because the new one cannot be it), and both backends'
+    /// `free_str_temp`. Claimed the WRONG way — fresh when actually aliasing —
+    /// every one of them becomes a double free.
+    ///
+    /// So the claim is executed rather than asserted (the proof appendix's
+    /// §24, "witnessed instead of asserted"): build each form, evaluate it
+    /// against inputs whose `Rc` this test holds, and check the result's
+    /// allocation is not any input's. The classifier is asserted IN THE SAME
+    /// LOOP, so the claimed set and the witnessed set cannot drift apart.
+    ///
+    /// The GROW claim (`@push` hands back the receiver's allocation) is
+    /// deliberately not witnessed here: the interpreter's statement fast path
+    /// answers it with `Rc::make_mut`, whose identity depends on the count,
+    /// and the compiled behaviour is already pinned by `memory.rs`'s
+    /// `selfAppend` row on wasm.
+    #[test]
+    fn every_claimed_fresh_string_form_is_fresh() {
+        use crate::ast::{BinOp, Expr};
+        use std::rc::Rc;
+
+        let program = crate::parser::parse(
+            crate::lexer::lex("fn main() -> Int64 {\n    return 0\n}\n").unwrap(),
+        )
+        .unwrap();
+        let interp = super::new_interp(&program, &[]).unwrap();
+
+        let ra = Rc::new("left-".to_string());
+        let rb = Rc::new("right".to_string());
+        let mut frame = super::Frame::default();
+        frame.slots.push((
+            "a".to_string(),
+            super::Slot {
+                v: Val::Str(ra.clone()),
+                ty: None,
+            },
+        ));
+        frame.slots.push((
+            "b".to_string(),
+            super::Slot {
+                v: Val::Str(rb.clone()),
+                ty: None,
+            },
+        ));
+        let mut scope = vec![frame];
+
+        let var = |n: &str| Expr::Var {
+            name: n.to_string(),
+            line: 1,
+        };
+        let forms: Vec<(&str, Expr)> = vec![
+            (
+                "@concat",
+                Expr::Call {
+                    name: "@concat".to_string(),
+                    args: vec![var("a"), var("b")],
+                    line: 1,
+                },
+            ),
+            (
+                "String +",
+                Expr::Binary {
+                    op: BinOp::Add,
+                    lhs: Box::new(var("a")),
+                    rhs: Box::new(var("b")),
+                    line: 1,
+                },
+            ),
+            // `@str` of a String is the sharpest case: an identity shortcut
+            // here would be the natural optimization and the silent double
+            // free. The arm builds `Rc::new(scalar_to_string(..))` today, and
+            // this row is what keeps that true.
+            (
+                "@str",
+                Expr::Call {
+                    name: "@str".to_string(),
+                    args: vec![var("a")],
+                    line: 1,
+                },
+            ),
+        ];
+
+        for (what, e) in &forms {
+            assert!(
+                crate::own::str_temporary(e),
+                "{what}: `str_temporary` no longer claims this form — the claimed \
+                 set and this witness have drifted; update both together"
+            );
+            let got = interp
+                .expr(e, &mut scope)
+                .unwrap_or_else(|c| panic!("{what}: evaluation failed: {c:?}"));
+            let Val::Str(rs) = got else {
+                panic!("{what}: expected a String, got {got:?}")
+            };
+            assert!(
+                !Rc::ptr_eq(&rs, &ra) && !Rc::ptr_eq(&rs, &rb),
+                "{what}: the result ALIASES an input — the Alloc claim is false, \
+                 and freeing it as a temporary is a double free"
+            );
+        }
+
+        // And the classifier claims nothing else of the shapes nearby: a bare
+        // variable is a borrow of the binding, and freeing it would free the
+        // binding's own buffer.
+        assert!(
+            !crate::own::str_temporary(&var("a")),
+            "a variable read must never be claimed fresh"
+        );
+    }
+
     /// Run a single-source program that uses `toJson`, with `std/json` reachable.
     ///
     /// Since RFC-0078 M2b, `toJson`'s serializer IS that module's `emit`: the
