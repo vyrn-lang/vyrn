@@ -524,6 +524,16 @@ const ROWS: &[Row] = &[
               guard: the branch value must not be able to alias what the edge frees",
     },
     Row {
+        export: "revivedBinding",
+        census: "RFC-0114 untake",
+        today: Shape::Steady,
+        why: "The take is real, but the binding is provably re-established — the last \
+              event is an owning write at the let's own loop set and branch path, every \
+              take precedes it, and no early exit sits between — so block exit releases \
+              the FINAL value. A conditional revive, or a return/break/`?` in the \
+              window, refuses toward the leak",
+    },
+    Row {
         export: "prependLoop",
         census: "§4",
         today: Shape::Steady,
@@ -1563,6 +1573,22 @@ export extern fn conditionalMoveMatch() {{
 fn pick(n: Int64) -> Result<Int64, Int64> {{
     if n < 0 {{ return Ok(n) }}
     return Err(n)
+}}
+
+/// RFC-0114 untake: the value is taken, the binding is provably re-established,
+/// and block exit releases the FINAL value — the taken one is the callee's,
+/// which `drop`s it (the language's contract for a read-only `consume`).
+fn takeDrop(v: consume String) -> Int64 {{
+    let n = Int64(v.byteLength)
+    drop v
+    return n
+}}
+
+export extern fn revivedBinding() {{
+    let mut s = tag() + tag()
+    seen = seen + takeDrop(consume s)
+    s = tag() + tag()
+    seen = seen + Int64(s.byteLength)
 }}
 
 /// RFC-0114 Rule N at an `if`-EXPRESSION join — the third join shape, same

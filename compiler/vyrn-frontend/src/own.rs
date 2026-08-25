@@ -1246,6 +1246,7 @@ pub fn analyze(program: &Program) -> Ownership {
     let facts = crate::movecheck::facts(program);
     let store_owned = fold_store_owned(&facts);
     let edge_releases = fold_edge_releases(&facts);
+    let revived = fold_revived(&facts);
     let lets = facts.lets;
 
     let mut droppable = HashMap::new();
@@ -1253,7 +1254,7 @@ pub fn analyze(program: &Program) -> Ownership {
     let mut notes = HashMap::new();
     let mut releases = HashMap::new();
     let mut emit = |name: String, body: &Block| {
-        let r = emit_body(body, &lets, &proto);
+        let r = emit_body(body, &lets, &proto, &revived);
         releases.insert(name.clone(), place_body(body, &r.droppable));
         droppable.insert(name.clone(), r.droppable);
         holes.insert(name.clone(), r.holes);
@@ -1302,6 +1303,64 @@ pub fn analyze(program: &Program) -> Ownership {
         edge_releases,
         receiver_frees,
     }
+}
+
+/// RFC-0114 untake: the bindings whose value was taken and then provably
+/// re-established, so block exit releases the FINAL value. The rules, all
+/// refusing toward the leak:
+///
+/// - the last event is an OWNING write whose loop set and branch path equal
+///   the `let`'s own — a revive inside a loop that may not run, or on one arm
+///   of a branch, does not dominate the exit;
+/// - every take precedes that write in walk order;
+/// - no early exit (`return`, `?`, `break`, `continue`) sits between the
+///   first take and the write — on such an exit the binding still holds the
+///   taken state, and the exit path's releases run from the same `droppable`
+///   table this fold feeds.
+fn fold_revived(facts: &crate::movecheck::Facts) -> std::collections::HashSet<usize> {
+    use crate::movecheck::{EvKind, Gone};
+    let mut per: HashMap<usize, Vec<&crate::movecheck::StoreEv>> = HashMap::new();
+    for ev in &facts.store_events {
+        per.entry(ev.key).or_default().push(ev);
+    }
+    let mut out = std::collections::HashSet::new();
+    for (key, row) in &facts.lets {
+        if !matches!(
+            row.gone,
+            Some(Gone::Moved { .. }) | Some(Gone::Dropped { .. })
+        ) {
+            continue;
+        }
+        let Some(evs) = per.get(key) else { continue };
+        let (Some(first), Some(last)) = (evs.first(), evs.last()) else {
+            continue;
+        };
+        if !matches!(first.kind, EvKind::Write { id: 0, .. })
+            || !matches!(last.kind, EvKind::Write { owning: true, .. })
+            || last.loops != first.loops
+            || last.branch != first.branch
+        {
+            continue;
+        }
+        let takes: Vec<u32> = evs
+            .iter()
+            .filter(|e| matches!(e.kind, EvKind::Take))
+            .map(|e| e.order)
+            .collect();
+        if takes.is_empty() || takes.iter().any(|&t| t >= last.order) {
+            continue;
+        }
+        let first_take = *takes.iter().min().expect("nonempty");
+        if facts
+            .exit_orders
+            .iter()
+            .any(|&o| o >= first_take && o <= last.order)
+        {
+            continue;
+        }
+        out.insert(*key);
+    }
+    out
 }
 
 /// RFC-0114 Rule N (edge normalization, R5). The walker hands over every `if`
@@ -1787,9 +1846,15 @@ struct FnResult {
 }
 
 /// One body's drop sites, in source order.
-fn emit_body(body: &Block, lets: &HashMap<usize, LetOwnership>, proto: &Owned) -> FnResult {
+fn emit_body(
+    body: &Block,
+    lets: &HashMap<usize, LetOwnership>,
+    proto: &Owned,
+    revived: &std::collections::HashSet<usize>,
+) -> FnResult {
     let mut e = Emit {
         droppable: HashMap::new(),
+        revived,
         holes: HashMap::new(),
         notes: Vec::new(),
         region_depth: 0,
@@ -1816,6 +1881,9 @@ fn id(s: &Stmt) -> usize {
 /// [`crate::movecheck`]. There is no expression analysis here at all.
 struct Emit<'a> {
     droppable: HashMap<usize, DropKind>,
+    /// RFC-0114 untake: bindings whose taken value was provably re-established
+    /// — their FINAL value is this block's to release. See [`fold_revived`].
+    revived: &'a std::collections::HashSet<usize>,
     /// The places a take took out of a droppable `let` (RFC-0093 M2).
     holes: HashMap<usize, Vec<String>>,
     /// One row per `let`, in source order, with what happens to its value.
@@ -2196,6 +2264,16 @@ impl Emit<'_> {
                         line: *line,
                     })
                 }
+            }
+            // RFC-0114 untake: the take is real, but the binding was
+            // provably re-established afterwards, so what the block exits
+            // with is this frame's — the same per-slot final value all three
+            // engines already release for a reassigned `mut` binding.
+            Some(Gone::Dropped { .. }) if self.revived.contains(&key) => {
+                Fate::Reclaimed(kind, Vec::new())
+            }
+            Some(Gone::Moved { .. }) if self.revived.contains(&key) => {
+                Fate::Reclaimed(kind, Vec::new())
             }
             Some(Gone::Dropped { line }) => Fate::Dropped { line: *line },
             Some(Gone::Returned { line }) => Fate::Moved {

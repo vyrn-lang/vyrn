@@ -302,6 +302,32 @@ harness flips. Deliberately out: a heap field of a temporary record
 (extraction lends into the record) and non-String receivers, recorded in the
 census.
 
+**The untake LANDED.** A binding whose value was taken and then provably
+re-established releases its FINAL value at block exit — the naive version of
+this was deferred as a double free, and the event stream is what makes the
+non-naive version provable. Three refusals, each closing one double-free
+path: the last event must be an OWNING write whose loop set and branch path
+equal the `let`'s own (a revive inside a loop that may not run, or on one
+arm of a branch, does not dominate the exit — the walker now stamps a branch
+path on every event, mirroring the loop ids); every take must precede that
+write in walk order; and no early exit — `return`, `?`, `break`, `continue`,
+now recorded as walk-order positions — may sit between the first take and
+the write, because on such an exit the binding still holds the taken state
+and the exit path's releases run from the same `droppable` table. No backend
+changed: the fold feeds `fate`, a qualified `Moved`/`Dropped` row becomes
+`Reclaimed`, and all three engines already release a `mut` binding by its
+slot's final value. The witness fell 423 MB → 4.1 MB; `revivedBinding` pins
+it on wasm; the conditional-revive and early-return probes hold.
+
+**Found while measuring, not fixed here**: a read-only `consume` parameter
+is not released by the callee — the language's current contract is an
+explicit `drop v` (`give` in `examples/binarytrees.vyrn` writes exactly
+that), and a callee that omits it leaks its argument. Half the untake
+witness's 423 MB was this defect, not the revive. Parameters are bound to
+node 0 in the walker (deliberately, for BORROWED params, whose rows would
+release somebody else's value) — an owned `consume` param wants a row of
+its own.
+
 The state is per place, per program point: `Owned | Moved | Uninit`, a forward
 dataflow with a join at every merge.
 
