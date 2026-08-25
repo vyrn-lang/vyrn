@@ -829,6 +829,25 @@ the observable subset is Theorem 9's boundary verified per trace. This is the
 bisimulation the coincidence theorem promises, and it subsumes every
 `Steady`/`Leaks` row while catching the two failure classes those rows cannot.
 
+**Coverage as landed (2026-08-26), and what the full check would still add.**
+The failure space has four classes, and three carry a standing gate:
+
+| class | gate |
+| --- | --- |
+| a value never freed | the `memory.rs` peak rows, per shape |
+| a double or foreign free | the `__vyrn_free` audit, on every parity native run |
+| a free BEFORE the last read | the audit's poison: a freed block is filled with `0xDD`, so a dangling read yields poison and the parity byte-compare fails — verified by a hand-doctored IR whose premature free prints stale-but-plausible text unaudited and pure poison audited |
+| an observable release at the wrong point | the `lowered.rs` trace gate (interpreter walk vs placement) plus parity's byte order on everything a declared release prints |
+
+What none of them see is a SILENT free at a later-than-planned point — extra
+residency, which is a performance property, not a safety one — and the formal
+multiset equality itself. Closing that residue needs the site-keyed identity
+this section describes: every allocation stamped with its source site and
+birth index, which is an ABI change at `__vyrn_malloc` and an
+instrumentation pass over the interpreter's `Rc` births. That is a project,
+and it buys a theorem's worth of assurance the four gates above approximate
+from four sides; it stays open, priced.
+
 ## 26. Migration, in the order that keeps every step green
 
 1. **Witness the table** (§24) against today's classifications — this can land

@@ -114,7 +114,8 @@ static void* __vyrn_alloc_check(void* p, unsigned long long n) {
    default), the cost is one branch per free and one getenv ever.
    The table uses raw malloc/calloc so it never audits itself. */
 static int vyrn_audit_state = -1;
-static void** vyrn_audit_tab = 0;
+typedef struct { void* p; unsigned long long n; } VyrnAuditEnt;
+static VyrnAuditEnt* vyrn_audit_tab = 0;
 static size_t vyrn_audit_cap = 0, vyrn_audit_len = 0;
 #if defined(__wasm__)
 static void vyrn_audit_acquire(void) {}
@@ -131,47 +132,54 @@ static int vyrn_audit_on(void) {
     }
     return vyrn_audit_state;
 }
-static size_t vyrn_audit_slot(void* p, void** tab, size_t cap) {
+static size_t vyrn_audit_slot(void* p, VyrnAuditEnt* tab, size_t cap) {
     size_t h = (size_t)p;
     h ^= h >> 16;
     h *= (size_t)0x9e3779b1u;
     h ^= h >> 13;
     size_t i = h & (cap - 1);
-    while (tab[i] && tab[i] != p) i = (i + 1) & (cap - 1);
+    while (tab[i].p && tab[i].p != p) i = (i + 1) & (cap - 1);
     return i;
 }
 /* lock held */
-static void vyrn_audit_add(void* p) {
+static void vyrn_audit_add(void* p, unsigned long long n) {
     if (vyrn_audit_len * 2 >= vyrn_audit_cap) {
         size_t ncap = vyrn_audit_cap ? vyrn_audit_cap * 2 : 1024;
-        void** nt = (void**)calloc(ncap, sizeof(void*));
+        VyrnAuditEnt* nt = (VyrnAuditEnt*)calloc(ncap, sizeof(VyrnAuditEnt));
         if (!nt) return; /* the audit degrades; the program continues */
         for (size_t i = 0; i < vyrn_audit_cap; i++)
-            if (vyrn_audit_tab[i]) nt[vyrn_audit_slot(vyrn_audit_tab[i], nt, ncap)] = vyrn_audit_tab[i];
+            if (vyrn_audit_tab[i].p)
+                nt[vyrn_audit_slot(vyrn_audit_tab[i].p, nt, ncap)] = vyrn_audit_tab[i];
         free(vyrn_audit_tab);
         vyrn_audit_tab = nt;
         vyrn_audit_cap = ncap;
     }
     size_t i = vyrn_audit_slot(p, vyrn_audit_tab, vyrn_audit_cap);
-    if (!vyrn_audit_tab[i]) { vyrn_audit_tab[i] = p; vyrn_audit_len++; }
+    if (!vyrn_audit_tab[i].p) {
+        vyrn_audit_tab[i].p = p;
+        vyrn_audit_tab[i].n = n;
+        vyrn_audit_len++;
+    }
 }
-/* lock held; 1 = the pointer was live. Removal rehashes the probe cluster
-   after the hole, or a later lookup stops early and reports a false double. */
-static int vyrn_audit_remove(void* p) {
-    if (!vyrn_audit_cap) return 0;
+/* lock held; the block's size if the pointer was live, or -1 (as ull) if it
+   was not. Removal rehashes the probe cluster after the hole, or a later
+   lookup stops early and reports a false double. */
+static unsigned long long vyrn_audit_remove(void* p) {
+    if (!vyrn_audit_cap) return (unsigned long long)-1;
     size_t i = vyrn_audit_slot(p, vyrn_audit_tab, vyrn_audit_cap);
-    if (vyrn_audit_tab[i] != p) return 0;
-    vyrn_audit_tab[i] = 0;
+    if (vyrn_audit_tab[i].p != p) return (unsigned long long)-1;
+    unsigned long long n = vyrn_audit_tab[i].n;
+    vyrn_audit_tab[i].p = 0;
     vyrn_audit_len--;
     size_t j = (i + 1) & (vyrn_audit_cap - 1);
-    while (vyrn_audit_tab[j]) {
-        void* q = vyrn_audit_tab[j];
-        vyrn_audit_tab[j] = 0;
+    while (vyrn_audit_tab[j].p) {
+        VyrnAuditEnt q = vyrn_audit_tab[j];
+        vyrn_audit_tab[j].p = 0;
         vyrn_audit_len--;
-        vyrn_audit_add(q);
+        vyrn_audit_add(q.p, q.n);
         j = (j + 1) & (vyrn_audit_cap - 1);
     }
-    return 1;
+    return n;
 }
 static void vyrn_audit_fail(void) {
     fputs("free audit: double or foreign free\n", stderr);
@@ -181,9 +189,13 @@ void __vyrn_free(void* p) {
     if (p == NULL) return;
     if (vyrn_audit_on()) {
         vyrn_audit_acquire();
-        int live = vyrn_audit_remove(p);
+        unsigned long long n = vyrn_audit_remove(p);
         vyrn_audit_release();
-        if (!live) vyrn_audit_fail();
+        if (n == (unsigned long long)-1) vyrn_audit_fail();
+        /* Poison before the block goes back: a dangling read now yields 0xDD
+           bytes instead of stale-but-plausible data, so a use-after-free
+           becomes a byte diff parity can see rather than a silent maybe. */
+        memset(p, 0xDD, (size_t)n);
     }
     free(p);
 }
@@ -195,7 +207,7 @@ void* __vyrn_malloc(unsigned long long n) {
     void* p = __vyrn_alloc_check(malloc((size_t)n), n);
     if (vyrn_audit_on()) {
         vyrn_audit_acquire();
-        vyrn_audit_add(p);
+        vyrn_audit_add(p, n);
         vyrn_audit_release();
     }
     return p;
@@ -206,14 +218,15 @@ void* __vyrn_realloc(void* p, unsigned long long n) {
         exit(1);
     }
     if (!vyrn_audit_on()) return __vyrn_alloc_check(realloc(p, (size_t)n), n);
-    /* a realloc frees its argument, so the audit treats it as free + malloc */
+    /* a realloc frees its argument, so the audit treats it as free + malloc —
+       unpoisoned, because realloc itself keeps the prefix bytes alive */
     vyrn_audit_acquire();
-    int live = (p == NULL) || vyrn_audit_remove(p);
+    unsigned long long old = (p == NULL) ? 0 : vyrn_audit_remove(p);
     vyrn_audit_release();
-    if (!live) vyrn_audit_fail();
+    if (old == (unsigned long long)-1) vyrn_audit_fail();
     void* q = __vyrn_alloc_check(realloc(p, (size_t)n), n);
     vyrn_audit_acquire();
-    vyrn_audit_add(q);
+    vyrn_audit_add(q, n);
     vyrn_audit_release();
     return q;
 }
