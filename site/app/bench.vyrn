@@ -1206,7 +1206,7 @@ export fn causeRows() -> Array<Array<String>> {
 /// milestone's scope, all of them what it exists to produce.
 export fn workItems() -> Array<String> {
     return [
-        "A hashed Map. Lookup is a linear strcmp scan in both backends; the ordered-vector representation can keep insertion order with an index beside it.",
+        "CLOSED — the Map is hashed in all three engines: an FNV index of cap*2 buckets lives beside the insertion-ordered storage and never reorders it, which is how RFC-0028's locked order survives a hash underneath. The shim's map_find, the wasm runtime's, and the interpreter's MapVal all probe instead of scanning.",
         "Byte-slice map keys, so a k-mer window is not a String allocation and a UTF-8 validation per position.",
         "One search per update, so m[k] = m[k] + 1 does not scan the map twice.",
         "A comparator, or a secondary key, for sortBy, so \"count descending, ties by fragment\" stops being a hand-written insertion sort with three copies per swap.",
