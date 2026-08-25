@@ -1253,26 +1253,56 @@ pub fn analyze(program: &Program) -> Ownership {
     let mut holes = HashMap::new();
     let mut notes = HashMap::new();
     let mut releases = HashMap::new();
-    let mut emit = |name: String, body: &Block| {
-        let r = emit_body(body, &lets, &proto, &revived);
-        releases.insert(name.clone(), place_body(body, &r.droppable));
+    let mut emit = |name: String, params: &[crate::ast::Param], body: &Block| {
+        let mut r = emit_body(body, &lets, &proto, &revived);
+        // RFC-0114: a `consume` parameter whose row says nothing took its
+        // value (or whose take was provably revived) is the callee's to
+        // release at exit — the same decision a `let` gets, minus the
+        // initializer cases a parameter cannot have.
+        let mut owned_params: Vec<(usize, String, u32)> = Vec::new();
+        // A declared `release(consume self)` is excluded outright: the release
+        // IS the release, and a row for its `self` would place a second one —
+        // a self-recursive call, which the trace gate caught on its fixture
+        // before any program ran it.
+        let is_release_fn = proto.impls.values().any(|f| f == &name);
+        for p in params {
+            if is_release_fn || p.capability != crate::ast::Capability::Consume {
+                continue;
+            }
+            let key = p as *const crate::ast::Param as usize;
+            let Some(kind) = proto.release_kind(&p.ty) else {
+                continue;
+            };
+            let taken = lets.get(&key).and_then(|r| r.gone.as_ref());
+            let ours = match taken {
+                None => true,
+                Some(crate::movecheck::Gone::Moved { .. })
+                | Some(crate::movecheck::Gone::Dropped { .. }) => revived.contains(&key),
+                _ => false,
+            };
+            if ours {
+                r.droppable.insert(key, kind);
+                owned_params.push((key, p.name.clone(), 0));
+            }
+        }
+        releases.insert(name.clone(), place_body(body, &r.droppable, &owned_params));
         droppable.insert(name.clone(), r.droppable);
         holes.insert(name.clone(), r.holes);
         notes.insert(name, r.notes);
     };
     for f in &program.functions {
-        emit(f.name.clone(), &f.body);
+        emit(f.name.clone(), &f.params, &f.body);
     }
     // Test bodies (RFC-0015) get the same block-exit drops, so a `let` in a test
     // reclaims its heap value exactly as it would in a function. The body is the
     // REAL node the interpreter walks, so the by-address keys match at run time.
     for (i, t) in program.tests.iter().enumerate() {
-        emit(format!("test@{i}"), &t.body);
+        emit(format!("test@{i}"), &[], &t.body);
     }
     // Bench bodies (RFC-0055), keyed by the synthetic `bench@<index>` name the
     // interpreter (`--check`) walks.
     for (i, b) in program.benches.iter().enumerate() {
-        emit(format!("bench@{i}"), &b.body);
+        emit(format!("bench@{i}"), &[], &b.body);
     }
     // Rule 3: a return is owned. The return type is the whole answer.
     let owned_fns: HashMap<String, DropKind> = program
@@ -1543,6 +1573,9 @@ struct Live {
 /// `Gen::drop_stack`, `Fn_::releases` and the interpreter's per-block `Vec` each
 /// used to keep privately.
 struct Place<'a> {
+    /// RFC-0114: the owned `consume` parameters, tracked FIRST on the
+    /// outermost frame — they outlive every local, so they release last.
+    pending: Vec<(usize, String, u32)>,
     droppable: &'a HashMap<usize, DropKind>,
     out: Vec<Release>,
     /// Innermost last. An exit's steps are these frames, from a boundary
@@ -1562,12 +1595,17 @@ struct Place<'a> {
 /// `droppable`, so no step can be placed inside one. Skipping them is what lets
 /// the placement live here, in the crate the interpreter can reach, instead of
 /// needing the checker's recorded types to expand a projection.
-fn place_body(body: &Block, droppable: &HashMap<usize, DropKind>) -> Vec<Release> {
+fn place_body(
+    body: &Block,
+    droppable: &HashMap<usize, DropKind>,
+    params: &[(usize, String, u32)],
+) -> Vec<Release> {
     let mut p = Place {
         droppable,
         out: Vec::new(),
         frames: Vec::new(),
         loops: Vec::new(),
+        pending: params.to_vec(),
     };
     p.block(body);
     p.out
@@ -1617,6 +1655,11 @@ impl Place<'_> {
     fn block(&mut self, b: &Block) {
         self.frames.push(Vec::new());
         let here = self.frames.len() - 1;
+        if here == 0 {
+            for (k, n, l) in std::mem::take(&mut self.pending) {
+                self.track(k, &n, l);
+            }
+        }
         for s in &b.stmts {
             self.stmt(s);
         }

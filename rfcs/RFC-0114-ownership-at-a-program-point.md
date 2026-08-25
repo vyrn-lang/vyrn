@@ -319,14 +319,22 @@ changed: the fold feeds `fate`, a qualified `Moved`/`Dropped` row becomes
 slot's final value. The witness fell 423 MB → 4.1 MB; `revivedBinding` pins
 it on wasm; the conditional-revive and early-return probes hold.
 
-**Found while measuring, not fixed here**: a read-only `consume` parameter
-is not released by the callee — the language's current contract is an
-explicit `drop v` (`give` in `examples/binarytrees.vyrn` writes exactly
-that), and a callee that omits it leaks its argument. Half the untake
-witness's 423 MB was this defect, not the revive. Parameters are bound to
-node 0 in the walker (deliberately, for BORROWED params, whose rows would
-release somebody else's value) — an owned `consume` param wants a row of
-its own.
+**The consume-parameter release LANDED** (it was found one commit earlier as
+"half the untake witness's 423 MB"). A `consume` parameter whose type owns
+heap gets a row keyed by its `Param` node, exactly as a `let` is keyed by
+its statement — every take writes onto that row, so a param that is moved
+on, dropped, or returned releases nothing, same as a `let`; a read-only one
+is released at the callee's exit. Borrowed parameters stay at node 0, whose
+reason stands (a row for one releases somebody else's value — the
+`argsdemo` corruption). The placement puts owned params FIRST on the
+outermost frame, so they release last; both backends register the drop in
+the prologue; the interpreter seeds its body-block drops with them, so a
+DECLARED release runs at the same point in all three engines
+(byte-identical order verified). One exclusion, caught by the trace gate on
+its own fixture before any program ran it: `release(consume self)` itself —
+the release IS the release, and a row for its `self` would place a
+self-recursive second one. `consumedParamRead` pins the fix on wasm; the
+no-`drop` untake witness fell 194.4 MB → 3.8.
 
 The state is per place, per program point: `Owned | Moved | Uninit`, a forward
 dataflow with a join at every merge.

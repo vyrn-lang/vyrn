@@ -3083,8 +3083,27 @@ impl<'a> Interp<'a> {
                 },
             );
         }
+        // RFC-0114: an owned `consume` parameter the body neither moves nor
+        // drops is the callee's to release at exit. `own` gave it a row; only
+        // a declared release is observable in this engine, exactly as for a
+        // `let` — the buffers are `Rc`'s to reclaim when the scope drops.
+        let mut seed: Vec<(&str, Option<Val>, Option<String>, usize)> = Vec::new();
+        for p in &f.params {
+            if p.capability != Capability::Consume {
+                continue;
+            }
+            let key = p as *const crate::ast::Param as usize;
+            let release = match self.droppable.get(&key) {
+                Some(crate::own::DropKind::Release(fr, _)) => Some(Some(fr.clone())),
+                Some(crate::own::DropKind::Deep(_)) if self.has_owned => Some(None),
+                _ => None,
+            };
+            if let Some(fr) = release {
+                seed.push((p.name.as_str(), None, fr, key));
+            }
+        }
         // A `?` inside the body surfaces as Ctrl::Return; catch it as the result.
-        let ret = match self.block(&f.body, &mut scope) {
+        let ret = match self.block_seeded(&f.body, &mut scope, seed) {
             Ok(Flow::Return(v)) => v,
             Ok(Flow::Normal) => Val::Unit,
             // `break`/`continue` outside a loop are a checker error.
@@ -3120,6 +3139,19 @@ impl<'a> Interp<'a> {
     }
 
     fn block(&self, block: &Block, scope: &mut Vec<Frame>) -> Result<Flow, Ctrl> {
+        self.block_seeded(block, scope, Vec::new())
+    }
+
+    /// [`Interp::block`], with the drops list pre-seeded — RFC-0114's consume
+    /// parameters, which belong to the function BODY's frame but are bound
+    /// before it opens. Only a declared release is observable here; the
+    /// buffers are the host's, exactly as for a `let`.
+    fn block_seeded(
+        &self,
+        block: &Block,
+        scope: &mut Vec<Frame>,
+        seed: Vec<(&str, Option<Val>, Option<String>, usize)>,
+    ) -> Result<Flow, Ctrl> {
         // A BLOCK THAT BINDS NOTHING GETS NO FRAME.
         //
         // `Stmt::Let` is the only statement that inserts into the frame a block
@@ -3158,7 +3190,7 @@ impl<'a> Interp<'a> {
         // The fourth field is the `Stmt::Let`'s node address — `own`'s own key
         // for the binding, and what RFC-0101 M4's shadow trace reports so that
         // one gate can assert this engine's order against the other two.
-        let mut drops: Vec<(&str, Option<Val>, Option<String>, usize)> = Vec::new();
+        let mut drops: Vec<(&str, Option<Val>, Option<String>, usize)> = seed;
         let blk = block as *const Block as usize;
         for stmt in &block.stmts {
             if let Stmt::Let { name, .. } = stmt {

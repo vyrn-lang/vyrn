@@ -1868,6 +1868,17 @@ fn lower_body(
                 _ => Place::Local(local),
             }
         };
+        // RFC-0114: an owned `consume` parameter the body neither moves nor
+        // drops is released at exit — same row, same placement, same key as
+        // the textual backend.
+        if p.capability == Capability::Consume {
+            let key = p as *const vyrn_frontend::ast::Param as usize;
+            if cx_fn.drops.contains_key(&key) {
+                if let Some(r) = cx_fn.rel_for(&ty, f.line)? {
+                    cx_fn.register_rel(key, place, r);
+                }
+            }
+        }
         cx_fn.scope.push((p.name.clone(), place, ty));
     }
 

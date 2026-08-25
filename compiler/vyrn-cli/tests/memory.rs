@@ -534,6 +534,16 @@ const ROWS: &[Row] = &[
               window, refuses toward the leak",
     },
     Row {
+        export: "consumedParamRead",
+        census: "RFC-0114 param",
+        today: Shape::Steady,
+        why: "A `consume` parameter is a value the frame OWNS, and it was the one owned \
+              value with no row — released only if the body wrote `drop v`. It is keyed \
+              by its `Param` node now, exactly as a `let` is keyed by its statement; a \
+              param that is moved on, dropped, or returned still releases nothing, and \
+              a declared release runs at the callee's exit in all three engines",
+    },
+    Row {
         export: "prependLoop",
         census: "§4",
         today: Shape::Steady,
@@ -1573,6 +1583,18 @@ export extern fn conditionalMoveMatch() {{
 fn pick(n: Int64) -> Result<Int64, Int64> {{
     if n < 0 {{ return Ok(n) }}
     return Err(n)
+}}
+
+/// RFC-0114 consume-param release: a `consume` parameter the body only READS.
+/// The callee owns it; until this landed, only an explicit `drop v` released
+/// it, and a body without one leaked its argument every call.
+fn readOnly(v: consume String) -> Int64 {{
+    return Int64(v.byteLength)
+}}
+
+export extern fn consumedParamRead() {{
+    let s = tag() + tag()
+    seen = seen + readOnly(consume s)
 }}
 
 /// RFC-0114 untake: the value is taken, the binding is provably re-established,

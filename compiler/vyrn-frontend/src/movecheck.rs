@@ -1243,7 +1243,40 @@ impl MoveCheck<'_> {
             n.enter();
             for p in f_params {
                 v.bind(&p.name, Some(p.ty.clone()));
-                n.bind(&p.name, 0);
+                // RFC-0114: a `consume` parameter is a value this frame OWNS,
+                // and until now it was the one owned value with no row — the
+                // callee released it only if the body wrote `drop v`, and a
+                // body that merely read it leaked its argument every call. It
+                // gets a row keyed by the `Param` node, exactly as a `let` is
+                // keyed by its statement; every take writes onto that row, so
+                // a param that is moved on, dropped, or returned releases
+                // nothing here, same as a `let`. A BORROWED parameter stays at
+                // node 0 — minting a row for one releases somebody else's
+                // value, which is the `argsdemo` corruption Phase 10a records.
+                if p.capability == Capability::Consume && self.decl.owns_heap(&p.ty) {
+                    let key = p as *const Param as usize;
+                    n.bind(&p.name, key);
+                    if let Some(sink) = &self.lets {
+                        sink.borrow_mut().insert(
+                            key,
+                            LetOwnership {
+                                ty: Some(p.ty.clone()),
+                                gone: None,
+                                from_call: None,
+                                passed: Vec::new(),
+                            },
+                        );
+                    }
+                    self.store_ev(
+                        key,
+                        EvKind::Write {
+                            id: 0,
+                            owning: true,
+                        },
+                    );
+                } else {
+                    n.bind(&p.name, 0);
+                }
                 // RFC-0089 rule 2: everything but `consume` is a borrow, and only
                 // a type that owns heap has anything to borrow.
                 b.bind(

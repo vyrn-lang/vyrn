@@ -4446,6 +4446,16 @@ impl<'a> Gen<'a> {
                 self.modify_copyout.push((slot, format!("%arg{i}"), ll));
             } else {
                 self.emit(format!("store {ll} %arg{i}, ptr {slot}"));
+                // RFC-0114: an owned `consume` parameter the body neither
+                // moves nor drops is released at exit — `own` gave it a row
+                // keyed by the `Param` node, and the placement already put it
+                // on the outermost frame.
+                if p.capability == Capability::Consume {
+                    let key = p as *const Param as usize;
+                    if let Some(kind) = self.droppable.get(&key).cloned() {
+                        self.register_drop(key, slot.clone(), kind);
+                    }
+                }
             }
         }
 
