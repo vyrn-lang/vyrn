@@ -1807,13 +1807,8 @@ pub fn emit(program: &Program) -> Result<String, String> {
         .collect();
     let holes_map = &holes_map;
     let owned_proto = &ownership.proto;
-    // Every call-argument temporary this program releases at the call
-    // (`rfcs/census-call-arguments.md`), keyed by the argument's node address —
-    // the same shape as `droppable`, one level down from a `let`.
-    let arg_drops = ownership.arg_drops();
-    let store_owned = ownership.store_owned.clone();
-    let edge_releases = ownership.edge_releases.clone();
-    let receiver_frees = ownership.receiver_frees.clone();
+    // The per-node release decisions, one artifact (RFC-0114 §26 step 2).
+    let plan = ownership.plan.clone();
 
     let protocol_methods: HashMap<String, String> = program
         .protocols
@@ -1848,10 +1843,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             owned_proto,
             &regex_globals,
             &program.impls,
-            &arg_drops,
-            &store_owned,
-            &edge_releases,
-            &receiver_frees,
+            &plan,
             &program.type_decls,
         );
         gi.log_level = program.log_level;
@@ -1970,10 +1962,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             owned_proto,
             &regex_globals,
             &program.impls,
-            &arg_drops,
-            &store_owned,
-            &edge_releases,
-            &receiver_frees,
+            &plan,
             &program.type_decls,
         );
         gen.log_level = program.log_level;
@@ -2026,10 +2015,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 owned_proto,
                 &regex_globals,
                 &program.impls,
-                &arg_drops,
-                &store_owned,
-                &edge_releases,
-                &receiver_frees,
+                &plan,
                 &program.type_decls,
             );
             gen.log_level = program.log_level;
@@ -2092,10 +2078,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 owned_proto,
                 &regex_globals,
                 &program.impls,
-                &arg_drops,
-                &store_owned,
-                &edge_releases,
-                &receiver_frees,
+                &plan,
                 &program.type_decls,
             );
             gen.log_level = program.log_level;
@@ -2144,10 +2127,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             owned_proto,
             &regex_globals,
             &program.impls,
-            &arg_drops,
-            &store_owned,
-            &edge_releases,
-            &receiver_frees,
+            &plan,
             &program.type_decls,
         );
         dgen.protocol_methods = protocol_methods.clone();
@@ -2178,10 +2158,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             owned_proto,
             &regex_globals,
             &program.impls,
-            &arg_drops,
-            &store_owned,
-            &edge_releases,
-            &receiver_frees,
+            &plan,
             &program.type_decls,
         );
         cgen.fnval_variants = fnval_registry.clone();
@@ -2206,10 +2183,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             owned_proto,
             &regex_globals,
             &program.impls,
-            &arg_drops,
-            &store_owned,
-            &edge_releases,
-            &receiver_frees,
+            &plan,
             &program.type_decls,
         );
         cgen.protocol_methods = protocol_methods.clone();
@@ -2396,13 +2370,9 @@ struct Gen<'a> {
     /// registered before the cursor is a frame outside the loop, so the cursor
     /// runs first.
     cursors: Vec<(String, u32)>,
-    /// The argument expressions whose value this frame releases after the call
-    /// they belong to — `own`'s answer, keyed by node address the way
-    /// `droppable` is keyed by the `Stmt::Let`'s.
-    arg_drops: &'a std::collections::HashSet<usize>,
-    store_owned: &'a std::collections::HashSet<usize>,
-    edge_releases: &'a std::collections::HashMap<usize, Vec<(String, u32)>>,
-    receiver_frees: &'a std::collections::HashSet<usize>,
+    /// The per-node release decisions (RFC-0114 §26) — every site this
+    /// lowering frees at is an address in here, and in nothing of its own.
+    plan: &'a vyrn_frontend::own::ReleasePlan,
     /// The registers holding those values, innermost call last. Pushed where the
     /// argument is EVALUATED and taken back where its call ends.
     arg_frees: Vec<(String, Type)>,
@@ -2551,17 +2521,11 @@ impl<'a> Gen<'a> {
         owned: &'a vyrn_frontend::own::Owned,
         regex_globals: &'a HashMap<String, (String, String, u32)>,
         impls: &'a [vyrn_frontend::ast::ImplBlock],
-        arg_drops: &'a std::collections::HashSet<usize>,
-        store_owned: &'a std::collections::HashSet<usize>,
-        edge_releases: &'a std::collections::HashMap<usize, Vec<(String, u32)>>,
-        receiver_frees: &'a std::collections::HashSet<usize>,
+        plan: &'a vyrn_frontend::own::ReleasePlan,
         decls: &'a [TypeDecl],
     ) -> Self {
         Gen {
-            arg_drops,
-            store_owned,
-            edge_releases,
-            receiver_frees,
+            plan,
             arg_frees: Vec::new(),
             tmp: 0,
             label: 0,
@@ -5098,7 +5062,10 @@ impl<'a> Gen<'a> {
                 // stays: it answers whether the NEW value can alias the old,
                 // which is representation knowledge.
                 let owned_here = self.region_depth == 0
-                    && self.store_owned.contains(&(stmt as *const Stmt as usize));
+                    && self
+                        .plan
+                        .store_owned
+                        .contains(&(stmt as *const Stmt as usize));
                 let snap = if owned_here
                     && (fresh_str || !vyrn_frontend::movecheck::mentions_place(value, name))
                 {
@@ -5354,6 +5321,7 @@ impl<'a> Gen<'a> {
                 // An `if` with no else-block grows one when the implicit edge
                 // is the one that owes a release.
                 let ers = self
+                    .plan
                     .edge_releases
                     .get(&(stmt as *const Stmt as usize))
                     .cloned()
@@ -5767,7 +5735,12 @@ impl<'a> Gen<'a> {
     /// reclaims it, exactly as [`Gen::free_str_temp`] stands aside there.
     fn gen_expr(&mut self, expr: &Expr) -> Result<(String, Type), String> {
         let r = self.gen_expr_inner(expr)?;
-        if self.region_depth == 0 && self.arg_drops.contains(&(expr as *const Expr as usize)) {
+        if self.region_depth == 0
+            && self
+                .plan
+                .arg_drops
+                .contains(&(expr as *const Expr as usize))
+        {
             self.arg_frees.push((r.0.clone(), r.1.clone()));
         }
         if crate::observe::on() {
@@ -5946,6 +5919,7 @@ impl<'a> Gen<'a> {
                         // dies here — the header read was its last observer.
                         if self.region_depth == 0
                             && self
+                                .plan
                                 .receiver_frees
                                 .contains(&(expr as *const Expr as usize))
                         {
@@ -5963,6 +5937,7 @@ impl<'a> Gen<'a> {
                     // meets a declared release here.
                     let rfree = self.region_depth == 0
                         && self
+                            .plan
                             .receiver_frees
                             .contains(&(expr as *const Expr as usize));
                     match self.resolve(&ety) {
@@ -6018,6 +5993,7 @@ impl<'a> Gen<'a> {
                 // record after this point.
                 if self.region_depth == 0
                     && self
+                        .plan
                         .receiver_frees
                         .contains(&(expr as *const Expr as usize))
                     && self.owned.release_kind(&fty).is_none()
@@ -6422,7 +6398,12 @@ impl<'a> Gen<'a> {
         }
         // RFC-0114 Rule N at a match join: the arms that still own what
         // another arm consumed, keyed by this match expression's address.
-        let ers = self.edge_releases.get(&key).cloned().unwrap_or_default();
+        let ers = self
+            .plan
+            .edge_releases
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
         let r = self.gen_match_body(&sv, &sty, arms, &ers);
         if !self.terminated {
             self.emit_releases(ExitKind::Scrutinee, key);
@@ -6517,7 +6498,12 @@ impl<'a> Gen<'a> {
         let else_branch =
             else_branch.ok_or("internal: `if` expression without `else` reached codegen")?;
         // RFC-0114 Rule N at an `if`-expression join.
-        let ers = self.edge_releases.get(&key).cloned().unwrap_or_default();
+        let ers = self
+            .plan
+            .edge_releases
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
         let (c, _) = self.gen_expr(cond)?;
         let then_l = self.fresh_label("ie.then");
         let else_l = self.fresh_label("ie.else");
@@ -13886,8 +13872,7 @@ mod tests {
     fn llt_prints_the_shapes_the_layout_engine_was_verified_on() {
         let (rt, pt, pc, ty, va, sg, sb, fs, dm, hm, rg) = Default::default();
         let ow = vyrn_frontend::own::Owned::default();
-        let ad = std::collections::HashSet::new();
-        let er = std::collections::HashMap::new();
+        let pl = vyrn_frontend::own::ReleasePlan::default();
         let g = Gen::new(
             &rt,
             &pt,
@@ -13902,10 +13887,7 @@ mod tests {
             &ow,
             &rg,
             &[],
-            &ad,
-            &ad,
-            &er,
-            &ad,
+            &pl,
             &[],
         );
         let rec = |fs: &[Type]| {

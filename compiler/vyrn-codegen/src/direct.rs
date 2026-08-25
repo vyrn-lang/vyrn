@@ -395,10 +395,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         // Every call-argument temporary this program releases at the call
         // (`rfcs/census-call-arguments.md`), taken before `ownership` is moved
         // from.
-        arg_drops: ownership.arg_drops(),
-        store_owned: ownership.store_owned.clone(),
-        edge_releases: ownership.edge_releases.clone(),
-        receiver_frees: ownership.receiver_frees.clone(),
+        plan: ownership.plan.clone(),
         releases: ownership.releases,
         droppable: ownership.droppable,
         // RFC-0093 M2, flattened across functions: the key is the `let`'s node
@@ -1111,21 +1108,9 @@ struct Cx<'a> {
     /// Per `let` node, the places a `consume` took out of it (RFC-0093 M2). The
     /// release walk skips them: the take already gave them an owner.
     holes: HashMap<usize, Vec<String>>,
-    /// The argument expressions whose value the CALLER releases after the call
-    /// (`rfcs/census-call-arguments.md`), keyed by node address — `own`'s
-    /// answer, one level down from a `let`'s.
-    arg_drops: std::collections::HashSet<usize>,
-    /// RFC-0114 M2: the assigns whose store releases the old value —
-    /// `own::fold_store_owned`'s answer, the same set the textual backend
-    /// gates on, so the two cannot disagree about a store.
-    store_owned: std::collections::HashSet<usize>,
-    /// RFC-0114 Rule N: per join address (`Stmt::If` / `Expr::Match`), `(name,
-    /// edge)` releases on
-    /// the edge the other branch's consume left still-owning.
-    edge_releases: std::collections::HashMap<usize, Vec<(String, u32)>>,
-    /// RFC-0114 R1′: the `.byteLength` reads whose unnamed String receiver
-    /// this frame owns and frees right after the header read.
-    receiver_frees: std::collections::HashSet<usize>,
+    /// The per-node release decisions (RFC-0114 §26) — the same artifact the
+    /// textual backend reads, so the two cannot disagree about a site.
+    plan: vyrn_frontend::own::ReleasePlan,
     /// The `Owned` table (RFC-0086 M1) — the same one `own` decided with, so a
     /// user type's declared `release` reaches this backend without a second list.
     owned: vyrn_frontend::own::Owned,
@@ -3406,7 +3391,11 @@ impl<'p> Fn_<'_, 'p> {
                 // the comment there. `place_owns` stays for the OTHER stores
                 // (fields, elements), which this slice does not touch.
                 let owned_here = self.region_depth == 0
-                    && self.cx.store_owned.contains(&(s as *const Stmt as usize));
+                    && self
+                        .cx
+                        .plan
+                        .store_owned
+                        .contains(&(s as *const Stmt as usize));
                 let snap = if owned_here
                     && (fresh_str || !vyrn_frontend::movecheck::mentions_place(value, name))
                 {
@@ -3523,6 +3512,7 @@ impl<'p> Fn_<'_, 'p> {
                 // releases are dead code, which wasm validates.
                 let ers = self
                     .cx
+                    .plan
                     .edge_releases
                     .get(&(s as *const Stmt as usize))
                     .cloned()
@@ -4538,7 +4528,13 @@ impl<'p> Fn_<'_, 'p> {
     /// is at the allocation on both backends now: see [`Fn_::str_owned`].
     fn expr(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
         let t = self.expr_inner(m, b, e)?;
-        if self.region_depth == 0 && self.cx.arg_drops.contains(&(e as *const Expr as usize)) {
+        if self.region_depth == 0
+            && self
+                .cx
+                .plan
+                .arg_drops
+                .contains(&(e as *const Expr as usize))
+        {
             let l = b.local(ValType::I32);
             b.ins(&Instruction::LocalTee(l));
             self.arg_frees.push((l, t.clone()));
@@ -4653,6 +4649,7 @@ impl<'p> Fn_<'_, 'p> {
                 let rfree = self.region_depth == 0
                     && self
                         .cx
+                        .plan
                         .receiver_frees
                         .contains(&(e as *const Expr as usize));
                 let tee = if rfree {
@@ -5094,7 +5091,13 @@ impl<'p> Fn_<'_, 'p> {
         // RFC-0114 Rule N at an `if`-expression join. The releases are
         // stack-neutral, so in the scalar case they sit under the branch value
         // exactly as `match_expr`'s do.
-        let ers = self.cx.edge_releases.get(&key).cloned().unwrap_or_default();
+        let ers = self
+            .cx
+            .plan
+            .edge_releases
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
         self.cond(m, b, cond, line)?;
         match &r {
             Repr::Agg(l) => {
@@ -11381,7 +11384,13 @@ impl<'p> Fn_<'_, 'p> {
         self.depth += 1;
 
         // RFC-0114 Rule N at a match join, keyed by this expression's address.
-        let ers = self.cx.edge_releases.get(&key).cloned().unwrap_or_default();
+        let ers = self
+            .cx
+            .plan
+            .edge_releases
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
         for (arm_ix, arm) in arms.iter().enumerate() {
             self.tag_test(b, addr, &sum, &arm.pattern, line)?;
             b.ins(&Instruction::If(BlockType::Empty));
@@ -17256,10 +17265,7 @@ mod tests {
 
     fn cx() -> Cx<'static> {
         Cx {
-            arg_drops: std::collections::HashSet::new(),
-            store_owned: std::collections::HashSet::new(),
-            edge_releases: std::collections::HashMap::new(),
-            receiver_frees: std::collections::HashSet::new(),
+            plan: Default::default(),
             types: HashMap::new(),
             decls: &[],
             lambdas: HashMap::new(),

@@ -855,12 +855,18 @@ the untake, and the consume-parameter release — each behind its own
 witness exists for string freshness (the `interp.rs` test). Step 6 landed
 its cheaper half: every free routes through `__vyrn_free`, and the parity
 harness audits the whole corpus for double and foreign frees on every run.
-Steps 2–4 — the single `ReleasePlan` artifact with linear discharge — remain
-open, and the pressure for them DROPPED: every decision this arc added is
-already produced in one place and consumed by address, which is the
-property the consolidation exists to force. What a plan would still buy is
-the deletion of the per-binding store gates the backends keep for field and
-element stores, and `plan.finish()`'s loudness for a missed site.
+Step 2 then landed in its right-sized form: `own::ReleasePlan` is one
+struct holding every per-NODE decision — `arg_drops`, `store_owned`,
+`edge_releases`, `receiver_frees` — produced once in `own::analyze` and
+handed to each backend as a single reference where four separate products
+used to thread through every constructor. (`droppable` and `releases` stay
+beside it: per-BINDING and per-EXIT, they feed the runtime registries.)
+Steps 3–4's remaining substance — deleting the per-binding store gates the
+backends keep for field and element stores, and `plan.finish()`'s loudness
+for a missed site — stays open: the finish check needs reachability
+knowledge only the lowering has, and instrumenting every construct for it
+is the sprawl the plan exists to remove, so it waits for a design rather
+than a patch.
 
 ## 27. What the three lenses agree on
 

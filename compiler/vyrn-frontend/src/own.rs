@@ -1151,23 +1151,36 @@ pub struct BindingNote {
     pub fate: Fate,
 }
 
+/// RFC-0114 §26's artifact, as landed: every per-NODE release decision, one
+/// struct, produced here and consumed by address in both backends — which
+/// therefore cannot disagree about a site. (`droppable` and `releases` stay
+/// beside it: they are per-BINDING and per-EXIT, keyed by name and placement,
+/// and the backends' runtime registries are built from them.)
+#[derive(Clone, Default)]
+pub struct ReleasePlan {
+    /// RFC-0114 M1: the call-argument expressions whose value the CALLER
+    /// releases after the call — the `ArgVerdict::Released` rows, by the
+    /// argument's node address.
+    pub arg_drops: std::collections::HashSet<usize>,
+    /// RFC-0114 M2: the `Stmt::Assign` nodes whose old value the store
+    /// releases — see [`fold_store_owned`].
+    pub store_owned: std::collections::HashSet<usize>,
+    /// RFC-0114 Rule N: per join address (`Stmt::If` or `Expr::Match`), the
+    /// bindings to release on one edge because another edge consumed them —
+    /// `(name, edge)`, 0/1 for an `if`'s then/else, the arm's source index
+    /// for a `match`. See [`fold_edge_releases`].
+    pub edge_releases: HashMap<usize, Vec<(String, u32)>>,
+    /// RFC-0114 R1′: the `Expr::Field` nodes whose unnamed receiver this
+    /// frame owns — freed right after the read (the header for a projection,
+    /// the whole record deep after a scalar field).
+    pub receiver_frees: std::collections::HashSet<usize>,
+}
+
 /// Whole-program ownership facts.
 #[derive(Default)]
 pub struct Ownership {
-    /// RFC-0114 M2: the `Stmt::Assign` nodes whose old value the store releases
-    /// — see [`fold_store_owned`]. Both backends gate the store-release on this
-    /// and on nothing of their own.
-    pub store_owned: std::collections::HashSet<usize>,
-    /// RFC-0114 Rule N: per `Stmt::If` address, the bindings to release on one
-    /// RFC-0114 Rule N: per join address (`Stmt::If` or `Expr::Match`), the
-    /// bindings to release on one edge because another edge consumed them —
-    /// `(name, edge)`, where `edge` is 0/1 for an `if`'s then/else and the
-    /// arm's source index for a `match`. See [`fold_edge_releases`].
-    pub edge_releases: HashMap<usize, Vec<(String, u32)>>,
-    /// RFC-0114 R1′: the `Expr::Field` nodes (`.byteLength` reads) whose
-    /// receiver is an unnamed String temporary this frame owns — the backends
-    /// free it right after the header read.
-    pub receiver_frees: std::collections::HashSet<usize>,
+    /// The per-node release decisions — see [`ReleasePlan`].
+    pub plan: ReleasePlan,
     /// Functions whose return value transfers heap ownership to the caller,
     /// with the kind of value returned.
     ///
@@ -1235,11 +1248,7 @@ impl Ownership {
         // `check(make(depth))` leaked 313.9 MB against the interpreter's 8.5.
         // Both backends free by TYPE now, through the same `release_kind`
         // table this filter used to consult, so the filter is the leak.
-        self.arg_temps
-            .iter()
-            .filter(|s| s.verdict == crate::movecheck::ArgVerdict::Released)
-            .map(|s| s.id)
-            .collect()
+        self.plan.arg_drops.clone()
     }
 }
 
@@ -1349,7 +1358,19 @@ pub fn analyze(program: &Program) -> Ownership {
         })
         .map(|(k, _)| *k)
         .collect();
+    let plan = ReleasePlan {
+        arg_drops: facts
+            .arg_temps
+            .iter()
+            .filter(|s| s.verdict == crate::movecheck::ArgVerdict::Released)
+            .map(|s| s.id)
+            .collect(),
+        store_owned,
+        edge_releases,
+        receiver_frees,
+    };
     Ownership {
+        plan,
         owned_fns,
         droppable,
         holes,
@@ -1357,9 +1378,6 @@ pub fn analyze(program: &Program) -> Ownership {
         proto,
         arg_temps: facts.arg_temps,
         releases,
-        store_owned,
-        edge_releases,
-        receiver_frees,
     }
 }
 
