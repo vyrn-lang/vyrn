@@ -93,24 +93,25 @@ alone. The double-free direction — a store after the value moved out — is
 exactly what the order and loop rules refuse. 4.9 MB after the fix;
 `escapingAccumulator` in `memory.rs` pins it as `Steady`.
 
-## Still open: a conditional move leaks on the path it did not take
+## CLOSED (RFC-0114 Rule N): a conditional move leaks on the path it did not take
 
 A fourth instance, found while writing RFC-0114's proof appendix. `vyrn check`
-accepts a binding consumed on one branch and read on the other; `why --memory`
-reports it with ONE verdict — "moved at line 15 into `consume`" — for a place
-whose state differs by path. On the branch where the move does not happen,
-nothing releases it.
-
-200,000 calls, one ~1000-byte allocation each, taking the branch that does NOT
-move: **211.5 MB**, which is the product to three figures.
+accepts a binding consumed on one branch when nothing reads it after the join;
+`why --memory` reports it with ONE verdict — "moved at line 15 into `consume`"
+— for a place whose state differs by path. On the branch where the move did
+not happen, nothing released it: 200,000 calls, one ~1000-byte allocation
+each, taking the branch that does NOT move, measured **215.3 MB**.
 
 Not an `Alloc`/`Lend` misclassification like the two that were fixed. The
-classification is right and the granularity is wrong — per binding, where the
-question is per path. The appendix's Part II resolves it: Rule N releases on
-the non-moving edge exactly when the place is dead after the join, so for a
-SILENT type this case is accepted and fixed rather than refused — 211.5 MB
-becomes one buffer. Only a declared `impl Owned` release conditionally moved
-stays refused, because its body is user code whose timing the three engines
+classification was right and the granularity wrong — per binding, where the
+question is per path. Rule N (the appendix's R5) now releases on the
+still-owning edge: the walker records the asymmetric join, `own::
+fold_edge_releases` keeps a candidate only when every write into the binding
+is owning and no other holder exists, and both backends emit the release at
+the end of the non-consuming arm — growing an else-arm when the implicit
+edge is the one that owes it. 215.3 MB became one buffer; `conditionalMove`
+in `memory.rs` pins it as `Steady`. A declared `impl Owned` release stays
+off the edge, because its body is user code whose timing the three engines
 must agree on.
 
 ## Still open: a temporary is never released

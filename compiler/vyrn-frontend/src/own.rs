@@ -1152,6 +1152,10 @@ pub struct Ownership {
     /// — see [`fold_store_owned`]. Both backends gate the store-release on this
     /// and on nothing of their own.
     pub store_owned: std::collections::HashSet<usize>,
+    /// RFC-0114 Rule N: per `Stmt::If` address, the bindings to release on one
+    /// edge of the join because the OTHER edge consumed them — `(name, on_then)`,
+    /// where `on_then` is the edge that releases. See [`fold_edge_releases`].
+    pub edge_releases: HashMap<usize, Vec<(String, bool)>>,
     /// Functions whose return value transfers heap ownership to the caller,
     /// with the kind of value returned.
     ///
@@ -1235,6 +1239,7 @@ pub fn analyze(program: &Program) -> Ownership {
     // opinion (RFC-0087 records three defects that were two walkers disagreeing).
     let facts = crate::movecheck::facts(program);
     let store_owned = fold_store_owned(&facts);
+    let edge_releases = fold_edge_releases(&facts);
     let lets = facts.lets;
 
     let mut droppable = HashMap::new();
@@ -1277,7 +1282,65 @@ pub fn analyze(program: &Program) -> Ownership {
         arg_temps: facts.arg_temps,
         releases,
         store_owned,
+        edge_releases,
     }
+}
+
+/// RFC-0114 Rule N (edge normalization, R5). The walker hands over every `if`
+/// that consumed a binding on exactly one branch with both branches reaching
+/// the join; this fold keeps a candidate only when the value at the other edge
+/// is provably this frame's to release:
+///
+/// - every write into the binding, anywhere, is OWNING — a binding ever
+///   assigned a projection may hold a borrow at the edge, and no walk-order
+///   argument survives a loop's back edge, so one non-owning write refuses
+///   the binding outright;
+/// - the binding's final verdict is a plain take — borrowed, lent, captured,
+///   aliased or holed refuses, exactly as [`fold_store_owned`] refuses.
+///
+/// The loop cases need no rule of their own: a binding declared outside a
+/// loop and conditionally consumed inside it is already refused by the
+/// checker's next-iteration reuse rule, so a candidate inside a loop is
+/// re-initialized every iteration before the `if` is reached.
+///
+/// Refusal is the leak direction, which is today's behaviour.
+fn fold_edge_releases(facts: &crate::movecheck::Facts) -> HashMap<usize, Vec<(String, bool)>> {
+    use crate::movecheck::{EvKind, Gone};
+    let vetoed: std::collections::HashSet<usize> = facts
+        .lets
+        .iter()
+        .filter(|(_, r)| {
+            !matches!(
+                r.gone,
+                None | Some(Gone::Moved { .. })
+                    | Some(Gone::Dropped { .. })
+                    | Some(Gone::Returned { .. })
+            )
+        })
+        .map(|(k, _)| *k)
+        .collect();
+    let mut all_owning: HashMap<usize, bool> = HashMap::new();
+    for ev in &facts.store_events {
+        if let EvKind::Write { owning, .. } = ev.kind {
+            *all_owning.entry(ev.key).or_insert(true) &= owning;
+        }
+    }
+
+    let mut out: HashMap<usize, Vec<(String, bool)>> = HashMap::new();
+    for er in &facts.edge_releases {
+        if vetoed.contains(&er.key) || !all_owning.get(&er.key).copied().unwrap_or(false) {
+            continue;
+        }
+        out.entry(er.if_key)
+            .or_default()
+            .push((er.name.clone(), er.on_then));
+    }
+    // The walker's bucket iteration is hash-ordered; the emitted IR must not be.
+    for v in out.values_mut() {
+        v.sort();
+        v.dedup();
+    }
+    out
 }
 
 /// The assigns whose OLD value is provably this frame's to release when the

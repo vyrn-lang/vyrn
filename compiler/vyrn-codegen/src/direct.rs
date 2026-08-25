@@ -397,6 +397,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         // from.
         arg_drops: ownership.arg_drops(),
         store_owned: ownership.store_owned.clone(),
+        edge_releases: ownership.edge_releases.clone(),
         releases: ownership.releases,
         droppable: ownership.droppable,
         // RFC-0093 M2, flattened across functions: the key is the `let`'s node
@@ -1117,6 +1118,9 @@ struct Cx<'a> {
     /// `own::fold_store_owned`'s answer, the same set the textual backend
     /// gates on, so the two cannot disagree about a store.
     store_owned: std::collections::HashSet<usize>,
+    /// RFC-0114 Rule N: per `Stmt::If` address, `(name, on_then)` releases on
+    /// the edge the other branch's consume left still-owning.
+    edge_releases: std::collections::HashMap<usize, Vec<(String, bool)>>,
     /// The `Owned` table (RFC-0086 M1) — the same one `own` decided with, so a
     /// user type's declared `release` reaches this backend without a second list.
     owned: vyrn_frontend::own::Owned,
@@ -3495,12 +3499,29 @@ impl<'p> Fn_<'_, 'p> {
                 line,
             } => {
                 self.cond(m, b, cond, *line)?;
+                // RFC-0114 Rule N: the analysis says one branch consumed a
+                // binding the other still holds at the join, where nothing may
+                // read it again — so the still-owning edge releases it here.
+                // An `if` with no else-arm grows one when the implicit edge is
+                // the one that owes a release. After a diverged arm the
+                // releases are dead code, which wasm validates.
+                let ers = self
+                    .cx
+                    .edge_releases
+                    .get(&(s as *const Stmt as usize))
+                    .cloned()
+                    .unwrap_or_default();
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
                 self.block(m, b, then_block)?;
+                self.emit_edge_releases(m, b, &ers, true, *line)?;
                 if let Some(e) = else_block {
                     b.ins(&Instruction::Else);
                     self.block(m, b, e)?;
+                    self.emit_edge_releases(m, b, &ers, false, *line)?;
+                } else if ers.iter().any(|(_, t)| !*t) {
+                    b.ins(&Instruction::Else);
+                    self.emit_edge_releases(m, b, &ers, false, *line)?;
                 }
                 self.depth -= 1;
                 b.ins(&Instruction::End);
@@ -5691,6 +5712,37 @@ impl<'p> Fn_<'_, 'p> {
     /// walk block exit uses and this adapter adds none. The kind comes off the
     /// type through [`Fn_::rel_for`], the same table the analysis consulted
     /// when it recorded the temporary.
+    /// RFC-0114 Rule N: release the bindings the OTHER branch of this `if`
+    /// consumed, on the edge where they are still this frame's. A declared
+    /// `impl Owned` release is skipped — its body is user code whose timing
+    /// all three engines must agree on, and the RFC refuses to put it on an
+    /// edge. Inside a `region` the memory is the arena's, as everywhere else.
+    fn emit_edge_releases(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        ers: &[(String, bool)],
+        on_then: bool,
+        line: usize,
+    ) -> Result<(), String> {
+        if self.region_depth != 0 {
+            return Ok(());
+        }
+        for (name, t) in ers {
+            if *t != on_then {
+                continue;
+            }
+            let Ok((place, ty)) = self.lookup(name, line) else {
+                continue;
+            };
+            match self.rel_for(&ty, line)? {
+                Some(Rel::Call(..)) | None => {}
+                Some(rel) => self.emit_rel(m, b, place, &rel, line)?,
+            }
+        }
+        Ok(())
+    }
+
     fn free_arg_temp(
         &mut self,
         m: &mut Module,
@@ -17136,6 +17188,7 @@ mod tests {
         Cx {
             arg_drops: std::collections::HashSet::new(),
             store_owned: std::collections::HashSet::new(),
+            edge_releases: std::collections::HashMap::new(),
             types: HashMap::new(),
             decls: &[],
             lambdas: HashMap::new(),

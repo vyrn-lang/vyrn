@@ -498,6 +498,15 @@ const ROWS: &[Row] = &[
               The old `slot_owns` gate abandoned the whole binding for that one consume",
     },
     Row {
+        export: "conditionalMove",
+        census: "RFC-0114 Rule N",
+        today: Shape::Steady,
+        why: "RFC-0114 Rule N: the still-owning edge releases what the other branch \
+              consumed. The union at the merge says consumed, so block exit stays out of \
+              it — the release sits ON THE EDGE, which is the one point where the path \
+              that kept the value is known. 215.3 MB native before; one buffer after",
+    },
+    Row {
         export: "prependLoop",
         census: "§4",
         today: Shape::Steady,
@@ -1503,6 +1512,24 @@ export extern fn escapingAccumulator() {{
     }}
     let b = Held {{ s: consume acc }}
     seen = seen + Int64(b.s.byteLength)
+}}
+
+/// RFC-0114 Rule N: a CONDITIONAL move. One branch gives the value away, the
+/// other only reads it, both continue to the join — so the move checker's
+/// union says "consumed" and block exit releases nothing, on the path where
+/// nothing consumed anything. 215.3 MB native over 200,000 rounds of a
+/// 1,000-byte value, taking the non-moving branch every time.
+fn takeIt(v: consume String) -> Int64 {{
+    return v.byteLength
+}}
+
+export extern fn conditionalMove() {{
+    let s = tag() + tag()
+    if seen < 0 {{
+        seen = seen + takeIt(consume s)
+    }} else {{
+        seen = seen + Int64(s.byteLength)
+    }}
 }}
 
 fn main() -> Int64 {{

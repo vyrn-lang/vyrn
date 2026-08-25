@@ -1812,6 +1812,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // the same shape as `droppable`, one level down from a `let`.
     let arg_drops = ownership.arg_drops();
     let store_owned = ownership.store_owned.clone();
+    let edge_releases = ownership.edge_releases.clone();
 
     let protocol_methods: HashMap<String, String> = program
         .protocols
@@ -1848,6 +1849,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &program.impls,
             &arg_drops,
             &store_owned,
+            &edge_releases,
             &program.type_decls,
         );
         gi.log_level = program.log_level;
@@ -1968,6 +1970,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &program.impls,
             &arg_drops,
             &store_owned,
+            &edge_releases,
             &program.type_decls,
         );
         gen.log_level = program.log_level;
@@ -2022,6 +2025,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 &program.impls,
                 &arg_drops,
                 &store_owned,
+                &edge_releases,
                 &program.type_decls,
             );
             gen.log_level = program.log_level;
@@ -2086,6 +2090,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 &program.impls,
                 &arg_drops,
                 &store_owned,
+                &edge_releases,
                 &program.type_decls,
             );
             gen.log_level = program.log_level;
@@ -2136,6 +2141,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &program.impls,
             &arg_drops,
             &store_owned,
+            &edge_releases,
             &program.type_decls,
         );
         dgen.protocol_methods = protocol_methods.clone();
@@ -2168,6 +2174,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &program.impls,
             &arg_drops,
             &store_owned,
+            &edge_releases,
             &program.type_decls,
         );
         cgen.fnval_variants = fnval_registry.clone();
@@ -2194,6 +2201,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &program.impls,
             &arg_drops,
             &store_owned,
+            &edge_releases,
             &program.type_decls,
         );
         cgen.protocol_methods = protocol_methods.clone();
@@ -2385,6 +2393,7 @@ struct Gen<'a> {
     /// `droppable` is keyed by the `Stmt::Let`'s.
     arg_drops: &'a std::collections::HashSet<usize>,
     store_owned: &'a std::collections::HashSet<usize>,
+    edge_releases: &'a std::collections::HashMap<usize, Vec<(String, bool)>>,
     /// The registers holding those values, innermost call last. Pushed where the
     /// argument is EVALUATED and taken back where its call ends.
     arg_frees: Vec<(String, Type)>,
@@ -2535,11 +2544,13 @@ impl<'a> Gen<'a> {
         impls: &'a [vyrn_frontend::ast::ImplBlock],
         arg_drops: &'a std::collections::HashSet<usize>,
         store_owned: &'a std::collections::HashSet<usize>,
+        edge_releases: &'a std::collections::HashMap<usize, Vec<(String, bool)>>,
         decls: &'a [TypeDecl],
     ) -> Self {
         Gen {
             arg_drops,
             store_owned,
+            edge_releases,
             arg_frees: Vec::new(),
             tmp: 0,
             label: 0,
@@ -5316,9 +5327,20 @@ impl<'a> Gen<'a> {
                 ..
             } => {
                 let (c, _) = self.gen_expr(cond)?;
+                // RFC-0114 Rule N: the analysis says one branch consumed a
+                // binding the other still holds at the join, where nothing may
+                // read it again — so the still-owning edge releases it here.
+                // An `if` with no else-block grows one when the implicit edge
+                // is the one that owes a release.
+                let ers = self
+                    .edge_releases
+                    .get(&(stmt as *const Stmt as usize))
+                    .cloned()
+                    .unwrap_or_default();
+                let else_owes = ers.iter().any(|(_, t)| !*t);
                 let then_l = self.fresh_label("then");
                 let end_l = self.fresh_label("endif");
-                let else_l = if else_block.is_some() {
+                let else_l = if else_block.is_some() || else_owes {
                     self.fresh_label("else")
                 } else {
                     end_l.clone()
@@ -5328,6 +5350,7 @@ impl<'a> Gen<'a> {
                 self.emit_label(&then_l);
                 self.gen_block(then_block)?;
                 if !self.terminated {
+                    self.emit_edge_releases(&ers, true);
                     self.emit_term(format!("br label %{end_l}"));
                 }
 
@@ -5335,8 +5358,13 @@ impl<'a> Gen<'a> {
                     self.emit_label(&else_l);
                     self.gen_block(eb)?;
                     if !self.terminated {
+                        self.emit_edge_releases(&ers, false);
                         self.emit_term(format!("br label %{end_l}"));
                     }
+                } else if else_owes {
+                    self.emit_label(&else_l);
+                    self.emit_edge_releases(&ers, false);
+                    self.emit_term(format!("br label %{end_l}"));
                 }
 
                 self.emit_label(&end_l);
@@ -9039,6 +9067,33 @@ impl<'a> Gen<'a> {
             // The analysis recorded a temporary whose type owns nothing —
             // nothing to do, and not worth a panic: the record is harmless.
             None => {}
+        }
+    }
+
+    /// RFC-0114 Rule N: release the bindings the OTHER branch of this `if`
+    /// consumed, on the edge where they are still this frame's. `on_then` picks
+    /// the edge. A declared `impl Owned` release is skipped: its body is user
+    /// code whose timing all three engines must agree on, and an edge is a
+    /// place none of them ran it before — the RFC refuses to normalize it.
+    /// Inside a `region` the memory is the arena's, as everywhere else.
+    fn emit_edge_releases(&mut self, ers: &[(String, bool)], on_then: bool) {
+        if self.region_depth != 0 {
+            return;
+        }
+        for (name, t) in ers {
+            if *t != on_then {
+                continue;
+            }
+            let Some((slot, ty)) = self.lookup(name) else {
+                continue;
+            };
+            let Some(kind) = self.owned.release_kind(&ty) else {
+                continue;
+            };
+            if matches!(kind, DropKind::Release(..)) {
+                continue;
+            }
+            self.emit_drop(&slot, &kind);
         }
     }
 
@@ -13734,6 +13789,7 @@ mod tests {
         let (rt, pt, pc, ty, va, sg, sb, fs, dm, hm, rg) = Default::default();
         let ow = vyrn_frontend::own::Owned::default();
         let ad = std::collections::HashSet::new();
+        let er = std::collections::HashMap::new();
         let g = Gen::new(
             &rt,
             &pt,
@@ -13750,6 +13806,7 @@ mod tests {
             &[],
             &ad,
             &ad,
+            &er,
             &[],
         );
         let rec = |fs: &[Type]| {

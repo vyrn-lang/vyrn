@@ -244,7 +244,21 @@ of the replaced value, which the in-place path has no counterpart for
 because it reuses the buffer. The intermediates that free reclaims were
 leaked before, equally, on both sides of that test's old equality.
 
-What remains of M2 is the join half, below.
+**Rule N (the join half) LANDED for `if`.** The walker records every join
+where exactly one branch consumed a whole binding — clean take, no hole, both
+branches continuing, the binding untouched before the `if` and on the other
+branch. `own::fold_edge_releases` keeps a candidate only when every write
+into the binding anywhere is owning (a binding ever assigned a projection may
+hold a borrow at the edge, and no walk-order argument survives a back edge)
+and the final verdict is a plain take. Both backends then release at the end
+of the non-consuming arm, growing an else-arm when the implicit edge owes the
+release. The loop case needs no rule of its own: a binding declared outside a
+loop and conditionally consumed inside it is already refused by the checker's
+next-iteration reuse rule, so any candidate inside a loop is re-initialized
+each iteration before its `if`. Measured: the conditional-move witness fell
+from 215.3 MB to 3.8 MB over 200,000 rounds; `conditionalMove` in `memory.rs`
+pins it. A declared `impl Owned` release stays off the edge (the thin refusal
+below, unchanged). `match` joins are not yet covered.
 
 The state is per place, per program point: `Owned | Moved | Uninit`, a forward
 dataflow with a join at every merge.

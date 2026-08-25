@@ -267,6 +267,8 @@ pub struct Facts {
     /// holds for the whole module and nothing may `consume` it, so every store
     /// into one releases what it replaces (Phase 5's rule, now stated as data).
     pub global_stores: std::collections::HashSet<usize>,
+    /// RFC-0114 Rule N: the asymmetric-consumption joins (see [`EdgeRel`]).
+    pub edge_releases: Vec<EdgeRel>,
 }
 
 /// One ownership-relevant event on one binding (RFC-0114 M2).
@@ -280,6 +282,18 @@ pub struct StoreEv {
     pub order: u32,
     pub loops: Vec<u32>,
     pub kind: EvKind,
+}
+
+/// RFC-0114 Rule N: an `if` consumed a binding on exactly one branch, both
+/// branches continue to the join, and the other branch still holds the value —
+/// so a release belongs ON THE EDGE that did not consume. `on_then` names the
+/// edge that releases. `own::analyze` folds these against the write events
+/// (every write must be owning) before either backend sees one.
+pub struct EdgeRel {
+    pub if_key: usize,
+    pub key: usize,
+    pub name: String,
+    pub on_then: bool,
 }
 
 pub enum EvKind {
@@ -365,6 +379,7 @@ pub fn facts(program: &Program) -> Facts {
         arg_temps,
         store_events: r.store_events,
         global_stores: r.global_stores,
+        edge_releases: r.edge_releases,
     }
 }
 
@@ -390,6 +405,7 @@ struct Run {
     projections: Vec<ProjectionSite>,
     store_events: Vec<StoreEv>,
     global_stores: HashSet<usize>,
+    edge_releases: Vec<EdgeRel>,
 }
 
 /// What the callee does with the temporary at `(callee, ix)`.
@@ -595,6 +611,7 @@ fn run(program: &Program, want: Want) -> Run {
         arg_temps: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         store_events: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         global_stores: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
+        edge_releases: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         ev_order: std::cell::Cell::new(0),
         loop_ids: RefCell::new(Vec::new()),
         next_loop: std::cell::Cell::new(0),
@@ -726,6 +743,10 @@ fn run(program: &Program, want: Want) -> Run {
             .global_stores
             .map(RefCell::into_inner)
             .unwrap_or_default(),
+        edge_releases: mc
+            .edge_releases
+            .map(RefCell::into_inner)
+            .unwrap_or_default(),
     }
 }
 
@@ -828,6 +849,7 @@ struct MoveCheck<'a> {
     /// assigns to module state, which are owned unconditionally.
     store_events: Option<RefCell<Vec<StoreEv>>>,
     global_stores: Option<RefCell<HashSet<usize>>>,
+    edge_releases: Option<RefCell<Vec<EdgeRel>>>,
     ev_order: std::cell::Cell<u32>,
     /// The stack of loop ids the walk is inside — pushed by `while`/`for`,
     /// stamped onto every event, so the fold can see which pairs of events a
@@ -3031,6 +3053,45 @@ impl MoveCheck<'_> {
                     Some(eb) => self.block(eb, &mut else_c, scope),
                     None => false,
                 };
+                // RFC-0114 Rule N: a binding consumed on exactly one branch,
+                // both branches continuing to the join. The union below will say
+                // "consumed", so nothing after the `if` may read it (that is A1)
+                // and block exit will not release it — the edge that did NOT
+                // consume is the one place the value can still be given back.
+                // Whole bindings only, taken clean (no hole), untouched before
+                // the `if` and untouched on the other branch — a projection
+                // take, or any prior activity in the binding's bucket, refuses.
+                if !then_div && !else_div {
+                    if let Some(sink) = &self.edge_releases {
+                        let if_key = s as *const Stmt as usize;
+                        for (taker, other, on_then) in
+                            [(&then_c, &else_c, false), (&else_c, &then_c, true)]
+                        {
+                            for (root, bucket) in &taker.0 {
+                                if consumed.0.contains_key(root)
+                                    || other.0.contains_key(root)
+                                    || bucket.len() != 1
+                                {
+                                    continue;
+                                }
+                                let Some(c) = bucket.get(root) else { continue };
+                                if c.hole {
+                                    continue;
+                                }
+                                let key = self.nodes.borrow().get(root).copied().unwrap_or(0);
+                                if key == 0 {
+                                    continue;
+                                }
+                                sink.borrow_mut().push(EdgeRel {
+                                    if_key,
+                                    key,
+                                    name: root.clone(),
+                                    on_then,
+                                });
+                            }
+                        }
+                    }
+                }
                 // may-consume, but a branch that DIVERGES (break/continue/return)
                 // carries its consumptions out the exit path, not to the code
                 // after the `if` — so a value moved only on a break-path is not
