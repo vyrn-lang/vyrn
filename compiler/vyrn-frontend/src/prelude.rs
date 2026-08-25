@@ -297,6 +297,13 @@ fn rows() -> Vec<Function> {
             arr(t()),
             &[],
         ),
+        row(
+            "@copyFrom",
+            &["T"],
+            &[("self", Read, arr(t())), ("xs", Read, arr(t()))],
+            arr(t()),
+            &[],
+        ),
         // ---- the stream primitives (RFC-0075, RFC-0090 M3) ------------------
         // The two PR #118 rows. A stream's close frees what its producer was
         // handed — the array's buffer, or the step's capture block — so the frame

@@ -5921,6 +5921,14 @@ impl<'a> Interp<'a> {
                         Val::Array(_) => Ok(vals[0].clone()),
                         other => Err(format!("reserve of non-Array {other:?}").into()),
                     },
+                    // `dst.copyFrom(src)` (RFC-0115): the receiver's buffer,
+                    // the source's elements. Value-wise that IS the source, and
+                    // `Rc` makes the copy lazy — buffers are the compiled
+                    // backends' business.
+                    "@copyFrom" => match (&vals[0], &vals[1]) {
+                        (Val::Array(_), Val::Array(_)) => Ok(vals[1].clone()),
+                        (a, b) => Err(format!("copyFrom of {a:?} and {b:?}").into()),
+                    },
                     // `xs.append(ys)` (RFC-0115): every element of `ys`, in order.
                     "@append" => match (&vals[0], &vals[1]) {
                         (Val::Array(elems), Val::Array(more)) => {

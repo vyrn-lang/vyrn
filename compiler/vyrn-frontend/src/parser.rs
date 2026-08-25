@@ -124,6 +124,9 @@ pub const METHOD_BUILTINS: &[(&str, &str)] = &[
     // receiver place.
     ("reserve", "@reserve"),
     ("append", "@append"),
+    // `dst.copyFrom(src)` (RFC-0115): overwrite `dst`'s elements with `src`'s,
+    // reusing the buffer — the refill loop fannkuch hand-wrote, as one copy.
+    ("copyFrom", "@copyFrom"),
     // `xs.toArray()` (RFC-0056) — copy a SmallArray out to a growable Array.
     ("toArray", "@toArray"),
     // `x.copy()` (RFC-0089 M1b) — a deep copy of an owned heap value.
@@ -4014,7 +4017,11 @@ impl Parser {
                     return Ok(self.spliced(pre));
                 }
                 if let Expr::Call { name, args, .. } = &e {
-                    if name == "@push" || name == "@reserve" || name == "@append" {
+                    if name == "@push"
+                        || name == "@reserve"
+                        || name == "@append"
+                        || name == "@copyFrom"
+                    {
                         match args.first() {
                             // `sq.push(v)` — a plain array variable.
                             Some(Expr::Var { name: recv, .. }) => {

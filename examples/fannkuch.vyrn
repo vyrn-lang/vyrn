@@ -99,12 +99,9 @@ fn fannkuch(n: Int64) -> Fold {
             count[r - 1] = r
             r = r - 1
         }
-        // Refill the one working buffer rather than allocating another.
-        let mut c = 0
-        while c < n {
-            work[c] = perm1[c]
-            c = c + 1
-        }
+        // Refill the one working buffer rather than allocating another —
+        // one `copyFrom` (RFC-0115) where a checked-store loop stood.
+        work.copyFrom(perm1)
         let folded = foldCount(consume work)
         let flips = folded.flips
         work = consume folded.buf

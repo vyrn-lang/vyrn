@@ -34,6 +34,11 @@ pub const KNOWN_DIVERGENT: &[(&str, &str)] = &[];
 /// refusal was pinned here.
 pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
     (
+        "copyfromowned.vyrn",
+        "RFC-0115: `copyFrom` overwrites by bytes, so an owning element that is          overwritten would never be released",
+        "overwrites the receiver's elements by bytes",
+    ),
+    (
         "appendowned.vyrn",
         "RFC-0115: `append` is a byte copy, so an element type that owns heap          is refused — copying one by bytes gives two arrays one buffer",
         "copies its source's elements by bytes",

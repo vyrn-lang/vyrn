@@ -6972,6 +6972,41 @@ impl<'a> Checker<'a> {
             }
             return Ok(at);
         }
+        if name == "@copyFrom" {
+            if args.len() != 2 {
+                return Err(cerr!(
+                    line,
+                    "`copyFrom` takes 2 arguments, got {}",
+                    args.len()
+                ));
+            }
+            let at = self.expr(&args[0], scope, None, fn_ret)?;
+            let elem = match self.base(&at) {
+                Type::Array(inner) => (*inner).clone(),
+                Type::Err => return Ok(Type::Err),
+                other => {
+                    return Err(cerr!(
+                        line,
+                        "`copyFrom` needs a growable Array as its receiver, found {other}"
+                    ))
+                }
+            };
+            let want = Type::Array(Box::new(elem.clone()));
+            let xs = self.expr(&args[1], scope, Some(&want), fn_ret)?;
+            if !self.coercible(&xs, &want) {
+                return Err(cerr!(
+                    line,
+                    "`copyFrom` source is {xs} but the receiver holds {elem} elements"
+                ));
+            }
+            if crate::own::owns_heap(&elem, &self.types) {
+                return Err(cerr!(
+                    line,
+                    "`copyFrom` overwrites the receiver's elements by bytes, and `{elem}` owns heap — the overwritten elements would never be released"
+                ));
+            }
+            return Ok(at);
+        }
         if name == "@append" {
             if args.len() != 2 {
                 return Err(cerr!(

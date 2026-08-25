@@ -10725,6 +10725,82 @@ impl<'a> Gen<'a> {
             ));
             return Ok((r3, Type::Array(Box::new(elem))));
         }
+        // `dst.copyFrom(src)` (RFC-0115): the receiver's buffer, the source's
+        // elements, one memcpy. Grows only when the source is longer; a
+        // self-copy moves zero bytes (a `select` on the data pointers), which
+        // sidesteps the same-pointer memcpy nobody defines.
+        if name == "@copyFrom" {
+            let (av, aty) = self.gen_expr(&args[0])?;
+            let elem = match self.resolve(&aty) {
+                Type::Array(inner) => *inner,
+                _ => return Err("copyFrom on a non-Array value".into()),
+            };
+            let ell = self.llt(&elem);
+            let (xv, _) = self.gen_expr(&args[1])?;
+            let data = self.fresh_tmp();
+            let cap = self.fresh_tmp();
+            self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {av}, 0"));
+            self.emit(format!("{cap} = extractvalue {{ ptr, i64, i64 }} {av}, 2"));
+            let xdata = self.fresh_tmp();
+            let xlen = self.fresh_tmp();
+            self.emit(format!(
+                "{xdata} = extractvalue {{ ptr, i64, i64 }} {xv}, 0"
+            ));
+            self.emit(format!("{xlen} = extractvalue {{ ptr, i64, i64 }} {xv}, 1"));
+            let fits = self.fresh_tmp();
+            self.emit(format!("{fits} = icmp sle i64 {xlen}, {cap}"));
+            let grow_l = self.fresh_label("cpf.grow");
+            let ready_l = self.fresh_label("cpf.ready");
+            let pre = self.cur_block.clone();
+            self.emit_term(format!("br i1 {fits}, label %{ready_l}, label %{grow_l}"));
+            self.emit_label(&grow_l);
+            let esz = self.fresh_tmp();
+            let nb = self.fresh_tmp();
+            let nd = self.fresh_tmp();
+            self.emit(format!(
+                "{esz} = ptrtoint ptr getelementptr ({ell}, ptr null, i64 1) to i64"
+            ));
+            self.emit(format!("{nb} = mul i64 {xlen}, {esz}"));
+            self.emit(format!(
+                "{nd} = call ptr @__vyrn_realloc(ptr {data}, i64 {nb})"
+            ));
+            self.emit_term(format!("br label %{ready_l}"));
+            self.emit_label(&ready_l);
+            let pdata = self.fresh_tmp();
+            let pcap = self.fresh_tmp();
+            self.emit(format!(
+                "{pdata} = phi ptr [ {data}, %{pre} ], [ {nd}, %{grow_l} ]"
+            ));
+            self.emit(format!(
+                "{pcap} = phi i64 [ {cap}, %{pre} ], [ {xlen}, %{grow_l} ]"
+            ));
+            let same = self.fresh_tmp();
+            let esz2 = self.fresh_tmp();
+            let raw = self.fresh_tmp();
+            let bytes = self.fresh_tmp();
+            self.emit(format!("{same} = icmp eq ptr {xdata}, {pdata}"));
+            self.emit(format!(
+                "{esz2} = ptrtoint ptr getelementptr ({ell}, ptr null, i64 1) to i64"
+            ));
+            self.emit(format!("{raw} = mul i64 {xlen}, {esz2}"));
+            self.emit(format!("{bytes} = select i1 {same}, i64 0, i64 {raw}"));
+            self.emit(format!(
+                "call void @llvm.memcpy.p0.p0.i64(ptr {pdata}, ptr {xdata}, i64 {bytes}, i1 false)"
+            ));
+            let r1 = self.fresh_tmp();
+            let r2 = self.fresh_tmp();
+            let r3 = self.fresh_tmp();
+            self.emit(format!(
+                "{r1} = insertvalue {{ ptr, i64, i64 }} undef, ptr {pdata}, 0"
+            ));
+            self.emit(format!(
+                "{r2} = insertvalue {{ ptr, i64, i64 }} {r1}, i64 {xlen}, 1"
+            ));
+            self.emit(format!(
+                "{r3} = insertvalue {{ ptr, i64, i64 }} {r2}, i64 {pcap}, 2"
+            ));
+            return Ok((r3, Type::Array(Box::new(elem))));
+        }
         // `xs.append(ys)` (RFC-0115): grow once to `max(need, cap*2)`, then one
         // memcpy of the source's elements — the checker held the element type
         // to heapless ones, so bytes ARE the elements. A self-append reads the

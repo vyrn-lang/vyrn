@@ -5509,7 +5509,9 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 // RFC-0115: `reserve`/`append` hand back the receiver's own
                 // type — capacity is not part of it.
-                "@reserve" | "@append" if !args.is_empty() => self.peek(&args[0], line)?,
+                "@reserve" | "@append" | "@copyFrom" if !args.is_empty() => {
+                    self.peek(&args[0], line)?
+                }
                 "@push" | "@list" if !args.is_empty() => match self.peek(&args[0], line)? {
                     t => match self.cx.resolve(&t) {
                         // A `SmallArray` push yields a `SmallArray`, inline state
@@ -7491,6 +7493,7 @@ impl<'p> Fn_<'_, 'p> {
             "@push" if args.len() == 2 => return self.push(m, b, args, line),
             "@reserve" if args.len() == 2 => return self.reserve_arr(m, b, args, line),
             "@append" if args.len() == 2 => return self.append_arr(m, b, args, line),
+            "@copyFrom" if args.len() == 2 => return self.copy_from_arr(m, b, args, line),
             // A `SmallArray` receiver takes the four-field path. Dispatched on
             // `peek` rather than on an emitted type, because the receiver must not
             // be evaluated twice — `sa_method` evaluates it itself, and for `pop`
@@ -10235,6 +10238,100 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Store(word()));
         b.slot(off + l.fields[1]);
         b.ins(&Instruction::LocalGet(need));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off + l.fields[2]);
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off);
+        Ok(Type::Array(Box::new(elem)))
+    }
+
+    /// `dst.copyFrom(src)` (RFC-0115): the receiver's buffer, the source's
+    /// elements, one `memory.copy`. Grows only when the source is longer; a
+    /// self-copy moves zero bytes.
+    fn copy_from_arr(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let aty = self.expr(m, b, &args[0])?;
+        let Type::Array(elem) = self.cx.resolve(&aty) else {
+            return unsupported(&format!("`copyFrom` on `{aty}`"), line);
+        };
+        let elem = *elem;
+        let l = self.layout_of(&aty, line)?;
+        let stride = self.stride(&elem, line)? as i32;
+        let (src, data, cap) = (
+            b.local(ValType::I32),
+            b.local(ValType::I32),
+            b.local(ValType::I64),
+        );
+        b.ins(&Instruction::LocalSet(src));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        b.ins(&Instruction::LocalSet(data));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I64Load(at(l.fields[2])));
+        b.ins(&Instruction::LocalSet(cap));
+        let (xsrc, xdata, xlen) = (
+            b.local(ValType::I32),
+            b.local(ValType::I32),
+            b.local(ValType::I64),
+        );
+        self.expr_as(m, b, &args[1], &aty)?;
+        b.ins(&Instruction::LocalSet(xsrc));
+        b.ins(&Instruction::LocalGet(xsrc));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        b.ins(&Instruction::LocalSet(xdata));
+        b.ins(&Instruction::LocalGet(xsrc));
+        b.ins(&Instruction::I64Load(at(l.fields[1])));
+        b.ins(&Instruction::LocalSet(xlen));
+        // xlen > cap: grow to exactly xlen. The old contents are dead, so this
+        // is malloc + free with NO copy of them.
+        b.ins(&Instruction::LocalGet(xlen));
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64GtS);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        let grown = b.local(ValType::I32);
+        b.ins(&Instruction::LocalGet(xlen));
+        b.ins(&Instruction::I64Const(stride as i64));
+        b.ins(&Instruction::I64Mul);
+        b.ins(&Instruction::Call(self.cx.rt.malloc));
+        b.ins(&Instruction::LocalSet(grown));
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::Call(self.cx.rt.free));
+        b.ins(&Instruction::LocalGet(grown));
+        b.ins(&Instruction::LocalSet(data));
+        b.ins(&Instruction::LocalGet(xlen));
+        b.ins(&Instruction::LocalSet(cap));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        // memory.copy, unless the pointers were one — then zero bytes.
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::LocalGet(xdata));
+        b.ins(&Instruction::I64Const(0));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalGet(xlen));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::I32Const(stride));
+        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::LocalGet(xdata));
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::I32Eq);
+        b.ins(&Instruction::Select);
+        b.ins(&Instruction::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        });
+        let off = b.alloc(l.size, l.align);
+        b.slot(off + l.fields[0]);
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::I32Store(word()));
+        b.slot(off + l.fields[1]);
+        b.ins(&Instruction::LocalGet(xlen));
         b.ins(&Instruction::I64Store(word8()));
         b.slot(off + l.fields[2]);
         b.ins(&Instruction::LocalGet(cap));
