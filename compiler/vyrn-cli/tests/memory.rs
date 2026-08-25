@@ -491,11 +491,11 @@ const ROWS: &[Row] = &[
     Row {
         export: "escapingAccumulator",
         census: "RFC-0114 M2",
-        today: Shape::Leaks,
-        why: "OPEN. `slot_owns` asks whether the binding is in `drop_slots`, and one whose \
-              value is consumed at the end is not — so no assignment in its life releases \
-              what it replaced. The same loop returning `acc` instead is steady. Flip to \
-              Steady when RFC-0114 M2 lands",
+        today: Shape::Steady,
+        why: "RFC-0114 M2: ownedness is per STORE, not per binding. `fold_store_owned` \
+              proves each reassignment's old value has no other holder — the final \
+              consume takes only the last value, so every store before it releases. \
+              The old `slot_owns` gate abandoned the whole binding for that one consume",
     },
     Row {
         export: "prependLoop",

@@ -396,6 +396,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         // (`rfcs/census-call-arguments.md`), taken before `ownership` is moved
         // from.
         arg_drops: ownership.arg_drops(),
+        store_owned: ownership.store_owned.clone(),
         releases: ownership.releases,
         droppable: ownership.droppable,
         // RFC-0093 M2, flattened across functions: the key is the `let`'s node
@@ -1112,6 +1113,10 @@ struct Cx<'a> {
     /// (`rfcs/census-call-arguments.md`), keyed by node address — `own`'s
     /// answer, one level down from a `let`'s.
     arg_drops: std::collections::HashSet<usize>,
+    /// RFC-0114 M2: the assigns whose store releases the old value —
+    /// `own::fold_store_owned`'s answer, the same set the textual backend
+    /// gates on, so the two cannot disagree about a store.
+    store_owned: std::collections::HashSet<usize>,
     /// The `Owned` table (RFC-0086 M1) — the same one `own` decided with, so a
     /// user type's declared `release` reaches this backend without a second list.
     owned: vyrn_frontend::own::Owned,
@@ -3376,7 +3381,13 @@ impl<'p> Fn_<'_, 'p> {
                 // 9.9 GB over 50,000 calls of a 200-iteration loop.
                 let fresh_str = matches!(self.cx.resolve(&ty), Type::Str)
                     && matches!(value, Expr::Binary { op: BinOp::Add, .. });
-                let snap = if self.place_owns(place)
+                // RFC-0114 M2: ownedness is the analysis's per-statement answer,
+                // shared with the textual backend — see `fold_store_owned` and
+                // the comment there. `place_owns` stays for the OTHER stores
+                // (fields, elements), which this slice does not touch.
+                let owned_here = self.region_depth == 0
+                    && self.cx.store_owned.contains(&(s as *const Stmt as usize));
+                let snap = if owned_here
                     && (fresh_str || !vyrn_frontend::movecheck::mentions_place(value, name))
                 {
                     match (place, &r) {
@@ -17124,6 +17135,7 @@ mod tests {
     fn cx() -> Cx<'static> {
         Cx {
             arg_drops: std::collections::HashSet::new(),
+            store_owned: std::collections::HashSet::new(),
             types: HashMap::new(),
             decls: &[],
             lambdas: HashMap::new(),

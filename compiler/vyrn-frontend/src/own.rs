@@ -1148,6 +1148,10 @@ pub struct BindingNote {
 /// Whole-program ownership facts.
 #[derive(Default)]
 pub struct Ownership {
+    /// RFC-0114 M2: the `Stmt::Assign` nodes whose old value the store releases
+    /// — see [`fold_store_owned`]. Both backends gate the store-release on this
+    /// and on nothing of their own.
+    pub store_owned: std::collections::HashSet<usize>,
     /// Functions whose return value transfers heap ownership to the caller,
     /// with the kind of value returned.
     ///
@@ -1230,6 +1234,7 @@ pub fn analyze(program: &Program) -> Ownership {
     // by the pass that enforces the rules. One walk, one answer, no second
     // opinion (RFC-0087 records three defects that were two walkers disagreeing).
     let facts = crate::movecheck::facts(program);
+    let store_owned = fold_store_owned(&facts);
     let lets = facts.lets;
 
     let mut droppable = HashMap::new();
@@ -1271,7 +1276,92 @@ pub fn analyze(program: &Program) -> Ownership {
         proto,
         arg_temps: facts.arg_temps,
         releases,
+        store_owned,
     }
+}
+
+/// The assigns whose OLD value is provably this frame's to release when the
+/// store runs (RFC-0114 M2, the straight-line half).
+///
+/// The rule, folded from the walker's event stream: a store releases what it
+/// replaces iff the previous write into the binding was OWNING, no take of the
+/// binding sits between the two in walk order, and no take shares a loop with
+/// the store — a back edge makes walk order meaningless between two events in
+/// one loop, so a shared loop is refused. Refusal is the leak direction, which
+/// is exactly today's behaviour; every difference this fold makes is a NEW
+/// release of a value the old per-binding gate abandoned. The adversarial
+/// cases — take-then-`break`, a take later in the loop body, a conditional
+/// take before the join — are worked in the proof appendix §45.
+///
+/// The veto: a binding whose FINAL row says somebody else holds the value —
+/// borrowed, lent, captured, aliased, or holed — releases at no store, however
+/// clean the order looks, because the lender/retainer verdicts arrive after
+/// the walk and a projection may be alive at any store. `Moved`, `Dropped` and
+/// `Returned` do NOT veto: they are ordinary takes, already placed in the
+/// order, and vetoing them is the per-binding mistake this fold exists to
+/// retire. Module-state stores are owned unconditionally — nothing may
+/// `consume` a global.
+fn fold_store_owned(facts: &crate::movecheck::Facts) -> std::collections::HashSet<usize> {
+    use crate::movecheck::{EvKind, Gone};
+    let vetoed: std::collections::HashSet<usize> = facts
+        .lets
+        .iter()
+        .filter(|(_, r)| {
+            !matches!(
+                r.gone,
+                None | Some(Gone::Moved { .. })
+                    | Some(Gone::Dropped { .. })
+                    | Some(Gone::Returned { .. })
+            )
+        })
+        .map(|(k, _)| *k)
+        .collect();
+
+    let mut per: HashMap<usize, Vec<&crate::movecheck::StoreEv>> = HashMap::new();
+    for ev in &facts.store_events {
+        per.entry(ev.key).or_default().push(ev);
+    }
+
+    let mut owned: std::collections::HashSet<usize> = facts.global_stores.clone();
+    for (key, evs) in &per {
+        if vetoed.contains(key) {
+            continue;
+        }
+        for (i, ev) in evs.iter().enumerate() {
+            let EvKind::Write { id, .. } = ev.kind else {
+                continue;
+            };
+            if id == 0 {
+                continue; // a `let` initializer is a store into nothing
+            }
+            let Some(prev) = evs[..i]
+                .iter()
+                .rev()
+                .find(|e| matches!(e.kind, EvKind::Write { .. }))
+            else {
+                continue;
+            };
+            let EvKind::Write {
+                owning: prev_owning,
+                ..
+            } = prev.kind
+            else {
+                unreachable!("filtered to writes");
+            };
+            if !prev_owning {
+                continue;
+            }
+            let blocked = evs.iter().any(|t| {
+                matches!(t.kind, EvKind::Take)
+                    && ((t.order > prev.order && t.order < ev.order)
+                        || t.loops.iter().any(|l| ev.loops.contains(l)))
+            });
+            if !blocked {
+                owned.insert(id);
+            }
+        }
+    }
+    owned
 }
 
 /// The placement as a consumer reads it: `(exit, the node the exit is AT)` maps

@@ -218,6 +218,34 @@ is allowed to have.
 
 ### M2 — per-store liveness, and no drop flags
 
+**Straight-line half LANDED.** `movecheck` records an event stream per binding
+— every write (with whether the stored value was owning) and every take, each
+stamped with walk order and the loops it sits in. `own::fold_store_owned`
+folds it into the set of `Assign` nodes whose store releases the old value:
+the previous write was owning, no take sits between the two in walk order,
+and no take shares a loop with the store (a back edge makes walk order
+meaningless inside one loop, so a shared loop refuses — refusal is the leak
+direction, which is exactly the old behaviour). A binding whose final verdict
+says somebody else holds the value — borrowed, lent, captured, aliased,
+holed — releases at no store; `Moved`/`Dropped`/`Returned` are ordinary
+takes, placed in the order, and do not veto. Both backends gate the store
+snapshot on this one set, keyed by statement address, and on nothing of
+their own; the old per-binding `slot_owns`/`place_owns` gate stays only for
+field and element stores, which this slice does not touch.
+
+Measured on landing: the escaping accumulator (50 000 rounds of an 8-concat
+loop whose result is consumed into a record) fell from 9 925.7 MB to
+4.9 MB native. `escapingAccumulator` in `memory.rs` flipped to `Steady` the
+way the harness is built to flip — the row failed as "now reads Steady" and
+was then rewritten. One codegen unit test moved with it, and the movement is
+the fix observed from another angle: the copying string-accumulator lowering
+now carries exactly one more free than the in-place lowering — the release
+of the replaced value, which the in-place path has no counterpart for
+because it reuses the buffer. The intermediates that free reclaims were
+leaked before, equally, on both sides of that test's old equality.
+
+What remains of M2 is the join half, below.
+
 The state is per place, per program point: `Owned | Moved | Uninit`, a forward
 dataflow with a join at every merge.
 

@@ -259,6 +259,39 @@ pub struct Facts {
     pub lets: HashMap<usize, LetOwnership>,
     /// Every call-argument temporary, with the callee's verdict on it.
     pub arg_temps: Vec<ArgTemp>,
+    /// The per-binding write/take event stream, in walk order (RFC-0114 M2).
+    /// `own::analyze` folds it into the store-ownedness set; nothing else
+    /// reads it.
+    pub store_events: Vec<StoreEv>,
+    /// Assigns to MODULE STATE, which are always owned: a global owns what it
+    /// holds for the whole module and nothing may `consume` it, so every store
+    /// into one releases what it replaces (Phase 5's rule, now stated as data).
+    pub global_stores: std::collections::HashSet<usize>,
+}
+
+/// One ownership-relevant event on one binding (RFC-0114 M2).
+///
+/// `key` is the binding's `Stmt::Let` address — the same key everything else
+/// here uses. `loops` is the stack of loop ids the event sits inside, because
+/// a back edge makes walk order meaningless between two events that share a
+/// loop, and the fold refuses rather than guesses there.
+pub struct StoreEv {
+    pub key: usize,
+    pub order: u32,
+    pub loops: Vec<u32>,
+    pub kind: EvKind,
+}
+
+pub enum EvKind {
+    /// A write into the binding: its `let` initializer (`id` 0) or an assign
+    /// (`id` = the `Stmt::Assign` address). `owning` is false when the value
+    /// is a projection of a place — the binding then HOLDS a borrow, and the
+    /// next store over it must not release.
+    Write { id: usize, owning: bool },
+    /// The value left or was compromised: moved, dropped, returned, captured,
+    /// lent, or a field taken out (a hole). One kind, because the fold only
+    /// asks "may the value still be released", and every answer here is no.
+    Take,
 }
 
 /// What every `let` in `program` owns at the end of its block, keyed by the
@@ -327,7 +360,12 @@ pub fn facts(program: &Program) -> Facts {
             });
         }
     }
-    Facts { lets, arg_temps }
+    Facts {
+        lets,
+        arg_temps,
+        store_events: r.store_events,
+        global_stores: r.global_stores,
+    }
 }
 
 /// What a run of the pass is for. The check is the hot path — a keystroke pays
@@ -350,6 +388,8 @@ struct Run {
     retains: HashSet<(String, usize)>,
     arg_temps: Vec<ArgTemp>,
     projections: Vec<ProjectionSite>,
+    store_events: Vec<StoreEv>,
+    global_stores: HashSet<usize>,
 }
 
 /// What the callee does with the temporary at `(callee, ix)`.
@@ -553,6 +593,11 @@ fn run(program: &Program, want: Want) -> Run {
         handed_on: (want == Want::Lets).then(|| RefCell::new(HashMap::new())),
         param_ix: RefCell::new(HashMap::new()),
         arg_temps: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
+        store_events: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
+        global_stores: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
+        ev_order: std::cell::Cell::new(0),
+        loop_ids: RefCell::new(Vec::new()),
+        next_loop: std::cell::Cell::new(0),
         projections: (want == Want::Projections).then(|| RefCell::new(Vec::new())),
     };
     let mut out = Vec::new();
@@ -676,6 +721,11 @@ fn run(program: &Program, want: Want) -> Run {
         retains,
         arg_temps,
         projections,
+        store_events: mc.store_events.map(RefCell::into_inner).unwrap_or_default(),
+        global_stores: mc
+            .global_stores
+            .map(RefCell::into_inner)
+            .unwrap_or_default(),
     }
 }
 
@@ -774,6 +824,16 @@ struct MoveCheck<'a> {
     /// Where the call-argument temporaries go — see [`MoveCheck::note_arg_temp`].
     /// `None` on the check path, with `lets`.
     arg_temps: Option<RefCell<Vec<ArgTemp>>>,
+    /// RFC-0114 M2: the write/take event stream (see [`StoreEv`]), and the
+    /// assigns to module state, which are owned unconditionally.
+    store_events: Option<RefCell<Vec<StoreEv>>>,
+    global_stores: Option<RefCell<HashSet<usize>>>,
+    ev_order: std::cell::Cell<u32>,
+    /// The stack of loop ids the walk is inside — pushed by `while`/`for`,
+    /// stamped onto every event, so the fold can see which pairs of events a
+    /// back edge could reorder.
+    loop_ids: RefCell<Vec<u32>>,
+    next_loop: std::cell::Cell<u32>,
     /// Where RFC-0092 M0's projection sites go, or `None` everywhere else. The
     /// measurement is a mode, not a second walk: the two places that would refuse
     /// are the two places that record.
@@ -1220,11 +1280,36 @@ impl MoveCheck<'_> {
         key
     }
 
+    /// Record one RFC-0114 M2 event for `key` (0 = untracked, dropped).
+    fn store_ev(&self, key: usize, kind: EvKind) {
+        if key == 0 {
+            return;
+        }
+        let Some(sink) = &self.store_events else {
+            return;
+        };
+        let order = self.ev_order.get();
+        self.ev_order.set(order + 1);
+        sink.borrow_mut().push(StoreEv {
+            key,
+            order,
+            loops: self.loop_ids.borrow().clone(),
+            kind,
+        });
+    }
+
     fn took(&self, name: &str, gone: Gone) {
         let Some(sink) = &self.lets else { return };
         let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
         if key == 0 {
             return;
+        }
+        // RFC-0114 M2: everything reaching here except a borrow-rebind means
+        // the value left or is compromised, and a later store must not release
+        // what is no longer there. A `Borrowed` row is the WRITE's property —
+        // its event was already pushed with `owning: false`.
+        if !matches!(gone, Gone::Borrowed(_)) {
+            self.store_ev(key, EvKind::Take);
         }
         if let Some(row) = sink.borrow_mut().get_mut(&key) {
             // A HOLE is not the last word (RFC-0093 M2): it says the binding is
@@ -1254,6 +1339,9 @@ impl MoveCheck<'_> {
         if key == 0 {
             return;
         }
+        // RFC-0114 M2: a hole compromises the whole value for release purposes
+        // — freeing around it is RFC-0093's job at block exit, not a store's.
+        self.store_ev(key, EvKind::Take);
         if let Some(row) = sink.borrow_mut().get_mut(&key) {
             match &mut row.gone {
                 None => {
@@ -2750,12 +2838,43 @@ impl MoveCheck<'_> {
                 }
                 self.bind(name, bty, borrow);
                 self.nodes.borrow_mut().bind(name, let_id(s));
+                // RFC-0114 M2: the initializer is the binding's first write.
+                // `id` 0 because a `let` is never itself a release site — it is
+                // only the store before the first assign.
+                self.store_ev(
+                    let_id(s),
+                    EvKind::Write {
+                        id: 0,
+                        owning: place.is_none(),
+                    },
+                );
                 revive(consumed, name); // a fresh binding is alive again
                 scope.last_mut().unwrap().insert(name.clone());
                 Ok(false)
             }
             Stmt::Assign { name, value, line } => {
                 self.expr(value, consumed, scope)?;
+                // RFC-0114 M2: the write event, BEFORE the store's own effects
+                // (`took(Borrowed)`, revive) so the fold sees the state the
+                // store finds. A global is recorded in its own set — module
+                // state is owned unconditionally.
+                {
+                    let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
+                    let sid = s as *const Stmt as usize;
+                    if key != 0 {
+                        self.store_ev(
+                            key,
+                            EvKind::Write {
+                                id: sid,
+                                owning: self.names_a_place(value).is_none(),
+                            },
+                        );
+                    } else if self.globals.contains(name) && !Self::in_scope(scope, name) {
+                        if let Some(g) = &self.global_stores {
+                            g.borrow_mut().insert(sid);
+                        }
+                    }
+                }
                 // Module state (RFC-0013) is a place with a whole-module lifetime,
                 // so 4b treats a store into it differently from a local's.
                 let global = self.globals.contains(name) && !Self::in_scope(scope, name);
@@ -3020,6 +3139,11 @@ impl MoveCheck<'_> {
                 Ok(then_div && else_div)
             }
             Stmt::While { cond, body, .. } => {
+                // RFC-0114 M2: everything inside carries this loop's id, so the
+                // fold can refuse to order two events a back edge could swap.
+                let lid = self.next_loop.get();
+                self.next_loop.set(lid + 1);
+                self.loop_ids.borrow_mut().push(lid);
                 // The condition re-runs on every iteration, so consumption in it
                 // is loop-consumption exactly like the body's (`while take(x)`
                 // would use `x` again next time around) — track both in the
@@ -3033,6 +3157,7 @@ impl MoveCheck<'_> {
                 // path of which LEAVES the loop runs at most once.
                 let leaves_loop = body_div && !self.continue_seen.get();
                 self.continue_seen.set(outer_continue);
+                self.loop_ids.borrow_mut().pop();
                 self.check_loop_reuse(consumed, &body_c, scope, leaves_loop)?;
                 for (k, v) in body_c {
                     consumed.or_insert(k, v);
@@ -3048,6 +3173,10 @@ impl MoveCheck<'_> {
                 line,
                 consuming,
             } => {
+                // RFC-0114 M2: same loop stamp as `while` — see there.
+                let m2_lid = self.next_loop.get();
+                self.next_loop.set(m2_lid + 1);
+                self.loop_ids.borrow_mut().push(m2_lid);
                 self.expr(iter, consumed, scope)?;
                 self.site("iterate", *line, iter, None);
                 if *consuming {
@@ -3129,6 +3258,7 @@ impl MoveCheck<'_> {
                 // not the runs-at-most-once divergence the reuse check may
                 // skip on — see the `while` arm.
                 let leaves_loop = body_div && !self.continue_seen.get();
+                self.loop_ids.borrow_mut().pop(); // RFC-0114 M2: for-loop extent ends
                 self.continue_seen.set(outer_continue);
                 self.check_loop_reuse(consumed, &body_c, scope, leaves_loop)?;
                 for (k, v) in body_c {

@@ -1811,6 +1811,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // (`rfcs/census-call-arguments.md`), keyed by the argument's node address —
     // the same shape as `droppable`, one level down from a `let`.
     let arg_drops = ownership.arg_drops();
+    let store_owned = ownership.store_owned.clone();
 
     let protocol_methods: HashMap<String, String> = program
         .protocols
@@ -1846,6 +1847,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &arg_drops,
+            &store_owned,
             &program.type_decls,
         );
         gi.log_level = program.log_level;
@@ -1965,6 +1967,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &arg_drops,
+            &store_owned,
             &program.type_decls,
         );
         gen.log_level = program.log_level;
@@ -2018,6 +2021,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 &regex_globals,
                 &program.impls,
                 &arg_drops,
+                &store_owned,
                 &program.type_decls,
             );
             gen.log_level = program.log_level;
@@ -2081,6 +2085,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 &regex_globals,
                 &program.impls,
                 &arg_drops,
+                &store_owned,
                 &program.type_decls,
             );
             gen.log_level = program.log_level;
@@ -2130,6 +2135,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &arg_drops,
+            &store_owned,
             &program.type_decls,
         );
         dgen.protocol_methods = protocol_methods.clone();
@@ -2161,6 +2167,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &arg_drops,
+            &store_owned,
             &program.type_decls,
         );
         cgen.fnval_variants = fnval_registry.clone();
@@ -2186,6 +2193,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &arg_drops,
+            &store_owned,
             &program.type_decls,
         );
         cgen.protocol_methods = protocol_methods.clone();
@@ -2376,6 +2384,7 @@ struct Gen<'a> {
     /// they belong to — `own`'s answer, keyed by node address the way
     /// `droppable` is keyed by the `Stmt::Let`'s.
     arg_drops: &'a std::collections::HashSet<usize>,
+    store_owned: &'a std::collections::HashSet<usize>,
     /// The registers holding those values, innermost call last. Pushed where the
     /// argument is EVALUATED and taken back where its call ends.
     arg_frees: Vec<(String, Type)>,
@@ -2525,10 +2534,12 @@ impl<'a> Gen<'a> {
         regex_globals: &'a HashMap<String, (String, String, u32)>,
         impls: &'a [vyrn_frontend::ast::ImplBlock],
         arg_drops: &'a std::collections::HashSet<usize>,
+        store_owned: &'a std::collections::HashSet<usize>,
         decls: &'a [TypeDecl],
     ) -> Self {
         Gen {
             arg_drops,
+            store_owned,
             arg_frees: Vec::new(),
             tmp: 0,
             label: 0,
@@ -5047,7 +5058,16 @@ impl<'a> Gen<'a> {
                 // because the spine declines a slot with no shadow.
                 let fresh_str = matches!(self.resolve(&tty), Type::Str)
                     && matches!(value, Expr::Binary { op: BinOp::Add, .. });
-                let snap = if self.slot_owns(&slot)
+                // RFC-0114 M2: whether the place is OWNED here is the analysis's
+                // per-statement answer (`fold_store_owned`) — not the per-binding
+                // `slot_owns`, which abandoned every store of a binding whose
+                // value eventually escapes, and released over holes it could not
+                // see. The value-side test (`fresh_str` / `mentions_place`)
+                // stays: it answers whether the NEW value can alias the old,
+                // which is representation knowledge.
+                let owned_here = self.region_depth == 0
+                    && self.store_owned.contains(&(stmt as *const Stmt as usize));
+                let snap = if owned_here
                     && (fresh_str || !vyrn_frontend::movecheck::mentions_place(value, name))
                 {
                     self.snap_old(&slot, &tty)
@@ -13729,6 +13749,7 @@ mod tests {
             &rg,
             &[],
             &ad,
+            &ad,
             &[],
         );
         let rec = |fs: &[Type]| {
@@ -15241,12 +15262,12 @@ mod tests {
         }
     }
 
-    /// The in-place path now runs where it never did, so the reclamation has to
-    /// be unchanged by it: an accumulator returned through a concat frees
-    /// exactly what the identical function frees when the append is disabled
-    /// (here by aliasing it, the disqualifier `string_accumulator_not_appended…`
-    /// already pins). Equality is the assertion — an absolute count would just
-    /// re-pin the ownership analysis.
+    /// The in-place path must not change reclamation. Since RFC-0114 M2 the
+    /// copying lowering releases each replaced value at the store, so it
+    /// carries exactly ONE free the in-place lowering has no counterpart for:
+    /// the in-place buffer is reused, there is no replaced value. Everything
+    /// else — the temporaries, the caller's frees — must be identical, so the
+    /// assertion is `copying == appending + 1` and nothing looser.
     #[test]
     fn the_append_path_frees_exactly_what_the_copying_path_frees() {
         let body = |extra: &str| {
@@ -15268,9 +15289,11 @@ mod tests {
             "setup"
         );
         assert_eq!(
-            free_calls(&appending),
             free_calls(&copying),
-            "growing the accumulator must not add or lose a free:\n{appending}"
+            free_calls(&appending) + 1,
+            "the copying path frees the replaced value at the store and the \
+             in-place path reuses the buffer; any other difference is a \
+             reclamation change:\n{appending}\n=== copying ===\n{copying}"
         );
     }
 

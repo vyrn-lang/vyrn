@@ -78,17 +78,20 @@ had only done one: `prependLoop` is a row there now, it runs on wasm, and it rea
 `Leaks` until `direct.rs` got the same change. 40/40 three-way parity, which is
 the check a release change needs.
 
-## Still open: a binding whose last value escapes releases nothing
+## CLOSED (RFC-0114 M2): a binding whose last value escapes releases nothing
 
-`consumed.vyrn` still leaks 9.9 GB, and it is the same loop with one difference:
-`out` is consumed into a record at the end. `Gen::slot_owns` asks whether the
-binding is in `drop_slots` — the set released at block exit — and a binding whose
-value is moved away is not, so NO assignment in its life releases anything.
+`consumed.vyrn` leaked 9 925.7 MB: the same loop, with `out` consumed into a
+record at the end. `Gen::slot_owns` asked whether the binding is in
+`drop_slots` — the set released at block exit — and a binding whose value is
+moved away is not, so NO assignment in its life released anything.
 
-Ownership there is per BINDING, not per VALUE. Relaxing it naively is a double
-free: a binding may be assigned again after its value moved out, and the old
-value is gone already. Fixing it properly needs the move checker's flow-sensitive
-answer at each store, which codegen does not have today.
+Ownership there was per BINDING, not per VALUE. The fix is the move checker's
+flow-sensitive answer at each store: `own::fold_store_owned` folds the
+walker's write/take event stream into the set of assigns whose old value is
+provably this frame's, and both backends gate the store release on that set
+alone. The double-free direction — a store after the value moved out — is
+exactly what the order and loop rules refuse. 4.9 MB after the fix;
+`escapingAccumulator` in `memory.rs` pins it as `Steady`.
 
 ## Still open: a conditional move leaks on the path it did not take
 
