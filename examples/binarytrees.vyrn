@@ -23,6 +23,37 @@ let benchOrder = 14
 /// not about what they hold.
 type Tree = | Leaf | Node(Tree, Tree)
 
+/// Take ownership of `v` and let the block end release it.
+fn give<T>(v: consume T) -> Int64 {
+    drop v
+    return 0
+}
+
+/// A node owns its subtree, and says so — RFC-0096 M2.
+///
+/// `Tree` reaches itself through `Node`, so the structural release walk has no
+/// bottom, and without a declaration `own.rs`'s guard answers "this type owns
+/// no heap" and frees nothing. A declaration IS a bottom: the walk emits a CALL
+/// here instead of recursing. This is what RFC-0096 M2 asks for.
+///
+/// IT DOES NOT YET FREE ANYTHING, and that is a compiler defect rather than a
+/// fault in this file — see `rfcs/census/declared-release-does-not-run.md`.
+/// With the declaration `vyrn why --memory` reports `make` as transferring and
+/// the binding as reclaimed by `Owned__Tree__release`; 200,000 trees of depth 8
+/// built and discarded one at a time still peak at 3.1 GB, the same as without
+/// it, with a live set that never exceeds one tree.
+///
+/// The declaration stays because it is the correct thing to write, and because
+/// the day the release runs this program is already asking for it.
+impl Owned for Tree {
+    fn release(consume self) {
+        match consume self {
+            Leaf => 0,
+            Node(l, r) => give(l) + give(r),
+        }
+    }
+}
+
 /// A complete tree of `depth`.
 fn make(depth: Int64) -> Tree {
     if depth == 0 {
