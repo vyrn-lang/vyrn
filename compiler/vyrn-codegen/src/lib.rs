@@ -2378,7 +2378,7 @@ struct Gen<'a> {
     arg_drops: &'a std::collections::HashSet<usize>,
     /// The registers holding those values, innermost call last. Pushed where the
     /// argument is EVALUATED and taken back where its call ends.
-    arg_frees: Vec<String>,
+    arg_frees: Vec<(String, Type)>,
     /// Active loop targets for `break`/`continue` (RFC-0060), innermost last.
     /// A break/continue reclaims every scope pushed since loop-body entry (drops
     /// + region exits) before branching to the loop's exit / continue target.
@@ -5699,7 +5699,7 @@ impl<'a> Gen<'a> {
     fn gen_expr(&mut self, expr: &Expr) -> Result<(String, Type), String> {
         let r = self.gen_expr_inner(expr)?;
         if self.region_depth == 0 && self.arg_drops.contains(&(expr as *const Expr as usize)) {
-            self.arg_frees.push(r.0.clone());
+            self.arg_frees.push((r.0.clone(), r.1.clone()));
         }
         if crate::observe::on() {
             crate::observe::record(
@@ -7117,10 +7117,8 @@ impl<'a> Gen<'a> {
     fn gen_binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<(String, Type), String> {
         let mark = self.arg_frees.len();
         let r = self.gen_binary_inner(op, lhs, rhs);
-        for v in self.arg_frees.split_off(mark) {
-            if !self.terminated {
-                self.emit(format!("call void @__vyrn_str_free(ptr {v})"));
-            }
+        for (v, ty) in self.arg_frees.split_off(mark) {
+            self.free_arg_temp(&v, &ty);
         }
         r
     }
@@ -8986,15 +8984,42 @@ impl<'a> Gen<'a> {
     fn gen_call(&mut self, name: &str, args: &[Expr]) -> Result<(String, Type), String> {
         let mark = self.arg_frees.len();
         let r = self.gen_call_inner(name, args);
-        for v in self.arg_frees.split_off(mark) {
-            // A block that has already branched takes no more instructions —
-            // `panic("a" + b)` ends its block, and the free would be text after
-            // a terminator. The value is unreachable there anyway.
-            if !self.terminated {
-                self.emit(format!("call void @__vyrn_str_free(ptr {v})"));
-            }
+        for (v, ty) in self.arg_frees.split_off(mark) {
+            self.free_arg_temp(&v, &ty);
         }
         r
+    }
+
+    /// Release one argument temporary, by its TYPE (RFC-0114 M1).
+    ///
+    /// The String case is the historical fast path. Everything else spills the
+    /// SSA value to a fresh alloca and hands the slot to [`Gen::emit_drop`] —
+    /// the block-exit machinery — so there is exactly one spelling of every
+    /// release walk and this adapter adds none. The kind comes from the same
+    /// `Owned::release_kind` table the analysis consulted when it recorded the
+    /// temporary, so the two cannot disagree about what the type owns.
+    ///
+    /// A block that has already branched takes no more instructions —
+    /// `panic("a" + b)` ends its block, and the free would be text after a
+    /// terminator. The value is unreachable there anyway.
+    fn free_arg_temp(&mut self, v: &str, ty: &Type) {
+        if self.terminated {
+            return;
+        }
+        match self.owned.release_kind(ty) {
+            Some(DropKind::FreeStr) => {
+                self.emit(format!("call void @__vyrn_str_free(ptr {v})"));
+            }
+            Some(kind) => {
+                let ll = self.llt(ty);
+                let slot = self.fresh_alloca(&ll);
+                self.emit(format!("store {ll} {v}, ptr {slot}"));
+                self.emit_drop(&slot, &kind);
+            }
+            // The analysis recorded a temporary whose type owns nothing —
+            // nothing to do, and not worth a panic: the record is harmless.
+            None => {}
+        }
     }
 
     fn gen_call_inner(&mut self, name: &str, args: &[Expr]) -> Result<(String, Type), String> {

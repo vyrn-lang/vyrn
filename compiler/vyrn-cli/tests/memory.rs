@@ -479,13 +479,14 @@ const ROWS: &[Row] = &[
     },
     Row {
         export: "temporaryCall",
-        census: "RFC-0114 M1",
+        census: "RFC-0114 R1′",
         today: Shape::Leaks,
-        why: "OPEN. A temporary has no binding, and `drop_slots` is keyed on `let`. The \
-              interpreter reclaims it for free — `Val::Str` is an `Rc<String>` — so this \
-              row is also a three-engine divergence that parity cannot see: same program, \
-              same output, 8.5 MB interpreted against 313.9 MB native. Flip to Steady when \
-              RFC-0114 M1 lands",
+        why: "NARROWED by M1, still open. M1 freed ARGUMENT-position temporaries — \
+              `check(make(d))` went 313.9 MB to 4.1 native — but this shape is a \
+              RECEIVER: `fresh().byteLength`, and a receiver has no ArgVerdict. \
+              Blanket-freeing receivers would be unsound (a String FIELD read of a \
+              temp record lends), so R1′ needs its own verdict analysis. Flip to \
+              Steady when it lands",
     },
     Row {
         export: "escapingAccumulator",

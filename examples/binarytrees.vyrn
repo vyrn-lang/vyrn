@@ -72,13 +72,14 @@ fn checkAll(depth: Int64, iterations: Int64) -> Int64 {
     let mut sum = 0
     let mut i = 0
     while i < iterations {
-        // BOUND, not `check(make(depth))`. A temporary has no binding for the
-        // release to attach to, so the tree it built is never given back — at
-        // depth 16 that is 452 MB against 20 MB for the same run with this
-        // `let`. The game's own wording is "built, checked and released one at
-        // a time", and the release is the part a temporary skips.
-        let t = make(depth)
-        sum = sum + check(t)
+        // A TEMPORARY, deliberately — this line is the corpus's R1 witness
+        // (RFC-0114 M1). The tree is an argument temporary of `check`; the
+        // caller releases it after the call, which is the game's own wording:
+        // "built, checked and released one at a time". Before M1 this shape
+        // leaked every tree (452 MB at depth 16 against 20 MB bound) and the
+        // example carried a `let` as a workaround; the workaround is gone
+        // because the defect is.
+        sum = sum + check(make(depth))
         i = i + 1
     }
     return sum

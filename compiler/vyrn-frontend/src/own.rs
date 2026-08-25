@@ -1208,11 +1208,16 @@ impl Ownership {
     /// this filter; `movecheck::arg_verdict` answers the same question for a row
     /// that hands back a bare type parameter, which `blackBox` does.
     pub fn arg_drops(&self) -> std::collections::HashSet<usize> {
+        // EVERY `Released` temporary, whatever its kind (RFC-0114 M1). This
+        // carried `&& s.kind == DropKind::FreeStr` for as long as the emitters
+        // could only free a String — so a call-argument tree, array or record
+        // was analysed, verdicted, and then thrown away here, which is why
+        // `check(make(depth))` leaked 313.9 MB against the interpreter's 8.5.
+        // Both backends free by TYPE now, through the same `release_kind`
+        // table this filter used to consult, so the filter is the leak.
         self.arg_temps
             .iter()
-            .filter(|s| {
-                s.verdict == crate::movecheck::ArgVerdict::Released && s.kind == DropKind::FreeStr
-            })
+            .filter(|s| s.verdict == crate::movecheck::ArgVerdict::Released)
             .map(|s| s.id)
             .collect()
     }

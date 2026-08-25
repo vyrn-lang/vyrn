@@ -1620,7 +1620,7 @@ struct Fn_<'a, 'p> {
     /// The locals holding the argument temporaries this frame releases, innermost
     /// call last. Teed where the argument is EVALUATED and handed back where its
     /// call ends — see [`Fn_::call`].
-    arg_frees: Vec<u32>,
+    arg_frees: Vec<(u32, Type)>,
     /// The holes the walk in progress must skip, relative to the place it is
     /// looking at (RFC-0093 M2). Taken at the top of [`Fn_::rel_at`], so a walk
     /// into anything that is not a record starts empty.
@@ -4493,7 +4493,7 @@ impl<'p> Fn_<'_, 'p> {
         if self.region_depth == 0 && self.cx.arg_drops.contains(&(e as *const Expr as usize)) {
             let l = b.local(ValType::I32);
             b.ins(&Instruction::LocalTee(l));
-            self.arg_frees.push(l);
+            self.arg_frees.push((l, t.clone()));
         }
         if crate::observe::on() {
             crate::observe::record(
@@ -5664,10 +5664,38 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<Type, String> {
         let mark = self.arg_frees.len();
         let r = self.binary_inner(m, b, op, lhs, rhs, line);
-        for l in self.arg_frees.split_off(mark) {
-            self.free_str_temp(b, Some(l));
+        for (l, ty) in self.arg_frees.split_off(mark) {
+            self.free_arg_temp(m, b, l, &ty, line)?;
         }
         r
+    }
+
+    /// Release one argument temporary, by its TYPE (RFC-0114 M1).
+    ///
+    /// The String case is the historical fast path: the local holds the char
+    /// pointer and [`Fn_::free_str_temp`] adjusts to the block start. Every
+    /// other owning kind's local holds the ADDRESS of the value's storage —
+    /// aggregates travel by pointer in this backend — which is exactly what
+    /// [`Fn_::emit_rel`] takes as a `Place::Local`, so the release is the same
+    /// walk block exit uses and this adapter adds none. The kind comes off the
+    /// type through [`Fn_::rel_for`], the same table the analysis consulted
+    /// when it recorded the temporary.
+    fn free_arg_temp(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        l: u32,
+        ty: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        match self.rel_for(ty, line)? {
+            Some(Rel::Str) => {
+                self.free_str_temp(b, Some(l));
+                Ok(())
+            }
+            Some(rel) => self.emit_rel(m, b, Place::Local(l), &rel, line),
+            None => Ok(()),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6328,8 +6356,8 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<Type, String> {
         let mark = self.arg_frees.len();
         let r = self.call_inner(m, b, name, args, line);
-        for l in self.arg_frees.split_off(mark) {
-            self.free_str_temp(b, Some(l));
+        for (l, ty) in self.arg_frees.split_off(mark) {
+            self.free_arg_temp(m, b, l, &ty, line)?;
         }
         r
     }
