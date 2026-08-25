@@ -105,6 +105,85 @@ listed because it is the honest comparison, and refused for the reason
 constraint 3 gives — the parity programs hold only numbers, and they are at
 parity.
 
+## A recommended shape
+
+`RECOMMENDATION, NOT A DECISION`, but an opinionated one, in the order the two
+halves should land.
+
+### M1 — temporaries. The analysis already knows.
+
+The fact M1 needs is `Ownership::owned_fns`, which exists and is exact: RFC-0089
+rule 3 makes a return owned, and `movecheck` refuses the program where it is not.
+So there is no inference to add — only a position to notice.
+
+`own::analyze` records, per function, the expression positions where an owning
+value is produced and NOT taken by anything: not bound, not stored, not returned,
+not handed to a `consume` parameter. Keyed by statement, the way `droppable` is
+keyed by `let`. `Gen::register_drop` is the channel that already exists for the
+per-binding case; this is a second table through the same seam.
+
+**Codegen must not decide which positions those are.** The walker that decides
+`consume` decides this too, in the same pass, so the two cannot disagree — which
+is the rule `Ownership::fates` was built on ("recorded by the walker that
+decides, so the report and the emission cannot disagree").
+
+**Released at the end of the STATEMENT, in reverse creation order.** Not at the
+end of the expression: a callee may hold its borrow for the duration of the call,
+and so may a later operand of the same statement. Statement end is one
+well-defined point after evaluation is complete. Reverse order because one
+temporary may be a view of another.
+
+### M2 — per-store liveness, and no drop flags
+
+The state is per place, per program point: `Owned | Moved | Uninit`, a forward
+dataflow with a join at every merge.
+
+The design question is the join where one branch moved and the other did not.
+Rust answers it with a DROP FLAG — a runtime boolean the release tests. **This
+RFC recommends against that**, for two reasons that agree:
+
+- It is a runtime cost at a call site that may own nothing, which constraint 3
+  refuses.
+- It is inference. This language's memory model is "ownership is DEFINED, not
+  inferred" — the whole of RFC-0091 — and a conditional move that leaves a
+  place's state ambiguous is exactly the shape it refuses elsewhere.
+
+So: **refuse the ambiguity.** A place whose state differs across a join is a
+diagnostic, not a flag. That keeps the analysis static, keeps the emitted code
+free of branches nobody wrote, and gives the programmer the same kind of error
+they already get from `consume` inside a loop.
+
+### How to make it reliable, which is the part today got wrong
+
+**Three-way parity cannot see memory.** That is not a gap to work around; it is
+the finding. Two leaks lived through 40/40 for as long as they existed, and the
+`owns_heap` one survived a release mechanism written specifically to prevent it.
+
+- `compiler/vyrn-cli/tests/memory.rs` is the harness that works. It runs a shape
+  on wasm and asserts `Steady` against `Leaks` at two call counts. It caught,
+  within one command, that a fix had been applied to one backend and not the
+  other.
+- **Every row of this work lands a row there first.** `prependLoop` was written
+  before the fix, watched to fail, and then watched to pass.
+- **Add the interpreter as a leg, and treat it as the ORACLE.** `Val::Str` is an
+  `Rc<String>`: the interpreter is correct here by construction, with no analysis
+  at all. So the expected shape does not have to be guessed — it can be measured
+  from the engine that already gets it right, and the compiled backends compared
+  against it within a tolerance. That is the check that would have caught every
+  defect on this page.
+
+### Performance
+
+Nothing above costs anything where nothing owns heap. The temporary table is
+empty for a statement with no owning temporary. The dataflow is compile-time.
+There are no drop flags, so there are no runtime branches. The parity programs
+hold only numbers and stay exactly where they are.
+
+The one cost is real and worth stating: a release that runs at statement end
+rather than never is work the program did not do before. That is the point, and
+the measurement to keep beside it is the one in the table above — 313.9 MB
+against 8.5 MB is not a tradeoff, it is a defect.
+
 ## What this RFC does not decide
 
 Whether a temporary should be released at the end of the STATEMENT or at the end
