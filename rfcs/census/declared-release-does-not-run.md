@@ -90,6 +90,22 @@ free: a binding may be assigned again after its value moved out, and the old
 value is gone already. Fixing it properly needs the move checker's flow-sensitive
 answer at each store, which codegen does not have today.
 
+## Still open: a conditional move leaks on the path it did not take
+
+A fourth instance, found while writing RFC-0114's proof appendix. `vyrn check`
+accepts a binding consumed on one branch and read on the other; `why --memory`
+reports it with ONE verdict — "moved at line 15 into `consume`" — for a place
+whose state differs by path. On the branch where the move does not happen,
+nothing releases it.
+
+200,000 calls, one ~1000-byte allocation each, taking the branch that does NOT
+move: **211.5 MB**, which is the product to three figures.
+
+Not an `Alloc`/`Lend` misclassification like the two that were fixed. The
+classification is right and the granularity is wrong — per binding, where the
+question is per path. That is RFC-0114 §5.3, and the appendix measures what the
+three available answers cost.
+
 ## Still open: a temporary is never released
 
 `binarytrees` did not improve from the fix alone, because it wrote

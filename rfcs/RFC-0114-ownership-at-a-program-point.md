@@ -2,6 +2,9 @@
 
 - **Status:** **Draft. The problem is measured; the design is not chosen.**
 - **Evidence:** [rfcs/census/declared-release-does-not-run.md](census/declared-release-does-not-run.md).
+- **Appendix A:** [the algorithm and its proofs](proofs/release-algorithm.md) — the
+  invariant, three theorems, and the assumption each of today's three defects
+  violated.
 
 ## The gap in one sentence
 
