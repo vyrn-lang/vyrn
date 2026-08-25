@@ -1340,6 +1340,12 @@ pub fn analyze(program: &Program) -> Ownership {
                 // emptiness; a per-type reaches-a-release walk is the upgrade.
                 || (matches!(owned_fns.get(n), Some(DropKind::Deep(_)))
                     && !proto.declares_any())
+                // The chained projection frees only the FIELD it read — a
+                // String or a container, silent either way — so the record's
+                // walk never runs and the gate above does not apply.
+                || n
+                    .strip_prefix("@fieldof:")
+                    .is_some_and(|p| matches!(owned_fns.get(p), Some(DropKind::Deep(_))))
         })
         .map(|(k, _)| *k)
         .collect();

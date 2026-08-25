@@ -574,6 +574,12 @@ const ROWS: &[Row] = &[
               only while the program declares no `impl Owned` anywhere",
     },
     Row {
+        export: "temporaryChainedField",
+        census: "RFC-0114 R1′",
+        today: Shape::Steady,
+        why: "`makeTag(..).label.byteLength` — the receiver is a heap field of a record               temporary. The `@fieldof:` marker carries the producer through the lender               filter, and `own` admits it without the Deep gate: what the edge frees is               the FIELD it read, a String or container, silent either way",
+    },
+    Row {
         export: "prependLoop",
         census: "§4",
         today: Shape::Steady,
@@ -1659,6 +1665,12 @@ export extern fn temporaryRecordField() {{
 
 export extern fn temporaryRecordScalar() {{
     seen = seen + makeTag(seen).n
+}}
+
+/// The CHAINED projection: the receiver of `.byteLength` is itself a heap
+/// field of a record temporary, and freeing it frees only the field it read.
+export extern fn temporaryChainedField() {{
+    seen = seen + Int64(makeTag(seen).label.byteLength)
 }}
 
 /// RFC-0114 untake: the value is taken, the binding is provably re-established,

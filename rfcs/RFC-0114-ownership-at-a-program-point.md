@@ -327,7 +327,12 @@ record), a `lazy` field (forced later), and any `Deep` producer in a
 program that declares `impl Owned` anywhere staying out, each for its own
 stated reason. Measured: 44.4 MB → 3.8 and 46.2 → 3.8 over a million
 rounds; `temporaryRecordField` and `temporaryRecordScalar` pin both on
-wasm, and both run clean under the free audit.
+wasm, and both run clean under the free audit. The CHAINED projection
+(`makeRec().name.byteLength`) followed: the receiver is a heap field of a
+record temporary, the `@fieldof:` marker carries the producer name through
+the lender filter, and `own` admits it without the Deep gate because what
+the edge frees is the FIELD it read — a String or a container, silent
+either way. 38.1 MB → 3.8; `temporaryChainedField` pins it.
 
 **The untake LANDED.** A binding whose value was taken and then provably
 re-established releases its FINAL value at block exit — the naive version of

@@ -402,7 +402,10 @@ pub fn facts(program: &Program) -> Facts {
         receiver_temps: r
             .receiver_temps
             .into_iter()
-            .filter(|(_, n)| !r.lending.contains(n))
+            .filter(|(_, n)| {
+                let base = n.strip_prefix("@fieldof:").unwrap_or(n);
+                !r.lending.contains(base)
+            })
             .collect(),
         exit_orders: r.exit_orders,
     }
@@ -3875,6 +3878,18 @@ impl MoveCheck<'_> {
                                 (Expr::Call { name, .. }, _) => Some(name.clone()),
                                 (Expr::Binary { op: BinOp::Add, .. }, "byteLength") => {
                                     Some("@concat".to_string())
+                                }
+                                // A CHAINED projection: `makeRec().name.byteLength`
+                                // — the receiver is a heap field of a record
+                                // temporary. The projection's read is silent
+                                // whatever the record's walk would be, so `own`
+                                // admits it without the Deep gate; the marker
+                                // keeps the producer name for the lender filter.
+                                (Expr::Field { expr: inner, .. }, "byteLength" | "length") => {
+                                    match &**inner {
+                                        Expr::Call { name, .. } => Some(format!("@fieldof:{name}")),
+                                        _ => None,
+                                    }
                                 }
                                 _ => None,
                             };
