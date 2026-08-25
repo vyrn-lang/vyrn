@@ -134,35 +134,62 @@ call returns. `rfcs/census-call-arguments.md` is the record.
 a plain String — every record, every array, every declared release. That is why
 `check(make(depth))` leaks a tree.
 
-**Removing it does not work, and the failure says what M1 actually is.** The
-emission side is String-only:
+**Removing it breaks ONE backend, and measuring which is what scopes M1.**
+
+The textual backend refuses to compile, deterministically:
 
 ```
 ti3.ll:637:34: error: '%t6' defined with type '{ i64, i64, i64 }' but expected 'ptr'
   call void @__vyrn_str_free(ptr %t6)
 ```
 
-`arg_frees` is a `Vec<String>` of registers and the free site emits
-`@__vyrn_str_free` unconditionally. So the filter is not a redundant guard on a
-precise verdict — it is what keeps the emitter from being handed something it
-cannot free.
+`arg_frees` there is a `Vec<String>` of registers and the free site emits
+`@__vyrn_str_free` unconditionally. It cannot be a WRONG free: `Type::Str` is the
+only type in `llt_of` that lowers to a bare `ptr` — every other owning type is a
+struct, a scalar or a vector — so LLVM's type checker catches every case at
+compile time. The filter is what keeps that emitter from being handed something
+it has no code to free.
 
-So M1 is:
+**The direct wasm backend needs nothing.** With the condition removed it builds,
+runs, and frees correctly:
 
-1. `arg_frees` carries the `DropKind` beside the register.
-2. A release-BY-VALUE path. `snap_old` + `free_snap` is the existing pair and it
-   works from a SLOT; an argument temporary is an SSA value with no address, so
-   the buffer extraction has to be reachable from a value.
-3. The same in `direct.rs`, which has its own copy — and the memory suite is what
-   will say so, exactly as it did for the prepend fix.
-4. Then, and only then, drop the `FreeStr` condition.
+| `check(make(8))` x 20,000, wasm | peak |
+| --- | --- |
+| with the `FreeStr` condition | 330.5 MB |
+| without it | **10 MB** |
 
-The order matters: dropping the condition first produces a compile error at best
-and a wrong free at worst.
+Ten against the interpreter's 8.5, and the program prints `10220000` either way.
+Checked across the corpus rather than on one program: all 158 examples built to
+wasm both ways and run, output compared byte for byte. **Three differ, and none
+of them behaviourally** — a timestamp in `clock`, the module PATH inside
+`externdemo`'s error text, and `storage`'s random temp-file suffix.
+
+So M1 is smaller than it looked, and it is one backend:
+
+1. In `vyrn-codegen/src/lib.rs`, `arg_frees` carries the `DropKind` beside the
+   register, and the free site dispatches on it instead of assuming a String.
+   `snap_old` + `free_snap` is the existing pair, and it works from a SLOT — an
+   argument temporary is an SSA value with no address, so the buffer extraction
+   has to become reachable from a value.
+2. Then drop the `FreeStr` condition, and both backends have it.
+
+`direct.rs` is already correct because its `arg_frees` holds an `i32` local and
+an aggregate's value there IS the pointer to its storage; `free_str_temp`'s
+header adjustment lands on the same allocation the aggregate came from. That is
+worth stating rather than relying on: it is why the wasm column moved without a
+line of backend change.
 
 **Released after the call, which `gen_call` already does.** Statement-end is the
 looser alternative and is not needed here — the verdict is per argument position,
 and the callee is done with the borrow when it returns.
+
+**A correction, recorded because it was stated the other way first.** An earlier
+draft of this section said dropping the condition was "a compile error at best
+and a wrong free at worst". The second half is not supported: `Type::Str` is the
+only bare `ptr` in `llt_of`, so the textual backend cannot silently mis-free, and
+the wasm backend was measured over 158 programs with no behavioural change. The
+risk in M1 is a build that stops compiling, which is the failure mode a compiler
+is allowed to have.
 
 ### M2 — per-store liveness, and no drop flags
 
