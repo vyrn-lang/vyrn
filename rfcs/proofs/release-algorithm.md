@@ -848,6 +848,20 @@ bisimulation the coincidence theorem promises, and it subsumes every
 Each step is separately revertible and separately testable, which is the
 property this week's fixes did not have until the memory suite gained rows.
 
+**As landed (2026-08-25/26), the order deviated and stayed green.** Step 5
+went first: Rule N at all three join shapes, R1′ for Strings and containers,
+the untake, and the consume-parameter release — each behind its own
+`memory.rs` row, each a fold in `own::analyze` both backends read. Step 1's
+witness exists for string freshness (the `interp.rs` test). Step 6 landed
+its cheaper half: every free routes through `__vyrn_free`, and the parity
+harness audits the whole corpus for double and foreign frees on every run.
+Steps 2–4 — the single `ReleasePlan` artifact with linear discharge — remain
+open, and the pressure for them DROPPED: every decision this arc added is
+already produced in one place and consumed by address, which is the
+property the consolidation exists to force. What a plan would still buy is
+the deletion of the per-binding store gates the backends keep for field and
+element stores, and `plan.finish()`'s loudness for a missed site.
+
 ## 27. What the three lenses agree on
 
 Stated once, because it is the actual conclusion:
