@@ -33,6 +33,11 @@ pub const KNOWN_DIVERGENT: &[(&str, &str)] = &[];
 /// was a validation failure, and a silent hole the moment a second kind of
 /// refusal was pinned here.
 pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
+    (
+        "appendowned.vyrn",
+        "RFC-0115: `append` is a byte copy, so an element type that owns heap          is refused — copying one by bytes gives two arrays one buffer",
+        "copies its source's elements by bytes",
+    ),
     // ---- RFC-0114's proof appendix, §45: the four load-bearing assumptions,
     // pinned as refusals. Each row is one assumption of the release-algorithm
     // proofs (rfcs/proofs/release-algorithm.md); the needle is the checker's

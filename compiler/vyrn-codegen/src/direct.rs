@@ -5507,6 +5507,9 @@ impl<'p> Fn_<'_, 'p> {
                         _ => t,
                     }
                 }
+                // RFC-0115: `reserve`/`append` hand back the receiver's own
+                // type — capacity is not part of it.
+                "@reserve" | "@append" if !args.is_empty() => self.peek(&args[0], line)?,
                 "@push" | "@list" if !args.is_empty() => match self.peek(&args[0], line)? {
                     t => match self.cx.resolve(&t) {
                         // A `SmallArray` push yields a `SmallArray`, inline state
@@ -7486,6 +7489,8 @@ impl<'p> Fn_<'_, 'p> {
                 return Ok(ty);
             }
             "@push" if args.len() == 2 => return self.push(m, b, args, line),
+            "@reserve" if args.len() == 2 => return self.reserve_arr(m, b, args, line),
+            "@append" if args.len() == 2 => return self.append_arr(m, b, args, line),
             // A `SmallArray` receiver takes the four-field path. Dispatched on
             // `peek` rather than on an emitted type, because the receiver must not
             // be evaluated twice — `sa_method` evaluates it itself, and for `pop`
@@ -10022,6 +10027,222 @@ impl<'p> Fn_<'_, 'p> {
     /// `xs.push(v)` — the value, and a NEW triple describing the array with it
     /// in. The parser turns the statement into `xs = @push(xs, v)`, so the
     /// write-back is an ordinary assignment and this never touches the binding.
+    /// `xs.reserve(n)` (RFC-0115): one allocation for `n` more elements. The
+    /// growth is malloc + copy + free, exactly the shape [`Fn_::push`] grows
+    /// by, so the two backends cost the same heap.
+    fn reserve_arr(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let _ = m;
+        let aty = self.expr(m, b, &args[0])?;
+        let Type::Array(elem) = self.cx.resolve(&aty) else {
+            return unsupported(&format!("`reserve` on `{aty}`"), line);
+        };
+        let elem = *elem;
+        let l = self.layout_of(&aty, line)?;
+        let stride = self.stride(&elem, line)? as i32;
+        let (src, data, len, cap) = (
+            b.local(ValType::I32),
+            b.local(ValType::I32),
+            b.local(ValType::I64),
+            b.local(ValType::I64),
+        );
+        b.ins(&Instruction::LocalSet(src));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        b.ins(&Instruction::LocalSet(data));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I64Load(at(l.fields[1])));
+        b.ins(&Instruction::LocalSet(len));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I64Load(at(l.fields[2])));
+        b.ins(&Instruction::LocalSet(cap));
+        let need = b.local(ValType::I64);
+        self.expr_as(m, b, &args[1], &Type::Int)?;
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::I64Add);
+        b.ins(&Instruction::LocalSet(need));
+        // need > cap: grow to exactly `need`.
+        b.ins(&Instruction::LocalGet(need));
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64GtS);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        let grown = b.local(ValType::I32);
+        b.ins(&Instruction::LocalGet(need));
+        b.ins(&Instruction::I64Const(stride as i64));
+        b.ins(&Instruction::I64Mul);
+        b.ins(&Instruction::Call(self.cx.rt.malloc));
+        b.ins(&Instruction::LocalTee(grown));
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::I32Const(stride));
+        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        });
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::Call(self.cx.rt.free));
+        b.ins(&Instruction::LocalGet(grown));
+        b.ins(&Instruction::LocalSet(data));
+        b.ins(&Instruction::LocalGet(need));
+        b.ins(&Instruction::LocalSet(cap));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        let off = b.alloc(l.size, l.align);
+        b.slot(off + l.fields[0]);
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::I32Store(word()));
+        b.slot(off + l.fields[1]);
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off + l.fields[2]);
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off);
+        Ok(Type::Array(Box::new(elem)))
+    }
+
+    /// `xs.append(ys)` (RFC-0115): grow once to `max(need, cap * 2)`, then one
+    /// `memory.copy` of the source's elements — the checker held the element
+    /// type to heapless ones, so bytes ARE the elements. A self-append reads
+    /// the source out of the grown buffer (the old one is freed), chosen by a
+    /// `select` on the old data pointer.
+    fn append_arr(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let aty = self.expr(m, b, &args[0])?;
+        let Type::Array(elem) = self.cx.resolve(&aty) else {
+            return unsupported(&format!("`append` on `{aty}`"), line);
+        };
+        let elem = *elem;
+        let l = self.layout_of(&aty, line)?;
+        let stride = self.stride(&elem, line)? as i32;
+        let (src, data, len, cap) = (
+            b.local(ValType::I32),
+            b.local(ValType::I32),
+            b.local(ValType::I64),
+            b.local(ValType::I64),
+        );
+        b.ins(&Instruction::LocalSet(src));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        b.ins(&Instruction::LocalSet(data));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I64Load(at(l.fields[1])));
+        b.ins(&Instruction::LocalSet(len));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I64Load(at(l.fields[2])));
+        b.ins(&Instruction::LocalSet(cap));
+        let (xsrc, xdata, xlen) = (
+            b.local(ValType::I32),
+            b.local(ValType::I32),
+            b.local(ValType::I64),
+        );
+        self.expr_as(m, b, &args[1], &aty)?;
+        b.ins(&Instruction::LocalSet(xsrc));
+        b.ins(&Instruction::LocalGet(xsrc));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        b.ins(&Instruction::LocalSet(xdata));
+        b.ins(&Instruction::LocalGet(xsrc));
+        b.ins(&Instruction::I64Load(at(l.fields[1])));
+        b.ins(&Instruction::LocalSet(xlen));
+        let need = b.local(ValType::I64);
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::LocalGet(xlen));
+        b.ins(&Instruction::I64Add);
+        b.ins(&Instruction::LocalSet(need));
+        // need > cap: grow to max(need, cap * 2), copy, free the old buffer —
+        // AFTER retargeting a self-append's source at the copy just made.
+        b.ins(&Instruction::LocalGet(need));
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64GtS);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        let nc = b.local(ValType::I64);
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64Const(2));
+        b.ins(&Instruction::I64Mul);
+        b.ins(&Instruction::LocalTee(nc));
+        b.ins(&Instruction::LocalGet(need));
+        b.ins(&Instruction::I64LtS);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        b.ins(&Instruction::LocalGet(need));
+        b.ins(&Instruction::LocalSet(nc));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        let grown = b.local(ValType::I32);
+        b.ins(&Instruction::LocalGet(nc));
+        b.ins(&Instruction::I64Const(stride as i64));
+        b.ins(&Instruction::I64Mul);
+        b.ins(&Instruction::Call(self.cx.rt.malloc));
+        b.ins(&Instruction::LocalTee(grown));
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::I32Const(stride));
+        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        });
+        // A self-append's source moved with the copy.
+        b.ins(&Instruction::LocalGet(grown));
+        b.ins(&Instruction::LocalGet(xdata));
+        b.ins(&Instruction::LocalGet(xdata));
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::I32Eq);
+        b.ins(&Instruction::Select);
+        b.ins(&Instruction::LocalSet(xdata));
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::Call(self.cx.rt.free));
+        b.ins(&Instruction::LocalGet(grown));
+        b.ins(&Instruction::LocalSet(data));
+        b.ins(&Instruction::LocalGet(nc));
+        b.ins(&Instruction::LocalSet(cap));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        // dst = data + len * stride; memory.copy xlen * stride bytes.
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::I32Const(stride));
+        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::LocalGet(xdata));
+        b.ins(&Instruction::LocalGet(xlen));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::I32Const(stride));
+        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        });
+        let off = b.alloc(l.size, l.align);
+        b.slot(off + l.fields[0]);
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::I32Store(word()));
+        b.slot(off + l.fields[1]);
+        b.ins(&Instruction::LocalGet(need));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off + l.fields[2]);
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off);
+        Ok(Type::Array(Box::new(elem)))
+    }
+
     fn push(
         &mut self,
         m: &mut Module,

@@ -1,0 +1,9 @@
+/// RFC-0115's refusal: `append` is a byte copy of the source's elements, and
+/// an element that owns heap — a String here — would give two arrays one
+/// buffer. The fix the checker names is a `push` loop with `.copy()`.
+fn main() -> Int64 {
+    let mut a: Array<String> = ["x"]
+    let b: Array<String> = ["y"]
+    a.append(b)
+    return a.length
+}

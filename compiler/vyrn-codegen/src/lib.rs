@@ -10665,6 +10665,172 @@ impl<'a> Gen<'a> {
         // `Some(x)` / `Ok(x)` / `Err(e)` — build a { i1 tag, i64 payload } value.
         // Growable arrays. An `Array<T>` is { ptr data, i64 len, i64 cap }; used
         // linearly (`push` returns the updated triple, reallocating on growth).
+        // `xs.reserve(n)` (RFC-0115): make room for `n` more elements, in one
+        // realloc, and hand the (possibly moved) buffer back. A `need` already
+        // inside `cap` passes the triple through untouched.
+        if name == "@reserve" {
+            let (av, aty) = self.gen_expr(&args[0])?;
+            let elem = match self.resolve(&aty) {
+                Type::Array(inner) => *inner,
+                _ => return Err("reserve on a non-Array value".into()),
+            };
+            let ell = self.llt(&elem);
+            let (nv, _) = self.gen_expr(&args[1])?;
+            let data = self.fresh_tmp();
+            let len = self.fresh_tmp();
+            let cap = self.fresh_tmp();
+            self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {av}, 0"));
+            self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {av}, 1"));
+            self.emit(format!("{cap} = extractvalue {{ ptr, i64, i64 }} {av}, 2"));
+            let need = self.fresh_tmp();
+            let fits = self.fresh_tmp();
+            self.emit(format!("{need} = add i64 {len}, {nv}"));
+            self.emit(format!("{fits} = icmp sle i64 {need}, {cap}"));
+            let grow_l = self.fresh_label("rsv.grow");
+            let ready_l = self.fresh_label("rsv.ready");
+            let pre = self.cur_block.clone();
+            self.emit_term(format!("br i1 {fits}, label %{ready_l}, label %{grow_l}"));
+            self.emit_label(&grow_l);
+            let esz = self.fresh_tmp();
+            let nb = self.fresh_tmp();
+            let nd = self.fresh_tmp();
+            self.emit(format!(
+                "{esz} = ptrtoint ptr getelementptr ({ell}, ptr null, i64 1) to i64"
+            ));
+            self.emit(format!("{nb} = mul i64 {need}, {esz}"));
+            self.emit(format!(
+                "{nd} = call ptr @__vyrn_realloc(ptr {data}, i64 {nb})"
+            ));
+            self.emit_term(format!("br label %{ready_l}"));
+            self.emit_label(&ready_l);
+            let pdata = self.fresh_tmp();
+            let pcap = self.fresh_tmp();
+            self.emit(format!(
+                "{pdata} = phi ptr [ {data}, %{pre} ], [ {nd}, %{grow_l} ]"
+            ));
+            self.emit(format!(
+                "{pcap} = phi i64 [ {cap}, %{pre} ], [ {need}, %{grow_l} ]"
+            ));
+            let r1 = self.fresh_tmp();
+            let r2 = self.fresh_tmp();
+            let r3 = self.fresh_tmp();
+            self.emit(format!(
+                "{r1} = insertvalue {{ ptr, i64, i64 }} undef, ptr {pdata}, 0"
+            ));
+            self.emit(format!(
+                "{r2} = insertvalue {{ ptr, i64, i64 }} {r1}, i64 {len}, 1"
+            ));
+            self.emit(format!(
+                "{r3} = insertvalue {{ ptr, i64, i64 }} {r2}, i64 {pcap}, 2"
+            ));
+            return Ok((r3, Type::Array(Box::new(elem))));
+        }
+        // `xs.append(ys)` (RFC-0115): grow once to `max(need, cap*2)`, then one
+        // memcpy of the source's elements — the checker held the element type
+        // to heapless ones, so bytes ARE the elements. A self-append reads the
+        // source from the reallocated buffer: `select` keeps the old source
+        // pointer only when it was a different array's.
+        if name == "@append" {
+            let (av, aty) = self.gen_expr(&args[0])?;
+            let elem = match self.resolve(&aty) {
+                Type::Array(inner) => *inner,
+                _ => return Err("append on a non-Array value".into()),
+            };
+            let ell = self.llt(&elem);
+            let (xv, _) = self.gen_expr(&args[1])?;
+            // The same post-evaluation header re-read `push` does: evaluating
+            // the source may have grown the receiver through a `modify` call.
+            let hdr = match &args[0] {
+                Expr::Var { name, .. } if self.lookup(name).is_some() => {
+                    let (slot, _) = self.lookup(name).unwrap();
+                    let fresh = self.fresh_tmp();
+                    self.emit(format!("{fresh} = load {{ ptr, i64, i64 }}, ptr {slot}"));
+                    fresh
+                }
+                _ => av.clone(),
+            };
+            let data = self.fresh_tmp();
+            let len = self.fresh_tmp();
+            let cap = self.fresh_tmp();
+            self.emit(format!(
+                "{data} = extractvalue {{ ptr, i64, i64 }} {hdr}, 0"
+            ));
+            self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {hdr}, 1"));
+            self.emit(format!("{cap} = extractvalue {{ ptr, i64, i64 }} {hdr}, 2"));
+            let xdata = self.fresh_tmp();
+            let xlen = self.fresh_tmp();
+            self.emit(format!(
+                "{xdata} = extractvalue {{ ptr, i64, i64 }} {xv}, 0"
+            ));
+            self.emit(format!("{xlen} = extractvalue {{ ptr, i64, i64 }} {xv}, 1"));
+            let need = self.fresh_tmp();
+            let fits = self.fresh_tmp();
+            self.emit(format!("{need} = add i64 {len}, {xlen}"));
+            self.emit(format!("{fits} = icmp sle i64 {need}, {cap}"));
+            let grow_l = self.fresh_label("app.grow");
+            let ready_l = self.fresh_label("app.ready");
+            let pre = self.cur_block.clone();
+            self.emit_term(format!("br i1 {fits}, label %{ready_l}, label %{grow_l}"));
+            self.emit_label(&grow_l);
+            let dbl = self.fresh_tmp();
+            let over = self.fresh_tmp();
+            let nc = self.fresh_tmp();
+            let esz = self.fresh_tmp();
+            let nb = self.fresh_tmp();
+            let nd = self.fresh_tmp();
+            self.emit(format!("{dbl} = mul i64 {cap}, 2"));
+            self.emit(format!("{over} = icmp sgt i64 {need}, {dbl}"));
+            self.emit(format!("{nc} = select i1 {over}, i64 {need}, i64 {dbl}"));
+            self.emit(format!(
+                "{esz} = ptrtoint ptr getelementptr ({ell}, ptr null, i64 1) to i64"
+            ));
+            self.emit(format!("{nb} = mul i64 {nc}, {esz}"));
+            self.emit(format!(
+                "{nd} = call ptr @__vyrn_realloc(ptr {data}, i64 {nb})"
+            ));
+            self.emit_term(format!("br label %{ready_l}"));
+            self.emit_label(&ready_l);
+            let pdata = self.fresh_tmp();
+            let pcap = self.fresh_tmp();
+            self.emit(format!(
+                "{pdata} = phi ptr [ {data}, %{pre} ], [ {nd}, %{grow_l} ]"
+            ));
+            self.emit(format!(
+                "{pcap} = phi i64 [ {cap}, %{pre} ], [ {nc}, %{grow_l} ]"
+            ));
+            let same = self.fresh_tmp();
+            let src = self.fresh_tmp();
+            let dst = self.fresh_tmp();
+            let esz2 = self.fresh_tmp();
+            let bytes = self.fresh_tmp();
+            self.emit(format!("{same} = icmp eq ptr {xdata}, {data}"));
+            self.emit(format!(
+                "{src} = select i1 {same}, ptr {pdata}, ptr {xdata}"
+            ));
+            self.emit(format!(
+                "{dst} = getelementptr {ell}, ptr {pdata}, i64 {len}"
+            ));
+            self.emit(format!(
+                "{esz2} = ptrtoint ptr getelementptr ({ell}, ptr null, i64 1) to i64"
+            ));
+            self.emit(format!("{bytes} = mul i64 {xlen}, {esz2}"));
+            self.emit(format!(
+                "call void @llvm.memcpy.p0.p0.i64(ptr {dst}, ptr {src}, i64 {bytes}, i1 false)"
+            ));
+            let r1 = self.fresh_tmp();
+            let r2 = self.fresh_tmp();
+            let r3 = self.fresh_tmp();
+            self.emit(format!(
+                "{r1} = insertvalue {{ ptr, i64, i64 }} undef, ptr {pdata}, 0"
+            ));
+            self.emit(format!(
+                "{r2} = insertvalue {{ ptr, i64, i64 }} {r1}, i64 {need}, 1"
+            ));
+            self.emit(format!(
+                "{r3} = insertvalue {{ ptr, i64, i64 }} {r2}, i64 {pcap}, 2"
+            ));
+            return Ok((r3, Type::Array(Box::new(elem))));
+        }
         if name == "@push" {
             let (av, aty) = self.gen_expr(&args[0])?;
             // `SmallArray<T, N>.push(v)` (RFC-0056): store into the live buffer

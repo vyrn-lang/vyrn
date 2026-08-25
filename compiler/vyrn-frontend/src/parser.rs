@@ -118,6 +118,12 @@ pub const METHOD_BUILTINS: &[(&str, &str)] = &[
     // In-place array mutation (RFC-0011).
     ("pop", "@pop"),
     ("swapRemove", "@swapRemove"),
+    // Capacity and bulk growth (RFC-0115). `xs.reserve(n)` makes room for `n`
+    // more elements; `xs.append(ys)` copies every element of `ys` on, in
+    // order. Both rebuild like `push`, so a statement writes back through the
+    // receiver place.
+    ("reserve", "@reserve"),
+    ("append", "@append"),
     // `xs.toArray()` (RFC-0056) — copy a SmallArray out to a growable Array.
     ("toArray", "@toArray"),
     // `x.copy()` (RFC-0089 M1b) — a deep copy of an owned heap value.
@@ -4008,7 +4014,7 @@ impl Parser {
                     return Ok(self.spliced(pre));
                 }
                 if let Expr::Call { name, args, .. } = &e {
-                    if name == "@push" {
+                    if name == "@push" || name == "@reserve" || name == "@append" {
                         match args.first() {
                             // `sq.push(v)` — a plain array variable.
                             Some(Expr::Var { name: recv, .. }) => {

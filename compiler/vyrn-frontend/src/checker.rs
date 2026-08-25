@@ -6942,6 +6942,72 @@ impl<'a> Checker<'a> {
             return Ok(Type::Option(Box::new(Type::Int)));
         }
 
+        // `xs.reserve(n)` / `xs.append(ys)` (RFC-0115). Growable `Array` only:
+        // a `SmallArray`'s capacity is part of its type and a fixed array has
+        // none to grow. `append` is a byte copy of the source's elements in
+        // the compiled backends, so an element type that owns heap is refused
+        // — copying such an element by bytes would give two arrays one buffer.
+        if name == "@reserve" {
+            if args.len() != 2 {
+                return Err(cerr!(
+                    line,
+                    "`reserve` takes 2 arguments, got {}",
+                    args.len()
+                ));
+            }
+            let at = self.expr(&args[0], scope, None, fn_ret)?;
+            match self.base(&at) {
+                Type::Array(_) => {}
+                Type::Err => return Ok(Type::Err),
+                other => {
+                    return Err(cerr!(
+                        line,
+                        "`reserve` needs a growable Array as its receiver, found {other}"
+                    ))
+                }
+            }
+            let n = self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?;
+            if !self.coercible(&n, &Type::Int) {
+                return Err(cerr!(line, "`reserve` count is {n}, not an Int64"));
+            }
+            return Ok(at);
+        }
+        if name == "@append" {
+            if args.len() != 2 {
+                return Err(cerr!(
+                    line,
+                    "`append` takes 2 arguments, got {}",
+                    args.len()
+                ));
+            }
+            let at = self.expr(&args[0], scope, None, fn_ret)?;
+            let elem = match self.base(&at) {
+                Type::Array(inner) => (*inner).clone(),
+                Type::Err => return Ok(Type::Err),
+                other => {
+                    return Err(cerr!(
+                        line,
+                        "`append` needs a growable Array as its receiver, found {other}"
+                    ))
+                }
+            };
+            let want = Type::Array(Box::new(elem.clone()));
+            let xs = self.expr(&args[1], scope, Some(&want), fn_ret)?;
+            if !self.coercible(&xs, &want) {
+                return Err(cerr!(
+                    line,
+                    "`append` source is {xs} but the receiver holds {elem} elements"
+                ));
+            }
+            if crate::own::owns_heap(&elem, &self.types) {
+                return Err(cerr!(
+                    line,
+                    "`append` copies its source's elements by bytes, and `{elem}` owns heap — push each element with `.copy()` in a loop instead"
+                ));
+            }
+            return Ok(at);
+        }
+
         // Growable arrays. `[]` builds one, `xs.push(v)` (`@push`) appends and
         // `xs[i]` (`@at`) reads an element; `xs.length` is a field access, so it
         // never arrives here at all.

@@ -5914,6 +5914,24 @@ impl<'a> Interp<'a> {
                         }
                         other => Err(format!("push of non-Array {other:?}").into()),
                     },
+                    // `xs.reserve(n)` (RFC-0115): capacity is invisible in this
+                    // engine — an `Rc<Vec>`'s is the allocator's business — so
+                    // the value passes through unchanged.
+                    "@reserve" => match &vals[0] {
+                        Val::Array(_) => Ok(vals[0].clone()),
+                        other => Err(format!("reserve of non-Array {other:?}").into()),
+                    },
+                    // `xs.append(ys)` (RFC-0115): every element of `ys`, in order.
+                    "@append" => match (&vals[0], &vals[1]) {
+                        (Val::Array(elems), Val::Array(more)) => {
+                            let mut next = elems.clone();
+                            let v = std::rc::Rc::make_mut(&mut next);
+                            reserve_vec(v, more.len())?;
+                            v.extend(more.iter().cloned());
+                            Ok(Val::Array(next))
+                        }
+                        (a, b) => Err(format!("append of {a:?} and {b:?}").into()),
+                    },
                     // Spelled out rather than named through `project::AT`
                     // because `primitives::the_census_is_the_code` reads these
                     // arms as literals.

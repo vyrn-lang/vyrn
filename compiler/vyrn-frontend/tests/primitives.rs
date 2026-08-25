@@ -130,6 +130,8 @@ use Why::*;
 const CENSUS: &[(&str, Why, &str)] = &[
     // ---- Memory: the allocator and the containers standing on it ------------
     ("@push", Memory, "Array: append, reallocating"),
+    ("@reserve", Memory, "Array (RFC-0115): capacity for n more, one realloc"),
+    ("@append", Memory, "Array (RFC-0115): bulk copy of a heapless source, one growth"),
     ("@at", Memory, "Array: indexed read; also traps out of bounds"),
     ("@list", Memory, "a fixed and a growable array share one representation"),
     ("@toArray", Memory, "SmallArray (RFC-0056): copy the inline/spilled buffer out"),
@@ -564,7 +566,12 @@ fn the_census_is_the_code() {
     // CAPABILITY and not a second spelling: before them a program could compute
     // bytes that are not text and had no way to emit them, which is why
     // `mandelbrot-200.expected` sat in the corpus with no program beside it.
-    assert_eq!(found.len(), 91, "the primitive core changed size");
+    //
+    // 91 -> 93 for RFC-0115's `@reserve` and `@append`. Capacity is genuinely
+    // unspellable from inside the language — no composition of `push` can ask
+    // the allocator for room ahead of time — and a bulk append that grows at
+    // most once is the same fact stated for `n` elements.
+    assert_eq!(found.len(), 93, "the primitive core changed size");
 }
 
 /// The fourth engine, and nothing asked it anything until now (RFC-0094 M1).

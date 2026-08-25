@@ -1,0 +1,58 @@
+/// RFC-0115 — capacity reservation and bulk append.
+///
+/// `xs.reserve(n)` makes room for `n` more elements ahead of the pushes, so a
+/// build whose size is known is one allocation instead of a doubling ladder.
+/// `xs.append(ys)` copies every element of `ys` on, in order, growing at most
+/// once — the shape a line builder wants, and the shape `std/html`'s
+/// `appendBytes` hand-wrote with a per-byte loop until this landed.
+///
+/// A self-append is defined and duplicates the array: the source is read out
+/// of the grown buffer, which is the case the lowering has to get right
+/// rather than refuse.
+
+type Point = {
+    x: Int64,
+    y: Int64,
+}
+
+fn line(n: Int64) -> Array<UInt8> {
+    let mut out: Array<UInt8> = []
+    out.reserve(n)
+    let mut i = 0
+    while i < n {
+        out.push(UInt8(65 + i - (i / 26) * 26))
+        i = i + 1
+    }
+    return out
+}
+
+fn main() -> Int64 {
+    // Bytes: ten 60-byte lines into one reserved buffer.
+    let one = line(60)
+    let mut out: Array<UInt8> = []
+    out.reserve(610)
+    let mut j = 0
+    while j < 10 {
+        out.append(one)
+        out.push(UInt8(10))
+        j = j + 1
+    }
+    print("bytes \{out.length} first \{Int64(out[0])} nl \{Int64(out[60])}")
+
+    // Heapless records append by bytes too.
+    let mut ps: Array<Point> = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]
+    let more: Array<Point> = [Point { x: 5, y: 6 }]
+    ps.append(more)
+    print("points \{ps.length} last \{ps[2].x},\{ps[2].y}")
+
+    // Self-append duplicates.
+    let mut dup: Array<Int64> = [7, 8, 9]
+    dup.append(dup)
+    print("dup \{dup.length} tail \{dup[3]}\{dup[4]}\{dup[5]}")
+
+    // Reserve alone changes nothing observable.
+    let mut r: Array<Int64> = [1]
+    r.reserve(100)
+    print("reserved len \{r.length}")
+    return 0
+}

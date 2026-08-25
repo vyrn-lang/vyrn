@@ -1212,7 +1212,7 @@ export fn workItems() -> Array<String> {
         "A comparator, or a secondary key, for sortBy, so \"count descending, ties by fragment\" stops being a hand-written insertion sort with three copies per swap.",
         "A copy into an array that already exists, so .copy() inside a loop stops allocating — 600 ms of fannkuch-redux's 763 ms, measured.",
         "CLOSED — the byte sink shipped as RFC-0111: writeStdout takes packed bytes as they are and writeFileBytes writes them, which is what unblocked mandelbrot's P4 bitmap; fasta and reverse-complement can take the same path.",
-        "Capacity reservation and a bulk append for Array, so a 60-byte line is one allocation rather than five doublings and sixty checked pushes.",
+        "CLOSED — RFC-0115: xs.reserve(n) makes a known-size build one allocation, and xs.append(ys) is one copy with at most one growth. std/html's per-byte appendBytes loop is one append now; the heapless-element rule keeps the byte copy honest.",
         "CLOSED — standard input is block-buffered in both engines: the native shim reads blocks into its own buffer (read, not fread, so a pipe that has one line wakes the reader), and the wasm runtime asks fd_read for 4,096 bytes at a time. Reverse-complement's 40.7 million syscalls became thousands.",
         "Loop facts in the emitted IR. No noalias anywhere and no loop metadata, so the ownership model's proofs never reach the optimizer.",
         "An allocator of Vyrn's own on the native leg. The wasm backend's segregated free list beats the platform malloc by enough to win binary-trees while running no optimizer.",

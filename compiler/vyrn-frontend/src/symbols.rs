@@ -3769,6 +3769,8 @@ struct BuiltinMethod {
 /// for lookup; it only matters that each name maps to one entry.
 static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod { name: "push", detail: "array.push(value) -> Array<T> — append to a growable array; a statement writes the result back through the receiver" },
+    BuiltinMethod { name: "reserve", detail: "array.reserve(n) -> Array<T> — make room for n more elements ahead of time, so a known-size build is one allocation (RFC-0115)" },
+    BuiltinMethod { name: "append", detail: "array.append(other) -> Array<T> — copy every element of `other` on, in order; element type must not own heap (RFC-0115)" },
     BuiltinMethod { name: "at", detail: "array.at(index) -> T — read an element by index; `array[index]` is the same call" },
     // RFC-0083's four vector methods. They were in `parser::METHOD_BUILTINS`
     // and not here, so `v.` offered no completion for them and hovering one
@@ -3846,6 +3848,8 @@ fn builtin_methods_of_shape(ty: &Type) -> Vec<BuiltinMethod> {
             by_name("at"),
             by_name("pop"),
             by_name("swapRemove"),
+            by_name("reserve"),
+            by_name("append"),
         ]
         .into_iter()
         .flatten()
