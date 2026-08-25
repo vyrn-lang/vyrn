@@ -3,6 +3,38 @@
 Measured over the last 20 completed runs of each workflow. The cuts are the
 owner's call; this census only measures.
 
+
+## Do not shard the site suite (measured 2026-08-25)
+
+The slowest step in this table is `The site's own tests` at 1018 s median, of
+which 687 s is `vyrn test site/export.vyrn`. Splitting it across a CI matrix is
+the obvious answer and it is the wrong one. `vyrn test --shard i/n` was built,
+measured and reverted; this is why.
+
+Locally, after RFC-0113:
+
+| | |
+| --- | --- |
+| the whole suite, 34 tests | **16.15 s** |
+| the slowest of four round-robin shards | **12.80 s** |
+| loading and generating, no test selected | **0.32 s** |
+| every test run ALONE, times added up | **88.7 s** |
+
+The last two lines are the finding. Setup is not the fixed cost — it is a third
+of a second. But thirty-four tests that take 88.7 s apart take 16.2 s together,
+because they SHARE the render: the site's modules cache their parse and their
+pages in module state, so the first test that needs a page pays for it and the
+other thirty-three do not.
+
+Sharding breaks exactly that. Four runners each pay the full render, so the
+compute goes up fourfold to take 21 per cent off the wall clock — and 21 per
+cent of 687 s is still nine minutes, which does not reach the goal it was for.
+
+What follows for this step: its cost is one render, not thirty-four tests. It
+gets faster when rendering gets faster — which is what took the export from
+26.3 s to 12.75 s — or when it renders less. It does not get faster by being cut
+into pieces, and a future reader reaching for a matrix should read this first.
+
 ## Part one — the step-level record
 
 One row per step, per job, per operating system. Sorted by median, largest
