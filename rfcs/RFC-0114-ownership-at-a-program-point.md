@@ -1,6 +1,13 @@
 # RFC-0114 — Ownership At A Program Point
 
-- **Status:** **Draft. The problem is measured; the design is not chosen.**
+- **Status:** **Implemented** — the design the appendix proves, landed as it
+  was proved: M1 argument temporaries (313.9 MB → 4.1), M2 per-store
+  ownedness (9,925.7 MB → 4.9), Rule N at all three join shapes (215.3 MB →
+  one buffer each), R1′ receivers for Strings and containers (313.9 → steady;
+  178.9 → 3.8), the untake (423 → 4.1), and the consume-parameter release the
+  untake's own measurement uncovered. Every landing is pinned by a
+  `memory.rs` row that failed first. Still out, recorded in the census: a
+  heap field of a temporary record, and the §26 `ReleasePlan` consolidation.
 - **Evidence:** [rfcs/census/declared-release-does-not-run.md](census/declared-release-does-not-run.md).
 - **Appendix A:** [the algorithm and its proofs](proofs/release-algorithm.md) —
   Part I: the invariant, three soundness theorems, and the assumption each of
