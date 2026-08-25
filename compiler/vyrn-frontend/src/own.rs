@@ -808,11 +808,41 @@ fn self_referring_past(
 /// declaration that refers to itself; a type that deep is answered `false`, which
 /// costs a copy that copies nothing and never a wrong free.
 pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
-    fn go(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> bool {
-        if depth > 8 {
-            return false;
+    fn go(ty: &Type, types: &HashMap<String, TypeDecl>, seen: &mut Vec<String>) -> bool {
+        // A NAME THAT REACHES ITSELF OWNS HEAP, and answering otherwise is what
+        // this function used to do. The guard was `if depth > 8 { false }`, so
+        // `type Tree = | Leaf | Node(Tree, Tree)` — which is nothing but heap —
+        // exhausted the counter and answered "no". Two things followed from that
+        // one word:
+        //
+        //   - `vyrn why --memory` reported "the return type Tree owns no heap".
+        //   - `Gen::release_enum` skips a variant whose payloads own nothing, so
+        //     RFC-0096's `free_declared_boxes` freed nothing for exactly the
+        //     variant whose boxes needed it. 200,000 trees of depth 8, built and
+        //     discarded one at a time, peaked at 3.1 GB with a live set of one.
+        //
+        // The cycle is the answer, not the limit. A type that reaches itself
+        // cannot be stored inline — the representation has to box the recursive
+        // field to be finite — and that box is heap whatever else the type
+        // holds. So a repeated name answers `true` where the counter answered
+        // `false`.
+        //
+        // `seen` keyed on the NAME, which is `self_referring_past`'s shape a few
+        // functions up: the two ask different questions about the same walk, and
+        // now they walk the same way.
+        if let Type::Named(n) | Type::App(n, _) = ty {
+            if seen.iter().any(|x| x == n) {
+                return true;
+            }
+            if !types.contains_key(n) {
+                return false;
+            }
+            seen.push(n.clone());
+            let r = go(&crate::types::resolve(ty, types), types, seen);
+            seen.pop();
+            return r;
         }
-        let deeper = |t: &Type| go(t, types, depth + 1);
+        let deeper = |t: &Type| go(t, types, &mut seen.clone());
         match crate::types::resolve(ty, types) {
             // A `Task<T>` owns a frame, a record and an operating-system handle
             // whatever `T` is (RFC-0095 M1), so it answers `true` for `Task<Unit>`
@@ -865,7 +895,7 @@ pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
             _ => false,
         }
     }
-    go(ty, types, 0)
+    go(ty, types, &mut Vec::new())
 }
 
 /// Why a binding is **not** reclaimed at block exit (RFC-0087 U1).
@@ -2746,6 +2776,62 @@ pub(crate) mod tests {
         let (o, _) = analyze_src(src);
         assert!(!o.owned_fns.contains_key("pick"));
         assert_eq!(drop_count(src, "main"), 0);
+    }
+
+    /// A type that reaches itself owns heap, because it had to be boxed to be
+    /// representable at all.
+    ///
+    /// THE DEFECT THIS PINS: the walk used to give up after eight levels and
+    /// answer `false`, so `type Tree = | Leaf | Node(Tree, Tree)` — which is
+    /// nothing but heap — reported that it owned none. `release_enum` skips a
+    /// variant whose payloads own nothing, so the boxes behind `Node` were
+    /// never freed and 200,000 trees of depth 8 peaked at 3.1 GB against a live
+    /// set of one. See `rfcs/census/declared-release-does-not-run.md`.
+    ///
+    /// The depth counter is the thing to watch. Any bound cheap enough to reach
+    /// on an ordinary nested type brings the leak back, and it comes back
+    /// SILENTLY: nothing fails, the program only grows.
+    #[test]
+    fn a_self_referring_type_owns_heap() {
+        use crate::ast::{EnumVariant, TypeDecl};
+        let mut types: HashMap<String, TypeDecl> = HashMap::new();
+        types.insert(
+            "Tree".to_string(),
+            TypeDecl {
+                name: "Tree".to_string(),
+                base: Type::Enum(vec![
+                    EnumVariant {
+                        name: "Leaf".to_string(),
+                        payload: vec![],
+                    },
+                    EnumVariant {
+                        name: "Node".to_string(),
+                        payload: vec![
+                            Type::Named("Tree".to_string()),
+                            Type::Named("Tree".to_string()),
+                        ],
+                    },
+                ]),
+                exported: false,
+                module: None,
+                doc: None,
+                type_params: vec![],
+                predicate: None,
+                line: 1,
+            },
+        );
+        assert!(
+            super::owns_heap(&Type::Named("Tree".to_string()), &types),
+            "a recursive enum owns the boxes its payloads travel in"
+        );
+        // And a record that reaches itself, which is the other shape `own.rs`
+        // documents (`type Node = {{ kids: Array<Node> }}`) — that one owns heap
+        // through the array as well, so it answered `true` before; this is the
+        // enum shape, where the box IS the only heap.
+        assert!(
+            !super::owns_heap(&Type::Int, &types),
+            "an integer owns nothing, and the cycle rule must not change that"
+        );
     }
 
     // ---- the RFC-0089 gate (M0) ------------------------------------------

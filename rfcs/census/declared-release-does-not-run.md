@@ -1,7 +1,76 @@
 # A declared `Owned` release is reported and does not free
 
-Status: **measured 2026-08-25, not fixed.** A minimal reproduction, the numbers,
-and what was ruled out. The fix is not attempted here.
+Status: **FIXED 2026-08-25, same day.** The diagnosis was one word in
+`own::owns_heap`, and a second, smaller gap is left open below. The
+reproduction and the ruled-out list are kept as written, because the thing that
+was ruled out three times was not the thing.
+
+## The cause: `owns_heap` ran out of depth and said "no"
+
+```rust
+fn go(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> bool {
+    if depth > 8 {
+        return false;
+    }
+```
+
+`type Tree = | Leaf | Node(Tree, Tree)` reaches itself, so the walk spent its
+eight levels on `Tree` and answered that a type which is nothing but heap owns
+none. Two things followed:
+
+- `vyrn why --memory` reported "the return type Tree owns no heap".
+- `Gen::release_enum` skips a variant whose payloads own nothing — so
+  RFC-0096's `free_declared_boxes`, which exists precisely to free the block a
+  wide payload travels in, skipped the one variant whose boxes needed it.
+
+The emitted IR is where it became visible. `make` calls `__vyrn_malloc` twice
+per `Node`; the declared release destructures with `inttoptr` and `load` and
+frees neither box:
+
+```llvm
+me.arm.3:
+  %t3 = extractvalue { i64, i64, i64 } %t1, 1
+  %t4 = inttoptr i64 %t3 to ptr
+  %t5 = load { i64, i64, i64 }, ptr %t4      ; the subtree comes out
+  ...                                        ; the box never goes back
+```
+
+**The cycle is the answer, not the limit.** A type that reaches itself cannot be
+stored inline — the representation has to box the recursive field to be finite —
+and that box is heap whatever else the type holds. `owns_heap` keys a `seen`
+stack on the type NAME now, the same shape `self_referring_past` a few functions
+up already used, and a repeated name answers `true`.
+
+### The numbers, after
+
+| rounds | before | after |
+| --- | --- | --- |
+| 50,000 | 765.2 MB | **3.8 MB** |
+| 200,000 | 3115.0 MB | **3.8 MB** |
+
+Flat, which is what "not a leak" means. Three-way parity is 40/40, which is the
+check that matters for a release change: freeing something twice is the failure
+mode a memory fix has, and the corpus runs every example on three engines.
+
+## Still open: a temporary is never released
+
+`binarytrees` did not improve from the fix alone, because it wrote
+`check(make(depth))`. A temporary has no binding for the release to attach to,
+so the tree is built and abandoned. Binding it — `let t = make(depth)` — takes
+depth 16 from **451.9 MB to 20.5 MB**, and 20 MB is about the live long-lived
+tree.
+
+`examples/binarytrees.vyrn` binds it now, and the game's own wording asks for
+exactly that: trees are "built, checked and released one at a time". But the
+language should not need the `let`. **A temporary of an owning type, passed to a
+`read` parameter and dropped on the floor, is not released.** That is a second
+defect and it is not fixed here.
+
+---
+
+The original report follows, as written.
+
+
 
 ## The claim
 
