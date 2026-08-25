@@ -1,0 +1,10 @@
+/// A2's capture clause: a lambda capturing a `read` parameter — a borrow.
+fn hold(s: String) -> Int64 {
+    let g: fn() -> Int64 = () -> s.byteLength
+    return g()
+}
+
+fn main() -> Int64 {
+    print("\{hold("hello")}")
+    return 0
+}

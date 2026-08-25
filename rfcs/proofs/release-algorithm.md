@@ -486,8 +486,15 @@ reaching `π`, `p` holds a live allocation this frame owns. This is Part I's
 I₁ made path-universal — and it is the whole performance story, because it is
 what lets every release be emitted **without a guard**.
 
-The §10 program is now fixed rather than refused: `s` is `O` on the else edge,
-dead at the merge, so R5 releases it there. 211.5 MB becomes one buffer.
+The §10 program is fixed rather than refused — but by R4, not by R5, and the
+verification pass (§45) caught the misattribution: §10's then-branch RETURNS,
+so its edge goes to the function exit and the point after the `if` has one
+incoming edge. No conflicting join exists; `s` is `O` on the else path, read,
+dead, and released at exit — the leak was purely the per-binding
+implementation. The genuine Rule N witness is the variant where BOTH branches
+continue to the join (`if flag { n = n + take(consume s) } else
+{ n = n + s.byteLength } return n`), which the checker accepts today and which
+leaks the same way. Either way, 211.5 MB becomes one buffer.
 
 ## 13. Temporaries, uniformly
 
@@ -1430,12 +1437,15 @@ this whole language made.
 
 ## 44. What Part V still does not do
 
-- **Interior mutation of containers while lent.** The model lets a container
-  be lent (`B`) and separately mutated (`modify`), and A6 keeps those apart
-  today because `modify` is treated as `read` in v0.1. The day `modify` grows
-  real in-place mutation of containers, the frontier needs an exclusivity rule
-  (no `B` outstanding across a `modify`), which is a fifth assumption, not a
-  theorem. Named now so it is not discovered as a defect.
+- **Interior mutation while lent** — WITHDRAWN by verification (§45). The
+  worry was that `modify` mutating a container under an outstanding `B` would
+  need a new exclusivity assumption. The checker already enforces it, with its
+  own wording: "`xs` is passed to `g` as `modify` and read again in the same
+  call — a `modify` borrow is exclusive". So exclusivity is assumption **A7**,
+  and unlike A6 it is not a parser accident — it is a deliberate rule with a
+  diagnostic. (The stale `ast.rs` comment "treated as `Read` in v0.1" is what
+  misled the first draft of this bullet; `std/slots`' `insert` has mutated in
+  place since RFC-0091.)
 - **The container interior is a multiset, not a modelled tree.** Billing "to
   the interior" flattens element order and sharing among elements. Sufficient
   for every theorem here; insufficient the day elements can be lent out by
@@ -1445,4 +1455,69 @@ this whole language made.
 - **Ω with paths is stated by construction (§39), not written as rules.** The
   path-aware [LET]/[REL]/split/collapse rules are mechanical to produce and
   long; they belong to the mechanization (§37 step 2), not to prose.
+
+
+---
+
+## 45. Verification against the implementation, 2026-08-25
+
+A proof about a real compiler is verified two ways: internally (numbering,
+cross-references — checked, Theorems 1–18 and Lemmas 1–5, no gaps or
+duplicates) and EMPIRICALLY, by running the load-bearing assumptions against
+`vyrn check`. Four assumptions carry the whole document; each got a probe
+program; all four verdicts are quoted verbatim, because the wording is the
+evidence.
+
+**A1's reach — a read after a conditional move.** Theorem 4's first case needs
+the checker to refuse `consume s` on one branch followed by a read AFTER the
+join. It does:
+
+```
+`s` was moved here into `consume`
+line 14: ... and `s` is used again here
+```
+
+And it is exactly path-sensitive where the model needs it: the variant reading
+`s` ON the other branch (states disjoint by path, no conflicting join) is
+accepted. The checker already draws Theorem 4's line, in both directions.
+
+**A2's capture clause — a closure over a borrow.** Lemma 3's Dyck argument
+dies if a lambda can capture a `read` parameter and outlive the call. Refused,
+in both the local and the escaping form, with the extent named:
+
+```
+`s` may not be captured by a closure that outlives this call — it is a `read` parameter
+```
+
+**A6 — parameter reassignment.** Refused (`cannot assign to `x``), though by
+the general no-`mut` rule rather than a parameter-specific one — the
+assumption holds today by the absence of `mut` parameters from the grammar, and
+the sharpness table's advice stands: this is the row to pin with a test the day
+anyone proposes them.
+
+**A7 (new) — `modify` exclusivity.** The §44 worry, probed with
+`g(xs, xs)` where one position is `modify`:
+
+```
+`xs` is passed to `g` as `modify` and read again in the same call — a `modify` borrow is exclusive
+```
+
+Already a rule, already worded. §44's first bullet is withdrawn accordingly,
+and the assumption roster is now A1–A7 with every row either checker-enforced
+(A1, A2, A7), grammar-enforced (A6), semantics-stated (A5), or empirical (A4 —
+the permanent frontier, with §24's witnesses as its correct form).
+
+**One misattribution found and fixed.** §12 credited Rule N with fixing §10's
+program; §10's then-branch returns, so no conflicting join exists and plain R4
+covers it — the genuine Rule N witness is the both-branches-continue variant,
+which the checker accepts and which leaks identically today. The correction is
+in place at §12.
+
+**What this verification is NOT.** It samples four assumptions with one probe
+each; it does not mechanize anything (§37 is still the roadmap), and it cannot
+verify A4 — three defects this week are the standing proof that only §24's
+executable witnesses can. The honest summary: every assumption the proofs
+lean on is enforced by the implementation today, one more strongly than the
+document claimed (A7), and the document was wrong twice in its own favour —
+both errors of attributing to the future what the checker already does.
 

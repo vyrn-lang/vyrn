@@ -33,6 +33,37 @@ pub const KNOWN_DIVERGENT: &[(&str, &str)] = &[];
 /// was a validation failure, and a silent hole the moment a second kind of
 /// refusal was pinned here.
 pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
+    // ---- RFC-0114's proof appendix, §45: the four load-bearing assumptions,
+    // pinned as refusals. Each row is one assumption of the release-algorithm
+    // proofs (rfcs/proofs/release-algorithm.md); the needle is the checker's
+    // own wording, quoted in §45. If any of these ever COMPILES, a theorem's
+    // hypothesis just became false and the proof document is the first thing
+    // to reread.
+    (
+        "a1_afterjoin.vyrn",
+        "A1's reach: a read AFTER the join of a conditional move (Theorem 4's          first case). The branch-disjoint read is accepted; this is not",
+        "used again here",
+    ),
+    (
+        "a2_capture.vyrn",
+        "A2's capture clause: a closure over a `read` parameter (Lemma 3's          bracketing dies if this compiles)",
+        "may not be captured by a closure",
+    ),
+    (
+        "a2_capture_escape.vyrn",
+        "A2, the escaping form: the capturing closure is returned",
+        "may not be captured by a closure",
+    ),
+    (
+        "a6_reassign.vyrn",
+        "A6: parameters are not reassignable — borrows are path-invariant          because nothing can overwrite one",
+        "cannot assign to",
+    ),
+    (
+        "excl_alias.vyrn",
+        "A7: a `modify` borrow is exclusive — one variable as `modify` and          `read` in one call is refused",
+        "borrow is exclusive",
+    ),
     (
         "validate_compile.vyrn",
         "compile-time rejection of a provably-invalid constant",
