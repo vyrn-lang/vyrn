@@ -6011,6 +6011,20 @@ impl<'a> Gen<'a> {
                 let ll = self.llt(&ety);
                 let t = self.fresh_tmp();
                 self.emit(format!("{t} = extractvalue {ll} {v}, {idx}"));
+                // RFC-0114 R1′: a SCALAR field read off an unnamed record this
+                // frame owns is the record's last observer — free it whole. A
+                // heap field stays out: `names_a_place` made the binding its
+                // owner. A `lazy` field stays out too: forcing it reads the
+                // record after this point.
+                if self.region_depth == 0
+                    && self
+                        .receiver_frees
+                        .contains(&(expr as *const Expr as usize))
+                    && self.owned.release_kind(&fty).is_none()
+                    && vyrn_frontend::types::deferred(&fty).is_none()
+                {
+                    self.free_arg_temp(&v, &ety);
+                }
                 // RFC-0085 M4a: reading a `lazy T` field FORCES it — the loaded
                 // `{ i64, i64 }` is a stored nullary closure and this is the
                 // call. Nothing is cached, so a second read is a second call

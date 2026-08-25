@@ -4650,8 +4650,7 @@ impl<'p> Fn_<'_, 'p> {
                 // RFC-0114 R1′: an unnamed String receiver this frame owns is
                 // freed right after the header read — the pointer is teed to a
                 // local before `length_of` consumes it.
-                let rfree = (field == "byteLength" || field == "length")
-                    && self.region_depth == 0
+                let rfree = self.region_depth == 0
                     && self
                         .cx
                         .receiver_frees
@@ -4672,7 +4671,8 @@ impl<'p> Fn_<'_, 'p> {
                     return Ok(t);
                 }
                 let (off, fty) = self.field_of(&base, field, *line)?;
-                match self.cx.repr(&fty, *line)? {
+                let frepr = self.cx.repr(&fty, *line)?;
+                match &frepr {
                     Repr::Scalar(_) => {
                         b.ins(&load_of(&self.cx.ll(&fty), off, self.cx.signed(&fty)))
                     }
@@ -4681,6 +4681,19 @@ impl<'p> Fn_<'_, 'p> {
                         .ins(&Instruction::I32Add),
                     Repr::Unit => return unsupported("a Unit field", *line),
                 };
+                // RFC-0114 R1′: a SCALAR field read off an unnamed record this
+                // frame owns is the record's last observer — free it whole
+                // from the teed address. An aggregate field is an address INTO
+                // the record; a heap or `lazy` one is read again later. All
+                // three stay out.
+                if let Some(l) = tee {
+                    if matches!(frepr, Repr::Scalar(_))
+                        && self.rel_for(&fty, *line)?.is_none()
+                        && vyrn_frontend::types::deferred(&fty).is_none()
+                    {
+                        self.free_arg_temp(m, b, l, &base, *line)?;
+                    }
+                }
                 // RFC-0085 M4a: reading a `lazy T` field FORCES it. The address
                 // now on the stack IS a stored nullary closure (`lazy T` lowers
                 // as `fn() -> T`), so the force is one call through that

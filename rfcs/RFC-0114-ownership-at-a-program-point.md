@@ -311,8 +311,23 @@ elements — right after the count is read, filtered by the producer's return
 KIND, so only silent frees ever enter the set (measured 178.9 MB → 3.8 over
 200,000 rounds of a 128-element array; `temporaryArrayLength` pins it).
 `.charCount()` needed nothing: it desugars to a call, and the M1 argument
-machinery already frees its receiver-as-argument. Deliberately out: a heap
-field of a temporary record (extraction lends into the record).
+machinery already frees its receiver-as-argument.
+
+**The last receiver case CLOSED: a field of a temporary record.** The defect
+was a classification: `names_a_place` called every field read "read out of a
+place that owns it", but a field of a TEMPORARY is read out of a value
+NOBODY owns — no row, no release, and calling the binding a borrow was the
+leak. Two halves, split by what the field carries. A HEAP field transfers:
+the binding owns the extracted buffer and its block exit releases it (safe
+because a view builtin's field stays a borrow through the recursion, and a
+user function cannot return a borrow at all — "a return is owned"). A
+SCALAR field is the record's last observer: the record is freed whole,
+deep, right after the read — with an aggregate field (an address INTO the
+record), a `lazy` field (forced later), and any `Deep` producer in a
+program that declares `impl Owned` anywhere staying out, each for its own
+stated reason. Measured: 44.4 MB → 3.8 and 46.2 → 3.8 over a million
+rounds; `temporaryRecordField` and `temporaryRecordScalar` pin both on
+wasm, and both run clean under the free audit.
 
 **The untake LANDED.** A binding whose value was taken and then provably
 re-established releases its FINAL value at block exit — the naive version of

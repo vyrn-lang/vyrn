@@ -1528,7 +1528,21 @@ impl MoveCheck<'_> {
     /// view builtin, module state, or a name that is itself a borrow.
     fn names_a_place(&self, value: &Expr) -> Option<&'static str> {
         match value {
-            Expr::Field { .. } => Some("read out of a place that owns it"),
+            // A field read is somebody's place only when its base chain roots
+            // at one. A field of a TEMPORARY — `makeRec(i).name` — is read out
+            // of a value NOBODY owns: no row, no release, and calling it a
+            // borrow was the leak (RFC-0114, the last receiver case). The
+            // binding takes ownership of the extracted buffer instead; the
+            // recursion keeps a view builtin's field a borrow, and a user
+            // function cannot return a borrow at all ("a return is owned"),
+            // so there is no owner left to double-free against.
+            Expr::Field { expr, .. } => {
+                if place_path(value).is_some() || element_path(value).is_some() {
+                    Some("read out of a place that owns it")
+                } else {
+                    self.names_a_place(expr)
+                }
+            }
             Expr::Var { name, .. } => {
                 if self.borrow_of(name).is_some() {
                     return Some("a borrow of somebody else's value");
@@ -3840,13 +3854,16 @@ impl MoveCheck<'_> {
                     self.check_use(&path, *line, consumed)
                 }
                 None => {
-                    // RFC-0114 R1′: a `.byteLength` receiver with no name is a
-                    // String temporary — the field exists only on String, which
-                    // is the type proof — and if its producer transfers
-                    // ownership, nothing else will ever release it. Recorded
-                    // here, decided against `owned_fns` in `own::analyze`,
-                    // freed by the backends after the header read.
-                    if field == "byteLength" || field == "length" {
+                    // RFC-0114 R1′: a receiver with no name — `.byteLength` on
+                    // a String temporary, `.length` on a container one, or a
+                    // record field of one — is a value nothing else will ever
+                    // release. Recorded here for every field of a call
+                    // producer, decided against `owned_fns` in `own::analyze`,
+                    // freed by the backends after the read: after the header
+                    // for the projections, deep after a SCALAR record field
+                    // (a heap field takes ownership instead — see
+                    // `names_a_place`).
+                    {
                         if let Some(sink) = &self.receiver_temps {
                             // `.length` receivers are containers, so only a
                             // call can produce an owned one; the concat form

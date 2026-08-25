@@ -554,6 +554,26 @@ const ROWS: &[Row] = &[
               enters the set, so the free is always silent",
     },
     Row {
+        export: "temporaryRecordField",
+        census: "RFC-0114 R1′",
+        today: Shape::Steady,
+        why: "A heap field of a temporary record: `names_a_place` called every field \
+              read a borrow, but a field of a value NOBODY owns has no owner to borrow \
+              from — the binding owns the extracted buffer now, and its block exit \
+              releases it. The record aggregate itself is by value, so for a record \
+              whose only heap is the extracted field, the transfer is complete",
+    },
+    Row {
+        export: "temporaryRecordScalar",
+        census: "RFC-0114 R1′",
+        today: Shape::Steady,
+        why: "A scalar field of a temporary record: the read is the record's last \
+              observer, so the record is freed whole right after it — deep, so its \
+              heap fields go too. A heap or `lazy` field, or an aggregate one (an \
+              address INTO the record), stays out; a `Deep` producer is admitted \
+              only while the program declares no `impl Owned` anywhere",
+    },
+    Row {
         export: "prependLoop",
         census: "§4",
         today: Shape::Steady,
@@ -1620,6 +1640,25 @@ fn makeNums(n: Int64) -> Array<Int64> {{
 
 export extern fn temporaryArrayLength() {{
     seen = seen + makeNums(64).length
+}}
+
+/// RFC-0114, the last receiver case: a field of a TEMPORARY record. A heap
+/// field is read out of a value NOBODY owns, so the binding takes ownership
+/// (`names_a_place` stopped calling it a borrow); a scalar field is the
+/// record's last observer, so the record is freed whole after the read.
+type Tag = {{ label: String, n: Int64 }}
+
+fn makeTag(i: Int64) -> Tag {{
+    return Tag {{ label: tag(), n: i }}
+}}
+
+export extern fn temporaryRecordField() {{
+    let x = makeTag(seen).label
+    seen = seen + Int64(x.byteLength)
+}}
+
+export extern fn temporaryRecordScalar() {{
+    seen = seen + makeTag(seen).n
 }}
 
 /// RFC-0114 untake: the value is taken, the binding is provably re-established,

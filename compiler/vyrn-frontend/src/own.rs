@@ -549,6 +549,12 @@ impl Owned {
     ///
     /// The match has no `_` arm on purpose. A new [`Type`] variant does not get
     /// to be silently unreclaimed; it has to say so.
+    /// Whether ANY type declares `impl Owned` — the coarse gate the receiver
+    /// filter uses before admitting a `Deep` producer.
+    pub fn declares_any(&self) -> bool {
+        !self.impls.is_empty()
+    }
+
     pub fn release_kind(&self, ty: &Type) -> Option<DropKind> {
         if let Some(f) = crate::types::type_key(ty).and_then(|k| self.impls.get(&k)) {
             return Some(DropKind::Release(f.clone(), ty.clone()));
@@ -1328,6 +1334,12 @@ pub fn analyze(program: &Program) -> Ownership {
                             | DropKind::FreeMap
                     )
                 )
+                // A record producer joins only while the program declares no
+                // `impl Owned` at all: a Deep walk may call a declared release,
+                // and that timing is user-visible. ponytail: program-wide
+                // emptiness; a per-type reaches-a-release walk is the upgrade.
+                || (matches!(owned_fns.get(n), Some(DropKind::Deep(_)))
+                    && !proto.declares_any())
         })
         .map(|(k, _)| *k)
         .collect();
