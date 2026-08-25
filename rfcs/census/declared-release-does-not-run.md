@@ -52,6 +52,44 @@ Flat, which is what "not a leak" means. Three-way parity is 40/40, which is the
 check that matters for a release change: freeing something twice is the failure
 mode a memory fix has, and the corpus runs every example on three engines.
 
+## A second leak, found looking for the first: a reassignment did not release
+
+Not a temporary at all, which is what the first pass through this thought. The
+store that overwrites an owning place skipped its release whenever the new value
+MENTIONED the place — correct for `a = @push(a, i)`, which grows the old buffer
+and hands it back, and wrong for a `+`, because `__vyrn_str_concat` always calls
+`__vyrn_str_new` and memcpy's both operands into it.
+
+It stayed invisible because `s = s + x` never reaches the general store: an
+in-place append spine catches it and grows the buffer. What reaches the general
+store is everything the spine declines — a PREPEND above all — and nobody writes
+one in a hot loop until they do.
+
+Measured, 50,000 calls of a 200-iteration loop:
+
+| shape | peak |
+| --- | --- |
+| `s = s + "x"` (the spine catches it) | 4.2 MB |
+| `s = "x" + s` (the spine cannot) | **9902.5 MB** |
+| `s = "x" + s`, after the fix | **4.5 MB** |
+
+Fixed in BOTH backends, and the memory suite is what caught that the first patch
+had only done one: `prependLoop` is a row there now, it runs on wasm, and it read
+`Leaks` until `direct.rs` got the same change. 40/40 three-way parity, which is
+the check a release change needs.
+
+## Still open: a binding whose last value escapes releases nothing
+
+`consumed.vyrn` still leaks 9.9 GB, and it is the same loop with one difference:
+`out` is consumed into a record at the end. `Gen::slot_owns` asks whether the
+binding is in `drop_slots` — the set released at block exit — and a binding whose
+value is moved away is not, so NO assignment in its life releases anything.
+
+Ownership there is per BINDING, not per VALUE. Relaxing it naively is a double
+free: a binding may be assigned again after its value moved out, and the old
+value is gone already. Fixing it properly needs the move checker's flow-sensitive
+answer at each store, which codegen does not have today.
+
 ## Still open: a temporary is never released
 
 `binarytrees` did not improve from the fix alone, because it wrote

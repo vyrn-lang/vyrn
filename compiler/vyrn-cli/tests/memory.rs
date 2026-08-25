@@ -478,6 +478,12 @@ const ROWS: &[Row] = &[
               first append abandons the initializer's buffer",
     },
     Row {
+        export: "prependLoop",
+        census: "§4",
+        today: Shape::Steady,
+        why: "A `+` always allocates, so the store releases what it replaced. The guard was               \"does the new value mention the place\", which is right for `a = @push(a, i)`               and wrong for a concat; the append spine hid it, because the shape that reaches               the general store is a PREPEND and nobody writes one in a hot loop until they do",
+    },
+    Row {
         export: "selfAppend",
         census: "§4/P1",
         today: Shape::Steady,
@@ -983,6 +989,27 @@ export extern fn ifExpr() {{
 /// same hole through module state.
 export extern fn mutString() {{
     let mut s = tag() + "!"
+    seen = seen + Int64(s.byteLength)
+}}
+
+/// A PREPEND in a loop, which no in-place append can serve: the old buffer is
+/// not a prefix of the new one, so `s = "x" + s` must allocate and the store
+/// must release what it replaced.
+///
+/// THE LEAK THIS PINS. The store's release was skipped whenever the new value
+/// mentioned the place at all — right for `a = @push(a, i)`, which grows the old
+/// buffer and hands it back, and wrong for a `+`, because `__vyrn_str_concat`
+/// always calls `__vyrn_str_new` and memcpy's both operands. It stayed invisible
+/// because `s = s + x` is caught by the append spine and never reaches the
+/// general store. Measured before the fix: 9.9 GB over 50,000 calls of a
+/// 200-iteration loop, where the append form used 4.2 MB.
+export extern fn prependLoop() {{
+    let mut s = ""
+    let mut i = 0
+    while i < 200 {{
+        s = "abcdefghij" + s
+        i = i + 1
+    }}
     seen = seen + Int64(s.byteLength)
 }}
 

@@ -5028,11 +5028,27 @@ impl<'a> Gen<'a> {
                 // RFC-0089 rule 4: the store releases what the place held. Not when
                 // the new value names the place — `a = @push(a, i)` grows the old
                 // buffer and hands it back, so freeing it would be a double free.
-                // That shape is the self-append above where it is a String, and a
-                // recorded leak everywhere else. The release runs AFTER the value
-                // is built, which is the PR #61 sha1 lesson.
+                // The release runs AFTER the value is built, which is the PR #61
+                // sha1 lesson.
+                //
+                // A STRING `+` IS THE EXCEPTION, and leaving it out was a leak
+                // that the append fast path above hid. `__vyrn_str_concat`
+                // always calls `__vyrn_str_new` and memcpy's both operands
+                // (see the prelude): it cannot hand back either input, so the
+                // old buffer is garbage the moment the store lands.
+                //
+                // What made it invisible: `out = out + s` is caught by the
+                // append spine above and never reaches here, so the common
+                // shape was fine. Anything the spine declines was not.
+                // `out = "x" + out` — a prepend, which no in-place append can
+                // serve — leaked 9.9 GB over 50,000 calls of a 200-iteration
+                // loop where the append form used 4.2 MB. So did `out = out + s`
+                // in a function whose `out` is later consumed into a record,
+                // because the spine declines a slot with no shadow.
+                let fresh_str = matches!(self.resolve(&tty), Type::Str)
+                    && matches!(value, Expr::Binary { op: BinOp::Add, .. });
                 let snap = if self.slot_owns(&slot)
-                    && !vyrn_frontend::movecheck::mentions_place(value, name)
+                    && (fresh_str || !vyrn_frontend::movecheck::mentions_place(value, name))
                 {
                     self.snap_old(&slot, &tty)
                 } else {

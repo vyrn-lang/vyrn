@@ -3366,10 +3366,18 @@ impl<'p> Fn_<'_, 'p> {
                 // RFC-0089 rule 4: the store releases what the place held. Not
                 // when the new value names the place — `a = @push(a, i)` grows the
                 // old buffer and hands it back, so freeing it would be a double
-                // free. That shape is the self-append above where it is a String,
-                // and a recorded leak everywhere else.
+                // free.
+                //
+                // A STRING `+` IS THE EXCEPTION, for the reason the textual
+                // backend's copy of this gives: a concat always allocates a fresh
+                // buffer and copies both operands into it, so it cannot hand back
+                // either input. The append spine above hides the common
+                // `s = s + x`; what reaches here is a PREPEND, and that leaked
+                // 9.9 GB over 50,000 calls of a 200-iteration loop.
+                let fresh_str = matches!(self.cx.resolve(&ty), Type::Str)
+                    && matches!(value, Expr::Binary { op: BinOp::Add, .. });
                 let snap = if self.place_owns(place)
-                    && !vyrn_frontend::movecheck::mentions_place(value, name)
+                    && (fresh_str || !vyrn_frontend::movecheck::mentions_place(value, name))
                 {
                     match (place, &r) {
                         // A scalar local IS the pointer; it has no address.
