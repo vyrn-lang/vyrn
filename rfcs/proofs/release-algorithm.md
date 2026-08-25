@@ -855,3 +855,345 @@ attach: to one table produced in one place, instead of to a dozen guards in
 three. A proof about a single artifact with forced consumption is worth more
 than the same proof about a convention — the last week is the evidence.
 
+---
+
+# Part IV — Foundations
+
+Parts I–III still lean on four informal steps: traces are never defined, the
+Galois connection of §20 is named but not constructed, Theorem 8's proof rests
+on an unstated bracketing lemma, and no assumption is shown NECESSARY. Part IV
+closes each, and ends with the observation that unifies the whole document:
+every memory-management strategy is a choice of where to pay for an incomplete
+abstraction, and this design's distinguishing property is that it makes the
+abstraction COMPLETE.
+
+## 28. The instrumented machine
+
+The language is structured — no goto — so the semantics is structural; Part
+II's CFG is a derived view (§37 discharges the correspondence).
+
+A **configuration** is `⟨s, K, ρ, H, β⟩`: the statement under execution, a
+continuation stack `K` of call frames, the store `ρ : P ⇀ Addr`, the heap
+`H ⊆ Addr`, and the **billing map** `β : H ⇀ P` — the instrumentation. `β` is
+not part of the language; it is ghost state that makes ownership a fact of the
+concrete semantics so that §30's abstraction has something to abstract.
+
+Steps emit **events**:
+
+```
+ev ::= alloc(a)            a fresh, a enters H, β(a) := the receiving place
+     | free(a)             a leaves H and dom(β)
+     | move(a, p→q)        β(a) := q          (store, consume-arg, return)
+     | lend(a, p→q)        β unchanged        (read/modify argument)
+     | obs(o)              an output byte, a trap, or ENTRY into a declared release
+```
+
+A **trace** is a maximal step sequence from `⟨body, [], ρ₀, H₀, β₀⟩`. Its
+**observable projection** `obs(t)` is the subsequence of `obs(·)` events. Two
+traces are **observationally equal** iff their projections are equal.
+
+The billing map is total on frame allocations by construction: `alloc` bills
+the receiving place, `move` re-bills, `free` un-bills, and nothing else touches
+`β`. This replaces Part I's prose "ρ(p) is the allocation p holds" with a
+defined object, and I₁–I₄ become statements ABOUT `β`:
+
+```
+I₁  σ(p) = O  ⟹  ∃a ∈ H. β(a) = p
+I₂  β is injective          (one owner per allocation — now a property, not an axiom)
+I₄  every frame allocation is in dom(β) until moved out or freed
+```
+
+## 29. The bracketing lemma, and Theorem 8 made whole
+
+**Lemma 3 (lends flow down and close by the next statement).** Every `lend`
+event is created by a call expression in the LENDING frame, and its extent ends
+when that call returns. Lends therefore form a balanced bracket sequence
+against `K` — a Dyck word — and at every statement boundary of a frame, all
+lends issued by that frame are closed.
+
+*Proof.* A lend is created only at an argument position with verdict
+`Released`/`Lent` (§4) — there is no other constructor of `B`, by A2 no rule
+stores one, and by A3 no rule returns one, so a lend cannot travel UP the
+stack. Travelling down, the callee may re-lend, and the nesting follows the
+call stack. A statement boundary in the lender is reached only after its call
+expressions have returned; the brackets opened within the statement are closed
+within it. ∎
+
+**Theorem 8, full proof.** Let `a` be a frame allocation with owner chain
+`p₀ → p₁ → …` (the `β`-history under moves). Every non-owner handle to `a` in
+the interpreter is an `Rc` clone created at a `lend`. The static release of `a`
+is one of R1–R5, each of which sits at a statement boundary or immediately
+after a call in the OWNING frame — by Lemma 3, every lend of `a` issued by that
+frame is closed there, and no other frame can hold a lend of `a` (lends flow
+down only from the owner, and the owner is executing). So at the static release
+point, the owner's handle is the unique live handle; dropping it is the `Rc`
+zero-crossing. Conversely, the interpreter's zero-crossing is the owner's drop,
+which the interpreter performs at exactly the release semantics' point for the
+binding (block exit / move / drop) — the same point the plan names for
+observable kinds, and the erasure-adjusted point for silent kinds (§32). The
+two event sets coincide as multisets keyed by allocation, and as sequences on
+the observable subset. ∎
+
+## 30. The Galois connection, constructed
+
+Per program point, the concrete domain is `C = 2^States` (sets of reachable
+configurations), ordered by inclusion. The abstract domain is `A = P → S` with
+`S = {Ø, O, B, ⊤}` ordered pointwise (⊤ re-enters ONLY to state completeness;
+Theorem 4 will evict it again).
+
+```
+α(X)(p) =  O  if in every state in X, ∃a. β(a) = p and ρ(p) = a
+           B  if in every state in X, ρ(p) ∈ H and β(ρ(p)) ≠ p
+           Ø  if in every state in X, ρ(p) undefined or ρ(p) ∉ H
+           ⊤  otherwise (the states disagree)
+
+γ(σ)     =  { states consistent with σ at every place }
+```
+
+`(α, γ)` is a Galois connection by construction (α is the best abstraction of
+the three predicates; γ its adjoint).
+
+**Lemma 4 (local soundness).** For every statement kind `s`, the concrete post
+`post_s : C → C` and the abstract transfer `⟦s⟧ : A → A` of §5.1 satisfy
+`α ∘ post_s ⊑ ⟦s⟧ ∘ α`.
+
+*Proof.* Case by case; each is bookkeeping over the events of §28. `alloc`
+bills the receiver, so `α` reads `O` there — matching `cls(e) = O` for `Alloc`.
+`move` un-bills the source and bills the target — matching `M`/store transfer.
+`lend` leaves `β` fixed — matching `B` with no state change at the owner. The
+one non-trivial case is the call with a `Released` argument: by Lemma 3 the
+lend closes before the post-state at the following point is formed, so the
+argument's abstract `O → Ø` (via R1's release) matches the concrete free. ∎
+
+**Theorem 11 (completeness, the load-bearing one).** With Rule N, on every
+checker-accepted program, `α ∘ post_s = ⟦s⟧ ∘ α` — equality, not `⊑` — at every
+point; equivalently, the analysis result contains no `⊤` and `γ(σ)` at each
+point contains exactly the reachable states' ownership patterns.
+
+*Proof.* Soundness is Lemma 4. For completeness it suffices that no join
+introduces `⊤` (transfer functions map non-⊤ to non-⊤ pointwise, by
+inspection). That is Theorem 4. ∎
+
+**Why completeness is the whole design.** A sound-but-incomplete abstraction
+has states in `γ(σ)` that never occur; any EMISSION driven by `σ` must then be
+guarded against them at runtime. That guard is a drop flag. So:
+
+> **A runtime check is the price of the concretization gap.** Drop flags pay it
+> per place; reference counts pay it per handle transfer; a tracing collector
+> pays it per collection, wholesale. Rule N is none of these because it closes
+> the gap itself: it edits the PROGRAM (inserting releases on edges) until the
+> abstraction is exact, instead of editing the EMISSION until it tolerates
+> inexactness.
+
+This is the single sentence the three lenses of Part III were circling.
+
+## 31. The declarative system Ω, and the algorithm as its elaborator
+
+The dataflow of §5 is an algorithm. The deep object is the TYPE SYSTEM it
+implements — stated declaratively, it is a small linear system, and stating it
+is what makes the design mechanizable (§37).
+
+Judgments: `Γ ⊢ e : q ⊣ Γ′` (expressions, `q ∈ {O, B, ∅}` the result
+qualifier) and `Γ ⊢ s ⊣ Γ′` (statements), with `Γ : P → S`.
+
+```
+[ALLOC]   Γ ⊢ e : O ⊣ Γ′                    e classified Alloc, operands checked in Γ, Γ′ their post
+[LEND]    Γ ⊢ e : B ⊣ Γ′                    e classified Lend
+[VAR-O]   Γ, p:O ⊢ p : B ⊣ Γ, p:O           reading an owned place lends it
+[LET]     Γ ⊢ e : O ⊣ Γ′    Γ′, x:O ⊢ s ⊣ Δ, x:Ø
+          ─────────────────────────────────────────
+          Γ ⊢ let x = e; s ⊣ Δ
+
+[REL]     Γ, p:O ⊢ release p ⊣ Γ, p:Ø       structural; for observable kinds,
+                                            admissible only at block-exit position
+[IF]      Γ ⊢ e : ∅ ⊣ Γ₀    Γ₀ ⊢ s₁ ⊣ Δ    Γ₀ ⊢ s₂ ⊣ Δ
+          ───────────────────────────────────────────────
+          Γ ⊢ if e { s₁ } else { s₂ } ⊣ Δ
+
+[WHILE]   Γ ⊢ e : ∅ ⊣ Γ    Γ ⊢ s ⊣ Γ
+          ───────────────────────────        the loop invariant IS the context
+          Γ ⊢ while e { s } ⊣ Γ
+```
+
+The join has vanished: [IF] demands the two branches END in the SAME context,
+and [REL] is the structural rule that lets a derivation arrange that — a
+release inserted at the end of the branch that still owns is exactly Rule N,
+now visible as a use of [REL] before the branch's last inference. [WHILE]'s
+invariant context is what the fixpoint computes.
+
+**Theorem 12 (elaboration).** (Soundness) every plan the algorithm produces
+corresponds to an Ω-derivation, with the inserted releases as [REL] instances.
+(Completeness) if ANY placement of [REL] instances yields an Ω-derivation, the
+algorithm finds one — and for silent kinds, the one whose [REL]s are earliest
+(Theorem 7). (Boundary) for observable kinds, an Ω-derivation exists iff
+Theorem 10's fate-invariance holds; the position side-condition on [REL] is
+where the two proofs meet.
+
+*Proof sketch.* Soundness: induction on the CFG walk, mapping each Rule N/R1–R4
+emission to [REL]. Completeness: given a derivation, its contexts at each point
+form a valid dataflow solution; the least fixpoint refines it, and moving
+[REL]s earlier preserves derivability for silent kinds by §32's commutation.
+Boundary: [IF] forces equal contexts; without fate-invariance the only
+equalizer for an observable place is a [REL] mid-branch, which the
+side-condition forbids — the derivation cannot close, matching Theorem 10's
+impossibility. ∎
+
+Ω is the artifact to mechanize: intrinsically-scoped syntax, contexts as
+functions from a finite place set, and the metatheory (progress + preservation
+against §28's machine) is structural induction with no CFG anywhere.
+
+## 32. Erasure, formally
+
+Define an event **silent** iff it is `free(a)` where `a`'s kind runs no user
+code — everything except a declared `impl Owned` body.
+
+**Lemma 5 (commutation).** In §28's machine, a silent `free(a)` commutes with
+every adjacent event except an `alloc` that fails: no rule reads `H`'s
+membership except allocation (for freshness/OOM) and `free` itself (I₂ makes a
+second free of `a` unreachable — Theorem 1). `obs` events read `ρ` and values,
+never `H`-membership. So exchanging a silent free with a neighbouring non-alloc
+event yields a step-for-step equal trace with the same observable projection.
+
+**Theorem 9′ (erasure, full).** Moving every silent free from its Ω-position
+([REL] at block exit) to its earliest-death position preserves the observable
+projection of every trace, and transforms the heap function `R(τ) = |H(τ)|`
+pointwise downward. Against OOM the transformation is an improvement
+simulation: every trace that completes before the move completes after it,
+because each prefix's heap is a subset. ∎
+
+The interpreter needs no change under this theorem: its silent frees happen at
+`Rc`-zero (owner drop), later than the plan's earliest-death point, and §25's
+oracle compares MULTISETS for silent frees precisely because Theorem 9′ says
+the timing difference is unobservable. Sequences are compared only where
+sequences are meaningful — the observable subset.
+
+## 33. Sharpness: every assumption is necessary
+
+Each hypothesis of the theorems has a two-line counterexample without it. This
+is what makes the theorems tight rather than merely true.
+
+| dropped | counterexample | first casualty |
+| --- | --- | --- |
+| A1 (no read after move) | `take(consume s); print(s.byteLength)` | Theorem 3 — the read is a UAF at the freed address |
+| A2 (borrows do not escape) | callee stores its `read` argument into module state; owner's R4 fires; the global reads later | Theorem 3, and I₂ across frames |
+| A3 (returns are owned) | `fn id(s: read String) -> String { return s }` — the result is billed `O` but aliases the caller's other binding | Theorem 1 — two owners, one buffer, two frees |
+| A4 (classification true) | this week, three times, empirically | Theorem 2 (both `Lend`-defaults) — measured at 3.1 GB and 9.9 GB |
+| A5 (no unwinding) | an exception path exiting the body between R3 and R4 | Theorem 2 — the exit bypasses R4 |
+| A6 (borrows path-invariant) | a reassignable `read` parameter set to an owned value on one branch | Theorem 4 — a genuine `B`/`O` join, `⊤` reachable |
+
+A6's row is the one to guard operationally: it holds today because parameters
+are not assignable, and nothing but a parser rule keeps it true. The row IS the
+test to write.
+
+## 34. The manager-space theorem
+
+Fix a trace `t` and a frame allocation `a` with birth `b(a)` and last use
+`u(a)`. Every sound reclamation strategy frees `a` at some `d(a) ≥ u(a)`.
+Define the **offline optimum**: `d*(a) = u(a)⁺`, the point just past last use —
+achievable only with full knowledge of the future.
+
+**Theorem 13.** Under the discipline (A1–A6):
+
+```
+d_plan(a) = d*(a)                  earliest-death static placement (silent kinds)
+d_RC(a)   = owner-drop point       ≥ d*(a)
+d_GC(a)   = next collection after unreachability   ≥ d_RC-comparable, unbounded
+```
+
+with per-allocation lifetime intervals nested left to right, hence residency
+`R_plan ≤ R_RC ≤ R_GC` pointwise on every trace; and the runtime costs are
+
+```
+plan: 0        RC: Θ(#handle transfers)        GC: amortized tracing
+```
+
+*Proof.* `d_plan = d*` because under A1–A3 the last use is a static fact —
+liveness computes it exactly (no aliasing survives the rules to blur it), and
+Theorem 7 places the free there. The RC point is the owner's drop, which
+follows the last use by Lemma 3. The GC point follows unreachability, which
+follows the owner's drop. Nesting gives the pointwise residency chain. ∎
+
+**Reading.** The move discipline's payoff, stated once: it makes the OFFLINE
+optimum ONLINE-ACHIEVABLE at zero runtime cost — the gap that refcounting pays
+counters for and garbage collection pays pauses for is, in this fragment,
+exactly zero. The compiled backends, once on the plan, are not merely as good
+as the interpreter oracle; on residency they are strictly better than it, and
+§25's multiset (not sequence) comparison for silent frees is what makes the
+oracle fair about that.
+
+## 35. Worked derivation: the escaping accumulator
+
+The shape that motivated M2, run through the model. `tag()` is `Alloc`;
+`consume` moves.
+
+```
+                                        σ(acc)         event / rule
+let mut acc = ""                        O   (static "" is Ø-kind: no heap)
+loop head, iteration i:                 O ⊔ O = O      [WHILE] invariant holds
+    acc = acc + tag()                   O              Alloc; R2 releases the
+                                                       PREVIOUS buffer — the
+                                                       leak that was 9.9 GB is
+                                                       this single row
+loop exit:                              O
+let b = Held { s: consume acc }         Ø              move(a, acc→b.s)
+return b.s.byteLength                   Ø              b: R4 at exit, one free
+```
+
+The per-binding view could not say this: it summarized `acc` as "moved", one
+verdict for eleven distinct program points with three distinct answers. The
+per-point table has no way to even ASK the per-binding question — which is what
+"dissolved" meant in §18, now visible line by line.
+
+And the conditional case, with Rule N as a [REL] instance:
+
+```
+let s = build()          σ(s) = O
+if flag:
+    take(consume s)      σ(s) = Ø on this edge
+else:
+    s.byteLength         σ(s) = O … [REL] fires on this edge (silent kind)
+                         σ(s) = Ø
+join:                    Ø = Ø        [IF] closes; Theorem 4 witnessed
+```
+
+## 36. What Part IV does NOT deepen
+
+- **`β` is ghost state.** The billing map instruments the semantics; it is not
+  implemented anywhere. §25's debug logging is its partial realization, and the
+  freshness provers of §24 are spot-checks of its `alloc` rule. Full
+  realization would be a checked-billing interpreter mode — worth building, not
+  yet designed.
+- **Ω is stated, not mechanized.** §37 is a roadmap, not a formalization. The
+  inductions are structural and the machine is small, which is a claim about
+  difficulty, not a proof.
+- **The classification table is still the frontier.** Part IV moves it INTO the
+  semantics (`Alloc` = the `alloc` event's billing rule) — which makes each row
+  a statement about the machine — but the correspondence between the table and
+  the actual Rust/C/wasm helpers remains exactly as empirical as §24 left it.
+
+## 37. Mechanization roadmap
+
+In dependency order, each step checkable alone:
+
+1. **The machine** (§28) over structured syntax — configurations, events,
+   billing. Small-step, intrinsically scoped. No CFG: the structural [IF]/
+   [WHILE] rules make the CFG a lemma, not a definition. (The language is
+   goto-free, so the correspondence is an induction over syntax; this is where
+   Part II's CFG formulation is discharged.)
+2. **Ω** (§31) as an inductive family; contexts as total maps on a finite
+   place set.
+3. **Preservation + progress** for Ω against the machine, with I₁–I₄ as the
+   preserved invariant — Theorems 1–3 fall out as corollaries, replacing Part
+   I's prose induction.
+4. **Elaboration** (Theorem 12): the dataflow as a function, proved sound and
+   complete against Ω. This is the largest proof and the one that certifies
+   the IMPLEMENTATION shape, not just the idea.
+5. **Erasure** (Theorem 9′) as a trace transformation with a simulation proof.
+6. Leave A4 outside the mechanization, permanently: it is the boundary between
+   the model and the world, and §24's witnesses are its correct form — tests,
+   not theorems.
+
+The order matters because each artifact is USED by the next, and because steps
+1–3 alone would already have been worth more than Part I: the three defects of
+§8 were all violations of what step 3 preserves.
+

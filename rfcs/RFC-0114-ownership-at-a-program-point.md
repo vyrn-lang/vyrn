@@ -12,6 +12,14 @@
   the refusal set proved minimal (Theorem 10), one `ReleasePlan` artifact that
   deletes six decision mechanisms from both backends, witnessed classification,
   and free-trace bisimulation against the interpreter as the standing gate.
+  Part IV: foundations — the instrumented machine with a ghost billing map, the
+  bracketing lemma that completes Theorem 8, the Galois connection constructed
+  with COMPLETENESS proved (Theorem 11: a runtime check is the price of the
+  concretization gap, and Rule N closes the gap instead of paying it), the
+  declarative linear system Ω with the dataflow as its elaborator (Theorem 12),
+  a sharpness table giving each assumption its two-line counterexample, the
+  manager-space theorem (the discipline makes the offline optimum
+  online-achievable at zero cost — Theorem 13), and the mechanization roadmap.
 
 ## The gap in one sentence
 
