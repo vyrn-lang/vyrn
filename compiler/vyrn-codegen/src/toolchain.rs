@@ -104,19 +104,118 @@ static void* __vyrn_alloc_check(void* p, unsigned long long n) {
     }
     return p;
 }
+
+/* ---- free audit (RFC-0114 SS25, the double-free half) --------------------
+   Every free the IR or this shim runs goes through `__vyrn_free`. With
+   VYRN_FREE_AUDIT=1 in the environment, the allocator keeps a live-pointer
+   table and a free of anything not in it - a double free, or a free of
+   memory this program never owned - prints one line and exits 134. The peak
+   rows in `memory.rs` see leaks; this sees the class they cannot. Off (the
+   default), the cost is one branch per free and one getenv ever.
+   The table uses raw malloc/calloc so it never audits itself. */
+static int vyrn_audit_state = -1;
+static void** vyrn_audit_tab = 0;
+static size_t vyrn_audit_cap = 0, vyrn_audit_len = 0;
+#if defined(__wasm__)
+static void vyrn_audit_acquire(void) {}
+static void vyrn_audit_release(void) {}
+#else
+static volatile int vyrn_audit_lock = 0;
+static void vyrn_audit_acquire(void) { while (__sync_lock_test_and_set(&vyrn_audit_lock, 1)) {} }
+static void vyrn_audit_release(void) { __sync_lock_release(&vyrn_audit_lock); }
+#endif
+static int vyrn_audit_on(void) {
+    if (vyrn_audit_state < 0) {
+        const char* e = getenv("VYRN_FREE_AUDIT");
+        vyrn_audit_state = (e && e[0] && e[0] != '0') ? 1 : 0;
+    }
+    return vyrn_audit_state;
+}
+static size_t vyrn_audit_slot(void* p, void** tab, size_t cap) {
+    size_t h = (size_t)p;
+    h ^= h >> 16;
+    h *= (size_t)0x9e3779b1u;
+    h ^= h >> 13;
+    size_t i = h & (cap - 1);
+    while (tab[i] && tab[i] != p) i = (i + 1) & (cap - 1);
+    return i;
+}
+/* lock held */
+static void vyrn_audit_add(void* p) {
+    if (vyrn_audit_len * 2 >= vyrn_audit_cap) {
+        size_t ncap = vyrn_audit_cap ? vyrn_audit_cap * 2 : 1024;
+        void** nt = (void**)calloc(ncap, sizeof(void*));
+        if (!nt) return; /* the audit degrades; the program continues */
+        for (size_t i = 0; i < vyrn_audit_cap; i++)
+            if (vyrn_audit_tab[i]) nt[vyrn_audit_slot(vyrn_audit_tab[i], nt, ncap)] = vyrn_audit_tab[i];
+        free(vyrn_audit_tab);
+        vyrn_audit_tab = nt;
+        vyrn_audit_cap = ncap;
+    }
+    size_t i = vyrn_audit_slot(p, vyrn_audit_tab, vyrn_audit_cap);
+    if (!vyrn_audit_tab[i]) { vyrn_audit_tab[i] = p; vyrn_audit_len++; }
+}
+/* lock held; 1 = the pointer was live. Removal rehashes the probe cluster
+   after the hole, or a later lookup stops early and reports a false double. */
+static int vyrn_audit_remove(void* p) {
+    if (!vyrn_audit_cap) return 0;
+    size_t i = vyrn_audit_slot(p, vyrn_audit_tab, vyrn_audit_cap);
+    if (vyrn_audit_tab[i] != p) return 0;
+    vyrn_audit_tab[i] = 0;
+    vyrn_audit_len--;
+    size_t j = (i + 1) & (vyrn_audit_cap - 1);
+    while (vyrn_audit_tab[j]) {
+        void* q = vyrn_audit_tab[j];
+        vyrn_audit_tab[j] = 0;
+        vyrn_audit_len--;
+        vyrn_audit_add(q);
+        j = (j + 1) & (vyrn_audit_cap - 1);
+    }
+    return 1;
+}
+static void vyrn_audit_fail(void) {
+    fputs("free audit: double or foreign free\n", stderr);
+    exit(134);
+}
+void __vyrn_free(void* p) {
+    if (p == NULL) return;
+    if (vyrn_audit_on()) {
+        vyrn_audit_acquire();
+        int live = vyrn_audit_remove(p);
+        vyrn_audit_release();
+        if (!live) vyrn_audit_fail();
+    }
+    free(p);
+}
 void* __vyrn_malloc(unsigned long long n) {
     if (n > (unsigned long long)(size_t)-1) {
         fputs($OOM, stderr);
         exit(1);
     }
-    return __vyrn_alloc_check(malloc((size_t)n), n);
+    void* p = __vyrn_alloc_check(malloc((size_t)n), n);
+    if (vyrn_audit_on()) {
+        vyrn_audit_acquire();
+        vyrn_audit_add(p);
+        vyrn_audit_release();
+    }
+    return p;
 }
 void* __vyrn_realloc(void* p, unsigned long long n) {
     if (n > (unsigned long long)(size_t)-1) {
         fputs($OOM, stderr);
         exit(1);
     }
-    return __vyrn_alloc_check(realloc(p, (size_t)n), n);
+    if (!vyrn_audit_on()) return __vyrn_alloc_check(realloc(p, (size_t)n), n);
+    /* a realloc frees its argument, so the audit treats it as free + malloc */
+    vyrn_audit_acquire();
+    int live = (p == NULL) || vyrn_audit_remove(p);
+    vyrn_audit_release();
+    if (!live) vyrn_audit_fail();
+    void* q = __vyrn_alloc_check(realloc(p, (size_t)n), n);
+    vyrn_audit_acquire();
+    vyrn_audit_add(q);
+    vyrn_audit_release();
+    return q;
 }
 /* ---- String header (RFC-0089 M1a) --------------------------------------- */
 /* A Vyrn String is still a NUL-terminated `char*`, so every C sink here keeps
@@ -317,7 +416,7 @@ char* __vyrn_read_line(unsigned long long* outlen) {
     }
     if (len > 0 && buf[len - 1] == '\r') len--;
     vstr_setlen(buf, len);
-    if (had_nul) { free(buf - VSTR_HDR); return 0; }
+    if (had_nul) { __vyrn_free(buf - VSTR_HDR); return 0; }
     *outlen = len;
     return buf;
 }
@@ -340,10 +439,10 @@ int __vyrn_read_file(const char* path, char** out, unsigned long long* outlen) {
     }
     int bad = ferror(f);
     fclose(f);
-    if (bad) { free(buf - VSTR_HDR); return 1; }
+    if (bad) { __vyrn_free(buf - VSTR_HDR); return 1; }
     vstr_setlen(buf, len);
     for (unsigned long long k = 0; k < len; k++) {
-        if (buf[k] == 0) { free(buf - VSTR_HDR); return 3; }
+        if (buf[k] == 0) { __vyrn_free(buf - VSTR_HDR); return 3; }
     }
     *out = buf;
     *outlen = len;
@@ -364,7 +463,7 @@ int __vyrn_read_file_bytes(const char* path, char** out, unsigned long long* out
     }
     int bad = ferror(f);
     fclose(f);
-    if (bad) { free(buf); return 1; }
+    if (bad) { __vyrn_free(buf); return 1; }
     *out = buf;
     *outlen = len;
     return 0;
@@ -575,8 +674,8 @@ void* __vyrn_join(void* task) { return ((VTask*)task)->frame; }
 /* No threads, so the wait is nothing and the release is two frees. */
 void __vyrn_task_release(void* task) {
     VTask* t = (VTask*)task;
-    free(t->frame);
-    free(t);
+    __vyrn_free(t->frame);
+    __vyrn_free(t);
 }
 static void __vyrn_join_all(void) {}
 #else
@@ -724,8 +823,8 @@ void __vyrn_task_release(void* task) {
     pthread_cond_destroy(&t->cv);
     pthread_mutex_destroy(&t->mu);
 #endif
-    free(t->frame);
-    free(t);
+    __vyrn_free(t->frame);
+    __vyrn_free(t);
 }
 
 /* Join every task that is still outstanding when the program returns from

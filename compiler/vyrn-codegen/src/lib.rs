@@ -213,7 +213,7 @@ entry:
   store i64 %idx, ptr @__vyrn_region_sp
   %slot = getelementptr [$NEST x ptr], ptr @__vyrn_region_blocks, i64 0, i64 %idx
   %vec = load ptr, ptr %slot
-  call void @free(ptr %vec)
+  call void @__vyrn_free(ptr %vec)
   store ptr null, ptr %slot
   ret void
 }
@@ -235,11 +235,11 @@ loop:
 body:
   %el = getelementptr ptr, ptr %vec, i64 %i
   %blk = load ptr, ptr %el
-  call void @free(ptr %blk)
+  call void @__vyrn_free(ptr %blk)
   %i1 = add i64 %i, 1
   br label %loop
 done:
-  call void @free(ptr %vec)
+  call void @__vyrn_free(ptr %vec)
   store ptr null, ptr %slot
   ret void
 }
@@ -415,7 +415,7 @@ entry:
   br i1 %static, label %done, label %heap
 heap:
   %base = getelementptr i8, ptr %s, i64 -16
-  call void @free(ptr %base)
+  call void @__vyrn_free(ptr %base)
   br label %done
 done:
   ret void
@@ -1219,7 +1219,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("declare i64 @__vyrn_col_at(ptr, i64, i64)\n");
     out.push_str("declare ptr @__vyrn_malloc(i64)\n");
     out.push_str("declare ptr @__vyrn_realloc(ptr, i64)\n");
-    out.push_str("declare void @free(ptr)\n");
+    out.push_str("declare void @__vyrn_free(ptr)\n");
     out.push_str("declare ptr @strcpy(ptr, ptr)\n");
     out.push_str("declare ptr @strcat(ptr, ptr)\n");
     // `llvm.memcpy` — used by `SmallArray` (RFC-0056) to move its inline slots
@@ -3836,7 +3836,7 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {v}, 0"));
                 self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {v}, 1"));
                 self.release_elems(&data, &len, &inner)?;
-                self.emit(format!("call void @free(ptr {data})"));
+                self.emit(format!("call void @__vyrn_free(ptr {data})"));
                 Ok(())
             }
             // A `SmallArray<T, N>`'s live slots are its inline block while it
@@ -3849,7 +3849,7 @@ impl<'a> Gen<'a> {
                 self.emit(format!("store {sa_ll} {v}, ptr {slot}"));
                 let (base, len, _, data) = self.sa_slot_base(&slot, &inner, n);
                 self.release_elems(&base, &len, &inner)?;
-                self.emit(format!("call void @free(ptr {data})"));
+                self.emit(format!("call void @__vyrn_free(ptr {data})"));
                 Ok(())
             }
             // Two parallel buffers, and the keys are Strings — so a map that
@@ -3867,9 +3867,9 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{ix} = extractvalue {m} {v}, 4"));
                 self.release_elems(&keys, &len, &Type::Str)?;
                 self.release_elems(&vals, &len, &vt)?;
-                self.emit(format!("call void @free(ptr {keys})"));
-                self.emit(format!("call void @free(ptr {vals})"));
-                self.emit(format!("call void @free(ptr {ix})"));
+                self.emit(format!("call void @__vyrn_free(ptr {keys})"));
+                self.emit(format!("call void @__vyrn_free(ptr {vals})"));
+                self.emit(format!("call void @__vyrn_free(ptr {ix})"));
                 Ok(())
             }
             Type::Array(_) | Type::SmallArray(..) | Type::Map(..) => {
@@ -3921,7 +3921,7 @@ impl<'a> Gen<'a> {
                 let q = self.fresh_tmp();
                 self.emit(format!("{p} = extractvalue {{ i64, i64 }} {v}, 1"));
                 self.emit(format!("{q} = inttoptr i64 {p} to ptr"));
-                self.emit(format!("call void @free(ptr {q})"));
+                self.emit(format!("call void @__vyrn_free(ptr {q})"));
                 Ok(())
             }
             // A fixed `[N x T]` is a container, so its elements are U4's
@@ -3971,7 +3971,7 @@ impl<'a> Gen<'a> {
             if self.payload_boxed(pty) {
                 let q = self.fresh_tmp();
                 self.emit(format!("{q} = inttoptr i64 {w0} to ptr"));
-                self.emit(format!("call void @free(ptr {q})"));
+                self.emit(format!("call void @__vyrn_free(ptr {q})"));
             }
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&miss_l);
@@ -4043,7 +4043,7 @@ impl<'a> Gen<'a> {
                 if pv != w {
                     let q = self.fresh_tmp();
                     self.emit(format!("{q} = inttoptr i64 {w} to ptr"));
-                    self.emit(format!("call void @free(ptr {q})"));
+                    self.emit(format!("call void @__vyrn_free(ptr {q})"));
                 }
             }
             self.emit_term(format!("br label %{end_l}"));
@@ -4708,7 +4708,7 @@ impl<'a> Gen<'a> {
                 let d = self.fresh_tmp();
                 self.emit(format!("{a} = load {{ ptr, i64, i64 }}, ptr {slot}"));
                 self.emit(format!("{d} = extractvalue {{ ptr, i64, i64 }} {a}, 0"));
-                self.emit(format!("call void @free(ptr {d})"));
+                self.emit(format!("call void @__vyrn_free(ptr {d})"));
             }
             DropKind::FreeSmallArr => {
                 // A `SmallArray<T, N>` (RFC-0056) is `{ i64 len, i64 cap, ptr
@@ -4722,7 +4722,7 @@ impl<'a> Gen<'a> {
                 let d = self.fresh_tmp();
                 self.emit(format!("{p} = getelementptr i8, ptr {slot}, i64 16"));
                 self.emit(format!("{d} = load ptr, ptr {p}"));
-                self.emit(format!("call void @free(ptr {d})"));
+                self.emit(format!("call void @__vyrn_free(ptr {d})"));
             }
             DropKind::FreeMap => {
                 // Free all three of the map's final backing buffers (keys,
@@ -4744,9 +4744,9 @@ impl<'a> Gen<'a> {
                 self.emit(format!(
                     "{ix} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {a}, 4"
                 ));
-                self.emit(format!("call void @free(ptr {k})"));
-                self.emit(format!("call void @free(ptr {v})"));
-                self.emit(format!("call void @free(ptr {ix})"));
+                self.emit(format!("call void @__vyrn_free(ptr {k})"));
+                self.emit(format!("call void @__vyrn_free(ptr {v})"));
+                self.emit(format!("call void @__vyrn_free(ptr {ix})"));
             }
             // Phase 5: an aggregate owns its places. The walk is the type — and
             // in a generic instantiation the type still carries its parameters,
@@ -4960,7 +4960,7 @@ impl<'a> Gen<'a> {
             if *hdr {
                 self.emit(format!("call void @__vyrn_str_free(ptr {p})"));
             } else {
-                self.emit(format!("call void @free(ptr {p})"));
+                self.emit(format!("call void @__vyrn_free(ptr {p})"));
             }
         }
     }
@@ -8743,7 +8743,7 @@ impl<'a> Gen<'a> {
         out.push_str("  br i1 %isbuf, label %buf, label %stp\n");
         out.push_str("buf:\n");
         out.push_str("  %d = load ptr, ptr %s\n");
-        out.push_str("  call void @free(ptr %d)\n");
+        out.push_str("  call void @__vyrn_free(ptr %d)\n");
         out.push_str("  ret void\n");
         out.push_str("stp:\n");
         out.push_str(&format!(
@@ -8769,7 +8769,7 @@ impl<'a> Gen<'a> {
         out.push_str("  br i1 %hascap, label %cap, label %done\n");
         out.push_str("cap:\n");
         out.push_str("  %cb = inttoptr i64 %pay to ptr\n");
-        out.push_str("  call void @free(ptr %cb)\n");
+        out.push_str("  call void @__vyrn_free(ptr %cb)\n");
         out.push_str("  br label %done\n");
         out.push_str("done:\n");
         out.push_str("  ret void\n");
@@ -11072,7 +11072,7 @@ impl<'a> Gen<'a> {
             let base = self.fresh_tmp();
             self.emit(format!("{base} = getelementptr i8, ptr {d}, i64 -8"));
             self.emit(format!("store i64 0, ptr {base}"));
-            self.emit(format!("call void @free(ptr {base})"));
+            self.emit(format!("call void @__vyrn_free(ptr {base})"));
             return Ok((sv, Type::Stream(Box::new(elem))));
         }
         // `pullAt(a)` (RFC-0075 M2c) — one element from the stream in that box,
@@ -15081,7 +15081,7 @@ mod tests {
         )
         .unwrap();
         let ir = emit(&cont).unwrap();
-        let frees = ir.matches("call void @free(").count();
+        let frees = ir.matches("call void @__vyrn_free(").count();
         assert!(
             frees >= 2,
             "continue path must also drop `s`: {frees} frees"
@@ -15095,7 +15095,7 @@ mod tests {
         .unwrap();
         let bir = emit(&brk).unwrap();
         assert!(
-            bir.contains("call void @free("),
+            bir.contains("call void @__vyrn_free("),
             "break must drop the body's owned string: {bir}"
         );
     }
@@ -15649,7 +15649,7 @@ mod tests {
     /// and a producer's step capture block.
     const STREAM_CLOSER_FREES: usize = 2;
     fn free_calls(ir: &str) -> usize {
-        ir.matches("call void @free(ptr").count()
+        ir.matches("call void @__vyrn_free(ptr").count()
             + ir.matches("call void @__vyrn_str_free(ptr").count()
     }
 
@@ -16864,7 +16864,7 @@ mod tests {
                    a.push(1); return a[0]; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(
-            ir.contains("call void @free(ptr"),
+            ir.contains("call void @__vyrn_free(ptr"),
             "expected an automatic free: {ir}"
         );
     }

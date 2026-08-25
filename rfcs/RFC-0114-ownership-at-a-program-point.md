@@ -348,6 +348,25 @@ the release IS the release, and a row for its `self` would place a
 self-recursive second one. `consumedParamRead` pins the fix on wasm; the
 no-`drop` untake witness fell 194.4 MB → 3.8.
 
+### The audit — §25's double-free half, standing
+
+Every free the IR or the C shim runs now goes through one choke point,
+`__vyrn_free`, and `VYRN_FREE_AUDIT=1` makes the allocator keep a
+live-pointer table: a free of anything not in it — a double free, or a free
+of memory the program never owned — prints one line and exits 134. A
+`realloc` is audited as free-plus-malloc. Off (the default), the cost is one
+branch per free, so nothing the benchmarks measure changes.
+
+The peak rows see leaks; this sees the class they cannot, and it cannot be
+fooled by a free at the wrong point that keeps peak flat. **The parity
+harness sets it on every native run**, so the whole example corpus is a
+double-free audit on every CI pass — 40/40 clean on landing. The mechanism
+was proven the honest way: a hand-doctored IR with a duplicated
+`__vyrn_str_free` runs to silent heap corruption without the audit and dies
+loudly with it. The full §25 bisimulation (multiset equality of free traces
+against the interpreter's Rc zero-crossings) remains open; this is its
+cheaper, always-on half.
+
 The state is per place, per program point: `Owned | Moved | Uninit`, a forward
 dataflow with a join at every merge.
 

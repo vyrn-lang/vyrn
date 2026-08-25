@@ -108,6 +108,7 @@ fn examples_interp_native_parity() {
             continue;
         }
         let mut native_cmd = Command::new(&exe);
+        native_cmd.env("VYRN_FREE_AUDIT", "1");
         native_cmd.args(&prog_args);
         let native = run_io(native_cmd, &dir, &stdin_fixture);
 
@@ -264,7 +265,10 @@ fn wasm_only_examples_trap_identically() {
             "{name}: native build must succeed (extern trap stubs link):\n{}",
             norm(&build.stderr)
         );
-        let native = Command::new(&exe).output().expect("run native");
+        let native = Command::new(&exe)
+            .env("VYRN_FREE_AUDIT", "1")
+            .output()
+            .expect("run native");
         assert_eq!(
             native.status.code(),
             Some(1),
@@ -310,8 +314,12 @@ fn threaded_spawn_matches_sequential_and_interp() {
         norm(&build.stderr)
     );
 
-    let threaded = Command::new(&exe).output().expect("run threaded");
+    let threaded = Command::new(&exe)
+        .env("VYRN_FREE_AUDIT", "1")
+        .output()
+        .expect("run threaded");
     let sequential = Command::new(&exe)
+        .env("VYRN_FREE_AUDIT", "1")
         .env("VYRN_SEQUENTIAL_SPAWN", "1")
         .output()
         .expect("run sequential");
@@ -372,8 +380,12 @@ fn task_trap_prints_once_and_exits_1_threaded() {
     );
 
     let interp = vyrn().arg("run").arg(&file).output().expect("run interp");
-    let threaded = Command::new(&exe).output().expect("run threaded");
+    let threaded = Command::new(&exe)
+        .env("VYRN_FREE_AUDIT", "1")
+        .output()
+        .expect("run threaded");
     let sequential = Command::new(&exe)
+        .env("VYRN_FREE_AUDIT", "1")
         .env("VYRN_SEQUENTIAL_SPAWN", "1")
         .output()
         .expect("run sequential");
@@ -429,8 +441,12 @@ fn a_dropped_task_that_traps_still_prints_once_and_exits_1() {
     );
 
     let interp = vyrn().arg("run").arg(&file).output().expect("run interp");
-    let threaded = Command::new(&exe).output().expect("run threaded");
+    let threaded = Command::new(&exe)
+        .env("VYRN_FREE_AUDIT", "1")
+        .output()
+        .expect("run threaded");
     let sequential = Command::new(&exe)
+        .env("VYRN_FREE_AUDIT", "1")
         .env("VYRN_SEQUENTIAL_SPAWN", "1")
         .output()
         .expect("run sequential");
@@ -532,7 +548,10 @@ fn stored_fn_param_compiles_for_any_payload() {
             norm(&build.stdout),
             norm(&build.stderr)
         );
-        let native = Command::new(&exe).output().expect("run native");
+        let native = Command::new(&exe)
+            .env("VYRN_FREE_AUDIT", "1")
+            .output()
+            .expect("run native");
         assert_eq!(
             norm(&native.stdout),
             norm(&interp.stdout),
@@ -705,7 +724,9 @@ fn recursion_with_an_aggregate_local_stops_at_one_limit_on_all_three_engines() {
         let mut interp_cmd = vyrn();
         interp_cmd.arg("run").arg(&path);
         let i = run_io(interp_cmd, &dir, &no_stdin);
-        let n_out = run_io(Command::new(&exe), &dir, &no_stdin);
+        let mut n_cmd = Command::new(&exe);
+        n_cmd.env("VYRN_FREE_AUDIT", "1");
+        let n_out = run_io(n_cmd, &dir, &no_stdin);
         let mut wasm_cmd = Command::new(&wasmtime);
         wasm_cmd.arg("run").arg(&module);
         let w = run_io(wasm_cmd, &dir, &no_stdin);
@@ -3453,7 +3474,9 @@ fn three_engines_in(
         norm(&b.stdout),
         norm(&b.stderr)
     );
-    let n = run_io(Command::new(&exe), &dir, &no_stdin);
+    let mut n_cmd = Command::new(&exe);
+    n_cmd.env("VYRN_FREE_AUDIT", "1");
+    let n = run_io(n_cmd, &dir, &no_stdin);
     out.push((
         "native",
         norm(&n.stdout),
