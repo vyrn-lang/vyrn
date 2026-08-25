@@ -4753,7 +4753,15 @@ impl<'p> Fn_<'_, 'p> {
                 let els = else_branch
                     .as_deref()
                     .ok_or_else(|| gap("an `if` expression with no `else`", *line))?;
-                self.join(m, b, cond, then_branch, els, *line)?
+                self.join(
+                    m,
+                    b,
+                    e as *const Expr as usize,
+                    cond,
+                    then_branch,
+                    els,
+                    *line,
+                )?
             }
             Expr::Unary { op, expr, line } => {
                 let t = self.expr(m, b, expr)?;
@@ -5021,6 +5029,7 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
+        key: usize,
         cond: &Expr,
         then_e: &Expr,
         else_e: &Expr,
@@ -5033,6 +5042,10 @@ impl<'p> Fn_<'_, 'p> {
         };
         let want = self.join_ty(want);
         let r = self.cx.repr(&want, line)?;
+        // RFC-0114 Rule N at an `if`-expression join. The releases are
+        // stack-neutral, so in the scalar case they sit under the branch value
+        // exactly as `match_expr`'s do.
+        let ers = self.cx.edge_releases.get(&key).cloned().unwrap_or_default();
         self.cond(m, b, cond, line)?;
         match &r {
             Repr::Agg(l) => {
@@ -5046,6 +5059,7 @@ impl<'p> Fn_<'_, 'p> {
                     src_mem: 0,
                     dst_mem: 0,
                 });
+                self.emit_edge_releases(m, b, &ers, 0, line)?;
                 b.ins(&Instruction::Else);
                 b.slot(off);
                 self.expr_as(m, b, else_e, &want)?;
@@ -5054,6 +5068,7 @@ impl<'p> Fn_<'_, 'p> {
                     src_mem: 0,
                     dst_mem: 0,
                 });
+                self.emit_edge_releases(m, b, &ers, 1, line)?;
                 self.depth -= 1;
                 b.ins(&Instruction::End);
                 b.slot(off);
@@ -5062,8 +5077,10 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::If(BlockType::Result(*v)));
                 self.depth += 1;
                 self.expr_as(m, b, then_e, &want)?;
+                self.emit_edge_releases(m, b, &ers, 0, line)?;
                 b.ins(&Instruction::Else);
                 self.expr_as(m, b, else_e, &want)?;
+                self.emit_edge_releases(m, b, &ers, 1, line)?;
                 self.depth -= 1;
                 b.ins(&Instruction::End);
             }

@@ -2481,6 +2481,27 @@ impl MoveCheck<'_> {
         }
     }
 
+    /// Whether `e`'s VALUE provably cannot alias `root`'s heap (RFC-0114
+    /// Rule N's edge guard), structurally: an operator result is a scalar or a
+    /// fresh allocation; a scalar projection carries nothing; a call cannot
+    /// return heap it was never handed, so its result is safe when every
+    /// argument is — a lending function can only lend what it was passed, and
+    /// a return of module state or a projection is refused elsewhere. A
+    /// closure capturing the binding is `Gone::Captured`, which the fold's
+    /// veto refuses before this is asked. Anything unproven answers false,
+    /// which is the leak direction.
+    fn value_cannot_alias(&self, e: &Expr, root: &str) -> bool {
+        if !mentions_place(e, root) {
+            return true;
+        }
+        match e {
+            Expr::Binary { .. } | Expr::Unary { .. } => true,
+            Expr::Field { .. } => !self.arm_carries_heap(e),
+            Expr::Call { args, .. } => args.iter().all(|a| self.value_cannot_alias(a, root)),
+            _ => false,
+        }
+    }
+
     /// Record that a borrowed PARAMETER was put somewhere that outlives the call.
     fn note_retention(&self, e: &Expr) {
         let Some(sink) = &self.retains else { return };
@@ -3893,13 +3914,13 @@ impl MoveCheck<'_> {
                             continue;
                         }
                         for (i, (c, arm)) in arm_cs.iter().zip(arms).enumerate() {
-                            // A `Binary`/`Unary` value never aliases an
-                            // operand: comparisons and arithmetic are scalars,
-                            // and a concat is fresh (the freshness witness in
-                            // `interp.rs` executes that claim).
-                            let safe_value = !arm_heap[i]
-                                || matches!(arm.body, Expr::Binary { .. } | Expr::Unary { .. })
-                                || !mentions_place(&arm.body, root);
+                            // `arm_heap` keeps the in-scope answer (binder
+                            // types are gone by now); the structural proof —
+                            // operator results are scalar or fresh, a call
+                            // returns only what it was handed — covers what
+                            // the type alone could not.
+                            let safe_value =
+                                !arm_heap[i] || self.value_cannot_alias(&arm.body, root);
                             if untouched(c) && safe_value {
                                 sink.borrow_mut().push(EdgeRel {
                                     if_key: match_key,
@@ -3941,9 +3962,50 @@ impl MoveCheck<'_> {
                 let base = consumed.clone();
                 let mut then_c = base.clone();
                 self.expr(then_branch, &mut then_c, scope)?;
-                let mut else_c = base;
+                let mut else_c = base.clone();
                 if let Some(eb) = else_branch {
                     self.expr(eb, &mut else_c, scope)?;
+                }
+                // RFC-0114 Rule N at an `if`-expression join — the statement
+                // rule with the match's value guard: the releasing branch's
+                // value must not alias the binding (no heap, no mention, or a
+                // Binary/Unary body, whose result is a scalar or fresh). No
+                // binders and no scrutinee here, so those guards do not apply;
+                // the condition is a Bool read completed before the branch.
+                if let Some(sink) = &self.edge_releases {
+                    if let Some(eb) = else_branch {
+                        let if_key = e as *const Expr as usize;
+                        let branches: [&Expr; 2] = [then_branch, eb];
+                        for (taker, edge) in [(&then_c, 1usize), (&else_c, 0usize)] {
+                            let other = if edge == 1 { &else_c } else { &then_c };
+                            let value: &Expr = branches[edge];
+                            for (root, bucket) in &taker.0 {
+                                if base.0.contains_key(root)
+                                    || other.0.contains_key(root)
+                                    || bucket.len() != 1
+                                {
+                                    continue;
+                                }
+                                let Some(c) = bucket.get(root) else { continue };
+                                if c.hole {
+                                    continue;
+                                }
+                                let key = self.nodes.borrow().get(root).copied().unwrap_or(0);
+                                if key == 0 {
+                                    continue;
+                                }
+                                if !self.value_cannot_alias(value, root) {
+                                    continue;
+                                }
+                                sink.borrow_mut().push(EdgeRel {
+                                    if_key,
+                                    key,
+                                    name: root.clone(),
+                                    edge: edge as u32,
+                                });
+                            }
+                        }
+                    }
                 }
                 for (k, v) in then_c.into_iter().chain(else_c) {
                     consumed.or_insert(k, v);

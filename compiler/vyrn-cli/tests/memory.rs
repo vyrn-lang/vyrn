@@ -516,6 +516,15 @@ const ROWS: &[Row] = &[
               alias the binding all refuse; a Binary value never can, so it does not",
     },
     Row {
+        export: "conditionalMoveIfExpr",
+        census: "RFC-0114 Rule N",
+        today: Shape::Steady,
+        why: "Rule N at an if-expression join, the third join shape. The release sits \
+              under the untouched branch's value — stack-neutral in the wasm lowering, \
+              before the branch to the phi in the textual one — with the match's value \
+              guard: the branch value must not be able to alias what the edge frees",
+    },
+    Row {
         export: "prependLoop",
         census: "§4",
         today: Shape::Steady,
@@ -1555,6 +1564,13 @@ export extern fn conditionalMoveMatch() {{
 fn pick(n: Int64) -> Result<Int64, Int64> {{
     if n < 0 {{ return Ok(n) }}
     return Err(n)
+}}
+
+/// RFC-0114 Rule N at an `if`-EXPRESSION join — the third join shape, same
+/// asymmetry, the release under the untouched branch's value.
+export extern fn conditionalMoveIfExpr() {{
+    let s = tag() + tag()
+    seen = seen + (if seen < 0 {{ takeIt(consume s) }} else {{ Int64(s.byteLength) }})
 }}
 
 fn main() -> Int64 {{

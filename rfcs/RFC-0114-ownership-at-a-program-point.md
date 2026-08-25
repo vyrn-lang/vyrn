@@ -271,7 +271,23 @@ One implementation lesson worth keeping: `arm_carries_heap` must be asked
 INSIDE the arm's scope, while the binder types exist — asked after the walk
 it degrades to "yes" and the rule silently never fires. The match witness
 measured the same as the `if`: ~210 MB to 3.8 MB. `conditionalMoveMatch`
-pins it on wasm. `if`-expressions (`Expr::IfExpr`) are not yet covered.
+pins it on wasm.
+
+**Rule N at `if`-expression joins LANDED**, closing the third join shape —
+the statement rule with the match's value guard and neither of its other
+two (no binders, no scrutinee; the condition is a `Bool` read completed
+before the branch). The value guard itself grew into a structural proof,
+`value_cannot_alias`: an operator result is a scalar or a fresh allocation;
+a scalar projection carries nothing; and a call cannot return heap it was
+never handed, so its result is safe when every argument is — which is what
+lets `Int64(s.byteLength)` release where a flat mentions-test refused it
+(a lending function can only lend what it was passed; returning module
+state or a projection is refused elsewhere; a capturing closure is
+`Gone::Captured`, vetoed before the question is asked). The releases sit
+under the branch value: stack-neutral in the wasm lowering, before the
+branch to the `phi` in the textual one. `conditionalMoveIfExpr` pins it —
+and its first run caught the flat guard failing, on wasm, before any code
+shipped, which is the harness doing its job.
 
 The state is per place, per program point: `Owned | Moved | Uninit`, a forward
 dataflow with a join at every merge.

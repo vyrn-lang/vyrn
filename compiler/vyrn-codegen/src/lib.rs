@@ -5903,7 +5903,12 @@ impl<'a> Gen<'a> {
                 then_branch,
                 else_branch,
                 ..
-            } => self.gen_if_expr(cond, then_branch, else_branch.as_deref()),
+            } => self.gen_if_expr(
+                expr as *const Expr as usize,
+                cond,
+                then_branch,
+                else_branch.as_deref(),
+            ),
             Expr::Try { expr: operand, .. } => self.gen_try(operand, expr as *const Expr as usize),
             Expr::StructLit { name, fields, .. } => self.gen_struct_lit(name, fields),
             Expr::Field { expr, field, .. } => {
@@ -6441,12 +6446,15 @@ impl<'a> Gen<'a> {
     /// guarantees `else_branch` is present.
     fn gen_if_expr(
         &mut self,
+        key: usize,
         cond: &Expr,
         then_branch: &Expr,
         else_branch: Option<&Expr>,
     ) -> Result<(String, Type), String> {
         let else_branch =
             else_branch.ok_or("internal: `if` expression without `else` reached codegen")?;
+        // RFC-0114 Rule N at an `if`-expression join.
+        let ers = self.edge_releases.get(&key).cloned().unwrap_or_default();
         let (c, _) = self.gen_expr(cond)?;
         let then_l = self.fresh_label("ie.then");
         let else_l = self.fresh_label("ie.else");
@@ -6456,6 +6464,9 @@ impl<'a> Gen<'a> {
         // then branch
         self.emit_label(&then_l);
         let (then_val, then_t) = self.gen_expr(then_branch)?;
+        if !self.terminated {
+            self.emit_edge_releases(&ers, 0);
+        }
         // The predecessor of the join is the CURRENT block — a nested if/match in
         // the branch body may have moved us past `then_l`.
         let then_end = self.cur_block.clone();
@@ -6464,6 +6475,9 @@ impl<'a> Gen<'a> {
         // else branch
         self.emit_label(&else_l);
         let (else_val, else_t) = self.gen_expr(else_branch)?;
+        if !self.terminated {
+            self.emit_edge_releases(&ers, 1);
+        }
         let ty = join_never(then_t, else_t);
         let else_end = self.cur_block.clone();
         self.emit_term(format!("br label %{end_l}"));
