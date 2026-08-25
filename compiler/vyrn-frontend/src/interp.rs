@@ -5921,6 +5921,22 @@ impl<'a> Interp<'a> {
                         Val::Array(_) => Ok(vals[0].clone()),
                         other => Err(format!("reserve of non-Array {other:?}").into()),
                     },
+                    // `m.tally(k, n)` (RFC-0116): insert-or-add. Two probes in
+                    // THIS engine — semantics only; the one-probe fact is the
+                    // compiled backends'.
+                    "@tally" => match (&vals[0], &vals[1], &vals[2]) {
+                        (Val::Map(m0), Val::Str(k), Val::Int(n)) => {
+                            let mut next = m0.clone();
+                            let mm = std::rc::Rc::make_mut(&mut next);
+                            let cur = match mm.get(k) {
+                                Some(Val::Int(v)) => *v,
+                                _ => 0,
+                            };
+                            mm.insert((**k).clone(), Val::Int(cur + n));
+                            Ok(Val::Map(next))
+                        }
+                        (a, b, c) => Err(format!("tally of {a:?}, {b:?}, {c:?}").into()),
+                    },
                     // `dst.copyFrom(src)` (RFC-0115): the receiver's buffer,
                     // the source's elements. Value-wise that IS the source, and
                     // `Rc` makes the copy lazy — buffers are the compiled

@@ -3772,6 +3772,7 @@ static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod { name: "reserve", detail: "array.reserve(n) -> Array<T> — make room for n more elements ahead of time, so a known-size build is one allocation (RFC-0115)" },
     BuiltinMethod { name: "append", detail: "array.append(other) -> Array<T> — copy every element of `other` on, in order; element type must not own heap (RFC-0115)" },
     BuiltinMethod { name: "copyFrom", detail: "array.copyFrom(src) -> Array<T> — overwrite the elements with `src`'s, reusing the buffer; element type must not own heap (RFC-0115)" },
+    BuiltinMethod { name: "tally", detail: "map.tally(key, n) -> Map<String, Int64> — insert-or-add on a count map, one probe (RFC-0116)" },
     BuiltinMethod { name: "at", detail: "array.at(index) -> T — read an element by index; `array[index]` is the same call" },
     // RFC-0083's four vector methods. They were in `parser::METHOD_BUILTINS`
     // and not here, so `v.` offered no completion for them and hovering one

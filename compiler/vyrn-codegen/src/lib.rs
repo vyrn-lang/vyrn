@@ -10725,6 +10725,91 @@ impl<'a> Gen<'a> {
             ));
             return Ok((r3, Type::Array(Box::new(elem))));
         }
+        // `m.tally(k, n)` (RFC-0116): insert-or-add, ONE probe — the fusion a
+        // read-then-store cannot compose. The callee never takes the key: a
+        // hit touches nothing (the free audit caught the first draft freeing
+        // a key the argument machinery also frees), a miss stores a COPY.
+        // Values are Int64 (the checker pinned them), so the displaced value
+        // releases nothing.
+        if name == "@tally" {
+            let (mv, mty) = self.gen_expr(&args[0])?;
+            let (kv, _) = self.gen_expr(&args[1])?;
+            let (nv, _) = self.gen_expr(&args[2])?;
+            let slot = self.fresh_alloca("{ ptr, ptr, i64, i64, ptr }");
+            self.emit(format!(
+                "store {{ ptr, ptr, i64, i64, ptr }} {mv}, ptr {slot}"
+            ));
+            let keys = self.fresh_tmp();
+            let len = self.fresh_tmp();
+            self.emit(format!(
+                "{keys} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {mv}, 0"
+            ));
+            self.emit(format!(
+                "{len} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {mv}, 2"
+            ));
+            let (ix, cap) = self.map_index_of(&mv);
+            let idx = self.fresh_tmp();
+            self.emit(format!(
+                "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {kv}, ptr {ix}, i64 {cap})"
+            ));
+            let found = self.fresh_tmp();
+            self.emit(format!("{found} = icmp sge i64 {idx}, 0"));
+            let upd_l = self.fresh_label("tally.upd");
+            let ins_l = self.fresh_label("tally.ins");
+            let done_l = self.fresh_label("tally.done");
+            self.emit_term(format!("br i1 {found}, label %{upd_l}, label %{ins_l}"));
+            self.emit_label(&upd_l);
+            let vals0 = self.fresh_tmp();
+            self.emit(format!(
+                "{vals0} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {mv}, 1"
+            ));
+            let ep0 = self.fresh_tmp();
+            let old = self.fresh_tmp();
+            let newv = self.fresh_tmp();
+            self.emit(format!("{ep0} = getelementptr i64, ptr {vals0}, i64 {idx}"));
+            self.emit(format!("{old} = load i64, ptr {ep0}"));
+            self.emit(format!("{newv} = add i64 {old}, {nv}"));
+            self.emit(format!("store i64 {newv}, ptr {ep0}"));
+            self.emit_term(format!("br label %{done_l}"));
+            self.emit_label(&ins_l);
+            self.emit(format!("call void @__vyrn_map_reserve(ptr {slot}, i64 8)"));
+            let hdr2 = self.fresh_tmp();
+            let keys2 = self.fresh_tmp();
+            let vals2 = self.fresh_tmp();
+            self.emit(format!(
+                "{hdr2} = load {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}"
+            ));
+            self.emit(format!(
+                "{keys2} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr2}, 0"
+            ));
+            self.emit(format!(
+                "{vals2} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr2}, 1"
+            ));
+            let kcopy = self.deep_copy(&kv, &Type::Str)?;
+            let kep = self.fresh_tmp();
+            self.emit(format!("{kep} = getelementptr ptr, ptr {keys2}, i64 {len}"));
+            self.emit(format!("store ptr {kcopy}, ptr {kep}"));
+            self.emit(format!(
+                "call void @__vyrn_map_index_add(ptr {slot}, i64 {len})"
+            ));
+            let vep = self.fresh_tmp();
+            self.emit(format!("{vep} = getelementptr i64, ptr {vals2}, i64 {len}"));
+            self.emit(format!("store i64 {nv}, ptr {vep}"));
+            let nl = self.fresh_tmp();
+            let lenp = self.fresh_tmp();
+            self.emit(format!("{nl} = add i64 {len}, 1"));
+            self.emit(format!(
+                "{lenp} = getelementptr {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}, i64 0, i32 2"
+            ));
+            self.emit(format!("store i64 {nl}, ptr {lenp}"));
+            self.emit_term(format!("br label %{done_l}"));
+            self.emit_label(&done_l);
+            let out = self.fresh_tmp();
+            self.emit(format!(
+                "{out} = load {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}"
+            ));
+            return Ok((out, mty));
+        }
         // `dst.copyFrom(src)` (RFC-0115): the receiver's buffer, the source's
         // elements, one memcpy. Grows only when the source is longer; a
         // self-copy moves zero bytes (a `select` on the data pointers), which

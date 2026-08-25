@@ -406,6 +406,21 @@ fn rows() -> Vec<Function> {
             arr(Str),
             &[],
         ),
+        // `m.tally(k, n)` (RFC-0116): insert-or-add on a count map, one probe.
+        // The key is READ — a hit keeps the key the map already has, a miss
+        // copies this one in — and the value type is pinned to `Int64`, which
+        // is what makes the add spellable in a signature.
+        row(
+            "@tally",
+            &[],
+            &[
+                ("m", Read, Type::Map(Box::new(Str), Box::new(Int))),
+                ("k", Read, Str),
+                ("n", Read, Int),
+            ],
+            Type::Map(Box::new(Str), Box::new(Int)),
+            &[],
+        ),
         // ---- the rest of the allocating returns (RFC-0096 M3) ---------------
         // RFC-0094 folded FOUR return types onto rows and left the audit at
         // that. RFC-0096 M2 found the hole by building a fixture: `let s =

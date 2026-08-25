@@ -6972,6 +6972,40 @@ impl<'a> Checker<'a> {
             }
             return Ok(at);
         }
+        // `m.tally(k, n)` (RFC-0116): one probe where a read-then-store made
+        // two. `Int64` values only — the add is the operation, and the
+        // signature can spell it for no other value type.
+        if name == "@tally" {
+            if args.len() != 3 {
+                return Err(cerr!(line, "`tally` takes 3 arguments, got {}", args.len()));
+            }
+            let at = self.expr(&args[0], scope, None, fn_ret)?;
+            match self.base(&at) {
+                Type::Map(_, v) if matches!(self.base(&v), Type::Int) => {}
+                Type::Err => return Ok(Type::Err),
+                Type::Map(_, v) => {
+                    return Err(cerr!(
+                        line,
+                        "`tally` counts Int64 values, and this map holds {v}"
+                    ))
+                }
+                other => {
+                    return Err(cerr!(
+                        line,
+                        "`tally` needs a Map<String, Int64> as its receiver, found {other}"
+                    ))
+                }
+            }
+            let k = self.expr(&args[1], scope, Some(&Type::Str), fn_ret)?;
+            if !self.coercible(&k, &Type::Str) {
+                return Err(cerr!(line, "`tally` key is {k}, not a String"));
+            }
+            let n = self.expr(&args[2], scope, Some(&Type::Int), fn_ret)?;
+            if !self.coercible(&n, &Type::Int) {
+                return Err(cerr!(line, "`tally` count is {n}, not an Int64"));
+            }
+            return Ok(at);
+        }
         if name == "@copyFrom" {
             if args.len() != 2 {
                 return Err(cerr!(

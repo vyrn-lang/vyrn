@@ -127,6 +127,8 @@ pub const METHOD_BUILTINS: &[(&str, &str)] = &[
     // `dst.copyFrom(src)` (RFC-0115): overwrite `dst`'s elements with `src`'s,
     // reusing the buffer — the refill loop fannkuch hand-wrote, as one copy.
     ("copyFrom", "@copyFrom"),
+    // `m.tally(k, n)` (RFC-0116): insert-or-add on a count map, one probe.
+    ("tally", "@tally"),
     // `xs.toArray()` (RFC-0056) — copy a SmallArray out to a growable Array.
     ("toArray", "@toArray"),
     // `x.copy()` (RFC-0089 M1b) — a deep copy of an owned heap value.
@@ -4021,6 +4023,7 @@ impl Parser {
                         || name == "@reserve"
                         || name == "@append"
                         || name == "@copyFrom"
+                        || name == "@tally"
                     {
                         match args.first() {
                             // `sq.push(v)` — a plain array variable.

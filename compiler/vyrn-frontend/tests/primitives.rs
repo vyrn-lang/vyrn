@@ -133,6 +133,7 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("@reserve", Memory, "Array (RFC-0115): capacity for n more, one realloc"),
     ("@append", Memory, "Array (RFC-0115): bulk copy of a heapless source, one growth"),
     ("@copyFrom", Memory, "Array (RFC-0115): overwrite in place, reusing the buffer"),
+    ("@tally", Memory, "Map (RFC-0116): insert-or-add in one probe"),
     ("@at", Memory, "Array: indexed read; also traps out of bounds"),
     ("@list", Memory, "a fixed and a growable array share one representation"),
     ("@toArray", Memory, "SmallArray (RFC-0056): copy the inline/spilled buffer out"),
@@ -574,7 +575,10 @@ fn the_census_is_the_code() {
     // grows at most once is the same fact stated for `n` elements; and an
     // overwrite that KEEPS the buffer cannot be said either, because every
     // store keeps the length and `append` only grows.
-    assert_eq!(found.len(), 94, "the primitive core changed size");
+    //
+    // 94 -> 95 for RFC-0116's `@tally`: a read-then-store is two probes by
+    // construction, and no composition can make the find answer for both.
+    assert_eq!(found.len(), 95, "the primitive core changed size");
 }
 
 /// The fourth engine, and nothing asked it anything until now (RFC-0094 M1).

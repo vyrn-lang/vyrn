@@ -73,11 +73,9 @@ fn countKmers(seq: Array<UInt8>, k: Int64) -> Map<String, Int64> {
             Ok(s) => s,
             Err(_) => "",
         }
-        let seen = match m[key] {
-            Some(c) => c,
-            None => 0,
-        }
-        m[key] = seen + 1
+        // One probe (RFC-0116): this was a read (`match m[key]`) and a
+        // store, each probing the index for the same key.
+        m.tally(key, 1)
         i = i + 1
     }
     return m
