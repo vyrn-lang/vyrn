@@ -480,13 +480,12 @@ const ROWS: &[Row] = &[
     Row {
         export: "temporaryCall",
         census: "RFC-0114 R1′",
-        today: Shape::Leaks,
-        why: "NARROWED by M1, still open. M1 freed ARGUMENT-position temporaries — \
-              `check(make(d))` went 313.9 MB to 4.1 native — but this shape is a \
-              RECEIVER: `fresh().byteLength`, and a receiver has no ArgVerdict. \
-              Blanket-freeing receivers would be unsound (a String FIELD read of a \
-              temp record lends), so R1′ needs its own verdict analysis. Flip to \
-              Steady when it lands",
+        today: Shape::Steady,
+        why: "RFC-0114 R1′: the unnamed String receiver of `.byteLength` is freed right \
+              after the header read — the read was its last observer. The field exists \
+              only on String, which is the type proof; the producer must transfer \
+              ownership (`owned_fns`, lenders filtered by `facts`), which is the \
+              ownership proof. A heap field of a temp RECORD stays out: extraction lends",
     },
     Row {
         export: "escapingAccumulator",

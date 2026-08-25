@@ -269,6 +269,12 @@ pub struct Facts {
     pub global_stores: std::collections::HashSet<usize>,
     /// RFC-0114 Rule N: the asymmetric-consumption joins (see [`EdgeRel`]).
     pub edge_releases: Vec<EdgeRel>,
+    /// RFC-0114 R1′: `.byteLength` reads whose receiver is an unnamed String
+    /// temporary — `(Expr::Field address, producer)`, producer a function name
+    /// or `@concat`/`@str`. Lenders are already filtered out; `own::analyze`
+    /// keeps the rows whose producer transfers ownership, and the backends
+    /// free the receiver right after the header read.
+    pub receiver_temps: Vec<(usize, String)>,
 }
 
 /// One ownership-relevant event on one binding (RFC-0114 M2).
@@ -382,6 +388,14 @@ pub fn facts(program: &Program) -> Facts {
         store_events: r.store_events,
         global_stores: r.global_stores,
         edge_releases: r.edge_releases,
+        // A lender's result names storage inside its argument; freeing it
+        // would free the argument. Filtered here because the lender set is
+        // only complete once every body has been read.
+        receiver_temps: r
+            .receiver_temps
+            .into_iter()
+            .filter(|(_, n)| !r.lending.contains(n))
+            .collect(),
     }
 }
 
@@ -408,6 +422,7 @@ struct Run {
     store_events: Vec<StoreEv>,
     global_stores: HashSet<usize>,
     edge_releases: Vec<EdgeRel>,
+    receiver_temps: Vec<(usize, String)>,
 }
 
 /// What the callee does with the temporary at `(callee, ix)`.
@@ -614,6 +629,7 @@ fn run(program: &Program, want: Want) -> Run {
         store_events: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         global_stores: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
         edge_releases: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
+        receiver_temps: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         ev_order: std::cell::Cell::new(0),
         loop_ids: RefCell::new(Vec::new()),
         next_loop: std::cell::Cell::new(0),
@@ -749,6 +765,10 @@ fn run(program: &Program, want: Want) -> Run {
             .edge_releases
             .map(RefCell::into_inner)
             .unwrap_or_default(),
+        receiver_temps: mc
+            .receiver_temps
+            .map(RefCell::into_inner)
+            .unwrap_or_default(),
     }
 }
 
@@ -852,6 +872,7 @@ struct MoveCheck<'a> {
     store_events: Option<RefCell<Vec<StoreEv>>>,
     global_stores: Option<RefCell<HashSet<usize>>>,
     edge_releases: Option<RefCell<Vec<EdgeRel>>>,
+    receiver_temps: Option<RefCell<Vec<(usize, String)>>>,
     ev_order: std::cell::Cell<u32>,
     /// The stack of loop ids the walk is inside — pushed by `while`/`for`,
     /// stamped onto every event, so the fold can see which pairs of events a
@@ -3722,7 +3743,7 @@ impl MoveCheck<'_> {
             // Walking into the root instead would ask it of `er` and refuse
             // `er.next` after `consume er.node`, which is the case RFC-0093
             // exists to allow. The root still gets its capture bookkeeping.
-            Expr::Field { expr, line, .. } => match place_path(e) {
+            Expr::Field { expr, field, line } => match place_path(e) {
                 Some((_, path)) => {
                     let (root, rline) = root_var(e);
                     self.capture_site(root, rline);
@@ -3730,7 +3751,27 @@ impl MoveCheck<'_> {
                     self.note_capture(root, rline);
                     self.check_use(&path, *line, consumed)
                 }
-                None => self.expr(expr, consumed, scope),
+                None => {
+                    // RFC-0114 R1′: a `.byteLength` receiver with no name is a
+                    // String temporary — the field exists only on String, which
+                    // is the type proof — and if its producer transfers
+                    // ownership, nothing else will ever release it. Recorded
+                    // here, decided against `owned_fns` in `own::analyze`,
+                    // freed by the backends after the header read.
+                    if field == "byteLength" {
+                        if let Some(sink) = &self.receiver_temps {
+                            let tag = match &**expr {
+                                Expr::Call { name, .. } => Some(name.clone()),
+                                Expr::Binary { op: BinOp::Add, .. } => Some("@concat".to_string()),
+                                _ => None,
+                            };
+                            if let Some(t) = tag {
+                                sink.borrow_mut().push((e as *const Expr as usize, t));
+                            }
+                        }
+                    }
+                    self.expr(expr, consumed, scope)
+                }
             },
             // RFC-0093 — the take. `check_take` says whether the frame may give
             // this place away; the record below is what makes a later read of it,

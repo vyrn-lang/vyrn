@@ -1813,6 +1813,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     let arg_drops = ownership.arg_drops();
     let store_owned = ownership.store_owned.clone();
     let edge_releases = ownership.edge_releases.clone();
+    let receiver_frees = ownership.receiver_frees.clone();
 
     let protocol_methods: HashMap<String, String> = program
         .protocols
@@ -1850,6 +1851,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &arg_drops,
             &store_owned,
             &edge_releases,
+            &receiver_frees,
             &program.type_decls,
         );
         gi.log_level = program.log_level;
@@ -1971,6 +1973,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &arg_drops,
             &store_owned,
             &edge_releases,
+            &receiver_frees,
             &program.type_decls,
         );
         gen.log_level = program.log_level;
@@ -2026,6 +2029,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 &arg_drops,
                 &store_owned,
                 &edge_releases,
+                &receiver_frees,
                 &program.type_decls,
             );
             gen.log_level = program.log_level;
@@ -2091,6 +2095,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 &arg_drops,
                 &store_owned,
                 &edge_releases,
+                &receiver_frees,
                 &program.type_decls,
             );
             gen.log_level = program.log_level;
@@ -2142,6 +2147,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &arg_drops,
             &store_owned,
             &edge_releases,
+            &receiver_frees,
             &program.type_decls,
         );
         dgen.protocol_methods = protocol_methods.clone();
@@ -2175,6 +2181,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &arg_drops,
             &store_owned,
             &edge_releases,
+            &receiver_frees,
             &program.type_decls,
         );
         cgen.fnval_variants = fnval_registry.clone();
@@ -2202,6 +2209,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &arg_drops,
             &store_owned,
             &edge_releases,
+            &receiver_frees,
             &program.type_decls,
         );
         cgen.protocol_methods = protocol_methods.clone();
@@ -2394,6 +2402,7 @@ struct Gen<'a> {
     arg_drops: &'a std::collections::HashSet<usize>,
     store_owned: &'a std::collections::HashSet<usize>,
     edge_releases: &'a std::collections::HashMap<usize, Vec<(String, u32)>>,
+    receiver_frees: &'a std::collections::HashSet<usize>,
     /// The registers holding those values, innermost call last. Pushed where the
     /// argument is EVALUATED and taken back where its call ends.
     arg_frees: Vec<(String, Type)>,
@@ -2545,12 +2554,14 @@ impl<'a> Gen<'a> {
         arg_drops: &'a std::collections::HashSet<usize>,
         store_owned: &'a std::collections::HashSet<usize>,
         edge_releases: &'a std::collections::HashMap<usize, Vec<(String, u32)>>,
+        receiver_frees: &'a std::collections::HashSet<usize>,
         decls: &'a [TypeDecl],
     ) -> Self {
         Gen {
             arg_drops,
             store_owned,
             edge_releases,
+            receiver_frees,
             arg_frees: Vec::new(),
             tmp: 0,
             label: 0,
@@ -5911,14 +5922,25 @@ impl<'a> Gen<'a> {
             ),
             Expr::Try { expr: operand, .. } => self.gen_try(operand, expr as *const Expr as usize),
             Expr::StructLit { name, fields, .. } => self.gen_struct_lit(name, fields),
-            Expr::Field { expr, field, .. } => {
-                let (v, ety) = self.gen_expr(expr)?;
+            Expr::Field {
+                expr: fbase, field, ..
+            } => {
+                let (v, ety) = self.gen_expr(fbase)?;
                 // `str.byteLength` is one load from the String header
                 // (RFC-0089 M1a; RFC-0058 named it, this made it O(1)).
                 // `.length` on a String is rejected by the checker.
                 if field == "byteLength" {
                     if let Type::Str = self.resolve(&ety) {
                         let len = self.str_len(&v);
+                        // RFC-0114 R1′: an unnamed receiver this frame owns
+                        // dies here — the header read was its last observer.
+                        if self.region_depth == 0
+                            && self
+                                .receiver_frees
+                                .contains(&(expr as *const Expr as usize))
+                        {
+                            self.emit(format!("call void @__vyrn_str_free(ptr {v})"));
+                        }
                         return Ok((len, Type::Int));
                     }
                 }
@@ -13842,6 +13864,7 @@ mod tests {
             &ad,
             &ad,
             &er,
+            &ad,
             &[],
         );
         let rec = |fs: &[Type]| {

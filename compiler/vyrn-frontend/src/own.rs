@@ -1158,6 +1158,10 @@ pub struct Ownership {
     /// `(name, edge)`, where `edge` is 0/1 for an `if`'s then/else and the
     /// arm's source index for a `match`. See [`fold_edge_releases`].
     pub edge_releases: HashMap<usize, Vec<(String, u32)>>,
+    /// RFC-0114 R1′: the `Expr::Field` nodes (`.byteLength` reads) whose
+    /// receiver is an unnamed String temporary this frame owns — the backends
+    /// free it right after the header read.
+    pub receiver_frees: std::collections::HashSet<usize>,
     /// Functions whose return value transfers heap ownership to the caller,
     /// with the kind of value returned.
     ///
@@ -1270,10 +1274,21 @@ pub fn analyze(program: &Program) -> Ownership {
         emit(format!("bench@{i}"), &b.body);
     }
     // Rule 3: a return is owned. The return type is the whole answer.
-    let owned_fns = program
+    let owned_fns: HashMap<String, DropKind> = program
         .functions
         .iter()
         .filter_map(|f| proto.release_kind(&f.ret).map(|k| (f.name.clone(), k)))
+        .collect();
+    // RFC-0114 R1′: keep the `.byteLength` receivers whose producer transfers
+    // ownership of a String — a user function returning one (a lender was
+    // already filtered out by `facts`), or the fresh forms `@concat`/`@str`.
+    let receiver_frees: std::collections::HashSet<usize> = facts
+        .receiver_temps
+        .iter()
+        .filter(|(_, n)| {
+            n == "@concat" || n == "@str" || matches!(owned_fns.get(n), Some(DropKind::FreeStr))
+        })
+        .map(|(k, _)| *k)
         .collect();
     Ownership {
         owned_fns,
@@ -1285,6 +1300,7 @@ pub fn analyze(program: &Program) -> Ownership {
         releases,
         store_owned,
         edge_releases,
+        receiver_frees,
     }
 }
 

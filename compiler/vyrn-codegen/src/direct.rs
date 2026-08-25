@@ -398,6 +398,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         arg_drops: ownership.arg_drops(),
         store_owned: ownership.store_owned.clone(),
         edge_releases: ownership.edge_releases.clone(),
+        receiver_frees: ownership.receiver_frees.clone(),
         releases: ownership.releases,
         droppable: ownership.droppable,
         // RFC-0093 M2, flattened across functions: the key is the `let`'s node
@@ -1122,6 +1123,9 @@ struct Cx<'a> {
     /// edge)` releases on
     /// the edge the other branch's consume left still-owning.
     edge_releases: std::collections::HashMap<usize, Vec<(String, u32)>>,
+    /// RFC-0114 R1′: the `.byteLength` reads whose unnamed String receiver
+    /// this frame owns and frees right after the header read.
+    receiver_frees: std::collections::HashSet<usize>,
     /// The `Owned` table (RFC-0086 M1) — the same one `own` decided with, so a
     /// user type's declared `release` reaches this backend without a second list.
     owned: vyrn_frontend::own::Owned,
@@ -4632,7 +4636,26 @@ impl<'p> Fn_<'_, 'p> {
             }
             Expr::Field { expr, field, line } => {
                 let base = self.expr(m, b, expr)?;
+                // RFC-0114 R1′: an unnamed String receiver this frame owns is
+                // freed right after the header read — the pointer is teed to a
+                // local before `length_of` consumes it.
+                let rfree = field == "byteLength"
+                    && self.region_depth == 0
+                    && self
+                        .cx
+                        .receiver_frees
+                        .contains(&(e as *const Expr as usize));
+                let tee = if rfree {
+                    let l = b.local(ValType::I32);
+                    b.ins(&Instruction::LocalTee(l));
+                    Some(l)
+                } else {
+                    None
+                };
                 if let Some(t) = self.length_of(b, &base, field, *line)? {
+                    if let Some(l) = tee {
+                        self.free_str_temp(b, Some(l));
+                    }
                     return Ok(t);
                 }
                 let (off, fty) = self.field_of(&base, field, *line)?;
@@ -17210,6 +17233,7 @@ mod tests {
             arg_drops: std::collections::HashSet::new(),
             store_owned: std::collections::HashSet::new(),
             edge_releases: std::collections::HashMap::new(),
+            receiver_frees: std::collections::HashSet::new(),
             types: HashMap::new(),
             decls: &[],
             lambdas: HashMap::new(),

@@ -114,19 +114,27 @@ in `memory.rs` pins it as `Steady`. A declared `impl Owned` release stays
 off the edge, because its body is user code whose timing the three engines
 must agree on.
 
-## Still open: a temporary is never released
+## MOSTLY CLOSED (RFC-0114 M1 + R1′): a temporary is never released
 
 `binarytrees` did not improve from the fix alone, because it wrote
 `check(make(depth))`. A temporary has no binding for the release to attach to,
-so the tree is built and abandoned. Binding it — `let t = make(depth)` — takes
-depth 16 from **451.9 MB to 20.5 MB**, and 20 MB is about the live long-lived
-tree.
+so the tree was built and abandoned — 451.9 MB at depth 16 against 20.5 with a
+`let`.
 
-`examples/binarytrees.vyrn` binds it now, and the game's own wording asks for
-exactly that: trees are "built, checked and released one at a time". But the
-language should not need the `let`. **A temporary of an owning type, passed to a
-`read` parameter and dropped on the floor, is not released.** That is a second
-defect and it is not fixed here.
+**RFC-0114 M1 closed the argument position**: a call-argument temporary is
+released on the callee's `ArgVerdict` — `check(make(depth))` now measures what
+the `let` form measures, and `examples/binarytrees.vyrn` is back to the
+temporary form as the witness. **R1′ closed the receiver position for the
+pinned shape**: `fresh().byteLength` frees the unnamed String receiver right
+after the header read. The field exists only on String (the type proof); the
+producer must transfer ownership — `owned_fns`, lenders filtered — and the
+checker's own "a return is owned" rule makes every user function's String
+return owned. `temporaryCall` in `memory.rs` pins it as `Steady`.
+
+Still out, deliberately: a heap FIELD of a temporary record (`makeRec().s`) —
+extraction lends into the record, so freeing the record after the read frees
+the extracted value; and non-String receivers (`.length` on a temporary
+array), which want the same treatment with the array's element walk.
 
 ---
 

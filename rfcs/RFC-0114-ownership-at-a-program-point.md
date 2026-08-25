@@ -289,6 +289,19 @@ branch to the `phi` in the textual one. `conditionalMoveIfExpr` pins it —
 and its first run caught the flat guard failing, on wasm, before any code
 shipped, which is the harness doing its job.
 
+**R1′ LANDED for the pinned receiver shape.** A `.byteLength` read whose
+receiver has no name is recorded by the walker (the field exists only on
+String, which is the type proof), `facts` filters out lenders, and
+`own::analyze` keeps the rows whose producer transfers ownership — a user
+function returning String (the checker's "a return is owned" rule makes that
+unconditional: returning a `read` parameter, a second name for one, or an
+arm binder over one is refused at the source), or the fresh forms
+`@concat`/`@str`. Both backends free the receiver right after the header
+read — its last observer. `temporaryCall` flipped to `Steady` the way the
+harness flips. Deliberately out: a heap field of a temporary record
+(extraction lends into the record) and non-String receivers, recorded in the
+census.
+
 The state is per place, per program point: `Owned | Moved | Uninit`, a forward
 dataflow with a join at every merge.
 
