@@ -3846,11 +3846,19 @@ impl MoveCheck<'_> {
                     // ownership, nothing else will ever release it. Recorded
                     // here, decided against `owned_fns` in `own::analyze`,
                     // freed by the backends after the header read.
-                    if field == "byteLength" {
+                    if field == "byteLength" || field == "length" {
                         if let Some(sink) = &self.receiver_temps {
-                            let tag = match &**expr {
-                                Expr::Call { name, .. } => Some(name.clone()),
-                                Expr::Binary { op: BinOp::Add, .. } => Some("@concat".to_string()),
+                            // `.length` receivers are containers, so only a
+                            // call can produce an owned one; the concat form
+                            // belongs to `.byteLength` alone. Which field it
+                            // was does not travel: the checker already ties
+                            // the field to the type, and `own` filters by the
+                            // producer's return KIND.
+                            let tag = match (&**expr, field.as_str()) {
+                                (Expr::Call { name, .. }, _) => Some(name.clone()),
+                                (Expr::Binary { op: BinOp::Add, .. }, "byteLength") => {
+                                    Some("@concat".to_string())
+                                }
                                 _ => None,
                             };
                             if let Some(t) = tag {

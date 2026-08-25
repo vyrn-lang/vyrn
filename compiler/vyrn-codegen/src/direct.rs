@@ -4650,7 +4650,7 @@ impl<'p> Fn_<'_, 'p> {
                 // RFC-0114 R1′: an unnamed String receiver this frame owns is
                 // freed right after the header read — the pointer is teed to a
                 // local before `length_of` consumes it.
-                let rfree = field == "byteLength"
+                let rfree = (field == "byteLength" || field == "length")
                     && self.region_depth == 0
                     && self
                         .cx
@@ -4664,8 +4664,10 @@ impl<'p> Fn_<'_, 'p> {
                     None
                 };
                 if let Some(t) = self.length_of(b, &base, field, *line)? {
+                    // `own` admits only silent kinds into the set, so this
+                    // never meets a declared release.
                     if let Some(l) = tee {
-                        self.free_str_temp(b, Some(l));
+                        self.free_arg_temp(m, b, l, &base, *line)?;
                     }
                     return Ok(t);
                 }

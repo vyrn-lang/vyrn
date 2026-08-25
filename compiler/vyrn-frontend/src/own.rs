@@ -1317,7 +1317,17 @@ pub fn analyze(program: &Program) -> Ownership {
         .receiver_temps
         .iter()
         .filter(|(_, n)| {
-            n == "@concat" || n == "@str" || matches!(owned_fns.get(n), Some(DropKind::FreeStr))
+            n == "@concat"
+                || n == "@str"
+                || matches!(
+                    owned_fns.get(n),
+                    Some(
+                        DropKind::FreeStr
+                            | DropKind::FreeArr
+                            | DropKind::FreeSmallArr
+                            | DropKind::FreeMap
+                    )
+                )
         })
         .map(|(k, _)| *k)
         .collect();

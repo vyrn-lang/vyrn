@@ -544,6 +544,16 @@ const ROWS: &[Row] = &[
               a declared release runs at the callee's exit in all three engines",
     },
     Row {
+        export: "temporaryArrayLength",
+        census: "RFC-0114 R1′",
+        today: Shape::Steady,
+        why: "The container counterpart of `temporaryCall`: `.length` on an unnamed \
+              Array the frame owns frees the receiver — buffer and elements — right \
+              after the count is read. The producer's return KIND is the filter \
+              (FreeArr/FreeSmallArr/FreeMap join FreeStr); a declared release never \
+              enters the set, so the free is always silent",
+    },
+    Row {
         export: "prependLoop",
         census: "§4",
         today: Shape::Steady,
@@ -1595,6 +1605,21 @@ fn readOnly(v: consume String) -> Int64 {{
 export extern fn consumedParamRead() {{
     let s = tag() + tag()
     seen = seen + readOnly(consume s)
+}}
+
+/// RFC-0114 R1′ for containers: `.length` on an unnamed Array the frame owns.
+fn makeNums(n: Int64) -> Array<Int64> {{
+    let mut a: Array<Int64> = []
+    let mut i = 0
+    while i < n {{
+        a.push(i)
+        i = i + 1
+    }}
+    return a
+}}
+
+export extern fn temporaryArrayLength() {{
+    seen = seen + makeNums(64).length
 }}
 
 /// RFC-0114 untake: the value is taken, the binding is provably re-established,

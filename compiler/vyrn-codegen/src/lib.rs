@@ -5957,11 +5957,22 @@ impl<'a> Gen<'a> {
                 // `arr.length` is the element count: a constant for a fixed
                 // array, field 1 of the `{ptr,len,cap}` triple otherwise.
                 if field == "length" {
+                    // RFC-0114 R1′ for containers: an unnamed receiver this
+                    // frame owns dies after the count is read. `own` admits
+                    // only silent kinds into the set, so `free_arg_temp` never
+                    // meets a declared release here.
+                    let rfree = self.region_depth == 0
+                        && self
+                            .receiver_frees
+                            .contains(&(expr as *const Expr as usize));
                     match self.resolve(&ety) {
                         Type::ArrayN(_, n) => return Ok((format!("{n}"), Type::Int)),
                         Type::Array(_) => {
                             let len = self.fresh_tmp();
                             self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {v}, 1"));
+                            if rfree {
+                                self.free_arg_temp(&v, &ety);
+                            }
                             return Ok((len, Type::Int));
                         }
                         // `smallArray.length` is field 0 of the SmallArray header
@@ -5970,6 +5981,9 @@ impl<'a> Gen<'a> {
                             let sa_ll = self.sa_ll(&inner, n);
                             let len = self.fresh_tmp();
                             self.emit(format!("{len} = extractvalue {sa_ll} {v}, 0"));
+                            if rfree {
+                                self.free_arg_temp(&v, &ety);
+                            }
                             return Ok((len, Type::Int));
                         }
                         // `map.length` is the entry count (field 2 of the header).
@@ -5978,6 +5992,9 @@ impl<'a> Gen<'a> {
                             self.emit(format!(
                                 "{len} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {v}, 2"
                             ));
+                            if rfree {
+                                self.free_arg_temp(&v, &ety);
+                            }
                             return Ok((len, Type::Int));
                         }
                         _ => {}

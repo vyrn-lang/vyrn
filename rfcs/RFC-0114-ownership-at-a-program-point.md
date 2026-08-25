@@ -298,9 +298,14 @@ unconditional: returning a `read` parameter, a second name for one, or an
 arm binder over one is refused at the source), or the fresh forms
 `@concat`/`@str`. Both backends free the receiver right after the header
 read — its last observer. `temporaryCall` flipped to `Steady` the way the
-harness flips. Deliberately out: a heap field of a temporary record
-(extraction lends into the record) and non-String receivers, recorded in the
-census.
+harness flips. The container half followed: `.length` on an unnamed
+`Array`/`SmallArray`/`Map` a call produced frees the receiver — buffer and
+elements — right after the count is read, filtered by the producer's return
+KIND, so only silent frees ever enter the set (measured 178.9 MB → 3.8 over
+200,000 rounds of a 128-element array; `temporaryArrayLength` pins it).
+`.charCount()` needed nothing: it desugars to a call, and the M1 argument
+machinery already frees its receiver-as-argument. Deliberately out: a heap
+field of a temporary record (extraction lends into the record).
 
 **The untake LANDED.** A binding whose value was taken and then provably
 re-established releases its FINAL value at block exit — the naive version of
