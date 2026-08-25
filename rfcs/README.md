@@ -164,7 +164,7 @@ claim is true — is written down in the test's own header.
 | [0106](RFC-0106-a-consumer-page-is-scanned-not-read.md) | A Consumer Page Is Scanned, Not Read | Implemented |
 | [0107](RFC-0107-a-template-component-is-a-library.md) | A Template Component Is a Library | Implemented |
 | [0108](RFC-0108-the-string-scan-is-interpreted.md) | The String Scan Is Interpreted | Prototyped; its own question answered no |
-| [0109](RFC-0109-a-read-that-does-not-copy.md) | A Read That Does Not Copy | Draft; the problem is measured, the design is not chosen |
+| [0109](RFC-0109-a-read-that-does-not-copy.md) | A Read That Does Not Copy | Draft; three of four designs eliminated by measurement, the fourth not chosen |
 | [0110](RFC-0110-a-lambda-takes-its-parameters-before-an-arrow.md) | A Lambda Takes Its Parameters Before an Arrow | Implemented; `x -> e`, `(a, b) -> e`, `() -> e` |
 | [0111](RFC-0111-a-program-can-write-bytes.md) | A Program Can Write Bytes | Implemented; `writeFileBytes`, `writeStdout` — closes the mandelbrot gap |
 | [0112](RFC-0112-a-regular-expression-that-searches.md) | A Regular Expression That Searches | Implemented; `std/regex` in Vyrn — closes the regex-redux gap |

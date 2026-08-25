@@ -1,6 +1,7 @@
 # RFC-0109 — A Read That Does Not Copy
 
-- **Status:** **Draft. The problem is measured; the design is not chosen.** This
+- **Status:** **Draft. The problem is measured and RE-measured; three of the
+  four candidate designs are eliminated; the remaining one is not chosen.** This
   document exists because the same gap was found three times, by three methods
   that did not see each other's results. It states what is missing, what it
   costs, and what the candidate designs would each cost. It chooses none of
@@ -14,13 +15,53 @@ every accessor in the standard library either copies or forces its caller to.
 ## Why the ownership words do not already cover this
 
 Vyrn has four ownership words: `read`, `modify`, `consume`, `share`. A `read`
-parameter does not copy the value it is given. But **reading a field out of a
-borrowed record copies that field**, and there is no type that names "a view of
-someone else's bytes". So `read` stops at the record boundary. A function that
-takes `read Scanner` and wants the scanner's source array has one move
-available: copy it.
+parameter does not copy the value it is given, and there is no type that names
+"a view of someone else's bytes". A function that takes `read Scanner` and wants
+to hand the scanner's source array back to its caller has one move available:
+copy it.
 
 That is the whole gap. It is not a missing optimisation. It is a missing type.
+
+### Correction, 2026-08-25: it is ESCAPING that copies, not reading
+
+The first version of this section said "reading a field out of a borrowed record
+copies that field". **That is not true, and measuring it is what collapses the
+option table below from four rows to one.**
+
+Reading through a borrowed field is already free, on both engines:
+
+| measurement | result |
+| --- | --- |
+| interpreter, 20,000 field reads in a loop | 0.48 µs each |
+| interpreter, the same reads on the array directly | 0.21 µs each |
+| native, 5,000 field reads over a 5,000-byte array | 108 ms |
+| native, the same over 20,000 bytes | 91 ms |
+| native, the same over 80,000 bytes | 92 ms |
+
+Flat across a sixteenfold change in the size of the thing supposedly being
+copied. The interpreter's 0.48 µs against 0.21 µs is one refcount bump, not
+twenty thousand elements — `Val::Array` is an `Rc<Vec<Val>>` and has been since
+the value-copy work; native reads the header in place.
+
+What costs is a borrow LEAVING. Over a 40,000-byte array, 300 calls each:
+
+| shape | per call |
+| --- | --- |
+| `lookInside(h)` — reads `h.data[0]` and `h.data.length` | **0.86 µs** |
+| `takeOut(h)` — `return h.data.copy()` | **490 µs** |
+
+Five hundred and seventy times, and the copy is not a choice. `return h.data`
+does not compile:
+
+```
+`h.data` may not be returned — it is a `read` parameter, and a return is owned
+  fix: declare the parameter `h: consume ..` if this function should own it
+  fix: `h.data.copy()` if both sides need a value
+```
+
+So the gap is exactly: **a borrow cannot be returned or stored.** Which is the
+question the last section of this document says it does not answer, and it turns
+out to be the only question there is.
 
 ## The evidence, from three directions
 
@@ -108,6 +149,44 @@ The fourth row is included because it is the only one that needs no language
 change, and because two of the census's other repeating patterns — constant work
 rebuilt per call, in seven modules, and linear-scan lookup, in eleven — would be
 fixed by that same work regardless of what happens here.
+
+### What the correction does to this table
+
+**Row B is out.** "Reading a field of a `read` record yields a borrow rather
+than a copy" describes a change to something that already does not copy. There
+is nothing there to fix.
+
+**Row A is out, in its non-storable form.** A view that cannot outlive the
+expression it appears in buys nothing over reading through the field, which is
+already 0.86 µs. Its whole value would have been avoiding a copy that is not
+happening.
+
+**Row C is the only candidate left**, and the measurement is why: it is the only
+one of the four that can be RETURNED and STORED, which is the operation that
+costs 490 µs today. Its stated drawback — the source stays alive as long as any
+slice does — is now the entire design question, rather than one trade among
+four.
+
+**Row D stays available**, and RFC-0113 is evidence it is worth more than this
+table gave it credit for: giving `bytes` a range took `std/strpred`'s `slice`
+from 57.5 per cent of the site build to 9.2, with no view type and no lifetime
+reasoning. That is one of the ten modules routed around, and it cost one arity
+on an existing builtin.
+
+### What row C would cost, stated plainly
+
+The interpreter is nearly free: `Val::Str` is `Rc<String>` and `Val::Array` is
+`Rc<Vec<Val>>`, so a slice is a refcount and two integers.
+
+Native and wasm are not. An array is `{ptr, len, cap}` and a string is a
+`{len, cap}` header with no refcount, so either every array and string grows one
+— which is a cost at call sites that never take a slice, and constraint 4
+refuses that — or slices become a SECOND type with its own representation, and
+every API that takes a `String` needs to say whether it takes a slice too.
+
+That second-type question is the real work, and it is a language design decision
+rather than an implementation one. It is still the owner's.
+
 
 ## The question this RFC does not answer
 
