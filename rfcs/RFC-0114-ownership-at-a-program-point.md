@@ -2,9 +2,12 @@
 
 - **Status:** **Draft. The problem is measured; the design is not chosen.**
 - **Evidence:** [rfcs/census/declared-release-does-not-run.md](census/declared-release-does-not-run.md).
-- **Appendix A:** [the algorithm and its proofs](proofs/release-algorithm.md) — the
-  invariant, three theorems, and the assumption each of today's three defects
-  violated.
+- **Appendix A:** [the algorithm and its proofs](proofs/release-algorithm.md) —
+  Part I: the invariant, three soundness theorems, and the assumption each of
+  today's defects violated. Part II: the complete model — edge normalization
+  makes the ambiguous join UNREACHABLE instead of refused, with closure and
+  optimality theorems (minimal releases, zero runtime state, pointwise-minimal
+  residency) and the one case it cannot serve.
 
 ## The gap in one sentence
 
@@ -209,10 +212,17 @@ RFC recommends against that**, for two reasons that agree:
   inferred" — the whole of RFC-0091 — and a conditional move that leaves a
   place's state ambiguous is exactly the shape it refuses elsewhere.
 
-So: **refuse the ambiguity.** A place whose state differs across a join is a
-diagnostic, not a flag. That keeps the analysis static, keeps the emitted code
-free of branches nobody wrote, and gives the programmer the same kind of error
-they already get from `consume` inside a loop.
+So: **refuse the ambiguity** — was this section's first answer, and Appendix A
+Part II supersedes it with a strictly better one. Rule N (edge normalization)
+releases on the branch that still owns, exactly when the place is dead after
+the join; the ambiguous state then never arises, the program is ACCEPTED, and
+the analysis stays exact with no flag (Theorem 4). The 211.5 MB conditional-move
+leak becomes one buffer instead of a diagnostic. What survives of the refusal is
+one thin case: a DECLARED `impl Owned` release moved on one path of a join —
+user code whose timing all three engines must agree on, where an edge release
+would change observable order and a flag would be inference. That case, and
+only that case, is refused with a diagnostic naming the fix (`drop p` on the
+non-moving path).
 
 ### How to make it reliable, which is the part today got wrong
 

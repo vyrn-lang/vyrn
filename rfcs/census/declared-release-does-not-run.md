@@ -103,8 +103,12 @@ move: **211.5 MB**, which is the product to three figures.
 
 Not an `Alloc`/`Lend` misclassification like the two that were fixed. The
 classification is right and the granularity is wrong — per binding, where the
-question is per path. That is RFC-0114 §5.3, and the appendix measures what the
-three available answers cost.
+question is per path. The appendix's Part II resolves it: Rule N releases on
+the non-moving edge exactly when the place is dead after the join, so for a
+SILENT type this case is accepted and fixed rather than refused — 211.5 MB
+becomes one buffer. Only a declared `impl Owned` release conditionally moved
+stays refused, because its body is user code whose timing the three engines
+must agree on.
 
 ## Still open: a temporary is never released
 

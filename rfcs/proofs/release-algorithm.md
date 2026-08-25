@@ -170,6 +170,13 @@ taste:
 
 Refusing `⊤` keeps the whole argument static.
 
+> **SUPERSEDED for silent releases — see Part II.** Refusal is not the optimum.
+> §12's edge normalization accepts every program the move checker accepts,
+> keeps the analysis exact, and adds no runtime state; `⊤` becomes UNREACHABLE
+> rather than refused (Theorem 4). Refusal survives only for the one case
+> normalization cannot serve, §17's observable conditional move, and Part II
+> says exactly why.
+
 ### 5.4 Fixpoint
 
 `S` has height 2 and the transfer functions are monotone, so the standard forward
@@ -387,3 +394,234 @@ proof lives rather than about the program.
 appendix. It is not an A4 violation — the classification is right — but a case
 where the analysis's granularity is per binding and the question is per path,
 which is the whole of RFC-0114.
+
+---
+
+# Part II — The complete model
+
+Part I proved the four rules sound and left two things open: the join (§5.3
+refused it) and where a temporary dies. Part II closes both, and closes them
+OPTIMALLY in a sense made precise in §15: among all schemes that are leak-free
+and double-free-free, this one executes the minimum possible number of release
+instructions, carries zero bytes of runtime state, and is pointwise-minimal in
+heap residency for every silent allocation. The one thing it cannot do is
+stated, not smoothed over (§17).
+
+## 11. Two passes
+
+Everything is computed by two classical dataflow passes over the CFG, in this
+order.
+
+### 11.1 Liveness (backward)
+
+Standard. `use(n)` = places read at node `n`; `def(n)` = places written.
+
+```
+live-out(n) = ⋃ { live-in(m) | m ∈ succ(n) }
+live-in(n)  = use(n) ∪ (live-out(n) \ def(n))
+```
+
+Bit-vector fixpoint; on a reducible CFG it converges in loop-depth + 2 passes.
+"Dead at π" means ∉ live-in(π): not read on any path before being overwritten
+or before exit.
+
+### 11.2 Ownership (forward)
+
+The state set SHRINKS from Part I:
+
+```
+S  =  { Ø , O , B }
+```
+
+`Ø` merges Part I's `⊥` and `M` — "this frame holds no release responsibility
+here" — because the release algorithm never needed to distinguish them; only
+the move checker does, and it runs first. **`⊤` is not in the set.** Theorem 4
+is the licence for removing it.
+
+The classification of §4 gains one class, replacing R2's awkward side
+condition:
+
+| class | meaning | transfer |
+| --- | --- | --- |
+| `Alloc` | fresh allocation | result `O` |
+| `Lend` | pointer into storage owned elsewhere | result `B` |
+| `Grow(p)` | reads `p`'s allocation, returns THE SAME allocation, possibly reallocated | `p` stays `O`; no release |
+| `Pure` | nothing releasable | untracked |
+
+`@push(a, i)` and the in-place append spine are `Grow(a)`. `__vyrn_str_concat`
+is `Alloc` — always, which is the fact whose absence was defect (b).
+
+## 12. Edge normalization — the join dissolves
+
+**Rule N.** For every CFG edge `e : n → j` where `j` is a join, and every place
+`p` with `σ_e(p) = O` and `p ∉ live-in(j)`:
+
+> emit `release(p)` on the edge `e`, and set `σ_e(p) := Ø`.
+
+That is the entire rule. It is R1–R4's missing sibling — call it **R5** — and
+like the others it is a static, unconditional instruction on a specific edge.
+
+**Why it is enough.** Consider any join and any place `p` whose incoming states
+differ. The only states are `Ø`, `O`, `B`.
+
+- `O` vs `Ø`, and `p` live after the join: some path from `j` reads `p`, and on
+  the `Ø` edge `p` was moved or never initialised — the move checker refuses
+  that program (A1 / use-before-init). **This conflict cannot reach codegen.**
+- `O` vs `Ø`, and `p` dead after the join: Rule N fires on the `O` edge. Both
+  edges now carry `Ø`. **Resolved, and the allocation is released on exactly
+  the paths that still held it.**
+- `B` vs anything: `B` for a variable arises only from a `read`/`modify`
+  parameter, which is not reassignable, so a variable's `B` is path-invariant
+  (assumption **A6**, checked by the parser today). A temp's state never meets
+  a join at all — a temp's whole life is inside one statement (§13).
+
+**Theorem 4 (closure).** For every program the move checker accepts, the
+forward pass with Rule N assigns every place a state in `{Ø, O, B}` at every
+point, and every join is between equal states. `⊤` is unreachable.
+
+*Proof.* The case analysis above is exhaustive over `S × S`. ∎
+
+**Corollary (exactness).** `σ(π)(p) = O` implies that on EVERY execution
+reaching `π`, `p` holds a live allocation this frame owns. This is Part I's
+I₁ made path-universal — and it is the whole performance story, because it is
+what lets every release be emitted **without a guard**.
+
+The §10 program is now fixed rather than refused: `s` is `O` on the else edge,
+dead at the merge, so R5 releases it there. 211.5 MB becomes one buffer.
+
+## 13. Temporaries, uniformly
+
+A temp `t` is born at its producing node and its liveness is confined to its
+statement, so Rule N never sees it. Its death point is fully determined:
+
+| producer / position | death point | rule |
+| --- | --- | --- |
+| argument at `Released` | immediately after the call returns | R1 |
+| argument at `Transferred` | callee's — `σ(t) := Ø` at the call | — |
+| argument at `Lent` / `Retained` | not this frame's | — |
+| discarded result (expression statement) | end of the statement | R1′ |
+| operand of an `Alloc` that copies (concat) | after the consumer | R1″ (this is `own::str_temporary` today) |
+
+R1, R1′, R1″ are one rule — *release at the earliest point past the last
+observer* — instantiated at the three positions a temp can occupy. This is
+what "statement-scoped temporaries" from the RFC's option table becomes when
+made precise.
+
+## 14. Soundness, carried over
+
+Theorems 1–3 hold unchanged, with one addition to Lemma 2's case analysis:
+
+- **Rule N edge.** The released `p` has `σ_e(p) = O`, so by I₁ the allocation is
+  live, by I₂ uniquely owned; setting `Ø` restores I₃/I₄ exactly as R3 did. A
+  release on an edge is a release like any other; the lemma's cases did not
+  depend on WHERE a release sits, only that `σ` said `O` before and `Ø` after.
+
+And the double-free proof gets STRONGER: with `⊤` gone, the exactness corollary
+replaces the per-path argument in Theorem 1 case 1 — nothing in the frame can
+hold a freed allocation with state `O` on any path, not merely on the analysed
+one. ∎
+
+## 15. Optimality — three theorems
+
+**Theorem 5 (release minimality).** On every execution trace, the number of
+release instructions executed equals the number of allocations the frame
+created (or received by `consume`) and did not transfer out. No leak-free
+scheme can execute fewer; this scheme executes no more, and executes **zero
+runtime tests** deciding any of them.
+
+*Proof.* Theorems 1+2 give exactly-once per such allocation — that is the
+count. Fewer would leave an allocation unfreed (a leak, Theorem 2's
+contrapositive). "No tests" is the exactness corollary: every emitted release
+sits at a point where `σ = O` holds on all incoming paths, so it needs no
+condition. ∎
+
+**Theorem 6 (zero cost off the heap).** A function in which no operation is
+classified `Alloc` and no parameter is `consume` compiles to exactly the code
+it compiles to today.
+
+*Proof.* All places stay `Ø`/`B` everywhere; R1–R5's guards (`σ = O`) never
+hold; the emitted release set is empty. The passes run at compile time only. ∎
+
+**Theorem 7 (pointwise-minimal residency, silent releases).** Among all static,
+guard-free placements satisfying Theorems 1–3, placing each SILENT release at
+the earliest point where its place is dead on all continuations gives, at every
+program point of every trace, a set of live heap allocations that is a subset
+of the corresponding set under any other correct placement. Peak heap usage is
+therefore minimal.
+
+*Proof.* A correct placement cannot release before last use (Theorem 3 breaks).
+The earliest-death placement releases at exactly that frontier. Any other
+correct placement releases at the frontier or later on every path, so at every
+point its live set contains this one's. Pointwise dominance implies dominance
+of the maximum. ∎
+
+## 16. Complexity
+
+| pass | cost |
+| --- | --- |
+| liveness | O((N + E) · ⌈P/w⌉) per iteration, ≤ loop-depth + 2 iterations, bitsets |
+| ownership + Rule N | one reverse-postorder pass; loop heads settle in ≤ 2 visits because Rule N fixes each back-edge state from already-computed liveness |
+| emitted code | zero words of runtime state; zero branches; releases = the trace minimum of Theorem 5 |
+
+Both passes are the textbook algorithms; nothing here needs SSA, regions, or an
+interprocedural fixpoint — calls enter only through the §4 table, which is
+per-signature.
+
+## 17. The one thing normalization cannot do, and the honest split
+
+Rule N moves a release ONTO AN EDGE — earlier than the block exit where the
+language's observable semantics puts it. For a **silent** free (a `String` or
+`Array` buffer, a payload box) that is invisible and Theorem 7 says it is
+optimal.
+
+For a **declared** `impl Owned` release it is not invisible: the release is
+user code that may print, and the interpreter — the oracle — runs it at block
+exit, keyed on the `let`, from the value the binding took. Moving it to an edge
+in the compiled backends would make the three engines run user code at
+different times, which is the one thing this project never trades away.
+
+Rust faces the same fork and chooses **drop flags**: a runtime bit so the
+scope-end drop knows whether the value is still there. This model refuses that
+for the reason §5.3 gave — the memory model is *defined, not inferred*, and a
+flag is inference smuggled into the emitted code — and because it breaks
+Theorem 5's "zero tests".
+
+So the complete model is a split with a sharp boundary:
+
+| release kind | conditional-move join | placement | cost |
+| --- | --- | --- | --- |
+| silent (`FreeStr`, `FreeArr`, boxes, `Deep` walks with no user code) | **Rule N: normalized, accepted** | earliest death (Theorem 7) | zero |
+| observable (`impl Owned` with a user body) | **refused, with a diagnostic naming the place and both paths** | block exit, matching the interpreter | zero |
+
+The refusal is now a THIN case — only user-bodied releases, only when moved on
+one path of a join and live nowhere after — and the diagnostic can say
+precisely what to write instead (`drop p` on the non-moving path), which makes
+it the same family as "consumed by `m` inside a loop". Everything else, the
+211.5 MB case included, is accepted and exact.
+
+## 18. What each open leak becomes under this model
+
+| leak (census) | model verdict |
+| --- | --- |
+| temporary never released (`check(make(d))`) | R1: `Released` argument, dies after the call. The tree is freed 20,000 times; the wasm measurement (10 MB against 330.5) is this row already running |
+| escaping accumulator (`out` consumed at end) | dissolved by per-POINT `σ`: at every store in the loop `σ(out) = O`, so R2 releases the old buffer; the final `consume` sets `Ø` **at the move**, not retroactively for the binding's whole life. The per-binding/per-value confusion cannot be expressed in this model |
+| conditional move, silent type (§10) | Rule N releases on the non-moving edge: 211.5 MB → one buffer |
+| conditional move, observable type | refused with a diagnostic (§17) — the only refusal the model makes |
+
+## 19. Assumptions, restated for Part II
+
+A1–A5 as in §3, plus:
+
+- **A6 (borrows are path-invariant).** A variable in state `B` is a `read` or
+  `modify` parameter and is never reassigned. *Holds today because parameters
+  are not assignable; if that ever changes, §12's case analysis gains a real
+  `B`-conflict and Theorem 4 needs revisiting — this is the assumption to pin
+  with a test.*
+
+And the standing caveat of §9 stands: **the classification table (§4, now with
+`Grow`) is the proof's entire attack surface.** Three A4 violations in one day,
+all on the `Alloc`/`Lend` boundary, all defaulting to the leaking side. The
+model does not make that table right; it makes everything DOWNSTREAM of the
+table right, and makes the table small enough to audit — four classes, one
+verdict per signature position, and every entry falsifiable by the memory
+suite's `Steady`/`Leaks` rows with the interpreter as oracle.
