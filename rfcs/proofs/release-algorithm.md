@@ -625,3 +625,233 @@ model does not make that table right; it makes everything DOWNSTREAM of the
 table right, and makes the table small enough to audit — four classes, one
 verdict per signature position, and every entry falsifiable by the memory
 suite's `Steady`/`Leaks` rows with the interpreter as oracle.
+
+---
+
+# Part III — The unconstrained redesign
+
+Parts I and II answer "is the algorithm right". Part III answers a harder
+question: **what is the design under which the last week's defects could not
+have been written?** Nothing here is limited to the current code's shape. Three
+lenses, because each attacks a different weakness of Parts I–II:
+
+- the **proof-theoretic** lens attacks "the classification table is asserted,
+  not derived" (§9's first confession);
+- the **systems** lens attacks "a dozen special-case mechanisms, duplicated
+  across two backends, each independently wrong-able";
+- the **mathematical** lens looks for the theorem that makes the whole design
+  inevitable rather than chosen.
+
+They converge, and the point of this part is to show WHERE.
+
+## 20. The master theorem: static ownership is partially evaluated refcounting
+
+The observation that reframes everything: the interpreter is correct with no
+analysis because `Rc` makes ownership a property of the RUNTIME, and the
+compiled backends are wrong because they make it a property of an analysis that
+is not asked. Those are not two designs to reconcile. They are one design at
+two stages of evaluation.
+
+**Claim.** The move checker's discipline (A1–A3, A6) is exactly the fragment of
+the language on which reference counting is STATICALLY EVALUABLE — every
+count's zero-crossing is decidable at compile time.
+
+Make it precise. In the interpreter, passing a value to a `read` parameter
+clones the `Rc` (count rises), and the clone dies when the callee returns. By
+**A2** a borrow is never stored, so every non-owner handle's lifetime is
+strictly nested inside the owner's live range. Therefore:
+
+**Theorem 8 (coincidence).** For a checker-accepted program, every allocation's
+strong count reaches zero exactly once, at the point Part II's model marks the
+owner `O → Ø` by a release rule — the borrow clones having all died earlier by
+nesting. The static release plan and the dynamic zero-crossings are the same
+set of events.
+
+*Proof sketch.* Induction over the trace with I₁–I₄. The owner handle is the
+`O` place; each borrow clone is created at a call and destroyed at its return,
+which precedes any release of the owner on the same path (a release site is
+never inside a call that borrowed the value — R1 sits after the call, R2/R3/R5
+are statements, R4 is an exit). So the owner's drop is the last handle's drop.
+The count's zero point is the owner's release point. ∎
+
+**Theorem 9 (erasure).** A SILENT free — one that runs no user code and writes
+no stream — commutes with every observable operation. Hence moving it from the
+`Rc`-zero point to the earliest-death point (Theorem 7's placement) preserves
+observable behaviour, and only shrinks residency. The one non-commuting free is
+a declared `impl Owned` body, which is why §17's split falls where it falls.
+
+*Caveat, stated because it is real:* allocation failure is observable as an OOM
+trap. Earlier frees only reduce OOM, so the reorder is sound in the improving
+direction; a program that RELIED on running out of memory at a particular
+statement was never portable across the three engines anyway.
+
+**Why this matters beyond elegance.** Correctness stops being "the plan
+satisfies four rules" and becomes "the plan equals the erasure of the
+interpreter" — a statement with a MECHANICAL check (§26). The interpreter is
+promoted from test oracle to *definition*.
+
+## 21. Theorem 10: the refusal set is minimal, not preferred
+
+§17 chose to refuse a conditionally-moved `impl Owned` binding. Unconstrained,
+one should ask: is that choice forced?
+
+**Theorem 10 (exact characterization).** A checker-accepted function admits a
+guard-free, flag-free static release plan that (a) satisfies Theorems 1–3 and
+(b) places every observable release at its semantically defined point, **iff**
+every place with an observable release kind has path-invariant fate at every
+join. Silent kinds never obstruct: Rule N completes their plan on any CFG.
+
+*Proof.* (⇐) is Part II. (⇒): suppose fates differ at a join for observable
+place `p` — owned on edge 1, moved on edge 2. Any static plan must decide `p`'s
+release downstream of the join. Releasing: doubles on path 2 (Theorem 1
+violated). Not releasing: leaks on path 1 (Theorem 2 violated). Releasing on
+edge 1: violates (b), the observable point moved. There is no fourth option
+without a runtime discriminator — which is the definition of a flag. ∎
+
+So the ONE refused case is exactly the case where no correct plan exists under
+the stated semantics. The diagnostic is not the model giving up; it is the
+model reporting an impossibility, the way a type error does. That is the
+mathematical lens's contribution: **the boundary of the method is
+characterized, not chosen** — and anyone proposing to accept that case is
+proposing a flag or a semantics change, and now has to say which.
+
+## 22. One data structure, and the deletion list
+
+The systems lens: three leaks in one day, each hidden by a DIFFERENT mechanism
+— the depth counter under `owns_heap`, the `mentions_place` guard, the
+`FreeStr` filter — and each mechanism duplicated, differently, in `direct.rs`.
+The bug factory is not any one guard. It is that **codegen decides**. Two
+backends each re-derive ownership facts from scraps (`drop_slots`,
+`mentions_place`, filters), so every fact has three implementations that can
+disagree: the analysis's, lib.rs's, direct.rs's.
+
+The fix is the boring one: **one table, dumb consumers.**
+
+```
+ReleasePlan = [ Obligation { at: PointId, place: PlaceId,
+                             kind: DropKind, why: Rule } ]
+```
+
+Produced entirely by `own::analyze` + Part II's two passes. Both backends
+consume it: at each point, emit the frees the plan names, with the kind the
+plan names. A backend makes ZERO ownership decisions.
+
+What that deletes — every one of these is a decision site today, and every one
+has hosted or could host a defect:
+
+| mechanism | today | after |
+| --- | --- | --- |
+| `Gen::slot_owns` / `Fn_::place_owns` | per-binding guess, twice | gone — the plan says |
+| `mentions_place` at stores + the `fresh_str` exception | heuristic, twice | gone — `Grow` is a class in the plan |
+| `arg_drops` + `FreeStr` filter | verdict discarded by kind | gone — obligations are typed |
+| `str_temporary` / `free_str_temp` | String-only special case | an ordinary R1″ obligation |
+| the append spine's ownership shadow | its own state machine | a `Grow` obligation stream |
+| block-exit `drop_slots` ordering | re-derived per backend | R4 obligations, ordered in the plan |
+
+Six decision mechanisms times two backends collapse into one producer and two
+emitters. The prepend bug, the FreeStr bug and the escaping-accumulator bug
+become UNWRITABLE — not fixed, unwritable — because the place they were written
+no longer exists.
+
+## 23. Wrong frees made unrepresentable
+
+The proof-theoretic lens, applied to the compiler's own Rust. Two mechanisms,
+both cheap, both in the spirit of a discipline the codebase already has
+(`release_kind`'s "the match has no `_` arm on purpose", own.rs:550).
+
+**Linear discharge.** The plan is consumed through an API that enforces
+affinity: `plan.take(at)` yields the obligations for a point at most once, and
+`plan.finish()` — called at the end of every function's emission, by both
+backends — panics naming any obligation never taken. Skipping an obligation
+(the `direct.rs`-forgot-the-fix failure mode that the memory suite caught by
+measurement) becomes a loud failure at compile time of the PROGRAM, before any
+measurement runs.
+
+**Typed handles.** The wasm emitter's values are `i32` soup, which is why the
+textual backend caught the FreeStr misuse (LLVM is typed) and the direct one
+would not have. The emitters' handles become a closed enum —
+`Handle::Str(reg) | Agg(slot) | Scalar(reg)` — and `emit_free(kind, handle)` is
+a TOTAL match with no wildcard. Handing an aggregate to a String free stops
+being a runtime corruption and becomes a compiler-compile error; adding a
+`DropKind` variant forces every emitter arm to answer.
+
+Together these are the Agda move translated to Rust: not full dependent types,
+but the two properties that matter — *every obligation discharged exactly
+once*, *no free constructible at the wrong representation* — pushed into types
+and asserts that fail the build, not the profile.
+
+## 24. The classification table, witnessed instead of asserted
+
+§9's first confession stands over Parts I–II: `Alloc`/`Lend`/`Grow` is the
+entire attack surface, and it was wrong three times in one day, always
+defaulting to the leaking side. Unconstrained, the fix is to make every row an
+EXECUTABLE CLAIM:
+
+- Each runtime helper and primitive carries its class as data:
+  `(name, class, prover)`.
+- The **prover** is a test: run the primitive in the interpreter, compare the
+  result's allocation identity against every input's (`Rc::ptr_eq`; in the C
+  shim's debug mode, pointer equality). `Alloc` asserts freshness against all
+  inputs. `Grow(p)` asserts identity with exactly `p` — or a fresh block whose
+  old block was freed, the realloc case, observed via the debug allocator's
+  log. `Lend` asserts identity with some input.
+- A meta-test walks the table: **a row without a prover fails.** A row whose
+  prover fails names the primitive and the direction of the lie.
+
+`__vyrn_str_concat` misclassified as `Grow` — defect (b) — dies in that test
+the day it is written: the prover observes a fresh pointer and says `Alloc`.
+The table remains the axiom set of the proof, but every axiom is now falsified
+automatically rather than by a 9.9 GB measurement.
+
+## 25. The oracle, completed: free-trace bisimulation
+
+`memory.rs` compares PEAK at two call counts — it sees leaks. It cannot see a
+free at the WRONG POINT that happens to keep peak flat, and it cannot see a
+double free at all (that is parity's accidental job). Theorem 8 licenses the
+complete check:
+
+- Debug interpreter: log `(allocation-site, birth-index)` at every `Rc`
+  zero-crossing.
+- Debug compiled builds: the shim and the wasm runtime log every free the plan
+  emits, with the same keys.
+- The harness asserts the two MULTISETS are equal per program — and, for
+  observable releases, that the two SEQUENCES agree.
+
+Equality of multisets is Theorems 1+2 verified per trace. Sequence agreement on
+the observable subset is Theorem 9's boundary verified per trace. This is the
+bisimulation the coincidence theorem promises, and it subsumes every
+`Steady`/`Leaks` row while catching the two failure classes those rows cannot.
+
+## 26. Migration, in the order that keeps every step green
+
+1. **Witness the table** (§24) against today's classifications — this can land
+   first and alone, and would already have caught defects (a) and (b).
+2. **Build `ReleasePlan`** in `own::analyze` from the facts movecheck already
+   computes; assert it AGREES with today's emission on the corpus (plan-vs-IR
+   differential) before any backend consumes it.
+3. **Switch the textual backend** to the plan behind the linear-discharge API;
+   memory suite + parity green.
+4. **Switch `direct.rs`**; delete its private copies. `plan.finish()` is what
+   makes a missed site loud.
+5. **Land Rule N and R1-general** — now one change in one producer, both
+   backends inherit it, and the two open `Leaks` rows flip to `Steady`.
+6. **Free-trace bisimulation** (§25) as the standing gate; retire nothing —
+   peak rows stay as the cheap smoke layer.
+
+Each step is separately revertible and separately testable, which is the
+property this week's fixes did not have until the memory suite gained rows.
+
+## 27. What the three lenses agree on
+
+Stated once, because it is the actual conclusion:
+
+> **Move every decision into one artifact whose production is proved (Part II),
+> whose consumption is forced (linear discharge, typed handles), whose axioms
+> are executable (witnessed classification), and whose ground truth is the
+> interpreter (coincidence + bisimulation).**
+
+The proofs in Parts I–II are unchanged by Part III. What changes is where they
+attach: to one table produced in one place, instead of to a dozen guards in
+three. A proof about a single artifact with forced consumption is worth more
+than the same proof about a convention — the last week is the evidence.
+

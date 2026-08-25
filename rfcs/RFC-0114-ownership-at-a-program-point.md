@@ -7,7 +7,11 @@
   today's defects violated. Part II: the complete model — edge normalization
   makes the ambiguous join UNREACHABLE instead of refused, with closure and
   optimality theorems (minimal releases, zero runtime state, pointwise-minimal
-  residency) and the one case it cannot serve.
+  residency) and the one case it cannot serve. Part III: the unconstrained
+  redesign — static ownership as partially evaluated refcounting (Theorem 8),
+  the refusal set proved minimal (Theorem 10), one `ReleasePlan` artifact that
+  deletes six decision mechanisms from both backends, witnessed classification,
+  and free-trace bisimulation against the interpreter as the standing gate.
 
 ## The gap in one sentence
 
