@@ -5937,6 +5937,42 @@ impl<'a> Interp<'a> {
                         }
                         (a, b, c) => Err(format!("tally of {a:?}, {b:?}, {c:?}").into()),
                     },
+                    // `m.tallyBytes(w, n)` (RFC-0116): `tally` keyed by raw
+                    // bytes. THIS engine builds the String either way — the
+                    // hit-path economy is the compiled backends' — but the trap
+                    // is canonical here first, as every trap is.
+                    "@tallyBytes" => match (&vals[0], &vals[1], &vals[2]) {
+                        (Val::Map(m0), Val::Array(bytes), Val::Int(n)) => {
+                            let mut raw = Vec::with_capacity(bytes.len());
+                            for b in bytes.iter() {
+                                match b {
+                                    Val::IntN { v, .. } => raw.push(*v as u8),
+                                    Val::Int(v) => raw.push(*v as u8),
+                                    other => {
+                                        return Err(
+                                            format!("tallyBytes over non-byte {other:?}").into()
+                                        )
+                                    }
+                                }
+                            }
+                            if raw.contains(&0) {
+                                return Err(crate::trap::io("tbytes").to_string().into());
+                            }
+                            let Ok(key) = std::str::from_utf8(&raw) else {
+                                return Err(crate::trap::io("tbytes").to_string().into());
+                            };
+                            let key = key.to_string();
+                            let mut next = m0.clone();
+                            let mm = std::rc::Rc::make_mut(&mut next);
+                            let cur = match mm.get(&key) {
+                                Some(Val::Int(v)) => *v,
+                                _ => 0,
+                            };
+                            mm.insert(key, Val::Int(cur + n));
+                            Ok(Val::Map(next))
+                        }
+                        (a, b, c) => Err(format!("tallyBytes of {a:?}, {b:?}, {c:?}").into()),
+                    },
                     // `dst.copyFrom(src)` (RFC-0115): the receiver's buffer,
                     // the source's elements. Value-wise that IS the source, and
                     // `Rc` makes the copy lazy — buffers are the compiled

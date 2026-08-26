@@ -421,6 +421,28 @@ fn rows() -> Vec<Function> {
             Type::Map(Box::new(Str), Box::new(Int)),
             &[],
         ),
+        // `m.tallyBytes(w, n)` (RFC-0116): the byte-keyed form. On a hit the
+        // bytes are compared where they lie — no String, no validation, no
+        // allocation; a miss builds the key once, and bytes that are not a
+        // String trap with `stringFromBytes`'s reasons behind one wording.
+        row(
+            "@tallyBytes",
+            &[],
+            &[
+                ("m", Read, Type::Map(Box::new(Str), Box::new(Int))),
+                (
+                    "w",
+                    Read,
+                    arr(Type::IntN {
+                        bits: 8,
+                        signed: false,
+                    }),
+                ),
+                ("n", Read, Int),
+            ],
+            Type::Map(Box::new(Str), Box::new(Int)),
+            &[],
+        ),
         // ---- the rest of the allocating returns (RFC-0096 M3) ---------------
         // RFC-0094 folded FOUR return types onto rows and left the audit at
         // that. RFC-0096 M2 found the hole by building a fixture: `let s =

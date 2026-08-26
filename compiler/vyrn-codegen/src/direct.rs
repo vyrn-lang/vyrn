@@ -5509,7 +5509,9 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 // RFC-0115: `reserve`/`append` hand back the receiver's own
                 // type — capacity is not part of it.
-                "@reserve" | "@append" | "@copyFrom" | "@tally" if !args.is_empty() => {
+                "@reserve" | "@append" | "@copyFrom" | "@tally" | "@tallyBytes"
+                    if !args.is_empty() =>
+                {
                     self.peek(&args[0], line)?
                 }
                 "@push" | "@list" if !args.is_empty() => match self.peek(&args[0], line)? {
@@ -7495,6 +7497,7 @@ impl<'p> Fn_<'_, 'p> {
             "@append" if args.len() == 2 => return self.append_arr(m, b, args, line),
             "@copyFrom" if args.len() == 2 => return self.copy_from_arr(m, b, args, line),
             "@tally" if args.len() == 3 => return self.map_tally(m, b, args, line),
+            "@tallyBytes" if args.len() == 3 => return self.map_tally_bytes(m, b, args, line),
             // A `SmallArray` receiver takes the four-field path. Dispatched on
             // `peek` rather than on an emitted type, because the receiver must not
             // be evaluated twice — `sa_method` evaluates it itself, and for `pop`
@@ -12224,6 +12227,124 @@ impl<'p> Fn_<'_, 'p> {
     /// the caller, because a new value that names the map could name the very
     /// bytes this frees. The map takes the value as well as the key, so a hit
     /// that only stored over the old value leaked it.
+    /// `m.tallyBytes(w, n)` (RFC-0116). THIS backend validates and builds the
+    /// key first and then tallies — the one-probe, key-only-on-miss economy is
+    /// the native backend's; what parity holds here is the SEMANTICS, the trap
+    /// included. The key this path builds is owned, so a hit frees it and a
+    /// miss stores it, no copy either way.
+    fn map_tally_bytes(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let mty = self.expr(m, b, &args[0])?;
+        let Type::Map(..) = self.cx.resolve(&mty) else {
+            return unsupported(&format!("`tallyBytes` on `{mty}`"), line);
+        };
+        let l = self.layout_of(&mty, line)?;
+        let hdr = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(hdr));
+        let bytes = Type::Array(Box::new(Type::IntN {
+            bits: 8,
+            signed: false,
+        }));
+        let wsrc = b.local(ValType::I32);
+        self.expr_as(m, b, &args[1], &bytes)?;
+        b.ins(&Instruction::LocalSet(wsrc));
+        let al = self.layout_of(&bytes, line)?;
+        let n = b.local(ValType::I64);
+        self.expr_as(m, b, &args[2], &Type::Int)?;
+        b.ins(&Instruction::LocalSet(n));
+        // stringFromBytes into scratch; an Err is the trap.
+        let rl = layout::of_ll("{ i1, i64, i64 }").expect("the Result shape");
+        let dest = b.alloc(rl.size, rl.align);
+        b.ins(&Instruction::LocalGet(wsrc));
+        b.ins(&Instruction::I32Load(word_at(al.fields[0])));
+        b.ins(&Instruction::LocalGet(wsrc));
+        b.ins(&Instruction::I64Load(at(al.fields[1])));
+        b.ins(&Instruction::I32WrapI64);
+        b.slot(dest);
+        b.ins(&Instruction::Call(self.cx.rt.str_from_bytes));
+        b.slot(dest + rl.fields[0]);
+        b.ins(&Instruction::I32Load8U(MemArg {
+            offset: 0,
+            align: 0,
+            memory_index: 0,
+        }));
+        b.ins(&Instruction::I32Eqz);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        let msg = self.cx.rt.intern(
+            m,
+            &vyrn_frontend::trap::line(vyrn_frontend::trap::io("tbytes")),
+        );
+        b.ins(&Instruction::I32Const(msg as i32));
+        b.ins(&Instruction::Call(self.cx.rt.trap));
+        b.ins(&Instruction::Unreachable);
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        let k = b.local(ValType::I32);
+        b.slot(dest + rl.fields[1]);
+        b.ins(&Instruction::I64Load(at(0)));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalSet(k));
+        let idx = b.local(ValType::I32);
+        self.map_scan(b, hdr, &l, k, idx);
+        b.ins(&Instruction::LocalGet(idx));
+        b.ins(&Instruction::I32Const(0));
+        b.ins(&Instruction::I32LtS);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        // miss: the key is ours — store it, no copy.
+        self.map_reserve(b, hdr, &l, 8);
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I64Load(at(l.fields[2])));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalTee(idx));
+        b.ins(&Instruction::I32Const(4));
+        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::LocalGet(k));
+        b.ins(&Instruction::I32Store(word()));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        self.map_index(b, hdr, &l);
+        b.ins(&Instruction::LocalGet(idx));
+        b.ins(&Instruction::Call(self.cx.rt.map_put));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I64Load(at(l.fields[2])));
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Add);
+        b.ins(&Instruction::I64Store(at(l.fields[2])));
+        self.map_val_addr(b, hdr, &l, idx, 8);
+        b.ins(&Instruction::LocalGet(n));
+        b.ins(&Instruction::I64Store(at(0)));
+        b.ins(&Instruction::Else);
+        // hit: add in place; the key we built is surplus and ours to free.
+        self.map_val_addr(b, hdr, &l, idx, 8);
+        let vp = b.local(ValType::I32);
+        b.ins(&Instruction::LocalTee(vp));
+        b.ins(&Instruction::LocalGet(vp));
+        b.ins(&Instruction::I64Load(at(0)));
+        b.ins(&Instruction::LocalGet(n));
+        b.ins(&Instruction::I64Add);
+        b.ins(&Instruction::I64Store(at(0)));
+        if self.region_depth == 0 {
+            b.ins(&Instruction::LocalGet(k));
+            str_hdr(b);
+            b.ins(&Instruction::Call(self.cx.rt.free));
+        }
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        b.ins(&Instruction::LocalGet(hdr));
+        Ok(mty)
+    }
+
     /// `m.tally(k, n)` (RFC-0116): insert-or-add, ONE probe. The callee never
     /// takes the key — a hit adds in place and touches nothing else, a miss
     /// stores a COPY — so the caller's ownership is the same on both paths.

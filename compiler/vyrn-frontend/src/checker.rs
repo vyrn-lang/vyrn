@@ -7006,6 +7006,46 @@ impl<'a> Checker<'a> {
             }
             return Ok(at);
         }
+        // `m.tallyBytes(w, n)` (RFC-0116): `tally` keyed by raw bytes.
+        if name == "@tallyBytes" {
+            if args.len() != 3 {
+                return Err(cerr!(
+                    line,
+                    "`tallyBytes` takes 3 arguments, got {}",
+                    args.len()
+                ));
+            }
+            let at = self.expr(&args[0], scope, None, fn_ret)?;
+            match self.base(&at) {
+                Type::Map(_, v) if matches!(self.base(&v), Type::Int) => {}
+                Type::Err => return Ok(Type::Err),
+                Type::Map(_, v) => {
+                    return Err(cerr!(
+                        line,
+                        "`tallyBytes` counts Int64 values, and this map holds {v}"
+                    ))
+                }
+                other => {
+                    return Err(cerr!(
+                        line,
+                        "`tallyBytes` needs a Map<String, Int64> as its receiver, found {other}"
+                    ))
+                }
+            }
+            let want = Type::Array(Box::new(Type::IntN {
+                bits: 8,
+                signed: false,
+            }));
+            let w = self.expr(&args[1], scope, Some(&want), fn_ret)?;
+            if !self.coercible(&w, &want) {
+                return Err(cerr!(line, "`tallyBytes` key is {w}, not an Array<UInt8>"));
+            }
+            let n = self.expr(&args[2], scope, Some(&Type::Int), fn_ret)?;
+            if !self.coercible(&n, &Type::Int) {
+                return Err(cerr!(line, "`tallyBytes` count is {n}, not an Int64"));
+            }
+            return Ok(at);
+        }
         if name == "@copyFrom" {
             if args.len() != 2 {
                 return Err(cerr!(

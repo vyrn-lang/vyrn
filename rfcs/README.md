@@ -171,7 +171,7 @@ claim is true — is written down in the test's own header.
 | [0113](RFC-0113-bytes-takes-a-range.md) | `bytes` Takes a Range | Implemented; `slice` 57% of the site build to 9.2% |
 | [0114](RFC-0114-ownership-at-a-program-point.md) | Ownership At A Program Point | Implemented; ownership is per store, per edge, per parameter — six leak classes closed, each pinned by a row that failed first |
 | [0115](RFC-0115-reserve-and-append.md) | `reserve`, `append` and `copyFrom` | Implemented; a known-size build is one allocation, a bulk append is one copy, and an overwrite keeps its buffer |
-| [0116](RFC-0116-tally.md) | `tally` | Implemented; insert-or-add on a count map is one probe, and the audit caught the first draft's double free |
+| [0116](RFC-0116-tally.md) | `tally` and `tallyBytes` | Implemented; insert-or-add is one probe, byte keys exist only on a miss, and the audit caught the first draft's double free |
 
 ## The other documents here
 

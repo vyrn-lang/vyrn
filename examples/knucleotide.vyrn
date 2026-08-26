@@ -61,21 +61,28 @@ fn thirdSequence() -> Array<UInt8> {
 /// a key costs here, and it is the number this program exists to produce.
 fn countKmers(seq: Array<UInt8>, k: Int64) -> Map<String, Int64> {
     let mut m: Map<String, Int64> = [:]
+    if seq.length < k {
+        return m
+    }
+    // ONE window buffer for the whole scan, and no String anywhere on the hot
+    // path: `tallyBytes` (RFC-0116) compares the bytes where they lie, so a
+    // window that has been seen costs one probe — the key is built, and
+    // validated, only the first time a fragment appears.
+    let mut w: Array<UInt8> = []
+    w.reserve(k)
+    let mut j = 0
+    while j < k {
+        w.push(seq[j])
+        j = j + 1
+    }
     let mut i = 0
     while i + k <= seq.length {
-        let mut w: Array<UInt8> = []
-        let mut j = 0
-        while j < k {
-            w.push(seq[i + j])
-            j = j + 1
+        let mut t = 0
+        while t < k {
+            w[t] = seq[i + t]
+            t = t + 1
         }
-        let key = match stringFromBytes(w) {
-            Ok(s) => s,
-            Err(_) => "",
-        }
-        // One probe (RFC-0116): this was a read (`match m[key]`) and a
-        // store, each probing the index for the same key.
-        m.tally(key, 1)
+        m.tallyBytes(w, 1)
         i = i + 1
     }
     return m

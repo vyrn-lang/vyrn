@@ -134,6 +134,7 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("@append", Memory, "Array (RFC-0115): bulk copy of a heapless source, one growth"),
     ("@copyFrom", Memory, "Array (RFC-0115): overwrite in place, reusing the buffer"),
     ("@tally", Memory, "Map (RFC-0116): insert-or-add in one probe"),
+    ("@tallyBytes", Memory, "Map (RFC-0116): tally keyed by raw bytes; the key exists only on a miss"),
     ("@at", Memory, "Array: indexed read; also traps out of bounds"),
     ("@list", Memory, "a fixed and a growable array share one representation"),
     ("@toArray", Memory, "SmallArray (RFC-0056): copy the inline/spilled buffer out"),
@@ -576,9 +577,12 @@ fn the_census_is_the_code() {
     // overwrite that KEEPS the buffer cannot be said either, because every
     // store keeps the length and `append` only grows.
     //
-    // 94 -> 95 for RFC-0116's `@tally`: a read-then-store is two probes by
-    // construction, and no composition can make the find answer for both.
-    assert_eq!(found.len(), 95, "the primitive core changed size");
+    // 94 -> 96 for RFC-0116's `@tally` and `@tallyBytes`: a read-then-store
+    // is two probes by construction, and no composition can make the find
+    // answer for both; and no composition can probe a map WITHOUT building
+    // the String key first — the whole point of the byte-keyed form is that
+    // the key exists only on a miss.
+    assert_eq!(found.len(), 96, "the primitive core changed size");
 }
 
 /// The fourth engine, and nothing asked it anything until now (RFC-0094 M1).

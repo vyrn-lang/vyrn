@@ -303,6 +303,28 @@ static void map_reindex(VMap* m) {
     memset(m->idx, 0, (size_t)nb * sizeof(long long));
     for (i = 0; i < m->len; i++) m->idx[map_slot(m->keys, m->idx, nb, m->keys[i])] = i + 1;
 }
+/* Index of the entry whose key equals the RAW BYTES `p[0..blen)`, or -1
+   (RFC-0116). The hash is FNV-1a over exactly `blen` bytes, which equals
+   `map_hash` of the equal key — a stored key has no interior NUL, so its
+   to-the-NUL hash covers the same bytes. A slice that carries a NUL can
+   therefore never match, and the miss path's validation is what refuses it. */
+long long __vyrn_map_find_bytes(char** keys, long long len, const unsigned char* p, long long blen, long long* idx, long long cap) {
+    unsigned long long h = 14695981039346656037ULL, mask, b;
+    long long i;
+    if (len <= 0 || cap <= 0) return -1;
+    for (i = 0; i < blen; i++) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    mask = (unsigned long long)(cap * 2) - 1;
+    b = h & mask;
+    while (idx[b]) {
+        const char* k = keys[idx[b] - 1];
+        if (memcmp(k, p, (size_t)blen) == 0 && k[blen] == 0) return idx[b] - 1;
+        b = (b + 1) & mask;
+    }
+    return -1;
+}
 /* Index of `key`, or -1. Operates on raw buffers so read paths (`at`, `has`) can
    call it with values extracted from an SSA aggregate. */
 long long __vyrn_map_find(char** keys, long long len, const char* key, long long* idx, long long cap) {

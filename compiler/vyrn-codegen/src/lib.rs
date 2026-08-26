@@ -1354,6 +1354,10 @@ pub fn emit(program: &Program) -> Result<String, String> {
 ",
     );
     out.push_str(
+        "declare i64 @__vyrn_map_find_bytes(ptr, i64, ptr, i64, ptr, i64)
+",
+    );
+    out.push_str(
         "declare void @__vyrn_map_reserve(ptr, i64)
 ",
     );
@@ -1419,6 +1423,13 @@ pub fn emit(program: &Program) -> Result<String, String> {
             vyrn_frontend::trap::ARRAY_INDEX,
             "%lld",
         )),
+    ));
+    // RFC-0116: `tallyBytes` over bytes that are not a String. One wording for
+    // both of `stringFromBytes`'s reasons — the caller who wants the WHY has
+    // that function.
+    out.push_str(&trap_global(
+        "@.trap.tbytes",
+        &vyrn_frontend::trap::line(vyrn_frontend::trap::io("tbytes")),
     ));
     out.push_str(&trap_global(
         "@.trap.soob",
@@ -10789,6 +10800,116 @@ impl<'a> Gen<'a> {
             let kep = self.fresh_tmp();
             self.emit(format!("{kep} = getelementptr ptr, ptr {keys2}, i64 {len}"));
             self.emit(format!("store ptr {kcopy}, ptr {kep}"));
+            self.emit(format!(
+                "call void @__vyrn_map_index_add(ptr {slot}, i64 {len})"
+            ));
+            let vep = self.fresh_tmp();
+            self.emit(format!("{vep} = getelementptr i64, ptr {vals2}, i64 {len}"));
+            self.emit(format!("store i64 {nv}, ptr {vep}"));
+            let nl = self.fresh_tmp();
+            let lenp = self.fresh_tmp();
+            self.emit(format!("{nl} = add i64 {len}, 1"));
+            self.emit(format!(
+                "{lenp} = getelementptr {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}, i64 0, i32 2"
+            ));
+            self.emit(format!("store i64 {nl}, ptr {lenp}"));
+            self.emit_term(format!("br label %{done_l}"));
+            self.emit_label(&done_l);
+            let out = self.fresh_tmp();
+            self.emit(format!(
+                "{out} = load {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}"
+            ));
+            return Ok((out, mty));
+        }
+        // `m.tallyBytes(w, n)` (RFC-0116): `tally` keyed by raw bytes. The HIT
+        // path — the hot one in a counting loop — compares the bytes where they
+        // lie: no String, no UTF-8 validation, no allocation. Only a MISS
+        // builds the key, and bytes that are not a String trap there.
+        if name == "@tallyBytes" {
+            let (mv, mty) = self.gen_expr(&args[0])?;
+            let (wv, _) = self.gen_expr(&args[1])?;
+            let (nv, _) = self.gen_expr(&args[2])?;
+            let slot = self.fresh_alloca("{ ptr, ptr, i64, i64, ptr }");
+            self.emit(format!(
+                "store {{ ptr, ptr, i64, i64, ptr }} {mv}, ptr {slot}"
+            ));
+            let keys = self.fresh_tmp();
+            let len = self.fresh_tmp();
+            self.emit(format!(
+                "{keys} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {mv}, 0"
+            ));
+            self.emit(format!(
+                "{len} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {mv}, 2"
+            ));
+            let (ix, cap) = self.map_index_of(&mv);
+            let wdata = self.fresh_tmp();
+            let wlen = self.fresh_tmp();
+            self.emit(format!(
+                "{wdata} = extractvalue {{ ptr, i64, i64 }} {wv}, 0"
+            ));
+            self.emit(format!("{wlen} = extractvalue {{ ptr, i64, i64 }} {wv}, 1"));
+            let idx = self.fresh_tmp();
+            self.emit(format!(
+                "{idx} = call i64 @__vyrn_map_find_bytes(ptr {keys}, i64 {len}, ptr {wdata}, i64 {wlen}, ptr {ix}, i64 {cap})"
+            ));
+            let found = self.fresh_tmp();
+            self.emit(format!("{found} = icmp sge i64 {idx}, 0"));
+            let upd_l = self.fresh_label("tbyt.upd");
+            let mk_l = self.fresh_label("tbyt.mk");
+            let bad_l = self.fresh_label("tbyt.bad");
+            let chk_l = self.fresh_label("tbyt.chk");
+            let ins_l = self.fresh_label("tbyt.ins");
+            let done_l = self.fresh_label("tbyt.done");
+            self.emit_term(format!("br i1 {found}, label %{upd_l}, label %{mk_l}"));
+            self.emit_label(&upd_l);
+            let vals0 = self.fresh_tmp();
+            self.emit(format!(
+                "{vals0} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {mv}, 1"
+            ));
+            let ep0 = self.fresh_tmp();
+            let old = self.fresh_tmp();
+            let newv = self.fresh_tmp();
+            self.emit(format!("{ep0} = getelementptr i64, ptr {vals0}, i64 {idx}"));
+            self.emit(format!("{old} = load i64, ptr {ep0}"));
+            self.emit(format!("{newv} = add i64 {old}, {nv}"));
+            self.emit(format!("store i64 {newv}, ptr {ep0}"));
+            self.emit_term(format!("br label %{done_l}"));
+            // miss: the key exists from here on. `bytes_dup` answers null for an
+            // embedded NUL; the DFA answers for the rest; either way the trap.
+            self.emit_label(&mk_l);
+            let buf = self.fresh_tmp();
+            self.emit(format!(
+                "{buf} = call ptr @__vyrn_bytes_dup(ptr {wdata}, i64 {wlen})"
+            ));
+            let isnull = self.fresh_tmp();
+            self.emit(format!("{isnull} = icmp eq ptr {buf}, null"));
+            self.emit_term(format!("br i1 {isnull}, label %{bad_l}, label %{chk_l}"));
+            self.emit_label(&chk_l);
+            let valid = self.fresh_tmp();
+            self.emit(format!(
+                "{valid} = call i1 @__vyrn_utf8valid(ptr {buf}, i64 {wlen})"
+            ));
+            self.emit_term(format!("br i1 {valid}, label %{ins_l}, label %{bad_l}"));
+            self.emit_label(&bad_l);
+            self.emit("call void @__vyrn_trap_msg(ptr @.trap.tbytes)".into());
+            self.emit_term("unreachable".into());
+            self.emit_label(&ins_l);
+            self.emit(format!("call void @__vyrn_map_reserve(ptr {slot}, i64 8)"));
+            let hdr2 = self.fresh_tmp();
+            let keys2 = self.fresh_tmp();
+            let vals2 = self.fresh_tmp();
+            self.emit(format!(
+                "{hdr2} = load {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}"
+            ));
+            self.emit(format!(
+                "{keys2} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr2}, 0"
+            ));
+            self.emit(format!(
+                "{vals2} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr2}, 1"
+            ));
+            let kep = self.fresh_tmp();
+            self.emit(format!("{kep} = getelementptr ptr, ptr {keys2}, i64 {len}"));
+            self.emit(format!("store ptr {buf}, ptr {kep}"));
             self.emit(format!(
                 "call void @__vyrn_map_index_add(ptr {slot}, i64 {len})"
             ));
