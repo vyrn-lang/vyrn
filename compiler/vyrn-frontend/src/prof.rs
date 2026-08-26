@@ -216,13 +216,18 @@ mod tests {
         let rows = take();
         let by = |n: &str| rows.iter().find(|r| r.name == n).unwrap().clone();
         let (o, i) = (by("outer"), by("inner"));
-        // The callee's whole span belongs to the callee.
+        // The callee's whole span belongs to the callee. Lower bounds only:
+        // a sleep can overshoot on a loaded runner, never undershoot.
         assert!(i.exclusive >= Duration::from_millis(25), "{i:?}");
         assert!(o.inclusive >= Duration::from_millis(35), "{o:?}");
-        // And none of it to the caller: 10 ms of its own, not 40.
+        // And none of it to the caller: the two exclusives PARTITION the outer
+        // span, so their sum cannot exceed it. Arithmetic on one clock rather
+        // than a wall bound, because a loaded runner (macOS CI stretched the
+        // 10 ms sleep past 25) stretches every number together — a caller
+        // charged its callee's time fails this however slow the machine.
         assert!(
-            o.exclusive < Duration::from_millis(25),
-            "the caller was charged its callee's time: {o:?}"
+            o.exclusive + i.exclusive <= o.inclusive + Duration::from_millis(5),
+            "the caller was charged its callee's time: {o:?} {i:?}"
         );
     }
 
@@ -247,8 +252,15 @@ mod tests {
         let rows = take();
         let r = rows.iter().find(|r| r.name == "rec").unwrap();
         assert_eq!(r.calls, 2);
-        // Inclusive counts both frames and so can pass the wall time; exclusive
-        // is charged to the inner frame alone and cannot.
-        assert!(r.exclusive < Duration::from_millis(35), "{r:?}");
+        // Inclusive counts both frames; exclusive is charged to the inner
+        // frame alone, so it is at most HALF of inclusive plus the outer
+        // frame's own sliver — a ratio, not a wall bound, for the reason the
+        // test above states (macOS CI stretched the 20 ms sleep to 110).
+        // Charged twice, exclusive equals inclusive and this fails at any
+        // speed.
+        assert!(
+            r.exclusive * 2 <= r.inclusive + Duration::from_millis(5),
+            "{r:?}"
+        );
     }
 }
