@@ -94,6 +94,13 @@ export type Panel = { key: String, name: String, n: String, note: String, cause:
 /// programs, the same five contestants, the same cross-verification, measured
 /// by a runner that also records cpu time, peak memory, build time and source
 /// size. M2's original pair stays committed beside it and is not edited.
+///
+/// DATED, AND HONESTLY SO: this record predates RFC-0114, when the compiled
+/// legs LEAKED instead of releasing — the record's own memory column says it
+/// (binary-trees at 2,093 MB where it now peaks at 262). A current build pays
+/// for reclamation these rows never did, so its wall clock is not comparable
+/// to them in either direction. The record stays as the honest snapshot it
+/// is; replacing it is a re-run on a machine, not an edit here.
 fn run1File() -> String {
     return "rfcs/bench-0104/results/2026-08-19-v2.json"
 }
@@ -1207,7 +1214,7 @@ export fn causeRows() -> Array<Array<String>> {
 export fn workItems() -> Array<String> {
     return [
         "CLOSED — the Map is hashed in all three engines: an FNV index of cap*2 buckets lives beside the insertion-ordered storage and never reorders it, which is how RFC-0028's locked order survives a hash underneath. The shim's map_find, the wasm runtime's, and the interpreter's MapVal all probe instead of scanning.",
-        "CLOSED — m.tallyBytes(w, n) (RFC-0116) probes with the bytes where they lie: on the native backend a seen window costs one probe, and the String is built and validated once per distinct fragment, not once per position. k-nucleotide's inner loop is one reused buffer and one call.",
+        "CLOSED — m.tallyBytes(w, n) (RFC-0116) probes with the bytes where they lie, on both compiled backends: a seen window costs one probe, and the String is built and validated once per distinct fragment, not once per position. k-nucleotide's inner loop is one reused buffer and one call.",
         "CLOSED — m.tally(k, n) (RFC-0116) is insert-or-add in one probe; k-nucleotide's read-then-store count loop is one call. The scan itself had already fallen to the hash index, so what this removes is the second probe.",
         "CLOSED — std/arrays gained sortWith(xs, cmp): a comparator crosses the API now, so count-descending-ties-by-fragment is one stable pass, and k-nucleotide's hand-written insertion sort with three copies per swap is gone.",
         "CLOSED — dst.copyFrom(src) (RFC-0115) overwrites in place, reusing the buffer: one copy, growth only when the source is longer. fannkuch's per-permutation refill loop is one call now; the allocation itself had already been engineered out by returning the buffer.",

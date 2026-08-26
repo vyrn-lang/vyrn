@@ -46,9 +46,11 @@ both reasons, byte-identical in all three engines:
 
 > error: tallyBytes: the bytes are not a String — `stringFromBytes` names why
 
-The direct wasm backend validates and builds the key first and then tallies
-— the SEMANTICS are parity's contract, the one-probe economy is the native
-backend's. The asymmetry is deliberate and this section is its record.
+The direct wasm backend carries the same probe now: `map_find_bytes` in its
+runtime — the FNV loop, the length-aware compare, the terminator check,
+instruction for instruction in effect — so its hit path builds no String
+either. (It landed one commit after the native one; the paragraph that stood
+here recorded the interim asymmetry as deliberate, and it lasted a day.)
 
 k-nucleotide's whole inner loop moved: one window buffer for the entire
 scan (RFC-0115's `reserve` plus element overwrites), one `tallyBytes` per

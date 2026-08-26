@@ -38,15 +38,25 @@
   partition from spawn isolation, and borrows/lifetimes/RFC-0109 unified as one
   question about brackets: who proves the nesting.
 
+**How to read this document.** Everything from here through "A recommended
+shape" is the DRAFT-TIME record, kept as written because the measurements and
+the reasoning are the evidence the design was chosen on. The present tense in
+those sections describes the compiler as it stood before the arc; each
+milestone section carries an "as landed" record, and the Status header above
+is the current state.
+
 ## The gap in one sentence
 
-The compiled backends know whether a BINDING is released at the end of its
-block; they do not know whether a PLACE holds heap at a given statement — so a
-value that is neither a live binding nor a block-exit binding is never released.
+The compiled backends knew whether a BINDING was released at the end of its
+block; they did not know whether a PLACE held heap at a given statement — so a
+value that was neither a live binding nor a block-exit binding was never
+released. (Closed: the plan's per-node sets and the R1′/Rule N/untake
+landings below.)
 
 ## Why this is one RFC and not two bugs
 
-Two leaks are open, they look unrelated, and they are the same missing fact.
+Two leaks were open, they looked unrelated, and they were the same missing
+fact.
 
 **A temporary has no binding.** `check(make(depth))` builds a tree, lends it to
 `check`, and drops it on the floor. `Gen` emits a release from `drop_slots`,
@@ -79,14 +89,16 @@ differing by 37x in memory.
 
 ## THE INTERPRETER IS RIGHT AND THE COMPILED BACKENDS ARE WRONG
 
-That is the part that makes this urgent rather than merely untidy. `Val::Str` is
+That was the part that made this urgent rather than merely untidy. `Val::Str` is
 an `Rc<String>` and `Val::Array` an `Rc<Vec<Val>>`, so the interpreter reclaims a
 temporary when the last handle goes, with no analysis at all. Native and wasm
 carry no refcount and rely on the analysis, and the analysis is not asked.
 
 **Three-way parity cannot see this.** It compares bytes on stdout and exit codes,
 which are identical. A test suite that runs every example on three engines
-reports 40/40 while one engine uses 37 times the memory of another.
+reported 40/40 while one engine used 37 times the memory of another. (The
+`memory.rs` rows and the free audit are the answer this finding demanded, and
+both stand as gates now.)
 
 ## What a design has to satisfy
 
