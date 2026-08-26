@@ -1,9 +1,12 @@
 // k-nucleotide, from the Computer Language Benchmarks Game (RFC-0104 M1).
 //
 // Count every DNA fragment of a given length in the third sequence of a FASTA
-// file on stdin. It measures the hash map, and it measures it the hard way:
-// there is one key per position of the sequence, and the key is a window of its
-// bytes.
+// file on stdin. It measures the hash map, and it measures it the way the C
+// reference does now (RFC-0117): a k-mer over four bases is two bits a base,
+// so the key is an Int64 maintained ROLLING — one multiply, one add, one
+// modulo per position, whatever the width — and the table is Map<Int64, Int64>.
+// No window buffer, no byte hash, no String anywhere in the counting loop; a
+// fragment becomes text once, when a table row is printed.
 //
 //   $ vyrn run examples/knucleotide.vyrn < rfcs/bench-0104/fasta-1000.expected
 //   $ vyrn bench examples/knucleotide.vyrn
@@ -12,11 +15,11 @@
 // corpus feeds it automatically; the output is
 // `rfcs/bench-0104/knucleotide-1000.expected`.
 //
-// The census cost this program used to pay — a heap `String` manufactured and
-// validated per window, because `Map` keys are `String` (RFC-0028) — is gone:
-// `tallyBytes` (RFC-0116) probes the window's bytes where they lie, and the
-// key is built once per DISTINCT fragment. `sortWith` (a comparator) orders by
-// count descending with ties by fragment in one stable pass.
+// Packing bounds the width at 31 (4^k must fit an Int64); the game's largest is
+// 18. `sortWith` (a comparator) orders by count descending with ties by
+// fragment in one stable pass — and a tie compares the PACKED keys, because
+// A=0 < C=1 < G=2 < T=3 matches the bytes' own order ('A' < 'C' < 'G' < 'T'),
+// so numeric order on equal-width keys IS lexicographic order on fragments.
 
 import { toUpper } from "std/strings"
 import { startsWith } from "std/strpred"
@@ -32,7 +35,23 @@ fn namedFragments() -> Array<String> {
     return ["GGT", "GGTA", "GGTATT", "GGTATTTTAATT", "GGTATTTTAATTTATAGT"]
 }
 
-type Entry = { frag: String, count: Int64 }
+type Entry = { key: Int64, count: Int64 }
+
+/// The 2-bit code of one base.
+fn code(b: UInt8) -> Int64 {
+    return if b == 'A' { 0 } else if b == 'C' { 1 } else if b == 'G' { 2 } else { 3 }
+}
+
+/// `4^k` — the modulus that ages the oldest base out of a rolling key.
+fn modulusOf(k: Int64) -> Int64 {
+    let mut m = 1
+    let mut j = 0
+    while j < k {
+        m = m * 4
+        j = j + 1
+    }
+    return m
+}
 
 /// The THREE sequence from FASTA on stdin: uppercased, with the newlines and
 /// the other two sequences left out.
@@ -54,35 +73,49 @@ fn thirdSequence() -> Array<UInt8> {
     return out
 }
 
-/// Every window of width `k`, counted. A key costs one `stringFromBytes` per
-/// DISTINCT fragment — the first time it appears — and one byte probe after.
-fn countKmers(seq: Array<UInt8>, k: Int64) -> Map<String, Int64> {
-    let mut m: Map<String, Int64> = [:]
+/// Every window of width `k`, counted. A window costs one multiply, one add,
+/// one modulo and one `tally` probe — nothing is allocated, hit or miss.
+fn countKmers(seq: Array<UInt8>, k: Int64) -> Map<Int64, Int64> {
+    let mut m: Map<Int64, Int64> = [:]
     if seq.length < k {
         return m
     }
-    // ONE window buffer for the whole scan, and no String anywhere on the hot
-    // path: `tallyBytes` (RFC-0116) compares the bytes where they lie, so a
-    // window that has been seen costs one probe — the key is built, and
-    // validated, only the first time a fragment appears.
-    let mut w: Array<UInt8> = []
-    w.reserve(k)
-    let mut j = 0
-    while j < k {
-        w.push(seq[j])
-        j = j + 1
-    }
+    let modulus = modulusOf(k)
+    let mut key = 0
     let mut i = 0
-    while i + k <= seq.length {
-        let mut t = 0
-        while t < k {
-            w[t] = seq[i + t]
-            t = t + 1
+    while i < seq.length {
+        key = (key * 4 + code(seq[i])) % modulus
+        if i >= k - 1 {
+            m.tally(key, 1)
         }
-        m.tallyBytes(w, 1)
         i = i + 1
     }
     return m
+}
+
+/// The fragment a packed key spells at width `k` — highest two bits first.
+fn unpack(key: Int64, k: Int64) -> String {
+    let alphabet = bytes("ACGT")
+    let mut w: Array<UInt8> = []
+    w.reserve(k)
+    let mut d = modulusOf(k) / 4
+    while d >= 1 {
+        w.push(alphabet[(key / d) % 4])
+        d = d / 4
+    }
+    return match stringFromBytes(w) {
+        Ok(s) => s,
+        Err(_) => "",
+    }
+}
+
+/// The packed key a fragment spells — `unpack`'s inverse.
+fn pack(frag: String) -> Int64 {
+    let mut key = 0
+    for b in bytes(frag) {
+        key = key * 4 + code(b)
+    }
+    return key
 }
 
 /// `x` at three decimal places — `print` gives six and the game asks for three.
@@ -97,9 +130,8 @@ fn fixed3(x: Float64) -> String {
 }
 
 /// Count descending, ties by fragment ascending — one comparator, one stable
-/// pass. This was two passes until `sortWith` landed: a hand-written insertion
-/// sort for the fragment order (three `.copy()` per swap) and then `sortBy`
-/// on the negated count, because no comparator crossed the API.
+/// pass. The tie compares packed keys: same width, and the 2-bit codes are in
+/// the bytes' own order, so the numbers sort exactly as the strings would.
 fn byCountThenFrag(a: Entry, b: Entry) -> Int64 {
     if a.count > b.count {
         return 0 - 1
@@ -107,34 +139,35 @@ fn byCountThenFrag(a: Entry, b: Entry) -> Int64 {
     if a.count < b.count {
         return 1
     }
-    if a.frag < b.frag {
+    if a.key < b.key {
         return 0 - 1
     }
-    if a.frag > b.frag {
+    if a.key > b.key {
         return 1
     }
     return 0
 }
 
-fn ranked(m: Map<String, Int64>) -> Array<Entry> {
+fn ranked(m: Map<Int64, Int64>) -> Array<Entry> {
     let mut es: Array<Entry> = []
-    for k in m.keys() {
-        let c = match m[k] {
+    for key in m.keys() {
+        let c = match m[key] {
             Some(v) => v,
             None => 0,
         }
-        es.push(Entry { frag: k, count: c })
+        es.push(Entry { key: key, count: c })
     }
     return sortWith(es, byCountThenFrag)
 }
 
 /// One frequency table: every fragment of width `k` as a percentage of the
-/// windows there are, then a blank line.
+/// windows there are, then a blank line. The unpack runs once per printed row
+/// — 4 rows at width 1, 16 at width 2 — not once per window.
 fn report(seq: Array<UInt8>, k: Int64) {
     let m = countKmers(seq, k)
     let total = seq.length - k + 1
     for e in ranked(m) {
-        print("\{e.frag} \{fixed3(100.0 * Float64(e.count) / Float64(total))}")
+        print("\{unpack(e.key, k)} \{fixed3(100.0 * Float64(e.count) / Float64(total))}")
     }
     print("")
 }
@@ -146,7 +179,7 @@ fn report(seq: Array<UInt8>, k: Int64) {
 /// scan would measure something the other languages are not doing.
 fn countOf(seq: Array<UInt8>, frag: String) -> Int64 {
     let m = countKmers(seq, Int64(frag.byteLength))
-    return match m[frag] {
+    return match m[pack(frag)] {
         Some(c) => c,
         None => 0,
     }

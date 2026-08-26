@@ -136,6 +136,28 @@ RFC-0117 now carries both: the key-type set is a `Hashable` protocol (the
 user's call), and the wire form is held open by refusal at the boundary until
 a real program needs a keyed map to cross one.
 
+## Measured end-to-end, after RFC-0117 M1
+
+`examples/knucleotide.vyrn` converted to the rolling key the day M1 landed:
+`Map<Int64, Int64>`, `key = (key * 4 + code) mod 4^k`, no window buffer, no
+String anywhere in the counting loop, output byte-identical on all three
+engines and at a 5,000,000-base input. Interleaved old/new, three rounds each,
+one window, fasta N = 1,000,000 (a 10.3 MB stdin; medians):
+
+| | whole program | minus the shared input parse (~98 ms) |
+| --- | --- | --- |
+| tallyBytes (before) | 535 ms | 437 ms |
+| rolling Int64 (after) | 308 ms | 210 ms |
+| speedup | 1.74x | **2.0x** |
+
+Against the prediction: the ~3–5x above was for the k=12 and k=18 counting
+loops, where the byte path touches 12–18 bytes a window. The benchmark blends
+k = 1, 2, 3, 4, 6, 12, 18, and at the small widths `tallyBytes` was already
+near the probe's floor — so the blended counting speedup is 2.0x, and the
+whole-program figure carries the input parse both variants share. The
+prediction was right about the mechanism and the direction, and the blend is
+what a real program pays.
+
 ## What the re-measurement caught instead
 
 Two real defects, both fixed the same day:
