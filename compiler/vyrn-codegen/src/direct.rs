@@ -2758,10 +2758,11 @@ impl<'p> Fn_<'_, 'p> {
                     .ins(&Instruction::Call(self.cx.rt.free));
                 Ok(())
             }
-            // Two parallel buffers, and the keys are Strings — so a map that
-            // releases anything always releases its keys (RFC-0092 M3). The
+            // Two parallel buffers. String keys are released per entry
+            // (RFC-0092 M3); Int64 keys go with their buffer (RFC-0117). The
             // elements first, then the buffers they live in.
-            Type::Map(_, vt) if self.deep_row(ty) => {
+            Type::Map(kt, vt) if self.deep_row(ty) => {
+                let ik = self.cx.resolve(&kt) == Type::Int;
                 let l = self.layout_of(ty, line)?;
                 let vstride = self.stride(&vt, line)?;
                 let n = b.local(ValType::I32);
@@ -2777,7 +2778,9 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalGet(a));
                     b.ins(&Instruction::I32Load(word_at(l.fields[i])));
                     b.ins(&Instruction::LocalSet(buf));
-                    self.rel_each(m, b, buf, n, stride, &elem, line)?;
+                    if !(ik && i == 0) {
+                        self.rel_each(m, b, buf, n, stride, &elem, line)?;
+                    }
                     b.ins(&Instruction::LocalGet(buf))
                         .ins(&Instruction::Call(self.cx.rt.free));
                 }
@@ -3801,7 +3804,7 @@ impl<'p> Fn_<'_, 'p> {
                     .ok_or_else(|| gap("an element assignment to a non-array", *line))?;
                 // `m[k] = v` (RFC-0028) inserts or updates; it is not a bounded
                 // element store and has no index to check.
-                if let Type::Map(_, val) = self.cx.resolve(&ty) {
+                if let Type::Map(key_t, val) = self.cx.resolve(&ty) {
                     let l = self.layout_of(&ty, *line)?;
                     let hdr = b.local(ValType::I32);
                     b.ins(&Instruction::LocalSet(hdr));
@@ -3813,7 +3816,9 @@ impl<'p> Fn_<'_, 'p> {
                     let drop_old = self.region_depth == 0
                         && !vyrn_frontend::movecheck::mentions_place(value, name)
                         && !vyrn_frontend::movecheck::mentions_place(index, name);
-                    return self.map_set(m, b, hdr, &l, index, value, &val, drop_old, *line);
+                    return self.map_set(
+                        m, b, hdr, &l, index, value, &key_t, &val, drop_old, *line,
+                    );
                 }
                 let w = self.walk(b, &ty, *line)?;
                 if w.byte {
@@ -5282,7 +5287,10 @@ impl<'p> Fn_<'_, 'p> {
             Expr::MapLit { entries, .. } => match self.expect.last().map(|t| self.cx.resolve(t)) {
                 Some(t @ Type::Map(..)) => t,
                 _ => match entries.first() {
-                    Some((_, ve)) => Type::Map(Box::new(Type::Str), Box::new(self.peek(ve, line)?)),
+                    Some((ke, ve)) => Type::Map(
+                        Box::new(self.peek(ke, line)?),
+                        Box::new(self.peek(ve, line)?),
+                    ),
                     None => Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
                 },
             },
@@ -11093,7 +11101,10 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::End);
                 self.copy_each(b, base, n, stride, &inner, line)
             }
-            Type::Map(_, vt) => {
+            Type::Map(kt, vt) => {
+                // String keys are dup'd per entry; Int64 keys copy with the
+                // buffer (RFC-0117) — 8-byte stride, no per-element walk.
+                let ik = self.cx.resolve(&kt) == Type::Int;
                 let l = self.layout_of(ty, line)?;
                 let vstride = self.stride(&vt, line)?;
                 let (n, cap) = (b.local(ValType::I32), b.local(ValType::I32));
@@ -11105,7 +11116,8 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I64Load(at(l.fields[3])));
                 b.ins(&Instruction::I32WrapI64);
                 b.ins(&Instruction::LocalSet(cap));
-                for (i, (stride, elem)) in [(4u32, Type::Str), (vstride, (*vt).clone())]
+                let kstride = if ik { 8u32 } else { 4u32 };
+                for (i, (stride, elem)) in [(kstride, Type::Str), (vstride, (*vt).clone())]
                     .into_iter()
                     .enumerate()
                 {
@@ -11129,7 +11141,9 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalGet(a));
                     b.ins(&Instruction::LocalGet(nb));
                     b.ins(&Instruction::I32Store(word_at(l.fields[i])));
-                    self.copy_each(b, nb, n, stride, &elem, line)?;
+                    if !(ik && i == 0) {
+                        self.copy_each(b, nb, n, stride, &elem, line)?;
+                    }
                 }
                 // The index is copied rather than rebuilt: it holds POSITIONS,
                 // and a copy keeps the capacity as well as the order, so every
@@ -12181,12 +12195,14 @@ impl<'p> Fn_<'_, 'p> {
         entries: &[(Expr, Expr)],
         line: usize,
     ) -> Result<Type, String> {
-        let want = match self.expect.last().map(|t| self.cx.resolve(t)) {
-            Some(Type::Map(_, v)) => Some(*v),
-            _ => None,
+        let (want_k, want) = match self.expect.last().map(|t| self.cx.resolve(t)) {
+            Some(Type::Map(k, v)) => (Some(*k), Some(*v)),
+            _ => (None, None),
         };
         // A value type that IS an unsolved parameter names no type (see
-        // `array_lit`) — the first value answers.
+        // `array_lit`) — the first value answers. The key type comes from the
+        // position too, else from the first key (RFC-0117: `String` or
+        // `Int64` — the checker made every key the same one).
         let val = match (
             want.filter(|t| !matches!(t, Type::Param(_))),
             entries.first(),
@@ -12198,7 +12214,12 @@ impl<'p> Fn_<'_, 'p> {
             // because the header is the same 32 bytes either way.
             (None, None) => Type::Int,
         };
-        let mty = Type::Map(Box::new(Type::Str), Box::new(val.clone()));
+        let key_t = match (want_k, entries.first()) {
+            (Some(k), _) => k,
+            (None, Some((ke, _))) => self.peek(ke, line)?,
+            (None, None) => Type::Str,
+        };
+        let mty = Type::Map(Box::new(key_t.clone()), Box::new(val.clone()));
         let l = self.layout_of(&mty, line)?;
         let off = b.alloc(l.size, l.align);
         b.slot(off);
@@ -12214,7 +12235,7 @@ impl<'p> Fn_<'_, 'p> {
         // left — `["usd": 1, "usd": 3]`. Inside a `region` the arena owns it.
         let drop_old = self.region_depth == 0;
         for (ke, ve) in entries {
-            self.map_set(m, b, hdr, &l, ke, ve, &val, drop_old, line)?;
+            self.map_set(m, b, hdr, &l, ke, ve, &key_t, &val, drop_old, line)?;
         }
         b.slot(off);
         Ok(mty)
@@ -12319,7 +12340,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalSet(k));
         // The insert path — the probe already said the key is absent, and the
         // fresh key is ours, so it is stored, not copied.
-        self.map_reserve(b, hdr, &l, 8);
+        self.map_reserve(b, hdr, &l, 8, false);
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         b.ins(&Instruction::LocalGet(hdr));
@@ -12372,44 +12393,55 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<Type, String> {
         let mty = self.expr(m, b, &args[0])?;
-        let Type::Map(..) = self.cx.resolve(&mty) else {
-            return unsupported(&format!("`tally` on `{mty}`"), line);
+        let key_t = match self.cx.resolve(&mty) {
+            Type::Map(k, _) => *k,
+            _ => return unsupported(&format!("`tally` on `{mty}`"), line),
         };
+        let ik = self.cx.resolve(&key_t) == Type::Int;
         let l = self.layout_of(&mty, line)?;
         let hdr = b.local(ValType::I32);
         b.ins(&Instruction::LocalSet(hdr));
-        let k = b.local(ValType::I32);
-        self.expr_as(m, b, &args[1], &Type::Str)?;
+        let k = b.local(if ik { ValType::I64 } else { ValType::I32 });
+        self.expr_as(m, b, &args[1], if ik { &Type::Int } else { &Type::Str })?;
         b.ins(&Instruction::LocalSet(k));
         let n = b.local(ValType::I64);
         self.expr_as(m, b, &args[2], &Type::Int)?;
         b.ins(&Instruction::LocalSet(n));
         let idx = b.local(ValType::I32);
-        self.map_scan(b, hdr, &l, k, idx);
+        self.map_scan(b, hdr, &l, k, idx, ik);
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::I32Const(0));
         b.ins(&Instruction::I32LtS);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        // miss: reserve, append the key, index it, count starts at `n`.
-        self.map_reserve(b, hdr, &l, 8);
+        // miss: reserve, append the key, index it, count starts at `n`. An
+        // Int64 key is stored by value — nothing dup'd (RFC-0117).
+        self.map_reserve(b, hdr, &l, 8, ik);
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[2])));
         b.ins(&Instruction::I32WrapI64);
         b.ins(&Instruction::LocalTee(idx));
-        b.ins(&Instruction::I32Const(4));
+        b.ins(&Instruction::I32Const(if ik { 8 } else { 4 }));
         b.ins(&Instruction::I32Mul);
         b.ins(&Instruction::I32Add);
         b.ins(&Instruction::LocalGet(k));
-        self.str_dup(b);
-        b.ins(&Instruction::I32Store(word()));
+        if ik {
+            b.ins(&Instruction::I64Store(word8()));
+        } else {
+            self.str_dup(b);
+            b.ins(&Instruction::I32Store(word()));
+        }
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         self.map_index(b, hdr, &l);
         b.ins(&Instruction::LocalGet(idx));
-        b.ins(&Instruction::Call(self.cx.rt.map_put));
+        b.ins(&Instruction::Call(if ik {
+            self.cx.rt.map_put_i64
+        } else {
+            self.cx.rt.map_put
+        }));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[2])));
@@ -12443,17 +12475,21 @@ impl<'p> Fn_<'_, 'p> {
         l: &Layout,
         key: &Expr,
         value: &Expr,
+        key_t: &Type,
         val: &Type,
         drop_old: bool,
         line: usize,
     ) -> Result<(), String> {
+        // An Int64-keyed map (RFC-0117): the key by value, stored by value,
+        // never dup'd or freed.
+        let ik = self.cx.resolve(key_t) == Type::Int;
         let esz = self.stride(val, line)? as i32;
         let r = self.cx.repr(val, line)?;
         // Key then value, before the scan: the textual backend evaluates both
         // first, and a side-effecting value expression must not run at a
         // different point on the two backends.
-        let k = b.local(ValType::I32);
-        self.expr_as(m, b, key, &Type::Str)?;
+        let k = b.local(if ik { ValType::I64 } else { ValType::I32 });
+        self.expr_as(m, b, key, if ik { &Type::Int } else { &Type::Str })?;
         b.ins(&Instruction::LocalSet(k));
         let v = b.local(match &r {
             Repr::Scalar(t) => *t,
@@ -12464,13 +12500,13 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalSet(v));
 
         let idx = b.local(ValType::I32);
-        self.map_scan(b, hdr, l, k, idx);
+        self.map_scan(b, hdr, l, k, idx, ik);
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::I32Const(0));
         b.ins(&Instruction::I32LtS);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        self.map_reserve(b, hdr, l, esz);
+        self.map_reserve(b, hdr, l, esz, ik);
         // keys[len] = k, and the new entry's index IS the old length.
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
@@ -12478,11 +12514,15 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64Load(at(l.fields[2])));
         b.ins(&Instruction::I32WrapI64);
         b.ins(&Instruction::LocalTee(idx));
-        b.ins(&Instruction::I32Const(4));
+        b.ins(&Instruction::I32Const(if ik { 8 } else { 4 }));
         b.ins(&Instruction::I32Mul);
         b.ins(&Instruction::I32Add);
         b.ins(&Instruction::LocalGet(k));
-        b.ins(&Instruction::I32Store(word()));
+        if ik {
+            b.ins(&Instruction::I64Store(word8()));
+        } else {
+            b.ins(&Instruction::I32Store(word()));
+        }
         // The key is in its slot, so the index can record where. `map_reserve`
         // above grew the bucket array and rebuilt it, so this is the only entry it
         // is missing — and the reason the append stays O(1).
@@ -12490,7 +12530,11 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         self.map_index(b, hdr, l);
         b.ins(&Instruction::LocalGet(idx));
-        b.ins(&Instruction::Call(self.cx.rt.map_put));
+        b.ins(&Instruction::Call(if ik {
+            self.cx.rt.map_put_i64
+        } else {
+            self.cx.rt.map_put
+        }));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[2])));
@@ -12512,8 +12556,9 @@ impl<'p> Fn_<'_, 'p> {
         }
         // Inside a `region` the surplus key came from the arena, which hands it
         // back at the exit — freeing it here would give one block two owners.
-        // The same partition `rel_at` draws for a `String`, drawn here too.
-        if self.region_depth == 0 {
+        // The same partition `rel_at` draws for a `String`, drawn here too. An
+        // Int64 key owns nothing, so it has no surplus to return (RFC-0117).
+        if !ik && self.region_depth == 0 {
             b.ins(&Instruction::LocalGet(k));
             str_hdr(b);
             b.ins(&Instruction::Call(self.cx.rt.free));
@@ -12540,8 +12585,9 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// `map_find(keys, len, k, idx, cap)` into `idx`.
-    fn map_scan(&mut self, b: &mut Frame, hdr: u32, l: &Layout, k: u32, idx: u32) {
+    /// `map_find(keys, len, k, idx, cap)` into `idx` — or the `_i64` twin when
+    /// the map is Int64-keyed (`k` is then an I64 local; RFC-0117).
+    fn map_scan(&mut self, b: &mut Frame, hdr: u32, l: &Layout, k: u32, idx: u32, ik: bool) {
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         b.ins(&Instruction::LocalGet(hdr));
@@ -12553,7 +12599,11 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[3])));
         b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::Call(self.cx.rt.map_find));
+        b.ins(&Instruction::Call(if ik {
+            self.cx.rt.map_find_i64
+        } else {
+            self.cx.rt.map_find
+        }));
         b.ins(&Instruction::LocalSet(idx));
     }
 
@@ -12583,7 +12633,7 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// Allocate, copy, free the old — the shape `push` grows in, and what
     /// `__vyrn_map_reserve`'s `realloc` does for the textual backend.
-    fn map_reserve(&mut self, b: &mut Frame, hdr: u32, l: &Layout, esz: i32) {
+    fn map_reserve(&mut self, b: &mut Frame, hdr: u32, l: &Layout, esz: i32, ik: bool) {
         let (nc, nk, nv) = (
             b.local(ValType::I32),
             b.local(ValType::I32),
@@ -12616,7 +12666,10 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Mul);
         b.ins(&Instruction::End);
         b.ins(&Instruction::LocalSet(nc));
-        for (field, stride, into) in [(l.fields[0], 4i32, nk), (l.fields[1], esz, nv)] {
+        for (field, stride, into) in [
+            (l.fields[0], if ik { 8i32 } else { 4i32 }, nk),
+            (l.fields[1], esz, nv),
+        ] {
             // The count is safe in 32 bits — an entry costs at least twelve bytes,
             // so a wasm32 memory holds well under 2^31 of them — but `nc * stride`
             // is not, so the product is 64-bit and `malloc` decides.
@@ -12667,7 +12720,11 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         b.ins(&Instruction::LocalGet(len));
         self.map_index(b, hdr, l);
-        b.ins(&Instruction::Call(self.cx.rt.map_reindex));
+        b.ins(&Instruction::Call(if ik {
+            self.cx.rt.map_reindex_i64
+        } else {
+            self.cx.rt.map_reindex
+        }));
         self.depth -= 1;
         b.ins(&Instruction::End);
     }
@@ -12684,15 +12741,19 @@ impl<'p> Fn_<'_, 'p> {
         key: &Expr,
         line: usize,
     ) -> Result<Type, String> {
+        let ik = match self.cx.resolve(mty) {
+            Type::Map(k, _) => self.cx.resolve(&k) == Type::Int,
+            _ => false,
+        };
         let l = self.layout_of(mty, line)?;
         let esz = self.stride(val, line)? as i32;
         let hdr = b.local(ValType::I32);
         b.ins(&Instruction::LocalSet(hdr));
-        let k = b.local(ValType::I32);
-        self.expr_as(m, b, key, &Type::Str)?;
+        let k = b.local(if ik { ValType::I64 } else { ValType::I32 });
+        self.expr_as(m, b, key, if ik { &Type::Int } else { &Type::Str })?;
         b.ins(&Instruction::LocalSet(k));
         let idx = b.local(ValType::I32);
-        self.map_scan(b, hdr, &l, k, idx);
+        self.map_scan(b, hdr, &l, k, idx, ik);
 
         let oty = Type::Option(Box::new(val.clone()));
         let Repr::Agg(ol) = self.cx.repr(&oty, line)? else {
@@ -12776,20 +12837,21 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::LocalSet(hdr));
             (hdr, ty, false)
         };
-        let Type::Map(_, val) = self.cx.resolve(&mty) else {
-            return unsupported(&format!("`{name}` on `{mty}`"), line);
+        let (key_t, val) = match self.cx.resolve(&mty) {
+            Type::Map(k, v) => (*k, v),
+            _ => return unsupported(&format!("`{name}` on `{mty}`"), line),
         };
+        let ik = self.cx.resolve(&key_t) == Type::Int;
+        let kstride = if ik { 8i32 } else { 4i32 };
         let l = self.layout_of(&mty, line)?;
 
         if name == "@keys" {
-            // A snapshot `Array<String>`: the key pointers copied into a buffer of
-            // its own, so the map may be mutated afterwards without disturbing it,
-            // and since RFC-0092 M2 the KEYS as well — the snapshot is an
-            // `Array<String>` and an array owns its elements, so a snapshot of
-            // the map's own pointers would be freed twice. The interpreter has
-            // copied each key since RFC-0028, so this is the compiling backend
-            // catching up with the oracle rather than a new cost in the model.
-            let aty = Type::Array(Box::new(Type::Str));
+            // A snapshot `Array<K>`: the keys copied into a buffer of their
+            // own, so the map may be mutated afterwards without disturbing it.
+            // String keys are then dup'd per element (RFC-0092 M2 — an array
+            // owns its elements, so a snapshot of the map's own pointers would
+            // be freed twice); Int64 keys copy with the buffer (RFC-0117).
+            let aty = Type::Array(Box::new(key_t.clone()));
             let al = self.layout_of(&aty, line)?;
             let (len, buf) = (b.local(ValType::I32), b.local(ValType::I32));
             b.ins(&Instruction::LocalGet(hdr));
@@ -12800,7 +12862,7 @@ impl<'p> Fn_<'_, 'p> {
             // null — the same rule `bytes` follows, for the same `push`.
             b.ins(&Instruction::I32Const(1));
             b.ins(&Instruction::I32Add);
-            b.ins(&Instruction::I32Const(4));
+            b.ins(&Instruction::I32Const(kstride));
             b.ins(&Instruction::I32Mul);
             b.ins(&Instruction::I64ExtendI32U);
             b.ins(&Instruction::Call(self.cx.rt.malloc));
@@ -12808,13 +12870,15 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::LocalGet(hdr));
             b.ins(&Instruction::I32Load(word_at(l.fields[0])));
             b.ins(&Instruction::LocalGet(len));
-            b.ins(&Instruction::I32Const(4));
+            b.ins(&Instruction::I32Const(kstride));
             b.ins(&Instruction::I32Mul);
             b.ins(&Instruction::MemoryCopy {
                 src_mem: 0,
                 dst_mem: 0,
             });
-            self.copy_each(b, buf, len, 4, &Type::Str, line)?;
+            if !ik {
+                self.copy_each(b, buf, len, 4, &Type::Str, line)?;
+            }
             let off = b.alloc(al.size, al.align);
             b.slot(off + al.fields[0]);
             b.ins(&Instruction::LocalGet(buf));
@@ -12829,11 +12893,11 @@ impl<'p> Fn_<'_, 'p> {
             return Ok(aty);
         }
 
-        let k = b.local(ValType::I32);
-        self.expr_as(m, b, &args[1], &Type::Str)?;
+        let k = b.local(if ik { ValType::I64 } else { ValType::I32 });
+        self.expr_as(m, b, &args[1], if ik { &Type::Int } else { &Type::Str })?;
         b.ins(&Instruction::LocalSet(k));
         let idx = b.local(ValType::I32);
-        self.map_scan(b, hdr, &l, k, idx);
+        self.map_scan(b, hdr, &l, k, idx, ik);
         let found = b.local(ValType::I32);
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::I32Const(0));
@@ -12851,11 +12915,13 @@ impl<'p> Fn_<'_, 'p> {
             // when the entry goes — BEFORE the shift moves the survivors over
             // the slots they live in. The runtime's `map_remove_at` twin shifts
             // bytes and is handed no types, so this is the only place that can.
+            // An Int64 key owns nothing to hand back (RFC-0117).
             if owns {
-                for (field, stride, ety) in [
-                    (l.fields[0], 4i32, Type::Str),
-                    (l.fields[1], esz, val.as_ref().clone()),
-                ] {
+                let mut cols = vec![(l.fields[1], esz, val.as_ref().clone())];
+                if !ik {
+                    cols.insert(0, (l.fields[0], 4i32, Type::Str));
+                }
+                for (field, stride, ety) in cols {
                     let a = b.local(ValType::I32);
                     b.ins(&Instruction::LocalGet(hdr));
                     b.ins(&Instruction::I32Load(word_at(field)));
@@ -12875,7 +12941,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::I32Const(1));
             b.ins(&Instruction::I32Sub);
             b.ins(&Instruction::LocalSet(rest));
-            for (field, stride) in [(l.fields[0], 4i32), (l.fields[1], esz)] {
+            for (field, stride) in [(l.fields[0], kstride), (l.fields[1], esz)] {
                 let base = b.local(ValType::I32);
                 b.ins(&Instruction::LocalGet(hdr));
                 b.ins(&Instruction::I32Load(word_at(field)));
@@ -12911,7 +12977,11 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::I64Load(at(l.fields[2])));
             b.ins(&Instruction::I32WrapI64);
             self.map_index(b, hdr, &l);
-            b.ins(&Instruction::Call(self.cx.rt.map_reindex));
+            b.ins(&Instruction::Call(if ik {
+                self.cx.rt.map_reindex_i64
+            } else {
+                self.cx.rt.map_reindex
+            }));
             self.depth -= 1;
             b.ins(&Instruction::End);
         }
@@ -13648,6 +13718,12 @@ struct Rt {
     map_slot: u32,
     map_put: u32,
     map_reindex: u32,
+    /// The Int64-keyed chain (RFC-0117 M1): the same four shapes over an
+    /// 8-byte key column, the hash SplitMix64's finalizer, equality the bits.
+    map_find_i64: u32,
+    map_slot_i64: u32,
+    map_put_i64: u32,
+    map_reindex_i64: u32,
     /// RFC-0046's `=~` (M2m): walk a complete DFA over a NUL-terminated string.
     /// One helper for every pattern in the module, because the pattern is entirely
     /// in the table it is handed — which is the same split the textual backend's
@@ -13831,6 +13907,10 @@ impl Rt {
             map_slot: slot("map_slot"),
             map_put: slot("map_put"),
             map_reindex: slot("map_reindex"),
+            map_find_i64: slot("map_find_i64"),
+            map_slot_i64: slot("map_slot_i64"),
+            map_put_i64: slot("map_put_i64"),
+            map_reindex_i64: slot("map_reindex_i64"),
             regex_run: slot("regex_run"),
             parse_i64: slot("parse_i64"),
             line_at: slot("line_at"),
@@ -15513,6 +15593,229 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
             b.ins(&Instruction::End);
         },
     );
+
+    // ---- the Int64-keyed chain (RFC-0117 M1) -------------------------------
+    // The same four shapes over an 8-byte key column: the hash is SplitMix64's
+    // finalizer (the function std/hash's `impl Hashable for Int64` spells, and
+    // the shim's `map_hash_i64`), equality is the bits, and nothing about a
+    // key is ever dup'd or freed.
+
+    // map_find_i64(keys, len, key: i64, idx, cap) -> the entry's index, or -1.
+    {
+        // Params 0..4 (2 is the i64 key), the builder's frame base at 5, ours
+        // from 6.
+        let bkt = 6;
+        rt.next_is(m, rt.map_find_i64);
+        let map_slot_i64 = rt.map_slot_i64;
+        m.func(
+            &[
+                ValType::I32,
+                ValType::I32,
+                ValType::I64,
+                ValType::I32,
+                ValType::I32,
+            ],
+            &[ValType::I32],
+            &[ValType::I32],
+            0,
+            |b| {
+                b.ins(&Instruction::Block(BlockType::Result(ValType::I32)));
+                b.ins(&Instruction::LocalGet(1))
+                    .ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::I32LeS)
+                    .ins(&Instruction::LocalGet(4))
+                    .ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::I32LeS)
+                    .ins(&Instruction::I32Or)
+                    .ins(&Instruction::If(BlockType::Empty))
+                    .ins(&Instruction::I32Const(-1))
+                    .ins(&Instruction::Br(1))
+                    .ins(&Instruction::End);
+                b.ins(&Instruction::LocalGet(0))
+                    .ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::LocalGet(4))
+                    .ins(&Instruction::I32Const(2))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::LocalGet(2))
+                    .ins(&Instruction::Call(map_slot_i64))
+                    .ins(&Instruction::I32Const(8))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I64Load(word8()))
+                    .ins(&Instruction::I32WrapI64)
+                    .ins(&Instruction::LocalSet(bkt));
+                b.ins(&Instruction::LocalGet(bkt))
+                    .ins(&Instruction::I32Eqz)
+                    .ins(&Instruction::If(BlockType::Result(ValType::I32)))
+                    .ins(&Instruction::I32Const(-1))
+                    .ins(&Instruction::Else)
+                    .ins(&Instruction::LocalGet(bkt))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Sub)
+                    .ins(&Instruction::End);
+                b.ins(&Instruction::End);
+            },
+        );
+    }
+
+    // map_slot_i64(keys, idx, nb, key: i64) -> the bucket `key` belongs in.
+    {
+        // Params 0..3 (3 is the i64 key), frame base at 4, ours from 5.
+        let (slot_b, mask, ent, h) = (5, 6, 7, 8);
+        rt.next_is(m, rt.map_slot_i64);
+        m.func(
+            &[ValType::I32, ValType::I32, ValType::I32, ValType::I64],
+            &[ValType::I32],
+            &[ValType::I32, ValType::I32, ValType::I32, ValType::I64],
+            0,
+            |b| {
+                b.ins(&Instruction::LocalGet(2))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Sub)
+                    .ins(&Instruction::LocalSet(mask));
+                // SplitMix64's finalizer, inline: three xor-shift-multiply
+                // rounds over the key's bits.
+                b.ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::I64Const(30))
+                    .ins(&Instruction::I64ShrU)
+                    .ins(&Instruction::I64Xor)
+                    .ins(&Instruction::I64Const(0xBF58476D1CE4E5B9u64 as i64))
+                    .ins(&Instruction::I64Mul)
+                    .ins(&Instruction::LocalSet(h));
+                b.ins(&Instruction::LocalGet(h))
+                    .ins(&Instruction::LocalGet(h))
+                    .ins(&Instruction::I64Const(27))
+                    .ins(&Instruction::I64ShrU)
+                    .ins(&Instruction::I64Xor)
+                    .ins(&Instruction::I64Const(0x94D049BB133111EBu64 as i64))
+                    .ins(&Instruction::I64Mul)
+                    .ins(&Instruction::LocalSet(h));
+                b.ins(&Instruction::LocalGet(h))
+                    .ins(&Instruction::LocalGet(h))
+                    .ins(&Instruction::I64Const(31))
+                    .ins(&Instruction::I64ShrU)
+                    .ins(&Instruction::I64Xor)
+                    .ins(&Instruction::I32WrapI64)
+                    .ins(&Instruction::LocalGet(mask))
+                    .ins(&Instruction::I32And)
+                    .ins(&Instruction::LocalSet(slot_b));
+                b.ins(&Instruction::Block(BlockType::Empty))
+                    .ins(&Instruction::Loop(BlockType::Empty));
+                b.ins(&Instruction::LocalGet(1))
+                    .ins(&Instruction::LocalGet(slot_b))
+                    .ins(&Instruction::I32Const(8))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I64Load(word8()))
+                    .ins(&Instruction::I32WrapI64)
+                    .ins(&Instruction::LocalTee(ent))
+                    .ins(&Instruction::I32Eqz)
+                    .ins(&Instruction::BrIf(1));
+                b.ins(&Instruction::LocalGet(0))
+                    .ins(&Instruction::LocalGet(ent))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Sub)
+                    .ins(&Instruction::I32Const(8))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I64Load(word8()))
+                    .ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::I64Eq)
+                    .ins(&Instruction::BrIf(1));
+                b.ins(&Instruction::LocalGet(slot_b))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::LocalGet(mask))
+                    .ins(&Instruction::I32And)
+                    .ins(&Instruction::LocalSet(slot_b))
+                    .ins(&Instruction::Br(0))
+                    .ins(&Instruction::End)
+                    .ins(&Instruction::End);
+                b.ins(&Instruction::LocalGet(slot_b));
+            },
+        );
+    }
+
+    // map_put_i64(keys, idx, nb, i) — record the entry at position `i`, whose
+    // key is already in `keys[i]`.
+    {
+        rt.next_is(m, rt.map_put_i64);
+        let map_slot_i64 = rt.map_slot_i64;
+        m.func(
+            &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+            &[],
+            &[],
+            0,
+            |b| {
+                b.ins(&Instruction::LocalGet(1));
+                b.ins(&Instruction::LocalGet(0))
+                    .ins(&Instruction::LocalGet(1))
+                    .ins(&Instruction::LocalGet(2))
+                    .ins(&Instruction::LocalGet(0))
+                    .ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::I32Const(8))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I64Load(word8()))
+                    .ins(&Instruction::Call(map_slot_i64))
+                    .ins(&Instruction::I32Const(8))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::I32Add);
+                b.ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::I64ExtendI32U)
+                    .ins(&Instruction::I64Const(1))
+                    .ins(&Instruction::I64Add)
+                    .ins(&Instruction::I64Store(word8()));
+            },
+        );
+    }
+
+    // map_reindex_i64(keys, len, idx, nb) — rebuild the whole index.
+    {
+        let ri = 5;
+        rt.next_is(m, rt.map_reindex_i64);
+        let map_put_i64 = rt.map_put_i64;
+        m.func(
+            &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+            &[],
+            &[ValType::I32],
+            0,
+            |b| {
+                b.ins(&Instruction::Block(BlockType::Empty));
+                b.ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::I32LeS)
+                    .ins(&Instruction::BrIf(0));
+                b.ins(&Instruction::LocalGet(2))
+                    .ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::I32Const(8))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::MemoryFill(0));
+                b.ins(&Instruction::Block(BlockType::Empty))
+                    .ins(&Instruction::Loop(BlockType::Empty));
+                b.ins(&Instruction::LocalGet(ri))
+                    .ins(&Instruction::LocalGet(1))
+                    .ins(&Instruction::I32GeS)
+                    .ins(&Instruction::BrIf(1));
+                b.ins(&Instruction::LocalGet(0))
+                    .ins(&Instruction::LocalGet(2))
+                    .ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::LocalGet(ri))
+                    .ins(&Instruction::Call(map_put_i64));
+                b.ins(&Instruction::LocalGet(ri))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::LocalSet(ri))
+                    .ins(&Instruction::Br(0))
+                    .ins(&Instruction::End)
+                    .ins(&Instruction::End);
+                b.ins(&Instruction::End);
+            },
+        );
+    }
 
     // regex_run(s, table, start, accept) -> whether `s` matches in full.
     //

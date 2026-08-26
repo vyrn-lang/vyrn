@@ -1,0 +1,8 @@
+// RFC-0117 refuses float map keys by name: `NaN != NaN` breaks the
+// reflexivity a key needs, and `+0.0 == -0.0` would hash apart. A program
+// that wants float keys must make that decision explicitly, outside the map.
+fn main() -> Int64 {
+    let mut m: Map<Float64, Int64> = [:]
+    m[1.5] = 1
+    return m.length
+}

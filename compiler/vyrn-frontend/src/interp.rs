@@ -513,6 +513,14 @@ pub enum Val {
     /// Writes go through `Rc::make_mut`, so a uniquely-owned map is still
     /// edited in place.
     Map(std::rc::Rc<MapVal>),
+    /// An `Int64`-keyed map (RFC-0117 M1). Its own variant rather than a key
+    /// enum inside [`MapVal`], so the `String`-keyed path keeps its
+    /// allocation-free `&str` lookups. The checker types every key, so an op
+    /// never meets the wrong variant — with one deliberate exception: `[:]`
+    /// evaluates to an empty [`Val::Map`] before any key exists, and every
+    /// map op treats an EMPTY string-keyed map as either kind (reads answer
+    /// `None`/`false`/`[]` regardless; the first `Int64` insert upgrades it).
+    MapI(std::rc::Rc<MapIVal>),
     /// An opaque `Code` fragment (RFC-0054): a sequence of rendered text pieces,
     /// some carrying an origin span. Produced only inside a generation context by
     /// `vyrn"…"` quotes / `raw` / `rawAt`, concatenated by `+`, and consumed by
@@ -603,11 +611,74 @@ impl std::ops::Deref for MapVal {
     }
 }
 
+/// [`MapVal`] with `Int64` keys (RFC-0117 M1): the same pairs-plus-index
+/// shape, the same first-insertion-order law, the key column holding the
+/// values themselves.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MapIVal {
+    pairs: Vec<(i64, Val)>,
+    idx: std::collections::HashMap<i64, usize>,
+}
+
+impl MapIVal {
+    pub fn get(&self, k: i64) -> Option<&Val> {
+        self.idx.get(&k).map(|i| &self.pairs[*i].1)
+    }
+
+    pub fn contains(&self, k: i64) -> bool {
+        self.idx.contains_key(&k)
+    }
+
+    /// Overwrite in place on a hit (the entry keeps its position), append on
+    /// a miss — the one policy every map shares (RFC-0028).
+    pub fn insert(&mut self, k: i64, v: Val) {
+        match self.idx.get(&k) {
+            Some(i) => self.pairs[*i].1 = v,
+            None => {
+                self.idx.insert(k, self.pairs.len());
+                self.pairs.push((k, v));
+            }
+        }
+    }
+
+    /// Drop the entry, shifting the survivors down (see [`MapVal::remove`]).
+    pub fn remove(&mut self, k: i64) -> bool {
+        let Some(i) = self.idx.remove(&k) else {
+            return false;
+        };
+        self.pairs.remove(i);
+        for at in self.idx.values_mut() {
+            if *at > i {
+                *at -= 1;
+            }
+        }
+        true
+    }
+}
+
+impl std::ops::Deref for MapIVal {
+    type Target = [(i64, Val)];
+    fn deref(&self) -> &Self::Target {
+        &self.pairs
+    }
+}
+
 impl FromIterator<(String, Val)> for MapVal {
     /// Built by insertion, so a repeated key in the source updates in place and
     /// keeps its slot — the one policy every builder of a map shares.
     fn from_iter<T: IntoIterator<Item = (String, Val)>>(it: T) -> Self {
         let mut m = MapVal::default();
+        for (k, v) in it {
+            m.insert(k, v);
+        }
+        m
+    }
+}
+
+impl FromIterator<(i64, Val)> for MapIVal {
+    /// By insertion, exactly as [`MapVal`]'s.
+    fn from_iter<T: IntoIterator<Item = (i64, Val)>>(it: T) -> Self {
+        let mut m = MapIVal::default();
         for (k, v) in it {
             m.insert(k, v);
         }
@@ -671,6 +742,9 @@ fn deep_copy(v: &Val) -> Val {
         Val::Array(xs) => Val::Array(std::rc::Rc::new(xs.iter().map(deep_copy).collect())),
         Val::Map(kv) => Val::Map(std::rc::Rc::new(
             kv.iter().map(|(k, x)| (k.clone(), deep_copy(x))).collect(),
+        )),
+        Val::MapI(kv) => Val::MapI(std::rc::Rc::new(
+            kv.iter().map(|(k, x)| (*k, deep_copy(x))).collect(),
         )),
         Val::Record(fs, name) => Val::Record(
             std::rc::Rc::new(fs.iter().map(|(k, x)| (k.clone(), deep_copy(x))).collect()),
@@ -3752,18 +3826,28 @@ impl<'a> Interp<'a> {
                             .iter()
                             .rev()
                             .find_map(|f| f.get(name))
-                            .is_some_and(|s| matches!(s.v, Val::Map(_)))
+                            .is_some_and(|s| matches!(s.v, Val::Map(_) | Val::MapI(_)))
                     {
+                        // The key's runtime kind picks the map variant
+                        // (RFC-0117): a String or bytes for the string-keyed
+                        // map, an Int64 for the integer-keyed one — and an
+                        // Int64 meeting an empty `Val::Map` is a pre-upgrade
+                        // `[:]`, upgraded on this first insert.
+                        enum TKey {
+                            S(String),
+                            I(i64),
+                        }
                         let key = if fname == "@tally" {
                             match self.expr(&args[1], scope)? {
-                                Val::Str(s) => (*s).clone(),
+                                Val::Str(s) => TKey::S((*s).clone()),
+                                Val::Int(k) => TKey::I(k),
                                 other => {
-                                    return Err(format!("tally of non-String {other:?}").into())
+                                    return Err(format!("tally key of {other:?}").into())
                                 }
                             }
                         } else {
                             match self.expr(&args[1], scope)? {
-                                Val::Array(bytes) => tally_key_bytes(&bytes)?,
+                                Val::Array(bytes) => TKey::S(tally_key_bytes(&bytes)?),
                                 other => {
                                     return Err(
                                         format!("tallyBytes of non-Array {other:?}").into()
@@ -3775,16 +3859,35 @@ impl<'a> Interp<'a> {
                             Val::Int(v) => v,
                             other => return Err(format!("tally count of {other:?}").into()),
                         };
+                        let mut keyopt = Some(key);
                         for frame in scope.iter_mut().rev() {
                             if let Some(slot) = frame.get_mut(name) {
-                                if let Val::Map(m) = &mut slot.v {
-                                    let mm = std::rc::Rc::make_mut(m);
-                                    let cur = match mm.get(&key) {
-                                        Some(Val::Int(v)) => *v,
-                                        _ => 0,
-                                    };
-                                    mm.insert(key, Val::Int(cur + add));
-                                    return Ok(Flow::Normal);
+                                match (&mut slot.v, keyopt.take().expect("one iteration")) {
+                                    (Val::Map(m), TKey::S(key)) => {
+                                        let mm = std::rc::Rc::make_mut(m);
+                                        let cur = match mm.get(&key) {
+                                            Some(Val::Int(v)) => *v,
+                                            _ => 0,
+                                        };
+                                        mm.insert(key, Val::Int(cur + add));
+                                        return Ok(Flow::Normal);
+                                    }
+                                    (Val::MapI(m), TKey::I(key)) => {
+                                        let mm = std::rc::Rc::make_mut(m);
+                                        let cur = match mm.get(key) {
+                                            Some(Val::Int(v)) => *v,
+                                            _ => 0,
+                                        };
+                                        mm.insert(key, Val::Int(cur + add));
+                                        return Ok(Flow::Normal);
+                                    }
+                                    (Val::Map(m), TKey::I(key)) if m.is_empty() => {
+                                        let mut mm = MapIVal::default();
+                                        mm.insert(key, Val::Int(add));
+                                        slot.v = Val::MapI(std::rc::Rc::new(mm));
+                                        return Ok(Flow::Normal);
+                                    }
+                                    _ => {}
                                 }
                                 break;
                             }
@@ -4141,6 +4244,66 @@ impl<'a> Interp<'a> {
                         {
                             std::rc::Rc::make_mut(pairs).insert((*k).clone(), v);
                             return Ok(Flow::Normal);
+                        }
+                        return Err(format!("index-assignment to unbound map `{name}`").into());
+                    }
+                }
+                // `m[k] = v` on an Int64-keyed Map (RFC-0117): the same
+                // in-place law. The binding's runtime kind separates this from
+                // an array store — and an empty `Val::Map` under a declared
+                // `Map` type is a pre-upgrade `[:]`, upgraded by this first
+                // insert (the checker already matched the key to `Int64`).
+                if let Val::Int(k) = &iv {
+                    let imap_of = |s: &Slot| match &s.v {
+                        Val::MapI(_) => Some(match &s.ty {
+                            Some(Type::Map(_, v)) => Some((**v).clone()),
+                            _ => None,
+                        }),
+                        Val::Map(m) if m.is_empty() && matches!(&s.ty, Some(Type::Map(..))) => {
+                            Some(match &s.ty {
+                                Some(Type::Map(_, v)) => Some((**v).clone()),
+                                _ => None,
+                            })
+                        }
+                        _ => None,
+                    };
+                    let found = scope
+                        .iter()
+                        .rev()
+                        .find_map(|f| f.get(name).and_then(imap_of))
+                        .or_else(|| self.globals.borrow().get(name).and_then(imap_of));
+                    if let Some(val_ty) = found {
+                        let k = *k;
+                        let mut v = self.expr(value, scope)?;
+                        if let Some(t) = &val_ty {
+                            v = self.coerce(v, t)?;
+                        }
+                        let mut vopt = Some(v);
+                        let mut put = |slot: &mut Slot| {
+                            let v = vopt.take().expect("put runs once");
+                            match &mut slot.v {
+                                Val::MapI(pairs) => {
+                                    std::rc::Rc::make_mut(pairs).insert(k, v);
+                                }
+                                _ => {
+                                    let mut mm = MapIVal::default();
+                                    mm.insert(k, v);
+                                    slot.v = Val::MapI(std::rc::Rc::new(mm));
+                                }
+                            }
+                            Ok(Flow::Normal)
+                        };
+                        for frame in scope.iter_mut().rev() {
+                            if let Some(slot) = frame.get_mut(name) {
+                                if matches!(&slot.v, Val::MapI(_) | Val::Map(_)) {
+                                    return put(slot);
+                                }
+                            }
+                        }
+                        if let Some(slot) = self.globals.borrow_mut().get_mut(name) {
+                            if matches!(&slot.v, Val::MapI(_) | Val::Map(_)) {
+                                return put(slot);
+                            }
                         }
                         return Err(format!("index-assignment to unbound map `{name}`").into());
                     }
@@ -5061,29 +5224,35 @@ impl<'a> Interp<'a> {
                         return Err("`remove` needs a mutable map binding".into());
                     };
                     let recv = recv.clone();
-                    let key = match self.expr(&args[1], scope)? {
-                        Val::Str(s) => s,
-                        other => {
-                            return Err(
-                                format!("a map key must be a String, found {other:?}").into()
-                            )
+                    let key = self.expr(&args[1], scope)?;
+                    // One closure serves locals and globals; the key's runtime
+                    // kind picks the map variant (RFC-0117). An `Int64` key on
+                    // an empty pre-upgrade `[:]` removes nothing, truthfully.
+                    let act = |v: &mut Val| -> Option<Result<Val, Ctrl>> {
+                        match (v, &key) {
+                            (Val::Map(pairs), Val::Str(k)) => Some(Ok(Val::Bool(
+                                std::rc::Rc::make_mut(pairs).remove(k.as_str()),
+                            ))),
+                            (Val::MapI(pairs), Val::Int(k)) => Some(Ok(Val::Bool(
+                                std::rc::Rc::make_mut(pairs).remove(*k),
+                            ))),
+                            (Val::Map(pairs), Val::Int(_)) if pairs.is_empty() => {
+                                Some(Ok(Val::Bool(false)))
+                            }
+                            _ => None,
                         }
                     };
                     for frame in scope.iter_mut().rev() {
-                        if let Some(Slot {
-                            v: Val::Map(pairs), ..
-                        }) = frame.get_mut(&recv)
-                        {
-                            return Ok(Val::Bool(
-                                std::rc::Rc::make_mut(pairs).remove(key.as_str()),
-                            ));
+                        if let Some(slot) = frame.get_mut(&recv) {
+                            if let Some(r) = act(&mut slot.v) {
+                                return r;
+                            }
                         }
                     }
-                    if let Some(Slot {
-                        v: Val::Map(pairs), ..
-                    }) = self.globals.borrow_mut().get_mut(&recv)
-                    {
-                        return Ok(Val::Bool(std::rc::Rc::make_mut(pairs).remove(key.as_str())));
+                    if let Some(slot) = self.globals.borrow_mut().get_mut(&recv) {
+                        if let Some(r) = act(&mut slot.v) {
+                            return r;
+                        }
                     }
                     return Err("`remove` needs a mutable map binding".into());
                 }
@@ -6051,6 +6220,24 @@ impl<'a> Interp<'a> {
                             mm.insert((**k).clone(), Val::Int(cur + n));
                             Ok(Val::Map(next))
                         }
+                        // The Int64-keyed twin (RFC-0117). An empty `[:]` is
+                        // still a string-keyed value — the first insert is
+                        // where the representation upgrades.
+                        (Val::MapI(m0), Val::Int(k), Val::Int(n)) => {
+                            let mut next = m0.clone();
+                            let mm = std::rc::Rc::make_mut(&mut next);
+                            let cur = match mm.get(*k) {
+                                Some(Val::Int(v)) => *v,
+                                _ => 0,
+                            };
+                            mm.insert(*k, Val::Int(cur + n));
+                            Ok(Val::MapI(next))
+                        }
+                        (Val::Map(m0), Val::Int(k), Val::Int(n)) if m0.is_empty() => {
+                            let mut mm = MapIVal::default();
+                            mm.insert(*k, Val::Int(*n));
+                            Ok(Val::MapI(std::rc::Rc::new(mm)))
+                        }
                         (a, b, c) => Err(format!("tally of {a:?}, {b:?}, {c:?}").into()),
                     },
                     // `m.tallyBytes(w, n)` (RFC-0116): `tally` keyed by raw
@@ -6110,24 +6297,41 @@ impl<'a> Interp<'a> {
                                 signed: false,
                             })
                             .ok_or_else(|| crate::trap::string_index(i).into()),
-                        // `m[k]` on a Map (RFC-0028) → `Option<V>`.
+                    // `m[k]` on a Map (RFC-0028) → `Option<V>`. An `Int64` key
+                    // meeting an empty string-keyed map is a pre-upgrade `[:]`
+                    // (RFC-0117): a read of an empty map is `None` either way.
                         (Val::Map(pairs), Val::Str(k)) => Ok(Val::Option(
                             pairs.get(k.as_str()).map(|v| Box::new(v.clone())),
                         )),
+                        (Val::MapI(pairs), Val::Int(k)) => {
+                            Ok(Val::Option(pairs.get(*k).map(|v| Box::new(v.clone()))))
+                        }
+                        (Val::Map(pairs), Val::Int(_)) if pairs.is_empty() => {
+                            Ok(Val::Option(None))
+                        }
                         _ => Err("at of non-Array/Int64".into()),
                     },
                     // `m.has(k)` (RFC-0028) — membership test.
                     "@has" => match (&vals[0], &vals[1]) {
                         (Val::Map(pairs), Val::Str(k)) => Ok(Val::Bool(pairs.contains(k.as_str()))),
-                        _ => Err("`has` needs a Map and a String key".into()),
+                        (Val::MapI(pairs), Val::Int(k)) => Ok(Val::Bool(pairs.contains(*k))),
+                        (Val::Map(pairs), Val::Int(_)) if pairs.is_empty() => Ok(Val::Bool(false)),
+                        _ => Err("`has` needs a Map and a key of its key type".into()),
                     },
-                    // `m.keys()` (RFC-0028) — a fresh snapshot Array<String> in
+                    // `m.keys()` (RFC-0028) — a fresh snapshot Array<K> in
                     // insertion order (safe to mutate the map while iterating it).
                     "@keys" => match &vals[0] {
                         Val::Map(pairs) => Ok(Val::Array(
                             pairs
                                 .iter()
                                 .map(|(k, _)| Val::Str(std::rc::Rc::new(k.clone())))
+                                .collect::<Vec<_>>()
+                                .into(),
+                        )),
+                        Val::MapI(pairs) => Ok(Val::Array(
+                            pairs
+                                .iter()
+                                .map(|(k, _)| Val::Int(*k))
                                 .collect::<Vec<_>>()
                                 .into(),
                         )),
@@ -6469,7 +6673,7 @@ impl<'a> Interp<'a> {
                         .iter()
                         .rev()
                         .find_map(|f| f.get(v))
-                        .is_some_and(|s| matches!(s.v, Val::Array(_) | Val::Map(_)))
+                        .is_some_and(|s| matches!(s.v, Val::Array(_) | Val::Map(_) | Val::MapI(_)))
                 } =>
             {
                 let Expr::Var { name: v, .. } = &**expr else {
@@ -6483,6 +6687,7 @@ impl<'a> Interp<'a> {
                 Ok(match &slot.v {
                     Val::Array(items) => Val::Int(items.len() as i64),
                     Val::Map(pairs) => Val::Int(pairs.len() as i64),
+                    Val::MapI(pairs) => Val::Int(pairs.len() as i64),
                     _ => unreachable!("guarded above"),
                 })
             }
@@ -6493,6 +6698,7 @@ impl<'a> Interp<'a> {
                     Val::Array(items) if field == "length" => Ok(Val::Int(items.len() as i64)),
                     // `map.length` is the entry count (RFC-0028).
                     Val::Map(pairs) if field == "length" => Ok(Val::Int(pairs.len() as i64)),
+                    Val::MapI(pairs) if field == "length" => Ok(Val::Int(pairs.len() as i64)),
                     // `str.byteLength` is the O(1) byte length (RFC-0058; matches
                     // `strlen`). `.length` on a String is rejected by the checker.
                     Val::Str(s) if field == "byteLength" => Ok(Val::Int(s.len() as i64)),
@@ -6535,20 +6741,34 @@ impl<'a> Interp<'a> {
             // A map literal (RFC-0028): evaluate entries in written order as
             // insertions — a repeated key updates in place (keeps its slot).
             Expr::MapLit { entries, .. } => {
+                // The first key's runtime kind picks the variant (RFC-0117) —
+                // the checker made every key the same kind. An empty `[:]` is
+                // a string-keyed value; the ops upgrade it on first insert.
                 let mut pairs = MapVal::default();
-                for (ke, ve) in entries {
-                    let k = match self.expr(ke, scope)? {
-                        Val::Str(s) => s,
+                let mut ipairs = MapIVal::default();
+                let mut int_keyed = false;
+                for (i, (ke, ve)) in entries.iter().enumerate() {
+                    let k = self.expr(ke, scope)?;
+                    if i == 0 {
+                        int_keyed = matches!(k, Val::Int(_));
+                    }
+                    let v = self.expr(ve, scope)?;
+                    match k {
+                        Val::Str(s) if !int_keyed => pairs.insert((*s).clone(), v),
+                        Val::Int(n) if int_keyed => ipairs.insert(n, v),
                         other => {
                             return Err(
-                                format!("a map key must be a String, found {other:?}").into()
+                                format!("a map key must be a String or an Int64, found {other:?}")
+                                    .into(),
                             )
                         }
-                    };
-                    let v = self.expr(ve, scope)?;
-                    pairs.insert((*k).clone(), v);
+                    }
                 }
-                Ok(Val::Map(std::rc::Rc::new(pairs)))
+                Ok(if int_keyed {
+                    Val::MapI(std::rc::Rc::new(ipairs))
+                } else {
+                    Val::Map(std::rc::Rc::new(pairs))
+                })
             }
             // A deterministic fork-join task: the callee is isolated (pure), so
             // running it eagerly here yields the same result any scheduler would.
@@ -7225,14 +7445,28 @@ impl<'a> Interp<'a> {
                 }
                 Ok(Val::Array(std::rc::Rc::new(out)))
             }
-            // A `Map<String, V>` coerces (and thus validates) every value into
+            // A `Map<K, V>` coerces (and thus validates) every value into
             // `V` — the boundary re-validation for a predicated value type.
-            (Type::Map(_, val), Val::Map(pairs)) => {
+            // An EMPTY string-keyed value under an Int64-keyed type is a
+            // pre-upgrade `[:]` (RFC-0117): the boundary settles the variant.
+            (Type::Map(key, val), Val::Map(pairs)) => {
+                if pairs.is_empty()
+                    && crate::types::resolve(key, &self.type_map) == Type::Int
+                {
+                    return Ok(Val::MapI(std::rc::Rc::new(MapIVal::default())));
+                }
                 let mut out = MapVal::default();
                 for (k, v) in pairs.pairs.iter() {
                     out.insert(k.clone(), self.coerce(v.clone(), val)?);
                 }
                 Ok(Val::Map(std::rc::Rc::new(out)))
+            }
+            (Type::Map(_, val), Val::MapI(pairs)) => {
+                let mut out = MapIVal::default();
+                for (k, v) in pairs.pairs.iter() {
+                    out.insert(*k, self.coerce(v.clone(), val)?);
+                }
+                Ok(Val::MapI(std::rc::Rc::new(out)))
             }
             // A function value flowing into a stored fn-typed slot (RFC-0037):
             // adopt the slot's signature. A lambda evaluated bare (in a storage
@@ -7414,6 +7648,12 @@ impl<'a> Interp<'a> {
                 self.coercion_is_noop(if *is_ok { ok } else { err }, p, d)
             }
             (Type::Map(_, val), Val::Map(pairs)) => {
+                pairs.iter().all(|(_, x)| self.coercion_is_noop(val, x, d))
+            }
+            // An empty string-keyed `[:]` under an Int64-keyed type counts as
+            // a noop deliberately: every op upgrades it on first insert
+            // (RFC-0117), so nothing needs the conversion.
+            (Type::Map(_, val), Val::MapI(pairs)) => {
                 pairs.iter().all(|(_, x)| self.coercion_is_noop(val, x, d))
             }
             (Type::Record(fields), Val::Record(map, _)) => fields.iter().all(|f| {

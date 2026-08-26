@@ -31,6 +31,45 @@ export fn fnv1aStr(s: String) -> UInt64 {
     return fnv1a(bytes(s))
 }
 
+/// A key is anything that hashes (RFC-0117). The one contract: equal values
+/// return equal hashes. Beyond that the value is the implementation's — a
+/// `Map`'s index mixes and masks it itself, and the hash decides nothing
+/// observable (insertion order does, RFC-0028).
+export protocol Hashable {
+    fn hash(self) -> UInt64
+}
+
+/// SplitMix64's finalizer (Vigna) — the same constants [`std/random`] mixes
+/// with, and the same function the map runtime applies to an `Int64` key.
+/// Spelled here so the contract has one readable definition.
+impl Hashable for Int64 {
+    fn hash(self) -> UInt64 {
+        let c1: UInt64 = 13787848793156543929 // 0xBF58476D1CE4E5B9
+        let c2: UInt64 = 10723151780598845931 // 0x94D049BB133111EB
+        let mut z: UInt64 = UInt64(self)
+        z = (z ^ (z >> 30)) * c1
+        z = (z ^ (z >> 27)) * c2
+        return z ^ (z >> 31)
+    }
+}
+
+/// FNV-1a over the UTF-8 bytes — the hash the String-keyed map has always run.
+impl Hashable for String {
+    fn hash(self) -> UInt64 {
+        return fnv1aStr(self)
+    }
+}
+
+test "equal values hash equal, and the mix spreads" {
+    let a = 7
+    let b = 7
+    assertEq(a.hash(), b.hash())
+    let c = 8
+    assert(a.hash() != c.hash())
+    assertEq("key".hash(), "key".hash())
+    assert("key".hash() != "keys".hash())
+}
+
 // ---- SHA-1 (RFC 3174) ------------------------------------------------------
 
 /// **SHA-1 is here as a handshake nonce transform, not as a security

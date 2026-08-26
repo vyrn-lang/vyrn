@@ -380,6 +380,38 @@ char** __vyrn_map_keys_copy(char** keys, long long len) {
     for (i = 0; i < len; i++) r[i] = keys[i];
     return r;
 }
+
+/* ---- the Int64-keyed map (RFC-0117 M1) ---------------------------------- */
+/* The same shape with the key column holding the values themselves: no dup on
+   insert, no free on removal, equality is the bits. Its own struct because the
+   key stride is 8 where a pointer may be 4 (wasm32). The hash is SplitMix64's
+   finalizer — the same function std/hash's `impl Hashable for Int64` spells —
+   and, like the string map's FNV, it is never observable: only insertion order
+   is (RFC-0028). */
+typedef struct { long long* keys; char* vals; long long len, cap; long long* idx; } VMapI;
+static unsigned long long map_hash_i64(long long k) {
+    unsigned long long z = (unsigned long long)k;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+static unsigned long long map_slot_i64(long long* keys, long long* idx, long long nb, long long key) {
+    unsigned long long mask = (unsigned long long)nb - 1;
+    unsigned long long b = map_hash_i64(key) & mask;
+    while (idx[b] && keys[idx[b] - 1] != key) b = (b + 1) & mask;
+    return b;
+}
+static void map_reindex_i64(VMapI* m) {
+    long long nb = m->cap * 2, i;
+    if (nb <= 0) return;
+    memset(m->idx, 0, (size_t)nb * sizeof(long long));
+    for (i = 0; i < m->len; i++) m->idx[map_slot_i64(m->keys, m->idx, nb, m->keys[i])] = i + 1;
+}
+long long __vyrn_map_find_i64(long long* keys, long long len, long long key, long long* idx, long long cap) { unsigned long long b; if (len <= 0 || cap <= 0) return -1; b = map_slot_i64(keys, idx, cap * 2, key); return idx[b] ? idx[b] - 1 : -1; }
+void __vyrn_map_reserve_i64(VMapI* m, long long esz) { if (m->len + 1 > m->cap) { m->cap = m->cap ? m->cap * 2 : 4; m->keys = (long long*)__vyrn_realloc(m->keys, (unsigned long long)m->cap * sizeof(long long)); m->vals = (char*)__vyrn_realloc(m->vals, (unsigned long long)m->cap * (unsigned long long)esz); m->idx = (long long*)__vyrn_realloc(m->idx, (unsigned long long)m->cap * 2 * sizeof(long long)); map_reindex_i64(m); } }
+void __vyrn_map_index_add_i64(VMapI* m, long long i) { m->idx[map_slot_i64(m->keys, m->idx, m->cap * 2, m->keys[i])] = i + 1; }
+void __vyrn_map_remove_at_i64(VMapI* m, long long i, long long esz) { long long rest = m->len - i - 1; if (rest > 0) { memmove(m->keys + i, m->keys + i + 1, (size_t)(rest * (long long)sizeof(long long))); memmove(m->vals + i * esz, m->vals + (i + 1) * esz, (size_t)(rest * esz)); } m->len--; map_reindex_i64(m); }
+long long* __vyrn_map_keys_copy_i64(long long* keys, long long len) { long long* r = (long long*)__vyrn_malloc((unsigned long long)(len ? len : 1) * sizeof(long long)); long long i; for (i = 0; i < len; i++) r[i] = keys[i]; return r; }
 int __vyrn_snprintf(char* buf, unsigned long long n, const char* fmt, ...) {
     va_list ap;
     int r;

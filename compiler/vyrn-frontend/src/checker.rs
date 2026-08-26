@@ -2131,8 +2131,8 @@ impl<'a> Checker<'a> {
         if let (Type::Result(a, e1), Type::Result(b, e2)) = (from, to) {
             return self.assignable_d(a, b, depth + 1) && self.assignable_d(e1, e2, depth + 1);
         }
-        // A Map is covariant in its value type (keys are always String; values
-        // are immutable at a read boundary) — RFC-0028.
+        // A Map is covariant in its value type (keys recurse the same way;
+        // values are immutable at a read boundary) — RFC-0028.
         if let (Type::Map(ka, va), Type::Map(kb, vb)) = (from, to) {
             return self.assignable_d(ka, kb, depth + 1) && self.assignable_d(va, vb, depth + 1);
         }
@@ -2545,18 +2545,31 @@ impl<'a> Checker<'a> {
                 }
                 self.ensure_type_exists(inner, line)?
             }
-            // `Map<String, V>` (RFC-0028): keys are `String` in v1. A validated
-            // string type is a legal key (it resolves to `String`); any other
-            // key spelling is rejected here with the named diagnostic.
+            // `Map<K, V>` (RFC-0028, RFC-0117): a key is `String` or `Int64`
+            // today. A validated string type is a legal key (it resolves to
+            // `String`). Floats are refused BY NAME — `NaN != NaN` breaks the
+            // reflexivity a key needs, and `+0.0 == -0.0` hash-equal is a trap
+            // either way; a program that wants float keys must make that
+            // decision explicitly. The other scalars and user `Hashable` types
+            // are RFC-0117 M2's, where the declared-K coercion machinery they
+            // need exists for both.
             Type::Map(key, val) => {
                 self.ensure_type_exists(key, line)?;
                 self.ensure_type_exists(val, line)?;
-                if crate::types::resolve(key, self.types) != Type::Str {
-                    return Err(cerr!(
-                        line,
-                        "a `Map` key must be `String` in v1, found `{key}` \
-                         (RFC-0028; validated string types are allowed)"
-                    ));
+                match crate::types::resolve(key, self.types) {
+                    Type::Str | Type::Int => {}
+                    Type::Float | Type::Float32 => {
+                        return Err(cerr!(
+                            line,
+                            "a `Map` key must hash and compare by equality, and `{key}` does neither well: `NaN != NaN`, and `+0.0 == -0.0` would hash apart (RFC-0117 refuses float keys by name)"
+                        ));
+                    }
+                    _ => {
+                        return Err(cerr!(
+                            line,
+                            "a `Map` key is `String` or `Int64` today, found `{key}` (RFC-0117 M1; the other `Hashable` scalars and user types follow in M2)"
+                        ));
+                    }
                 }
             }
             // A generic parameter is always valid in the context the parser
@@ -3435,14 +3448,18 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 // `m[k] = v` on a Map (RFC-0028) inserts or updates in place: the
-                // key coerces to `String`, the value to `V` (auto-validated when
-                // `V` is predicated, exactly like an array element store).
-                if let Type::Map(_, val) = self.base(&b.ty) {
-                    let k = self.base(&self.expr(index, scope, Some(&Type::Str), Some(ret))?);
-                    if !matches!(k, Type::Err) && crate::types::resolve(&k, self.types) != Type::Str
-                    {
-                        return Err(cerr!(line, "a map key must be a String, found {k}"));
+                // key coerces to the map's key type `K` (RFC-0117), the value to
+                // `V` (auto-validated when `V` is predicated, exactly like an
+                // array element store).
+                if let Type::Map(key, val) = self.base(&b.ty) {
+                    let k = self.base(&self.expr(index, scope, Some(&key), Some(ret))?);
+                    if !matches!(k, Type::Err) && !self.coercible(&k, &key) {
+                        return Err(cerr!(
+                            line,
+                            "`{name}` is keyed by {key}, but the key here is {k}"
+                        ));
                     }
+                    self.prove_coercion(index, &key, *line)?;
                     let vty = self.expr(value, scope, Some(&val), Some(ret))?;
                     if !self.coercible(&vty, &val) {
                         return Err(cerr!(
@@ -4675,8 +4692,11 @@ impl<'a> Checker<'a> {
                 };
                 for (i, (k, v)) in entries.iter().enumerate() {
                     let kt = self.expr(k, scope, Some(&key_ty), fn_ret)?;
-                    if crate::types::resolve(&self.base(&kt), self.types) != Type::Str {
-                        return Err(cerr!(line, "a map key must be a String, found {kt}"));
+                    if !self.coercible(&self.base(&kt), &key_ty) {
+                        return Err(cerr!(
+                            line,
+                            "the map is keyed by {key_ty}, but this key is {kt}"
+                        ));
                     }
                     self.prove_coercion(k, &key_ty, *line)?;
                     self.prove_string_interpolation(k, &key_ty, scope, fn_ret, *line)?;
@@ -6980,8 +7000,8 @@ impl<'a> Checker<'a> {
                 return Err(cerr!(line, "`tally` takes 3 arguments, got {}", args.len()));
             }
             let at = self.expr(&args[0], scope, None, fn_ret)?;
-            match self.base(&at) {
-                Type::Map(_, v) if matches!(self.base(&v), Type::Int) => {}
+            let key_ty = match self.base(&at) {
+                Type::Map(k, v) if matches!(self.base(&v), Type::Int) => (*k).clone(),
                 Type::Err => return Ok(Type::Err),
                 Type::Map(_, v) => {
                     return Err(cerr!(
@@ -6992,14 +7012,18 @@ impl<'a> Checker<'a> {
                 other => {
                     return Err(cerr!(
                         line,
-                        "`tally` needs a Map<String, Int64> as its receiver, found {other}"
+                        "`tally` needs a Map<K, Int64> as its receiver, found {other}"
                     ))
                 }
+            };
+            let k = self.expr(&args[1], scope, Some(&key_ty), fn_ret)?;
+            if !self.coercible(&k, &key_ty) {
+                return Err(cerr!(
+                    line,
+                    "the map is keyed by {key_ty}, but the `tally` key is {k}"
+                ));
             }
-            let k = self.expr(&args[1], scope, Some(&Type::Str), fn_ret)?;
-            if !self.coercible(&k, &Type::Str) {
-                return Err(cerr!(line, "`tally` key is {k}, not a String"));
-            }
+            self.prove_coercion(&args[1], &key_ty, line)?;
             let n = self.expr(&args[2], scope, Some(&Type::Int), fn_ret)?;
             if !self.coercible(&n, &Type::Int) {
                 return Err(cerr!(line, "`tally` count is {n}, not an Int64"));
@@ -7017,7 +7041,16 @@ impl<'a> Checker<'a> {
             }
             let at = self.expr(&args[0], scope, None, fn_ret)?;
             match self.base(&at) {
-                Type::Map(_, v) if matches!(self.base(&v), Type::Int) => {}
+                Type::Map(k, v) if matches!(self.base(&v), Type::Int) => {
+                    // Bytes become a String, so only a String-keyed map can
+                    // take them — an Int64-keyed map has `tally` (RFC-0117).
+                    if crate::types::resolve(&k, self.types) != Type::Str {
+                        return Err(cerr!(
+                            line,
+                            "`tallyBytes` builds a String key, and this map is keyed by {k} — use `tally` with the key itself"
+                        ));
+                    }
+                }
                 Type::Err => return Ok(Type::Err),
                 Type::Map(_, v) => {
                     return Err(cerr!(
@@ -7200,16 +7233,21 @@ impl<'a> Checker<'a> {
                     return Ok(t);
                 }
             }
-            // `m[k]` on a Map (RFC-0028): the key coerces to `String` and the
-            // result is `Option<V>` (a missing key is `None`, never a trap).
-            if let Type::Map(_, val) = self.base(&at) {
-                let k = self.base(&self.expr(&args[1], scope, Some(&Type::Str), fn_ret)?);
+            // `m[k]` on a Map (RFC-0028): the key coerces to the map's key type
+            // `K` (RFC-0117) and the result is `Option<V>` (a missing key is
+            // `None`, never a trap).
+            if let Type::Map(key, val) = self.base(&at) {
+                let k = self.base(&self.expr(&args[1], scope, Some(&key), fn_ret)?);
                 if matches!(k, Type::Err) {
                     return Ok(Type::Err);
                 }
-                if crate::types::resolve(&k, self.types) != Type::Str {
-                    return Err(cerr!(line, "a map key must be a String, found {k}"));
+                if !self.coercible(&k, &key) {
+                    return Err(cerr!(
+                        line,
+                        "the map is keyed by {key}, but the key here is {k}"
+                    ));
                 }
+                self.prove_coercion(&args[1], &key, line)?;
                 return Ok(Type::Option(val));
             }
             let elem = match self.base(&at) {
@@ -7571,8 +7609,8 @@ impl<'a> Checker<'a> {
         if name == "@has" || name == "@remove" || name == "@keys" {
             let op = &name[1..];
             let mt = self.expr(&args[0], scope, None, fn_ret)?;
-            let val = match self.base(&mt) {
-                Type::Map(_, v) => (*v).clone(),
+            let key_ty = match self.base(&mt) {
+                Type::Map(k, _) => (*k).clone(),
                 Type::Err => return Ok(Type::Err),
                 other => {
                     return Err(cerr!(
@@ -7581,14 +7619,13 @@ impl<'a> Checker<'a> {
                     ))
                 }
             };
-            let _ = val;
             if name == "@keys" {
                 if args.len() != 1 {
                     return Err(cerr!(line, "`keys` takes no arguments"));
                 }
-                return Ok(Type::Array(Box::new(Type::Str)));
+                return Ok(Type::Array(Box::new(key_ty)));
             }
-            // `has(k)` / `remove(k)` take one String key.
+            // `has(k)` / `remove(k)` take one key of the map's key type.
             if args.len() != 2 {
                 return Err(cerr!(line, "`{op}` takes 1 argument (a key)"));
             }
@@ -7611,10 +7648,14 @@ impl<'a> Checker<'a> {
                     ));
                 }
             }
-            let k = self.base(&self.expr(&args[1], scope, Some(&Type::Str), fn_ret)?);
-            if !matches!(k, Type::Err) && crate::types::resolve(&k, self.types) != Type::Str {
-                return Err(cerr!(line, "a map key must be a String, found {k}"));
+            let k = self.base(&self.expr(&args[1], scope, Some(&key_ty), fn_ret)?);
+            if !matches!(k, Type::Err) && !self.coercible(&k, &key_ty) {
+                return Err(cerr!(
+                    line,
+                    "the map is keyed by {key_ty}, but the key here is {k}"
+                ));
             }
+            self.prove_coercion(&args[1], &key_ty, line)?;
             return Ok(Type::Bool);
         }
         // Numeric conversion: `Int32(x)`, `Float64(x)`, etc. — resize/round a
@@ -13775,11 +13816,20 @@ mod tests {
     }
 
     #[test]
-    fn map_rejects_non_string_key() {
-        let src = "fn f(m: Map<Int64, Int64>) -> Int64 { return 0 }\n\
-                   fn main() -> Int64 { return 0 }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("Map` key must be `String`"), "{e}");
+    fn map_accepts_int64_key_and_rejects_the_rest() {
+        // RFC-0117 M1: `Int64` joined `String` as a key. Floats are refused
+        // by name; every other spelling gets the M1 diagnostic.
+        let ok = "fn f(m: Map<Int64, Int64>) -> Int64 { return 0 }\n\
+                  fn main() -> Int64 { return 0 }";
+        assert!(check_src(ok).is_ok(), "{:?}", check_src(ok));
+        let float = "fn f(m: Map<Float64, Int64>) -> Int64 { return 0 }\n\
+                     fn main() -> Int64 { return 0 }";
+        let e = check_src(float).unwrap_err();
+        assert!(e.contains("does neither well"), "{e}");
+        let heap = "fn f(m: Map<Array<UInt8>, Int64>) -> Int64 { return 0 }\n\
+                    fn main() -> Int64 { return 0 }";
+        let e = check_src(heap).unwrap_err();
+        assert!(e.contains("is `String` or `Int64` today"), "{e}");
     }
 
     #[test]

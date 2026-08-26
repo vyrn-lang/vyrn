@@ -1377,6 +1377,27 @@ pub fn emit(program: &Program) -> Result<String, String> {
         "declare ptr @__vyrn_map_keys_copy(ptr, i64)
 ",
     );
+    // The Int64-keyed family (RFC-0117 M1): same shapes, the key by value.
+    out.push_str(
+        "declare i64 @__vyrn_map_find_i64(ptr, i64, i64, ptr, i64)
+",
+    );
+    out.push_str(
+        "declare void @__vyrn_map_reserve_i64(ptr, i64)
+",
+    );
+    out.push_str(
+        "declare void @__vyrn_map_index_add_i64(ptr, i64)
+",
+    );
+    out.push_str(
+        "declare void @__vyrn_map_remove_at_i64(ptr, i64, i64)
+",
+    );
+    out.push_str(
+        "declare ptr @__vyrn_map_keys_copy_i64(ptr, i64)
+",
+    );
     // `extern` imports (RFC-0012): each body-less `extern fn` becomes a wasm
     // import from the fixed `vyrn` namespace. We emit ONE target-neutral IR —
     // a `declare` carrying the wasm-import attributes plus a real `call` at each
@@ -3599,10 +3620,12 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{out} = load {sa_ll}, ptr {slot}"));
                 Ok(out)
             }
-            // Two parallel buffers, and the keys are Strings, so a map copy
-            // always duplicates its keys and duplicates its values only when the
-            // value type owns something.
-            Type::Map(_, vt) => {
+            // Two parallel buffers. String keys are duplicated per entry; Int64
+            // keys (RFC-0117) copy with the buffer, since the buffer holds the
+            // values themselves. Values duplicate only when the value type owns
+            // something.
+            Type::Map(kt, vt) => {
+                let ik = self.key_is_int(&kt);
                 let vll = self.llt(&vt);
                 let keys = self.fresh_tmp();
                 let vals = self.fresh_tmp();
@@ -3613,8 +3636,10 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{vals} = extractvalue {m} {v}, 1"));
                 self.emit(format!("{len} = extractvalue {m} {v}, 2"));
                 self.emit(format!("{cap} = extractvalue {m} {v}, 3"));
-                let kb = self.copy_buf(&keys, &len, &cap, "ptr");
-                self.copy_elems(&kb, &len, &Type::Str)?;
+                let kb = self.copy_buf(&keys, &len, &cap, if ik { "i64" } else { "ptr" });
+                if !ik {
+                    self.copy_elems(&kb, &len, &Type::Str)?;
+                }
                 let vb = self.copy_buf(&vals, &len, &cap, &vll);
                 self.copy_elems(&vb, &len, &vt)?;
                 // The index is copied rather than rebuilt: it holds POSITIONS,
@@ -3831,10 +3856,11 @@ impl<'a> Gen<'a> {
                 self.emit(format!("call void @__vyrn_free(ptr {data})"));
                 Ok(())
             }
-            // Two parallel buffers, and the keys are Strings — so a map that
-            // releases anything releases its keys. The elements first, then the
-            // buffers they live in.
-            Type::Map(_, vt) if matches!(self.rel_kind(ty), Some(DropKind::Deep(_))) => {
+            // Two parallel buffers. String keys are released per entry; Int64
+            // keys (RFC-0117) go with their buffer. The elements first, then
+            // the buffers they live in.
+            Type::Map(kt, vt) if matches!(self.rel_kind(ty), Some(DropKind::Deep(_))) => {
+                let ik = self.key_is_int(&kt);
                 let m = "{ ptr, ptr, i64, i64, ptr }";
                 let keys = self.fresh_tmp();
                 let vals = self.fresh_tmp();
@@ -3844,7 +3870,9 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{len} = extractvalue {m} {v}, 2"));
                 let ix = self.fresh_tmp();
                 self.emit(format!("{ix} = extractvalue {m} {v}, 4"));
-                self.release_elems(&keys, &len, &Type::Str)?;
+                if !ik {
+                    self.release_elems(&keys, &len, &Type::Str)?;
+                }
                 self.release_elems(&vals, &len, &vt)?;
                 self.emit(format!("call void @__vyrn_free(ptr {keys})"));
                 self.emit(format!("call void @__vyrn_free(ptr {vals})"));
@@ -5268,7 +5296,8 @@ impl<'a> Gen<'a> {
                         Ok(())
                     }
                     // `m[k] = v` on a Map (RFC-0028): insert-or-update in place.
-                    Type::Map(_, val) => {
+                    Type::Map(key, val) => {
+                        let key = *key;
                         let val = *val;
                         let (kv, _) = self.gen_expr(index)?;
                         self.expect.push(val.clone());
@@ -5290,7 +5319,7 @@ impl<'a> Gen<'a> {
                         let drop_old = self.region_depth == 0
                             && !vyrn_frontend::movecheck::mentions_place(value, name)
                             && !vyrn_frontend::movecheck::mentions_place(index, name);
-                        self.emit_map_set(&slot, &kv, &v, &val, drop_old)
+                        self.emit_map_set(&slot, &kv, &v, &key, &val, drop_old)
                     }
                     other => Err(format!(
                         "`{name}[i] = ..` needs an Array or Map, found {other:?}"
@@ -6165,8 +6194,12 @@ impl<'a> Gen<'a> {
                 // A value type that IS an unsolved parameter names no type (see
                 // the array literal above) — the first value answers.
                 let val_expect = val_expect.filter(|t| !matches!(t, Type::Param(_)));
-                let build = (|| -> Result<Type, String> {
-                    let (kv0, _) = self.gen_expr(&entries[0].0)?;
+                let build = (|| -> Result<(Type, Type), String> {
+                    let (kv0, kty0) = self.gen_expr(&entries[0].0)?;
+                    // The first key's generated type is the map's key type
+                    // (RFC-0117: `String` or `Int64` — the checker made every
+                    // key the same one).
+                    let kty = kty0;
                     let (v0, vty0) = self.gen_expr(&entries[0].1)?;
                     // Store values at the DECLARED value type when the boundary
                     // supplies one, coercing each into it — otherwise a value that
@@ -6180,24 +6213,24 @@ impl<'a> Gen<'a> {
                     // has no owner left — `["usd": 1, "usd": 3]`. Inside a
                     // `region` nothing goes back: the arena owns it.
                     let drop_old = self.region_depth == 0;
-                    self.emit_map_set(&slot, &kv0, &v0, &val, drop_old)?;
+                    self.emit_map_set(&slot, &kv0, &v0, &kty, &val, drop_old)?;
                     for (ke, ve) in entries.iter().skip(1) {
                         let (kv, _) = self.gen_expr(ke)?;
                         let (v, vt) = self.gen_expr(ve)?;
                         let (v, _) = self.coerce(v, &vt, &val)?;
-                        self.emit_map_set(&slot, &kv, &v, &val, drop_old)?;
+                        self.emit_map_set(&slot, &kv, &v, &kty, &val, drop_old)?;
                     }
-                    Ok(val)
+                    Ok((kty, val))
                 })();
                 if pushed {
                     self.expect.pop();
                 }
-                let val = build?;
+                let (kty, val) = build?;
                 let agg = self.fresh_tmp();
                 self.emit(format!(
                     "{agg} = load {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}"
                 ));
-                Ok((agg, Type::Map(Box::new(Type::Str), Box::new(val))))
+                Ok((agg, Type::Map(Box::new(kty), Box::new(val))))
             }
             // A lambda literal in a v1 argument position is monomorphized away
             // at the call site that receives it (RFC-0023); one reaching the
@@ -7678,6 +7711,12 @@ impl<'a> Gen<'a> {
     /// array and the capacity that sizes it (`cap * 2` buckets). Every
     /// `__vyrn_map_find` call site takes them from the same aggregate it took
     /// the other two from, which is why they are extracted together here.
+    /// Whether this map's key type is `Int64` (RFC-0117 M1) — the one question
+    /// every key-touching emission branches on.
+    fn key_is_int(&self, key_ty: &Type) -> bool {
+        vyrn_frontend::types::resolve(key_ty, self.types) == Type::Int
+    }
+
     fn map_index_of(&mut self, agg: &str) -> (String, String) {
         let cap = self.fresh_tmp();
         let ix = self.fresh_tmp();
@@ -7695,9 +7734,14 @@ impl<'a> Gen<'a> {
         slot: &str,
         key: &str,
         v: &str,
+        key_ty: &Type,
         val: &Type,
         drop_old: bool,
     ) -> Result<(), String> {
+        // An Int64-keyed map (RFC-0117): the key column holds the values
+        // themselves, so the probe takes the key by value, an insert stores it,
+        // and nothing about a key is ever dup'd or freed.
+        let ik = self.key_is_int(key_ty);
         let vll = self.llt(val);
         let esz = self.fresh_tmp();
         self.emit(format!(
@@ -7717,9 +7761,15 @@ impl<'a> Gen<'a> {
         ));
         let (ix, cap) = self.map_index_of(&hdr);
         let idx = self.fresh_tmp();
-        self.emit(format!(
-            "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {key}, ptr {ix}, i64 {cap})"
-        ));
+        if ik {
+            self.emit(format!(
+                "{idx} = call i64 @__vyrn_map_find_i64(ptr {keys}, i64 {len}, i64 {key}, ptr {ix}, i64 {cap})"
+            ));
+        } else {
+            self.emit(format!(
+                "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {key}, ptr {ix}, i64 {cap})"
+            ));
+        }
         let found = self.fresh_tmp();
         self.emit(format!("{found} = icmp sge i64 {idx}, 0"));
         let upd_l = self.fresh_label("map.set.upd");
@@ -7745,16 +7795,20 @@ impl<'a> Gen<'a> {
         // The map already holds an equal key, so this one is surplus. Inside a
         // `region` it came from the arena, which hands it back at the exit —
         // freeing it here would give one block two owners. The same partition
-        // `deep_release` draws for a `String`, drawn here too.
-        if self.region_depth == 0 {
+        // `deep_release` draws for a `String`, drawn here too. An `Int64` key
+        // owns nothing, so it has no surplus to return.
+        if !ik && self.region_depth == 0 {
             self.emit(format!("call void @__vyrn_str_free(ptr {key})"));
         }
         self.emit_term(format!("br label %{done_l}"));
         // insert: reserve (may realloc both buffers), reload, append, len += 1.
         self.emit_label(&ins_l);
-        self.emit(format!(
-            "call void @__vyrn_map_reserve(ptr {slot}, i64 {esz})"
-        ));
+        let rsv = if ik {
+            "__vyrn_map_reserve_i64"
+        } else {
+            "__vyrn_map_reserve"
+        };
+        self.emit(format!("call void @{rsv}(ptr {slot}, i64 {esz})"));
         let hdr2 = self.fresh_tmp();
         let keys2 = self.fresh_tmp();
         let vals2 = self.fresh_tmp();
@@ -7768,14 +7822,22 @@ impl<'a> Gen<'a> {
             "{vals2} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr2}, 1"
         ));
         let kep = self.fresh_tmp();
-        self.emit(format!("{kep} = getelementptr ptr, ptr {keys2}, i64 {len}"));
-        self.emit(format!("store ptr {key}, ptr {kep}"));
+        if ik {
+            self.emit(format!("{kep} = getelementptr i64, ptr {keys2}, i64 {len}"));
+            self.emit(format!("store i64 {key}, ptr {kep}"));
+        } else {
+            self.emit(format!("{kep} = getelementptr ptr, ptr {keys2}, i64 {len}"));
+            self.emit(format!("store ptr {key}, ptr {kep}"));
+        }
         // The key is in its slot, so the index can record where. `reserve` above
         // grew the bucket array and rebuilt it, so this is the only entry it is
         // missing — and the reason the append stays O(1).
-        self.emit(format!(
-            "call void @__vyrn_map_index_add(ptr {slot}, i64 {len})"
-        ));
+        let iadd = if ik {
+            "__vyrn_map_index_add_i64"
+        } else {
+            "__vyrn_map_index_add"
+        };
+        self.emit(format!("call void @{iadd}(ptr {slot}, i64 {len})"));
         let vep = self.fresh_tmp();
         self.emit(format!(
             "{vep} = getelementptr {vll}, ptr {vals2}, i64 {len}"
@@ -10748,6 +10810,13 @@ impl<'a> Gen<'a> {
         // releases nothing.
         if name == "@tally" {
             let (mv, mty) = self.gen_expr(&args[0])?;
+            // The map's key type picks the probe family (RFC-0117): an Int64
+            // key is passed by value, stored by value, and never copied or
+            // freed.
+            let ik = match vyrn_frontend::types::resolve(&mty, self.types) {
+                Type::Map(k, _) => self.key_is_int(&k),
+                _ => false,
+            };
             let (kv, _) = self.gen_expr(&args[1])?;
             let (nv, _) = self.gen_expr(&args[2])?;
             let slot = self.fresh_alloca("{ ptr, ptr, i64, i64, ptr }");
@@ -10764,9 +10833,15 @@ impl<'a> Gen<'a> {
             ));
             let (ix, cap) = self.map_index_of(&mv);
             let idx = self.fresh_tmp();
-            self.emit(format!(
-                "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {kv}, ptr {ix}, i64 {cap})"
-            ));
+            if ik {
+                self.emit(format!(
+                    "{idx} = call i64 @__vyrn_map_find_i64(ptr {keys}, i64 {len}, i64 {kv}, ptr {ix}, i64 {cap})"
+                ));
+            } else {
+                self.emit(format!(
+                    "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {kv}, ptr {ix}, i64 {cap})"
+                ));
+            }
             let found = self.fresh_tmp();
             self.emit(format!("{found} = icmp sge i64 {idx}, 0"));
             let upd_l = self.fresh_label("tally.upd");
@@ -10787,7 +10862,12 @@ impl<'a> Gen<'a> {
             self.emit(format!("store i64 {newv}, ptr {ep0}"));
             self.emit_term(format!("br label %{done_l}"));
             self.emit_label(&ins_l);
-            self.emit(format!("call void @__vyrn_map_reserve(ptr {slot}, i64 8)"));
+            let rsv = if ik {
+                "__vyrn_map_reserve_i64"
+            } else {
+                "__vyrn_map_reserve"
+            };
+            self.emit(format!("call void @{rsv}(ptr {slot}, i64 8)"));
             let hdr2 = self.fresh_tmp();
             let keys2 = self.fresh_tmp();
             let vals2 = self.fresh_tmp();
@@ -10800,13 +10880,21 @@ impl<'a> Gen<'a> {
             self.emit(format!(
                 "{vals2} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr2}, 1"
             ));
-            let kcopy = self.deep_copy(&kv, &Type::Str)?;
             let kep = self.fresh_tmp();
-            self.emit(format!("{kep} = getelementptr ptr, ptr {keys2}, i64 {len}"));
-            self.emit(format!("store ptr {kcopy}, ptr {kep}"));
-            self.emit(format!(
-                "call void @__vyrn_map_index_add(ptr {slot}, i64 {len})"
-            ));
+            if ik {
+                self.emit(format!("{kep} = getelementptr i64, ptr {keys2}, i64 {len}"));
+                self.emit(format!("store i64 {kv}, ptr {kep}"));
+            } else {
+                let kcopy = self.deep_copy(&kv, &Type::Str)?;
+                self.emit(format!("{kep} = getelementptr ptr, ptr {keys2}, i64 {len}"));
+                self.emit(format!("store ptr {kcopy}, ptr {kep}"));
+            }
+            let iadd = if ik {
+                "__vyrn_map_index_add_i64"
+            } else {
+                "__vyrn_map_index_add"
+            };
+            self.emit(format!("call void @{iadd}(ptr {slot}, i64 {len})"));
             let vep = self.fresh_tmp();
             self.emit(format!("{vep} = getelementptr i64, ptr {vals2}, i64 {len}"));
             self.emit(format!("store i64 {nv}, ptr {vep}"));
@@ -11357,9 +11445,12 @@ impl<'a> Gen<'a> {
                         },
                     ));
                 }
-                // `m[k]` on a Map (RFC-0028): linear key scan → `Option<V>`
-                // (`None` on a miss, never a trap). `iv` is the key `ptr`.
-                Type::Map(_, val) => {
+                // `m[k]` on a Map (RFC-0028): hashed probe → `Option<V>`
+                // (`None` on a miss, never a trap). `iv` is the key — a `ptr`
+                // for a String key, the `i64` itself for an Int64 one
+                // (RFC-0117).
+                Type::Map(key, val) => {
+                    let ik = self.key_is_int(&key);
                     let val = *val;
                     let vll = self.llt(&val);
                     let keys = self.fresh_tmp();
@@ -11376,9 +11467,15 @@ impl<'a> Gen<'a> {
                     ));
                     let (ix, cap) = self.map_index_of(&av);
                     let idx = self.fresh_tmp();
-                    self.emit(format!(
-                        "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {iv}, ptr {ix}, i64 {cap})"
-                    ));
+                    if ik {
+                        self.emit(format!(
+                            "{idx} = call i64 @__vyrn_map_find_i64(ptr {keys}, i64 {len}, i64 {iv}, ptr {ix}, i64 {cap})"
+                        ));
+                    } else {
+                        self.emit(format!(
+                            "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {iv}, ptr {ix}, i64 {cap})"
+                        ));
+                    }
                     let found = self.fresh_tmp();
                     self.emit(format!("{found} = icmp sge i64 {idx}, 0"));
                     let some_l = self.fresh_label("map.at.some");
@@ -11863,7 +11960,11 @@ impl<'a> Gen<'a> {
         // `m.has(k)` (RFC-0028) — membership test → i1. Read-only; the receiver
         // is any Map-typed expression (an SSA aggregate).
         if name == "@has" {
-            let (mv, _) = self.gen_expr(&args[0])?;
+            let (mv, mty) = self.gen_expr(&args[0])?;
+            let ik = match self.resolve(&mty) {
+                Type::Map(k, _) => self.key_is_int(&k),
+                _ => false,
+            };
             let (kv, _) = self.gen_expr(&args[1])?;
             let keys = self.fresh_tmp();
             let len = self.fresh_tmp();
@@ -11875,9 +11976,15 @@ impl<'a> Gen<'a> {
             ));
             let (ix, cap) = self.map_index_of(&mv);
             let idx = self.fresh_tmp();
-            self.emit(format!(
-                "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {kv}, ptr {ix}, i64 {cap})"
-            ));
+            if ik {
+                self.emit(format!(
+                    "{idx} = call i64 @__vyrn_map_find_i64(ptr {keys}, i64 {len}, i64 {kv}, ptr {ix}, i64 {cap})"
+                ));
+            } else {
+                self.emit(format!(
+                    "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {kv}, ptr {ix}, i64 {cap})"
+                ));
+            }
             let found = self.fresh_tmp();
             self.emit(format!("{found} = icmp sge i64 {idx}, 0"));
             return Ok((found, Type::Bool));
@@ -11892,10 +11999,11 @@ impl<'a> Gen<'a> {
             let (slot, aty) = self
                 .lookup(&recv)
                 .ok_or_else(|| format!("unbound `{recv}`"))?;
-            let val = match self.resolve(&aty) {
-                Type::Map(_, v) => *v,
+            let (key_t, val) = match self.resolve(&aty) {
+                Type::Map(k, v) => (*k, *v),
                 other => return Err(format!("`remove` needs a Map, found {other:?}")),
             };
+            let ik = self.key_is_int(&key_t);
             let vll = self.llt(&val);
             let esz = self.fresh_tmp();
             self.emit(format!(
@@ -11916,9 +12024,15 @@ impl<'a> Gen<'a> {
             ));
             let (ix, cap) = self.map_index_of(&hdr);
             let idx = self.fresh_tmp();
-            self.emit(format!(
-                "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {kv}, ptr {ix}, i64 {cap})"
-            ));
+            if ik {
+                self.emit(format!(
+                    "{idx} = call i64 @__vyrn_map_find_i64(ptr {keys}, i64 {len}, i64 {kv}, ptr {ix}, i64 {cap})"
+                ));
+            } else {
+                self.emit(format!(
+                    "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {kv}, ptr {ix}, i64 {cap})"
+                ));
+            }
             let found = self.fresh_tmp();
             self.emit(format!("{found} = icmp sge i64 {idx}, 0"));
             let do_l = self.fresh_label("map.rm.do");
@@ -11937,15 +12051,23 @@ impl<'a> Gen<'a> {
                 self.emit(format!(
                     "{vals} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr}, 1"
                 ));
-                let kp = self.fresh_tmp();
-                self.emit(format!("{kp} = getelementptr ptr, ptr {keys}, i64 {idx}"));
-                self.release_entry(&kp, &Type::Str)?;
+                // An Int64 key owns nothing to hand back (RFC-0117).
+                if !ik {
+                    let kp = self.fresh_tmp();
+                    self.emit(format!("{kp} = getelementptr ptr, ptr {keys}, i64 {idx}"));
+                    self.release_entry(&kp, &Type::Str)?;
+                }
                 let vp = self.fresh_tmp();
                 self.emit(format!("{vp} = getelementptr {vll}, ptr {vals}, i64 {idx}"));
                 self.release_entry(&vp, &val)?;
             }
+            let rmat = if ik {
+                "__vyrn_map_remove_at_i64"
+            } else {
+                "__vyrn_map_remove_at"
+            };
             self.emit(format!(
-                "call void @__vyrn_map_remove_at(ptr {slot}, i64 {idx}, i64 {esz})"
+                "call void @{rmat}(ptr {slot}, i64 {idx}, i64 {esz})"
             ));
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&end_l);
@@ -11959,7 +12081,12 @@ impl<'a> Gen<'a> {
         // since RFC-0028 (`Rc::new(k.clone())`), so this is the two compiling
         // backends catching up with the oracle, not a new cost in the model.
         if name == "@keys" {
-            let (mv, _) = self.gen_expr(&args[0])?;
+            let (mv, mty) = self.gen_expr(&args[0])?;
+            let key_t = match self.resolve(&mty) {
+                Type::Map(k, _) => *k,
+                _ => Type::Str,
+            };
+            let ik = self.key_is_int(&key_t);
             let keys = self.fresh_tmp();
             let len = self.fresh_tmp();
             self.emit(format!(
@@ -11969,10 +12096,18 @@ impl<'a> Gen<'a> {
                 "{len} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {mv}, 2"
             ));
             let buf = self.fresh_tmp();
-            self.emit(format!(
-                "{buf} = call ptr @__vyrn_map_keys_copy(ptr {keys}, i64 {len})"
-            ));
-            self.copy_elems(&buf, &len, &Type::Str)?;
+            if ik {
+                // Int64 keys copy by value — the snapshot IS the copy, and
+                // there is nothing per-element to duplicate (RFC-0117).
+                self.emit(format!(
+                    "{buf} = call ptr @__vyrn_map_keys_copy_i64(ptr {keys}, i64 {len})"
+                ));
+            } else {
+                self.emit(format!(
+                    "{buf} = call ptr @__vyrn_map_keys_copy(ptr {keys}, i64 {len})"
+                ));
+                self.copy_elems(&buf, &len, &Type::Str)?;
+            }
             let r0 = self.fresh_tmp();
             let r1 = self.fresh_tmp();
             let r2 = self.fresh_tmp();
@@ -11985,7 +12120,7 @@ impl<'a> Gen<'a> {
             self.emit(format!(
                 "{r2} = insertvalue {{ ptr, i64, i64 }} {r1}, i64 {len}, 2"
             ));
-            return Ok((r2, Type::Array(Box::new(Type::Str))));
+            return Ok((r2, Type::Array(Box::new(key_t))));
         }
         // value(x) -> Value: box a scalar into the built-in `Value` enum, using the
         // same payload encoding as any enum variant (so `match` decodes it).

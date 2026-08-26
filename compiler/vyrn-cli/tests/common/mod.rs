@@ -43,6 +43,21 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "RFC-0115: `append` is a byte copy, so an element type that owns heap          is refused — copying one by bytes gives two arrays one buffer",
         "copies its source's elements by bytes",
     ),
+    (
+        "floatkey.vyrn",
+        "RFC-0117: float keys are refused by name — NaN != NaN breaks the          reflexivity a key needs",
+        "does neither well",
+    ),
+    (
+        "heapkey.vyrn",
+        "RFC-0117 M1: a Map key is String or Int64 today; the other Hashable          scalars and user types are M2's",
+        "is `String` or `Int64` today",
+    ),
+    (
+        "wirekey.vyrn",
+        "RFC-0117 §5: a non-String-keyed map has no wire form yet, and the          boundary refuses rather than guessing",
+        "cannot encode",
+    ),
     // ---- RFC-0114's proof appendix, §45: the four load-bearing assumptions,
     // pinned as refusals. Each row is one assumption of the release-algorithm
     // proofs (rfcs/proofs/release-algorithm.md); the needle is the checker's

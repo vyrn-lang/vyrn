@@ -393,32 +393,44 @@ fn rows() -> Vec<Function> {
         // it is given and keeps nothing, so a temporary handed to it is the
         // caller's to release.
         row("print", &[], &[("x", Read, Unit)], Unit, &[]),
-        // `m.keys()` copies the key pointers into a new buffer (RFC-0028), so
-        // the result is the caller's and the map keeps its own.
+        // `m.keys()` copies the keys into a new buffer (RFC-0028), so the
+        // result is the caller's and the map keeps its own. Generic over the
+        // KEY too (RFC-0117): `Array<K>` is what makes an Int64-keyed map's
+        // snapshot release as integers rather than as someone's pointers —
+        // the seeded `Array<String>` this row used to pin was where the
+        // for-loop's temp release got `str_free` for an `i64`.
         row(
             "@keys",
-            &["V"],
+            &["K", "V"],
             &[(
                 "m",
                 Read,
-                Type::Map(Box::new(Str), Box::new(Type::Param("V".to_string()))),
+                Type::Map(
+                    Box::new(Type::Param("K".to_string())),
+                    Box::new(Type::Param("V".to_string())),
+                ),
             )],
-            arr(Str),
+            arr(Type::Param("K".to_string())),
             &[],
         ),
         // `m.tally(k, n)` (RFC-0116): insert-or-add on a count map, one probe.
         // The key is READ — a hit keeps the key the map already has, a miss
         // copies this one in — and the value type is pinned to `Int64`, which
-        // is what makes the add spellable in a signature.
+        // is what makes the add spellable in a signature. The key type is any
+        // legal one (RFC-0117).
         row(
             "@tally",
-            &[],
+            &["K"],
             &[
-                ("m", Read, Type::Map(Box::new(Str), Box::new(Int))),
-                ("k", Read, Str),
+                (
+                    "m",
+                    Read,
+                    Type::Map(Box::new(Type::Param("K".to_string())), Box::new(Int)),
+                ),
+                ("k", Read, Type::Param("K".to_string())),
                 ("n", Read, Int),
             ],
-            Type::Map(Box::new(Str), Box::new(Int)),
+            Type::Map(Box::new(Type::Param("K".to_string())), Box::new(Int)),
             &[],
         ),
         // `m.tallyBytes(w, n)` (RFC-0116): the byte-keyed form. On a hit the
@@ -685,7 +697,7 @@ mod tests {
         };
         assert_eq!(of("@concat"), "String");
         assert_eq!(of("@str"), "String");
-        assert_eq!(of("@keys"), "Array<String>");
+        assert_eq!(of("@keys"), "Array<K>");
         // `@push` needed no new row. The old list said `Array<Unit>` and the row
         // says `Array<T>`; both release the array's buffer.
         assert_eq!(of("@push"), "Array<T>");

@@ -245,6 +245,23 @@ impl Declared {
             Expr::Call { name, args, .. } if name == "@copy" => {
                 args.first().and_then(|a| self.type_of(vars, a))
             }
+            // `m.keys()` answers `Array<K>` where `K` is the RECEIVER's key
+            // type (RFC-0117). The seeded row spells `Array<K>` and this
+            // reading never solves a parameter, so an unsolved `K` here made
+            // the snapshot's release buffer-only — a `Map<String, V>`'s key
+            // snapshot leaked every String it held. `own`'s
+            // `a_fresh_key_snapshot_is_released` is the row that caught it.
+            Expr::Call { name, args, .. } if name == "@keys" => {
+                match crate::types::resolve(&self.type_of(vars, args.first()?)?, &self.decls) {
+                    Type::Map(k, _) => Some(Type::Array(k)),
+                    _ => None,
+                }
+            }
+            // `m.tally(..)` / `m.tallyBytes(..)` answer the receiver's own map
+            // type — solved the same way, for the same reason.
+            Expr::Call { name, args, .. } if name == "@tally" || name == "@tallyBytes" => {
+                args.first().and_then(|a| self.type_of(vars, a))
+            }
             Expr::Call { name, .. } => self.rets.get(name).cloned(),
             // The one allocating operator is `+` on Strings, and its result has
             // its left operand's type. Every other operator is a scalar, whose

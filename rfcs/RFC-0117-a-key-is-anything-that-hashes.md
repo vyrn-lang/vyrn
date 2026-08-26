@@ -1,9 +1,13 @@
 # RFC-0117 — a key is anything that hashes
 
-- **Status:** Proposed. The direction is the user's (2026-08-26): a hashable
-  protocol, not an `Int64` special case. The wire form is deliberately left
-  open — §5 records the options and a recommended default that does not block
-  the rest.
+- **Status:** M1 Implemented (2026-08-26) — `Map<Int64, V>` in all four
+  execution paths, `Hashable` declared in `std/hash` with the `Int64` and
+  `String` impls, the boundary refusals standing. See "M1 — as landed" for
+  the three places the milestone deviated from this document and why. M2
+  (user types, the remaining scalars) and M3 (the wire form) are open. The
+  direction is the user's (2026-08-26): a hashable protocol, not an `Int64`
+  special case. The wire form is deliberately left open — §5 records the
+  options and a recommended default that does not block the rest.
 - **Evidence:** the corrected census re-measurement
   (rfcs/census/knucleotide-needs-an-integer-key.md, "Corrected"): a rolling
   integer key costs 2.2–2.5 ns a window against 11 ns for the byte-keyed hit
@@ -127,6 +131,42 @@ m.tally(key, 1)
 
 no window buffer, no per-byte hash, no per-byte compare, and the String path
 keeps `tallyBytes` for keys that genuinely are bytes.
+
+## M1 — as landed
+
+Three deviations from the sections above, each cheaper than what was written
+and none of them surface-visible:
+
+1. **M1's key set is `Int64`, not all the scalars.** A `UInt64` key above
+   `Int64`'s ceiling would read back through an `Int64`-shaped slot and print
+   wrong; the sized integers need canonicalization on the way in and the
+   declared key type on the way out. That machinery is exactly what M2's user
+   types need too, so the other scalars moved there rather than shipping
+   half-made. Floats stay refused by name as §2 says; every other key spelling
+   gets the M1 diagnostic naming this RFC.
+2. **The probe is a runtime family beside the string one, not inline
+   emission.** §4 said "emitted monomorphized … a call would cost more than
+   the work"; what landed is `__vyrn_map_find_i64` and friends in the shim
+   (one-line definitions, SplitMix64's finalizer) and a
+   `map_find_i64`/`map_slot_i64`/`map_put_i64`/`map_reindex_i64` chain in the
+   direct backend's runtime — the same call shape `tallyBytes` already
+   measured at 11 ns a probe, at a tenth of the emission surface. If a
+   measurement ever shows the call dominating, inlining is a backend change
+   with no surface behind it.
+3. **The empty literal upgrades lazily.** `[:]` evaluates before any key
+   exists; the interpreter represents Int64-keyed maps as their own value
+   (`Val::MapI`) and an empty string-keyed `[:]` under an Int64-keyed type is
+   settled by the first insert — every read of an empty map has a
+   kind-independent answer, so nothing can observe the interim.
+
+Two defects fixed en route, both caught by the M1 witnesses: the prelude's
+seeded `@keys` row pinned `Array<String>` whatever the map, so the for-loop's
+temporary release freed integer keys as someone's pointers (the row is generic
+over the key now); and the wire refusal found its one choke point in
+`codec::wire`, which every codec and schema consumer already classifies
+through — the diagnostic names the offending map type rather than this RFC,
+because `toJson cannot encode Map<Int64, Int64>` is findable and a custom
+string at every consumer was not worth the thread.
 
 ## 7. Milestones
 
