@@ -178,6 +178,14 @@ string at every consumer was not worth the thread.
   EXPECTED_CHECK_FAILURE; a corpus witness counting by rolling `Int64` key;
   three-way parity.
 - **M2** — user heapless types as keys: `impl Hashable for T` accepted,
-  field-wise equality generated, padding never compared.
+  field-wise equality generated, padding never compared. **The scalar half of
+  M2 dissolved on inspection** (2026-08-26): this language never widens
+  implicitly — mixed-width arithmetic is spelled `Int64(x)`, `s[i]` needs it
+  too (RFC-0022) — so a narrow-int key is one explicit conversion away from
+  `Map<Int64, V>`, and even a full-range `UInt64` survives `Int64(u)`
+  faithfully, because the wrap is a bijection and equality is what a key
+  needs. `Map<Int8, V>` would be implicit sugar the language deliberately does
+  not do anywhere else. What remains of M2 is the user types, and they wait
+  where RFC-0028 waited: until something real demands one.
 - **M3** — the wire form: the user picks §5's 1 or 2; the refusals of M1
   become the codec.
