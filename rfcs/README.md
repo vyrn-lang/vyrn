@@ -44,7 +44,7 @@ drifts: each header says which milestone landed and what did not, and the
 
 ## The index
 
-115 RFCs, numbered 0001 to 0116, with one gap. **There is no RFC-0066** — the
+116 RFCs, numbered 0001 to 0117, with one gap. **There is no RFC-0066** — the
 number was skipped and never used. The only mention of it in the repository is
 this sentence. Closing the gap would mean renumbering thirty files and breaking
 every cross-reference, so the gap stays.
@@ -172,6 +172,7 @@ claim is true — is written down in the test's own header.
 | [0114](RFC-0114-ownership-at-a-program-point.md) | Ownership At A Program Point | Implemented; ownership is per store, per edge, per parameter — six leak classes closed, each pinned by a row that failed first |
 | [0115](RFC-0115-reserve-and-append.md) | `reserve`, `append` and `copyFrom` | Implemented; a known-size build is one allocation, a bulk append is one copy, and an overwrite keeps its buffer |
 | [0116](RFC-0116-tally.md) | `tally` and `tallyBytes` | Implemented; insert-or-add is one probe, byte keys exist only on a miss, and the audit caught the first draft's double free |
+| [0117](RFC-0117-a-key-is-anything-that-hashes.md) | a key is anything that hashes | Proposed; `Hashable` protocol, `Map<K, V>` for heapless scalar keys, the wire form held open by refusal |
 
 ## The other documents here
 

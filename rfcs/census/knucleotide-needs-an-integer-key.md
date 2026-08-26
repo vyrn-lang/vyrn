@@ -132,6 +132,10 @@ So the honest position is the reverse of the morning's: `tallyBytes` banked
 benchmark behind it. The decision remains the two design questions — the wire
 form and the key-type set — but they now carry a real number, not zero.
 
+RFC-0117 now carries both: the key-type set is a `Hashable` protocol (the
+user's call), and the wire form is held open by refusal at the boundary until
+a real program needs a keyed map to cross one.
+
 ## What the re-measurement caught instead
 
 Two real defects, both fixed the same day:
