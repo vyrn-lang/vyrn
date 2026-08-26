@@ -3816,9 +3816,8 @@ impl<'p> Fn_<'_, 'p> {
                     let drop_old = self.region_depth == 0
                         && !vyrn_frontend::movecheck::mentions_place(value, name)
                         && !vyrn_frontend::movecheck::mentions_place(index, name);
-                    return self.map_set(
-                        m, b, hdr, &l, index, value, &key_t, &val, drop_old, *line,
-                    );
+                    return self
+                        .map_set(m, b, hdr, &l, index, value, &key_t, &val, drop_old, *line);
                 }
                 let w = self.walk(b, &ty, *line)?;
                 if w.byte {

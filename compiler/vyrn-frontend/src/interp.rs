@@ -3841,17 +3841,13 @@ impl<'a> Interp<'a> {
                             match self.expr(&args[1], scope)? {
                                 Val::Str(s) => TKey::S((*s).clone()),
                                 Val::Int(k) => TKey::I(k),
-                                other => {
-                                    return Err(format!("tally key of {other:?}").into())
-                                }
+                                other => return Err(format!("tally key of {other:?}").into()),
                             }
                         } else {
                             match self.expr(&args[1], scope)? {
                                 Val::Array(bytes) => TKey::S(tally_key_bytes(&bytes)?),
                                 other => {
-                                    return Err(
-                                        format!("tallyBytes of non-Array {other:?}").into()
-                                    )
+                                    return Err(format!("tallyBytes of non-Array {other:?}").into())
                                 }
                             }
                         };
@@ -3913,9 +3909,7 @@ impl<'a> Interp<'a> {
                     {
                         let more = match self.expr(&args[1], scope)? {
                             Val::Array(more) => more,
-                            other => {
-                                return Err(format!("append of non-Array {other:?}").into())
-                            }
+                            other => return Err(format!("append of non-Array {other:?}").into()),
                         };
                         for frame in scope.iter_mut().rev() {
                             if let Some(slot) = frame.get_mut(name) {
@@ -5233,9 +5227,9 @@ impl<'a> Interp<'a> {
                             (Val::Map(pairs), Val::Str(k)) => Some(Ok(Val::Bool(
                                 std::rc::Rc::make_mut(pairs).remove(k.as_str()),
                             ))),
-                            (Val::MapI(pairs), Val::Int(k)) => Some(Ok(Val::Bool(
-                                std::rc::Rc::make_mut(pairs).remove(*k),
-                            ))),
+                            (Val::MapI(pairs), Val::Int(k)) => {
+                                Some(Ok(Val::Bool(std::rc::Rc::make_mut(pairs).remove(*k))))
+                            }
                             (Val::Map(pairs), Val::Int(_)) if pairs.is_empty() => {
                                 Some(Ok(Val::Bool(false)))
                             }
@@ -6297,18 +6291,16 @@ impl<'a> Interp<'a> {
                                 signed: false,
                             })
                             .ok_or_else(|| crate::trap::string_index(i).into()),
-                    // `m[k]` on a Map (RFC-0028) → `Option<V>`. An `Int64` key
-                    // meeting an empty string-keyed map is a pre-upgrade `[:]`
-                    // (RFC-0117): a read of an empty map is `None` either way.
+                        // `m[k]` on a Map (RFC-0028) → `Option<V>`. An `Int64` key
+                        // meeting an empty string-keyed map is a pre-upgrade `[:]`
+                        // (RFC-0117): a read of an empty map is `None` either way.
                         (Val::Map(pairs), Val::Str(k)) => Ok(Val::Option(
                             pairs.get(k.as_str()).map(|v| Box::new(v.clone())),
                         )),
                         (Val::MapI(pairs), Val::Int(k)) => {
                             Ok(Val::Option(pairs.get(*k).map(|v| Box::new(v.clone()))))
                         }
-                        (Val::Map(pairs), Val::Int(_)) if pairs.is_empty() => {
-                            Ok(Val::Option(None))
-                        }
+                        (Val::Map(pairs), Val::Int(_)) if pairs.is_empty() => Ok(Val::Option(None)),
                         _ => Err("at of non-Array/Int64".into()),
                     },
                     // `m.has(k)` (RFC-0028) — membership test.
@@ -6757,10 +6749,10 @@ impl<'a> Interp<'a> {
                         Val::Str(s) if !int_keyed => pairs.insert((*s).clone(), v),
                         Val::Int(n) if int_keyed => ipairs.insert(n, v),
                         other => {
-                            return Err(
-                                format!("a map key must be a String or an Int64, found {other:?}")
-                                    .into(),
+                            return Err(format!(
+                                "a map key must be a String or an Int64, found {other:?}"
                             )
+                            .into())
                         }
                     }
                 }
@@ -7450,9 +7442,7 @@ impl<'a> Interp<'a> {
             // An EMPTY string-keyed value under an Int64-keyed type is a
             // pre-upgrade `[:]` (RFC-0117): the boundary settles the variant.
             (Type::Map(key, val), Val::Map(pairs)) => {
-                if pairs.is_empty()
-                    && crate::types::resolve(key, &self.type_map) == Type::Int
-                {
+                if pairs.is_empty() && crate::types::resolve(key, &self.type_map) == Type::Int {
                     return Ok(Val::MapI(std::rc::Rc::new(MapIVal::default())));
                 }
                 let mut out = MapVal::default();
