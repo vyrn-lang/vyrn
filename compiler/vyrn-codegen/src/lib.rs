@@ -99,7 +99,7 @@ fn call_depth_runtime() -> String {
 @__vyrn_call_depth = thread_local global i64 0
 @.trap.calldepth = private unnamed_addr constant [{len} x i8] c\"{msg}\"
 
-define void @__vyrn_call_enter() {{
+define internal void @__vyrn_call_enter() {{
 entry:
   %d = load i64, ptr @__vyrn_call_depth
   %d1 = add i64 %d, 1
@@ -115,7 +115,7 @@ ok:
   ret void
 }}
 
-define void @__vyrn_call_exit() {{
+define internal void @__vyrn_call_exit() {{
 entry:
   %d = load i64, ptr @__vyrn_call_depth
   %d1 = sub i64 %d, 1
@@ -387,7 +387,7 @@ entry:
   ret i64 %n
 }
 
-define ptr @__vyrn_str_new(i64 %len, i64 %cap) {
+define noalias ptr @__vyrn_str_new(i64 %len, i64 %cap) {
 entry:
   %tot = add i64 %cap, 17
   %base = call ptr @__vyrn_malloc(i64 %tot)
@@ -421,7 +421,7 @@ done:
   ret void
 }
 
-define ptr @__vyrn_str_concat(ptr %a, ptr %b) {
+define noalias ptr @__vyrn_str_concat(ptr %a, ptr %b) {
 entry:
   %la = call i64 @__vyrn_str_len(ptr %a)
   %lb = call i64 @__vyrn_str_len(ptr %b)
@@ -578,7 +578,7 @@ entry:
   ret ptr %buf
 }
 
-define ptr @__vyrn_bytes_dup(ptr %data, i64 %len) {
+define noalias ptr @__vyrn_bytes_dup(ptr %data, i64 %len) {
 entry:
   %buf = call ptr @__vyrn_str_new(i64 %len, i64 %len)
   br label %loop
@@ -1217,8 +1217,12 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // `charCountV` is the same byte scan in Vyrn.)
     out.push_str("declare i64 @__vyrn_line_at(ptr, i64, i64)\n");
     out.push_str("declare i64 @__vyrn_col_at(ptr, i64, i64)\n");
-    out.push_str("declare ptr @__vyrn_malloc(i64)\n");
-    out.push_str("declare ptr @__vyrn_realloc(ptr, i64)\n");
+    // RFC-0104's loop-facts item, first slice: the allocator family's results
+    // are `noalias` — a fresh block aliases nothing, `realloc`'s result is the
+    // C guarantee — so the optimizer's alias analysis finally hears what the
+    // ownership model always knew. Measured on landing (bt/fk/sp kernels).
+    out.push_str("declare noalias ptr @__vyrn_malloc(i64)\n");
+    out.push_str("declare noalias ptr @__vyrn_realloc(ptr, i64)\n");
     out.push_str("declare void @__vyrn_free(ptr)\n");
     out.push_str("declare ptr @strcpy(ptr, ptr)\n");
     out.push_str("declare ptr @strcat(ptr, ptr)\n");
