@@ -1,10 +1,13 @@
 # k-nucleotide is a String allocated per window, and the key cannot be anything else
 
-Status: **re-measured 2026-08-26, after RFC-0116. The premise below is gone —
-`tallyBytes` builds the key once per distinct fragment, not once per window —
-and the re-measurement found no performance case left for `Map<Int64, V>`. The
-two design questions at the bottom are all that remains, and they are still the
-user's. Everything from here to "Re-measured" is the 2026-08-25 record, kept as
+Status: **re-measured 2026-08-26, after RFC-0116, then CORRECTED the same day.
+The premise below is gone — `tallyBytes` builds the key once per distinct
+fragment, not once per window — but the first re-measurement's verdict of "no
+performance case left" was wrong: it charged the integer path an O(k) repack
+per window that no integer-keyed program performs. The rolling key runs 5–14x
+below the byte-keyed counting loop; see "Corrected". The performance case is
+real, and the two design questions at the bottom now have a number attached.
+Everything from here to "Re-measured" is the 2026-08-25 record, kept as
 written.**
 
 RFC-0104 attributed k-nucleotide's 2.9x to "a heap `String` key manufactured per
@@ -90,25 +93,44 @@ Native, 2,000,000 bases:
 | tallyB distinct | 127.8 ms | 106.0 ms |
 | stringT distinct | 263.5 ms | 263.8 ms |
 
-Three facts fall out, and together they close the performance case:
+Two facts stand from this pass:
 
 - **The hit path costs 11 ns a window** (22.1 ms over two million probes:
-  FNV over the window's bytes plus one length-aware compare). The packing loop
-  an integer-keyed program would run costs 14–20 ms **before its map exists** —
-  the `Int64` program's floor is about the byte-keyed program's whole map cost.
-- **The miss path is bounded by the distinct-key count, and the game bounds
-  that itself.** The game's fasta is the same 139,968-period LCG, so distinct
-  k-mers cap near 140,000 at any N. Here: 138,716 distinct keys cost
-  127.8 − 22.1 ≈ 106 ms once — about 0.76 µs a key for build, validate, insert
-  and growth — and at the game's 25 million windows that once-per-table cost is
-  0.4 per cent of positions. An integer key could remove only the build and
-  validate slice of it.
+  FNV over the window's bytes plus one length-aware compare).
 - **stringT against tallyB is 2.1–2.5x** — the census's cost, already banked
   by RFC-0116 without a new key type.
 
-What remains for `Map<Int64, V>` is exactly the two questions in "The decision
-this needs" — the wire form and the key-type set — with no benchmark behind
-them anymore.
+The third conclusion this pass drew — that the packing loop's 14–20 ms put the
+integer program's floor at the byte program's whole map cost, closing the case
+— did not survive the day. See "Corrected".
+
+## Corrected: the packing floor was measured wrong (same day)
+
+The `pack` phase above rebuilds the integer key from scratch for every window:
+an inner loop over all k bytes. No integer-keyed program does that. The C
+reference maintains the key **incrementally** — two bits shift in, the top two
+age out, O(1) per position at any k. The user caught this ("I don't think
+other languages convert keys to strings"); re-measured with a rolling key,
+`key = (key * 4 + code) mod 4^k`, same binary, same 2,000,000 bases:
+
+| phase | k=12 | k=18 |
+| --- | --- | --- |
+| roll (integer key maintained, no map) | 4.2 ms | 5.0 ms |
+| tallyB hits (same run) | 20.9 ms | 22.8 ms |
+| tallyB distinct (same run) | 63.4 ms | 65.8 ms |
+
+The rolling key costs 2.2–2.5 ns a window — **5x under the byte-keyed hit path
+and 14x under the counting loop with real misses**. An `Int64`-keyed map would
+add a cheap integer hash and probe on top of that floor; a plausible whole-loop
+estimate is 3–5x faster than today's `tallyBytes` path, and the counting loop
+IS this benchmark. The byte-keyed probe cannot close that gap structurally:
+it must touch k bytes per window (refill, hash, compare) where the rolling key
+touches one.
+
+So the honest position is the reverse of the morning's: `tallyBytes` banked
+2–4x without a new key type, and `Map<Int64, V>` has a further ~3–5x on this
+benchmark behind it. The decision remains the two design questions — the wire
+form and the key-type set — but they now carry a real number, not zero.
 
 ## What the re-measurement caught instead
 
