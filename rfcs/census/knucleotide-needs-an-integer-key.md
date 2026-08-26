@@ -1,6 +1,11 @@
 # k-nucleotide is a String allocated per window, and the key cannot be anything else
 
-Status: **measured 2026-08-25, not fixed. Needs a language decision.**
+Status: **re-measured 2026-08-26, after RFC-0116. The premise below is gone —
+`tallyBytes` builds the key once per distinct fragment, not once per window —
+and the re-measurement found no performance case left for `Map<Int64, V>`. The
+two design questions at the bottom are all that remains, and they are still the
+user's. Everything from here to "Re-measured" is the 2026-08-25 record, kept as
+written.**
 
 RFC-0104 attributed k-nucleotide's 2.9x to "a heap `String` key manufactured per
 window position". That is right, it is the dominant cost, and the program cannot
@@ -64,3 +69,63 @@ roughly 2.6x, leaves the allocation in place, and would have to be undone the da
 an integer key lands — `countKmers` would build a number, not a substring. It is
 recorded here so that whoever takes the decision knows the program half is
 cheap and already measured.
+
+## Re-measured after RFC-0116 (2026-08-26)
+
+Method: one probe program, five phases over the same synthetic sequence, each
+timed on its own. `refill` is the window loop alone (no map). `pack` is the
+window loop plus 2-bit packing to an `Int64` — the loop floor of the
+`Map<Int64, V>` program that cannot be written. `tallyB hits` runs `tallyBytes`
+over an ACGT-tiled sequence (four distinct k-mers, so the miss path never
+runs); `tallyB distinct` runs it over the game's fasta LCG read from its high
+bits; `stringT` is the pre-0116 path, a fresh `String` per window into `tally`.
+
+Native, 2,000,000 bases:
+
+| phase | k=12 | k=18 |
+| --- | --- | --- |
+| refill | 9.3 ms | 3.0 ms |
+| pack | 13.9 ms | 20.3 ms |
+| tallyB hits | 22.1 ms | 23.5 ms |
+| tallyB distinct | 127.8 ms | 106.0 ms |
+| stringT distinct | 263.5 ms | 263.8 ms |
+
+Three facts fall out, and together they close the performance case:
+
+- **The hit path costs 11 ns a window** (22.1 ms over two million probes:
+  FNV over the window's bytes plus one length-aware compare). The packing loop
+  an integer-keyed program would run costs 14–20 ms **before its map exists** —
+  the `Int64` program's floor is about the byte-keyed program's whole map cost.
+- **The miss path is bounded by the distinct-key count, and the game bounds
+  that itself.** The game's fasta is the same 139,968-period LCG, so distinct
+  k-mers cap near 140,000 at any N. Here: 138,716 distinct keys cost
+  127.8 − 22.1 ≈ 106 ms once — about 0.76 µs a key for build, validate, insert
+  and growth — and at the game's 25 million windows that once-per-table cost is
+  0.4 per cent of positions. An integer key could remove only the build and
+  validate slice of it.
+- **stringT against tallyB is 2.1–2.5x** — the census's cost, already banked
+  by RFC-0116 without a new key type.
+
+What remains for `Map<Int64, V>` is exactly the two questions in "The decision
+this needs" — the wire form and the key-type set — with no benchmark behind
+them anymore.
+
+## What the re-measurement caught instead
+
+Two real defects, both fixed the same day:
+
+- **The interpreter was quadratic in distinct keys — still.** `m.tally(k, n)`
+  desugars to `m = @tally(m, k, n)`, and evaluating that receiver argument
+  clones the map's `Rc` to refcount 2, so the builtin's `Rc::make_mut`
+  deep-copied the whole table (pairs and index) on every call: 0.9 s for 5,000
+  distinct keys, 3.3 s for 10,000, 15.8 s for 20,000, against 76 ms for the
+  same loop over four keys. The `xs.push(v)` desugar had an in-place
+  fast path for precisely this shape; `tally`, `tallyBytes` and `append`
+  (RFC-0115/0116, newer than that fix) did not. They do now: the 20,000-key
+  phase fell from 15.8 s to 76 ms, 209x, and distinct-key tallying is linear
+  in this engine too.
+- **The example's bench sequence was ACGT tiled.** `syntheticSequence` read the
+  LCG through `state % 4`, and 3877 and 29573 are both 1 mod 4, so the low bits
+  count 0,1,2,3 and every k-mer table it fed held four keys. The comment beside
+  it claimed the opposite. It reads the high bits now, the way the game's own
+  fasta does.

@@ -1021,6 +1021,28 @@ fn reserve_vec<T>(v: &mut Vec<T>, more: usize) -> Result<(), Ctrl> {
         .map_err(|_| Ctrl::Err(crate::trap::OUT_OF_MEMORY.into()))
 }
 
+/// The `tallyBytes` key: the window's bytes as a validated `String`, with the
+/// canonical trap for a NUL or invalid UTF-8. Shared by the `@tallyBytes`
+/// builtin arm and the in-place assign fast path, so the two spell the checks
+/// identically.
+fn tally_key_bytes(bytes: &[Val]) -> Result<String, Ctrl> {
+    let mut raw = Vec::with_capacity(bytes.len());
+    for b in bytes {
+        match b {
+            Val::IntN { v, .. } => raw.push(*v as u8),
+            Val::Int(v) => raw.push(*v as u8),
+            other => return Err(format!("tallyBytes over non-byte {other:?}").into()),
+        }
+    }
+    if raw.contains(&0) {
+        return Err(crate::trap::io("tbytes").to_string().into());
+    }
+    let Ok(key) = std::str::from_utf8(&raw) else {
+        return Err(crate::trap::io("tbytes").to_string().into());
+    };
+    Ok(key.to_string())
+}
+
 /// `a + b` for strings, allocated once and fallibly.
 ///
 /// `format!("{a}{b}")` was two infallible allocations in a row (the `String`,
@@ -3710,6 +3732,100 @@ impl<'a> Interp<'a> {
                             }
                         }
                     }
+                    // `m.tally(k, n)` / `m.tallyBytes(w, n)` on a local Map:
+                    // insert-or-add IN PLACE. The statement form desugars to
+                    // `m = @tally(m, k, n)`, and evaluating that receiver
+                    // argument clones the map's `Rc` to refcount 2, so the
+                    // builtin's `Rc::make_mut` deep-copies the whole table —
+                    // pairs AND index — on every call. Cheap while the map is
+                    // small, quadratic in distinct keys: 0.9 s for 5,000, 3.3 s
+                    // for 10,000, 15.8 s for 20,000, against 76 ms for the same
+                    // loop over 4 keys. The checker pins the receiver to
+                    // `Map<String, Int64>`, so no declared-type validation is
+                    // being skipped. Safe for a local for the reason `push`
+                    // above is: the slot is inspected before any argument is
+                    // evaluated, and no callee can reach a local.
+                    if (fname == "@tally" || fname == "@tallyBytes")
+                        && args.len() == 3
+                        && matches!(&args[0], Expr::Var { name: n, .. } if n == name)
+                        && scope
+                            .iter()
+                            .rev()
+                            .find_map(|f| f.get(name))
+                            .is_some_and(|s| matches!(s.v, Val::Map(_)))
+                    {
+                        let key = if fname == "@tally" {
+                            match self.expr(&args[1], scope)? {
+                                Val::Str(s) => (*s).clone(),
+                                other => {
+                                    return Err(format!("tally of non-String {other:?}").into())
+                                }
+                            }
+                        } else {
+                            match self.expr(&args[1], scope)? {
+                                Val::Array(bytes) => tally_key_bytes(&bytes)?,
+                                other => {
+                                    return Err(
+                                        format!("tallyBytes of non-Array {other:?}").into()
+                                    )
+                                }
+                            }
+                        };
+                        let add = match self.expr(&args[2], scope)? {
+                            Val::Int(v) => v,
+                            other => return Err(format!("tally count of {other:?}").into()),
+                        };
+                        for frame in scope.iter_mut().rev() {
+                            if let Some(slot) = frame.get_mut(name) {
+                                if let Val::Map(m) = &mut slot.v {
+                                    let mm = std::rc::Rc::make_mut(m);
+                                    let cur = match mm.get(&key) {
+                                        Some(Val::Int(v)) => *v,
+                                        _ => 0,
+                                    };
+                                    mm.insert(key, Val::Int(cur + add));
+                                    return Ok(Flow::Normal);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    // `xs.append(ys)` on a local Array: extend IN PLACE — the
+                    // same defect class as `tally`, from the same RFC-0115/0116
+                    // vintage. `xs.append(xs)` still works: evaluating the
+                    // source snapshots the pre-state behind a second `Rc`
+                    // handle, so `make_mut` pays one honest copy and the
+                    // appended elements are the original ones, exactly as the
+                    // compiled backends define self-append. Element coercion is
+                    // not being skipped: the checker pins the source to the
+                    // receiver's own element type, already validated.
+                    if fname == "@append"
+                        && args.len() == 2
+                        && matches!(&args[0], Expr::Var { name: n, .. } if n == name)
+                        && scope
+                            .iter()
+                            .rev()
+                            .find_map(|f| f.get(name))
+                            .is_some_and(|s| matches!(s.v, Val::Array(_)))
+                    {
+                        let more = match self.expr(&args[1], scope)? {
+                            Val::Array(more) => more,
+                            other => {
+                                return Err(format!("append of non-Array {other:?}").into())
+                            }
+                        };
+                        for frame in scope.iter_mut().rev() {
+                            if let Some(slot) = frame.get_mut(name) {
+                                if let Val::Array(elems) = &mut slot.v {
+                                    let elems = std::rc::Rc::make_mut(elems);
+                                    reserve_vec(elems, more.len())?;
+                                    elems.extend(more.iter().cloned());
+                                    return Ok(Flow::Normal);
+                                }
+                                break;
+                            }
+                        }
+                    }
                 }
                 // `s = s + a + b + …` on an untyped local String: append IN PLACE.
                 //
@@ -5943,25 +6059,7 @@ impl<'a> Interp<'a> {
                     // is canonical here first, as every trap is.
                     "@tallyBytes" => match (&vals[0], &vals[1], &vals[2]) {
                         (Val::Map(m0), Val::Array(bytes), Val::Int(n)) => {
-                            let mut raw = Vec::with_capacity(bytes.len());
-                            for b in bytes.iter() {
-                                match b {
-                                    Val::IntN { v, .. } => raw.push(*v as u8),
-                                    Val::Int(v) => raw.push(*v as u8),
-                                    other => {
-                                        return Err(
-                                            format!("tallyBytes over non-byte {other:?}").into()
-                                        )
-                                    }
-                                }
-                            }
-                            if raw.contains(&0) {
-                                return Err(crate::trap::io("tbytes").to_string().into());
-                            }
-                            let Ok(key) = std::str::from_utf8(&raw) else {
-                                return Err(crate::trap::io("tbytes").to_string().into());
-                            };
-                            let key = key.to_string();
+                            let key = tally_key_bytes(bytes)?;
                             let mut next = m0.clone();
                             let mm = std::rc::Rc::make_mut(&mut next);
                             let cur = match mm.get(&key) {
@@ -8325,6 +8423,40 @@ mod tests {
                    let mut i = 0; while i < 5 { a.push(i); i = i + 1; } \
                    let mut s = 0; for x in a { s = s + x; } return s; }"; // 0+1+2+3+4
         assert_eq!(run(src).unwrap(), 10);
+    }
+
+    #[test]
+    fn method_tally_writes_back_in_place() {
+        // `m.tally(k, n);` as a statement takes the in-place fast path: distinct
+        // keys accumulate AND a repeated key adds, through the same slot.
+        let src = "fn main() -> Int64 { let mut m: Map<String, Int64> = [:]; \
+                   m.tally(\"a\", 2); m.tally(\"b\", 5); m.tally(\"a\", 3); \
+                   let n = match m[\"a\"] { Some(v) => v, None => 0 }; \
+                   return m.length * 100 + n; }"; // 2 keys, a=5
+        assert_eq!(run(src).unwrap(), 205);
+    }
+
+    #[test]
+    fn method_tally_bytes_writes_back_in_place() {
+        // The byte-keyed twin through the same fast path, with the buffer reused
+        // between calls exactly as a counting loop reuses it.
+        let src = "fn main() -> Int64 { let mut m: Map<String, Int64> = [:]; \
+                   let mut w: Array<UInt8> = []; w.push(65); \
+                   m.tallyBytes(w, 1); m.tallyBytes(w, 4); \
+                   w[0] = 66; m.tallyBytes(w, 7); \
+                   let n = match m[\"A\"] { Some(v) => v, None => 0 }; \
+                   return m.length * 100 + n; }"; // keys A,B; A=5
+        assert_eq!(run(src).unwrap(), 205);
+    }
+
+    #[test]
+    fn method_append_writes_back_and_self_append_uses_pre_state() {
+        // `xs.append(ys);` extends in place; `xs.append(xs)` appends the
+        // PRE-state elements (the compiled backends define it the same way).
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = [1, 2]; \
+                   let b: Array<Int64> = [3]; a.append(b); a.append(a); \
+                   return a.length * 100 + a[3] + a[5]; }"; // [1,2,3,1,2,3]: 600+1+3
+        assert_eq!(run(src).unwrap(), 604);
     }
 
     #[test]

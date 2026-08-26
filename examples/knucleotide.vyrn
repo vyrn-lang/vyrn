@@ -12,14 +12,11 @@
 // corpus feeds it automatically; the output is
 // `rfcs/bench-0104/knucleotide-1000.expected`.
 //
-// Two costs the census measured and this program still pays, because they are
-// the language's real answers today:
-//
-//   * `Map` is `Map<String, V>` (RFC-0028) and the only way from bytes to a
-//     `String` is `stringFromBytes`, so every window is an allocation and a
-//     UTF-8 validation.
-//   * `sortWith` (a comparator) orders by count descending with ties by
-//     fragment in one stable pass.
+// The census cost this program used to pay — a heap `String` manufactured and
+// validated per window, because `Map` keys are `String` (RFC-0028) — is gone:
+// `tallyBytes` (RFC-0116) probes the window's bytes where they lie, and the
+// key is built once per DISTINCT fragment. `sortWith` (a comparator) orders by
+// count descending with ties by fragment in one stable pass.
 
 import { toUpper } from "std/strings"
 import { startsWith } from "std/strpred"
@@ -57,8 +54,8 @@ fn thirdSequence() -> Array<UInt8> {
     return out
 }
 
-/// Every window of width `k`, counted. One `stringFromBytes` per window is what
-/// a key costs here, and it is the number this program exists to produce.
+/// Every window of width `k`, counted. A key costs one `stringFromBytes` per
+/// DISTINCT fragment — the first time it appears — and one byte probe after.
 fn countKmers(seq: Array<UInt8>, k: Int64) -> Map<String, Int64> {
     let mut m: Map<String, Int64> = [:]
     if seq.length < k {
@@ -158,6 +155,11 @@ fn countOf(seq: Array<UInt8>, frag: String) -> Int64 {
 /// A sequence that repeats with a long period, so the 18-mer table has many
 /// distinct keys rather than four. The bench blocks build their own input
 /// because `vyrn bench` has no stdin to read one from.
+///
+/// The base comes from the LCG's HIGH bits, the way the game's own fasta reads
+/// it. `state % 4` looks equivalent and is not: 3877 and 29573 are both 1 mod
+/// 4, so the low bits just count and the "long period" sequence is ACGT tiled —
+/// this bench spent its first weeks measuring a four-key table of pure hits.
 fn syntheticSequence(n: Int64) -> Array<UInt8> {
     let alphabet = bytes("ACGT")
     let mut out: Array<UInt8> = []
@@ -165,7 +167,7 @@ fn syntheticSequence(n: Int64) -> Array<UInt8> {
     let mut i = 0
     while i < n {
         state = (state * 3877 + 29573) % 139968
-        out.push(alphabet[state % 4])
+        out.push(alphabet[(state * 4) / 139968])
         i = i + 1
     }
     return out
