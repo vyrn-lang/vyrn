@@ -1303,6 +1303,42 @@ originally named, in the proportion it thought they had.
    the exact defect this item exists to close. The empty map is answered by its
    own length instead.
 
+## The 2026-08-28 dataset — the re-run the old record asked for
+
+The published pair is now `2026-08-28.json` and `-run2.json`: the same eight
+programs, five contestants and cross-verification, the same machine, ten runs a
+cell, measured with the compiler at `c53bd5e6` (the worktree carried unrelated
+site edits; the compiler build was clean). The 2026-08-19 record's own
+provenance note said replacing it "is a re-run on a machine, not an edit here"
+— this is that re-run, after the arcs its rows predated:
+
+- **k-nucleotide: 211x C became 0.67x.** The linear scan the old row measured
+  is gone (work item 1's hash index), the counting loop is one `tally` probe
+  (RFC-0116), and the key is a rolling `Int64` instead of a rebuilt `String`
+  (RFC-0117). At 6.5 ms the native leg now sits a few multiples above the
+  process floor — faster than the plain C and Rust legs, and labelled
+  "ahead of the band" rather than claimed as a win, because at that size the
+  row mostly measures start-up.
+- **binary-trees' memory story closed.** The native leg peaks at 37.3 MB
+  against Rust's 37.6 — the leak RFC-0114 fixed was 2,093 MB in the old
+  record's own memory column.
+- **fannkuch-redux moved inside the band** (1.03x Rust): the copy per
+  permutation went when `copyFrom` (RFC-0115) landed.
+- **Nothing is off-scale against C any more**, and two cells remain past the
+  rim against Rust — both wasm legs, the backend that runs no optimizer.
+- **reverse-complement is the widest row left**: 8.34x Rust, the per-byte
+  passes and per-line assembly named on the page. The old record's 13.5x
+  included a byte-at-a-time `getchar` that block-buffered stdin has since
+  removed.
+- The training job that polluted the old record's floor was gone: C's empty
+  program is back to 3.8 ms, and thirty-nine of forty cells reproduce within
+  five per cent across the two runs.
+
+The three earlier datasets stay committed and unedited beside the new pair.
+The site reads the new one; every figure on both pages moved with it, and the
+hand pins in `site/app/bench.vyrn`'s tests were re-read from the new record —
+which is what they are for.
+
 ## What this RFC does not do
 
 - It does not vendor Benchmarks Game sources. Reference ceilings are recorded

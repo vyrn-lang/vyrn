@@ -15,7 +15,7 @@
 // with (RFC-0104) and the reason this page can be a claim at all.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
-import { programs, contestants, radarBox, radarCx, radarCy, radarRings, radarSpokes, radarLines, tableRows, ratioWay, axisPanels, panelBars, panelNote, panelSpeed, panelMemLine, benchMachine, benchRuns, envRows, Prog, Series, Ring, Spoke, Line, Mark, Reading, Row, Panel, BarRow } from "../bench"
+import { programs, contestants, radarBox, radarCx, radarCy, radarRings, radarSpokes, radarLines, tableRows, ratioWay, axisPanels, panelBars, panelNote, panelSpeed, panelMemLine, benchMachine, benchRuns, envRows, run1File, Prog, Series, Ring, Spoke, Line, Mark, Reading, Row, Panel, BarRow } from "../bench"
 import { TreeGroup, docSubnav } from "../docshell"
 
 export fn head() -> Head {
@@ -78,7 +78,7 @@ fn barStyle(pct: String) -> String {
         <p>One axis per program, one polygon per engine. A small shape is a fast one; a reading past the rim is drawn at the rim with a stroke continuing outward.</p>
         <div class="plate" data-widget="radar">
             <div class="plate-head">
-                <span class="eyebrow">rfcs/bench-0104/results/2026-08-19-v2.json</span>
+                <span class="eyebrow">{{ run1File() }}</span>
                 <span class="spacer"></span>
                 <div class="controls" role="group" aria-label="Normalize the chart to">
                     <button type="button" data-norm="c" aria-pressed="true">C = 1</button>
