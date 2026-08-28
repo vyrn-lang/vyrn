@@ -553,10 +553,10 @@ export fn chapters() -> Array<Chapter> {
             group: "The page",
             slug: "styling",
             title: "Styling and icons",
-            lede: "`std/tw` reads the classes your templates use and writes one stylesheet. `std/icons` turns a pinned icon collection into an import, so a glyph is checked like a name.",
+            lede: "`std/tw` writes the theme's utility stylesheet at build time. `std/icons` turns a pinned icon collection into an import, so a glyph is checked like a name.",
             sections: [
                 section("tw", "Utility classes, compiled", [
-                        "<a href=\"/docs/std/tw.html\">std/tw</a> is a generator: it scans the templates for utility classes — spacing, color, breakpoints — and emits one stylesheet holding only the rules those classes need. Nothing is fetched and nothing unused ships.",
+                        "<a href=\"/docs/std/tw.html\">std/tw</a> is a generator: it compiles the theme — spacing, color, breakpoints — into one stylesheet at build time. Nothing is fetched at runtime. The whole vocabulary ships, used or not; per-template pruning is a recorded gap, not a feature this page may claim.",
                     ], []),
                 section("icons", "Icons are imports", [
                         "<a href=\"/docs/std/icons.html\">std/icons</a> makes a glyph a name: <code>import { book } from icons(\"bytesize\", \"book\")</code> generates one function per glyph from a collection pinned in the lock file. A name the collection does not have fails the build. The <code>&lt;Icon&gt;</code> tag draws them.",
