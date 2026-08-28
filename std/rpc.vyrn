@@ -334,7 +334,14 @@ fn serverHandlerFn(f: FnInfo) -> String {
 /// named type / it returns `Unit`), assembled from `jsonSchema()` calls emitted
 /// into the generated code.
 fn serverSchemaFn(iface: ModuleInterface) -> String {
-    let mut out = "fn rpcSchema() -> String {\n"
+    // Built once per process: every piece is a compile-time constant, and the
+    // caller serves it per HTTP request (the census's pattern 3). Module
+    // state in a generated module is ordinary RFC-0029 state.
+    let mut out = "let mut rpcSchemaCache: String = \"\"\n"
+    out = out + "fn rpcSchema() -> String {\n"
+    out = out + "    if rpcSchemaCache.byteLength > 0 {\n"
+    out = out + "        return rpcSchemaCache.copy()\n"
+    out = out + "    }\n"
     out = out + "    let mut acc = \"{\\\"procedures\\\":[\"\n"
     let mut i = 0
     for f in iface.functions {
@@ -355,7 +362,8 @@ fn serverSchemaFn(iface: ModuleInterface) -> String {
         i = i + 1
     }
     out = out + "    acc = acc + \"]}\"\n"
-    out = out + "    return acc\n}\n"
+    out = out + "    rpcSchemaCache = acc\n"
+    out = out + "    return rpcSchemaCache.copy()\n}\n"
     return out
 }
 
@@ -1127,7 +1135,13 @@ fn rpcDirHandler(f: FnInfo, qual: String, ns: String) -> String {
 /// response JSON Schema, keyed by the wire PATH as well as the name, because
 /// under a derived scheme the path is what a caller has.
 gen fn rpcDirSchema(mods: Array<RpcModule>, cfg: RpcConfig) -> String {
-    let mut out = "fn rpcSchema() -> String {\n"
+    // Same once-per-process cache as `serverSchemaFn` — one of the two schema
+    // builders reaches any one generated module, so the name is shared.
+    let mut out = "let mut rpcSchemaCache: String = \"\"\n"
+    out = out + "fn rpcSchema() -> String {\n"
+    out = out + "    if rpcSchemaCache.byteLength > 0 {\n"
+    out = out + "        return rpcSchemaCache.copy()\n"
+    out = out + "    }\n"
     out = out + "    let mut acc = \"{\\\"procedures\\\":[\"\n"
     let mut i = 0
     for m in mods {
@@ -1152,7 +1166,8 @@ gen fn rpcDirSchema(mods: Array<RpcModule>, cfg: RpcConfig) -> String {
         }
     }
     out = out + "    acc = acc + \"]}\"\n"
-    out = out + "    return acc\n}\n"
+    out = out + "    rpcSchemaCache = acc\n"
+    out = out + "    return rpcSchemaCache.copy()\n}\n"
     return out
 }
 

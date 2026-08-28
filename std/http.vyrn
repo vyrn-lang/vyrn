@@ -837,24 +837,19 @@ fn httpLastEventId(req: Request) -> Int64 {
 /// unreachable route is the kind of thing nobody notices until production. Order
 /// *within* a group is the author's own, and left alone.
 ///
-/// The check runs on every call rather than once, because there is no init hook
-/// to hang it on and a router is a handful of routes: the scan is O(routes²) and
-/// that number is 5 in `examples/bin`.
-///
-/// **The threshold, measured rather than guessed.** This paragraph used to say
-/// the count "would have to reach the thousands before it showed up next to a
-/// JSON decode". It does not. Timed over 500 iterations of the same request: 8
-/// routes cost 4 µs per request, 64 routes in ONE group cost 33 µs, and 64 routes
-/// split into two groups of 32 cost 432 µs — the cross-group loop is 32x32
-/// `httpSubsumes` calls and each splits both patterns into fresh segment arrays.
-/// So the real threshold is tens of routes, not thousands, and it arrives an
-/// order of magnitude sooner when the routes are split across groups.
-///
-/// The policy stands for the configurations here, which are small. It is written
-/// down so that an app with sixty routes knows what it pays, instead of reading
-/// a number that was never measured. `vyrn serve` runs `main` at
-/// startup, so an app that touches `handle` there sees the trap at startup, which
-/// is where it belongs.
+/// The check runs ONCE per process now, not once per request. The old policy —
+/// "the check runs on every call rather than once, because there is no init
+/// hook to hang it on" — was measured out of its own footnote: 8 routes cost
+/// 4 µs per request, 64 in one group 33 µs, and 64 split into two groups of 32
+/// cost 432 µs, because the cross-group loop is 32x32 `httpSubsumes` calls and
+/// each splits both patterns into fresh segment arrays. The threshold was tens
+/// of routes, not the thousands the paragraph before it had guessed. The init
+/// hook it lacked is module state (RFC-0029): a clean audit sets
+/// `httpMountAudited` and stands for the process, which preserves exactly the
+/// property the old policy bought — `vyrn serve` runs `main` at startup, so an
+/// app that touches `handle` there sees the trap at startup, where it belongs.
+/// A route set is a declaration; an app that mutates its groups between
+/// requests is outside the audit's model, as it always was.
 ///
 /// The fourth parameter is `ws`'s, and it is a fourth parameter for the same
 /// reason `live` was a third: Vyrn has no sum over two record types, and a
@@ -1312,9 +1307,23 @@ fn httpLiveMatch(l: Live, req: Request) -> Option<Map<String, String>> {
     return httpMatch(httpWithMethod(httpLiveRoute(l), "GET"), req)
 }
 
+/// Whether the mount audit has PASSED once this process (RFC-0029 module
+/// state). A route set is a declaration — every caller in this tree builds the
+/// same groups on every request — so a clean pass stands for the process, and
+/// the per-request O(routes²) scan the census measured at 280 µs for two
+/// groups of 32 becomes one Bool read. An app that mutates its route set
+/// between requests is outside this audit's model, and was outside the old
+/// one's too: the doc above already promises the trap AT STARTUP, which is
+/// exactly what one audited pass is. A failing audit still panics on the call
+/// that finds it, first or not.
+let mut httpMountAudited = false
+
 /// Trap on any route a later group could never reach, and on any route that never
 /// got a method.
 fn httpCheckMount(groups: Array<Array<Route>>, live: Array<Live>, sockets: Array<Socket>) {
+    if httpMountAudited {
+        return
+    }
     // A stream resolves first, so it is the one thing that can shadow rather than
     // be shadowed. Reported at startup for the same reason the group check is: an
     // unreachable route is what nobody notices until production.
@@ -1404,6 +1413,7 @@ fn httpCheckMount(groups: Array<Array<Route>>, live: Array<Live>, sockets: Array
         }
         gi = gi + 1
     }
+    httpMountAudited = true
 }
 
 /// The shadowing diagnostic when `a` answers everything `b` matches within ONE
