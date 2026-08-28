@@ -310,3 +310,7 @@ RECOMMENDATION, NOT A DECISION.
 |C: `@kernel` + GPU backend|annotated functions compile to GPU kernels|one annotation; thread-index builtins|transitive allocation check (same shape as RFC-0103 floor)|nothing — lowered form unchanged; GPU backend reads it|nothing — `@kernel` is opt-in|CUDA (`__global__`), JAX (`jit`+XLA), Taichi|
 |D: tracing|annotated functions traced into fused IR, then compiled|one annotation|purity check; shape inference|new IR; new compilation pass|nothing — `@trace` is opt-in|JAX (`jit` + XLA)|
 |E: do nothing|operators stay hardcoded, no GPU, no user overloading|nothing|nothing|nothing|nothing|C (fixed set), Kotlin (fixed set)|
+
+## Decision (2026-08-28)
+
+**Operators: design A in principle, on demand. GPU: design E, and C stays priced.** Operator protocols are the survey's own conclusion — a protocol with syntax, static and monomorphized exactly as RFC-0084 built, none of Python's three costs — so the direction is fixed: when generic numeric code wants `+` on a user type, the work is rewiring the parser's operator table onto protocol rows, and nothing about it is open-ended. It is not implemented today because no program in the tree defines a numeric type that wants an operator. The GPU half stays closed: a third backend at a third of a backend's price (RFC-0101's own estimate) against zero kernels anyone has asked to run, and HVM4 remains pre-launch with unpublished numbers, as the census measured. Design B (broadcast fusion) would follow operators, not precede them. Reopen the GPU question only with a workload in hand.
