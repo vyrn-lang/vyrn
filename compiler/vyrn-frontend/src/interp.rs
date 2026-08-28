@@ -2877,9 +2877,26 @@ impl<'a> Interp<'a> {
     /// Mediated `listDir` (RFC-0021): list through the resolver, record the
     /// (sorted) listing for the cache key.
     fn gen_list_dir(&self, path: &str) -> Result<Val, Ctrl> {
+        self.gen_list_dir_by(path, false)
+    }
+
+    /// Mediated `listDirKinds` (RFC-0119): the same listing with each
+    /// directory entry's name carrying a trailing `/`. The suffixed names join
+    /// the cache key under the same directory key — distinct bytes, so a kind
+    /// that changes invalidates the entry exactly as a name that changes does.
+    fn gen_list_dir_kinds(&self, path: &str) -> Result<Val, Ctrl> {
+        self.gen_list_dir_by(path, true)
+    }
+
+    fn gen_list_dir_by(&self, path: &str, kinds: bool) -> Result<Val, Ctrl> {
         let resolved = self.gen_scoped_path(path)?;
         let g = self.gen.as_ref().unwrap();
-        match g.resolver.list(&resolved) {
+        let listed = if kinds {
+            g.resolver.list_kinds(&resolved)
+        } else {
+            g.resolver.list(&resolved)
+        };
+        match listed {
             Ok(mut names) => {
                 names.sort();
                 // Record the listing as a synthetic input so a directory whose
@@ -5890,6 +5907,53 @@ impl<'a> Interp<'a> {
                                 let mut names: Vec<String> = entries
                                     .filter_map(|e| e.ok())
                                     .map(|e| e.file_name().to_string_lossy().into_owned())
+                                    .collect();
+                                names.sort();
+                                Ok(Val::Result(
+                                    true,
+                                    Box::new(Val::Array(std::rc::Rc::new(
+                                        names
+                                            .into_iter()
+                                            .map(|n| Val::Str(std::rc::Rc::new(n)))
+                                            .collect(),
+                                    ))),
+                                ))
+                            }
+                            Err(_) => Ok(Val::Result(
+                                false,
+                                Box::new(Val::Str(std::rc::Rc::new(crate::trap::io_at(
+                                    "listerr", &path,
+                                )))),
+                            )),
+                        }
+                    }
+                    // `listDirKinds(path) -> Result<Array<String>, String>`
+                    // (RFC-0119): the same listing with a `/` appended to each
+                    // directory entry's name. An entry whose type cannot be
+                    // read reports as a file — the caller's walk surfaces the
+                    // real error at the entry itself.
+                    "listDirKinds" => {
+                        let path = match &vals[0] {
+                            Val::Str(s) => s.clone(),
+                            other => {
+                                return Err(format!("listDirKinds of non-String {other:?}").into())
+                            }
+                        };
+                        if self.gen.is_some() {
+                            return self.gen_list_dir_kinds(&path);
+                        }
+                        match std::fs::read_dir(path.as_str()) {
+                            Ok(entries) => {
+                                let mut names: Vec<String> = entries
+                                    .filter_map(|e| e.ok())
+                                    .map(|e| {
+                                        let name = e.file_name().to_string_lossy().into_owned();
+                                        if e.file_type().is_ok_and(|t| t.is_dir()) {
+                                            format!("{name}/")
+                                        } else {
+                                            name
+                                        }
+                                    })
                                     .collect();
                                 names.sort();
                                 Ok(Val::Result(

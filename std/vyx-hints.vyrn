@@ -120,7 +120,14 @@ type VhFileRead = { src: String, err: String }
 /// carrying on would tell a project its tree is checked while it is not, the
 /// fault `vyxHintsConfigured` refuses for an unreadable config.
 gen fn vhScan(p: HintPolicy, dir: String) -> VhScan {
-    let listed = match listDir(dir) {
+    // The kinded listing (RFC-0119): a subdirectory's name carries a trailing
+    // `/`, so ONE call answers both "what is here" and "which entries do I
+    // descend into". The old shape listed every subdirectory twice — once in
+    // `vhIsDir` just to test directory-ness, once here to walk it — because
+    // `listDir`'s error cannot tell a regular file from an unreadable
+    // directory, and guessing from error TEXT is a dependency on OS wording
+    // this project refuses.
+    let listed = match listDirKinds(dir) {
         Ok(ns) => VhDirRead { names: ns, err: "" },
         Err(e) => VhDirRead { names: [], err: e.copy() },
     }
@@ -133,8 +140,13 @@ gen fn vhScan(p: HintPolicy, dir: String) -> VhScan {
     let mut out = ""
     let mut checked = 0
     for name in listed.names {
-        let path = dir + "/" + name
-        if name.endsWith(".vyx") {
+        if name.endsWith("/") {
+            let bare = slice(name, 0, name.byteLength - 1) ?? panic("vhScan: the cut is at the listing's own ASCII `/`")
+            let sub = vhScan(p, dir + "/" + bare)
+            out = out + sub.out
+            checked = checked + sub.checked
+        } else if name.endsWith(".vyx") {
+            let path = dir + "/" + name
             let got = match readFile(path) {
                 Ok(v) => VhFileRead { src: v, err: "" },
                 Err(e) => VhFileRead { src: "", err: e },
@@ -145,23 +157,9 @@ gen fn vhScan(p: HintPolicy, dir: String) -> VhScan {
                 out = out + vhCheck(p, got.src, path)
                 checked = checked + 1
             }
-        } else if vhIsDir(path) {
-            let sub = vhScan(p, path)
-            out = out + sub.out
-            checked = checked + sub.checked
         }
     }
     return VhScan { out: out, checked: checked }
-}
-
-/// Whether `path` is a directory — a `listDir` that succeeds. A regular file
-/// lists as an error. Spelled exactly as `std/ui`'s `uiIsDir`, and a `gen fn` for
-/// the same reason: a comptime-only builtin has no runtime lowering.
-gen fn vhIsDir(path: String) -> Bool {
-    return match listDir(path) {
-        Ok(ns) => true,
-        Err(e) => false,
-    }
 }
 
 /// A parsed policy, or the refusal that explains why there is none.

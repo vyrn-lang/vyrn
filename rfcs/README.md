@@ -44,7 +44,7 @@ drifts: each header says which milestone landed and what did not, and the
 
 ## The index
 
-117 RFCs, numbered 0001 to 0118, with one gap. **There is no RFC-0066** — the
+118 RFCs, numbered 0001 to 0119, with one gap. **There is no RFC-0066** — the
 number was skipped and never used. The only mention of it in the repository is
 this sentence. Closing the gap would mean renumbering thirty files and breaking
 every cross-reference, so the gap stays.
@@ -174,6 +174,7 @@ claim is true — is written down in the test's own header.
 | [0116](RFC-0116-tally.md) | `tally` and `tallyBytes` | Implemented; insert-or-add is one probe, byte keys exist only on a miss, and the audit caught the first draft's double free |
 | [0117](RFC-0117-a-key-is-anything-that-hashes.md) | a key is anything that hashes | M1+M3 Implemented; `Hashable` + `Map<Int64, V>` in all four engines, the wire form chosen and built (stringified keys, canonical decimal); M2 user types parked on demand |
 | [0118](RFC-0118-a-match-arm-can-be-a-block.md) | a match arm can be a block | Implemented; statement-position block arms in every engine, the four trampolines deleted — the priced halving measured a wash (the optimizer had already inlined it), the ergonomics stand |
+| [0119](RFC-0119-a-listing-carries-its-kinds.md) | a listing carries its kinds | Implemented; `listDirKinds` marks directories with a trailing `/`, and the three scanners that listed every subdirectory twice list it once |
 
 ## The other documents here
 

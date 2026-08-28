@@ -210,6 +210,7 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("renameFile", Syscall, "path_rename"),
     ("fsyncFile", Syscall, "fd_sync"),
     ("listDir", Syscall, "fd_readdir"),
+    ("listDirKinds", Syscall, "fd_readdir with each entry's type (RFC-0119): a directory's name carries a trailing `/`, because the listing's error cannot tell `not a directory` from `unreadable` and a walker was listing every subdirectory twice"),
     // ---- Representation: a view, not an operation ---------------------------
     ("bytes", View, "String -> Array<UInt8>, whole or a byte range: what all four runtime modules stand on"),
     ("stringFromBytes", View, "the only Array<UInt8> -> String construction there is"),
@@ -582,7 +583,11 @@ fn the_census_is_the_code() {
     // answer for both; and no composition can probe a map WITHOUT building
     // the String key first — the whole point of the byte-keyed form is that
     // the key exists only on a miss.
-    assert_eq!(found.len(), 96, "the primitive core changed size");
+    // 96 -> 97 for RFC-0119's `listDirKinds`: no composition can learn an
+    // entry's kind from `listDir` — the listing's error is one string for
+    // every failure, and the project refuses to parse OS wording — so a
+    // walker paid a second full listing per subdirectory to find out.
+    assert_eq!(found.len(), 97, "the primitive core changed size");
 }
 
 /// The fourth engine, and nothing asked it anything until now (RFC-0094 M1).

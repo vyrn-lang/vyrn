@@ -557,6 +557,16 @@ fn rows() -> Vec<Function> {
             Type::Result(Box::new(arr(Str)), Box::new(Str)),
             &[],
         ),
+        // `listDirKinds` (RFC-0119): the same listing, each directory entry's
+        // name carrying a trailing `/`. Same type, same mediation, same row
+        // reasoning as `listDir` above.
+        row(
+            "listDirKinds",
+            &[],
+            &[("p", Read, Str)],
+            Type::Result(Box::new(arr(Str)), Box::new(Str)),
+            &[],
+        ),
         row(
             "moduleInterface",
             &[],
@@ -748,6 +758,7 @@ mod tests {
             // two reflection records are the parser's own injected
             // declarations, so the reading resolves them like any other name.
             ("listDir", "Result<Array<String>, String>"),
+            ("listDirKinds", "Result<Array<String>, String>"),
             ("moduleInterface", "ModuleInterface"),
             ("contractOf", "ContractInfo"),
         ] {

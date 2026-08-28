@@ -48,6 +48,27 @@ pub fn list_dir(dir: &str) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
+/// The same listing with each entry's kind (RFC-0119 `listDirKinds`): a
+/// directory's name carries a trailing `/`. An entry whose type cannot be read
+/// is reported as a file — the caller's walk will then surface the real error
+/// at the entry itself instead of this listing guessing.
+pub fn list_dir_kinds(dir: &str) -> Result<Vec<String>, String> {
+    let entries = std::fs::read_dir(dir).map_err(|_| vyrn_frontend::trap::io_at("listerr", dir))?;
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                format!("{name}/")
+            } else {
+                name
+            }
+        })
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
 // ---------------------------------------------------------------------------
 // specifier resolution + fetching
 // ---------------------------------------------------------------------------
@@ -277,6 +298,9 @@ impl vyrn_frontend::loader::ModuleResolver for RemoteResolver {
         // Generation-time `listDir` reads local directories only (inputs are
         // local or lock-pinned; a remote key has no directory to enumerate).
         list_dir(resolved)
+    }
+    fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
+        list_dir_kinds(resolved)
     }
     fn gen_cache_get(&self, key: &str) -> Option<String> {
         gen_cache_get(key)

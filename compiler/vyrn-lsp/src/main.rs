@@ -236,6 +236,26 @@ impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
         Ok(names)
     }
 
+    /// The kinded listing (RFC-0119): a directory entry's name carries a
+    /// trailing `/`.
+    fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
+        let entries = std::fs::read_dir(resolved)
+            .map_err(|_| vyrn_frontend::trap::io_at("listerr", resolved))?;
+        let mut names: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if e.file_type().is_ok_and(|t| t.is_dir()) {
+                    format!("{name}/")
+                } else {
+                    name
+                }
+            })
+            .collect();
+        names.sort();
+        Ok(names)
+    }
+
     /// Participate in the shared generator cache (RFC-0021) so per-keystroke
     /// re-analysis reuses a build's generation instead of re-running it. Same
     /// `~/.vyrn/cache/gen` the CLI writes (honors `VYRN_GEN_CACHE_DIR`).

@@ -1039,6 +1039,11 @@ const FNVAL_COPY: &str = "__vyrn_fnval_copy";
 pub const GEN_MODE_READ: i32 = 0;
 pub const GEN_MODE_READ_BYTES: i32 = 1;
 pub const GEN_MODE_LIST: i32 = 2;
+// 3 is the genwasm host's `moduleInterface`, which never reaches this emitter.
+/// `listDirKinds` (RFC-0119): the same `\n`-joined listing as `GEN_MODE_LIST`,
+/// with a `/` appended to each directory entry's name. An entry name cannot
+/// contain either byte, so the encoding stays invertible.
+pub const GEN_MODE_LIST_KINDS: i32 = 4;
 
 /// `@__vyrn_gen_reflect`'s kinds — which builtin the host is answering
 /// (RFC-0076 M3b). The argument is the module path, the contract NAME, or the
@@ -1071,6 +1076,12 @@ pub const GEN_ENTRY_CONTRACT_OF: &str = "__vyrnGenContractOf_";
 pub const LIST_DIR_NO_LOWERING: &str =
     "`listDir` runs in the interpreter / at generation time (RFC-0021); it has no native or wasm \
      lowering in v1 — use it in a `gen fn` or under `vyrn run`";
+
+/// `listDirKinds`' copy of the sentence (RFC-0119) — same reasoning, its own
+/// name, so the diagnostic names the call the user wrote.
+pub const LIST_DIR_KINDS_NO_LOWERING: &str = "`listDirKinds` runs in the interpreter / at \
+     generation time (RFC-0119); it has no native or wasm lowering in v1 — use it in a `gen fn` \
+     or under `vyrn run`";
 
 /// The atom-stream primitives the synthesized decoders are written against.
 pub const GEN_REFLECT: &str = "__vyrnGenReflect";
@@ -10085,6 +10096,9 @@ impl<'a> Gen<'a> {
             // one thing it ever had to say about it — and the direct backend says
             // it in the same words, out of the same constant.
             return Err(crate::LIST_DIR_NO_LOWERING.to_string());
+        }
+        if name == "listDirKinds" {
+            return Err(crate::LIST_DIR_KINDS_NO_LOWERING.to_string());
         }
         if name == "moduleInterface" {
             return Err(
