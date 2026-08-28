@@ -157,7 +157,9 @@ Ranked:
 3. **Design C** — a redesign of output, not an unblocking of mandelbrot; price
    it separately if the owner wants it.
 
-Note on the rules: `.claude/ox/RULES.md:18-30` forbids adding a native body for
+Note on the rules: the census brief's standing backend rule (quoted in full in
+`blocked-regex.md`; the brief file itself is retired with the tool that read
+it) forbids adding a native body for
 a standard-library FUNCTION and forbids divergent per-backend implementations.
 The existing I/O builtins already carry per-engine bodies behind one canonical
 behaviour (`RFC-0014`'s structure); design A extends that existing class of

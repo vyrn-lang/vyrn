@@ -402,7 +402,9 @@ backend instead of one shared Vyrn walker, plus checker signatures, capability
 rows, SPAWN/COMPTIME list entries, and schema/reflection decisions for every
 new operation.
 
-And the rule: `.claude/ox/RULES.md:22-30` — "Do NOT add a native body for a
+And the rule — the census brief's standing backend rule, quoted here in full
+because the brief file (`.claude/ox/RULES.md`, retired with the tool that read
+it) no longer lives in the tree: "Do NOT add a native body for a
 standard library function. Do NOT hard-implement any standard library behaviour
 inside a backend. Do NOT write one implementation for one backend and a
 different one for another … If a task looks like it needs a backend
@@ -410,7 +412,7 @@ implementation, stop and report that instead of writing one." Option 3 puts
 match SEMANTICS (which syntax is accepted, what a match means) into
 backend-owned code, which is the shape the rule forbids. The counter-reading —
 that `=~` itself already lives there, so regex is language surface rather than
-library behaviour — is exactly the kind of ruling RULES.md reserves to the owner
+library behaviour — is exactly the kind of ruling the brief reserves to the owner
 ("Language syntax, standard library shape … are decided by the repository
 owner"). Included so the owner sees the trade, not because it is available.
 
