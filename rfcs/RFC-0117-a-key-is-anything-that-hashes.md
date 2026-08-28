@@ -1,13 +1,14 @@
 # RFC-0117 — a key is anything that hashes
 
-- **Status:** M1 Implemented (2026-08-26) — `Map<Int64, V>` in all four
-  execution paths, `Hashable` declared in `std/hash` with the `Int64` and
-  `String` impls, the boundary refusals standing. See "M1 — as landed" for
-  the three places the milestone deviated from this document and why. M2
-  (user types, the remaining scalars) and M3 (the wire form) are open. The
-  direction is the user's (2026-08-26): a hashable protocol, not an `Int64`
-  special case. The wire form is deliberately left open — §5 records the
-  options and a recommended default that does not block the rest.
+- **Status:** M1 and M3 Implemented — `Map<Int64, V>` in all four execution
+  paths (2026-08-26), `Hashable` declared in `std/hash` with the `Int64` and
+  `String` impls, and the wire form chosen and built (2026-08-28): §5's
+  stringified keys, canonical decimal, schema-described, pinned three ways by
+  `examples/wirekey.vyrn`. See "M1 — as landed" for the three places that
+  milestone deviated from this document and why. M2 is what remains, reduced
+  to user heapless types and parked on real demand (its scalar half dissolved
+  — see the milestone note). The direction is the user's (2026-08-26): a
+  hashable protocol, not an `Int64` special case.
 - **Evidence:** the corrected census re-measurement
   (rfcs/census/knucleotide-needs-an-integer-key.md, "Corrected"): a rolling
   integer key costs 2.2–2.5 ns a window against 11 ns for the byte-keyed hit
@@ -103,14 +104,22 @@ three honest answers:
    one wire shape, and every schema consumer learns a second one.
 3. **No wire form yet** — the boundary refuses.
 
-**This RFC takes 3 for M1**: `jsonSchema`, `schemaOf`, codecs and
-`moduleInterface` reject a non-String-keyed map with a named diagnostic
-("a `Map<Int64, V>` has no wire form yet (RFC-0117 defers it); key by
-`String` at the boundary"), the same pattern that kept function values out of
-`Task`. Nothing about the performance win waits on serialization, the
-diagnostic names the RFC that owes the answer, and choosing 1 later is purely
-additive. The choice between 1 and 2 is the user's, whenever a real program
-needs a keyed map to cross a boundary.
+**This RFC took 3 for M1**: the boundary refused while the choice stood open.
+**M3 chose 1 (2026-08-28, on the user's "finish"), and it is implemented**:
+`Map<Int64, V>` crosses as a JSON object whose keys are the decimal texts
+`toString` writes, and the decoder reads keys back through the target type in
+CANONICAL form only — `"007"` is an Issue, never a silent alias of `"7"` (two
+spellings of one key collapsing into one entry with no Issue saying so is the
+leniency the canon rule exists to refuse). The schema says what the keys are
+with `propertyNames` (`^-?(0|[1-9][0-9]*)$`) beside the usual
+`additionalProperties`. Insertion order survives the round trip, because the
+object's fields are written in it and read back in it. Why 1 over 2: the value
+stays a JSON object — the shape every generic JSON consumer indexes by key —
+where pair arrays would trade that for exactness the canonical-text rule
+already provides. The schema IMPORTER still reads such a schema back as
+`Map<String, V>` (recognizing the `propertyNames` marker is additive work for
+whenever a real import needs it). `examples/wirekey.vyrn` is the three-way
+witness.
 
 **Why one, and where configurability lives** (discussed 2026-08-28). What the
 two ends of a wire share is a TYPE, so the spelling is one PER TYPE, chosen
@@ -205,5 +214,7 @@ string at every consumer was not worth the thread.
   needs. `Map<Int8, V>` would be implicit sugar the language deliberately does
   not do anywhere else. What remains of M2 is the user types, and they wait
   where RFC-0028 waited: until something real demands one.
-- **M3** — the wire form: the user picks §5's 1 or 2; the refusals of M1
-  become the codec.
+- **M3** — the wire form: **done** (2026-08-28). §5's option 1, stringified
+  keys in canonical decimal, chosen and implemented — the refusals of M1
+  became the codec, the schema names its key rule, and the round trip is
+  pinned three ways by `examples/wirekey.vyrn`.

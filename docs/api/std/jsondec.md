@@ -208,6 +208,19 @@ A JSON integer-syntax number as an exact `Int64`. A fractional or exponent
 form, or a magnitude outside `Int64`, is `expected integer` — never a value
 rounded through a `Float64`.
 
+## dIntKey
+
+```vyrn
+fn dIntKey(key: String, path: String, iss: modify Array<Issue>) -> Array<Int64>
+```
+
+An object KEY that must spell an `Int64` — the read half of RFC-0117 M3's
+wire form for `Map<Int64, V>`: the object's keys are the decimal texts the
+encoder writes with `toString`. CANONICAL text only (`n.toString()` must
+give the key back), so `"007"` and `"+7"` are refused rather than silently
+aliasing the key `"7"` — a leniency here would let two spellings of one
+key collapse into one entry with no Issue saying so.
+
 ## dIntRange
 
 ```vyrn

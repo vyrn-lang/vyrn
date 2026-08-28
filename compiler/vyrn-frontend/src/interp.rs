@@ -4248,18 +4248,27 @@ impl<'a> Interp<'a> {
                 // `Map` type is a pre-upgrade `[:]`, upgraded by this first
                 // insert (the checker already matched the key to `Int64`).
                 if let Val::Int(k) = &iv {
-                    let imap_of = |s: &Slot| match &s.v {
-                        Val::MapI(_) => Some(match &s.ty {
-                            Some(Type::Map(_, v)) => Some((**v).clone()),
-                            _ => None,
-                        }),
-                        Val::Map(m) if m.is_empty() && matches!(&s.ty, Some(Type::Map(..))) => {
-                            Some(match &s.ty {
-                                Some(Type::Map(_, v)) => Some((**v).clone()),
+                    // The declared type is RESOLVED first: `m: Counts` writes
+                    // an alias, and matching the spelling instead of the base
+                    // sent an aliased map down the array path ("unbound
+                    // array") — caught by the M3 witness.
+                    let imap_of = |s: &Slot| {
+                        let base =
+                            s.ty.as_ref()
+                                .map(|t| crate::types::resolve(t, &self.type_map));
+                        match &s.v {
+                            Val::MapI(_) => Some(match base {
+                                Some(Type::Map(_, v)) => Some((*v).clone()),
                                 _ => None,
-                            })
+                            }),
+                            Val::Map(m) if m.is_empty() && matches!(base, Some(Type::Map(..))) => {
+                                Some(match base {
+                                    Some(Type::Map(_, v)) => Some((*v).clone()),
+                                    _ => None,
+                                })
+                            }
+                            _ => None,
                         }
-                        _ => None,
                     };
                     let found = scope
                         .iter()

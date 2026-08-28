@@ -297,6 +297,24 @@ export fn dInt64(v: Json, path: String, iss: modify Array<Issue>) -> Array<Int64
     return out
 }
 
+/// An object KEY that must spell an `Int64` — the read half of RFC-0117 M3's
+/// wire form for `Map<Int64, V>`: the object's keys are the decimal texts the
+/// encoder writes with `toString`. CANONICAL text only (`n.toString()` must
+/// give the key back), so `"007"` and `"+7"` are refused rather than silently
+/// aliasing the key `"7"` — a leniency here would let two spellings of one
+/// key collapse into one entry with no Issue saying so.
+export fn dIntKey(key: String, path: String, iss: modify Array<Issue>) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    if let Some(n) = parseInt64(key) {
+        if n.toString() == key {
+            out.push(n)
+            return out
+        }
+    }
+    pushType(iss, path, "an integer key", "\"" + key + "\"")
+    return out
+}
+
 /// The same, restricted to `[lo, hi]` — the sized signed integers.
 export fn dIntRange(
     v: Json,

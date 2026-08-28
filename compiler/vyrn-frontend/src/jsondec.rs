@@ -294,6 +294,7 @@ impl Walk<'_> {
             }
             Wire::Array(inner) => self.array_body(&t, &inner),
             Wire::Map(val) => self.map_body(&t, &val),
+            Wire::MapI(val) => self.map_body_i(&t, &val),
             Wire::Option(inner) => self.option_body(&t, &inner),
             // `Result<T, E>` arrives as the two-variant enum it is on the wire,
             // so external tagging is read back in one place — and its
@@ -576,6 +577,43 @@ impl Walk<'_> {
              \x20       if m.has(f.key) == false {{\n\
              \x20           for x in consume dv {{\n\
              \x20               m[f.key.copy()] = x\n\
+             \x20           }}\n\
+             \x20       }}\n\
+             \x20   }}\n\
+             \x20   out.push(m)\n\
+             \x20   return out\n"
+        ))
+    }
+
+    /// The `Map<Int64, V>` twin (RFC-0117 M3): each field's KEY reads back
+    /// through `dIntKey` — canonical decimal text only, an Issue otherwise —
+    /// and a duplicate key keeps its first value, exactly as the String-keyed
+    /// body does.
+    fn map_body_i(&mut self, t: &str, val: &Type) -> Result<String, String> {
+        let d = self.decoder(val)?;
+        let (kind, ptype, fields_of, fpath, dkey) = (
+            self.rd("kindName"),
+            self.rd("pushType"),
+            self.rd("fieldsOf"),
+            self.rd("fieldPath"),
+            self.rd("dIntKey"),
+        );
+        let vspell = spell(val);
+        Ok(format!(
+            "    let mut out: Array<{t}> = []\n\
+             \x20   let k = {kind}(v)\n\
+             \x20   if k != \"object\" {{\n\
+             \x20       {ptype}(iss, path, \"object\", k)\n\
+             \x20       return out\n\
+             \x20   }}\n\
+             \x20   let mut m: Map<Int64, {vspell}> = [:]\n\
+             \x20   for f in {fields_of}(v) {{\n\
+             \x20       for kn in {dkey}(f.key, {fpath}(path, f.key), iss) {{\n\
+             \x20           let dv = {d}(f.value, {fpath}(path, f.key), iss)\n\
+             \x20           if m.has(kn) == false {{\n\
+             \x20               for x in consume dv {{\n\
+             \x20                   m[kn] = x\n\
+             \x20               }}\n\
              \x20           }}\n\
              \x20       }}\n\
              \x20   }}\n\

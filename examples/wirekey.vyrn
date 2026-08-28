@@ -1,10 +1,43 @@
-// RFC-0117 §5: a non-String-keyed map has no wire form yet — a Map<String, V>
-// IS a JSON object and an Int64-keyed one is not, and the boundary refuses
-// rather than guessing between stringified keys and pair arrays.
+// RFC-0117 M3: `Map<Int64, V>` crosses JSON as an object whose keys are the
+// DECIMAL TEXTS of the map's keys — `{"7": 1}` — one spelling per type, read
+// back through the target type in canonical form only ("007" is an Issue, not
+// an alias of "7"). Insertion order survives the round trip, because the
+// object's fields are written in it and read back in it (RFC-0028's law,
+// through the wire).
+type Counts = Map<Int64, Int64>
+
+/// The decoded map, reported — a function because a `match` arm is a single
+/// expression (the very limitation RFC-0118 is priced against).
+fn report(back: Counts) {
+    print("\{back.length}")
+    print(match back[7] {
+            Some(v) => "\{v}",
+            None => "?",
+        })
+    print(match back[0 - 3] {
+            Some(v) => "\{v}",
+            None => "?",
+        })
+    for k in back.keys() {
+        print("\{k}")
+    }
+}
+
 fn main() -> Int64 {
-    let mut m: Map<Int64, Int64> = [:]
+    let mut m: Counts = [:]
     m[7] = 1
+    m[0 - 3] = 2
+    m.tally(7, 4)
     let s = toJson(m)
     print(s)
+    match fromJson(Counts, s) {
+        Valid(back) => report(back),
+        Invalid(iss) => print("invalid: \{iss.length}"),
+    }
+    // A non-canonical key is an Issue, never a silent alias.
+    match fromJson(Counts, "{\"007\": 1}") {
+        Valid(v) => print("aliased"),
+        Invalid(iss) => print("issues \{iss.length}"),
+    }
     return 0
 }
