@@ -53,6 +53,11 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "RFC-0117 M1: a Map key is String or Int64 today; the other Hashable          scalars and user types are M2's",
         "is `String` or `Int64` today",
     ),
+    (
+        "blockvalarm.vyrn",
+        "RFC-0118: a match used as a value keeps single-expression arms; a          block arm exists only in statement position",
+        "a block arm needs statement position",
+    ),
     // ---- RFC-0114's proof appendix, §45: the four load-bearing assumptions,
     // pinned as refusals. Each row is one assumption of the release-algorithm
     // proofs (rfcs/proofs/release-algorithm.md); the needle is the checker's

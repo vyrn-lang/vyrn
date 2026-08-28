@@ -173,7 +173,7 @@ claim is true — is written down in the test's own header.
 | [0115](RFC-0115-reserve-and-append.md) | `reserve`, `append` and `copyFrom` | Implemented; a known-size build is one allocation, a bulk append is one copy, and an overwrite keeps its buffer |
 | [0116](RFC-0116-tally.md) | `tally` and `tallyBytes` | Implemented; insert-or-add is one probe, byte keys exist only on a miss, and the audit caught the first draft's double free |
 | [0117](RFC-0117-a-key-is-anything-that-hashes.md) | a key is anything that hashes | M1+M3 Implemented; `Hashable` + `Map<Int64, V>` in all four engines, the wire form chosen and built (stringified keys, canonical decimal); M2 user types parked on demand |
-| [0118](RFC-0118-a-match-arm-can-be-a-block.md) | a match arm can be a block | Proposed, direction decided; statement-position block arms over drop-as-expression — four trampolines named, the release walk's halving priced |
+| [0118](RFC-0118-a-match-arm-can-be-a-block.md) | a match arm can be a block | Implemented; statement-position block arms in every engine, the four trampolines deleted — the priced halving measured a wash (the optimizer had already inlined it), the ergonomics stand |
 
 ## The other documents here
 

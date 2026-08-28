@@ -33,6 +33,16 @@ trampoline is a LANGUAGE ergonomics gap — block-bodied match arms, or `drop`
 as an expression, would let a self-referring release recurse directly and
 halve the release walk's call count.
 
+**Measured (2026-08-28, RFC-0118 M2): the halving is a wall-clock WASH.**
+Block arms landed, `give` was deleted, and the interleaved before/after at
+depth 21 read 18.3/22.2/22.0 s against 18.2/22.1/21.7 — inside the noise,
+outputs byte-identical. This page's call count was read off the EMITTED IR;
+the optimizer was already inlining the trampoline before the machine saw a
+second call. The finding joins the noalias wash above it: a claim about
+per-node calls is priced after `-O2`, not off the textual IR. The ergonomics
+half of the gap was real and is closed (RFC-0118); the remaining per-node
+cost is the enum-payload copies, which no surface change reaches.
+
 ## What this page is not
 
 Not a work item for the allocator (measured, declined) and not one for the

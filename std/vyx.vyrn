@@ -532,18 +532,6 @@ export type VyxNode =
 /// payload (an if-chain's per-branch bodies) without an `Array<Array<…>>`.
 export type VyxBody = { nodes: Array<VyxNode> }
 
-/// Give one payload back. One helper for every place the release below hands a
-/// value over, because a `match` arm is an expression and `drop` is a statement.
-///
-/// `drop v` reads the row the INSTANCE has (RFC-0090 M1, Phase 8b), so this one
-/// function releases a `String`, an `Array<String>`, an `Array<VyxAttr>` and an
-/// `Array<VyxNode>` — and the last of those calls the release below once per
-/// element, which is where the recursion lives.
-fn vyxGive<T>(v: consume T) -> Int64 {
-    drop v
-    return 0
-}
-
 /// A node owns its subtree, and says so — RFC-0096.
 ///
 /// `VyxNode` reaches itself through `VNElem`'s children, so the structural
@@ -566,14 +554,45 @@ fn vyxGive<T>(v: consume T) -> Int64 {
 /// which is two orders of magnitude under that.
 impl Owned for VyxNode {
     fn release(consume self) {
-        let given = match consume self {
-            VNText(s) => vyxGive(s),
-            VNInterp(s, l, c) => vyxGive(s),
-            VNRaw(s, l, c) => vyxGive(s),
-            VNChildren => 0,
-            VNElem(tag, isComp, attrs, kids, l) => vyxGive(tag) + vyxGive(attrs) + vyxGive(kids),
-            VNIf(conds, cl, cc, bodies, els, has) => vyxGive(conds) + vyxGive(cl) + vyxGive(cc) + vyxGive(bodies) + vyxGive(els),
-            VNFor(v, it, key, body, l, c) => vyxGive(v) + vyxGive(it) + vyxGive(key) + vyxGive(body),
+        // Block arms (RFC-0118): each payload dropped in its arm, where the
+        // `vyxGive` trampoline used to hand them over one call at a time.
+        // `drop v` still reads the row the INSTANCE has (RFC-0090 M1), and
+        // the recursion still lives in the `Array<VyxNode>` releases.
+        match consume self {
+            VNText(s) => {
+                drop s
+            }
+            VNInterp(s, l, c) => {
+                drop s
+            }
+            VNRaw(s, l, c) => {
+                drop s
+            }
+            VNChildren => {}
+            VNElem(tag, isComp, attrs, kids, l) => {
+                drop tag
+                drop attrs
+                drop kids
+            }
+            VNIf(conds, cl, cc, bodies, els, has) => {
+                drop conds
+                drop cl
+                drop cc
+                drop bodies
+                // `els` is a record (`{ nodes: Array<VyxNode> }`), and `drop`
+                // names bindings, not records without an `impl Owned` — the
+                // generic trampoline used to launder this. A block arm can
+                // say it honestly: take the one heap field, drop it, and the
+                // scalar shell goes with the arm.
+                let elsNodes = consume els.nodes
+                drop elsNodes
+            }
+            VNFor(v, it, key, body, l, c) => {
+                drop v
+                drop it
+                drop key
+                drop body
+            }
         }
     }
 }

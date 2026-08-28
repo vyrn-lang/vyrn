@@ -1395,11 +1395,35 @@ pub enum LambdaBody {
     Block(Block),
 }
 
+/// A match arm's body (RFC-0118): a single expression, or — in STATEMENT
+/// position only, which the checker enforces — a brace-delimited block that
+/// yields nothing. The twin of [`LambdaBody`], for the same reason: a body
+/// that needs two statements should not have to become a function called
+/// from the arm (the `give`/`jsonGive`/`vyxGive` trampolines this exists to
+/// retire).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArmBody {
+    Expr(Expr),
+    Block(Block),
+}
+
+impl ArmBody {
+    /// The body as the single expression it is in every pre-RFC-0118 position
+    /// — an EXPRESSION match's arms, and every desugar that builds arms.
+    /// `None` is a block body, which only a statement match may carry.
+    pub fn as_expr(&self) -> Option<&Expr> {
+        match self {
+            ArmBody::Expr(e) => Some(e),
+            ArmBody::Block(_) => None,
+        }
+    }
+}
+
 /// One arm of a `match`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
     pub pattern: Pattern,
-    pub body: Expr,
+    pub body: ArmBody,
 }
 
 /// A pattern in a `match` arm. v0.1 supports the `Option` and `Result` variants.
@@ -1560,7 +1584,10 @@ fn lambdas_expr<'a>(e: &'a Expr, out: &mut std::collections::HashMap<usize, &'a 
         } => {
             lambdas_expr(scrutinee, out);
             for a in arms {
-                lambdas_expr(&a.body, out);
+                match &a.body {
+                    ArmBody::Expr(e) => lambdas_expr(e, out),
+                    ArmBody::Block(b) => lambdas_block(b, out),
+                }
             }
         }
         Expr::IfExpr {

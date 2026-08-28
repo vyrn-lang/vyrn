@@ -6,23 +6,6 @@
 // through the wire).
 type Counts = Map<Int64, Int64>
 
-/// The decoded map, reported — a function because a `match` arm is a single
-/// expression (the very limitation RFC-0118 is priced against).
-fn report(back: Counts) {
-    print("\{back.length}")
-    print(match back[7] {
-            Some(v) => "\{v}",
-            None => "?",
-        })
-    print(match back[0 - 3] {
-            Some(v) => "\{v}",
-            None => "?",
-        })
-    for k in back.keys() {
-        print("\{k}")
-    }
-}
-
 fn main() -> Int64 {
     let mut m: Counts = [:]
     m[7] = 1
@@ -30,8 +13,23 @@ fn main() -> Int64 {
     m.tally(7, 4)
     let s = toJson(m)
     print(s)
+    // A block arm (RFC-0118) where a `report` helper stood the day this file
+    // was written — the fourth trampoline the RFC named, deleted by it.
     match fromJson(Counts, s) {
-        Valid(back) => report(back),
+        Valid(back) => {
+            print("\{back.length}")
+            print(match back[7] {
+                    Some(v) => "\{v}",
+                    None => "?",
+                })
+            print(match back[0 - 3] {
+                    Some(v) => "\{v}",
+                    None => "?",
+                })
+            for k in back.keys() {
+                print("\{k}")
+            }
+        }
         Invalid(iss) => print("invalid: \{iss.length}"),
     }
     // A non-canonical key is an Issue, never a silent alias.

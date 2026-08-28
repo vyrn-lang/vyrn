@@ -1817,7 +1817,11 @@ fn mount_calls_expr<'a>(e: &'a Expr, out: &mut Vec<&'a [Expr]>) {
         } => {
             mount_calls_expr(scrutinee, out);
             for a in arms {
-                mount_calls_expr(&a.body, out);
+                match &a.body {
+                    ArmBody::Expr(e) => mount_calls_expr(e, out),
+                    // A statement match's block arm (RFC-0118) can mount.
+                    ArmBody::Block(b) => mount_calls_block(b, out),
+                }
             }
         }
         Expr::IfExpr {
@@ -4653,6 +4657,18 @@ impl<'a> Interp<'a> {
                 Ok(Flow::Normal)
             }
             Stmt::Expr(e) => {
+                // A `match` statement (RFC-0118) takes the statement path, so
+                // its arms may be blocks and a `break`/`continue` inside one
+                // reaches the enclosing loop — with the same scrutinee
+                // temporary release the expression form pays.
+                if let Expr::Match {
+                    scrutinee, arms, ..
+                } = e
+                {
+                    let sv = self.expr(scrutinee, scope)?;
+                    let r = self.eval_match_stmt(sv.clone(), arms, scope);
+                    return self.release_temp(e as *const Expr as usize, &sv, r.is_err(), r);
+                }
                 self.expr(e, scope)?;
                 Ok(Flow::Normal)
             }
@@ -6819,7 +6835,40 @@ impl<'a> Interp<'a> {
             for (name, val) in bindings {
                 scope.last_mut().unwrap().insert(name, Slot::untyped(val));
             }
-            let result = self.expr(&arm.body, scope);
+            let result = match &arm.body {
+                ArmBody::Expr(e) => self.expr(e, scope),
+                // The checker confines block arms to statement position,
+                // which routes through `eval_match_stmt` below.
+                ArmBody::Block(_) => Err("a block arm in expression position (RFC-0118)".into()),
+            };
+            scope.pop();
+            return result;
+        }
+        Err("non-exhaustive match (should have been caught)".into())
+    }
+
+    /// A `match` in STATEMENT position (RFC-0118): the same pattern walk, but
+    /// arms may be blocks, values are discarded, and control flow — a `break`
+    /// or `continue` inside an arm — comes back as the [`Flow`] a statement
+    /// answers with.
+    fn eval_match_stmt(
+        &self,
+        sv: Val,
+        arms: &[MatchArm],
+        scope: &mut Vec<Frame>,
+    ) -> Result<Flow, Ctrl> {
+        for arm in arms {
+            let Some(bindings) = Self::match_pattern(&arm.pattern, &sv) else {
+                continue;
+            };
+            scope.push(Frame::default());
+            for (name, val) in bindings {
+                scope.last_mut().unwrap().insert(name, Slot::untyped(val));
+            }
+            let result = match &arm.body {
+                ArmBody::Expr(e) => self.expr(e, scope).map(|_| Flow::Normal),
+                ArmBody::Block(b) => self.block(b, scope),
+            };
             scope.pop();
             return result;
         }

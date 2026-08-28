@@ -6512,7 +6512,13 @@ impl<'a> Gen<'a> {
         if !self.terminated {
             self.emit_edge_releases(ers, zero_ix as u32);
         }
-        let ty = join_never(one_t, zero_t);
+        // Any block arm (RFC-0118) makes this a statement match — Unit, so
+        // the void path below skips the phi a valueless edge could not feed.
+        let ty = if arms.iter().any(|a| matches!(a.body, ArmBody::Block(_))) {
+            Type::Unit
+        } else {
+            join_never(one_t, zero_t)
+        };
         let zero_end = self.cur_block.clone();
         self.emit_term(format!("br label %{end_l}"));
 
@@ -6649,7 +6655,16 @@ impl<'a> Gen<'a> {
                     self.emit(format!("store {ll} {v}, ptr {slot}"));
                 }
             }
-            let (v, t) = self.gen_expr(&arm.body)?;
+            let (v, t) = match &arm.body {
+                ArmBody::Expr(e) => self.gen_expr(e)?,
+                // A block arm (RFC-0118) is its statements and yields nothing;
+                // `has_block` below forces the void merge, so the empty value
+                // never reaches a `phi`.
+                ArmBody::Block(b) => {
+                    self.gen_block(b)?;
+                    (String::new(), Type::Unit)
+                }
+            };
             // Reconcile the arms' reported type. All arms share one enum (the
             // checker proved it), but different arms carry different knowledge of
             // its type arguments: a payload-bearing arm that mentions the param
@@ -6682,6 +6697,13 @@ impl<'a> Gen<'a> {
         self.emit_term("unreachable".into());
 
         self.emit_label(&end_l);
+        // Any block arm (RFC-0118) makes this a statement match: whatever the
+        // expression arms beside it computed is discarded, the type is Unit,
+        // and the void path below skips the phi a valueless edge could not
+        // feed.
+        if arms.iter().any(|a| matches!(a.body, ArmBody::Block(_))) {
+            ty = Type::Unit;
+        }
         let ll = self.llt(&ty);
         // Unit-typed arms (side effects only) have no value — `phi void` is
         // invalid IR, so skip the merge entirely.
@@ -7086,7 +7108,15 @@ impl<'a> Gen<'a> {
             let slot = self.declare(bind, payload_ty);
             self.emit(format!("store {ll} {v}, ptr {slot}"));
         }
-        let out = self.gen_expr(&arm.body)?;
+        let out = match &arm.body {
+            ArmBody::Expr(e) => self.gen_expr(e)?,
+            // A block arm (RFC-0118): the statements, and no value — the
+            // caller forces the void merge whenever one exists.
+            ArmBody::Block(b) => {
+                self.gen_block(b)?;
+                (String::new(), Type::Unit)
+            }
+        };
         self.scope.pop();
         Ok(out)
     }
@@ -8341,7 +8371,10 @@ fn captures_of_expr(
                 for b in vyrn_frontend::pattern_bindings(&arm.pattern) {
                     inner.insert(b.to_string());
                 }
-                captures_of_expr(&arm.body, &mut inner, out, seen, is_local);
+                match &arm.body {
+                    ArmBody::Expr(e) => captures_of_expr(e, &mut inner, out, seen, is_local),
+                    ArmBody::Block(b) => captures_of_block(b, &mut inner, out, seen, is_local),
+                }
             }
         }
         Expr::IfExpr {
@@ -13146,7 +13179,10 @@ fn bound_names(b: &Block, out: &mut std::collections::HashSet<String>) {
                 in_expr(scrutinee, out);
                 for a in arms {
                     out.extend(pattern_names(&a.pattern));
-                    in_expr(&a.body, out);
+                    match &a.body {
+                        ArmBody::Expr(e) => in_expr(e, out),
+                        ArmBody::Block(b) => bound_names(b, out),
+                    }
                 }
             }
             Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
@@ -13447,7 +13483,15 @@ fn ban_append_expr(e: &Expr, banned: &mut std::collections::HashSet<String>, str
         } => {
             ban_append_expr(scrutinee, banned, strict);
             for arm in arms {
-                ban_append_expr(&arm.body, banned, strict);
+                match &arm.body {
+                    ArmBody::Expr(e) => ban_append_expr(e, banned, strict),
+                    // A block arm (RFC-0118): the throwaway target set means a
+                    // self-append inside it keeps the copying path — correct,
+                    // just not upgraded; the in-place path can follow demand.
+                    ArmBody::Block(b) => {
+                        scan_append_block(b, &mut std::collections::HashSet::new(), banned, strict)
+                    }
+                }
             }
         }
         Expr::IfExpr {
@@ -13577,7 +13621,10 @@ fn collect_regex_expr(e: &Expr, out: &mut Vec<String>) {
         } => {
             collect_regex_expr(scrutinee, out);
             for a in arms {
-                collect_regex_expr(&a.body, out);
+                match &a.body {
+                    ArmBody::Expr(e) => collect_regex_expr(e, out),
+                    ArmBody::Block(b) => collect_regex_block(b, out),
+                }
             }
         }
         Expr::IfExpr {
@@ -13732,7 +13779,10 @@ fn collect_strings_expr(e: &Expr, out: &mut Vec<String>, types: &HashMap<String,
         } => {
             collect_strings_expr(scrutinee, out, types);
             for a in arms {
-                collect_strings_expr(&a.body, out, types);
+                match &a.body {
+                    ArmBody::Expr(e) => collect_strings_expr(e, out, types),
+                    ArmBody::Block(b) => collect_strings_block(b, out, types),
+                }
             }
         }
         Expr::IfExpr {

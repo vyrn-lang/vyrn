@@ -63,17 +63,6 @@ impl Copy for Json {
     }
 }
 
-/// Hands one payload back to its own release row, so an arm can be an
-/// EXPRESSION. `drop v` is a statement and a `match` arm is an expression, so
-/// the release below cannot write `drop` in an arm. The row read is the row the
-/// INSTANCE has (RFC-0090 M1) — one helper releases a `String`, an
-/// `Array<Json>` and an `Array<JsonField>`, and the last two are where the
-/// recursion lives. The twin of `std/vyx`'s `vyxGive`.
-fn jsonGive<T>(v: consume T) -> Int64 {
-    drop v
-    return 0
-}
-
 /// A `Json` owns its subtree, and says so — RFC-0096 M2.
 ///
 /// `Json` reaches itself through `JArr` and `JObj`, so the structural release
@@ -86,13 +75,26 @@ fn jsonGive<T>(v: consume T) -> Int64 {
 /// releasing both the original and the copy frees two distinct trees.
 impl Owned for Json {
     fn release(consume self) {
+        // Block arms (RFC-0118): `drop` stands in the arm where `jsonGive` —
+        // a helper that existed only because an arm was a single expression —
+        // used to trampoline it. The row read is still the row the INSTANCE
+        // has (RFC-0090 M1), and the recursion still lives in the two list
+        // releases.
         match consume self {
-            JNull => 0,
-            JBool(b) => 0,
-            JNum(s) => jsonGive(s),
-            JStr(s) => jsonGive(s),
-            JArr(xs) => jsonGive(xs),
-            JObj(fs) => jsonGive(fs),
+            JNull => {}
+            JBool(b) => {}
+            JNum(s) => {
+                drop s
+            }
+            JStr(s) => {
+                drop s
+            }
+            JArr(xs) => {
+                drop xs
+            }
+            JObj(fs) => {
+                drop fs
+            }
         }
     }
 }

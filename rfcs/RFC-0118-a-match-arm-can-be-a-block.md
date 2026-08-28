@@ -1,8 +1,11 @@
 # RFC-0118 — a match arm can be a block
 
-- **Status:** Proposed, direction decided (2026-08-28, on the user's "finish
-  the design decisions"): block-bodied arms in STATEMENT position, not `drop`
-  as an expression. Implementation is the open half.
+- **Status:** M1 and M2 Implemented (2026-08-28, the same day the direction
+  was decided on the user's "finish the design decisions"): block-bodied arms
+  in STATEMENT position, not `drop` as an expression, in all engines, the
+  formatter and the LSP; the four trampolines deleted. **M2's measurement
+  came back a wash** — see "What it bought, measured" — so the change stands
+  on the ergonomics argument, which was the decision's spine anyway.
 - **Evidence:** the per-node census
   (rfcs/census/binary-trees-per-node.md): binary-trees' release walk makes
   **two calls per node where one would do**, and the second call exists only
@@ -67,27 +70,53 @@ Mixed arms are legal in a statement match — `Leaf => {}` beside
 `Node(l, r) => free(l, r)` — an expression arm's value is discarded, as any
 expression statement's is.
 
-## What it buys, priced in advance
+## What it bought, measured
 
-The release walk stops paying the trampoline: `release` recurses into itself,
-one call per child instead of `give`'s spill-call-free. The census's
-prediction is the release walk's call count HALVED on binary-trees; M2 is
-where that number is measured rather than promised, interleaved in one
-window, before-and-after, the way this repository prices claims. The three
-`give` twins and `report` are deleted in the same milestone, which is the
-ergonomics half made concrete: four functions that exist only to stand where
-a block could not.
+**The wall clock: a wash.** Binary-trees at depth 21, interleaved old/new,
+three rounds each in one window: 18.3/22.2/22.0 s against 18.2/22.1/21.7 —
+the differences are smaller than the round-to-round noise, and the outputs
+are byte-identical. The census predicted the release walk's call count
+halved; that prediction was read off the EMITTED IR, and the optimizer was
+evidently already inlining `give` before the machine ever saw a second call.
+The lesson joins the noalias wash and the declined pool on the same page:
+what the emitted IR spends is not what the machine spends, and a claim about
+calls is priced after `-O2`, not before.
 
-## Milestones
+**The ergonomics: real, and the decision's actual spine.** Four functions
+existed only to stand where a block could not — `give`, `jsonGive`,
+`vyxGive`, `report` — and all four are deleted, their sites now saying `drop`
+(or their three prints) directly in the arm. The `=> 0` contortion is gone
+from every release impl with them.
 
-- **M1** — the surface: parser (statement-position `match` accepts
-  `pat => { stmts }` arms; expression position refuses a brace with a named
-  diagnostic), checker (arm blocks walked as blocks, no value), movecheck/own
-  (arm blocks enter the same branch scopes Rule N's arm walks already
-  maintain), interpreter and both compiled backends (arm blocks lower as
-  statement blocks into the existing join), `vyrn fmt`, and the LSP's
-  outline. A corpus witness with a multi-statement arm; the refusal —
-  a block arm in expression position — pinned in EXPECTED_CHECK_FAILURE.
-- **M2** — the payoff: `give`/`jsonGive`/`vyxGive`/`report` deleted, their
-  sites rewritten as block arms; binary-trees re-measured interleaved with
-  the census's numbers updated; the census page closes its finding.
+**And the deletion caught the trampoline doing something it never advertised:
+laundering the `drop` rule.** `drop` names a binding whose type is heap or
+declares `impl Owned`; a plain record is refused. `vyxGive<T>(v: consume T)`
+took the record as a type parameter, and `drop v` on a `T` passes the check
+the direct spelling fails — so `VNIf`'s `els` (`{ nodes: Array<VyxNode> }`)
+was being dropped through a hole in the rule's coverage. The block arm says
+it honestly now: `let elsNodes = consume els.nodes` then `drop elsNodes`, the
+scalar shell going with the arm — a spelling that needed a block to exist.
+
+## Milestones — as landed
+
+- **M1** — the surface, all of it: parser (statement-position `match` accepts
+  `pat => { stmts }` arms, no comma needed after a block; expression position
+  refuses with a named diagnostic through the checker's position flag — the
+  arms-slice address set at `Stmt::Expr`, consumed at `check_match`, so a
+  nested match never inherits it), checker (arm blocks checked as blocks,
+  contributing no type; expression arms beside them still unify among
+  themselves), movecheck (arm blocks walk as statements inside the same
+  binder scope and branch stamp; a block arm's `arm_heap` is `false` because
+  no value exists to alias), own (arm blocks get frames and placement as an
+  `if` branch's do), the interpreter (a dedicated statement path, so `break`
+  and `continue` inside an arm reach the enclosing loop), both compiled
+  backends (any block arm forces the existing void merge, so no phi ever
+  meets a valueless edge; the textual backend discards expression-arm values,
+  the direct backend `Drop`s them), `vyrn fmt` (the token-stream formatter
+  handled arm braces without a change), and the LSP (arm-block lets hover
+  like any block's). `examples/blockarms.vyrn` is the corpus witness —
+  statements, mixed arms, `break` from an arm, and the trampoline-free
+  release — byte-identical three ways under the free audit;
+  `examples/blockvalarm.vyrn` pins the refusal.
+- **M2** — the trampolines deleted and the claim measured; both results
+  above.

@@ -1569,7 +1569,10 @@ impl MoveCheck<'_> {
             } => self
                 .names_a_place(then_branch)
                 .or_else(|| else_branch.as_ref().and_then(|b| self.names_a_place(b))),
-            Expr::Match { arms, .. } => arms.iter().find_map(|a| self.names_a_place(&a.body)),
+            // A block arm (RFC-0118) yields no value, so it names no place.
+            Expr::Match { arms, .. } => arms
+                .iter()
+                .find_map(|a| a.body.as_expr().and_then(|e| self.names_a_place(e))),
             // `x.copy()` allocates for exactly the types `owns_heap` counts
             // (RFC-0089 M1b). Everything else it is called on is a handle, and a
             // copied handle SHARES what it points at — releasing both copies of
@@ -1677,7 +1680,8 @@ impl MoveCheck<'_> {
                 for (i, b) in pattern_bindings(&arm.pattern).into_iter().enumerate() {
                     self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
                 }
-                let t = self.type_of(&arm.body);
+                // A block arm (RFC-0118) yields nothing to have a type.
+                let t = arm.body.as_expr().and_then(|e| self.type_of(e));
                 self.exit();
                 t
             }
@@ -2147,7 +2151,11 @@ impl MoveCheck<'_> {
                 }
                 Expr::Match { arms, .. } => {
                     for a in arms {
-                        self.check_handover(&a.body, callee, line)?;
+                        // A block arm (RFC-0118) exists only in statement
+                        // position, which is never an argument.
+                        if let ArmBody::Expr(e) = &a.body {
+                            self.check_handover(e, callee, line)?;
+                        }
                     }
                     Ok(())
                 }
@@ -2685,7 +2693,8 @@ impl MoveCheck<'_> {
                     for (i, b) in pattern_bindings(&arm.pattern).into_iter().enumerate() {
                         self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
                     }
-                    let r = self.returned_borrow(&arm.body);
+                    // A block arm (RFC-0118) is never a return value.
+                    let r = arm.body.as_expr().and_then(|e| self.returned_borrow(e));
                     self.exit();
                     if r.is_some() {
                         found = r;
@@ -2816,7 +2825,11 @@ impl MoveCheck<'_> {
                 for (i, b) in pattern_bindings(&arm.pattern).into_iter().enumerate() {
                     self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
                 }
-                let r = self.lends_through_a_wrapper(&arm.body);
+                // A block arm (RFC-0118) is never a return value.
+                let r = arm
+                    .body
+                    .as_expr()
+                    .and_then(|e| self.lends_through_a_wrapper(e));
                 self.exit();
                 r
             }),
@@ -4030,17 +4043,35 @@ impl MoveCheck<'_> {
                         }
                     }
                     all_binders.extend(binders.iter().cloned());
-                    // Asked HERE, one scope in, because the question is about the
-                    // binders and this is where they are bound.
-                    self.note_arm_value(&arm.body, *line, &binders);
-                    // Asked here too, and kept per arm: the answer needs the
-                    // binder types, which leave with this scope.
-                    arm_heap.push(self.arm_carries_heap(&arm.body));
+                    match &arm.body {
+                        ArmBody::Expr(body) => {
+                            // Asked HERE, one scope in, because the question is
+                            // about the binders and this is where they are bound.
+                            self.note_arm_value(body, *line, &binders);
+                            // Asked here too, and kept per arm: the answer needs
+                            // the binder types, which leave with this scope.
+                            arm_heap.push(self.arm_carries_heap(body));
+                        }
+                        // A block arm (RFC-0118) yields nothing: there is no
+                        // arm value to note, and `false` is the TRUE answer to
+                        // "does the value carry heap", not the conservative one
+                        // — nothing exists to alias the binding Rule N would
+                        // release.
+                        ArmBody::Block(_) => arm_heap.push(false),
+                    }
                     self.arm_binders
                         .borrow_mut()
                         .push(binders.iter().map(|b| b.to_string()).collect());
                     self.enter_branch();
-                    let r = self.expr(&arm.body, &mut c, scope);
+                    let r = match &arm.body {
+                        ArmBody::Expr(body) => self.expr(body, &mut c, scope),
+                        // The statements walk as statements, inside the same
+                        // binder scope and branch stamp an expression arm gets.
+                        ArmBody::Block(b) => {
+                            self.block(b, &mut c, scope);
+                            Ok(())
+                        }
+                    };
                     self.leave_branch();
                     self.arm_binders.borrow_mut().pop();
                     self.exit();
@@ -4095,8 +4126,14 @@ impl MoveCheck<'_> {
                             // operator results are scalar or fresh, a call
                             // returns only what it was handed — covers what
                             // the type alone could not.
-                            let safe_value =
-                                !arm_heap[i] || self.value_cannot_alias(&arm.body, root);
+                            // `arm_heap` is already `false` for a block arm
+                            // (no value exists to carry heap), so the alias
+                            // proof is only ever asked of an expression.
+                            let safe_value = !arm_heap[i]
+                                || arm
+                                    .body
+                                    .as_expr()
+                                    .is_some_and(|e| self.value_cannot_alias(e, root));
                             if untouched(c) && safe_value {
                                 sink.borrow_mut().push(EdgeRel {
                                     if_key: match_key,
@@ -4491,9 +4528,17 @@ pub fn mentions_place(e: &Expr, base: &str) -> bool {
             | Expr::ArrayLit { elems: args, .. } => args.iter().any(|a| go(a, base)),
             Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| go(k, base) || go(v, base)),
             Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| go(v, base)),
+            // A block arm (RFC-0118) answers `true` without being read — the
+            // lambda-block precedent above, for the same reason: `true` costs
+            // a leak and `false` can cost a use-after-free.
             Expr::Match {
                 scrutinee, arms, ..
-            } => go(scrutinee, base) || arms.iter().any(|a| go(&a.body, base)),
+            } => {
+                go(scrutinee, base)
+                    || arms
+                        .iter()
+                        .any(|a| a.body.as_expr().is_none_or(|e| go(e, base)))
+            }
             Expr::IfExpr {
                 cond,
                 then_branch,
@@ -4801,9 +4846,12 @@ mod linear {
             // The first arm that carries one answers for the rendering as well.
             // The checker has already made the arms agree on the type, so a
             // second arm would quote the same spelling.
-            Expr::Match { arms, .. } => arms
-                .iter()
-                .find_map(|a| owed_let(None, &a.body, live, producers, decl)),
+            Expr::Match { arms, .. } => arms.iter().find_map(|a| {
+                // A block arm (RFC-0118) yields nothing a binding could owe.
+                a.body
+                    .as_expr()
+                    .and_then(|e| owed_let(None, e, live, producers, decl))
+            }),
             Expr::IfExpr {
                 then_branch,
                 else_branch,
@@ -5117,8 +5165,16 @@ mod linear {
                 if arms.is_empty() {
                     return s;
                 }
-                let any = arms.iter().any(|a| paths(&a.body, name).0);
-                let every = arms.iter().all(|a| paths(&a.body, name).1);
+                // A block arm (RFC-0118) exists only in statement position,
+                // which is never an operand this hoisting question is asked
+                // about; if one is ever met, (true, false) is conservative in
+                // both directions.
+                let any = arms
+                    .iter()
+                    .any(|a| a.body.as_expr().is_none_or(|e| paths(e, name).0));
+                let every = arms
+                    .iter()
+                    .all(|a| a.body.as_expr().is_some_and(|e| paths(e, name).1));
                 seq(s, (any, every))
             }
             // A missing `else` is a path that names nothing. The checker refuses
@@ -5214,7 +5270,12 @@ fn reads(e: &Expr) -> Vec<String> {
             } => {
                 go(scrutinee, out);
                 for a in arms {
-                    go(&a.body, out);
+                    // A block arm (RFC-0118) is never part of a return or a
+                    // spawn argument — statement position only, the checker's
+                    // rule — so there is nothing here to carry out.
+                    if let ArmBody::Expr(e) = &a.body {
+                        go(e, out);
+                    }
                 }
             }
             Expr::IfExpr {
@@ -5258,7 +5319,11 @@ fn calls_in(e: &Expr, out: &mut Vec<String>) {
         } => {
             calls_in(scrutinee, out);
             for a in arms {
-                calls_in(&a.body, out);
+                // A block arm (RFC-0118) is never a return value, so it can
+                // forward no lender.
+                if let ArmBody::Expr(e) = &a.body {
+                    calls_in(e, out);
+                }
             }
         }
         Expr::IfExpr {

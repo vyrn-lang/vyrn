@@ -1859,7 +1859,13 @@ impl Place<'_> {
                 let key = e as *const Expr as usize;
                 self.owned_temp(key, "@match", e.line() as u32, |p| {
                     for arm in arms {
-                        p.expr(&arm.body);
+                        match &arm.body {
+                            ArmBody::Expr(body) => p.expr(body),
+                            // A block arm (RFC-0118) walks as the statements
+                            // it is — its lets get frames and placement
+                            // exactly as an `if` branch's do.
+                            ArmBody::Block(b) => p.block(b),
+                        }
                     }
                 });
             }
@@ -2185,7 +2191,10 @@ impl Emit<'_> {
             } => {
                 self.exprs(scrutinee);
                 for a in arms {
-                    self.exprs(&a.body);
+                    match &a.body {
+                        ArmBody::Expr(e) => self.exprs(e),
+                        ArmBody::Block(b) => self.block(b),
+                    }
                 }
             }
             Expr::IfExpr {
