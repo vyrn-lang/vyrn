@@ -341,6 +341,9 @@ memory model's rather than the container's. Phase 8b closed all three.
 and lowered once per instantiation, so the instance decides: a `free` in a
 `Slots<String>`, no instruction at all in a `Slots<Int64>`. That is this plan's
 own rule — conventions checked per monomorphized instance — reaching `drop`.
+*(Reversed 2026-08-28: no per-instance check ever ran, the loop is gone, and
+the pass laundered the record rule — `drop` on a bare `T` is refused again.
+See RFC-0118 "The hole, closed".)*
 
 Measured on the Node and `wasi-min.js` harness the memory suite uses, 500 calls
 against 2000: **720,896 -> 2,424,832 bytes before, 131,072 -> 131,072 after.**

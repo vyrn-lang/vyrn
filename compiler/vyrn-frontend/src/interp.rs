@@ -220,10 +220,6 @@ impl Frame {
         }
         self.slots.push((k, v));
     }
-
-    fn len(&self) -> usize {
-        self.slots.len()
-    }
 }
 
 impl FromIterator<(String, Slot)> for Frame {

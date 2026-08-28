@@ -747,7 +747,8 @@ the table and gives each payload back, because it knows every slot holds one
 payload it owns — `insert` takes `consume T`, and the only other writer is a
 store, which releases what it replaced. `drop v` where `v: T` is legal and the
 monomorphized instance decides: a `free` for a `Slots<String>`, no instruction
-at all for a `Slots<Int64>`.
+at all for a `Slots<Int64>`. *(Reversed 2026-08-28: the loop went with a later
+arc, and `drop` on a bare `T` is refused again — RFC-0118 "The hole, closed".)*
 
 **The other half stays open, and the restriction is now the right one.** A
 built-in `Array<T>` releases no element and must not. An array cannot say
