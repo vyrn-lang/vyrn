@@ -367,7 +367,10 @@ carried the ownership fact — see the note under Phase 9.
   carries a row (the drop site solves the type arguments from the binding and
   asks for the instance, which is the route a written call already took); and
   census U4 opens for a container that DECLARES what it owns — `drop v` where
-  `v: T` checks, and the instance decides. `std/slots` gained
+  `v: T` checks, and the instance decides. *(Reversed 2026-08-28: the
+  per-element loop is gone — `Slots` drops its arrays — and the Param pass was
+  laundering the record rule, so `drop` on a bare `T` is refused again. See
+  RFC-0118 "The hole, closed".)* `std/slots` gained
   `impl<T> Owned for Slots<T>`, and a `Slots<String>` at block exit is flat:
   720,896 -> 2,424,832 bytes before, 131,072 -> 131,072 after. The memory suite
   gained a `slotsContainer` row. `elementLeak` did NOT flip and should not — a
