@@ -1,0 +1,89 @@
+// An Int64-keyed Map (RFC-0117 M1): every map operation over integer keys,
+// plus the rolling-key counting loop the RFC was priced on — the key updated
+// in O(1) per window the way the C reference maintains it, not rebuilt from
+// every byte.
+//
+//   $ vyrn run examples/intkeys.vyrn
+
+/// Every window of width `k` over `seq`, counted by a ROLLING packed key:
+/// two bits shift in per position, the top two age out through the modulus.
+fn countRolling(seq: Array<UInt8>, k: Int64) -> Map<Int64, Int64> {
+    let mut m: Map<Int64, Int64> = [:]
+    if seq.length < k {
+        return m
+    }
+    let mut modulus = 1
+    let mut j = 0
+    while j < k {
+        modulus = modulus * 4
+        j = j + 1
+    }
+    let mut key = 0
+    let mut i = 0
+    while i < seq.length {
+        let b = seq[i]
+        let c = if b == 'A' { 0 } else if b == 'C' { 1 } else if b == 'G' { 2 } else { 3 }
+        key = (key * 4 + c) % modulus
+        if i >= k - 1 {
+            m.tally(key, 1)
+        }
+        i = i + 1
+    }
+    return m
+}
+
+fn main() -> Int64 {
+    // The ops, one by one: insert, update, tally, read, membership, snapshot,
+    // removal — insertion order preserved throughout (RFC-0028's law).
+    let mut m: Map<Int64, Int64> = [:]
+    m[7] = 10
+    m[3] = 20
+    m[7] = 11
+    m.tally(7, 4)
+    m.tally(9, 1)
+    print("\{m.length}")
+    let seven = match m[7] {
+        Some(v) => v,
+        None => 0 - 1,
+    }
+    print("\{seven}")
+    print("\{m.has(3)} \{m.has(4)}")
+    for k in m.keys() {
+        print("\{k}")
+    }
+    print("\{m.remove(3)} \{m.remove(3)} \{m.length}")
+    let missing = match m[3] {
+        Some(v) => v,
+        None => 0 - 1,
+    }
+    print("\{missing}")
+
+    // A literal, Int64-keyed, with a value type of its own.
+    let names: Map<Int64, String> = [1: "one", 2: "two", 1: "uno"]
+    print("\{names.length}")
+    print(match names[1] {
+            Some(s) => s,
+            None => "?",
+        })
+
+    // The counting loop: ACGTACGT… has exactly four distinct 3-mers, and each
+    // window is one multiply, one add, one modulo, one probe.
+    let mut seq: Array<UInt8> = []
+    let alphabet = bytes("ACGT")
+    let mut i = 0
+    while i < 24 {
+        seq.push(alphabet[i % 4])
+        i = i + 1
+    }
+    let counts = countRolling(seq, 3)
+    print("\{counts.length}")
+    let mut total = 0
+    for k in counts.keys() {
+        total = total + match counts[k] {
+            Some(c) => c,
+            None => 0,
+        }
+    }
+    print("\{total}")
+    return 0
+}

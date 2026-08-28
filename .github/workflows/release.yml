@@ -352,6 +352,12 @@ jobs:
         # `gh` ships on the runner, so no third-party action is in the trust
         # path of a signed artifact. `--verify-tag` refuses to invent a tag that
         # was never pushed.
+        #
+        # The notes heredoc is QUOTED and stays quoted: its body holds backticks
+        # around `SHA256SUMS` and the command names, and an expanding heredoc
+        # would run them. So the repository arrives as `__REPO__` and one `sed`
+        # fills it in, rather than the name being typed twice in a release note
+        # a fork would then publish pointing at this repository.
         run: |
           set -eu
           tag="${GITHUB_REF_NAME}"
@@ -364,11 +370,11 @@ jobs:
 
           Install (Linux, macOS):
 
-              curl -fsSL https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh | sh
+              curl -fsSL https://raw.githubusercontent.com/__REPO__/main/install.sh | sh
 
           Install (Windows PowerShell):
 
-              irm https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.ps1 | iex
+              irm https://raw.githubusercontent.com/__REPO__/main/install.ps1 | iex
 
           Verify a manual download against `SHA256SUMS`.
 
@@ -376,4 +382,6 @@ jobs:
 
           `vyrn run`, `vyrn check`, `vyrn test` and `vyrn build --target wasm` need nothing beyond this archive. `vyrn build` (native) needs `clang` on `PATH`.
           EOF
+          sed -i "s|__REPO__|${GITHUB_REPOSITORY}|g" notes.md
+          if grep -q __REPO__ notes.md; then echo "notes.md still holds __REPO__"; exit 1; fi
           gh release create "$tag" $flags --title "$tag" --notes-file notes.md dist/*

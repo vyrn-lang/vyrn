@@ -34,6 +34,62 @@ pub const KNOWN_DIVERGENT: &[(&str, &str)] = &[];
 /// refusal was pinned here.
 pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
     (
+        "copyfromowned.vyrn",
+        "RFC-0115: `copyFrom` overwrites by bytes, so an owning element that is          overwritten would never be released",
+        "overwrites the receiver's elements by bytes",
+    ),
+    (
+        "appendowned.vyrn",
+        "RFC-0115: `append` is a byte copy, so an element type that owns heap          is refused — copying one by bytes gives two arrays one buffer",
+        "copies its source's elements by bytes",
+    ),
+    (
+        "floatkey.vyrn",
+        "RFC-0117: float keys are refused by name — NaN != NaN breaks the          reflexivity a key needs",
+        "does neither well",
+    ),
+    (
+        "heapkey.vyrn",
+        "RFC-0117 M1: a Map key is String or Int64 today; the other Hashable          scalars and user types are M2's",
+        "is `String` or `Int64` today",
+    ),
+    (
+        "wirekey.vyrn",
+        "RFC-0117 §5: a non-String-keyed map has no wire form yet, and the          boundary refuses rather than guessing",
+        "cannot encode",
+    ),
+    // ---- RFC-0114's proof appendix, §45: the four load-bearing assumptions,
+    // pinned as refusals. Each row is one assumption of the release-algorithm
+    // proofs (rfcs/proofs/release-algorithm.md); the needle is the checker's
+    // own wording, quoted in §45. If any of these ever COMPILES, a theorem's
+    // hypothesis just became false and the proof document is the first thing
+    // to reread.
+    (
+        "a1_afterjoin.vyrn",
+        "A1's reach: a read AFTER the join of a conditional move (Theorem 4's          first case). The branch-disjoint read is accepted; this is not",
+        "used again here",
+    ),
+    (
+        "a2_capture.vyrn",
+        "A2's capture clause: a closure over a `read` parameter (Lemma 3's          bracketing dies if this compiles)",
+        "may not be captured by a closure",
+    ),
+    (
+        "a2_capture_escape.vyrn",
+        "A2, the escaping form: the capturing closure is returned",
+        "may not be captured by a closure",
+    ),
+    (
+        "a6_reassign.vyrn",
+        "A6: parameters are not reassignable — borrows are path-invariant          because nothing can overwrite one",
+        "cannot assign to",
+    ),
+    (
+        "excl_alias.vyrn",
+        "A7: a `modify` borrow is exclusive — one variable as `modify` and          `read` in one call is refused",
+        "borrow is exclusive",
+    ),
+    (
         "validate_compile.vyrn",
         "compile-time rejection of a provably-invalid constant",
         "does not satisfy",

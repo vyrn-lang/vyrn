@@ -323,6 +323,67 @@ fn indentOf(line: String) -> Int64 {
     return i
 }
 
+/// `doc` with its parenthetical design-record citations taken out.
+///
+/// A `std/` doc comment cites the record that decided a rule — `(RFC-0045)`,
+/// `(RFC-0071 M2b)`, `(RFC-0014's rule)`. That citation is for whoever maintains
+/// the module. A reader of the published reference cannot follow it: the records
+/// are not published, and the pages that once served them retired.
+///
+/// ONLY THE PARENTHETICAL FORM. `(RFC-0045)` is an aside and lifts out cleanly.
+/// `RFC-0014 forbids a NUL inside a String` is the sentence, and cutting the
+/// name out of it leaves nothing that reads. Of 461 citations in `std/` doc
+/// comments, 287 are parenthetical and 174 are prose; this takes the 287 and
+/// leaves the rest to an editing pass that rewrites the sentence.
+///
+/// The source keeps every one of them. `vyrn doc` renders `docs/api/` from the
+/// same comments for the people who want the citation, and this is the reader's
+/// copy.
+fn withoutCitations(doc: String) -> String {
+    let n = doc.byteLength
+    let mut out = ""
+    let mut last = 0
+    let mut i = 0
+    while i < n {
+        // `(RFC-` at `i`, tested a byte at a time. A `substring` here would be
+        // the bug this function already had once: the doc text is UTF-8 and
+        // `substring` refuses an offset inside a character, so nothing may cut
+        // except at the brackets, which are ASCII.
+        if i + 5 <= n
+        && doc[i] == '('
+        && doc[i + 1] == 'R'
+        && doc[i + 2] == 'F'
+        && doc[i + 3] == 'C'
+        && doc[i + 4] == '-'
+        {
+            let mut j = i + 1
+            let mut closed = 0 - 1
+            while j < n && doc[j] != '\n' {
+                if doc[j] == ')' {
+                    closed = j
+                    j = n
+                } else {
+                    j = j + 1
+                }
+            }
+            if closed >= 0 {
+                // The space in front of the citation goes with it, so a sentence
+                // does not end with one hanging before its full stop.
+                let mut cut = i
+                if cut > last && doc[cut - 1] == ' ' {
+                    cut = cut - 1
+                }
+                out = out + substring(doc, last, cut)
+                last = closed + 1
+                i = closed + 1
+                continue
+            }
+        }
+        i = i + 1
+    }
+    return out + substring(doc, last, n)
+}
+
 /// `doc` as HTML.
 ///
 /// An indented run is a code block, and the repository indents code by two
@@ -332,17 +393,34 @@ fn indentOf(line: String) -> Int64 {
 /// introduce themselves.
 /// The block's own indent is the margin: what is indented further inside it —
 /// nested JSON, a continued argument list — keeps its shape.
-gen fn proseHtml(doc: String) -> String {
-    if doc.byteLength == 0 {
+gen fn proseHtml(raw: String) -> String {
+    if raw.byteLength == 0 {
         return ""
     }
+    let doc = withoutCitations(raw)
     let mut out = ""
     let mut kind = ""
     let mut rows: Array<String> = []
     let mut fenced = false
     let mut margin = 0
-    for line in split(doc, "\n") {
+    let ls = split(doc, "\n")
+    let mut i = 0
+    while i < ls.length {
+        let line = ls[i]
         let flat = trim(line)
+        // A banner: a run of `=`, the title under it, a run of `=` again. It is
+        // how `std/` names a section of a doc comment, and it used to reach the
+        // published page as a paragraph of equals signs with the title inside.
+        // The title is the heading; the rules on either side are decoration and
+        // are dropped.
+        if !fenced && isBanner(flat) && i + 2 < ls.length && trim(ls[i + 1]).byteLength > 0 && isBanner(trim(ls[i + 2])) {
+            out = out + blockHtml(kind, rows)
+            rows = []
+            kind = ""
+            out = out + "<h3>" + inlineHtml(trim(ls[i + 1])) + "</h3>"
+            i = i + 3
+            continue
+        }
         if startsWith(flat, "```") {
             if fenced {
                 out = out + blockHtml("code", rows)
@@ -386,13 +464,29 @@ gen fn proseHtml(doc: String) -> String {
             kind = "para"
             rows.push(flat.copy())
         }
+        i = i + 1
     }
     return out + blockHtml(kind, rows)
 }
 
+/// Whether `t` is one of the `===` rules a `std/` doc comment draws a section
+/// banner with: nothing on the line but at least three equals signs.
+fn isBanner(t: String) -> Bool {
+    if t.byteLength < 3 {
+        return false
+    }
+    for b in bytes(t) {
+        if b != '=' {
+            return false
+        }
+    }
+    return true
+}
+
 /// The one-line summary for the module list: the first sentence of the header
 /// block, with its code spans intact.
-fn summaryOf(doc: String) -> String {
+fn summaryOf(raw: String) -> String {
+    let doc = withoutCitations(raw)
     let mut flat = ""
     for line in split(doc, "\n") {
         let t = trim(line)

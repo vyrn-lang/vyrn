@@ -117,3 +117,70 @@ fn a_refused_argv_says_the_librarys_own_words() {
         );
     }
 }
+
+/// `vyrn run --profile` prints the table to STDERR and leaves stdout alone.
+///
+/// Both halves matter. A run whose stdout is piped somewhere must pipe the same
+/// bytes with the flag as without it, and the flag belongs to the CLI rather
+/// than the program — so it counts only before the file, and `vyrn run app.vyrn
+/// --profile` hands it to `app.vyrn` as an ordinary argument.
+#[test]
+fn profile_writes_the_table_to_stderr_and_not_to_stdout() {
+    let dir = std::env::temp_dir().join("vyrn-cli-profile");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("p.vyrn");
+    std::fs::write(
+        &file,
+        "fn work(n: Int64) -> Int64 {\n\
+         \x20   let mut h = 0\n\
+         \x20   let mut i = 0\n\
+         \x20   while i < n { h = h + i  i = i + 1 }\n\
+         \x20   return h\n\
+         }\n\
+         fn main() -> Int64 {\n\
+         \x20   let a = args()\n\
+         \x20   print(work(1000) + a.length)\n\
+         \x20   return 0\n\
+         }\n",
+    )
+    .unwrap();
+
+    let plain = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("run")
+        .arg(&file)
+        .output()
+        .expect("vyrn run");
+    let profiled = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("run")
+        .arg("--profile")
+        .arg(&file)
+        .output()
+        .expect("vyrn run --profile");
+    assert!(profiled.status.success());
+    assert_eq!(
+        plain.stdout, profiled.stdout,
+        "the profile changed the program's own output"
+    );
+    let table = String::from_utf8_lossy(&profiled.stderr).replace("\r\n", "\n");
+    assert!(table.contains("function"), "no table on stderr:\n{table}");
+    assert!(table.contains("work"), "`work` is missing:\n{table}");
+    assert!(table.contains("main"), "`main` is missing:\n{table}");
+    assert!(
+        String::from_utf8_lossy(&plain.stderr).trim().is_empty(),
+        "an unprofiled run printed a table"
+    );
+
+    // After the file, it is the program's argument and not the CLI's.
+    let passed = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("run")
+        .arg(&file)
+        .arg("--profile")
+        .output()
+        .expect("vyrn run file --profile");
+    assert!(
+        String::from_utf8_lossy(&passed.stderr).trim().is_empty(),
+        "a trailing --profile was taken by the CLI"
+    );
+    // `args()` saw it, so the program's own output changed by exactly one.
+    assert_ne!(plain.stdout, passed.stdout);
+}

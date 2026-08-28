@@ -1,0 +1,832 @@
+/// A regular expression that SEARCHES — counts, finds and replaces.
+///
+/// WHY THIS EXISTS (RFC-0112). The language has had a regex engine since
+/// RFC-0005, reached through `=~`, and it answers exactly one question: does
+/// this whole string match this compile-time-constant pattern? It has no
+/// search, no count, no position and no substitution, so `regex-redux` — which
+/// counts nine patterns across a sequence and then rewrites it five times —
+/// could not be written. `rfcs/bench-0104/regexredux-1000.expected` sat in the
+/// corpus with no program beside it.
+///
+/// WHY IT IS VYRN AND NOT A BUILTIN. `rfcs/census/blocked-regex.md` measured
+/// the split: the expensive half of a regex engine (parsing, determinisation,
+/// the table format) is already written in Rust and reusable, and the CHEAP-
+/// looking half, the walk, is where the parity risk is. A searching walker as a
+/// builtin would be spelled three times — Rust for the interpreter, LLVM IR for
+/// the textual backend, wasm for the direct one — and the three would have to
+/// agree on offsets and counts byte for byte, not merely on a `Bool`. Written
+/// here it is spelled ONCE and the three engines run the same source. That is
+/// the whole argument, and it is the standing rule about backends applied
+/// exactly.
+///
+/// WHAT IT SUPPORTS. Literals, `.`, classes (`[abc]`, `[a-z]`, `[^>]`),
+/// alternation, grouping, and the three repeats `*` `+` `?`. Escapes with `\`.
+/// The linear-time guarantee that comes with a Thompson construction is kept:
+/// there is no backtracking here, so there is no pattern that takes
+/// exponential time, which is the whole reason to prefer this shape.
+///
+/// WHAT IT DOES NOT SUPPORT, and will refuse rather than mis-answer:
+/// backreferences, lookaround, anchors (`^`, `$`), non-greedy `*?`, and
+/// counted repetition `{m,n}`. The first two are incompatible with the
+/// linear-time guarantee — that is why RE2, Go and Rust drop them too. The
+/// other three are ordinary work nobody has needed yet.
+///
+/// MATCH SEMANTICS: leftmost-longest, which is POSIX's rule and RE2's
+/// `POSIX` mode. `a|ab` against `ab` matches `ab` here, where a backtracking
+/// engine would answer `a`. Stated because it is a real difference and a
+/// caller porting a pattern from Perl should know which one they have.
+
+import { substring } from "std/strings"
+
+// ---------------------------------------------------------------------------
+// The compiled form
+//
+// A Thompson NFA held as flat arrays, because that is what this language makes
+// cheap: three integer arrays and one byte array, no pointers and no recursive
+// type. One instruction is one index into `op`/`a`/`b`.
+// ---------------------------------------------------------------------------
+
+/// `op[i]` is a byte-class test: `a[i]` is the class, `b[i]` the next pc.
+let opClass = 0
+
+/// `op[i]` is a fork: `a[i]` and `b[i]` are both next pcs, tried as one set.
+let opSplit = 1
+
+/// `op[i]` accepts.
+let opMatch = 2
+
+/// A compiled pattern.
+///
+/// `sets` holds one 32-byte bitmap per class, so class `k` owns bytes
+/// `k * 32 .. k * 32 + 32` and byte `c` is in it when bit `c % 8` of
+/// `sets[k * 32 + c / 8]` is set. A bitmap rather than 256 booleans because a
+/// pattern with twenty classes is 640 bytes this way and 5,120 the other.
+export type Regex = {
+    op: Array<Int64>,
+    a: Array<Int64>,
+    b: Array<Int64>,
+    sets: Array<UInt8>,
+    start: Int64,
+    // `first` is the bytes that can begin a match, as a 32-byte bitmap: the
+    // search skips any position whose byte is not in it, which keeps a scan over
+    // a sequence from paying a match attempt per base. `firstKnown` is false
+    // when the pattern can match the empty string, in which case every position
+    // begins a match and the filter says nothing.
+    first: Array<UInt8>,
+    firstKnown: Bool,
+}
+
+/// One match: a half-open byte range of the haystack.
+export type Match = { at: Int64, end: Int64 }
+
+// ---------------------------------------------------------------------------
+// Bitmaps
+// ---------------------------------------------------------------------------
+
+fn emptySet() -> Array<UInt8> {
+    let mut s: Array<UInt8> = []
+    let mut i = 0
+    while i < 32 {
+        s.push(0)
+        i = i + 1
+    }
+    return s
+}
+
+/// The bit within a bitmap byte that stands for `c`. Shared, because the two
+/// setters below differ only in which array they reach — `modify` takes a
+/// variable and not a field, so a builder cannot hand its own `sets` to the
+/// plain one.
+fn bitMask(c: Int64) -> Int64 {
+    let bit = c % 8
+    let mut mask = 1
+    let mut k = 0
+    while k < bit {
+        mask = mask * 2
+        k = k + 1
+    }
+    return mask
+}
+
+fn setAdd(s: modify Array<UInt8>, at: Int64, c: Int64) {
+    let idx = at + c / 8
+    s[idx] = UInt8(Int64(s[idx]) | bitMask(c))
+}
+
+/// The same store, into the builder's class table.
+fn classAdd(bd: modify Builder, base: Int64, c: Int64) {
+    let idx = base + c / 8
+    bd.sets[idx] = UInt8(Int64(bd.sets[idx]) | bitMask(c))
+}
+
+fn setHas(s: Array<UInt8>, at: Int64, c: Int64) -> Bool {
+    return (Int64(s[at + c / 8]) & bitMask(c)) != 0
+}
+
+// ---------------------------------------------------------------------------
+// The parser
+//
+// Recursive descent that EMITS as it goes. Each level answers a fragment: the
+// pc it starts at, and the list of operand slots that still need an exit
+// patched into them. A hole is encoded `pc * 2 + which`, `which` being 0 for
+// the `a` operand and 1 for `b`, so a list of holes is an ordinary Int64 array.
+// ---------------------------------------------------------------------------
+
+type Frag = { start: Int64, holes: Array<Int64> }
+
+type Builder = {
+    op: Array<Int64>,
+    a: Array<Int64>,
+    b: Array<Int64>,
+    sets: Array<UInt8>,
+    nsets: Int64,
+    pat: Array<UInt8>,
+    at: Int64,
+    err: String,
+}
+
+fn emit(bd: modify Builder, o: Int64, x: Int64, y: Int64) -> Int64 {
+    let pc = bd.op.length
+    bd.op.push(o)
+    bd.a.push(x)
+    bd.b.push(y)
+    return pc
+}
+
+fn patch(bd: modify Builder, holes: Array<Int64>, target: Int64) {
+    let mut i = 0
+    while i < holes.length {
+        let pc = holes[i] / 2
+        if holes[i] % 2 == 0 {
+            bd.a[pc] = target
+        } else {
+            bd.b[pc] = target
+        }
+        i = i + 1
+    }
+}
+
+fn joinHoles(x: Array<Int64>, y: Array<Int64>) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let mut i = 0
+    while i < x.length {
+        out.push(x[i])
+        i = i + 1
+    }
+    let mut j = 0
+    while j < y.length {
+        out.push(y[j])
+        j = j + 1
+    }
+    return out
+}
+
+fn peek(bd: Builder) -> Int64 {
+    if bd.at >= bd.pat.length {
+        return 0 - 1
+    }
+    return Int64(bd.pat[bd.at])
+}
+
+/// A new class, filled by the caller, answered as its index.
+fn newClass(bd: modify Builder) -> Int64 {
+    let k = bd.nsets
+    let mut i = 0
+    while i < 32 {
+        bd.sets.push(0)
+        i = i + 1
+    }
+    bd.nsets = bd.nsets + 1
+    return k
+}
+
+/// One class holding exactly `c`.
+fn literalClass(bd: modify Builder, c: Int64) -> Int64 {
+    let k = newClass(bd)
+    classAdd(bd, k * 32, c)
+    return k
+}
+
+/// `[...]` — the bracket is already consumed.
+fn bracketClass(bd: modify Builder) -> Int64 {
+    let k = newClass(bd)
+    let base = k * 32
+    let mut negate = false
+    if peek(bd) == '^' {
+        negate = true
+        bd.at = bd.at + 1
+    }
+    let mut any = false
+    // A `]` first is a literal `]`, which is the one place POSIX and every
+    // other engine agree, so it is not a special case worth refusing.
+    while bd.at < bd.pat.length {
+        let c = Int64(bd.pat[bd.at])
+        if c == ']' && any {
+            bd.at = bd.at + 1
+            if negate {
+                let mut i = 0
+                while i < 32 {
+                    bd.sets[base + i] = UInt8(Int64(bd.sets[base + i]) ^ 255)
+                    i = i + 1
+                }
+            }
+            return k
+        }
+        bd.at = bd.at + 1
+        let mut lo = c
+        if c == 92 {
+            if bd.at >= bd.pat.length {
+                bd.err = "a backslash at the end of a character class"
+                return k
+            }
+            lo = Int64(bd.pat[bd.at])
+            bd.at = bd.at + 1
+        }
+        // `a-z`, but a `-` last in the class is a literal `-`.
+        if peek(bd) == '-' && bd.at + 1 < bd.pat.length && Int64(bd.pat[bd.at + 1]) != ']' {
+            bd.at = bd.at + 1
+            let mut hi = Int64(bd.pat[bd.at])
+            bd.at = bd.at + 1
+            if hi == 92 && bd.at < bd.pat.length {
+                hi = Int64(bd.pat[bd.at])
+                bd.at = bd.at + 1
+            }
+            if hi < lo {
+                bd.err = "a character range that runs backwards"
+                return k
+            }
+            let mut x = lo
+            while x <= hi {
+                classAdd(bd, base, x)
+                x = x + 1
+            }
+        } else {
+            classAdd(bd, base, lo)
+        }
+        any = true
+    }
+    bd.err = "a character class with no closing `]`"
+    return k
+}
+
+/// Every byte but `\n`, which is what `.` means everywhere that is not a flag.
+fn dotClass(bd: modify Builder) -> Int64 {
+    let k = newClass(bd)
+    let base = k * 32
+    let mut c = 0
+    while c < 256 {
+        if c != 10 {
+            classAdd(bd, base, c)
+        }
+        c = c + 1
+    }
+    return k
+}
+
+fn parseAtom(bd: modify Builder) -> Frag {
+    let c = peek(bd)
+    if c < 0 {
+        bd.err = "a pattern that ends where a term was expected"
+        return Frag { start: 0, holes: [] }
+    }
+    if c == '(' {
+        bd.at = bd.at + 1
+        let inner = parseAlt(bd)
+        if peek(bd) != ')' {
+            bd.err = "a group with no closing `)`"
+            return inner
+        }
+        bd.at = bd.at + 1
+        return inner
+    }
+    if c == '[' {
+        bd.at = bd.at + 1
+        let k = bracketClass(bd)
+        let pc = emit(bd, opClass, k, 0)
+        return Frag { start: pc, holes: [pc * 2 + 1] }
+    }
+    if c == '.' {
+        bd.at = bd.at + 1
+        let k = dotClass(bd)
+        let pc = emit(bd, opClass, k, 0)
+        return Frag { start: pc, holes: [pc * 2 + 1] }
+    }
+    if c == '^' || c == '$' {
+        bd.err = "anchors (`^` and `$`) are not supported"
+        bd.at = bd.at + 1
+        return Frag { start: 0, holes: [] }
+    }
+    let mut lit = c
+    if c == 92 {
+        bd.at = bd.at + 1
+        if bd.at >= bd.pat.length {
+            bd.err = "a backslash at the end of the pattern"
+            return Frag { start: 0, holes: [] }
+        }
+        lit = Int64(bd.pat[bd.at])
+    }
+    bd.at = bd.at + 1
+    let k = literalClass(bd, lit)
+    let pc = emit(bd, opClass, k, 0)
+    return Frag { start: pc, holes: [pc * 2 + 1] }
+}
+
+fn parseRepeat(bd: modify Builder) -> Frag {
+    let mut f = parseAtom(bd)
+    while bd.err.byteLength == 0 {
+        let c = peek(bd)
+        if c == '*' {
+            bd.at = bd.at + 1
+            if peek(bd) == '?' {
+                bd.err = "non-greedy repetition (`*?`) is not supported"
+                return f
+            }
+            // A split that either enters the body or leaves; the body loops
+            // back to the split. Zero or more, and greedy because the enter
+            // edge is the first operand.
+            let sp = emit(bd, opSplit, f.start, 0)
+            patch(bd, f.holes, sp)
+            f = Frag { start: sp, holes: [sp * 2 + 1] }
+        } else if c == '+' {
+            bd.at = bd.at + 1
+            if peek(bd) == '?' {
+                bd.err = "non-greedy repetition (`+?`) is not supported"
+                return f
+            }
+            let sp = emit(bd, opSplit, f.start, 0)
+            patch(bd, f.holes, sp)
+            f = Frag { start: f.start, holes: [sp * 2 + 1] }
+        } else if c == '?' {
+            bd.at = bd.at + 1
+            let sp = emit(bd, opSplit, f.start, 0)
+            f = Frag { start: sp, holes: joinHoles(f.holes, [sp * 2 + 1]) }
+        } else if c == '{' {
+            bd.err = "counted repetition (`{m,n}`) is not supported"
+            return f
+        } else {
+            return f
+        }
+    }
+    return f
+}
+
+fn parseConcat(bd: modify Builder) -> Frag {
+    let c = peek(bd)
+    if c < 0 || c == '|' || c == ')' {
+        // The empty branch, as in `(a|)`. A split with both edges dangling is
+        // the fragment that matches nothing and leaves immediately.
+        let sp = emit(bd, opSplit, 0, 0)
+        return Frag { start: sp, holes: [sp * 2, sp * 2 + 1] }
+    }
+    let mut f = parseRepeat(bd)
+    while bd.err.byteLength == 0 {
+        let n = peek(bd)
+        if n < 0 || n == '|' || n == ')' {
+            return f
+        }
+        let g = parseRepeat(bd)
+        patch(bd, f.holes, g.start)
+        f = Frag { start: f.start, holes: consume g.holes }
+    }
+    return f
+}
+
+fn parseAlt(bd: modify Builder) -> Frag {
+    let mut f = parseConcat(bd)
+    while bd.err.byteLength == 0 && peek(bd) == '|' {
+        bd.at = bd.at + 1
+        let g = parseConcat(bd)
+        let sp = emit(bd, opSplit, f.start, g.start)
+        f = Frag { start: sp, holes: joinHoles(f.holes, g.holes) }
+    }
+    return f
+}
+
+// ---------------------------------------------------------------------------
+// Compilation
+// ---------------------------------------------------------------------------
+
+/// The bytes that can begin a match, by walking the split graph from the start
+/// without consuming anything.
+///
+/// A pattern that can match the empty string has no such set — every position
+/// begins a match — and that is what `firstKnown: false` says.
+type First = { set: Array<UInt8>, known: Bool }
+
+fn firstBytes(bd: Builder, start: Int64) -> First {
+    let mut seen: Array<Int64> = []
+    let mut i = 0
+    while i < bd.op.length {
+        seen.push(0)
+        i = i + 1
+    }
+    let mut stack: Array<Int64> = [start]
+    let mut set = emptySet()
+    let mut known = true
+    while stack.length > 0 {
+        let pc = stack[stack.length - 1]
+        stack.pop()
+        if pc < 0 || pc >= bd.op.length {
+            continue
+        }
+        if seen[pc] == 1 {
+            continue
+        }
+        seen[pc] = 1
+        if bd.op[pc] == opMatch {
+            // Reachable without consuming a byte: the pattern matches empty.
+            known = false
+        } else if bd.op[pc] == opSplit {
+            stack.push(bd.a[pc])
+            stack.push(bd.b[pc])
+        } else {
+            let base = bd.a[pc] * 32
+            let mut c = 0
+            while c < 256 {
+                if setHas(bd.sets, base, c) {
+                    setAdd(set, 0, c)
+                }
+                c = c + 1
+            }
+        }
+    }
+    return First { set: set, known: known }
+}
+
+/// Compile `pattern`, or say what is wrong with it.
+///
+/// The whole cost of a pattern is paid here, so a caller that scans with the
+/// same pattern many times compiles once and searches often — which is what
+/// `regex-redux` does nine times over one sequence.
+export fn compile(pattern: String) -> Result<Regex, String> {
+    let mut bd = Builder {
+        op: [],
+        a: [],
+        b: [],
+        sets: [],
+        nsets: 0,
+        pat: bytes(pattern),
+        at: 0,
+        err: "",
+    }
+    if bd.pat.length == 0 {
+        return Err("an empty pattern")
+    }
+    let f = parseAlt(bd)
+    if bd.err.byteLength > 0 {
+        return Err(bd.err)
+    }
+    if bd.at < bd.pat.length {
+        // The only way out of `parseAlt` with input left is an unbalanced `)`.
+        return Err("a `)` with no `(` before it")
+    }
+    let m = emit(bd, opMatch, 0, 0)
+    patch(bd, f.holes, m)
+    // The filter is read off the builder BEFORE the builder gives its arrays up,
+    // so the record is constructed once and nothing is copied.
+    let head = firstBytes(bd, f.start)
+    return Ok(Regex {
+            op: consume bd.op,
+            a: consume bd.a,
+            b: consume bd.b,
+            sets: consume bd.sets,
+            start: f.start,
+            first: consume head.set,
+            firstKnown: head.known,
+        })
+}
+
+// ---------------------------------------------------------------------------
+// The walk
+//
+// A Thompson simulation: one set of live pcs, stepped one input byte at a time.
+// No backtracking, so the cost is bounded by the pattern's size times the input
+// length however hostile the pattern is.
+// ---------------------------------------------------------------------------
+
+/// Add `pc` and everything reachable from it without consuming, marking `mark`.
+fn addThread(re: Regex, list: modify Array<Int64>, mark: modify Array<Int64>, gen: Int64, pc: Int64) {
+    let mut stack: Array<Int64> = [pc]
+    while stack.length > 0 {
+        let p = stack[stack.length - 1]
+        stack.pop()
+        if p < 0 || p >= re.op.length {
+            continue
+        }
+        if mark[p] == gen {
+            continue
+        }
+        mark[p] = gen
+        if re.op[p] == opSplit {
+            // `b` first so `a` is popped first: the greedy edge is explored
+            // ahead of the exit, which is what makes `*` greedy.
+            stack.push(re.b[p])
+            stack.push(re.a[p])
+        } else {
+            list.push(p)
+        }
+    }
+}
+
+/// The end of the LONGEST match starting exactly at `at`, or -1 for no match.
+fn matchAt(re: Regex, hay: Array<UInt8>, at: Int64, mark: modify Array<Int64>, genBox: modify Array<Int64>) -> Int64 {
+    let mut clist: Array<Int64> = []
+    genBox[0] = genBox[0] + 1
+    addThread(re, clist, mark, genBox[0], re.start)
+    let mut best = 0 - 1
+    let mut i = at
+    while clist.length > 0 {
+        // Accepting here is a candidate; a longer one may still be found, which
+        // is what leftmost-LONGEST means.
+        let mut k = 0
+        while k < clist.length {
+            if re.op[clist[k]] == opMatch {
+                best = i
+                k = clist.length
+            } else {
+                k = k + 1
+            }
+        }
+        if i >= hay.length {
+            return best
+        }
+        let c = Int64(hay[i])
+        let mut nlist: Array<Int64> = []
+        genBox[0] = genBox[0] + 1
+        let g = genBox[0]
+        let mut j = 0
+        while j < clist.length {
+            let pc = clist[j]
+            if re.op[pc] == opClass && setHas(re.sets, re.a[pc] * 32, c) {
+                addThread(re, nlist, mark, g, re.b[pc])
+            }
+            j = j + 1
+        }
+        clist = nlist
+        i = i + 1
+    }
+    return best
+}
+
+fn freshMark(re: Regex) -> Array<Int64> {
+    let mut m: Array<Int64> = []
+    let mut i = 0
+    while i < re.op.length {
+        m.push(0)
+        i = i + 1
+    }
+    return m
+}
+
+/// The first match at or after `from`, or `None`.
+export fn find(re: Regex, hay: String, from: Int64) -> Option<Match> {
+    let raw = bytes(hay)
+    let mut mark = freshMark(re)
+    let mut genBox: Array<Int64> = [0]
+    let mut i = from
+    while i <= raw.length {
+        // The first-byte filter. Without it a scan pays a match attempt per
+        // position; with it a DNA pattern skips three bases in four.
+        let viable = if re.firstKnown {
+            if i < raw.length { setHas(re.first, 0, Int64(raw[i])) } else { false }
+        } else {
+            true
+        }
+        if viable {
+            let e = matchAt(re, raw, i, mark, genBox)
+            if e >= 0 {
+                return Some(Match { at: i, end: e })
+            }
+        }
+        i = i + 1
+    }
+    return None
+}
+
+/// How many non-overlapping matches `re` has in `hay`.
+///
+/// Non-overlapping and leftmost: a match consumes what it covered, so
+/// `aa` in `aaa` is one match and not two. An empty match advances by one
+/// byte, which is what stops a pattern like `a*` looping forever.
+export fn countMatches(re: Regex, hay: String) -> Int64 {
+    let raw = bytes(hay)
+    let mut mark = freshMark(re)
+    let mut genBox: Array<Int64> = [0]
+    let mut n = 0
+    let mut i = 0
+    while i <= raw.length {
+        let viable = if re.firstKnown {
+            if i < raw.length { setHas(re.first, 0, Int64(raw[i])) } else { false }
+        } else {
+            true
+        }
+        if viable {
+            let e = matchAt(re, raw, i, mark, genBox)
+            if e >= 0 {
+                n = n + 1
+                i = if e > i { e } else { i + 1 }
+            } else {
+                i = i + 1
+            }
+        } else {
+            i = i + 1
+        }
+    }
+    return n
+}
+
+/// `hay` with every non-overlapping match replaced by `with`.
+///
+/// `with` is literal: there is no `$1` and no backreference, because there are
+/// no captures to name. That is deliberate and not an omission — see the module
+/// note on what a linear-time engine gives up.
+export fn replaceAll(re: Regex, hay: String, with: String) -> String {
+    let raw = bytes(hay)
+    let mut mark = freshMark(re)
+    let mut genBox: Array<Int64> = [0]
+    let mut out = ""
+    let mut kept = 0
+    let mut i = 0
+    while i <= raw.length {
+        let viable = if re.firstKnown {
+            if i < raw.length { setHas(re.first, 0, Int64(raw[i])) } else { false }
+        } else {
+            true
+        }
+        let mut moved = false
+        if viable {
+            let e = matchAt(re, raw, i, mark, genBox)
+            if e >= 0 {
+                out = out + substring(hay, kept, i) + with
+                kept = if e > i { e } else { i }
+                i = if e > i { e } else { i + 1 }
+                moved = true
+            }
+        }
+        if !moved {
+            i = i + 1
+        }
+    }
+    return out + substring(hay, kept, raw.length)
+}
+
+test "a literal is found, counted and replaced" {
+    let re = match compile("abc") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(re, "abcabc"), 2)
+    assertEq(countMatches(re, "xxabcyy"), 1)
+    assertEq(countMatches(re, "ab"), 0)
+    assertEq(replaceAll(re, "xabcy", "-"), "x-y")
+    assertEq(replaceAll(re, "abcabc", ""), "")
+}
+
+test "alternation takes the longest branch, which is POSIX's rule" {
+    let re = match compile("a|ab") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    // A backtracking engine answers `a` here. This one answers `ab`, and the
+    // module note says so.
+    assertEq(replaceAll(re, "ab", "<>"), "<>")
+}
+
+test "a class matches its members and a negated one everything else" {
+    let re = match compile("[cgt]") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(re, "acgta"), 3)
+    let neg = match compile("[^>]") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(neg, "a>b>c"), 3)
+    let range = match compile("[a-f]") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(range, "abcxyzf"), 4)
+}
+
+test "the three repeats" {
+    let star = match compile("ab*c") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(star, "ac"), 1)
+    assertEq(countMatches(star, "abbbc"), 1)
+    let plus = match compile("ab+c") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(plus, "ac"), 0)
+    assertEq(countMatches(plus, "abc"), 1)
+    let opt = match compile("ab?c") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(opt, "ac"), 1)
+    assertEq(countMatches(opt, "abc"), 1)
+    assertEq(countMatches(opt, "abbc"), 0)
+}
+
+test "a star is greedy" {
+    let re = match compile("<[^>]*>") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(re, "a<bcd>e", "|"), "a|e")
+    assertEq(replaceAll(re, "<>", "|"), "|")
+    // Two tags, not one run across both, because `[^>]` cannot cross a `>`.
+    assertEq(replaceAll(re, "<a><b>", "|"), "||")
+}
+
+test "an escape is the byte after it, not the metacharacter" {
+    let re = match compile("\\|[^|][^|]*\\|") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(replaceAll(re, "x|ab|y", "-"), "x-y")
+}
+
+test "the patterns regex-redux counts" {
+    let dna = "agggtaaacccagggtaaacttttaccctgg"
+    let re = match compile("agggtaaa|tttaccct") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(re, dna), 3)
+    let cls = match compile("agggtaa[cgt]|[acg]ttaccct") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(cls, "agggtaacXXcttaccct"), 2)
+}
+
+test "a group is a term the repeats apply to" {
+    let re = match compile("(ab)+c") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(re, "ababc"), 1)
+    assertEq(countMatches(re, "c"), 0)
+    let alt = match compile("(a|b)c") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    assertEq(countMatches(alt, "ac bc"), 2)
+}
+
+test "find says where, and searching from there finds the next" {
+    let re = match compile("aa") {
+        Ok(r) => r,
+        Err(w) => panic("compile: \{w}"),
+    }
+    if let Some(m) = find(re, "xxaayyaa", 0) {
+        assertEq(m.at, 2)
+        assertEq(m.end, 4)
+    } else {
+        panic("the first match is at 2")
+    }
+    if let Some(m) = find(re, "xxaayyaa", 4) {
+        assertEq(m.at, 6)
+    } else {
+        panic("the second match is at 6")
+    }
+    if let Some(m) = find(re, "xxaayyaa", 7) {
+        panic("there is no third match, got \{m.at}")
+    }
+}
+
+test "what it refuses, it refuses by name" {
+    match compile("a(b") {
+        Ok(r) => panic("an unbalanced group compiled"),
+        Err(w) => assert(w == "a group with no closing `)`"),
+    }
+    match compile("[abc") {
+        Ok(r) => panic("an unterminated class compiled"),
+        Err(w) => assert(w == "a character class with no closing `]`"),
+    }
+    match compile("^a") {
+        Ok(r) => panic("an anchor compiled"),
+        Err(w) => assert(w == "anchors (`^` and `$`) are not supported"),
+    }
+    match compile("a{2,3}") {
+        Ok(r) => panic("counted repetition compiled"),
+        Err(w) => assert(w == "counted repetition (`{m,n}`) is not supported"),
+    }
+    match compile("a*?") {
+        Ok(r) => panic("a non-greedy repeat compiled"),
+        Err(w) => assert(w == "non-greedy repetition (`*?`) is not supported"),
+    }
+    match compile("[z-a]") {
+        Ok(r) => panic("a backwards range compiled"),
+        Err(w) => assert(w == "a character range that runs backwards"),
+    }
+    match compile("") {
+        Ok(r) => panic("an empty pattern compiled"),
+        Err(w) => assert(w == "an empty pattern"),
+    }
+}

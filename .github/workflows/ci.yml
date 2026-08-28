@@ -600,6 +600,26 @@ jobs:
         # app cold (minutes in a debug build) — too slow for the test job.
         working-directory: compiler
         run: cargo test --quiet -p vyrn-cli --test universal_pages -- --ignored
+      - name: The native bench harness (RFC-0055)
+        # Ignored-tier because it compiles with clang, which this job has and
+        # the test job does not.
+        #
+        # `bench --check`, the face the blocking gate runs, never loads the
+        # harness at all — it runs each body under the interpreter against the
+        # program as written. So nothing in CI exercised the merge that pulls
+        # `std/bench` in, and a defect lived there: a root program declaring a
+        # name that a module the harness injects uses privately either failed to
+        # compile, naming a type it had never imported, or compiled and called
+        # the wrong body. A program with its own `twoDecimals` printed
+        # `min XX µs` and exited 0.
+        #
+        # The `benchmarks` job below DOES run the native path, over the whole
+        # corpus. It saw none of this, because no example under `examples/`
+        # picks a colliding name — a corpus of the project's own files cannot
+        # catch a defect triggered by the name a user chooses. These tests pick
+        # the names on purpose, and read them off `std/`.
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test benching -- --ignored
 
   gen-engine:
     name: cross-engine generation (interp == wasm)

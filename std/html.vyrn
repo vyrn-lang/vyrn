@@ -223,11 +223,13 @@ fn withKey(attrs: consume Array<Attr>, k: consume String) -> Array<Attr> {
 // ===========================================================================
 
 /// Append every byte of `src` onto `dst`, returning the grown array.
+///
+/// One `append` (RFC-0115) — this was the per-byte `push` loop that the
+/// benchmarks census costed at five doublings and sixty checked pushes per
+/// 60-byte line.
 fn appendBytes(dst: consume Array<UInt8>, src: Array<UInt8>) -> Array<UInt8> {
     let mut out = dst
-    for b in src {
-        out.push(b)
-    }
+    out.append(src)
     return out
 }
 

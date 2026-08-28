@@ -33,6 +33,17 @@ fn fnv1aStr(s: String) -> UInt64
 The FNV-1a-64 hash of a String's UTF-8 bytes — a convenience over [`fnv1a`]
 (Vyrn strings are UTF-8 byte sequences, so this hashes the exact bytes).
 
+## Hashable
+
+```vyrn
+protocol Hashable { fn hash(self) -> UInt64 }
+```
+
+A key is anything that hashes (RFC-0117). The one contract: equal values
+return equal hashes. Beyond that the value is the implementation's — a
+`Map`'s index mixes and masks it itself, and the hash decides nothing
+observable (insertion order does, RFC-0028).
+
 ## sha1
 
 ```vyrn

@@ -195,6 +195,13 @@ pub const IO: &[(&str, &str)] = &[
     ("xdeverr", "cannot rename `%s` across devices"),
     // Byte-bridge errors (M2, no path): fixed payloads for `stringFromBytes`.
     ("bnul", "bytes contain a NUL byte"),
+    // RFC-0116: `tallyBytes` traps where `stringFromBytes` answers — a count
+    // map's key must be a String, and the caller who wants the WHY calls
+    // `stringFromBytes` and reads the `Err`.
+    (
+        "tbytes",
+        "tallyBytes: the bytes are not a String — `stringFromBytes` names why",
+    ),
     ("butf8", "bytes are not valid UTF-8"),
 ];
 

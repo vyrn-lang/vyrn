@@ -145,6 +145,35 @@ PROGRAMS: list[Program] = [
         ),
     ),
     Program("pidigits", "pidigits-27.expected", 27, 12000, n_let="order"),
+    # The two RFC-0104 recorded as boundaries rather than omissions, and that
+    # RFC-0111 and RFC-0112 unblocked. Both fixtures had been committed with no
+    # program beside them since M1.
+    #
+    # `mandelbrot` has NO `n_let`: the harness rewrites a `let` to set N, and
+    # this program's output is a binary PBM whose header states its own
+    # dimensions, so the fixture size and the timing size are the same 200 and
+    # the row would have nothing to rewrite.
+    Program(
+        "mandelbrot",
+        "mandelbrot-200.expected",
+        200,
+        200,
+        n_let="order",
+        note="writes a binary PBM through `writeStdout` (RFC-0111)",
+    ),
+    Program(
+        "regexredux",
+        "regexredux-1000.expected",
+        1000,
+        1000,
+        stdin_fasta_n=1000,
+        note=(
+            "N is the fasta n. The engine is `std/regex`, written in Vyrn and "
+            "run by all three backends (RFC-0112); the timing N stays at the "
+            "fixture size because a Thompson walk in the interpreter is the "
+            "slowest leg by a wide margin"
+        ),
+    ),
 ]
 
 BY_NAME = {p.name: p for p in PROGRAMS}

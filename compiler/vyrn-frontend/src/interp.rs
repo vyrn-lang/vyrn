@@ -167,8 +167,82 @@ impl std::hash::BuildHasher for FxBuild {
     }
 }
 
-/// The interpreter's scope frame: identifiers to slots, hashed cheaply.
-type Frame = HashMap<String, Slot, FxBuild>;
+/// The interpreter's scope frame: identifiers to slots.
+///
+/// A `Vec` and a linear scan, not a hash map, and the measurement is the reason.
+/// Counted over `vyrn test site/export.vyrn`, which is the longest step in CI:
+///
+/// ```text
+/// frame probes by frame size, total 652,922,153
+///   size 0:  15,320,274   ( 2.3% cumulative)
+///   size 1: 138,229,088   (23.5%)
+///   size 2:  16,685,143   (26.1%)
+///   size 3: 477,409,293   (99.2%)
+///   size 4+: everything else
+/// ```
+///
+/// 99.2 per cent of probes are into a frame holding three bindings or fewer, and
+/// three quarters into one holding exactly three. Hashing a name to pick a
+/// bucket costs more than comparing three names, and three pairs sit in about
+/// one cache line. The comparison starts with the length, which `str`'s own `==`
+/// does, so names of different lengths cost a load and a compare.
+///
+/// `insert` REPLACES, exactly as the map did: a second `let` of the same name in
+/// one block rebinds rather than shadows, and both compiled backends agree.
+/// Because there are no duplicates, the scan direction cannot change an answer;
+/// it runs backwards because the name just bound is the one most likely read.
+#[derive(Clone, Default)]
+struct Frame {
+    slots: Vec<(String, Slot)>,
+}
+
+impl Frame {
+    fn get(&self, k: &str) -> Option<&Slot> {
+        self.slots
+            .iter()
+            .rev()
+            .find(|(n, _)| n == k)
+            .map(|(_, s)| s)
+    }
+
+    fn get_mut(&mut self, k: &str) -> Option<&mut Slot> {
+        self.slots
+            .iter_mut()
+            .rev()
+            .find(|(n, _)| n == k)
+            .map(|(_, s)| s)
+    }
+
+    fn insert(&mut self, k: String, v: Slot) {
+        if let Some(cur) = self.get_mut(&k) {
+            *cur = v;
+            return;
+        }
+        self.slots.push((k, v));
+    }
+
+    fn len(&self) -> usize {
+        self.slots.len()
+    }
+}
+
+impl FromIterator<(String, Slot)> for Frame {
+    fn from_iter<I: IntoIterator<Item = (String, Slot)>>(it: I) -> Self {
+        let mut f = Frame::default();
+        for (k, v) in it {
+            f.insert(k, v);
+        }
+        f
+    }
+}
+
+impl<'a> IntoIterator for &'a Frame {
+    type Item = &'a (String, Slot);
+    type IntoIter = std::slice::Iter<'a, (String, Slot)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.slots.iter()
+    }
+}
 use std::io::Write as _;
 
 use crate::ast::*;
@@ -221,6 +295,51 @@ macro_rules! vyrn_out {
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         println!($($arg)*);
     }};
+}
+
+/// Raw bytes to stdout: no newline, no formatting, no line buffering promise
+/// beyond what the handle already gives (RFC-0111).
+///
+/// THE PLAYGROUND CANNOT DO THIS FAITHFULLY, and says so rather than pretending.
+/// Its stdout is a `String` shown in a web page, so bytes that are not UTF-8
+/// have no representation there; they arrive as U+FFFD. That is the same class
+/// of limit as the playground having no filesystem — a display surface is not a
+/// byte sink — and it is the only engine where `writeStdout` is lossy. The
+/// interpreter, the native binary and the WASI module all write the bytes.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn vyrn_out_bytes(bytes: &[u8]) {
+    crate::playhost::out_text(&String::from_utf8_lossy(bytes));
+}
+
+/// Raw bytes to stdout (RFC-0111). Shares the process handle with `print`, so
+/// the two interleave in call order.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn vyrn_out_bytes(bytes: &[u8]) {
+    use std::io::Write as _;
+    let out = std::io::stdout();
+    let mut lock = out.lock();
+    let _ = lock.write_all(bytes);
+    let _ = lock.flush();
+}
+
+/// An `Array<UInt8>` as bytes, or a type error naming the builtin that asked.
+///
+/// The checker already refused anything but `Array<UInt8>`, so a mismatch here
+/// is an interpreter bug and not a program's fault — hence the `Err` rather
+/// than a trap a program could catch.
+fn byte_vec(v: &Val, who: &str) -> Result<Vec<u8>, Ctrl> {
+    let Val::Array(items) = v else {
+        return Err(format!("{who} of non-Array {v:?}").into());
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for it in items.iter() {
+        match it {
+            Val::IntN { v, .. } => out.push(*v as u8),
+            Val::Int(n) => out.push(*n as u8),
+            other => return Err(format!("{who} of non-byte element {other:?}").into()),
+        }
+    }
+    Ok(out)
 }
 
 /// One line of log output, kept off stdout (RFC-0008).
@@ -362,7 +481,15 @@ pub enum Val {
     /// differently-named type of the same shape dispatches as the type it was
     /// coerced to, which is what the checker told native/wasm. A literal starts
     /// out under its own name, which every boundary is then free to overwrite.
-    Record(HashMap<String, Val>, Option<std::rc::Rc<str>>),
+    ///
+    /// The field map is behind an `Rc` for the reason [`Val::Array`],
+    /// [`Val::Str`] and [`Val::Map`] are: reading a binding clones the value,
+    /// and cloning a bare `HashMap` copies every field. So passing a record to
+    /// a function that reads ONE field cost a copy of all of them — 200,000
+    /// calls took 0.276 s for a two-field record and 1.868 s for a sixty-four
+    /// field one, for the same one field read. Writes go through
+    /// `Rc::make_mut`, so a uniquely owned record is still edited in place.
+    Record(std::rc::Rc<HashMap<String, Val>>, Option<std::rc::Rc<str>>),
     /// A user-enum value (RFC-0002 §4): variant name + payload values.
     Enum(String, Vec<Val>),
     /// A growable array (`Vec`). Used linearly; `push` returns a new value.
@@ -376,7 +503,24 @@ pub enum Val {
     /// cannot be recycled under a live cache entry.
     Array(std::rc::Rc<Vec<Val>>),
     /// A growable, insertion-ordered dictionary (RFC-0028). See [`MapVal`].
-    Map(MapVal),
+    ///
+    /// Behind an `Rc` for the reason [`Val::Array`] is: reading a binding clones
+    /// the value, and a bare `MapVal` clone copies both the pair vector AND the
+    /// index. So `m[k]` copied the whole table before the O(1) hashed lookup
+    /// ever ran, and every map-heavy program was quadratic under the
+    /// interpreter — 2,000 reads of one key cost 0.15 s against a 1,000-entry
+    /// map and 1.37 s against an 8,000-entry one, for the same 2,000 reads.
+    /// Writes go through `Rc::make_mut`, so a uniquely-owned map is still
+    /// edited in place.
+    Map(std::rc::Rc<MapVal>),
+    /// An `Int64`-keyed map (RFC-0117 M1). Its own variant rather than a key
+    /// enum inside [`MapVal`], so the `String`-keyed path keeps its
+    /// allocation-free `&str` lookups. The checker types every key, so an op
+    /// never meets the wrong variant — with one deliberate exception: `[:]`
+    /// evaluates to an empty [`Val::Map`] before any key exists, and every
+    /// map op treats an EMPTY string-keyed map as either kind (reads answer
+    /// `None`/`false`/`[]` regardless; the first `Int64` insert upgrades it).
+    MapI(std::rc::Rc<MapIVal>),
     /// An opaque `Code` fragment (RFC-0054): a sequence of rendered text pieces,
     /// some carrying an origin span. Produced only inside a generation context by
     /// `vyrn"…"` quotes / `raw` / `rawAt`, concatenated by `+`, and consumed by
@@ -467,11 +611,74 @@ impl std::ops::Deref for MapVal {
     }
 }
 
+/// [`MapVal`] with `Int64` keys (RFC-0117 M1): the same pairs-plus-index
+/// shape, the same first-insertion-order law, the key column holding the
+/// values themselves.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MapIVal {
+    pairs: Vec<(i64, Val)>,
+    idx: std::collections::HashMap<i64, usize>,
+}
+
+impl MapIVal {
+    pub fn get(&self, k: i64) -> Option<&Val> {
+        self.idx.get(&k).map(|i| &self.pairs[*i].1)
+    }
+
+    pub fn contains(&self, k: i64) -> bool {
+        self.idx.contains_key(&k)
+    }
+
+    /// Overwrite in place on a hit (the entry keeps its position), append on
+    /// a miss — the one policy every map shares (RFC-0028).
+    pub fn insert(&mut self, k: i64, v: Val) {
+        match self.idx.get(&k) {
+            Some(i) => self.pairs[*i].1 = v,
+            None => {
+                self.idx.insert(k, self.pairs.len());
+                self.pairs.push((k, v));
+            }
+        }
+    }
+
+    /// Drop the entry, shifting the survivors down (see [`MapVal::remove`]).
+    pub fn remove(&mut self, k: i64) -> bool {
+        let Some(i) = self.idx.remove(&k) else {
+            return false;
+        };
+        self.pairs.remove(i);
+        for at in self.idx.values_mut() {
+            if *at > i {
+                *at -= 1;
+            }
+        }
+        true
+    }
+}
+
+impl std::ops::Deref for MapIVal {
+    type Target = [(i64, Val)];
+    fn deref(&self) -> &Self::Target {
+        &self.pairs
+    }
+}
+
 impl FromIterator<(String, Val)> for MapVal {
     /// Built by insertion, so a repeated key in the source updates in place and
     /// keeps its slot — the one policy every builder of a map shares.
     fn from_iter<T: IntoIterator<Item = (String, Val)>>(it: T) -> Self {
         let mut m = MapVal::default();
+        for (k, v) in it {
+            m.insert(k, v);
+        }
+        m
+    }
+}
+
+impl FromIterator<(i64, Val)> for MapIVal {
+    /// By insertion, exactly as [`MapVal`]'s.
+    fn from_iter<T: IntoIterator<Item = (i64, Val)>>(it: T) -> Self {
+        let mut m = MapIVal::default();
         for (k, v) in it {
             m.insert(k, v);
         }
@@ -533,9 +740,14 @@ fn deep_copy(v: &Val) -> Val {
     match v {
         Val::Str(s) => Val::Str(std::rc::Rc::new(String::clone(s))),
         Val::Array(xs) => Val::Array(std::rc::Rc::new(xs.iter().map(deep_copy).collect())),
-        Val::Map(kv) => Val::Map(kv.iter().map(|(k, x)| (k.clone(), deep_copy(x))).collect()),
+        Val::Map(kv) => Val::Map(std::rc::Rc::new(
+            kv.iter().map(|(k, x)| (k.clone(), deep_copy(x))).collect(),
+        )),
+        Val::MapI(kv) => Val::MapI(std::rc::Rc::new(
+            kv.iter().map(|(k, x)| (*k, deep_copy(x))).collect(),
+        )),
         Val::Record(fs, name) => Val::Record(
-            fs.iter().map(|(k, x)| (k.clone(), deep_copy(x))).collect(),
+            std::rc::Rc::new(fs.iter().map(|(k, x)| (k.clone(), deep_copy(x))).collect()),
             name.clone(),
         ),
         Val::Option(o) => Val::Option(o.as_ref().map(|b| Box::new(deep_copy(b)))),
@@ -752,7 +964,7 @@ fn lex_tokens(source: &str) -> Vec<Val> {
             r.insert("text".to_string(), Val::Str(std::rc::Rc::new(text)));
             r.insert("line".to_string(), Val::Int(line));
             r.insert("col".to_string(), Val::Int(col));
-            Val::Record(r, None)
+            Val::Record(std::rc::Rc::new(r), None)
         })
         .collect()
 }
@@ -881,6 +1093,28 @@ fn reserve_str(s: &mut String, more: usize) -> Result<(), Ctrl> {
 fn reserve_vec<T>(v: &mut Vec<T>, more: usize) -> Result<(), Ctrl> {
     v.try_reserve(more)
         .map_err(|_| Ctrl::Err(crate::trap::OUT_OF_MEMORY.into()))
+}
+
+/// The `tallyBytes` key: the window's bytes as a validated `String`, with the
+/// canonical trap for a NUL or invalid UTF-8. Shared by the `@tallyBytes`
+/// builtin arm and the in-place assign fast path, so the two spell the checks
+/// identically.
+fn tally_key_bytes(bytes: &[Val]) -> Result<String, Ctrl> {
+    let mut raw = Vec::with_capacity(bytes.len());
+    for b in bytes {
+        match b {
+            Val::IntN { v, .. } => raw.push(*v as u8),
+            Val::Int(v) => raw.push(*v as u8),
+            other => return Err(format!("tallyBytes over non-byte {other:?}").into()),
+        }
+    }
+    if raw.contains(&0) {
+        return Err(crate::trap::io("tbytes").to_string().into());
+    }
+    let Ok(key) = std::str::from_utf8(&raw) else {
+        return Err(crate::trap::io("tbytes").to_string().into());
+    };
+    Ok(key.to_string())
 }
 
 /// `a + b` for strings, allocated once and fallibly.
@@ -1167,7 +1401,11 @@ fn on_deep_stack(f: impl FnOnce() -> Result<i64, String> + Send) -> Result<i64, 
     // one. Nothing is carried unless a caller asked for the trace, which is the
     // corpus gate and nothing else.
     let tracing = crate::own::trace::on();
+    // The profile is per thread for the same reason the trace is, so it makes
+    // the same trip back.
+    let profiling = crate::prof::on();
     let carried = std::sync::Mutex::new(Vec::new());
+    let rows = std::sync::Mutex::new(Vec::new());
     let out = std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(INTERP_STACK_BYTES)
@@ -1175,9 +1413,15 @@ fn on_deep_stack(f: impl FnOnce() -> Result<i64, String> + Send) -> Result<i64, 
                 if tracing {
                     crate::own::trace::start();
                 }
+                if profiling {
+                    crate::prof::start();
+                }
                 let r = f();
                 if tracing {
                     *carried.lock().unwrap() = crate::own::trace::take();
+                }
+                if profiling {
+                    *rows.lock().unwrap() = crate::prof::take();
                 }
                 r
             })
@@ -1187,6 +1431,9 @@ fn on_deep_stack(f: impl FnOnce() -> Result<i64, String> + Send) -> Result<i64, 
     });
     if tracing {
         crate::own::trace::adopt(carried.into_inner().unwrap_or_default());
+    }
+    if profiling {
+        crate::prof::adopt(rows.into_inner().unwrap_or_default());
     }
     out
 }
@@ -1234,14 +1481,31 @@ pub fn run_tests<F>(
 where
     F: FnMut(&str, &Result<(), String>) + Send,
 {
-    std::thread::scope(|s| {
+    // The tests run on their own stack, so a profile collected in there has to
+    // be handed back the way `on_deep_stack` hands the release trace back.
+    let profiling = crate::prof::on();
+    let rows = std::sync::Mutex::new(Vec::new());
+    let out = std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(INTERP_STACK_BYTES)
-            .spawn_scoped(s, || run_tests_inner(program, filter, on_result))
+            .spawn_scoped(s, || {
+                if profiling {
+                    crate::prof::start();
+                }
+                let r = run_tests_inner(program, filter, on_result);
+                if profiling {
+                    *rows.lock().unwrap() = crate::prof::take();
+                }
+                r
+            })
             .expect("failed to spawn interpreter thread")
             .join()
             .unwrap_or_else(|_| Err("interpreter thread panicked (likely stack overflow)".into()))
-    })
+    });
+    if profiling {
+        crate::prof::adopt(rows.into_inner().unwrap_or_default());
+    }
+    out
 }
 
 fn run_tests_inner<F>(
@@ -1767,19 +2031,19 @@ fn serve_call(interp: &Interp<'_>, call: ServeCall) -> Result<ServeAnswer, Strin
 /// interpreter, and read the `Response` record back out — the shared body of
 /// [`serve`] (one interpreter) and [`serve_pool`] (one per worker, RFC-0025).
 fn handle_request(interp: &Interp<'_>, req: ServeRequest) -> Result<ServeAnswer, String> {
-    let headers = Val::Map(
+    let headers = Val::Map(std::rc::Rc::new(
         req.headers
             .into_iter()
             .map(|(k, v)| (k, Val::Str(std::rc::Rc::new(v))))
             .collect(),
-    );
+    ));
     let request = Val::Record(
-        HashMap::from([
+        std::rc::Rc::new(HashMap::from([
             ("method".to_string(), Val::Str(std::rc::Rc::new(req.method))),
             ("path".to_string(), Val::Str(std::rc::Rc::new(req.path))),
             ("headers".to_string(), headers),
             ("body".to_string(), Val::Str(std::rc::Rc::new(req.body))),
-        ]),
+        ])),
         None,
     );
     match interp.call("handle", &[request]) {
@@ -2298,10 +2562,14 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
         .collect();
     // Enum variant names, so constructor uses (Var/Call) can be recognized.
     let mut variants: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut variant_lead = [false; 256];
     for t in &program.type_decls {
         if let Type::Enum(vs) = &t.base {
             for v in vs {
                 variants.insert(v.name.as_str());
+                if let Some(b) = v.name.as_bytes().first() {
+                    variant_lead[*b as usize] = true;
+                }
             }
         }
     }
@@ -2327,6 +2595,7 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
         types,
         contracts,
         type_map,
+        variant_lead,
         variants,
         droppable,
         boxes: RefCell::new(HashMap::new()),
@@ -2374,6 +2643,19 @@ struct Interp<'a> {
     /// Owned type map for `resolve`/codec (RFC-0018 JSON codec).
     type_map: HashMap<String, TypeDecl>,
     variants: std::collections::HashSet<&'a str>,
+    /// Which first bytes any nullary variant name starts with.
+    ///
+    /// EVERY variable read asks whether the name is a variant, because a variant
+    /// wins over a local of the same name and that is observable. Asking costs a
+    /// string hash. Measured over `vyrn test site/export.vyrn`: 500,451,689
+    /// reads, of which **four** were variants. Half a billion hashes to find four
+    /// hits.
+    ///
+    /// This answers `no` for almost all of them with one array index. It is
+    /// exact, not a heuristic — a name whose first byte no variant starts with
+    /// cannot be a variant — so the order of the two rules is unchanged and so is
+    /// what a program does.
+    variant_lead: [bool; 256],
     /// Droppable `let` bindings (by `Stmt` node address) and their reclamation
     /// kind — the ownership analysis shared with the native backend.
     droppable: HashMap<usize, crate::own::DropKind>,
@@ -2477,6 +2759,27 @@ thread_local! {
     #[allow(clippy::type_complexity)]
     static LINE_STARTS: std::cell::RefCell<
         std::collections::HashMap<usize, (std::rc::Rc<Vec<Val>>, std::rc::Rc<Vec<usize>>)>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+
+    /// Arrays already proven to need no coercion, by identity.
+    /// `(array pointer, what noop means for this element type) -> a WEAK handle`.
+    ///
+    /// Weak and not strong, which is the whole design. A strong handle is what
+    /// `LINE_STARTS` holds, and it is right there: a source buffer is read and
+    /// never written. An entry that owns the array a SECOND time turns every
+    /// element store into a copy-on-write clone of the whole row — `rows[i][j] =
+    /// c` went from a name compare per element to a row clone per element, which
+    /// `an_element_store_does_not_restamp_its_row` catches and should.
+    ///
+    /// A weak handle costs mutation nothing: with one strong owner left,
+    /// `Rc::make_mut` disassociates the weak handles and edits in place. That is
+    /// also what makes the entry safe to trust — an upgrade that still succeeds,
+    /// to the same address, proves the allocation was never written since it was
+    /// proven. An upgrade that fails is simply a miss, and a recycled address is
+    /// a miss too, because the check is the upgrade and not the key.
+    #[allow(clippy::type_complexity)]
+    static NOOP_ARRAYS: std::cell::RefCell<
+        std::collections::HashMap<(usize, String), std::rc::Weak<Vec<Val>>>,
     > = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
@@ -2825,10 +3128,20 @@ impl<'a> Interp<'a> {
             }
             self.call_depth.set(d);
         }
+        // The profiler counts what the depth counter counts, and for the same
+        // reason: an `extern` is the host's frame and an unknown name has none.
+        // `None` unless `vyrn run --profile` armed it, which is one thread-local
+        // read per call otherwise.
+        let started = if counted { crate::prof::enter() } else { None };
         let r = self.call_capturing_inner(name, args);
         // Balanced on every path out, including a trap the caller catches: a
         // `test` run calls many bodies in one process, and a depth left behind
-        // would refuse the next one.
+        // would refuse the next one. The profiler's frame is balanced here too,
+        // and it has to be: an unpopped frame charges the trap's whole unwind to
+        // whatever the next call turns out to be.
+        if let Some(t) = started {
+            crate::prof::exit(name, t);
+        }
         if counted {
             self.call_depth.set(self.call_depth.get() - 1);
         }
@@ -2866,8 +3179,27 @@ impl<'a> Interp<'a> {
                 },
             );
         }
+        // RFC-0114: an owned `consume` parameter the body neither moves nor
+        // drops is the callee's to release at exit. `own` gave it a row; only
+        // a declared release is observable in this engine, exactly as for a
+        // `let` — the buffers are `Rc`'s to reclaim when the scope drops.
+        let mut seed: Vec<(&str, Option<Val>, Option<String>, usize)> = Vec::new();
+        for p in &f.params {
+            if p.capability != Capability::Consume {
+                continue;
+            }
+            let key = p as *const crate::ast::Param as usize;
+            let release = match self.droppable.get(&key) {
+                Some(crate::own::DropKind::Release(fr, _)) => Some(Some(fr.clone())),
+                Some(crate::own::DropKind::Deep(_)) if self.has_owned => Some(None),
+                _ => None,
+            };
+            if let Some(fr) = release {
+                seed.push((p.name.as_str(), None, fr, key));
+            }
+        }
         // A `?` inside the body surfaces as Ctrl::Return; catch it as the result.
-        let ret = match self.block(&f.body, &mut scope) {
+        let ret = match self.block_seeded(&f.body, &mut scope, seed) {
             Ok(Flow::Return(v)) => v,
             Ok(Flow::Normal) => Val::Unit,
             // `break`/`continue` outside a loop are a checker error.
@@ -2903,7 +3235,39 @@ impl<'a> Interp<'a> {
     }
 
     fn block(&self, block: &Block, scope: &mut Vec<Frame>) -> Result<Flow, Ctrl> {
-        scope.push(Frame::default());
+        self.block_seeded(block, scope, Vec::new())
+    }
+
+    /// [`Interp::block`], with the drops list pre-seeded — RFC-0114's consume
+    /// parameters, which belong to the function BODY's frame but are bound
+    /// before it opens. Only a declared release is observable here; the
+    /// buffers are the host's, exactly as for a `let`.
+    fn block_seeded(
+        &self,
+        block: &Block,
+        scope: &mut Vec<Frame>,
+        seed: Vec<(&str, Option<Val>, Option<String>, usize)>,
+    ) -> Result<Flow, Ctrl> {
+        // A BLOCK THAT BINDS NOTHING GETS NO FRAME.
+        //
+        // `Stmt::Let` is the only statement that inserts into the frame a block
+        // opens. Every other binder — a `match` arm's payload, an `if let`, a
+        // `for in` variable — pushes a frame of its own first. So a block with no
+        // `let` at its top level opens a frame that stays empty for its whole
+        // life, and every variable read inside it probes that empty map before
+        // finding the name one frame further out.
+        //
+        // Counted over `vyrn test site/export.vyrn`: 500,451,689 variable reads
+        // and 860,691,511 frame probes, 1.72 per read. A `while` body that
+        // declares nothing — which is what `slice`'s copy loop is — pays one of
+        // those on every read of every name.
+        //
+        // The scan is over this block's own statements, never into nested ones,
+        // because a nested block opens its own frame and answers for itself.
+        let owns_frame = block.stmts.iter().any(|s| matches!(s, Stmt::Let { .. }));
+        if owns_frame {
+            scope.push(Frame::default());
+        }
         // Values reclaimed when this frame exits — normally, via `return`,
         // `break` or `continue`, or via a propagating `?` — mirroring the native
         // backend's block-exit drops. Only a reference
@@ -2922,7 +3286,7 @@ impl<'a> Interp<'a> {
         // The fourth field is the `Stmt::Let`'s node address — `own`'s own key
         // for the binding, and what RFC-0101 M4's shadow trace reports so that
         // one gate can assert this engine's order against the other two.
-        let mut drops: Vec<(&str, Option<Val>, Option<String>, usize)> = Vec::new();
+        let mut drops: Vec<(&str, Option<Val>, Option<String>, usize)> = seed;
         let blk = block as *const Block as usize;
         for stmt in &block.stmts {
             if let Stmt::Let { name, .. } = stmt {
@@ -2946,7 +3310,9 @@ impl<'a> Interp<'a> {
                     // second phase, and the only thing the trace asks of this
                     // engine that the compiled ones do not need.
                     self.run_drops(None, &drops, scope)?;
-                    scope.pop();
+                    if owns_frame {
+                        scope.pop();
+                    }
                     return Ok(flow);
                 }
                 Ok(Flow::Normal) => {
@@ -2986,13 +3352,17 @@ impl<'a> Interp<'a> {
                     if matches!(e, Ctrl::Return(_)) {
                         self.run_drops(None, &drops, scope)?;
                     }
-                    scope.pop();
+                    if owns_frame {
+                        scope.pop();
+                    }
                     return Err(e);
                 }
             }
         }
         let r = self.run_drops(Some(blk), &drops, scope);
-        scope.pop();
+        if owns_frame {
+            scope.pop();
+        }
         r?;
         Ok(Flow::Normal)
     }
@@ -3235,7 +3605,7 @@ impl<'a> Interp<'a> {
                 (
                     parent,
                     Box::new(move |s: &mut Slot| match &mut s.v {
-                        Val::Record(map, _) => map
+                        Val::Record(map, _) => std::rc::Rc::make_mut(map)
                             .get_mut(field)
                             .map(|slot| std::mem::replace(slot, Val::Unit)),
                         _ => None,
@@ -3436,6 +3806,123 @@ impl<'a> Interp<'a> {
                             }
                         }
                     }
+                    // `m.tally(k, n)` / `m.tallyBytes(w, n)` on a local Map:
+                    // insert-or-add IN PLACE. The statement form desugars to
+                    // `m = @tally(m, k, n)`, and evaluating that receiver
+                    // argument clones the map's `Rc` to refcount 2, so the
+                    // builtin's `Rc::make_mut` deep-copies the whole table —
+                    // pairs AND index — on every call. Cheap while the map is
+                    // small, quadratic in distinct keys: 0.9 s for 5,000, 3.3 s
+                    // for 10,000, 15.8 s for 20,000, against 76 ms for the same
+                    // loop over 4 keys. The checker pins the receiver to
+                    // `Map<String, Int64>`, so no declared-type validation is
+                    // being skipped. Safe for a local for the reason `push`
+                    // above is: the slot is inspected before any argument is
+                    // evaluated, and no callee can reach a local.
+                    if (fname == "@tally" || fname == "@tallyBytes")
+                        && args.len() == 3
+                        && matches!(&args[0], Expr::Var { name: n, .. } if n == name)
+                        && scope
+                            .iter()
+                            .rev()
+                            .find_map(|f| f.get(name))
+                            .is_some_and(|s| matches!(s.v, Val::Map(_) | Val::MapI(_)))
+                    {
+                        // The key's runtime kind picks the map variant
+                        // (RFC-0117): a String or bytes for the string-keyed
+                        // map, an Int64 for the integer-keyed one — and an
+                        // Int64 meeting an empty `Val::Map` is a pre-upgrade
+                        // `[:]`, upgraded on this first insert.
+                        enum TKey {
+                            S(String),
+                            I(i64),
+                        }
+                        let key = if fname == "@tally" {
+                            match self.expr(&args[1], scope)? {
+                                Val::Str(s) => TKey::S((*s).clone()),
+                                Val::Int(k) => TKey::I(k),
+                                other => return Err(format!("tally key of {other:?}").into()),
+                            }
+                        } else {
+                            match self.expr(&args[1], scope)? {
+                                Val::Array(bytes) => TKey::S(tally_key_bytes(&bytes)?),
+                                other => {
+                                    return Err(format!("tallyBytes of non-Array {other:?}").into())
+                                }
+                            }
+                        };
+                        let add = match self.expr(&args[2], scope)? {
+                            Val::Int(v) => v,
+                            other => return Err(format!("tally count of {other:?}").into()),
+                        };
+                        let mut keyopt = Some(key);
+                        for frame in scope.iter_mut().rev() {
+                            if let Some(slot) = frame.get_mut(name) {
+                                match (&mut slot.v, keyopt.take().expect("one iteration")) {
+                                    (Val::Map(m), TKey::S(key)) => {
+                                        let mm = std::rc::Rc::make_mut(m);
+                                        let cur = match mm.get(&key) {
+                                            Some(Val::Int(v)) => *v,
+                                            _ => 0,
+                                        };
+                                        mm.insert(key, Val::Int(cur + add));
+                                        return Ok(Flow::Normal);
+                                    }
+                                    (Val::MapI(m), TKey::I(key)) => {
+                                        let mm = std::rc::Rc::make_mut(m);
+                                        let cur = match mm.get(key) {
+                                            Some(Val::Int(v)) => *v,
+                                            _ => 0,
+                                        };
+                                        mm.insert(key, Val::Int(cur + add));
+                                        return Ok(Flow::Normal);
+                                    }
+                                    (Val::Map(m), TKey::I(key)) if m.is_empty() => {
+                                        let mut mm = MapIVal::default();
+                                        mm.insert(key, Val::Int(add));
+                                        slot.v = Val::MapI(std::rc::Rc::new(mm));
+                                        return Ok(Flow::Normal);
+                                    }
+                                    _ => {}
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    // `xs.append(ys)` on a local Array: extend IN PLACE — the
+                    // same defect class as `tally`, from the same RFC-0115/0116
+                    // vintage. `xs.append(xs)` still works: evaluating the
+                    // source snapshots the pre-state behind a second `Rc`
+                    // handle, so `make_mut` pays one honest copy and the
+                    // appended elements are the original ones, exactly as the
+                    // compiled backends define self-append. Element coercion is
+                    // not being skipped: the checker pins the source to the
+                    // receiver's own element type, already validated.
+                    if fname == "@append"
+                        && args.len() == 2
+                        && matches!(&args[0], Expr::Var { name: n, .. } if n == name)
+                        && scope
+                            .iter()
+                            .rev()
+                            .find_map(|f| f.get(name))
+                            .is_some_and(|s| matches!(s.v, Val::Array(_)))
+                    {
+                        let more = match self.expr(&args[1], scope)? {
+                            Val::Array(more) => more,
+                            other => return Err(format!("append of non-Array {other:?}").into()),
+                        };
+                        for frame in scope.iter_mut().rev() {
+                            if let Some(slot) = frame.get_mut(name) {
+                                if let Val::Array(elems) = &mut slot.v {
+                                    let elems = std::rc::Rc::make_mut(elems);
+                                    reserve_vec(elems, more.len())?;
+                                    elems.extend(more.iter().cloned());
+                                    return Ok(Flow::Normal);
+                                }
+                                break;
+                            }
+                        }
+                    }
                 }
                 // `s = s + a + b + …` on an untyped local String: append IN PLACE.
                 //
@@ -3624,7 +4111,9 @@ impl<'a> Interp<'a> {
                                             continue;
                                         };
                                         if let Val::Record(map, _) = &mut slot.v {
-                                            if let Some(cur) = map.get_mut(field) {
+                                            if let Some(cur) =
+                                                std::rc::Rc::make_mut(map).get_mut(field)
+                                            {
                                                 *cur = Val::Unit;
                                             }
                                         }
@@ -3673,7 +4162,7 @@ impl<'a> Interp<'a> {
                         ..
                     }) = frame.get_mut(name)
                     {
-                        map.insert(field.clone(), v);
+                        std::rc::Rc::make_mut(map).insert(field.clone(), v);
                         return Ok(Flow::Normal);
                     }
                 }
@@ -3682,7 +4171,7 @@ impl<'a> Interp<'a> {
                     ..
                 }) = self.globals.borrow_mut().get_mut(name)
                 {
-                    map.insert(field.clone(), v);
+                    std::rc::Rc::make_mut(map).insert(field.clone(), v);
                     return Ok(Flow::Normal);
                 }
                 Err(format!("field assignment to unbound record `{name}`").into())
@@ -3739,7 +4228,7 @@ impl<'a> Interp<'a> {
                                 v: Val::Map(pairs), ..
                             }) = frame.get_mut(name)
                             {
-                                pairs.insert((*k).clone(), v);
+                                std::rc::Rc::make_mut(pairs).insert((*k).clone(), v);
                                 return Ok(Flow::Normal);
                             }
                         }
@@ -3747,8 +4236,68 @@ impl<'a> Interp<'a> {
                             v: Val::Map(pairs), ..
                         }) = self.globals.borrow_mut().get_mut(name)
                         {
-                            pairs.insert((*k).clone(), v);
+                            std::rc::Rc::make_mut(pairs).insert((*k).clone(), v);
                             return Ok(Flow::Normal);
+                        }
+                        return Err(format!("index-assignment to unbound map `{name}`").into());
+                    }
+                }
+                // `m[k] = v` on an Int64-keyed Map (RFC-0117): the same
+                // in-place law. The binding's runtime kind separates this from
+                // an array store — and an empty `Val::Map` under a declared
+                // `Map` type is a pre-upgrade `[:]`, upgraded by this first
+                // insert (the checker already matched the key to `Int64`).
+                if let Val::Int(k) = &iv {
+                    let imap_of = |s: &Slot| match &s.v {
+                        Val::MapI(_) => Some(match &s.ty {
+                            Some(Type::Map(_, v)) => Some((**v).clone()),
+                            _ => None,
+                        }),
+                        Val::Map(m) if m.is_empty() && matches!(&s.ty, Some(Type::Map(..))) => {
+                            Some(match &s.ty {
+                                Some(Type::Map(_, v)) => Some((**v).clone()),
+                                _ => None,
+                            })
+                        }
+                        _ => None,
+                    };
+                    let found = scope
+                        .iter()
+                        .rev()
+                        .find_map(|f| f.get(name).and_then(imap_of))
+                        .or_else(|| self.globals.borrow().get(name).and_then(imap_of));
+                    if let Some(val_ty) = found {
+                        let k = *k;
+                        let mut v = self.expr(value, scope)?;
+                        if let Some(t) = &val_ty {
+                            v = self.coerce(v, t)?;
+                        }
+                        let mut vopt = Some(v);
+                        let mut put = |slot: &mut Slot| {
+                            let v = vopt.take().expect("put runs once");
+                            match &mut slot.v {
+                                Val::MapI(pairs) => {
+                                    std::rc::Rc::make_mut(pairs).insert(k, v);
+                                }
+                                _ => {
+                                    let mut mm = MapIVal::default();
+                                    mm.insert(k, v);
+                                    slot.v = Val::MapI(std::rc::Rc::new(mm));
+                                }
+                            }
+                            Ok(Flow::Normal)
+                        };
+                        for frame in scope.iter_mut().rev() {
+                            if let Some(slot) = frame.get_mut(name) {
+                                if matches!(&slot.v, Val::MapI(_) | Val::Map(_)) {
+                                    return put(slot);
+                                }
+                            }
+                        }
+                        if let Some(slot) = self.globals.borrow_mut().get_mut(name) {
+                            if matches!(&slot.v, Val::MapI(_) | Val::Map(_)) {
+                                return put(slot);
+                            }
                         }
                         return Err(format!("index-assignment to unbound map `{name}`").into());
                     }
@@ -4239,7 +4788,9 @@ impl<'a> Interp<'a> {
                     return Ok(Val::Option(None));
                 }
                 // A nullary enum variant, e.g. `Empty`.
-                if self.variants.contains(name.as_str()) {
+                if self.variant_lead[name.as_bytes().first().copied().unwrap_or(0) as usize]
+                    && self.variants.contains(name.as_str())
+                {
                     return Ok(Val::Enum(name.clone(), Vec::new()));
                 }
                 for frame in scope.iter().rev() {
@@ -4667,27 +5218,35 @@ impl<'a> Interp<'a> {
                         return Err("`remove` needs a mutable map binding".into());
                     };
                     let recv = recv.clone();
-                    let key = match self.expr(&args[1], scope)? {
-                        Val::Str(s) => s,
-                        other => {
-                            return Err(
-                                format!("a map key must be a String, found {other:?}").into()
-                            )
+                    let key = self.expr(&args[1], scope)?;
+                    // One closure serves locals and globals; the key's runtime
+                    // kind picks the map variant (RFC-0117). An `Int64` key on
+                    // an empty pre-upgrade `[:]` removes nothing, truthfully.
+                    let act = |v: &mut Val| -> Option<Result<Val, Ctrl>> {
+                        match (v, &key) {
+                            (Val::Map(pairs), Val::Str(k)) => Some(Ok(Val::Bool(
+                                std::rc::Rc::make_mut(pairs).remove(k.as_str()),
+                            ))),
+                            (Val::MapI(pairs), Val::Int(k)) => {
+                                Some(Ok(Val::Bool(std::rc::Rc::make_mut(pairs).remove(*k))))
+                            }
+                            (Val::Map(pairs), Val::Int(_)) if pairs.is_empty() => {
+                                Some(Ok(Val::Bool(false)))
+                            }
+                            _ => None,
                         }
                     };
                     for frame in scope.iter_mut().rev() {
-                        if let Some(Slot {
-                            v: Val::Map(pairs), ..
-                        }) = frame.get_mut(&recv)
-                        {
-                            return Ok(Val::Bool(pairs.remove(key.as_str())));
+                        if let Some(slot) = frame.get_mut(&recv) {
+                            if let Some(r) = act(&mut slot.v) {
+                                return r;
+                            }
                         }
                     }
-                    if let Some(Slot {
-                        v: Val::Map(pairs), ..
-                    }) = self.globals.borrow_mut().get_mut(&recv)
-                    {
-                        return Ok(Val::Bool(pairs.remove(key.as_str())));
+                    if let Some(slot) = self.globals.borrow_mut().get_mut(&recv) {
+                        if let Some(r) = act(&mut slot.v) {
+                            return r;
+                        }
                     }
                     return Err("`remove` needs a mutable map binding".into());
                 }
@@ -4717,7 +5276,21 @@ impl<'a> Interp<'a> {
                 // A user function shadows the gen-only surface builtins
                 // (`render`/`rawAt`/`raw`/`lex`) — they are common words and not
                 // reserved, so a same-named user function wins (RFC-0054).
-                let shadowed = matches!(name.as_str(), "render" | "rawAt" | "raw" | "lex")
+                //
+                // THIS TABLE IS FLAT, and that is safe here for a reason worth
+                // writing down rather than rediscovering. The four are legal only
+                // inside a `gen fn`, and a `gen fn` runs in the generation
+                // sandbox, whose program is the generator module's own closure —
+                // so `self.funcs` here holds the generator's declarations and not
+                // the importing program's. The CHECKER's copy of this test was
+                // not so lucky: it ran over the linked program and one module's
+                // `fn raw` disabled the builtin everywhere, which is the defect
+                // `examples/shadowbuiltin.vyrn` pins.
+                //
+                // If the sandbox ever widens to the whole program, this needs the
+                // module test `Checker::shadows_here` performs, and that example
+                // is what will say so.
+                let shadowed = crate::ast::is_surface_builtin(name.as_str())
                     && self.funcs.contains_key(name.as_str());
                 // RFC-0078 M4c: a builtin whose implementation IS a Vyrn function
                 // is a call to it, and nothing else. The loader injected the module
@@ -5063,6 +5636,11 @@ impl<'a> Interp<'a> {
                     // Log methods write `[LEVEL] name: msg` to stderr (kept off
                     // stdout, so program output and logs are separable — the
                     // "where does it print" concern behind RFC-0008).
+                    // NOT `ast::is_log_level(n)`. This match is READ AS DATA:
+                    // `tests/primitives.rs` scans these arms to enumerate every
+                    // builtin the interpreter implements, and compares that to
+                    // RFC-0078's census. A predicate here is invisible to it, so
+                    // five builtins would silently leave the census.
                     "trace" | "debug" | "info" | "warn" | "error" => {
                         // Drop calls below the configured threshold (RFC-0008).
                         if log_level_ordinal(name).unwrap_or(0) >= self.log_level {
@@ -5160,16 +5738,34 @@ impl<'a> Interp<'a> {
                     // `bytes` decodes the UTF-8 bytes as UInt8 (RFC-0014 M2) —
                     // the irreducible VIEW every Vyrn string routine is built on.
                     "bytes" => match &vals[0] {
-                        Val::Str(s) => Ok(Val::Array(
-                            s.bytes()
-                                .map(|b| Val::IntN {
-                                    v: b as i64,
-                                    bits: 8,
-                                    signed: false,
-                                })
-                                .collect::<Vec<_>>()
-                                .into(),
-                        )),
+                        Val::Str(s) => {
+                            // The range form (RFC-0113), or the whole string.
+                            let (a, b) = if vals.len() == 3 {
+                                let int = |v: &Val| match v {
+                                    Val::Int(n) => *n,
+                                    Val::IntN { v, .. } => *v,
+                                    _ => -1,
+                                };
+                                (int(&vals[1]), int(&vals[2]))
+                            } else {
+                                (0, s.len() as i64)
+                            };
+                            if a < 0 || b < a || b as usize > s.len() {
+                                let bad = if a < 0 || b < a { a } else { b };
+                                return Err(crate::trap::string_index(bad).into());
+                            }
+                            Ok(Val::Array(
+                                s.as_bytes()[a as usize..b as usize]
+                                    .iter()
+                                    .map(|b| Val::IntN {
+                                        v: *b as i64,
+                                        bits: 8,
+                                        signed: false,
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .into(),
+                            ))
+                        }
                         _ => Err("bytes of non-String".into()),
                     },
                     // (`chars` is `std/text`'s `charsV` — RFC-0078 M4c. Rust's
@@ -5306,6 +5902,34 @@ impl<'a> Interp<'a> {
                         };
                         let lit = self.gen_module_interface(&path)?;
                         return self.expr(&lit, scope);
+                    }
+                    // RFC-0111: the byte sink. Same create/truncate/write-all
+                    // as `writeFile` and the same canonical wording, over an
+                    // `Array<UInt8>` that no UTF-8 or NUL rule touches.
+                    "writeFileBytes" => {
+                        let path = match &vals[0] {
+                            Val::Str(s) => s.clone(),
+                            other => {
+                                return Err(format!("writeFileBytes of non-String {other:?}").into())
+                            }
+                        };
+                        let bytes = byte_vec(&vals[1], "writeFileBytes")?;
+                        match std::fs::write(path.as_str(), &bytes) {
+                            Ok(()) => Ok(Val::Result(true, Box::new(Val::Bool(true)))),
+                            Err(_) => Ok(Val::Result(
+                                false,
+                                Box::new(Val::Str(std::rc::Rc::new(crate::trap::io_at(
+                                    "writeerr", &path,
+                                )))),
+                            )),
+                        }
+                    }
+                    // RFC-0111: `print` for bytes — no newline, no formatting,
+                    // no result. The bytes go out exactly as given.
+                    "writeStdout" => {
+                        let bytes = byte_vec(&vals[0], "writeStdout")?;
+                        vyrn_out_bytes(&bytes);
+                        Ok(Val::Unit)
                     }
                     "writeFile" => {
                         let path = match &vals[0] {
@@ -5569,6 +6193,84 @@ impl<'a> Interp<'a> {
                         }
                         other => Err(format!("push of non-Array {other:?}").into()),
                     },
+                    // `xs.reserve(n)` (RFC-0115): capacity is invisible in this
+                    // engine — an `Rc<Vec>`'s is the allocator's business — so
+                    // the value passes through unchanged.
+                    "@reserve" => match &vals[0] {
+                        Val::Array(_) => Ok(vals[0].clone()),
+                        other => Err(format!("reserve of non-Array {other:?}").into()),
+                    },
+                    // `m.tally(k, n)` (RFC-0116): insert-or-add. Two probes in
+                    // THIS engine — semantics only; the one-probe fact is the
+                    // compiled backends'.
+                    "@tally" => match (&vals[0], &vals[1], &vals[2]) {
+                        (Val::Map(m0), Val::Str(k), Val::Int(n)) => {
+                            let mut next = m0.clone();
+                            let mm = std::rc::Rc::make_mut(&mut next);
+                            let cur = match mm.get(k) {
+                                Some(Val::Int(v)) => *v,
+                                _ => 0,
+                            };
+                            mm.insert((**k).clone(), Val::Int(cur + n));
+                            Ok(Val::Map(next))
+                        }
+                        // The Int64-keyed twin (RFC-0117). An empty `[:]` is
+                        // still a string-keyed value — the first insert is
+                        // where the representation upgrades.
+                        (Val::MapI(m0), Val::Int(k), Val::Int(n)) => {
+                            let mut next = m0.clone();
+                            let mm = std::rc::Rc::make_mut(&mut next);
+                            let cur = match mm.get(*k) {
+                                Some(Val::Int(v)) => *v,
+                                _ => 0,
+                            };
+                            mm.insert(*k, Val::Int(cur + n));
+                            Ok(Val::MapI(next))
+                        }
+                        (Val::Map(m0), Val::Int(k), Val::Int(n)) if m0.is_empty() => {
+                            let mut mm = MapIVal::default();
+                            mm.insert(*k, Val::Int(*n));
+                            Ok(Val::MapI(std::rc::Rc::new(mm)))
+                        }
+                        (a, b, c) => Err(format!("tally of {a:?}, {b:?}, {c:?}").into()),
+                    },
+                    // `m.tallyBytes(w, n)` (RFC-0116): `tally` keyed by raw
+                    // bytes. THIS engine builds the String either way — the
+                    // hit-path economy is the compiled backends' — but the trap
+                    // is canonical here first, as every trap is.
+                    "@tallyBytes" => match (&vals[0], &vals[1], &vals[2]) {
+                        (Val::Map(m0), Val::Array(bytes), Val::Int(n)) => {
+                            let key = tally_key_bytes(bytes)?;
+                            let mut next = m0.clone();
+                            let mm = std::rc::Rc::make_mut(&mut next);
+                            let cur = match mm.get(&key) {
+                                Some(Val::Int(v)) => *v,
+                                _ => 0,
+                            };
+                            mm.insert(key, Val::Int(cur + n));
+                            Ok(Val::Map(next))
+                        }
+                        (a, b, c) => Err(format!("tallyBytes of {a:?}, {b:?}, {c:?}").into()),
+                    },
+                    // `dst.copyFrom(src)` (RFC-0115): the receiver's buffer,
+                    // the source's elements. Value-wise that IS the source, and
+                    // `Rc` makes the copy lazy — buffers are the compiled
+                    // backends' business.
+                    "@copyFrom" => match (&vals[0], &vals[1]) {
+                        (Val::Array(_), Val::Array(_)) => Ok(vals[1].clone()),
+                        (a, b) => Err(format!("copyFrom of {a:?} and {b:?}").into()),
+                    },
+                    // `xs.append(ys)` (RFC-0115): every element of `ys`, in order.
+                    "@append" => match (&vals[0], &vals[1]) {
+                        (Val::Array(elems), Val::Array(more)) => {
+                            let mut next = elems.clone();
+                            let v = std::rc::Rc::make_mut(&mut next);
+                            reserve_vec(v, more.len())?;
+                            v.extend(more.iter().cloned());
+                            Ok(Val::Array(next))
+                        }
+                        (a, b) => Err(format!("append of {a:?} and {b:?}").into()),
+                    },
                     // Spelled out rather than named through `project::AT`
                     // because `primitives::the_census_is_the_code` reads these
                     // arms as literals.
@@ -5589,24 +6291,39 @@ impl<'a> Interp<'a> {
                                 signed: false,
                             })
                             .ok_or_else(|| crate::trap::string_index(i).into()),
-                        // `m[k]` on a Map (RFC-0028) → `Option<V>`.
+                        // `m[k]` on a Map (RFC-0028) → `Option<V>`. An `Int64` key
+                        // meeting an empty string-keyed map is a pre-upgrade `[:]`
+                        // (RFC-0117): a read of an empty map is `None` either way.
                         (Val::Map(pairs), Val::Str(k)) => Ok(Val::Option(
                             pairs.get(k.as_str()).map(|v| Box::new(v.clone())),
                         )),
+                        (Val::MapI(pairs), Val::Int(k)) => {
+                            Ok(Val::Option(pairs.get(*k).map(|v| Box::new(v.clone()))))
+                        }
+                        (Val::Map(pairs), Val::Int(_)) if pairs.is_empty() => Ok(Val::Option(None)),
                         _ => Err("at of non-Array/Int64".into()),
                     },
                     // `m.has(k)` (RFC-0028) — membership test.
                     "@has" => match (&vals[0], &vals[1]) {
                         (Val::Map(pairs), Val::Str(k)) => Ok(Val::Bool(pairs.contains(k.as_str()))),
-                        _ => Err("`has` needs a Map and a String key".into()),
+                        (Val::MapI(pairs), Val::Int(k)) => Ok(Val::Bool(pairs.contains(*k))),
+                        (Val::Map(pairs), Val::Int(_)) if pairs.is_empty() => Ok(Val::Bool(false)),
+                        _ => Err("`has` needs a Map and a key of its key type".into()),
                     },
-                    // `m.keys()` (RFC-0028) — a fresh snapshot Array<String> in
+                    // `m.keys()` (RFC-0028) — a fresh snapshot Array<K> in
                     // insertion order (safe to mutate the map while iterating it).
                     "@keys" => match &vals[0] {
                         Val::Map(pairs) => Ok(Val::Array(
                             pairs
                                 .iter()
                                 .map(|(k, _)| Val::Str(std::rc::Rc::new(k.clone())))
+                                .collect::<Vec<_>>()
+                                .into(),
+                        )),
+                        Val::MapI(pairs) => Ok(Val::Array(
+                            pairs
+                                .iter()
+                                .map(|(k, _)| Val::Int(*k))
                                 .collect::<Vec<_>>()
                                 .into(),
                         )),
@@ -5929,7 +6646,10 @@ impl<'a> Interp<'a> {
                 // unannotated `let u = User { .. }` — the one binding `coerce`
                 // never sees — would carry no name while native dispatches on
                 // the inferred one, and the engines would disagree.
-                Ok(Val::Record(map, Some(std::rc::Rc::from(name.as_str()))))
+                Ok(Val::Record(
+                    std::rc::Rc::new(map),
+                    Some(std::rc::Rc::from(name.as_str())),
+                ))
             }
             // `xs.length` on a local Array or Map, read WITHOUT copying `xs` —
             // same reason as the index peephole above. A scan loop mentions it in
@@ -5945,7 +6665,7 @@ impl<'a> Interp<'a> {
                         .iter()
                         .rev()
                         .find_map(|f| f.get(v))
-                        .is_some_and(|s| matches!(s.v, Val::Array(_) | Val::Map(_)))
+                        .is_some_and(|s| matches!(s.v, Val::Array(_) | Val::Map(_) | Val::MapI(_)))
                 } =>
             {
                 let Expr::Var { name: v, .. } = &**expr else {
@@ -5959,6 +6679,7 @@ impl<'a> Interp<'a> {
                 Ok(match &slot.v {
                     Val::Array(items) => Val::Int(items.len() as i64),
                     Val::Map(pairs) => Val::Int(pairs.len() as i64),
+                    Val::MapI(pairs) => Val::Int(pairs.len() as i64),
                     _ => unreachable!("guarded above"),
                 })
             }
@@ -5969,6 +6690,7 @@ impl<'a> Interp<'a> {
                     Val::Array(items) if field == "length" => Ok(Val::Int(items.len() as i64)),
                     // `map.length` is the entry count (RFC-0028).
                     Val::Map(pairs) if field == "length" => Ok(Val::Int(pairs.len() as i64)),
+                    Val::MapI(pairs) if field == "length" => Ok(Val::Int(pairs.len() as i64)),
                     // `str.byteLength` is the O(1) byte length (RFC-0058; matches
                     // `strlen`). `.length` on a String is rejected by the checker.
                     Val::Str(s) if field == "byteLength" => Ok(Val::Int(s.len() as i64)),
@@ -6011,20 +6733,34 @@ impl<'a> Interp<'a> {
             // A map literal (RFC-0028): evaluate entries in written order as
             // insertions — a repeated key updates in place (keeps its slot).
             Expr::MapLit { entries, .. } => {
+                // The first key's runtime kind picks the variant (RFC-0117) —
+                // the checker made every key the same kind. An empty `[:]` is
+                // a string-keyed value; the ops upgrade it on first insert.
                 let mut pairs = MapVal::default();
-                for (ke, ve) in entries {
-                    let k = match self.expr(ke, scope)? {
-                        Val::Str(s) => s,
-                        other => {
-                            return Err(
-                                format!("a map key must be a String, found {other:?}").into()
-                            )
-                        }
-                    };
+                let mut ipairs = MapIVal::default();
+                let mut int_keyed = false;
+                for (i, (ke, ve)) in entries.iter().enumerate() {
+                    let k = self.expr(ke, scope)?;
+                    if i == 0 {
+                        int_keyed = matches!(k, Val::Int(_));
+                    }
                     let v = self.expr(ve, scope)?;
-                    pairs.insert((*k).clone(), v);
+                    match k {
+                        Val::Str(s) if !int_keyed => pairs.insert((*s).clone(), v),
+                        Val::Int(n) if int_keyed => ipairs.insert(n, v),
+                        other => {
+                            return Err(format!(
+                                "a map key must be a String or an Int64, found {other:?}"
+                            )
+                            .into())
+                        }
+                    }
                 }
-                Ok(Val::Map(pairs))
+                Ok(if int_keyed {
+                    Val::MapI(std::rc::Rc::new(ipairs))
+                } else {
+                    Val::Map(std::rc::Rc::new(pairs))
+                })
             }
             // A deterministic fork-join task: the callee is isolated (pure), so
             // running it eagerly here yields the same result any scheduler would.
@@ -6104,8 +6840,78 @@ impl<'a> Interp<'a> {
         }
     }
 
+    /// Two `Int64`s, which is nearly every operation a Vyrn program performs.
+    ///
+    /// `binop` asks about five vector widths before it reaches this case —
+    /// `F32x4`, `F64x2`, `I32x4` and two masks — and none of them can match an
+    /// `Int`. So every `i + 1` in every loop walked past all five. The patterns
+    /// are disjoint, so asking this one first cannot change an answer, only the
+    /// order the questions are asked in.
+    ///
+    /// The body is MOVED here, not copied. There is one integer arithmetic
+    /// implementation and this is it.
+    #[inline]
+    fn binop_int(&self, op: BinOp, a: i64, b: i64) -> Result<Val, Ctrl> {
+        use BinOp::*;
+        Ok(match op {
+            // Wrapping two's complement — the language's defined overflow
+            // semantics, matching native (and independent of the build
+            // profile; bare `+` would panic in debug and wrap in release).
+            Add => Val::Int(a.wrapping_add(b)),
+            Sub => Val::Int(a.wrapping_sub(b)),
+            Mul => Val::Int(a.wrapping_mul(b)),
+            Div => {
+                if b == 0 {
+                    return Err(crate::trap::DIV_ZERO.into());
+                }
+                if a == i64::MIN && b == -1 {
+                    return Err(crate::trap::DIV_OVERFLOW.into());
+                }
+                Val::Int(a / b)
+            }
+            Rem => {
+                if b == 0 {
+                    return Err(crate::trap::REM_ZERO.into());
+                }
+                // `MIN % -1 == 0` (RFC-0060): NO trap, unlike `MIN / -1`.
+                // `wrapping_rem` yields 0 there; raw `%` would panic on overflow.
+                Val::Int(a.wrapping_rem(b))
+            }
+            Lt => Val::Bool(a < b),
+            LtEq => Val::Bool(a <= b),
+            Gt => Val::Bool(a > b),
+            GtEq => Val::Bool(a >= b),
+            Eq => Val::Bool(a == b),
+            NotEq => Val::Bool(a != b),
+            // Bitwise on the literal `Int` (64-bit, signed): `>>` is
+            // arithmetic. An amount outside 0..64 traps (RFC-0045).
+            BitAnd => Val::Int(a & b),
+            BitOr => Val::Int(a | b),
+            BitXor => Val::Int(a ^ b),
+            Shl => {
+                if b < 0 || b >= 64 {
+                    return Err(crate::trap::SHIFT_RANGE.into());
+                }
+                Val::Int(a.wrapping_shl(b as u32))
+            }
+            Shr => {
+                if b < 0 || b >= 64 {
+                    return Err(crate::trap::SHIFT_RANGE.into());
+                }
+                Val::Int(a >> b)
+            }
+            And | Or | Match => unreachable!("handled above"),
+        })
+    }
+
     fn binop(&self, op: BinOp, l: Val, r: Val) -> Result<Val, Ctrl> {
         use BinOp::*;
+        // Before the vector widths, which cannot match it.
+        if let (Val::Int(a), Val::Int(b)) = (&l, &r) {
+            if !matches!(op, And | Or | Match) {
+                return self.binop_int(op, *a, *b);
+            }
+        }
         // Lane-wise arithmetic (RFC-0083). Four independent `f32` operations in
         // written lane order; the checker admits only these ten operators.
         if let (Val::F32x4(a), Val::F32x4(b)) = (&l, &r) {
@@ -6383,55 +7189,6 @@ impl<'a> Interp<'a> {
             });
         }
         match (l, r) {
-            (Val::Int(a), Val::Int(b)) => Ok(match op {
-                // Wrapping two's complement — the language's defined overflow
-                // semantics, matching native (and independent of the build
-                // profile; bare `+` would panic in debug and wrap in release).
-                Add => Val::Int(a.wrapping_add(b)),
-                Sub => Val::Int(a.wrapping_sub(b)),
-                Mul => Val::Int(a.wrapping_mul(b)),
-                Div => {
-                    if b == 0 {
-                        return Err(crate::trap::DIV_ZERO.into());
-                    }
-                    if a == i64::MIN && b == -1 {
-                        return Err(crate::trap::DIV_OVERFLOW.into());
-                    }
-                    Val::Int(a / b)
-                }
-                Rem => {
-                    if b == 0 {
-                        return Err(crate::trap::REM_ZERO.into());
-                    }
-                    // `MIN % -1 == 0` (RFC-0060): NO trap, unlike `MIN / -1`.
-                    // `wrapping_rem` yields 0 there; raw `%` would panic on overflow.
-                    Val::Int(a.wrapping_rem(b))
-                }
-                Lt => Val::Bool(a < b),
-                LtEq => Val::Bool(a <= b),
-                Gt => Val::Bool(a > b),
-                GtEq => Val::Bool(a >= b),
-                Eq => Val::Bool(a == b),
-                NotEq => Val::Bool(a != b),
-                // Bitwise on the literal `Int` (64-bit, signed): `>>` is
-                // arithmetic. An amount outside 0..64 traps (RFC-0045).
-                BitAnd => Val::Int(a & b),
-                BitOr => Val::Int(a | b),
-                BitXor => Val::Int(a ^ b),
-                Shl => {
-                    if b < 0 || b >= 64 {
-                        return Err(crate::trap::SHIFT_RANGE.into());
-                    }
-                    Val::Int(a.wrapping_shl(b as u32))
-                }
-                Shr => {
-                    if b < 0 || b >= 64 {
-                        return Err(crate::trap::SHIFT_RANGE.into());
-                    }
-                    Val::Int(a >> b)
-                }
-                And | Or | Match => unreachable!("handled above"),
-            }),
             (Val::Float(a), Val::Float(b)) => Ok(match op {
                 Add => Val::Float(a + b),
                 Sub => Val::Float(a - b),
@@ -6546,7 +7303,38 @@ impl<'a> Interp<'a> {
     /// canonical `validation failed for \`T\`` when it does not hold. The walk
     /// is exhaustive — record fields, Option/Result payloads, and array
     /// elements are coerced (and therefore validated) recursively.
+    /// The scalar identities, inlined at the call site.
+    ///
+    /// 183,682,210 coercions run over `vyrn test site/export.vyrn` and
+    /// 179,316,749 of them — 97.6 per cent — answer "nothing to do". Getting to
+    /// that answer was three nested calls: `coerce`, `coercion_is_noop`,
+    /// `coercion_is_identity`. This is the first of those three arms, hoisted so
+    /// the common case never makes the calls.
+    ///
+    /// The list is exactly `coercion_is_identity`'s own scalar arm, so this
+    /// cannot answer differently from the walk it skips. A type that is not one
+    /// of these falls through to the real thing.
+    #[inline]
     fn coerce(&self, v: Val, ty: &Type) -> Result<Val, Ctrl> {
+        if matches!(
+            ty,
+            Type::Int
+                | Type::Float
+                | Type::Bool
+                | Type::Str
+                | Type::Unit
+                | Type::F32x4
+                | Type::I32x4
+                | Type::F64x2
+                | Type::Mask32x4
+                | Type::Mask64x2
+        ) {
+            return Ok(v);
+        }
+        self.coerce_walk(v, ty)
+    }
+
+    fn coerce_walk(&self, v: Val, ty: &Type) -> Result<Val, Ctrl> {
         // A container whose element type can neither change a value nor reject
         // one is rebuilt for nothing, and every typed boundary rebuilds it
         // again: `rows[i][j] = v` on an `Array<Array<Int64>>` desugars to a
@@ -6625,9 +7413,11 @@ impl<'a> Interp<'a> {
             // is where a name is assigned (RFC-0084 M1).
             (Type::Record(fields), Val::Record(mut map, name)) => {
                 for f in fields {
-                    if let Some(fv) = map.remove(&f.name) {
-                        map.insert(f.name.clone(), self.coerce(fv, &f.ty)?);
-                    }
+                    let Some(fv) = map.get(&f.name).cloned() else {
+                        continue;
+                    };
+                    let cv = self.coerce(fv, &f.ty)?;
+                    std::rc::Rc::make_mut(&mut map).insert(f.name.clone(), cv);
                 }
                 Ok(Val::Record(map, name))
             }
@@ -6647,14 +7437,26 @@ impl<'a> Interp<'a> {
                 }
                 Ok(Val::Array(std::rc::Rc::new(out)))
             }
-            // A `Map<String, V>` coerces (and thus validates) every value into
+            // A `Map<K, V>` coerces (and thus validates) every value into
             // `V` — the boundary re-validation for a predicated value type.
-            (Type::Map(_, val), Val::Map(pairs)) => {
-                let mut out = MapVal::default();
-                for (k, v) in pairs.pairs {
-                    out.insert(k, self.coerce(v, val)?);
+            // An EMPTY string-keyed value under an Int64-keyed type is a
+            // pre-upgrade `[:]` (RFC-0117): the boundary settles the variant.
+            (Type::Map(key, val), Val::Map(pairs)) => {
+                if pairs.is_empty() && crate::types::resolve(key, &self.type_map) == Type::Int {
+                    return Ok(Val::MapI(std::rc::Rc::new(MapIVal::default())));
                 }
-                Ok(Val::Map(out))
+                let mut out = MapVal::default();
+                for (k, v) in pairs.pairs.iter() {
+                    out.insert(k.clone(), self.coerce(v.clone(), val)?);
+                }
+                Ok(Val::Map(std::rc::Rc::new(out)))
+            }
+            (Type::Map(_, val), Val::MapI(pairs)) => {
+                let mut out = MapIVal::default();
+                for (k, v) in pairs.pairs.iter() {
+                    out.insert(*k, self.coerce(v.clone(), val)?);
+                }
+                Ok(Val::MapI(std::rc::Rc::new(out)))
             }
             // A function value flowing into a stored fn-typed slot (RFC-0037):
             // adopt the slot's signature. A lambda evaluated bare (in a storage
@@ -6776,21 +7578,72 @@ impl<'a> Interp<'a> {
             (
                 Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _),
                 Val::Array(items),
-            ) => match self.stamp_only(inner, d) {
+            ) => {
                 // The element type is decided ONCE and the scan is then a name
                 // compare per element. Asking the general question per element
                 // costs two hashed `types` lookups each, which on a 1,600-element
                 // row is most of the store.
-                Some(n) => items
-                    .iter()
-                    .all(|it| matches!(it, Val::Record(_, Some(m)) if **m == *n)),
-                None => items.iter().all(|it| self.coercion_is_noop(inner, it, d)),
-            },
+                let stamp = self.stamp_only(inner, d);
+                let scan = || match stamp {
+                    Some(n) => items
+                        .iter()
+                        .all(|it| matches!(it, Val::Record(_, Some(m)) if **m == *n)),
+                    None => items.iter().all(|it| self.coercion_is_noop(inner, it, d)),
+                };
+                // Even a name compare per element is a scan, and a parser asks
+                // this same question of the same buffer once per helper call —
+                // so an O(n) walk became O(n^2). `std/von`'s reader spent 3.1 s
+                // on a 1,600-element document against 0.055 s in its lexer, and
+                // the difference was this. Memoize the answer on the array's
+                // IDENTITY, the way `lineAt` memoizes its line-start table.
+                //
+                // Only for the two element types a parser's state actually
+                // carries: a stamped record (the token row) and a sized integer
+                // (the source bytes). `Array<Int64>` never reaches here —
+                // `coercion_is_identity` answered above — and an element type
+                // whose answer is not decided by the type alone is left to scan,
+                // because a memo that has to be re-proven is not a memo.
+                let key = match (&stamp, inner.as_ref()) {
+                    (Some(n), _) => Some(format!("r{n}")),
+                    (None, Type::IntN { bits, signed }) => Some(format!("i{bits}{signed}")),
+                    _ => None,
+                };
+                let Some(key) = key else { return scan() };
+                let ptr = std::rc::Rc::as_ptr(items) as usize;
+                let key = (ptr, key);
+                NOOP_ARRAYS.with(|c| {
+                    if let Some(w) = c.borrow().get(&key) {
+                        if w.upgrade()
+                            .is_some_and(|up| std::rc::Rc::as_ptr(&up) as usize == ptr)
+                        {
+                            return true;
+                        }
+                    }
+                    let ok = scan();
+                    if ok {
+                        let mut m = c.borrow_mut();
+                        // ponytail: bounded crudely, the same way `LINE_STARTS`
+                        // is — a program threads a handful of buffers, not
+                        // thousands.
+                        if m.len() > 64 {
+                            m.clear();
+                        }
+                        m.insert(key, std::rc::Rc::downgrade(items));
+                    }
+                    ok
+                })
+            }
             (Type::Option(inner), Val::Option(Some(p))) => self.coercion_is_noop(inner, p, d),
             (Type::Result(ok, err), Val::Result(is_ok, p)) => {
                 self.coercion_is_noop(if *is_ok { ok } else { err }, p, d)
             }
             (Type::Map(_, val), Val::Map(pairs)) => {
+                pairs.iter().all(|(_, x)| self.coercion_is_noop(val, x, d))
+            }
+            // An empty string-keyed `[:]` under an Int64-keyed type counts as
+            // a noop deliberately: every op upgrades it on first insert
+            // (RFC-0117), so nothing needs the conversion.
+            (Type::Map(_, val), Val::MapI(pairs)) => {
                 pairs.iter().all(|(_, x)| self.coercion_is_noop(val, x, d))
             }
             (Type::Record(fields), Val::Record(map, _)) => fields.iter().all(|f| {
@@ -7083,6 +7936,121 @@ mod tests {
         code_splice, lex_tokens, render_code, reserve_str, reserve_vec, CodePiece, Ctrl, Val,
     };
     use crate::run;
+
+    // ---- RFC-0114 §24/§45: the freshness witnesses ------------------------
+
+    /// The release machinery claims three expression forms ALWAYS answer a
+    /// fresh String allocation: `@str`, `@concat`, and String `+`. Three
+    /// mechanisms lean on that one claim — `own::str_temporary` (the caller
+    /// frees the temporary), the store's `fresh_str` exception (the old buffer
+    /// is released because the new one cannot be it), and both backends'
+    /// `free_str_temp`. Claimed the WRONG way — fresh when actually aliasing —
+    /// every one of them becomes a double free.
+    ///
+    /// So the claim is executed rather than asserted (the proof appendix's
+    /// §24, "witnessed instead of asserted"): build each form, evaluate it
+    /// against inputs whose `Rc` this test holds, and check the result's
+    /// allocation is not any input's. The classifier is asserted IN THE SAME
+    /// LOOP, so the claimed set and the witnessed set cannot drift apart.
+    ///
+    /// The GROW claim (`@push` hands back the receiver's allocation) is
+    /// deliberately not witnessed here: the interpreter's statement fast path
+    /// answers it with `Rc::make_mut`, whose identity depends on the count,
+    /// and the compiled behaviour is already pinned by `memory.rs`'s
+    /// `selfAppend` row on wasm.
+    #[test]
+    fn every_claimed_fresh_string_form_is_fresh() {
+        use crate::ast::{BinOp, Expr};
+        use std::rc::Rc;
+
+        let program = crate::parser::parse(
+            crate::lexer::lex("fn main() -> Int64 {\n    return 0\n}\n").unwrap(),
+        )
+        .unwrap();
+        let interp = super::new_interp(&program, &[]).unwrap();
+
+        let ra = Rc::new("left-".to_string());
+        let rb = Rc::new("right".to_string());
+        let mut frame = super::Frame::default();
+        frame.slots.push((
+            "a".to_string(),
+            super::Slot {
+                v: Val::Str(ra.clone()),
+                ty: None,
+            },
+        ));
+        frame.slots.push((
+            "b".to_string(),
+            super::Slot {
+                v: Val::Str(rb.clone()),
+                ty: None,
+            },
+        ));
+        let mut scope = vec![frame];
+
+        let var = |n: &str| Expr::Var {
+            name: n.to_string(),
+            line: 1,
+        };
+        let forms: Vec<(&str, Expr)> = vec![
+            (
+                "@concat",
+                Expr::Call {
+                    name: "@concat".to_string(),
+                    args: vec![var("a"), var("b")],
+                    line: 1,
+                },
+            ),
+            (
+                "String +",
+                Expr::Binary {
+                    op: BinOp::Add,
+                    lhs: Box::new(var("a")),
+                    rhs: Box::new(var("b")),
+                    line: 1,
+                },
+            ),
+            // `@str` of a String is the sharpest case: an identity shortcut
+            // here would be the natural optimization and the silent double
+            // free. The arm builds `Rc::new(scalar_to_string(..))` today, and
+            // this row is what keeps that true.
+            (
+                "@str",
+                Expr::Call {
+                    name: "@str".to_string(),
+                    args: vec![var("a")],
+                    line: 1,
+                },
+            ),
+        ];
+
+        for (what, e) in &forms {
+            assert!(
+                crate::own::str_temporary(e),
+                "{what}: `str_temporary` no longer claims this form — the claimed \
+                 set and this witness have drifted; update both together"
+            );
+            let got = interp
+                .expr(e, &mut scope)
+                .unwrap_or_else(|c| panic!("{what}: evaluation failed: {c:?}"));
+            let Val::Str(rs) = got else {
+                panic!("{what}: expected a String, got {got:?}")
+            };
+            assert!(
+                !Rc::ptr_eq(&rs, &ra) && !Rc::ptr_eq(&rs, &rb),
+                "{what}: the result ALIASES an input — the Alloc claim is false, \
+                 and freeing it as a temporary is a double free"
+            );
+        }
+
+        // And the classifier claims nothing else of the shapes nearby: a bare
+        // variable is a borrow of the binding, and freeing it would free the
+        // binding's own buffer.
+        assert!(
+            !crate::own::str_temporary(&var("a")),
+            "a variable read must never be claimed fresh"
+        );
+    }
 
     /// Run a single-source program that uses `toJson`, with `std/json` reachable.
     ///
@@ -7685,6 +8653,40 @@ mod tests {
                    let mut i = 0; while i < 5 { a.push(i); i = i + 1; } \
                    let mut s = 0; for x in a { s = s + x; } return s; }"; // 0+1+2+3+4
         assert_eq!(run(src).unwrap(), 10);
+    }
+
+    #[test]
+    fn method_tally_writes_back_in_place() {
+        // `m.tally(k, n);` as a statement takes the in-place fast path: distinct
+        // keys accumulate AND a repeated key adds, through the same slot.
+        let src = "fn main() -> Int64 { let mut m: Map<String, Int64> = [:]; \
+                   m.tally(\"a\", 2); m.tally(\"b\", 5); m.tally(\"a\", 3); \
+                   let n = match m[\"a\"] { Some(v) => v, None => 0 }; \
+                   return m.length * 100 + n; }"; // 2 keys, a=5
+        assert_eq!(run(src).unwrap(), 205);
+    }
+
+    #[test]
+    fn method_tally_bytes_writes_back_in_place() {
+        // The byte-keyed twin through the same fast path, with the buffer reused
+        // between calls exactly as a counting loop reuses it.
+        let src = "fn main() -> Int64 { let mut m: Map<String, Int64> = [:]; \
+                   let mut w: Array<UInt8> = []; w.push(65); \
+                   m.tallyBytes(w, 1); m.tallyBytes(w, 4); \
+                   w[0] = 66; m.tallyBytes(w, 7); \
+                   let n = match m[\"A\"] { Some(v) => v, None => 0 }; \
+                   return m.length * 100 + n; }"; // keys A,B; A=5
+        assert_eq!(run(src).unwrap(), 205);
+    }
+
+    #[test]
+    fn method_append_writes_back_and_self_append_uses_pre_state() {
+        // `xs.append(ys);` extends in place; `xs.append(xs)` appends the
+        // PRE-state elements (the compiled backends define it the same way).
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = [1, 2]; \
+                   let b: Array<Int64> = [3]; a.append(b); a.append(a); \
+                   return a.length * 100 + a[3] + a[5]; }"; // [1,2,3,1,2,3]: 600+1+3
+        assert_eq!(run(src).unwrap(), 604);
     }
 
     #[test]
@@ -9328,14 +10330,14 @@ mod tests {
     #[test]
     fn lambda_argument_runs() {
         let src =
-            format!("{TWICE}fn main() -> Int64 {{ return sum(twice([1, 2, 3], |x| x * 2)) }}");
+            format!("{TWICE}fn main() -> Int64 {{ return sum(twice([1, 2, 3], x -> x * 2)) }}");
         assert_eq!(run(&src).unwrap(), 12);
     }
 
     #[test]
     fn lambda_captures_by_read() {
         let src = format!(
-            "{TWICE}fn main() -> Int64 {{ let off = 10  return sum(twice([1, 2, 3], |x| x + off)) }}"
+            "{TWICE}fn main() -> Int64 {{ let off = 10  return sum(twice([1, 2, 3], x -> x + off)) }}"
         );
         assert_eq!(run(&src).unwrap(), 36);
     }
@@ -9353,8 +10355,8 @@ mod tests {
     fn passthrough_and_empty_array() {
         let src = format!(
             "{TWICE}fn outer(xs: Array<Int64>, g: fn(Int64) -> Int64) -> Array<Int64> {{ return twice(xs, g) }}\n\
-             fn main() -> Int64 {{ let e: Array<Int64> = []  let z = sum(outer(e, |x| x + 1))\n\
-             let bump = 5  return z + sum(outer([1, 2], |x| x + bump)) }}"
+             fn main() -> Int64 {{ let e: Array<Int64> = []  let z = sum(outer(e, x -> x + 1))\n\
+             let bump = 5  return z + sum(outer([1, 2], x -> x + bump)) }}"
         );
         // empty → 0; outer([1,2], +5) → [6,7] → 13.
         assert_eq!(run(&src).unwrap(), 13);
@@ -9366,7 +10368,7 @@ mod tests {
              let mut out: Array<U> = []  for x in xs { out.push(f(x)) }  return out }\n\
              fn main() -> Int64 {\n\
                  let ys: Array<Int64> = [1, 2, 3]\n\
-                 let zs = map(ys, |x| x * x)\n\
+                 let zs = map(ys, x -> x * x)\n\
                  let mut s = 0  for z in zs { s = s + z }  return s }";
         assert_eq!(run(src).unwrap(), 14);
     }
@@ -9375,7 +10377,7 @@ mod tests {
 
     #[test]
     fn stored_lambda_in_let_runs() {
-        let src = "fn main() -> Int64 { let g: fn(Int64) -> Int64 = |x| x * 2  return g(21) }";
+        let src = "fn main() -> Int64 { let g: fn(Int64) -> Int64 = x -> x * 2  return g(21) }";
         assert_eq!(run(src).unwrap(), 42);
     }
 
@@ -9383,7 +10385,7 @@ mod tests {
     fn stored_capture_survives_scope_exit() {
         // The capture is a by-value snapshot at the lambda's evaluation site —
         // it lives inside the value, so it survives the maker's return.
-        let src = "fn makeAdder(n: Int64) -> fn(Int64) -> Int64 { return |x| x + n }\n\
+        let src = "fn makeAdder(n: Int64) -> fn(Int64) -> Int64 { return x -> x + n }\n\
              fn main() -> Int64 { let add5 = makeAdder(5)  let add7 = makeAdder(7)\n\
              return add5(10) + add7(10) }";
         assert_eq!(run(src).unwrap(), 32);
@@ -9394,7 +10396,7 @@ mod tests {
         // Reassigning the captured binding after the literal is evaluated is
         // never observed (RFC-0023 capture timing, verbatim in storage).
         let src = "fn main() -> Int64 { let mut n = 1\n\
-             let f: fn() -> Int64 = || n\n\
+             let f: fn() -> Int64 = () -> n\n\
              n = 5\n\
              return f() }";
         assert_eq!(run(src).unwrap(), 1);
@@ -9405,14 +10407,14 @@ mod tests {
         let src = "type Ops = { plus: fn(Int64) -> Int64, minus: fn(Int64) -> Int64 }\n\
              fn main() -> Int64 {\n\
              let mut xs: Array<fn(Int64) -> Int64> = []\n\
-             xs.push(|x| x * 2)\n\
-             xs.push(|x| x + 100)\n\
+             xs.push(x -> x * 2)\n\
+             xs.push(x -> x + 100)\n\
              let mut s = 0\n\
              for f in xs { s = s + f(10) }\n\
-             let ops = Ops { plus: |x| x + 1, minus: |x| x - 1 }\n\
+             let ops = Ops { plus: x -> x + 1, minus: x -> x - 1 }\n\
              let p = ops.plus\n\
              let m = ops.minus\n\
-             let o: Option<fn(Int64) -> Int64> = Some(|x| x * x)\n\
+             let o: Option<fn(Int64) -> Int64> = Some(x -> x * x)\n\
              let q = match o { Some(f) => f(3), None => 0 }\n\
              return s + p(5) + m(5) + q }";
         // s = 20 + 110 = 130; p(5)=6; m(5)=4; q=9 → 149.
@@ -9425,7 +10427,7 @@ mod tests {
         // chain matches the RFC's surface: first Some(..) wins.
         let src = "type Middleware = fn(Int64) -> Option<Int64>\n\
              let mut chain: Array<Middleware> = []\n\
-             fn add(threshold: Int64) { chain.push(|x| if x > threshold { Some(x * 10) } else { None }) }\n\
+             fn add(threshold: Int64) { chain.push(x -> if x > threshold { Some(x * 10) } else { None }) }\n\
              fn runAll(x: Int64) -> Int64 {\n\
                  let mut hit = 0 - 1\n\
                  for m in chain {\n\
@@ -9453,7 +10455,7 @@ mod tests {
         // the (interp-dynamic / codegen-specialized) instance.
         let src = format!(
             "{TWICE}fn main() -> Int64 {{ let bump = 3\n\
-             let g: fn(Int64) -> Int64 = |x| x + bump\n\
+             let g: fn(Int64) -> Int64 = x -> x + bump\n\
              return sum(twice([1, 2, 3], g)) }}"
         );
         assert_eq!(run(&src).unwrap(), 15);
@@ -9463,7 +10465,7 @@ mod tests {
     fn stored_closure_reads_module_state_live() {
         // Module state is NOT captured — a read inside the body resolves live.
         let src = "let mut base: Int64 = 1\n\
-             fn main() -> Int64 { let f: fn() -> Int64 = || base\n\
+             fn main() -> Int64 { let f: fn() -> Int64 = () -> base\n\
              base = 41\n\
              return f() + 1 }";
         assert_eq!(run(src).unwrap(), 42);
@@ -9474,7 +10476,7 @@ mod tests {
         // A stored fn type mentioning `T` monomorphizes with the body: each
         // instantiation gets its own signature (and, in codegen, its own enum).
         let src = "fn relay<T>(x: T) -> T {\n\
-             let f: fn(T) -> T = |v| v\n\
+             let f: fn(T) -> T = v -> v\n\
              return f(x) }\n\
              fn main() -> Int64 {\n\
              let n = relay(41)\n\
@@ -9488,7 +10490,7 @@ mod tests {
     fn module_state_of_fn_type_with_init_order() {
         // A directly fn-typed module-state binding (RFC-0029 init order):
         // the initializer lambda is replaced at runtime; reads are live.
-        let src = "let mut cur: fn(Int64) -> Int64 = |x| x + 1\n\
+        let src = "let mut cur: fn(Int64) -> Int64 = x -> x + 1\n\
              fn dbl(n: Int64) -> Int64 { return n * 2 }\n\
              fn main() -> Int64 {\n\
              let before = cur(10)\n\
@@ -9505,7 +10507,7 @@ mod tests {
              let mut out: Array<U> = []  for x in xs { out.push(f(x)) }  return out }\n\
              fn main() -> Int64 {\n\
              let xs: Array<Int64> = [1, 2]\n\
-             let g: fn(Int64) -> Int64 = |x| x * 3\n\
+             let g: fn(Int64) -> Int64 = x -> x * 3\n\
              let ys = map(xs, g)\n\
              return ys[0] + ys[1] }";
         assert_eq!(run(src).unwrap(), 9);
@@ -9513,7 +10515,7 @@ mod tests {
 
     #[test]
     fn trap_inside_stored_closure_has_canonical_wording() {
-        let src = "fn main() -> Int64 { let f: fn(Int64) -> Int64 = |x| 10 / x\n\
+        let src = "fn main() -> Int64 { let f: fn(Int64) -> Int64 = x -> 10 / x\n\
              return f(0) }";
         let err = run(src).unwrap_err();
         assert!(err.contains("division by zero"), "{err}");
@@ -9523,7 +10525,7 @@ mod tests {
     fn stored_lambda_coerces_arguments_to_signature_types() {
         // The declared slot type supplies the parameter coercions: a UInt8
         // parameter wraps exactly as a named callee's would.
-        let src = "fn main() -> Int64 { let f: fn(UInt8) -> Int64 = |b| Int64(b + 200)\n\
+        let src = "fn main() -> Int64 { let f: fn(UInt8) -> Int64 = b -> Int64(b + 200)\n\
              return f(100) }";
         // 100 + 200 wraps at the UInt8 parameter's width: 300 & 0xFF = 44.
         assert_eq!(run(src).unwrap(), 44);
@@ -9635,7 +10637,7 @@ mod tests {
     const LMAP: &str = "fn lmap<T, U>(s: Stream<T>, f: fn(T) -> U) -> Stream<U> { \
                         let a = boxStream(s) \
                         let g: fn(T) -> U = f \
-                        let step: fn(Int64, Int64, Bool) -> Option<U> = |sl, gn, cl| { \
+                        let step: fn(Int64, Int64, Bool) -> Option<U> = (sl, gn, cl) -> { \
                         if cl { let src: Stream<T> = unboxStream(a) close(src) return None } \
                         let x: Option<T> = pullAt(a) \
                         if let Some(v) = x { return Some(g(v)) } return None } \

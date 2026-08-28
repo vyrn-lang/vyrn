@@ -130,6 +130,11 @@ use Why::*;
 const CENSUS: &[(&str, Why, &str)] = &[
     // ---- Memory: the allocator and the containers standing on it ------------
     ("@push", Memory, "Array: append, reallocating"),
+    ("@reserve", Memory, "Array (RFC-0115): capacity for n more, one realloc"),
+    ("@append", Memory, "Array (RFC-0115): bulk copy of a heapless source, one growth"),
+    ("@copyFrom", Memory, "Array (RFC-0115): overwrite in place, reusing the buffer"),
+    ("@tally", Memory, "Map (RFC-0116): insert-or-add in one probe"),
+    ("@tallyBytes", Memory, "Map (RFC-0116): tally keyed by raw bytes; the key exists only on a miss"),
     ("@at", Memory, "Array: indexed read; also traps out of bounds"),
     ("@list", Memory, "a fixed and a growable array share one representation"),
     ("@toArray", Memory, "SmallArray (RFC-0056): copy the inline/spilled buffer out"),
@@ -197,11 +202,16 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("readFile", Syscall, "path_open + fd_read"),
     ("readFileBytes", Syscall, "path_open + fd_read, unvalidated"),
     ("writeFile", Syscall, "path_open + fd_write"),
+    // RFC-0111. Both are syscalls for the same reason every other row here
+    // is: nothing in Vyrn can hand bytes to a descriptor. `writeStdout` is
+    // the only output builtin with no result, which it shares with `print`.
+    ("writeFileBytes", Syscall, "path_open + fd_write, unvalidated"),
+    ("writeStdout", Syscall, "fd_write on stdout, unvalidated"),
     ("renameFile", Syscall, "path_rename"),
     ("fsyncFile", Syscall, "fd_sync"),
     ("listDir", Syscall, "fd_readdir"),
     // ---- Representation: a view, not an operation ---------------------------
-    ("bytes", View, "String -> Array<UInt8>: what all four runtime modules stand on"),
+    ("bytes", View, "String -> Array<UInt8>, whole or a byte range: what all four runtime modules stand on"),
     ("stringFromBytes", View, "the only Array<UInt8> -> String construction there is"),
     ("floatBits", View, "RFC-0078 M4a: i64.reinterpret_f64, one instruction"),
     ("floatFromBits", View, "RFC-0078 M4a: the other direction"),
@@ -554,7 +564,25 @@ fn the_census_is_the_code() {
     // both rows were a second spelling of something the language already had.
     // `push` and `at` stayed, under the unspellable names `@push` and `@at`,
     // because the method and index forms need them.
-    assert_eq!(found.len(), 89, "the primitive core changed size");
+    //
+    // 89 -> 91 for RFC-0111's `writeFileBytes` and `writeStdout`. Both are new
+    // CAPABILITY and not a second spelling: before them a program could compute
+    // bytes that are not text and had no way to emit them, which is why
+    // `mandelbrot-200.expected` sat in the corpus with no program beside it.
+    //
+    // 91 -> 94 for RFC-0115's `@reserve`, `@append` and `@copyFrom`. Capacity
+    // is genuinely unspellable from inside the language — no composition of
+    // `push` can ask the allocator for room ahead of time; a bulk append that
+    // grows at most once is the same fact stated for `n` elements; and an
+    // overwrite that KEEPS the buffer cannot be said either, because every
+    // store keeps the length and `append` only grows.
+    //
+    // 94 -> 96 for RFC-0116's `@tally` and `@tallyBytes`: a read-then-store
+    // is two probes by construction, and no composition can make the find
+    // answer for both; and no composition can probe a map WITHOUT building
+    // the String key first — the whole point of the byte-keyed form is that
+    // the key exists only on a miss.
+    assert_eq!(found.len(), 96, "the primitive core changed size");
 }
 
 /// The fourth engine, and nothing asked it anything until now (RFC-0094 M1).

@@ -39,7 +39,7 @@
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
 import { hasRelease, releaseTag, releaseDate, releasePre, releaseUrl, releaseUrlOf, exampleCount, stdCount, backendCount } from "../repo"
-import { Release, ArrivalRow, releaseRows, arrivalList, days, testBlockCount, testFileCount } from "../history"
+import { Release, releaseRows, days, testBlockCount, testFileCount } from "../history"
 import { feedName } from "../feed"
 import { indexOf } from "std/strings"
 
@@ -101,21 +101,6 @@ fn eyebrow() -> String {
     return "Releases · " + kindOf(releaseTag())
 }
 
-/// The design records that arrived after the tag, newest first. `arrivalList`
-/// is oldest first, so this walks it backwards.
-fn sinceRows() -> Array<ArrivalRow> {
-    let all = arrivalList()
-    let mut out: Array<ArrivalRow> = []
-    let mut i = all.length - 1
-    while i >= 0 {
-        if all[i].date > releaseDate() {
-            out.push(ArrivalRow { tag: all[i].tag.copy(), date: all[i].date.copy(), band: all[i].band.copy() })
-        }
-        i = i - 1
-    }
-    return out
-}
-
 /// Every release, newest first — the table's own order, which is the order a
 /// reader looks for the current one in.
 fn releasesNewestFirst() -> Array<Release> {
@@ -159,10 +144,6 @@ fn kindOf(tag: String) -> String {
                     <div><dt>Examples</dt><dd>{{ exampleCount() }}<small>on {{ backendCount() }} engines each</small></dd></div>
                     <div><dt>Standard library</dt><dd>{{ stdCount() }}<small>modules, in Vyrn</small></dd></div>
                 </dl>
-                <p class="eyebrow">Design records since the tag</p>
-                <ul class="twocol">
-                    <li v-for="r in sinceRows()" :key="r.tag"><strong>{{ r.tag }}</strong> <span class="dim">{{ r.band }}</span></li>
-                </ul>
             </div>
         </section>
 
@@ -170,7 +151,7 @@ fn kindOf(tag: String) -> String {
             <p class="eyebrow">Every release</p>
             <div class="scroller">
                 <table>
-                    <thead><tr><th>Version</th><th>Tagged</th><th>Kind</th><th>Archives</th></tr></thead>
+                    <thead><tr><th scope="col">Version</th><th scope="col">Tagged</th><th scope="col">Kind</th><th scope="col">Archives</th></tr></thead>
                     <tbody>
                         <tr v-for="r in releasesNewestFirst()" :key="r.tag">
                             <td><code>{{ r.tag }}</code></td>
@@ -192,7 +173,7 @@ fn kindOf(tag: String) -> String {
             <ul class="plain">
                 <li><strong>The installers take the newest release</strong><span>Pin another with <code>VYRN_VERSION</code>.</span></li>
                 <li><strong>Every example runs on three engines</strong><span>Byte for byte, on every push.</span></li>
-                <li><strong>Verified, not stable</strong><span>Every change is argued in a design record in <code>rfcs/</code>, and the parity harness runs before a tag is cut.</span></li>
+                <li><strong>Verified, not stable</strong><span>The parity harness runs before a tag is cut.</span></li>
             </ul>
         </section>
 </main>

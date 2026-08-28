@@ -347,7 +347,11 @@ export fn padEnd(s: String, len: Int64, fill: String) -> String {
 /// `.toString()` is decimal-only, so hex is built nibble-by-nibble via the
 /// bitwise ops (RFC-0045).
 export fn toHex(n: UInt64) -> String {
-    let db = bytes("0123456789abcdef")
+    // Indexed as a String, not materialised with `bytes()`. `bytes()` builds a
+    // fresh 16-element array on every call, and an ETag is computed per HTTP
+    // response, so that array was allocated once per response for sixteen
+    // constant bytes. A String index reads the byte in place.
+    let db = "0123456789abcdef"
     let mut out: Array<UInt8> = []
     let mut sh: UInt64 = 60
     let mut going = true
@@ -431,4 +435,14 @@ export fn editDistance(a: String, b: String) -> Int64 {
         r = r + 1
     }
     return d[n * w + m]
+}
+
+test "toHex writes sixteen zero-padded nibbles, low byte last" {
+    // Pins the output so the table this reads can be changed without changing
+    // what a caller sees. An ETag is one of these, so a drift here is a cache
+    // key that stops matching itself.
+    assertEq(toHex(0), "0000000000000000")
+    assertEq(toHex(1), "0000000000000001")
+    assertEq(toHex(255), "00000000000000ff")
+    assertEq(toHex(4886718345), "0000000123456789")
 }

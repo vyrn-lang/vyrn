@@ -106,6 +106,26 @@
         "command": "vyrn.dev",
         "title": "Vyrn: Run Dev Server",
         "category": "Vyrn"
+      },
+      {
+        "command": "vyrn.bench",
+        "title": "Vyrn: Run Bench",
+        "category": "Vyrn"
+      },
+      {
+        "command": "vyrn.benchAll",
+        "title": "Vyrn: Run All Benches",
+        "category": "Vyrn"
+      },
+      {
+        "command": "vyrn.profile",
+        "title": "Vyrn: Profile File",
+        "category": "Vyrn"
+      },
+      {
+        "command": "vyrn.profileTests",
+        "title": "Vyrn: Profile Tests",
+        "category": "Vyrn"
       }
     ],
     "configuration": {

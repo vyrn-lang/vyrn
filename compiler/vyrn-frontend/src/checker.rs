@@ -227,6 +227,8 @@ pub const RESERVED: &[&str] = &[
     "readLine",
     "readFile",
     "writeFile",
+    "writeFileBytes",
+    "writeStdout",
     "renameFile",
     "fsyncFile",
     "readFileBytes",
@@ -1001,6 +1003,8 @@ fn check_accum_inner(
         in_test: RefCell::new(false),
         in_bench: RefCell::new(false),
         in_gen: RefCell::new(false),
+        here: RefCell::new(None),
+        shadows: program.surface_shadows.clone(),
         stmt_line: RefCell::new(0),
         extern_fns: &extern_fns,
         gen_fns: &gen_fns,
@@ -1128,6 +1132,7 @@ fn check_accum_inner(
         // Signature validation (params/return) runs outside `function()`, so make
         // it gen-aware here too — a `Code` type in a `gen fn` signature is legal.
         *checker.in_gen.borrow_mut() = f.is_gen;
+        *checker.here.borrow_mut() = f.module.clone();
         let r = (|| -> Result<(), Diagnostic> {
             for p in &f.params {
                 // A function-value type is legal only on an ordinary function
@@ -1660,6 +1665,22 @@ struct Checker<'a> {
     /// which is also what keeps them out of any backend (gen fn bodies are never
     /// emitted).
     in_gen: RefCell<bool>,
+    /// The module whose body is being checked right now (RFC-0054, corrected).
+    ///
+    /// It exists for ONE question: is a call to `render`/`rawAt`/`raw`/`lex` the
+    /// builtin, or a function of that name this module can see? The four are
+    /// unreserved on purpose, so the answer depends on whose declarations are in
+    /// view — and the old test asked the LINKED PROGRAM, which is a different
+    /// question with a much wider answer. A `fn raw` in any module took the
+    /// builtin away from every module, `std/vyx` included.
+    ///
+    /// The answer itself is [`ast::Program::surface_shadows`], which the loader
+    /// fills: only it sees the `import` lists, and an imported `render` shadows
+    /// just as surely as a declared one.
+    ///
+    /// `None` is the root module, which is how the loader spells it.
+    here: RefCell<Option<String>>,
+    shadows: std::collections::HashSet<(Option<String>, String)>,
     /// The line of the statement currently being checked (best effort). The
     /// literal `Expr` variants carry no line of their own, so a range error on
     /// one (`let x: Int8 = 300`) would otherwise report line 0; this is the
@@ -2110,8 +2131,8 @@ impl<'a> Checker<'a> {
         if let (Type::Result(a, e1), Type::Result(b, e2)) = (from, to) {
             return self.assignable_d(a, b, depth + 1) && self.assignable_d(e1, e2, depth + 1);
         }
-        // A Map is covariant in its value type (keys are always String; values
-        // are immutable at a read boundary) — RFC-0028.
+        // A Map is covariant in its value type (keys recurse the same way;
+        // values are immutable at a read boundary) — RFC-0028.
         if let (Type::Map(ka, va), Type::Map(kb, vb)) = (from, to) {
             return self.assignable_d(ka, kb, depth + 1) && self.assignable_d(va, vb, depth + 1);
         }
@@ -2524,18 +2545,31 @@ impl<'a> Checker<'a> {
                 }
                 self.ensure_type_exists(inner, line)?
             }
-            // `Map<String, V>` (RFC-0028): keys are `String` in v1. A validated
-            // string type is a legal key (it resolves to `String`); any other
-            // key spelling is rejected here with the named diagnostic.
+            // `Map<K, V>` (RFC-0028, RFC-0117): a key is `String` or `Int64`
+            // today. A validated string type is a legal key (it resolves to
+            // `String`). Floats are refused BY NAME — `NaN != NaN` breaks the
+            // reflexivity a key needs, and `+0.0 == -0.0` hash-equal is a trap
+            // either way; a program that wants float keys must make that
+            // decision explicitly. The other scalars and user `Hashable` types
+            // are RFC-0117 M2's, where the declared-K coercion machinery they
+            // need exists for both.
             Type::Map(key, val) => {
                 self.ensure_type_exists(key, line)?;
                 self.ensure_type_exists(val, line)?;
-                if crate::types::resolve(key, self.types) != Type::Str {
-                    return Err(cerr!(
-                        line,
-                        "a `Map` key must be `String` in v1, found `{key}` \
-                         (RFC-0028; validated string types are allowed)"
-                    ));
+                match crate::types::resolve(key, self.types) {
+                    Type::Str | Type::Int => {}
+                    Type::Float | Type::Float32 => {
+                        return Err(cerr!(
+                            line,
+                            "a `Map` key must hash and compare by equality, and `{key}` does neither well: `NaN != NaN`, and `+0.0 == -0.0` would hash apart (RFC-0117 refuses float keys by name)"
+                        ));
+                    }
+                    _ => {
+                        return Err(cerr!(
+                            line,
+                            "a `Map` key is `String` or `Int64` today, found `{key}` (RFC-0117 M1; the other `Hashable` scalars and user types follow in M2)"
+                        ));
+                    }
                 }
             }
             // A generic parameter is always valid in the context the parser
@@ -3414,14 +3448,18 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 // `m[k] = v` on a Map (RFC-0028) inserts or updates in place: the
-                // key coerces to `String`, the value to `V` (auto-validated when
-                // `V` is predicated, exactly like an array element store).
-                if let Type::Map(_, val) = self.base(&b.ty) {
-                    let k = self.base(&self.expr(index, scope, Some(&Type::Str), Some(ret))?);
-                    if !matches!(k, Type::Err) && crate::types::resolve(&k, self.types) != Type::Str
-                    {
-                        return Err(cerr!(line, "a map key must be a String, found {k}"));
+                // key coerces to the map's key type `K` (RFC-0117), the value to
+                // `V` (auto-validated when `V` is predicated, exactly like an
+                // array element store).
+                if let Type::Map(key, val) = self.base(&b.ty) {
+                    let k = self.base(&self.expr(index, scope, Some(&key), Some(ret))?);
+                    if !matches!(k, Type::Err) && !self.coercible(&k, &key) {
+                        return Err(cerr!(
+                            line,
+                            "`{name}` is keyed by {key}, but the key here is {k}"
+                        ));
                     }
+                    self.prove_coercion(index, &key, *line)?;
                     let vty = self.expr(value, scope, Some(&val), Some(ret))?;
                     if !self.coercible(&vty, &val) {
                         return Err(cerr!(
@@ -4654,8 +4692,11 @@ impl<'a> Checker<'a> {
                 };
                 for (i, (k, v)) in entries.iter().enumerate() {
                     let kt = self.expr(k, scope, Some(&key_ty), fn_ret)?;
-                    if crate::types::resolve(&self.base(&kt), self.types) != Type::Str {
-                        return Err(cerr!(line, "a map key must be a String, found {kt}"));
+                    if !self.coercible(&self.base(&kt), &key_ty) {
+                        return Err(cerr!(
+                            line,
+                            "the map is keyed by {key_ty}, but this key is {kt}"
+                        ));
                     }
                     self.prove_coercion(k, &key_ty, *line)?;
                     self.prove_string_interpolation(k, &key_ty, scope, fn_ret, *line)?;
@@ -4690,7 +4731,7 @@ impl<'a> Checker<'a> {
                 line,
                 "a lambda `|..|` needs a function type from context: \
                  pass it to a `fn`-typed parameter, or give the binding a function \
-                 type (e.g. `let f: fn(Int64) -> Int64 = |x| x * 2`) (RFC-0037)"
+                 type (e.g. `let f: fn(Int64) -> Int64 = x -> x * 2`) (RFC-0037)"
             )),
         }
     }
@@ -6240,7 +6281,7 @@ impl<'a> Checker<'a> {
         }
         // built-in log methods: <level>(Logger, String) -> Unit. Written
         // subject-first via method sugar: `log.info("..")`.
-        if matches!(name, "trace" | "debug" | "info" | "warn" | "error") {
+        if crate::ast::is_log_level(name) {
             if args.len() != 2 {
                 return Err(cerr!(
                     line,
@@ -6444,10 +6485,16 @@ impl<'a> Checker<'a> {
         // are the surface builtins.
         // The surface builtins (`render`/`rawAt`/`raw`/`lex`) are common words, so
         // they are NOT reserved: a user function or binding of the same name wins
-        // (resolved below), and the builtin only applies when nothing shadows it.
-        // The `@`-prefixed desugar names are unspellable, so always intercepted.
-        let is_surface_builtin = matches!(name, "render" | "rawAt" | "raw" | "lex")
-            && self.sigs.get(name).is_none()
+        // and the builtin only applies when nothing shadows it. The `@`-prefixed
+        // desugar names are unspellable, so always intercepted.
+        //
+        // SHADOWED BY WHOM. This asked `self.sigs`, the linked program's flat
+        // table, so one module's `fn raw` disabled the builtin for every module
+        // in the program — including `std/vyx`, which neither imports it nor can
+        // see it. It asks this module now, which is what RFC-0054's wording
+        // always described.
+        let is_surface_builtin = crate::ast::is_surface_builtin(name)
+            && !self.shadows_here(name)
             && self.lookup(scope, name).is_none();
         if matches!(name, "@codeText" | "@codeSplice") || is_surface_builtin {
             if !*self.in_gen.borrow() {
@@ -6558,6 +6605,73 @@ impl<'a> Checker<'a> {
                 }
             }
             return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
+        }
+        // RFC-0111: the byte sink. `writeFile` for bytes that are not text —
+        // same create/truncate/write-all, same `Result<Bool, String>`, same
+        // canonical `@.io.writeerr` wording. It exists because a Vyrn `String`
+        // cannot hold a NUL or invalid UTF-8, so a program could compute a
+        // binary artifact and have no way to emit it.
+        if name == "writeFileBytes" {
+            if args.len() != 2 {
+                return Err(cerr!(
+                    line,
+                    "`writeFileBytes` takes 2 arguments (path, bytes), got {}",
+                    args.len()
+                ));
+            }
+            let p = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
+            if matches!(p, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if p != Type::Str {
+                return Err(cerr!(
+                    line,
+                    "`writeFileBytes` needs a String path, found {p}"
+                ));
+            }
+            let want = Type::Array(Box::new(Type::IntN {
+                bits: 8,
+                signed: false,
+            }));
+            let b = self.base(&self.expr(&args[1], scope, Some(&want), fn_ret)?);
+            if matches!(b, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if b != want {
+                return Err(cerr!(
+                    line,
+                    "`writeFileBytes` needs an Array<UInt8>, found {b}"
+                ));
+            }
+            return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
+        }
+        // RFC-0111: `print` for bytes. No result, for `print`'s reason — a
+        // write to a closed stdout is not a condition a Vyrn program can act
+        // on, and inventing one here would make the two output builtins
+        // disagree about whether output can fail.
+        if name == "writeStdout" {
+            if args.len() != 1 {
+                return Err(cerr!(
+                    line,
+                    "`writeStdout` takes 1 argument, got {}",
+                    args.len()
+                ));
+            }
+            let want = Type::Array(Box::new(Type::IntN {
+                bits: 8,
+                signed: false,
+            }));
+            let b = self.base(&self.expr(&args[0], scope, Some(&want), fn_ret)?);
+            if matches!(b, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if b != want {
+                return Err(cerr!(
+                    line,
+                    "`writeStdout` needs an Array<UInt8>, found {b}"
+                ));
+            }
+            return Ok(Type::Unit);
         }
         // RFC-0044: atomically move `from` over `to` (the host primitive behind
         // `writeAtomic`). Same error shape as `writeFile` — `Result<Bool, String>`
@@ -6715,9 +6829,23 @@ impl<'a> Checker<'a> {
         // M2; `stringFromBytes` is the fallible inverse). `chars` was its pair
         // until M2; it is `std/text`'s declaration now, and `bytes` stays because
         // it is the VIEW every runtime module stands on (`prelude::lends`).
+        // `bytes(s)` — the whole string. `bytes(s, start, end)` — a byte range of
+        // it, half-open, and the reason the second form exists is measured
+        // (RFC-0113): copying a range a byte at a time in Vyrn cost 19.6 µs
+        // where this costs 1.0 µs, and `std/strpred`'s `slice` doing exactly
+        // that was 57 per cent of the site build.
+        //
+        // It does NOT check character boundaries. `bytes` answers BYTES, and a
+        // caller asking for bytes 3..7 of a string means those bytes; `slice` is
+        // the one that cares about characters and checks before it calls. Out of
+        // range still traps, with the wording `s[i]` already uses.
         if name == "bytes" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "`bytes` takes 1 argument, got {}", args.len()));
+            if args.len() != 1 && args.len() != 3 {
+                return Err(cerr!(
+                    line,
+                    "`bytes` takes 1 argument, or 3 with a byte range, got {}",
+                    args.len()
+                ));
             }
             let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
             if matches!(t, Type::Err) {
@@ -6725,6 +6853,12 @@ impl<'a> Checker<'a> {
             }
             if t != Type::Str {
                 return Err(cerr!(line, "`bytes` needs a String, found {t}"));
+            }
+            for a in args.iter().skip(1) {
+                let n = self.base(&self.expr(a, scope, Some(&Type::Int), fn_ret)?);
+                if !matches!(n, Type::Err) && n != Type::Int {
+                    return Err(cerr!(line, "`bytes` needs Int64 offsets, found {n}"));
+                }
             }
             return Ok(Type::Array(Box::new(Type::IntN {
                 bits: 8,
@@ -6828,6 +6962,194 @@ impl<'a> Checker<'a> {
             return Ok(Type::Option(Box::new(Type::Int)));
         }
 
+        // `xs.reserve(n)` / `xs.append(ys)` (RFC-0115). Growable `Array` only:
+        // a `SmallArray`'s capacity is part of its type and a fixed array has
+        // none to grow. `append` is a byte copy of the source's elements in
+        // the compiled backends, so an element type that owns heap is refused
+        // — copying such an element by bytes would give two arrays one buffer.
+        if name == "@reserve" {
+            if args.len() != 2 {
+                return Err(cerr!(
+                    line,
+                    "`reserve` takes 2 arguments, got {}",
+                    args.len()
+                ));
+            }
+            let at = self.expr(&args[0], scope, None, fn_ret)?;
+            match self.base(&at) {
+                Type::Array(_) => {}
+                Type::Err => return Ok(Type::Err),
+                other => {
+                    return Err(cerr!(
+                        line,
+                        "`reserve` needs a growable Array as its receiver, found {other}"
+                    ))
+                }
+            }
+            let n = self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?;
+            if !self.coercible(&n, &Type::Int) {
+                return Err(cerr!(line, "`reserve` count is {n}, not an Int64"));
+            }
+            return Ok(at);
+        }
+        // `m.tally(k, n)` (RFC-0116): one probe where a read-then-store made
+        // two. `Int64` values only — the add is the operation, and the
+        // signature can spell it for no other value type.
+        if name == "@tally" {
+            if args.len() != 3 {
+                return Err(cerr!(line, "`tally` takes 3 arguments, got {}", args.len()));
+            }
+            let at = self.expr(&args[0], scope, None, fn_ret)?;
+            let key_ty = match self.base(&at) {
+                Type::Map(k, v) if matches!(self.base(&v), Type::Int) => (*k).clone(),
+                Type::Err => return Ok(Type::Err),
+                Type::Map(_, v) => {
+                    return Err(cerr!(
+                        line,
+                        "`tally` counts Int64 values, and this map holds {v}"
+                    ))
+                }
+                other => {
+                    return Err(cerr!(
+                        line,
+                        "`tally` needs a Map<K, Int64> as its receiver, found {other}"
+                    ))
+                }
+            };
+            let k = self.expr(&args[1], scope, Some(&key_ty), fn_ret)?;
+            if !self.coercible(&k, &key_ty) {
+                return Err(cerr!(
+                    line,
+                    "the map is keyed by {key_ty}, but the `tally` key is {k}"
+                ));
+            }
+            self.prove_coercion(&args[1], &key_ty, line)?;
+            let n = self.expr(&args[2], scope, Some(&Type::Int), fn_ret)?;
+            if !self.coercible(&n, &Type::Int) {
+                return Err(cerr!(line, "`tally` count is {n}, not an Int64"));
+            }
+            return Ok(at);
+        }
+        // `m.tallyBytes(w, n)` (RFC-0116): `tally` keyed by raw bytes.
+        if name == "@tallyBytes" {
+            if args.len() != 3 {
+                return Err(cerr!(
+                    line,
+                    "`tallyBytes` takes 3 arguments, got {}",
+                    args.len()
+                ));
+            }
+            let at = self.expr(&args[0], scope, None, fn_ret)?;
+            match self.base(&at) {
+                Type::Map(k, v) if matches!(self.base(&v), Type::Int) => {
+                    // Bytes become a String, so only a String-keyed map can
+                    // take them — an Int64-keyed map has `tally` (RFC-0117).
+                    if crate::types::resolve(&k, self.types) != Type::Str {
+                        return Err(cerr!(
+                            line,
+                            "`tallyBytes` builds a String key, and this map is keyed by {k} — use `tally` with the key itself"
+                        ));
+                    }
+                }
+                Type::Err => return Ok(Type::Err),
+                Type::Map(_, v) => {
+                    return Err(cerr!(
+                        line,
+                        "`tallyBytes` counts Int64 values, and this map holds {v}"
+                    ))
+                }
+                other => {
+                    return Err(cerr!(
+                        line,
+                        "`tallyBytes` needs a Map<String, Int64> as its receiver, found {other}"
+                    ))
+                }
+            }
+            let want = Type::Array(Box::new(Type::IntN {
+                bits: 8,
+                signed: false,
+            }));
+            let w = self.expr(&args[1], scope, Some(&want), fn_ret)?;
+            if !self.coercible(&w, &want) {
+                return Err(cerr!(line, "`tallyBytes` key is {w}, not an Array<UInt8>"));
+            }
+            let n = self.expr(&args[2], scope, Some(&Type::Int), fn_ret)?;
+            if !self.coercible(&n, &Type::Int) {
+                return Err(cerr!(line, "`tallyBytes` count is {n}, not an Int64"));
+            }
+            return Ok(at);
+        }
+        if name == "@copyFrom" {
+            if args.len() != 2 {
+                return Err(cerr!(
+                    line,
+                    "`copyFrom` takes 2 arguments, got {}",
+                    args.len()
+                ));
+            }
+            let at = self.expr(&args[0], scope, None, fn_ret)?;
+            let elem = match self.base(&at) {
+                Type::Array(inner) => (*inner).clone(),
+                Type::Err => return Ok(Type::Err),
+                other => {
+                    return Err(cerr!(
+                        line,
+                        "`copyFrom` needs a growable Array as its receiver, found {other}"
+                    ))
+                }
+            };
+            let want = Type::Array(Box::new(elem.clone()));
+            let xs = self.expr(&args[1], scope, Some(&want), fn_ret)?;
+            if !self.coercible(&xs, &want) {
+                return Err(cerr!(
+                    line,
+                    "`copyFrom` source is {xs} but the receiver holds {elem} elements"
+                ));
+            }
+            if crate::own::owns_heap(&elem, &self.types) {
+                return Err(cerr!(
+                    line,
+                    "`copyFrom` overwrites the receiver's elements by bytes, and `{elem}` owns heap — the overwritten elements would never be released"
+                ));
+            }
+            return Ok(at);
+        }
+        if name == "@append" {
+            if args.len() != 2 {
+                return Err(cerr!(
+                    line,
+                    "`append` takes 2 arguments, got {}",
+                    args.len()
+                ));
+            }
+            let at = self.expr(&args[0], scope, None, fn_ret)?;
+            let elem = match self.base(&at) {
+                Type::Array(inner) => (*inner).clone(),
+                Type::Err => return Ok(Type::Err),
+                other => {
+                    return Err(cerr!(
+                        line,
+                        "`append` needs a growable Array as its receiver, found {other}"
+                    ))
+                }
+            };
+            let want = Type::Array(Box::new(elem.clone()));
+            let xs = self.expr(&args[1], scope, Some(&want), fn_ret)?;
+            if !self.coercible(&xs, &want) {
+                return Err(cerr!(
+                    line,
+                    "`append` source is {xs} but the receiver holds {elem} elements"
+                ));
+            }
+            if crate::own::owns_heap(&elem, &self.types) {
+                return Err(cerr!(
+                    line,
+                    "`append` copies its source's elements by bytes, and `{elem}` owns heap — push each element with `.copy()` in a loop instead"
+                ));
+            }
+            return Ok(at);
+        }
+
         // Growable arrays. `[]` builds one, `xs.push(v)` (`@push`) appends and
         // `xs[i]` (`@at`) reads an element; `xs.length` is a field access, so it
         // never arrives here at all.
@@ -6911,16 +7233,21 @@ impl<'a> Checker<'a> {
                     return Ok(t);
                 }
             }
-            // `m[k]` on a Map (RFC-0028): the key coerces to `String` and the
-            // result is `Option<V>` (a missing key is `None`, never a trap).
-            if let Type::Map(_, val) = self.base(&at) {
-                let k = self.base(&self.expr(&args[1], scope, Some(&Type::Str), fn_ret)?);
+            // `m[k]` on a Map (RFC-0028): the key coerces to the map's key type
+            // `K` (RFC-0117) and the result is `Option<V>` (a missing key is
+            // `None`, never a trap).
+            if let Type::Map(key, val) = self.base(&at) {
+                let k = self.base(&self.expr(&args[1], scope, Some(&key), fn_ret)?);
                 if matches!(k, Type::Err) {
                     return Ok(Type::Err);
                 }
-                if crate::types::resolve(&k, self.types) != Type::Str {
-                    return Err(cerr!(line, "a map key must be a String, found {k}"));
+                if !self.coercible(&k, &key) {
+                    return Err(cerr!(
+                        line,
+                        "the map is keyed by {key}, but the key here is {k}"
+                    ));
                 }
+                self.prove_coercion(&args[1], &key, line)?;
                 return Ok(Type::Option(val));
             }
             let elem = match self.base(&at) {
@@ -7282,8 +7609,8 @@ impl<'a> Checker<'a> {
         if name == "@has" || name == "@remove" || name == "@keys" {
             let op = &name[1..];
             let mt = self.expr(&args[0], scope, None, fn_ret)?;
-            let val = match self.base(&mt) {
-                Type::Map(_, v) => (*v).clone(),
+            let key_ty = match self.base(&mt) {
+                Type::Map(k, _) => (*k).clone(),
                 Type::Err => return Ok(Type::Err),
                 other => {
                     return Err(cerr!(
@@ -7292,14 +7619,13 @@ impl<'a> Checker<'a> {
                     ))
                 }
             };
-            let _ = val;
             if name == "@keys" {
                 if args.len() != 1 {
                     return Err(cerr!(line, "`keys` takes no arguments"));
                 }
-                return Ok(Type::Array(Box::new(Type::Str)));
+                return Ok(Type::Array(Box::new(key_ty)));
             }
-            // `has(k)` / `remove(k)` take one String key.
+            // `has(k)` / `remove(k)` take one key of the map's key type.
             if args.len() != 2 {
                 return Err(cerr!(line, "`{op}` takes 1 argument (a key)"));
             }
@@ -7322,10 +7648,14 @@ impl<'a> Checker<'a> {
                     ));
                 }
             }
-            let k = self.base(&self.expr(&args[1], scope, Some(&Type::Str), fn_ret)?);
-            if !matches!(k, Type::Err) && crate::types::resolve(&k, self.types) != Type::Str {
-                return Err(cerr!(line, "a map key must be a String, found {k}"));
+            let k = self.base(&self.expr(&args[1], scope, Some(&key_ty), fn_ret)?);
+            if !matches!(k, Type::Err) && !self.coercible(&k, &key_ty) {
+                return Err(cerr!(
+                    line,
+                    "the map is keyed by {key_ty}, but the key here is {k}"
+                ));
             }
+            self.prove_coercion(&args[1], &key_ty, line)?;
             return Ok(Type::Bool);
         }
         // Numeric conversion: `Int32(x)`, `Float64(x)`, etc. — resize/round a
@@ -9037,6 +9367,23 @@ impl<'a> Checker<'a> {
     ///
     /// The module-state read is a LOOKUP and not a copy, which is the whole of
     /// [`Scope`]'s note.
+    /// Does the module being checked declare `name` itself?
+    ///
+    /// The test behind RFC-0054's four unreserved surface builtins. A module
+    /// that declares `raw` means its own `raw`; a module that does not means the
+    /// builtin, whatever some other module of the same program chose to call its
+    /// functions.
+    ///
+    /// An IMPORT shadows as surely as a declaration — naming `render` in an
+    /// `import { .. }` list is as deliberate as writing `fn render`. Getting
+    /// that wrong is what the first attempt at this fix did, and two loader
+    /// tests caught it: a root that imports `render` from a module meant that
+    /// `render`, and was told it was only available during generation.
+    fn shadows_here(&self, name: &str) -> bool {
+        self.shadows
+            .contains(&(self.here.borrow().clone(), name.to_string()))
+    }
+
     fn lookup(&self, scope: &Scope, name: &str) -> Option<Binding> {
         for frame in scope.iter().rev() {
             if let Some(b) = frame.get(name) {
@@ -9352,6 +9699,8 @@ const SPAWN_FORBIDDEN: &[&str] = &[
     "readLine",
     "readFile",
     "writeFile",
+    "writeFileBytes",
+    "writeStdout",
     "renameFile",
     "fsyncFile",
     "readFileBytes",
@@ -9477,6 +9826,8 @@ fn contains_spawn(b: &Block) -> bool {
 /// recorded as cache inputs. Logging sinks (`trace`..`error`) are here too.
 const COMPTIME_FORBIDDEN: &[&str] = &[
     "writeFile",
+    "writeFileBytes",
+    "writeStdout",
     "renameFile",
     "fsyncFile",
     "readLine",
@@ -10400,6 +10751,57 @@ fn calls_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
 
 #[cfg(test)]
 mod tests {
+
+    /// Every log level is reserved, and every log level is an effect.
+    ///
+    /// `trace`/`debug`/`info`/`warn`/`error` are spelled out inside three long
+    /// lists here — `RESERVED`, `SPAWN_FORBIDDEN`, `COMPTIME_FORBIDDEN` — mixed
+    /// among dozens of unrelated builtin names. They cannot read
+    /// [`ast::LOG_LEVELS`] directly, because splicing a const array into an
+    /// array literal costs more than it saves and would make three readable
+    /// lists unreadable.
+    ///
+    /// So this compares them instead. A sixth level added to `ast::LOG_LEVELS`
+    /// and to the dispatch, but not to these lists, is a level that logs while
+    /// counting as neither an effect nor a reserved word: `spawn` would let it
+    /// cross a task boundary, and a `gen fn` would be allowed to call it at
+    /// compile time.
+    #[test]
+    fn every_log_level_is_reserved_and_forbidden_where_effects_are() {
+        for list in [
+            ("RESERVED", RESERVED),
+            ("SPAWN_FORBIDDEN", SPAWN_FORBIDDEN),
+            ("COMPTIME_FORBIDDEN", COMPTIME_FORBIDDEN),
+        ] {
+            let (what, names) = list;
+            let missing: Vec<&str> = crate::ast::LOG_LEVELS
+                .iter()
+                .copied()
+                .filter(|lvl| !names.contains(lvl))
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "{what} does not hold every log level — missing: {}",
+                missing.join(", ")
+            );
+        }
+    }
+
+    /// The ordinal is the position in the table, and `logging { level: .. }`
+    /// compares against it. Reordering the table silently changes which calls a
+    /// threshold suppresses, so the order is pinned here rather than implied.
+    #[test]
+    fn the_log_level_ordinals_are_the_table_order() {
+        use crate::ast::{log_level_ordinal, DEFAULT_LOG_LEVEL};
+        assert_eq!(log_level_ordinal("trace"), Some(0));
+        assert_eq!(log_level_ordinal("debug"), Some(1));
+        assert_eq!(log_level_ordinal("info"), Some(2));
+        assert_eq!(log_level_ordinal("warn"), Some(3));
+        assert_eq!(log_level_ordinal("error"), Some(4));
+        assert_eq!(log_level_ordinal("shout"), None);
+        // The default suppresses `trace` and `debug` and nothing else.
+        assert_eq!(log_level_ordinal("info"), Some(DEFAULT_LOG_LEVEL));
+    }
     use super::*;
     use crate::{lexer::lex, parser::parse};
 
@@ -10845,7 +11247,7 @@ mod tests {
         // A loop does not extend into a lambda — a `break` inside is an error.
         let l = check_src(
             "fn ap(f: fn(Int64) -> Int64) -> Int64 { return f(1) } \
-             fn main() -> Int64 { while true { let r = ap(|x| { break }) } return 0 }",
+             fn main() -> Int64 { while true { let r = ap(x -> { break }) } return 0 }",
         )
         .unwrap_err();
         assert!(l.contains("`break` outside a loop"), "{l}");
@@ -10927,7 +11329,7 @@ mod tests {
     #[test]
     fn spawned_function_may_not_take_fn_parameters() {
         let src = "fn hof(f: fn(Int64) -> Int64) -> Int64 { return f(1) }\n\
-             fn main() -> Int64 { let t = spawn hof(|x| x)  return t.join() }";
+             fn main() -> Int64 { let t = spawn hof(x -> x)  return t.join() }";
         let e = check_src(src).unwrap_err();
         assert!(e.contains("may not take function-value parameters"), "{e}");
     }
@@ -13141,7 +13543,7 @@ mod tests {
     fn accepts_lambda_and_named_fn_argument() {
         let src = format!(
             "{TWICE}fn dbl(n: Int64) -> Int64 {{ return n * 2 }}\n\
-             fn main() -> Int64 {{ let a = twice([1, 2], |x| x * 2)  let b = twice([1, 2], dbl)  return 0 }}"
+             fn main() -> Int64 {{ let a = twice([1, 2], x -> x * 2)  let b = twice([1, 2], dbl)  return 0 }}"
         );
         assert!(check_src(&src).is_ok(), "{:?}", check_src(&src));
     }
@@ -13196,24 +13598,24 @@ mod tests {
              fn pick() -> fn(Int64) -> Int64 { return dbl }\n\
              fn main() -> Int64 { let f = pick()  return f(21) }";
         assert!(check_src(ret).is_ok(), "{:?}", check_src(ret));
-        let letb = "fn main() -> Int64 { let g: fn(Int64) -> Int64 = |x| x * 2  return g(3) }";
+        let letb = "fn main() -> Int64 { let g: fn(Int64) -> Int64 = x -> x * 2  return g(3) }";
         assert!(check_src(letb).is_ok(), "{:?}", check_src(letb));
         let rec = "type R = { f: fn(Int64) -> Int64 }\n\
-             fn main() -> Int64 { let r = R { f: |x| x + 1 }  let g = r.f  return g(1) }";
+             fn main() -> Int64 { let r = R { f: x -> x + 1 }  let g = r.f  return g(1) }";
         assert!(check_src(rec).is_ok(), "{:?}", check_src(rec));
         let arr = "fn main() -> Int64 {\n\
              let mut xs: Array<fn(Int64) -> Int64> = []\n\
-             xs.push(|x| x * 2)\n\
+             xs.push(x -> x * 2)\n\
              let f = xs[0]\n\
              return f(4) }";
         assert!(check_src(arr).is_ok(), "{:?}", check_src(arr));
         let opt = "fn main() -> Int64 {\n\
-             let o: Option<fn(Int64) -> Int64> = Some(|x| x - 1)\n\
+             let o: Option<fn(Int64) -> Int64> = Some(x -> x - 1)\n\
              return match o { Some(f) => f(1), None => 0 } }";
         assert!(check_src(opt).is_ok(), "{:?}", check_src(opt));
         let state = "type Middleware = fn(Int64) -> Int64\n\
              let mut chain: Array<Middleware> = []\n\
-             fn add() { chain.push(|x| x + 1) }\n\
+             fn add() { chain.push(x -> x + 1) }\n\
              fn main() -> Int64 { add()  let m = chain[0]  return m(1) }";
         assert!(check_src(state).is_ok(), "{:?}", check_src(state));
         // Composition: value-to-value flow creates no new source and stays legal.
@@ -13226,7 +13628,8 @@ mod tests {
     fn fn_types_still_rejected_where_illegal() {
         // No higher-order-of-higher-order: a stored fn type may not take or
         // return another function value.
-        let hof = "fn main() -> Int64 { let g: fn(fn(Int64) -> Int64) -> Int64 = |x| 0  return 0 }";
+        let hof =
+            "fn main() -> Int64 { let g: fn(fn(Int64) -> Int64) -> Int64 = x -> 0  return 0 }";
         assert!(
             check_src(hof)
                 .unwrap_err()
@@ -13254,7 +13657,7 @@ mod tests {
         // `toJson` rejects fn-typed data with the type named (functions don't
         // go on the wire).
         let wire = "type H = { f: fn(Int64) -> Int64 }\n\
-             fn main() -> Int64 { let h = H { f: |x| x }  let s = toJson(h)  return 0 }";
+             fn main() -> Int64 { let h = H { f: x -> x }  let s = toJson(h)  return 0 }";
         assert!(
             check_src(wire).unwrap_err().contains("cannot encode"),
             "{:?}",
@@ -13264,7 +13667,7 @@ mod tests {
 
     #[test]
     fn lambda_still_needs_a_function_type_from_context() {
-        let src = "fn main() -> Int64 { let g = |x| x * 2  return 0 }";
+        let src = "fn main() -> Int64 { let g = x -> x * 2  return 0 }";
         assert!(
             check_src(src)
                 .unwrap_err()
@@ -13276,8 +13679,9 @@ mod tests {
 
     #[test]
     fn lambda_arity_mismatch_is_rejected() {
-        let src =
-            format!("{TWICE}fn main() -> Int64 {{ let a = twice([1], |x, y| x + y)  return 0 }}");
+        let src = format!(
+            "{TWICE}fn main() -> Int64 {{ let a = twice([1], (x, y) -> x + y)  return 0 }}"
+        );
         assert!(
             check_src(&src).unwrap_err().contains("parameter"),
             "{:?}",
@@ -13288,7 +13692,7 @@ mod tests {
     #[test]
     fn lambda_return_type_mismatch_is_rejected() {
         let src =
-            format!("{TWICE}fn main() -> Int64 {{ let a = twice([1], |x| x > 0)  return 0 }}");
+            format!("{TWICE}fn main() -> Int64 {{ let a = twice([1], x -> x > 0)  return 0 }}");
         let e = check_src(&src).unwrap_err();
         assert!(
             e.contains("returns Bool") || e.contains("expects it to return"),
@@ -13299,7 +13703,7 @@ mod tests {
     #[test]
     fn cannot_assign_to_captured_binding() {
         let src = format!(
-            "{TWICE}fn main() -> Int64 {{ let mut c = 0  let a = twice([1], |x| {{ c = c + x  return c }})  return 0 }}"
+            "{TWICE}fn main() -> Int64 {{ let mut c = 0  let a = twice([1], x -> {{ c = c + x  return c }})  return 0 }}"
         );
         assert!(
             check_src(&src)
@@ -13313,7 +13717,7 @@ mod tests {
     #[test]
     fn cannot_drop_captured_binding() {
         let src = "fn apply(s: String, f: fn(Int64) -> Int64) -> Int64 { return f(1) }\n\
-             fn main() -> Int64 { let name = \"hi\"  let r = apply(name, |x| { drop name  return x })  return 0 }";
+             fn main() -> Int64 { let name = \"hi\"  let r = apply(name, x -> { drop name  return x })  return 0 }";
         assert!(
             check_src(src)
                 .unwrap_err()
@@ -13327,7 +13731,7 @@ mod tests {
     fn cannot_consume_captured_binding() {
         let src = "fn take(s: consume String) -> Int64 { return 1 }\n\
              fn apply(s: String, f: fn(Int64) -> Int64) -> Int64 { return f(1) }\n\
-             fn main() -> Int64 { let name = \"hi\"  let r = apply(name, |x| { let z = take(name)  return x })  return 0 }";
+             fn main() -> Int64 { let name = \"hi\"  let r = apply(name, x -> { let z = take(name)  return x })  return 0 }";
         assert!(
             check_src(src)
                 .unwrap_err()
@@ -13340,7 +13744,7 @@ mod tests {
     #[test]
     fn nested_lambda_literal_is_rejected() {
         let src = format!(
-            "{TWICE}fn main() -> Int64 {{ let a = twice([1], |x| twice([x], |y| y + 1).length)  return 0 }}"
+            "{TWICE}fn main() -> Int64 {{ let a = twice([1], x -> twice([x], y -> y + 1).length)  return 0 }}"
         );
         assert!(
             check_src(&src)
@@ -13355,7 +13759,7 @@ mod tests {
     fn passthrough_fn_param_is_accepted() {
         let src = format!(
             "{TWICE}fn outer(xs: Array<Int64>, g: fn(Int64) -> Int64) -> Array<Int64> {{ return twice(xs, g) }}\n\
-             fn main() -> Int64 {{ let a = outer([1, 2], |x| x + 1)  return 0 }}"
+             fn main() -> Int64 {{ let a = outer([1, 2], x -> x + 1)  return 0 }}"
         );
         assert!(check_src(&src).is_ok(), "{:?}", check_src(&src));
     }
@@ -13366,7 +13770,7 @@ mod tests {
              let mut out: Array<U> = []\n\
              for x in xs { out.push(f(x)) }\n\
              return out }\n\
-             fn main() -> Int64 { let ys: Array<Int64> = [1, 2]  let zs = map(ys, |x| x > 0)  return 0 }";
+             fn main() -> Int64 { let ys: Array<Int64> = [1, 2]  let zs = map(ys, x -> x > 0)  return 0 }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
@@ -13375,7 +13779,7 @@ mod tests {
         // A lambda that reads a global makes the enclosing function non-spawn-safe.
         let src = "let g: Int64 = 5\n\
              fn apply(x: Int64, f: fn(Int64) -> Int64) -> Int64 { return f(x) }\n\
-             fn worker(x: Int64) -> Int64 { return apply(x, |y| y + g) }\n\
+             fn worker(x: Int64) -> Int64 { return apply(x, y -> y + g) }\n\
              fn main() -> Int64 { let t = spawn worker(1)  return t.join() }";
         assert!(
             check_src(src).unwrap_err().contains("not allowed"),
@@ -13412,11 +13816,20 @@ mod tests {
     }
 
     #[test]
-    fn map_rejects_non_string_key() {
-        let src = "fn f(m: Map<Int64, Int64>) -> Int64 { return 0 }\n\
-                   fn main() -> Int64 { return 0 }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("Map` key must be `String`"), "{e}");
+    fn map_accepts_int64_key_and_rejects_the_rest() {
+        // RFC-0117 M1: `Int64` joined `String` as a key. Floats are refused
+        // by name; every other spelling gets the M1 diagnostic.
+        let ok = "fn f(m: Map<Int64, Int64>) -> Int64 { return 0 }\n\
+                  fn main() -> Int64 { return 0 }";
+        assert!(check_src(ok).is_ok(), "{:?}", check_src(ok));
+        let float = "fn f(m: Map<Float64, Int64>) -> Int64 { return 0 }\n\
+                     fn main() -> Int64 { return 0 }";
+        let e = check_src(float).unwrap_err();
+        assert!(e.contains("does neither well"), "{e}");
+        let heap = "fn f(m: Map<Array<UInt8>, Int64>) -> Int64 { return 0 }\n\
+                    fn main() -> Int64 { return 0 }";
+        let e = check_src(heap).unwrap_err();
+        assert!(e.contains("is `String` or `Int64` today"), "{e}");
     }
 
     #[test]
@@ -14314,7 +14727,7 @@ mod tests {
             "fn map<T, U>(xs: Array<T>, f: fn(T) -> U) -> Array<U> { return [] }\n\
              fn twice(n: Int64) -> Int64 { return n * 2 }\n\
              fn main() -> Int64 { let xs: Array<Int64> = [1, 2]\n \
-             let a = map(xs, |x| x * 2)\n let b = map(xs, twice)\n return 0 }",
+             let a = map(xs, x -> x * 2)\n let b = map(xs, twice)\n return 0 }",
         );
         assert!(ok.is_ok(), "{ok:?}");
     }
@@ -14387,7 +14800,7 @@ mod tests {
         let src = "fn sq(x: Int64) -> Int64 { return x * x } \
                    fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(2) } \
                    gen fn g() -> String { \
-                   let n = apply(|x| { let t = spawn sq(x) return t.join() }) \
+                   let n = apply(x -> { let t = spawn sq(x) return t.join() }) \
                    return \"\" } \
                    fn main() -> Int64 { return 0 }";
         let e = check_src(src).unwrap_err();

@@ -226,7 +226,11 @@ fn vyxLineAt(ba: Array<UInt8>, off: Int64) -> Int64 {
     return lineAt(ba, off)
 }
 
-/// The 1-based column of byte offset `off` within `ba` (chars since the last LF).
+/// The 1-based column of byte offset `off` within `ba`, counted in BYTES since
+/// the last LF. Not characters: `colAt` counts bytes, deliberately, because the
+/// interpreter's own column is `off - lineStart + 1` over a byte table and
+/// RFC-0033 origin directives feed a C-style `#line`, where byte columns are the
+/// convention. See `std/text.vyrn` on `colAtV` for the measurement.
 /// RFC-0033 origin directives are 1-based; this feeds their `:col` field so a
 /// diagnostic in a template pass-through maps to the exact `.vyx` column.
 fn vyxColAt(ba: Array<UInt8>, off: Int64) -> Int64 {

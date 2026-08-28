@@ -99,7 +99,7 @@ fn call_depth_runtime() -> String {
 @__vyrn_call_depth = thread_local global i64 0
 @.trap.calldepth = private unnamed_addr constant [{len} x i8] c\"{msg}\"
 
-define void @__vyrn_call_enter() {{
+define internal void @__vyrn_call_enter() {{
 entry:
   %d = load i64, ptr @__vyrn_call_depth
   %d1 = add i64 %d, 1
@@ -115,7 +115,7 @@ ok:
   ret void
 }}
 
-define void @__vyrn_call_exit() {{
+define internal void @__vyrn_call_exit() {{
 entry:
   %d = load i64, ptr @__vyrn_call_depth
   %d1 = sub i64 %d, 1
@@ -213,7 +213,7 @@ entry:
   store i64 %idx, ptr @__vyrn_region_sp
   %slot = getelementptr [$NEST x ptr], ptr @__vyrn_region_blocks, i64 0, i64 %idx
   %vec = load ptr, ptr %slot
-  call void @free(ptr %vec)
+  call void @__vyrn_free(ptr %vec)
   store ptr null, ptr %slot
   ret void
 }
@@ -235,11 +235,11 @@ loop:
 body:
   %el = getelementptr ptr, ptr %vec, i64 %i
   %blk = load ptr, ptr %el
-  call void @free(ptr %blk)
+  call void @__vyrn_free(ptr %blk)
   %i1 = add i64 %i, 1
   br label %loop
 done:
-  call void @free(ptr %vec)
+  call void @__vyrn_free(ptr %vec)
   store ptr null, ptr %slot
   ret void
 }
@@ -387,7 +387,7 @@ entry:
   ret i64 %n
 }
 
-define ptr @__vyrn_str_new(i64 %len, i64 %cap) {
+define noalias ptr @__vyrn_str_new(i64 %len, i64 %cap) {
 entry:
   %tot = add i64 %cap, 17
   %base = call ptr @__vyrn_malloc(i64 %tot)
@@ -415,13 +415,13 @@ entry:
   br i1 %static, label %done, label %heap
 heap:
   %base = getelementptr i8, ptr %s, i64 -16
-  call void @free(ptr %base)
+  call void @__vyrn_free(ptr %base)
   br label %done
 done:
   ret void
 }
 
-define ptr @__vyrn_str_concat(ptr %a, ptr %b) {
+define noalias ptr @__vyrn_str_concat(ptr %a, ptr %b) {
 entry:
   %la = call i64 @__vyrn_str_len(ptr %a)
   %lb = call i64 @__vyrn_str_len(ptr %b)
@@ -433,9 +433,9 @@ entry:
   ret ptr %r
 }
 
-define {ptr, i64, i64} @__vyrn_str_bytes(ptr %s) {
+define {ptr, i64, i64} @__vyrn_str_bytes_range(ptr %s, i64 %start, i64 %end) {
 entry:
-  %len = call i64 @__vyrn_str_len(ptr %s)
+  %len = sub i64 %end, %start
   %data = call ptr @__vyrn_malloc(i64 %len)
   br label %loop
 loop:
@@ -443,7 +443,8 @@ loop:
   %done = icmp uge i64 %i, %len
   br i1 %done, label %ret, label %body
 body:
-  %sp = getelementptr i8, ptr %s, i64 %i
+  %off = add i64 %start, %i
+  %sp = getelementptr i8, ptr %s, i64 %off
   %b = load i8, ptr %sp
   %dp = getelementptr i8, ptr %data, i64 %i
   store i8 %b, ptr %dp
@@ -454,6 +455,16 @@ ret:
   %r1 = insertvalue {ptr, i64, i64} %r0, i64 %len, 1
   %r2 = insertvalue {ptr, i64, i64} %r1, i64 %len, 2
   ret {ptr, i64, i64} %r2
+}
+
+; The whole string is the range 0..len, so there is ONE copy loop here and not
+; two (RFC-0113). The caller of the three-argument form has already been bounds
+; checked by the IR that emits the call.
+define {ptr, i64, i64} @__vyrn_str_bytes(ptr %s) {
+entry:
+  %len = call i64 @__vyrn_str_len(ptr %s)
+  %r = call {ptr, i64, i64} @__vyrn_str_bytes_range(ptr %s, i64 0, i64 %len)
+  ret {ptr, i64, i64} %r
 }
 
 ; (The byte-copy helper was here — the `slice` builtin's copy loop, and `slice`
@@ -567,7 +578,7 @@ entry:
   ret ptr %buf
 }
 
-define ptr @__vyrn_bytes_dup(ptr %data, i64 %len) {
+define noalias ptr @__vyrn_bytes_dup(ptr %data, i64 %len) {
 entry:
   %buf = call ptr @__vyrn_str_new(i64 %len, i64 %len)
   br label %loop
@@ -1206,9 +1217,13 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // `charCountV` is the same byte scan in Vyrn.)
     out.push_str("declare i64 @__vyrn_line_at(ptr, i64, i64)\n");
     out.push_str("declare i64 @__vyrn_col_at(ptr, i64, i64)\n");
-    out.push_str("declare ptr @__vyrn_malloc(i64)\n");
-    out.push_str("declare ptr @__vyrn_realloc(ptr, i64)\n");
-    out.push_str("declare void @free(ptr)\n");
+    // RFC-0104's loop-facts item, first slice: the allocator family's results
+    // are `noalias` — a fresh block aliases nothing, `realloc`'s result is the
+    // C guarantee — so the optimizer's alias analysis finally hears what the
+    // ownership model always knew. Measured on landing (bt/fk/sp kernels).
+    out.push_str("declare noalias ptr @__vyrn_malloc(i64)\n");
+    out.push_str("declare noalias ptr @__vyrn_realloc(ptr, i64)\n");
+    out.push_str("declare void @__vyrn_free(ptr)\n");
     out.push_str("declare ptr @strcpy(ptr, ptr)\n");
     out.push_str("declare ptr @strcat(ptr, ptr)\n");
     // `llvm.memcpy` — used by `SmallArray` (RFC-0056) to move its inline slots
@@ -1321,6 +1336,11 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("declare i32 @__vyrn_read_file(ptr, ptr, ptr)\n");
     out.push_str("declare i32 @__vyrn_read_file_bytes(ptr, ptr, ptr)\n");
     out.push_str("declare i32 @__vyrn_write_file(ptr, ptr)\n");
+    // RFC-0111: the byte sink. `write_file_bytes` takes an explicit length
+    // because the buffer may hold NULs, so strlen would stop short of it;
+    // `write_stdout` answers nothing, for the reason `print` answers nothing.
+    out.push_str("declare i32 @__vyrn_write_file_bytes(ptr, ptr, i64)\n");
+    out.push_str("declare void @__vyrn_write_stdout(ptr, i64)\n");
     // RFC-0044: atomic rename + fsync host primitives (implemented in the C shim
     // on every target, like the RFC-0043 clock — wasi lowers to path_rename /
     // fd_sync, so a storage program is a three-way parity citizen).
@@ -1338,6 +1358,10 @@ pub fn emit(program: &Program) -> Result<String, String> {
 ",
     );
     out.push_str(
+        "declare i64 @__vyrn_map_find_bytes(ptr, i64, ptr, i64, ptr, i64)
+",
+    );
+    out.push_str(
         "declare void @__vyrn_map_reserve(ptr, i64)
 ",
     );
@@ -1351,6 +1375,27 @@ pub fn emit(program: &Program) -> Result<String, String> {
     );
     out.push_str(
         "declare ptr @__vyrn_map_keys_copy(ptr, i64)
+",
+    );
+    // The Int64-keyed family (RFC-0117 M1): same shapes, the key by value.
+    out.push_str(
+        "declare i64 @__vyrn_map_find_i64(ptr, i64, i64, ptr, i64)
+",
+    );
+    out.push_str(
+        "declare void @__vyrn_map_reserve_i64(ptr, i64)
+",
+    );
+    out.push_str(
+        "declare void @__vyrn_map_index_add_i64(ptr, i64)
+",
+    );
+    out.push_str(
+        "declare void @__vyrn_map_remove_at_i64(ptr, i64, i64)
+",
+    );
+    out.push_str(
+        "declare ptr @__vyrn_map_keys_copy_i64(ptr, i64)
 ",
     );
     // `extern` imports (RFC-0012): each body-less `extern fn` becomes a wasm
@@ -1403,6 +1448,13 @@ pub fn emit(program: &Program) -> Result<String, String> {
             vyrn_frontend::trap::ARRAY_INDEX,
             "%lld",
         )),
+    ));
+    // RFC-0116: `tallyBytes` over bytes that are not a String. One wording for
+    // both of `stringFromBytes`'s reasons — the caller who wants the WHY has
+    // that function.
+    out.push_str(&trap_global(
+        "@.trap.tbytes",
+        &vyrn_frontend::trap::line(vyrn_frontend::trap::io("tbytes")),
     ));
     out.push_str(&trap_global(
         "@.trap.soob",
@@ -1791,10 +1843,8 @@ pub fn emit(program: &Program) -> Result<String, String> {
         .collect();
     let holes_map = &holes_map;
     let owned_proto = &ownership.proto;
-    // Every call-argument temporary this program releases at the call
-    // (`rfcs/census-call-arguments.md`), keyed by the argument's node address —
-    // the same shape as `droppable`, one level down from a `let`.
-    let arg_drops = ownership.arg_drops();
+    // The per-node release decisions, one artifact (RFC-0114 §26 step 2).
+    let plan = ownership.plan.clone();
 
     let protocol_methods: HashMap<String, String> = program
         .protocols
@@ -1829,7 +1879,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             owned_proto,
             &regex_globals,
             &program.impls,
-            &arg_drops,
+            &plan,
             &program.type_decls,
         );
         gi.log_level = program.log_level;
@@ -1948,7 +1998,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             owned_proto,
             &regex_globals,
             &program.impls,
-            &arg_drops,
+            &plan,
             &program.type_decls,
         );
         gen.log_level = program.log_level;
@@ -2001,7 +2051,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 owned_proto,
                 &regex_globals,
                 &program.impls,
-                &arg_drops,
+                &plan,
                 &program.type_decls,
             );
             gen.log_level = program.log_level;
@@ -2064,7 +2114,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 owned_proto,
                 &regex_globals,
                 &program.impls,
-                &arg_drops,
+                &plan,
                 &program.type_decls,
             );
             gen.log_level = program.log_level;
@@ -2113,7 +2163,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             owned_proto,
             &regex_globals,
             &program.impls,
-            &arg_drops,
+            &plan,
             &program.type_decls,
         );
         dgen.protocol_methods = protocol_methods.clone();
@@ -2144,7 +2194,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             owned_proto,
             &regex_globals,
             &program.impls,
-            &arg_drops,
+            &plan,
             &program.type_decls,
         );
         cgen.fnval_variants = fnval_registry.clone();
@@ -2169,7 +2219,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             owned_proto,
             &regex_globals,
             &program.impls,
-            &arg_drops,
+            &plan,
             &program.type_decls,
         );
         cgen.protocol_methods = protocol_methods.clone();
@@ -2356,13 +2406,12 @@ struct Gen<'a> {
     /// registered before the cursor is a frame outside the loop, so the cursor
     /// runs first.
     cursors: Vec<(String, u32)>,
-    /// The argument expressions whose value this frame releases after the call
-    /// they belong to — `own`'s answer, keyed by node address the way
-    /// `droppable` is keyed by the `Stmt::Let`'s.
-    arg_drops: &'a std::collections::HashSet<usize>,
+    /// The per-node release decisions (RFC-0114 §26) — every site this
+    /// lowering frees at is an address in here, and in nothing of its own.
+    plan: &'a vyrn_frontend::own::ReleasePlan,
     /// The registers holding those values, innermost call last. Pushed where the
     /// argument is EVALUATED and taken back where its call ends.
-    arg_frees: Vec<String>,
+    arg_frees: Vec<(String, Type)>,
     /// Active loop targets for `break`/`continue` (RFC-0060), innermost last.
     /// A break/continue reclaims every scope pushed since loop-body entry (drops
     /// + region exits) before branching to the loop's exit / continue target.
@@ -2508,11 +2557,11 @@ impl<'a> Gen<'a> {
         owned: &'a vyrn_frontend::own::Owned,
         regex_globals: &'a HashMap<String, (String, String, u32)>,
         impls: &'a [vyrn_frontend::ast::ImplBlock],
-        arg_drops: &'a std::collections::HashSet<usize>,
+        plan: &'a vyrn_frontend::own::ReleasePlan,
         decls: &'a [TypeDecl],
     ) -> Self {
         Gen {
-            arg_drops,
+            plan,
             arg_frees: Vec::new(),
             tmp: 0,
             label: 0,
@@ -3571,10 +3620,12 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{out} = load {sa_ll}, ptr {slot}"));
                 Ok(out)
             }
-            // Two parallel buffers, and the keys are Strings, so a map copy
-            // always duplicates its keys and duplicates its values only when the
-            // value type owns something.
-            Type::Map(_, vt) => {
+            // Two parallel buffers. String keys are duplicated per entry; Int64
+            // keys (RFC-0117) copy with the buffer, since the buffer holds the
+            // values themselves. Values duplicate only when the value type owns
+            // something.
+            Type::Map(kt, vt) => {
+                let ik = self.key_is_int(&kt);
                 let vll = self.llt(&vt);
                 let keys = self.fresh_tmp();
                 let vals = self.fresh_tmp();
@@ -3585,8 +3636,10 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{vals} = extractvalue {m} {v}, 1"));
                 self.emit(format!("{len} = extractvalue {m} {v}, 2"));
                 self.emit(format!("{cap} = extractvalue {m} {v}, 3"));
-                let kb = self.copy_buf(&keys, &len, &cap, "ptr");
-                self.copy_elems(&kb, &len, &Type::Str)?;
+                let kb = self.copy_buf(&keys, &len, &cap, if ik { "i64" } else { "ptr" });
+                if !ik {
+                    self.copy_elems(&kb, &len, &Type::Str)?;
+                }
                 let vb = self.copy_buf(&vals, &len, &cap, &vll);
                 self.copy_elems(&vb, &len, &vt)?;
                 // The index is copied rather than rebuilt: it holds POSITIONS,
@@ -3787,7 +3840,7 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {v}, 0"));
                 self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {v}, 1"));
                 self.release_elems(&data, &len, &inner)?;
-                self.emit(format!("call void @free(ptr {data})"));
+                self.emit(format!("call void @__vyrn_free(ptr {data})"));
                 Ok(())
             }
             // A `SmallArray<T, N>`'s live slots are its inline block while it
@@ -3800,13 +3853,14 @@ impl<'a> Gen<'a> {
                 self.emit(format!("store {sa_ll} {v}, ptr {slot}"));
                 let (base, len, _, data) = self.sa_slot_base(&slot, &inner, n);
                 self.release_elems(&base, &len, &inner)?;
-                self.emit(format!("call void @free(ptr {data})"));
+                self.emit(format!("call void @__vyrn_free(ptr {data})"));
                 Ok(())
             }
-            // Two parallel buffers, and the keys are Strings — so a map that
-            // releases anything releases its keys. The elements first, then the
-            // buffers they live in.
-            Type::Map(_, vt) if matches!(self.rel_kind(ty), Some(DropKind::Deep(_))) => {
+            // Two parallel buffers. String keys are released per entry; Int64
+            // keys (RFC-0117) go with their buffer. The elements first, then
+            // the buffers they live in.
+            Type::Map(kt, vt) if matches!(self.rel_kind(ty), Some(DropKind::Deep(_))) => {
+                let ik = self.key_is_int(&kt);
                 let m = "{ ptr, ptr, i64, i64, ptr }";
                 let keys = self.fresh_tmp();
                 let vals = self.fresh_tmp();
@@ -3816,11 +3870,13 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{len} = extractvalue {m} {v}, 2"));
                 let ix = self.fresh_tmp();
                 self.emit(format!("{ix} = extractvalue {m} {v}, 4"));
-                self.release_elems(&keys, &len, &Type::Str)?;
+                if !ik {
+                    self.release_elems(&keys, &len, &Type::Str)?;
+                }
                 self.release_elems(&vals, &len, &vt)?;
-                self.emit(format!("call void @free(ptr {keys})"));
-                self.emit(format!("call void @free(ptr {vals})"));
-                self.emit(format!("call void @free(ptr {ix})"));
+                self.emit(format!("call void @__vyrn_free(ptr {keys})"));
+                self.emit(format!("call void @__vyrn_free(ptr {vals})"));
+                self.emit(format!("call void @__vyrn_free(ptr {ix})"));
                 Ok(())
             }
             Type::Array(_) | Type::SmallArray(..) | Type::Map(..) => {
@@ -3872,7 +3928,7 @@ impl<'a> Gen<'a> {
                 let q = self.fresh_tmp();
                 self.emit(format!("{p} = extractvalue {{ i64, i64 }} {v}, 1"));
                 self.emit(format!("{q} = inttoptr i64 {p} to ptr"));
-                self.emit(format!("call void @free(ptr {q})"));
+                self.emit(format!("call void @__vyrn_free(ptr {q})"));
                 Ok(())
             }
             // A fixed `[N x T]` is a container, so its elements are U4's
@@ -3922,7 +3978,7 @@ impl<'a> Gen<'a> {
             if self.payload_boxed(pty) {
                 let q = self.fresh_tmp();
                 self.emit(format!("{q} = inttoptr i64 {w0} to ptr"));
-                self.emit(format!("call void @free(ptr {q})"));
+                self.emit(format!("call void @__vyrn_free(ptr {q})"));
             }
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&miss_l);
@@ -3994,7 +4050,7 @@ impl<'a> Gen<'a> {
                 if pv != w {
                     let q = self.fresh_tmp();
                     self.emit(format!("{q} = inttoptr i64 {w} to ptr"));
-                    self.emit(format!("call void @free(ptr {q})"));
+                    self.emit(format!("call void @__vyrn_free(ptr {q})"));
                 }
             }
             self.emit_term(format!("br label %{end_l}"));
@@ -4397,6 +4453,16 @@ impl<'a> Gen<'a> {
                 self.modify_copyout.push((slot, format!("%arg{i}"), ll));
             } else {
                 self.emit(format!("store {ll} %arg{i}, ptr {slot}"));
+                // RFC-0114: an owned `consume` parameter the body neither
+                // moves nor drops is released at exit — `own` gave it a row
+                // keyed by the `Param` node, and the placement already put it
+                // on the outermost frame.
+                if p.capability == Capability::Consume {
+                    let key = p as *const Param as usize;
+                    if let Some(kind) = self.droppable.get(&key).cloned() {
+                        self.register_drop(key, slot.clone(), kind);
+                    }
+                }
             }
         }
 
@@ -4649,7 +4715,7 @@ impl<'a> Gen<'a> {
                 let d = self.fresh_tmp();
                 self.emit(format!("{a} = load {{ ptr, i64, i64 }}, ptr {slot}"));
                 self.emit(format!("{d} = extractvalue {{ ptr, i64, i64 }} {a}, 0"));
-                self.emit(format!("call void @free(ptr {d})"));
+                self.emit(format!("call void @__vyrn_free(ptr {d})"));
             }
             DropKind::FreeSmallArr => {
                 // A `SmallArray<T, N>` (RFC-0056) is `{ i64 len, i64 cap, ptr
@@ -4663,7 +4729,7 @@ impl<'a> Gen<'a> {
                 let d = self.fresh_tmp();
                 self.emit(format!("{p} = getelementptr i8, ptr {slot}, i64 16"));
                 self.emit(format!("{d} = load ptr, ptr {p}"));
-                self.emit(format!("call void @free(ptr {d})"));
+                self.emit(format!("call void @__vyrn_free(ptr {d})"));
             }
             DropKind::FreeMap => {
                 // Free all three of the map's final backing buffers (keys,
@@ -4685,9 +4751,9 @@ impl<'a> Gen<'a> {
                 self.emit(format!(
                     "{ix} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {a}, 4"
                 ));
-                self.emit(format!("call void @free(ptr {k})"));
-                self.emit(format!("call void @free(ptr {v})"));
-                self.emit(format!("call void @free(ptr {ix})"));
+                self.emit(format!("call void @__vyrn_free(ptr {k})"));
+                self.emit(format!("call void @__vyrn_free(ptr {v})"));
+                self.emit(format!("call void @__vyrn_free(ptr {ix})"));
             }
             // Phase 5: an aggregate owns its places. The walk is the type — and
             // in a generic instantiation the type still carries its parameters,
@@ -4901,7 +4967,7 @@ impl<'a> Gen<'a> {
             if *hdr {
                 self.emit(format!("call void @__vyrn_str_free(ptr {p})"));
             } else {
-                self.emit(format!("call void @free(ptr {p})"));
+                self.emit(format!("call void @__vyrn_free(ptr {p})"));
             }
         }
     }
@@ -5012,11 +5078,39 @@ impl<'a> Gen<'a> {
                 // RFC-0089 rule 4: the store releases what the place held. Not when
                 // the new value names the place — `a = @push(a, i)` grows the old
                 // buffer and hands it back, so freeing it would be a double free.
-                // That shape is the self-append above where it is a String, and a
-                // recorded leak everywhere else. The release runs AFTER the value
-                // is built, which is the PR #61 sha1 lesson.
-                let snap = if self.slot_owns(&slot)
-                    && !vyrn_frontend::movecheck::mentions_place(value, name)
+                // The release runs AFTER the value is built, which is the PR #61
+                // sha1 lesson.
+                //
+                // A STRING `+` IS THE EXCEPTION, and leaving it out was a leak
+                // that the append fast path above hid. `__vyrn_str_concat`
+                // always calls `__vyrn_str_new` and memcpy's both operands
+                // (see the prelude): it cannot hand back either input, so the
+                // old buffer is garbage the moment the store lands.
+                //
+                // What made it invisible: `out = out + s` is caught by the
+                // append spine above and never reaches here, so the common
+                // shape was fine. Anything the spine declines was not.
+                // `out = "x" + out` — a prepend, which no in-place append can
+                // serve — leaked 9.9 GB over 50,000 calls of a 200-iteration
+                // loop where the append form used 4.2 MB. So did `out = out + s`
+                // in a function whose `out` is later consumed into a record,
+                // because the spine declines a slot with no shadow.
+                let fresh_str = matches!(self.resolve(&tty), Type::Str)
+                    && matches!(value, Expr::Binary { op: BinOp::Add, .. });
+                // RFC-0114 M2: whether the place is OWNED here is the analysis's
+                // per-statement answer (`fold_store_owned`) — not the per-binding
+                // `slot_owns`, which abandoned every store of a binding whose
+                // value eventually escapes, and released over holes it could not
+                // see. The value-side test (`fresh_str` / `mentions_place`)
+                // stays: it answers whether the NEW value can alias the old,
+                // which is representation knowledge.
+                let owned_here = self.region_depth == 0
+                    && self
+                        .plan
+                        .store_owned
+                        .contains(&(stmt as *const Stmt as usize));
+                let snap = if owned_here
+                    && (fresh_str || !vyrn_frontend::movecheck::mentions_place(value, name))
                 {
                     self.snap_old(&slot, &tty)
                 } else {
@@ -5202,7 +5296,8 @@ impl<'a> Gen<'a> {
                         Ok(())
                     }
                     // `m[k] = v` on a Map (RFC-0028): insert-or-update in place.
-                    Type::Map(_, val) => {
+                    Type::Map(key, val) => {
+                        let key = *key;
                         let val = *val;
                         let (kv, _) = self.gen_expr(index)?;
                         self.expect.push(val.clone());
@@ -5224,7 +5319,7 @@ impl<'a> Gen<'a> {
                         let drop_old = self.region_depth == 0
                             && !vyrn_frontend::movecheck::mentions_place(value, name)
                             && !vyrn_frontend::movecheck::mentions_place(index, name);
-                        self.emit_map_set(&slot, &kv, &v, &val, drop_old)
+                        self.emit_map_set(&slot, &kv, &v, &key, &val, drop_old)
                     }
                     other => Err(format!(
                         "`{name}[i] = ..` needs an Array or Map, found {other:?}"
@@ -5264,9 +5359,21 @@ impl<'a> Gen<'a> {
                 ..
             } => {
                 let (c, _) = self.gen_expr(cond)?;
+                // RFC-0114 Rule N: the analysis says one branch consumed a
+                // binding the other still holds at the join, where nothing may
+                // read it again — so the still-owning edge releases it here.
+                // An `if` with no else-block grows one when the implicit edge
+                // is the one that owes a release.
+                let ers = self
+                    .plan
+                    .edge_releases
+                    .get(&(stmt as *const Stmt as usize))
+                    .cloned()
+                    .unwrap_or_default();
+                let else_owes = ers.iter().any(|(_, t)| *t == 1);
                 let then_l = self.fresh_label("then");
                 let end_l = self.fresh_label("endif");
-                let else_l = if else_block.is_some() {
+                let else_l = if else_block.is_some() || else_owes {
                     self.fresh_label("else")
                 } else {
                     end_l.clone()
@@ -5276,6 +5383,7 @@ impl<'a> Gen<'a> {
                 self.emit_label(&then_l);
                 self.gen_block(then_block)?;
                 if !self.terminated {
+                    self.emit_edge_releases(&ers, 0);
                     self.emit_term(format!("br label %{end_l}"));
                 }
 
@@ -5283,8 +5391,13 @@ impl<'a> Gen<'a> {
                     self.emit_label(&else_l);
                     self.gen_block(eb)?;
                     if !self.terminated {
+                        self.emit_edge_releases(&ers, 1);
                         self.emit_term(format!("br label %{end_l}"));
                     }
+                } else if else_owes {
+                    self.emit_label(&else_l);
+                    self.emit_edge_releases(&ers, 1);
+                    self.emit_term(format!("br label %{end_l}"));
                 }
 
                 self.emit_label(&end_l);
@@ -5666,8 +5779,13 @@ impl<'a> Gen<'a> {
     /// reclaims it, exactly as [`Gen::free_str_temp`] stands aside there.
     fn gen_expr(&mut self, expr: &Expr) -> Result<(String, Type), String> {
         let r = self.gen_expr_inner(expr)?;
-        if self.region_depth == 0 && self.arg_drops.contains(&(expr as *const Expr as usize)) {
-            self.arg_frees.push(r.0.clone());
+        if self.region_depth == 0
+            && self
+                .plan
+                .arg_drops
+                .contains(&(expr as *const Expr as usize))
+        {
+            self.arg_frees.push((r.0.clone(), r.1.clone()));
         }
         if crate::observe::on() {
             crate::observe::record(
@@ -5823,28 +5941,57 @@ impl<'a> Gen<'a> {
                 then_branch,
                 else_branch,
                 ..
-            } => self.gen_if_expr(cond, then_branch, else_branch.as_deref()),
+            } => self.gen_if_expr(
+                expr as *const Expr as usize,
+                cond,
+                then_branch,
+                else_branch.as_deref(),
+            ),
             Expr::Try { expr: operand, .. } => self.gen_try(operand, expr as *const Expr as usize),
             Expr::StructLit { name, fields, .. } => self.gen_struct_lit(name, fields),
-            Expr::Field { expr, field, .. } => {
-                let (v, ety) = self.gen_expr(expr)?;
+            Expr::Field {
+                expr: fbase, field, ..
+            } => {
+                let (v, ety) = self.gen_expr(fbase)?;
                 // `str.byteLength` is one load from the String header
                 // (RFC-0089 M1a; RFC-0058 named it, this made it O(1)).
                 // `.length` on a String is rejected by the checker.
                 if field == "byteLength" {
                     if let Type::Str = self.resolve(&ety) {
                         let len = self.str_len(&v);
+                        // RFC-0114 R1′: an unnamed receiver this frame owns
+                        // dies here — the header read was its last observer.
+                        if self.region_depth == 0
+                            && self
+                                .plan
+                                .receiver_frees
+                                .contains(&(expr as *const Expr as usize))
+                        {
+                            self.emit(format!("call void @__vyrn_str_free(ptr {v})"));
+                        }
                         return Ok((len, Type::Int));
                     }
                 }
                 // `arr.length` is the element count: a constant for a fixed
                 // array, field 1 of the `{ptr,len,cap}` triple otherwise.
                 if field == "length" {
+                    // RFC-0114 R1′ for containers: an unnamed receiver this
+                    // frame owns dies after the count is read. `own` admits
+                    // only silent kinds into the set, so `free_arg_temp` never
+                    // meets a declared release here.
+                    let rfree = self.region_depth == 0
+                        && self
+                            .plan
+                            .receiver_frees
+                            .contains(&(expr as *const Expr as usize));
                     match self.resolve(&ety) {
                         Type::ArrayN(_, n) => return Ok((format!("{n}"), Type::Int)),
                         Type::Array(_) => {
                             let len = self.fresh_tmp();
                             self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {v}, 1"));
+                            if rfree {
+                                self.free_arg_temp(&v, &ety);
+                            }
                             return Ok((len, Type::Int));
                         }
                         // `smallArray.length` is field 0 of the SmallArray header
@@ -5853,6 +6000,9 @@ impl<'a> Gen<'a> {
                             let sa_ll = self.sa_ll(&inner, n);
                             let len = self.fresh_tmp();
                             self.emit(format!("{len} = extractvalue {sa_ll} {v}, 0"));
+                            if rfree {
+                                self.free_arg_temp(&v, &ety);
+                            }
                             return Ok((len, Type::Int));
                         }
                         // `map.length` is the entry count (field 2 of the header).
@@ -5861,6 +6011,9 @@ impl<'a> Gen<'a> {
                             self.emit(format!(
                                 "{len} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {v}, 2"
                             ));
+                            if rfree {
+                                self.free_arg_temp(&v, &ety);
+                            }
                             return Ok((len, Type::Int));
                         }
                         _ => {}
@@ -5877,6 +6030,21 @@ impl<'a> Gen<'a> {
                 let ll = self.llt(&ety);
                 let t = self.fresh_tmp();
                 self.emit(format!("{t} = extractvalue {ll} {v}, {idx}"));
+                // RFC-0114 R1′: a SCALAR field read off an unnamed record this
+                // frame owns is the record's last observer — free it whole. A
+                // heap field stays out: `names_a_place` made the binding its
+                // owner. A `lazy` field stays out too: forcing it reads the
+                // record after this point.
+                if self.region_depth == 0
+                    && self
+                        .plan
+                        .receiver_frees
+                        .contains(&(expr as *const Expr as usize))
+                    && self.owned.release_kind(&fty).is_none()
+                    && vyrn_frontend::types::deferred(&fty).is_none()
+                {
+                    self.free_arg_temp(&v, &ety);
+                }
                 // RFC-0085 M4a: reading a `lazy T` field FORCES it — the loaded
                 // `{ i64, i64 }` is a stored nullary closure and this is the
                 // call. Nothing is cached, so a second read is a second call
@@ -6026,8 +6194,12 @@ impl<'a> Gen<'a> {
                 // A value type that IS an unsolved parameter names no type (see
                 // the array literal above) — the first value answers.
                 let val_expect = val_expect.filter(|t| !matches!(t, Type::Param(_)));
-                let build = (|| -> Result<Type, String> {
-                    let (kv0, _) = self.gen_expr(&entries[0].0)?;
+                let build = (|| -> Result<(Type, Type), String> {
+                    let (kv0, kty0) = self.gen_expr(&entries[0].0)?;
+                    // The first key's generated type is the map's key type
+                    // (RFC-0117: `String` or `Int64` — the checker made every
+                    // key the same one).
+                    let kty = kty0;
                     let (v0, vty0) = self.gen_expr(&entries[0].1)?;
                     // Store values at the DECLARED value type when the boundary
                     // supplies one, coercing each into it — otherwise a value that
@@ -6041,24 +6213,24 @@ impl<'a> Gen<'a> {
                     // has no owner left — `["usd": 1, "usd": 3]`. Inside a
                     // `region` nothing goes back: the arena owns it.
                     let drop_old = self.region_depth == 0;
-                    self.emit_map_set(&slot, &kv0, &v0, &val, drop_old)?;
+                    self.emit_map_set(&slot, &kv0, &v0, &kty, &val, drop_old)?;
                     for (ke, ve) in entries.iter().skip(1) {
                         let (kv, _) = self.gen_expr(ke)?;
                         let (v, vt) = self.gen_expr(ve)?;
                         let (v, _) = self.coerce(v, &vt, &val)?;
-                        self.emit_map_set(&slot, &kv, &v, &val, drop_old)?;
+                        self.emit_map_set(&slot, &kv, &v, &kty, &val, drop_old)?;
                     }
-                    Ok(val)
+                    Ok((kty, val))
                 })();
                 if pushed {
                     self.expect.pop();
                 }
-                let val = build?;
+                let (kty, val) = build?;
                 let agg = self.fresh_tmp();
                 self.emit(format!(
                     "{agg} = load {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}"
                 ));
-                Ok((agg, Type::Map(Box::new(Type::Str), Box::new(val))))
+                Ok((agg, Type::Map(Box::new(kty), Box::new(val))))
             }
             // A lambda literal in a v1 argument position is monomorphized away
             // at the call site that receives it (RFC-0023); one reaching the
@@ -6272,7 +6444,15 @@ impl<'a> Gen<'a> {
             self.emit(format!("store {ll} {sv}, ptr {slot}"));
             self.register_drop(key, slot, kind);
         }
-        let r = self.gen_match_body(&sv, &sty, arms);
+        // RFC-0114 Rule N at a match join: the arms that still own what
+        // another arm consumed, keyed by this match expression's address.
+        let ers = self
+            .plan
+            .edge_releases
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        let r = self.gen_match_body(&sv, &sty, arms, &ers);
         if !self.terminated {
             self.emit_releases(ExitKind::Scrutinee, key);
         }
@@ -6287,12 +6467,13 @@ impl<'a> Gen<'a> {
         sv: &str,
         sty: &Type,
         arms: &[MatchArm],
+        ers: &[(String, u32)],
     ) -> Result<(String, Type), String> {
         let sv = sv.to_string();
         let sty = sty.clone();
         // A user enum dispatches to the switch-based path.
         if let Type::Enum(evs) = self.resolve(&sty) {
-            return self.gen_match_enum(&sv, &evs, arms);
+            return self.gen_match_enum(&sv, &evs, arms, ers);
         }
         // The payload type carried by each arm: for Option<T> the one-arm binds
         // `T`; for Result<T, E> the one-arm binds `T` and the zero-arm binds `E`.
@@ -6310,15 +6491,27 @@ impl<'a> Gen<'a> {
 
         // tag == 1 arm (Some / Ok)
         self.emit_label(&one_l);
-        let one_arm = arms.iter().find(|a| pattern_is_one(&a.pattern)).unwrap();
-        let (one_val, one_t) = self.gen_arm_body(&sv, one_arm, &one_ty)?;
+        let one_ix = arms
+            .iter()
+            .position(|a| pattern_is_one(&a.pattern))
+            .unwrap();
+        let (one_val, one_t) = self.gen_arm_body(&sv, &arms[one_ix], &one_ty)?;
+        if !self.terminated {
+            self.emit_edge_releases(ers, one_ix as u32);
+        }
         let one_end = self.cur_block.clone();
         self.emit_term(format!("br label %{end_l}"));
 
         // tag == 0 arm (None / Err)
         self.emit_label(&zero_l);
-        let zero_arm = arms.iter().find(|a| !pattern_is_one(&a.pattern)).unwrap();
-        let (zero_val, zero_t) = self.gen_arm_body(&sv, zero_arm, &zero_ty)?;
+        let zero_ix = arms
+            .iter()
+            .position(|a| !pattern_is_one(&a.pattern))
+            .unwrap();
+        let (zero_val, zero_t) = self.gen_arm_body(&sv, &arms[zero_ix], &zero_ty)?;
+        if !self.terminated {
+            self.emit_edge_releases(ers, zero_ix as u32);
+        }
         let ty = join_never(one_t, zero_t);
         let zero_end = self.cur_block.clone();
         self.emit_term(format!("br label %{end_l}"));
@@ -6345,12 +6538,20 @@ impl<'a> Gen<'a> {
     /// guarantees `else_branch` is present.
     fn gen_if_expr(
         &mut self,
+        key: usize,
         cond: &Expr,
         then_branch: &Expr,
         else_branch: Option<&Expr>,
     ) -> Result<(String, Type), String> {
         let else_branch =
             else_branch.ok_or("internal: `if` expression without `else` reached codegen")?;
+        // RFC-0114 Rule N at an `if`-expression join.
+        let ers = self
+            .plan
+            .edge_releases
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
         let (c, _) = self.gen_expr(cond)?;
         let then_l = self.fresh_label("ie.then");
         let else_l = self.fresh_label("ie.else");
@@ -6360,6 +6561,9 @@ impl<'a> Gen<'a> {
         // then branch
         self.emit_label(&then_l);
         let (then_val, then_t) = self.gen_expr(then_branch)?;
+        if !self.terminated {
+            self.emit_edge_releases(&ers, 0);
+        }
         // The predecessor of the join is the CURRENT block — a nested if/match in
         // the branch body may have moved us past `then_l`.
         let then_end = self.cur_block.clone();
@@ -6368,6 +6572,9 @@ impl<'a> Gen<'a> {
         // else branch
         self.emit_label(&else_l);
         let (else_val, else_t) = self.gen_expr(else_branch)?;
+        if !self.terminated {
+            self.emit_edge_releases(&ers, 1);
+        }
         let ty = join_never(then_t, else_t);
         let else_end = self.cur_block.clone();
         self.emit_term(format!("br label %{end_l}"));
@@ -6392,6 +6599,7 @@ impl<'a> Gen<'a> {
         sv: &str,
         evs: &[EnumVariant],
         arms: &[MatchArm],
+        ers: &[(String, u32)],
     ) -> Result<(String, Type), String> {
         let arity = evs.iter().map(|v| v.payload.len()).max().unwrap_or(0);
         let ell = enum_ll(arity);
@@ -6426,7 +6634,7 @@ impl<'a> Gen<'a> {
         // line down. Seeding `Unit` reported "no value" for a match that is in
         // value position, which is how an enclosing `phi` got an empty operand.
         let mut ty = Type::Never;
-        for (arm, (idx, lbl)) in arms.iter().zip(&arm_labels) {
+        for (arm_ix, (arm, (idx, lbl))) in arms.iter().zip(&arm_labels).enumerate() {
             self.emit_label(lbl);
             self.scope.push(Vec::new());
             if let Pattern::Variant(_, binds) = &arm.pattern {
@@ -6461,6 +6669,9 @@ impl<'a> Gen<'a> {
                 ty = t;
             }
             self.scope.pop();
+            if !self.terminated {
+                self.emit_edge_releases(ers, arm_ix as u32);
+            }
             let block = self.cur_block.clone();
             self.emit_term(format!("br label %{end_l}"));
             incoming.push((v, block));
@@ -7085,10 +7296,8 @@ impl<'a> Gen<'a> {
     fn gen_binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<(String, Type), String> {
         let mark = self.arg_frees.len();
         let r = self.gen_binary_inner(op, lhs, rhs);
-        for v in self.arg_frees.split_off(mark) {
-            if !self.terminated {
-                self.emit(format!("call void @__vyrn_str_free(ptr {v})"));
-            }
+        for (v, ty) in self.arg_frees.split_off(mark) {
+            self.free_arg_temp(&v, &ty);
         }
         r
     }
@@ -7502,6 +7711,12 @@ impl<'a> Gen<'a> {
     /// array and the capacity that sizes it (`cap * 2` buckets). Every
     /// `__vyrn_map_find` call site takes them from the same aggregate it took
     /// the other two from, which is why they are extracted together here.
+    /// Whether this map's key type is `Int64` (RFC-0117 M1) — the one question
+    /// every key-touching emission branches on.
+    fn key_is_int(&self, key_ty: &Type) -> bool {
+        vyrn_frontend::types::resolve(key_ty, self.types) == Type::Int
+    }
+
     fn map_index_of(&mut self, agg: &str) -> (String, String) {
         let cap = self.fresh_tmp();
         let ix = self.fresh_tmp();
@@ -7519,9 +7734,14 @@ impl<'a> Gen<'a> {
         slot: &str,
         key: &str,
         v: &str,
+        key_ty: &Type,
         val: &Type,
         drop_old: bool,
     ) -> Result<(), String> {
+        // An Int64-keyed map (RFC-0117): the key column holds the values
+        // themselves, so the probe takes the key by value, an insert stores it,
+        // and nothing about a key is ever dup'd or freed.
+        let ik = self.key_is_int(key_ty);
         let vll = self.llt(val);
         let esz = self.fresh_tmp();
         self.emit(format!(
@@ -7541,9 +7761,15 @@ impl<'a> Gen<'a> {
         ));
         let (ix, cap) = self.map_index_of(&hdr);
         let idx = self.fresh_tmp();
-        self.emit(format!(
-            "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {key}, ptr {ix}, i64 {cap})"
-        ));
+        if ik {
+            self.emit(format!(
+                "{idx} = call i64 @__vyrn_map_find_i64(ptr {keys}, i64 {len}, i64 {key}, ptr {ix}, i64 {cap})"
+            ));
+        } else {
+            self.emit(format!(
+                "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {key}, ptr {ix}, i64 {cap})"
+            ));
+        }
         let found = self.fresh_tmp();
         self.emit(format!("{found} = icmp sge i64 {idx}, 0"));
         let upd_l = self.fresh_label("map.set.upd");
@@ -7569,16 +7795,20 @@ impl<'a> Gen<'a> {
         // The map already holds an equal key, so this one is surplus. Inside a
         // `region` it came from the arena, which hands it back at the exit —
         // freeing it here would give one block two owners. The same partition
-        // `deep_release` draws for a `String`, drawn here too.
-        if self.region_depth == 0 {
+        // `deep_release` draws for a `String`, drawn here too. An `Int64` key
+        // owns nothing, so it has no surplus to return.
+        if !ik && self.region_depth == 0 {
             self.emit(format!("call void @__vyrn_str_free(ptr {key})"));
         }
         self.emit_term(format!("br label %{done_l}"));
         // insert: reserve (may realloc both buffers), reload, append, len += 1.
         self.emit_label(&ins_l);
-        self.emit(format!(
-            "call void @__vyrn_map_reserve(ptr {slot}, i64 {esz})"
-        ));
+        let rsv = if ik {
+            "__vyrn_map_reserve_i64"
+        } else {
+            "__vyrn_map_reserve"
+        };
+        self.emit(format!("call void @{rsv}(ptr {slot}, i64 {esz})"));
         let hdr2 = self.fresh_tmp();
         let keys2 = self.fresh_tmp();
         let vals2 = self.fresh_tmp();
@@ -7592,14 +7822,22 @@ impl<'a> Gen<'a> {
             "{vals2} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr2}, 1"
         ));
         let kep = self.fresh_tmp();
-        self.emit(format!("{kep} = getelementptr ptr, ptr {keys2}, i64 {len}"));
-        self.emit(format!("store ptr {key}, ptr {kep}"));
+        if ik {
+            self.emit(format!("{kep} = getelementptr i64, ptr {keys2}, i64 {len}"));
+            self.emit(format!("store i64 {key}, ptr {kep}"));
+        } else {
+            self.emit(format!("{kep} = getelementptr ptr, ptr {keys2}, i64 {len}"));
+            self.emit(format!("store ptr {key}, ptr {kep}"));
+        }
         // The key is in its slot, so the index can record where. `reserve` above
         // grew the bucket array and rebuilt it, so this is the only entry it is
         // missing — and the reason the append stays O(1).
-        self.emit(format!(
-            "call void @__vyrn_map_index_add(ptr {slot}, i64 {len})"
-        ));
+        let iadd = if ik {
+            "__vyrn_map_index_add_i64"
+        } else {
+            "__vyrn_map_index_add"
+        };
+        self.emit(format!("call void @{iadd}(ptr {slot}, i64 {len})"));
         let vep = self.fresh_tmp();
         self.emit(format!(
             "{vep} = getelementptr {vll}, ptr {vals2}, i64 {len}"
@@ -8582,7 +8820,7 @@ impl<'a> Gen<'a> {
         out.push_str("  br i1 %isbuf, label %buf, label %stp\n");
         out.push_str("buf:\n");
         out.push_str("  %d = load ptr, ptr %s\n");
-        out.push_str("  call void @free(ptr %d)\n");
+        out.push_str("  call void @__vyrn_free(ptr %d)\n");
         out.push_str("  ret void\n");
         out.push_str("stp:\n");
         out.push_str(&format!(
@@ -8608,7 +8846,7 @@ impl<'a> Gen<'a> {
         out.push_str("  br i1 %hascap, label %cap, label %done\n");
         out.push_str("cap:\n");
         out.push_str("  %cb = inttoptr i64 %pay to ptr\n");
-        out.push_str("  call void @free(ptr %cb)\n");
+        out.push_str("  call void @__vyrn_free(ptr %cb)\n");
         out.push_str("  br label %done\n");
         out.push_str("done:\n");
         out.push_str("  ret void\n");
@@ -8954,15 +9192,70 @@ impl<'a> Gen<'a> {
     fn gen_call(&mut self, name: &str, args: &[Expr]) -> Result<(String, Type), String> {
         let mark = self.arg_frees.len();
         let r = self.gen_call_inner(name, args);
-        for v in self.arg_frees.split_off(mark) {
-            // A block that has already branched takes no more instructions —
-            // `panic("a" + b)` ends its block, and the free would be text after
-            // a terminator. The value is unreachable there anyway.
-            if !self.terminated {
-                self.emit(format!("call void @__vyrn_str_free(ptr {v})"));
-            }
+        for (v, ty) in self.arg_frees.split_off(mark) {
+            self.free_arg_temp(&v, &ty);
         }
         r
+    }
+
+    /// Release one argument temporary, by its TYPE (RFC-0114 M1).
+    ///
+    /// The String case is the historical fast path. Everything else spills the
+    /// SSA value to a fresh alloca and hands the slot to [`Gen::emit_drop`] —
+    /// the block-exit machinery — so there is exactly one spelling of every
+    /// release walk and this adapter adds none. The kind comes from the same
+    /// `Owned::release_kind` table the analysis consulted when it recorded the
+    /// temporary, so the two cannot disagree about what the type owns.
+    ///
+    /// A block that has already branched takes no more instructions —
+    /// `panic("a" + b)` ends its block, and the free would be text after a
+    /// terminator. The value is unreachable there anyway.
+    fn free_arg_temp(&mut self, v: &str, ty: &Type) {
+        if self.terminated {
+            return;
+        }
+        match self.owned.release_kind(ty) {
+            Some(DropKind::FreeStr) => {
+                self.emit(format!("call void @__vyrn_str_free(ptr {v})"));
+            }
+            Some(kind) => {
+                let ll = self.llt(ty);
+                let slot = self.fresh_alloca(&ll);
+                self.emit(format!("store {ll} {v}, ptr {slot}"));
+                self.emit_drop(&slot, &kind);
+            }
+            // The analysis recorded a temporary whose type owns nothing —
+            // nothing to do, and not worth a panic: the record is harmless.
+            None => {}
+        }
+    }
+
+    /// RFC-0114 Rule N: release the bindings the OTHER branch of this `if`
+    /// consumed, on the edge where they are still this frame's. `edge` picks
+    /// the edge: 0/1 for an `if`'s then/else, the arm's source index for a
+    /// `match`. A declared `impl Owned` release is skipped: its body is user
+    /// code whose timing all three engines must agree on, and an edge is a
+    /// place none of them ran it before — the RFC refuses to normalize it.
+    /// Inside a `region` the memory is the arena's, as everywhere else.
+    fn emit_edge_releases(&mut self, ers: &[(String, u32)], edge: u32) {
+        if self.region_depth != 0 {
+            return;
+        }
+        for (name, t) in ers {
+            if *t != edge {
+                continue;
+            }
+            let Some((slot, ty)) = self.lookup(name) else {
+                continue;
+            };
+            let Some(kind) = self.owned.release_kind(&ty) else {
+                continue;
+            };
+            if matches!(kind, DropKind::Release(..)) {
+                continue;
+            }
+            self.emit_drop(&slot, &kind);
+        }
     }
 
     fn gen_call_inner(&mut self, name: &str, args: &[Expr]) -> Result<(String, Type), String> {
@@ -9527,7 +9820,7 @@ impl<'a> Gen<'a> {
         }
         // Log methods write `[LEVEL] name: msg\n` to stderr via fprintf. Kept off
         // stdout so program output and diagnostics are separable.
-        if matches!(name, "trace" | "debug" | "info" | "warn" | "error") {
+        if vyrn_frontend::ast::is_log_level(name) {
             // Evaluate both args regardless (their side effects must match the
             // interpreter, which also evaluates them), but emit the write only
             // when the level meets the configured threshold (RFC-0008).
@@ -9601,17 +9894,54 @@ impl<'a> Gen<'a> {
         // and is now `std/text`'s `charsV` — RFC-0078 M4c.)
         if matches!(name, "bytes") {
             let (v, _) = self.gen_expr(&args[0])?;
-            let helper = "@__vyrn_str_bytes";
-            let t = self.fresh_tmp();
-            self.emit(format!("{t} = call {{ ptr, i64, i64 }} {helper}(ptr {v})"));
-            let elem = if name == "bytes" {
-                Type::IntN {
-                    bits: 8,
-                    signed: false,
-                }
-            } else {
-                Type::Int
+            let elem = Type::IntN {
+                bits: 8,
+                signed: false,
             };
+            let t = self.fresh_tmp();
+            if args.len() == 3 {
+                // The range form (RFC-0113). Bounds are checked HERE rather than
+                // in the helper, because the trap needs the offset that was
+                // wrong and the helper has already turned the pair into a
+                // length. `soob` is the wording `s[i]` uses, so the catalogue
+                // does not grow.
+                let (a, _) = self.gen_expr(&args[1])?;
+                let (b, _) = self.gen_expr(&args[2])?;
+                let len = self.fresh_tmp();
+                self.emit(format!("{len} = call i64 @__vyrn_str_len(ptr {v})"));
+                let lo_bad = self.fresh_tmp();
+                let ord_bad = self.fresh_tmp();
+                let hi_bad = self.fresh_tmp();
+                let bad1 = self.fresh_tmp();
+                let bad = self.fresh_tmp();
+                self.emit(format!("{lo_bad} = icmp slt i64 {a}, 0"));
+                self.emit(format!("{ord_bad} = icmp slt i64 {b}, {a}"));
+                self.emit(format!("{hi_bad} = icmp sgt i64 {b}, {len}"));
+                self.emit(format!("{bad1} = or i1 {lo_bad}, {ord_bad}"));
+                self.emit(format!("{bad} = or i1 {bad1}, {hi_bad}"));
+                let trap_l = self.fresh_label("byr.trap");
+                let ok_l = self.fresh_label("byr.ok");
+                self.emit_term(format!("br i1 {bad}, label %{trap_l}, label %{ok_l}"));
+                self.emit_label(&trap_l);
+                // The offset the interpreter names: the low one when it is
+                // negative or out of order, otherwise the high one.
+                let which = self.fresh_tmp();
+                let pick = self.fresh_tmp();
+                self.emit(format!("{which} = or i1 {lo_bad}, {ord_bad}"));
+                self.emit(format!("{pick} = select i1 {which}, i64 {a}, i64 {b}"));
+                self.emit(format!(
+                    "call void @__vyrn_trap_idx(ptr @.trap.soob, i64 {pick})"
+                ));
+                self.emit_term("unreachable".into());
+                self.emit_label(&ok_l);
+                self.emit(format!(
+                    "{t} = call {{ ptr, i64, i64 }} @__vyrn_str_bytes_range(ptr {v}, i64 {a}, i64 {b})"
+                ));
+            } else {
+                self.emit(format!(
+                    "{t} = call {{ ptr, i64, i64 }} @__vyrn_str_bytes(ptr {v})"
+                ));
+            }
             return Ok((t, Type::Array(Box::new(elem))));
         }
 
@@ -9819,6 +10149,71 @@ impl<'a> Gen<'a> {
                 "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_l} ], [ {o2}, %{ok_l} ]"
             ));
             return Ok((r, Type::Result(Box::new(Type::Str), Box::new(Type::Str))));
+        }
+        // RFC-0111: the byte sink. Same status protocol as `writeFile` and the
+        // same error renderer, so the message is byte-identical to the other
+        // engines'. The length is passed because the buffer may hold NULs.
+        if name == "writeFileBytes" {
+            let (path, _) = self.gen_expr(&args[0])?;
+            let (arr, _) = self.gen_expr(&args[1])?;
+            let data = self.fresh_tmp();
+            let len = self.fresh_tmp();
+            self.emit(format!(
+                "{data} = extractvalue {{ ptr, i64, i64 }} {arr}, 0"
+            ));
+            self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {arr}, 1"));
+            let st = self.fresh_tmp();
+            self.emit(format!(
+                "{st} = call i32 @__vyrn_write_file_bytes(ptr {path}, ptr {data}, i64 {len})"
+            ));
+            let isok = self.fresh_tmp();
+            self.emit(format!("{isok} = icmp eq i32 {st}, 0"));
+            let ok_l = self.fresh_label("wfb.ok");
+            let err_l = self.fresh_label("wfb.err");
+            let end_l = self.fresh_label("wfb.end");
+            self.emit_term(format!("br i1 {isok}, label %{ok_l}, label %{err_l}"));
+            self.emit_label(&err_l);
+            let msg = self.fresh_tmp();
+            self.emit(format!("{msg} = call ptr @__vyrn_write_err(ptr {path})"));
+            let ew = self.fresh_tmp();
+            let e0 = self.fresh_tmp();
+            let e1 = self.fresh_tmp();
+            let e2 = self.fresh_tmp();
+            self.emit(format!("{ew} = ptrtoint ptr {msg} to i64"));
+            self.emit(format!(
+                "{e0} = insertvalue {{ i1, i64, i64 }} undef, i1 0, 0"
+            ));
+            self.emit(format!(
+                "{e1} = insertvalue {{ i1, i64, i64 }} {e0}, i64 {ew}, 1"
+            ));
+            self.emit(format!(
+                "{e2} = insertvalue {{ i1, i64, i64 }} {e1}, i64 0, 2"
+            ));
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&ok_l);
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&end_l);
+            let r = self.fresh_tmp();
+            self.emit(format!(
+                "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_l} ], \
+                 [ {{ i1 1, i64 1, i64 0 }}, %{ok_l} ]"
+            ));
+            return Ok((r, Type::Result(Box::new(Type::Bool), Box::new(Type::Str))));
+        }
+        // RFC-0111: `print` for bytes. No status to check — the shim answers
+        // nothing, for the reason `print` answers nothing.
+        if name == "writeStdout" {
+            let (arr, _) = self.gen_expr(&args[0])?;
+            let data = self.fresh_tmp();
+            let len = self.fresh_tmp();
+            self.emit(format!(
+                "{data} = extractvalue {{ ptr, i64, i64 }} {arr}, 0"
+            ));
+            self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {arr}, 1"));
+            self.emit(format!(
+                "call void @__vyrn_write_stdout(ptr {data}, i64 {len})"
+            ));
+            return Ok(("undef".to_string(), Type::Unit));
         }
         if name == "writeFile" {
             let (path, _) = self.gen_expr(&args[0])?;
@@ -10347,6 +10742,469 @@ impl<'a> Gen<'a> {
         // `Some(x)` / `Ok(x)` / `Err(e)` — build a { i1 tag, i64 payload } value.
         // Growable arrays. An `Array<T>` is { ptr data, i64 len, i64 cap }; used
         // linearly (`push` returns the updated triple, reallocating on growth).
+        // `xs.reserve(n)` (RFC-0115): make room for `n` more elements, in one
+        // realloc, and hand the (possibly moved) buffer back. A `need` already
+        // inside `cap` passes the triple through untouched.
+        if name == "@reserve" {
+            let (av, aty) = self.gen_expr(&args[0])?;
+            let elem = match self.resolve(&aty) {
+                Type::Array(inner) => *inner,
+                _ => return Err("reserve on a non-Array value".into()),
+            };
+            let ell = self.llt(&elem);
+            let (nv, _) = self.gen_expr(&args[1])?;
+            let data = self.fresh_tmp();
+            let len = self.fresh_tmp();
+            let cap = self.fresh_tmp();
+            self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {av}, 0"));
+            self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {av}, 1"));
+            self.emit(format!("{cap} = extractvalue {{ ptr, i64, i64 }} {av}, 2"));
+            let need = self.fresh_tmp();
+            let fits = self.fresh_tmp();
+            self.emit(format!("{need} = add i64 {len}, {nv}"));
+            self.emit(format!("{fits} = icmp sle i64 {need}, {cap}"));
+            let grow_l = self.fresh_label("rsv.grow");
+            let ready_l = self.fresh_label("rsv.ready");
+            let pre = self.cur_block.clone();
+            self.emit_term(format!("br i1 {fits}, label %{ready_l}, label %{grow_l}"));
+            self.emit_label(&grow_l);
+            let esz = self.fresh_tmp();
+            let nb = self.fresh_tmp();
+            let nd = self.fresh_tmp();
+            self.emit(format!(
+                "{esz} = ptrtoint ptr getelementptr ({ell}, ptr null, i64 1) to i64"
+            ));
+            self.emit(format!("{nb} = mul i64 {need}, {esz}"));
+            self.emit(format!(
+                "{nd} = call ptr @__vyrn_realloc(ptr {data}, i64 {nb})"
+            ));
+            self.emit_term(format!("br label %{ready_l}"));
+            self.emit_label(&ready_l);
+            let pdata = self.fresh_tmp();
+            let pcap = self.fresh_tmp();
+            self.emit(format!(
+                "{pdata} = phi ptr [ {data}, %{pre} ], [ {nd}, %{grow_l} ]"
+            ));
+            self.emit(format!(
+                "{pcap} = phi i64 [ {cap}, %{pre} ], [ {need}, %{grow_l} ]"
+            ));
+            let r1 = self.fresh_tmp();
+            let r2 = self.fresh_tmp();
+            let r3 = self.fresh_tmp();
+            self.emit(format!(
+                "{r1} = insertvalue {{ ptr, i64, i64 }} undef, ptr {pdata}, 0"
+            ));
+            self.emit(format!(
+                "{r2} = insertvalue {{ ptr, i64, i64 }} {r1}, i64 {len}, 1"
+            ));
+            self.emit(format!(
+                "{r3} = insertvalue {{ ptr, i64, i64 }} {r2}, i64 {pcap}, 2"
+            ));
+            return Ok((r3, Type::Array(Box::new(elem))));
+        }
+        // `m.tally(k, n)` (RFC-0116): insert-or-add, ONE probe — the fusion a
+        // read-then-store cannot compose. The callee never takes the key: a
+        // hit touches nothing (the free audit caught the first draft freeing
+        // a key the argument machinery also frees), a miss stores a COPY.
+        // Values are Int64 (the checker pinned them), so the displaced value
+        // releases nothing.
+        if name == "@tally" {
+            let (mv, mty) = self.gen_expr(&args[0])?;
+            // The map's key type picks the probe family (RFC-0117): an Int64
+            // key is passed by value, stored by value, and never copied or
+            // freed.
+            let ik = match vyrn_frontend::types::resolve(&mty, self.types) {
+                Type::Map(k, _) => self.key_is_int(&k),
+                _ => false,
+            };
+            let (kv, _) = self.gen_expr(&args[1])?;
+            let (nv, _) = self.gen_expr(&args[2])?;
+            let slot = self.fresh_alloca("{ ptr, ptr, i64, i64, ptr }");
+            self.emit(format!(
+                "store {{ ptr, ptr, i64, i64, ptr }} {mv}, ptr {slot}"
+            ));
+            let keys = self.fresh_tmp();
+            let len = self.fresh_tmp();
+            self.emit(format!(
+                "{keys} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {mv}, 0"
+            ));
+            self.emit(format!(
+                "{len} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {mv}, 2"
+            ));
+            let (ix, cap) = self.map_index_of(&mv);
+            let idx = self.fresh_tmp();
+            if ik {
+                self.emit(format!(
+                    "{idx} = call i64 @__vyrn_map_find_i64(ptr {keys}, i64 {len}, i64 {kv}, ptr {ix}, i64 {cap})"
+                ));
+            } else {
+                self.emit(format!(
+                    "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {kv}, ptr {ix}, i64 {cap})"
+                ));
+            }
+            let found = self.fresh_tmp();
+            self.emit(format!("{found} = icmp sge i64 {idx}, 0"));
+            let upd_l = self.fresh_label("tally.upd");
+            let ins_l = self.fresh_label("tally.ins");
+            let done_l = self.fresh_label("tally.done");
+            self.emit_term(format!("br i1 {found}, label %{upd_l}, label %{ins_l}"));
+            self.emit_label(&upd_l);
+            let vals0 = self.fresh_tmp();
+            self.emit(format!(
+                "{vals0} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {mv}, 1"
+            ));
+            let ep0 = self.fresh_tmp();
+            let old = self.fresh_tmp();
+            let newv = self.fresh_tmp();
+            self.emit(format!("{ep0} = getelementptr i64, ptr {vals0}, i64 {idx}"));
+            self.emit(format!("{old} = load i64, ptr {ep0}"));
+            self.emit(format!("{newv} = add i64 {old}, {nv}"));
+            self.emit(format!("store i64 {newv}, ptr {ep0}"));
+            self.emit_term(format!("br label %{done_l}"));
+            self.emit_label(&ins_l);
+            let rsv = if ik {
+                "__vyrn_map_reserve_i64"
+            } else {
+                "__vyrn_map_reserve"
+            };
+            self.emit(format!("call void @{rsv}(ptr {slot}, i64 8)"));
+            let hdr2 = self.fresh_tmp();
+            let keys2 = self.fresh_tmp();
+            let vals2 = self.fresh_tmp();
+            self.emit(format!(
+                "{hdr2} = load {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}"
+            ));
+            self.emit(format!(
+                "{keys2} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr2}, 0"
+            ));
+            self.emit(format!(
+                "{vals2} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr2}, 1"
+            ));
+            let kep = self.fresh_tmp();
+            if ik {
+                self.emit(format!("{kep} = getelementptr i64, ptr {keys2}, i64 {len}"));
+                self.emit(format!("store i64 {kv}, ptr {kep}"));
+            } else {
+                let kcopy = self.deep_copy(&kv, &Type::Str)?;
+                self.emit(format!("{kep} = getelementptr ptr, ptr {keys2}, i64 {len}"));
+                self.emit(format!("store ptr {kcopy}, ptr {kep}"));
+            }
+            let iadd = if ik {
+                "__vyrn_map_index_add_i64"
+            } else {
+                "__vyrn_map_index_add"
+            };
+            self.emit(format!("call void @{iadd}(ptr {slot}, i64 {len})"));
+            let vep = self.fresh_tmp();
+            self.emit(format!("{vep} = getelementptr i64, ptr {vals2}, i64 {len}"));
+            self.emit(format!("store i64 {nv}, ptr {vep}"));
+            let nl = self.fresh_tmp();
+            let lenp = self.fresh_tmp();
+            self.emit(format!("{nl} = add i64 {len}, 1"));
+            self.emit(format!(
+                "{lenp} = getelementptr {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}, i64 0, i32 2"
+            ));
+            self.emit(format!("store i64 {nl}, ptr {lenp}"));
+            self.emit_term(format!("br label %{done_l}"));
+            self.emit_label(&done_l);
+            let out = self.fresh_tmp();
+            self.emit(format!(
+                "{out} = load {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}"
+            ));
+            return Ok((out, mty));
+        }
+        // `m.tallyBytes(w, n)` (RFC-0116): `tally` keyed by raw bytes. The HIT
+        // path — the hot one in a counting loop — compares the bytes where they
+        // lie: no String, no UTF-8 validation, no allocation. Only a MISS
+        // builds the key, and bytes that are not a String trap there.
+        if name == "@tallyBytes" {
+            let (mv, mty) = self.gen_expr(&args[0])?;
+            let (wv, _) = self.gen_expr(&args[1])?;
+            let (nv, _) = self.gen_expr(&args[2])?;
+            let slot = self.fresh_alloca("{ ptr, ptr, i64, i64, ptr }");
+            self.emit(format!(
+                "store {{ ptr, ptr, i64, i64, ptr }} {mv}, ptr {slot}"
+            ));
+            let keys = self.fresh_tmp();
+            let len = self.fresh_tmp();
+            self.emit(format!(
+                "{keys} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {mv}, 0"
+            ));
+            self.emit(format!(
+                "{len} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {mv}, 2"
+            ));
+            let (ix, cap) = self.map_index_of(&mv);
+            let wdata = self.fresh_tmp();
+            let wlen = self.fresh_tmp();
+            self.emit(format!(
+                "{wdata} = extractvalue {{ ptr, i64, i64 }} {wv}, 0"
+            ));
+            self.emit(format!("{wlen} = extractvalue {{ ptr, i64, i64 }} {wv}, 1"));
+            let idx = self.fresh_tmp();
+            self.emit(format!(
+                "{idx} = call i64 @__vyrn_map_find_bytes(ptr {keys}, i64 {len}, ptr {wdata}, i64 {wlen}, ptr {ix}, i64 {cap})"
+            ));
+            let found = self.fresh_tmp();
+            self.emit(format!("{found} = icmp sge i64 {idx}, 0"));
+            let upd_l = self.fresh_label("tbyt.upd");
+            let mk_l = self.fresh_label("tbyt.mk");
+            let bad_l = self.fresh_label("tbyt.bad");
+            let chk_l = self.fresh_label("tbyt.chk");
+            let ins_l = self.fresh_label("tbyt.ins");
+            let done_l = self.fresh_label("tbyt.done");
+            self.emit_term(format!("br i1 {found}, label %{upd_l}, label %{mk_l}"));
+            self.emit_label(&upd_l);
+            let vals0 = self.fresh_tmp();
+            self.emit(format!(
+                "{vals0} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {mv}, 1"
+            ));
+            let ep0 = self.fresh_tmp();
+            let old = self.fresh_tmp();
+            let newv = self.fresh_tmp();
+            self.emit(format!("{ep0} = getelementptr i64, ptr {vals0}, i64 {idx}"));
+            self.emit(format!("{old} = load i64, ptr {ep0}"));
+            self.emit(format!("{newv} = add i64 {old}, {nv}"));
+            self.emit(format!("store i64 {newv}, ptr {ep0}"));
+            self.emit_term(format!("br label %{done_l}"));
+            // miss: the key exists from here on. `bytes_dup` answers null for an
+            // embedded NUL; the DFA answers for the rest; either way the trap.
+            self.emit_label(&mk_l);
+            let buf = self.fresh_tmp();
+            self.emit(format!(
+                "{buf} = call ptr @__vyrn_bytes_dup(ptr {wdata}, i64 {wlen})"
+            ));
+            let isnull = self.fresh_tmp();
+            self.emit(format!("{isnull} = icmp eq ptr {buf}, null"));
+            self.emit_term(format!("br i1 {isnull}, label %{bad_l}, label %{chk_l}"));
+            self.emit_label(&chk_l);
+            let valid = self.fresh_tmp();
+            self.emit(format!(
+                "{valid} = call i1 @__vyrn_utf8valid(ptr {buf}, i64 {wlen})"
+            ));
+            self.emit_term(format!("br i1 {valid}, label %{ins_l}, label %{bad_l}"));
+            self.emit_label(&bad_l);
+            self.emit("call void @__vyrn_trap_msg(ptr @.trap.tbytes)".into());
+            self.emit_term("unreachable".into());
+            self.emit_label(&ins_l);
+            self.emit(format!("call void @__vyrn_map_reserve(ptr {slot}, i64 8)"));
+            let hdr2 = self.fresh_tmp();
+            let keys2 = self.fresh_tmp();
+            let vals2 = self.fresh_tmp();
+            self.emit(format!(
+                "{hdr2} = load {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}"
+            ));
+            self.emit(format!(
+                "{keys2} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr2}, 0"
+            ));
+            self.emit(format!(
+                "{vals2} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr2}, 1"
+            ));
+            let kep = self.fresh_tmp();
+            self.emit(format!("{kep} = getelementptr ptr, ptr {keys2}, i64 {len}"));
+            self.emit(format!("store ptr {buf}, ptr {kep}"));
+            self.emit(format!(
+                "call void @__vyrn_map_index_add(ptr {slot}, i64 {len})"
+            ));
+            let vep = self.fresh_tmp();
+            self.emit(format!("{vep} = getelementptr i64, ptr {vals2}, i64 {len}"));
+            self.emit(format!("store i64 {nv}, ptr {vep}"));
+            let nl = self.fresh_tmp();
+            let lenp = self.fresh_tmp();
+            self.emit(format!("{nl} = add i64 {len}, 1"));
+            self.emit(format!(
+                "{lenp} = getelementptr {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}, i64 0, i32 2"
+            ));
+            self.emit(format!("store i64 {nl}, ptr {lenp}"));
+            self.emit_term(format!("br label %{done_l}"));
+            self.emit_label(&done_l);
+            let out = self.fresh_tmp();
+            self.emit(format!(
+                "{out} = load {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}"
+            ));
+            return Ok((out, mty));
+        }
+        // `dst.copyFrom(src)` (RFC-0115): the receiver's buffer, the source's
+        // elements, one memcpy. Grows only when the source is longer; a
+        // self-copy moves zero bytes (a `select` on the data pointers), which
+        // sidesteps the same-pointer memcpy nobody defines.
+        if name == "@copyFrom" {
+            let (av, aty) = self.gen_expr(&args[0])?;
+            let elem = match self.resolve(&aty) {
+                Type::Array(inner) => *inner,
+                _ => return Err("copyFrom on a non-Array value".into()),
+            };
+            let ell = self.llt(&elem);
+            let (xv, _) = self.gen_expr(&args[1])?;
+            let data = self.fresh_tmp();
+            let cap = self.fresh_tmp();
+            self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {av}, 0"));
+            self.emit(format!("{cap} = extractvalue {{ ptr, i64, i64 }} {av}, 2"));
+            let xdata = self.fresh_tmp();
+            let xlen = self.fresh_tmp();
+            self.emit(format!(
+                "{xdata} = extractvalue {{ ptr, i64, i64 }} {xv}, 0"
+            ));
+            self.emit(format!("{xlen} = extractvalue {{ ptr, i64, i64 }} {xv}, 1"));
+            let fits = self.fresh_tmp();
+            self.emit(format!("{fits} = icmp sle i64 {xlen}, {cap}"));
+            let grow_l = self.fresh_label("cpf.grow");
+            let ready_l = self.fresh_label("cpf.ready");
+            let pre = self.cur_block.clone();
+            self.emit_term(format!("br i1 {fits}, label %{ready_l}, label %{grow_l}"));
+            self.emit_label(&grow_l);
+            let esz = self.fresh_tmp();
+            let nb = self.fresh_tmp();
+            let nd = self.fresh_tmp();
+            self.emit(format!(
+                "{esz} = ptrtoint ptr getelementptr ({ell}, ptr null, i64 1) to i64"
+            ));
+            self.emit(format!("{nb} = mul i64 {xlen}, {esz}"));
+            self.emit(format!(
+                "{nd} = call ptr @__vyrn_realloc(ptr {data}, i64 {nb})"
+            ));
+            self.emit_term(format!("br label %{ready_l}"));
+            self.emit_label(&ready_l);
+            let pdata = self.fresh_tmp();
+            let pcap = self.fresh_tmp();
+            self.emit(format!(
+                "{pdata} = phi ptr [ {data}, %{pre} ], [ {nd}, %{grow_l} ]"
+            ));
+            self.emit(format!(
+                "{pcap} = phi i64 [ {cap}, %{pre} ], [ {xlen}, %{grow_l} ]"
+            ));
+            let same = self.fresh_tmp();
+            let esz2 = self.fresh_tmp();
+            let raw = self.fresh_tmp();
+            let bytes = self.fresh_tmp();
+            self.emit(format!("{same} = icmp eq ptr {xdata}, {pdata}"));
+            self.emit(format!(
+                "{esz2} = ptrtoint ptr getelementptr ({ell}, ptr null, i64 1) to i64"
+            ));
+            self.emit(format!("{raw} = mul i64 {xlen}, {esz2}"));
+            self.emit(format!("{bytes} = select i1 {same}, i64 0, i64 {raw}"));
+            self.emit(format!(
+                "call void @llvm.memcpy.p0.p0.i64(ptr {pdata}, ptr {xdata}, i64 {bytes}, i1 false)"
+            ));
+            let r1 = self.fresh_tmp();
+            let r2 = self.fresh_tmp();
+            let r3 = self.fresh_tmp();
+            self.emit(format!(
+                "{r1} = insertvalue {{ ptr, i64, i64 }} undef, ptr {pdata}, 0"
+            ));
+            self.emit(format!(
+                "{r2} = insertvalue {{ ptr, i64, i64 }} {r1}, i64 {xlen}, 1"
+            ));
+            self.emit(format!(
+                "{r3} = insertvalue {{ ptr, i64, i64 }} {r2}, i64 {pcap}, 2"
+            ));
+            return Ok((r3, Type::Array(Box::new(elem))));
+        }
+        // `xs.append(ys)` (RFC-0115): grow once to `max(need, cap*2)`, then one
+        // memcpy of the source's elements — the checker held the element type
+        // to heapless ones, so bytes ARE the elements. A self-append reads the
+        // source from the reallocated buffer: `select` keeps the old source
+        // pointer only when it was a different array's.
+        if name == "@append" {
+            let (av, aty) = self.gen_expr(&args[0])?;
+            let elem = match self.resolve(&aty) {
+                Type::Array(inner) => *inner,
+                _ => return Err("append on a non-Array value".into()),
+            };
+            let ell = self.llt(&elem);
+            let (xv, _) = self.gen_expr(&args[1])?;
+            // The same post-evaluation header re-read `push` does: evaluating
+            // the source may have grown the receiver through a `modify` call.
+            let hdr = match &args[0] {
+                Expr::Var { name, .. } if self.lookup(name).is_some() => {
+                    let (slot, _) = self.lookup(name).unwrap();
+                    let fresh = self.fresh_tmp();
+                    self.emit(format!("{fresh} = load {{ ptr, i64, i64 }}, ptr {slot}"));
+                    fresh
+                }
+                _ => av.clone(),
+            };
+            let data = self.fresh_tmp();
+            let len = self.fresh_tmp();
+            let cap = self.fresh_tmp();
+            self.emit(format!(
+                "{data} = extractvalue {{ ptr, i64, i64 }} {hdr}, 0"
+            ));
+            self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {hdr}, 1"));
+            self.emit(format!("{cap} = extractvalue {{ ptr, i64, i64 }} {hdr}, 2"));
+            let xdata = self.fresh_tmp();
+            let xlen = self.fresh_tmp();
+            self.emit(format!(
+                "{xdata} = extractvalue {{ ptr, i64, i64 }} {xv}, 0"
+            ));
+            self.emit(format!("{xlen} = extractvalue {{ ptr, i64, i64 }} {xv}, 1"));
+            let need = self.fresh_tmp();
+            let fits = self.fresh_tmp();
+            self.emit(format!("{need} = add i64 {len}, {xlen}"));
+            self.emit(format!("{fits} = icmp sle i64 {need}, {cap}"));
+            let grow_l = self.fresh_label("app.grow");
+            let ready_l = self.fresh_label("app.ready");
+            let pre = self.cur_block.clone();
+            self.emit_term(format!("br i1 {fits}, label %{ready_l}, label %{grow_l}"));
+            self.emit_label(&grow_l);
+            let dbl = self.fresh_tmp();
+            let over = self.fresh_tmp();
+            let nc = self.fresh_tmp();
+            let esz = self.fresh_tmp();
+            let nb = self.fresh_tmp();
+            let nd = self.fresh_tmp();
+            self.emit(format!("{dbl} = mul i64 {cap}, 2"));
+            self.emit(format!("{over} = icmp sgt i64 {need}, {dbl}"));
+            self.emit(format!("{nc} = select i1 {over}, i64 {need}, i64 {dbl}"));
+            self.emit(format!(
+                "{esz} = ptrtoint ptr getelementptr ({ell}, ptr null, i64 1) to i64"
+            ));
+            self.emit(format!("{nb} = mul i64 {nc}, {esz}"));
+            self.emit(format!(
+                "{nd} = call ptr @__vyrn_realloc(ptr {data}, i64 {nb})"
+            ));
+            self.emit_term(format!("br label %{ready_l}"));
+            self.emit_label(&ready_l);
+            let pdata = self.fresh_tmp();
+            let pcap = self.fresh_tmp();
+            self.emit(format!(
+                "{pdata} = phi ptr [ {data}, %{pre} ], [ {nd}, %{grow_l} ]"
+            ));
+            self.emit(format!(
+                "{pcap} = phi i64 [ {cap}, %{pre} ], [ {nc}, %{grow_l} ]"
+            ));
+            let same = self.fresh_tmp();
+            let src = self.fresh_tmp();
+            let dst = self.fresh_tmp();
+            let esz2 = self.fresh_tmp();
+            let bytes = self.fresh_tmp();
+            self.emit(format!("{same} = icmp eq ptr {xdata}, {data}"));
+            self.emit(format!(
+                "{src} = select i1 {same}, ptr {pdata}, ptr {xdata}"
+            ));
+            self.emit(format!(
+                "{dst} = getelementptr {ell}, ptr {pdata}, i64 {len}"
+            ));
+            self.emit(format!(
+                "{esz2} = ptrtoint ptr getelementptr ({ell}, ptr null, i64 1) to i64"
+            ));
+            self.emit(format!("{bytes} = mul i64 {xlen}, {esz2}"));
+            self.emit(format!(
+                "call void @llvm.memcpy.p0.p0.i64(ptr {dst}, ptr {src}, i64 {bytes}, i1 false)"
+            ));
+            let r1 = self.fresh_tmp();
+            let r2 = self.fresh_tmp();
+            let r3 = self.fresh_tmp();
+            self.emit(format!(
+                "{r1} = insertvalue {{ ptr, i64, i64 }} undef, ptr {pdata}, 0"
+            ));
+            self.emit(format!(
+                "{r2} = insertvalue {{ ptr, i64, i64 }} {r1}, i64 {need}, 1"
+            ));
+            self.emit(format!(
+                "{r3} = insertvalue {{ ptr, i64, i64 }} {r2}, i64 {pcap}, 2"
+            ));
+            return Ok((r3, Type::Array(Box::new(elem))));
+        }
         if name == "@push" {
             let (av, aty) = self.gen_expr(&args[0])?;
             // `SmallArray<T, N>.push(v)` (RFC-0056): store into the live buffer
@@ -10587,9 +11445,12 @@ impl<'a> Gen<'a> {
                         },
                     ));
                 }
-                // `m[k]` on a Map (RFC-0028): linear key scan → `Option<V>`
-                // (`None` on a miss, never a trap). `iv` is the key `ptr`.
-                Type::Map(_, val) => {
+                // `m[k]` on a Map (RFC-0028): hashed probe → `Option<V>`
+                // (`None` on a miss, never a trap). `iv` is the key — a `ptr`
+                // for a String key, the `i64` itself for an Int64 one
+                // (RFC-0117).
+                Type::Map(key, val) => {
+                    let ik = self.key_is_int(&key);
                     let val = *val;
                     let vll = self.llt(&val);
                     let keys = self.fresh_tmp();
@@ -10606,9 +11467,15 @@ impl<'a> Gen<'a> {
                     ));
                     let (ix, cap) = self.map_index_of(&av);
                     let idx = self.fresh_tmp();
-                    self.emit(format!(
-                        "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {iv}, ptr {ix}, i64 {cap})"
-                    ));
+                    if ik {
+                        self.emit(format!(
+                            "{idx} = call i64 @__vyrn_map_find_i64(ptr {keys}, i64 {len}, i64 {iv}, ptr {ix}, i64 {cap})"
+                        ));
+                    } else {
+                        self.emit(format!(
+                            "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {iv}, ptr {ix}, i64 {cap})"
+                        ));
+                    }
                     let found = self.fresh_tmp();
                     self.emit(format!("{found} = icmp sge i64 {idx}, 0"));
                     let some_l = self.fresh_label("map.at.some");
@@ -10754,7 +11621,7 @@ impl<'a> Gen<'a> {
             let base = self.fresh_tmp();
             self.emit(format!("{base} = getelementptr i8, ptr {d}, i64 -8"));
             self.emit(format!("store i64 0, ptr {base}"));
-            self.emit(format!("call void @free(ptr {base})"));
+            self.emit(format!("call void @__vyrn_free(ptr {base})"));
             return Ok((sv, Type::Stream(Box::new(elem))));
         }
         // `pullAt(a)` (RFC-0075 M2c) — one element from the stream in that box,
@@ -11093,7 +11960,11 @@ impl<'a> Gen<'a> {
         // `m.has(k)` (RFC-0028) — membership test → i1. Read-only; the receiver
         // is any Map-typed expression (an SSA aggregate).
         if name == "@has" {
-            let (mv, _) = self.gen_expr(&args[0])?;
+            let (mv, mty) = self.gen_expr(&args[0])?;
+            let ik = match self.resolve(&mty) {
+                Type::Map(k, _) => self.key_is_int(&k),
+                _ => false,
+            };
             let (kv, _) = self.gen_expr(&args[1])?;
             let keys = self.fresh_tmp();
             let len = self.fresh_tmp();
@@ -11105,9 +11976,15 @@ impl<'a> Gen<'a> {
             ));
             let (ix, cap) = self.map_index_of(&mv);
             let idx = self.fresh_tmp();
-            self.emit(format!(
-                "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {kv}, ptr {ix}, i64 {cap})"
-            ));
+            if ik {
+                self.emit(format!(
+                    "{idx} = call i64 @__vyrn_map_find_i64(ptr {keys}, i64 {len}, i64 {kv}, ptr {ix}, i64 {cap})"
+                ));
+            } else {
+                self.emit(format!(
+                    "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {kv}, ptr {ix}, i64 {cap})"
+                ));
+            }
             let found = self.fresh_tmp();
             self.emit(format!("{found} = icmp sge i64 {idx}, 0"));
             return Ok((found, Type::Bool));
@@ -11122,10 +11999,11 @@ impl<'a> Gen<'a> {
             let (slot, aty) = self
                 .lookup(&recv)
                 .ok_or_else(|| format!("unbound `{recv}`"))?;
-            let val = match self.resolve(&aty) {
-                Type::Map(_, v) => *v,
+            let (key_t, val) = match self.resolve(&aty) {
+                Type::Map(k, v) => (*k, *v),
                 other => return Err(format!("`remove` needs a Map, found {other:?}")),
             };
+            let ik = self.key_is_int(&key_t);
             let vll = self.llt(&val);
             let esz = self.fresh_tmp();
             self.emit(format!(
@@ -11146,9 +12024,15 @@ impl<'a> Gen<'a> {
             ));
             let (ix, cap) = self.map_index_of(&hdr);
             let idx = self.fresh_tmp();
-            self.emit(format!(
-                "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {kv}, ptr {ix}, i64 {cap})"
-            ));
+            if ik {
+                self.emit(format!(
+                    "{idx} = call i64 @__vyrn_map_find_i64(ptr {keys}, i64 {len}, i64 {kv}, ptr {ix}, i64 {cap})"
+                ));
+            } else {
+                self.emit(format!(
+                    "{idx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {kv}, ptr {ix}, i64 {cap})"
+                ));
+            }
             let found = self.fresh_tmp();
             self.emit(format!("{found} = icmp sge i64 {idx}, 0"));
             let do_l = self.fresh_label("map.rm.do");
@@ -11167,15 +12051,23 @@ impl<'a> Gen<'a> {
                 self.emit(format!(
                     "{vals} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr}, 1"
                 ));
-                let kp = self.fresh_tmp();
-                self.emit(format!("{kp} = getelementptr ptr, ptr {keys}, i64 {idx}"));
-                self.release_entry(&kp, &Type::Str)?;
+                // An Int64 key owns nothing to hand back (RFC-0117).
+                if !ik {
+                    let kp = self.fresh_tmp();
+                    self.emit(format!("{kp} = getelementptr ptr, ptr {keys}, i64 {idx}"));
+                    self.release_entry(&kp, &Type::Str)?;
+                }
                 let vp = self.fresh_tmp();
                 self.emit(format!("{vp} = getelementptr {vll}, ptr {vals}, i64 {idx}"));
                 self.release_entry(&vp, &val)?;
             }
+            let rmat = if ik {
+                "__vyrn_map_remove_at_i64"
+            } else {
+                "__vyrn_map_remove_at"
+            };
             self.emit(format!(
-                "call void @__vyrn_map_remove_at(ptr {slot}, i64 {idx}, i64 {esz})"
+                "call void @{rmat}(ptr {slot}, i64 {idx}, i64 {esz})"
             ));
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&end_l);
@@ -11189,7 +12081,12 @@ impl<'a> Gen<'a> {
         // since RFC-0028 (`Rc::new(k.clone())`), so this is the two compiling
         // backends catching up with the oracle, not a new cost in the model.
         if name == "@keys" {
-            let (mv, _) = self.gen_expr(&args[0])?;
+            let (mv, mty) = self.gen_expr(&args[0])?;
+            let key_t = match self.resolve(&mty) {
+                Type::Map(k, _) => *k,
+                _ => Type::Str,
+            };
+            let ik = self.key_is_int(&key_t);
             let keys = self.fresh_tmp();
             let len = self.fresh_tmp();
             self.emit(format!(
@@ -11199,10 +12096,18 @@ impl<'a> Gen<'a> {
                 "{len} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {mv}, 2"
             ));
             let buf = self.fresh_tmp();
-            self.emit(format!(
-                "{buf} = call ptr @__vyrn_map_keys_copy(ptr {keys}, i64 {len})"
-            ));
-            self.copy_elems(&buf, &len, &Type::Str)?;
+            if ik {
+                // Int64 keys copy by value — the snapshot IS the copy, and
+                // there is nothing per-element to duplicate (RFC-0117).
+                self.emit(format!(
+                    "{buf} = call ptr @__vyrn_map_keys_copy_i64(ptr {keys}, i64 {len})"
+                ));
+            } else {
+                self.emit(format!(
+                    "{buf} = call ptr @__vyrn_map_keys_copy(ptr {keys}, i64 {len})"
+                ));
+                self.copy_elems(&buf, &len, &Type::Str)?;
+            }
             let r0 = self.fresh_tmp();
             let r1 = self.fresh_tmp();
             let r2 = self.fresh_tmp();
@@ -11215,7 +12120,7 @@ impl<'a> Gen<'a> {
             self.emit(format!(
                 "{r2} = insertvalue {{ ptr, i64, i64 }} {r1}, i64 {len}, 2"
             ));
-            return Ok((r2, Type::Array(Box::new(Type::Str))));
+            return Ok((r2, Type::Array(Box::new(key_t))));
         }
         // value(x) -> Value: box a scalar into the built-in `Value` enum, using the
         // same payload encoding as any enum variant (so `match` decodes it).
@@ -13554,7 +14459,7 @@ mod tests {
     fn llt_prints_the_shapes_the_layout_engine_was_verified_on() {
         let (rt, pt, pc, ty, va, sg, sb, fs, dm, hm, rg) = Default::default();
         let ow = vyrn_frontend::own::Owned::default();
-        let ad = std::collections::HashSet::new();
+        let pl = vyrn_frontend::own::ReleasePlan::default();
         let g = Gen::new(
             &rt,
             &pt,
@@ -13569,7 +14474,7 @@ mod tests {
             &ow,
             &rg,
             &[],
-            &ad,
+            &pl,
             &[],
         );
         let rec = |fs: &[Type]| {
@@ -14117,7 +15022,7 @@ mod tests {
                 "Lazy",
                 "type Holder<T> = { body: lazy T }\n\
                  fn seven() -> Int64 { return 7 }\n\
-                 fn main() -> Int64 { let h: Holder<Int64> = Holder { body: || seven() }\n\
+                 fn main() -> Int64 { let h: Holder<Int64> = Holder { body: () -> seven() }\n\
                  return h.body }",
             ),
             // A `Task<T>` parameter.
@@ -14243,9 +15148,9 @@ mod tests {
          return out }\n\
          fn dbl(n: Int64) -> Int64 { return n * 2 }\n\
          fn main() -> Int64 {\n\
-             let a = twice([1, 2, 3], |x| x * 2)\n\
+             let a = twice([1, 2, 3], x -> x * 2)\n\
              let off = 10\n\
-             let b = twice([1, 2, 3], |x| x + off)\n\
+             let b = twice([1, 2, 3], x -> x + off)\n\
              let c = twice([1, 2, 3], dbl)\n\
              return 0 }";
 
@@ -14323,14 +15228,14 @@ mod tests {
             let mut out: Array<Int64> = []\n\
             for x in xs { out.push(f(x)) }\n\
             return out }\n\
-        fn makeAdder(n: Int64) -> M { return |x| x + n }\n\
+        fn makeAdder(n: Int64) -> M { return x -> x + n }\n\
         fn main() -> Int64 {\n\
-            let g: fn(Int64) -> Int64 = |x| x * 2\n\
+            let g: fn(Int64) -> Int64 = x -> x * 2\n\
             let h = g\n\
             let named = dbl\n\
-            chain.push(|x| x + 1)\n\
+            chain.push(x -> x + 1)\n\
             chain.push(dbl)\n\
-            let ops = Ops { plus: |x| x + 10, minus: |x| x - 10 }\n\
+            let ops = Ops { plus: x -> x + 10, minus: x -> x - 10 }\n\
             let p = ops.plus\n\
             let o: Option<M> = Some(makeAdder(5))\n\
             let q = match o { Some(f) => f(1), None => 0 }\n\
@@ -14340,7 +15245,7 @@ mod tests {
             let ws = twice([1, 2], chain[1])\n\
             let vs = twice([1, 2], makeAdder(7))\n\
             let d: Def<Int64, Int64> = Def { run: dbl }\n\
-            let dl: Def<Int64, Int64> = Def { run: |x| x + 3 }\n\
+            let dl: Def<Int64, Int64> = Def { run: x -> x + 3 }\n\
             let many: Many<Int64, Int64> = Many { runs: [dbl] }\n\
             let maybe: Maybe<Int64, Int64> = Maybe { run: Some(dbl) }\n\
             let outer: Outer<Int64, Int64> = Outer { inner: Def { run: dbl } }\n\
@@ -14420,7 +15325,7 @@ mod tests {
             let mut out: Array<Int64> = []\n\
             for x in xs { out.push(f(x)) }\n\
             return out }\n\
-            fn main() -> Int64 { let ys = twice([1], |x| x * 2)  return ys[0] }";
+            fn main() -> Int64 { let ys = twice([1], x -> x * 2)  return ys[0] }";
         let ir1 = emit(&check(v1).unwrap()).unwrap();
         let ho_takes_enum = ir1
             .lines()
@@ -14436,7 +15341,7 @@ mod tests {
         // A stored fn type mentioning `T` resolves per instantiation: each
         // concrete signature gets its own dispatcher, all calls direct.
         let src = "fn relay<T>(x: T) -> T {\n\
-             let f: fn(T) -> T = |v| v\n\
+             let f: fn(T) -> T = v -> v\n\
              return f(x) }\n\
              fn main() -> Int64 {\n\
              let n = relay(41)\n\
@@ -14463,7 +15368,7 @@ mod tests {
 
     #[test]
     fn module_state_of_fn_type_initializes_and_reassigns() {
-        let src = "let mut cur: fn(Int64) -> Int64 = |x| x + 1\n\
+        let src = "let mut cur: fn(Int64) -> Int64 = x -> x + 1\n\
              fn dbl(n: Int64) -> Int64 { return n * 2 }\n\
              fn main() -> Int64 { let before = cur(10)  cur = dbl\n\
              return before + cur(10) }";
@@ -14590,8 +15495,9 @@ mod tests {
         // consecutive lifts cannot answer each other's expectation. The two
         // signatures differ in PARAMETER, which is what the bodies are typed
         // from; RFC-0037 defers the fn-returning-fn shape outright.
-        let src = "fn main() -> Int64 {                    let a: fn(Int64) -> Int64 = |x| x + 1; \
-                   let b: fn(String) -> Int64 = |s| s.byteLength; \
+        let src =
+            "fn main() -> Int64 {                    let a: fn(Int64) -> Int64 = x -> x + 1; \
+                   let b: fn(String) -> Int64 = s -> s.byteLength; \
                    return a(1) + b(\"ab\") }";
         let ir = emit(&check(src).unwrap()).unwrap();
         // Two lifted lambdas, two signatures.
@@ -14758,7 +15664,7 @@ mod tests {
         )
         .unwrap();
         let ir = emit(&cont).unwrap();
-        let frees = ir.matches("call void @free(").count();
+        let frees = ir.matches("call void @__vyrn_free(").count();
         assert!(
             frees >= 2,
             "continue path must also drop `s`: {frees} frees"
@@ -14772,7 +15678,7 @@ mod tests {
         .unwrap();
         let bir = emit(&brk).unwrap();
         assert!(
-            bir.contains("call void @free("),
+            bir.contains("call void @__vyrn_free("),
             "break must drop the body's owned string: {bir}"
         );
     }
@@ -15081,12 +15987,12 @@ mod tests {
         }
     }
 
-    /// The in-place path now runs where it never did, so the reclamation has to
-    /// be unchanged by it: an accumulator returned through a concat frees
-    /// exactly what the identical function frees when the append is disabled
-    /// (here by aliasing it, the disqualifier `string_accumulator_not_appended…`
-    /// already pins). Equality is the assertion — an absolute count would just
-    /// re-pin the ownership analysis.
+    /// The in-place path must not change reclamation. Since RFC-0114 M2 the
+    /// copying lowering releases each replaced value at the store, so it
+    /// carries exactly ONE free the in-place lowering has no counterpart for:
+    /// the in-place buffer is reused, there is no replaced value. Everything
+    /// else — the temporaries, the caller's frees — must be identical, so the
+    /// assertion is `copying == appending + 1` and nothing looser.
     #[test]
     fn the_append_path_frees_exactly_what_the_copying_path_frees() {
         let body = |extra: &str| {
@@ -15108,9 +16014,11 @@ mod tests {
             "setup"
         );
         assert_eq!(
-            free_calls(&appending),
             free_calls(&copying),
-            "growing the accumulator must not add or lose a free:\n{appending}"
+            free_calls(&appending) + 1,
+            "the copying path frees the replaced value at the store and the \
+             in-place path reuses the buffer; any other difference is a \
+             reclamation change:\n{appending}\n=== copying ===\n{copying}"
         );
     }
 
@@ -15324,7 +16232,7 @@ mod tests {
     /// and a producer's step capture block.
     const STREAM_CLOSER_FREES: usize = 2;
     fn free_calls(ir: &str) -> usize {
-        ir.matches("call void @free(ptr").count()
+        ir.matches("call void @__vyrn_free(ptr").count()
             + ir.matches("call void @__vyrn_str_free(ptr").count()
     }
 
@@ -15403,7 +16311,7 @@ mod tests {
         // shallow release is what keeps that pointer from being freed twice —
         // and it is why `s` still leaks and `Gone::Captured` still says so.
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
-                   let s = a + b; let f: fn(Int64) -> Int64 = |x| x + s.byteLength; \
+                   let s = a + b; let f: fn(Int64) -> Int64 = x -> x + s.byteLength; \
                    return f(1); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert_eq!(
@@ -15621,7 +16529,7 @@ mod tests {
     const LMAP: &str = "fn lmap(s: Stream<Int64>, f: fn(Int64) -> Int64) -> Stream<Int64> { \
                         let a = boxStream(s) \
                         let g: fn(Int64) -> Int64 = f \
-                        let step: fn(Int64, Int64, Bool) -> Option<Int64> = |sl, gn, cl| { \
+                        let step: fn(Int64, Int64, Bool) -> Option<Int64> = (sl, gn, cl) -> { \
                         if cl { let src: Stream<Int64> = unboxStream(a) close(src) return None } \
                         let x: Option<Int64> = pullAt(a) \
                         if let Some(v) = x { return Some(g(v)) } return None } \
@@ -16539,7 +17447,7 @@ mod tests {
                    a.push(1); return a[0]; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(
-            ir.contains("call void @free(ptr"),
+            ir.contains("call void @__vyrn_free(ptr"),
             "expected an automatic free: {ir}"
         );
     }
@@ -16551,7 +17459,7 @@ mod tests {
         // two-word case until RFC-0090 M4 deleted it, so this is the whole of
         // what `payload_boxed` still answers `false` for above one word.
         let src = "type Bump = fn(Int64) -> Int64
-                   fn main() -> Int64 { let n = 7 let f: Bump = |x| x + n
+                   fn main() -> Int64 { let n = 7 let f: Bump = x -> x + n
                    let o: Option<Bump> = Some(f)
                    return match o { Some(g) => g(1), None => 0 } }";
         let ir = emit(&check(src).unwrap()).unwrap();
@@ -16901,7 +17809,7 @@ mod tests {
         // values into bindings that outlive one) nothing pins the lambda's
         // lifetime to the region it was written in.
         let src = "fn main() -> Int64 { \
-                   region { let g: fn(Int64) -> String = |y| \"b\" + y.toString() \
+                   region { let g: fn(Int64) -> String = y -> \"b\" + y.toString() \
                    print(g(1)) } return 0 }";
         let ir = emit(&check(src).unwrap()).unwrap();
         let mut checked = 0;

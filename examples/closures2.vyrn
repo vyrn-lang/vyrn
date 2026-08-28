@@ -32,13 +32,13 @@ fn apply(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Array<Int64> {
 /// A closure factory: the capture (`n`) lives inside the returned value, so it
 /// survives this function's scope exit.
 fn makeAdder(n: Int64) -> Transform {
-    return |x| x + n
+    return x -> x + n
 }
 
 /// Register a guard: pass values above `threshold` through (scaled), reject
 /// the rest to the next middleware.
 fn addGuard(threshold: Int64, scale: Int64) {
-    chain.push(|x| if x > threshold { Some(x * scale) } else { None })
+    chain.push(x -> if x > threshold { Some(x * scale) } else { None })
 }
 
 /// Run the chain: the first middleware that answers `Some` wins.
@@ -54,7 +54,7 @@ fn runChain(x: Int64) -> Int64 {
 
 fn main() -> Int64 {
     // A stored lambda in a `let`, called through the binding.
-    let g: Transform = |x| x * 10
+    let g: Transform = x -> x * 10
     print(g(4)) // 40
 
     // Composition: value-to-value flow, and a bare named function as a value.
@@ -69,13 +69,13 @@ fn main() -> Int64 {
 
     // The capture is a snapshot, not a reference.
     let mut base = 1
-    let snap: fn() -> Int64 = || base
+    let snap: fn() -> Int64 = () -> base
     base = 100
     print(snap()) // 1
 
     // Stored values in an array, called through the element binding.
     let mut ops: Array<Transform> = []
-    ops.push(|x| x + 1)
+    ops.push(x -> x + 1)
     ops.push(double)
     ops.push(add5)
     let mut sum = 0
@@ -85,13 +85,13 @@ fn main() -> Int64 {
     print(sum) // 11 + 20 + 15 = 46
 
     // Stored values in record fields.
-    let pair = Ops { plus: |x| x + 100, minus: |x| x - 100 }
+    let pair = Ops { plus: x -> x + 100, minus: x -> x - 100 }
     let plus = pair.plus
     let minus = pair.minus
     print(plus(1) + minus(1)) // 101 + -99 = 2
 
     // Option<fn> and a match arm binding the value.
-    let maybe: Option<Transform> = Some(|x| x * x)
+    let maybe: Option<Transform> = Some(x -> x * x)
     let squared = match maybe { Some(f) => f(9), None => 0 }
     print(squared) // 81
 
@@ -109,25 +109,25 @@ fn main() -> Int64 {
     print(runChain(0 - 3)) // nothing matches -> -1
 
     // Module state read inside a stored closure resolves live (not captured).
-    let counted: fn() -> Int64 = || chain.length
+    let counted: fn() -> Int64 = () -> chain.length
     print(counted()) // 3
 
     // std/arrays sortBy with a STORED key function: the stored value flows
     // into the v1 `fn`-typed parameter and dispatches inside the instance.
-    let negate: Transform = |x| 0 - x
+    let negate: Transform = x -> 0 - x
     let unsorted: Array<Int64> = [3, 1, 2]
     let sorted = sortBy(unsorted, negate)
     print(sorted[0] * 100 + sorted[1] * 10 + sorted[2]) // 321
 
     // Drop behavior: a chain of closures is an ordinary Array value.
     let mut local: Array<Transform> = []
-    local.push(|x| x + 2)
+    local.push(x -> x + 2)
     let two = local[0]
     print(two(0)) // 2
     drop local
 
     // A trap INSIDE a stored closure carries the canonical wording (parity
     // includes traps byte-for-byte, so this must be the last line).
-    let boom: Transform = |x| 10 / x
+    let boom: Transform = x -> 10 / x
     return boom(0)
 }

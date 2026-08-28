@@ -234,8 +234,24 @@ jobs:
             "$bin" test "$f"
           done
 
+      - name: The markup rules
+        # `std/vyx-hints` checks every `.vyx` file for the markup defects
+        # html-validate names — a `th` with no `scope`, a `tr` straight inside a
+        # `table`, an inline `style`, an `input` with no `type`, and the rest.
+        # The rules are errors, so a template that breaks one fails here.
+        #
+        # ITS OWN PROGRAM, not an import in `site/export.vyrn`. `std/vyx-hints`
+        # reaches `std/hints`, which declares `Policy`, and `std/http` declares
+        # `Policy` too; a top-level name is program-wide, so the two cannot be
+        # linked into one program, and the export links `std/http`. The comment
+        # in `site/markup.vyrn` says the same thing where the reader will be.
+        #
+        # It prints the number of files it checked. A `.vyx` file that stops
+        # being discovered shows up as a smaller number rather than as silence.
+        run: compiler/target/release/vyrn run site/markup.vyrn
+
       - name: Formatting
-        run: compiler/target/release/vyrn fmt --check site/app/*.vyrn site/guide/*.vyrn site/export.vyrn
+        run: compiler/target/release/vyrn fmt --check site/app/*.vyrn site/guide/*.vyrn site/export.vyrn site/markup.vyrn
 
       - name: The playground module
         # The compiler's own front end, as WebAssembly (`compiler/vyrn-play`).

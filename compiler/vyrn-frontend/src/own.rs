@@ -549,6 +549,12 @@ impl Owned {
     ///
     /// The match has no `_` arm on purpose. A new [`Type`] variant does not get
     /// to be silently unreclaimed; it has to say so.
+    /// Whether ANY type declares `impl Owned` — the coarse gate the receiver
+    /// filter uses before admitting a `Deep` producer.
+    pub fn declares_any(&self) -> bool {
+        !self.impls.is_empty()
+    }
+
     pub fn release_kind(&self, ty: &Type) -> Option<DropKind> {
         if let Some(f) = crate::types::type_key(ty).and_then(|k| self.impls.get(&k)) {
             return Some(DropKind::Release(f.clone(), ty.clone()));
@@ -808,11 +814,41 @@ fn self_referring_past(
 /// declaration that refers to itself; a type that deep is answered `false`, which
 /// costs a copy that copies nothing and never a wrong free.
 pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
-    fn go(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> bool {
-        if depth > 8 {
-            return false;
+    fn go(ty: &Type, types: &HashMap<String, TypeDecl>, seen: &mut Vec<String>) -> bool {
+        // A NAME THAT REACHES ITSELF OWNS HEAP, and answering otherwise is what
+        // this function used to do. The guard was `if depth > 8 { false }`, so
+        // `type Tree = | Leaf | Node(Tree, Tree)` — which is nothing but heap —
+        // exhausted the counter and answered "no". Two things followed from that
+        // one word:
+        //
+        //   - `vyrn why --memory` reported "the return type Tree owns no heap".
+        //   - `Gen::release_enum` skips a variant whose payloads own nothing, so
+        //     RFC-0096's `free_declared_boxes` freed nothing for exactly the
+        //     variant whose boxes needed it. 200,000 trees of depth 8, built and
+        //     discarded one at a time, peaked at 3.1 GB with a live set of one.
+        //
+        // The cycle is the answer, not the limit. A type that reaches itself
+        // cannot be stored inline — the representation has to box the recursive
+        // field to be finite — and that box is heap whatever else the type
+        // holds. So a repeated name answers `true` where the counter answered
+        // `false`.
+        //
+        // `seen` keyed on the NAME, which is `self_referring_past`'s shape a few
+        // functions up: the two ask different questions about the same walk, and
+        // now they walk the same way.
+        if let Type::Named(n) | Type::App(n, _) = ty {
+            if seen.iter().any(|x| x == n) {
+                return true;
+            }
+            if !types.contains_key(n) {
+                return false;
+            }
+            seen.push(n.clone());
+            let r = go(&crate::types::resolve(ty, types), types, seen);
+            seen.pop();
+            return r;
         }
-        let deeper = |t: &Type| go(t, types, depth + 1);
+        let deeper = |t: &Type| go(t, types, &mut seen.clone());
         match crate::types::resolve(ty, types) {
             // A `Task<T>` owns a frame, a record and an operating-system handle
             // whatever `T` is (RFC-0095 M1), so it answers `true` for `Task<Unit>`
@@ -865,7 +901,7 @@ pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
             _ => false,
         }
     }
-    go(ty, types, 0)
+    go(ty, types, &mut Vec::new())
 }
 
 /// Why a binding is **not** reclaimed at block exit (RFC-0087 U1).
@@ -1115,9 +1151,36 @@ pub struct BindingNote {
     pub fate: Fate,
 }
 
+/// RFC-0114 §26's artifact, as landed: every per-NODE release decision, one
+/// struct, produced here and consumed by address in both backends — which
+/// therefore cannot disagree about a site. (`droppable` and `releases` stay
+/// beside it: they are per-BINDING and per-EXIT, keyed by name and placement,
+/// and the backends' runtime registries are built from them.)
+#[derive(Clone, Default)]
+pub struct ReleasePlan {
+    /// RFC-0114 M1: the call-argument expressions whose value the CALLER
+    /// releases after the call — the `ArgVerdict::Released` rows, by the
+    /// argument's node address.
+    pub arg_drops: std::collections::HashSet<usize>,
+    /// RFC-0114 M2: the `Stmt::Assign` nodes whose old value the store
+    /// releases — see [`fold_store_owned`].
+    pub store_owned: std::collections::HashSet<usize>,
+    /// RFC-0114 Rule N: per join address (`Stmt::If` or `Expr::Match`), the
+    /// bindings to release on one edge because another edge consumed them —
+    /// `(name, edge)`, 0/1 for an `if`'s then/else, the arm's source index
+    /// for a `match`. See [`fold_edge_releases`].
+    pub edge_releases: HashMap<usize, Vec<(String, u32)>>,
+    /// RFC-0114 R1′: the `Expr::Field` nodes whose unnamed receiver this
+    /// frame owns — freed right after the read (the header for a projection,
+    /// the whole record deep after a scalar field).
+    pub receiver_frees: std::collections::HashSet<usize>,
+}
+
 /// Whole-program ownership facts.
 #[derive(Default)]
 pub struct Ownership {
+    /// The per-node release decisions — see [`ReleasePlan`].
+    pub plan: ReleasePlan,
     /// Functions whose return value transfers heap ownership to the caller,
     /// with the kind of value returned.
     ///
@@ -1178,13 +1241,14 @@ impl Ownership {
     /// this filter; `movecheck::arg_verdict` answers the same question for a row
     /// that hands back a bare type parameter, which `blackBox` does.
     pub fn arg_drops(&self) -> std::collections::HashSet<usize> {
-        self.arg_temps
-            .iter()
-            .filter(|s| {
-                s.verdict == crate::movecheck::ArgVerdict::Released && s.kind == DropKind::FreeStr
-            })
-            .map(|s| s.id)
-            .collect()
+        // EVERY `Released` temporary, whatever its kind (RFC-0114 M1). This
+        // carried `&& s.kind == DropKind::FreeStr` for as long as the emitters
+        // could only free a String — so a call-argument tree, array or record
+        // was analysed, verdicted, and then thrown away here, which is why
+        // `check(make(depth))` leaked 313.9 MB against the interpreter's 8.5.
+        // Both backends free by TYPE now, through the same `release_kind`
+        // table this filter used to consult, so the filter is the leak.
+        self.plan.arg_drops.clone()
     }
 }
 
@@ -1195,40 +1259,118 @@ pub fn analyze(program: &Program) -> Ownership {
     // by the pass that enforces the rules. One walk, one answer, no second
     // opinion (RFC-0087 records three defects that were two walkers disagreeing).
     let facts = crate::movecheck::facts(program);
+    let store_owned = fold_store_owned(&facts);
+    let edge_releases = fold_edge_releases(&facts);
+    let revived = fold_revived(&facts);
     let lets = facts.lets;
 
     let mut droppable = HashMap::new();
     let mut holes = HashMap::new();
     let mut notes = HashMap::new();
     let mut releases = HashMap::new();
-    let mut emit = |name: String, body: &Block| {
-        let r = emit_body(body, &lets, &proto);
-        releases.insert(name.clone(), place_body(body, &r.droppable));
+    let mut emit = |name: String, params: &[crate::ast::Param], body: &Block| {
+        let mut r = emit_body(body, &lets, &proto, &revived);
+        // RFC-0114: a `consume` parameter whose row says nothing took its
+        // value (or whose take was provably revived) is the callee's to
+        // release at exit — the same decision a `let` gets, minus the
+        // initializer cases a parameter cannot have.
+        let mut owned_params: Vec<(usize, String, u32)> = Vec::new();
+        // A declared `release(consume self)` is excluded outright: the release
+        // IS the release, and a row for its `self` would place a second one —
+        // a self-recursive call, which the trace gate caught on its fixture
+        // before any program ran it.
+        let is_release_fn = proto.impls.values().any(|f| f == &name);
+        for p in params {
+            if is_release_fn || p.capability != crate::ast::Capability::Consume {
+                continue;
+            }
+            let key = p as *const crate::ast::Param as usize;
+            let Some(kind) = proto.release_kind(&p.ty) else {
+                continue;
+            };
+            let taken = lets.get(&key).and_then(|r| r.gone.as_ref());
+            let ours = match taken {
+                None => true,
+                Some(crate::movecheck::Gone::Moved { .. })
+                | Some(crate::movecheck::Gone::Dropped { .. }) => revived.contains(&key),
+                _ => false,
+            };
+            if ours {
+                r.droppable.insert(key, kind);
+                owned_params.push((key, p.name.clone(), 0));
+            }
+        }
+        releases.insert(name.clone(), place_body(body, &r.droppable, &owned_params));
         droppable.insert(name.clone(), r.droppable);
         holes.insert(name.clone(), r.holes);
         notes.insert(name, r.notes);
     };
     for f in &program.functions {
-        emit(f.name.clone(), &f.body);
+        emit(f.name.clone(), &f.params, &f.body);
     }
     // Test bodies (RFC-0015) get the same block-exit drops, so a `let` in a test
     // reclaims its heap value exactly as it would in a function. The body is the
     // REAL node the interpreter walks, so the by-address keys match at run time.
     for (i, t) in program.tests.iter().enumerate() {
-        emit(format!("test@{i}"), &t.body);
+        emit(format!("test@{i}"), &[], &t.body);
     }
     // Bench bodies (RFC-0055), keyed by the synthetic `bench@<index>` name the
     // interpreter (`--check`) walks.
     for (i, b) in program.benches.iter().enumerate() {
-        emit(format!("bench@{i}"), &b.body);
+        emit(format!("bench@{i}"), &[], &b.body);
     }
     // Rule 3: a return is owned. The return type is the whole answer.
-    let owned_fns = program
+    let owned_fns: HashMap<String, DropKind> = program
         .functions
         .iter()
         .filter_map(|f| proto.release_kind(&f.ret).map(|k| (f.name.clone(), k)))
         .collect();
+    // RFC-0114 R1′: keep the `.byteLength` receivers whose producer transfers
+    // ownership of a String — a user function returning one (a lender was
+    // already filtered out by `facts`), or the fresh forms `@concat`/`@str`.
+    let receiver_frees: std::collections::HashSet<usize> = facts
+        .receiver_temps
+        .iter()
+        .filter(|(_, n)| {
+            n == "@concat"
+                || n == "@str"
+                || matches!(
+                    owned_fns.get(n),
+                    Some(
+                        DropKind::FreeStr
+                            | DropKind::FreeArr
+                            | DropKind::FreeSmallArr
+                            | DropKind::FreeMap
+                    )
+                )
+                // A record producer joins only while the program declares no
+                // `impl Owned` at all: a Deep walk may call a declared release,
+                // and that timing is user-visible. ponytail: program-wide
+                // emptiness; a per-type reaches-a-release walk is the upgrade.
+                || (matches!(owned_fns.get(n), Some(DropKind::Deep(_)))
+                    && !proto.declares_any())
+                // The chained projection frees only the FIELD it read — a
+                // String or a container, silent either way — so the record's
+                // walk never runs and the gate above does not apply.
+                || n
+                    .strip_prefix("@fieldof:")
+                    .is_some_and(|p| matches!(owned_fns.get(p), Some(DropKind::Deep(_))))
+        })
+        .map(|(k, _)| *k)
+        .collect();
+    let plan = ReleasePlan {
+        arg_drops: facts
+            .arg_temps
+            .iter()
+            .filter(|s| s.verdict == crate::movecheck::ArgVerdict::Released)
+            .map(|s| s.id)
+            .collect(),
+        store_owned,
+        edge_releases,
+        receiver_frees,
+    };
     Ownership {
+        plan,
         owned_fns,
         droppable,
         holes,
@@ -1237,6 +1379,205 @@ pub fn analyze(program: &Program) -> Ownership {
         arg_temps: facts.arg_temps,
         releases,
     }
+}
+
+/// RFC-0114 untake: the bindings whose value was taken and then provably
+/// re-established, so block exit releases the FINAL value. The rules, all
+/// refusing toward the leak:
+///
+/// - the last event is an OWNING write whose loop set and branch path equal
+///   the `let`'s own — a revive inside a loop that may not run, or on one arm
+///   of a branch, does not dominate the exit;
+/// - every take precedes that write in walk order;
+/// - no early exit (`return`, `?`, `break`, `continue`) sits between the
+///   first take and the write — on such an exit the binding still holds the
+///   taken state, and the exit path's releases run from the same `droppable`
+///   table this fold feeds.
+fn fold_revived(facts: &crate::movecheck::Facts) -> std::collections::HashSet<usize> {
+    use crate::movecheck::{EvKind, Gone};
+    let mut per: HashMap<usize, Vec<&crate::movecheck::StoreEv>> = HashMap::new();
+    for ev in &facts.store_events {
+        per.entry(ev.key).or_default().push(ev);
+    }
+    let mut out = std::collections::HashSet::new();
+    for (key, row) in &facts.lets {
+        if !matches!(
+            row.gone,
+            Some(Gone::Moved { .. }) | Some(Gone::Dropped { .. })
+        ) {
+            continue;
+        }
+        let Some(evs) = per.get(key) else { continue };
+        let (Some(first), Some(last)) = (evs.first(), evs.last()) else {
+            continue;
+        };
+        if !matches!(first.kind, EvKind::Write { id: 0, .. })
+            || !matches!(last.kind, EvKind::Write { owning: true, .. })
+            || last.loops != first.loops
+            || last.branch != first.branch
+        {
+            continue;
+        }
+        let takes: Vec<u32> = evs
+            .iter()
+            .filter(|e| matches!(e.kind, EvKind::Take))
+            .map(|e| e.order)
+            .collect();
+        if takes.is_empty() || takes.iter().any(|&t| t >= last.order) {
+            continue;
+        }
+        let first_take = *takes.iter().min().expect("nonempty");
+        if facts
+            .exit_orders
+            .iter()
+            .any(|&o| o >= first_take && o <= last.order)
+        {
+            continue;
+        }
+        out.insert(*key);
+    }
+    out
+}
+
+/// RFC-0114 Rule N (edge normalization, R5). The walker hands over every `if`
+/// that consumed a binding on exactly one branch with both branches reaching
+/// the join; this fold keeps a candidate only when the value at the other edge
+/// is provably this frame's to release:
+///
+/// - every write into the binding, anywhere, is OWNING — a binding ever
+///   assigned a projection may hold a borrow at the edge, and no walk-order
+///   argument survives a loop's back edge, so one non-owning write refuses
+///   the binding outright;
+/// - the binding's final verdict is a plain take — borrowed, lent, captured,
+///   aliased or holed refuses, exactly as [`fold_store_owned`] refuses.
+///
+/// The loop cases need no rule of their own: a binding declared outside a
+/// loop and conditionally consumed inside it is already refused by the
+/// checker's next-iteration reuse rule, so a candidate inside a loop is
+/// re-initialized every iteration before the `if` is reached.
+///
+/// Refusal is the leak direction, which is today's behaviour.
+fn fold_edge_releases(facts: &crate::movecheck::Facts) -> HashMap<usize, Vec<(String, u32)>> {
+    use crate::movecheck::{EvKind, Gone};
+    let vetoed: std::collections::HashSet<usize> = facts
+        .lets
+        .iter()
+        .filter(|(_, r)| {
+            !matches!(
+                r.gone,
+                None | Some(Gone::Moved { .. })
+                    | Some(Gone::Dropped { .. })
+                    | Some(Gone::Returned { .. })
+            )
+        })
+        .map(|(k, _)| *k)
+        .collect();
+    let mut all_owning: HashMap<usize, bool> = HashMap::new();
+    for ev in &facts.store_events {
+        if let EvKind::Write { owning, .. } = ev.kind {
+            *all_owning.entry(ev.key).or_insert(true) &= owning;
+        }
+    }
+
+    let mut out: HashMap<usize, Vec<(String, u32)>> = HashMap::new();
+    for er in &facts.edge_releases {
+        if vetoed.contains(&er.key) || !all_owning.get(&er.key).copied().unwrap_or(false) {
+            continue;
+        }
+        out.entry(er.if_key)
+            .or_default()
+            .push((er.name.clone(), er.edge));
+    }
+    // The walker's bucket iteration is hash-ordered; the emitted IR must not be.
+    for v in out.values_mut() {
+        v.sort();
+        v.dedup();
+    }
+    out
+}
+
+/// The assigns whose OLD value is provably this frame's to release when the
+/// store runs (RFC-0114 M2, the straight-line half).
+///
+/// The rule, folded from the walker's event stream: a store releases what it
+/// replaces iff the previous write into the binding was OWNING, no take of the
+/// binding sits between the two in walk order, and no take shares a loop with
+/// the store — a back edge makes walk order meaningless between two events in
+/// one loop, so a shared loop is refused. Refusal is the leak direction, which
+/// is exactly today's behaviour; every difference this fold makes is a NEW
+/// release of a value the old per-binding gate abandoned. The adversarial
+/// cases — take-then-`break`, a take later in the loop body, a conditional
+/// take before the join — are worked in the proof appendix §45.
+///
+/// The veto: a binding whose FINAL row says somebody else holds the value —
+/// borrowed, lent, captured, aliased, or holed — releases at no store, however
+/// clean the order looks, because the lender/retainer verdicts arrive after
+/// the walk and a projection may be alive at any store. `Moved`, `Dropped` and
+/// `Returned` do NOT veto: they are ordinary takes, already placed in the
+/// order, and vetoing them is the per-binding mistake this fold exists to
+/// retire. Module-state stores are owned unconditionally — nothing may
+/// `consume` a global.
+fn fold_store_owned(facts: &crate::movecheck::Facts) -> std::collections::HashSet<usize> {
+    use crate::movecheck::{EvKind, Gone};
+    let vetoed: std::collections::HashSet<usize> = facts
+        .lets
+        .iter()
+        .filter(|(_, r)| {
+            !matches!(
+                r.gone,
+                None | Some(Gone::Moved { .. })
+                    | Some(Gone::Dropped { .. })
+                    | Some(Gone::Returned { .. })
+            )
+        })
+        .map(|(k, _)| *k)
+        .collect();
+
+    let mut per: HashMap<usize, Vec<&crate::movecheck::StoreEv>> = HashMap::new();
+    for ev in &facts.store_events {
+        per.entry(ev.key).or_default().push(ev);
+    }
+
+    let mut owned: std::collections::HashSet<usize> = facts.global_stores.clone();
+    for (key, evs) in &per {
+        if vetoed.contains(key) {
+            continue;
+        }
+        for (i, ev) in evs.iter().enumerate() {
+            let EvKind::Write { id, .. } = ev.kind else {
+                continue;
+            };
+            if id == 0 {
+                continue; // a `let` initializer is a store into nothing
+            }
+            let Some(prev) = evs[..i]
+                .iter()
+                .rev()
+                .find(|e| matches!(e.kind, EvKind::Write { .. }))
+            else {
+                continue;
+            };
+            let EvKind::Write {
+                owning: prev_owning,
+                ..
+            } = prev.kind
+            else {
+                unreachable!("filtered to writes");
+            };
+            if !prev_owning {
+                continue;
+            }
+            let blocked = evs.iter().any(|t| {
+                matches!(t.kind, EvKind::Take)
+                    && ((t.order > prev.order && t.order < ev.order)
+                        || t.loops.iter().any(|l| ev.loops.contains(l)))
+            });
+            if !blocked {
+                owned.insert(id);
+            }
+        }
+    }
+    owned
 }
 
 /// The placement as a consumer reads it: `(exit, the node the exit is AT)` maps
@@ -1278,6 +1619,9 @@ struct Live {
 /// `Gen::drop_stack`, `Fn_::releases` and the interpreter's per-block `Vec` each
 /// used to keep privately.
 struct Place<'a> {
+    /// RFC-0114: the owned `consume` parameters, tracked FIRST on the
+    /// outermost frame — they outlive every local, so they release last.
+    pending: Vec<(usize, String, u32)>,
     droppable: &'a HashMap<usize, DropKind>,
     out: Vec<Release>,
     /// Innermost last. An exit's steps are these frames, from a boundary
@@ -1297,12 +1641,17 @@ struct Place<'a> {
 /// `droppable`, so no step can be placed inside one. Skipping them is what lets
 /// the placement live here, in the crate the interpreter can reach, instead of
 /// needing the checker's recorded types to expand a projection.
-fn place_body(body: &Block, droppable: &HashMap<usize, DropKind>) -> Vec<Release> {
+fn place_body(
+    body: &Block,
+    droppable: &HashMap<usize, DropKind>,
+    params: &[(usize, String, u32)],
+) -> Vec<Release> {
     let mut p = Place {
         droppable,
         out: Vec::new(),
         frames: Vec::new(),
         loops: Vec::new(),
+        pending: params.to_vec(),
     };
     p.block(body);
     p.out
@@ -1352,6 +1701,11 @@ impl Place<'_> {
     fn block(&mut self, b: &Block) {
         self.frames.push(Vec::new());
         let here = self.frames.len() - 1;
+        if here == 0 {
+            for (k, n, l) in std::mem::take(&mut self.pending) {
+                self.track(k, &n, l);
+            }
+        }
         for s in &b.stmts {
             self.stmt(s);
         }
@@ -1581,9 +1935,15 @@ struct FnResult {
 }
 
 /// One body's drop sites, in source order.
-fn emit_body(body: &Block, lets: &HashMap<usize, LetOwnership>, proto: &Owned) -> FnResult {
+fn emit_body(
+    body: &Block,
+    lets: &HashMap<usize, LetOwnership>,
+    proto: &Owned,
+    revived: &std::collections::HashSet<usize>,
+) -> FnResult {
     let mut e = Emit {
         droppable: HashMap::new(),
+        revived,
         holes: HashMap::new(),
         notes: Vec::new(),
         region_depth: 0,
@@ -1610,6 +1970,9 @@ fn id(s: &Stmt) -> usize {
 /// [`crate::movecheck`]. There is no expression analysis here at all.
 struct Emit<'a> {
     droppable: HashMap<usize, DropKind>,
+    /// RFC-0114 untake: bindings whose taken value was provably re-established
+    /// — their FINAL value is this block's to release. See [`fold_revived`].
+    revived: &'a std::collections::HashSet<usize>,
     /// The places a take took out of a droppable `let` (RFC-0093 M2).
     holes: HashMap<usize, Vec<String>>,
     /// One row per `let`, in source order, with what happens to its value.
@@ -1991,6 +2354,16 @@ impl Emit<'_> {
                     })
                 }
             }
+            // RFC-0114 untake: the take is real, but the binding was
+            // provably re-established afterwards, so what the block exits
+            // with is this frame's — the same per-slot final value all three
+            // engines already release for a reassigned `mut` binding.
+            Some(Gone::Dropped { .. }) if self.revived.contains(&key) => {
+                Fate::Reclaimed(kind, Vec::new())
+            }
+            Some(Gone::Moved { .. }) if self.revived.contains(&key) => {
+                Fate::Reclaimed(kind, Vec::new())
+            }
             Some(Gone::Dropped { line }) => Fate::Dropped { line: *line },
             Some(Gone::Returned { line }) => Fate::Moved {
                 line: *line,
@@ -2116,7 +2489,7 @@ pub(crate) mod tests {
     fn a_lambda_parameter_shadowing_a_string_is_not_a_string() {
         let src = "fn apply(f: fn(Int64) -> Int64, x: Int64) -> Int64 { return f(x); } \
                    fn main() -> Int64 { let s = \"x\"; print(s); \
-                   return apply(|s| { let t = s + 1; print(t); return t + 1; }, 2); }";
+                   return apply(s -> { let t = s + 1; print(t); return t + 1; }, 2); }";
         assert_eq!(drop_count(src, "main"), 0);
     }
 
@@ -2746,6 +3119,62 @@ pub(crate) mod tests {
         let (o, _) = analyze_src(src);
         assert!(!o.owned_fns.contains_key("pick"));
         assert_eq!(drop_count(src, "main"), 0);
+    }
+
+    /// A type that reaches itself owns heap, because it had to be boxed to be
+    /// representable at all.
+    ///
+    /// THE DEFECT THIS PINS: the walk used to give up after eight levels and
+    /// answer `false`, so `type Tree = | Leaf | Node(Tree, Tree)` — which is
+    /// nothing but heap — reported that it owned none. `release_enum` skips a
+    /// variant whose payloads own nothing, so the boxes behind `Node` were
+    /// never freed and 200,000 trees of depth 8 peaked at 3.1 GB against a live
+    /// set of one. See `rfcs/census/declared-release-does-not-run.md`.
+    ///
+    /// The depth counter is the thing to watch. Any bound cheap enough to reach
+    /// on an ordinary nested type brings the leak back, and it comes back
+    /// SILENTLY: nothing fails, the program only grows.
+    #[test]
+    fn a_self_referring_type_owns_heap() {
+        use crate::ast::{EnumVariant, TypeDecl};
+        let mut types: HashMap<String, TypeDecl> = HashMap::new();
+        types.insert(
+            "Tree".to_string(),
+            TypeDecl {
+                name: "Tree".to_string(),
+                base: Type::Enum(vec![
+                    EnumVariant {
+                        name: "Leaf".to_string(),
+                        payload: vec![],
+                    },
+                    EnumVariant {
+                        name: "Node".to_string(),
+                        payload: vec![
+                            Type::Named("Tree".to_string()),
+                            Type::Named("Tree".to_string()),
+                        ],
+                    },
+                ]),
+                exported: false,
+                module: None,
+                doc: None,
+                type_params: vec![],
+                predicate: None,
+                line: 1,
+            },
+        );
+        assert!(
+            super::owns_heap(&Type::Named("Tree".to_string()), &types),
+            "a recursive enum owns the boxes its payloads travel in"
+        );
+        // And a record that reaches itself, which is the other shape `own.rs`
+        // documents (`type Node = {{ kids: Array<Node> }}`) — that one owns heap
+        // through the array as well, so it answered `true` before; this is the
+        // enum shape, where the box IS the only heap.
+        assert!(
+            !super::owns_heap(&Type::Int, &types),
+            "an integer owns nothing, and the cycle rule must not change that"
+        );
     }
 
     // ---- the RFC-0089 gate (M0) ------------------------------------------

@@ -66,7 +66,7 @@ fn main() -> Int64 {
     grow("\{twin(1).length}")
     grow("\{twin(2.5).length}")
     grow("\{twin(true).length}")
-    let twice: fn(Int64) -> Int64 = |n| n + n
+    let twice: fn(Int64) -> Int64 = n -> n + n
     print("\{alpha}\{beta}\{gamma}\{apply(twice, 3)}")
     return 0
 }

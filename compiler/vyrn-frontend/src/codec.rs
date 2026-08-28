@@ -622,9 +622,16 @@ pub fn wire(ty: &Type, types: &HashMap<String, TypeDecl>, decode: bool) -> Resul
                 Ok(Wire::FixedArray(*inner, n))
             }
         }
-        // The key is always `String` (the checker enforces it), so only the value
-        // type is carried.
-        Type::Map(_, val) => Ok(Wire::Map(*val)),
+        // A Map is a JSON object exactly when its keys are Strings, so only
+        // the value type is carried. A non-String key has no wire form yet —
+        // RFC-0117 §5 defers that choice (stringified keys against pair
+        // arrays), and the boundary refuses rather than guessing.
+        Type::Map(key, val) => {
+            if crate::types::resolve(&key, types) != Type::Str {
+                return Err(Type::Map(key, val));
+            }
+            Ok(Wire::Map(*val))
+        }
         Type::Record(fields) => Ok(Wire::Record(fields)),
         Type::Enum(vs) => Ok(Wire::Enum(vs)),
         // `Result<T, E>` flows through as the two-variant single-payload enum

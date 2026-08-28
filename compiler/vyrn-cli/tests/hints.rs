@@ -80,14 +80,14 @@ fn unit_tests_green(rel: &str, expected: &str) {
 
 #[test]
 fn std_hints_unit_tests_run_green() {
-    unit_tests_green("std/hints.vyrn", "8 passed, 0 failed");
+    unit_tests_green("std/hints.vyrn", "11 passed, 0 failed");
 }
 
 #[test]
 fn std_vyx_hints_unit_tests_run_green() {
     // One row per rule: the fixture that fires it, and the near miss that must
     // not. The near miss is the half that catches an over-eager rule.
-    unit_tests_green("std/vyx-hints.vyrn", "15 passed, 0 failed");
+    unit_tests_green("std/vyx-hints.vyrn", "22 passed, 0 failed");
 }
 
 // ---- `.vyx` rules, end to end ----------------------------------------------
@@ -330,12 +330,12 @@ fn a_waiver_in_the_component_drops_one_report_and_only_that_one() {
 /// `std/vyx-hints` imports — no `std/vyx`, no template parser, no privilege.
 /// Its rules, its codes, its severities and its config key are its own.
 const SQL_HINTS: &str = r#"import { reportHere, Severity } from "std/diag"
-import { hint, noPolicy, policyOf, Policy } from "std/hints"
+import { hint, noPolicy, policyOf, HintPolicy } from "std/hints"
 import { contains, slice } from "std/strpred"
 import { toLower } from "std/strings"
 
 /// A parsed policy, or the refusal that explains why there is none.
-type SqlPolicy = { policy: Policy, err: String }
+type SqlPolicy = { policy: HintPolicy, err: String }
 
 /// `sqlHints(path, config)` — two rules over a `.sql` file, one per line.
 export gen fn sqlHints(path: String, config: String) -> String {

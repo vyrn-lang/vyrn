@@ -1196,7 +1196,7 @@ mod tests {
             "type Ring = { data: Array<Int64> }\n\
              impl Index for Ring {\n\
                  place at(read self, i: Int64) -> Int64 {\n\
-                     let g = |k| self.data[i]\n\
+                     let g = k -> self.data[i]\n\
                      yield g(0)\n\
                  }\n\
              }\n\
@@ -1380,7 +1380,7 @@ mod tests {
             "type Ring = { data: Array<Int64> }\n\
              impl Index for Ring {\n\
                  place at(read self, i: Int64) -> Int64 {\n\
-                     let g = |i| i + 1\n\
+                     let g = i -> i + 1\n\
                      yield self.data[g(0)]\n\
                  }\n\
              }\n\

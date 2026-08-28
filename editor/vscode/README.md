@@ -32,10 +32,18 @@ compiler is resolved as: the `vyrn.path` setting, else
 `${workspaceFolder}/compiler/target/release/vyrn(.exe)`, else the `debug`
 build, else `cargo run -p vyrn-cli -- run <file>`.
 
+Beside it, a **◷ Profile** CodeLens runs `vyrn run --profile <file>`: the same
+program under the interpreter, plus a table of where its time went. The flag
+goes BEFORE the file on purpose — everything past the file is the program's own
+`args()` (RFC-0014), so `vyrn run app.vyrn --profile` hands the flag to
+`app.vyrn` and prints no table at all.
+
 For tests (RFC-0015), a **▶ Run test** CodeLens sits above every
 `test "name" { .. }` block — it runs `vyrn test <file> --name "name"` — and a
 **▶ Run all tests** CodeLens sits above the first test block (`vyrn test
-<file>`). Both use the same terminal and compiler-resolution as ▶ Run.
+<file>`), with a **◷ Profile tests** beside it. Benches (RFC-0055) get the same
+pair: **▶ Run bench** per block and **▶ Run all benches** over the first. All of
+them use the same terminal and compiler-resolution as ▶ Run.
 
 The LSP server (`compiler/vyrn-lsp`) is a thin adapter over the compiler's core
 diagnostics + symbol-query API (`vyrn_frontend::analyze`), the same one `vyrn

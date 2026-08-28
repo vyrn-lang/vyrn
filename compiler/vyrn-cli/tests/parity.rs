@@ -108,6 +108,7 @@ fn examples_interp_native_parity() {
             continue;
         }
         let mut native_cmd = Command::new(&exe);
+        native_cmd.env("VYRN_FREE_AUDIT", "1");
         native_cmd.args(&prog_args);
         let native = run_io(native_cmd, &dir, &stdin_fixture);
 
@@ -264,7 +265,10 @@ fn wasm_only_examples_trap_identically() {
             "{name}: native build must succeed (extern trap stubs link):\n{}",
             norm(&build.stderr)
         );
-        let native = Command::new(&exe).output().expect("run native");
+        let native = Command::new(&exe)
+            .env("VYRN_FREE_AUDIT", "1")
+            .output()
+            .expect("run native");
         assert_eq!(
             native.status.code(),
             Some(1),
@@ -310,8 +314,12 @@ fn threaded_spawn_matches_sequential_and_interp() {
         norm(&build.stderr)
     );
 
-    let threaded = Command::new(&exe).output().expect("run threaded");
+    let threaded = Command::new(&exe)
+        .env("VYRN_FREE_AUDIT", "1")
+        .output()
+        .expect("run threaded");
     let sequential = Command::new(&exe)
+        .env("VYRN_FREE_AUDIT", "1")
         .env("VYRN_SEQUENTIAL_SPAWN", "1")
         .output()
         .expect("run sequential");
@@ -372,8 +380,12 @@ fn task_trap_prints_once_and_exits_1_threaded() {
     );
 
     let interp = vyrn().arg("run").arg(&file).output().expect("run interp");
-    let threaded = Command::new(&exe).output().expect("run threaded");
+    let threaded = Command::new(&exe)
+        .env("VYRN_FREE_AUDIT", "1")
+        .output()
+        .expect("run threaded");
     let sequential = Command::new(&exe)
+        .env("VYRN_FREE_AUDIT", "1")
         .env("VYRN_SEQUENTIAL_SPAWN", "1")
         .output()
         .expect("run sequential");
@@ -429,8 +441,12 @@ fn a_dropped_task_that_traps_still_prints_once_and_exits_1() {
     );
 
     let interp = vyrn().arg("run").arg(&file).output().expect("run interp");
-    let threaded = Command::new(&exe).output().expect("run threaded");
+    let threaded = Command::new(&exe)
+        .env("VYRN_FREE_AUDIT", "1")
+        .output()
+        .expect("run threaded");
     let sequential = Command::new(&exe)
+        .env("VYRN_FREE_AUDIT", "1")
         .env("VYRN_SEQUENTIAL_SPAWN", "1")
         .output()
         .expect("run sequential");
@@ -504,7 +520,7 @@ fn stored_fn_param_compiles_for_any_payload() {
              fn on(k: String, cb: consume Sink) {{\n    pending[k.copy()] = cb\n}}\n\
              fn fire(k: String, p: {payload_ty}) {{\n    \
              match pending[k] {{ Some(cb) => cb(p), None => print(\"none\") }}\n}}\n\
-             fn main() -> Int64 {{\n    on(\"a\", |p| {body})\n    \
+             fn main() -> Int64 {{\n    on(\"a\", p -> {body})\n    \
              fire(\"a\", {sample})\n    return 0\n}}\n"
         );
         let file = out_dir.join(format!("fnparam_{label}.vyrn"));
@@ -532,7 +548,10 @@ fn stored_fn_param_compiles_for_any_payload() {
             norm(&build.stdout),
             norm(&build.stderr)
         );
-        let native = Command::new(&exe).output().expect("run native");
+        let native = Command::new(&exe)
+            .env("VYRN_FREE_AUDIT", "1")
+            .output()
+            .expect("run native");
         assert_eq!(
             norm(&native.stdout),
             norm(&interp.stdout),
@@ -705,7 +724,9 @@ fn recursion_with_an_aggregate_local_stops_at_one_limit_on_all_three_engines() {
         let mut interp_cmd = vyrn();
         interp_cmd.arg("run").arg(&path);
         let i = run_io(interp_cmd, &dir, &no_stdin);
-        let n_out = run_io(Command::new(&exe), &dir, &no_stdin);
+        let mut n_cmd = Command::new(&exe);
+        n_cmd.env("VYRN_FREE_AUDIT", "1");
+        let n_out = run_io(n_cmd, &dir, &no_stdin);
         let mut wasm_cmd = Command::new(&wasmtime);
         wasm_cmd.arg("run").arg(&module);
         let w = run_io(wasm_cmd, &dir, &no_stdin);
@@ -2427,7 +2448,7 @@ fn foldOver<T, A>(xs: Array<T>, init: A, f: fn(A, T) -> A) -> A {
 
 /// One lambda literal, two instantiations, two lifted copies.
 fn countAll<T>(xs: Array<T>) -> Int64 {
-    return foldOver(xs, 0, |acc, x| acc + 1)
+    return foldOver(xs, 0, (acc, x) -> acc + 1)
 }
 
 fn both(n: Int64, f: fn(Int64) -> Int64, g: fn(Int64) -> Int64) -> Int64 {
@@ -2453,28 +2474,28 @@ fn each(xs: Array<Int64>, f: fn(Int64)) {
 fn main() -> Int64 {
     // An aggregate capture named exactly as `on`'s own first parameter is.
     let p = Pt { x: 10, y: 20 }
-    let a = on(Pt { x: 1, y: 2 }, |q| Pt { x: q.x + p.x, y: q.y + p.y })
+    let a = on(Pt { x: 1, y: 2 }, q -> Pt { x: q.x + p.x, y: q.y + p.y })
     print(a.x * 100 + a.y)
-    let b = via(Pt { x: 3, y: 4 }, |q| Pt { x: q.x + p.x, y: q.y + p.y })
+    let b = via(Pt { x: 3, y: 4 }, q -> Pt { x: q.x + p.x, y: q.y + p.y })
     print(b.x * 100 + b.y)
     let c = on(Pt { x: 5, y: 6 }, flip)
     print(c.x * 100 + c.y)
 
     let nums: Array<Int64> = [1, 2, 3]
-    print(foldOver(nums, 0, |acc, x| acc + x))
-    print(foldOver(nums, 0, |acc, x| acc + x * 10))
+    print(foldOver(nums, 0, (acc, x) -> acc + x))
+    print(foldOver(nums, 0, (acc, x) -> acc + x * 10))
     let words: Array<String> = [\"a\", \"b\"]
     print(countAll(nums) + countAll(words))
 
     let u = 2
     let v = 5
-    print(both(3, |x| x + u, |x| x * v))
-    print(thrice(10, |x| { let d = x * 2 return d + 1 }))
+    print(both(3, x -> x + u, x -> x * v))
+    print(thrice(10, x -> { let d = x * 2 return d + 1 }))
     // One literal reached twice at one site: one instance.
-    print(thrice(1, |x| x) + thrice(1, |x| x))
+    print(thrice(1, x -> x) + thrice(1, x -> x))
 
     let tag = \"n=\"
-    each(nums, |x| print(\"\\{tag}\\{x}\"))
+    each(nums, x -> print(\"\\{tag}\\{x}\"))
     return 0
 }
 ";
@@ -2568,7 +2589,7 @@ fn main() -> Int64 {
     let mk: Make = origin
     let a = mk(3)
     print(a.x * 100 + a.y)
-    let lam: Make = |n| Pt { x: n + 1, y: n + 2 }
+    let lam: Make = n -> Pt { x: n + 1, y: n + 2 }
     let b = lam(10)
     print(b.x * 100 + b.y)
     let raw: fn(Int64) -> Pt = lam
@@ -3453,7 +3474,9 @@ fn three_engines_in(
         norm(&b.stdout),
         norm(&b.stderr)
     );
-    let n = run_io(Command::new(&exe), &dir, &no_stdin);
+    let mut n_cmd = Command::new(&exe);
+    n_cmd.env("VYRN_FREE_AUDIT", "1");
+    let n = run_io(n_cmd, &dir, &no_stdin);
     out.push((
         "native",
         norm(&n.stdout),

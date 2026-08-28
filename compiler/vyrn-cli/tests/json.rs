@@ -43,7 +43,7 @@ fn unit_tests_green(rel: &str, expected: &str) {
 
 #[test]
 fn std_json_writer_unit_tests_run_green() {
-    unit_tests_green("std/json.vyrn", "2 passed, 0 failed");
+    unit_tests_green("std/json.vyrn", "3 passed, 0 failed");
 }
 
 #[test]

@@ -159,7 +159,7 @@ export type VonTok = { kind: String, text: String, line: Int64, col: Int64 }
 /// The reader cursor: the token stream, the position in it, and the source bytes
 /// (which the number rule reads verbatim — a token carries the lexer's PARSED
 /// integer, and `0777` and `777` parse alike).
-type VonP = { toks: Array<VonTok>, n: Int64, i: Int64, src: Array<UInt8> }
+type VonP = { toks: Array<VonTok>, n: Int64, i: Int64, src: Array<UInt8>, lineAt: Int64, lineOff: Int64 }
 
 /// The current token's kind, or `""` past the end.
 fn kindAt(p: VonP) -> String {
@@ -266,22 +266,39 @@ fn showTok(p: VonP) -> String {
 
 /// The byte offset at which 1-based `line` begins (0 for line 1, the length past
 /// the end).
-fn lineStartOffset(src: Array<UInt8>, line: Int64) -> Int64 {
+///
+/// The scan starts at the parser's line cursor, not at byte 0. Tokens are read
+/// in one forward pass, so `line` never goes backwards in practice, and the
+/// document is then walked once in total across every number in it rather than
+/// once per number. Restarting each time was O(numbers x bytes), and measured
+/// as half the cost of reading an 800-field record of integers. The
+/// `line < p.lineAt` branch is the safety net, not the expected path: it does
+/// exactly what this function used to do every time.
+fn lineStartOffset(p: modify VonP, line: Int64) -> Int64 {
     if line <= 1 {
         return 0
     }
-    let mut at = 1
-    let mut i = 0
-    while i < src.length {
-        if src[i] == '\n' {
+    if line == p.lineAt {
+        return p.lineOff
+    }
+    if line < p.lineAt {
+        p.lineAt = 1
+        p.lineOff = 0
+    }
+    let mut at = p.lineAt
+    let mut i = p.lineOff
+    while i < p.src.length {
+        if p.src[i] == '\n' {
             at = at + 1
             if at == line {
+                p.lineAt = at
+                p.lineOff = i + 1
                 return i + 1
             }
         }
         i = i + 1
     }
-    return src.length
+    return p.src.length
 }
 
 /// The byte offset of 1-based `col` on the line beginning at `start`. The lexer
@@ -304,17 +321,18 @@ fn colOffset(src: Array<UInt8>, start: Int64, col: Int64) -> Int64 {
 /// most the `.` between them, exactly as written. This is the one place the
 /// reader looks past `lex()`: a token carries the lexer's PARSED value, and
 /// `0777`, `777` and `00777` all parse to the same integer.
-fn rawNumber(src: Array<UInt8>, line: Int64, col: Int64) -> String {
-    let start = colOffset(src, lineStartOffset(src, line), col)
+fn rawNumber(p: modify VonP, line: Int64, col: Int64) -> String {
+    let from = lineStartOffset(p, line)
+    let start = colOffset(p.src, from, col)
     let mut out: Array<UInt8> = []
     let mut i = start
-    while i < src.length {
-        let b = src[i]
+    while i < p.src.length {
+        let b = p.src[i]
         if (b >= '0' && b <= '9') || b == '.' {
             out.push(b)
             i = i + 1
         } else {
-            i = src.length
+            i = p.src.length
         }
     }
     return match stringFromBytes(out) {
@@ -342,7 +360,7 @@ fn readNumber(p: modify VonP, sign: String) -> Result<Von, String> {
     let isFloat = kindAt(p) == "float"
     let nline = tokLine(p)
     let ncol = tokCol(p)
-    let raw = rawNumber(p.src, nline, ncol)
+    let raw = rawNumber(p, nline, ncol)
     if hasLeadingZero(raw) {
         return Err(errAt(p, "`" + raw + "` has a leading zero; write it as a decimal number, or quote it if it is text"))
     }
@@ -361,23 +379,25 @@ fn readNumber(p: modify VonP, sign: String) -> Result<Von, String> {
 }
 
 /// Whether a record already carries `name`, and on which line — `-1` when not.
-fn fieldLine(fs: Array<VonField>, name: String) -> Int64 {
-    for f in fs {
-        if f.name == name {
-            return f.line
-        }
+///
+/// `seen` is the record's own name-to-line index, built as the fields are read.
+/// It used to be a scan over the fields already stored, which cost n(n-1)/2
+/// String comparisons for an n-field record: 800 fields took 1.7 s of build
+/// time, and four times that for 1600.
+fn fieldLine(seen: Map<String, Int64>, name: String) -> Int64 {
+    return match seen[name] {
+        Some(l) => l,
+        None => -1,
     }
-    return -1
 }
 
 /// Whether a map already carries `key`, and on which line — `-1` when not.
-fn entryLine(es: Array<VonEntry>, key: String) -> Int64 {
-    for e in es {
-        if e.key == key {
-            return e.line
-        }
+/// Indexed for the same reason `fieldLine` is.
+fn entryLine(seen: Map<String, Int64>, key: String) -> Int64 {
+    return match seen[key] {
+        Some(l) => l,
+        None => -1,
     }
-    return -1
 }
 
 /// The deepest nesting `parseVon` accepts — 128 enclosing records, variant
@@ -405,6 +425,7 @@ fn deeper(p: VonP, depth: Int64) -> Result<Int64, String> {
 fn readRecord(p: modify VonP, name: String, depth: Int64) -> Result<Von, String> {
     bump(p) // {
     let mut fs: Array<VonField> = []
+    let mut seen: Map<String, Int64> = [:]
     while true {
         skipDocs(p)
         if atPunct(p, "}") {
@@ -419,7 +440,7 @@ fn readRecord(p: modify VonP, name: String, depth: Int64) -> Result<Von, String>
         }
         let fname = textAt(p)
         let fline = tokLine(p)
-        let dup = fieldLine(fs, fname)
+        let dup = fieldLine(seen, fname)
         if dup >= 0 {
             return Err(errAt(p, "duplicate field `" + fname + "` (first at line " + dup.toString() + ")"))
         }
@@ -429,6 +450,7 @@ fn readRecord(p: modify VonP, name: String, depth: Int64) -> Result<Von, String>
         }
         bump(p)
         let v = readValue(p, depth)?
+        seen[fname.copy()] = fline
         fs.push(VonField { name: fname, value: v, line: fline })
         if atPunct(p, ",") {
             bump(p)
@@ -483,6 +505,7 @@ fn readArray(p: modify VonP, depth: Int64) -> Result<Von, String> {
 /// Read a map literal's entries (the cursor is just past `[`, on the first key).
 fn readMap(p: modify VonP, depth: Int64) -> Result<Von, String> {
     let mut es: Array<VonEntry> = []
+    let mut seen: Map<String, Int64> = [:]
     while true {
         skipDocs(p)
         if atPunct(p, "]") {
@@ -494,7 +517,7 @@ fn readMap(p: modify VonP, depth: Int64) -> Result<Von, String> {
         }
         let key = textAt(p)
         let kline = tokLine(p)
-        let dup = entryLine(es, key)
+        let dup = entryLine(seen, key)
         if dup >= 0 {
             return Err(errAt(p, "duplicate map key \"" + key + "\" (first at line " + dup.toString() + ")"))
         }
@@ -504,6 +527,7 @@ fn readMap(p: modify VonP, depth: Int64) -> Result<Von, String> {
         }
         bump(p)
         let v = readValue(p, depth)?
+        seen[key.copy()] = kline
         es.push(VonEntry { key: key, value: v, line: kline })
         if atPunct(p, ",") {
             bump(p)
@@ -729,7 +753,7 @@ fn walkVon(toks: consume Array<VonTok>, src: String) -> Result<VonDoc, String> {
         return Err(layout)
     }
     let count = toks.length
-    let mut p = VonP { toks: toks, n: count, i: 0, src: bytes(src) }
+    let mut p = VonP { toks: toks, n: count, i: 0, src: bytes(src), lineAt: 1, lineOff: 0 }
     let bad = firstErrorToken(p)
     if bad != "" {
         return Err(bad)
@@ -790,7 +814,9 @@ fn indent(n: Int64) -> String {
 
 /// The lowercase 2-digit hex of a byte value 0..255.
 fn hex2(b: Int64) -> String {
-    let db = bytes("0123456789abcdef")
+    // The digit table is read out of the literal rather than materialised with
+    // `bytes()`, which built a fresh 16-element array on every call.
+    let db = "0123456789abcdef"
     let mut out: Array<UInt8> = []
     out.push(db[(b / 16) % 16])
     out.push(db[b % 16])
@@ -1510,4 +1536,27 @@ test "nesting past vonMaxDepth is an Err, not a trap" {
     // At the limit the document parses, and the writer walks the tree it made.
     assertEq(parseErr(nested("[", "]", 128)), "ok")
     assertEq(roundTrip(nested("[", "]", 128)).charCount() > 0, true)
+}
+
+test "several numbers on one line each keep their own verbatim text" {
+    // `rawNumber` finds a number by walking to the start of its line, and the
+    // walk carries a cursor so the document is crossed once in total rather than
+    // once per number. Two numbers on the SAME line is the case that cursor gets
+    // wrong if it only ever moves forward: the second asks for a line the cursor
+    // is already standing on. A leading zero is rejected on the RAW text, so an
+    // answer that came back empty or from the wrong offset shows up here.
+    let doc = "import type { P } from \"./p\"\n\nP { a: 1, b: 22, c: 333 }\n"
+    let text = match parseVon(doc) {
+        Ok(d) => toVon(d),
+        Err(e) => e,
+    }
+    let Q = "\""
+    assertEq(text, "import type { P } from " + Q + "./p" + Q + "
+
+P {
+    a: 1,
+    b: 22,
+    c: 333,
+}
+")
 }

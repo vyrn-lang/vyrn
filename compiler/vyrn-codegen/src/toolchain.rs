@@ -49,6 +49,10 @@ pub const RUNTIME_SHIM_TEMPLATE: &str = r#"
 __declspec(dllimport) int __stdcall MoveFileExA(const char*, const char*, unsigned long);
 __declspec(dllimport) unsigned long __stdcall GetLastError(void);
 #pragma comment(lib, "kernel32")
+/* RFC-0111: `_setmode`/`_fileno` and the `_O_BINARY` flag, for the binary
+   stdout `__vyrn_write_stdout` needs. */
+#include <io.h>
+#include <fcntl.h>
 #define VYRN_MOVEFILE_REPLACE_EXISTING 0x1u
 #define VYRN_ERROR_NOT_SAME_DEVICE 17u
 #endif
@@ -100,19 +104,131 @@ static void* __vyrn_alloc_check(void* p, unsigned long long n) {
     }
     return p;
 }
+
+/* ---- free audit (RFC-0114 SS25, the double-free half) --------------------
+   Every free the IR or this shim runs goes through `__vyrn_free`. With
+   VYRN_FREE_AUDIT=1 in the environment, the allocator keeps a live-pointer
+   table and a free of anything not in it - a double free, or a free of
+   memory this program never owned - prints one line and exits 134. The peak
+   rows in `memory.rs` see leaks; this sees the class they cannot. Off (the
+   default), the cost is one branch per free and one getenv ever.
+   The table uses raw malloc/calloc so it never audits itself. */
+static int vyrn_audit_state = -1;
+typedef struct { void* p; unsigned long long n; } VyrnAuditEnt;
+static VyrnAuditEnt* vyrn_audit_tab = 0;
+static size_t vyrn_audit_cap = 0, vyrn_audit_len = 0;
+#if defined(__wasm__)
+static void vyrn_audit_acquire(void) {}
+static void vyrn_audit_release(void) {}
+#else
+static volatile int vyrn_audit_lock = 0;
+static void vyrn_audit_acquire(void) { while (__sync_lock_test_and_set(&vyrn_audit_lock, 1)) {} }
+static void vyrn_audit_release(void) { __sync_lock_release(&vyrn_audit_lock); }
+#endif
+static int vyrn_audit_on(void) {
+    if (vyrn_audit_state < 0) {
+        const char* e = getenv("VYRN_FREE_AUDIT");
+        vyrn_audit_state = (e && e[0] && e[0] != '0') ? 1 : 0;
+    }
+    return vyrn_audit_state;
+}
+static size_t vyrn_audit_slot(void* p, VyrnAuditEnt* tab, size_t cap) {
+    size_t h = (size_t)p;
+    h ^= h >> 16;
+    h *= (size_t)0x9e3779b1u;
+    h ^= h >> 13;
+    size_t i = h & (cap - 1);
+    while (tab[i].p && tab[i].p != p) i = (i + 1) & (cap - 1);
+    return i;
+}
+/* lock held */
+static void vyrn_audit_add(void* p, unsigned long long n) {
+    if (vyrn_audit_len * 2 >= vyrn_audit_cap) {
+        size_t ncap = vyrn_audit_cap ? vyrn_audit_cap * 2 : 1024;
+        VyrnAuditEnt* nt = (VyrnAuditEnt*)calloc(ncap, sizeof(VyrnAuditEnt));
+        if (!nt) return; /* the audit degrades; the program continues */
+        for (size_t i = 0; i < vyrn_audit_cap; i++)
+            if (vyrn_audit_tab[i].p)
+                nt[vyrn_audit_slot(vyrn_audit_tab[i].p, nt, ncap)] = vyrn_audit_tab[i];
+        free(vyrn_audit_tab);
+        vyrn_audit_tab = nt;
+        vyrn_audit_cap = ncap;
+    }
+    size_t i = vyrn_audit_slot(p, vyrn_audit_tab, vyrn_audit_cap);
+    if (!vyrn_audit_tab[i].p) {
+        vyrn_audit_tab[i].p = p;
+        vyrn_audit_tab[i].n = n;
+        vyrn_audit_len++;
+    }
+}
+/* lock held; the block's size if the pointer was live, or -1 (as ull) if it
+   was not. Removal rehashes the probe cluster after the hole, or a later
+   lookup stops early and reports a false double. */
+static unsigned long long vyrn_audit_remove(void* p) {
+    if (!vyrn_audit_cap) return (unsigned long long)-1;
+    size_t i = vyrn_audit_slot(p, vyrn_audit_tab, vyrn_audit_cap);
+    if (vyrn_audit_tab[i].p != p) return (unsigned long long)-1;
+    unsigned long long n = vyrn_audit_tab[i].n;
+    vyrn_audit_tab[i].p = 0;
+    vyrn_audit_len--;
+    size_t j = (i + 1) & (vyrn_audit_cap - 1);
+    while (vyrn_audit_tab[j].p) {
+        VyrnAuditEnt q = vyrn_audit_tab[j];
+        vyrn_audit_tab[j].p = 0;
+        vyrn_audit_len--;
+        vyrn_audit_add(q.p, q.n);
+        j = (j + 1) & (vyrn_audit_cap - 1);
+    }
+    return n;
+}
+static void vyrn_audit_fail(void) {
+    fputs("free audit: double or foreign free\n", stderr);
+    exit(134);
+}
+void __vyrn_free(void* p) {
+    if (p == NULL) return;
+    if (vyrn_audit_on()) {
+        vyrn_audit_acquire();
+        unsigned long long n = vyrn_audit_remove(p);
+        vyrn_audit_release();
+        if (n == (unsigned long long)-1) vyrn_audit_fail();
+        /* Poison before the block goes back: a dangling read now yields 0xDD
+           bytes instead of stale-but-plausible data, so a use-after-free
+           becomes a byte diff parity can see rather than a silent maybe. */
+        memset(p, 0xDD, (size_t)n);
+    }
+    free(p);
+}
 void* __vyrn_malloc(unsigned long long n) {
     if (n > (unsigned long long)(size_t)-1) {
         fputs($OOM, stderr);
         exit(1);
     }
-    return __vyrn_alloc_check(malloc((size_t)n), n);
+    void* p = __vyrn_alloc_check(malloc((size_t)n), n);
+    if (vyrn_audit_on()) {
+        vyrn_audit_acquire();
+        vyrn_audit_add(p, n);
+        vyrn_audit_release();
+    }
+    return p;
 }
 void* __vyrn_realloc(void* p, unsigned long long n) {
     if (n > (unsigned long long)(size_t)-1) {
         fputs($OOM, stderr);
         exit(1);
     }
-    return __vyrn_alloc_check(realloc(p, (size_t)n), n);
+    if (!vyrn_audit_on()) return __vyrn_alloc_check(realloc(p, (size_t)n), n);
+    /* a realloc frees its argument, so the audit treats it as free + malloc —
+       unpoisoned, because realloc itself keeps the prefix bytes alive */
+    vyrn_audit_acquire();
+    unsigned long long old = (p == NULL) ? 0 : vyrn_audit_remove(p);
+    vyrn_audit_release();
+    if (old == (unsigned long long)-1) vyrn_audit_fail();
+    void* q = __vyrn_alloc_check(realloc(p, (size_t)n), n);
+    vyrn_audit_acquire();
+    vyrn_audit_add(q, n);
+    vyrn_audit_release();
+    return q;
 }
 /* ---- String header (RFC-0089 M1a) --------------------------------------- */
 /* A Vyrn String is still a NUL-terminated `char*`, so every C sink here keeps
@@ -187,6 +303,28 @@ static void map_reindex(VMap* m) {
     memset(m->idx, 0, (size_t)nb * sizeof(long long));
     for (i = 0; i < m->len; i++) m->idx[map_slot(m->keys, m->idx, nb, m->keys[i])] = i + 1;
 }
+/* Index of the entry whose key equals the RAW BYTES `p[0..blen)`, or -1
+   (RFC-0116). The hash is FNV-1a over exactly `blen` bytes, which equals
+   `map_hash` of the equal key — a stored key has no interior NUL, so its
+   to-the-NUL hash covers the same bytes. A slice that carries a NUL can
+   therefore never match, and the miss path's validation is what refuses it. */
+long long __vyrn_map_find_bytes(char** keys, long long len, const unsigned char* p, long long blen, long long* idx, long long cap) {
+    unsigned long long h = 14695981039346656037ULL, mask, b;
+    long long i;
+    if (len <= 0 || cap <= 0) return -1;
+    for (i = 0; i < blen; i++) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    mask = (unsigned long long)(cap * 2) - 1;
+    b = h & mask;
+    while (idx[b]) {
+        const char* k = keys[idx[b] - 1];
+        if (memcmp(k, p, (size_t)blen) == 0 && k[blen] == 0) return idx[b] - 1;
+        b = (b + 1) & mask;
+    }
+    return -1;
+}
 /* Index of `key`, or -1. Operates on raw buffers so read paths (`at`, `has`) can
    call it with values extracted from an SSA aggregate. */
 long long __vyrn_map_find(char** keys, long long len, const char* key, long long* idx, long long cap) {
@@ -242,6 +380,38 @@ char** __vyrn_map_keys_copy(char** keys, long long len) {
     for (i = 0; i < len; i++) r[i] = keys[i];
     return r;
 }
+
+/* ---- the Int64-keyed map (RFC-0117 M1) ---------------------------------- */
+/* The same shape with the key column holding the values themselves: no dup on
+   insert, no free on removal, equality is the bits. Its own struct because the
+   key stride is 8 where a pointer may be 4 (wasm32). The hash is SplitMix64's
+   finalizer — the same function std/hash's `impl Hashable for Int64` spells —
+   and, like the string map's FNV, it is never observable: only insertion order
+   is (RFC-0028). */
+typedef struct { long long* keys; char* vals; long long len, cap; long long* idx; } VMapI;
+static unsigned long long map_hash_i64(long long k) {
+    unsigned long long z = (unsigned long long)k;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+static unsigned long long map_slot_i64(long long* keys, long long* idx, long long nb, long long key) {
+    unsigned long long mask = (unsigned long long)nb - 1;
+    unsigned long long b = map_hash_i64(key) & mask;
+    while (idx[b] && keys[idx[b] - 1] != key) b = (b + 1) & mask;
+    return b;
+}
+static void map_reindex_i64(VMapI* m) {
+    long long nb = m->cap * 2, i;
+    if (nb <= 0) return;
+    memset(m->idx, 0, (size_t)nb * sizeof(long long));
+    for (i = 0; i < m->len; i++) m->idx[map_slot_i64(m->keys, m->idx, nb, m->keys[i])] = i + 1;
+}
+long long __vyrn_map_find_i64(long long* keys, long long len, long long key, long long* idx, long long cap) { unsigned long long b; if (len <= 0 || cap <= 0) return -1; b = map_slot_i64(keys, idx, cap * 2, key); return idx[b] ? idx[b] - 1 : -1; }
+void __vyrn_map_reserve_i64(VMapI* m, long long esz) { if (m->len + 1 > m->cap) { m->cap = m->cap ? m->cap * 2 : 4; m->keys = (long long*)__vyrn_realloc(m->keys, (unsigned long long)m->cap * sizeof(long long)); m->vals = (char*)__vyrn_realloc(m->vals, (unsigned long long)m->cap * (unsigned long long)esz); m->idx = (long long*)__vyrn_realloc(m->idx, (unsigned long long)m->cap * 2 * sizeof(long long)); map_reindex_i64(m); } }
+void __vyrn_map_index_add_i64(VMapI* m, long long i) { m->idx[map_slot_i64(m->keys, m->idx, m->cap * 2, m->keys[i])] = i + 1; }
+void __vyrn_map_remove_at_i64(VMapI* m, long long i, long long esz) { long long rest = m->len - i - 1; if (rest > 0) { memmove(m->keys + i, m->keys + i + 1, (size_t)(rest * (long long)sizeof(long long))); memmove(m->vals + i * esz, m->vals + (i + 1) * esz, (size_t)(rest * esz)); } m->len--; map_reindex_i64(m); }
+long long* __vyrn_map_keys_copy_i64(long long* keys, long long len) { long long* r = (long long*)__vyrn_malloc((unsigned long long)(len ? len : 1) * sizeof(long long)); long long i; for (i = 0; i < len; i++) r[i] = keys[i]; return r; }
 int __vyrn_snprintf(char* buf, unsigned long long n, const char* fmt, ...) {
     va_list ap;
     int r;
@@ -261,26 +431,59 @@ long long __vyrn_args_count(void) {
 }
 const char* __vyrn_args_get(long long i) { return __vyrn_argv[i + 1]; }
 
+/* One byte of standard input, or -1 at end. `getchar` is buffered by the C
+   library already, but it is still a call per byte and on some libraries a lock
+   per byte; reverse complement over a 40 MB sequence makes 40 million of them.
+   Reading blocks into our own buffer costs a compare and an index instead, and
+   it is the same shape the wasm runtime's `getbyte` uses, so the two engines
+   read standard input the same way rather than two ways.
+
+   `read` and not `fread`: asked for 4096 bytes from a PIPE, `fread` blocks
+   until it has all 4096 or the writer closes. A program that parks on
+   `readLine()` waiting for one line would then never wake — which is exactly
+   what `the_spawn_handles_go_back_natively` does, and it caught this. `read`
+   hands back whatever has arrived, which is also what the wasm side's `fd_read`
+   does.
+
+   `readLine` is the only reader of fd 0 a Vyrn program has -- `readFile` and
+   `readFileBytes` both take a path -- so nothing else can hold a position in
+   this stream. */
+static unsigned char __vyrn_in_buf[4096];
+static unsigned long long __vyrn_in_len = 0, __vyrn_in_pos = 0;
+static int __vyrn_in_byte(void) {
+    if (__vyrn_in_pos >= __vyrn_in_len) {
+#if defined(_WIN32)
+        int n = _read(0, __vyrn_in_buf, (unsigned)sizeof __vyrn_in_buf);
+#else
+        long n = (long)read(0, __vyrn_in_buf, sizeof __vyrn_in_buf);
+#endif
+        if (n <= 0) return -1;
+        __vyrn_in_len = (unsigned long long)n;
+        __vyrn_in_pos = 0;
+    }
+    return __vyrn_in_buf[__vyrn_in_pos++];
+}
+
 /* readLine: one line from stdin as a malloc'd, NUL-terminated buffer with its
    trailing \r?\n stripped; *outlen is its byte length. Returns NULL at EOF (no
    bytes) and also for a line containing an embedded NUL byte, which cannot live
    in a NUL-terminated Vyrn String (the parity-safe rule, RFC-0014). The codegen
    validates UTF-8 (via the shared DFA); an invalid line reads as None too. */
 char* __vyrn_read_line(unsigned long long* outlen) {
-    int c = getchar();
-    if (c == EOF) return 0;
+    int c = __vyrn_in_byte();
+    if (c < 0) return 0;
     unsigned long long cap = 64, len = 0;
     char* buf = vstr_new(0, cap);
     int had_nul = 0;
-    while (c != EOF && c != '\n') {
+    while (c >= 0 && c != '\n') {
         if (c == 0) had_nul = 1;
         if (len + 2 >= cap) { cap *= 2; buf = vstr_grow(buf, cap); }
         buf[len++] = (char)c;
-        c = getchar();
+        c = __vyrn_in_byte();
     }
     if (len > 0 && buf[len - 1] == '\r') len--;
     vstr_setlen(buf, len);
-    if (had_nul) { free(buf - VSTR_HDR); return 0; }
+    if (had_nul) { __vyrn_free(buf - VSTR_HDR); return 0; }
     *outlen = len;
     return buf;
 }
@@ -303,10 +506,10 @@ int __vyrn_read_file(const char* path, char** out, unsigned long long* outlen) {
     }
     int bad = ferror(f);
     fclose(f);
-    if (bad) { free(buf - VSTR_HDR); return 1; }
+    if (bad) { __vyrn_free(buf - VSTR_HDR); return 1; }
     vstr_setlen(buf, len);
     for (unsigned long long k = 0; k < len; k++) {
-        if (buf[k] == 0) { free(buf - VSTR_HDR); return 3; }
+        if (buf[k] == 0) { __vyrn_free(buf - VSTR_HDR); return 3; }
     }
     *out = buf;
     *outlen = len;
@@ -327,10 +530,45 @@ int __vyrn_read_file_bytes(const char* path, char** out, unsigned long long* out
     }
     int bad = ferror(f);
     fclose(f);
-    if (bad) { free(buf); return 1; }
+    if (bad) { __vyrn_free(buf); return 1; }
     *out = buf;
     *outlen = len;
     return 0;
+}
+
+/* writeFileBytes (RFC-0111): the same write, with the length passed in rather
+   than found with strlen -- the buffer may hold NULs, which is the whole point.
+   Status 0 ok / 1 io-error. Already "wb", so no newline translation on any
+   platform. */
+int __vyrn_write_file_bytes(const char* path, const char* data, unsigned long long len) {
+    FILE* f = fopen(path, "wb");
+    if (f == 0) return 1;
+    size_t wrote = fwrite(data, 1, (size_t)len, f);
+    int bad = (wrote != (size_t)len);
+    if (fclose(f) != 0) bad = 1;
+    return bad ? 1 : 0;
+}
+
+/* writeStdout (RFC-0111): raw bytes to fd 1, no newline, no formatting.
+
+   THE WINDOWS TRAP. C stdio opens stdout in TEXT mode, where fwrite turns a
+   0x0A into 0x0D 0x0A. For `print` that is the platform's own newline and it is
+   correct. For a packed pixel row it is corruption that no line-ending
+   normalisation can undo, because nothing downstream can tell which 0x0D 0x0A
+   was a real pair of pixels. So stdout goes to binary mode for the write and
+   back afterwards -- back, because a `print` after a `writeStdout` must still
+   get the platform's newline. Every other platform is binary already and the
+   guard compiles to nothing. */
+void __vyrn_write_stdout(const char* data, unsigned long long len) {
+#if defined(_WIN32)
+    fflush(stdout);
+    int prev = _setmode(_fileno(stdout), _O_BINARY);
+#endif
+    fwrite(data, 1, (size_t)len, stdout);
+    fflush(stdout);
+#if defined(_WIN32)
+    if (prev != -1) _setmode(_fileno(stdout), prev);
+#endif
 }
 
 /* writeFile: create/truncate + write all bytes. Status 0 ok / 1 io-error. A
@@ -503,8 +741,8 @@ void* __vyrn_join(void* task) { return ((VTask*)task)->frame; }
 /* No threads, so the wait is nothing and the release is two frees. */
 void __vyrn_task_release(void* task) {
     VTask* t = (VTask*)task;
-    free(t->frame);
-    free(t);
+    __vyrn_free(t->frame);
+    __vyrn_free(t);
 }
 static void __vyrn_join_all(void) {}
 #else
@@ -652,8 +890,8 @@ void __vyrn_task_release(void* task) {
     pthread_cond_destroy(&t->cv);
     pthread_mutex_destroy(&t->mu);
 #endif
-    free(t->frame);
-    free(t);
+    __vyrn_free(t->frame);
+    __vyrn_free(t);
 }
 
 /* Join every task that is still outstanding when the program returns from

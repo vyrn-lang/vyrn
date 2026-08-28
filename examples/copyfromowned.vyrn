@@ -1,0 +1,8 @@
+/// RFC-0115's second refusal: `copyFrom` overwrites the receiver's elements
+/// by bytes, and an owning element that is overwritten is never released.
+fn main() -> Int64 {
+    let mut a: Array<String> = ["x"]
+    let b: Array<String> = ["y"]
+    a.copyFrom(b)
+    return a.length
+}

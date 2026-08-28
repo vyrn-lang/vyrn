@@ -67,7 +67,7 @@ fn applyTo(f: fn(Int64) -> Int64, x: Int64) -> Int64 {
 fn shadowedByLambdaParam() -> Int64 {
     let k = "k"
     print(k)
-    let bump: fn(Int64) -> Int64 = |k| {
+    let bump: fn(Int64) -> Int64 = k -> {
         let t = k + 1
         return t + 1
     }

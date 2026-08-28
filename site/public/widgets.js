@@ -1177,7 +1177,7 @@ boot();
   const field = $("[data-find-input]");
   const list = $("[data-find-results]");
   const note = $("[data-find-note]");
-  // The backstage wears its own shell and has no overlay in it.
+  // A page that wears its own shell has no overlay in it.
   if (box && field && list) {
     let index = null;
     let loading = null;

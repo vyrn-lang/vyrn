@@ -23,6 +23,33 @@ let benchOrder = 14
 /// not about what they hold.
 type Tree = | Leaf | Node(Tree, Tree)
 
+/// Take ownership of `v` and let the block end release it.
+fn give<T>(v: consume T) -> Int64 {
+    drop v
+    return 0
+}
+
+/// A node owns its subtree, and says so — RFC-0096 M2.
+///
+/// `Tree` reaches itself through `Node`, so the structural release walk has no
+/// bottom, and without a declaration `own.rs`'s guard answers "this type owns
+/// no heap" and frees nothing. A declaration IS a bottom: the walk emits a CALL
+/// here instead of recursing. This is what RFC-0096 M2 asks for.
+///
+/// It leaked every box until `own::owns_heap` was fixed the same day — that
+/// function spent its eight levels of depth on `Tree` and answered that a type
+/// which is nothing but heap owns none, so the walk that frees a boxed payload
+/// skipped the one variant with boxes. 200,000 trees of depth 8 went from
+/// 3.1 GB to 3.8 MB. See `rfcs/census/declared-release-does-not-run.md`.
+impl Owned for Tree {
+    fn release(consume self) {
+        match consume self {
+            Leaf => 0,
+            Node(l, r) => give(l) + give(r),
+        }
+    }
+}
+
 /// A complete tree of `depth`.
 fn make(depth: Int64) -> Tree {
     if depth == 0 {
@@ -45,6 +72,13 @@ fn checkAll(depth: Int64, iterations: Int64) -> Int64 {
     let mut sum = 0
     let mut i = 0
     while i < iterations {
+        // A TEMPORARY, deliberately — this line is the corpus's R1 witness
+        // (RFC-0114 M1). The tree is an argument temporary of `check`; the
+        // caller releases it after the call, which is the game's own wording:
+        // "built, checked and released one at a time". Before M1 this shape
+        // leaked every tree (452 MB at depth 16 against 20 MB bound) and the
+        // example carried a `let` as a workaround; the workaround is gone
+        // because the defect is.
         sum = sum + check(make(depth))
         i = i + 1
     }

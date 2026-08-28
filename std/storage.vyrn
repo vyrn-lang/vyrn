@@ -1,4 +1,6 @@
-/// std/storage — crash-safe persistence (RFC-0044).
+/// std/storage — crash-safe persistence: a save writes a sibling file and
+/// renames it over the target, so a crash leaves the whole old file or the
+/// whole new one, never a torn one (RFC-0044).
 ///
 /// `writeFile` truncates then streams, so a crash mid-write leaves the file torn
 /// — the old contents gone, the new ones incomplete. For a whole-file JSON store

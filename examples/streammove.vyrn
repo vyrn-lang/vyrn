@@ -44,7 +44,7 @@ fn mk() -> Array<Int64> {
 fn stepped() -> Int64 {
     let each = 7
     let mut left = 3
-    let run: fn(Int64, Int64, Bool) -> Option<Int64> = |slot, gen, closing| {
+    let run: fn(Int64, Int64, Bool) -> Option<Int64> = (slot, gen, closing) -> {
         if closing {
             return None
         }

@@ -5,11 +5,11 @@ import { joinWith } from "std/strings"
 type Transform = fn(Int64) -> Int64
 
 fn makeAdder(n: Int64) -> Transform {
-    return |x| x + n
+    return x -> x + n
 }
 
 export fn demo() -> String {
-    let tenfold: Transform = |x| x * 10
+    let tenfold: Transform = x -> x * 10
     let addFive = makeAdder(5)
     let steps: Array<Transform> = [tenfold, addFive]
 

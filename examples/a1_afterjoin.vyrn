@@ -1,0 +1,20 @@
+fn take(v: consume String) -> Int64 {
+    drop v
+    return 0
+}
+
+/// A1's reach: `s` moved on ONE branch, READ AFTER the join. Theorem 4's first
+/// case claims the checker refuses this. Does it?
+fn f(flag: Bool) -> Int64 {
+    let s = "ab" + "cd"
+    let mut n = 0
+    if flag {
+        n = n + take(consume s)
+    }
+    return n + s.byteLength
+}
+
+fn main() -> Int64 {
+    print("\{f(false)}")
+    return 0
+}

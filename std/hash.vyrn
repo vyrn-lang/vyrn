@@ -31,6 +31,45 @@ export fn fnv1aStr(s: String) -> UInt64 {
     return fnv1a(bytes(s))
 }
 
+/// A key is anything that hashes (RFC-0117). The one contract: equal values
+/// return equal hashes. Beyond that the value is the implementation's — a
+/// `Map`'s index mixes and masks it itself, and the hash decides nothing
+/// observable (insertion order does, RFC-0028).
+export protocol Hashable {
+    fn hash(self) -> UInt64
+}
+
+/// SplitMix64's finalizer (Vigna) — the same constants [`std/random`] mixes
+/// with, and the same function the map runtime applies to an `Int64` key.
+/// Spelled here so the contract has one readable definition.
+impl Hashable for Int64 {
+    fn hash(self) -> UInt64 {
+        let c1: UInt64 = 13787848793156543929 // 0xBF58476D1CE4E5B9
+        let c2: UInt64 = 10723151780598845931 // 0x94D049BB133111EB
+        let mut z: UInt64 = UInt64(self)
+        z = (z ^ (z >> 30)) * c1
+        z = (z ^ (z >> 27)) * c2
+        return z ^ (z >> 31)
+    }
+}
+
+/// FNV-1a over the UTF-8 bytes — the hash the String-keyed map has always run.
+impl Hashable for String {
+    fn hash(self) -> UInt64 {
+        return fnv1aStr(self)
+    }
+}
+
+test "equal values hash equal, and the mix spreads" {
+    let a = 7
+    let b = 7
+    assertEq(a.hash(), b.hash())
+    let c = 8
+    assert(a.hash() != c.hash())
+    assertEq("key".hash(), "key".hash())
+    assert("key".hash() != "keys".hash())
+}
+
 // ---- SHA-1 (RFC 3174) ------------------------------------------------------
 
 /// **SHA-1 is here as a handshake nonce transform, not as a security
@@ -145,7 +184,9 @@ export fn sha1(data: Array<UInt8>) -> Array<UInt8> {
 /// The SHA-1 digest of a String's UTF-8 bytes as lowercase hex — the spelling
 /// RFC 3174 §7.3's test vectors are written in. Read [`sha1`]'s warning first.
 export fn sha1Hex(s: String) -> String {
-    let digits = bytes("0123456789abcdef")
+    // The digit table is read out of the literal rather than materialised with
+    // `bytes()`, which built a fresh 16-element array on every call.
+    let digits = "0123456789abcdef"
     let mut out: Array<UInt8> = []
     for b in sha1(bytes(s)) {
         out.push(digits[Int64(b) / 16])
@@ -170,4 +211,11 @@ fn sha1Rotl5(x: UInt64) -> UInt64 {
 
 fn sha1Rotl30(x: UInt64) -> UInt64 {
     return ((x << 30) | (x >> 2)) & 4294967295
+}
+
+test "sha1Hex matches the published vectors" {
+    // RFC 3174 section 7.3 publishes these. The hex table this reads was
+    // changed; the digest text must not move with it.
+    assertEq(sha1Hex("abc"), "a9993e364706816aba3e25717850c26c9cd0d89d")
+    assertEq(sha1Hex(""), "da39a3ee5e6b4b0d3255bfef95601890afd80709")
 }

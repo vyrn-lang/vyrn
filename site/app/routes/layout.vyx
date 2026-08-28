@@ -19,14 +19,17 @@ import { exampleCount, backendCount, hasRelease, releaseTag, releasePre } from "
 // has no entry for a `<meta>`. Each page therefore carries the viewport and
 // description meta in its own `head()` — one call to `pageHead`, which builds
 // them from a `Head` value where `withMeta` does exist.
-// `theme.js` is a CLASSIC script and the others are modules, which is the whole
-// reason it is a separate file: a module is deferred, so it runs after the first
-// paint, and a theme applied after the first paint is a flash. This one blocks
-// rendering for four hundred bytes and sets the root attribute before anything
-// is painted (RFC-0105 M4).
+// `theme.js` WAS a classic script, so that it blocked rendering and set the
+// root attribute before the first paint. It blocked on a request to do it, and
+// nothing is painted while that request is in flight — which is the flash it was
+// there to prevent, moved rather than removed (B3 defect 5). The four lines that
+// read the choice are inline in the head now, written by `withThemeBoot` in
+// `site/export.vyrn`, and they need no request at all. What is left in the file
+// is the toggle and its listeners, which run after the paint by definition, so
+// it is a module like every other script here.
 head {
     stylesheet "/style.css"
-    script "/theme.js"
+    module "/theme.js"
     module "/widgets.js"
 }
 
@@ -49,9 +52,7 @@ fn standing() -> String {
 <div class="shell">
 <!-- THE HEADER IS THE VIEWPORT'S (RFC-0106 M4 follow-up, user row 1): the
      masthead and its border-bottom span the whole window, the reference
-     site's own shape, and the framed 1232px plate begins under it. Only the
-     backstage keeps its masthead inside its root, because it wears its own
-     shell. -->
+     site's own shape, and the framed 1232px plate begins under it. -->
 <a class="skip" href="#main">Skip to content</a>
 <header class="masthead">
         <a href="/index.html" class="wordmark">vyrn</a>
@@ -75,8 +76,8 @@ fn standing() -> String {
         </details>
         <!-- The one call to action and the theme control, pushed to the end of
              the row together. Both are strings from `../nav` rather than markup
-             here: the theme control because the backstage builds its masthead as
-             one string and has no host element, and the CTA because the export's
+             here: the theme control because a page that builds its masthead as
+             one string has no host element, and the CTA because the export's
              `aria-current` marker matches on `href` and `data-key` being the
              first two attributes, which a template cannot promise. `.slot` is
              `display: contents`, so `v-html` costs no box either time. -->
@@ -158,13 +159,6 @@ fn standing() -> String {
              the link leaves this site, which no word here says, so it carries a
              `label` and renders as `role="img"` with that name. -->
         <a href="https://github.com/vyrn-lang/vyrn"><Icon name="bytesize:github"/> Source on GitHub <Icon name="bytesize:external" label="opens on github.com"/></a>
-        <!-- The one door to the other front (RFC-0105 M1). It is a footer link
-             and not a navigation row on purpose: a reader deciding whether to
-             use the language is never sent into the design record by the
-             masthead. `data-nav="hard"` because the backstage wears its own
-             shell, and a soft navigation would swap the content under this
-             masthead and leave the reader in neither section. -->
-        
         <span>{{ standing() }}</span>
     </footer>
 </div>

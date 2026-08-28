@@ -42,8 +42,7 @@ async function generatorNames() {
   return names;
 }
 
-/// The shell every consumer page wears. Its footer link is the marker: the
-/// backstage builds a masthead of its own and wears none of this.
+/// The shell every consumer page wears. Its footer link is the marker.
 const SHELL = "layout.vyx";
 const SHELL_MARK = "Source on GitHub";
 /// The route templates that carry tags of their own, and the pages they make.
@@ -56,6 +55,10 @@ const PAGE_TAGS = {
   "install.vyx": "install.html",
   "index.vyx": "index.html",
   "docs/index.vyx": "docs.html",
+  // The two hand-written leaves. They gained the page-actions menu, and the
+  // menu's glyphs are theirs alone — one page each, so a page key, not a shelf.
+  "docs/graph.vyx": "docs/graph.html",
+  "tooling/editors.vyx": "tooling/editors.html",
 };
 /// Templates that make MANY pages, all of them docs-shell pages the per-page
 /// assertion already treats as a floor: their tags join the named set, and no

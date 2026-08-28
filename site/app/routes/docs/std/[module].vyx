@@ -20,12 +20,12 @@
 // A String segment binds the module name, and the query returns
 // `Result<ModuleDoc, PageError>`, so a name that is not a module renders the
 // themed error page at 404 instead of an empty page.
-import { ApiEntry, apiEntries, apiIntro, apiKnown, apiSource, apiSourceLine, apiTests, apiHref, importLine } from "../../../docs"
+import { ApiEntry, apiBlurb, apiEntries, apiIntro, apiKnown, apiSource, apiSourceLine, apiTests, apiHref, importLine, exportPhrase } from "../../../docs"
 import { Demo, demoFor, chapterHref } from "../../../guide"
 import { examplesUsing, usesOfModule, usedByModule } from "../../../stdgraph"
 import { blob } from "../../../repo"
 import { Head, PageError, ParamQuery, noHead, notFound, paramQuery } from "std/ui"
-import { pageHead } from "../../../nav"
+import { pageHeadWith } from "../../../nav"
 import { mdUrl, askClaudeUrl } from "../../../pagemd"
 // THE DOCS SHELL (RFC-0106 M4). The left column is the whole reference, in the
 // library's own groups; the right is this page's own headings; the foot is the
@@ -40,7 +40,7 @@ type ModuleDoc = { name: String, intro: String, entries: Array<ApiEntry> }
 /// The document title names the module, because a reader with twelve tabs open
 /// is reading the title, not the page.
 export fn head(d: ModuleDoc) -> Head {
-    return pageHead("std/" + d.name + " — Vyrn")
+    return pageHeadWith("std/" + d.name + " — Vyrn", apiBlurb(d.name))
 }
 
 export fn data() -> ParamQuery<Params, Result<ModuleDoc, PageError>> {
@@ -52,12 +52,6 @@ fn fetchModule(p: Params) -> Result<ModuleDoc, PageError> {
         return Err(notFound("std/" + p.module + " is not a module"))
     }
     return Ok(ModuleDoc { name: p.module.copy(), intro: apiIntro(p.module), entries: apiEntries(p.module) })
-}
-
-/// `1 export`, `44 exports`. A count and its noun disagreeing is the sort of
-/// thing a reader takes as a sign that nothing here was read.
-fn exportCount(n: Int64) -> String {
-    return if n == 1 { "1 export" } else { n.toString() + " exports" }
 }
 
 /// The same rule for the other three counts on this page.
@@ -188,7 +182,7 @@ fn claudeHref(m: String) -> String {
 
     <section class="hero">
         <h1 class="display">std/{{ data.name }}</h1>
-        <p class="lede">{{ exportCount(data.entries.length) }}, read off <code>std/{{ data.name }}.vyrn</code> by the compiler's own lexer while this page was built.</p>
+        <p class="lede">{{ exportPhrase(data.entries.length) }}, from <code>std/{{ data.name }}.vyrn</code>.</p>
     </section>
 
     <section class="band" id="about">
@@ -204,18 +198,17 @@ fn claudeHref(m: String) -> String {
     <section class="band" id="use">
         <p class="eyebrow">Take it</p>
         <h2>The line you copy</h2>
-        <p>Every name this module exports, in one <code>import</code>. Keep the ones you want; the compiler will tell you about the rest. Nothing is installed — <code>std/</code> arrives with the compiler — so this line is the whole of using it.</p>
+        <p>Every name this module exports, in one <code>import</code>. Keep the ones you want. Nothing is installed: <code>std/</code> arrives with the compiler.</p>
         <div class="cmd" data-copy>
             <code :data-import="importLine(data.name)">{{ importLine(data.name) }}</code>
             <button type="button" data-copy-btn aria-label="Copy it">Copy</button>
         </div>
-        <p class="cap">Compiled as a program of its own on every build, so it is a line that builds and not a line that reads like one.</p>
     </section>
 
     <section class="band" id="graph">
         <p class="eyebrow">In the graph</p>
         <h2>What it needs, and who needs it</h2>
-        <p>Read from the module's own <code>import</code> lines while this page was built. <a href="/docs/graph.html">The whole graph</a> is on one page.</p>
+        <p>Read from this module's own <code>import</code> lines. <a href="/docs/graph.html">The import graph</a> draws the whole library.</p>
         <dl class="specs">
             <div>
                 <dt>Imports</dt>
@@ -240,14 +233,14 @@ fn claudeHref(m: String) -> String {
             <pre class="code" v-html="e.sig"></pre>
             <div class="prose" v-html="e.prose"></div>
             <p class="cap"><a :href="apiSourceLine(data.name, e.line)">std/{{ data.name }}.vyrn, line {{ e.line }}</a></p>
-            <p class="cap demo" v-if="hasDemo(data.name, e)">Used by a program in the guide: <a :href="demoChapterHref(data.name, e)">{{ demoOf(data.name, e).title }}</a> — <a :href="demoOf(data.name, e).play">open it in the playground</a>.</p>
+            <p class="cap demo" v-if="hasDemo(data.name, e)">Used in the guide: <a :href="demoChapterHref(data.name, e)">{{ demoOf(data.name, e).title }}</a> — <a :href="demoOf(data.name, e).play">run it in the playground</a>.</p>
         </article>
     </section>
 
     <section class="band" id="tests">
         <p class="eyebrow">What the tests promise</p>
         <h2>{{ plural(apiTests(data.name).length, "test block", "test blocks") }}</h2>
-        <p>Every one of these is a <code>test</code> block in <code>std/{{ data.name }}.vyrn</code>, named by the person who wrote it. CI runs all of them, so a promise here is a promise the build keeps.</p>
+        <p>Every one of these is a <code>test</code> block in <code>std/{{ data.name }}.vyrn</code>. CI runs all of them.</p>
         <details class="promises">
             <summary>Read the promises</summary>
             <ul class="plain">
@@ -260,7 +253,7 @@ fn claudeHref(m: String) -> String {
     <section class="band" id="examples">
         <p class="eyebrow">In use</p>
         <h2>{{ plural(samples(data.name).length, "example program", "example programs") }}</h2>
-        <p>Whole programs in <code>examples/</code> that import this module. The parity harness runs every one of them on all three backends, so each is a working use of what is documented above.</p>
+        <p>Whole programs in <code>examples/</code> that import this module. Every one runs on all three backends.</p>
         <ul class="plain paths">
             <li v-for="s in samples(data.name)" :key="s.path"><a :href="s.href">{{ s.path }}</a></li>
         </ul>

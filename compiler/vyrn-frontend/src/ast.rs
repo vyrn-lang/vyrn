@@ -49,6 +49,20 @@ pub struct Program {
     /// modules); initialized once, in declaration order, before `main`. Every
     /// function sees them as an outermost scope frame below its parameters.
     pub globals: Vec<GlobalDecl>,
+    /// Where each of RFC-0054's surface builtins is shadowed: `(module, name)`
+    /// for every module that can SEE a declaration of `render`/`rawAt`/`raw`/
+    /// `lex` — its own, or one it imported.
+    ///
+    /// The loader fills this and the checker reads it, because the question
+    /// cannot be answered on either side alone. The checker never sees
+    /// `imports` (they are consumed above), and the loader does not resolve
+    /// calls. Asking the linked program instead — which is what both engines
+    /// used to do — makes one module's `fn raw` disable the builtin for every
+    /// module, `std/vyx` included; `examples/shadowbuiltin.vyrn` is that defect.
+    ///
+    /// `None` in the module position is the root module, spelled as the loader
+    /// spells it on [`Function::module`].
+    pub surface_shadows: std::collections::HashSet<(Option<String>, String)>,
     /// The logging threshold ordinal (RFC-0008), set by a `logging { level: X }`
     /// block. A log call below it is dropped at compile time. Defaults to
     /// [`DEFAULT_LOG_LEVEL`] (Info) when there is no config block.
@@ -137,18 +151,60 @@ pub fn is_place_temp(name: &str) -> bool {
 /// a `logging { level: .. }` block lowers it.
 pub const DEFAULT_LOG_LEVEL: usize = 2;
 
+/// The four SURFACE builtins (RFC-0054): the ones spelled as ordinary
+/// identifiers rather than with an unspellable `@` prefix.
+///
+/// They are deliberately NOT reserved — they are common words, and a program
+/// that wants a function called `render` should have one. A module that
+/// declares one means its own; a module that does not means the builtin.
+///
+/// WHOSE DECLARATION COUNTS IS THE WHOLE SUBTLETY. Both engines used to ask
+/// whether the LINKED PROGRAM held a function of the name, which is a different
+/// question with a much wider answer: a two-argument `rawAt` in one module took
+/// the four-argument builtin away from `std/vyx`, in a module that neither
+/// imports nor knows about it. The question is now asked of the calling
+/// module's own scope, which is what the RFC's wording always described.
+pub const SURFACE_BUILTINS: [&str; 4] = ["render", "rawAt", "raw", "lex"];
+
+/// Whether `name` is one of the four surface builtins.
+pub fn is_surface_builtin(name: &str) -> bool {
+    SURFACE_BUILTINS.contains(&name)
+}
+
+/// The five log levels (RFC-0008), in order, lowest first.
+///
+/// ONE TABLE. These five names were written out in eleven places across three
+/// crates — the ordinal map below, the checker's effect lists, the interpreter's
+/// dispatch, both code generators, and the editor's index. A sixth level added
+/// to some of them and not others is a level that logs but does not count as an
+/// effect, so `spawn` would let it cross a task boundary.
+///
+/// The ORDER is the meaning: the index is the ordinal a `logging { level: .. }`
+/// block compares against, so this is a list and not a set.
+///
+/// THREE SITES DELIBERATELY STILL SPELL THE FIVE OUT, and they are not
+/// duplication:
+///
+/// - `interp.rs`'s dispatch arm and `vyrn-codegen/src/direct.rs`'s two arms are
+///   READ AS DATA by `vyrn-frontend/tests/primitives.rs`, which scans both files
+///   for literals to enumerate what each engine implements and compares that to
+///   RFC-0078's census. A predicate is invisible to a text scan.
+/// - `checker.rs`'s `RESERVED`, `SPAWN_FORBIDDEN` and `COMPTIME_FORBIDDEN` hold
+///   the five among dozens of unrelated names, where splicing a const array in
+///   costs more than it saves. `every_log_level_is_reserved_and_forbidden_where_effects_are`
+///   compares them to this table instead.
+pub const LOG_LEVELS: [&str; 5] = ["trace", "debug", "info", "warn", "error"];
+
+/// Whether `name` is one of the five log levels.
+pub fn is_log_level(name: &str) -> bool {
+    LOG_LEVELS.contains(&name)
+}
+
 /// The ordinal of a log-level name (RFC-0008), `trace` lowest → `error` highest.
 /// Shared by the config-block parser, the interpreter, and the codegen so they
 /// filter identically. Returns `None` for an unknown name.
 pub fn log_level_ordinal(name: &str) -> Option<usize> {
-    match name {
-        "trace" => Some(0),
-        "debug" => Some(1),
-        "info" => Some(2),
-        "warn" => Some(3),
-        "error" => Some(4),
-        _ => None,
-    }
+    LOG_LEVELS.iter().position(|l| *l == name)
 }
 
 /// A top-level module-state binding (RFC-0013): `let [mut] name [: Type] = init`.

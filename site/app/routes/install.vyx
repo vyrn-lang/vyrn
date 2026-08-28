@@ -83,12 +83,30 @@ fn osId(p: InstallTarget) -> String {
 /// The script the selected command pipes into a shell, so a reader can read it
 /// before they run it. It is the file this site serves and the command fetches —
 /// the same bytes, one click, no second copy to keep in step.
+///
+/// THE VIEW LINK NAMES THE `.txt` TWIN, and the extension is the whole reason.
+/// GitHub Pages types a file by its extension and cannot be told otherwise per
+/// request, so `/install.sh` arrives as `application/x-sh` and `/install.ps1`
+/// as `application/octet-stream` — a press on this link downloaded the file
+/// instead of showing it. A `.txt` name is served as `text/plain`, which every
+/// browser renders as a page of readable text. The bytes are the export's own
+/// copy of the repository's file, so what is read and what is run are the same.
 fn scriptHref(p: InstallTarget) -> String {
+    if p.id == "windows" {
+        return "/install.ps1.txt"
+    }
+    return "/install.sh.txt"
+}
+
+/// The same file under its own name, for the reader who wants the file and not
+/// a page of it. The command pipes this one.
+fn scriptDownload(p: InstallTarget) -> String {
     if p.id == "windows" {
         return "/install.ps1"
     }
     return "/install.sh"
 }
+
 </script>
 
 <template>
@@ -127,7 +145,7 @@ fn scriptHref(p: InstallTarget) -> String {
                             <code v-html="shellHtml(p.cmd)"></code>
                             <button type="button" data-copy-btn aria-label="Copy the install command">Copy</button>
                         </div>
-                        <p class="ctarow"><a class="cta" :href="scriptHref(p)">View the install script</a></p>
+                        <p class="ctarow"><a class="cta" :href="scriptHref(p)">View the install script</a> <a class="cta" :href="scriptDownload(p)" download>Download</a></p>
                     </div>
                 </div>
             </fieldset>
@@ -139,7 +157,7 @@ fn scriptHref(p: InstallTarget) -> String {
             <div class="say">
                 <p class="eyebrow"><Icon name="bytesize:lock"/> Verified</p>
                 <h2>It refuses what it cannot check</h2>
-                <p>Running a stranger's script deserves this much. Read it first: <a href="https://github.com/vyrn-lang/vyrn/blob/main/install.sh">install.sh</a>, <a href="https://github.com/vyrn-lang/vyrn/blob/main/install.ps1">install.ps1</a>.</p>
+                <p>Read the script before you run it: <a href="https://github.com/vyrn-lang/vyrn/blob/main/install.sh">install.sh</a>, <a href="https://github.com/vyrn-lang/vyrn/blob/main/install.ps1">install.ps1</a>.</p>
             </div>
             <ul class="plain">
                 <li><strong>Downloads the release's own <code>SHA256SUMS</code></strong></li>
@@ -168,7 +186,7 @@ fn scriptHref(p: InstallTarget) -> String {
                     <code v-html="shellHtml(uninstall())"></code>
                     <button type="button" data-copy-btn aria-label="Copy the uninstall command">Copy</button>
                 </div>
-                <p>Build from source, for the newest commit or a machine with no archive. Needs a recent Rust toolchain; a native binary needs <code>clang</code> on <code>PATH</code>.</p>
+                <p>Build from source, for the newest commit or a machine with no archive. It needs a recent Rust toolchain, and <code>clang</code> on <code>PATH</code> for a native binary.</p>
                 <div class="cmd" data-copy>
                     <code v-html="shellHtml(sourceBuild())"></code>
                     <button type="button" data-copy-btn aria-label="Copy the build commands">Copy</button>

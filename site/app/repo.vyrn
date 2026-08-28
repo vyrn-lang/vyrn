@@ -7,7 +7,7 @@
 import { repoFacts } from "./facts"
 import { exampleCount as genExamples, rfcCount as genRfcs, stdCount as genStd, stdModules as genModules, rfcNumbers as genNumbers, rfcTitles as genTitles, releaseTag as genTag, releaseDate as genDate } from repoFacts("../../examples", "../../rfcs", "../../std", "../release.txt")
 import { indexOf } from "std/strings"
-import { ghBlob, ghSpec, ghRelease } from "./github"
+import { ghBlob, ghSpec, ghRelease, ghRaw } from "./github"
 import { Release, releaseRows } from "./history"
 
 /// One design record: its number and its title.
@@ -47,7 +47,7 @@ export fn rfcRows() -> Array<RfcRow> {
     return out
 }
 
-/// A file in this repository, on GitHub. The three URL builders live in
+/// A file in this repository, on GitHub. The four URL builders live in
 /// `app/github.vyrn` — a leaf that imports nothing, so that this module can read
 /// the repository's own tags without closing an import cycle — and are
 /// re-exported here so every caller on the site keeps one name for them.
@@ -58,6 +58,18 @@ export fn blob(path: String) -> String {
 /// A file in this repository, as a remote import specifier (RFC-0010 M4).
 export fn remoteSpec(path: String) -> String {
     return ghSpec(path)
+}
+
+/// A file in this repository, served raw at `gitRef`.
+///
+/// NOT `rawAt`, and no longer for a compiler reason. Naming it that once broke
+/// `std/vyx`, because a declaration in any module shadowed the RFC-0054 builtin
+/// for every module; that is fixed and `examples/shadowbuiltin.vyrn` pins it.
+/// The name stays `rawFile` because it is the better one: this answers a FILE
+/// at a ref, and the builtin it would have collided with splices code at a
+/// source position.
+export fn rawFile(gitRef: String, path: String) -> String {
+    return ghRaw(gitRef, path)
 }
 
 /// How many backends a program compiles to: the tree-walking interpreter, the

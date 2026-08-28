@@ -24,6 +24,7 @@
 /// what cache policy is. An empty `derived` is omitted rather than written `{}`.
 
 import { Json, JsonField, emit } from "std/json"
+import { fnv1aStr } from "std/hash"
 
 /// One mapped symbol: the name the generated module exports, the declaration it
 /// stands for, and the derived facts about it.
@@ -86,12 +87,23 @@ export fn mapJson(module: String, symbols: Array<Symbol>) -> String {
 /// root does the moment it links both `rpc("./server/api")` and a REST
 /// projection's `http("./pastes")`. The generator call is the one thing that
 /// distinguishes them and it is already in hand.
+///
+/// Only ASCII letters and digits survive, so a byte above 0x7F would vanish and
+/// two module paths differing only in their non-ASCII characters would produce
+/// one slug — the collision this function exists to prevent. When any such byte
+/// is seen the slug carries an FNV-1a-64 suffix of the whole path, which is
+/// distinct wherever the path is. An ASCII-only path takes the same route it
+/// always did and its slug is unchanged, so no existing symbol moves.
 fn mapSlug(module: String) -> String {
     let mut bytes: Array<UInt8> = []
     let mut upper = true
+    let mut lossy = false
     let mut i = 0
     while i < module.byteLength {
         let b = module[i]
+        if b >= 128 {
+            lossy = true
+        }
         let lower = b >= 'a' && b <= 'z'
         if lower || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') {
             bytes.push(if upper && lower { b - 32 } else { b })
@@ -104,10 +116,14 @@ fn mapSlug(module: String) -> String {
     // Every kept byte is ASCII alphanumeric, so the decode cannot fail; the
     // empty fallback is unreachable and is written rather than trapped, because
     // a generator that trapped here would report a lexer fact as a user error.
-    return match stringFromBytes(bytes) {
+    let base = match stringFromBytes(bytes) {
         Ok(s) => s,
         Err(why) => "",
     }
+    if lossy {
+        return base + "X" + fnv1aStr(module).toString()
+    }
+    return base
 }
 
 /// The map declaration to append to a generated module — the whole of what a
@@ -129,4 +145,20 @@ export gen fn symbolMapFn(module: String, symbols: Array<Symbol>) -> String {
     out = out + "export fn symbolMap" + mapSlug(module) + "() -> String {\n"
     out = out + "    return " + render(vyrn"\{json}") + "\n}\n"
     return out
+}
+
+test "a slug distinguishes paths that differ only outside ASCII" {
+    // The two paths below share every ASCII byte. Dropping the non-ASCII ones
+    // mapped both to `HttpPster`, and a top-level name is program-wide, so the
+    // two generated modules collided in one program.
+    let a = mapSlug("http(./påster)")
+    let b = mapSlug("http(./pa̋ster)")
+    assert(a != b)
+}
+
+test "an ASCII path keeps the slug it always had" {
+    // The suffix must not move an existing symbol. Every path in this
+    // repository is ASCII, so every existing slug takes this route.
+    assertEq(mapSlug("http(./pastes)"), "HttpPastes")
+    assertEq(mapSlug("rpc(./server/api)"), "RpcServerApi")
 }

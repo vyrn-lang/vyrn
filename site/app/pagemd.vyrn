@@ -26,6 +26,8 @@ import { siteOrigin } from "./repo"
 import { substring, indexOf, replace, trimEnd } from "std/strings"
 import { startsWith } from "std/strpred"
 import { urlEncode } from "std/codecs"
+import { pageTitle, lede, notice, features, featuresHeading, featuresIntro, featuresCap, featuresNotice, installHeading, installIntro, installNotice, installCap, otherHeading, otherIntro, otherClose, steps } from "./editors"
+import { edgeCount, searchRows, graphLede, graphIntro, graphCaption } from "./stdgraph"
 
 /// The markdown beside a page: `/guide/values.html` → `/guide/values.md`.
 ///
@@ -64,6 +66,12 @@ export fn mdPaths() -> Array<String> {
     for m in apiModules() {
         out.push("/docs/std/\{m.name}")
     }
+    // The one hand-written leaf with a twin. Its prose and its data live in
+    // `app/editors.vyrn`, so the twin reads the same strings the page does.
+    out.push("/tooling/editors")
+    // The graph page, the other hand-written leaf. Its prose lives in
+    // `app/stdgraph.vyrn` beside the geometry the page draws.
+    out.push("/docs/graph")
     return out
 }
 
@@ -71,6 +79,12 @@ export fn mdPaths() -> Array<String> {
 /// twin answers with "", which the export refuses to write rather than
 /// publishing an empty file.
 export fn markdownOf(path: String) -> String {
+    if path == "/tooling/editors" {
+        return editorsMd()
+    }
+    if path == "/docs/graph" {
+        return graphMd()
+    }
     if startsWith(path, "/guide/") {
         return chapterMd(substring(path, 7, path.byteLength))
     }
@@ -84,6 +98,39 @@ export fn markdownOf(path: String) -> String {
         return moduleMd(substring(path, 10, path.byteLength))
     }
     return ""
+}
+
+/// The editors page: its prose, every feature row with the file that implements
+/// it, and every install step with the command it teaches.
+fn editorsMd() -> String {
+    let mut out = "# \{pageTitle()}\n\n\{asMarkdown(lede())}\n\n\{asMarkdown(notice())}\n"
+    out = out + "\n## \{features().length} \{featuresHeading()}\n\n"
+    out = out + asMarkdown(featuresIntro()) + "\n\n"
+    for f in features() {
+        out = out + "- **\{f.name}** — \{asMarkdown(f.what)} Implemented by `\{f.path}` (`\{f.symbol}`).\n"
+    }
+    out = out + "\n" + asMarkdown(featuresCap()) + "\n\n" + asMarkdown(featuresNotice()) + "\n"
+    out = out + "\n## \{installHeading()}\n\n" + asMarkdown(installIntro()) + "\n"
+    for s in steps() {
+        out = out + "\n### \{s.title}\n\n"
+        out = out + fenced("sh", s.command)
+        out = out + asMarkdown(s.what) + "\n\n"
+    }
+    out = out + asMarkdown(installNotice()) + "\n\n" + asMarkdown(installCap()) + "\n"
+    out = out + "\n## \{otherHeading()}\n\n" + asMarkdown(otherIntro()) + "\n\n" + asMarkdown(otherClose()) + "\n"
+    return collapse(out + "\n") + trailer(absolute("/tooling/editors.html"))
+}
+
+/// The graph page: its prose and the counts the page's own heading carries. The
+/// drawing itself is not prose, so the twin says where it lives instead of
+/// pretending to hold it.
+fn graphMd() -> String {
+    let mut out = "# \{edgeCount().toString()} imports between \{searchRows().length} modules\n\n"
+    out = out + asMarkdown(graphLede()) + "\n"
+    out = out + "\n## The library, as it depends on itself\n\n" + asMarkdown(graphIntro()) + "\n\n"
+    out = out + "The drawing is on the page — one node per module, one wire per `import`, and pointing at a module lights its wires.\n"
+    out = out + "\n" + asMarkdown(graphCaption()) + "\n"
+    return collapse(out + "\n") + trailer(absolute("/docs/graph.html"))
 }
 
 /// One chapter of the book: its lede, its sections, and every program in it with
@@ -324,11 +371,16 @@ test "the two names beside a page are the page's own" {
 
 test "every chapter and every module publishes a markdown twin" {
     let paths = mdPaths()
-    assertEq(paths.length, chapterSlugs().length + apiModules().length)
-    // A path outside the two kinds has no twin, and says so rather than
-    // answering with an empty document.
+    // The chapters, the modules, and the two hand-written leaves
+    // (`/tooling/editors` and `/docs/graph`) whose prose lives beside their
+    // data for exactly this reason.
+    assertEq(paths.length, chapterSlugs().length + apiModules().length + 2)
+    // A path outside the kinds that have a twin says so rather than answering
+    // with an empty document.
     assertEq(markdownOf("/install"), "")
-    assertEq(markdownOf("/backstage/rfcs/0106"), "")
+    assertEq(markdownOf("/nowhere/at/all"), "")
+    assert(markdownOf("/tooling/editors").byteLength > 0)
+    assert(markdownOf("/docs/graph").byteLength > 0)
 }
 
 test "a chapter's markdown carries its programs and its prose" {

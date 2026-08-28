@@ -1,0 +1,10 @@
+// RFC-0117 §5: a non-String-keyed map has no wire form yet — a Map<String, V>
+// IS a JSON object and an Int64-keyed one is not, and the boundary refuses
+// rather than guessing between stringified keys and pair arrays.
+fn main() -> Int64 {
+    let mut m: Map<Int64, Int64> = [:]
+    m[7] = 1
+    let s = toJson(m)
+    print(s)
+    return 0
+}

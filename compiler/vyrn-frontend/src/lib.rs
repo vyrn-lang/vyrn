@@ -39,6 +39,7 @@ pub mod parser;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub mod playhost;
 pub mod prelude;
+pub mod prof;
 pub mod project;
 pub mod regex;
 pub mod schema;

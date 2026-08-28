@@ -60,8 +60,18 @@ fn zeroes(n: Int64) -> Array<Int64> {
     return out
 }
 
-/// How many flips `p` takes to bring a 0 to the front.
-fn foldCount(p: consume Array<Int64>) -> Int64 {
+/// A fold's answer AND the buffer it worked in.
+type Folded = { flips: Int64, buf: Array<Int64> }
+
+/// How many flips `p` takes to bring a 0 to the front, and the buffer back.
+///
+/// HANDING THE BUFFER BACK IS THE POINT. This used to `drop a` and answer only
+/// the count, so `fannkuch` below had to hand it a fresh `perm1.copy()` for
+/// every one of the n! permutations — one allocation per permutation, which the
+/// C reference does not make: it memcpy's into a buffer it allocated once.
+/// Returning the buffer lets one serve the whole walk, and that is 24 per cent
+/// of this program at order 10.
+fn foldCount(p: consume Array<Int64>) -> Folded {
     let mut a = p
     let mut flips = 0
     let mut k = a[0]
@@ -70,14 +80,14 @@ fn foldCount(p: consume Array<Int64>) -> Int64 {
         flips = flips + 1
         k = a[0]
     }
-    drop a
-    return flips
+    return Folded { flips: flips, buf: consume a }
 }
 
 /// The whole walk: the alternating-sign checksum and the deepest fold, over
 /// every permutation of `n` elements in the game's prescribed order.
 fn fannkuch(n: Int64) -> Fold {
     let mut perm1 = iota(n)
+    let mut work = zeroes(n)
     let mut count = zeroes(n)
     let mut maxflips = 0
     let mut checksum = 0
@@ -89,7 +99,12 @@ fn fannkuch(n: Int64) -> Fold {
             count[r - 1] = r
             r = r - 1
         }
-        let flips = foldCount(perm1.copy())
+        // Refill the one working buffer rather than allocating another —
+        // one `copyFrom` (RFC-0115) where a checked-store loop stood.
+        work.copyFrom(perm1)
+        let folded = foldCount(consume work)
+        let flips = folded.flips
+        work = consume folded.buf
         if flips > maxflips {
             maxflips = flips
         }

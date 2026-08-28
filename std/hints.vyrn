@@ -72,11 +72,11 @@ import { substring } from "std/strings"
 /// Per-code severity overrides, as parallel arrays (a code and its level word).
 /// Built by [`policyOf`]; [`noPolicy`] is the empty one, under which every rule
 /// runs at the severity its author chose.
-export type Policy = { codes: Array<String>, levels: Array<String> }
+export type HintPolicy = { codes: Array<String>, levels: Array<String> }
 
 /// The empty policy: no override, every rule at its default severity.
-export fn noPolicy() -> Policy {
-    return Policy { codes: [], levels: [] }
+export fn noPolicy() -> HintPolicy {
+    return HintPolicy { codes: [], levels: [] }
 }
 
 /// Read a policy out of `configText`, from its top-level `key`.
@@ -85,7 +85,7 @@ export fn noPolicy() -> Policy {
 /// nothing gets the library's defaults. `Err` when the document does not parse,
 /// when the key is not an object of strings, or when a level word is not `off`,
 /// `warning` or `error`. Report the `Err`; do not fall back to checking nothing.
-export fn policyOf(configText: String, key: String) -> Result<Policy, String> {
+export fn policyOf(configText: String, key: String) -> Result<HintPolicy, String> {
     let doc = parseJson(configText)?
     let mut found = false
     let mut section = JNull
@@ -116,12 +116,12 @@ export fn policyOf(configText: String, key: String) -> Result<Policy, String> {
             )
         }
     }
-    return Ok(Policy { codes: codes, levels: levels })
+    return Ok(HintPolicy { codes: codes, levels: levels })
 }
 
 /// The level `code` runs at under `p`: its configured word, or the word for
 /// `dflt` when the project said nothing about it.
-export fn levelOf(p: Policy, code: String, dflt: Severity) -> String {
+export fn levelOf(p: HintPolicy, code: String, dflt: Severity) -> String {
     let mut i = 0
     while i < p.codes.length {
         if p.codes[i] == code {
@@ -143,7 +143,7 @@ export fn levelOf(p: Policy, code: String, dflt: Severity) -> String {
 /// again. The `code` rides the message, which is RFC-0099's convention until a
 /// consumer for a separate field exists.
 export fn hint(
-    p: Policy,
+    p: HintPolicy,
     code: String,
     dflt: Severity,
     src: String,
@@ -166,11 +166,53 @@ export fn hint(
 /// Whether `code` is waived at `line` of `src` — a `vyrn-ignore <code>` marker
 /// on that line or on the one above it.
 export fn waived(src: String, line: Int64, code: String) -> Bool {
-    if waivesLine(lineText(src, line), code) {
-        return true
+    // One walk, not two. `lineText` restarts at byte 0 on every call, so asking
+    // it for the reported line and then for the line above walked the whole
+    // source twice for every hint emitted. This keeps the previous line's
+    // bounds as it passes them. The complexity is still O(hints x bytes) — only
+    // a caller that hoists the line index out of its loop removes that, and
+    // that is an API change this does not make.
+    let n = src.byteLength
+    let mut at = 1
+    let mut start = 0
+    let mut prevStart = 0
+    let mut prevEnd = 0
+    let mut havePrev = false
+    let mut i = 0
+    while i < n {
+        if src[i] == '\n' {
+            if at == line {
+                if waivesLine(substring(src, start, i), code) {
+                    return true
+                }
+                if havePrev {
+                    return waivesLine(substring(src, prevStart, prevEnd), code)
+                }
+                return false
+            }
+            prevStart = start
+            prevEnd = i
+            havePrev = true
+            at = at + 1
+            start = i + 1
+        }
+        i = i + 1
     }
-    if line > 1 {
-        return waivesLine(lineText(src, line - 1), code)
+    if at == line {
+        if waivesLine(substring(src, start, n), code) {
+            return true
+        }
+        if havePrev {
+            return waivesLine(substring(src, prevStart, prevEnd), code)
+        }
+        return false
+    }
+    // `line` is one past a source whose last line has no trailing newline. The
+    // line does not exist, but the one above it is that final segment, and a
+    // waiver there still covers `line`. Found by a differential test against the
+    // two-walk original, not by reasoning: the hand-written cases all missed it.
+    if line > 1 && at == line - 1 {
+        return waivesLine(substring(src, start, n), code)
     }
     return false
 }
@@ -283,7 +325,7 @@ fn stringOf(j: Json) -> String {
 
 /// The policy in `text` under `"hints"`, or the empty one (the `Err` arms are
 /// asserted on separately).
-fn policyOr(text: String) -> Policy {
+fn policyOr(text: String) -> HintPolicy {
     return match policyOf(text, "hints") {
         Ok(v) => v,
         Err(e) => noPolicy(),
@@ -364,4 +406,32 @@ test "line text is 1-based and ends at the newline" {
     assertEq(lineText("a\r\nbb\r\n", 1), "a\r")
     assertEq(lineText("a\nbb", 3), "")
     assertEq(lineText("a\nbb", 0), "")
+}
+
+test "a waiver is honoured on its own line and on the line below it" {
+    // Pins the four positions the one-walk rewrite has to keep: the reported
+    // line itself, the line above it, the first line where there is no line
+    // above, and the last line where there is no trailing newline.
+    let src = "a\nb // vyrn-ignore x/y\nc\nd // vyrn-ignore x/y"
+    assertEq(waived(src, 2, "x/y"), true)
+    assertEq(waived(src, 3, "x/y"), true)
+    assertEq(waived(src, 1, "x/y"), false)
+    assertEq(waived(src, 4, "x/y"), true)
+    assertEq(waived(src, 2, "other"), false)
+}
+
+test "a waiver on line one has no line above to consult" {
+    let src = "a // vyrn-ignore x/y\nb"
+    assertEq(waived(src, 1, "x/y"), true)
+    assertEq(waived(src, 2, "x/y"), true)
+}
+
+test "a waiver on a final line with no newline covers the line past the end" {
+    // The case a differential test against the two-walk original caught and
+    // every hand-written case missed: line 2 of a one-line source. The line
+    // does not exist; the waiver on the line above it still applies.
+    assertEq(waived("// vyrn-ignore p/q", 2, "p/q"), true)
+    assertEq(waived("// vyrn-ignore p/q", 3, "p/q"), false)
+    assertEq(waived("a\n// vyrn-ignore p/q", 3, "p/q"), true)
+    assertEq(waived("plain text", 2, "p/q"), false)
 }

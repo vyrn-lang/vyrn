@@ -29,8 +29,8 @@
 ///
 /// WHERE THE FILES ARE READ. `examples/*/vyrn.json` and the modules under it are
 /// read with `readFile` and `listDir` while the pages render, relative to the
-/// directory the export runs in — the repository root, the same way
-/// `backstage.vyrn` reads `rfcs/`. The export scan is a LINE scan rather than
+/// directory the export runs in — the repository root. The scan is a LINE scan
+/// rather than
 /// the compiler's lexer, because `lex` is only available during generation and
 /// these files are read at render time; the rule it applies is written out in
 /// `exportNames` and pinned by a test.
@@ -38,9 +38,10 @@ import { Json, JsonField, copyJson, copyJsonFields } from "std/json"
 import { parseJson } from "std/jsonread"
 import { apiHref, apiKnown, apiModules } from "./docs"
 import { examplesUsing } from "./stdgraph"
-import { blob, remoteSpec } from "./repo"
+import { blob, remoteSpec, rawFile } from "./repo"
 import { hrefOf } from "./nav"
 import { escapeHtml } from "./code"
+import { blurbFrom } from "./meta"
 import { joinWith, substring, indexOf, trim, replace, lines, split } from "std/strings"
 import { startsWith, endsWith } from "std/strpred"
 
@@ -156,6 +157,17 @@ export fn packageOf(slug: String) -> Package {
         deps: packageDeps(slug).length,
         href: packageHref(slug),
     }
+}
+
+/// What a package page's card and its search result say (RFC-0106 M6).
+///
+/// The package's own summary, which is the first documentation line of the
+/// module `vyrn add` installs, with the package named in front of it. The name
+/// goes in front because a summary is written inside a project and says `The
+/// wire types:` — three of the four projects begin that way, and three cards
+/// that read alike are three cards that say nothing.
+export fn packageBlurb(p: Package) -> String {
+    return blurbFrom(p.name + " — " + p.summary, "")
 }
 
 /// The page one package is published at.
@@ -446,7 +458,7 @@ export fn lockShape(slug: String) -> String {
 
 /// The URL a specifier resolves to, with the commit `git ls-remote` fills in.
 fn rawUrl(slug: String) -> String {
-    return "https://raw.githubusercontent.com/vyrn-lang/vyrn/<commit>/" + examplesDir() + "/" + slug + "/" + offerOf(slug).path
+    return rawFile("<commit>", examplesDir() + "/" + slug + "/" + offerOf(slug).path)
 }
 
 /// The `import` line a reader writes once the package is added: the alias

@@ -52,6 +52,13 @@ pub fn drain() -> (String, String) {
     )
 }
 
+/// Text to stdout with NO newline — what `writeStdout` does natively, minus
+/// the bytes a web page cannot hold (RFC-0111). The caller has already replaced
+/// anything that is not UTF-8; this only appends.
+pub fn out_text(text: &str) {
+    OUT.with(|o| o.borrow_mut().push_str(text));
+}
+
 /// One line to stdout, newline included — what `println!` does natively.
 pub fn out_line(args: std::fmt::Arguments) {
     OUT.with(|o| {

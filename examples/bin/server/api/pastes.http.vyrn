@@ -21,7 +21,7 @@ export fn routes() -> Array<Route> {
         // A paste is immutable once stored, so an hour is safe and `created` — the
         // wall-clock stamp the store already writes — is a true `Last-Modified`.
         // `Err("no paste with id …")` is the one absence this resource has.
-        GET(byId("/{id}")).cacheFor(3600).etag().lastModified("created").notFoundWhen(|why| why.startsWith("no paste with id")),
+        GET(byId("/{id}")).cacheFor(3600).etag().lastModified("created").notFoundWhen(why -> why.startsWith("no paste with id")),
         // 201 with a Location, built from the id the store content-addressed.
         POST(create("/")).createdAt("/pastes/{id}"),
     ]

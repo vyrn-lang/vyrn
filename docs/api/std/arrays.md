@@ -58,6 +58,18 @@ membership in an `Array<String>`). Concrete `String` on purpose — every privat
 copy it replaces was `Array<String>`, and a concrete parameter also accepts a
 fixed-size array literal, which a generic `Array<T>` parameter does not.
 
+## sortWith
+
+```vyrn
+fn sortWith<T>(xs: Array<T>, cmp: fn(T, T) -> Int64) -> Array<T>
+```
+
+A stably sorted copy, ordered by a comparator: negative puts `a` before
+`b`, positive after, and zero keeps arrival order (insertion sort, so the
+sort is stable). "Count descending, ties by fragment" is one comparator
+here where `sortBy`'s single `Int64` key needed two passes and a
+hand-written one.
+
 ## sortBy
 
 ```vyrn

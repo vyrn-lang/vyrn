@@ -105,7 +105,7 @@ export fn unfold<T>(seed: Int64, step: fn(Cursor) -> Option<T>) -> Stream<T> {
     // cursor words the stream carries and a flag that is true exactly once —
     // when the stream is being closed. That is how a release reaches a slab the
     // runtime cannot name: the stream asks its own step to give the slot back.
-    let run: fn(Int64, Int64, Bool) -> Option<T> = |slot, gen, closing| {
+    let run: fn(Int64, Int64, Bool) -> Option<T> = (slot, gen, closing) -> {
         let cur = Cursor { slot: slot, gen: gen }
         if closing {
             let none = takeCursor(cur)
@@ -159,7 +159,7 @@ export fn unfold<T>(seed: Int64, step: fn(Cursor) -> Option<T>) -> Stream<T> {
 /// learn. See RFC-0075 "As landed — M3".
 export fn map<T, U>(s: Stream<T>, f: fn(T) -> U) -> Stream<U> {
     let c = newCursor(0, boxStream(s))
-    let run: fn(Int64, Int64, Bool) -> Option<U> = |slot, gen, closing| {
+    let run: fn(Int64, Int64, Bool) -> Option<U> = (slot, gen, closing) -> {
         let cur = Cursor { slot: slot, gen: gen }
         if closing {
             let src: Stream<T> = unboxStream(takeCursor(cur))
@@ -185,7 +185,7 @@ export fn map<T, U>(s: Stream<T>, f: fn(T) -> U) -> Stream<U> {
 /// laziness introduced.
 export fn filter<T>(s: Stream<T>, pred: fn(T) -> Bool) -> Stream<T> {
     let c = newCursor(0, boxStream(s))
-    let run: fn(Int64, Int64, Bool) -> Option<T> = |slot, gen, closing| {
+    let run: fn(Int64, Int64, Bool) -> Option<T> = (slot, gen, closing) -> {
         let cur = Cursor { slot: slot, gen: gen }
         if closing {
             let src: Stream<T> = unboxStream(takeCursor(cur))
@@ -220,7 +220,7 @@ export fn filter<T>(s: Stream<T>, pred: fn(T) -> Bool) -> Stream<T> {
 /// are the ordinary cursor operations, on the slot this call took.
 export fn take<T>(s: Stream<T>, n: Int64) -> Stream<T> {
     let c = newCursor(0, boxStream(s))
-    let run: fn(Int64, Int64, Bool) -> Option<T> = |slot, gen, closing| {
+    let run: fn(Int64, Int64, Bool) -> Option<T> = (slot, gen, closing) -> {
         let cur = Cursor { slot: slot, gen: gen }
         if closing {
             let src: Stream<T> = unboxStream(takeCursor(cur))

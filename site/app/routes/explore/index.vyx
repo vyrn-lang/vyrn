@@ -73,7 +73,7 @@ fn exportsOf(p: Package) -> String {
                 </li>
             </ul>
         </div>
-        <p class="cap">No registry server and no account — a dependency is a URL, and <code>vyrn add</code> pins its sha256 in <code>vyrn.lock</code>. <a href="/tooling/projects.html">How installing works</a>.</p>
+        <p class="cap">No registry server and no account: a dependency is a URL. <a href="/tooling/projects.html">Projects and dependencies</a> explains how one is pinned.</p>
     </section>
 </main>
 </template>

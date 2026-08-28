@@ -16,25 +16,48 @@ import { startsWith } from "std/strpred"
 import { Head, noHead, withTitle, withMeta } from "std/ui"
 import { metaOf } from "./meta"
 
-/// The head every page shares: its title, the viewport (without which a page
-/// renders at desktop width on a phone), and one description.
+/// The head for a page that is not a place: the language's own paragraph as the
+/// description.
 ///
 /// It lives here rather than in the layout because the layout's `head { … }`
 /// block has entries for a stylesheet and a script and none for a `<meta>`,
 /// while a page's `head()` returns a `Head` value, which does.
+///
+/// SIX CALLERS, AND ALL SIX ARE REDIRECT STUBS (RFC-0106 M6). This was the head
+/// of every page on the site, which is why 67 of 80 documents carried one
+/// paragraph between them. Every page that is a place now writes its own
+/// sentence — from the table for a named page, from the chapter, the module or
+/// the package for a generated one. A stub is the OLD NAME of a page: the export
+/// gives it no card at all, and the paragraph about the language is the honest
+/// thing for the one head element it keeps.
 export fn pageHead(title: String) -> Head {
-    let titled = withTitle(noHead(), title)
-    let sized = withMeta(titled, "viewport", "width=device-width, initial-scale=1")
-    return withMeta(sized, "description", "Vyrn is a systems language with the expressiveness of TypeScript. Types carry the rules that make a value valid. Ownership is a word you write on a parameter. No garbage collector, and one program for three backends.")
+    return pageHeadWith(title, "Vyrn is a systems language with the expressiveness of TypeScript. Types carry the rules that make a value valid. Ownership is a word you write on a parameter. No garbage collector, and one program for three backends.")
 }
 
-/// The head for one of the ten pages `app/meta.vyrn` names: its own title and
-/// its own sentence, from the table (RFC-0106 M1).
+/// A head with a title and a description of its own.
+///
+/// The one place a page's two head strings are written, and the three callers
+/// below and in `app/routes/` differ only in where the strings come from: the
+/// table for a named page, the chapter's lede or the module's first
+/// documentation line for a generated one, and the language's own paragraph for
+/// a redirect stub, which is the old name of a page rather than a place.
+///
+/// A page's description is the string its CARD is built from —
+/// `site/export.vyrn` reads it back out of the document — so a page that writes
+/// one here cannot preview as something else.
+export fn pageHeadWith(title: String, description: String) -> Head {
+    let titled = withTitle(noHead(), title)
+    let sized = withMeta(titled, "viewport", "width=device-width, initial-scale=1")
+    return withMeta(sized, "description", description)
+}
+
+/// The head for a page `app/meta.vyrn` names: its own title and its own
+/// sentence, from the table (RFC-0106 M1).
 ///
 /// THIS IS WHERE THE ONE SHARED DESCRIPTION ENDS. Every page on the site used
 /// `pageHead` above, so 174 documents carried the same paragraph, and a link to
-/// `/install` previewed as a link to `/compare`. The ten consumer pages take
-/// their sentence from the table instead, and `site/export.vyrn` reads the title
+/// `/install` previewed as a link to `/compare`. A page in the table takes
+/// its sentence from there instead, and `site/export.vyrn` reads the title
 /// and the description back out of the document to write the OpenGraph card — so
 /// the tab, the search result, the card and the search overlay's own row are one
 /// string with one author.
@@ -45,14 +68,12 @@ export fn pageHead(title: String) -> Head {
 /// after the route was renamed; `/docs` was titled "Docs" while the masthead
 /// called it Reference and called the book Docs.
 ///
-/// The other 162 pages keep `pageHead` and the language's own description, and
-/// the export derives their card from the title they already write — a chapter,
-/// a module, a package and a design record each name themselves.
+/// The generated pages take `pageHeadWith` instead, with the sentence each of
+/// them already carries — a chapter's lede, a module's first documentation line,
+/// a package's summary — so a page that no table names still says what it is.
 export fn pageHeadOf(path: String) -> Head {
     let m = metaOf(path)
-    let titled = withTitle(noHead(), m.title)
-    let sized = withMeta(titled, "viewport", "width=device-width, initial-scale=1")
-    return withMeta(sized, "description", m.blurb)
+    return pageHeadWith(m.title, m.blurb)
 }
 
 /// One navigation entry: where it goes, and what it is called.
@@ -82,8 +103,8 @@ export type NavRow = { href: String, label: String }
 /// marks — cannot exist, because a static page has no reader's choice to mark it
 /// from.
 ///
-/// One definition, two mastheads. The consumer layout puts it in `<template>`
-/// and the backstage builds its masthead as a string; both call this.
+/// One definition, one masthead. It was two — the second front built its
+/// masthead as a string — and the string caller went with that section.
 export fn themeControl() -> String {
     return "<button type=\"button\" class=\"theme\" data-theme-cycle aria-label=\"Theme: System. Press to use Light.\">System</button>"
 }

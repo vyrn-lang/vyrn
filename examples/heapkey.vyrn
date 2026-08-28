@@ -1,0 +1,7 @@
+// RFC-0117 M1: a `Map` key is `String` or `Int64` today. The other `Hashable`
+// scalars and user types are M2's, where the declared-key coercion machinery
+// they need exists for both.
+fn main() -> Int64 {
+    let mut m: Map<Array<UInt8>, Int64> = [:]
+    return m.length
+}

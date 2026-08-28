@@ -35,6 +35,15 @@ export fn ghSpec(path: String) -> String {
     return "github:" + repoName() + "@main/" + path
 }
 
+/// A file in this repository, served raw at a given ref.
+///
+/// The fourth shape, and the one `packages.vyrn` was building by hand. `ref` is
+/// whatever resolved the specifier — a commit for a lock line, `main` for a
+/// floating one — so this does not assume the branch the other three do.
+export fn ghRaw(gitRef: String, path: String) -> String {
+    return "https://raw.githubusercontent.com/" + repoName() + "/" + gitRef + "/" + path
+}
+
 /// A tag's release page, which is where its archives and its `SHA256SUMS` are.
 export fn ghRelease(tag: String) -> String {
     if tag.byteLength == 0 {
@@ -43,9 +52,10 @@ export fn ghRelease(tag: String) -> String {
     return "https://github.com/" + repoName() + "/releases/tag/" + tag
 }
 
-test "one repository name, three URL shapes" {
+test "one repository name, four URL shapes" {
     assertEq(ghBlob("README.md"), "https://github.com/vyrn-lang/vyrn/blob/main/README.md")
     assertEq(ghSpec("std/json.vyrn"), "github:vyrn-lang/vyrn@main/std/json.vyrn")
+    assertEq(ghRaw("main", "install.sh"), "https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh")
     assertEq(ghRelease("v0.1.0"), "https://github.com/vyrn-lang/vyrn/releases/tag/v0.1.0")
     // No tag is the listing, so a link is never a URL with nothing on the end.
     assertEq(ghRelease(""), "https://github.com/vyrn-lang/vyrn/releases")

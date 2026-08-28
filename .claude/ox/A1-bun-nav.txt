@@ -1,0 +1,161 @@
+# Runtime sub nav
+
+Get Started
+    Welcome to Bun
+    Installation
+    Quickstart
+    TypeScript
+    TypeScript 6 and 7
+    bun init
+    bun create
+
+Core Runtime
+    Bun Runtime
+    Watch Mode
+    Debugging
+    REPL
+    bunfig.toml
+
+File & Module System
+    File Types
+    Module Resolution
+    JSX
+    Auto-install
+    Plugins
+    File System Router
+
+HTTP server
+    Server
+    Routing
+    Cookies
+    TLS
+    Error Handling
+    Metrics
+
+Networking
+    Fetch
+    WebSockets
+    TCP
+    UDP
+    DNS
+
+Data & Storage
+    Cookies
+    File I/O
+    Streams
+    Binary Data
+    Archive
+    SQL
+    SQLite
+    S3
+    Redis
+
+Concurrency
+    Workers
+
+Process & System
+    Environment Variables
+    Shell
+    Spawn
+    WebView
+    Cron
+
+Interop & Tooling
+    Node-API
+    FFI
+    C Compiler
+    Transpiler
+
+Utilities
+    CSRF Protection
+    Secrets
+    Console
+    TOML
+    YAML
+    Markdown
+    JSON5
+    XML
+    JSONL
+    HTMLRewriter
+    Image
+    Hashing
+    Glob
+    Semver
+    Color
+    Utils
+
+Standards & Compatibility
+    Globals
+    Bun APIs
+    Web APIs
+    Node.js Compatibility
+
+Contributing
+    Roadmap
+    Benchmarking
+    Contributing
+    Building Windows
+    Bindgen
+    License
+
+# Package Manager sub nav
+
+Core Commands
+    bun install
+    bun add
+    bun remove
+    bun update
+    bun dedupe
+    bun prune
+    bunx
+
+Publishing & Analysis
+    bun publish
+    bun outdated
+    bun why
+    bun audit
+    bun info
+
+Workspace Management
+    Workspaces
+    Catalogs
+    bun link
+    bun pm
+
+Advanced Configuration
+    bun patch
+    bun --filter
+    Global cache
+    Global virtual store
+    Isolated installs
+    Lockfile
+    Lifecycle scripts
+    Scopes and registries
+    Overrides and resolutions
+    Security Scanner API
+    .npmrc support
+
+# Test runner sub nav
+
+Getting Started
+    Test runner
+    Writing tests
+    Test configuration
+
+Test Execution
+    Runtime behavior
+    Finding tests
+    Parallel & isolated test runs
+
+Test Features
+    Lifecycle hooks
+    Mocks
+    Snapshots
+    Dates and times
+
+Specialized Testing
+    DOM testing
+
+Reporting
+    Code coverage
+    Test Reporters

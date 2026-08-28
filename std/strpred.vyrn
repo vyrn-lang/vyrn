@@ -49,13 +49,25 @@
 /// needle cannot match at a non-boundary offset. The case that looks dangerous is
 /// unreachable rather than handled.
 ///
-/// One measurement worth keeping, since it decided whether the routing was safe to
-/// take: `byteLengthV` is `bytes(s).length`, which ALLOCATES, and `std/vyx` calls
-/// these predicates 97 times over a page. Timed with the generator cache off, the
-/// biggest generator app in the repo went 933 ms -> 951 ms and `examples/vyxdemo`
-/// went 79 ms -> 76 ms. So the allocation does not matter at these needle sizes and
-/// the module was left exactly as the equivalence proof wrote it, rather than
-/// rebuilt on `s.byteLength` for a speed nothing needed.
+/// **The predicates take their lengths from the `byteLength` FIELD, not from
+/// `byteLengthV`.** `byteLengthV(s)` is `bytes(s).length`, which allocates a copy
+/// of the whole string to read a number; `s.byteLength` is `strlen` and folds at
+/// compile time. Measured per call on a 47-byte haystack: 72.5 ns through the
+/// allocating form against 4.5 ns through the field, about 16 times.
+///
+/// This paragraph used to say the opposite, and the reason it was wrong is worth
+/// keeping. It justified the allocation with "`std/vyx` calls these predicates 97
+/// times over a page", while the comment on `contains` below says vyx asks it
+/// about tag and attribute names MILLIONS of times. Both sentences were in this
+/// file. The second is the true one — the first counted something else — and a
+/// per-call cost of 16 times over millions of calls is not a speed nothing needed.
+///
+/// End to end it is small, because the strings vyx asks about are tag names and
+/// not templates: the biggest generator app in the repo measured 933 ms against
+/// 951 ms with the generator cache off. Small and free is still worth taking, and
+/// `bytes(s).length` equals `s.byteLength` by definition, so nothing moves.
+/// `byteLengthV` stays exported: `byteLength` is a FIELD, and a caller that needs
+/// the function form has nowhere else to get it.
 
 /// The byte length of `s` — the `s.byteLength` field, as a function.
 ///
@@ -68,8 +80,8 @@ export fn byteLengthV(s: String) -> Int64 {
 /// Does `s` begin with `needle`? An empty needle is a prefix of everything
 /// (including `""`), matching the builtin.
 export fn startsWith(s: String, needle: String) -> Bool {
-    let nl = byteLengthV(needle)
-    if nl > byteLengthV(s) {
+    let nl = needle.byteLength
+    if nl > s.byteLength {
         return false
     }
     let mut j = 0
@@ -84,11 +96,11 @@ export fn startsWith(s: String, needle: String) -> Bool {
 
 /// Does `s` end with `needle`? An empty needle is a suffix of everything.
 export fn endsWith(s: String, needle: String) -> Bool {
-    let off = byteLengthV(s) - byteLengthV(needle)
+    let off = s.byteLength - needle.byteLength
     if off < 0 {
         return false
     }
-    let nl = byteLengthV(needle)
+    let nl = needle.byteLength
     let mut j = 0
     while j < nl {
         if s[off + j] != needle[j] {
@@ -201,8 +213,8 @@ export fn findSkipping(s: String, needle: String, from: Int64, skip: Array<Int64
 }
 
 export fn contains(s: String, needle: String) -> Bool {
-    let n = byteLengthV(s)
-    if byteLengthV(needle) > n {
+    let n = s.byteLength
+    if needle.byteLength > n {
         return false
     }
     if worthPreparing(needle, n) {
@@ -212,7 +224,7 @@ export fn contains(s: String, needle: String) -> Bool {
     // library — `std/vyx` asks it about tag and attribute names millions of
     // times while it compiles templates — and routing it through one more
     // frame cost 2.7 per cent of the generator phase on its own.
-    let nl = byteLengthV(needle)
+    let nl = needle.byteLength
     let mut i = 0
     while i + nl <= n {
         let mut j = 0
@@ -300,14 +312,52 @@ export fn slice(s: String, start: Int64, end: Int64) -> Result<String, SliceErro
     if end < n && (Int64(s[end]) & 192) == 128 {
         return Err(SplitsCharacter(end))
     }
-    let mut out: Array<UInt8> = []
-    let mut i = start
-    while i < end {
-        out.push(s[i])
-        i = i + 1
+    // The whole string, which the loop below would rebuild byte by byte for
+    // nothing. `trimStart` and `trimEnd` on text with no space to trim ask for
+    // exactly this, and so does every `substring(s, 0, s.byteLength)`.
+    if start == 0 && end == n {
+        return Ok(s.copy())
     }
-    return match stringFromBytes(out) {
+    if start == end {
+        return Ok("")
+    }
+    // The copy, as ONE call (RFC-0113). This was a `while` pushing a byte at a
+    // time into an `Array<UInt8>`, which measured 19.6 µs against this shape's
+    // 1.0 µs for the same ninety bytes — and `slice` doing it was 57 per cent of
+    // the site build.
+    //
+    // Every decision stays here. `bytes` answers bytes and checks only that the
+    // range exists; the bounds and the character boundaries above are this
+    // function's, and they have already run by the time the copy happens.
+    return match stringFromBytes(bytes(s, start, end)) {
         Ok(v) => Ok(v),
         Err(e) => Err(SplitsCharacter(start)),
     }
+}
+
+test "the predicates answer the same on ASCII and on multi-byte text" {
+    // This module had no tests. UTF-8 self-synchronization is what makes a
+    // byte-wise scan safe, and these pin it: a needle can only match at a
+    // character boundary, so a search for a lead byte never lands mid-character.
+    assertEq(startsWith("café au lait", "café"), true)
+    assertEq(endsWith("café au lait", "lait"), true)
+    assertEq(contains("café au lait", "é a"), true)
+    assertEq(contains("日本語テキスト", "語テ"), true)
+    assertEq(contains("日本語テキスト", "zz"), false)
+    // An empty needle is a prefix, a suffix, and a substring of everything.
+    assertEq(startsWith("", ""), true)
+    assertEq(endsWith("", ""), true)
+    assertEq(contains("", ""), true)
+    // A needle longer than the haystack is refused rather than read past.
+    assertEq(startsWith("ab", "abc"), false)
+    assertEq(endsWith("ab", "abc"), false)
+    assertEq(contains("ab", "abc"), false)
+}
+
+test "contains finds an overlapping repeat and a match at the very end" {
+    // Both cut points of the skip path: a match that begins before the previous
+    // one ended, and one whose last byte is the haystack's last byte.
+    assertEq(contains("aaaaaaaaab", "aaab"), true)
+    assertEq(contains("the lazy dog", "dog"), true)
+    assertEq(contains("abcabc", "cab"), true)
 }

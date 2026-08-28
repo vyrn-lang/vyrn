@@ -129,7 +129,9 @@ export fn copyJsonFields(fs: Array<JsonField>) -> Array<JsonField> {
 
 /// The lowercase 2-digit hex of a byte value 0..255.
 fn hex2(b: Int64) -> String {
-    let db = bytes("0123456789abcdef")
+    // The digit table is read out of the literal rather than materialised with
+    // `bytes()`, which built a fresh 16-element array on every call.
+    let db = "0123456789abcdef"
     let mut out: Array<UInt8> = []
     out.push(db[(b / 16) % 16])
     out.push(db[b % 16])
@@ -403,4 +405,13 @@ test "emitPretty indents nested structures" {
     // empty collections stay compact
     assertEq(emitPretty(JArr([]), 2), "[]")
     assertEq(emitPretty(JObj([]), 2), "{}")
+}
+
+test "hex2 writes two lowercase nibbles" {
+    // A JSON control-character escape goes through this. The table it reads is
+    // an implementation detail; these four outputs are not.
+    assertEq(hex2(0), "00")
+    assertEq(hex2(9), "09")
+    assertEq(hex2(31), "1f")
+    assertEq(hex2(255), "ff")
 }

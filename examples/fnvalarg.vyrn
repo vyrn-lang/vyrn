@@ -52,7 +52,7 @@ fn defer<P, T>(run: consume fn(P) -> T) -> Deferred<P, T> {
 }
 
 fn scale(by: Int64) -> fn(Int64) -> Int64 {
-    let g: fn(Int64) -> Int64 = |n| n * by
+    let g: fn(Int64) -> Int64 = n -> n * by
     return g
 }
 
@@ -103,7 +103,7 @@ fn main() -> Int64 {
     print(df(13)) // n=13
 
     // A lambda in that field: its parameter type comes from the annotation too.
-    let lam: Deferred<Int64, String> = Deferred { run: |n| "n=\{n}" }
+    let lam: Deferred<Int64, String> = Deferred { run: n -> "n=\{n}" }
     let lf = lam.run
     print(lf(15)) // n=15
 

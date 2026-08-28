@@ -1012,10 +1012,16 @@ mod tests {
             Some((vec![Some(ValType::I64)], Some(ValType::I32)))
         );
         assert_eq!(b["__vyrn_now_millis"], Some((vec![], Some(ValType::I64))));
+        // RFC-0114 SS25: every free goes through the shim's one choke point,
+        // so the audit can see it. `free` itself no longer crosses.
         assert_eq!(
-            b["free"],
+            b["__vyrn_free"],
             Some((vec![Some(ValType::I32)], None)),
             "void is None"
+        );
+        assert!(
+            !b.contains_key("free"),
+            "`free` is the shim's, not a crossing"
         );
         assert_eq!(b["printf"], None, "variadic has no wasm signature at all");
         assert!(

@@ -44,7 +44,7 @@ drifts: each header says which milestone landed and what did not, and the
 
 ## The index
 
-107 RFCs, numbered 0001 to 0108, with one gap. **There is no RFC-0066** — the
+116 RFCs, numbered 0001 to 0117, with one gap. **There is no RFC-0066** — the
 number was skipped and never used. The only mention of it in the repository is
 this sentence. Closing the gap would mean renumbering thirty files and breaking
 every cross-reference, so the gap stays.
@@ -164,6 +164,15 @@ claim is true — is written down in the test's own header.
 | [0106](RFC-0106-a-consumer-page-is-scanned-not-read.md) | A Consumer Page Is Scanned, Not Read | Implemented |
 | [0107](RFC-0107-a-template-component-is-a-library.md) | A Template Component Is a Library | Implemented |
 | [0108](RFC-0108-the-string-scan-is-interpreted.md) | The String Scan Is Interpreted | Prototyped; its own question answered no |
+| [0109](RFC-0109-a-read-that-does-not-copy.md) | A Read That Does Not Copy | Draft; three of four designs eliminated by measurement, the fourth not chosen |
+| [0110](RFC-0110-a-lambda-takes-its-parameters-before-an-arrow.md) | A Lambda Takes Its Parameters Before an Arrow | Implemented; `x -> e`, `(a, b) -> e`, `() -> e` |
+| [0111](RFC-0111-a-program-can-write-bytes.md) | A Program Can Write Bytes | Implemented; `writeFileBytes`, `writeStdout` — closes the mandelbrot gap |
+| [0112](RFC-0112-a-regular-expression-that-searches.md) | A Regular Expression That Searches | Implemented; `std/regex` in Vyrn — closes the regex-redux gap |
+| [0113](RFC-0113-bytes-takes-a-range.md) | `bytes` Takes a Range | Implemented; `slice` 57% of the site build to 9.2% |
+| [0114](RFC-0114-ownership-at-a-program-point.md) | Ownership At A Program Point | Implemented; ownership is per store, per edge, per parameter — six leak classes closed, each pinned by a row that failed first |
+| [0115](RFC-0115-reserve-and-append.md) | `reserve`, `append` and `copyFrom` | Implemented; a known-size build is one allocation, a bulk append is one copy, and an overwrite keeps its buffer |
+| [0116](RFC-0116-tally.md) | `tally` and `tallyBytes` | Implemented; insert-or-add is one probe, byte keys exist only on a miss, and the audit caught the first draft's double free |
+| [0117](RFC-0117-a-key-is-anything-that-hashes.md) | a key is anything that hashes | M1 Implemented; `Hashable` + `Map<Int64, V>` in all four engines, the wire form held open by refusal; M2 user types, M3 the wire |
 
 ## The other documents here
 

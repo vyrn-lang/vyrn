@@ -70,7 +70,7 @@ use vyrn_codegen::toolchain::{extern_trap_stubs, find_clang, runtime_shim};
 /// feature so the default build keeps its zero external dependencies.
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
+const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn run --profile [file.vyrn] [args...]   (where the interpreted run spent its time, to stderr; the flag counts only BEFORE the file, so a program can have one of its own)\n       vyrn check --profile [file.vyrn]   (the same, for generation alone: `check` runs every `gen fn` and stops. Needs a cold generator cache to mean anything)\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
        vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact-name>   (every import chain that pulls that capability into the artifact's closure)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
        vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [--locked] [alias] | vyrn vendor [--check] | vyrn deps [artifact]   (deps: every declared artifact's module graph, then the toolchain)\n       vyrn --version   (also -V)";
 
@@ -329,6 +329,23 @@ fn real_main() -> ExitCode {
     if args.get(1).map(|a| a.as_str()) != Some("run") {
         args.retain(|a| a != "--maps");
     }
+    // `--profile` is the CLI's and not the program's, so it counts only BEFORE
+    // the file — the same line `--version` draws one comment down, and for the
+    // same reason: `vyrn run app.vyrn --profile` is a flag for `app.vyrn`.
+    let head = args
+        .iter()
+        .skip(2)
+        .position(|a| !a.starts_with('-'))
+        .map_or(args.len(), |i| i + 2)
+        .max(2.min(args.len()));
+    let at = args
+        .get(2.min(args.len())..head)
+        .and_then(|h| h.iter().position(|a| a == "--profile"));
+    let want_profile = at.is_some();
+    // Removed once, so a program's own `--profile` further along survives.
+    if let Some(i) = at {
+        args.remove(i + 2);
+    }
     // `--version` / `-V`, before the usage screen: the published alpha printed
     // usage and exited 2 for both, which is what a package manager reads as a
     // broken install. The string is the crate's own `version`, so the binary and
@@ -410,7 +427,18 @@ fn real_main() -> ExitCode {
         return build(&path, rest);
     }
     if cmd == "test" {
-        return test_cmd(&path, rest);
+        // Armed before the load for the reason `run` and `check` are: a `gen fn`
+        // executes while the program loads, and a `test` block is the third
+        // thing in this project that only ever runs interpreted.
+        if want_profile {
+            vyrn_frontend::prof::start();
+        }
+        let code = test_cmd(&path, rest);
+        if want_profile {
+            let rows = vyrn_frontend::prof::take();
+            eprint!("{}", vyrn_frontend::prof::table(&rows, 25));
+        }
+        return code;
     }
     if cmd == "bench" {
         return bench_cmd(&path, rest);
@@ -435,13 +463,29 @@ fn real_main() -> ExitCode {
         }
     };
 
+    // `check` profiles too, and it is the more useful of the two on a program
+    // whose weight is generators: `check` runs every `gen fn` and then stops,
+    // so what it reports is generation and nothing else. The gen cache has to be
+    // cold for that to mean anything — a warm one makes generation free, which
+    // is the point of it.
+    if want_profile && cmd == "check" {
+        vyrn_frontend::prof::start();
+    }
+    let profile_now = |code: ExitCode| -> ExitCode {
+        if want_profile {
+            let rows = vyrn_frontend::prof::take();
+            eprint!("{}", vyrn_frontend::prof::table(&rows, 25));
+        }
+        code
+    };
+
     match cmd {
         "fix" => fix_cmd(path, &source),
         // `check` has to predict `build` about the one thing `build` can fail to
         // FINISH (audit A5.2). Monomorphization is only visible while emitting,
         // so `check` emits and throws the code away, and reports the depth
         // refusal alone — every other codegen error stays `build`'s.
-        "check" => match load_program(path, &source) {
+        "check" => profile_now(match load_program(path, &source) {
             Ok(program) => {
                 let _memo = shared_desugars();
                 match vyrn_codegen::check_instantiations(&program) {
@@ -456,14 +500,31 @@ fn real_main() -> ExitCode {
                 }
             }
             Err(code) => code,
-        },
+        }),
         "run" => {
+            // Armed BEFORE the load, because the load is where generators run.
+            // A `gen fn` is ordinary Vyrn executed by this same interpreter at
+            // compile time, and on a generator-heavy program it is most of the
+            // work — profiling only what happens after `load_program` would miss
+            // it and say nothing was slow.
+            if want_profile {
+                vyrn_frontend::prof::start();
+            }
             let program = match load_program(path, &source) {
                 Ok(p) => p,
                 Err(code) => return code,
             };
             let _memo = shared_desugars();
-            match vyrn_frontend::interp::run_with_args(&program, &prog_args) {
+            let out = vyrn_frontend::interp::run_with_args(&program, &prog_args);
+            // The table goes to STDERR, and on the failing path too. A profile is
+            // not the program's output — a run whose stdout is piped somewhere
+            // must pipe the same bytes with the flag as without it — and the run
+            // worth profiling is often the one that traps.
+            if want_profile {
+                let rows = vyrn_frontend::prof::take();
+                eprint!("{}", vyrn_frontend::prof::table(&rows, 25));
+            }
+            match out {
                 Ok(code) => {
                     // main's return value becomes the process exit code (0..=255).
                     ExitCode::from((code & 0xff) as u8)
@@ -3647,11 +3708,11 @@ fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {
         return bench_check(&program, filter.as_deref());
     }
     if let Some(baseline) = compare {
-        return bench_compare(path, program, filter.as_deref(), &baseline, threshold);
+        return bench_compare(path, filter.as_deref(), &baseline, threshold);
     }
     // `--json` streams the machine-readable report; the default streams the human
     // report. Neither captures the child's stdout.
-    let (code, _) = bench_native(path, program, filter.as_deref(), json, false);
+    let (code, _) = bench_native(path, filter.as_deref(), json, false);
     code
 }
 
@@ -3692,65 +3753,47 @@ fn bench_check(program: &vyrn_frontend::ast::Program, filter: Option<&str>) -> E
 /// NATIVE via clang, and run it so it prints real timings.
 fn bench_native(
     path: &str,
-    mut program: vyrn_frontend::ast::Program,
     filter: Option<&str>,
     json: bool,
     capture: bool,
 ) -> (ExitCode, Option<String>) {
     use vyrn_frontend::ast::{Block, Expr, Function, Stmt, Type};
 
-    // 1. Pull in the harness runtime (`std/bench` + its transitive `std/time`) by
-    //    loading a synthetic root that imports it, then merge every module decl it
-    //    brought (module-tagged, so the synthetic root's own dummy `main` is left
-    //    out) into the user's program — skipping any name the program already has.
-    // Importing `benchOne` loads the whole `std/bench` module, so its `benchMeasure`
-    // / `benchJson` / `BenchResult` (and their transitive `std/time` + `std/json`)
-    // are merged too — the `--json` harness needs them.
-    let runtime_src = "import { benchOne } from \"std/bench\"\nfn main() -> Int64 { return 0 }\n";
-    let rt = match load_program(path, runtime_src) {
+    // 1. Pull in the harness runtime (`std/bench` + its transitive `std/time`
+    //    and `std/json`) by re-reading the user's source with the import
+    //    APPENDED and loading that. Appended, not prepended: every original line
+    //    keeps its number, so a trap inside a bench body still names the right
+    //    line. An import is legal anywhere at top level.
+    //
+    //    This is ONE load on purpose. It used to be two — the user's program,
+    //    plus a synthetic root importing `std/bench` — with the runtime's
+    //    declarations merged in afterwards, "skipping any name the program
+    //    already has". That key was the bare name, so a std module's PRIVATE
+    //    function was dropped whenever the root program happened to declare the
+    //    same name, and the module's own calls then bound to the root's body.
+    //    A program defining its own `twoDecimals` printed `min XX µs`: the
+    //    harness had called the user's function to format its timings, with no
+    //    error. The loader already prevents this (name-privacy auto-rename,
+    //    RFC-0046 §3) but only across modules it can see in a single load, which
+    //    is exactly what the second load hid from it.
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {path}: {e}");
+            return (ExitCode::from(2), None);
+        }
+    };
+    let mut program = match load_program(
+        path,
+        &format!(
+            "{source}
+import {{ benchOne }} from \"std/bench\"
+"
+        ),
+    ) {
         Ok(p) => p,
         Err(code) => return (code, None),
     };
-    let have_fn: std::collections::HashSet<String> =
-        program.functions.iter().map(|f| f.name.clone()).collect();
-    for f in rt.functions {
-        if f.module.is_some() && !have_fn.contains(&f.name) {
-            program.functions.push(f);
-        }
-    }
-    let have_ty: std::collections::HashSet<String> =
-        program.type_decls.iter().map(|t| t.name.clone()).collect();
-    for t in rt.type_decls {
-        if t.module.is_some() && !have_ty.contains(&t.name) {
-            program.type_decls.push(t);
-        }
-    }
-    let have_pr: std::collections::HashSet<String> =
-        program.protocols.iter().map(|p| p.name.clone()).collect();
-    for pr in rt.protocols {
-        if pr.module.is_some() && !have_pr.contains(&pr.name) {
-            program.protocols.push(pr);
-        }
-    }
-    // Impls carry no module tag; dedup by (protocol, implementing type). In
-    // practice the harness runtime defines none, so this loop is empty.
-    let have_im: std::collections::HashSet<(String, String)> = program
-        .impls
-        .iter()
-        .map(|im| (im.protocol.clone(), im.ty.to_string()))
-        .collect();
-    for im in rt.impls {
-        if !have_im.contains(&(im.protocol.clone(), im.ty.to_string())) {
-            program.impls.push(im);
-        }
-    }
-    let have_g: std::collections::HashSet<String> =
-        program.globals.iter().map(|g| g.name.clone()).collect();
-    for g in rt.globals {
-        if g.module.is_some() && !have_g.contains(&g.name) {
-            program.globals.push(g);
-        }
-    }
 
     // 2. Lift each selected root bench body into an ordinary Unit function
     //    `__vyrn_bench_body_<slot>` (declaration order). `blackBox` inside is fine:
@@ -4045,7 +4088,6 @@ fn baseline_is_placeholder(doc: &vyrn_frontend::schema::Json) -> bool {
 /// run against a not-yet-seeded baseline is meaningless, never a failure.
 fn bench_compare(
     path: &str,
-    program: vyrn_frontend::ast::Program,
     filter: Option<&str>,
     baseline_path: &str,
     threshold: f64,
@@ -4080,7 +4122,7 @@ fn bench_compare(
     };
 
     // Run the benches native, capturing the machine-readable report.
-    let (run_code, captured) = bench_native(path, program, filter, true, true);
+    let (run_code, captured) = bench_native(path, filter, true, true);
     let run_json = match captured {
         Some(j) => j,
         None => return run_code, // the run failed; its error already printed

@@ -1,15 +1,22 @@
 // The theme control (RFC-0105 M4). Three states — system, light, dark — on ONE
 // button that cycles through them.
 //
-// WHY THIS IS A CLASSIC SCRIPT IN THE HEAD, and not part of `widgets.js`. A
-// module is deferred, so it runs after the document is parsed and after the
-// first paint — which is exactly the flash this file exists to prevent: a reader
-// who chose dark would see a white page and then a dark one, on every navigation.
-// A classic `<script src>` in `<head>` blocks rendering, so the root attribute is
-// on the element before anything is painted. It is four hundred bytes and every
-// page loads it, which is the price of not flashing.
+// WHAT IS NOT IN THIS FILE, AND WHY. This was a classic `<script src>` in the
+// head, so that it blocked rendering and the root attribute was on the element
+// before the first paint. It blocked on a REQUEST to do it, and nothing is
+// painted while that request is in flight — so the flash it existed to prevent
+// was still there on a cold load, moved from after the paint to before it
+// (B3 defect 5). The reader's choice is in `localStorage`, which needs no
+// request, so the four lines that read it are written INLINE in the head of
+// every page by `withThemeBoot` in `site/export.vyrn`. This file is a module
+// now, deferred like every other script on the page, and what it holds is the
+// toggle — which runs when a reader presses it, long after any paint.
 //
-// WHAT IT WRITES. One attribute on `<html>`:
+// The inline piece and this file share `vyrn.theme` and the `data-theme`
+// attribute and nothing else. If they disagree, the inline piece wins on load
+// and this one wins on the next press, which is the right way round.
+//
+// WHAT THE INLINE PIECE WRITES. One attribute on `<html>`:
 //
 //   data-theme="light" | "dark"   the reader's explicit choice
 //   (absent)                      system — the default, and the only state a
@@ -29,19 +36,14 @@
   var KEY = "vyrn.theme";
   var root = document.documentElement;
 
-  // THE MASTHEAD'S HEIGHT CROSSES THE NAVIGATION HERE. The editor wears a
-  // title-bar masthead and every other page wears the full one, and the two
-  // live in different documents — so nothing can animate between them unless
-  // the arriving page STARTS in the state the last one ended in. This runs
-  // before the first paint, which is the only moment that is true; `boot()`
-  // in `widgets.js` then sets the state this page actually wants, one frame
-  // later, and the difference animates (user: it changed in one direction
-  // only).
-  try {
-    if (sessionStorage.getItem("vyrn.mast") === "compact") root.classList.add("idecompact");
-  } catch (err) {
-    /* a blocked store means no handoff, which is the old behaviour */
-  }
+  // THE MASTHEAD'S HEIGHT CROSSES THE NAVIGATION IN THE INLINE PIECE, not here.
+  // The editor wears a title-bar masthead and every other page wears the full
+  // one, and the two live in different documents — so nothing can animate
+  // between them unless the arriving page STARTS in the state the last one
+  // ended in. That is true before the first paint and at no later moment, which
+  // is why `withThemeBoot` carries it and this file does not; `boot()` in
+  // `widgets.js` then sets the state this page actually wants, one frame later,
+  // and the difference animates (user: it changed in one direction only).
 
   // The cycle, in order, and the word each state is called. `""` is system, and
   // it is first because it is the default. The words live here rather than in
@@ -82,8 +84,9 @@
   /// The visible word is inside the name, so a reader who says "click System"
   /// to a voice control hits the same button they can see (WCAG 2.5.3).
   ///
-  /// The consumer masthead and the backstage masthead each carry one control,
-  /// and only one of the two is ever in a document.
+  /// The masthead carries one control. The query is `querySelectorAll` and the
+  /// loop is over all of it, because a document with none is the normal case
+  /// for a page that wears its own shell.
   function mark(choice) {
     var buttons = document.querySelectorAll("[data-theme-cycle]");
     for (var i = 0; i < buttons.length; i += 1) {
@@ -92,11 +95,9 @@
     }
   }
 
-  apply(stored());
-  // The control is inert markup until this line, and styled `display: none`
-  // until it. Both halves of the progressive rule are here, so neither can be
-  // shipped without the other.
-  root.setAttribute("data-js", "on");
+  // `apply(stored())` and `data-js` are the inline piece's, for the reason at
+  // the top of this file: both decide what a reader looks at, and a decision
+  // made after the paint is a change a reader watches happen.
 
   // One delegated listener, registered on `document` — which exists while the
   // head is being parsed, unlike anything in the body. It therefore survives a

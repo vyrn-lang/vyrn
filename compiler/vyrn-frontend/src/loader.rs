@@ -1071,6 +1071,7 @@ fn load_modules(
                     tests: Vec::new(),
                     benches: Vec::new(),
                     log_level: DEFAULT_LOG_LEVEL,
+                    surface_shadows: std::collections::HashSet::new(),
                     log_sink: LogSink::Stderr,
                 },
                 import_targets: Vec::new(),
@@ -3448,6 +3449,9 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     let clashed: HashSet<&str> = clashes.iter().map(|(n, _, _)| n.as_str()).collect();
 
     // ---- per-module import + visibility checks ---------------------------
+    // RFC-0054's shadowing fact, gathered as the loop goes and handed to the
+    // checker below. See `ast::Program::surface_shadows`.
+    let mut surface_shadows: HashSet<(Option<String>, String)> = HashSet::new();
     for m in &modules {
         let mut visible: HashSet<String> = HashSet::new(); // foreign names imported here
         for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
@@ -3562,6 +3566,20 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
             .filter(|f| f.is_extern && !f.exported)
             .map(|f| f.name.as_str())
             .collect();
+        // RFC-0054, recorded for the checker. A module shadows a surface builtin
+        // when it can SEE a declaration of that name — its own, or one it
+        // imported — and only this loop knows both halves: `imports` are consumed
+        // here and never reach the checker.
+        for b in crate::ast::SURFACE_BUILTINS {
+            if own.contains(b) || visible.contains(b) {
+                let home = if m.key == root_key {
+                    None
+                } else {
+                    Some(m.key.clone())
+                };
+                surface_shadows.insert((home, b.to_string()));
+            }
+        }
         let check_name = |name: &str, line: usize, what: &str, errors: &mut Vec<Diagnostic>| {
             // Resolve constructors/methods to their OWNING declarations. Either
             // map can hold several candidates — same-named protocol methods or
@@ -3581,6 +3599,15 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                 candidates.extend(ps);
             }
             let in_scope = |decl: &str| own.contains(decl) || visible.contains(decl);
+            // RFC-0054's four surface builtins. A module that has NOT declared
+            // or imported one MEANS THE BUILTIN, and what some other module of
+            // the program called its functions is none of this module's
+            // business. Without this, a `fn raw` anywhere made every other
+            // module's `raw(..)` read as an un-imported foreign reference —
+            // including `std/vyx`'s, which is where it was found.
+            if crate::ast::is_surface_builtin(name) && !in_scope(name) {
+                return;
+            }
             if candidates.is_empty() {
                 // A plain reference to a top-level decl.
                 if in_scope(name) {
@@ -3732,6 +3759,9 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     }
     let mut program = merged.expect("root module was loaded");
     program.type_decls.extend(extra_types);
+    // RFC-0054: which modules can see a declaration of a surface builtin. The
+    // checker needs this and cannot compute it — `imports` are consumed here.
+    program.surface_shadows = surface_shadows;
     // One host-ABI declaration per shared-extern name (`shared_externs`): the
     // modules carried identical copies, and emitting the wasm import twice
     // would be pure waste. The root's copy (already in `program.functions`)
@@ -5698,7 +5728,7 @@ mod tests {
         // GLOBAL — in plain statements and inside lambda bodies alike.
         let lib = "let mut flag = 9 \
                    export fn flip() -> Int64 { let flag = 1 return flag } \
-                   export fn lam() -> Int64 { let g: fn(Int64) -> Int64 = |flag| flag + 1 return g(10) } \
+                   export fn lam() -> Int64 { let g: fn(Int64) -> Int64 = flag -> flag + 1 return g(10) } \
                    export fn peek() -> Int64 { return flag }";
         let root = "import { flip, lam, peek } from \"./lib\" \
                     let mut flag = 7 \

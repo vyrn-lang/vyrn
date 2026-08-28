@@ -215,6 +215,9 @@ fn rows() -> Vec<Function> {
         // the result is the place at offset 0 of `s` — which is the sentence
         // `place at` writes for `a[i]`, and the declared return type is inert for
         // the reason it is inert there.
+        // One row for both arities: the two offsets are plain `Int64`s and
+        // carry no ownership, so the borrow view is the same either way
+        // (RFC-0113).
         row("bytes", &[], &[("s", Read, Str)], u8s(), &["s", "0"]),
         // Its inverse ALLOCATES, so it is not a view. The two sit side by side on
         // purpose: the old list held one and not the other, and nothing in either
@@ -272,6 +275,32 @@ fn rows() -> Vec<Function> {
             "@push",
             &["T"],
             &[("self", Read, arr(t())), ("v", Consume, t())],
+            arr(t()),
+            &[],
+        ),
+        // Capacity and bulk growth (RFC-0115). Both rebuild the way `push`
+        // does — the receiver is `read`, the result carries the (possibly
+        // reallocated) buffer, and the statement form writes it back.
+        // `append` reads its source: the elements are copied, and the checker
+        // holds the element type to ones a byte copy is correct for.
+        row(
+            "@reserve",
+            &["T"],
+            &[("self", Read, arr(t())), ("n", Read, Int)],
+            arr(t()),
+            &[],
+        ),
+        row(
+            "@append",
+            &["T"],
+            &[("self", Read, arr(t())), ("xs", Read, arr(t()))],
+            arr(t()),
+            &[],
+        ),
+        row(
+            "@copyFrom",
+            &["T"],
+            &[("self", Read, arr(t())), ("xs", Read, arr(t()))],
             arr(t()),
             &[],
         ),
@@ -364,17 +393,66 @@ fn rows() -> Vec<Function> {
         // it is given and keeps nothing, so a temporary handed to it is the
         // caller's to release.
         row("print", &[], &[("x", Read, Unit)], Unit, &[]),
-        // `m.keys()` copies the key pointers into a new buffer (RFC-0028), so
-        // the result is the caller's and the map keeps its own.
+        // `m.keys()` copies the keys into a new buffer (RFC-0028), so the
+        // result is the caller's and the map keeps its own. Generic over the
+        // KEY too (RFC-0117): `Array<K>` is what makes an Int64-keyed map's
+        // snapshot release as integers rather than as someone's pointers —
+        // the seeded `Array<String>` this row used to pin was where the
+        // for-loop's temp release got `str_free` for an `i64`.
         row(
             "@keys",
-            &["V"],
+            &["K", "V"],
             &[(
                 "m",
                 Read,
-                Type::Map(Box::new(Str), Box::new(Type::Param("V".to_string()))),
+                Type::Map(
+                    Box::new(Type::Param("K".to_string())),
+                    Box::new(Type::Param("V".to_string())),
+                ),
             )],
-            arr(Str),
+            arr(Type::Param("K".to_string())),
+            &[],
+        ),
+        // `m.tally(k, n)` (RFC-0116): insert-or-add on a count map, one probe.
+        // The key is READ — a hit keeps the key the map already has, a miss
+        // copies this one in — and the value type is pinned to `Int64`, which
+        // is what makes the add spellable in a signature. The key type is any
+        // legal one (RFC-0117).
+        row(
+            "@tally",
+            &["K"],
+            &[
+                (
+                    "m",
+                    Read,
+                    Type::Map(Box::new(Type::Param("K".to_string())), Box::new(Int)),
+                ),
+                ("k", Read, Type::Param("K".to_string())),
+                ("n", Read, Int),
+            ],
+            Type::Map(Box::new(Type::Param("K".to_string())), Box::new(Int)),
+            &[],
+        ),
+        // `m.tallyBytes(w, n)` (RFC-0116): the byte-keyed form. On a hit the
+        // bytes are compared where they lie — no String, no validation, no
+        // allocation; a miss builds the key once, and bytes that are not a
+        // String trap with `stringFromBytes`'s reasons behind one wording.
+        row(
+            "@tallyBytes",
+            &[],
+            &[
+                ("m", Read, Type::Map(Box::new(Str), Box::new(Int))),
+                (
+                    "w",
+                    Read,
+                    arr(Type::IntN {
+                        bits: 8,
+                        signed: false,
+                    }),
+                ),
+                ("n", Read, Int),
+            ],
+            Type::Map(Box::new(Str), Box::new(Int)),
             &[],
         ),
         // ---- the rest of the allocating returns (RFC-0096 M3) ---------------
@@ -428,6 +506,14 @@ fn rows() -> Vec<Function> {
             Type::Result(Box::new(u8s()), Box::new(Str)),
             &[],
         ),
+        row(
+            "writeFileBytes",
+            &[],
+            &[("p", Read, Str), ("b", Read, u8s())],
+            Type::Result(Box::new(Bool), Box::new(Str)),
+            &[],
+        ),
+        row("writeStdout", &[], &[("b", Read, u8s())], Type::Unit, &[]),
         row(
             "writeFile",
             &[],
@@ -611,7 +697,7 @@ mod tests {
         };
         assert_eq!(of("@concat"), "String");
         assert_eq!(of("@str"), "String");
-        assert_eq!(of("@keys"), "Array<String>");
+        assert_eq!(of("@keys"), "Array<K>");
         // `@push` needed no new row. The old list said `Array<Unit>` and the row
         // says `Array<T>`; both release the array's buffer.
         assert_eq!(of("@push"), "Array<T>");
@@ -652,6 +738,8 @@ mod tests {
             ("readFile", "Result<String, String>"),
             ("readFileBytes", "Result<Array<UInt8>, String>"),
             ("writeFile", "Result<Bool, String>"),
+            ("writeFileBytes", "Result<Bool, String>"),
+            ("writeStdout", "Unit"),
             ("renameFile", "Result<Bool, String>"),
             ("fsyncFile", "Result<Bool, String>"),
             ("stringFromBytes", "Result<String, String>"),

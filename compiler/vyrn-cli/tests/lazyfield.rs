@@ -115,7 +115,7 @@ fn a_read_cannot_recover_the_thunk() {
     let out = check(
         "steal",
         "type B = { body: lazy String }\n\
-         fn main() -> Int64 { let b = B { body: || \"x\" }\n \
+         fn main() -> Int64 { let b = B { body: () -> \"x\" }\n \
          let f: fn() -> String = b.body\n return 0 }\n",
     );
     assert!(
@@ -141,7 +141,7 @@ fn a_lazy_field_encodes_but_does_not_decode() {
     let stdout = run(
         "encode",
         "type B = { title: String, body: lazy String }\n\
-         fn main() -> Int64 { let b = B { title: \"t\", body: || \"deferred\" }\n \
+         fn main() -> Int64 { let b = B { title: \"t\", body: () -> \"deferred\" }\n \
          print(toJson(b))\n return 0 }\n",
     );
     assert_eq!(stdout.trim(), "{\"title\":\"t\",\"body\":\"deferred\"}");
@@ -174,7 +174,7 @@ fn lazy_is_still_an_ordinary_identifier_everywhere_else() {
         "type B = { body: lazy String }\n\
          fn lazy(n: Int64) -> Int64 { return n + 1 }\n\
          fn main() -> Int64 { let lazy = lazy(1)\n \
-         let b = B { body: || \"v\" }\n \
+         let b = B { body: () -> \"v\" }\n \
          print(\"\\{lazy} \\{b.body}\")\n return 0 }\n",
     );
     assert_eq!(stdout.trim(), "2 v");
@@ -199,7 +199,7 @@ fn a_lazy_field_lowers_exactly_as_the_stored_closure_it_is() {
         "type B = { tag: String, body: lazy String }\n\
          fn make(n: Int64) -> B {\n\
          \x20   let pre = \"prefix-\\{n}\"\n\
-         \x20   return B { tag: \"t\\{n}\", body: || \"\\{pre}!\" }\n\
+         \x20   return B { tag: \"t\\{n}\", body: () -> \"\\{pre}!\" }\n\
          }\n\
          fn main() -> Int64 {\n\
          \x20   let b = make(1)\n\
@@ -212,7 +212,7 @@ fn a_lazy_field_lowers_exactly_as_the_stored_closure_it_is() {
         "type B = { tag: String, body: fn() -> String }\n\
          fn make(n: Int64) -> B {\n\
          \x20   let pre = \"prefix-\\{n}\"\n\
-         \x20   return B { tag: \"t\\{n}\", body: || \"\\{pre}!\" }\n\
+         \x20   return B { tag: \"t\\{n}\", body: () -> \"\\{pre}!\" }\n\
          }\n\
          fn main() -> Int64 {\n\
          \x20   let b = make(1)\n\

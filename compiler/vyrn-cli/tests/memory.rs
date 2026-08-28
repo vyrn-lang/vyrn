@@ -307,7 +307,7 @@ fn main() -> Int64 {
     let held = a + b
     let job = spawn score(2)
     let doubled = job.join()
-    let f: Sizer = |x| x + held.byteLength
+    let f: Sizer = x -> x + held.byteLength
     region {
         let arena = a + b
         print(arena)
@@ -476,6 +476,114 @@ const ROWS: &[Row] = &[
               not reassign. An in-place append (`s = s + \"x\"`) is a second leak of \
               its own: the accumulator shadow starts every `let` unowned, so the \
               first append abandons the initializer's buffer",
+    },
+    Row {
+        export: "temporaryCall",
+        census: "RFC-0114 R1′",
+        today: Shape::Steady,
+        why: "RFC-0114 R1′: the unnamed String receiver of `.byteLength` is freed right \
+              after the header read — the read was its last observer. The field exists \
+              only on String, which is the type proof; the producer must transfer \
+              ownership (`owned_fns`, lenders filtered by `facts`), which is the \
+              ownership proof. A heap field of a temp RECORD stays out: extraction lends",
+    },
+    Row {
+        export: "escapingAccumulator",
+        census: "RFC-0114 M2",
+        today: Shape::Steady,
+        why: "RFC-0114 M2: ownedness is per STORE, not per binding. `fold_store_owned` \
+              proves each reassignment's old value has no other holder — the final \
+              consume takes only the last value, so every store before it releases. \
+              The old `slot_owns` gate abandoned the whole binding for that one consume",
+    },
+    Row {
+        export: "conditionalMove",
+        census: "RFC-0114 Rule N",
+        today: Shape::Steady,
+        why: "RFC-0114 Rule N: the still-owning edge releases what the other branch \
+              consumed. The union at the merge says consumed, so block exit stays out of \
+              it — the release sits ON THE EDGE, which is the one point where the path \
+              that kept the value is known. 215.3 MB native before; one buffer after",
+    },
+    Row {
+        export: "conditionalMoveMatch",
+        census: "RFC-0114 Rule N",
+        today: Shape::Steady,
+        why: "Rule N at a match join: one arm consumes, another only reads, the release \
+              sits on the untouched arm's edge (its source index). The guards fail toward \
+              the leak — a binder shadow, a scrutinee mention, or an arm value that could \
+              alias the binding all refuse; a Binary value never can, so it does not",
+    },
+    Row {
+        export: "conditionalMoveIfExpr",
+        census: "RFC-0114 Rule N",
+        today: Shape::Steady,
+        why: "Rule N at an if-expression join, the third join shape. The release sits \
+              under the untouched branch's value — stack-neutral in the wasm lowering, \
+              before the branch to the phi in the textual one — with the match's value \
+              guard: the branch value must not be able to alias what the edge frees",
+    },
+    Row {
+        export: "revivedBinding",
+        census: "RFC-0114 untake",
+        today: Shape::Steady,
+        why: "The take is real, but the binding is provably re-established — the last \
+              event is an owning write at the let's own loop set and branch path, every \
+              take precedes it, and no early exit sits between — so block exit releases \
+              the FINAL value. A conditional revive, or a return/break/`?` in the \
+              window, refuses toward the leak",
+    },
+    Row {
+        export: "consumedParamRead",
+        census: "RFC-0114 param",
+        today: Shape::Steady,
+        why: "A `consume` parameter is a value the frame OWNS, and it was the one owned \
+              value with no row — released only if the body wrote `drop v`. It is keyed \
+              by its `Param` node now, exactly as a `let` is keyed by its statement; a \
+              param that is moved on, dropped, or returned still releases nothing, and \
+              a declared release runs at the callee's exit in all three engines",
+    },
+    Row {
+        export: "temporaryArrayLength",
+        census: "RFC-0114 R1′",
+        today: Shape::Steady,
+        why: "The container counterpart of `temporaryCall`: `.length` on an unnamed \
+              Array the frame owns frees the receiver — buffer and elements — right \
+              after the count is read. The producer's return KIND is the filter \
+              (FreeArr/FreeSmallArr/FreeMap join FreeStr); a declared release never \
+              enters the set, so the free is always silent",
+    },
+    Row {
+        export: "temporaryRecordField",
+        census: "RFC-0114 R1′",
+        today: Shape::Steady,
+        why: "A heap field of a temporary record: `names_a_place` called every field \
+              read a borrow, but a field of a value NOBODY owns has no owner to borrow \
+              from — the binding owns the extracted buffer now, and its block exit \
+              releases it. The record aggregate itself is by value, so for a record \
+              whose only heap is the extracted field, the transfer is complete",
+    },
+    Row {
+        export: "temporaryRecordScalar",
+        census: "RFC-0114 R1′",
+        today: Shape::Steady,
+        why: "A scalar field of a temporary record: the read is the record's last \
+              observer, so the record is freed whole right after it — deep, so its \
+              heap fields go too. A heap or `lazy` field, or an aggregate one (an \
+              address INTO the record), stays out; a `Deep` producer is admitted \
+              only while the program declares no `impl Owned` anywhere",
+    },
+    Row {
+        export: "temporaryChainedField",
+        census: "RFC-0114 R1′",
+        today: Shape::Steady,
+        why: "`makeTag(..).label.byteLength` — the receiver is a heap field of a record               temporary. The `@fieldof:` marker carries the producer through the lender               filter, and `own` admits it without the Deep gate: what the edge frees is               the FIELD it read, a String or container, silent either way",
+    },
+    Row {
+        export: "prependLoop",
+        census: "§4",
+        today: Shape::Steady,
+        why: "A `+` always allocates, so the store releases what it replaced. The guard was               \"does the new value mention the place\", which is right for `a = @push(a, i)`               and wrong for a concat; the append spine hid it, because the shape that reaches               the general store is a PREPEND and nobody writes one in a hot loop until they do",
     },
     Row {
         export: "selfAppend",
@@ -986,6 +1094,27 @@ export extern fn mutString() {{
     seen = seen + Int64(s.byteLength)
 }}
 
+/// A PREPEND in a loop, which no in-place append can serve: the old buffer is
+/// not a prefix of the new one, so `s = "x" + s` must allocate and the store
+/// must release what it replaced.
+///
+/// THE LEAK THIS PINS. The store's release was skipped whenever the new value
+/// mentioned the place at all — right for `a = @push(a, i)`, which grows the old
+/// buffer and hands it back, and wrong for a `+`, because `__vyrn_str_concat`
+/// always calls `__vyrn_str_new` and memcpy's both operands. It stayed invisible
+/// because `s = s + x` is caught by the append spine and never reaches the
+/// general store. Measured before the fix: 9.9 GB over 50,000 calls of a
+/// 200-iteration loop, where the append form used 4.2 MB.
+export extern fn prependLoop() {{
+    let mut s = ""
+    let mut i = 0
+    while i < 200 {{
+        s = "abcdefghij" + s
+        i = i + 1
+    }}
+    seen = seen + Int64(s.byteLength)
+}}
+
 /// Census §4/P1, and the shape a server has: module state reset and then grown.
 /// `examples/bin` and `examples/shelf` both rebuild module state per request.
 ///
@@ -1024,7 +1153,7 @@ export extern fn lambdaLoop() {{
     let mut i = 0
     while i < 32 {{
         let k = i
-        let f: Bump = |x| x + k
+        let f: Bump = x -> x + k
         seen = seen + f(i)
         i = i + 1
     }}
@@ -1419,6 +1548,152 @@ let mut kept: Array<String> = []
 export extern fn keptForever() {{
     kept.push(tag() + "!")
     seen = seen + Int64(kept.length)
+}}
+
+/// RFC-0114 M1: a TEMPORARY. `fresh()` returns a String the caller owns, it is
+/// read for its length, and nothing binds it — so `drop_slots`, which is keyed
+/// on `let`, has no row for it and nothing releases it.
+///
+/// The interpreter reclaims this one for free: `Val::Str` is an `Rc<String>`.
+/// The compiled backends carry no refcount and rely on an analysis that is not
+/// asked. Measured on the same program, 20,000 rounds: 8.5 MB interpreted
+/// against 313.9 MB native.
+export extern fn temporaryCall() {{
+    seen = seen + Int64(fresh().byteLength)
+}}
+
+fn fresh() -> String {{
+    return tag() + "!"
+}}
+
+/// RFC-0114 M2: an accumulator whose LAST value escapes. `Gen::slot_owns` asks
+/// whether the binding is in `drop_slots` — the set released at block exit — and
+/// one consumed into a record is not, so no assignment in its life releases what
+/// it replaced. Every intermediate leaks; only the last one is given back, by
+/// `b` at the end of the block.
+///
+/// The same loop with `acc` merely RETURNED is steady, which is what makes this
+/// a defect rather than a cost: 4.2 MB against 9.9 GB over 50,000 calls.
+type Held = {{ s: String }}
+
+export extern fn escapingAccumulator() {{
+    let mut acc = ""
+    let mut i = 0
+    while i < 8 {{
+        acc = acc + tag()
+        i = i + 1
+    }}
+    let b = Held {{ s: consume acc }}
+    seen = seen + Int64(b.s.byteLength)
+}}
+
+/// RFC-0114 Rule N: a CONDITIONAL move. One branch gives the value away, the
+/// other only reads it, both continue to the join — so the move checker's
+/// union says "consumed" and block exit releases nothing, on the path where
+/// nothing consumed anything. 215.3 MB native over 200,000 rounds of a
+/// 1,000-byte value, taking the non-moving branch every time.
+fn takeIt(v: consume String) -> Int64 {{
+    return v.byteLength
+}}
+
+export extern fn conditionalMove() {{
+    let s = tag() + tag()
+    if seen < 0 {{
+        seen = seen + takeIt(consume s)
+    }} else {{
+        seen = seen + Int64(s.byteLength)
+    }}
+}}
+
+/// RFC-0114 Rule N at a MATCH join: the same asymmetry, one arm consuming and
+/// one only reading, with the release on the untouched arm's edge — the arm's
+/// source index instead of then/else.
+export extern fn conditionalMoveMatch() {{
+    let s = tag() + tag()
+    seen = seen + match pick(seen) {{
+        Ok(v) => takeIt(consume s) + v,
+        Err(v) => Int64(s.byteLength) - v + v,
+    }}
+}}
+
+fn pick(n: Int64) -> Result<Int64, Int64> {{
+    if n < 0 {{ return Ok(n) }}
+    return Err(n)
+}}
+
+/// RFC-0114 consume-param release: a `consume` parameter the body only READS.
+/// The callee owns it; until this landed, only an explicit `drop v` released
+/// it, and a body without one leaked its argument every call.
+fn readOnly(v: consume String) -> Int64 {{
+    return Int64(v.byteLength)
+}}
+
+export extern fn consumedParamRead() {{
+    let s = tag() + tag()
+    seen = seen + readOnly(consume s)
+}}
+
+/// RFC-0114 R1′ for containers: `.length` on an unnamed Array the frame owns.
+fn makeNums(n: Int64) -> Array<Int64> {{
+    let mut a: Array<Int64> = []
+    let mut i = 0
+    while i < n {{
+        a.push(i)
+        i = i + 1
+    }}
+    return a
+}}
+
+export extern fn temporaryArrayLength() {{
+    seen = seen + makeNums(64).length
+}}
+
+/// RFC-0114, the last receiver case: a field of a TEMPORARY record. A heap
+/// field is read out of a value NOBODY owns, so the binding takes ownership
+/// (`names_a_place` stopped calling it a borrow); a scalar field is the
+/// record's last observer, so the record is freed whole after the read.
+type Tag = {{ label: String, n: Int64 }}
+
+fn makeTag(i: Int64) -> Tag {{
+    return Tag {{ label: tag(), n: i }}
+}}
+
+export extern fn temporaryRecordField() {{
+    let x = makeTag(seen).label
+    seen = seen + Int64(x.byteLength)
+}}
+
+export extern fn temporaryRecordScalar() {{
+    seen = seen + makeTag(seen).n
+}}
+
+/// The CHAINED projection: the receiver of `.byteLength` is itself a heap
+/// field of a record temporary, and freeing it frees only the field it read.
+export extern fn temporaryChainedField() {{
+    seen = seen + Int64(makeTag(seen).label.byteLength)
+}}
+
+/// RFC-0114 untake: the value is taken, the binding is provably re-established,
+/// and block exit releases the FINAL value — the taken one is the callee's,
+/// which `drop`s it (the language's contract for a read-only `consume`).
+fn takeDrop(v: consume String) -> Int64 {{
+    let n = Int64(v.byteLength)
+    drop v
+    return n
+}}
+
+export extern fn revivedBinding() {{
+    let mut s = tag() + tag()
+    seen = seen + takeDrop(consume s)
+    s = tag() + tag()
+    seen = seen + Int64(s.byteLength)
+}}
+
+/// RFC-0114 Rule N at an `if`-EXPRESSION join — the third join shape, same
+/// asymmetry, the release under the untouched branch's value.
+export extern fn conditionalMoveIfExpr() {{
+    let s = tag() + tag()
+    seen = seen + (if seen < 0 {{ takeIt(consume s) }} else {{ Int64(s.byteLength) }})
 }}
 
 fn main() -> Int64 {{

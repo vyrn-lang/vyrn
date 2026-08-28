@@ -395,7 +395,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         // Every call-argument temporary this program releases at the call
         // (`rfcs/census-call-arguments.md`), taken before `ownership` is moved
         // from.
-        arg_drops: ownership.arg_drops(),
+        plan: ownership.plan.clone(),
         releases: ownership.releases,
         droppable: ownership.droppable,
         // RFC-0093 M2, flattened across functions: the key is the `let`'s node
@@ -611,6 +611,16 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
             b.ins(&Instruction::Call(init_index));
         }
         b.ins(&Instruction::Call(main));
+        // Whatever `print` left in the standard output buffer, on the way out.
+        // A zero-length write to a descriptor that is not fd 1 flushes and
+        // writes nothing, which is exactly the two things needed here — and it
+        // is why both trap paths need no flush of their own: they write their
+        // message to fd 2 first.
+        b.ins(&Instruction::I32Const(2))
+            .ins(&Instruction::I32Const(0))
+            .ins(&Instruction::I32Const(0))
+            .ins(&Instruction::Call(cx.rt.write_all))
+            .ins(&Instruction::Drop);
         if let Some((at, ..)) = log_open {
             b.ins(&Instruction::I32Const(at as i32))
                 .ins(&Instruction::I32Load(word()))
@@ -1098,10 +1108,9 @@ struct Cx<'a> {
     /// Per `let` node, the places a `consume` took out of it (RFC-0093 M2). The
     /// release walk skips them: the take already gave them an owner.
     holes: HashMap<usize, Vec<String>>,
-    /// The argument expressions whose value the CALLER releases after the call
-    /// (`rfcs/census-call-arguments.md`), keyed by node address — `own`'s
-    /// answer, one level down from a `let`'s.
-    arg_drops: std::collections::HashSet<usize>,
+    /// The per-node release decisions (RFC-0114 §26) — the same artifact the
+    /// textual backend reads, so the two cannot disagree about a site.
+    plan: vyrn_frontend::own::ReleasePlan,
     /// The `Owned` table (RFC-0086 M1) — the same one `own` decided with, so a
     /// user type's declared `release` reaches this backend without a second list.
     owned: vyrn_frontend::own::Owned,
@@ -1610,7 +1619,7 @@ struct Fn_<'a, 'p> {
     /// The locals holding the argument temporaries this frame releases, innermost
     /// call last. Teed where the argument is EVALUATED and handed back where its
     /// call ends — see [`Fn_::call`].
-    arg_frees: Vec<u32>,
+    arg_frees: Vec<(u32, Type)>,
     /// The holes the walk in progress must skip, relative to the place it is
     /// looking at (RFC-0093 M2). Taken at the top of [`Fn_::rel_at`], so a walk
     /// into anything that is not a record starts empty.
@@ -1844,6 +1853,17 @@ fn lower_body(
                 _ => Place::Local(local),
             }
         };
+        // RFC-0114: an owned `consume` parameter the body neither moves nor
+        // drops is released at exit — same row, same placement, same key as
+        // the textual backend.
+        if p.capability == Capability::Consume {
+            let key = p as *const vyrn_frontend::ast::Param as usize;
+            if cx_fn.drops.contains_key(&key) {
+                if let Some(r) = cx_fn.rel_for(&ty, f.line)? {
+                    cx_fn.register_rel(key, place, r);
+                }
+            }
+        }
         cx_fn.scope.push((p.name.clone(), place, ty));
     }
 
@@ -2738,10 +2758,11 @@ impl<'p> Fn_<'_, 'p> {
                     .ins(&Instruction::Call(self.cx.rt.free));
                 Ok(())
             }
-            // Two parallel buffers, and the keys are Strings — so a map that
-            // releases anything always releases its keys (RFC-0092 M3). The
+            // Two parallel buffers. String keys are released per entry
+            // (RFC-0092 M3); Int64 keys go with their buffer (RFC-0117). The
             // elements first, then the buffers they live in.
-            Type::Map(_, vt) if self.deep_row(ty) => {
+            Type::Map(kt, vt) if self.deep_row(ty) => {
+                let ik = self.cx.resolve(&kt) == Type::Int;
                 let l = self.layout_of(ty, line)?;
                 let vstride = self.stride(&vt, line)?;
                 let n = b.local(ValType::I32);
@@ -2757,7 +2778,9 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalGet(a));
                     b.ins(&Instruction::I32Load(word_at(l.fields[i])));
                     b.ins(&Instruction::LocalSet(buf));
-                    self.rel_each(m, b, buf, n, stride, &elem, line)?;
+                    if !(ik && i == 0) {
+                        self.rel_each(m, b, buf, n, stride, &elem, line)?;
+                    }
                     b.ins(&Instruction::LocalGet(buf))
                         .ins(&Instruction::Call(self.cx.rt.free));
                 }
@@ -3356,10 +3379,28 @@ impl<'p> Fn_<'_, 'p> {
                 // RFC-0089 rule 4: the store releases what the place held. Not
                 // when the new value names the place — `a = @push(a, i)` grows the
                 // old buffer and hands it back, so freeing it would be a double
-                // free. That shape is the self-append above where it is a String,
-                // and a recorded leak everywhere else.
-                let snap = if self.place_owns(place)
-                    && !vyrn_frontend::movecheck::mentions_place(value, name)
+                // free.
+                //
+                // A STRING `+` IS THE EXCEPTION, for the reason the textual
+                // backend's copy of this gives: a concat always allocates a fresh
+                // buffer and copies both operands into it, so it cannot hand back
+                // either input. The append spine above hides the common
+                // `s = s + x`; what reaches here is a PREPEND, and that leaked
+                // 9.9 GB over 50,000 calls of a 200-iteration loop.
+                let fresh_str = matches!(self.cx.resolve(&ty), Type::Str)
+                    && matches!(value, Expr::Binary { op: BinOp::Add, .. });
+                // RFC-0114 M2: ownedness is the analysis's per-statement answer,
+                // shared with the textual backend — see `fold_store_owned` and
+                // the comment there. `place_owns` stays for the OTHER stores
+                // (fields, elements), which this slice does not touch.
+                let owned_here = self.region_depth == 0
+                    && self
+                        .cx
+                        .plan
+                        .store_owned
+                        .contains(&(s as *const Stmt as usize));
+                let snap = if owned_here
+                    && (fresh_str || !vyrn_frontend::movecheck::mentions_place(value, name))
                 {
                     match (place, &r) {
                         // A scalar local IS the pointer; it has no address.
@@ -3466,12 +3507,30 @@ impl<'p> Fn_<'_, 'p> {
                 line,
             } => {
                 self.cond(m, b, cond, *line)?;
+                // RFC-0114 Rule N: the analysis says one branch consumed a
+                // binding the other still holds at the join, where nothing may
+                // read it again — so the still-owning edge releases it here.
+                // An `if` with no else-arm grows one when the implicit edge is
+                // the one that owes a release. After a diverged arm the
+                // releases are dead code, which wasm validates.
+                let ers = self
+                    .cx
+                    .plan
+                    .edge_releases
+                    .get(&(s as *const Stmt as usize))
+                    .cloned()
+                    .unwrap_or_default();
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
                 self.block(m, b, then_block)?;
+                self.emit_edge_releases(m, b, &ers, 0, *line)?;
                 if let Some(e) = else_block {
                     b.ins(&Instruction::Else);
                     self.block(m, b, e)?;
+                    self.emit_edge_releases(m, b, &ers, 1, *line)?;
+                } else if ers.iter().any(|(_, t)| *t == 1) {
+                    b.ins(&Instruction::Else);
+                    self.emit_edge_releases(m, b, &ers, 1, *line)?;
                 }
                 self.depth -= 1;
                 b.ins(&Instruction::End);
@@ -3745,7 +3804,7 @@ impl<'p> Fn_<'_, 'p> {
                     .ok_or_else(|| gap("an element assignment to a non-array", *line))?;
                 // `m[k] = v` (RFC-0028) inserts or updates; it is not a bounded
                 // element store and has no index to check.
-                if let Type::Map(_, val) = self.cx.resolve(&ty) {
+                if let Type::Map(key_t, val) = self.cx.resolve(&ty) {
                     let l = self.layout_of(&ty, *line)?;
                     let hdr = b.local(ValType::I32);
                     b.ins(&Instruction::LocalSet(hdr));
@@ -3757,7 +3816,8 @@ impl<'p> Fn_<'_, 'p> {
                     let drop_old = self.region_depth == 0
                         && !vyrn_frontend::movecheck::mentions_place(value, name)
                         && !vyrn_frontend::movecheck::mentions_place(index, name);
-                    return self.map_set(m, b, hdr, &l, index, value, &val, drop_old, *line);
+                    return self
+                        .map_set(m, b, hdr, &l, index, value, &key_t, &val, drop_old, *line);
                 }
                 let w = self.walk(b, &ty, *line)?;
                 if w.byte {
@@ -4472,10 +4532,16 @@ impl<'p> Fn_<'_, 'p> {
     /// is at the allocation on both backends now: see [`Fn_::str_owned`].
     fn expr(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
         let t = self.expr_inner(m, b, e)?;
-        if self.region_depth == 0 && self.cx.arg_drops.contains(&(e as *const Expr as usize)) {
+        if self.region_depth == 0
+            && self
+                .cx
+                .plan
+                .arg_drops
+                .contains(&(e as *const Expr as usize))
+        {
             let l = b.local(ValType::I32);
             b.ins(&Instruction::LocalTee(l));
-            self.arg_frees.push(l);
+            self.arg_frees.push((l, t.clone()));
         }
         if crate::observe::on() {
             crate::observe::record(
@@ -4581,11 +4647,33 @@ impl<'p> Fn_<'_, 'p> {
             }
             Expr::Field { expr, field, line } => {
                 let base = self.expr(m, b, expr)?;
+                // RFC-0114 R1′: an unnamed String receiver this frame owns is
+                // freed right after the header read — the pointer is teed to a
+                // local before `length_of` consumes it.
+                let rfree = self.region_depth == 0
+                    && self
+                        .cx
+                        .plan
+                        .receiver_frees
+                        .contains(&(e as *const Expr as usize));
+                let tee = if rfree {
+                    let l = b.local(ValType::I32);
+                    b.ins(&Instruction::LocalTee(l));
+                    Some(l)
+                } else {
+                    None
+                };
                 if let Some(t) = self.length_of(b, &base, field, *line)? {
+                    // `own` admits only silent kinds into the set, so this
+                    // never meets a declared release.
+                    if let Some(l) = tee {
+                        self.free_arg_temp(m, b, l, &base, *line)?;
+                    }
                     return Ok(t);
                 }
                 let (off, fty) = self.field_of(&base, field, *line)?;
-                match self.cx.repr(&fty, *line)? {
+                let frepr = self.cx.repr(&fty, *line)?;
+                match &frepr {
                     Repr::Scalar(_) => {
                         b.ins(&load_of(&self.cx.ll(&fty), off, self.cx.signed(&fty)))
                     }
@@ -4594,6 +4682,19 @@ impl<'p> Fn_<'_, 'p> {
                         .ins(&Instruction::I32Add),
                     Repr::Unit => return unsupported("a Unit field", *line),
                 };
+                // RFC-0114 R1′: a SCALAR field read off an unnamed record this
+                // frame owns is the record's last observer — free it whole
+                // from the teed address. An aggregate field is an address INTO
+                // the record; a heap or `lazy` one is read again later. All
+                // three stay out.
+                if let Some(l) = tee {
+                    if matches!(frepr, Repr::Scalar(_))
+                        && self.rel_for(&fty, *line)?.is_none()
+                        && vyrn_frontend::types::deferred(&fty).is_none()
+                    {
+                        self.free_arg_temp(m, b, l, &base, *line)?;
+                    }
+                }
                 // RFC-0085 M4a: reading a `lazy T` field FORCES it. The address
                 // now on the stack IS a stored nullary closure (`lazy T` lowers
                 // as `fn() -> T`), so the force is one call through that
@@ -4702,7 +4803,15 @@ impl<'p> Fn_<'_, 'p> {
                 let els = else_branch
                     .as_deref()
                     .ok_or_else(|| gap("an `if` expression with no `else`", *line))?;
-                self.join(m, b, cond, then_branch, els, *line)?
+                self.join(
+                    m,
+                    b,
+                    e as *const Expr as usize,
+                    cond,
+                    then_branch,
+                    els,
+                    *line,
+                )?
             }
             Expr::Unary { op, expr, line } => {
                 let t = self.expr(m, b, expr)?;
@@ -4970,6 +5079,7 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
+        key: usize,
         cond: &Expr,
         then_e: &Expr,
         else_e: &Expr,
@@ -4982,6 +5092,16 @@ impl<'p> Fn_<'_, 'p> {
         };
         let want = self.join_ty(want);
         let r = self.cx.repr(&want, line)?;
+        // RFC-0114 Rule N at an `if`-expression join. The releases are
+        // stack-neutral, so in the scalar case they sit under the branch value
+        // exactly as `match_expr`'s do.
+        let ers = self
+            .cx
+            .plan
+            .edge_releases
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
         self.cond(m, b, cond, line)?;
         match &r {
             Repr::Agg(l) => {
@@ -4995,6 +5115,7 @@ impl<'p> Fn_<'_, 'p> {
                     src_mem: 0,
                     dst_mem: 0,
                 });
+                self.emit_edge_releases(m, b, &ers, 0, line)?;
                 b.ins(&Instruction::Else);
                 b.slot(off);
                 self.expr_as(m, b, else_e, &want)?;
@@ -5003,6 +5124,7 @@ impl<'p> Fn_<'_, 'p> {
                     src_mem: 0,
                     dst_mem: 0,
                 });
+                self.emit_edge_releases(m, b, &ers, 1, line)?;
                 self.depth -= 1;
                 b.ins(&Instruction::End);
                 b.slot(off);
@@ -5011,8 +5133,10 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::If(BlockType::Result(*v)));
                 self.depth += 1;
                 self.expr_as(m, b, then_e, &want)?;
+                self.emit_edge_releases(m, b, &ers, 0, line)?;
                 b.ins(&Instruction::Else);
                 self.expr_as(m, b, else_e, &want)?;
+                self.emit_edge_releases(m, b, &ers, 1, line)?;
                 self.depth -= 1;
                 b.ins(&Instruction::End);
             }
@@ -5162,7 +5286,10 @@ impl<'p> Fn_<'_, 'p> {
             Expr::MapLit { entries, .. } => match self.expect.last().map(|t| self.cx.resolve(t)) {
                 Some(t @ Type::Map(..)) => t,
                 _ => match entries.first() {
-                    Some((_, ve)) => Type::Map(Box::new(Type::Str), Box::new(self.peek(ve, line)?)),
+                    Some((ke, ve)) => Type::Map(
+                        Box::new(self.peek(ke, line)?),
+                        Box::new(self.peek(ve, line)?),
+                    ),
                     None => Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
                 },
             },
@@ -5386,6 +5513,13 @@ impl<'p> Fn_<'_, 'p> {
                         Type::Task(inner) => *inner,
                         _ => t,
                     }
+                }
+                // RFC-0115: `reserve`/`append` hand back the receiver's own
+                // type — capacity is not part of it.
+                "@reserve" | "@append" | "@copyFrom" | "@tally" | "@tallyBytes"
+                    if !args.is_empty() =>
+                {
+                    self.peek(&args[0], line)?
                 }
                 "@push" | "@list" if !args.is_empty() => match self.peek(&args[0], line)? {
                     t => match self.cx.resolve(&t) {
@@ -5646,10 +5780,69 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<Type, String> {
         let mark = self.arg_frees.len();
         let r = self.binary_inner(m, b, op, lhs, rhs, line);
-        for l in self.arg_frees.split_off(mark) {
-            self.free_str_temp(b, Some(l));
+        for (l, ty) in self.arg_frees.split_off(mark) {
+            self.free_arg_temp(m, b, l, &ty, line)?;
         }
         r
+    }
+
+    /// Release one argument temporary, by its TYPE (RFC-0114 M1).
+    ///
+    /// The String case is the historical fast path: the local holds the char
+    /// pointer and [`Fn_::free_str_temp`] adjusts to the block start. Every
+    /// other owning kind's local holds the ADDRESS of the value's storage —
+    /// aggregates travel by pointer in this backend — which is exactly what
+    /// [`Fn_::emit_rel`] takes as a `Place::Local`, so the release is the same
+    /// walk block exit uses and this adapter adds none. The kind comes off the
+    /// type through [`Fn_::rel_for`], the same table the analysis consulted
+    /// when it recorded the temporary.
+    /// RFC-0114 Rule N: release the bindings the OTHER branch of this `if`
+    /// consumed, on the edge where they are still this frame's. A declared
+    /// `impl Owned` release is skipped — its body is user code whose timing
+    /// all three engines must agree on, and the RFC refuses to put it on an
+    /// edge. Inside a `region` the memory is the arena's, as everywhere else.
+    fn emit_edge_releases(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        ers: &[(String, u32)],
+        edge: u32,
+        line: usize,
+    ) -> Result<(), String> {
+        if self.region_depth != 0 {
+            return Ok(());
+        }
+        for (name, t) in ers {
+            if *t != edge {
+                continue;
+            }
+            let Ok((place, ty)) = self.lookup(name, line) else {
+                continue;
+            };
+            match self.rel_for(&ty, line)? {
+                Some(Rel::Call(..)) | None => {}
+                Some(rel) => self.emit_rel(m, b, place, &rel, line)?,
+            }
+        }
+        Ok(())
+    }
+
+    fn free_arg_temp(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        l: u32,
+        ty: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        match self.rel_for(ty, line)? {
+            Some(Rel::Str) => {
+                self.free_str_temp(b, Some(l));
+                Ok(())
+            }
+            Some(rel) => self.emit_rel(m, b, Place::Local(l), &rel, line),
+            None => Ok(()),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6310,8 +6503,8 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<Type, String> {
         let mark = self.arg_frees.len();
         let r = self.call_inner(m, b, name, args, line);
-        for l in self.arg_frees.split_off(mark) {
-            self.free_str_temp(b, Some(l));
+        for (l, ty) in self.arg_frees.split_off(mark) {
+            self.free_arg_temp(m, b, l, &ty, line)?;
         }
         r
     }
@@ -6490,6 +6683,9 @@ impl<'p> Fn_<'_, 'p> {
             // (The five spellings are RESERVED by the checker, so no user function
             // can reach this arm — the same reason the textual backend needs no
             // guard either.)
+            // Literal for the same reason as the interpreter's arm:
+            // `primitives.rs` greps THIS FILE for each census name to decide
+            // whether the direct backend covers it.
             "trace" | "debug" | "info" | "warn" | "error" if args.len() == 2 => {
                 self.expr_as(m, b, &args[0], &Type::Logger)?;
                 self.expr_as(m, b, &args[1], &Type::Str)?;
@@ -6689,7 +6885,10 @@ impl<'p> Fn_<'_, 'p> {
             // `bytes(s)` — the string's UTF-8 bytes as an `Array<UInt8>`, i8 stride.
             // A copy, because the array is growable and the string is not: a `push`
             // on the result must not write into the string's storage.
-            "bytes" if args.len() == 1 => {
+            // `bytes(s)` and `bytes(s, start, end)` (RFC-0113). One arm: the
+            // three-argument form differs only in where the copy starts and how
+            // long it is, and `MemoryCopy` does not care which.
+            "bytes" if args.len() == 1 || args.len() == 3 => {
                 let ty = Type::Array(Box::new(Type::IntN {
                     bits: 8,
                     signed: false,
@@ -6699,9 +6898,71 @@ impl<'p> Fn_<'_, 'p> {
                 let s = self.scratch(b, ValType::I32, 0);
                 let n = self.scratch(b, ValType::I32, 1);
                 let buf = self.scratch(b, ValType::I32, 2);
+                let from = self.scratch(b, ValType::I32, 3);
                 let malloc = self.cx.rt.malloc;
                 b.ins(&Instruction::LocalTee(s));
-                str_len(b);
+                if args.len() == 3 {
+                    // `start` and `end` as i32 offsets, bounds checked against
+                    // the string's length before either is used. The wording is
+                    // `s[i]`'s, so the trap catalogue does not grow.
+                    str_len(b);
+                    let len = self.scratch(b, ValType::I32, 4);
+                    b.ins(&Instruction::LocalSet(len));
+                    self.expr_as(m, b, &args[1], &Type::Int)?;
+                    b.ins(&Instruction::I32WrapI64);
+                    b.ins(&Instruction::LocalSet(from));
+                    self.expr_as(m, b, &args[2], &Type::Int)?;
+                    b.ins(&Instruction::I32WrapI64);
+                    let to = self.scratch(b, ValType::I32, 5);
+                    b.ins(&Instruction::LocalSet(to));
+                    // start < 0 || end < start || end > len — one unsigned
+                    // compare would miss the ordering, so all three are written.
+                    let (pre, post, trap) = (
+                        self.cx.rt.msg_soob,
+                        self.cx.rt.msg_oob_end,
+                        self.cx.rt.trap_idx,
+                    );
+                    b.ins(&Instruction::LocalGet(from));
+                    b.ins(&Instruction::I32Const(0));
+                    b.ins(&Instruction::I32LtS);
+                    b.ins(&Instruction::LocalGet(to));
+                    b.ins(&Instruction::LocalGet(from));
+                    b.ins(&Instruction::I32LtS);
+                    b.ins(&Instruction::I32Or);
+                    b.ins(&Instruction::LocalGet(to));
+                    b.ins(&Instruction::LocalGet(len));
+                    b.ins(&Instruction::I32GtS);
+                    b.ins(&Instruction::I32Or);
+                    b.ins(&Instruction::If(BlockType::Empty));
+                    self.depth += 1;
+                    b.ins(&Instruction::I32Const(pre as i32));
+                    // The offset the other two engines name: the low one when it
+                    // is negative or out of order, otherwise the high one.
+                    b.ins(&Instruction::LocalGet(from));
+                    b.ins(&Instruction::I64ExtendI32S);
+                    b.ins(&Instruction::LocalGet(to));
+                    b.ins(&Instruction::I64ExtendI32S);
+                    b.ins(&Instruction::LocalGet(from));
+                    b.ins(&Instruction::I32Const(0));
+                    b.ins(&Instruction::I32LtS);
+                    b.ins(&Instruction::LocalGet(to));
+                    b.ins(&Instruction::LocalGet(from));
+                    b.ins(&Instruction::I32LtS);
+                    b.ins(&Instruction::I32Or);
+                    b.ins(&Instruction::Select);
+                    b.ins(&Instruction::I32Const(post as i32));
+                    b.ins(&Instruction::Call(trap));
+                    b.ins(&Instruction::Unreachable);
+                    self.depth -= 1;
+                    b.ins(&Instruction::End);
+                    b.ins(&Instruction::LocalGet(to));
+                    b.ins(&Instruction::LocalGet(from));
+                    b.ins(&Instruction::I32Sub);
+                } else {
+                    b.ins(&Instruction::I32Const(0));
+                    b.ins(&Instruction::LocalSet(from));
+                    str_len(b);
+                }
                 b.ins(&Instruction::LocalTee(n));
                 // A zero-length string still gets a buffer, so the triple's pointer
                 // is never null — `push` reallocs from it either way.
@@ -6711,6 +6972,8 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Call(malloc));
                 b.ins(&Instruction::LocalTee(buf));
                 b.ins(&Instruction::LocalGet(s));
+                b.ins(&Instruction::LocalGet(from));
+                b.ins(&Instruction::I32Add);
                 b.ins(&Instruction::LocalGet(n));
                 b.ins(&Instruction::MemoryCopy {
                     src_mem: 0,
@@ -6774,6 +7037,58 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Call(f));
                 b.slot(off);
                 return Ok(ty);
+            }
+            // RFC-0111: a path and an `Array<UInt8>`, into the same destination
+            // slot `writeFile` uses. The array arrives as a POINTER to its
+            // `{ ptr, len, cap }` record, so the two words are loaded out of it
+            // and pushed separately — the buffer may hold NULs, which is exactly
+            // what the String writer's `strlen` could not have measured.
+            "writeFileBytes" if args.len() == 2 => {
+                let ty = io_builtin_ty(name, 2).expect("writeFileBytes is an I/O builtin");
+                let l = self.layout_of(&ty, line)?;
+                self.expr_as(m, b, &args[0], &Type::Str)?;
+                let bytes = Type::Array(Box::new(Type::IntN {
+                    bits: 8,
+                    signed: false,
+                }));
+                self.expr_as(m, b, &args[1], &bytes)?;
+                let src = self.scratch(b, ValType::I32, 0);
+                let al = self.layout_of(&bytes, line)?;
+                b.ins(&Instruction::LocalSet(src));
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I32Load(word_at(al.fields[0])));
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I64Load(at(al.fields[1])));
+                b.ins(&Instruction::I32WrapI64);
+                let off = b.alloc(l.size, l.align);
+                b.slot(off);
+                b.ins(&Instruction::Call(self.cx.rt.write_file_bytes));
+                b.slot(off);
+                return Ok(ty);
+            }
+            // RFC-0111: `print` for bytes. `write_all` is already the gathered
+            // stdout writer every printed line goes through, so this is that call
+            // with the caller's buffer — same buffering, same ordering against
+            // `print` and against standard error. Its status is dropped, for the
+            // reason `print` drops it.
+            "writeStdout" if args.len() == 1 => {
+                let bytes = Type::Array(Box::new(Type::IntN {
+                    bits: 8,
+                    signed: false,
+                }));
+                self.expr_as(m, b, &args[0], &bytes)?;
+                let src = self.scratch(b, ValType::I32, 0);
+                let al = self.layout_of(&bytes, line)?;
+                b.ins(&Instruction::LocalSet(src));
+                b.ins(&Instruction::I32Const(1));
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I32Load(word_at(al.fields[0])));
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I64Load(at(al.fields[1])));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::Call(self.cx.rt.write_all));
+                b.ins(&Instruction::Drop);
+                return Ok(Type::Unit);
             }
             // Two strings in, a `Result<Bool, String>` out, through a destination
             // slot — the same shape, so one arm. RFC-0044's `renameFile` differs
@@ -7185,6 +7500,11 @@ impl<'p> Fn_<'_, 'p> {
                 return Ok(ty);
             }
             "@push" if args.len() == 2 => return self.push(m, b, args, line),
+            "@reserve" if args.len() == 2 => return self.reserve_arr(m, b, args, line),
+            "@append" if args.len() == 2 => return self.append_arr(m, b, args, line),
+            "@copyFrom" if args.len() == 2 => return self.copy_from_arr(m, b, args, line),
+            "@tally" if args.len() == 3 => return self.map_tally(m, b, args, line),
+            "@tallyBytes" if args.len() == 3 => return self.map_tally_bytes(m, b, args, line),
             // A `SmallArray` receiver takes the four-field path. Dispatched on
             // `peek` rather than on an emitted type, because the receiver must not
             // be evaluated twice — `sa_method` evaluates it itself, and for `pop`
@@ -9721,6 +10041,316 @@ impl<'p> Fn_<'_, 'p> {
     /// `xs.push(v)` — the value, and a NEW triple describing the array with it
     /// in. The parser turns the statement into `xs = @push(xs, v)`, so the
     /// write-back is an ordinary assignment and this never touches the binding.
+    /// `xs.reserve(n)` (RFC-0115): one allocation for `n` more elements. The
+    /// growth is malloc + copy + free, exactly the shape [`Fn_::push`] grows
+    /// by, so the two backends cost the same heap.
+    fn reserve_arr(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let _ = m;
+        let aty = self.expr(m, b, &args[0])?;
+        let Type::Array(elem) = self.cx.resolve(&aty) else {
+            return unsupported(&format!("`reserve` on `{aty}`"), line);
+        };
+        let elem = *elem;
+        let l = self.layout_of(&aty, line)?;
+        let stride = self.stride(&elem, line)? as i32;
+        let (src, data, len, cap) = (
+            b.local(ValType::I32),
+            b.local(ValType::I32),
+            b.local(ValType::I64),
+            b.local(ValType::I64),
+        );
+        b.ins(&Instruction::LocalSet(src));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        b.ins(&Instruction::LocalSet(data));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I64Load(at(l.fields[1])));
+        b.ins(&Instruction::LocalSet(len));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I64Load(at(l.fields[2])));
+        b.ins(&Instruction::LocalSet(cap));
+        let need = b.local(ValType::I64);
+        self.expr_as(m, b, &args[1], &Type::Int)?;
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::I64Add);
+        b.ins(&Instruction::LocalSet(need));
+        // need > cap: grow to exactly `need`.
+        b.ins(&Instruction::LocalGet(need));
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64GtS);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        let grown = b.local(ValType::I32);
+        b.ins(&Instruction::LocalGet(need));
+        b.ins(&Instruction::I64Const(stride as i64));
+        b.ins(&Instruction::I64Mul);
+        b.ins(&Instruction::Call(self.cx.rt.malloc));
+        b.ins(&Instruction::LocalTee(grown));
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::I32Const(stride));
+        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        });
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::Call(self.cx.rt.free));
+        b.ins(&Instruction::LocalGet(grown));
+        b.ins(&Instruction::LocalSet(data));
+        b.ins(&Instruction::LocalGet(need));
+        b.ins(&Instruction::LocalSet(cap));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        let off = b.alloc(l.size, l.align);
+        b.slot(off + l.fields[0]);
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::I32Store(word()));
+        b.slot(off + l.fields[1]);
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off + l.fields[2]);
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off);
+        Ok(Type::Array(Box::new(elem)))
+    }
+
+    /// `xs.append(ys)` (RFC-0115): grow once to `max(need, cap * 2)`, then one
+    /// `memory.copy` of the source's elements — the checker held the element
+    /// type to heapless ones, so bytes ARE the elements. A self-append reads
+    /// the source out of the grown buffer (the old one is freed), chosen by a
+    /// `select` on the old data pointer.
+    fn append_arr(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let aty = self.expr(m, b, &args[0])?;
+        let Type::Array(elem) = self.cx.resolve(&aty) else {
+            return unsupported(&format!("`append` on `{aty}`"), line);
+        };
+        let elem = *elem;
+        let l = self.layout_of(&aty, line)?;
+        let stride = self.stride(&elem, line)? as i32;
+        let (src, data, len, cap) = (
+            b.local(ValType::I32),
+            b.local(ValType::I32),
+            b.local(ValType::I64),
+            b.local(ValType::I64),
+        );
+        b.ins(&Instruction::LocalSet(src));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        b.ins(&Instruction::LocalSet(data));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I64Load(at(l.fields[1])));
+        b.ins(&Instruction::LocalSet(len));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I64Load(at(l.fields[2])));
+        b.ins(&Instruction::LocalSet(cap));
+        let (xsrc, xdata, xlen) = (
+            b.local(ValType::I32),
+            b.local(ValType::I32),
+            b.local(ValType::I64),
+        );
+        self.expr_as(m, b, &args[1], &aty)?;
+        b.ins(&Instruction::LocalSet(xsrc));
+        b.ins(&Instruction::LocalGet(xsrc));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        b.ins(&Instruction::LocalSet(xdata));
+        b.ins(&Instruction::LocalGet(xsrc));
+        b.ins(&Instruction::I64Load(at(l.fields[1])));
+        b.ins(&Instruction::LocalSet(xlen));
+        let need = b.local(ValType::I64);
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::LocalGet(xlen));
+        b.ins(&Instruction::I64Add);
+        b.ins(&Instruction::LocalSet(need));
+        // need > cap: grow to max(need, cap * 2), copy, free the old buffer —
+        // AFTER retargeting a self-append's source at the copy just made.
+        b.ins(&Instruction::LocalGet(need));
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64GtS);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        let nc = b.local(ValType::I64);
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64Const(2));
+        b.ins(&Instruction::I64Mul);
+        b.ins(&Instruction::LocalTee(nc));
+        b.ins(&Instruction::LocalGet(need));
+        b.ins(&Instruction::I64LtS);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        b.ins(&Instruction::LocalGet(need));
+        b.ins(&Instruction::LocalSet(nc));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        let grown = b.local(ValType::I32);
+        b.ins(&Instruction::LocalGet(nc));
+        b.ins(&Instruction::I64Const(stride as i64));
+        b.ins(&Instruction::I64Mul);
+        b.ins(&Instruction::Call(self.cx.rt.malloc));
+        b.ins(&Instruction::LocalTee(grown));
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::I32Const(stride));
+        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        });
+        // A self-append's source moved with the copy.
+        b.ins(&Instruction::LocalGet(grown));
+        b.ins(&Instruction::LocalGet(xdata));
+        b.ins(&Instruction::LocalGet(xdata));
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::I32Eq);
+        b.ins(&Instruction::Select);
+        b.ins(&Instruction::LocalSet(xdata));
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::Call(self.cx.rt.free));
+        b.ins(&Instruction::LocalGet(grown));
+        b.ins(&Instruction::LocalSet(data));
+        b.ins(&Instruction::LocalGet(nc));
+        b.ins(&Instruction::LocalSet(cap));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        // dst = data + len * stride; memory.copy xlen * stride bytes.
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::I32Const(stride));
+        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::LocalGet(xdata));
+        b.ins(&Instruction::LocalGet(xlen));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::I32Const(stride));
+        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        });
+        let off = b.alloc(l.size, l.align);
+        b.slot(off + l.fields[0]);
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::I32Store(word()));
+        b.slot(off + l.fields[1]);
+        b.ins(&Instruction::LocalGet(need));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off + l.fields[2]);
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off);
+        Ok(Type::Array(Box::new(elem)))
+    }
+
+    /// `dst.copyFrom(src)` (RFC-0115): the receiver's buffer, the source's
+    /// elements, one `memory.copy`. Grows only when the source is longer; a
+    /// self-copy moves zero bytes.
+    fn copy_from_arr(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let aty = self.expr(m, b, &args[0])?;
+        let Type::Array(elem) = self.cx.resolve(&aty) else {
+            return unsupported(&format!("`copyFrom` on `{aty}`"), line);
+        };
+        let elem = *elem;
+        let l = self.layout_of(&aty, line)?;
+        let stride = self.stride(&elem, line)? as i32;
+        let (src, data, cap) = (
+            b.local(ValType::I32),
+            b.local(ValType::I32),
+            b.local(ValType::I64),
+        );
+        b.ins(&Instruction::LocalSet(src));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        b.ins(&Instruction::LocalSet(data));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I64Load(at(l.fields[2])));
+        b.ins(&Instruction::LocalSet(cap));
+        let (xsrc, xdata, xlen) = (
+            b.local(ValType::I32),
+            b.local(ValType::I32),
+            b.local(ValType::I64),
+        );
+        self.expr_as(m, b, &args[1], &aty)?;
+        b.ins(&Instruction::LocalSet(xsrc));
+        b.ins(&Instruction::LocalGet(xsrc));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        b.ins(&Instruction::LocalSet(xdata));
+        b.ins(&Instruction::LocalGet(xsrc));
+        b.ins(&Instruction::I64Load(at(l.fields[1])));
+        b.ins(&Instruction::LocalSet(xlen));
+        // xlen > cap: grow to exactly xlen. The old contents are dead, so this
+        // is malloc + free with NO copy of them.
+        b.ins(&Instruction::LocalGet(xlen));
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64GtS);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        let grown = b.local(ValType::I32);
+        b.ins(&Instruction::LocalGet(xlen));
+        b.ins(&Instruction::I64Const(stride as i64));
+        b.ins(&Instruction::I64Mul);
+        b.ins(&Instruction::Call(self.cx.rt.malloc));
+        b.ins(&Instruction::LocalSet(grown));
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::Call(self.cx.rt.free));
+        b.ins(&Instruction::LocalGet(grown));
+        b.ins(&Instruction::LocalSet(data));
+        b.ins(&Instruction::LocalGet(xlen));
+        b.ins(&Instruction::LocalSet(cap));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        // memory.copy, unless the pointers were one — then zero bytes.
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::LocalGet(xdata));
+        b.ins(&Instruction::I64Const(0));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalGet(xlen));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::I32Const(stride));
+        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::LocalGet(xdata));
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::I32Eq);
+        b.ins(&Instruction::Select);
+        b.ins(&Instruction::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        });
+        let off = b.alloc(l.size, l.align);
+        b.slot(off + l.fields[0]);
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::I32Store(word()));
+        b.slot(off + l.fields[1]);
+        b.ins(&Instruction::LocalGet(xlen));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off + l.fields[2]);
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off);
+        Ok(Type::Array(Box::new(elem)))
+    }
+
     fn push(
         &mut self,
         m: &mut Module,
@@ -10470,7 +11100,10 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::End);
                 self.copy_each(b, base, n, stride, &inner, line)
             }
-            Type::Map(_, vt) => {
+            Type::Map(kt, vt) => {
+                // String keys are dup'd per entry; Int64 keys copy with the
+                // buffer (RFC-0117) — 8-byte stride, no per-element walk.
+                let ik = self.cx.resolve(&kt) == Type::Int;
                 let l = self.layout_of(ty, line)?;
                 let vstride = self.stride(&vt, line)?;
                 let (n, cap) = (b.local(ValType::I32), b.local(ValType::I32));
@@ -10482,7 +11115,8 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I64Load(at(l.fields[3])));
                 b.ins(&Instruction::I32WrapI64);
                 b.ins(&Instruction::LocalSet(cap));
-                for (i, (stride, elem)) in [(4u32, Type::Str), (vstride, (*vt).clone())]
+                let kstride = if ik { 8u32 } else { 4u32 };
+                for (i, (stride, elem)) in [(kstride, Type::Str), (vstride, (*vt).clone())]
                     .into_iter()
                     .enumerate()
                 {
@@ -10506,7 +11140,9 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalGet(a));
                     b.ins(&Instruction::LocalGet(nb));
                     b.ins(&Instruction::I32Store(word_at(l.fields[i])));
-                    self.copy_each(b, nb, n, stride, &elem, line)?;
+                    if !(ik && i == 0) {
+                        self.copy_each(b, nb, n, stride, &elem, line)?;
+                    }
                 }
                 // The index is copied rather than rebuilt: it holds POSITIONS,
                 // and a copy keeps the capacity as well as the order, so every
@@ -11082,7 +11718,15 @@ impl<'p> Fn_<'_, 'p> {
         }));
         self.depth += 1;
 
-        for arm in arms {
+        // RFC-0114 Rule N at a match join, keyed by this expression's address.
+        let ers = self
+            .cx
+            .plan
+            .edge_releases
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        for (arm_ix, arm) in arms.iter().enumerate() {
             self.tag_test(b, addr, &sum, &arm.pattern, line)?;
             b.ins(&Instruction::If(BlockType::Empty));
             self.depth += 1;
@@ -11106,6 +11750,7 @@ impl<'p> Fn_<'_, 'p> {
                 None => self.expr_as(m, b, &arm.body, &want)?,
             }
             self.scope.truncate(mark);
+            self.emit_edge_releases(m, b, &ers, arm_ix as u32, line)?;
             let d = self.br_to(out);
             b.ins(&Instruction::Br(d));
 
@@ -11549,12 +12194,14 @@ impl<'p> Fn_<'_, 'p> {
         entries: &[(Expr, Expr)],
         line: usize,
     ) -> Result<Type, String> {
-        let want = match self.expect.last().map(|t| self.cx.resolve(t)) {
-            Some(Type::Map(_, v)) => Some(*v),
-            _ => None,
+        let (want_k, want) = match self.expect.last().map(|t| self.cx.resolve(t)) {
+            Some(Type::Map(k, v)) => (Some(*k), Some(*v)),
+            _ => (None, None),
         };
         // A value type that IS an unsolved parameter names no type (see
-        // `array_lit`) — the first value answers.
+        // `array_lit`) — the first value answers. The key type comes from the
+        // position too, else from the first key (RFC-0117: `String` or
+        // `Int64` — the checker made every key the same one).
         let val = match (
             want.filter(|t| !matches!(t, Type::Param(_))),
             entries.first(),
@@ -11566,7 +12213,12 @@ impl<'p> Fn_<'_, 'p> {
             // because the header is the same 32 bytes either way.
             (None, None) => Type::Int,
         };
-        let mty = Type::Map(Box::new(Type::Str), Box::new(val.clone()));
+        let key_t = match (want_k, entries.first()) {
+            (Some(k), _) => k,
+            (None, Some((ke, _))) => self.peek(ke, line)?,
+            (None, None) => Type::Str,
+        };
+        let mty = Type::Map(Box::new(key_t.clone()), Box::new(val.clone()));
         let l = self.layout_of(&mty, line)?;
         let off = b.alloc(l.size, l.align);
         b.slot(off);
@@ -11582,7 +12234,7 @@ impl<'p> Fn_<'_, 'p> {
         // left — `["usd": 1, "usd": 3]`. Inside a `region` the arena owns it.
         let drop_old = self.region_depth == 0;
         for (ke, ve) in entries {
-            self.map_set(m, b, hdr, &l, ke, ve, &val, drop_old, line)?;
+            self.map_set(m, b, hdr, &l, ke, ve, &key_t, &val, drop_old, line)?;
         }
         b.slot(off);
         Ok(mty)
@@ -11595,43 +12247,99 @@ impl<'p> Fn_<'_, 'p> {
     /// the caller, because a new value that names the map could name the very
     /// bytes this frees. The map takes the value as well as the key, so a hit
     /// that only stored over the old value leaked it.
-    fn map_set(
+    /// `m.tallyBytes(w, n)` (RFC-0116): the byte-keyed probe, on this backend
+    /// too. `map_find_bytes` compares the window where it lies, so a hit — the
+    /// hot path in a counting loop — builds no String, validates nothing, and
+    /// allocates nothing. Only a miss goes through `str_from_bytes` (whose Err
+    /// is the trap) and the insert path, where the fresh key is stored, not
+    /// copied.
+    fn map_tally_bytes(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        hdr: u32,
-        l: &Layout,
-        key: &Expr,
-        value: &Expr,
-        val: &Type,
-        drop_old: bool,
+        args: &[Expr],
         line: usize,
-    ) -> Result<(), String> {
-        let esz = self.stride(val, line)? as i32;
-        let r = self.cx.repr(val, line)?;
-        // Key then value, before the scan: the textual backend evaluates both
-        // first, and a side-effecting value expression must not run at a
-        // different point on the two backends.
-        let k = b.local(ValType::I32);
-        self.expr_as(m, b, key, &Type::Str)?;
-        b.ins(&Instruction::LocalSet(k));
-        let v = b.local(match &r {
-            Repr::Scalar(t) => *t,
-            Repr::Agg(_) => ValType::I32,
-            Repr::Unit => return unsupported("a Map of Unit", line),
-        });
-        self.expr_as(m, b, value, val)?;
-        b.ins(&Instruction::LocalSet(v));
-
+    ) -> Result<Type, String> {
+        let mty = self.expr(m, b, &args[0])?;
+        let Type::Map(..) = self.cx.resolve(&mty) else {
+            return unsupported(&format!("`tallyBytes` on `{mty}`"), line);
+        };
+        let l = self.layout_of(&mty, line)?;
+        let hdr = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(hdr));
+        let bytes = Type::Array(Box::new(Type::IntN {
+            bits: 8,
+            signed: false,
+        }));
+        let wsrc = b.local(ValType::I32);
+        self.expr_as(m, b, &args[1], &bytes)?;
+        b.ins(&Instruction::LocalSet(wsrc));
+        let al = self.layout_of(&bytes, line)?;
+        let (wdata, wlen) = (b.local(ValType::I32), b.local(ValType::I32));
+        b.ins(&Instruction::LocalGet(wsrc));
+        b.ins(&Instruction::I32Load(word_at(al.fields[0])));
+        b.ins(&Instruction::LocalSet(wdata));
+        b.ins(&Instruction::LocalGet(wsrc));
+        b.ins(&Instruction::I64Load(at(al.fields[1])));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalSet(wlen));
+        let n = b.local(ValType::I64);
+        self.expr_as(m, b, &args[2], &Type::Int)?;
+        b.ins(&Instruction::LocalSet(n));
+        // One probe, before any key exists.
         let idx = b.local(ValType::I32);
-        self.map_scan(b, hdr, l, k, idx);
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I64Load(at(l.fields[2])));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalGet(wdata));
+        b.ins(&Instruction::LocalGet(wlen));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I32Load(word_at(l.fields[4])));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I64Load(at(l.fields[3])));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::Call(self.cx.rt.map_find_bytes));
+        b.ins(&Instruction::LocalSet(idx));
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::I32Const(0));
         b.ins(&Instruction::I32LtS);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        self.map_reserve(b, hdr, l, esz);
-        // keys[len] = k, and the new entry's index IS the old length.
+        // miss: NOW the key exists — str_from_bytes, whose Err is the trap.
+        let rl = layout::of_ll("{ i1, i64, i64 }").expect("the Result shape");
+        let dest = b.alloc(rl.size, rl.align);
+        b.ins(&Instruction::LocalGet(wdata));
+        b.ins(&Instruction::LocalGet(wlen));
+        b.slot(dest);
+        b.ins(&Instruction::Call(self.cx.rt.str_from_bytes));
+        b.slot(dest + rl.fields[0]);
+        b.ins(&Instruction::I32Load8U(MemArg {
+            offset: 0,
+            align: 0,
+            memory_index: 0,
+        }));
+        b.ins(&Instruction::I32Eqz);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        let msg = self.cx.rt.intern(
+            m,
+            &vyrn_frontend::trap::line(vyrn_frontend::trap::io("tbytes")),
+        );
+        b.ins(&Instruction::I32Const(msg as i32));
+        b.ins(&Instruction::Call(self.cx.rt.trap));
+        b.ins(&Instruction::Unreachable);
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        let k = b.local(ValType::I32);
+        b.slot(dest + rl.fields[1]);
+        b.ins(&Instruction::I64Load(at(0)));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalSet(k));
+        // The insert path — the probe already said the key is absent, and the
+        // fresh key is ours, so it is stored, not copied.
+        self.map_reserve(b, hdr, &l, 8, false);
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         b.ins(&Instruction::LocalGet(hdr));
@@ -11643,6 +12351,177 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Add);
         b.ins(&Instruction::LocalGet(k));
         b.ins(&Instruction::I32Store(word()));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        self.map_index(b, hdr, &l);
+        b.ins(&Instruction::LocalGet(idx));
+        b.ins(&Instruction::Call(self.cx.rt.map_put));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I64Load(at(l.fields[2])));
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Add);
+        b.ins(&Instruction::I64Store(at(l.fields[2])));
+        self.map_val_addr(b, hdr, &l, idx, 8);
+        b.ins(&Instruction::LocalGet(n));
+        b.ins(&Instruction::I64Store(at(0)));
+        b.ins(&Instruction::Else);
+        // hit: add in place. Nothing was built, so nothing frees.
+        self.map_val_addr(b, hdr, &l, idx, 8);
+        let vp = b.local(ValType::I32);
+        b.ins(&Instruction::LocalTee(vp));
+        b.ins(&Instruction::LocalGet(vp));
+        b.ins(&Instruction::I64Load(at(0)));
+        b.ins(&Instruction::LocalGet(n));
+        b.ins(&Instruction::I64Add);
+        b.ins(&Instruction::I64Store(at(0)));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        b.ins(&Instruction::LocalGet(hdr));
+        Ok(mty)
+    }
+
+    /// `m.tally(k, n)` (RFC-0116): insert-or-add, ONE probe. The callee never
+    /// takes the key — a hit adds in place and touches nothing else, a miss
+    /// stores a COPY — so the caller's ownership is the same on both paths.
+    fn map_tally(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let mty = self.expr(m, b, &args[0])?;
+        let key_t = match self.cx.resolve(&mty) {
+            Type::Map(k, _) => *k,
+            _ => return unsupported(&format!("`tally` on `{mty}`"), line),
+        };
+        let ik = self.cx.resolve(&key_t) == Type::Int;
+        let l = self.layout_of(&mty, line)?;
+        let hdr = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(hdr));
+        let k = b.local(if ik { ValType::I64 } else { ValType::I32 });
+        self.expr_as(m, b, &args[1], if ik { &Type::Int } else { &Type::Str })?;
+        b.ins(&Instruction::LocalSet(k));
+        let n = b.local(ValType::I64);
+        self.expr_as(m, b, &args[2], &Type::Int)?;
+        b.ins(&Instruction::LocalSet(n));
+        let idx = b.local(ValType::I32);
+        self.map_scan(b, hdr, &l, k, idx, ik);
+        b.ins(&Instruction::LocalGet(idx));
+        b.ins(&Instruction::I32Const(0));
+        b.ins(&Instruction::I32LtS);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        // miss: reserve, append the key, index it, count starts at `n`. An
+        // Int64 key is stored by value — nothing dup'd (RFC-0117).
+        self.map_reserve(b, hdr, &l, 8, ik);
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I64Load(at(l.fields[2])));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalTee(idx));
+        b.ins(&Instruction::I32Const(if ik { 8 } else { 4 }));
+        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::LocalGet(k));
+        if ik {
+            b.ins(&Instruction::I64Store(word8()));
+        } else {
+            self.str_dup(b);
+            b.ins(&Instruction::I32Store(word()));
+        }
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        self.map_index(b, hdr, &l);
+        b.ins(&Instruction::LocalGet(idx));
+        b.ins(&Instruction::Call(if ik {
+            self.cx.rt.map_put_i64
+        } else {
+            self.cx.rt.map_put
+        }));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I64Load(at(l.fields[2])));
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Add);
+        b.ins(&Instruction::I64Store(at(l.fields[2])));
+        self.map_val_addr(b, hdr, &l, idx, 8);
+        b.ins(&Instruction::LocalGet(n));
+        b.ins(&Instruction::I64Store(at(0)));
+        b.ins(&Instruction::Else);
+        // hit: add in place, free the surplus key.
+        self.map_val_addr(b, hdr, &l, idx, 8);
+        let vp = b.local(ValType::I32);
+        b.ins(&Instruction::LocalTee(vp));
+        b.ins(&Instruction::LocalGet(vp));
+        b.ins(&Instruction::I64Load(at(0)));
+        b.ins(&Instruction::LocalGet(n));
+        b.ins(&Instruction::I64Add);
+        b.ins(&Instruction::I64Store(at(0)));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        b.ins(&Instruction::LocalGet(hdr));
+        Ok(mty)
+    }
+
+    fn map_set(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        hdr: u32,
+        l: &Layout,
+        key: &Expr,
+        value: &Expr,
+        key_t: &Type,
+        val: &Type,
+        drop_old: bool,
+        line: usize,
+    ) -> Result<(), String> {
+        // An Int64-keyed map (RFC-0117): the key by value, stored by value,
+        // never dup'd or freed.
+        let ik = self.cx.resolve(key_t) == Type::Int;
+        let esz = self.stride(val, line)? as i32;
+        let r = self.cx.repr(val, line)?;
+        // Key then value, before the scan: the textual backend evaluates both
+        // first, and a side-effecting value expression must not run at a
+        // different point on the two backends.
+        let k = b.local(if ik { ValType::I64 } else { ValType::I32 });
+        self.expr_as(m, b, key, if ik { &Type::Int } else { &Type::Str })?;
+        b.ins(&Instruction::LocalSet(k));
+        let v = b.local(match &r {
+            Repr::Scalar(t) => *t,
+            Repr::Agg(_) => ValType::I32,
+            Repr::Unit => return unsupported("a Map of Unit", line),
+        });
+        self.expr_as(m, b, value, val)?;
+        b.ins(&Instruction::LocalSet(v));
+
+        let idx = b.local(ValType::I32);
+        self.map_scan(b, hdr, l, k, idx, ik);
+        b.ins(&Instruction::LocalGet(idx));
+        b.ins(&Instruction::I32Const(0));
+        b.ins(&Instruction::I32LtS);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        self.map_reserve(b, hdr, l, esz, ik);
+        // keys[len] = k, and the new entry's index IS the old length.
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I64Load(at(l.fields[2])));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalTee(idx));
+        b.ins(&Instruction::I32Const(if ik { 8 } else { 4 }));
+        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::LocalGet(k));
+        if ik {
+            b.ins(&Instruction::I64Store(word8()));
+        } else {
+            b.ins(&Instruction::I32Store(word()));
+        }
         // The key is in its slot, so the index can record where. `map_reserve`
         // above grew the bucket array and rebuilt it, so this is the only entry it
         // is missing — and the reason the append stays O(1).
@@ -11650,7 +12529,11 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         self.map_index(b, hdr, l);
         b.ins(&Instruction::LocalGet(idx));
-        b.ins(&Instruction::Call(self.cx.rt.map_put));
+        b.ins(&Instruction::Call(if ik {
+            self.cx.rt.map_put_i64
+        } else {
+            self.cx.rt.map_put
+        }));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[2])));
@@ -11672,8 +12555,9 @@ impl<'p> Fn_<'_, 'p> {
         }
         // Inside a `region` the surplus key came from the arena, which hands it
         // back at the exit — freeing it here would give one block two owners.
-        // The same partition `rel_at` draws for a `String`, drawn here too.
-        if self.region_depth == 0 {
+        // The same partition `rel_at` draws for a `String`, drawn here too. An
+        // Int64 key owns nothing, so it has no surplus to return (RFC-0117).
+        if !ik && self.region_depth == 0 {
             b.ins(&Instruction::LocalGet(k));
             str_hdr(b);
             b.ins(&Instruction::Call(self.cx.rt.free));
@@ -11700,8 +12584,9 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// `map_find(keys, len, k, idx, cap)` into `idx`.
-    fn map_scan(&mut self, b: &mut Frame, hdr: u32, l: &Layout, k: u32, idx: u32) {
+    /// `map_find(keys, len, k, idx, cap)` into `idx` — or the `_i64` twin when
+    /// the map is Int64-keyed (`k` is then an I64 local; RFC-0117).
+    fn map_scan(&mut self, b: &mut Frame, hdr: u32, l: &Layout, k: u32, idx: u32, ik: bool) {
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         b.ins(&Instruction::LocalGet(hdr));
@@ -11713,7 +12598,11 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[3])));
         b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::Call(self.cx.rt.map_find));
+        b.ins(&Instruction::Call(if ik {
+            self.cx.rt.map_find_i64
+        } else {
+            self.cx.rt.map_find
+        }));
         b.ins(&Instruction::LocalSet(idx));
     }
 
@@ -11743,7 +12632,7 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// Allocate, copy, free the old — the shape `push` grows in, and what
     /// `__vyrn_map_reserve`'s `realloc` does for the textual backend.
-    fn map_reserve(&mut self, b: &mut Frame, hdr: u32, l: &Layout, esz: i32) {
+    fn map_reserve(&mut self, b: &mut Frame, hdr: u32, l: &Layout, esz: i32, ik: bool) {
         let (nc, nk, nv) = (
             b.local(ValType::I32),
             b.local(ValType::I32),
@@ -11776,7 +12665,10 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Mul);
         b.ins(&Instruction::End);
         b.ins(&Instruction::LocalSet(nc));
-        for (field, stride, into) in [(l.fields[0], 4i32, nk), (l.fields[1], esz, nv)] {
+        for (field, stride, into) in [
+            (l.fields[0], if ik { 8i32 } else { 4i32 }, nk),
+            (l.fields[1], esz, nv),
+        ] {
             // The count is safe in 32 bits — an entry costs at least twelve bytes,
             // so a wasm32 memory holds well under 2^31 of them — but `nc * stride`
             // is not, so the product is 64-bit and `malloc` decides.
@@ -11827,7 +12719,11 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         b.ins(&Instruction::LocalGet(len));
         self.map_index(b, hdr, l);
-        b.ins(&Instruction::Call(self.cx.rt.map_reindex));
+        b.ins(&Instruction::Call(if ik {
+            self.cx.rt.map_reindex_i64
+        } else {
+            self.cx.rt.map_reindex
+        }));
         self.depth -= 1;
         b.ins(&Instruction::End);
     }
@@ -11844,15 +12740,19 @@ impl<'p> Fn_<'_, 'p> {
         key: &Expr,
         line: usize,
     ) -> Result<Type, String> {
+        let ik = match self.cx.resolve(mty) {
+            Type::Map(k, _) => self.cx.resolve(&k) == Type::Int,
+            _ => false,
+        };
         let l = self.layout_of(mty, line)?;
         let esz = self.stride(val, line)? as i32;
         let hdr = b.local(ValType::I32);
         b.ins(&Instruction::LocalSet(hdr));
-        let k = b.local(ValType::I32);
-        self.expr_as(m, b, key, &Type::Str)?;
+        let k = b.local(if ik { ValType::I64 } else { ValType::I32 });
+        self.expr_as(m, b, key, if ik { &Type::Int } else { &Type::Str })?;
         b.ins(&Instruction::LocalSet(k));
         let idx = b.local(ValType::I32);
-        self.map_scan(b, hdr, &l, k, idx);
+        self.map_scan(b, hdr, &l, k, idx, ik);
 
         let oty = Type::Option(Box::new(val.clone()));
         let Repr::Agg(ol) = self.cx.repr(&oty, line)? else {
@@ -11936,20 +12836,21 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::LocalSet(hdr));
             (hdr, ty, false)
         };
-        let Type::Map(_, val) = self.cx.resolve(&mty) else {
-            return unsupported(&format!("`{name}` on `{mty}`"), line);
+        let (key_t, val) = match self.cx.resolve(&mty) {
+            Type::Map(k, v) => (*k, v),
+            _ => return unsupported(&format!("`{name}` on `{mty}`"), line),
         };
+        let ik = self.cx.resolve(&key_t) == Type::Int;
+        let kstride = if ik { 8i32 } else { 4i32 };
         let l = self.layout_of(&mty, line)?;
 
         if name == "@keys" {
-            // A snapshot `Array<String>`: the key pointers copied into a buffer of
-            // its own, so the map may be mutated afterwards without disturbing it,
-            // and since RFC-0092 M2 the KEYS as well — the snapshot is an
-            // `Array<String>` and an array owns its elements, so a snapshot of
-            // the map's own pointers would be freed twice. The interpreter has
-            // copied each key since RFC-0028, so this is the compiling backend
-            // catching up with the oracle rather than a new cost in the model.
-            let aty = Type::Array(Box::new(Type::Str));
+            // A snapshot `Array<K>`: the keys copied into a buffer of their
+            // own, so the map may be mutated afterwards without disturbing it.
+            // String keys are then dup'd per element (RFC-0092 M2 — an array
+            // owns its elements, so a snapshot of the map's own pointers would
+            // be freed twice); Int64 keys copy with the buffer (RFC-0117).
+            let aty = Type::Array(Box::new(key_t.clone()));
             let al = self.layout_of(&aty, line)?;
             let (len, buf) = (b.local(ValType::I32), b.local(ValType::I32));
             b.ins(&Instruction::LocalGet(hdr));
@@ -11960,7 +12861,7 @@ impl<'p> Fn_<'_, 'p> {
             // null — the same rule `bytes` follows, for the same `push`.
             b.ins(&Instruction::I32Const(1));
             b.ins(&Instruction::I32Add);
-            b.ins(&Instruction::I32Const(4));
+            b.ins(&Instruction::I32Const(kstride));
             b.ins(&Instruction::I32Mul);
             b.ins(&Instruction::I64ExtendI32U);
             b.ins(&Instruction::Call(self.cx.rt.malloc));
@@ -11968,13 +12869,15 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::LocalGet(hdr));
             b.ins(&Instruction::I32Load(word_at(l.fields[0])));
             b.ins(&Instruction::LocalGet(len));
-            b.ins(&Instruction::I32Const(4));
+            b.ins(&Instruction::I32Const(kstride));
             b.ins(&Instruction::I32Mul);
             b.ins(&Instruction::MemoryCopy {
                 src_mem: 0,
                 dst_mem: 0,
             });
-            self.copy_each(b, buf, len, 4, &Type::Str, line)?;
+            if !ik {
+                self.copy_each(b, buf, len, 4, &Type::Str, line)?;
+            }
             let off = b.alloc(al.size, al.align);
             b.slot(off + al.fields[0]);
             b.ins(&Instruction::LocalGet(buf));
@@ -11989,11 +12892,11 @@ impl<'p> Fn_<'_, 'p> {
             return Ok(aty);
         }
 
-        let k = b.local(ValType::I32);
-        self.expr_as(m, b, &args[1], &Type::Str)?;
+        let k = b.local(if ik { ValType::I64 } else { ValType::I32 });
+        self.expr_as(m, b, &args[1], if ik { &Type::Int } else { &Type::Str })?;
         b.ins(&Instruction::LocalSet(k));
         let idx = b.local(ValType::I32);
-        self.map_scan(b, hdr, &l, k, idx);
+        self.map_scan(b, hdr, &l, k, idx, ik);
         let found = b.local(ValType::I32);
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::I32Const(0));
@@ -12011,11 +12914,13 @@ impl<'p> Fn_<'_, 'p> {
             // when the entry goes — BEFORE the shift moves the survivors over
             // the slots they live in. The runtime's `map_remove_at` twin shifts
             // bytes and is handed no types, so this is the only place that can.
+            // An Int64 key owns nothing to hand back (RFC-0117).
             if owns {
-                for (field, stride, ety) in [
-                    (l.fields[0], 4i32, Type::Str),
-                    (l.fields[1], esz, val.as_ref().clone()),
-                ] {
+                let mut cols = vec![(l.fields[1], esz, val.as_ref().clone())];
+                if !ik {
+                    cols.insert(0, (l.fields[0], 4i32, Type::Str));
+                }
+                for (field, stride, ety) in cols {
                     let a = b.local(ValType::I32);
                     b.ins(&Instruction::LocalGet(hdr));
                     b.ins(&Instruction::I32Load(word_at(field)));
@@ -12035,7 +12940,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::I32Const(1));
             b.ins(&Instruction::I32Sub);
             b.ins(&Instruction::LocalSet(rest));
-            for (field, stride) in [(l.fields[0], 4i32), (l.fields[1], esz)] {
+            for (field, stride) in [(l.fields[0], kstride), (l.fields[1], esz)] {
                 let base = b.local(ValType::I32);
                 b.ins(&Instruction::LocalGet(hdr));
                 b.ins(&Instruction::I32Load(word_at(field)));
@@ -12071,7 +12976,11 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::I64Load(at(l.fields[2])));
             b.ins(&Instruction::I32WrapI64);
             self.map_index(b, hdr, &l);
-            b.ins(&Instruction::Call(self.cx.rt.map_reindex));
+            b.ins(&Instruction::Call(if ik {
+                self.cx.rt.map_reindex_i64
+            } else {
+                self.cx.rt.map_reindex
+            }));
             self.depth -= 1;
             b.ins(&Instruction::End);
         }
@@ -12784,6 +13693,7 @@ struct Rt {
     read_file: u32,
     read_file_bytes: u32,
     write_file: u32,
+    write_file_bytes: u32,
     rename_file: u32,
     fsync_file: u32,
     /// `listDir` (RFC-0021), on the generator path ONLY — the language gives it no
@@ -12802,10 +13712,17 @@ struct Rt {
     /// lookup and an insert probe for the same bucket and differ only in what they
     /// do when they find it.
     map_find: u32,
+    map_find_bytes: u32,
     map_hash: u32,
     map_slot: u32,
     map_put: u32,
     map_reindex: u32,
+    /// The Int64-keyed chain (RFC-0117 M1): the same four shapes over an
+    /// 8-byte key column, the hash SplitMix64's finalizer, equality the bits.
+    map_find_i64: u32,
+    map_slot_i64: u32,
+    map_put_i64: u32,
+    map_reindex_i64: u32,
     /// RFC-0046's `=~` (M2m): walk a complete DFA over a NUL-terminated string.
     /// One helper for every pattern in the module, because the pattern is entirely
     /// in the table it is handed — which is the same split the textual backend's
@@ -12875,7 +13792,31 @@ struct Rt {
     /// MIN_CLASS + 1` words. Zero-filled by `reserve`, which is what an empty
     /// list is.
     heads: u32,
+    /// The standard input read-ahead buffer, and how far into it reading has
+    /// got. [`STDIN_BUF`] bytes, then two words: the count `fd_read` returned
+    /// and the offset of the next byte. Both start at zero, which `reserve`
+    /// gives for free and which reads as "the buffer is spent" — so the first
+    /// `getbyte` fills it.
+    stdin_buf: u32,
+    stdin_len: u32,
+    stdin_pos: u32,
+    /// The standard output write-behind buffer, and how much of it is filled.
+    /// [`STDIN_BUF`] bytes again. `write_all` is the one place bytes leave this
+    /// module, so it is the one place they can be gathered: one `fd_write` per
+    /// printed line is one syscall per printed line, and fasta prints five
+    /// million of them.
+    stdout_buf: u32,
+    stdout_pos: u32,
 }
+
+/// How much standard input one `fd_read` asks for.
+///
+/// `readLine` is the only reader of fd 0 in a Vyrn program — `readFileBytes`
+/// takes a path — so there is no second consumer whose position this buffer
+/// could get wrong. Without it every byte cost a WASI syscall: reverse
+/// complement over a 40 MB sequence made 40.7 million of them, and the read path
+/// was 19.56 s of that leg's 20.45 s.
+const STDIN_BUF: u32 = 4096;
 
 /// The bytes in front of every heap block, holding its size class.
 ///
@@ -12951,15 +13892,24 @@ impl Rt {
             err3: slot("err3"),
             read_file: slot("read_file"),
             read_file_bytes: slot("read_file_bytes"),
+            // Declared in EMISSION order: the bytes writer is the real one
+            // and `write_file` is the wrapper that calls it, so it is
+            // emitted second and must be declared second (RFC-0111).
+            write_file_bytes: slot("write_file_bytes"),
             write_file: slot("write_file"),
             rename_file: slot("rename_file"),
             fsync_file: slot("fsync_file"),
             list_dir: gen_host.then(|| slot("list_dir")),
             map_find: slot("map_find"),
+            map_find_bytes: slot("map_find_bytes"),
             map_hash: slot("map_hash"),
             map_slot: slot("map_slot"),
             map_put: slot("map_put"),
             map_reindex: slot("map_reindex"),
+            map_find_i64: slot("map_find_i64"),
+            map_slot_i64: slot("map_slot_i64"),
+            map_put_i64: slot("map_put_i64"),
+            map_reindex_i64: slot("map_reindex_i64"),
             regex_run: slot("regex_run"),
             parse_i64: slot("parse_i64"),
             line_at: slot("line_at"),
@@ -12985,6 +13935,11 @@ impl Rt {
             region_len: 0,
             region_cap: 0,
             heads: 0,
+            stdin_buf: 0,
+            stdin_len: 0,
+            stdin_pos: 0,
+            stdout_buf: 0,
+            stdout_pos: 0,
         };
         rt.count = table.len() as u32;
         (rt, table)
@@ -13149,6 +14104,11 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     rt.region_vec = m.reserve(4 * REGION_MAX, 4);
     rt.region_len = m.reserve(4 * REGION_MAX, 4);
     rt.region_cap = m.reserve(4 * REGION_MAX, 4);
+    rt.stdin_buf = m.reserve(STDIN_BUF, 4);
+    rt.stdin_len = m.reserve(4, 4);
+    rt.stdin_pos = m.reserve(4, 4);
+    rt.stdout_buf = m.reserve(STDIN_BUF, 4);
+    rt.stdout_pos = m.reserve(4, 4);
 
     // write_all(fd, ptr, len) -> status — the ONE place bytes leave this module.
     // Zero when every byte arrived, non-zero when the loop gave up.
@@ -13166,54 +14126,147 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     // native shim has checked `wrote != n` since it was written
     // (`__vyrn_write_file`, `toolchain.rs`). Every caller that only prints drops
     // it, exactly as they drop `fd_close`'s errno.
-    let (nw, st) = (4, 5);
+    //
+    // Standard output is GATHERED here, the mirror of standard input being
+    // scattered in `getbyte`: one `fd_write` per printed line is one syscall per
+    // printed line, and fasta prints five million of them. A write to fd 1 that
+    // fits is copied into the buffer and nothing leaves. Anything else -- a
+    // different descriptor, a write too long to buffer, a buffer with no room --
+    // flushes what is waiting FIRST, so order holds against standard error and
+    // against a file. Both trap paths write to fd 2 before they exit, which
+    // flushes on the way out; the ordinary exit flushes in `_start`.
+    let (nw, st, sfd, sptr, slen, buffered) = (4, 5, 6, 7, 8, 9);
+    let (obuf, opos) = (rt.stdout_buf, rt.stdout_pos);
+    // The retry loop, emitted twice: once over the pending buffer and once over
+    // the bytes the caller brought. A helper would need an index in the runtime
+    // table and a call, for twenty instructions.
+    let drain = |b: &mut Frame| {
+        b.ins(&Instruction::Block(BlockType::Empty))
+            .ins(&Instruction::Loop(BlockType::Empty));
+        // Nothing left to write: `st` is still the zero a local starts at.
+        b.ins(&Instruction::LocalGet(2))
+            .ins(&Instruction::I32Eqz)
+            .ins(&Instruction::BrIf(1));
+        b.slot(0)
+            .ins(&Instruction::LocalGet(1))
+            .ins(&Instruction::I32Store(word()));
+        b.slot(4)
+            .ins(&Instruction::LocalGet(2))
+            .ins(&Instruction::I32Store(word()));
+        b.ins(&Instruction::LocalGet(0));
+        b.slot(0);
+        b.ins(&Instruction::I32Const(1));
+        b.slot(8);
+        // A non-zero errno, or a zero-length write, would spin forever.
+        b.ins(&Instruction::Call(fd_write))
+            .ins(&Instruction::LocalTee(st))
+            .ins(&Instruction::BrIf(1));
+        b.slot(8)
+            .ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::LocalTee(nw))
+            .ins(&Instruction::I32Eqz)
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::I32Const(1))
+            .ins(&Instruction::LocalSet(st))
+            .ins(&Instruction::Br(2))
+            .ins(&Instruction::End);
+        b.ins(&Instruction::LocalGet(1))
+            .ins(&Instruction::LocalGet(nw))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::LocalSet(1));
+        b.ins(&Instruction::LocalGet(2))
+            .ins(&Instruction::LocalGet(nw))
+            .ins(&Instruction::I32Sub)
+            .ins(&Instruction::LocalSet(2));
+        b.ins(&Instruction::Br(0))
+            .ins(&Instruction::End)
+            .ins(&Instruction::End);
+    };
     rt.next_is(m, rt.write_all);
     m.func(
         &[ValType::I32, ValType::I32, ValType::I32],
         &[ValType::I32],
-        &[ValType::I32, ValType::I32],
+        &[
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+        ],
         12,
         |b| {
-            b.ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::Loop(BlockType::Empty));
-            // Nothing left to write: `st` is still the zero a local starts at.
-            b.ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::BrIf(1));
-            b.slot(0)
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Store(word()));
-            b.slot(4)
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I32Store(word()));
-            b.ins(&Instruction::LocalGet(0));
-            b.slot(0);
-            b.ins(&Instruction::I32Const(1));
-            b.slot(8);
-            // A non-zero errno, or a zero-length write, would spin forever.
-            b.ins(&Instruction::Call(fd_write))
-                .ins(&Instruction::LocalTee(st))
-                .ins(&Instruction::BrIf(1));
-            b.slot(8)
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalTee(nw))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::LocalSet(st))
-                .ins(&Instruction::Br(2))
-                .ins(&Instruction::End);
+            // `drain` rewrites locals 0..2, so the request is kept whole first.
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::LocalSet(sfd));
             b.ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(nw))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(1));
+                .ins(&Instruction::LocalSet(sptr));
             b.ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::LocalGet(nw))
-                .ins(&Instruction::I32Sub)
+                .ins(&Instruction::LocalSet(slen));
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Eq)
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::I32Const(STDIN_BUF as i32))
+                .ins(&Instruction::I32LtU)
+                .ins(&Instruction::I32And)
+                .ins(&Instruction::LocalSet(buffered));
+            // Flush when bytes are waiting AND this write cannot join them.
+            b.ins(&Instruction::I32Const(opos as i32))
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::I32Eqz);
+            b.ins(&Instruction::LocalGet(buffered))
+                .ins(&Instruction::I32Eqz);
+            b.ins(&Instruction::I32Const(opos as i32))
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::LocalGet(slen))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(STDIN_BUF as i32))
+                .ins(&Instruction::I32GtU)
+                .ins(&Instruction::I32Or)
+                .ins(&Instruction::I32And)
+                .ins(&Instruction::If(BlockType::Empty));
+            b.ins(&Instruction::I32Const(1))
+                .ins(&Instruction::LocalSet(0));
+            b.ins(&Instruction::I32Const(obuf as i32))
+                .ins(&Instruction::LocalSet(1));
+            b.ins(&Instruction::I32Const(opos as i32))
+                .ins(&Instruction::I32Load(word()))
                 .ins(&Instruction::LocalSet(2));
-            b.ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
+            b.ins(&Instruction::I32Const(opos as i32))
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32Store(word()));
+            drain(b);
+            b.ins(&Instruction::End);
+            // Either copy the bytes in, or write them through.
+            b.ins(&Instruction::LocalGet(buffered))
+                .ins(&Instruction::If(BlockType::Empty));
+            b.ins(&Instruction::I32Const(obuf as i32))
+                .ins(&Instruction::I32Const(opos as i32))
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalGet(sptr))
+                .ins(&Instruction::LocalGet(slen))
+                .ins(&Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
+            b.ins(&Instruction::I32Const(opos as i32))
+                .ins(&Instruction::I32Const(opos as i32))
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::LocalGet(slen))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Store(word()));
+            b.ins(&Instruction::Else);
+            b.ins(&Instruction::LocalGet(sfd))
+                .ins(&Instruction::LocalSet(0));
+            b.ins(&Instruction::LocalGet(sptr))
+                .ins(&Instruction::LocalSet(1));
+            b.ins(&Instruction::LocalGet(slen))
+                .ins(&Instruction::LocalSet(2));
+            drain(b);
+            b.ins(&Instruction::End);
             b.ins(&Instruction::LocalGet(st));
         },
     );
@@ -14189,6 +15242,175 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
         },
     );
 
+    // map_find_bytes(keys, len, p, blen, idx, cap) -> the entry index, or -1
+    // (RFC-0116). The byte-keyed probe: FNV-1a over exactly `blen` bytes —
+    // which equals `map_hash` of the equal key, since a stored key has no
+    // interior NUL — then a length-aware compare with the terminator checked.
+    // The shim's `__vyrn_map_find_bytes`, instruction for instruction in
+    // effect, and the reason the wasm leg's `tallyBytes` hit path builds no
+    // String either.
+    {
+        // Params 0..5, the builder's frame base at 6, then ours.
+        let (h, i, bb, ent, kk, res, eq, mask) = (7, 8, 9, 10, 11, 12, 13, 14);
+        rt.next_is(m, rt.map_find_bytes);
+        m.func(
+            &[
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+            ],
+            &[ValType::I32],
+            &[
+                ValType::I64,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+            ],
+            0,
+            |b| {
+                b.ins(&Instruction::I32Const(-1))
+                    .ins(&Instruction::LocalSet(res));
+                b.ins(&Instruction::Block(BlockType::Empty));
+                // An empty map, or one with no index yet: not here.
+                b.ins(&Instruction::LocalGet(1))
+                    .ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::I32LeS)
+                    .ins(&Instruction::LocalGet(5))
+                    .ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::I32LeS)
+                    .ins(&Instruction::I32Or)
+                    .ins(&Instruction::BrIf(0));
+                // FNV-1a over p[0..blen).
+                b.ins(&Instruction::I64Const(14695981039346656037u64 as i64))
+                    .ins(&Instruction::LocalSet(h));
+                b.ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::LocalSet(i));
+                b.ins(&Instruction::Block(BlockType::Empty))
+                    .ins(&Instruction::Loop(BlockType::Empty));
+                b.ins(&Instruction::LocalGet(i))
+                    .ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::I32GeS)
+                    .ins(&Instruction::BrIf(1));
+                b.ins(&Instruction::LocalGet(h))
+                    .ins(&Instruction::LocalGet(2))
+                    .ins(&Instruction::LocalGet(i))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I32Load8U(byte()))
+                    .ins(&Instruction::I64ExtendI32U)
+                    .ins(&Instruction::I64Xor)
+                    .ins(&Instruction::I64Const(1099511628211))
+                    .ins(&Instruction::I64Mul)
+                    .ins(&Instruction::LocalSet(h));
+                b.ins(&Instruction::LocalGet(i))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::LocalSet(i))
+                    .ins(&Instruction::Br(0))
+                    .ins(&Instruction::End)
+                    .ins(&Instruction::End);
+                // mask = cap*2 - 1; bb = h & mask.
+                b.ins(&Instruction::LocalGet(5))
+                    .ins(&Instruction::I32Const(2))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Sub)
+                    .ins(&Instruction::LocalSet(mask));
+                b.ins(&Instruction::LocalGet(h))
+                    .ins(&Instruction::I32WrapI64)
+                    .ins(&Instruction::LocalGet(mask))
+                    .ins(&Instruction::I32And)
+                    .ins(&Instruction::LocalSet(bb));
+                // The probe walk. `len <= cap` keeps the table at most half
+                // full, so an empty bucket is always reached.
+                b.ins(&Instruction::Loop(BlockType::Empty));
+                b.ins(&Instruction::LocalGet(4))
+                    .ins(&Instruction::LocalGet(bb))
+                    .ins(&Instruction::I32Const(8))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I64Load(word8()))
+                    .ins(&Instruction::I32WrapI64)
+                    .ins(&Instruction::LocalTee(ent))
+                    .ins(&Instruction::I32Eqz)
+                    .ins(&Instruction::BrIf(1));
+                b.ins(&Instruction::LocalGet(0))
+                    .ins(&Instruction::LocalGet(ent))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Sub)
+                    .ins(&Instruction::I32Const(4))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I32Load(word()))
+                    .ins(&Instruction::LocalSet(kk));
+                // Length-aware compare: eq stays 1 only if every byte matches.
+                b.ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::LocalSet(eq));
+                b.ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::LocalSet(i));
+                b.ins(&Instruction::Block(BlockType::Empty))
+                    .ins(&Instruction::Loop(BlockType::Empty));
+                b.ins(&Instruction::LocalGet(i))
+                    .ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::I32GeS)
+                    .ins(&Instruction::BrIf(1));
+                b.ins(&Instruction::LocalGet(kk))
+                    .ins(&Instruction::LocalGet(i))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I32Load8U(byte()))
+                    .ins(&Instruction::LocalGet(2))
+                    .ins(&Instruction::LocalGet(i))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I32Load8U(byte()))
+                    .ins(&Instruction::I32Ne)
+                    .ins(&Instruction::If(BlockType::Empty));
+                b.ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::LocalSet(eq))
+                    .ins(&Instruction::Br(2));
+                b.ins(&Instruction::End);
+                b.ins(&Instruction::LocalGet(i))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::LocalSet(i))
+                    .ins(&Instruction::Br(0))
+                    .ins(&Instruction::End)
+                    .ins(&Instruction::End);
+                // A hit needs the terminator too: keys carry no interior NUL,
+                // so kk[blen] == 0 is exactly length equality.
+                b.ins(&Instruction::LocalGet(eq))
+                    .ins(&Instruction::LocalGet(kk))
+                    .ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I32Load8U(byte()))
+                    .ins(&Instruction::I32Eqz)
+                    .ins(&Instruction::I32And)
+                    .ins(&Instruction::If(BlockType::Empty));
+                b.ins(&Instruction::LocalGet(ent))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Sub)
+                    .ins(&Instruction::LocalSet(res))
+                    .ins(&Instruction::Br(2));
+                b.ins(&Instruction::End);
+                b.ins(&Instruction::LocalGet(bb))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::LocalGet(mask))
+                    .ins(&Instruction::I32And)
+                    .ins(&Instruction::LocalSet(bb))
+                    .ins(&Instruction::Br(0))
+                    .ins(&Instruction::End);
+                b.ins(&Instruction::End);
+                b.ins(&Instruction::LocalGet(res));
+            },
+        );
+    }
+
     // map_hash(key) -> FNV-1a over the key's bytes, to the NUL.
     //
     // The hash is never observable — no two backends have to agree on it, only on
@@ -14370,6 +15592,229 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
             b.ins(&Instruction::End);
         },
     );
+
+    // ---- the Int64-keyed chain (RFC-0117 M1) -------------------------------
+    // The same four shapes over an 8-byte key column: the hash is SplitMix64's
+    // finalizer (the function std/hash's `impl Hashable for Int64` spells, and
+    // the shim's `map_hash_i64`), equality is the bits, and nothing about a
+    // key is ever dup'd or freed.
+
+    // map_find_i64(keys, len, key: i64, idx, cap) -> the entry's index, or -1.
+    {
+        // Params 0..4 (2 is the i64 key), the builder's frame base at 5, ours
+        // from 6.
+        let bkt = 6;
+        rt.next_is(m, rt.map_find_i64);
+        let map_slot_i64 = rt.map_slot_i64;
+        m.func(
+            &[
+                ValType::I32,
+                ValType::I32,
+                ValType::I64,
+                ValType::I32,
+                ValType::I32,
+            ],
+            &[ValType::I32],
+            &[ValType::I32],
+            0,
+            |b| {
+                b.ins(&Instruction::Block(BlockType::Result(ValType::I32)));
+                b.ins(&Instruction::LocalGet(1))
+                    .ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::I32LeS)
+                    .ins(&Instruction::LocalGet(4))
+                    .ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::I32LeS)
+                    .ins(&Instruction::I32Or)
+                    .ins(&Instruction::If(BlockType::Empty))
+                    .ins(&Instruction::I32Const(-1))
+                    .ins(&Instruction::Br(1))
+                    .ins(&Instruction::End);
+                b.ins(&Instruction::LocalGet(0))
+                    .ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::LocalGet(4))
+                    .ins(&Instruction::I32Const(2))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::LocalGet(2))
+                    .ins(&Instruction::Call(map_slot_i64))
+                    .ins(&Instruction::I32Const(8))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I64Load(word8()))
+                    .ins(&Instruction::I32WrapI64)
+                    .ins(&Instruction::LocalSet(bkt));
+                b.ins(&Instruction::LocalGet(bkt))
+                    .ins(&Instruction::I32Eqz)
+                    .ins(&Instruction::If(BlockType::Result(ValType::I32)))
+                    .ins(&Instruction::I32Const(-1))
+                    .ins(&Instruction::Else)
+                    .ins(&Instruction::LocalGet(bkt))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Sub)
+                    .ins(&Instruction::End);
+                b.ins(&Instruction::End);
+            },
+        );
+    }
+
+    // map_slot_i64(keys, idx, nb, key: i64) -> the bucket `key` belongs in.
+    {
+        // Params 0..3 (3 is the i64 key), frame base at 4, ours from 5.
+        let (slot_b, mask, ent, h) = (5, 6, 7, 8);
+        rt.next_is(m, rt.map_slot_i64);
+        m.func(
+            &[ValType::I32, ValType::I32, ValType::I32, ValType::I64],
+            &[ValType::I32],
+            &[ValType::I32, ValType::I32, ValType::I32, ValType::I64],
+            0,
+            |b| {
+                b.ins(&Instruction::LocalGet(2))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Sub)
+                    .ins(&Instruction::LocalSet(mask));
+                // SplitMix64's finalizer, inline: three xor-shift-multiply
+                // rounds over the key's bits.
+                b.ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::I64Const(30))
+                    .ins(&Instruction::I64ShrU)
+                    .ins(&Instruction::I64Xor)
+                    .ins(&Instruction::I64Const(0xBF58476D1CE4E5B9u64 as i64))
+                    .ins(&Instruction::I64Mul)
+                    .ins(&Instruction::LocalSet(h));
+                b.ins(&Instruction::LocalGet(h))
+                    .ins(&Instruction::LocalGet(h))
+                    .ins(&Instruction::I64Const(27))
+                    .ins(&Instruction::I64ShrU)
+                    .ins(&Instruction::I64Xor)
+                    .ins(&Instruction::I64Const(0x94D049BB133111EBu64 as i64))
+                    .ins(&Instruction::I64Mul)
+                    .ins(&Instruction::LocalSet(h));
+                b.ins(&Instruction::LocalGet(h))
+                    .ins(&Instruction::LocalGet(h))
+                    .ins(&Instruction::I64Const(31))
+                    .ins(&Instruction::I64ShrU)
+                    .ins(&Instruction::I64Xor)
+                    .ins(&Instruction::I32WrapI64)
+                    .ins(&Instruction::LocalGet(mask))
+                    .ins(&Instruction::I32And)
+                    .ins(&Instruction::LocalSet(slot_b));
+                b.ins(&Instruction::Block(BlockType::Empty))
+                    .ins(&Instruction::Loop(BlockType::Empty));
+                b.ins(&Instruction::LocalGet(1))
+                    .ins(&Instruction::LocalGet(slot_b))
+                    .ins(&Instruction::I32Const(8))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I64Load(word8()))
+                    .ins(&Instruction::I32WrapI64)
+                    .ins(&Instruction::LocalTee(ent))
+                    .ins(&Instruction::I32Eqz)
+                    .ins(&Instruction::BrIf(1));
+                b.ins(&Instruction::LocalGet(0))
+                    .ins(&Instruction::LocalGet(ent))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Sub)
+                    .ins(&Instruction::I32Const(8))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I64Load(word8()))
+                    .ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::I64Eq)
+                    .ins(&Instruction::BrIf(1));
+                b.ins(&Instruction::LocalGet(slot_b))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::LocalGet(mask))
+                    .ins(&Instruction::I32And)
+                    .ins(&Instruction::LocalSet(slot_b))
+                    .ins(&Instruction::Br(0))
+                    .ins(&Instruction::End)
+                    .ins(&Instruction::End);
+                b.ins(&Instruction::LocalGet(slot_b));
+            },
+        );
+    }
+
+    // map_put_i64(keys, idx, nb, i) — record the entry at position `i`, whose
+    // key is already in `keys[i]`.
+    {
+        rt.next_is(m, rt.map_put_i64);
+        let map_slot_i64 = rt.map_slot_i64;
+        m.func(
+            &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+            &[],
+            &[],
+            0,
+            |b| {
+                b.ins(&Instruction::LocalGet(1));
+                b.ins(&Instruction::LocalGet(0))
+                    .ins(&Instruction::LocalGet(1))
+                    .ins(&Instruction::LocalGet(2))
+                    .ins(&Instruction::LocalGet(0))
+                    .ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::I32Const(8))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I64Load(word8()))
+                    .ins(&Instruction::Call(map_slot_i64))
+                    .ins(&Instruction::I32Const(8))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::I32Add);
+                b.ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::I64ExtendI32U)
+                    .ins(&Instruction::I64Const(1))
+                    .ins(&Instruction::I64Add)
+                    .ins(&Instruction::I64Store(word8()));
+            },
+        );
+    }
+
+    // map_reindex_i64(keys, len, idx, nb) — rebuild the whole index.
+    {
+        let ri = 5;
+        rt.next_is(m, rt.map_reindex_i64);
+        let map_put_i64 = rt.map_put_i64;
+        m.func(
+            &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+            &[],
+            &[ValType::I32],
+            0,
+            |b| {
+                b.ins(&Instruction::Block(BlockType::Empty));
+                b.ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::I32LeS)
+                    .ins(&Instruction::BrIf(0));
+                b.ins(&Instruction::LocalGet(2))
+                    .ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::I32Const(8))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::MemoryFill(0));
+                b.ins(&Instruction::Block(BlockType::Empty))
+                    .ins(&Instruction::Loop(BlockType::Empty));
+                b.ins(&Instruction::LocalGet(ri))
+                    .ins(&Instruction::LocalGet(1))
+                    .ins(&Instruction::I32GeS)
+                    .ins(&Instruction::BrIf(1));
+                b.ins(&Instruction::LocalGet(0))
+                    .ins(&Instruction::LocalGet(2))
+                    .ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::LocalGet(ri))
+                    .ins(&Instruction::Call(map_put_i64));
+                b.ins(&Instruction::LocalGet(ri))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::LocalSet(ri))
+                    .ins(&Instruction::Br(0))
+                    .ins(&Instruction::End)
+                    .ins(&Instruction::End);
+                b.ins(&Instruction::End);
+            },
+        );
+    }
 
     // regex_run(s, table, start, accept) -> whether `s` matches in full.
     //
@@ -15391,18 +16836,28 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
     // getbyte() — one byte from stdin, or -1 at EOF (and on any error, which is
     // what `getchar` returning `EOF` covers too).
     //
-    // ponytail: one `fd_read` per byte, where C's `getchar` is buffered. `readLine`
-    // is the only caller and the corpus feeds it a few hundred bytes from a
-    // fixture; a 4 KB buffer here would need its own invalidation story to stay
-    // correct if anything else ever reads fd 0.
+    // Buffered, the way C's `getchar` is. `fd_read` refills [`STDIN_BUF`] bytes
+    // when the buffer is spent and every other call is two loads and a store.
+    // One syscall per byte is what this cost before, which reverse complement
+    // paid 40.7 million times.
     let fd_read = wasi.fd_read;
+    let (sbuf, slen, spos) = (rt.stdin_buf, rt.stdin_len, rt.stdin_pos);
     rt.next_is(m, rt.getbyte);
     m.func(&[], &[ValType::I32], &[], 16, |b| {
-        b.slot(0);
-        b.slot(12);
-        b.ins(&Instruction::I32Store(word()));
+        // Spent? `pos >= len` covers the initial zero-zero state, which is what
+        // `reserve` leaves and what makes the first call a fill.
+        b.ins(&Instruction::I32Const(spos as i32))
+            .ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::I32Const(slen as i32))
+            .ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::I32GeU)
+            .ins(&Instruction::If(BlockType::Empty));
+        // One iovec { buf, len } in the frame, and the count written back.
+        b.slot(0)
+            .ins(&Instruction::I32Const(sbuf as i32))
+            .ins(&Instruction::I32Store(word()));
         b.slot(4)
-            .ins(&Instruction::I32Const(1))
+            .ins(&Instruction::I32Const(STDIN_BUF as i32))
             .ins(&Instruction::I32Store(word()));
         b.slot(8)
             .ins(&Instruction::I32Const(0))
@@ -15411,19 +16866,40 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
         b.slot(0);
         b.ins(&Instruction::I32Const(1));
         b.slot(8);
+        // An error and a zero-length read are the same answer to the caller,
+        // and neither may leave the buffer looking full.
         b.ins(&Instruction::Call(fd_read))
-            .ins(&Instruction::If(BlockType::Result(ValType::I32)));
-        b.ins(&Instruction::I32Const(-1)).ins(&Instruction::Else);
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::I32Const(-1))
+            .ins(&Instruction::Return)
+            .ins(&Instruction::End);
         b.slot(8);
         b.ins(&Instruction::I32Load(word()))
             .ins(&Instruction::I32Eqz)
-            .ins(&Instruction::If(BlockType::Result(ValType::I32)))
+            .ins(&Instruction::If(BlockType::Empty))
             .ins(&Instruction::I32Const(-1))
-            .ins(&Instruction::Else);
-        b.slot(12);
-        b.ins(&Instruction::I32Load8U(byte()))
-            .ins(&Instruction::End)
+            .ins(&Instruction::Return)
             .ins(&Instruction::End);
+        b.ins(&Instruction::I32Const(slen as i32));
+        b.slot(8);
+        b.ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::I32Store(word()));
+        b.ins(&Instruction::I32Const(spos as i32))
+            .ins(&Instruction::I32Const(0))
+            .ins(&Instruction::I32Store(word()))
+            .ins(&Instruction::End);
+        // buf[pos], then pos + 1.
+        b.ins(&Instruction::I32Const(sbuf as i32))
+            .ins(&Instruction::I32Const(spos as i32))
+            .ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::I32Load8U(byte()));
+        b.ins(&Instruction::I32Const(spos as i32))
+            .ins(&Instruction::I32Const(spos as i32))
+            .ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::I32Const(1))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::I32Store(word()));
     });
 
     // read_line(dest) — RFC-0014's `readLine()` as an `Option<String>` written
@@ -16017,14 +17493,20 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
     // reached on every path there; the close's own errno joins the write's,
     // because a buffered write that only fails at the close failed.
     let write_all = rt.write_all;
-    rt.next_is(m, rt.write_file);
+    // write_file_bytes(path, ptr, len, dest) — RFC-0111.
+    //
+    // THE ONLY FILE WRITER IN THIS BACKEND. `writeFile` and `writeFileBytes`
+    // differ by exactly one `strlen`, so `write_file` below measures its String
+    // and calls this; nothing else duplicates the open/write/close/errno
+    // sequence, which is where a second spelling would have drifted.
+    rt.next_is(m, rt.write_file_bytes);
     m.func(
-        &[ValType::I32, ValType::I32, ValType::I32],
+        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
         &[],
         &[ValType::I32, ValType::I32, ValType::I32],
         0,
         |b| {
-            let (fd, emsg, wst) = (4, 5, 6); // params 0..2, the frame base 3, then ours
+            let (fd, emsg, wst) = (5, 6, 7); // params 0..3, the frame base 4, then ours
             b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
                 .ins(&Instruction::Block(BlockType::Empty)) // 0: err
                 .ins(&Instruction::LocalGet(0))
@@ -16044,8 +17526,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::End)
                 .ins(&Instruction::LocalGet(fd))
                 .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::Call(strlen))
+                .ins(&Instruction::LocalGet(2))
                 .ins(&Instruction::Call(write_all))
                 .ins(&Instruction::LocalSet(wst))
                 .ins(&Instruction::LocalGet(fd))
@@ -16062,23 +17543,43 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::End);
             // `Ok(true)`: the payload is a `Bool`, zero-extended into the word,
             // which is the encoding `build_sum2`'s `Word::Ext` arm produces.
-            b.ins(&Instruction::LocalGet(2))
+            b.ins(&Instruction::LocalGet(3))
                 .ins(&Instruction::I32Const(1))
                 .ins(&Instruction::I32Store8(MemArg {
                     offset: sum2.fields[0] as u64,
                     align: 0,
                     memory_index: 0,
                 }))
-                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::LocalGet(3))
                 .ins(&Instruction::I64Const(1))
                 .ins(&Instruction::I64Store(at(sum2.fields[1])))
-                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::LocalGet(3))
                 .ins(&Instruction::I64Const(0))
                 .ins(&Instruction::I64Store(at(sum2.fields[2])))
                 .ins(&Instruction::Br(1))
                 .ins(&Instruction::End); // err
-            sum2_write_to(b, 2, &sum2, 0, Some(emsg));
+            sum2_write_to(b, 3, &sum2, 0, Some(emsg));
             b.ins(&Instruction::End); // fin
+        },
+    );
+
+    // write_file(path, contents, dest) — the String face of the writer above.
+    // A Vyrn String never holds a NUL, so `strlen` is its whole length; that one
+    // call is the entire difference between the two builtins.
+    let write_file_bytes = rt.write_file_bytes;
+    rt.next_is(m, rt.write_file);
+    m.func(
+        &[ValType::I32, ValType::I32, ValType::I32],
+        &[],
+        &[],
+        0,
+        |b| {
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::Call(strlen))
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::Call(write_file_bytes));
         },
     );
 
@@ -16704,7 +18205,7 @@ fn io_builtin_ty(name: &str, argc: usize) -> Option<Type> {
             signed: false,
         }))),
         ("fsyncFile", 1) => str_err(Type::Bool),
-        ("writeFile", 2) | ("renameFile", 2) => str_err(Type::Bool),
+        ("writeFile", 2) | ("renameFile", 2) | ("writeFileBytes", 2) => str_err(Type::Bool),
         _ => return None,
     })
 }
@@ -16767,7 +18268,7 @@ mod tests {
 
     fn cx() -> Cx<'static> {
         Cx {
-            arg_drops: std::collections::HashSet::new(),
+            plan: Default::default(),
             types: HashMap::new(),
             decls: &[],
             lambdas: HashMap::new(),

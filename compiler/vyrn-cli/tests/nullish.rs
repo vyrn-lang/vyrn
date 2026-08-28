@@ -201,7 +201,9 @@ fn the_desugar_frees_exactly_what_the_handwritten_match_frees() {
             .output()
             .expect("vyrn emit-ir");
         assert!(out.status.success(), "{name}: {}", norm(&out.stderr));
-        norm(&out.stdout).matches("call void @free(ptr").count()
+        norm(&out.stdout)
+            .matches("call void @__vyrn_free(ptr")
+            .count()
     };
     assert_eq!(
         frees("free_sugar", "toNum(\"two\") ?? -1"),

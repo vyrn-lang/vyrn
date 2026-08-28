@@ -1,0 +1,80 @@
+/// mandelbrot — the benchmarks game program, writing the binary PBM it asks for.
+///
+/// THIS PROGRAM IS WHY RFC-0111 EXISTS. The game's mandelbrot writes a P4
+/// portable bitmap: a short text header, then one bit per pixel packed eight to
+/// a byte. Those bytes are arbitrary — the twelfth byte of the committed fixture
+/// is a NUL — and a Vyrn `String` cannot hold a NUL or invalid UTF-8. So the
+/// pixels were computable and unemittable, and `rfcs/bench-0104/p-mandelbrot.vyrn`
+/// printed them as hex to prove the arithmetic while the output stayed blocked.
+///
+/// `writeStdout` takes the packed bytes as they are. The header goes through the
+/// same call rather than through `print`, so the whole file is one sink and
+/// there is no question about which newline `print` would have written.
+///
+/// The kernel is the probe's, unchanged: 50 iterations, escape at |z|² > 4,
+/// the row padded to a byte boundary when the width is not a multiple of eight.
+
+/// The width and height of the image. The harness rewrites this line.
+let order = 200
+
+/// `s` as bytes, for the header — the one part of a PBM that IS text.
+fn ascii(s: String) -> Array<UInt8> {
+    return bytes(s)
+}
+
+fn main() -> Int64 {
+    let n = order
+    // "P4\n<n> <n>\n" — the whole text part of the format, and the only place a
+    // newline in this program means a newline.
+    writeStdout(ascii("P4\n\{n} \{n}\n"))
+
+    let mut y = 0
+    while y < n {
+        let ci = 2.0 * Float64(y) / Float64(n) - 1.0
+        // One row of packed pixels. A bit per pixel, high bit first, which is
+        // what P4 means by "the leftmost pixel is the most significant bit".
+        let mut row: Array<UInt8> = []
+        let mut bits = 0
+        let mut nbits = 0
+        let mut x = 0
+        while x < n {
+            let cr = 2.0 * Float64(x) / Float64(n) - 1.5
+            let mut zr = 0.0
+            let mut zi = 0.0
+            let mut inside = 1
+            let mut i = 0
+            while i < 50 {
+                let nzr = zr * zr - zi * zi + cr
+                zi = 2.0 * zr * zi + ci
+                zr = nzr
+                if zr * zr + zi * zi > 4.0 {
+                    inside = 0
+                    i = 50
+                } else {
+                    i = i + 1
+                }
+            }
+            bits = bits * 2 + inside
+            nbits = nbits + 1
+            if nbits == 8 {
+                row.push(UInt8(bits))
+                bits = 0
+                nbits = 0
+            }
+            x = x + 1
+        }
+        // A width that is not a multiple of eight leaves a partial byte, and P4
+        // pads it on the RIGHT — the unused low bits are zero.
+        if nbits > 0 {
+            let mut pad = nbits
+            while pad < 8 {
+                bits = bits * 2
+                pad = pad + 1
+            }
+            row.push(UInt8(bits))
+        }
+        writeStdout(row)
+        y = y + 1
+    }
+    return 0
+}

@@ -26,6 +26,6 @@ export fn routes() -> Array<Route> {
         // `del` reports absence and refusal with different words; only the first
         // is a 404. The other stays a 200 carrying `{"Err":"…"}`, exactly as the
         // RPC surface answers it.
-        DELETE(del("/{id}")).notFoundWhen(|why| why == "no such user"),
+        DELETE(del("/{id}")).notFoundWhen(why -> why == "no such user"),
     ]
 }

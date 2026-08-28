@@ -490,3 +490,82 @@ fn a_call_result_is_still_not_an_assignable_place() {
         "the refusal should name the forms that DO work:\n{err}"
     );
 }
+
+/// The same shape once more, for `Map`. `Val::Map` held a bare `MapVal` while
+/// `Array` and `Str` were both behind an `Rc`, so reading a map binding cloned
+/// the pair vector AND the index — `m[k]` copied the whole table before the
+/// hashed lookup ran, and the cost of a fixed number of reads tracked the SIZE
+/// of the map. 2,000 reads took 0.154 s against 1,000 entries and 1.371 s
+/// against 8,000, which is a copy per read wearing a lookup's clothes.
+///
+/// A ratio again, between two programs that differ in one number: how many
+/// entries the map holds. Both do 2,000 reads of the same key. Measured 8.9x
+/// before the fix and 1.3x after.
+#[test]
+fn a_map_read_does_not_copy_the_table() {
+    let dir = std::env::temp_dir().join("vyrn-places");
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = |entries: usize| {
+        format!(
+            "fn main() -> Int64 {{\n\
+             let mut m: Map<String, Int64> = [:]\n\
+             let mut i = 0\n\
+             while i < {entries} {{ m[\"k\" + i.toString()] = i  i = i + 1 }}\n\
+             let mut hits = 0\n\
+             let mut r = 0\n\
+             while r < 2000 {{\n\
+             hits = hits + match m[\"k1\"] {{ Some(v) => v, None => 0 }}\n\
+             r = r + 1\n\
+             }}\n\
+             print(hits)\n\
+             return 0\n}}\n"
+        )
+    };
+    let small = best_of_3(&dir, "interp-map-small", &prog(1000), "2000");
+    let large = best_of_3(&dir, "interp-map-large", &prog(8000), "2000");
+    assert!(
+        large.as_secs_f64() < 3.0 * small.as_secs_f64(),
+        "a map read is copying the table: {large:?} for 8,000 entries against \
+         {small:?} for 1,000 — the same 2,000 reads"
+    );
+}
+
+/// And once more for a record. `Val::Record` held a bare `HashMap` while
+/// `Array`, `Str` and `Map` were all behind an `Rc`, so passing a record to a
+/// function copied every field — including the fields the callee never looks
+/// at. 200,000 calls of a function that reads ONE field took 0.258 s for a
+/// two-field record and 1.685 s for a sixty-four field one.
+///
+/// A ratio between two programs that differ only in how many fields the record
+/// declares. Both make the same calls and read the same single field. Measured
+/// 6.5x before the fix and 1.0x after — the cost no longer depends on the field
+/// count at all.
+#[test]
+fn passing_a_record_does_not_copy_its_fields() {
+    let dir = std::env::temp_dir().join("vyrn-places");
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = |fields: usize| {
+        let decl: Vec<String> = (0..fields).map(|i| format!("f{i}: Int64")).collect();
+        let init: Vec<String> = (0..fields).map(|i| format!("f{i}: {i}")).collect();
+        format!(
+            "type R = {{ {} }}\n\
+             fn peek(r: R) -> Int64 {{ return r.f0 }}\n\
+             fn main() -> Int64 {{\n\
+             let r = R {{ {} }}\n\
+             let mut acc = 0\n\
+             let mut i = 0\n\
+             while i < 200000 {{ acc = acc + peek(r)  i = i + 1 }}\n\
+             print(acc)\n\
+             return 0\n}}\n",
+            decl.join(", "),
+            init.join(", ")
+        )
+    };
+    let narrow = best_of_3(&dir, "interp-rec-narrow", &prog(2), "0");
+    let wide = best_of_3(&dir, "interp-rec-wide", &prog(64), "0");
+    assert!(
+        wide.as_secs_f64() < 3.0 * narrow.as_secs_f64(),
+        "passing a record is copying its fields: {wide:?} for 64 fields against \
+         {narrow:?} for 2 — the same calls, the same one field read"
+    );
+}
