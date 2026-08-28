@@ -33,6 +33,7 @@ web/*.shim.c
 *.shim.c
 
 # Editor / tooling
+.air/
 editor/**/node_modules/
 # Bundled LSP server binary (copied from vyrn-lsp/target by npm run package)
 editor/vscode/server/
