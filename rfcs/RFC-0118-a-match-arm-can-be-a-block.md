@@ -120,3 +120,16 @@ scalar shell going with the arm — a spelling that needed a block to exist.
   `examples/blockvalarm.vyrn` pins the refusal.
 - **M2** — the trampolines deleted and the claim measured; both results
   above.
+- **The hole, closed (same day).** `drop` on a bare type parameter is refused
+  now. It used to pass "so the instance decides" — the allowance census U4
+  won for a generic container's per-element loop — but that loop is gone
+  (`Slots`' release drops its arrays, never a bare `T`), no per-instance
+  check ever ran on a generic body, and what the pass actually did in the
+  tree was launder the record rule through exactly the trampolines this RFC
+  deleted. Closing it surfaced two more twins M2's census missed —
+  `htmlGive` in `std/html` and `vonGive` in `std/von`, plus the same shape in
+  two test fixtures — all converted to block arms, which is the count's own
+  argument: six functions existed to stand where a block could not, not
+  four. `examples/dropparam.vyrn` pins the refusal; a generic fn that needs
+  to release a `T` again is the program that reopens the question, with the
+  per-instance check the old comment promised.

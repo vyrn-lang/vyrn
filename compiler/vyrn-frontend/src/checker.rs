@@ -3771,13 +3771,17 @@ impl<'a> Checker<'a> {
                 // carries the measurement that kept them off; this list follows it
                 // rather than deciding a second time.
                 let t = self.base(&b.ty);
-                // A type PARAMETER passes, and the instance decides (Phase 8b).
-                // This body is checked once and lowered once per instantiation,
-                // so `drop v` where `v: T` is a `free` in `Slots<String>` and no
-                // instruction at all in `Slots<Int64>` — which is the plan's
-                // "conventions checked per monomorphized instance". Refusing it
-                // here is what kept a generic container from giving its elements
-                // back (census U4).
+                // A type PARAMETER is REFUSED (RFC-0118 M2's finding). It used
+                // to pass "so the instance decides", which kept a generic
+                // container's per-element loop legal (census U4) — but that
+                // loop is gone (`Slots` releases its arrays, never a bare `T`),
+                // and what the pass actually did in the tree was launder this
+                // very rule: `vyxGive<T>(v: consume T) { drop v }` accepted a
+                // plain record as `T` and dropped it, where the direct spelling
+                // is refused below. No instance check runs on a generic body,
+                // so the only sound gate is here. A generic fn that needs to
+                // release a `T` again is the program that reopens this, with
+                // the per-instance check the old comment promised.
                 // A DECLARED row passes too, and the key is read off the written
                 // type rather than off `base` — `impl Owned for Ring` is what
                 // `Ring` means, so resolving it to its record shape first is
@@ -3811,11 +3815,20 @@ impl<'a> Checker<'a> {
                         | Type::SmallArray(..)
                         | Type::Map(..)
                         | Type::Task(_)
-                        | Type::Param(_)
                 ) || (matches!(t, Type::Option(_) | Type::Result(..))
                     && crate::own::owns_heap(&t, &self.types))
                 {
                     return Ok(false);
+                }
+                if matches!(t, Type::Param(_)) {
+                    return Err(cerr!(
+                        line,
+                        "cannot `drop` `{name}`: its type `{t}` is a type parameter, so this \
+                         body cannot know whether the rule below holds for the instance — a \
+                         plain record would be released here where `drop` on it directly is \
+                         refused. Release the value where its concrete type is known, or \
+                         `consume` the heap field and `drop` that"
+                    ));
                 }
                 Err(cerr!(
                     line,

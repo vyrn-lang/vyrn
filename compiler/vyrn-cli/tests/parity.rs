@@ -1226,16 +1226,16 @@ type Twig =
     | Tip(String)
     | Fork(String, Array<Twig>)
 
-fn give<T>(v: consume T) -> Int64 {
-    drop v
-    return 0
-}
-
 impl Owned for Twig {
     fn release(consume self) {
-        let given = match consume self {
-            Tip(s) => give(s),
-            Fork(s, kids) => give(s) + give(kids),
+        match consume self {
+            Tip(s) => {
+                drop s
+            }
+            Fork(s, kids) => {
+                drop s
+                drop kids
+            }
         }
     }
 }

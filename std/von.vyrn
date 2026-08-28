@@ -83,28 +83,38 @@ impl Copy for Von {
     }
 }
 
-/// Hands one payload back to its own release row, so an arm can be an
-/// EXPRESSION. `drop v` is a statement and a `match` arm is not. The twin of
-/// `std/json`'s `jsonGive`.
-fn vonGive<T>(v: consume T) -> Int64 {
-    drop v
-    return 0
-}
-
 /// A `Von` owns its subtree, and says so — RFC-0096 M2. A declaration is the
 /// bottom the structural release walk lacks, so every type ABOVE this one gets
-/// its own row back.
+/// its own row back. Block arms (RFC-0118): `drop` stands in the arm where
+/// `vonGive` — a helper that existed only because an arm was a single
+/// expression — used to trampoline it.
 impl Owned for Von {
     fn release(consume self) {
         match consume self {
-            VRecord(n, fs) => vonGive(n) + vonGive(fs),
-            VVariant(n, xs) => vonGive(n) + vonGive(xs),
-            VArray(xs) => vonGive(xs),
-            VMap(es) => vonGive(es),
-            VStr(s) => vonGive(s),
-            VInt(s) => vonGive(s),
-            VFloat(s) => vonGive(s),
-            VBool(b) => 0,
+            VRecord(n, fs) => {
+                drop n
+                drop fs
+            }
+            VVariant(n, xs) => {
+                drop n
+                drop xs
+            }
+            VArray(xs) => {
+                drop xs
+            }
+            VMap(es) => {
+                drop es
+            }
+            VStr(s) => {
+                drop s
+            }
+            VInt(s) => {
+                drop s
+            }
+            VFloat(s) => {
+                drop s
+            }
+            VBool(b) => {}
         }
     }
 }

@@ -58,6 +58,11 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "RFC-0118: a match used as a value keeps single-expression arms; a          block arm exists only in statement position",
         "a block arm needs statement position",
     ),
+    (
+        "dropparam.vyrn",
+        "RFC-0118 M2's finding: `drop` on a bare type parameter laundered the          record rule through generic trampolines, and no instance check runs on          a generic body",
+        "is a type parameter",
+    ),
     // ---- RFC-0114's proof appendix, §45: the four load-bearing assumptions,
     // pinned as refusals. Each row is one assumption of the release-algorithm
     // proofs (rfcs/proofs/release-algorithm.md); the needle is the checker's

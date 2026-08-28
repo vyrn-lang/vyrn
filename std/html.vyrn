@@ -108,27 +108,29 @@ impl Copy for Html {
     }
 }
 
-/// Hands one payload back to its own release row, so an arm can be an
-/// EXPRESSION — `drop v` is a statement and a `match` arm is not. The twin of
-/// `std/json`'s `jsonGive` and `std/vyx`'s `vyxGive`.
-fn htmlGive<T>(v: consume T) -> Int64 {
-    drop v
-    return 0
-}
-
 /// A node owns its subtree, and says so — RFC-0096 M2.
 ///
 /// `Html` reaches itself through `El`, so the structural release walk has no
 /// bottom. A declaration IS one: the walk emits a CALL here, and every type
 /// above — `Array<Html>`, a record holding a view — gets its structural row
-/// back.
+/// back. Block arms (RFC-0118): `drop` stands in the arm where `htmlGive` —
+/// a helper that existed only because an arm was a single expression — used
+/// to trampoline it.
 impl Owned for Html {
     fn release(consume self) {
         match consume self {
-            Empty => 0,
-            Text(s) => htmlGive(s),
-            Raw(s) => htmlGive(s),
-            El(tag, attrs, kids) => htmlGive(tag) + htmlGive(attrs) + htmlGive(kids),
+            Empty => {}
+            Text(s) => {
+                drop s
+            }
+            Raw(s) => {
+                drop s
+            }
+            El(tag, attrs, kids) => {
+                drop tag
+                drop attrs
+                drop kids
+            }
         }
     }
 }

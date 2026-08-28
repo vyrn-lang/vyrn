@@ -673,11 +673,13 @@ const ROWS: &[Row] = &[
         census: "U4 / RFC-0090 M1",
         today: Shape::Steady,
         why: "Phase 8b: `std/slots` declares `impl<T> Owned for Slots<T>`, and the release gives \
-              back every element and then the five buffers. Three refusals had to move for it — \
+              back every element and then the five buffers. Two refusals had to move for it — \
               a `mut` binding may take a declared release (the interpreter reads the slot now), \
-              a generic impl carries a row (the drop site solves the type arguments and asks for \
-              the instance), and `drop v` where `v: T` checks, because the instance decides. U4 \
-              opens for a container that knows what it owns, and stays open for one that cannot",
+              and a generic impl carries a row (the drop site solves the type arguments and asks \
+              for the instance). The third — `drop v` where `v: T` — moved back: the release \
+              drops its ARRAYS now, never a bare `T`, and the Param pass was laundering the \
+              record rule (RFC-0118 M2), so it is refused again. U4 opens for a container that \
+              knows what it owns, and stays open for one that cannot",
     },
     Row {
         export: "keysLoop",
@@ -1024,21 +1026,21 @@ type Twig =
 /// declaration below.
 type Bough = {{ root: Twig, label: String }}
 
-/// One helper for every payload the release hands back, because a `match` arm
-/// is an expression and `drop` is a statement. `drop v` reads the row the
-/// INSTANCE has, so this one function releases a `String` and an `Array<Twig>`.
-fn give<T>(v: consume T) -> Int64 {{
-    drop v
-    return 0
-}}
-
 /// The declaration that IS the bottom. The walk emits a call here rather than
-/// expanding, and this function makes the recursion the walk cannot.
+/// expanding, and this function makes the recursion the walk cannot. Block
+/// arms (RFC-0118): `drop` stands in the arm where a generic `give` used to
+/// trampoline it — and `drop` on a bare `T` is refused now, for laundering
+/// the record rule.
 impl Owned for Twig {{
     fn release(consume self) {{
-        let given = match consume self {{
-            Tip(s) => give(s),
-            Fork(s, kids) => give(s) + give(kids),
+        match consume self {{
+            Tip(s) => {{
+                drop s
+            }}
+            Fork(s, kids) => {{
+                drop s
+                drop kids
+            }}
         }}
     }}
 }}
