@@ -1,43 +1,574 @@
 {
-  "_readme": [
-    "RFC-0063 bench baseline — the reference min-times `vyrn bench --compare`",
-    "measures regressions against. JSON has no comments, so this doc lives in",
-    "the ignored `_readme`/`placeholder` fields (the comparator reads only",
-    "`benches`).",
-    "",
-    "THIS IS STILL A PLACEHOLDER. `placeholder: true` (and the empty `benches`)",
-    "makes `--compare` report every bench as `new` and exit 0 — comparing real",
-    "timings against an unseeded baseline is meaningless, never a failure. The",
-    "CI bench job is a real gate now (it no longer carries `continue-on-error`),",
-    "and it stays a no-op until this file is seeded, by this arithmetic and not",
-    "by a flag.",
-    "",
-    "SEEDING IT. Take the numbers from CI hardware, never from a dev machine:",
-    "comparing across machines is noise, not a measurement. The `benchmarks",
-    "(regression gate)` job of the CI workflow, on a push to main, assembles",
-    "exactly this document and uploads it. Seeding is two commands:",
-    "",
-    "  1. Open the newest green `CI` run on main, download the `bench-json`",
-    "     artifact (it holds one report per bench-bearing example PLUS the",
-    "     merged `baseline.json`).",
-    "  2. cp baseline.json bench/baseline.json && git commit",
-    "",
-    "The merged file has no `placeholder` and no `_readme`, so committing it",
-    "arms the gate in the same commit. There is nothing to hand-edit — the shape",
-    "is produced by the `Assemble a seedable baseline` step, and hand-merging",
-    "the per-example reports is what that step exists to prevent.",
-    "",
-    "Refresh the same way whenever the runner hardware changes, and record which",
-    "workflow run the numbers came from in the commit message.",
-    "",
-    "The failure margin is NOT here. It is `BENCH_THRESHOLD` in",
-    ".github/workflows/ci.yml, one value with its justification beside it.",
-    "",
-    "Local refresh on a quiet machine (smoke-testing only, do NOT commit):",
-    "  vyrn bench examples/benching.vyrn --json > bench/baseline.json"
-  ],
-  "placeholder": true,
   "backend": "native",
   "opt": "O2",
-  "benches": []
+  "benches": [
+    {
+      "name": "hash to 1000",
+      "minNs": 4589,
+      "medianNs": 4593,
+      "meanNs": 4600,
+      "samples": 425,
+      "iters": 256
+    },
+    {
+      "name": "push 1000",
+      "minNs": 691,
+      "medianNs": 697,
+      "meanNs": 699,
+      "samples": 349,
+      "iters": 2048
+    },
+    {
+      "name": "binary-trees, depth 14 at the minimum depth",
+      "minNs": 10332024,
+      "medianNs": 10376125,
+      "meanNs": 10429639,
+      "samples": 48,
+      "iters": 1
+    },
+    {
+      "name": "fannkuch-redux, n = 9",
+      "minNs": 22797792,
+      "medianNs": 23092677,
+      "meanNs": 23237923,
+      "samples": 31,
+      "iters": 1
+    },
+    {
+      "name": "fasta, 250000 random bases",
+      "minNs": 5450199,
+      "medianNs": 5619516,
+      "meanNs": 5608040,
+      "samples": 90,
+      "iters": 1
+    },
+    {
+      "name": "k-nucleotide, 2-mers over 200000 bases",
+      "minNs": 2565640,
+      "medianNs": 2598612,
+      "meanNs": 2604074,
+      "samples": 192,
+      "iters": 1
+    },
+    {
+      "name": "k-nucleotide, 18-mers over 200000 bases",
+      "minNs": 9564298,
+      "medianNs": 9930836,
+      "meanNs": 10047217,
+      "samples": 50,
+      "iters": 1
+    },
+    {
+      "name": "map build, 1000 string keys",
+      "minNs": 176568,
+      "medianNs": 179160,
+      "meanNs": 179921,
+      "samples": 348,
+      "iters": 8
+    },
+    {
+      "name": "map lookup hit, 1000 keys",
+      "minNs": 165838,
+      "medianNs": 168109,
+      "meanNs": 168547,
+      "samples": 371,
+      "iters": 8
+    },
+    {
+      "name": "map lookup miss, 1000 keys",
+      "minNs": 251276,
+      "medianNs": 258844,
+      "meanNs": 258872,
+      "samples": 483,
+      "iters": 4
+    },
+    {
+      "name": "string interpolation, 1000 rows",
+      "minNs": 188943,
+      "medianNs": 190789,
+      "meanNs": 191360,
+      "samples": 327,
+      "iters": 8
+    },
+    {
+      "name": "joinWith over 1000 parts",
+      "minNs": 72197,
+      "medianNs": 73743,
+      "meanNs": 73819,
+      "samples": 424,
+      "iters": 16
+    },
+    {
+      "name": "split of a 1000-field line",
+      "minNs": 185176,
+      "medianNs": 187429,
+      "meanNs": 188237,
+      "samples": 332,
+      "iters": 8
+    },
+    {
+      "name": "protocol dispatch, 10000 calls",
+      "minNs": 46395,
+      "medianNs": 46716,
+      "meanNs": 46718,
+      "samples": 335,
+      "iters": 32
+    },
+    {
+      "name": "fn-value dispatch, 10000 calls",
+      "minNs": 45920,
+      "medianNs": 46053,
+      "meanNs": 46034,
+      "samples": 340,
+      "iters": 32
+    },
+    {
+      "name": "json emit, 20 x 200-member object",
+      "minNs": 840404,
+      "medianNs": 859396,
+      "meanNs": 861428,
+      "samples": 291,
+      "iters": 2
+    },
+    {
+      "name": "json parse, 20 x 200-member object",
+      "minNs": 2259978,
+      "medianNs": 2282827,
+      "meanNs": 2290721,
+      "samples": 219,
+      "iters": 1
+    },
+    {
+      "name": "copy of a 10 KB string, 1000 times",
+      "minNs": 120393,
+      "medianNs": 122704,
+      "meanNs": 122403,
+      "samples": 256,
+      "iters": 16
+    },
+    {
+      "name": "copy of a 1000-element Array<Int64>, 1000 times",
+      "minNs": 100452,
+      "medianNs": 102624,
+      "meanNs": 102953,
+      "samples": 304,
+      "iters": 16
+    },
+    {
+      "name": "string concat, 1000 fresh buffers",
+      "minNs": 13691,
+      "medianNs": 13910,
+      "meanNs": 13930,
+      "samples": 281,
+      "iters": 128
+    },
+    {
+      "name": "string append spine, 1000 appends",
+      "minNs": 775,
+      "medianNs": 803,
+      "meanNs": 802,
+      "samples": 305,
+      "iters": 2048
+    },
+    {
+      "name": "module-state append spine, 1000 appends",
+      "minNs": 949,
+      "medianNs": 1015,
+      "meanNs": 1077,
+      "samples": 453,
+      "iters": 1024
+    },
+    {
+      "name": "byteLength of a 10 KB string, 500 reads",
+      "minNs": 944,
+      "medianNs": 974,
+      "meanNs": 975,
+      "samples": 501,
+      "iters": 1024
+    },
+    {
+      "name": "splice 1000 Strings, consuming loop",
+      "minNs": 75559,
+      "medianNs": 76787,
+      "meanNs": 76931,
+      "samples": 407,
+      "iters": 16
+    },
+    {
+      "name": "splice 1000 Strings, copying loop",
+      "minNs": 97752,
+      "medianNs": 98972,
+      "meanNs": 99349,
+      "samples": 315,
+      "iters": 16
+    },
+    {
+      "name": "keys() of a 1000-key map, 10 snapshots",
+      "minNs": 391966,
+      "medianNs": 396497,
+      "meanNs": 397386,
+      "samples": 315,
+      "iters": 4
+    },
+    {
+      "name": "array push churn, 1000 pushes",
+      "minNs": 537,
+      "medianNs": 575,
+      "meanNs": 565,
+      "samples": 432,
+      "iters": 2048
+    },
+    {
+      "name": "array element read, 10000 reads",
+      "minNs": 17512,
+      "medianNs": 17586,
+      "meanNs": 17599,
+      "samples": 444,
+      "iters": 64
+    },
+    {
+      "name": "fixed array element read, 1024 reads",
+      "minNs": 304,
+      "medianNs": 306,
+      "meanNs": 306,
+      "samples": 398,
+      "iters": 4096
+    },
+    {
+      "name": "fixed array field read, 1024 reads",
+      "minNs": 306,
+      "medianNs": 307,
+      "meanNs": 307,
+      "samples": 396,
+      "iters": 4096
+    },
+    {
+      "name": "growable array element read, 1024 reads",
+      "minNs": 666,
+      "medianNs": 670,
+      "meanNs": 671,
+      "samples": 364,
+      "iters": 2048
+    },
+    {
+      "name": "array element store, 10000 stores",
+      "minNs": 2616,
+      "medianNs": 2622,
+      "meanNs": 2627,
+      "samples": 372,
+      "iters": 512
+    },
+    {
+      "name": "array iteration, 10000 elements",
+      "minNs": 1869,
+      "medianNs": 1937,
+      "meanNs": 1945,
+      "samples": 251,
+      "iters": 1024
+    },
+    {
+      "name": "handle insert/set/get/get/remove, 1000 times",
+      "minNs": 4452,
+      "medianNs": 4461,
+      "meanNs": 4465,
+      "samples": 438,
+      "iters": 256
+    },
+    {
+      "name": "std/slots insert/set/get/get/remove, 1000 times",
+      "minNs": 18676,
+      "medianNs": 18742,
+      "meanNs": 18797,
+      "samples": 416,
+      "iters": 64
+    },
+    {
+      "name": "std/slots build and release, 1000 containers of 16",
+      "minNs": 437258,
+      "medianNs": 501039,
+      "meanNs": 499338,
+      "samples": 251,
+      "iters": 4
+    },
+    {
+      "name": "stream unfold + take, 1000 elements",
+      "minNs": 18401,
+      "medianNs": 18598,
+      "meanNs": 18675,
+      "samples": 419,
+      "iters": 64
+    },
+    {
+      "name": "stream map over unfold + take, 1000 elements",
+      "minNs": 23932,
+      "medianNs": 24300,
+      "meanNs": 24336,
+      "samples": 321,
+      "iters": 64
+    },
+    {
+      "name": "stream open and close, 1000 cycles",
+      "minNs": 37852,
+      "medianNs": 38525,
+      "meanNs": 38561,
+      "samples": 406,
+      "iters": 32
+    },
+    {
+      "name": "nbody, 50000 steps",
+      "minNs": 2974676,
+      "medianNs": 2988972,
+      "meanNs": 3037928,
+      "samples": 165,
+      "iters": 1
+    },
+    {
+      "name": "pidigits, 1000 digits",
+      "minNs": 15742472,
+      "medianNs": 15755447,
+      "meanNs": 15760404,
+      "samples": 32,
+      "iters": 1
+    },
+    {
+      "name": "reverse-complement, 2000000 bases",
+      "minNs": 3269727,
+      "medianNs": 3296179,
+      "meanNs": 3304273,
+      "samples": 152,
+      "iters": 1
+    },
+    {
+      "name": "min builtin",
+      "minNs": 19202,
+      "medianNs": 19251,
+      "meanNs": 19274,
+      "samples": 406,
+      "iters": 64
+    },
+    {
+      "name": "min in Vyrn",
+      "minNs": 105433,
+      "medianNs": 106834,
+      "meanNs": 106897,
+      "samples": 293,
+      "iters": 16
+    },
+    {
+      "name": "max builtin",
+      "minNs": 20649,
+      "medianNs": 20669,
+      "meanNs": 20714,
+      "samples": 378,
+      "iters": 64
+    },
+    {
+      "name": "max in Vyrn",
+      "minNs": 103091,
+      "medianNs": 104407,
+      "meanNs": 104621,
+      "samples": 299,
+      "iters": 16
+    },
+    {
+      "name": "abs in Vyrn",
+      "minNs": 42172,
+      "medianNs": 42413,
+      "meanNs": 42644,
+      "samples": 367,
+      "iters": 32
+    },
+    {
+      "name": "ceil builtin",
+      "minNs": 18799,
+      "medianNs": 18844,
+      "meanNs": 18863,
+      "samples": 415,
+      "iters": 64
+    },
+    {
+      "name": "ceil in Vyrn",
+      "minNs": 354268,
+      "medianNs": 374392,
+      "meanNs": 375590,
+      "samples": 333,
+      "iters": 4
+    },
+    {
+      "name": "floor builtin",
+      "minNs": 18798,
+      "medianNs": 18847,
+      "meanNs": 18863,
+      "samples": 415,
+      "iters": 64
+    },
+    {
+      "name": "floor in Vyrn",
+      "minNs": 325805,
+      "medianNs": 332804,
+      "meanNs": 332934,
+      "samples": 376,
+      "iters": 4
+    },
+    {
+      "name": "trunc builtin",
+      "minNs": 18796,
+      "medianNs": 18848,
+      "meanNs": 18864,
+      "samples": 415,
+      "iters": 64
+    },
+    {
+      "name": "trunc in Vyrn",
+      "minNs": 267846,
+      "medianNs": 271629,
+      "meanNs": 271979,
+      "samples": 460,
+      "iters": 4
+    },
+    {
+      "name": "nearest builtin",
+      "minNs": 18794,
+      "medianNs": 18817,
+      "meanNs": 18843,
+      "samples": 415,
+      "iters": 64
+    },
+    {
+      "name": "nearest in Vyrn",
+      "minNs": 545792,
+      "medianNs": 567633,
+      "meanNs": 567494,
+      "samples": 441,
+      "iters": 2
+    },
+    {
+      "name": "select in Vyrn",
+      "minNs": 18674,
+      "medianNs": 18691,
+      "meanNs": 18720,
+      "samples": 418,
+      "iters": 64
+    },
+    {
+      "name": "sum scalar Float64",
+      "minNs": 73173,
+      "medianNs": 73224,
+      "meanNs": 73315,
+      "samples": 427,
+      "iters": 16
+    },
+    {
+      "name": "sum with F64x2",
+      "minNs": 35953,
+      "medianNs": 36004,
+      "meanNs": 36088,
+      "samples": 433,
+      "iters": 32
+    },
+    {
+      "name": "wide min builtin",
+      "minNs": 38535,
+      "medianNs": 38573,
+      "meanNs": 38641,
+      "samples": 405,
+      "iters": 32
+    },
+    {
+      "name": "wide min in Vyrn",
+      "minNs": 102454,
+      "medianNs": 106996,
+      "meanNs": 107207,
+      "samples": 292,
+      "iters": 16
+    },
+    {
+      "name": "wide max builtin",
+      "minNs": 41642,
+      "medianNs": 41696,
+      "meanNs": 41770,
+      "samples": 374,
+      "iters": 32
+    },
+    {
+      "name": "wide max in Vyrn",
+      "minNs": 102185,
+      "medianNs": 107713,
+      "meanNs": 107610,
+      "samples": 291,
+      "iters": 16
+    },
+    {
+      "name": "anyTrue builtin",
+      "minNs": 12146,
+      "medianNs": 12237,
+      "meanNs": 12335,
+      "samples": 317,
+      "iters": 128
+    },
+    {
+      "name": "anyTrue in Vyrn",
+      "minNs": 12957,
+      "medianNs": 13000,
+      "meanNs": 13033,
+      "samples": 300,
+      "iters": 128
+    },
+    {
+      "name": "allTrue builtin",
+      "minNs": 11206,
+      "medianNs": 11618,
+      "meanNs": 11601,
+      "samples": 337,
+      "iters": 128
+    },
+    {
+      "name": "allTrue in Vyrn",
+      "minNs": 15997,
+      "medianNs": 16018,
+      "meanNs": 16034,
+      "samples": 488,
+      "iters": 64
+    },
+    {
+      "name": "smallarray push16 (inline, no alloc)",
+      "minNs": 115,
+      "medianNs": 116,
+      "meanNs": 116,
+      "samples": 262,
+      "iters": 16384
+    },
+    {
+      "name": "array push16 (heap, grows)",
+      "minNs": 55,
+      "medianNs": 57,
+      "meanNs": 57,
+      "samples": 265,
+      "iters": 32768
+    },
+    {
+      "name": "smallarray indexed sum (branch/access)",
+      "minNs": 232,
+      "medianNs": 233,
+      "meanNs": 233,
+      "samples": 261,
+      "iters": 8192
+    },
+    {
+      "name": "array indexed sum (direct)",
+      "minNs": 65,
+      "medianNs": 67,
+      "meanNs": 68,
+      "samples": 441,
+      "iters": 16384
+    },
+    {
+      "name": "spectral-norm, N = 500",
+      "minNs": 15599149,
+      "medianNs": 15625036,
+      "meanNs": 15630424,
+      "samples": 32,
+      "iters": 1
+    }
+  ]
 }
