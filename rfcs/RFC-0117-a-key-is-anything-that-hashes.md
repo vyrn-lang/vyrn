@@ -112,6 +112,24 @@ diagnostic names the RFC that owes the answer, and choosing 1 later is purely
 additive. The choice between 1 and 2 is the user's, whenever a real program
 needs a keyed map to cross a boundary.
 
+**Why one, and where configurability lives** (discussed 2026-08-28). What the
+two ends of a wire share is a TYPE, so the spelling is one PER TYPE, chosen
+where both ends can read it — never per call. A flag on `toJson` lives in one
+function body where `fromJson`, `jsonSchema` and the generated clients cannot
+see it, which is how a typed contract stops being one. A program that needs a
+different scheme spells the scheme as a type — `Array<Entry>` with one
+conversion — and the schema, the decoder and parity are automatically honest,
+which is this language's general character (`Int64(x)`, `.copy()`: spell the
+decision). If per-type choice ever needs to be declarative, the growth path is
+a `Wire` protocol — the type itself declaring how it crosses, serde's model —
+which keeps the property that matters: attached to the declaration, visible to
+every consumer, still one spelling per type. Presentation is a different axis
+entirely and IS configurable, as `std/json` library functions over the DOM:
+`emitPretty` exists; sorted keys and a JSON5 reader belong beside it, and none
+of them create a second wire form because they emit from or read into the one
+`Json`. So this section's open question is exactly one line wide: what the
+DEFAULT `Map<Int64, V>` spells as.
+
 ## 6. What it buys, measured
 
 The corrected census table, native, 2,000,000 bases, one binary, one run:
