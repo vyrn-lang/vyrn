@@ -32,7 +32,9 @@
 //! whose `place at` yields `self.data[i]` inlines to the same `@slot` through
 //! one more level of the same machinery.
 
-use crate::ast::{BinOp, Block, Expr, Function, ImplBlock, LambdaBody, Program, Stmt, Type};
+use crate::ast::{
+    ArmBody, BinOp, Block, Expr, Function, ImplBlock, LambdaBody, Program, Stmt, Type,
+};
 use std::collections::HashMap;
 
 /// The element-place primitive: `@slot(container, index)`. Unspellable (no
@@ -985,7 +987,10 @@ fn walk_expr(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
         } => {
             walk_expr(scrutinee, f);
             for a in arms {
-                walk_expr(&mut a.body, f);
+                match &mut a.body {
+                    ArmBody::Expr(e) => walk_expr(e, f),
+                    ArmBody::Block(b) => walk_block(b, f),
+                }
             }
         }
         Expr::IfExpr {

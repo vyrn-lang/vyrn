@@ -17,6 +17,7 @@
 - [std/i18n](std/i18n.md) — std/i18n — typed translations as a library (RFC-0020 M2), built entirely on
 - [std/icons](std/icons.md) — std/icons — an icon collection is a LIBRARY (RFC-0107 M2), not a compiler
 - [std/json](std/json.md) — std/json (RFC-0059) — the shared JSON value tree and its canonical writer,
+- [std/json5](std/json5.md) — std/json5 — a JSON5 reader producing the SAME `Json` tree `std/json` emits.
 - [std/jsondec](std/jsondec.md) — std/jsondec (RFC-0078 M3) — the untyped half of `fromJson`, in Vyrn.
 - [std/jsonread](std/jsonread.md) — std/jsonread (RFC-0059, split out by RFC-0078 M2a) — the STRICT JSON reader,
 - [std/math](std/math.md) — std/math — numeric helpers, written in Vyrn itself. Being ordinary Vyrn,

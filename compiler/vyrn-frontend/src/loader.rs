@@ -3281,7 +3281,10 @@ impl NsResolver<'_> {
                         }
                         Pattern::None => {}
                     }
-                    self.walk_expr(&mut arm.body, &mut inner);
+                    match &mut arm.body {
+                        ArmBody::Expr(e) => self.walk_expr(e, &mut inner),
+                        ArmBody::Block(b) => self.walk_block(b, &mut inner),
+                    }
                 }
             }
             Expr::IfExpr {
@@ -4153,7 +4156,13 @@ fn scope_expr(e: &Expr, line: usize, locals: &HashSet<String>, out: &mut Vec<(St
                     }
                     Pattern::None => {}
                 }
-                scope_expr(&arm.body, *line, &inner, out);
+                match &arm.body {
+                    ArmBody::Expr(e) => scope_expr(e, *line, &inner, out),
+                    ArmBody::Block(b) => {
+                        let mut binner = inner.clone();
+                        scope_block(b, &mut binner, out);
+                    }
+                }
             }
         }
         Expr::IfExpr {
@@ -4428,7 +4437,13 @@ fn rewrite_expr(
                         inner.insert(b.clone());
                     }
                 }
-                rewrite_expr(&mut arm.body, map, ns, &inner);
+                match &mut arm.body {
+                    ArmBody::Expr(e) => rewrite_expr(e, map, ns, &inner),
+                    ArmBody::Block(b) => {
+                        let mut binner = inner.clone();
+                        rewrite_block(b, map, ns, &mut binner);
+                    }
+                }
             }
         }
         Expr::IfExpr {

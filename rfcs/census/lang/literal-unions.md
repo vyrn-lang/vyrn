@@ -461,3 +461,7 @@ Costs: the most expressive and the most expensive. The parser must disambiguate 
 ---
 
 The owner's hard question — `Array<TheUnion>` — is decided by variance, not by the union shape. Designs B and E inherit unsound covariance from the rule at `compiler/vyrn-frontend/src/checker.rs:2118`. Design C closes it by making arrays invariant. Design A and D dodge it by keeping variants non-standalone. Which trade the owner wants is the decision this file does not make.
+
+## Decision (2026-08-28)
+
+**Design A — nominal enum only, as today.** The union shapes B through E all serve programs this repository does not have: no dogfood app (shelf, in, log, the site) has hit a place where a nominal enum with payloads, exhaustive match and narrowing was the wrong tool, and the two costs the survey names are real — a visible discriminant field changes every match in the tree (B, D), and the sound version of standalone variants makes arrays invariant (C), breaking the covariance at checker.rs:2118 that existing code relies on. The hard question this file ends on — `Array<TheUnion>` — therefore stays unasked rather than answered wrongly. Reopen when a real program wants a value that is one-of-several records selected by a field it can read; design D (a visible tag on the nominal enum) is the likely shape then, because it adds the discriminant without touching variance.

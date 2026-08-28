@@ -1,0 +1,14 @@
+// RFC-0118 M2's finding, closed: `drop` on a bare type parameter is refused.
+// It used to pass "so the instance decides" — and what that did in practice
+// was launder the record rule: a generic trampoline dropped a plain record
+// that `drop` refuses directly. No instance check runs on a generic body, so
+// the gate is at the `drop` itself.
+fn toss<T>(v: consume T) -> Int64 {
+    drop v
+    return 0
+}
+
+fn main() -> Int64 {
+    let n = toss("abc")
+    return n
+}

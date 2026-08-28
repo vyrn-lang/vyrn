@@ -54,9 +54,14 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "is `String` or `Int64` today",
     ),
     (
-        "wirekey.vyrn",
-        "RFC-0117 §5: a non-String-keyed map has no wire form yet, and the          boundary refuses rather than guessing",
-        "cannot encode",
+        "blockvalarm.vyrn",
+        "RFC-0118: a match used as a value keeps single-expression arms; a          block arm exists only in statement position",
+        "a block arm needs statement position",
+    ),
+    (
+        "dropparam.vyrn",
+        "RFC-0118 M2's finding: `drop` on a bare type parameter laundered the          record rule through generic trampolines, and no instance check runs on          a generic body",
+        "is a type parameter",
     ),
     // ---- RFC-0114's proof appendix, §45: the four load-bearing assumptions,
     // pinned as refusals. Each row is one assumption of the release-algorithm

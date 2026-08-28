@@ -213,9 +213,17 @@ pub fn contains_call(expr: &Expr) -> bool {
             args.iter().any(contains_call)
         }
         Expr::Call { .. } => true,
+        // A block arm (RFC-0118) cannot appear in a predicate (statement
+        // position only); counted as a call so a hole here refuses rather
+        // than folds.
         Expr::Match {
             scrutinee, arms, ..
-        } => contains_call(scrutinee) || arms.iter().any(|a| contains_call(&a.body)),
+        } => {
+            contains_call(scrutinee)
+                || arms
+                    .iter()
+                    .any(|a| a.body.as_expr().is_none_or(contains_call))
+        }
         Expr::IfExpr {
             cond,
             then_branch,

@@ -291,6 +291,16 @@ impl Walk<'_> {
                     "    let mut fs: Array<{fld}> = []\n    for k in v.keys() {{\n        fs = match v[k] {{ Some(x) => fs.push({fld} {{ key: k, value: {e}(x) }}), None => fs }}\n    }}\n    return {obj}(fs)\n"
                 ))
             }
+            // A `Map<Int64, V>` (RFC-0117 M3): the same object, its keys the
+            // decimal texts `toString` writes — the canonical form `dIntKey`
+            // reads back exactly.
+            Wire::MapI(v) => {
+                let e = self.encoder(&v)?;
+                let (obj, fld) = (self.rt("JObj"), self.rt("JsonField"));
+                Ok(format!(
+                    "    let mut fs: Array<{fld}> = []\n    for k in v.keys() {{\n        fs = match v[k] {{ Some(x) => fs.push({fld} {{ key: k.toString(), value: {e}(x) }}), None => fs }}\n    }}\n    return {obj}(fs)\n"
+                ))
+            }
             // `Result<T, E>` arrives here as the two-variant enum it is on the
             // wire, so external tagging is written once.
             Wire::Enum(vs) => {

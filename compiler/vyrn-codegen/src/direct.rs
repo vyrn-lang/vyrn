@@ -5034,6 +5034,12 @@ impl<'p> Fn_<'_, 'p> {
     /// `expr_as` refuses it later if it truly cannot be lowered. So the scan never
     /// narrows what this backend reaches.
     fn match_ty(&mut self, sum: &Sum, arms: &[MatchArm], line: usize) -> Result<Type, String> {
+        // Any block arm (RFC-0118) makes this a statement match: the arms
+        // yield nothing, whatever the expression arms compute is discarded,
+        // and the join carries no value.
+        if arms.iter().any(|a| matches!(a.body, ArmBody::Block(_))) {
+            return Ok(Type::Unit);
+        }
         let first = arms.first().ok_or_else(|| gap("an empty `match`", line))?;
         let ty = self.peek_arm(first, sum, line)?;
         if self.concrete_app(&ty) {
@@ -5063,7 +5069,11 @@ impl<'p> Fn_<'_, 'p> {
         for (n, t) in self.pattern_binds(sum, &arm.pattern, line)? {
             self.scope.push((n, Place::Local(u32::MAX), t));
         }
-        let got = self.peek(&arm.body, line);
+        let got = match &arm.body {
+            ArmBody::Expr(e) => self.peek(e, line),
+            // A block arm (RFC-0118) yields nothing.
+            ArmBody::Block(_) => Ok(Type::Unit),
+        };
         self.scope.truncate(mark);
         got
     }
@@ -11737,17 +11747,28 @@ impl<'p> Fn_<'_, 'p> {
                 let place = self.bind_payload(b, addr, &sum, &sl, i, &t, line)?;
                 self.scope.push((n, place, t));
             }
-            match dest {
-                Some((off, size)) => {
+            match (&arm.body, dest) {
+                (ArmBody::Expr(body), Some((off, size))) => {
                     b.slot(off);
-                    self.expr_as(m, b, &arm.body, &want)?;
+                    self.expr_as(m, b, body, &want)?;
                     b.ins(&Instruction::I32Const(size as i32));
                     b.ins(&Instruction::MemoryCopy {
                         src_mem: 0,
                         dst_mem: 0,
                     });
                 }
-                None => self.expr_as(m, b, &arm.body, &want)?,
+                // A statement match (RFC-0118): a block arm is its statements;
+                // an expression arm beside one computes and drops — `want` is
+                // Unit whenever any arm is a block, so a dest never exists on
+                // this path.
+                (ArmBody::Expr(body), None) if matches!(want, Type::Unit) => {
+                    let got = self.expr(m, b, body)?;
+                    if !matches!(self.cx.repr(&got, line)?, Repr::Unit) {
+                        b.ins(&Instruction::Drop);
+                    }
+                }
+                (ArmBody::Expr(body), None) => self.expr_as(m, b, body, &want)?,
+                (ArmBody::Block(blk), _) => self.block(m, b, blk)?,
             }
             self.scope.truncate(mark);
             self.emit_edge_releases(m, b, &ers, arm_ix as u32, line)?;

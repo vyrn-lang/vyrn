@@ -1,7 +1,7 @@
 /// The Benchmarks Game radar, computed while the site builds (RFC-0104 M3).
 ///
-/// WHERE THE NUMBERS COME FROM. `rfcs/bench-0104/results/2026-08-19-v2.json`
-/// and `-v2-run2.json`, written by `rfcs/bench-0104/harness/run.py`, read here at
+/// WHERE THE NUMBERS COME FROM. `rfcs/bench-0104/results/2026-08-28.json`
+/// and `-run2.json`, written by `rfcs/bench-0104/harness/run.py`, read here at
 /// export time. Nothing on the two pages this module feeds is typed in by hand:
 /// change the record, rebuild, and
 /// every chart, ratio and caption moves with it. That is the point — a chart
@@ -18,14 +18,15 @@
 /// reader cuts` below fails the build the day `run.py` changes it.
 ///
 /// THE SCALE, AND WHY IT IS THE ONE DECISION THIS FILE MAKES OUT LOUD. The
-/// measured ratios span 0.24x to 222x. No linear radial axis can carry both ends:
-/// on a scale that reaches k-nucleotide's 211x, every other point on the chart is
-/// a dot at the centre. The axis is therefore **log2 around the baseline** — the
-/// centre ring is an eighth of it, every ring out is a doubling, the rim is
-/// sixteen times it. A value past the rim is drawn AT the rim and carries an
-/// off-scale marker on its spoke; its exact figure is in the table, in the axis
-/// panel and in the detail table. Three cells are drawn that way with C as the
-/// baseline and four with Rust. None is truncated quietly, and `no cell is ever
+/// measured ratios span 0.23x to 18.2x. No linear radial axis carries both ends
+/// well, and the previous dataset — which reached 222x before the map was
+/// hashed — is why the axis was designed this way and why it stays: **log2
+/// around the baseline** — the centre ring is an eighth of it, every ring out
+/// is a doubling, the rim is sixteen times it. A value past the rim is drawn AT
+/// the rim and carries an off-scale marker on its spoke; its exact figure is in
+/// the table, in the axis panel and in the detail table. No cell is drawn that
+/// way with C as the baseline now, and two are with Rust — both wasm legs,
+/// which run no optimizer. None is truncated quietly, and `no cell is ever
 /// silently truncated` below is the test that keeps that true.
 import { indexOf, substring, trim, split, joinWith } from "std/strings"
 import { parseFloat64 } from "std/num"
@@ -90,23 +91,21 @@ export type Panel = { key: String, name: String, n: String, note: String, cause:
 
 /// The dataset the site publishes. One machine, one afternoon, twice.
 ///
-/// The `-v2` pair is the re-run under the M3 amendment: the same eight
-/// programs, the same five contestants, the same cross-verification, measured
-/// by a runner that also records cpu time, peak memory, build time and source
-/// size. M2's original pair stays committed beside it and is not edited.
-///
-/// DATED, AND HONESTLY SO: this record predates RFC-0114, when the compiled
-/// legs LEAKED instead of releasing — the record's own memory column says it
-/// (binary-trees at 2,093 MB where it now peaks at 262). A current build pays
-/// for reclamation these rows never did, so its wall clock is not comparable
-/// to them in either direction. The record stays as the honest snapshot it
-/// is; replacing it is a re-run on a machine, not an edit here.
-fn run1File() -> String {
-    return "rfcs/bench-0104/results/2026-08-19-v2.json"
+/// The 2026-08-28 pair is the re-run the previous dataset's own provenance
+/// note asked for: the same eight programs, the same five contestants, the
+/// same cross-verification, on the same machine — measured AFTER the arcs the
+/// old rows predated. RFC-0114 made the releases real (binary-trees' native
+/// leg peaks at 37 MB in these rows, within one per cent of Rust's, where the
+/// old record's leaked 2,093), and RFC-0116/0117 rebuilt the map (k-nucleotide's
+/// native leg is 6.5 ms where the old record held 2.9 s — from 211x C to
+/// faster than C). The two earlier datasets stay committed beside this one
+/// and are not edited; they are the before that makes these rows an after.
+export fn run1File() -> String {
+    return "rfcs/bench-0104/results/2026-08-28.json"
 }
 
 fn run2File() -> String {
-    return "rfcs/bench-0104/results/2026-08-19-v2-run2.json"
+    return "rfcs/bench-0104/results/2026-08-28-run2.json"
 }
 
 /// The text after the first `needle`, or nothing.
@@ -1198,14 +1197,14 @@ fn labelOf(program: String) -> String {
 /// the cause in a few words, for the consumer page.
 export fn causeRows() -> Array<Array<String>> {
     return [
-        ["nbody", "a deviation", "The vectorizer runs on rustc's IR and not on ours: Rust's inner loop is 342 packed-double instructions and four sqrtpd, ours is thirteen scalar ops and one sqrtsd. Plain C loses by the same order. The emitted IR carries no noalias anywhere, so the facts ownership already proves never reach the optimizer.", "no vector code, and no noalias"],
-        ["spectralnorm", "inside the noise band", "Not a deviation. 0.99x Rust, well inside the +/-10% band.", "no deviation to explain"],
-        ["fannkuch", "a deviation", "perm1.copy() allocates a fresh array per permutation — 39,916,800 of them at n = 11. Giving the C leg the same malloc and free per permutation and changing nothing else moved it from 1830 ms to 2430 ms, so the allocation is about 600 ms of a gap that measures 679 ms here and 763 ms on M2's dataset. There is no way to copy into an array that already exists.", "a copy per permutation"],
-        ["binarytrees", "at the edge of the band", "1.13x Rust on this dataset and 1.06x on M2's, either side of the +/-10% band, and Rust's own reading is what moved. The row's own finding is elsewhere: node wins it outright, and the Vyrn wasm leg — which runs no optimizer — beats the native one, because the wasm backend carries its own segregated free list and the native leg calls the platform malloc.", "the platform malloc"],
-        ["fasta", "a deviation", "What a 60-byte output line costs: a fresh array grown from empty by doubling, then stringFromBytes, which is a byte-at-a-time UTF-8 validation over bytes known to be ASCII plus a second allocation — because print takes a String and there is no byte sink. Transcribed into C and measured on its own: 160 ns a line, 133 ms of the 269 ms gap.", "the price of one output line"],
-        ["revcomp", "a deviation", "Three per-byte passes and the same per-line tax. About 120 M push operations for 40 M bases, each a bounds and capacity check into an array grown by doubling. Rust's output loop allocates nothing at all. The input side is shared with C, and is why C is itself 4.1x Rust here: readLine in the native shim reads one byte at a time with getchar().", "per-byte passes and a per-line tax"],
-        ["knucleotide", "a deviation", "Map is not a hash map. In every engine Map<String, V> is an insertion-ordered vector of pairs and lookup is a linear strcmp scan, so a program that counts every k-mer is quadratic in the number of distinct keys. Measured: four times the input is 4.1 to 4.6 times the time, against C's flat line.", "Map lookup is a linear scan"],
-        ["pidigits", "inside the noise band", "Not a deviation. 1.00x Rust — the closest row in the set.", "no deviation to explain"],
+        ["nbody", "a deviation", "The vectorizer runs on rustc's IR and not on ours: Rust's inner loop is 342 packed-double instructions and four sqrtpd, ours is thirteen scalar ops and one sqrtsd. The native leg matches plain C to one per cent and both lose to Rust by a third. noalias rides the allocator family now — a slice that measured a wash — but the loop itself still carries no aliasing facts, so what ownership already proves never reaches the vectorizer.", "no vector code, and no noalias"],
+        ["spectralnorm", "inside the noise band", "Not a deviation. 1.00x Rust, dead centre of the +/-10% band.", "no deviation to explain"],
+        ["fannkuch", "inside the noise band", "Not a deviation any more. 1.03x Rust, where the last dataset measured a 679 ms gap. The copy per permutation this row used to name — a fresh array 39,916,800 times, about 600 ms of that gap — is gone: dst.copyFrom(src) (RFC-0115) refills the buffer in place, and the row moved inside the band when it landed.", "a copy per permutation, closed"],
+        ["binarytrees", "at the edge of the band", "1.11x Rust, just past the +/-10% line, and the memory story is closed: the native leg peaks at 37.3 MB against Rust's 37.6, where before RFC-0114 it leaked 2,093. The row's own finding is elsewhere: node wins it outright, and the Vyrn wasm leg — which runs no optimizer — beats the native one twice over, because the wasm backend carries its own segregated free list and the native leg calls the platform malloc.", "the platform malloc"],
+        ["fasta", "a deviation", "What a 60-byte output line costs: a fresh array grown from empty by doubling, then stringFromBytes, which is a byte-at-a-time UTF-8 validation over bytes known to be ASCII plus a second allocation — because this program still prints a String per line. The byte sink it lacked exists now (writeStdout, RFC-0111); the remaining gap is a program that has not moved onto it, not a missing feature.", "the price of one output line"],
+        ["revcomp", "a deviation", "Three per-byte passes and a per-line assembly tax: about 120 M push operations for 40 M bases, each a bounds and capacity check into an array grown by doubling, where Rust's output loop allocates nothing at all. The widest row left, and the whole set's spread in one program: the C leg itself pays 4.3x Rust for reading line-at-a-time with fgets.", "per-byte passes and a per-line tax"],
+        ["knucleotide", "ahead of the band", "Outside the band on the wrong side to be a deviation: 0.81x Rust and 0.67x C. The row that measured 211x C when Map lookup was a linear scan now runs a rolling Int64 key into a hashed Map<Int64, Int64> (RFC-0116 gave every map a hash index and tally; RFC-0117 made the key an integer), and at 6.5 ms the whole row sits near the process floor.", "a rolling key into a hashed map"],
+        ["pidigits", "inside the noise band", "Not a deviation. 1.00x Rust — the arithmetic is Int64 all the way down in every leg.", "no deviation to explain"],
     ]
 }
 
@@ -1396,10 +1395,9 @@ export fn worstDrift() -> String {
 
 /// How many of the forty cells moved by less than five per cent between runs.
 ///
-/// It is THIRTY-FOUR, computed from the two committed records. RFC-0104's M2
-/// section says thirty-six, and that sentence is the one thing on these two pages
-/// that the data contradicted — see M3's own section. Every other figure M2
-/// states about the noise reproduces here to the digit.
+/// Computed from the two committed records, never quoted — an earlier dataset's
+/// hand-written "thirty-six" was contradicted by its own data (RFC-0104 M3),
+/// which is why this sentence is a function.
 export fn steadyCells() -> String {
     loadCells()
     let mut steady = 0
@@ -1473,40 +1471,40 @@ test "the record still has the shape this reader cuts" {
         assert(c.spread1.byteLength > 0)
         assert(c.runs1.byteLength > 0)
     }
-    assertEq(benchDate(), "2026-08-19")
+    assertEq(benchDate(), "2026-08-28")
     assertEq(benchRuns(), "10")
 }
 
 test "the medians are the ones the published record holds" {
-    // Every figure below is read off `2026-08-19-v2.json` by hand. They
+    // Every figure below is read off `2026-08-28.json` by hand. They
     // are pins, and they are meant to be: the day the record is replaced they
     // fail, which is what makes a repointed reader visible instead of silent.
-    // RFC-0104 M2's own table is the earlier dataset and is not this one — see
-    // the M3 amendment for the four cells that moved and why.
-    assertEq(msOf(medianUs("nbody", "c")), "885 ms")
-    assertEq(msOf(medianUs("nbody", "rust")), "658 ms")
-    assertEq(msOf(medianUs("nbody", "js")), "1128 ms")
-    assertEq(msOf(medianUs("nbody", "vyrn-native")), "895 ms")
-    assertEq(msOf(medianUs("nbody", "vyrn-wasm")), "12412 ms")
-    assertEq(msOf(medianUs("knucleotide", "c")), "13.7 ms")
-    assertEq(msOf(medianUs("knucleotide", "rust")), "12.3 ms")
-    assertEq(msOf(medianUs("knucleotide", "vyrn-native")), "2888 ms")
-    assertEq(msOf(medianUs("binarytrees", "js")), "426 ms")
-    assertEq(msOf(medianUs("pidigits", "vyrn-native")), "1309 ms")
+    // The earlier datasets' tables are not this one — the 2026-08-19 rows
+    // predate RFC-0114's releases and RFC-0116/0117's hashed map.
+    assertEq(msOf(medianUs("nbody", "c")), "853 ms")
+    assertEq(msOf(medianUs("nbody", "rust")), "642 ms")
+    assertEq(msOf(medianUs("nbody", "js")), "1067 ms")
+    assertEq(msOf(medianUs("nbody", "vyrn-native")), "848 ms")
+    assertEq(msOf(medianUs("nbody", "vyrn-wasm")), "11674 ms")
+    assertEq(msOf(medianUs("knucleotide", "c")), "9.7 ms")
+    assertEq(msOf(medianUs("knucleotide", "rust")), "8.0 ms")
+    assertEq(msOf(medianUs("knucleotide", "vyrn-native")), "6.5 ms")
+    assertEq(msOf(medianUs("binarytrees", "js")), "404 ms")
+    assertEq(msOf(medianUs("pidigits", "vyrn-native")), "1284 ms")
 }
 
 test "the normalized figures are the ones the record computes" {
-    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "c")), "1.01x")
-    assertEq(ratioText(ratioOf("nbody", "vyrn-wasm", "c")), "14.02x")
-    assertEq(ratioText(ratioOf("spectralnorm", "vyrn-native", "c")), "0.99x")
-    assertEq(ratioText(ratioOf("binarytrees", "js", "c")), "0.52x")
-    assertEq(ratioText(ratioOf("revcomp", "rust", "c")), "0.24x")
-    assertEq(ratioText(ratioOf("knucleotide", "vyrn-native", "c")), "211x")
-    assertEq(ratioText(ratioOf("knucleotide", "vyrn-wasm", "c")), "222x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "c")), "0.99x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-wasm", "c")), "13.68x")
+    assertEq(ratioText(ratioOf("spectralnorm", "vyrn-native", "c")), "1.00x")
+    assertEq(ratioText(ratioOf("binarytrees", "js", "c")), "0.50x")
+    assertEq(ratioText(ratioOf("revcomp", "rust", "c")), "0.23x")
+    assertEq(ratioText(ratioOf("knucleotide", "vyrn-native", "c")), "0.67x")
+    assertEq(ratioText(ratioOf("knucleotide", "vyrn-wasm", "c")), "1.80x")
     // And against Rust, which is the comparison the gate was written about.
-    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "rust")), "1.36x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "rust")), "1.32x")
     assertEq(ratioText(ratioOf("pidigits", "vyrn-native", "rust")), "1.00x")
-    assertEq(ratioText(ratioOf("revcomp", "vyrn-native", "rust")), "13.53x")
+    assertEq(ratioText(ratioOf("revcomp", "vyrn-native", "rust")), "8.34x")
 }
 
 test "the log scale puts a doubling on every ring" {
@@ -1544,9 +1542,10 @@ test "no cell is ever silently truncated" {
         }
     }
     assertEq(clamped, marked)
-    // Three under C, and they are the three the milestone names: reverse-
-    // complement's wasm leg and both of k-nucleotide's Vyrn legs.
-    assertEq(clamped, 3)
+    // None under C: the three cells the old dataset drew at the rim — reverse-
+    // complement's wasm leg and both of k-nucleotide's — came inside when the
+    // map was hashed and stdin stopped being read a byte at a time.
+    assertEq(clamped, 0)
     let mut altClamped = 0
     let mut altMarked = 0
     for line in radarLines() {
@@ -1558,9 +1557,11 @@ test "no cell is ever silently truncated" {
         }
     }
     assertEq(altClamped, altMarked)
-    assertEq(altClamped, 4)
+    // Two against Rust, both wasm legs — the backend that runs no optimizer:
+    // nbody at 18.17x and reverse-complement at 16.85x.
+    assertEq(altClamped, 2)
     // And no reading falls off the INNER end: the fastest cell in the set is
-    // 0.24x, three rings out from the centre.
+    // 0.23x, still comfortably outside the centre.
     for line in radarLines() {
         for p in programs() {
             assert(radiusOf(ratioOf(p.key, line.key, "c")) > 0)
@@ -1622,9 +1623,9 @@ test "the table is the whole dataset and the panels are the same numbers" {
         assertEq(r.cells.length, 5)
     }
     assertEq(rows[0].n, "25,000,000")
-    assertEq(rows[0].cells[0].ms, "885 ms")
-    assertEq(rows[0].cells[3].vsC, "1.01x")
-    assertEq(rows[0].cells[3].vsRust, "1.36x")
+    assertEq(rows[0].cells[0].ms, "853 ms")
+    assertEq(rows[0].cells[3].vsC, "0.99x")
+    assertEq(rows[0].cells[3].vsRust, "1.32x")
     let panels = axisPanels()
     assertEq(panels.length, 8)
     for i in [0, 1, 2, 3, 4, 5, 6, 7] {
@@ -1633,10 +1634,13 @@ test "the table is the whole dataset and the panels are the same numbers" {
         assert(panels[i].cause.byteLength > 40)
         assert(panels[i].verdict.byteLength > 0)
     }
-    // The rows that are not deviations say so rather than naming a defect, and
-    // the one that sits on the line says THAT rather than picking a side.
+    // The rows that are not deviations say so rather than naming a defect, the
+    // one that sits on the line says THAT rather than picking a side, and the
+    // one that is outside the band on the FAST side is not called a deviation.
     assertEq(panels[1].verdict, "inside the noise band")
+    assertEq(panels[2].verdict, "inside the noise band")
     assertEq(panels[3].verdict, "at the edge of the band")
+    assertEq(panels[6].verdict, "ahead of the band")
     assertEq(panels[7].verdict, "inside the noise band")
 }
 
@@ -1669,7 +1673,7 @@ test "the caption names the hardware and the toolchain, and never the machine" {
     let cap = benchMachine()
     assert(has(cap, "Ryzen"))
     assert(has(cap, "wasmtime 46.0.1"))
-    assert(has(cap, "2026-08-19"))
+    assert(has(cap, "2026-08-28"))
     assertEq(envRows().length, 14)
     for row in envRows() {
         assert(row[0].byteLength > 0)
@@ -1684,8 +1688,8 @@ test "the caption names the hardware and the toolchain, and never the machine" {
     // The floor is published beside the medians, because a whole-process time
     // that hides its floor cannot be checked.
     assertEq(floorRows().length, 5)
-    assertEq(floorRows()[0].ms, "7.8 ms")
-    assertEq(floorRows()[4].ms, "17.7 ms")
+    assertEq(floorRows()[0].ms, "3.8 ms")
+    assertEq(floorRows()[4].ms, "13.6 ms")
 }
 
 test "both runs are published, and the drift is computed from them" {
@@ -1697,11 +1701,12 @@ test "both runs are published, and the drift is computed from them" {
         assert(r.drift.byteLength > 2)
         assertEq(split(r.runs, "  ").length, 10)
     }
-    // The gate's own sentence, computed: thirty-six of forty cells moved by less
-    // than five per cent, and the worst moved by 9.5%.
-    assertEq(steadyCells(), "37 of 40")
-    assertEq(detailRows("binarytrees")[1].drift, "+1.23%")
-    assert(has(worstDrift(), "knucleotide / c"))
+    // The gate's own sentence, computed: thirty-nine of forty cells moved by
+    // less than five per cent between the two runs, and the one that moved
+    // more is the near-floor cell — k-nucleotide's 6.5 ms native leg.
+    assertEq(steadyCells(), "39 of 40")
+    assertEq(detailRows("binarytrees")[1].drift, "-1.76%")
+    assert(has(worstDrift(), "knucleotide / vyrn-native"))
 }
 
 test "the published ceiling is dated, and never mixed with the measured rows" {

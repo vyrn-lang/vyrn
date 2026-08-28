@@ -1,0 +1,638 @@
+/// std/json5 — a JSON5 reader producing the SAME `Json` tree `std/json` emits.
+///
+///   import { parseJson5 } from "std/json5"
+///
+/// One tree, two readers: a strict document goes through `std/jsonread`, a
+/// hand-written config through this. There is deliberately no JSON5 WRITER:
+/// numbers are normalized to their strict spelling AT THE PARSE (`0x1A` → `26`,
+/// `.5` → `0.5`, `5.` → `5`, `+5` → `5`), because `JNum` holds raw text that
+/// `emit` re-emits verbatim — so whatever this reader builds, the writer still
+/// writes valid strict JSON. JSON5 is a reading convenience, never a second
+/// wire form (RFC-0117 §5).
+///
+/// What the grammar adds over strict JSON, all honored here: `//` and `/* */`
+/// comments, trailing commas in arrays and objects, unquoted object keys,
+/// single-quoted strings, the extra escapes (`\'`, `\v`, `\0`, `\xHH`, an
+/// escaped literal character) and line continuations, hex integers, leading
+/// `+`, and leading or trailing decimal points. The extended whitespace set
+/// (vertical tab, form feed, NBSP, U+2028/U+2029, BOM) is skipped anywhere
+/// whitespace may appear.
+///
+/// Two named refusals, both about the tree rather than the grammar:
+/// `Infinity` and `NaN` have no strict-JSON spelling for `emit` to write, so
+/// they are errors here; and a hex literal past `Int64`'s ceiling has no exact
+/// decimal text to normalize to. One deviation: an unquoted key is an ASCII
+/// identifier (`$`, `_`, letters, digits) — Unicode identifier keys and `\u`
+/// escapes in identifiers are not recognized; quote such a key.
+
+import { Json, JsonField, emit, jsonEq } from "std/json"
+
+/// The reader cursor — `std/jsonread`'s shape, shared discipline.
+type P5 = { src: Array<UInt8>, n: Int64, pos: Int64, line: Int64, col: Int64 }
+
+/// The nesting budget, mirroring `std/jsonread`'s and for the same reason: a
+/// recursive-descent reader that can reach the engine's call cap traps where
+/// its `Result` promised an `Err`.
+fn maxDepth() -> Int64 {
+    return 128
+}
+
+fn newP5(s: String) -> P5 {
+    let ba = bytes(s)
+    return P5 { src: ba, n: ba.length, pos: 0, line: 1, col: 1 }
+}
+
+/// The current byte, or `-1` at end of input.
+fn cur(p: P5) -> Int64 {
+    if p.pos >= p.n {
+        return -1
+    }
+    return Int64(p.src[p.pos])
+}
+
+/// The byte `k` ahead, or `-1` past the end.
+fn ahead(p: P5, k: Int64) -> Int64 {
+    let i = p.pos + k
+    if i < 0 || i >= p.n {
+        return -1
+    }
+    return Int64(p.src[i])
+}
+
+/// Advance one byte, keeping `line`/`col` in sync (an LF starts a new line).
+fn step(p: modify P5) -> Unit {
+    if p.pos >= p.n {
+        return
+    }
+    let b = Int64(p.src[p.pos])
+    p.pos = p.pos + 1
+    if b == '\n' {
+        p.line = p.line + 1
+        p.col = 1
+    } else {
+        p.col = p.col + 1
+    }
+}
+
+/// `msg` prefixed with the cursor's 1-based `line N, col M:` position.
+fn errAt(p: P5, msg: String) -> String {
+    return "line " + p.line.toString() + ", col " + p.col.toString() + ": " + msg
+}
+
+/// True for an ASCII hex digit byte.
+fn isHex(b: Int64) -> Bool {
+    return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
+}
+
+/// The value of one ASCII hex digit (0..15); assumes `isHex(b)`.
+fn hexVal(b: Int64) -> Int64 {
+    if b >= '0' && b <= '9' {
+        return b - '0'
+    }
+    if b >= 'a' && b <= 'f' {
+        return b - 'a' + 10
+    }
+    return b - 'A' + 10
+}
+
+/// Append the UTF-8 encoding of code point `cp` to `out`.
+fn pushUtf8(out: modify Array<UInt8>, cp: Int64) -> Unit {
+    if cp < 128 {
+        out.push(UInt8(cp))
+    } else if cp < 2048 {
+        out.push(UInt8(192 + (cp / 64)))
+        out.push(UInt8(128 + (cp % 64)))
+    } else if cp < 65536 {
+        out.push(UInt8(224 + (cp / 4096)))
+        out.push(UInt8(128 + ((cp / 64) % 64)))
+        out.push(UInt8(128 + (cp % 64)))
+    } else {
+        out.push(UInt8(240 + (cp / 262144)))
+        out.push(UInt8(128 + ((cp / 4096) % 64)))
+        out.push(UInt8(128 + ((cp / 64) % 64)))
+        out.push(UInt8(128 + (cp % 64)))
+    }
+}
+
+/// How many bytes of JSON5 whitespace start at the cursor: the ASCII set
+/// (space, tab, LF, CR, VT, FF) as one byte, and the multi-byte members —
+/// NBSP (C2 A0), BOM (EF BB BF), U+2028/U+2029 (E2 80 A8/A9) — as their
+/// sequence length. Zero means the cursor is not on whitespace.
+fn wsLen(p: P5) -> Int64 {
+    let b = cur(p)
+    if b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\x0b' || b == '\x0c' {
+        return 1
+    }
+    if b == 194 && ahead(p, 1) == 160 {
+        return 2
+    }
+    if b == 226 && ahead(p, 1) == 128 && (ahead(p, 2) == 168 || ahead(p, 2) == 169) {
+        return 3
+    }
+    if b == 239 && ahead(p, 1) == 187 && ahead(p, 2) == 191 {
+        return 3
+    }
+    return 0
+}
+
+/// Skip whitespace AND comments — the "gap" every JSON5 token may be wrapped
+/// in. Fallible because a block comment can be left open; the `Bool` is inert
+/// (call sites discard it), carried because the error is what matters.
+fn skipGap(p: modify P5) -> Result<Bool, String> {
+    while true {
+        let w = wsLen(p)
+        if w > 0 {
+            let mut i = 0
+            while i < w {
+                step(p)
+                i = i + 1
+            }
+        } else if cur(p) == '/' && ahead(p, 1) == '/' {
+            while cur(p) >= 0 && cur(p) != '\n' {
+                step(p)
+            }
+        } else if cur(p) == '/' && ahead(p, 1) == '*' {
+            step(p)
+            step(p)
+            let mut closed = false
+            while cur(p) >= 0 {
+                if cur(p) == '*' && ahead(p, 1) == '/' {
+                    step(p)
+                    step(p)
+                    closed = true
+                    break
+                }
+                step(p)
+            }
+            if closed == false {
+                return Err(errAt(p, "unterminated /* comment"))
+            }
+        } else {
+            return Ok(true)
+        }
+    }
+    return Ok(true)
+}
+
+/// Read a 4-hex-digit `\uXXXX` escape body (the cursor is just past the `u`).
+fn readHex4(p: modify P5) -> Result<Int64, String> {
+    let mut v = 0
+    let mut i = 0
+    while i < 4 {
+        let b = cur(p)
+        if isHex(b) == false {
+            return Err(errAt(p, "invalid \\u escape: expected 4 hex digits"))
+        }
+        v = v * 16 + hexVal(b)
+        step(p)
+        i = i + 1
+    }
+    return Ok(v)
+}
+
+/// A string quoted by `q` (`"` or `'`), the cursor ON the opening quote.
+/// JSON5 differences from the strict reader: single quotes, the extra escapes
+/// (`\'`, `\v`, `\0`, `\xHH`, any literal character), line continuations, and
+/// raw control characters other than LF/CR are allowed unescaped.
+fn parseString5(p: modify P5, q: Int64) -> Result<String, String> {
+    step(p)
+    let mut out: Array<UInt8> = []
+    while true {
+        let b = cur(p)
+        if b < 0 {
+            return Err(errAt(p, "unterminated string"))
+        }
+        if b == q {
+            step(p)
+            return match stringFromBytes(out) {
+                Ok(v) => Ok(v),
+                Err(e) => Err(errAt(p, "string is not valid UTF-8")),
+            }
+        }
+        if b == '\n' || b == '\r' {
+            return Err(errAt(p, "unescaped line break in string (JSON5 continues a line with a trailing backslash)"))
+        }
+        if b == '\\' {
+            step(p)
+            let e = cur(p)
+            if e == 'b' {
+                out.push('\x08')
+                step(p)
+            } else if e == 'f' {
+                out.push('\x0c')
+                step(p)
+            } else if e == 'n' {
+                out.push('\n')
+                step(p)
+            } else if e == 'r' {
+                out.push('\r')
+                step(p)
+            } else if e == 't' {
+                out.push('\t')
+                step(p)
+            } else if e == 'v' {
+                out.push('\x0b')
+                step(p)
+            } else if e == '0' {
+                // JSON5 spells NUL; a Vyrn String cannot hold one (the NUL
+                // rule every byte-to-String boundary enforces), so the refusal
+                // is named here rather than surfacing as a generic UTF-8 error.
+                return Err(errAt(p, "\\0 is NUL, and a Vyrn String cannot hold NUL"))
+            } else if e >= '1' && e <= '9' {
+                return Err(errAt(p, "octal escapes are not JSON5"))
+            } else if e == 'x' {
+                step(p)
+                let h1 = cur(p)
+                let h2 = ahead(p, 1)
+                if isHex(h1) == false || isHex(h2) == false {
+                    return Err(errAt(p, "invalid \\x escape: expected 2 hex digits"))
+                }
+                pushUtf8(out, hexVal(h1) * 16 + hexVal(h2))
+                step(p)
+                step(p)
+            } else if e == 'u' {
+                step(p)
+                let hi = readHex4(p)?
+                if hi >= 55296 && hi <= 56319 {
+                    if cur(p) != '\\' || ahead(p, 1) != 'u' {
+                        return Err(errAt(p, "unpaired high surrogate in \\u escape"))
+                    }
+                    step(p)
+                    step(p)
+                    let lo = readHex4(p)?
+                    if lo < 56320 || lo > 57343 {
+                        return Err(errAt(p, "unpaired high surrogate in \\u escape"))
+                    }
+                    pushUtf8(out, 65536 + (hi - 55296) * 1024 + (lo - 56320))
+                } else if hi >= 56320 && hi <= 57343 {
+                    return Err(errAt(p, "unexpected low surrogate in \\u escape"))
+                } else {
+                    pushUtf8(out, hi)
+                }
+            } else if e == '\n' {
+                // Line continuation: the break joins the line and adds nothing.
+                step(p)
+            } else if e == '\r' {
+                step(p)
+                if cur(p) == '\n' {
+                    step(p)
+                }
+            } else if e == 226 && ahead(p, 1) == 128 && (ahead(p, 2) == 168 || ahead(p, 2) == 169) {
+                // U+2028/U+2029 are line terminators, so this too is a continuation.
+                step(p)
+                step(p)
+                step(p)
+            } else if e < 0 {
+                return Err(errAt(p, "unterminated string"))
+            } else {
+                // Any other escaped character stands for itself. Pushing the
+                // lead byte suffices for a multi-byte character: its
+                // continuation bytes follow as ordinary string bytes.
+                out.push(UInt8(e))
+                step(p)
+            }
+        } else {
+            out.push(UInt8(b))
+            step(p)
+        }
+    }
+    return Err(errAt(p, "unterminated string"))
+}
+
+fn isIdentStart(b: Int64) -> Bool {
+    return b == '_' || b == '$' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+fn isIdentPart(b: Int64) -> Bool {
+    return isIdentStart(b) || (b >= '0' && b <= '9')
+}
+
+/// An unquoted object key: an ASCII identifier (the module doc names the
+/// Unicode deviation). The cursor is on its first byte.
+fn parseIdentKey(p: modify P5) -> Result<String, String> {
+    let mut out: Array<UInt8> = []
+    while isIdentPart(cur(p)) {
+        out.push(UInt8(cur(p)))
+        step(p)
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(errAt(p, "identifier key is not valid UTF-8")),
+    }
+}
+
+/// Whether the bytes at the cursor spell `kw` exactly; consumes them if so.
+fn eatWord(p: modify P5, kw: String) -> Bool {
+    let kb = bytes(kw)
+    let mut i = 0
+    while i < kb.length {
+        if ahead(p, i) != Int64(kb[i]) {
+            return false
+        }
+        i = i + 1
+    }
+    let mut j = 0
+    while j < kb.length {
+        step(p)
+        j = j + 1
+    }
+    return true
+}
+
+/// A number, normalized to its STRICT spelling — see the module doc. The
+/// cursor is on the first byte (a sign, a digit, or a dot).
+fn parseNumber5(p: modify P5) -> Result<Json, String> {
+    let mut neg = false
+    if cur(p) == '+' {
+        step(p)
+    } else if cur(p) == '-' {
+        neg = true
+        step(p)
+    }
+    if cur(p) == 'I' {
+        if eatWord(p, "Infinity") {
+            return Err(errAt(p, "Infinity has no strict-JSON spelling, and this tree re-emits strict JSON"))
+        }
+        return Err(errAt(p, "invalid number"))
+    }
+    if cur(p) == 'N' {
+        if eatWord(p, "NaN") {
+            return Err(errAt(p, "NaN has no strict-JSON spelling, and this tree re-emits strict JSON"))
+        }
+        return Err(errAt(p, "invalid number"))
+    }
+    // Hex: exact while it fits an Int64, a named refusal past it — there is no
+    // exact decimal text to normalize an overflowing literal to.
+    if cur(p) == '0' && (ahead(p, 1) == 'x' || ahead(p, 1) == 'X') {
+        step(p)
+        step(p)
+        if isHex(cur(p)) == false {
+            return Err(errAt(p, "invalid hex literal: expected hex digits"))
+        }
+        let mut v = 0
+        while isHex(cur(p)) {
+            let d = hexVal(cur(p))
+            if v > (9223372036854775807 - d) / 16 {
+                return Err(errAt(p, "hex literal is past Int64, so it has no exact decimal spelling"))
+            }
+            v = v * 16 + d
+            step(p)
+        }
+        if neg {
+            return Ok(JNum("-" + v.toString()))
+        }
+        return Ok(JNum(v.toString()))
+    }
+    // Decimal: digits, an optional fraction, an optional exponent — with the
+    // JSON5 liberties (a missing side of the dot) written back out strictly.
+    let mut intPart: Array<UInt8> = []
+    while cur(p) >= '0' && cur(p) <= '9' {
+        intPart.push(UInt8(cur(p)))
+        step(p)
+    }
+    let mut fracPart: Array<UInt8> = []
+    if cur(p) == '.' {
+        step(p)
+        while cur(p) >= '0' && cur(p) <= '9' {
+            fracPart.push(UInt8(cur(p)))
+            step(p)
+        }
+    }
+    if intPart.length == 0 && fracPart.length == 0 {
+        return Err(errAt(p, "invalid number"))
+    }
+    if intPart.length > 1 && Int64(intPart[0]) == '0' {
+        return Err(errAt(p, "leading zeros are not JSON5"))
+    }
+    let mut out: Array<UInt8> = []
+    if neg {
+        out.push('-')
+    }
+    if intPart.length == 0 {
+        out.push('0')
+    }
+    out.append(intPart)
+    if fracPart.length > 0 {
+        out.push('.')
+        out.append(fracPart)
+    }
+    if cur(p) == 'e' || cur(p) == 'E' {
+        out.push(UInt8(cur(p)))
+        step(p)
+        if cur(p) == '+' || cur(p) == '-' {
+            out.push(UInt8(cur(p)))
+            step(p)
+        }
+        if cur(p) < '0' || cur(p) > '9' {
+            return Err(errAt(p, "invalid number: exponent needs digits"))
+        }
+        while cur(p) >= '0' && cur(p) <= '9' {
+            out.push(UInt8(cur(p)))
+            step(p)
+        }
+    }
+    return match stringFromBytes(out) {
+        Ok(t) => Ok(JNum(t)),
+        Err(e) => Err(errAt(p, "number is not valid UTF-8")),
+    }
+}
+
+/// One JSON5 value, the cursor on its first byte.
+fn parseValue5(p: modify P5, depth: Int64) -> Result<Json, String> {
+    if depth > maxDepth() {
+        return Err(errAt(p, "nesting is deeper than 128"))
+    }
+    let b = cur(p)
+    if b < 0 {
+        return Err(errAt(p, "unexpected end of input"))
+    }
+    if b == '{' {
+        step(p)
+        let mut fs: Array<JsonField> = []
+        let _ = skipGap(p)?
+        if cur(p) == '}' {
+            step(p)
+            return Ok(JObj(fs))
+        }
+        while true {
+            let _ = skipGap(p)?
+            let kb = cur(p)
+            if kb != '"' && kb != '\x27' && isIdentStart(kb) == false {
+                return Err(errAt(p, "expected an object key (a string or an identifier)"))
+            }
+            let key = if kb == '"' || kb == '\x27' {
+                parseString5(p, kb)?
+            } else {
+                parseIdentKey(p)?
+            }
+            let _ = skipGap(p)?
+            if cur(p) != ':' {
+                return Err(errAt(p, "expected ':' after object key"))
+            }
+            step(p)
+            let _ = skipGap(p)?
+            let v = parseValue5(p, depth + 1)?
+            fs.push(JsonField { key: key, value: v })
+            let _ = skipGap(p)?
+            if cur(p) == ',' {
+                step(p)
+                let _ = skipGap(p)?
+                // The trailing comma: a `}` after a comma closes the object.
+                if cur(p) == '}' {
+                    step(p)
+                    return Ok(JObj(fs))
+                }
+            } else if cur(p) == '}' {
+                step(p)
+                return Ok(JObj(fs))
+            } else {
+                return Err(errAt(p, "expected ',' or '}' in object"))
+            }
+        }
+    }
+    if b == '[' {
+        step(p)
+        let mut xs: Array<Json> = []
+        let _ = skipGap(p)?
+        if cur(p) == ']' {
+            step(p)
+            return Ok(JArr(xs))
+        }
+        while true {
+            let _ = skipGap(p)?
+            let v = parseValue5(p, depth + 1)?
+            xs.push(v)
+            let _ = skipGap(p)?
+            if cur(p) == ',' {
+                step(p)
+                let _ = skipGap(p)?
+                if cur(p) == ']' {
+                    step(p)
+                    return Ok(JArr(xs))
+                }
+            } else if cur(p) == ']' {
+                step(p)
+                return Ok(JArr(xs))
+            } else {
+                return Err(errAt(p, "expected ',' or ']' in array"))
+            }
+        }
+    }
+    if b == '"' || b == '\x27' {
+        let s = parseString5(p, b)?
+        return Ok(JStr(s))
+    }
+    if b == 't' {
+        if eatWord(p, "true") {
+            return Ok(JBool(true))
+        }
+        return Err(errAt(p, "invalid value"))
+    }
+    if b == 'f' {
+        if eatWord(p, "false") {
+            return Ok(JBool(false))
+        }
+        return Err(errAt(p, "invalid value"))
+    }
+    if b == 'n' {
+        if eatWord(p, "null") {
+            return Ok(JNull)
+        }
+        return Err(errAt(p, "invalid value"))
+    }
+    if b == '+' || b == '-' || b == '.' || (b >= '0' && b <= '9') || b == 'I' || b == 'N' {
+        return parseNumber5(p)
+    }
+    return Err(errAt(p, "invalid value"))
+}
+
+/// Parse one JSON5 document: a single value, with gaps (whitespace and
+/// comments) allowed around it and nothing after it.
+export fn parseJson5(src: String) -> Result<Json, String> {
+    let mut p = newP5(src)
+    let _ = skipGap(p)?
+    let v = parseValue5(p, 1)?
+    let _ = skipGap(p)?
+    if cur(p) >= 0 {
+        return Err(errAt(p, "unexpected trailing input"))
+    }
+    return Ok(v)
+}
+
+// ===========================================================================
+// Tests — each JSON5 liberty once, both named refusals, and the strictness of
+// what comes OUT: emit over a parse writes plain JSON.
+// ===========================================================================
+
+/// The parsed tree, or a `JStr` carrying the error — the tests' one helper.
+fn parsed(src: String) -> Json {
+    return match parseJson5(src) {
+        Ok(v) => v,
+        Err(e) => JStr("ERR " + e),
+    }
+}
+
+/// The parse error, or "parsed" — for asserting a refusal fired.
+fn parseErr(src: String) -> String {
+    return match parseJson5(src) {
+        Ok(v) => "parsed",
+        Err(e) => e,
+    }
+}
+
+test "comments, trailing commas, unquoted keys, single quotes" {
+    let src = "// a config\n{\n  name: 'shelf', // inline\n  ports: [80, 443,],\n  /* block\n     comment */\n  deep: { 'single': true, },\n}"
+    assertEq(emit(parsed(src)), "{\"name\":\"shelf\",\"ports\":[80,443],\"deep\":{\"single\":true}}")
+}
+
+test "numbers normalize to their strict spelling" {
+    let src = "[0xFF, .5, 5., +7, -.25, 1.5e+3]"
+    assertEq(emit(parsed(src)), "[255,0.5,5,7,-0.25,1.5e+3]")
+}
+
+test "the extra escapes and a continued line" {
+    // \x41 is A, \v is its byte, the continuation joins the line, and \q
+    // stands for q: a A VT b c q. The expectation is built as bytes because
+    // Vyrn string literals have no \x escape of their own.
+    let mut want: Array<UInt8> = []
+    want.push('a')
+    want.push('A')
+    want.push('\x0b')
+    want.push('b')
+    want.push('c')
+    want.push('q')
+    let wantS = match stringFromBytes(want) {
+        Ok(s) => s,
+        Err(e) => "",
+    }
+    let src = "'a\\x41\\vb\\\nc\\q'"
+    assert(jsonEq(parsed(src), JStr(wantS)))
+}
+
+test "extended whitespace and the BOM are gaps" {
+    let mut src: Array<UInt8> = []
+    // BOM, NBSP, VT around a bare number.
+    src.push(239)
+    src.push(187)
+    src.push(191)
+    src.push(194)
+    src.push(160)
+    src.push('4')
+    src.push('2')
+    src.push('\x0b')
+    let text = match stringFromBytes(src) {
+        Ok(s) => s,
+        Err(e) => "",
+    }
+    assert(jsonEq(parsed(text), JNum("42")))
+}
+
+test "the named refusals, and the strictness holes stay closed" {
+    assert(parseErr("[Infinity]") != "parsed")
+    assert(parseErr("0x10000000000000000") != "parsed")
+    assert(parseErr("0123") != "parsed")
+    assert(parseErr("{a:1} extra") != "parsed")
+    assert(parseErr("'unterminated") != "parsed")
+    assert(parseErr("/* open") != "parsed")
+    assert(parseErr("'\\0'") != "parsed")
+}

@@ -1,0 +1,71 @@
+// Block-bodied match arms (RFC-0118 M1): a `match` in STATEMENT position may
+// give an arm a brace-delimited body of statements. The arms yield nothing —
+// a match used as a value keeps single-expression arms — and that containment
+// is the design: the value story never meets a brace.
+//
+// The middle function is the shape the RFC exists for: a release that drops
+// two payloads in one arm, with no `give` trampoline standing where a block
+// could not.
+
+type Shape =
+    | Dot
+    | Wide(String, String)
+
+/// The trampoline-free release: both payloads dropped in the arm, directly.
+fn toss(s: consume Shape) {
+    match consume s {
+        Dot => {}
+        Wide(a, b) => {
+            drop a
+            drop b
+        }
+    }
+}
+
+fn maybe(i: Int64) -> Option<Int64> {
+    if i % 2 == 0 {
+        return Some(i)
+    }
+    return None
+}
+
+fn main() -> Int64 {
+    // Statements in an arm: a binding, two prints — no helper function.
+    let t = Wide("left", "right")
+    match t {
+        Dot => print("dot"),
+        Wide(a, b) => {
+            let joined = a + "+" + b
+            print("wide \{joined}")
+            print("\{joined.byteLength}")
+        }
+    }
+
+    // Mixed arms: an expression arm beside a block arm, values discarded.
+    match maybe(4) {
+        Some(n) => print("even \{n}"),
+        None => {}
+    }
+
+    // `break` inside a block arm reaches the enclosing loop.
+    let mut i = 0
+    let mut sum = 0
+    while i < 10 {
+        match maybe(i) {
+            Some(n) => {
+                if n > 4 {
+                    break
+                }
+                sum = sum + n
+            }
+            None => {}
+        }
+        i = i + 1
+    }
+    print("sum \{sum}")
+
+    toss(Wide("a", "b"))
+    toss(Dot)
+    print("tossed")
+    return 0
+}

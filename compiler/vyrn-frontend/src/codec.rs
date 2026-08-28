@@ -452,7 +452,7 @@ pub fn escape_into(s: &str, out: &mut String) {
 /// *data* looks like, which both directions agree about.
 pub fn expected_name(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
     match wire(ty, types, false) {
-        Ok(Wire::Record(_) | Wire::Map(_)) => "object".to_string(),
+        Ok(Wire::Record(_) | Wire::Map(_) | Wire::MapI(_)) => "object".to_string(),
         Ok(Wire::Array(_) | Wire::FixedArray(..)) => "array".to_string(),
         Ok(Wire::Str) => "string".to_string(),
         Ok(Wire::Int | Wire::IntN { .. }) => "integer".to_string(),
@@ -562,6 +562,11 @@ pub enum Wire {
     FixedArray(Type, usize),
     /// `Map<String, V>` — a JSON object. Carries `V`; the key is always `String`.
     Map(Type),
+    /// `Map<Int64, V>` — a JSON object whose keys are the DECIMAL TEXTS of the
+    /// map's keys (RFC-0117 M3): `{"7": 1}`. One spelling per type, chosen
+    /// here; the decoder reads keys back through the target type, canonical
+    /// text only.
+    MapI(Type),
     Record(Vec<Field>),
     /// A sum type in RFC-0024 external tagging. `Result<T, E>` arrives here too,
     /// as the two-variant enum it is on the wire.
@@ -622,16 +627,16 @@ pub fn wire(ty: &Type, types: &HashMap<String, TypeDecl>, decode: bool) -> Resul
                 Ok(Wire::FixedArray(*inner, n))
             }
         }
-        // A Map is a JSON object exactly when its keys are Strings, so only
-        // the value type is carried. A non-String key has no wire form yet —
-        // RFC-0117 §5 defers that choice (stringified keys against pair
-        // arrays), and the boundary refuses rather than guessing.
-        Type::Map(key, val) => {
-            if crate::types::resolve(&key, types) != Type::Str {
-                return Err(Type::Map(key, val));
-            }
-            Ok(Wire::Map(*val))
-        }
+        // A Map is a JSON object either way; the KEY type picks the spelling.
+        // String keys are the object's keys as they are; Int64 keys write
+        // their decimal texts (RFC-0117 M3). Any other key type has no wire
+        // form — unreachable from checked programs, kept as a refusal because
+        // `wire` is also asked about imported and reflected types.
+        Type::Map(key, val) => match crate::types::resolve(&key, types) {
+            Type::Str => Ok(Wire::Map(*val)),
+            Type::Int => Ok(Wire::MapI(*val)),
+            _ => Err(Type::Map(key, val)),
+        },
         Type::Record(fields) => Ok(Wire::Record(fields)),
         Type::Enum(vs) => Ok(Wire::Enum(vs)),
         // `Result<T, E>` flows through as the two-variant single-payload enum
@@ -764,7 +769,8 @@ fn codable_wire(
             Wire::Option(inner)
             | Wire::Array(inner)
             | Wire::FixedArray(inner, _)
-            | Wire::Map(inner),
+            | Wire::Map(inner)
+            | Wire::MapI(inner),
         ) => codable(&inner, types, decode, seen),
         Ok(Wire::Record(fields)) => {
             for f in &fields {

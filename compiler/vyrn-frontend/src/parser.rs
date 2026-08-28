@@ -4222,14 +4222,14 @@ impl Parser {
             arms: vec![
                 MatchArm {
                     pattern: Pattern::Success("@v".to_string()),
-                    body: Expr::Var {
+                    body: ArmBody::Expr(Expr::Var {
                         name: "@v".to_string(),
                         line,
-                    },
+                    }),
                 },
                 MatchArm {
                     pattern: Pattern::Failure("@e".to_string()),
-                    body: rhs,
+                    body: ArmBody::Expr(rhs),
                 },
             ],
             line,
@@ -5145,11 +5145,22 @@ impl Parser {
         while *self.peek() != Tok::RBrace && *self.peek() != Tok::Eof {
             let pattern = self.pattern()?;
             self.eat(&Tok::FatArrow)?;
-            let body = self.expr()?;
+            // RFC-0118: `pat => { stmts }` is a BLOCK arm. Unambiguous at the
+            // brace — a bare `{` starts no Vyrn expression (record literals
+            // carry a type name) — and legal only in statement position,
+            // which the checker enforces. A block arm needs no comma: the
+            // closing brace already ends it, matching how a block reads
+            // everywhere else in the language.
+            let body = if *self.peek() == Tok::LBrace {
+                ArmBody::Block(self.block()?)
+            } else {
+                ArmBody::Expr(self.expr()?)
+            };
+            let block_arm = matches!(body, ArmBody::Block(_));
             arms.push(MatchArm { pattern, body });
             if *self.peek() == Tok::Comma {
                 self.advance();
-            } else {
+            } else if !block_arm {
                 break;
             }
         }
@@ -5204,14 +5215,14 @@ impl Parser {
                     arms: vec![
                         MatchArm {
                             pattern: Pattern::Variant("Valid".to_string(), vec!["@v".to_string()]),
-                            body: call("Loaded", vec![var("@v")]),
+                            body: ArmBody::Expr(call("Loaded", vec![var("@v")])),
                         },
                         MatchArm {
                             pattern: Pattern::Variant(
                                 "Invalid".to_string(),
                                 vec!["@i".to_string()],
                             ),
-                            body: call("Corrupt", vec![var("@i")]),
+                            body: ArmBody::Expr(call("Corrupt", vec![var("@i")])),
                         },
                     ],
                     line,
@@ -5221,11 +5232,11 @@ impl Parser {
                     arms: vec![
                         MatchArm {
                             pattern: Pattern::Ok("@t".to_string()),
-                            body: decoded,
+                            body: ArmBody::Expr(decoded),
                         },
                         MatchArm {
                             pattern: Pattern::Err("@e".to_string()),
-                            body: var("Missing"),
+                            body: ArmBody::Expr(var("Missing")),
                         },
                     ],
                     line,
@@ -5238,14 +5249,14 @@ impl Parser {
                     arms: vec![
                         MatchArm {
                             pattern: Pattern::Variant("Valid".to_string(), vec!["@v".to_string()]),
-                            body: var("@v"),
+                            body: ArmBody::Expr(var("@v")),
                         },
                         MatchArm {
                             pattern: Pattern::Variant(
                                 "Invalid".to_string(),
                                 vec!["@i".to_string()],
                             ),
-                            body: default.clone(),
+                            body: ArmBody::Expr(default.clone()),
                         },
                     ],
                     line,
@@ -5255,11 +5266,11 @@ impl Parser {
                     arms: vec![
                         MatchArm {
                             pattern: Pattern::Ok("@t".to_string()),
-                            body: decoded,
+                            body: ArmBody::Expr(decoded),
                         },
                         MatchArm {
                             pattern: Pattern::Err("@e".to_string()),
-                            body: default,
+                            body: ArmBody::Expr(default),
                         },
                     ],
                     line,

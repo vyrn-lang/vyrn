@@ -996,6 +996,7 @@ fn check_accum_inner(
         impl_blocks: &program.impls,
         cur_bounds: RefCell::new(HashMap::new()),
         region_floor: RefCell::new(Vec::new()),
+        stmt_match: std::cell::Cell::new(0),
         in_loop: RefCell::new(false),
         let_types: RefCell::new(HashMap::new()),
         errors: RefCell::new(Vec::new()),
@@ -1629,6 +1630,12 @@ struct Checker<'a> {
     /// which a binding is "outer" — a heap value must not be assigned there, or
     /// it would dangle when the region frees at block exit.
     region_floor: RefCell<Vec<usize>>,
+    /// The arms of a `match` sitting DIRECTLY in statement position
+    /// (RFC-0118), by the arms slice's address; 0 = none. Set by `Stmt::Expr`
+    /// and consumed by `check_match`, so block arms are legal exactly there
+    /// and a nested match — expression position by construction — never
+    /// inherits it.
+    stmt_match: std::cell::Cell<usize>,
     /// Inferred (or declared) type of each `let` binding and each `for`-in loop
     /// variable that checked cleanly, keyed by `(line, name)`. Populated as a
     /// side effect of checking so the symbol-query layer can show `let x: Int`
@@ -3764,13 +3771,17 @@ impl<'a> Checker<'a> {
                 // carries the measurement that kept them off; this list follows it
                 // rather than deciding a second time.
                 let t = self.base(&b.ty);
-                // A type PARAMETER passes, and the instance decides (Phase 8b).
-                // This body is checked once and lowered once per instantiation,
-                // so `drop v` where `v: T` is a `free` in `Slots<String>` and no
-                // instruction at all in `Slots<Int64>` — which is the plan's
-                // "conventions checked per monomorphized instance". Refusing it
-                // here is what kept a generic container from giving its elements
-                // back (census U4).
+                // A type PARAMETER is REFUSED (RFC-0118 M2's finding). It used
+                // to pass "so the instance decides", which kept a generic
+                // container's per-element loop legal (census U4) — but that
+                // loop is gone (`Slots` releases its arrays, never a bare `T`),
+                // and what the pass actually did in the tree was launder this
+                // very rule: `vyxGive<T>(v: consume T) { drop v }` accepted a
+                // plain record as `T` and dropped it, where the direct spelling
+                // is refused below. No instance check runs on a generic body,
+                // so the only sound gate is here. A generic fn that needs to
+                // release a `T` again is the program that reopens this, with
+                // the per-instance check the old comment promised.
                 // A DECLARED row passes too, and the key is read off the written
                 // type rather than off `base` — `impl Owned for Ring` is what
                 // `Ring` means, so resolving it to its record shape first is
@@ -3804,11 +3815,20 @@ impl<'a> Checker<'a> {
                         | Type::SmallArray(..)
                         | Type::Map(..)
                         | Type::Task(_)
-                        | Type::Param(_)
                 ) || (matches!(t, Type::Option(_) | Type::Result(..))
                     && crate::own::owns_heap(&t, &self.types))
                 {
                     return Ok(false);
+                }
+                if matches!(t, Type::Param(_)) {
+                    return Err(cerr!(
+                        line,
+                        "cannot `drop` `{name}`: its type `{t}` is a type parameter, so this \
+                         body cannot know whether the rule below holds for the instance — a \
+                         plain record would be released here where `drop` on it directly is \
+                         refused. Release the value where its concrete type is known, or \
+                         `consume` the heap field and `drop` that"
+                    ));
                 }
                 Err(cerr!(
                     line,
@@ -3818,6 +3838,12 @@ impl<'a> Checker<'a> {
                 ))
             }
             Stmt::Expr(e) => {
+                // A `match` directly here is in STATEMENT position (RFC-0118):
+                // its arms may be blocks. The flag is the arms' address, so a
+                // match nested anywhere inside stays expression-position.
+                if let Expr::Match { arms, .. } = e {
+                    self.stmt_match.set(arms.as_ptr() as usize);
+                }
                 // A `panic` statement is `Never`-typed, so it satisfies the
                 // return-path check the way a `return` does (RFC-0079): the
                 // statements after it are unreachable and a function whose body
@@ -4977,6 +5003,10 @@ impl<'a> Checker<'a> {
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
+        // Statement position (RFC-0118), consumed HERE so a nested match —
+        // expression position by construction — sees the flag cleared. The
+        // enum path receives it as a plain bool.
+        let stmt_pos = self.stmt_match.replace(0) == arms.as_ptr() as usize;
         let raw_sty = self.expr(scrutinee, scope, None, fn_ret)?;
         // Resolve a transparent alias so `match` over `type X = Result<..>` (or an
         // `Option`/enum alias) dispatches on the underlying shape (RFC-0024).
@@ -4994,7 +5024,8 @@ impl<'a> Checker<'a> {
         };
         // A user enum dispatches to its own (N-variant) checker.
         if let Type::Enum(evs) = self.base(&sty) {
-            return self.check_match_enum(&sty, &evs, arms, line, scope, expected, fn_ret);
+            return self
+                .check_match_enum(&sty, &evs, arms, line, scope, expected, fn_ret, stmt_pos);
         }
         // The two patterns an Option/Result scrutinee requires.
         let want: [&str; 2] = match &sty {
@@ -5055,8 +5086,18 @@ impl<'a> Checker<'a> {
                     },
                 );
             }
-            let bty = self.expr(&arm.body, &inner_scope, result.as_ref(), fn_ret)?;
-            self.unify_arm(&mut result, bty, line)?;
+            match &arm.body {
+                ArmBody::Expr(e) => {
+                    let bty = self.expr(e, &inner_scope, result.as_ref(), fn_ret)?;
+                    self.unify_arm(&mut result, bty, line)?;
+                }
+                // A block arm (RFC-0118): statement position only, checked as
+                // the block it is, contributing no type — the expression arms
+                // beside it still unify among themselves.
+                ArmBody::Block(b) => {
+                    self.arm_block(b, stmt_pos, line, &mut inner_scope, fn_ret)?;
+                }
+            }
         }
         if !want.iter().all(|w| seen.contains(w)) {
             return Err(cerr!(
@@ -5066,11 +5107,40 @@ impl<'a> Checker<'a> {
                 want[1]
             ));
         }
+        // A statement match whose arms are all blocks yields nothing, which is
+        // exactly what its position consumes.
+        if stmt_pos && result.is_none() {
+            return Ok(Type::Unit);
+        }
         result.ok_or_else(|| cerr!(line, "empty `match`"))
+    }
+
+    /// Check one block arm (RFC-0118): legal only in statement position, and
+    /// then checked exactly as the block it is.
+    fn arm_block(
+        &self,
+        b: &Block,
+        stmt_pos: bool,
+        line: usize,
+        inner_scope: &mut Scope,
+        fn_ret: Option<&Type>,
+    ) -> Result<(), Diagnostic> {
+        if !stmt_pos {
+            return Err(cerr!(
+                line,
+                "a `match` used as a value has single-expression arms; a block arm needs statement position (RFC-0118)"
+            ));
+        }
+        let Some(ret) = fn_ret else {
+            return Err(cerr!(line, "a block arm needs a function body around it"));
+        };
+        self.block(b, ret, inner_scope);
+        Ok(())
     }
 
     /// Check a `match` over a user enum: every arm a valid variant pattern,
     /// bindings matching payloads, all variants covered exactly once.
+    #[allow(clippy::too_many_arguments)]
     fn check_match_enum(
         &self,
         sty: &Type,
@@ -5080,6 +5150,7 @@ impl<'a> Checker<'a> {
         scope: &Scope,
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
+        stmt_pos: bool,
     ) -> Result<Type, Diagnostic> {
         let mut seen: Vec<String> = Vec::new();
         let mut result: Option<Type> = expected.cloned();
@@ -5133,13 +5204,23 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
-            let bty = self.expr(&arm.body, &inner, result.as_ref(), fn_ret)?;
-            self.unify_arm(&mut result, bty, line)?;
+            match &arm.body {
+                ArmBody::Expr(e) => {
+                    let bty = self.expr(e, &inner, result.as_ref(), fn_ret)?;
+                    self.unify_arm(&mut result, bty, line)?;
+                }
+                ArmBody::Block(b) => {
+                    self.arm_block(b, stmt_pos, line, &mut inner, fn_ret)?;
+                }
+            }
         }
         for v in evs {
             if !seen.contains(&v.name) {
                 return Err(cerr!(line, "`match` is missing variant `{}`", v.name));
             }
+        }
+        if stmt_pos && result.is_none() {
+            return Ok(Type::Unit);
         }
         result.ok_or_else(|| cerr!(line, "empty `match`"))
     }
@@ -9110,7 +9191,10 @@ impl<'a> Checker<'a> {
                     for b in crate::movecheck::pattern_bindings(&arm.pattern) {
                         inner.insert(b.to_string());
                     }
-                    self.captures_expr(&arm.body, outer, &inner)?;
+                    match &arm.body {
+                        ArmBody::Expr(e) => self.captures_expr(e, outer, &inner)?,
+                        ArmBody::Block(b) => self.captures_block(b, outer, &mut inner)?,
+                    }
                 }
                 Ok(())
             }
@@ -9754,7 +9838,13 @@ fn expr_contains_spawn(e: &Expr) -> bool {
         | Expr::ArrayLit { elems: args, .. } => args.iter().any(expr_contains_spawn),
         Expr::Match {
             scrutinee, arms, ..
-        } => expr_contains_spawn(scrutinee) || arms.iter().any(|a| expr_contains_spawn(&a.body)),
+        } => {
+            expr_contains_spawn(scrutinee)
+                || arms.iter().any(|a| match &a.body {
+                    ArmBody::Expr(e) => expr_contains_spawn(e),
+                    ArmBody::Block(b) => contains_spawn(b),
+                })
+        }
         Expr::IfExpr {
             cond,
             then_branch,
@@ -10438,9 +10528,14 @@ fn global_ref_expr(
             scrutinee, arms, ..
         } => {
             global_ref_expr(scrutinee, globals, local)
-                || arms
-                    .iter()
-                    .any(|a| global_ref_expr(&a.body, globals, &locals_with(local, &a.pattern)))
+                || arms.iter().any(|a| match &a.body {
+                    ArmBody::Expr(e) => {
+                        global_ref_expr(e, globals, &locals_with(local, &a.pattern))
+                    }
+                    ArmBody::Block(b) => {
+                        global_ref_block(b, globals, &locals_with(local, &a.pattern))
+                    }
+                })
         }
         Expr::IfExpr {
             cond,
@@ -10560,8 +10655,19 @@ fn init_restrictions(
             scrutinee, arms, ..
         } => {
             recur(scrutinee)?;
-            for a in &arms.iter().map(|a| &a.body).collect::<Vec<_>>() {
-                recur(a)?;
+            for a in arms {
+                match &a.body {
+                    ArmBody::Expr(e) => recur(e)?,
+                    // A module-state initializer is an expression, and a block
+                    // arm exists only in statement position — unreachable, and
+                    // refused rather than assumed.
+                    ArmBody::Block(_) => {
+                        return Err(cerr!(
+                            line,
+                            "initializer of `{own_name}` may not use a block match arm"
+                        ))
+                    }
+                }
             }
             Ok(())
         }
@@ -10707,7 +10813,10 @@ fn calls_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
         } => {
             calls_expr(scrutinee, out);
             for a in arms {
-                calls_expr(&a.body, out);
+                match &a.body {
+                    ArmBody::Expr(e) => calls_expr(e, out),
+                    ArmBody::Block(b) => calls_block(b, out),
+                }
             }
         }
         Expr::IfExpr {

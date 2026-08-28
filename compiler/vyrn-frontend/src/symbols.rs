@@ -17,8 +17,8 @@
 //! from the cached [`Analysis`].
 
 use crate::ast::{
-    self, Block, Capability, EnumVariant, Expr, Function, GlobalDecl, LambdaBody, MethodSig,
-    ProtocolDecl, Stmt, Type, TypeDecl,
+    self, ArmBody, Block, Capability, EnumVariant, Expr, Function, GlobalDecl, LambdaBody,
+    MethodSig, ProtocolDecl, Stmt, Type, TypeDecl,
 };
 use crate::checker;
 use crate::diagnostics::Diagnostic;
@@ -2503,7 +2503,11 @@ fn collect_lets_expr(
                         });
                     }
                 }
-                collect_lets_expr(&arm.body, fn_line, tok_info, let_types, out);
+                match &arm.body {
+                    ArmBody::Expr(e) => collect_lets_expr(e, fn_line, tok_info, let_types, out),
+                    // A block arm's lets (RFC-0118) hover like any block's.
+                    ArmBody::Block(b) => collect_lets(b, fn_line, tok_info, let_types, out),
+                }
             }
         }
         Expr::Lambda { params, body, .. } => {

@@ -1,6 +1,6 @@
-# Census — six open language questions
+# Census — six language questions, now ruled
 
-Six topics the owner asked about. Each file collects what other languages did, what it cost them, and what Vyrn already has that touches the question. Each file ends with options, not a choice.
+Six topics the owner asked about. Each file collects what other languages did, what it cost them, and what Vyrn already has that touches the question. Each ended with options, not a choice — and each now carries the ruling under its `## Decision (2026-08-28)` heading, made on the owner's "finish the design decisions": lambda syntax shipped as RFC-0110; literal unions stay the nominal enum (design A); coroutines are deferred whole, `spawn` standing, until wasm can suspend and a real program asks; attributes stay `gen fn` plus contextual keywords (option A); refinement subsumption fixes its line at the decidable core (options 1–2, never an SMT solver) and waits for a caller; operator protocols are the fixed direction on demand and the GPU backend stays closed with its price recorded.
 
 ## The index
 

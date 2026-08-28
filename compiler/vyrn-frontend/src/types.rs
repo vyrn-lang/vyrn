@@ -738,6 +738,15 @@ fn type_schema(ty: &Type, cx: &mut SchemaCx) -> String {
                     type_schema(&val, cx)
                 )
             }
+            // A `Map<Int64, V>` (RFC-0117 M3) is the same object with its keys
+            // constrained to canonical decimal texts — `propertyNames` is JSON
+            // Schema's spelling for a rule about the keys themselves.
+            Ok(Wire::MapI(val)) => {
+                format!(
+                    "{{\"type\":\"object\",\"propertyNames\":{{\"pattern\":\"^-?(0|[1-9][0-9]*)$\"}},\"additionalProperties\":{}}}",
+                    type_schema(&val, cx)
+                )
+            }
             Ok(Wire::Record(fields)) => record_schema(&fields, cx),
             // A payload-less sum type is exactly a JSON Schema `enum` of its
             // variant names. A payload sum type — and `Result<T, E>`, which IS

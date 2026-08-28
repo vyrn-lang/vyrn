@@ -806,7 +806,12 @@ fn expr<'a>(e: &'a Expr, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) ->
         } => {
             kids.push(expr(scrutinee, d, chain, w));
             for arm in arms {
-                kids.push(expr(&arm.body, d, chain, w));
+                match &arm.body {
+                    vyrn_frontend::ast::ArmBody::Expr(e) => kids.push(expr(e, d, chain, w)),
+                    // A block arm (RFC-0118) walks as the statements it is; a
+                    // block contributes no expression node of its own.
+                    vyrn_frontend::ast::ArmBody::Block(b) => block(b, d, chain, w),
+                }
             }
         }
         Expr::IfExpr {

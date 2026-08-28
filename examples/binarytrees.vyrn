@@ -23,12 +23,6 @@ let benchOrder = 14
 /// not about what they hold.
 type Tree = | Leaf | Node(Tree, Tree)
 
-/// Take ownership of `v` and let the block end release it.
-fn give<T>(v: consume T) -> Int64 {
-    drop v
-    return 0
-}
-
 /// A node owns its subtree, and says so — RFC-0096 M2.
 ///
 /// `Tree` reaches itself through `Node`, so the structural release walk has no
@@ -43,9 +37,17 @@ fn give<T>(v: consume T) -> Int64 {
 /// 3.1 GB to 3.8 MB. See `rfcs/census/declared-release-does-not-run.md`.
 impl Owned for Tree {
     fn release(consume self) {
+        // Block arms (RFC-0118): the drops stand where the `give` trampoline
+        // stood — one recursive `release` per child instead of a spill, a
+        // call, and a free through a helper that existed only because a match
+        // arm was a single expression. The per-node census priced this exact
+        // change.
         match consume self {
-            Leaf => 0,
-            Node(l, r) => give(l) + give(r),
+            Leaf => {}
+            Node(l, r) => {
+                drop l
+                drop r
+            }
         }
     }
 }
