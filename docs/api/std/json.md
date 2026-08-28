@@ -65,6 +65,22 @@ fn copyJsonFields(fs: Array<JsonField>) -> Array<JsonField>
 
 `copy` over a list of object fields, for `xs.copy()`'s reason.
 
+## sortKeys
+
+```vyrn
+fn sortKeys(j: Json) -> Json
+```
+
+The same tree with every object's fields in byte order, recursively — a
+PRESENTATION transform for diffs and content-addressed output, feeding
+[`emit`] or [`emitPretty`]. It builds a new tree, so the stored order —
+which deterministic generators depend on, and which mirrors a `Map`'s
+insertion order across `toJson` (RFC-0028) — never moves; sorting is a
+choice a call site makes about ONE emission, exactly where RFC-0117 §5
+says presentation choices live. The sort is a stable insertion sort:
+fields per object are few, and this module deliberately imports nothing,
+`std/arrays` included.
+
 ## emit
 
 ```vyrn

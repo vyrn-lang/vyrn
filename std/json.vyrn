@@ -122,6 +122,66 @@ export fn copyJsonFields(fs: Array<JsonField>) -> Array<JsonField> {
     return out
 }
 
+/// The same tree with every object's fields in byte order, recursively — a
+/// PRESENTATION transform for diffs and content-addressed output, feeding
+/// [`emit`] or [`emitPretty`]. It builds a new tree, so the stored order —
+/// which deterministic generators depend on, and which mirrors a `Map`'s
+/// insertion order across `toJson` (RFC-0028) — never moves; sorting is a
+/// choice a call site makes about ONE emission, exactly where RFC-0117 §5
+/// says presentation choices live. The sort is a stable insertion sort:
+/// fields per object are few, and this module deliberately imports nothing,
+/// `std/arrays` included.
+export fn sortKeys(j: Json) -> Json {
+    return match j {
+        JNull => JNull,
+        JBool(b) => JBool(b),
+        JNum(s) => JNum(s.copy()),
+        JStr(s) => JStr(s.copy()),
+        JArr(xs) => JArr(sortKeysArray(xs)),
+        JObj(fs) => JObj(sortKeysFields(fs)),
+    }
+}
+
+/// [`sortKeys`] over a list of values.
+fn sortKeysArray(xs: Array<Json>) -> Array<Json> {
+    let mut out: Array<Json> = []
+    for x in xs {
+        out.push(sortKeys(x))
+    }
+    return out
+}
+
+/// [`sortKeys`] over a list of object fields: emit the fields in key order by
+/// repeated minimum, recursing into each value as it is taken. Selection by
+/// strict `<` takes the FIRST of equal keys, so the order is stable; each
+/// field is copied exactly once and no tree is ever swapped, which is what a
+/// sort that moved `JsonField`s would have to do (`JsonField.copy()` is
+/// structurally refused — see the `impl Copy` note above).
+fn sortKeysFields(fs: Array<JsonField>) -> Array<JsonField> {
+    let mut used: Array<Bool> = []
+    let mut i = 0
+    while i < fs.length {
+        used.push(false)
+        i = i + 1
+    }
+    let mut out: Array<JsonField> = []
+    let mut made = 0
+    while made < fs.length {
+        let mut best = 0 - 1
+        let mut k = 0
+        while k < fs.length {
+            if used[k] == false && (best < 0 || fs[k].key < fs[best].key) {
+                best = k
+            }
+            k = k + 1
+        }
+        used[best] = true
+        out.push(JsonField { key: fs[best].key.copy(), value: sortKeys(fs[best].value) })
+        made = made + 1
+    }
+    return out
+}
+
 // ===========================================================================
 // Writer — canonical, correct escaping (control chars as `\u00XX`), field order
 // as stored. `emit` is compact; `emitPretty` indents.
@@ -405,6 +465,22 @@ test "emitPretty indents nested structures" {
     // empty collections stay compact
     assertEq(emitPretty(JArr([]), 2), "[]")
     assertEq(emitPretty(JObj([]), 2), "{}")
+}
+
+test "sortKeys orders every object recursively and moves nothing stored" {
+    let j = JObj([
+            JsonField { key: "b", value: JNum("1") },
+            JsonField {
+                key: "a",
+                value: JObj([
+                        JsonField { key: "z", value: JNull },
+                        JsonField { key: "y", value: JNull },
+                    ]),
+            },
+        ])
+    assertEq(emit(sortKeys(j)), "{\"a\":{\"y\":null,\"z\":null},\"b\":1}")
+    // The source tree still emits in its stored order — sortKeys is a copy.
+    assertEq(emit(j), "{\"b\":1,\"a\":{\"z\":null,\"y\":null}}")
 }
 
 test "hex2 writes two lowercase nibbles" {

@@ -43,7 +43,17 @@ fn unit_tests_green(rel: &str, expected: &str) {
 
 #[test]
 fn std_json_writer_unit_tests_run_green() {
-    unit_tests_green("std/json.vyrn", "3 passed, 0 failed");
+    // The 4th is `sortKeys` — recursive key ordering as a copy, with the
+    // source tree's stored order asserted unmoved.
+    unit_tests_green("std/json.vyrn", "4 passed, 0 failed");
+}
+
+#[test]
+fn std_json5_reader_unit_tests_run_green() {
+    // The JSON5 reader (RFC-0117 §5's presentation axis): each liberty once,
+    // the named refusals, and the strictness of what comes out — `emit` over a
+    // JSON5 parse writes plain JSON.
+    unit_tests_green("std/json5.vyrn", "5 passed, 0 failed");
 }
 
 #[test]
