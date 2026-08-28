@@ -291,6 +291,14 @@ and `build`. Whatever triggers this needs more of `std/von` than its shape.
 Recorded so the next attempt does not repeat the same guess. Still not
 diagnosed.
 
+**Verified gone (2026-08-28).** The twelve-line repro passes — and so does a
+bench that actually calls `emitVon` at runtime — with the compiler at the
+RFC-0118 head. The defect was fixed incidentally by one of the arcs between
+the census commit and now (the record-coercion and generic-solving paths both
+moved under RFC-0114..0118); nobody diagnosed it by name, so if it returns,
+the narrowing above is still the map. `vyrn bench` can measure `std/von`
+importers again.
+
 ### Correction: the map primitive already exists
 
 Pattern 4 says "Without a map primitive, every 'is this key present' question
@@ -396,3 +404,15 @@ also use. That is a language question, not eleven library patches.
 defect with a twelve-line repro, narrowed but not diagnosed. And `std/num`'s
 float parser is 40 times slower on a large decimal exponent, which is real and is
 its own piece of work with its own correctness corpus, not a performance patch.
+
+**Both re-judged 2026-08-28.** The `std/von` defect is GONE — the repro and a
+bench that calls `emitVon` both pass; fixed incidentally by an RFC-0114..0118
+arc, verified above. And finding 2 got the half that pays: `parseFloat64` now
+takes Clinger's fast path — at most 15 significant digits and an exponent
+within ±22 is one exact multiply or divide, correctly rounded by construction
+— measured 4.92 µs → 155 ns on `"12345.678"`, the shape every JSON float in
+this repository actually has. The pins at the path borders and the randomized
+bit-identical differential against Rust's parser both hold. `"1e300"` still
+walks the exact decimal machinery at ~200 µs: the remaining cost is confined
+to exponents beyond ±22, which no caller in this repository parses outside a
+test.

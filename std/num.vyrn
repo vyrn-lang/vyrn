@@ -281,6 +281,20 @@ fn ldexp(neg: Bool, mIn: Int64, exIn: Int64) -> Float64 {
     return floatFromBits(bits)
 }
 
+/// `10^k` as an exact `Float64`, for `k` up to 22. Every partial product is a
+/// power of ten below `10^22 = 2^22 × 5^22`, whose odd part is under `2^53` —
+/// each is exactly representable, so each multiply rounds to itself and the
+/// loop is exact arithmetic, not an approximation.
+fn pow10Exact(k: Int64) -> Float64 {
+    let mut v = 1.0
+    let mut i = 0
+    while i < k {
+        v = v * 10.0
+        i = i + 1
+    }
+    return v
+}
+
 /// The core conversion: a scanned decimal, correctly rounded to a binary format
 /// of `mantBits` significand bits whose smallest exponent is `minExp`.
 ///
@@ -290,6 +304,40 @@ fn ldexp(neg: Bool, mIn: Int64, exIn: Int64) -> Float64 {
 fn toFloat(sc: Scanned, mantBits: Int64, minExp: Int64) -> Float64 {
     if sc.d.length == 0 {
         return ldexp(sc.neg, 0, 0)
+    }
+    // Clinger's fast path, for the numbers programs actually parse. With at
+    // most 15 significant digits the significand is an integer below `2^53`,
+    // exact as a `Float64`; with the effective exponent within ±22 the power
+    // of ten is exact too. One multiply (or one divide) of two exact values
+    // rounds ONCE, and IEEE-754 rounds correctly — so the result is the
+    // correctly rounded answer by construction, not by digit-walking. The
+    // conditions are the proof's, checked literally; anything outside them —
+    // more digits, a bigger exponent, a truncated tail — falls through to the
+    // exact decimal machinery below, which was this function's whole body
+    // before and answers the extremes at its own pace. `Float64` only: the
+    // `Float32` caller needs its one rounding at 24 bits, and computing here
+    // at 53 then narrowing would round twice.
+    if mantBits == 53 && !sc.trunc && sc.d.length <= 15 {
+        let e10 = sc.dp - sc.d.length
+        if e10 >= 0 - 22 && e10 <= 22 {
+            let mut whole = 0
+            let mut di = 0
+            while di < sc.d.length {
+                whole = whole * 10 + sc.d[di]
+                di = di + 1
+            }
+            let mut v = Float64(whole)
+            if e10 > 0 {
+                v = v * pow10Exact(e10)
+            }
+            if e10 < 0 {
+                v = v / pow10Exact(0 - e10)
+            }
+            if sc.neg {
+                return 0.0 - v
+            }
+            return v
+        }
     }
     // Coarse guards, so the scaling loop below cannot be handed an exponent that
     // would make it run for a million iterations to reach an answer it already
@@ -819,6 +867,63 @@ test "the mantissa bits are the correctly rounded ones" {
     assertEq(
         match parseFloat64("1.8e308") { Some(v) => floatBits(v).toString(), None => "None" },
         "9218868437227405312",
+    )
+}
+
+/// The fast path against the slow one, at its own borders. Every expected bit
+/// pattern is from CPython's `strtod`, which is correctly rounded — so a wrong
+/// bit here is this module's, whichever path produced it. The pairs straddle
+/// the path boundary on purpose: 15 digits beside 16, `e22` beside `e23`, so a
+/// condition off by one puts a case on the wrong path and the pin still judges
+/// the ANSWER.
+test "the fast path is the correctly rounded one, at its borders" {
+    // Inside: few digits, small exponents, both signs of the exponent.
+    assertEq(
+        match parseFloat64("12345.678") { Some(v) => floatBits(v).toString(), None => "None" },
+        "4668012722585352536",
+    )
+    assertEq(
+        match parseFloat64("0.3") { Some(v) => floatBits(v).toString(), None => "None" },
+        "4599075939470750515",
+    )
+    // The exponent border: 22 is the last exact power of ten, 23 the first
+    // inexact one — the classic value a fast path that overreaches gets wrong.
+    assertEq(
+        match parseFloat64("1e22") { Some(v) => floatBits(v).toString(), None => "None" },
+        "4936209963552724370",
+    )
+    assertEq(
+        match parseFloat64("1e23") { Some(v) => floatBits(v).toString(), None => "None" },
+        "4950912855330343670",
+    )
+    assertEq(
+        match parseFloat64("1e-22") { Some(v) => floatBits(v).toString(), None => "None" },
+        "4277919505920253670",
+    )
+    assertEq(
+        match parseFloat64("1e-23") { Some(v) => floatBits(v).toString(), None => "None" },
+        "4262707295203537489",
+    )
+    // The digit border, at the exponent border, both ways.
+    assertEq(
+        match parseFloat64("123456789012345e-22") {
+            Some(v) => floatBits(v).toString(),
+            None => "None",
+        },
+        "4488544134225830496",
+    )
+    assertEq(
+        match parseFloat64("999999999999999e22") {
+            Some(v) => floatBits(v).toString(),
+            None => "None",
+        },
+        "5160588303184390419",
+    )
+    // A negative through the fast path: negation of a finite float is exact,
+    // and the bit pattern is the positive one with the sign bit set.
+    assertEq(
+        match parseFloat64("-12345.678") { Some(v) => floatBits(v).toString(), None => "None" },
+        "13891384759440128344",
     )
 }
 

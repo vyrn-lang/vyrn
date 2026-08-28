@@ -46,7 +46,7 @@ fn number_conversion_pins_hold() {
 
 #[test]
 fn std_num_unit_tests_run_green() {
-    unit_tests_green("std/num.vyrn", "7 passed, 0 failed");
+    unit_tests_green("std/num.vyrn", "8 passed, 0 failed");
 }
 
 /// `std/num`'s `f64Str` against Rust's own `{:.6}`, byte for byte, over bit
