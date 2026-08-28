@@ -211,7 +211,7 @@ jobs:
         shell: bash
     steps:
       # actions/checkout@v4
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Rust cache
         # Unlike actions/cache with a lockfile key (which never re-uploads
         # after the first hit, so every run rebuilt all vyrn-* crates from a
@@ -240,7 +240,7 @@ jobs:
         #     restore as a hit — and its populate step is `if: cache-hit !=
         #     'true'`, so wasmtime would silently never arrive.
         # actions/cache@v4
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ~/.vyrn/tools
           # `-v2-`: the audit added the `.vyrn-sha` certification marker to
@@ -343,7 +343,7 @@ jobs:
         shell: bash
     steps:
       # actions/checkout@v4
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Rust cache
         # Swatinem/rust-cache@v2
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
@@ -514,7 +514,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # actions/checkout@v4
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Rust cache
         # Swatinem/rust-cache@v2
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
@@ -543,7 +543,7 @@ jobs:
         # not go stale against a pin it never read. `~/.vyrn/tools/<sha256>/` is
         # what the resolver looks in, so a hit needs no fetch and no unpack.
         # actions/cache@v4
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ~/.vyrn/tools
           # `-v2-` for the same marker reason as the nextest cache above.
@@ -630,7 +630,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # actions/checkout@v4
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Rust cache
         # Swatinem/rust-cache@v2
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
@@ -695,7 +695,7 @@ jobs:
     # fail for an unrelated reason either is not worth running.
     steps:
       # actions/checkout@v4
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Rust cache
         # Swatinem/rust-cache@v2
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
@@ -757,7 +757,7 @@ jobs:
         # That is the whole procedure — see the `_readme` in the placeholder.
         if: always()
         # actions/upload-artifact@v4
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: bench-json
           path: bench/out/*.json
