@@ -451,6 +451,42 @@ fn vhElem(
                 "`style` is an inline style, so the page needs `style-src 'unsafe-inline'`; move the declarations to a class in the sheet",
             )
         }
+        // a11y/aria-name. The ARIA vocabulary is CLOSED, so any attribute
+        // that begins `aria` and is not in it is a typo by construction —
+        // `arial-label`, `aria-lable` — and a misspelled ARIA attribute is
+        // silently ignored by every browser, which is the worst failure mode
+        // an accessibility attribute can have. The name matters whether the
+        // value is static or bound, so `a.dyn` is not consulted.
+        if a.evt == false && startsWith(a.name, "aria") && vhAriaAttr(a.name) == false {
+            out = out
+            + hint(
+                p,
+                "a11y/aria-name",
+                Warning,
+                src,
+                file,
+                a.line,
+                a.col,
+                "`\{a.name}` is not an ARIA attribute — a typo? The vocabulary is closed, and a misspelled name is silently ignored",
+            )
+        }
+        // html/deprecated-attr. `html-validate`'s `no-deprecated-attr`,
+        // `"error"` in its recommended preset (read 2026-08-29). The pair is
+        // exact — `align` is removed on `<td>` and was never on `<span>` —
+        // so the table answers for the tag and the attribute together.
+        if a.evt == false && vhDeprecatedAttrOn(tag, a.name) {
+            out = out
+            + hint(
+                p,
+                "html/deprecated-attr",
+                Error,
+                src,
+                file,
+                a.line,
+                a.col,
+                "`\{a.name}` on `<\{tag}>` was removed from HTML; the platform may ignore it — write CSS or current markup",
+            )
+        }
         // a11y/autoplay. `html-validate`'s `no-autoplay`, WCAG 1.4.2. Sound the
         // reader did not ask for, and they must find the page to stop it. Both
         // spellings count: the attribute is present either way.
@@ -958,6 +994,284 @@ fn vhDeprecatedTag(tag: String) -> Bool {
     return false
 }
 
+/// The ARIA attribute vocabulary and the removed-attribute pairs — the next
+/// two rows of the census's second table. ARIA names read from
+/// `A11yance/aria-query` master, `src/ariaPropsMap.js`, on 2026-08-29: 51
+/// attributes, the closed WAI-ARIA set (the deprecated `aria-dropeffect`/
+/// `aria-grabbed` stay KNOWN — a legal name is not a typo). The removed
+/// (tag, attribute) pairs read from the same `html5.ts` as the element
+/// vocabulary, same date: 189 pairs, each an attribute-level `deprecated`
+/// flag, grouped here by attribute name.
+fn vhAriaAttr(name: String) -> Bool {
+    if name.byteLength < 6 {
+        return false
+    }
+    let lead = bytes(name)[5]
+    if lead == 'a' {
+        return name == "aria-activedescendant" || name == "aria-atomic" || name == "aria-autocomplete"
+    }
+    if lead == 'b' {
+        return name == "aria-braillelabel" || name == "aria-brailleroledescription" || name == "aria-busy"
+    }
+    if lead == 'c' {
+        return name == "aria-checked" || name == "aria-colcount" || name == "aria-colindex" || name == "aria-colspan" || name == "aria-controls" || name == "aria-current"
+    }
+    if lead == 'd' {
+        return name == "aria-describedby" || name == "aria-description" || name == "aria-details" || name == "aria-disabled" || name == "aria-dropeffect"
+    }
+    if lead == 'e' {
+        return name == "aria-errormessage" || name == "aria-expanded"
+    }
+    if lead == 'f' {
+        return name == "aria-flowto"
+    }
+    if lead == 'g' {
+        return name == "aria-grabbed"
+    }
+    if lead == 'h' {
+        return name == "aria-haspopup" || name == "aria-hidden"
+    }
+    if lead == 'i' {
+        return name == "aria-invalid"
+    }
+    if lead == 'k' {
+        return name == "aria-keyshortcuts"
+    }
+    if lead == 'l' {
+        return name == "aria-label" || name == "aria-labelledby" || name == "aria-level" || name == "aria-live"
+    }
+    if lead == 'm' {
+        return name == "aria-modal" || name == "aria-multiline" || name == "aria-multiselectable"
+    }
+    if lead == 'o' {
+        return name == "aria-orientation" || name == "aria-owns"
+    }
+    if lead == 'p' {
+        return name == "aria-placeholder" || name == "aria-posinset" || name == "aria-pressed"
+    }
+    if lead == 'r' {
+        return name == "aria-readonly" || name == "aria-relevant" || name == "aria-required" || name == "aria-roledescription" || name == "aria-rowcount" || name == "aria-rowindex" || name == "aria-rowspan"
+    }
+    if lead == 's' {
+        return name == "aria-selected" || name == "aria-setsize" || name == "aria-sort"
+    }
+    if lead == 'v' {
+        return name == "aria-valuemax" || name == "aria-valuemin" || name == "aria-valuenow" || name == "aria-valuetext"
+    }
+    return false
+}
+
+fn vhDeprecatedAttrOn(tag: String, name: String) -> Bool {
+    if name == "accept" {
+        return tag == "form"
+    }
+    if name == "align" {
+        return tag == "caption" || tag == "col" || tag == "div" || tag == "h1" || tag == "h2" || tag == "h3" || tag == "h4" || tag == "h5" || tag == "h6" || tag == "hr" || tag == "iframe" || tag == "img" || tag == "input" || tag == "legend" || tag == "math" || tag == "object" || tag == "p" || tag == "table" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr"
+    }
+    if name == "alink" {
+        return tag == "body"
+    }
+    if name == "allowtransparency" {
+        return tag == "iframe"
+    }
+    if name == "archive" {
+        return tag == "object"
+    }
+    if name == "axis" {
+        return tag == "td" || tag == "th"
+    }
+    if name == "background" {
+        return tag == "body" || tag == "table" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr"
+    }
+    if name == "bgcolor" {
+        return tag == "body" || tag == "table" || tag == "td" || tag == "th" || tag == "tr"
+    }
+    if name == "border" {
+        return tag == "img" || tag == "object"
+    }
+    if name == "bordercolor" {
+        return tag == "table"
+    }
+    if name == "cellpadding" {
+        return tag == "table"
+    }
+    if name == "cellspacing" {
+        return tag == "table"
+    }
+    if name == "char" {
+        return tag == "col" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr"
+    }
+    if name == "charoff" {
+        return tag == "col" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr"
+    }
+    if name == "charset" {
+        return tag == "a" || tag == "link"
+    }
+    if name == "classid" {
+        return tag == "object"
+    }
+    if name == "clear" {
+        return tag == "br"
+    }
+    if name == "code" {
+        return tag == "object"
+    }
+    if name == "codebase" {
+        return tag == "object"
+    }
+    if name == "codetype" {
+        return tag == "object"
+    }
+    if name == "color" {
+        return tag == "hr"
+    }
+    if name == "compact" {
+        return tag == "dl" || tag == "ol" || tag == "ul"
+    }
+    if name == "coords" {
+        return tag == "a"
+    }
+    if name == "datafld" {
+        return tag == "a" || tag == "applet" || tag == "button" || tag == "div" || tag == "fieldset" || tag == "frame" || tag == "iframe" || tag == "img" || tag == "input" || tag == "label" || tag == "legend" || tag == "marquee" || tag == "object" || tag == "param" || tag == "span" || tag == "textarea"
+    }
+    if name == "dataformatas" {
+        return tag == "button" || tag == "div" || tag == "input" || tag == "label" || tag == "legend" || tag == "marquee" || tag == "object" || tag == "option" || tag == "span" || tag == "table"
+    }
+    if name == "datapagesize" {
+        return tag == "table"
+    }
+    if name == "datasrc" {
+        return tag == "a" || tag == "applet" || tag == "button" || tag == "div" || tag == "frame" || tag == "iframe" || tag == "img" || tag == "input" || tag == "label" || tag == "legend" || tag == "marquee" || tag == "object" || tag == "option" || tag == "span" || tag == "table" || tag == "textarea"
+    }
+    if name == "declare" {
+        return tag == "object"
+    }
+    if name == "event" {
+        return tag == "script"
+    }
+    if name == "for" {
+        return tag == "script"
+    }
+    if name == "frame" {
+        return tag == "table"
+    }
+    if name == "frameborder" {
+        return tag == "iframe"
+    }
+    if name == "height" {
+        return tag == "td" || tag == "th"
+    }
+    if name == "hspace" {
+        return tag == "iframe" || tag == "img" || tag == "input" || tag == "math" || tag == "object"
+    }
+    if name == "ismap" {
+        return tag == "input"
+    }
+    if name == "language" {
+        return tag == "script"
+    }
+    if name == "link" {
+        return tag == "body"
+    }
+    if name == "lowsrc" {
+        return tag == "img"
+    }
+    if name == "marginbottom" {
+        return tag == "body"
+    }
+    if name == "marginheight" {
+        return tag == "body" || tag == "iframe"
+    }
+    if name == "marginleft" {
+        return tag == "body"
+    }
+    if name == "marginright" {
+        return tag == "body"
+    }
+    if name == "margintop" {
+        return tag == "body"
+    }
+    if name == "marginwidth" {
+        return tag == "body" || tag == "iframe"
+    }
+    if name == "methods" {
+        return tag == "a" || tag == "link"
+    }
+    if name == "name" {
+        return tag == "a" || tag == "img" || tag == "math" || tag == "option"
+    }
+    if name == "nohref" {
+        return tag == "area"
+    }
+    if name == "noshade" {
+        return tag == "hr"
+    }
+    if name == "nowrap" {
+        return tag == "td" || tag == "th"
+    }
+    if name == "profile" {
+        return tag == "head"
+    }
+    if name == "rules" {
+        return tag == "table"
+    }
+    if name == "scheme" {
+        return tag == "meta"
+    }
+    if name == "scope" {
+        return tag == "td"
+    }
+    if name == "scrolling" {
+        return tag == "iframe"
+    }
+    if name == "shape" {
+        return tag == "a"
+    }
+    if name == "size" {
+        return tag == "hr"
+    }
+    if name == "standby" {
+        return tag == "object"
+    }
+    if name == "summary" {
+        return tag == "table"
+    }
+    if name == "target" {
+        return tag == "link"
+    }
+    if name == "text" {
+        return tag == "body"
+    }
+    if name == "type" {
+        return tag == "li" || tag == "param" || tag == "ul"
+    }
+    if name == "urn" {
+        return tag == "a" || tag == "link"
+    }
+    if name == "usemap" {
+        return tag == "input"
+    }
+    if name == "valign" {
+        return tag == "col" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr"
+    }
+    if name == "valuetype" {
+        return tag == "param"
+    }
+    if name == "version" {
+        return tag == "html"
+    }
+    if name == "vlink" {
+        return tag == "body"
+    }
+    if name == "vspace" {
+        return tag == "iframe" || tag == "img" || tag == "input" || tag == "math" || tag == "object"
+    }
+    if name == "width" {
+        return tag == "col" || tag == "hr" || tag == "pre" || tag == "table" || tag == "td" || tag == "th"
+    }
+    return false
+}
+
 /// Whether `name` is an HTML event handler attribute.
 ///
 /// A NAMED LIST, not `startsWith("on")`, and the reason is that this rule is an
@@ -1278,6 +1592,27 @@ test "an external script or sheet without integrity fires; a local one does not"
     assert(fires("<link rel=\"stylesheet\" href=\"/style.css\"/>", "sec/require-sri") == false)
     assert(fires("<link rel=\"icon\" href=\"https://cdn.test/a.png\"/>", "sec/require-sri") == false)
     assert(fires("<script :src=\"url\"></script>", "sec/require-sri") == false)
+}
+
+test "a misspelled aria attribute fires; the vocabulary and bound values do not" {
+    assert(fires("<div arial-label=\"menu\">x</div>", "a11y/aria-name"))
+    assert(fires("<div aria-lable=\"menu\">x</div>", "a11y/aria-name"))
+    assert(fires("<div aria-label=\"menu\">x</div>", "a11y/aria-name") == false)
+    // The name matters on a binding too — the value is dynamic, the typo is not.
+    assert(fires("<div :aria-lable=\"m\">x</div>", "a11y/aria-name"))
+    assert(fires("<div :aria-hidden=\"h\">x</div>", "a11y/aria-name") == false)
+    // Deprecated ARIA names are still names, not typos.
+    assert(fires("<div aria-grabbed=\"true\">x</div>", "a11y/aria-name") == false)
+}
+
+test "a removed attribute fires on its element and nowhere else" {
+    assert(fires("<td align=\"left\">x</td>", "html/deprecated-attr"))
+    assert(fires("<table cellpadding=\"0\"><tbody><tr><td>x</td></tr></tbody></table>", "html/deprecated-attr"))
+    assert(fires("<span align=\"left\">x</span>", "html/deprecated-attr") == false)
+    assert(fires("<td>x</td>", "html/deprecated-attr") == false)
+    // `scope` is removed on `<td>` and REQUIRED on `<th>` — the pair is exact.
+    assert(fires("<td scope=\"row\">x</td>", "html/deprecated-attr"))
+    assert(fires("<th scope=\"row\">x</th>", "html/deprecated-attr") == false)
 }
 
 test "an unknown element fires; the vocabulary, custom elements and foreign content do not" {
