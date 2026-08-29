@@ -1434,6 +1434,15 @@ pub fn emit(program: &Program) -> Result<String, String> {
         "declare ptr @__vyrn_map_keys_copy_pack(ptr, i64, i64)
 ",
     );
+    // RFC-0114 §25: the leak-check predicate and the exit assertion.
+    out.push_str(
+        "declare i32 @__vyrn_leak_check_on()
+",
+    );
+    out.push_str(
+        "declare void @__vyrn_audit_exit()
+",
+    );
     // `extern` imports (RFC-0012): each body-less `extern fn` becomes a wasm
     // import from the fixed `vyrn` namespace. We emit ONE target-neutral IR —
     // a `declare` carrying the wasm-import attributes plus a real `call` at each
@@ -1995,6 +2004,63 @@ pub fn emit(program: &Program) -> Result<String, String> {
         fnval_registry = std::mem::take(&mut gi.fnval_variants);
         fnval_dispatch = std::mem::take(&mut gi.fnval_dispatch);
         stream_closers = std::mem::take(&mut gi.stream_closers);
+        // RFC-0114 §25's completeness half: `@__vyrn_globals_teardown` drops
+        // every module-state binding in REVERSE declaration order, with the
+        // same per-slot drops a block exit runs — so under VYRN_LEAK_CHECK
+        // the audit table must come back empty, and "births equal frees" is
+        // a checked exit condition instead of a peak-row approximation. It
+        // runs only in that mode; a normal exit still leaves module state to
+        // the operating system, exactly as before.
+        let mut gt = Gen::new(
+            &ret_types,
+            &param_types,
+            &param_caps,
+            &types,
+            &variants,
+            &str_globals,
+            &empty_subst,
+            &funcs,
+            &ownership,
+            holes_map,
+            owned_proto,
+            &regex_globals,
+            &program.impls,
+            &plan,
+            &program.type_decls,
+        );
+        gt.log_level = program.log_level;
+        gt.log_sink = program.log_sink.clone();
+        gt.protocol_methods = protocol_methods.clone();
+        gt.fnval_variants = std::mem::take(&mut fnval_registry);
+        gt.fnval_dispatch = std::mem::take(&mut fnval_dispatch);
+        gt.stream_closers = std::mem::take(&mut stream_closers);
+        for g in program.globals.iter().rev() {
+            let Some((sym, ty)) = globals_map.get(&g.name) else {
+                continue;
+            };
+            let Some(kind) = gt.rel_kind(ty) else {
+                continue;
+            };
+            gt.emit_drop(sym, &kind);
+        }
+        globals_init_ir.push_str("define internal void @__vyrn_globals_teardown() {\n");
+        globals_init_ir.push_str("entry:\n");
+        for a in &gt.allocas {
+            globals_init_ir.push_str(a);
+            globals_init_ir.push('\n');
+        }
+        for b in &gt.body {
+            globals_init_ir.push_str(b);
+            globals_init_ir.push('\n');
+        }
+        globals_init_ir.push_str("  ret void\n");
+        globals_init_ir.push_str("}\n\n");
+        let insts = std::mem::take(&mut gt.instantiations);
+        enqueue(&emitted, &mut queued, &mut queue, insts);
+        drain_ho(&mut gt, &mut out, &mut ho_queue, &mut lambda_emitted);
+        fnval_registry = std::mem::take(&mut gt.fnval_variants);
+        fnval_dispatch = std::mem::take(&mut gt.fnval_dispatch);
+        stream_closers = std::mem::take(&mut gt.stream_closers);
     }
 
     // RFC-0114 §26's finish check: the SOURCE names of every function whose
@@ -2327,6 +2393,18 @@ pub fn emit(program: &Program) -> Result<String, String> {
         out.push_str("  br label %log.done\n");
         out.push_str("log.done:\n");
     }
+    // RFC-0114 §25: under VYRN_LEAK_CHECK, drop module state and assert
+    // the audit table is empty — the completeness half, as an exit condition.
+    out.push_str("  %lk = call i32 @__vyrn_leak_check_on()\n");
+    out.push_str("  %lkon = icmp ne i32 %lk, 0\n");
+    out.push_str("  br i1 %lkon, label %leak.check, label %leak.done\n");
+    out.push_str("leak.check:\n");
+    if !program.globals.is_empty() {
+        out.push_str("  call void @__vyrn_globals_teardown()\n");
+    }
+    out.push_str("  call void @__vyrn_audit_exit()\n");
+    out.push_str("  br label %leak.done\n");
+    out.push_str("leak.done:\n");
     out.push_str("  %m = and i64 %r, 255\n");
     out.push_str("  %c = trunc i64 %m to i32\n");
     out.push_str("  ret i32 %c\n");

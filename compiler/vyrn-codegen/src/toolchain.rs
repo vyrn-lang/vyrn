@@ -125,10 +125,22 @@ static volatile int vyrn_audit_lock = 0;
 static void vyrn_audit_acquire(void) { while (__sync_lock_test_and_set(&vyrn_audit_lock, 1)) {} }
 static void vyrn_audit_release(void) { __sync_lock_release(&vyrn_audit_lock); }
 #endif
+static int vyrn_leak_state = -1;
+/* RFC-0114 SS25 (the completeness half): leak-check mode arms the audit
+   table, runs the module-state teardown after `main`, and then asserts the
+   table is EMPTY - births equal frees, per program, as a checked theorem
+   instead of a peak-row approximation. */
+int __vyrn_leak_check_on(void) {
+    if (vyrn_leak_state < 0) {
+        const char* e = getenv("VYRN_LEAK_CHECK");
+        vyrn_leak_state = (e && e[0] && e[0] != '0') ? 1 : 0;
+    }
+    return vyrn_leak_state;
+}
 static int vyrn_audit_on(void) {
     if (vyrn_audit_state < 0) {
         const char* e = getenv("VYRN_FREE_AUDIT");
-        vyrn_audit_state = (e && e[0] && e[0] != '0') ? 1 : 0;
+        vyrn_audit_state = ((e && e[0] && e[0] != '0') || __vyrn_leak_check_on()) ? 1 : 0;
     }
     return vyrn_audit_state;
 }
@@ -198,6 +210,29 @@ void __vyrn_free(void* p) {
         memset(p, 0xDD, (size_t)n);
     }
     free(p);
+}
+/* The completeness assertion (RFC-0114 SS25): after the teardown, anything
+   still in the table was allocated and never freed by any path - a leak,
+   reported with its own exit code so a harness cannot mistake it for a
+   double free. Literal provenance needs no care here: a static String
+   carries cap == -1 and `__vyrn_str_free` already skips it, so the typed
+   teardown frees exactly what was malloc'd. */
+void __vyrn_audit_exit(void) {
+    if (!__vyrn_leak_check_on()) return;
+    unsigned long long live = 0, bytes = 0;
+    size_t i;
+    vyrn_audit_acquire();
+    for (i = 0; i < vyrn_audit_cap; i++) {
+        if (vyrn_audit_tab[i].p) {
+            live++;
+            bytes += vyrn_audit_tab[i].n;
+        }
+    }
+    vyrn_audit_release();
+    if (live > 0) {
+        fprintf(stderr, "free audit: %llu block(s), %llu bytes, never freed\n", live, bytes);
+        exit(135);
+    }
 }
 void* __vyrn_malloc(unsigned long long n) {
     if (n > (unsigned long long)(size_t)-1) {
