@@ -3395,8 +3395,17 @@ impl<'p> Fn_<'_, 'p> {
                             // §26's finish check knows the site was
                             // considered, not walked past.
                             let _ = self.cx.plan.store_owned_at(s as *const Stmt as usize);
+                            // A CALL-producer part's `Released` row is teed by
+                            // `expr` into `arg_frees`, and this fast path was
+                            // the one consumer with no drain — the textual
+                            // backend's twin has the same note (exit-residue
+                            // round five, herofield's per-glyph temporary).
+                            let mark = self.arg_frees.len();
                             for p in parts {
                                 self.append_once(m, b, place, own, p)?;
+                            }
+                            for (l, t2) in self.arg_frees.split_off(mark) {
+                                self.free_arg_temp(m, b, l, &t2, *line)?;
                             }
                             return Ok(());
                         }
