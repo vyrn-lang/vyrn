@@ -4148,10 +4148,31 @@ impl<'p> Fn_<'_, 'p> {
         want: &Type,
     ) -> Result<(), String> {
         self.expect.push(want.clone());
+        let mark = self.arg_frees.len();
         let got = self.expr(m, b, e);
         self.expect.pop();
         let got = got?;
-        self.coerce(m, b, Some(e), &got, want, Expr::line(e))
+        self.coerce(m, b, Some(e), &got, want, Expr::line(e))?;
+        // RFC-0114 §25 round three: a `[..]` argument's recorded temporary
+        // (`@heapify`) is teed by `expr` on the FIXED value, before the
+        // conversion above builds the heap triple the record is actually
+        // about. Freeing the fixed one walks frame memory whose element
+        // pointers the triple now shares — so the pending free is retargeted
+        // at the triple, exactly as the textual backend's call loops do.
+        if self.arg_frees.len() > mark {
+            let want_r = self.cx.resolve(want);
+            if matches!(self.cx.resolve(&got), Type::ArrayN(..))
+                && matches!(want_r, Type::Array(_))
+                && self.arg_frees.last().is_some_and(|(_, t)| *t == got)
+            {
+                let l = b.local(ValType::I32);
+                b.ins(&Instruction::LocalTee(l));
+                if let Some(last) = self.arg_frees.last_mut() {
+                    *last = (l, want_r);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Reconcile the value on the stack, of type `from`, into `to`.

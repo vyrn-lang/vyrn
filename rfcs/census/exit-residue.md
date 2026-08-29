@@ -110,6 +110,23 @@ nothing. En route the finish check caught the NATIVE `fromJson` rewrite
 embedding a clone of its payload argument — the direct backend's disease,
 cured with the same scoped alias.
 
+The class then earned two narrowings, both taught by the wasm generator
+host (the one engine that RUNS `std/vyx`, whose CI job trapped where
+every native gate stayed green). A `consume` position stands the record
+down — the callee owns the coerced triple, and a caller-side free is a
+second one (`vyxBuildModule(consume Array<VyxComp>)`). And the row is
+recorded only for an element type that owns NO heap: the triple's buffer
+is always freshly the caller's, but its elements are word copies of
+whatever the literal held, and a binding the literal did not take
+(`vyxUsesChildren([root])`, where a self-referring `VyxNode` stands down
+from `owns_heap`, so `root` outlives the call into `VyxComp.root`) still
+owns that heap — the deep free corrupted it and `vyxStrLit` trapped
+three frames later. Heap-owning element types are a recorded leak of
+this table, not a free. The direct backend's `expr_as` also retargets
+the pending free at the coerced triple now, as the textual loops do —
+the buffer free must land on the triple, not the frame-allocated fixed
+value the tee saw.
+
 Second, **the capture block**: capture is a take (`Gone::Captured` stops
 the binding's own release), so a closure's block OWNS every heap value it
 snapshot — and both the copy and the release were shallow. A copied fn

@@ -2631,13 +2631,32 @@ impl MoveCheck<'_> {
             // the literal's own type deliberately answers nothing (see
             // `Declared::type_of`'s array-literal note).
             Expr::ArrayLit { .. } => {
+                // A `consume` position stands the record down, exactly as the
+                // call walk stands down for every other temporary: the callee
+                // owns the coerced triple and frees it, and a caller-side row
+                // here is a second free (the shape `vyxBuildModule(consume
+                // Array<VyxComp>)` trapped the wasm generator host on).
+                if self.caps.get(callee).and_then(|c| c.get(ix)) == Some(&Capability::Consume)
+                    || self.sinks(callee, ix)
+                {
+                    return;
+                }
                 let Some(pty) = self.decl.param_ty(callee, ix) else {
                     return;
                 };
-                if !matches!(
-                    crate::types::resolve(pty, self.decl.decls()),
-                    Type::Array(_)
-                ) {
+                let Type::Array(elem) = crate::types::resolve(pty, self.decl.decls()) else {
+                    return;
+                };
+                // Only an element type that owns no heap. The coerced triple's
+                // BUFFER is always freshly the caller's, but its elements are
+                // word copies of whatever the literal held — and a binding the
+                // literal did not take (`[root]` where `root`'s type stands
+                // down from `owns_heap`, as a self-referring `VyxNode` does)
+                // still owns that heap. A deep free here freed `root`'s
+                // attributes out from under the record that kept it, which the
+                // wasm generator host turned into a trap. Heap-owning element
+                // types stay a recorded leak (`rfcs/census/exit-residue.md`).
+                if self.decl.owns_heap(&elem) {
                     return;
                 }
                 let Some(kind) = self.decl.release_kind(pty) else {

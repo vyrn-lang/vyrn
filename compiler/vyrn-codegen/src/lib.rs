@@ -3789,15 +3789,7 @@ impl<'a> Gen<'a> {
                 self.emit(format!(
                     "{pay2} = call i64 @{FNVAL_COPY}(i64 {tag}, i64 {pay})"
                 ));
-                let a = self.fresh_tmp();
-                let b = self.fresh_tmp();
-                self.emit(format!(
-                    "{a} = insertvalue {{ i64, i64 }} undef, i64 {tag}, 0"
-                ));
-                self.emit(format!(
-                    "{b} = insertvalue {{ i64, i64 }} {a}, i64 {pay2}, 1"
-                ));
-                Ok(b)
+                Ok(self.fnval_aggregate_v(&tag, &pay2))
             }
             // Two parallel buffers. String keys are duplicated per entry; Int64
             // keys (RFC-0117) copy with the buffer, since the buffer holds the
@@ -3892,23 +3884,6 @@ impl<'a> Gen<'a> {
                 self.copy_sum(v, &[(Some("1"), vec![*ok]), (Some("0"), vec![*err])])
             }
             Type::Enum(vs) => self.copy_enum(v, &vs),
-            // A stored `fn` value (RFC-0037, Phase 10b): `{ tag, captures }`,
-            // and the copy is a fresh capture block. The block's SIZE is per
-            // tag, so the walk cannot be written here — it is one call to the
-            // derived copy, which switches on the tag the defunctionalizer
-            // chose. Shallow, like the release: two lambdas over one String
-            // build two blocks holding one pointer.
-            Type::Fn(..) => {
-                let tag = self.fresh_tmp();
-                let pay = self.fresh_tmp();
-                let np = self.fresh_tmp();
-                self.emit(format!("{tag} = extractvalue {{ i64, i64 }} {v}, 0"));
-                self.emit(format!("{pay} = extractvalue {{ i64, i64 }} {v}, 1"));
-                self.emit(format!(
-                    "{np} = call i64 @{FNVAL_COPY}(i64 {tag}, i64 {pay})"
-                ));
-                Ok(self.fnval_aggregate_v(&tag, &np))
-            }
             // A handle names something; copying it names the same thing. A
             // `Task<T>`/`lazy T` is a promise, which is the same shape.
             Type::Task(_) | Type::Lazy(_) => Ok(v.to_string()),
