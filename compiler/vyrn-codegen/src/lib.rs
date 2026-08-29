@@ -5238,6 +5238,7 @@ impl<'a> Gen<'a> {
                         // the site was considered, not walked past.
                         let _ = self.plan.store_owned_at(stmt as *const Stmt as usize);
                         self.expect.push(tty.clone());
+                        let mark = self.arg_frees.len();
                         let vals: Result<Vec<String>, String> = parts
                             .iter()
                             .map(|p| self.gen_expr(p).map(|(v, _)| v))
@@ -5251,6 +5252,17 @@ impl<'a> Gen<'a> {
                         for (p, v) in parts.iter().zip(vals?) {
                             self.emit_str_append(&slot, &v);
                             self.free_str_temp(p, &v);
+                        }
+                        // A CALL-producer part (`acc = acc + substring(..)`) is
+                        // the other half of the partition: its row is
+                        // `Released`, pushed by the `gen_expr` wrapper — and
+                        // this fast path was the one consumer with no drain, so
+                        // every render loop whose accumulator is returned
+                        // leaked one temporary per glyph (exit-residue round
+                        // five: herofield's 660, and the emit/render loops of
+                        // std/json and std/html behind it).
+                        for (v, ty) in self.arg_frees.split_off(mark) {
+                            self.free_arg_temp(&v, &ty);
                         }
                         return Ok(());
                     }

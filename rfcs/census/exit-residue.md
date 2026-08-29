@@ -187,6 +187,38 @@ piece` in the emit/render loops — one grow-buffer block per append
 spine, already listed under recorded conservatisms) and per-library
 shapes (`htmltree`/`herofield` moved nothing and are next).
 
+## Fifth triage: the fast path with no drain
+
+One hole, both backends, convicted by `herofield`'s 660 identical
+18-byte blocks — one per glyph cell. `acc = acc + f(..)` takes the
+in-place append fast path when `acc` is an append candidate, and a
+RETURNED accumulator is exactly that (a bare `return acc` does not ban;
+a `print(acc)` does, which is why every `main`-shaped probe came back
+clean and the class hid in functions). On that path the operand
+partition was half-plumbed: an `@str`/`@concat`/`+` part is
+`AlreadyFreed` and `free_str_temp` frees it, but a CALL-producer part
+(`substring(..)`, `emitString(..)`, `emit(..)`) is `Released` — its row
+pushed into `arg_frees` by the expression wrapper — and the fast path
+was the one consumer with no drain. The rows sat below every later
+mark, unreachable, until the function's clear. Both backends now drain
+their mark after the appends, exactly as `gen_binary`/`call` do.
+
+This was most of the render-loop residue: the emit loops of `std/json`
+(`out + emitString(f.key) + ":" + emit(f.value)`) and the render loops
+of `std/html` concatenate call results into a returned accumulator, per
+field, per node. Movement: herofield 667→7 blocks, htmltree 799→589,
+domdemo 970→472, graphql 2758→2275, jsonbytes 385→251, enumcodec
+175→133 — and the method note stands corrected: a probe that prints two
+lines hides the audit line from `tail -2` (stdout flushes after
+stderr), so every probe verdict is now read off the EXIT CODE.
+
+Tallies after round five: **clean 63, leaking 87, zero double-frees** —
+the example counts hold (each shrunken row still holds a remainder),
+but the block totals across the family dropped by roughly a third.
+What herofield still holds (7 blocks) is its outermost results and the
+float-bits appends; what the render family still holds is the decode
+scratch and per-library shapes, next in line.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach
