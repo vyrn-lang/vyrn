@@ -119,18 +119,27 @@ export fn sha1(data: Array<UInt8>) -> Array<UInt8> {
     msg.push(UInt8((bits >> 8) & 255))
     msg.push(UInt8(bits & 255))
 
+    // The message schedule, allocated ONCE and overwritten per block — a fresh
+    // eighty-word array per 64 bytes of input was the census's hash row 13,
+    // and every word is written before it is read, so one buffer serves.
+    let mut w: Array<UInt64> = []
+    w.reserve(80)
+    let mut z = 0
+    while z < 80 {
+        w.push(0)
+        z = z + 1
+    }
     let mut off = 0
     while off < msg.length {
-        // The message schedule: sixteen big-endian words, extended to eighty.
-        let mut w: Array<UInt64> = []
+        // Sixteen big-endian words, extended to eighty.
         let mut t = 0
         while t < 16 {
             let p = off + t * 4
-            w.push((UInt64(msg[p]) << 24) | (UInt64(msg[p + 1]) << 16) | (UInt64(msg[p + 2]) << 8) | UInt64(msg[p + 3]))
+            w[t] = (UInt64(msg[p]) << 24) | (UInt64(msg[p + 1]) << 16) | (UInt64(msg[p + 2]) << 8) | UInt64(msg[p + 3])
             t = t + 1
         }
         while t < 80 {
-            w.push(sha1Rotl1(w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16]))
+            w[t] = sha1Rotl1(w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16])
             t = t + 1
         }
 
