@@ -50,6 +50,31 @@ conservatisms, runtime machinery, and candidate real leaks.
   cleanest specimen: one tiny string, one missing release, invisible to
   every existing gate.
 
+## First triage (same day): one row closed a quarter of the table
+
+`intkeys`' 4-byte specimen led straight to a systemic finding: the
+prelude's seeded row for `bytes` claimed a VIEW — "a header over the
+String's OWN buffer" — and `lends` read the claim, so no `bytes` result
+was ever released. But every engine implements a COPY (the interpreter
+must: an `Rc<Vec<Val>>` cannot share a String's bytes, and
+`__vyrn_str_bytes_range` is a malloc and a byte loop in both compiled
+backends). Copy is the semantics; the row now says so (`prelude.rs`,
+body emptied, return type answered), the ownership machinery frees the
+result wherever it frees any fresh allocation, and the survey moved:
+**clean 54, leaking 100 → 77, with `numparse`'s 2.5 MB outlier gone
+entirely** (its bignum scratch was `bytes`-derived) and most remaining
+rows shrunk (`knucleotide` 406 → 129 blocks, `codecbytes` 79 → 38). A
+true zero-copy `bytes` is RFC-0109's stored-view question and would
+arrive through that door — a locator, not a reclassification.
+
+The triage also hardened the instrument itself: the teardown frees
+through the audit table's arbitration now (`__vyrn_teardown_begin`),
+because a global stored inside a `region` holds a block the arena
+already freed at the closing brace — dynamic provenance the old
+`place_owns` doc recorded as bluntness — and the strict double-free rule
+must not apply to the teardown's own walk. `regionescape` moved from a
+teardown double-free to an honest residue row.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach

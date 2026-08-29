@@ -39,7 +39,10 @@ fn maxDepth() -> Int64 {
 
 fn newP5(s: String) -> P5 {
     let ba = bytes(s)
-    return P5 { src: ba, n: ba.length, pos: 0, line: 1, col: 1 }
+    // The length reads BEFORE the literal — `src: ba` moves the owned copy
+    // `bytes` returns (jsonread's `newParser` carries the same note).
+    let n = ba.length
+    return P5 { src: ba, n: n, pos: 0, line: 1, col: 1 }
 }
 
 /// The current byte, or `-1` at end of input.

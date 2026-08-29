@@ -1443,6 +1443,10 @@ pub fn emit(program: &Program) -> Result<String, String> {
         "declare void @__vyrn_audit_exit()
 ",
     );
+    out.push_str(
+        "declare void @__vyrn_teardown_begin()
+",
+    );
     // `extern` imports (RFC-0012): each body-less `extern fn` becomes a wasm
     // import from the fixed `vyrn` namespace. We emit ONE target-neutral IR —
     // a `declare` carrying the wasm-import attributes plus a real `call` at each
@@ -2399,6 +2403,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("  %lkon = icmp ne i32 %lk, 0\n");
     out.push_str("  br i1 %lkon, label %leak.check, label %leak.done\n");
     out.push_str("leak.check:\n");
+    out.push_str("  call void @__vyrn_teardown_begin()\n");
     if !program.globals.is_empty() {
         out.push_str("  call void @__vyrn_globals_teardown()\n");
     }
