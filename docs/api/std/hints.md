@@ -68,12 +68,13 @@ is actually for.
 ## HintPolicy
 
 ```vyrn
-type HintPolicy = { codes: Array<String>, levels: Array<String> }
+type HintPolicy = { codes: Array<String>, levels: Array<String>, strict: Bool }
 ```
 
 Per-code severity overrides, as parallel arrays (a code and its level word).
 Built by [`policyOf`]; [`noPolicy`] is the empty one, under which every rule
-runs at the severity its author chose.
+runs at the severity its author chose. `strict` ignores waivers — never a
+caller-facing mode, only the second pass [`unusedWaivers`] audits against.
 
 ## noPolicy
 
@@ -82,6 +83,15 @@ fn noPolicy() -> HintPolicy
 ```
 
 The empty policy: no override, every rule at its default severity.
+
+## strictly
+
+```vyrn
+fn strictly(p: HintPolicy) -> HintPolicy
+```
+
+`p`, with waivers ignored — what a rule WOULD report. The audit half of
+the waiver contract: a marker is only as honest as the report it edits.
 
 ## policyOf
 
@@ -127,3 +137,20 @@ fn waived(src: String, line: Int64, code: String) -> Bool
 
 Whether `code` is waived at `line` of `src` — a `vyrn-ignore <code>` marker
 on that line or on the one above it.
+
+## unusedWaivers
+
+```vyrn
+fn unusedWaivers(p: HintPolicy, src: String, file: String, raw: String) -> String
+```
+
+Every `vyrn-ignore` marker in `src` that waived NOTHING (`html-validate`'s
+`no-unused-disable`, `hint/unused-waiver` here). `raw` is the same report
+built under [`strictly`] — what the rules WOULD have said with every
+waiver ignored — and a marker at line L is USED when a raw report of its
+code sits at L or L + 1, the two lines [`waived`] covers. A marker that
+waives nothing usually means the finding it apologized for was fixed;
+the marker now misleads the reader about the line below it.
+
+Reported through [`hint`] with the CALLER's policy, so the audit rule is
+configured and waived like any other — a marker may vouch for a marker.

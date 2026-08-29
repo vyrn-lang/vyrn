@@ -87,7 +87,7 @@ fn std_hints_unit_tests_run_green() {
 fn std_vyx_hints_unit_tests_run_green() {
     // One row per rule: the fixture that fires it, and the near miss that must
     // not. The near miss is the half that catches an over-eager rule.
-    unit_tests_green("std/vyx-hints.vyrn", "26 passed, 0 failed");
+    unit_tests_green("std/vyx-hints.vyrn", "27 passed, 0 failed");
 }
 
 // ---- `.vyx` rules, end to end ----------------------------------------------

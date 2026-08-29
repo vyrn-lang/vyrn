@@ -1346,8 +1346,18 @@ fn gate() {
     // The ceiling is just above the highest of the runs measured: a backend
     // that goes back to expanding for itself, or to cloning a callee before it
     // lowers it, fails here.
+    //
+    // 2026-08-29: the ceiling moved 1,200 -> 1,400, and the reason is the
+    // CORPUS, not an engine. The projection arc (RFC-0120..0122) and the
+    // census closures added five examples and three std rule sets in one day,
+    // and the count follows the code the corpus links — measured 1,208 on the
+    // grown corpus, with the two zero-gates below (the actual clone
+    // detectors) still at zero. The count is also address-collision noisy by
+    // construction (the spread note above), which is what a same-tree Windows
+    // CI failure against a green local run turned out to be: a different
+    // allocator's collision pattern over a count already near the ceiling.
     assert!(
-        t.synthesized < 1_200,
+        t.synthesized < 1_400,
         "{} backend answers are about AST no instantiation of the program holds.          RFC-0101 M6 brought that to 1,052 by deleting the lambda and predicate          clones; a number near 2,000 means one of them is back, near 3,300 that a          `place atSet` is expanded per engine again, and near 4,600 that the read          half is too",
         t.synthesized
     );

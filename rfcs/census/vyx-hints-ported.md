@@ -165,11 +165,23 @@ Same day, two more rows — the attribute vocabularies:
 The `td scope` corner is its own test: removed on `<td>` by the pair table,
 required on `<th>` by `a11y/th-scope` — exact on both sides.
 
+And the waiver audit — `no-unused-disable`, `hint/unused-waiver` here, the
+one rule that needs no table at all because its subject is the checker's own
+markers. A `vyrn-ignore` that waives nothing usually means the finding it
+apologized for was fixed, and the marker now misleads the reader about the
+line below it. The mechanics live in `std/hints`, where the waivers do: the
+policy grows a `strict` flag (`strictly(p)`) under which `hint` ignores
+waivers, and a template that carries a marker — only such a template — is
+walked a second time to learn what the rules WOULD have said; a marker is
+used when a strict report of its code sits on its line or the one below,
+the two lines a waiver covers. The audit reports through `hint` with the
+caller's own policy, so it is configured and waived like any rule — a
+marker may vouch for a marker, and the test pins that case.
+
 Still open from table two: the full per-element attribute tables
 (`no-unknown-attributes` — `html5.ts` lists constrained attributes, not the
 complete allowed set, so that rule needs a source this census has not read),
-the entity table (`unrecognized-char-ref`), and
-`no-raw-characters`/`no-unused-disable`.
+the entity table (`unrecognized-char-ref`), and `no-raw-characters`.
 
 ## Pages changed
 
