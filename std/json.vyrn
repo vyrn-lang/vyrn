@@ -421,67 +421,92 @@ export fn emit(j: Json) -> String {
     }
 }
 
-/// `n` copies of a single space.
+/// `n` copies of a single space, built as the bytes they are. The string
+/// append this replaces paid concat machinery per character, per node, per
+/// level — the census's json row 10, "at least cubic in nesting depth". A
+/// pretty output CONTAINS its pads, so quadratic-in-depth total work is the
+/// floor; this reaches it, with byte-push constants.
 fn spaces(n: Int64) -> String {
-    let mut out = ""
+    let mut b: Array<UInt8> = []
+    b.reserve(n)
     let mut i = 0
     while i < n {
-        out = out + " "
+        b.push(' ')
         i = i + 1
     }
-    return out
+    return stringFromBytes(b) ?? panic("spaces: ASCII spaces are UTF-8")
 }
 
-/// Pretty-print a non-empty array at `depth`.
-fn prettyArr(items: Array<Json>, indent: Int64, depth: Int64) -> String {
-    let pad = spaces((depth + 1) * indent)
-    let close = spaces(depth * indent)
-    let mut out = "[\n"
-    let mut i = 0
-    for it in items {
-        if i > 0 {
-            out = out + ",\n"
+/// The pretty printer's ONE accumulator (RFC-0029 module state). Returning
+/// strings level by level copied every child's whole output into its parent
+/// — O(bytes × depth) for O(bytes) of output, the census's json row 10 —
+/// and a `modify` parameter is call-by-value-result, so threading it pays
+/// the same copies at every call boundary. Module state is the accumulator
+/// the append fast path serves; `emitPretty` copies the result out once and
+/// empties the buffer behind it.
+let mut prettyOut = ""
+
+fn prettyIntoAt(j: Json, indent: Int64, depth: Int64) {
+    match j {
+        JNull => {
+            prettyOut = prettyOut + "null"
         }
-        out = out + pad + emitPrettyAt(it, indent, depth + 1)
-        i = i + 1
-    }
-    return out + "\n" + close + "]"
-}
-
-/// Pretty-print a non-empty object at `depth`.
-fn prettyObj(fields: Array<JsonField>, indent: Int64, depth: Int64) -> String {
-    let pad = spaces((depth + 1) * indent)
-    let close = spaces(depth * indent)
-    let mut out = "{\n"
-    let mut i = 0
-    for f in fields {
-        if i > 0 {
-            out = out + ",\n"
+        JBool(b) => {
+            prettyOut = prettyOut + (if b { "true" } else { "false" })
         }
-        out = out + pad + emitString(f.key) + ": " + emitPrettyAt(f.value, indent, depth + 1)
-        i = i + 1
-    }
-    return out + "\n" + close + "}"
-}
-
-/// The pretty printer, threading the current indentation `depth` (in `indent`-wide
-/// steps). Compact for empty arrays/objects (`[]`/`{}`); a colon then a space
-/// separates a key from its value.
-fn emitPrettyAt(j: Json, indent: Int64, depth: Int64) -> String {
-    return match j {
-        JNull => "null",
-        JBool(b) => if b { "true" } else { "false" },
-        JNum(raw) => emitNumber(raw),
-        JStr(s) => emitString(s),
-        JArr(items) => if items.length == 0 { "[]" } else { prettyArr(items, indent, depth) },
-        JObj(fields) => if fields.length == 0 { "{}" } else { prettyObj(fields, indent, depth) },
+        JNum(raw) => {
+            prettyOut = prettyOut + emitNumber(raw)
+        }
+        JStr(s) => {
+            prettyOut = prettyOut + emitString(s)
+        }
+        JArr(items) => {
+            if items.length == 0 {
+                prettyOut = prettyOut + "[]"
+            } else {
+                let pad = spaces((depth + 1) * indent)
+                prettyOut = prettyOut + "[\n"
+                let mut i = 0
+                for it in items {
+                    if i > 0 {
+                        prettyOut = prettyOut + ",\n"
+                    }
+                    prettyOut = prettyOut + pad
+                    prettyIntoAt(it, indent, depth + 1)
+                    i = i + 1
+                }
+                prettyOut = prettyOut + "\n" + spaces(depth * indent) + "]"
+            }
+        }
+        JObj(fields) => {
+            if fields.length == 0 {
+                prettyOut = prettyOut + "{}"
+            } else {
+                let pad = spaces((depth + 1) * indent)
+                prettyOut = prettyOut + "{\n"
+                let mut i = 0
+                for f in fields {
+                    if i > 0 {
+                        prettyOut = prettyOut + ",\n"
+                    }
+                    prettyOut = prettyOut + pad + emitString(f.key) + ": "
+                    prettyIntoAt(f.value, indent, depth + 1)
+                    i = i + 1
+                }
+                prettyOut = prettyOut + "\n" + spaces(depth * indent) + "}"
+            }
+        }
     }
 }
 
 /// Emit `j` as indented JSON, `indent` spaces per nesting level, field order as
 /// stored. Empty arrays/objects stay compact (`[]`/`{}`).
 export fn emitPretty(j: Json, indent: Int64) -> String {
-    return emitPrettyAt(j, indent, 0)
+    prettyOut = ""
+    prettyIntoAt(j, indent, 0)
+    let out = prettyOut.copy()
+    prettyOut = ""
+    return out
 }
 
 // ===========================================================================

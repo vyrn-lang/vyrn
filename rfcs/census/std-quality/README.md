@@ -463,13 +463,13 @@ a list that stops being re-read starts lying.
 | 4 | hints | PARTIAL | The double walk is gone (one walk carrying the previous line's bounds); the per-hint restart from byte 0 remains, late-line ~200x early-line. |
 | 5 | html | LIVE | Diff of two identical keyed trees still costs 6x a build (213 µs vs 35 µs); copies per level, partly an RFC-0109 case. |
 | 6 | http | LIVE | Every policy-free 200 body still `parseJson`ed, ~2.9 µs at 4 KiB, up to three parses with stamps. |
-| 7 | graphql | LIVE | `gqlHas` sibling scans still O(k²): 239 µs at 512 siblings. The hashed Map exists now (RFC-0116) — a fix is available. |
+| 7 | graphql | CLOSED (2026-08-29) | The duplicate-argument and duplicate-response-key accumulators are `Map<String, Bool>` now: 325.55 µs → 96.59 µs on a 512-sibling parse, messages unchanged. `gqlHas` survives only on the generator's cold import-dedup path. |
 | 8 | vyx-hints | STALE | The `out = out + ...` pattern remains but the mechanism died: string append-assign is amortized-linear now; a fixed-total-bytes probe ran flat. |
 | 9 | i18n | PARTIAL | "Hard-fails at 200 keys" is stale (200 completes; the budget cliff moved to ~400); `keyCollisionErrors` is still the O(K²·L) pair loop and generation is still superlinear. |
-| 10 | json | LIVE | `emitPretty` still rebuilds the pad per node per level: depth 192 = 10.35 ms vs 42 µs compact, ×16 per depth doubling. |
+| 10 | json | CLOSED (2026-08-29) | Two mechanisms, not one: the pads (now built as bytes) and — the dominant term — the recursion returning strings, every child's output copied into its parent per level. The writer accumulates into module state (a `modify` parameter is call-by-value-result, so threading one pays the same copies): depth 192 = 596.65 µs, from 10.35 ms, output byte-identical. |
 | 11 | strings | STALE | `split` hoists the skip table ("ONE TABLE FOR EVERY MATCH"); measured at or under the census's own no-copy baseline. |
 | 12 | graphql | LIVE | Projection still deep-copies the path per level: O(d²) reproduces (33.67 µs at d16, 444.4 µs at d64). |
-| 13 | hash | LIVE | `sha1` still allocates the 80-word schedule per block; gap narrowed (3.6x fnv1a, was 5.4x) but the allocation stands. |
+| 13 | hash | CLOSED (2026-08-29) | The schedule is allocated once and overwritten per block — every word is written before it is read, so one buffer serves: 336.60 µs → 169.08 µs on 64 KiB, digest unchanged. |
 | 14 | arrays | LIVE | `sortBy` is still insertion sort with the key called twice per comparison; `sortWith` landed BESIDE it, not instead of it. Census numbers reproduce. |
 | 15 | rpc | STALE | The concat emitter is linear now: 16x the appends costs 11.4x the time. The census's 320x was the old quadratic append. |
 | 16 | strpred | STALE | The predicates read the `byteLength` field; the module doc records the fix and keeps the census's numbers as history. |
