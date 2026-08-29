@@ -5695,7 +5695,10 @@ mod tests {
     /// `views`, or the passes are back to knowing nothing.
     #[test]
     fn the_passes_read_the_seeded_capabilities() {
-        assert!(views(crate::project::AT) && views("bytes"));
+        assert!(views(crate::project::AT));
+        // `bytes` left the views set when the exit-residue census caught its
+        // row lying: every engine copies, so the result is owned.
+        assert!(!views("bytes"), "a copy is not a view");
         assert!(!views("stringFromBytes"), "its inverse allocates");
 
         let p = crate::parser::parse(crate::lexer::lex("fn main() -> Int64 { return 0 }").unwrap())

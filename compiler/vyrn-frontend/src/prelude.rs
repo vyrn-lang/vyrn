@@ -208,17 +208,21 @@ fn rows() -> Vec<Function> {
             Unit,
             &["self", "i"],
         ),
-        // ---- the representation views (RFC-0078 M4a) ------------------------
-        // `bytes` is the one all four runtime modules stand on: the `Array<UInt8>`
-        // it hands back is a header over the String's OWN buffer, so a binding to
-        // it owns nothing and nothing may release it. The body says exactly that —
-        // the result is the place at offset 0 of `s` — which is the sentence
-        // `place at` writes for `a[i]`, and the declared return type is inert for
-        // the reason it is inert there.
-        // One row for both arities: the two offsets are plain `Int64`s and
-        // carry no ownership, so the borrow view is the same either way
-        // (RFC-0113).
-        row("bytes", &[], &[("s", Read, Str)], u8s(), &["s", "0"]),
+        // `bytes` COPIES, and this row saying otherwise was a leak per call
+        // (RFC-0114 §25's exit-residue census, first triage, 2026-08-29).
+        // The row's old body claimed a view — "a header over the String's OWN
+        // buffer" — and `lends` read that claim, so no binding to a `bytes`
+        // result was ever released. But every engine implements a copy: the
+        // interpreter must (an `Rc<Vec<Val>>` cannot share a String's bytes),
+        // and `__vyrn_str_bytes_range` is a malloc and a byte loop in both
+        // compiled backends. Copy is therefore the SEMANTICS, the result is
+        // owned like any fresh allocation, and the ownership machinery frees
+        // it wherever it frees one. A true zero-copy view is exactly
+        // RFC-0109's stored-view question, and would arrive through that
+        // door — a locator, not a reclassification.
+        // One row for both arities (RFC-0113): the offsets are plain
+        // `Int64`s and change nothing about ownership.
+        row("bytes", &[], &[("s", Read, Str)], u8s(), &[]),
         // Its inverse ALLOCATES, so it is not a view. The two sit side by side on
         // purpose: the old list held one and not the other, and nothing in either
         // name says which.
@@ -679,15 +683,18 @@ mod tests {
         }
     }
 
-    /// Three rows lend, and no fourth may start to by accident.
+    /// Two rows lend, and no third may start to by accident. `bytes` was
+    /// the third until the exit-residue census caught the row lying: every
+    /// engine copies, so the result is owned and released like any fresh
+    /// allocation.
     #[test]
-    fn exactly_three_rows_are_views() {
+    fn exactly_two_rows_are_views() {
         let views: Vec<&str> = all()
             .iter()
             .map(|f| f.name.as_str())
             .filter(|n| lends(n))
             .collect();
-        assert_eq!(views, vec!["at", "atSet", "bytes"]);
+        assert_eq!(views, vec!["at", "atSet"]);
         assert!(
             lends(crate::project::AT),
             "the call site's name reaches `at`"
@@ -713,7 +720,9 @@ mod tests {
         assert_eq!(of("@push"), "Array<T>");
         // A lending row cannot name its result, and a bare type parameter names
         // a type the program never wrote.
-        for held in ["at", "atSet", "bytes", "blackBox", "@swapRemove", "@join"] {
+        // `bytes` answers now — a copy names its result like any allocator.
+        assert_eq!(of("bytes"), "Array<UInt8>");
+        for held in ["at", "atSet", "blackBox", "@swapRemove", "@join"] {
             assert!(
                 !rets.iter().any(|(k, _)| *k == held),
                 "`{held}` declares an inert return type and may not answer for a call"

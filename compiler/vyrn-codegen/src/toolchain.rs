@@ -197,13 +197,24 @@ static void vyrn_audit_fail(void) {
     fputs("free audit: double or foreign free\n", stderr);
     exit(134);
 }
+/* Set once, by the entry, before the leak-check teardown runs. Inside the
+   teardown a pointer's provenance is dynamic - a global stored inside a
+   `region` holds a block the arena already freed at the closing brace (the
+   bluntness `place_owns`'s old doc recorded) - so the table arbitrates: a
+   teardown free of a block the program no longer owns is a no-op, not a
+   double-free failure. Outside the teardown the strict rule stands. */
+static int vyrn_teardown = 0;
+void __vyrn_teardown_begin(void) { vyrn_teardown = 1; }
 void __vyrn_free(void* p) {
     if (p == NULL) return;
     if (vyrn_audit_on()) {
         vyrn_audit_acquire();
         unsigned long long n = vyrn_audit_remove(p);
         vyrn_audit_release();
-        if (n == (unsigned long long)-1) vyrn_audit_fail();
+        if (n == (unsigned long long)-1) {
+            if (vyrn_teardown) return;
+            vyrn_audit_fail();
+        }
         /* Poison before the block goes back: a dangling read now yields 0xDD
            bytes instead of stale-but-plausible data, so a use-after-free
            becomes a byte diff parity can see rather than a silent maybe. */
