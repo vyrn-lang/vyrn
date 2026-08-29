@@ -2154,11 +2154,10 @@ impl<'a> Checker<'a> {
     /// element. `None` is "some engine cannot", and the refusal above says so.
     fn chain_ty(&self, e: &Expr, scope: &Scope) -> Option<Type> {
         match e {
-            Expr::Var { name, .. } => scope
-                .iter()
-                .rev()
-                .find_map(|f| f.get(name))
-                .map(|b| b.ty.clone()),
+            // The full resolver, module-state fall-through included: a chain
+            // rooted in a global is as answerable as one rooted in a local
+            // (the engines' probes read global types too).
+            Expr::Var { name, .. } => self.lookup(scope, name).map(|b| b.ty),
             Expr::Call { name, args, .. } if !args.is_empty() => {
                 let m = if name == crate::project::AT {
                     "at"

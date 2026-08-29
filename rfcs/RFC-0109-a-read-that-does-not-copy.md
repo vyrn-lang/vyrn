@@ -1,11 +1,13 @@
 # RFC-0109 — A Read That Does Not Copy
 
-- **Status:** **Draft. The problem is measured and RE-measured; three of the
-  four candidate designs are eliminated; the remaining one is not chosen.** This
-  document exists because the same gap was found three times, by three methods
-  that did not see each other's results. It states what is missing, what it
-  costs, and what the candidate designs would each cost. It chooses none of
-  them.
+- **Status:** **Decided (2026-08-29): the stored view is a locator, not a
+  pointer** — see "The decision" at the end. The trilemma there proves no
+  freer design exists; the projection arc (RFC-0120..0123) already built the
+  non-stored half; the stored half is source-plus-locator (a range, a path,
+  a handle), which adds no heap edge and therefore no proof obligation. A
+  dedicated `Range` type lands with its first payer; nothing ships today,
+  and the re-measurement below is why that is the strong form of "free"
+  rather than an evasion.
 
 ## The gap in one sentence
 
@@ -188,7 +190,7 @@ That second-type question is the real work, and it is a language design decision
 rather than an implementation one. It is still the owner's.
 
 
-## The question this RFC does not answer
+## The question this RFC did not answer, answered
 
 Whether a view can be stored. The ten modules mostly want to *keep* a view — a
 parser holding a window into its source, a schema holding a name out of a
@@ -196,8 +198,62 @@ document. A view that cannot be stored solves the hot loop and not the library.
 A view that can be stored needs the move checker to reason about lifetimes it
 does not reason about today.
 
-That is the decision, and it belongs to the repository owner. Everything above
-is the evidence for making it.
+## The decision (2026-08-29): the trilemma, and the branch this language took twice already
+
+Let `V` be a storable value granting O(1), copy-free access into a buffer
+`B`. Soundness means `B` is live at every USE of `V`. There are exactly
+three ways to have that, and the list is exhaustive because a stored `V`
+either carries proof, carries ownership, or carries neither — and then the
+use must check:
+
+1. **Carry proof** — lifetime or region variables in the type system.
+   Sound, zero runtime, and the annotations infect every signature a view
+   passes through. Rice's theorem closes the annotation-free version:
+   whether an arbitrary stored value outlives an arbitrary source is a
+   semantic property no analysis decides in general, which is the same
+   wall RFC-0120's partition argument hit from the other side.
+2. **Carry ownership** — row C's refcounted slice, or a view that consumes
+   its source. Runtime cost or exclusivity, plus the second-representation
+   question this document already priced.
+3. **Check at the use** — `V` is a LOCATOR (an index with extent), and the
+   read validates it. Dangling degrades from undefined behaviour to a
+   CHECKED outcome: a canonical trap or an honest `None`.
+
+This language chose branch 3 twice before this document existed: every
+`a[i]` is bounds-checked with a canonical trap, and `std/slots`' `Handle`
+is a storable generational locator whose read answers staleness with a trap
+or an `Option` (RFC-0122 priced the checked read at ~3 ns). The decision is
+to name that choice rather than add a fourth mechanism: **a stored view is
+`(source, locator)` — a byte range into a `String`/`Array`, a path into a
+tree, a handle into a container — and the READ is a projection.**
+
+Why this is "proven" in the strict sense: a locator is plain data and
+creates NO edge into the heap, so the Heap Forest Theorem
+(rfcs/proofs/release-algorithm.md, Part V) — the invariant every release
+theorem stands on — is untouched. The design's proof obligation is empty.
+The staleness residue is the bounds/generation check's job, already
+canonical, already paid. Constraint 4 holds exactly: a program that never
+slices sees no representation change and no new checks.
+
+**The re-measurement that sized the remaining work (2026-08-29, at the
+RFC-0123 head).** The projection arc landed after this document's numbers:
+`j.field(k)` / `j[i]` read at their access sites (RFC-0120..0122), and
+chains dispatch (RFC-0123). The census's headline copy — a 4096-element
+subtree escaping `fieldAt` by value — re-measures at 168.7 µs; the same
+subtree read through the chain is **3 ns**, and walking all 4,096 elements
+through chains totals 4.6 µs — a thirty-seventh of ONE escape-copy. The
+hot-loop half of this RFC's gap is closed by machinery that shipped for
+other reasons, and the stored half already has its locator forms:
+`bytes`' range (RFC-0113: 57.5 → 9.2 per cent of the site build),
+`indexPath` (~106 ns), `Handle`. **So nothing ships today.** A dedicated
+`Range` type with range projections is the recorded next step, and it
+lands when a payer turns up holding `(source, start, len)` triples often
+enough to hurt — the RFC-0123 M4 bar, applied here.
+
+**The reopen condition, stated so it can fire:** a payer that needs a
+SELF-CONTAINED stored view — one that travels without its source. The
+trilemma is the proof that no free version of that exists; whoever reopens
+this chooses branch 1 or branch 2 with the price list above open.
 
 ## Sources
 
