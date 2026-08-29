@@ -1,0 +1,96 @@
+/// The census's last pattern-2 payer: `matchedMember` answers one name query
+/// by materializing the module's whole export surface (every name, parameter
+/// and return spelling copied) and copying the member's alternatives, then
+/// reading one row of each. The benches price one query against a
+/// forty-function surface; `main` pins the answers the query gives.
+
+import { checkContract, matchedMember, suppliesMember } from "std/contract"
+
+fn noSchema() -> Schema {
+    return Schema {
+        name: "",
+        base: "",
+        doc: None,
+        min: None,
+        max: None,
+        multipleOf: None,
+        minLength: None,
+        maxLength: None,
+        pattern: None,
+    }
+}
+
+fn noOrigin() -> Origin {
+    return Origin { file: "", line: 0, col: 0, name: "" }
+}
+
+fn fnOf(name: consume String, a: consume String, b: consume String, ret: consume String) -> FnInfo {
+    let mut ps: Array<ParamInfo> = []
+    ps.push(ParamInfo { name: "a", spelling: a, schema: noSchema(), uncodable: "" })
+    ps.push(ParamInfo { name: "b", spelling: b, schema: noSchema(), uncodable: "" })
+    return FnInfo {
+        name: name,
+        params: ps,
+        ret: ret,
+        retSchema: noSchema(),
+        retUncodable: "",
+        mutates: false,
+        origin: noOrigin(),
+    }
+}
+
+fn memberOf(name: consume String, a: consume String, b: consume String, ret: consume String) -> MemberInfo {
+    let mut ps: Array<String> = []
+    ps.push(a.copy())
+    ps.push(b.copy())
+    return MemberInfo {
+        name: name,
+        kind: "fn",
+        spelling: "fn(\{a}, \{b}) -> \{ret}",
+        params: ps,
+        ret: ret,
+        optional: false,
+        variadic: false,
+        doc: None,
+    }
+}
+
+let mut iface: ModuleInterface = ModuleInterface { functions: [], types: [] }
+let mut pact: ContractInfo = ContractInfo {
+    name: "Page",
+    module: "",
+    doc: None,
+    open: false,
+    members: [],
+}
+
+fn ensure() {
+    if iface.functions.length == 0 {
+        let mut i = 0
+        while i < 40 {
+            iface.functions.push(fnOf("export\{i}", "Int64", "String", "String"))
+            i = i + 1
+        }
+        iface.functions.push(fnOf("data", "Query<T>", "String", "Head"))
+        // `data` at three alternative shapes: the module supplies the third.
+        pact.members.push(memberOf("data", "Int64", "Int64", "Head"))
+        pact.members.push(memberOf("data", "String", "String", "Head"))
+        pact.members.push(memberOf("data", "Query<T>", "String", "Head"))
+        pact.members.push(memberOf("head", "Int64", "String", "Head"))
+    }
+}
+
+bench "one member query against a forty-function surface" {
+    ensure()
+    blackBox(matchedMember(iface, pact, "data"))
+}
+
+fn main() -> Int64 {
+    ensure()
+    print("data: \{matchedMember(iface, pact, "data")}")
+    print("head: \{suppliesMember(iface, pact, "head")}")
+    print("absent: \{matchedMember(iface, pact, "absent")}")
+    let issues = checkContract(iface, pact)
+    print("issues: \{issues.length}")
+    return 0
+}

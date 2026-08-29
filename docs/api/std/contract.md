@@ -103,3 +103,9 @@ LSP completes, and a typo breaks loudly.
 
 A member with one signature answers `0` (supplied) or `0 - 1` (not), so a
 caller that only wants presence should keep using `suppliesMember`.
+
+One name query reads IN PLACE: the member rows and the reflected function
+are compared where they live, and nothing is materialized — this was the
+std-quality census's last pattern-2 payer, a whole `Export` surface built
+(every spelling copied) to read one row of it. `checkContract` keeps
+`moduleExports`, because a full check reads every row it builds.

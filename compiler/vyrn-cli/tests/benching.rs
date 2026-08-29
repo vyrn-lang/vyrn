@@ -480,7 +480,9 @@ fn bench_corpus_is_exactly_the_bench_bearing_examples() {
     // copy. `jsonplace` is RFC-0121's: the census's 4096-element lookup, in
     // place against the tolerant copying reader. `tryplace` is RFC-0122's:
     // the same live handle through `tryAt` (an option of a place) and
-    // through the copying `get`.
+    // through the copying `get`. `contractquery` prices the census's last
+    // pattern-2 payer: one `matchedMember` query, which used to materialize
+    // the whole export surface to read one row of it.
     let mut found: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(examples_dir()).unwrap() {
         let path = entry.unwrap().path();
@@ -498,6 +500,7 @@ fn bench_corpus_is_exactly_the_bench_bearing_examples() {
         vec![
             "benching".to_string(),
             "binarytrees".to_string(),
+            "contractquery".to_string(),
             "fannkuch".to_string(),
             "fasta".to_string(),
             "jsonplace".to_string(),
