@@ -2045,7 +2045,15 @@ pub fn emit(program: &Program) -> Result<String, String> {
             let Some(kind) = gt.rel_kind(ty) else {
                 continue;
             };
+            // A GENERIC declared release (`impl<T> Owned for Slots<T>`)
+            // solves its type arguments from `slot_ty`, which reads the
+            // scope — empty here, so the release was silently swallowed and
+            // every `Slots` global left its slab at exit (the census's
+            // 5-block signature). Park the binding so the lookup answers.
+            gt.scope
+                .push(vec![(g.name.clone(), sym.clone(), ty.clone())]);
             gt.emit_drop(sym, &kind);
+            gt.scope.pop();
         }
         globals_init_ir.push_str("define internal void @__vyrn_globals_teardown() {\n");
         globals_init_ir.push_str("entry:\n");
