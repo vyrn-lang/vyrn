@@ -390,6 +390,15 @@ Option of a place, `jsondec` on a place surviving a `match`, `contract` on a
 receiver for a free function's result. Each payer now names its missing
 extension instead of citing RFC-0109 wholesale.
 
+**Same day: RFC-0121 closed the `jsondec` row.** The refutable `let`
+(`let JArr(items) = j` — bind the payload in the enclosing scope, or trap)
+put an enum's payload inside a projection's flat prologue, and `std/json`
+now reads `j[i]` and `j.field(key)` in place: 3 ns against 43 ns for the
+copying reader on the census's own 4096-element shape (the copy scales with
+the subtree; the place is flat). The tolerant `elemAt`/`fieldAt` stay for
+the JNull-on-miss paths. Still waiting: `slots.get` (an Option of a place)
+and `contract` (a receiver for a free function's result).
+
 ### Question two: is there anywhere to put work that happens once?
 
 Pattern 3, seven modules, plus `std/openapi` and `std/http` and `std/rpc`

@@ -1453,6 +1453,12 @@ pub enum Pattern {
     /// payload is bound rather than dropped on the floor; on the `Option` path
     /// the checker binds nothing, since there is no payload.
     Failure(String),
+    /// The default arm: matches ANY value, binds nothing. Unspellable in
+    /// source; produced only by the refutable-`let` desugar (RFC-0121), whose
+    /// `match` must be exhaustive over an enum the parser cannot see the
+    /// variants of — the same reason `Success`/`Failure` exist for `??`.
+    /// Placed last by its producer; every engine tests it as `true`.
+    Other,
 }
 
 impl Expr {

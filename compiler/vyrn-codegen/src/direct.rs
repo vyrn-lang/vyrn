@@ -11687,6 +11687,9 @@ impl<'p> Fn_<'_, 'p> {
             }
             (Sum::Opt(_), Pattern::Failure(_)) => vec![],
             (Sum::Res(_, e), Pattern::Failure(n)) => vec![(n.clone(), e.clone())],
+            // The refutable-`let` desugar's default arm (RFC-0121): any
+            // variant, nothing bound.
+            (_, Pattern::Other) => vec![],
             (Sum::Enum(vs), Pattern::Variant(name, binds)) => {
                 let v = vs
                     .iter()
@@ -12121,6 +12124,13 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I64Load(word8()));
                 b.ins(&Instruction::I64Const(tag as i64));
                 b.ins(&Instruction::I64Eq);
+            }
+            // The refutable-`let` desugar's default arm (RFC-0121): the probe
+            // is constant truth — the address read above is discarded, and the
+            // one `i32` every caller expects is pushed in its place.
+            (_, Pattern::Other) => {
+                b.ins(&Instruction::Drop);
+                b.ins(&Instruction::I32Const(1));
             }
             (_, p) => {
                 let one = matches!(p, Pattern::Some(_) | Pattern::Ok(_) | Pattern::Success(_));

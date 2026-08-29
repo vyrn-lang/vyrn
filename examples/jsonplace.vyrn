@@ -1,0 +1,63 @@
+/// Reading a `Json` in place (RFC-0121): `j[i]` and `j.field(key)` are
+/// projections — the refutable `let` inside them binds the payload as a
+/// borrow, and the place they return is read at the access site with no
+/// subtree copied. The benches price the census row this closed: one lookup
+/// in a 4096-element array, in place against the tolerant copying reader.
+
+import { Json, JsonField } from "std/json"
+import { elemAt, fieldAt } from "std/jsondec"
+
+fn smallDoc() -> Json {
+    return JObj([
+            JsonField { key: "name", value: JStr("a heap string a copy would duplicate") },
+            JsonField { key: "items", value: JArr([JStr("zero"), JStr("one")]) },
+        ])
+}
+
+let mut benchDoc: Json = JNull
+
+fn ensureDoc() {
+    if let JNull = benchDoc {
+        let mut xs: Array<Json> = []
+        xs.reserve(4096)
+        let mut i = 0
+        while i < 4096 {
+            xs.push(JStr("element \{i} of the array the census measured"))
+            i = i + 1
+        }
+        benchDoc = JArr(xs)
+    }
+}
+
+bench "one element of 4096, read in place" {
+    ensureDoc()
+    if let JStr(s) = benchDoc[4000] {
+        blackBox(s.byteLength)
+    }
+}
+
+bench "one element of 4096, copied out" {
+    ensureDoc()
+    let JArr(items) = benchDoc
+    if let JStr(s) = elemAt(items, 4000) {
+        blackBox(s.byteLength)
+    }
+}
+
+fn main() -> Int64 {
+    let doc = smallDoc()
+    if let JStr(s) = doc.field("name") {
+        print("name len: \{s.byteLength}")
+    }
+    let items = doc.field("items")
+    if let JStr(s) = items[1] {
+        print("second: \{s}")
+    }
+    // The tolerant readers stay beside the projections: a miss is `JNull`,
+    // and the value they answer outlives the document.
+    let JObj(fields) = doc
+    if let JNull = fieldAt(fields, "absent") {
+        print("miss: JNull")
+    }
+    return 0
+}

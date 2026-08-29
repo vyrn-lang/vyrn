@@ -477,7 +477,8 @@ fn bench_corpus_is_exactly_the_bench_bearing_examples() {
     // whose output is pinned to a fixture.
     // `namedplace` arrived with RFC-0120: its two benches are the RFC's
     // before/after — the same label read through a projection and as an owned
-    // copy.
+    // copy. `jsonplace` is RFC-0121's: the census's 4096-element lookup, in
+    // place against the tolerant copying reader.
     let mut found: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(examples_dir()).unwrap() {
         let path = entry.unwrap().path();
@@ -497,6 +498,7 @@ fn bench_corpus_is_exactly_the_bench_bearing_examples() {
             "binarytrees".to_string(),
             "fannkuch".to_string(),
             "fasta".to_string(),
+            "jsonplace".to_string(),
             "knucleotide".to_string(),
             "langbench".to_string(),
             "membench".to_string(),

@@ -723,12 +723,24 @@ fn collect_bindings(b: &mut Block, tag: usize, out: &mut HashMap<String, String>
                 then_block,
                 else_block,
                 ..
+            } => {
+                collect_bindings(then_block, tag, out);
+                if let Some(e) = else_block {
+                    collect_bindings(e, tag, out);
+                }
             }
-            | Stmt::IfLet {
+            Stmt::IfLet {
+                pattern,
                 then_block,
                 else_block,
                 ..
             } => {
+                // A pattern binder is a binding of the body too (RFC-0121):
+                // leaving it un-renamed while `subst_block` rewrites its uses
+                // is how an arm came to yield a name nothing bound.
+                for n in pattern_binder_names(pattern) {
+                    out.insert(n.clone(), format!("@b{tag}.{n}"));
+                }
                 collect_bindings(then_block, tag, out);
                 if let Some(e) = else_block {
                     collect_bindings(e, tag, out);
@@ -745,11 +757,49 @@ fn collect_bindings(b: &mut Block, tag: usize, out: &mut HashMap<String, String>
         }
     }
     // The statement walk above never enters an expression, and that is where a
-    // lambda lives (`let g = |i| ..`). One full-expression walk per block picks
-    // them up, nested lambdas included; re-visiting a sub-block's expressions
-    // from both this walk and the recursion re-inserts the same entries, which
-    // is idempotent.
-    walk_block(b, &mut |e: &mut Expr| collect_lambda(e, tag, out));
+    // lambda lives (`let g = |i| ..`) — and, since RFC-0121, a `match` whose
+    // arms bind payloads. One full-expression walk per block picks both up,
+    // nested ones included; re-visiting a sub-block's expressions from both
+    // this walk and the recursion re-inserts the same entries, which is
+    // idempotent.
+    walk_block(b, &mut |e: &mut Expr| {
+        collect_lambda(e, tag, out);
+        if let Expr::Match { arms, .. } = e {
+            for arm in arms {
+                for n in pattern_binder_names(&arm.pattern) {
+                    out.insert(n.clone(), format!("@b{tag}.{n}"));
+                }
+            }
+        }
+    });
+}
+
+/// The names a pattern binds, by reference — the rename walk's view.
+fn pattern_binder_names(p: &crate::ast::Pattern) -> Vec<&String> {
+    use crate::ast::Pattern;
+    match p {
+        Pattern::Some(b)
+        | Pattern::Ok(b)
+        | Pattern::Err(b)
+        | Pattern::Success(b)
+        | Pattern::Failure(b) => vec![b],
+        Pattern::Variant(_, binds) => binds.iter().collect(),
+        Pattern::None | Pattern::Other => Vec::new(),
+    }
+}
+
+/// The same names, mutably — what [`rename_bindings`] rewrites.
+fn pattern_binder_names_mut(p: &mut crate::ast::Pattern) -> Vec<&mut String> {
+    use crate::ast::Pattern;
+    match p {
+        Pattern::Some(b)
+        | Pattern::Ok(b)
+        | Pattern::Err(b)
+        | Pattern::Success(b)
+        | Pattern::Failure(b) => vec![b],
+        Pattern::Variant(_, binds) => binds.iter_mut().collect(),
+        Pattern::None | Pattern::Other => Vec::new(),
+    }
 }
 
 fn collect_lambda(e: &mut Expr, tag: usize, out: &mut HashMap<String, String>) {
@@ -776,16 +826,39 @@ fn rename_bindings(b: &mut Block, map: &HashMap<String, String>) {
                     *name = n.clone();
                 }
             }
+            // A statement that NAMES a binding follows the binding's rename
+            // (RFC-0121 — the first projection bodies that mutate a local).
+            // A name not in the map is somebody else's (module state) and is
+            // left alone.
+            Stmt::Assign { name, .. }
+            | Stmt::IndexSet { name, .. }
+            | Stmt::SetField { name, .. }
+            | Stmt::Drop { name, .. } => {
+                if let Some(n) = map.get(name) {
+                    *name = n.clone();
+                }
+            }
             Stmt::If {
                 then_block,
                 else_block,
                 ..
+            } => {
+                rename_bindings(then_block, map);
+                if let Some(e) = else_block {
+                    rename_bindings(e, map);
+                }
             }
-            | Stmt::IfLet {
+            Stmt::IfLet {
+                pattern,
                 then_block,
                 else_block,
                 ..
             } => {
+                for n in pattern_binder_names_mut(pattern) {
+                    if let Some(r) = map.get(n.as_str()) {
+                        *n = r.clone();
+                    }
+                }
                 rename_bindings(then_block, map);
                 if let Some(e) = else_block {
                     rename_bindings(e, map);
@@ -802,6 +875,15 @@ fn rename_bindings(b: &mut Block, map: &HashMap<String, String>) {
         }
     }
     walk_block(b, &mut |e: &mut Expr| {
+        if let Expr::Match { arms, .. } = e {
+            for arm in arms.iter_mut() {
+                for n in pattern_binder_names_mut(&mut arm.pattern) {
+                    if let Some(r) = map.get(n.as_str()) {
+                        *n = r.clone();
+                    }
+                }
+            }
+        }
         if let Expr::Lambda { params, .. } = e {
             for p in params.iter_mut() {
                 if let Some(n) = map.get(p) {

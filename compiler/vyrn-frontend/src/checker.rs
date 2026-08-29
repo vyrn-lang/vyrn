@@ -1334,14 +1334,35 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
             ));
             continue;
         }
+        // RFC-0121: for a READ projection the root set is transitive — a
+        // prologue `let` that BORROWS (a place rooted in an accepted root, or
+        // the refutable-`let` desugar's `match`, whose every value arm yields
+        // a binder of its own pattern over an accepted scrutinee) is itself an
+        // accepted root. The trace still bottoms out in the receiver. A
+        // MODIFY projection keeps the direct rule: a read through a copied
+        // handle reads the same bytes, but a write through one can land in
+        // the copy, so `atSet`'s place stays a chain the store machinery can
+        // prove writes through.
+        let mut roots: std::collections::HashSet<String> =
+            f.params.iter().map(|p| p.name.clone()).collect();
+        if f.params.first().map(|p| p.capability) != Some(crate::ast::Capability::Modify) {
+            for s in &f.body.stmts[..f.body.stmts.len() - 1] {
+                if let Stmt::Let { name, value, .. } = s {
+                    if let_borrows_from(value, &roots) {
+                        roots.insert(name.clone());
+                    }
+                }
+            }
+        }
         match crate::project::place_root(y) {
-            Some(root) if root == "self" || f.params.iter().any(|p| p.name == root) => {}
+            Some(root) if roots.contains(&root) => {}
             Some(root) => push(cerr_at!(
                 f.line,
                 f.name_span(),
                 "projection `{}` returns a place rooted at `{root}`, which the \
                  access site does not own — a projection may only return a place \
-                 inside `self` or one of its parameters",
+                 inside `self`, a parameter, or a prologue `let` that borrows \
+                 from one",
                 f.name
             )),
             None => {}
@@ -1356,6 +1377,43 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
         }
         let _ = imp;
     }
+}
+
+/// Whether a `let`'s initializer BORROWS from one of `roots` (RFC-0121):
+/// either a place expression rooted there, or the refutable-`let` desugar's
+/// `match` — a named scrutinee in `roots`, every arm either diverging (a
+/// `panic` decides nothing) or yielding a binder its own pattern bound out of
+/// the scrutinee. Both shapes alias; neither owns; so a place that roots in
+/// the binding roots where the binding borrowed from.
+fn let_borrows_from(e: &Expr, roots: &std::collections::HashSet<String>) -> bool {
+    if crate::project::is_place(e) {
+        return crate::project::place_root(e).is_some_and(|r| roots.contains(&r));
+    }
+    let Expr::Match {
+        scrutinee, arms, ..
+    } = e
+    else {
+        return false;
+    };
+    let Expr::Var { name, .. } = &**scrutinee else {
+        return false;
+    };
+    if !roots.contains(name) {
+        return false;
+    }
+    arms.iter().all(|arm| {
+        let Some(body) = arm.body.as_expr() else {
+            return false;
+        };
+        if let Expr::Call { name, .. } = body {
+            if crate::ast::is_panic(name) {
+                return true;
+            }
+        }
+        let binders = pattern_binders(&arm.pattern);
+        crate::project::is_place(body)
+            && crate::project::place_root(body).is_some_and(|r| binders.contains(&r))
+    })
 }
 
 /// How many `yield`s a projection body has, counting every branch.
@@ -1813,6 +1871,40 @@ impl<'a> Checker<'a> {
     /// with no such member — and the caller keeps its own typing and its own
     /// diagnostic. The arguments are checked here against the projection's
     /// parameters, exactly as an ordinary call checks its own.
+    /// Refuse a user-projection dispatch whose RECEIVER is itself a
+    /// projection-shaped call (RFC-0121's recorded gap). The checker can type
+    /// `doc.field("items")[1]`, but no engine can dispatch it — the receiver
+    /// probe at an access site resolves names, not call results — and three
+    /// engines trapping in three wordings on checked code is the outcome this
+    /// refusal exists to prevent. The workaround IS the message; a bound name
+    /// dispatches everywhere. Conservative on purpose: an index read feeding a
+    /// projection (`rows[i].field(k)`) is refused too, because the checker
+    /// cannot tell a builtin inner access from a user one by shape, and the
+    /// same one-line `let` fixes both.
+    fn refuse_chained_projection(&self, recv: &Expr, line: usize) -> Result<(), Diagnostic> {
+        let Expr::Call { name, args, .. } = recv else {
+            return Ok(());
+        };
+        if args.is_empty() {
+            return Ok(());
+        }
+        let projection_shaped = name == crate::project::AT
+            || (self.sigs.get(name.as_str()).is_none()
+                && self
+                    .impl_blocks
+                    .iter()
+                    .any(|i| i.places.iter().any(|p| p.name == *name)));
+        if projection_shaped {
+            return Err(cerr!(
+                line,
+                "a projection reads at its access site, so its receiver must be \
+                 a name — bind the inner access with a `let`, then read through \
+                 the binding"
+            ));
+        }
+        Ok(())
+    }
+
     fn place_result(
         &self,
         recv: &Type,
@@ -5065,6 +5157,12 @@ impl<'a> Checker<'a> {
                         "pattern `{n}` does not match scrutinee of type {sty}"
                     ))
                 }
+                // The refutable-`let` desugar's default arm (RFC-0121) belongs
+                // to an enum `match`; an Option/Result scrutinee spells both
+                // tags, so nothing produces it here.
+                Pattern::Other => {
+                    return Err(cerr!(line, "the default arm belongs to an enum `match`"))
+                }
             };
             if !want.contains(&tag) {
                 return Err(cerr!(
@@ -5157,7 +5255,28 @@ impl<'a> Checker<'a> {
     ) -> Result<Type, Diagnostic> {
         let mut seen: Vec<String> = Vec::new();
         let mut result: Option<Type> = expected.cloned();
-        for arm in arms {
+        let mut has_other = false;
+        for (i, arm) in arms.iter().enumerate() {
+            // The refutable-`let` desugar's default arm (RFC-0121): matches
+            // any remaining variant, binds nothing, and must be LAST — the
+            // engines test arms in order, so an arm after it would be dead.
+            if matches!(arm.pattern, Pattern::Other) {
+                if i + 1 != arms.len() {
+                    return Err(cerr!(line, "the default arm must be the last arm"));
+                }
+                has_other = true;
+                let mut inner = scope.clone();
+                match &arm.body {
+                    ArmBody::Expr(e) => {
+                        let bty = self.expr(e, &inner, result.as_ref(), fn_ret)?;
+                        self.unify_arm(&mut result, bty, line)?;
+                    }
+                    ArmBody::Block(b) => {
+                        self.arm_block(b, stmt_pos, line, &mut inner, fn_ret)?;
+                    }
+                }
+                continue;
+            }
             let (vname, bind) = match &arm.pattern {
                 Pattern::Variant(n, b) => (n.clone(), b.clone()),
                 // The `??` desugar's patterns (RFC-0079 M2) reaching an enum. They
@@ -5217,9 +5336,11 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        for v in evs {
-            if !seen.contains(&v.name) {
-                return Err(cerr!(line, "`match` is missing variant `{}`", v.name));
+        if !has_other {
+            for v in evs {
+                if !seen.contains(&v.name) {
+                    return Err(cerr!(line, "`match` is missing variant `{}`", v.name));
+                }
             }
         }
         if stmt_pos && result.is_none() {
@@ -5376,6 +5497,11 @@ impl<'a> Checker<'a> {
                     line,
                     "pattern `{n}` does not match scrutinee of type {sty}"
                 ))
+            }
+            // Produced only inside the refutable-`let` desugar's `match`
+            // (RFC-0121); an `if let` never carries it.
+            Pattern::Other => {
+                return Err(cerr!(line, "the default arm belongs to an enum `match`"))
             }
         };
         let want: [&str; 2] = match sty {
@@ -7291,6 +7417,7 @@ impl<'a> Checker<'a> {
             // receiver. Lowering inlines the body; the type is the declaration.
             if name == crate::project::AT {
                 if let Some(t) = self.place_result(&at, "at", args, scope, fn_ret, line)? {
+                    self.refuse_chained_projection(&args[0], line)?;
                     // …and the nodes the site LOWERS through, which are the
                     // projection's body inlined here. See [`record_desugar`].
                     if recording() {
@@ -8363,6 +8490,7 @@ impl<'a> Checker<'a> {
         {
             let recv = self.expr(&args[0], scope, None, fn_ret)?;
             if let Some(t) = self.place_result(&recv, name, args, scope, fn_ret, line)? {
+                self.refuse_chained_projection(&args[0], line)?;
                 if recording() {
                     if let Ok(Some(p)) = crate::project::site(
                         self.impl_blocks,
@@ -10468,7 +10596,7 @@ fn pattern_binders(p: &Pattern) -> Vec<String> {
         | Pattern::Success(n)
         | Pattern::Failure(n) => vec![n.clone()],
         Pattern::Variant(_, ns) => ns.clone(),
-        Pattern::None => Vec::new(),
+        Pattern::None | Pattern::Other => Vec::new(),
     }
 }
 
@@ -11142,6 +11270,71 @@ mod tests {
         ))
         .unwrap_err();
         assert!(e.contains("String"), "{e}");
+    }
+
+    // ---- RFC-0121: payload places -------------------------------------------
+
+    /// An enum container and the projection that reads through its payload.
+    const LEDGER: &str = "type E = | Tag(String) | Blank\n\
+                          type Led = { rows: Array<E> }\n\
+                          impl Index for Led {\n\
+                              fn at(read self, i: Int64) -> read E {\n\
+                                  return self.rows[i]\n\
+                              }\n\
+                          }\n";
+
+    #[test]
+    fn a_place_may_root_in_a_borrowing_prologue_let() {
+        // Two links on purpose: a field borrow, then a payload borrow through
+        // it — the root trace is transitive, and each scrutinee is a name.
+        assert!(check_src(
+            "type E = | Tag(Array<Int64>) | Blank\n\
+             type Box = { v: E }\n\
+             impl Index for Box {\n\
+                 fn at(read self, i: Int64) -> read Int64 {\n\
+                     let e = self.v\n\
+                     let Tag(xs) = e\n\
+                     return xs[i]\n\
+                 }\n\
+             }\n\
+             fn main() -> Int64 { return 0 }",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_prologue_let_that_owns_is_not_a_root() {
+        let e = check_src(
+            "type Box = { v: Array<Int64> }\n\
+             impl Index for Box {\n\
+                 fn at(read self, i: Int64) -> read Int64 {\n\
+                     let xs = [1, 2, 3]\n\
+                     return xs[i]\n\
+                 }\n\
+             }\n\
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("the access site does not own"), "{e}");
+    }
+
+    #[test]
+    fn a_projection_receiver_must_be_a_name() {
+        let e = check_src(&format!(
+            "{LEDGER}\
+             impl Index for E {{\n\
+                 fn s(read self) -> read String {{\n\
+                     let Tag(v) = self\n\
+                     return v\n\
+                 }}\n\
+             }}\n\
+             fn main() -> Int64 {{\n\
+                 let led = Led {{ rows: [] }}\n\
+                 return led.at(0).s().byteLength\n\
+             }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("receiver must be a name"), "{e}");
     }
 
     // ---- RFC-0094 M3: `impl Show` --------------------------------------------
