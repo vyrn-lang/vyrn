@@ -154,9 +154,22 @@ sentence — never `html/element-name` as well.
 
 Zero noise on the repository's own corpus: `vyxHints("site/app")` reports the
 same 61 pre-existing findings before and after, none from the two new rules.
-Still open from table two: the per-element ATTRIBUTE tables
-(`no-unknown-attributes`, `no-deprecated-attr`), the entity table
-(`unrecognized-char-ref`), and `no-raw-characters`/`no-unused-disable`.
+
+Same day, two more rows — the attribute vocabularies:
+
+| Vyrn code | source | severity | why |
+| --- | --- | --- | --- |
+| `html/deprecated-attr` | `no-deprecated-attr` | `Error` | `"error"` in `src/config/presets/recommended.ts`; 189 exact (tag, attribute) pairs from the same `html5.ts` read, each an attribute-level `deprecated` flag — `align` is removed on `<td>` and was never on `<span>`, so the pair answers, not the name |
+| `a11y/aria-name` | the closed WAI-ARIA set | `Warning` | 51 names read from `A11yance/aria-query` master, `src/ariaPropsMap.js`, 2026-08-29. Anything beginning `aria` outside the set is a typo by construction (`arial-label`, `aria-lable`), and a misspelled ARIA attribute is silently ignored — the worst failure mode an accessibility attribute can have. The deprecated `aria-dropeffect`/`aria-grabbed` stay KNOWN: a legal name is not a typo |
+
+The `td scope` corner is its own test: removed on `<td>` by the pair table,
+required on `<th>` by `a11y/th-scope` — exact on both sides.
+
+Still open from table two: the full per-element attribute tables
+(`no-unknown-attributes` — `html5.ts` lists constrained attributes, not the
+complete allowed set, so that rule needs a source this census has not read),
+the entity table (`unrecognized-char-ref`), and
+`no-raw-characters`/`no-unused-disable`.
 
 ## Pages changed
 
