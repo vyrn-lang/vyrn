@@ -407,6 +407,20 @@ copied. `slots.tryAt` prices the same live handle at 3 ns against `get`'s
 the value that must outlive the test. The last pattern-2 payer standing is
 `contract`, on a receiver for a free function's result.
 
+**And the `contract` row dissolved under measurement, no language needed.**
+The census filed it as "must hand a value to something else without copying
+it" — but the something else was `matchedMember`'s own helpers.
+`moduleExports` materialized the whole export surface (every name, parameter
+and return spelling copied) so `exportIndex` could find one row, and
+`alternatives` copied the member rows so `matchIndex` could read them. The
+query now compares the member rows and the reflected function where they
+live (`fnSatisfies`, no `Export` built): 6.55 µs → 1.37 µs per query in
+`examples/contractquery.vyrn`, answers pinned unchanged, and what remains is
+`typeMatches` comparison work rather than copies. `checkContract` keeps
+`moduleExports` — a full check reads every row it builds. **Pattern 2 is
+closed**: every payer either reads in place (RFC-0120/0121/0122) or never
+needed to escape at all.
+
 ### Question two: is there anywhere to put work that happens once?
 
 Pattern 3, seven modules, plus `std/openapi` and `std/http` and `std/rpc`

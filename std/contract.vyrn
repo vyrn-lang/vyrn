@@ -541,17 +541,58 @@ export fn suppliesMember(iface: ModuleInterface, c: ContractInfo, name: String) 
 ///
 /// A member with one signature answers `0` (supplied) or `0 - 1` (not), so a
 /// caller that only wants presence should keep using `suppliesMember`.
+///
+/// One name query reads IN PLACE: the member rows and the reflected function
+/// are compared where they live, and nothing is materialized — this was the
+/// std-quality census's last pattern-2 payer, a whole `Export` surface built
+/// (every spelling copied) to read one row of it. `checkContract` keeps
+/// `moduleExports`, because a full check reads every row it builds.
 export fn matchedMember(iface: ModuleInterface, c: ContractInfo, name: String) -> Int64 {
-    let alts = alternatives(c, name)
-    if alts.length == 0 {
-        return 0 - 1
+    let mut at = 0 - 1
+    let mut k = 0
+    while k < iface.functions.length {
+        if iface.functions[k].name == name {
+            at = k
+            break
+        }
+        k = k + 1
     }
-    let exports = moduleExports(iface)
-    let at = exportIndex(exports, name)
-    if at < 0 {
-        return 0 - 1
+    let mut alt = 0
+    for m in c.members {
+        if m.name == name {
+            if at >= 0 {
+                if fnSatisfies(m, iface.functions[at]) {
+                    return alt
+                }
+            }
+            alt = alt + 1
+        }
     }
-    return matchIndex(alts, exports[at])
+    return 0 - 1
+}
+
+/// Whether reflected function `f` satisfies member `m` — [`matchesSignature`]
+/// asked directly of the `FnInfo`, with no `Export` built between them. The
+/// `let`-member arm is `matchIndex`'s: the RFC-0029 accessor, an arity-0 fn
+/// returning the member's type.
+fn fnSatisfies(m: MemberInfo, f: FnInfo) -> Bool {
+    if m.kind != "fn" {
+        return f.params.length == 0 && typeMatches(m.spelling, f.ret)
+    }
+    if m.variadic {
+        return typeMatches(m.ret, f.ret)
+    }
+    if m.params.length != f.params.length {
+        return false
+    }
+    let mut i = 0
+    while i < m.params.length {
+        if typeMatches(m.params[i], f.params[i].spelling) == false {
+            return false
+        }
+        i = i + 1
+    }
+    return typeMatches(m.ret, f.ret)
 }
 
 test "type parameters are open, concrete types are not" {
