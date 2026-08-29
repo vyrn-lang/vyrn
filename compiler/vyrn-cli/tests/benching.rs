@@ -475,6 +475,9 @@ fn bench_corpus_is_exactly_the_bench_bearing_examples() {
     // each one is a whole published benchmark at a larger N than the parity
     // corpus runs it at, so M2 has something to time without editing a program
     // whose output is pinned to a fixture.
+    // `namedplace` arrived with RFC-0120: its two benches are the RFC's
+    // before/after — the same label read through a projection and as an owned
+    // copy.
     let mut found: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(examples_dir()).unwrap() {
         let path = entry.unwrap().path();
@@ -497,6 +500,7 @@ fn bench_corpus_is_exactly_the_bench_bearing_examples() {
             "knucleotide".to_string(),
             "langbench".to_string(),
             "membench".to_string(),
+            "namedplace".to_string(),
             "nbody".to_string(),
             "pidigits".to_string(),
             "revcomp".to_string(),
