@@ -114,7 +114,9 @@ answer RFC-0090 wanted and the old `Ref` could not give: a value the caller
 handles instead of a trap it cannot.
 
 The element is COPIED out, because a return is owned (RFC-0089 rule 3). Read
-`s[h]` instead where the element should stay where it is.
+`s[h]` instead where the element should stay where it is, and
+`if let Some(v) = s.tryAt(h)` (RFC-0122) where the miss matters but the
+value does not outlive the test — neither of those copies anything.
 
 ## remove
 

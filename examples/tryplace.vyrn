@@ -1,0 +1,73 @@
+/// An option of a place (RFC-0122): `if let Some(v) = s.tryAt(h)` reads the
+/// element where a live handle points and takes the `else` arm where a dead
+/// one does — no `Option` is built and nothing is copied on either path.
+/// `get` stays beside it for the value that must outlive the test, and the
+/// benches price the difference on the hit path.
+
+import { Slots, Handle, newSlots, insert, remove, get } from "std/slots"
+import { Json, JsonField } from "std/json"
+
+type Row = { label: String, n: Int64 }
+
+let mut benchSlab: Slots<Row> = newSlots()
+let mut benchHandle: Handle<Row> = Handle { slot: 0 - 1, gen: 0 - 1, owner: 0 - 1 }
+
+fn ensureSlab() {
+    if benchSlab.vals.length == 0 {
+        let mut i = 0
+        while i < 64 {
+            let h = insert(benchSlab, Row { label: "row \{i} with a heap label", n: i })
+            if i == 40 {
+                benchHandle = h
+            }
+            i = i + 1
+        }
+    }
+}
+
+bench "a live handle read through tryAt" {
+    ensureSlab()
+    if let Some(r) = benchSlab.tryAt(benchHandle) {
+        blackBox(r.n + r.label.byteLength)
+    }
+}
+
+bench "the same handle read through get" {
+    ensureSlab()
+    if let Some(r) = get(benchSlab, benchHandle) {
+        blackBox(r.n + r.label.byteLength)
+    }
+}
+
+fn main() -> Int64 {
+    let mut people: Slots<Row> = newSlots()
+    let a = insert(people, Row { label: "alpha", n: 1 })
+    let b = insert(people, Row { label: "beta", n: 2 })
+    let gone = remove(people, a)
+
+    if let Some(r) = people.tryAt(b) {
+        print("live: \{r.label} \{r.n}")
+    }
+    if let Some(r) = people.tryAt(a) {
+        print("unreached: \{r.n}")
+    } else {
+        print("dead handle: miss (removed: \{gone})")
+    }
+
+    let doc = JObj([
+            JsonField { key: "name", value: JStr("a heap string a copy would duplicate") },
+        ])
+    if let Some(v) = doc.tryField("name") {
+        if let JStr(s) = v {
+            print("name len: \{s.byteLength}")
+        }
+    }
+    if let Some(v) = doc.tryField("absent") {
+        if let JStr(s) = v {
+            print("unreached: \{s}")
+        }
+    } else {
+        print("absent field: miss")
+    }
+    return 0
+}

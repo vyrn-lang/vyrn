@@ -193,6 +193,67 @@ pub fn site(
     .map(Some)
 }
 
+/// [`site`], for the OPTIONAL kind (RFC-0122). `Ok(None)` means "no optional
+/// projection answers here": a builtin receiver, a type this walk cannot
+/// name, a member of the PLAIN kind (the caller's own paths handle those),
+/// or no member at all. Shares [`Memo`]'s lifetime and discipline — one
+/// tree, one set of addresses, one answer per node.
+pub fn optional_site(
+    impls: &[ImplBlock],
+    recv: Option<&Type>,
+    method: &str,
+    recv_expr: &Expr,
+    args: &[Expr],
+    line: usize,
+) -> Result<Option<&'static OptionalProjection>, String> {
+    let Some(t) = recv.filter(|t| !is_builtin_container(t)) else {
+        return Ok(None);
+    };
+    let Some(key) = crate::types::type_key(t) else {
+        return Ok(None);
+    };
+    let Some(f) = lookup_by_key(impls, &key, method) else {
+        return Ok(None);
+    };
+    if !is_optional(f) {
+        return Ok(None);
+    }
+    let hit = OPT_MEMO.with(|m| {
+        let m = m.borrow();
+        let e = m.as_ref()?.get(&(
+            recv_expr as *const Expr as usize,
+            key.clone(),
+            method.to_string(),
+        ))?;
+        (e.recv == *recv_expr && e.args == args).then_some(e.tree)
+    });
+    if let Some(t) = hit {
+        return Ok(Some(t));
+    }
+    let tree: &'static OptionalProjection =
+        Box::leak(Box::new(optional_inline(f, recv_expr, args, line)?));
+    OPT_MEMO.with(|m| {
+        if let Some(m) = m.borrow_mut().as_mut() {
+            m.insert(
+                (recv_expr as *const Expr as usize, key, method.to_string()),
+                OptExpansion {
+                    recv: recv_expr.clone(),
+                    args: args.to_vec(),
+                    tree,
+                },
+            );
+        }
+    });
+    Ok(Some(tree))
+}
+
+/// [`Expansion`], for the optional kind — same verification, same reason.
+struct OptExpansion {
+    recv: Expr,
+    args: Vec<Expr>,
+    tree: &'static OptionalProjection,
+}
+
 // ---------------------------------------------------------------------------
 // Desugar once
 // ---------------------------------------------------------------------------
@@ -216,6 +277,9 @@ thread_local! {
         Option<HashMap<(usize, String, String), (Expr, Block, &'static Block)>>,
     > = const { std::cell::RefCell::new(None) };
     static MEMO: std::cell::RefCell<Option<HashMap<(usize, String, String), Expansion>>> =
+        const { std::cell::RefCell::new(None) };
+    /// The optional kind's half of [`MEMO`] (RFC-0122), same key, same rules.
+    static OPT_MEMO: std::cell::RefCell<Option<HashMap<(usize, String, String), OptExpansion>>> =
         const { std::cell::RefCell::new(None) };
     /// The store half, keyed by the INDEX node rather than by the receiver:
     /// `a[i] = v` has no receiver node — [`store_index`] synthesizes one, and a
@@ -245,6 +309,7 @@ pub struct Memo(());
 impl Memo {
     pub fn open() -> Self {
         MEMO.with(|m| *m.borrow_mut() = Some(HashMap::new()));
+        OPT_MEMO.with(|m| *m.borrow_mut() = Some(HashMap::new()));
         LOOPS.with(|m| *m.borrow_mut() = Some(HashMap::new()));
         STORES.with(|m| *m.borrow_mut() = Some(HashMap::new()));
         Memo(())
@@ -254,6 +319,7 @@ impl Memo {
 impl Drop for Memo {
     fn drop(&mut self) {
         MEMO.with(|m| *m.borrow_mut() = None);
+        OPT_MEMO.with(|m| *m.borrow_mut() = None);
         LOOPS.with(|m| *m.borrow_mut() = None);
         STORES.with(|m| *m.borrow_mut() = None);
     }
@@ -372,6 +438,35 @@ pub fn stored(name: &str, index: &Expr, value: &Expr) -> Option<&'static Block> 
 /// An argument used zero times or more than once binds a temporary first: zero
 /// so its side effects still happen, more than once so they happen once.
 pub fn inline(f: &Function, recv: &Expr, args: &[Expr], line: usize) -> Result<Projection, String> {
+    let (mut prologue, body) = substituted(f, recv, args, line)?;
+    let mut stmts = body;
+    let Some(Stmt::Return {
+        value: Some(place), ..
+    }) = stmts.last()
+    else {
+        return Err(format!(
+            "line {line}: projection `{}` has no exit — a projection ends by \
+             returning the place it names",
+            f.name
+        ));
+    };
+    let place = place.clone();
+    stmts.pop();
+    prologue.extend(stmts);
+    Ok(Projection { prologue, place })
+}
+
+/// The shared front half of every inline: hygiene-rename the body's own
+/// bindings, substitute the receiver and the arguments, and hand back the
+/// argument-temporary prologue plus the substituted statements. [`inline`]
+/// splits one trailing `return` off the result; [`optional_inline`]
+/// (RFC-0122) splits a miss test and a `Some` exit.
+fn substituted(
+    f: &Function,
+    recv: &Expr,
+    args: &[Expr],
+    line: usize,
+) -> Result<(Vec<Stmt>, Vec<Stmt>), String> {
     if args.len() + 1 != f.params.len() {
         return Err(format!(
             "line {line}: projection `{}` takes {} argument(s), got {}",
@@ -442,21 +537,81 @@ pub fn inline(f: &Function, recv: &Expr, args: &[Expr], line: usize) -> Result<P
         }
     }
     subst_block(&mut body, &map);
+    Ok((prologue, body.stmts))
+}
 
-    let Some(Stmt::Return {
-        value: Some(place), ..
-    }) = body.stmts.last()
-    else {
-        return Err(format!(
-            "line {line}: projection `{}` has no exit — a projection ends by \
-             returning the place it names",
+/// One OPTIONAL access site's lowering (RFC-0122): statements, then a miss
+/// test, then the place a hit reads. The consumer is always an `if let` —
+/// the else arm on the miss, the then arm with its binder aliased to the
+/// place — so no `Option` exists on either path.
+#[derive(Debug, Clone)]
+pub struct OptionalProjection {
+    pub prologue: Vec<Stmt>,
+    pub miss: Expr,
+    pub place: Expr,
+}
+
+/// Whether a projection member is the OPTIONAL kind (RFC-0122): its declared
+/// result is an `Option<T>`, where the plain kind names the place's type
+/// bare. The checker enforces the body shape this classification implies.
+pub fn is_optional(f: &Function) -> bool {
+    matches!(f.ret, crate::ast::Type::Option(_))
+}
+
+/// [`inline`] for an optional projection: split the body's trailing
+/// `if <miss> { return None }` and `return Some(<place>)` off the prologue.
+/// The shapes are the checker's (`check_places`) — a surprise here is a bug
+/// there, and errs rather than mis-lowers.
+pub fn optional_inline(
+    f: &Function,
+    recv: &Expr,
+    args: &[Expr],
+    line: usize,
+) -> Result<OptionalProjection, String> {
+    let (mut prologue, mut stmts) = substituted(f, recv, args, line)?;
+    let bad = || {
+        format!(
+            "line {line}: optional projection `{}` must end with \
+             `if <miss> {{ return None }}` then `return Some(<place>)`",
             f.name
-        ));
+        )
     };
-    let place = place.clone();
-    body.stmts.pop();
-    prologue.extend(body.stmts);
-    Ok(Projection { prologue, place })
+    let Some(Stmt::Return { value: Some(v), .. }) = stmts.last() else {
+        return Err(bad());
+    };
+    let Expr::Call { name, args: sa, .. } = v else {
+        return Err(bad());
+    };
+    if name != "Some" || sa.len() != 1 {
+        return Err(bad());
+    }
+    let place = sa[0].clone();
+    stmts.pop();
+    let Some(Stmt::If {
+        cond,
+        then_block,
+        else_block: None,
+        ..
+    }) = stmts.last()
+    else {
+        return Err(bad());
+    };
+    if then_block.stmts.len() != 1
+        || !matches!(
+            &then_block.stmts[0],
+            Stmt::Return { value: Some(Expr::Var { name, .. }), .. } if name == "None"
+        )
+    {
+        return Err(bad());
+    }
+    let miss = cond.clone();
+    stmts.pop();
+    prologue.extend(stmts);
+    Ok(OptionalProjection {
+        prologue,
+        miss,
+        place,
+    })
 }
 
 /// What a store through a projected place becomes (RFC-0091 M3).

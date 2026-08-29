@@ -4508,6 +4508,14 @@ impl<'a> Interp<'a> {
                 else_block,
                 ..
             } => {
+                // An OPTIONAL projection as the scrutinee (RFC-0122): no
+                // `Option` is built — the prologue runs, the miss picks the
+                // arm, and the hit binds the pattern's binder to the place.
+                if let Some(flow) =
+                    self.optional_if_let(pattern, scrutinee, then_block, else_block, scope)?
+                {
+                    return Ok(flow);
+                }
                 // Evaluate the scrutinee ONCE (no double-eval), test the pattern,
                 // and run the matching arm with the binders in scope (RFC-0060).
                 let sv = self.expr(scrutinee, scope)?;
@@ -4794,6 +4802,68 @@ impl<'a> Interp<'a> {
         })();
         scope.pop();
         out.map(Some)
+    }
+
+    /// `if let Some(x) = s.tryAt(h)` (RFC-0122): consume an OPTIONAL
+    /// projection where it is tested. No `Option` is built — the prologue
+    /// runs, the miss picks the arm, and a hit binds the pattern's binder to
+    /// the place's value. `Ok(None)` means the scrutinee is not an optional
+    /// projection and the caller keeps the ordinary path.
+    #[allow(clippy::too_many_arguments)]
+    fn optional_if_let(
+        &self,
+        pattern: &Pattern,
+        scrutinee: &Expr,
+        then_block: &Block,
+        else_block: &Option<Block>,
+        scope: &mut Vec<Frame>,
+    ) -> Result<Option<Flow>, Ctrl> {
+        let Expr::Call { name, args, line } = scrutinee else {
+            return Ok(None);
+        };
+        if args.is_empty()
+            || self.funcs.get(name.as_str()).is_some()
+            || !self
+                .impls
+                .iter()
+                .any(|i| i.places.iter().any(|p| p.name == *name))
+        {
+            return Ok(None);
+        }
+        let Some(key) = self.index_receiver_key(&args[0], scope) else {
+            return Ok(None);
+        };
+        let Some(f) = crate::project::lookup_by_key(self.impls, &key, name) else {
+            return Ok(None);
+        };
+        if !crate::project::is_optional(f) {
+            return Ok(None);
+        }
+        let p =
+            crate::project::optional_inline(f, &args[0], &args[1..], *line).map_err(Ctrl::Err)?;
+        scope.push(Frame::default());
+        let flow = (|| -> Result<Flow, Ctrl> {
+            for s in &p.prologue {
+                self.stmt(s, scope)?;
+            }
+            if self.as_bool(self.expr(&p.miss, scope)?)? {
+                match else_block {
+                    Some(eb) => self.block(eb, scope),
+                    None => Ok(Flow::Normal),
+                }
+            } else {
+                let v = self.expr(&p.place, scope)?;
+                if let Pattern::Some(b) = pattern {
+                    scope
+                        .last_mut()
+                        .unwrap()
+                        .insert(b.clone(), Slot::untyped(v));
+                }
+                self.block(then_block, scope)
+            }
+        })();
+        scope.pop();
+        flow.map(Some)
     }
 
     fn expr(&self, expr: &Expr, scope: &mut Vec<Frame>) -> Result<Val, Ctrl> {

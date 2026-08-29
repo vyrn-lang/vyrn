@@ -701,6 +701,30 @@ fn stmt<'a>(s: &'a Stmt, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
             ..
         } => {
             expr(scrutinee, d, chain, w);
+            // An OPTIONAL projection as the scrutinee (RFC-0122): walk its
+            // expansion too, exactly as [`desugar`] walks `@at`'s — the rows
+            // are what a backend inlining the same tree has answers for.
+            if let Expr::Call { name, args, .. } = scrutinee {
+                if !args.is_empty() && !w.impls.is_empty() {
+                    let key = &args[0] as *const Expr as usize;
+                    if let Some(recv) = w.recorded.node_types.get(&key).map(|t| apply(t, chain)) {
+                        if let Ok(Some(p)) = vyrn_frontend::project::optional_site(
+                            w.impls,
+                            Some(&recv),
+                            name,
+                            &args[0],
+                            &args[1..],
+                            stmt_line(s),
+                        ) {
+                            for ps in &p.prologue {
+                                stmt(ps, d, chain, w);
+                            }
+                            expr(&p.miss, d, chain, w);
+                            expr(&p.place, d, chain, w);
+                        }
+                    }
+                }
+            }
             block(then_block, d, chain, w);
             if let Some(e) = else_block {
                 block(e, d, chain, w);

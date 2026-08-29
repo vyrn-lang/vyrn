@@ -3548,6 +3548,13 @@ impl<'p> Fn_<'_, 'p> {
                 else_block,
                 line,
             } => {
+                // An OPTIONAL projection as the scrutinee (RFC-0122): no
+                // `Option` is built — prologue, one branch on the miss, and
+                // the hit arm's binder bound to the place by an ordinary
+                // (synthetic, row-less, so never drop-tracked) `let`.
+                if self.optional_if_let(m, b, pattern, scrutinee, then_block, else_block, *line)? {
+                    return Ok(());
+                }
                 let st = self.expr(m, b, scrutinee)?;
                 let sum = self
                     .sum_of(&st)
@@ -12098,6 +12105,78 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64Store(word8()));
         b.slot(off);
         Ok(ty)
+    }
+
+    /// `if let Some(x) = s.tryAt(h)` (RFC-0122): lower an OPTIONAL projection
+    /// where it is tested. Answers `false` when the scrutinee is not one, and
+    /// the caller keeps the ordinary path.
+    #[allow(clippy::too_many_arguments)]
+    fn optional_if_let(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        pattern: &Pattern,
+        scrutinee: &Expr,
+        then_block: &vyrn_frontend::ast::Block,
+        else_block: &Option<vyrn_frontend::ast::Block>,
+        line: usize,
+    ) -> Result<bool, String> {
+        let Expr::Call { name, args, .. } = scrutinee else {
+            return Ok(false);
+        };
+        if args.is_empty()
+            || self.cx.sigs.contains_key(name.as_str())
+            || !self
+                .cx
+                .impls
+                .iter()
+                .any(|i| i.places.iter().any(|p| p.name == *name))
+        {
+            return Ok(false);
+        }
+        let recv = self.peek(&args[0], line).ok();
+        let Some(p) = vyrn_frontend::project::optional_site(
+            &self.cx.impls,
+            recv.as_ref(),
+            name,
+            &args[0],
+            &args[1..],
+            line,
+        )?
+        else {
+            return Ok(false);
+        };
+        let mark = self.scope.len();
+        for s in &p.prologue {
+            self.stmt(m, b, s)?;
+        }
+        self.cond(m, b, &p.miss, line)?;
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        // miss: the else arm (the wasm `if` takes the true edge).
+        if let Some(eb) = else_block {
+            self.block(m, b, eb)?;
+        }
+        b.ins(&Instruction::Else);
+        // hit: bind the pattern's binder to the place by a synthetic `let` —
+        // no analysis row exists for it, so nothing drop-tracks the alias.
+        let inner = self.scope.len();
+        if let Pattern::Some(bind) = pattern {
+            let synth = Stmt::Let {
+                name: bind.clone(),
+                mutable: false,
+                ty: None,
+                value: p.place.clone(),
+                line,
+            };
+            self.stmt(m, b, &synth)?;
+        }
+        self.block(m, b, then_block)?;
+        self.scope.truncate(inner);
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        self.scope.truncate(mark);
+        Ok(true)
     }
 
     /// Push whether the sum at `addr` is `pat`'s variant.
