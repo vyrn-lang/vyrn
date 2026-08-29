@@ -4,7 +4,10 @@
   its own gate.** The generalization layer over RFC-0089/0090: what makes a
   third-party container indistinguishable from a built-in. `place`/`yield`
   members, `Copy`, `Iterate` and `Index` all ship, and `std/slots` is the
-  customer that proved them. Read "M2 as landed", "M1 and M3 as landed" and "The
+  customer that proved them. **Spelling note (2026-08-29):** RFC-0120 retired
+  `place`/`yield` for the result capability — every `place f(..) -> T
+  { yield p }` below is now written `fn f(read self, ..) -> read T
+  { return p }`, and the mechanism this RFC built is unchanged underneath. Read "M2 as landed", "M1 and M3 as landed" and "The
   generic-container correction" — the last records two things this RFC says that
   are wrong. Then read "M4 as landed": `SmallArray` is not portable, the reason
   is three separate missing features, and the numbers say the port would cost

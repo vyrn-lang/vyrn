@@ -182,36 +182,36 @@ export fn handles<T>(s: Slots<T>) -> Array<Handle<T>> {
 /// `s[h].field = v` writes where the element lives and nothing is copied. A dead
 /// handle stops the program, exactly as `a[i]` out of range does.
 impl<T> Index for Slots<T> {
-    place at(read self, h: Handle<T>) -> T {
+    fn at(read self, h: Handle<T>) -> read T {
         if h.owner != self.owner || h.slot < 0 || h.slot >= self.gens.length
         || self.gens[h.slot] != h.gen
         {
             panic("slots: handle is not alive")
         }
-        yield self.vals[h.slot]
+        return self.vals[h.slot]
     }
-    place atSet(modify self, h: Handle<T>) -> T {
+    fn atSet(modify self, h: Handle<T>) -> modify T {
         if h.owner != self.owner || h.slot < 0 || h.slot >= self.gens.length
         || self.gens[h.slot] != h.gen
         {
             panic("slots: handle is not alive")
         }
-        yield self.vals[h.slot]
+        return self.vals[h.slot]
     }
 }
 
 /// `for x in s` — the live elements, in `dense` order.
 ///
-/// This is the answer a projection can give. `place nth` maps a dense position
+/// This is the answer a projection can give. `nth` maps a dense position
 /// to a place and nothing else: it cannot skip, because it has no cursor to
-/// advance and no branch to yield from. `dense` is what makes the skipping
+/// advance and no branch to exit from. `dense` is what makes the skipping
 /// happen before the projection runs.
 impl<T> Iterate for Slots<T> {
     fn size(self) -> Int64 {
         return self.dense.length
     }
-    place nth(read self, i: Int64) -> T {
-        yield self.vals[self.dense[i]]
+    fn nth(read self, i: Int64) -> read T {
+        return self.vals[self.dense[i]]
     }
 }
 

@@ -4735,8 +4735,8 @@ impl Iterate for Ring {
     fn size(self) -> Int64 {
         return self.data.length
     }
-    place nth(read self, i: Int64) -> Int64 {
-        yield self.data[i]
+    fn nth(read self, i: Int64) -> read Int64 {
+        return self.data[i]
     }
 }
 

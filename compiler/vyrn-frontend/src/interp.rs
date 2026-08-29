@@ -4761,9 +4761,9 @@ impl<'a> Interp<'a> {
             .map_err(Ctrl::Err)?;
         let Some(store) = crate::project::store_stmts(&p.place, value, line) else {
             return Err(Ctrl::Err(format!(
-                "line {line}: `{name}[..] = v` goes through a `place atSet` that yields \
-                 something with no address — a call result or a temporary. A projection \
-                 yields a place: a binding, a field of one, or an element of one"
+                "line {line}: `{name}[..] = v` goes through an `atSet` projection whose \
+                 result has no address — a call result or a temporary. A projection \
+                 returns a place: a binding, a field of one, or an element of one"
             )));
         };
         let mut out = p.prologue;
@@ -4773,6 +4773,7 @@ impl<'a> Interp<'a> {
 
     fn project_read(
         &self,
+        method: &str,
         args: &[Expr],
         scope: &mut Vec<Frame>,
         line: usize,
@@ -4780,7 +4781,7 @@ impl<'a> Interp<'a> {
         let Some(key) = self.index_receiver_key(&args[0], scope) else {
             return Ok(None);
         };
-        let Some(f) = crate::project::lookup_by_key(self.impls, &key, "at") else {
+        let Some(f) = crate::project::lookup_by_key(self.impls, &key, method) else {
             return Ok(None);
         };
         let p = crate::project::inline(f, &args[0], &args[1..], line).map_err(Ctrl::Err)?;
@@ -4983,7 +4984,7 @@ impl<'a> Interp<'a> {
                 // the element directly — the interpreter has no lowering to
                 // delete, so it keeps one spelling.
                 if name == crate::project::AT && args.len() == 2 {
-                    if let Some(v) = self.project_read(args, scope, *line)? {
+                    if let Some(v) = self.project_read("at", args, scope, *line)? {
                         return Ok(v);
                     }
                 }
@@ -4998,6 +4999,28 @@ impl<'a> Interp<'a> {
                         vals.push(self.expr(a, scope)?);
                     }
                     return self.call_fnval(&fv, &vals);
+                }
+                // RFC-0120: `x.f(..)` where `f` names a projection on `x`'s
+                // type reads through the place exactly as `x[i]` reads through
+                // `at`. Consulted only for a name that resolves to nothing
+                // else — a function, a fn-typed local, a variant, a type or a
+                // protocol method all answered above or answer below — so no
+                // program that ran before this existed changes meaning, and
+                // the name scan is one walk over the impl list on the sole
+                // path that used to end in `call to unknown function`.
+                if !args.is_empty()
+                    && self.funcs.get(name.as_str()).is_none()
+                    && !self.protocol_methods.contains_key(name.as_str())
+                    && !self.variants.contains(name.as_str())
+                    && !self.types.contains_key(name.as_str())
+                    && self
+                        .impls
+                        .iter()
+                        .any(|i| i.places.iter().any(|p| p.name == *name))
+                {
+                    if let Some(v) = self.project_read(name, args, scope, *line)? {
+                        return Ok(v);
+                    }
                 }
                 // Test builtins (RFC-0015): `assert` / `assertEq`. A failing
                 // assertion traps the current test with a canonical message; the

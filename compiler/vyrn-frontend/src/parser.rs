@@ -272,7 +272,6 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         type_aliases: Default::default(),
         field_preds: None,
         extra_stmts: Vec::new(),
-        in_place: false,
         errors: Vec::new(),
         depth: 0,
     }
@@ -888,11 +887,6 @@ struct Parser {
     /// the rest here; `block` drains them right after, preserving order. Only
     /// ever non-empty for the duration of one `stmt` call (its single caller).
     extra_stmts: Vec<Stmt>,
-    /// True while parsing the body of a `place` projection (RFC-0091 M2).
-    /// Inside one, `yield <place>` is the exit and `return` is a parse error;
-    /// outside one, `yield` is an ordinary identifier. One flag rather than a
-    /// second statement parser, because the two bodies differ in exactly this.
-    in_place: bool,
     /// Diagnostics accumulated by *within-body* statement recovery (RFC-0006):
     /// when a statement inside a block fails to parse, [`Parser::block`] records
     /// the error here and syncs to the next statement boundary instead of
@@ -1734,6 +1728,20 @@ impl Parser {
             self.eat(&Tok::RParen)?;
             let ret = if *self.peek() == Tok::Arrow {
                 self.advance();
+                let (rline, rcol) = (self.line(), self.col());
+                if self.parse_result_capability()?.is_some() {
+                    return Err(Diagnostic::error(
+                        rline,
+                        rcol,
+                        "parse",
+                        format!(
+                            "a protocol cannot declare a projection yet — a capability \
+                             result (`-> read T` / `-> modify T`) is declared on the \
+                             `impl` (RFC-0120's recorded gap; `{name}` stays a protocol \
+                             of owned-result methods)"
+                        ),
+                    ));
+                }
                 self.type_()?
             } else {
                 Type::Unit
@@ -2101,23 +2109,34 @@ impl Parser {
                 self.eat_semi();
                 continue;
             }
-            // `place name(read self, ..) -> T { .. yield <place> }` (RFC-0091
-            // M2). Contextual, like `gen fn` and `lazy`: `place` counts as the
-            // keyword only where a member begins AND a member name follows, so
-            // an ordinary `place` identifier keeps its meaning everywhere else.
+            // `place name(..) { yield .. }` was RFC-0091 M2's spelling for a
+            // projection; RFC-0120 retired it for the result capability. The
+            // detection stays (a member beginning `place <name>`) so the old
+            // form gets its own sentence instead of "expected `fn`".
             if matches!(self.peek(), Tok::Ident(w) if w == "place")
                 && matches!(self.tokens[self.pos + 1].tok, Tok::Ident(_))
             {
-                let mut p = self.place_member(&ty)?;
-                p.type_params = type_params.clone();
-                p.type_bounds = type_bounds.clone();
-                places.push(p);
-                continue;
+                return Err(Diagnostic::error(
+                    self.line(),
+                    self.col(),
+                    "parse",
+                    "`place`/`yield` is the retired spelling of a projection (RFC-0120) — \
+                     write `fn name(read self, ..) -> read T { .. return <place> }` \
+                     (`modify` for the writable form)"
+                        .to_string(),
+                ));
             }
-            let mut m = self.impl_method(&ty)?;
+            let (mut m, place_cap) = self.impl_method(&ty)?;
             m.type_params = type_params.clone();
             m.type_bounds = type_bounds.clone();
-            methods.push(m);
+            // A capability result is what MAKES a member a projection: it goes
+            // in the bucket the engines inline from, never into the flattened
+            // callable methods. See [`ImplBlock::places`].
+            if place_cap.is_some() {
+                places.push(m);
+            } else {
+                methods.push(m);
+            }
         }
         self.eat(&Tok::RBrace)?;
         self.type_params.clear();
@@ -2131,89 +2150,6 @@ impl Parser {
             places,
             line,
             col,
-        })
-    }
-
-    /// One `place name(read self, ..) -> T { .. yield <place> }` inside an
-    /// `impl` (RFC-0091 M2). Returns a [`Function`] shaped like an impl method:
-    /// the first parameter is `self`, carrying the receiver's capability
-    /// (`read self` projects for reading, `modify self` for writing).
-    ///
-    /// The body's `yield` becomes a [`Stmt::Return`]; see [`ImplBlock::places`]
-    /// for why. `return` inside a projection is refused here, because a
-    /// projection has no frame of its own to return from.
-    fn place_member(&mut self, self_ty: &Type) -> Result<Function, Diagnostic> {
-        let line = self.line();
-        self.advance(); // `place`
-        let col = self.col();
-        let name = self.expect_ident()?;
-        self.eat(&Tok::LParen)?;
-        let (cline, ccol) = (self.line(), self.col());
-        let capability = self.parse_self_capability();
-        if capability == Capability::Consume {
-            return Err(Diagnostic::error(
-                cline,
-                ccol,
-                "parse",
-                format!(
-                    "`place {name}` cannot take `consume self` — a projection yields a place \
-                     inside the receiver, so the receiver has to outlive the yield"
-                ),
-            ));
-        }
-        self.eat(&Tok::Vself)?;
-        let mut params = vec![Param {
-            name: "self".to_string(),
-            capability,
-            ty: self_ty.clone(),
-        }];
-        while *self.peek() == Tok::Comma {
-            self.advance();
-            let pname = self.expect_ident()?;
-            self.eat(&Tok::Colon)?;
-            let capability = self.parse_capability();
-            let ty = self.type_()?;
-            params.push(Param {
-                name: pname,
-                capability,
-                ty,
-            });
-        }
-        self.eat(&Tok::RParen)?;
-        let (rline, rcol) = (self.line(), self.col());
-        let ret = if *self.peek() == Tok::Arrow {
-            self.advance();
-            self.type_()?
-        } else {
-            return Err(Diagnostic::error(
-                rline,
-                rcol,
-                "parse",
-                format!(
-                    "`place {name}` needs a return type (`-> T`) — a projection \
-                     names the type of the place it yields"
-                ),
-            ));
-        };
-        let outer = std::mem::replace(&mut self.in_place, true);
-        let body = self.block();
-        self.in_place = outer;
-        Ok(Function {
-            exported: false,
-            module: None,
-            name,
-            doc: None,
-            type_params: Vec::new(),
-            type_bounds: Default::default(),
-            params,
-            ret,
-            body: body?,
-            line,
-            col,
-            is_extern: false,
-            is_export_extern: false,
-            is_gen: false,
-            is_mut: false,
         })
     }
 
@@ -2239,6 +2175,53 @@ impl Parser {
         Capability::Read
     }
 
+    /// The contextual `read` / `modify` a RESULT may carry (RFC-0120):
+    /// `-> read T` gives the caller read access to a place the receiver keeps,
+    /// `-> modify T` write access. A signature that says neither returns an
+    /// owned value, which is what `-> T` has always meant — so `-> consume T`
+    /// is refused as a second spelling of the default. Contextual, like the
+    /// receiver's word: the capability counts only where a type follows, so a
+    /// user type named `read` (none exists) would still parse alone.
+    ///
+    /// The caller decides which positions may carry one; positions that cannot
+    /// (a free function, a protocol declaration, a contract member) call this
+    /// too and refuse a `Some` with their own reason, which is what keeps the
+    /// refusals in the signature's own words rather than a type error about an
+    /// unknown type `read` three passes later.
+    fn parse_result_capability(&mut self) -> Result<Option<Capability>, Diagnostic> {
+        let Tok::Ident(id) = self.peek() else {
+            return Ok(None);
+        };
+        let cap = match id.as_str() {
+            "read" => Capability::Read,
+            "modify" => Capability::Modify,
+            "consume" => Capability::Consume,
+            _ => return Ok(None),
+        };
+        // A type must FOLLOW for the word to count. `{` is excluded on
+        // purpose: after `-> read {` the brace is the function's body and
+        // `read` is a type name — a projection returning an anonymous-record
+        // place would have to name the record, which is no loss (nothing in
+        // the corpus returns one).
+        if !matches!(
+            self.tokens[self.pos + 1].tok,
+            Tok::Ident(_) | Tok::LParen | Tok::Fn
+        ) {
+            return Ok(None);
+        }
+        if cap == Capability::Consume {
+            return Err(Diagnostic::error(
+                self.line(),
+                self.col(),
+                "parse",
+                "a result is owned by its caller already — `-> consume T` is spelled `-> T`"
+                    .to_string(),
+            ));
+        }
+        self.advance();
+        Ok(Some(cap))
+    }
+
     /// One `fn m(read|modify|consume self, ..) -> R { .. }` inside an `impl`.
     /// Returns a [`Function`] whose first parameter is `self`, typed to the
     /// implementing type and carrying the receiver's capability.
@@ -2247,7 +2230,10 @@ impl Parser {
     /// word is what makes a mutating method sayable: `modify self` is RFC-0089
     /// rule 2 on the receiver, so `people.insert(x)` is the method
     /// `insert(people, x)` was written as a function to avoid.
-    fn impl_method(&mut self, self_ty: &Type) -> Result<Function, Diagnostic> {
+    fn impl_method(
+        &mut self,
+        self_ty: &Type,
+    ) -> Result<(Function, Option<Capability>), Diagnostic> {
         let line = self.line();
         self.eat(&Tok::Fn)?;
         let col = self.col();
@@ -2273,30 +2259,61 @@ impl Parser {
             });
         }
         self.eat(&Tok::RParen)?;
-        let ret = if *self.peek() == Tok::Arrow {
+        let (ret, result_cap) = if *self.peek() == Tok::Arrow {
             self.advance();
-            self.type_()?
+            let (rline, rcol) = (self.line(), self.col());
+            let rc = self.parse_result_capability()?;
+            // A projection's two capability columns must agree: `-> read T`
+            // hands out a look into the receiver, so the receiver must be
+            // `read self`; `-> modify T` writes through it, so `modify self`.
+            // A mismatch is either a write through a read receiver (unsound)
+            // or a receiver claim the result never uses (a lie in the
+            // signature) — and `consume self` can never pair with either,
+            // because the receiver has to outlive the access.
+            if let Some(rc) = rc {
+                if capability != rc {
+                    let want = if rc == Capability::Read {
+                        "read"
+                    } else {
+                        "modify"
+                    };
+                    return Err(Diagnostic::error(
+                        rline,
+                        rcol,
+                        "parse",
+                        format!(
+                            "`fn {name}` returns `{want} T`, so its receiver must be \
+                             `{want} self` — the result is a place inside the receiver, \
+                             and the two capabilities name one access"
+                        ),
+                    ));
+                }
+            }
+            (self.type_()?, rc)
         } else {
-            Type::Unit
+            (Type::Unit, None)
         };
         let body = self.block()?;
-        Ok(Function {
-            exported: false,
-            module: None,
-            name,
-            doc: None,
-            type_params: Vec::new(),
-            type_bounds: Default::default(),
-            params,
-            ret,
-            body,
-            line,
-            col,
-            is_extern: false,
-            is_export_extern: false,
-            is_gen: false,
-            is_mut: false,
-        })
+        Ok((
+            Function {
+                exported: false,
+                module: None,
+                name,
+                doc: None,
+                type_params: Vec::new(),
+                type_bounds: Default::default(),
+                params,
+                ret,
+                body,
+                line,
+                col,
+                is_extern: false,
+                is_export_extern: false,
+                is_gen: false,
+                is_mut: false,
+            },
+            result_cap,
+        ))
     }
 
     /// `logging { level: <name>, sink: <dest> }` — comma-separated fields, each
@@ -2850,6 +2867,19 @@ impl Parser {
         // optional `-> Type`; absence means Unit
         let ret = if *self.peek() == Tok::Arrow {
             self.advance();
+            let (rline, rcol) = (self.line(), self.col());
+            if self.parse_result_capability()?.is_some() {
+                return Err(Diagnostic::error(
+                    rline,
+                    rcol,
+                    "parse",
+                    format!(
+                        "`fn {name}` cannot return a capability — a projection's result \
+                         is a place inside its receiver, and a free function has none. \
+                         Declare it on an `impl`."
+                    ),
+                ));
+            }
             self.type_()?
         } else {
             Type::Unit
@@ -3683,30 +3713,6 @@ impl Parser {
                     mutable,
                     ty,
                     value,
-                    line,
-                })
-            }
-            Tok::Return if self.in_place => {
-                let col = self.col();
-                Err(Diagnostic::error(
-                    line,
-                    col,
-                    "parse",
-                    "a `place` projection yields, it does not return: write \
-                     `yield <place>`. A projection has no frame of its own — \
-                     its body runs inside the access site."
-                        .to_string(),
-                ))
-            }
-            // `yield <place>` — the exit of a `place` projection (RFC-0091 M2).
-            // Contextual: outside a projection body `yield` is an ordinary
-            // identifier, so no program that used the name has to change.
-            Tok::Ident(w) if self.in_place && w == "yield" => {
-                self.advance();
-                let value = self.expr()?;
-                self.eat_semi();
-                Ok(Stmt::Return {
-                    value: Some(value),
                     line,
                 })
             }
@@ -4852,7 +4858,6 @@ impl Parser {
             type_aliases: self.type_aliases.clone(),
             field_preds: None,
             extra_stmts: Vec::new(),
-            in_place: false,
             errors: Vec::new(),
             depth: 0,
         };
@@ -5068,7 +5073,6 @@ impl Parser {
             type_aliases: self.type_aliases.clone(),
             field_preds: None,
             extra_stmts: Vec::new(),
-            in_place: false,
             errors: Vec::new(),
             depth: 0,
         })
@@ -5558,12 +5562,12 @@ mod tests {
         assert!(names.contains(&"@copy".to_string()), "got {names:?}");
     }
 
-    // ---- RFC-0091 M2: `place` / `yield` ------------------------------------
+    // ---- RFC-0091 M2 / RFC-0120: projections -------------------------------
 
     #[test]
-    fn place_and_yield_stay_ordinary_identifiers_outside_a_projection() {
-        // Both words are contextual. A program that already used them keeps
-        // working, which is why neither is a lexer keyword.
+    fn place_and_yield_stay_ordinary_identifiers() {
+        // The retired spelling's words were contextual, and retiring it does
+        // not claim them: a program using either as a name keeps working.
         let p = parse_src(
             "fn place(yield: Int64) -> Int64 { let place = yield + 1\n return place }\n\
              fn main() -> Int64 { return place(1) }",
@@ -5576,8 +5580,8 @@ mod tests {
         let p = parse_src(
             "type Ring = { data: Array<Int64> }\n\
              impl Index for Ring {\n\
-                 place at(read self, i: Int64) -> Int64 { yield self.data[i] }\n\
-                 place atSet(modify self, i: Int64) -> Int64 { yield self.data[i] }\n\
+                 fn at(read self, i: Int64) -> read Int64 { return self.data[i] }\n\
+                 fn atSet(modify self, i: Int64) -> modify Int64 { return self.data[i] }\n\
              }\n\
              fn main() -> Int64 { return 0 }",
         );
@@ -5588,31 +5592,83 @@ mod tests {
     }
 
     #[test]
-    fn a_projection_refuses_return() {
+    fn a_result_capability_must_match_the_receiver() {
         let src = "type Ring = { data: Array<Int64> }\n\
                    impl Index for Ring {\n\
-                       place at(read self, i: Int64) -> Int64 { return self.data[i] }\n\
+                       fn at(read self, i: Int64) -> modify Int64 { return self.data[i] }\n\
                    }\n\
                    fn main() -> Int64 { return 0 }";
         let (_, errs) = parse_accum(lex(src).unwrap());
         assert!(
             errs.iter()
-                .any(|e| e.message.contains("yields, it does not return")),
+                .any(|e| e.message.contains("receiver must be `modify self`")),
             "{errs:?}"
         );
     }
 
     #[test]
-    fn a_projection_needs_a_return_type() {
+    fn a_consume_result_is_spelled_arrow_t() {
         let src = "type Ring = { data: Array<Int64> }\n\
-                   impl Index for Ring { place at(read self, i: Int64) { yield self.data[i] } }\n\
+                   impl Index for Ring {\n\
+                       fn take(read self, i: Int64) -> consume Int64 { return self.data[i] }\n\
+                   }\n\
                    fn main() -> Int64 { return 0 }";
         let (_, errs) = parse_accum(lex(src).unwrap());
         assert!(
             errs.iter()
-                .any(|e| e.message.contains("needs a return type")),
+                .any(|e| e.message.contains("`-> consume T` is spelled `-> T`")),
             "{errs:?}"
         );
+    }
+
+    #[test]
+    fn the_retired_place_spelling_names_its_replacement() {
+        let src = "type Ring = { data: Array<Int64> }\n\
+                   impl Index for Ring { place at(read self, i: Int64) -> Int64 { yield self.data[i] } }\n\
+                   fn main() -> Int64 { return 0 }";
+        let (_, errs) = parse_accum(lex(src).unwrap());
+        assert!(
+            errs.iter().any(|e| e.message.contains("retired spelling")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn a_free_function_cannot_return_a_capability() {
+        let src = "fn f(xs: Array<Int64>, i: Int64) -> read Int64 { return xs[i] }\n\
+                   fn main() -> Int64 { return 0 }";
+        let (_, errs) = parse_accum(lex(src).unwrap());
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("a free function has none")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn a_protocol_cannot_declare_a_projection_yet() {
+        let src = "protocol Pick { fn at(read self, i: Int64) -> read Int64 }\n\
+                   fn main() -> Int64 { return 0 }";
+        let (_, errs) = parse_accum(lex(src).unwrap());
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("cannot declare a projection")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn a_type_named_read_still_parses_in_return_position() {
+        // The result capability is contextual: it counts only where a type
+        // FOLLOWS, so `-> read {` keeps `read` as a type name and the brace
+        // as the function's body.
+        let p = parse_src(
+            "type read = { v: Int64 }\n\
+             fn f() -> read { return read { v: 1 } }\n\
+             fn main() -> Int64 { return 0 }",
+        );
+        let f = p.functions.iter().find(|f| f.name == "f").unwrap();
+        assert_eq!(f.ret, Type::Named("read".into()));
     }
 
     #[test]
@@ -6167,7 +6223,6 @@ mod tests {
             type_aliases: Default::default(),
             field_preds: None,
             extra_stmts: Vec::new(),
-            in_place: false,
             errors: Vec::new(),
             depth: 0,
         };

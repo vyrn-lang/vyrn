@@ -807,7 +807,6 @@ fn fence_signature(hover: &str) -> String {
         "let ",
         "protocol ",
         "impl ",
-        "place ",
         "contract ",
     ];
     if DECL.iter().any(|d| head.starts_with(d)) {

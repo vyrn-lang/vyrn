@@ -4147,11 +4147,11 @@ export fn newCage() -> Cage {
 }
 
 impl Index for Cage {
-    place at(read self, k: Int64) -> Int64 {
+    fn at(read self, k: Int64) -> read Int64 {
         if k < 0 || k >= self.xs.length {
             panic("cage: no such key")
         }
-        yield self.xs[k]
+        return self.xs[k]
     }
 }
 "#,

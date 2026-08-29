@@ -603,18 +603,21 @@ pub struct ImplBlock {
     /// first time someone believed it.
     pub assoc: Vec<String>,
     pub methods: Vec<Function>,
-    /// `place at(read self, i: Int64) -> T { yield self.data[i] }` — the place
-    /// projections this impl declares (RFC-0091 M2). A projection is NOT a
-    /// function: it is never called, never flattened into
-    /// [`Program::functions`], and never emitted. Every access site inlines its
-    /// body, so the borrow it yields cannot outlive the access — rule 2 of
-    /// RFC-0089 holds by construction rather than by a check.
+    /// `fn at(read self, i: Int64) -> read T { return self.data[i] }` — the
+    /// place projections this impl declares (RFC-0091 M2, spelled per
+    /// RFC-0120: a capability on the RESULT is what makes a member a
+    /// projection). A projection is NOT a function: it is never called, never
+    /// flattened into [`Program::functions`], and never emitted. Every access
+    /// site inlines its body, so the borrow it returns cannot outlive the
+    /// access — rule 2 of RFC-0089 holds by construction rather than by a
+    /// check.
     ///
     /// The body is an ordinary [`Block`] whose last statement is a
-    /// [`Stmt::Return`]: that node IS the `yield`. Keeping the `yield` out of
-    /// the `Stmt` enum keeps ten exhaustive matches across the frontend and the
-    /// three backends unchanged, and the two forms never mix — the parser
-    /// accepts `yield` only inside a projection and `return` only outside one.
+    /// [`Stmt::Return`] — the same node an owned return uses, so ten
+    /// exhaustive matches across the frontend and the three backends never
+    /// learned a second exit exists. Which capability the result carries is
+    /// not stored: the parser enforces that it equals the receiver's, so
+    /// `params[0].capability` answers for both columns.
     pub places: Vec<Function>,
     pub line: usize,
     /// 1-based column of the `impl` keyword, in Unicode scalar values — `0` when

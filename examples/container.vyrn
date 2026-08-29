@@ -11,34 +11,34 @@
 /// A window over a buffer, iterated from its own zero.
 ///
 /// `Iterate` owes two answers: how many elements, and where each one is. The
-/// second is a `place`, not a method — it yields the element rather than
-/// returning a copy of it, so the loop variable borrows what the window
-/// borrows.
+/// second is a projection, not a method — its `read` result is the element's
+/// place rather than a copy of it, so the loop variable borrows what the
+/// window borrows.
 type Window = { data: Array<Int64>, start: Int64 }
 
 impl Iterate for Window {
     fn size(self) -> Int64 {
         return self.data.length - self.start
     }
-    place nth(read self, i: Int64) -> Int64 {
-        yield self.data[self.start + i]
+    fn nth(read self, i: Int64) -> read Int64 {
+        return self.data[self.start + i]
     }
 }
 
 /// A window that is written as well as read.
 ///
-/// `place atSet(modify self, ..)` is the writing half of `Index`. 7a refused a
-/// store that yielded anywhere but the binding's own element; M3 lowers it as
-/// the move-out/mutate/move-back the language already uses for `r.a[i] = v`, so
-/// no engine gained an addressing mode.
+/// `fn atSet(modify self, ..) -> modify T` is the writing half of `Index`. 7a
+/// refused a store that landed anywhere but the binding's own element; M3
+/// lowers it as the move-out/mutate/move-back the language already uses for
+/// `r.a[i] = v`, so no engine gained an addressing mode.
 type Slice = { data: Array<Int64>, start: Int64 }
 
 impl Index for Slice {
-    place at(read self, i: Int64) -> Int64 {
-        yield self.data[self.start + i]
+    fn at(read self, i: Int64) -> read Int64 {
+        return self.data[self.start + i]
     }
-    place atSet(modify self, i: Int64) -> Int64 {
-        yield self.data[self.start + i]
+    fn atSet(modify self, i: Int64) -> modify Int64 {
+        return self.data[self.start + i]
     }
 }
 

@@ -1,248 +1,248 @@
 ; vyrn lowered v1 — examples/projection.vyrn
 
-fn build(n: Int64) -> Array<Int64>                                       @48
-  let mut out : Array<Int64>                                             @49
-    array : Array<Int64>                                                 @49
-  let mut i : Int64                                                      @50
-    int 0 : Int64                                                        @50
-  while                                                                  @51
-    binary Lt : Bool                                                     @51
-      var i : Int64                                                      @51
-      var n : Int64                                                      @51
-    assign out                                                           @52
-      call @push : Array<Int64>                                          @52
-        var out : Array<Int64>                                           @52
-        binary Mul : Int64                                               @52
-          var i : Int64                                                  @52
-          int 10 : Int64                                                 @52
-    assign i                                                             @53
-      binary Add : Int64                                                 @53
-        var i : Int64                                                    @53
-        int 1 : Int64                                                    @53
-  return                                                                 @55
-    var out : Array<Int64>                                               @55
+fn build(n: Int64) -> Array<Int64>                                       @49
+  let mut out : Array<Int64>                                             @50
+    array : Array<Int64>                                                 @50
+  let mut i : Int64                                                      @51
+    int 0 : Int64                                                        @51
+  while                                                                  @52
+    binary Lt : Bool                                                     @52
+      var i : Int64                                                      @52
+      var n : Int64                                                      @52
+    assign out                                                           @53
+      call @push : Array<Int64>                                          @53
+        var out : Array<Int64>                                           @53
+        binary Mul : Int64                                               @53
+          var i : Int64                                                  @53
+          int 10 : Int64                                                 @53
+    assign i                                                             @54
+      binary Add : Int64                                                 @54
+        var i : Int64                                                    @54
+        int 1 : Int64                                                    @54
+  return                                                                 @56
+    var out : Array<Int64>                                               @56
 
-fn main() -> Int64                                                       @58
-  let w : Window                                                         @59
-    record Window : Window                                               @59
-      call build : Array<Int64>                                          @59
-        int 6 : Int64                                                    @59
-      int 2 : Int64                                                      @59
-  do                                                                     @60
-    call print : Unit                                                    @60
-      call @concat : String                                              @60
-        call @concat : String                                            @60
-          call @concat : String                                          @60
-            call @concat : String                                        @60
-              call @concat : String                                      @60
-                str "window: " : String                                  @60
-                call @str : String                                       @60
+fn main() -> Int64                                                       @59
+  let w : Window                                                         @60
+    record Window : Window                                               @60
+      call build : Array<Int64>                                          @60
+        int 6 : Int64                                                    @60
+      int 2 : Int64                                                      @60
+  do                                                                     @61
+    call print : Unit                                                    @61
+      call @concat : String                                              @61
+        call @concat : String                                            @61
+          call @concat : String                                          @61
+            call @concat : String                                        @61
+              call @concat : String                                      @61
+                str "window: " : String                                  @61
+                call @str : String                                       @61
                   call @at : Int64                                       @1
                     var w : Window                                       @1
-                    int 0 : Int64                                        @60
-                    call @at : Int64                                     @20
-                      field .data : Array<Int64>                         @20
+                    int 0 : Int64                                        @61
+                    call @at : Int64                                     @21
+                      field .data : Array<Int64>                         @21
                         var w : Window                                   @1
-                      binary Add : Int64                                 @20
-                        field .start : Int64                             @20
+                      binary Add : Int64                                 @21
+                        field .start : Int64                             @21
                           var w : Window                                 @1
-                        int 0 : Int64                                    @60
-              str " " : String                                           @60
-            call @str : String                                           @60
+                        int 0 : Int64                                    @61
+              str " " : String                                           @61
+            call @str : String                                           @61
               call @at : Int64                                           @1
                 var w : Window                                           @1
-                int 1 : Int64                                            @60
-                call @at : Int64                                         @20
-                  field .data : Array<Int64>                             @20
+                int 1 : Int64                                            @61
+                call @at : Int64                                         @21
+                  field .data : Array<Int64>                             @21
                     var w : Window                                       @1
-                  binary Add : Int64                                     @20
-                    field .start : Int64                                 @20
+                  binary Add : Int64                                     @21
+                    field .start : Int64                                 @21
                       var w : Window                                     @1
-                    int 1 : Int64                                        @60
-          str " " : String                                               @60
-        call @str : String                                               @60
+                    int 1 : Int64                                        @61
+          str " " : String                                               @61
+        call @str : String                                               @61
           call @at : Int64                                               @1
             var w : Window                                               @1
-            int 3 : Int64                                                @60
-            call @at : Int64                                             @20
-              field .data : Array<Int64>                                 @20
+            int 3 : Int64                                                @61
+            call @at : Int64                                             @21
+              field .data : Array<Int64>                                 @21
                 var w : Window                                           @1
-              binary Add : Int64                                         @20
-                field .start : Int64                                     @20
+              binary Add : Int64                                         @21
+                field .start : Int64                                     @21
                   var w : Window                                         @1
-                int 3 : Int64                                            @60
-  let s : Strided                                                        @62
-    record Strided : Strided                                             @62
-      call build : Array<Int64>                                          @62
-        int 9 : Int64                                                    @62
-      int 3 : Int64                                                      @62
-  do                                                                     @63
-    call print : Unit                                                    @63
-      call @concat : String                                              @63
-        call @concat : String                                            @63
-          call @concat : String                                          @63
-            call @concat : String                                        @63
-              call @concat : String                                      @63
-                str "strided: " : String                                 @63
-                call @str : String                                       @63
+                int 3 : Int64                                            @61
+  let s : Strided                                                        @63
+    record Strided : Strided                                             @63
+      call build : Array<Int64>                                          @63
+        int 9 : Int64                                                    @63
+      int 3 : Int64                                                      @63
+  do                                                                     @64
+    call print : Unit                                                    @64
+      call @concat : String                                              @64
+        call @concat : String                                            @64
+          call @concat : String                                          @64
+            call @concat : String                                        @64
+              call @concat : String                                      @64
+                str "strided: " : String                                 @64
+                call @str : String                                       @64
                   call @at : Int64                                       @1
                     var s : Strided                                      @1
-                    int 0 : Int64                                        @63
-                    let @b3.k : Int64                                    @31
-                      binary Mul : Int64                                 @31
-                        int 0 : Int64                                    @31
-                        field .stride : Int64                            @31
+                    int 0 : Int64                                        @64
+                    let @b3.k : Int64                                    @32
+                      binary Mul : Int64                                 @32
+                        int 0 : Int64                                    @32
+                        field .stride : Int64                            @32
                           var s : Strided                                @1
-                    call @at : Int64                                     @32
-                      field .data : Array<Int64>                         @32
+                    call @at : Int64                                     @33
+                      field .data : Array<Int64>                         @33
                         var s : Strided                                  @1
                       var @b3.k : Int64                                  @1
-              str " " : String                                           @63
-            call @str : String                                           @63
+              str " " : String                                           @64
+            call @str : String                                           @64
               call @at : Int64                                           @1
                 var s : Strided                                          @1
-                int 1 : Int64                                            @63
-                let @b4.k : Int64                                        @31
-                  binary Mul : Int64                                     @31
-                    int 1 : Int64                                        @31
-                    field .stride : Int64                                @31
+                int 1 : Int64                                            @64
+                let @b4.k : Int64                                        @32
+                  binary Mul : Int64                                     @32
+                    int 1 : Int64                                        @32
+                    field .stride : Int64                                @32
                       var s : Strided                                    @1
-                call @at : Int64                                         @32
-                  field .data : Array<Int64>                             @32
+                call @at : Int64                                         @33
+                  field .data : Array<Int64>                             @33
                     var s : Strided                                      @1
                   var @b4.k : Int64                                      @1
-          str " " : String                                               @63
-        call @str : String                                               @63
+          str " " : String                                               @64
+        call @str : String                                               @64
           call @at : Int64                                               @1
             var s : Strided                                              @1
-            int 2 : Int64                                                @63
-            let @b5.k : Int64                                            @31
-              binary Mul : Int64                                         @31
-                int 2 : Int64                                            @31
-                field .stride : Int64                                    @31
+            int 2 : Int64                                                @64
+            let @b5.k : Int64                                            @32
+              binary Mul : Int64                                         @32
+                int 2 : Int64                                            @32
+                field .stride : Int64                                    @32
                   var s : Strided                                        @1
-            call @at : Int64                                             @32
-              field .data : Array<Int64>                                 @32
+            call @at : Int64                                             @33
+              field .data : Array<Int64>                                 @33
                 var s : Strided                                          @1
               var @b5.k : Int64                                          @1
-  let c : Clamped                                                        @65
-    record Clamped : Clamped                                             @65
-      call build : Array<Int64>                                          @65
-        int 3 : Int64                                                    @65
-  do                                                                     @66
-    call print : Unit                                                    @66
-      call @concat : String                                              @66
-        call @concat : String                                            @66
-          call @concat : String                                          @66
-            call @concat : String                                        @66
-              call @concat : String                                      @66
-                str "clamped: " : String                                 @66
-                call @str : String                                       @66
+  let c : Clamped                                                        @66
+    record Clamped : Clamped                                             @66
+      call build : Array<Int64>                                          @66
+        int 3 : Int64                                                    @66
+  do                                                                     @67
+    call print : Unit                                                    @67
+      call @concat : String                                              @67
+        call @concat : String                                            @67
+          call @concat : String                                          @67
+            call @concat : String                                        @67
+              call @concat : String                                      @67
+                str "clamped: " : String                                 @67
+                call @str : String                                       @67
                   call @at : Int64                                       @1
                     var c : Clamped                                      @1
-                    int 0 : Int64                                        @66
+                    int 0 : Int64                                        @67
                     let @p6.i : Int64                                    @1
                       int 0 : Int64                                      @1
-                    let @b6.n : Int64                                    @42
-                      field .length : Int64                              @42
-                        field .data : Array<Int64>                       @42
+                    let @b6.n : Int64                                    @43
+                      field .length : Int64                              @43
+                        field .data : Array<Int64>                       @43
                           var c : Clamped                                @1
-                    let @b6.j : Int64                                    @43
-                      ifexpr : Int64                                     @43
-                        binary Lt : Bool                                 @43
+                    let @b6.j : Int64                                    @44
+                      ifexpr : Int64                                     @44
+                        binary Lt : Bool                                 @44
                           var @p6.i : Int64                              @1
                           var @b6.n : Int64                              @1
                         var @p6.i : Int64                                @1
-                        binary Sub : Int64                               @43
+                        binary Sub : Int64                               @44
                           var @b6.n : Int64                              @1
-                          int 1 : Int64                                  @43
-                    call @at : Int64                                     @44
-                      field .data : Array<Int64>                         @44
+                          int 1 : Int64                                  @44
+                    call @at : Int64                                     @45
+                      field .data : Array<Int64>                         @45
                         var c : Clamped                                  @1
                       var @b6.j : Int64                                  @1
-              str " " : String                                           @66
-            call @str : String                                           @66
+              str " " : String                                           @67
+            call @str : String                                           @67
               call @at : Int64                                           @1
                 var c : Clamped                                          @1
-                int 2 : Int64                                            @66
+                int 2 : Int64                                            @67
                 let @p7.i : Int64                                        @1
                   int 2 : Int64                                          @1
-                let @b7.n : Int64                                        @42
-                  field .length : Int64                                  @42
-                    field .data : Array<Int64>                           @42
+                let @b7.n : Int64                                        @43
+                  field .length : Int64                                  @43
+                    field .data : Array<Int64>                           @43
                       var c : Clamped                                    @1
-                let @b7.j : Int64                                        @43
-                  ifexpr : Int64                                         @43
-                    binary Lt : Bool                                     @43
+                let @b7.j : Int64                                        @44
+                  ifexpr : Int64                                         @44
+                    binary Lt : Bool                                     @44
                       var @p7.i : Int64                                  @1
                       var @b7.n : Int64                                  @1
                     var @p7.i : Int64                                    @1
-                    binary Sub : Int64                                   @43
+                    binary Sub : Int64                                   @44
                       var @b7.n : Int64                                  @1
-                      int 1 : Int64                                      @43
-                call @at : Int64                                         @44
-                  field .data : Array<Int64>                             @44
+                      int 1 : Int64                                      @44
+                call @at : Int64                                         @45
+                  field .data : Array<Int64>                             @45
                     var c : Clamped                                      @1
                   var @b7.j : Int64                                      @1
-          str " " : String                                               @66
-        call @str : String                                               @66
+          str " " : String                                               @67
+        call @str : String                                               @67
           call @at : Int64                                               @1
             var c : Clamped                                              @1
-            int 9 : Int64                                                @66
+            int 9 : Int64                                                @67
             let @p8.i : Int64                                            @1
               int 9 : Int64                                              @1
-            let @b8.n : Int64                                            @42
-              field .length : Int64                                      @42
-                field .data : Array<Int64>                               @42
+            let @b8.n : Int64                                            @43
+              field .length : Int64                                      @43
+                field .data : Array<Int64>                               @43
                   var c : Clamped                                        @1
-            let @b8.j : Int64                                            @43
-              ifexpr : Int64                                             @43
-                binary Lt : Bool                                         @43
+            let @b8.j : Int64                                            @44
+              ifexpr : Int64                                             @44
+                binary Lt : Bool                                         @44
                   var @p8.i : Int64                                      @1
                   var @b8.n : Int64                                      @1
                 var @p8.i : Int64                                        @1
-                binary Sub : Int64                                       @43
+                binary Sub : Int64                                       @44
                   var @b8.n : Int64                                      @1
-                  int 1 : Int64                                          @43
-            call @at : Int64                                             @44
-              field .data : Array<Int64>                                 @44
+                  int 1 : Int64                                          @44
+            call @at : Int64                                             @45
+              field .data : Array<Int64>                                 @45
                 var c : Clamped                                          @1
               var @b8.j : Int64                                          @1
-  let mut a : Array<Int64>                                               @70
-    call build : Array<Int64>                                            @70
-      int 4 : Int64                                                      @70
-  indexset a[]                                                           @71
-    int 1 : Int64                                                        @71
-    int 99 : Int64                                                       @71
-  do                                                                     @72
-    call print : Unit                                                    @72
-      call @concat : String                                              @72
-        call @concat : String                                            @72
-          call @concat : String                                          @72
-            call @concat : String                                        @72
-              call @concat : String                                      @72
-                str "array: " : String                                   @72
-                call @str : String                                       @72
+  let mut a : Array<Int64>                                               @71
+    call build : Array<Int64>                                            @71
+      int 4 : Int64                                                      @71
+  indexset a[]                                                           @72
+    int 1 : Int64                                                        @72
+    int 99 : Int64                                                       @72
+  do                                                                     @73
+    call print : Unit                                                    @73
+      call @concat : String                                              @73
+        call @concat : String                                            @73
+          call @concat : String                                          @73
+            call @concat : String                                        @73
+              call @concat : String                                      @73
+                str "array: " : String                                   @73
+                call @str : String                                       @73
                   call @at : Int64                                       @1
                     var a : Array<Int64>                                 @1
-                    int 0 : Int64                                        @72
-              str " " : String                                           @72
-            call @str : String                                           @72
+                    int 0 : Int64                                        @73
+              str " " : String                                           @73
+            call @str : String                                           @73
               call @at : Int64                                           @1
                 var a : Array<Int64>                                     @1
-                int 1 : Int64                                            @72
-          str " " : String                                               @72
-        call @str : String                                               @72
+                int 1 : Int64                                            @73
+          str " " : String                                               @73
+        call @str : String                                               @73
           call @at : Int64                                               @1
             var a : Array<Int64>                                         @1
-            int 3 : Int64                                                @72
-  return                                                                 @73
-    int 0 : Int64                                                        @73
-  release a : FreeArr exit=return                                        @70
-  release c : Deep<{ data: Array<Int64> }> exit=return                   @65
-  release s : Deep<{ data: Array<Int64>, stride: Int64 }> exit=return    @62
-  release w : Deep<{ data: Array<Int64>, start: Int64 }> exit=return     @59
-  release a : FreeArr exit=block                                         @70
-  release c : Deep<{ data: Array<Int64> }> exit=block                    @65
-  release s : Deep<{ data: Array<Int64>, stride: Int64 }> exit=block     @62
-  release w : Deep<{ data: Array<Int64>, start: Int64 }> exit=block      @59
+            int 3 : Int64                                                @73
+  return                                                                 @74
+    int 0 : Int64                                                        @74
+  release a : FreeArr exit=return                                        @71
+  release c : Deep<{ data: Array<Int64> }> exit=return                   @66
+  release s : Deep<{ data: Array<Int64>, stride: Int64 }> exit=return    @63
+  release w : Deep<{ data: Array<Int64>, start: Int64 }> exit=return     @60
+  release a : FreeArr exit=block                                         @71
+  release c : Deep<{ data: Array<Int64> }> exit=block                    @66
+  release s : Deep<{ data: Array<Int64>, stride: Int64 }> exit=block     @63
+  release w : Deep<{ data: Array<Int64>, start: Int64 }> exit=block      @60

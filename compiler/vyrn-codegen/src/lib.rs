@@ -11378,6 +11378,33 @@ impl<'a> Gen<'a> {
             }
             return self.gen_expr(&p.place);
         }
+        // RFC-0120: a named projection dispatches here exactly as `a[i]` does —
+        // the same table, its own method name. Reached only for a call the
+        // checker resolved to a projection (a function of the same name wins
+        // there, so it wins here too via the `funcs` guard).
+        if !args.is_empty()
+            && self.funcs.get(name).is_none()
+            && self
+                .impls
+                .iter()
+                .any(|i| i.places.iter().any(|p| p.name == *name))
+        {
+            let line = args[0].line();
+            let recv = self.static_ty(&args[0]);
+            if let Some(p) = vyrn_frontend::project::site(
+                self.impls,
+                recv.as_ref(),
+                name,
+                &args[0],
+                &args[1..],
+                line,
+            )? {
+                for s in &p.prologue {
+                    self.gen_stmt(s)?;
+                }
+                return self.gen_expr(&p.place);
+            }
+        }
         if name == vyrn_frontend::project::ELEM {
             let (av, aty) = self.gen_expr(&args[0])?;
             let (iv, _) = self.gen_expr(&args[1])?;
