@@ -234,6 +234,7 @@ pub const RESERVED: &[&str] = &[
     "readFileBytes",
     "stringFromBytes",
     "listDir",
+    "listDirKinds",
     "lineAt",
     "colAt",
     "moduleInterface",
@@ -6501,20 +6502,20 @@ impl<'a> Checker<'a> {
             }
             return Ok(Type::Int);
         }
-        if name == "listDir" {
+        // `listDirKinds(path)` (RFC-0119): `listDir`'s listing with each
+        // directory entry's name carrying a trailing `/`, because `listDir`'s
+        // error cannot tell "not a directory" from "unreadable" and a walker
+        // was listing every subdirectory twice to find out.
+        if name == "listDir" || name == "listDirKinds" {
             if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`listDir` takes 1 argument, got {}",
-                    args.len()
-                ));
+                return Err(cerr!(line, "`{name}` takes 1 argument, got {}", args.len()));
             }
             let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
             if matches!(t, Type::Err) {
                 return Ok(Type::Err);
             }
             if t != Type::Str {
-                return Err(cerr!(line, "`listDir` needs a String path, found {t}"));
+                return Err(cerr!(line, "`{name}` needs a String path, found {t}"));
             }
             return Ok(Type::Result(
                 Box::new(Type::Array(Box::new(Type::Str))),
@@ -9790,6 +9791,7 @@ const SPAWN_FORBIDDEN: &[&str] = &[
     "readFileBytes",
     "stringFromBytes",
     "listDir",
+    "listDirKinds",
     "lineAt",
     "colAt",
 ];

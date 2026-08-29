@@ -237,8 +237,13 @@ fn serve(
         &inputs.aliased,
         path,
     )?;
-    if mode == MODE_LIST {
-        return match inputs.resolver.list(&resolved) {
+    if mode == MODE_LIST || mode == MODE_LIST_KINDS {
+        let listed = if mode == MODE_LIST_KINDS {
+            inputs.resolver.list_kinds(&resolved)
+        } else {
+            inputs.resolver.list(&resolved)
+        };
+        return match listed {
             Ok(mut names) => {
                 names.sort();
                 // Recorded as a synthetic input under the directory key, in the
@@ -787,6 +792,9 @@ const MODE_LIST: i32 = 2;
 /// Not a read at all: `moduleInterface`, which needs the resolver AND the
 /// loader, so it is served on the host thread like one (RFC-0076 M3b).
 const MODE_MODULE_INTERFACE: i32 = 3;
+/// `listDirKinds` (RFC-0119): `MODE_LIST`'s encoding with a `/` appended to
+/// each directory entry's name.
+const MODE_LIST_KINDS: i32 = 4;
 
 /// One unit of a structured host result (RFC-0076 M3b).
 ///

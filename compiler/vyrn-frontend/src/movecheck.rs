@@ -7308,6 +7308,22 @@ mod tests {
                 names.sort();
                 Ok(names)
             }
+            fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
+                let mut names: Vec<String> = std::fs::read_dir(resolved)
+                    .map_err(|e| e.to_string())?
+                    .filter_map(|e| e.ok())
+                    .map(|e| {
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        if e.file_type().is_ok_and(|t| t.is_dir()) {
+                            format!("{name}/")
+                        } else {
+                            name
+                        }
+                    })
+                    .collect();
+                names.sort();
+                Ok(names)
+            }
         }
         let slashed = |p: &std::path::Path| {
             p.canonicalize()
@@ -7468,6 +7484,22 @@ mod tests {
                     .map_err(|e| e.to_string())?
                     .filter_map(|e| e.ok())
                     .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect();
+                names.sort();
+                Ok(names)
+            }
+            fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
+                let mut names: Vec<String> = std::fs::read_dir(resolved)
+                    .map_err(|e| e.to_string())?
+                    .filter_map(|e| e.ok())
+                    .map(|e| {
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        if e.file_type().is_ok_and(|t| t.is_dir()) {
+                            format!("{name}/")
+                        } else {
+                            name
+                        }
+                    })
                     .collect();
                 names.sort();
                 Ok(names)

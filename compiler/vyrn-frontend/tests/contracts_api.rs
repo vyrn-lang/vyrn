@@ -28,6 +28,22 @@ impl ModuleResolver for Disk {
     fn read(&self, resolved: &str) -> Result<String, String> {
         std::fs::read_to_string(resolved).map_err(|e| e.to_string())
     }
+    fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
+        let mut names: Vec<String> = std::fs::read_dir(resolved)
+            .map_err(|e| e.to_string())?
+            .filter_map(|e| e.ok())
+            .map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if e.file_type().is_ok_and(|t| t.is_dir()) {
+                    format!("{name}/")
+                } else {
+                    name
+                }
+            })
+            .collect();
+        names.sort();
+        Ok(names)
+    }
     fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
         let mut names: Vec<String> = std::fs::read_dir(resolved)
             .map_err(|e| e.to_string())?

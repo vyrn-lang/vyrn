@@ -58,7 +58,7 @@ import { el, empty, Html, Attr } from "std/html"
 // RFC-0071: a page's exports are checked against the `Page` contract declared
 // below, instead of hunted for by name.
 import { checkContract, matchedMember } from "std/contract"
-import { endsWith, startsWith } from "std/strpred"
+import { endsWith, slice, startsWith } from "std/strpred"
 // RFC-0099: every objection this generator raises is a diagnostic in its own
 // wording, at a severity it chooses — a page whose surface does not fit its
 // route, two routes landing on one helper name — instead of a module that fails
@@ -1341,7 +1341,10 @@ gen fn uiReadVyx(path: String) -> UiFileRead {
 type UiDirRead = { entries: Array<String>, err: String }
 
 gen fn uiReadDirOf(dir: String) -> UiDirRead {
-    return match listDir(dir) {
+    // The kinded listing (RFC-0119): a subdirectory's name carries a trailing
+    // `/`, so the scan descends off this one call instead of listing every
+    // subdirectory a second time just to test directory-ness.
+    return match listDirKinds(dir) {
         Ok(ns) => UiDirRead { entries: ns, err: "" },
         Err(err) => UiDirRead { entries: [], err: err },
     }
@@ -1509,16 +1512,6 @@ gen fn uiPageErr(modPath: String, segs: Array<String>, dirPrefix: Array<String>,
     }
 }
 
-/// Whether `path` is a directory (a `listDir` that succeeds), used to recurse
-/// into nested static route directories. A regular file lists as an error. A
-/// `gen fn` (calls `listDir`, generation-only) so codegen never lowers it.
-gen fn uiIsDir(path: String) -> Bool {
-    return match listDir(path) {
-        Ok(ns) => true,
-        Err(err) => false,
-    }
-}
-
 /// A layout or error `.vyx` discovered during the scan: its module path and the
 /// route segments of its DIRECTORY (for nearest-ancestor matching, RFC-0041).
 type UiChrome = { modPath: String, dirPrefix: Array<String> }
@@ -1540,7 +1533,21 @@ gen fn uiScanAll(dir: String, prefix: Array<String>) -> UiScan {
     let mut layouts: Array<UiChrome> = []
     let mut errors: Array<UiChrome> = []
     for name in listed.entries {
-        if name.endsWith(".vyrn") {
+        if name.endsWith("/") {
+            // A subdirectory, named as one by the kinded listing (RFC-0119).
+            let bare = slice(name, 0, name.byteLength - 1) ?? panic("uiScanAll: the cut is at the listing's own ASCII `/`")
+            let kid = uiScanAll(dir + "/" + bare, uiAppendStr(prefix, bare))
+            scanErr = scanErr + kid.err
+            for p in kid.pages {
+                pages.push(p.copy())
+            }
+            for l in kid.layouts {
+                layouts.push(l.copy())
+            }
+            for e in kid.errors {
+                errors.push(e.copy())
+            }
+        } else if name.endsWith(".vyrn") {
             let st = uiStem(name)
             let modPath = dir + "/" + st
             pages.push(uiInspectPage(modPath, uiRouteSegsFor(prefix, st), prefix))
@@ -1554,21 +1561,6 @@ gen fn uiScanAll(dir: String, prefix: Array<String>) -> UiScan {
                 errors.push(UiChrome { modPath: modPath, dirPrefix: prefix.copy() })
             } else {
                 pages.push(uiInspectVyxPage(modPath, uiRouteSegsFor(prefix, st), prefix))
-            }
-        } else {
-            let sub = dir + "/" + name
-            if uiIsDir(sub) {
-                let kid = uiScanAll(sub, uiAppendStr(prefix, name))
-                scanErr = scanErr + kid.err
-                for p in kid.pages {
-                    pages.push(p.copy())
-                }
-                for l in kid.layouts {
-                    layouts.push(l.copy())
-                }
-                for e in kid.errors {
-                    errors.push(e.copy())
-                }
             }
         }
     }

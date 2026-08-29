@@ -277,8 +277,19 @@ export gen fn openapi(contract: String) -> String {
     out = out + "    return oaWithId(id, oaNode(schema))\n"
     out = out + "}\n"
 
+    // COMPUTED ONCE PER PROCESS. The document is deterministic — every input
+    // is a compile-time constant baked below — yet the old body rebuilt the
+    // tree and pretty-printed it on every call, and the callers call it per
+    // HTTP request (the std-quality census's pattern 3). A generated module
+    // may hold module state like any other module (RFC-0029; the refusal the
+    // census remembered is comptime purity inside the GENERATOR's body, not
+    // its output), so the emitted function builds once and copies after.
+    out = out + "let mut oaDocCache: String = \"\"\n"
     out = out + "/// The OpenAPI 3.1 document for this contract (deterministic, byte-stable).\n"
     out = out + "export fn openapiJson() -> String {\n"
+    out = out + "    if oaDocCache.byteLength > 0 {\n"
+    out = out + "        return oaDocCache.copy()\n"
+    out = out + "    }\n"
     // paths — one entry per procedure in declaration order.
     out = out + "    let mut paths: Array<JsonField> = []\n"
     for f in iface.functions {
@@ -297,7 +308,8 @@ export gen fn openapi(contract: String) -> String {
     out = out + "        JsonField { key: \"paths\", value: JObj(paths) },\n"
     out = out + "        JsonField { key: \"components\", value: JObj([JsonField { key: \"schemas\", value: JObj(schemas) }]) },\n"
     out = out + "    ])\n"
-    out = out + "    return emitPretty(doc, 2)\n"
+    out = out + "    oaDocCache = emitPretty(doc, 2)\n"
+    out = out + "    return oaDocCache.copy()\n"
     out = out + "}\n"
     return out
 }

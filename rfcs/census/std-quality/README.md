@@ -405,6 +405,50 @@ defect with a twelve-line repro, narrowed but not diagnosed. And `std/num`'s
 float parser is 40 times slower on a large decimal exponent, which is real and is
 its own piece of work with its own correctness corpus, not a performance patch.
 
+---
+
+## The twenty, re-judged (2026-08-29)
+
+Every row re-read against the code at the RFC-0119 head and re-measured where
+a measurement was cheap. The arcs between the census commit and now
+(RFC-0114..0119, and the interpreter's amortized string append) closed some
+rows without anyone acting on the census — which is why this table exists:
+a list that stops being re-read starts lying.
+
+| # | Module | Verdict | Today's evidence |
+|---|---|---|---|
+| 1 | jsondec | LIVE, by design | Copies at every accessor level; the scalar baseline got ~11x faster since the census, so the relative gap WIDENED (201.6 µs vs 0.18 µs). Blocked on RFC-0109 (can a read borrow). |
+| 2 | num | CLOSED | `parseFloat64` takes Clinger's fast path: 4.92 µs → 155 ns on `"12345.678"`; `"1e300"` keeps the exact path. |
+| 3 | http | CLOSED | The mount audit runs until it passes once, then stands for the process (module state). Was 280 µs/request re-measured (432 µs in the census). |
+| 4 | hints | PARTIAL | The double walk is gone (one walk carrying the previous line's bounds); the per-hint restart from byte 0 remains, late-line ~200x early-line. |
+| 5 | html | LIVE | Diff of two identical keyed trees still costs 6x a build (213 µs vs 35 µs); copies per level, partly an RFC-0109 case. |
+| 6 | http | LIVE | Every policy-free 200 body still `parseJson`ed, ~2.9 µs at 4 KiB, up to three parses with stamps. |
+| 7 | graphql | LIVE | `gqlHas` sibling scans still O(k²): 239 µs at 512 siblings. The hashed Map exists now (RFC-0116) — a fix is available. |
+| 8 | vyx-hints | STALE | The `out = out + ...` pattern remains but the mechanism died: string append-assign is amortized-linear now; a fixed-total-bytes probe ran flat. |
+| 9 | i18n | PARTIAL | "Hard-fails at 200 keys" is stale (200 completes; the budget cliff moved to ~400); `keyCollisionErrors` is still the O(K²·L) pair loop and generation is still superlinear. |
+| 10 | json | LIVE | `emitPretty` still rebuilds the pad per node per level: depth 192 = 10.35 ms vs 42 µs compact, ×16 per depth doubling. |
+| 11 | strings | STALE | `split` hoists the skip table ("ONE TABLE FOR EVERY MATCH"); measured at or under the census's own no-copy baseline. |
+| 12 | graphql | LIVE | Projection still deep-copies the path per level: O(d²) reproduces (33.67 µs at d16, 444.4 µs at d64). |
+| 13 | hash | LIVE | `sha1` still allocates the 80-word schedule per block; gap narrowed (3.6x fnv1a, was 5.4x) but the allocation stands. |
+| 14 | arrays | LIVE | `sortBy` is still insertion sort with the key called twice per comparison; `sortWith` landed BESIDE it, not instead of it. Census numbers reproduce. |
+| 15 | rpc | STALE | The concat emitter is linear now: 16x the appends costs 11.4x the time. The census's 320x was the old quadratic append. |
+| 16 | strpred | STALE | The predicates read the `byteLength` field; the module doc records the fix and keeps the census's numbers as history. |
+| 17 | slots | LIVE | `get` still copies per read (468 µs / 10k gets); the `s[h]` place projection is a 9 ns/call escape hatch. `handles()` measured worse than the census (1.41 ms at 100k). |
+| 18 | openapi | CLOSED | The generated `openapiJson()` builds once into module state: 45.31 µs → 34 ns per call. |
+| 19 | stream | LIVE, deliberate | `merge` still drains eagerly and its post-census doc comment says so out loud, advising `take` on an endless side. |
+| 20 | tw | LIVE | `css()` still bakes the whole vocabulary (60,616 bytes, byte-identical to the census). The guide sentence that promised only-used-rules emission is corrected to stop claiming it. |
+
+Pattern 5 (the double list) closed wholesale: RFC-0119's `listDirKinds` marks
+directories in the listing itself, and the three `isDir` helpers are deleted.
+Pattern 3 (constant work per call) closed for its three census-named
+per-request payers — openapi, rpc's registry, http's audit — via module
+state, whose "refused inside a `gen fn`" turned out to be about the
+generator's body, never its output. Pattern 1 (quadratic string
+accumulation) dissolved underneath the census when append-assign went
+amortized-linear. What remains open above is pattern 2 — the copies, which
+are RFC-0109's question — plus the local LIVE rows, each fixable on its own
+terms.
+
 **Both re-judged 2026-08-28.** The `std/von` defect is GONE — the repro and a
 bench that calls `emitVon` both pass; fixed incidentally by an RFC-0114..0118
 arc, verified above. And finding 2 got the half that pays: `parseFloat64` now

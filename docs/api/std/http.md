@@ -442,24 +442,19 @@ later group that an earlier group already answers for is unreachable, and an
 unreachable route is the kind of thing nobody notices until production. Order
 *within* a group is the author's own, and left alone.
 
-The check runs on every call rather than once, because there is no init hook
-to hang it on and a router is a handful of routes: the scan is O(routes²) and
-that number is 5 in `examples/bin`.
-
-**The threshold, measured rather than guessed.** This paragraph used to say
-the count "would have to reach the thousands before it showed up next to a
-JSON decode". It does not. Timed over 500 iterations of the same request: 8
-routes cost 4 µs per request, 64 routes in ONE group cost 33 µs, and 64 routes
-split into two groups of 32 cost 432 µs — the cross-group loop is 32x32
-`httpSubsumes` calls and each splits both patterns into fresh segment arrays.
-So the real threshold is tens of routes, not thousands, and it arrives an
-order of magnitude sooner when the routes are split across groups.
-
-The policy stands for the configurations here, which are small. It is written
-down so that an app with sixty routes knows what it pays, instead of reading
-a number that was never measured. `vyrn serve` runs `main` at
-startup, so an app that touches `handle` there sees the trap at startup, which
-is where it belongs.
+The check runs ONCE per process now, not once per request. The old policy —
+"the check runs on every call rather than once, because there is no init
+hook to hang it on" — was measured out of its own footnote: 8 routes cost
+4 µs per request, 64 in one group 33 µs, and 64 split into two groups of 32
+cost 432 µs, because the cross-group loop is 32x32 `httpSubsumes` calls and
+each splits both patterns into fresh segment arrays. The threshold was tens
+of routes, not the thousands the paragraph before it had guessed. The init
+hook it lacked is module state (RFC-0029): a clean audit sets
+`httpMountAudited` and stands for the process, which preserves exactly the
+property the old policy bought — `vyrn serve` runs `main` at startup, so an
+app that touches `handle` there sees the trap at startup, where it belongs.
+A route set is a declaration; an app that mutates its groups between
+requests is outside the audit's model, as it always was.
 
 The fourth parameter is `ws`'s, and it is a fourth parameter for the same
 reason `live` was a third: Vyrn has no sum over two record types, and a

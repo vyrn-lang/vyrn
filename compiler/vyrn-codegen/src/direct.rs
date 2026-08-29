@@ -6272,6 +6272,7 @@ impl<'p> Fn_<'_, 'p> {
             (crate::GEN_NEXT_INT, 0) => Type::Int,
             (crate::GEN_NEXT_STR, 0) => Type::Str,
             ("listDir", 1) => gen_list_dir_ty(),
+            ("listDirKinds", 1) => gen_list_dir_ty(),
             _ => return None,
         })
     }
@@ -6423,6 +6424,21 @@ impl<'p> Fn_<'_, 'p> {
             ("listDir", 1) => {
                 let Some(f) = self.cx.rt.list_dir else {
                     return unsupported("`listDir` without a generator host", line);
+                };
+                let ty = gen_list_dir_ty();
+                let l = self.layout_of(&ty, line)?;
+                self.expr_as(m, b, &args[0], &Type::Str)?;
+                let off = b.alloc(l.size, l.align);
+                b.slot(off);
+                b.ins(&Instruction::Call(f));
+                b.slot(off);
+                Ok(Some(ty))
+            }
+            // `listDirKinds` (RFC-0119): the same lowering against its own
+            // runtime fn, whose host mode appends `/` to directory names.
+            ("listDirKinds", 1) => {
+                let Some(f) = self.cx.rt.list_dir_kinds else {
+                    return unsupported("`listDirKinds` without a generator host", line);
                 };
                 let ty = gen_list_dir_ty();
                 let l = self.layout_of(&ty, line)?;
@@ -13726,6 +13742,9 @@ struct Rt {
     /// COMPUTED — `slot` appends — so an absent entry shifts the ones after it and
     /// nothing outside one compile depends on where they land.
     list_dir: Option<u32>,
+    /// `listDirKinds` (RFC-0119): `list_dir`'s twin against the mode whose
+    /// directory names carry a trailing `/`.
+    list_dir_kinds: Option<u32>,
     /// RFC-0028's `Map<String, V>` lookup (M2l), and the three helpers the hash
     /// index put under it. `reserve`, `remove_at` and `keys_copy` are each reached
     /// from a single site and are a `malloc` plus a copy, so they are emitted
@@ -13921,6 +13940,7 @@ impl Rt {
             rename_file: slot("rename_file"),
             fsync_file: slot("fsync_file"),
             list_dir: gen_host.then(|| slot("list_dir")),
+            list_dir_kinds: gen_host.then(|| slot("list_dir_kinds")),
             map_find: slot("map_find"),
             map_find_bytes: slot("map_find_bytes"),
             map_hash: slot("map_hash"),
@@ -17785,7 +17805,16 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
     // The `Ok` payload is the `Array<String>` triple, which is three words where a
     // sum's payload is two, so it is BOXED — the same `Word::Boxed` encoding at the
     // same `layout::of_ll ∘ llt` offsets `read_file_bytes` uses.
-    if let (Some(list_dir), Some(g)) = (rt.list_dir, gen) {
+    // Emitted once per mode: `listDirKinds` (RFC-0119) is the same split over
+    // the same `\n`-joined blob — the host appends the `/` to directory names
+    // before joining, so the guest's splitter never learns kinds exist.
+    for (slot, mode) in [
+        (rt.list_dir, crate::GEN_MODE_LIST),
+        (rt.list_dir_kinds, crate::GEN_MODE_LIST_KINDS),
+    ] {
+        let (Some(list_dir), Some(g)) = (slot, gen) else {
+            continue;
+        };
         let (listpre, listpost) = msg(m, "listerr");
         // A `String` element is a `ptr`, so the names buffer is a `char**` — the
         // stride comes off the layout engine rather than off a 4 written here.
@@ -17808,7 +17837,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                     (malloc, str_new, err3),
                     [listpre, listpost, listpre, listpost],
                     (buf, len, emsg, 0),
-                    crate::GEN_MODE_LIST,
+                    mode,
                 );
                 // One pass to count separators, because the pointer array has to be
                 // allocated before the second pass can fill it.

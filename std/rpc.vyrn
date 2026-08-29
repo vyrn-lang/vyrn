@@ -44,7 +44,7 @@ import { report, reportHere, Severity } from "std/diag"
 // Inside the module rather than beside it, so the content-hash cache invalidates
 // the map with the code it describes.
 import { Symbol, symbol, strField, symbolMapFn } from "std/symbolmap"
-import { contains, endsWith, startsWith } from "std/strpred"
+import { contains, endsWith, slice, startsWith } from "std/strpred"
 
 // ---- the `Api` contract ----------------------------------------------------
 // RFC-0071 M3 / RFC-0072 M2. Until now "what is a procedure module" was a
@@ -334,7 +334,14 @@ fn serverHandlerFn(f: FnInfo) -> String {
 /// named type / it returns `Unit`), assembled from `jsonSchema()` calls emitted
 /// into the generated code.
 fn serverSchemaFn(iface: ModuleInterface) -> String {
-    let mut out = "fn rpcSchema() -> String {\n"
+    // Built once per process: every piece is a compile-time constant, and the
+    // caller serves it per HTTP request (the census's pattern 3). Module
+    // state in a generated module is ordinary RFC-0029 state.
+    let mut out = "let mut rpcSchemaCache: String = \"\"\n"
+    out = out + "fn rpcSchema() -> String {\n"
+    out = out + "    if rpcSchemaCache.byteLength > 0 {\n"
+    out = out + "        return rpcSchemaCache.copy()\n"
+    out = out + "    }\n"
     out = out + "    let mut acc = \"{\\\"procedures\\\":[\"\n"
     let mut i = 0
     for f in iface.functions {
@@ -355,7 +362,8 @@ fn serverSchemaFn(iface: ModuleInterface) -> String {
         i = i + 1
     }
     out = out + "    acc = acc + \"]}\"\n"
-    out = out + "    return acc\n}\n"
+    out = out + "    rpcSchemaCache = acc\n"
+    out = out + "    return rpcSchemaCache.copy()\n}\n"
     return out
 }
 
@@ -630,15 +638,6 @@ type RpcConfig = { prefix: String, path: String, pinKeys: Array<String>, pinPath
 /// One resolved route, as `vyrn routes` prints it.
 type RpcRoute = { path: String, key: String, pinned: Bool }
 
-/// Whether `path` is a directory — a `listDir` that succeeds. A `gen fn`
-/// (generation-only I/O), so codegen never lowers it.
-gen fn rpcIsDir(path: String) -> Bool {
-    return match listDir(path) {
-        Ok(ns) => true,
-        Err(err) => false,
-    }
-}
-
 /// `name` without its `.vyrn` extension.
 fn rpcStem(name: String) -> String {
     let b = bytes(name)
@@ -663,25 +662,26 @@ fn rpcStem(name: String) -> String {
 /// The dot is what marks it — the same suffix that derives its base path — so a
 /// projection colocates with what it projects without joining it.
 gen fn rpcScan(dir: String, prefix: String) -> Array<RpcModule> {
-    let entries = match listDir(dir) {
+    // The kinded listing (RFC-0119): a subdirectory's name carries a trailing
+    // `/`, so one call replaces the old shape's second listing per
+    // subdirectory (`rpcIsDir`, now deleted).
+    let entries = match listDirKinds(dir) {
         Ok(ns) => ns,
         Err(err) => [],
     }
     let mut out: Array<RpcModule> = []
     for name in entries {
-        if name.endsWith(".vyrn") {
+        if name.endsWith("/") {
+            let bare = slice(name, 0, name.byteLength - 1) ?? panic("rpcScan: the cut is at the listing's own ASCII `/`")
+            let deeper = if prefix == "" { bare.copy() } else { prefix + "/" + bare }
+            for m in rpcScan(dir + "/" + bare, deeper) {
+                out.push(m)
+            }
+        } else if name.endsWith(".vyrn") {
             let st = rpcStem(name)
             if st != "module" && st.contains(".") == false {
                 let rel = if prefix == "" { st } else { prefix + "/" + st }
                 out.push(RpcModule { modPath: dir + "/" + st, rel: rel })
-            }
-        } else {
-            let sub = dir + "/" + name
-            if rpcIsDir(sub) {
-                let deeper = if prefix == "" { name } else { prefix + "/" + name }
-                for m in rpcScan(sub, deeper) {
-                    out.push(m)
-                }
             }
         }
     }
@@ -1135,7 +1135,13 @@ fn rpcDirHandler(f: FnInfo, qual: String, ns: String) -> String {
 /// response JSON Schema, keyed by the wire PATH as well as the name, because
 /// under a derived scheme the path is what a caller has.
 gen fn rpcDirSchema(mods: Array<RpcModule>, cfg: RpcConfig) -> String {
-    let mut out = "fn rpcSchema() -> String {\n"
+    // Same once-per-process cache as `serverSchemaFn` — one of the two schema
+    // builders reaches any one generated module, so the name is shared.
+    let mut out = "let mut rpcSchemaCache: String = \"\"\n"
+    out = out + "fn rpcSchema() -> String {\n"
+    out = out + "    if rpcSchemaCache.byteLength > 0 {\n"
+    out = out + "        return rpcSchemaCache.copy()\n"
+    out = out + "    }\n"
     out = out + "    let mut acc = \"{\\\"procedures\\\":[\"\n"
     let mut i = 0
     for m in mods {
@@ -1160,7 +1166,8 @@ gen fn rpcDirSchema(mods: Array<RpcModule>, cfg: RpcConfig) -> String {
         }
     }
     out = out + "    acc = acc + \"]}\"\n"
-    out = out + "    return acc\n}\n"
+    out = out + "    rpcSchemaCache = acc\n"
+    out = out + "    return rpcSchemaCache.copy()\n}\n"
     return out
 }
 

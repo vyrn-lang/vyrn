@@ -45,6 +45,17 @@ pub trait ModuleResolver {
     fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
         Err(crate::trap::io_at("listerr", resolved))
     }
+    /// The same listing with each entry's KIND (RFC-0119): a directory's name
+    /// carries a trailing `/`, a file's does not. One convention instead of a
+    /// record type, and unambiguous because no entry NAME can contain a slash.
+    /// This exists because `list`'s error cannot tell "not a directory" from
+    /// "unreadable" — the project single-sources its I/O error strings and will
+    /// not parse operating-system wording — so a caller that needs to descend
+    /// listed a directory once to test it and again to walk it. Default:
+    /// unsupported, exactly as `list`.
+    fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
+        Err(crate::trap::io_at("listerr", resolved))
+    }
     /// Fetch a cached generator output by content-address key (RFC-0021). The
     /// frontend stays filesystem-free: the CLI/LSP back this with
     /// `~/.vyrn/cache/gen`; tests use an in-memory map. Default: no cache (a
@@ -113,6 +124,44 @@ impl ModuleResolver for MapResolver {
         }
         Ok(names.into_iter().collect())
     }
+    fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
+        // A segment with more path after it is a directory of the virtual tree;
+        // an exact key is a file. Both can hold at once (a key `a/b` beside a
+        // key `a/b/c` names `b` twice) — the map cannot happen on a real
+        // filesystem, and the directory reading wins because it is the one a
+        // walker acts on.
+        let prefix = format!("{}/", resolved.trim_end_matches('/'));
+        let mut dirs: std::collections::BTreeSet<String> = Default::default();
+        let mut files: std::collections::BTreeSet<String> = Default::default();
+        let mut any_under = false;
+        for key in self.0.keys() {
+            if let Some(rest) = key.strip_prefix(&prefix) {
+                any_under = true;
+                match rest.split_once('/') {
+                    Some((seg, _)) if !seg.is_empty() => {
+                        dirs.insert(seg.to_string());
+                    }
+                    None if !rest.is_empty() => {
+                        files.insert(rest.to_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !any_under {
+            return Err(crate::trap::io_at("listerr", resolved));
+        }
+        let mut out: Vec<String> = Vec::new();
+        for d in &dirs {
+            out.push(format!("{d}/"));
+        }
+        for f in files {
+            if !dirs.contains(&f) {
+                out.push(f);
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// A resolver that forwards every call to an inner resolver while recording each
@@ -155,6 +204,9 @@ impl ModuleResolver for RecordingResolver<'_> {
     }
     fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
         self.inner.list(resolved)
+    }
+    fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
+        self.inner.list_kinds(resolved)
     }
     fn gen_cache_get(&self, key: &str) -> Option<String> {
         self.inner.gen_cache_get(key)
@@ -6240,6 +6292,30 @@ mod gen_tests {
                         if !seg.is_empty() {
                             names.insert(seg.to_string());
                         }
+                    }
+                }
+            }
+            if any {
+                Ok(names.into_iter().collect())
+            } else {
+                Err(crate::trap::io_at("listerr", resolved))
+            }
+        }
+        fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
+            let prefix = format!("{}/", resolved.trim_end_matches('/'));
+            let mut names: std::collections::BTreeSet<String> = Default::default();
+            let mut any = false;
+            for k in self.files.keys() {
+                if let Some(rest) = k.strip_prefix(&prefix) {
+                    any = true;
+                    match rest.split_once('/') {
+                        Some((seg, _)) if !seg.is_empty() => {
+                            names.insert(format!("{seg}/"));
+                        }
+                        None if !rest.is_empty() => {
+                            names.insert(rest.to_string());
+                        }
+                        _ => {}
                     }
                 }
             }

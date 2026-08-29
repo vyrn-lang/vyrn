@@ -3199,6 +3199,7 @@ static MACRO_BUILTINS: &[&str] = &[
     "readFileBytes",
     "stringFromBytes",
     "listDir",
+    "listDirKinds",
     "moduleInterface",
     "schemaOf",
     "contractOf",

@@ -670,6 +670,9 @@ impl vyrn_frontend::loader::ModuleResolver for FsResolver {
     fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
         remote::list_dir(resolved)
     }
+    fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
+        remote::list_dir_kinds(resolved)
+    }
     fn gen_cache_get(&self, key: &str) -> Option<String> {
         remote::gen_cache_get(key)
     }
