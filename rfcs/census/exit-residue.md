@@ -75,6 +75,26 @@ already freed at the closing brace — dynamic provenance the old
 must not apply to the teardown's own walk. `regionescape` moved from a
 teardown double-free to an honest residue row.
 
+## Second triage: the stream signature was a Slots slab, and the teardown was swallowing generic releases
+
+The identical 5 × 192 signature across the three stream examples reduced
+to one probe: ANY `Slots` global leaks exactly those five blocks — and
+`std/stream`'s cursor slab is a `Slots` global (`cells`). The mechanism
+was in the teardown itself: a GENERIC declared release
+(`impl<T> Owned for Slots<T>`) solves its type arguments from `slot_ty`,
+which reads the emission scope — empty in the teardown's fresh `Gen` — and
+the Release arm's stated policy ("a drop this cannot emit is a leak,
+never a wrong free") swallowed the miss silently. Parking the global's
+binding in the scope for the duration of its drop lets the lookup answer,
+and the streams, `tryplace`, and every `Slots`-holding program came back
+clean. The instrument also gained a verbose form (`VYRN_LEAK_CHECK=2`)
+that lists each residual block's size — the first thing a triage keys on.
+
+Tallies after round two: **clean 58, leaking 92, zero double-frees** —
+the leaking count ROSE from 77 because the `jsonread`/`json5` move fixes
+restored nineteen json-heavy examples to the surveyable set; on the
+constant denominator every number moved down.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach

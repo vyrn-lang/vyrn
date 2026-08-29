@@ -446,6 +446,41 @@ fn build<'a>(
         &mut queue,
         &mut unresolved,
     );
+    // RFC-0114 §25: the leak-check teardown drops every module-state binding
+    // after `main`, and a GENERIC declared release it reaches is an
+    // instantiation like any placed one — modeled here so "the lowering is
+    // the worklist" covers the teardown's emission too. Solved from the
+    // DECLARED type, which is the type the backends' teardown drops by; an
+    // unannotated global of a declared-release type would surface at the
+    // gate as a missing instantiation — loud, the failure this file prefers.
+    let mut teardown_calls: Vec<(&str, HashMap<String, Type>)> = Vec::new();
+    for g in &program.globals {
+        let Some(gty) = &g.ty else { continue };
+        let Some(vyrn_frontend::own::DropKind::Release(f, _)) = ownership.proto.release_kind(gty)
+        else {
+            continue;
+        };
+        let Some(target) = by_name.get(f.as_str()) else {
+            continue;
+        };
+        if target.type_params.is_empty() {
+            continue;
+        }
+        let mut solved: HashMap<String, Type> = HashMap::new();
+        if let Some(p) = target.params.first() {
+            vyrn_frontend::types::solve_param(&p.ty, gty, &mut solved);
+        }
+        teardown_calls.push((target.name.as_str(), solved));
+    }
+    follow(
+        "<teardown>",
+        teardown_calls,
+        &by_name,
+        &decls,
+        &mut seen,
+        &mut queue,
+        &mut unresolved,
+    );
 
     while let Some((func, type_args)) = queue.pop_front() {
         let subst: BTreeMap<String, Type> = func

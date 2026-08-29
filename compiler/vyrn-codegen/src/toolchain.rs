@@ -133,7 +133,9 @@ static int vyrn_leak_state = -1;
 int __vyrn_leak_check_on(void) {
     if (vyrn_leak_state < 0) {
         const char* e = getenv("VYRN_LEAK_CHECK");
-        vyrn_leak_state = (e && e[0] && e[0] != '0') ? 1 : 0;
+        /* "2" is the verbose form: the exit report lists each block's size,
+           which is what a triage keys its first guess on. */
+        vyrn_leak_state = (e && e[0] && e[0] != '0') ? (e[0] == '2' ? 2 : 1) : 0;
     }
     return vyrn_leak_state;
 }
@@ -241,6 +243,13 @@ void __vyrn_audit_exit(void) {
     }
     vyrn_audit_release();
     if (live > 0) {
+        if (vyrn_leak_state == 2) {
+            vyrn_audit_acquire();
+            for (i = 0; i < vyrn_audit_cap; i++)
+                if (vyrn_audit_tab[i].p)
+                    fprintf(stderr, "  leaked block: %llu bytes\n", vyrn_audit_tab[i].n);
+            vyrn_audit_release();
+        }
         fprintf(stderr, "free audit: %llu block(s), %llu bytes, never freed\n", live, bytes);
         exit(135);
     }
