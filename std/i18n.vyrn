@@ -204,10 +204,20 @@ gen fn regexEscapeKey(key: String) -> String {
 type LocaleEntry = { key: String, value: String }
 
 /// A flattened locale in source order, or `ok = false` with a reason.
-type LocaleData = { ok: Bool, error: String, entries: Array<LocaleEntry> }
+/// `slots` maps each key to its FIRST index in `entries`, built once at
+/// flatten time — `entryIndex` ran a linear scan per lookup, and the
+/// emission loops ask per key per locale, which was quadratic in the key
+/// count (1.248 s of a 2000-key generation, the wall past the census's
+/// i18n row 9).
+type LocaleData = {
+    ok: Bool,
+    error: String,
+    entries: Array<LocaleEntry>,
+    slots: Map<String, Int64>,
+}
 
 fn dataError(msg: String) -> LocaleData {
-    return LocaleData { ok: false, error: msg.copy(), entries: [] }
+    return LocaleData { ok: false, error: msg.copy(), entries: [], slots: [:] }
 }
 
 /// The leaf-kind error for a value that is neither a string nor a nested object.
@@ -255,7 +265,17 @@ fn localeFromObj(fields: Array<JsonField>) -> LocaleData {
     if e != "" {
         return dataError(e)
     }
-    return LocaleData { ok: true, error: "", entries: entries }
+    // First occurrence wins, exactly as the linear scan answered — a
+    // duplicate key is the collision check's to report, not this map's.
+    let mut slots: Map<String, Int64> = [:]
+    let mut i = 0
+    while i < entries.length {
+        if let Some(_) = slots[entries[i].key] {} else {
+            slots[entries[i].key.copy()] = i
+        }
+        i = i + 1
+    }
+    return LocaleData { ok: true, error: "", entries: entries, slots: slots }
 }
 
 fn localeFromJson(j: Json) -> LocaleData {
@@ -288,16 +308,21 @@ gen fn localeKeys(d: LocaleData) -> Array<String> {
     return out
 }
 
-/// The index of `key` in locale `d`, or -1.
+/// The index of `key` in locale `d`, or -1 — one hashed lookup in the map
+/// the flatten built.
 gen fn entryIndex(d: LocaleData, key: String) -> Int64 {
-    let mut i = 0
-    while i < d.entries.length {
-        if d.entries[i].key == key {
-            return i
-        }
-        i = i + 1
+    if let Some(i) = d.slots[key] {
+        return i
     }
     return 0 - 1
+}
+
+/// Whether locale `d` defines `key` at all — the drift walk's question.
+gen fn hasKey(d: LocaleData, key: String) -> Bool {
+    if let Some(_) = d.slots[key] {
+        return true
+    }
+    return false
 }
 
 // ===========================================================================
@@ -967,7 +992,42 @@ gen fn keyCollisionErrors(base: LocaleData, dir: String, tag: String) -> String 
     // The exports the synthesized module owns outright, beside the per-key
     // functions: locale state, `t`, and the runtime key check.
     let reserved: Array<String> = ["locale", "setLocale", "t", "transKey"]
+    // The linear screen (the census's i18n row 9): derive each key's two
+    // names ONCE and ask three maps whether ANY pair collides — the pair
+    // loop below re-derived them per pair, 84,620 `keyFnName` calls at 400
+    // keys, which is what blew the generator's step budget. The screen only
+    // decides WHETHER; when it fires, the pair loop reports exactly what it
+    // always did, in exactly the order it always did — a collision is a
+    // build error, and an error path may cost what the happy path must not.
+    let mut anyPair = false
+    let mut seenKeys: Map<String, Bool> = [:]
+    let mut fnNames: Map<String, Bool> = [:]
+    let mut plainNames: Map<String, Bool> = [:]
+    for k in keys {
+        if let Some(_) = seenKeys[k] {
+            anyPair = true
+        }
+        seenKeys[k.copy()] = true
+        let f = keyFnName(k)
+        let p = keyPlainName(k)
+        if let Some(_) = fnNames[f] {
+            anyPair = true
+        }
+        if let Some(_) = plainNames[f] {
+            anyPair = true
+        }
+        if let Some(_) = fnNames[p] {
+            anyPair = true
+        }
+        fnNames[f] = true
+        plainNames[p] = true
+    }
     let mut out = ""
+    if anyPair == false {
+        // No pair collides; only the reserved-name walk below can speak.
+        out = out + keyReservedErrors(keys, reserved, dir, tag)
+        return out
+    }
     let mut i = 0
     while i < keys.length {
         let mut j = i + 1
@@ -1003,6 +1063,19 @@ gen fn keyCollisionErrors(base: LocaleData, dir: String, tag: String) -> String 
         }
         i = i + 1
     }
+    out = out + keyReservedErrors(keys, reserved, dir, tag)
+    return out
+}
+
+/// The reserved-name walk `keyCollisionErrors` ends with, on both of its
+/// paths: a key whose derived names land on the module's own exports.
+gen fn keyReservedErrors(
+    keys: Array<String>,
+    reserved: Array<String>,
+    dir: String,
+    tag: String,
+) -> String {
+    let mut out = ""
     for k in keys {
         for r in reserved {
             if keyPlainName(k) == r || keyFnName(k) == r {
@@ -1094,17 +1167,15 @@ export gen fn i18n(dir: String) -> String {
     // baseline and the source of docs, signatures, and generated types.
     let base = datas[0]
     let baseTag = tags[0]
-    let baseKeys = localeKeys(base)
     let mut drift = ""
     let mut li = 0
     while li < tags.length {
         let d = datas[li]
         let tag = tags[li]
-        let dKeys = localeKeys(d)
         // keys missing from this locale
         let mut ki = 0
         while ki < base.entries.length {
-            if includes(dKeys, base.entries[ki].key) == false {
+            if hasKey(d, base.entries[ki].key) == false {
                 drift = drift
                 + localeErr(
                     dir,
@@ -1117,7 +1188,7 @@ export gen fn i18n(dir: String) -> String {
         // extra keys in this locale
         ki = 0
         while ki < d.entries.length {
-            if includes(baseKeys, d.entries[ki].key) == false {
+            if hasKey(base, d.entries[ki].key) == false {
                 drift = drift
                 + localeErr(
                     dir,
@@ -1590,25 +1661,25 @@ test "icuBadBrace flags an unmatched or stray brace, quote-aware" {
 
 test "keyCollisionErrors names every collision class" {
     // Dotted vs nested flatten to the same `a.b`.
-    let dup = LocaleData { ok: true, error: "", entries: [LocaleEntry { key: "a.b", value: "x" }, LocaleEntry { key: "a.b", value: "y" }] }
+    let dup = LocaleData { ok: true, error: "", slots: [:], entries: [LocaleEntry { key: "a.b", value: "x" }, LocaleEntry { key: "a.b", value: "y" }] }
     assert(keyCollisionErrors(dup, "./locales", "en").contains("key `a.b` is defined twice"))
     // home.title and homeTitle both make tHomeTitle.
-    let clash = LocaleData { ok: true, error: "", entries: [LocaleEntry { key: "home.title", value: "A" }, LocaleEntry { key: "homeTitle", value: "B" }] }
+    let clash = LocaleData { ok: true, error: "", slots: [:], entries: [LocaleEntry { key: "home.title", value: "A" }, LocaleEntry { key: "homeTitle", value: "B" }] }
     assert(
         keyCollisionErrors(clash, "./locales", "en")
         .contains("keys `home.title` and `homeTitle` both name the function `tHomeTitle`"),
     )
     // `tCart.items` and `cart.items` collide through different doors: the
     // first key's un-prefixed alias (`tCartItems`) is the second's function.
-    let cross = LocaleData { ok: true, error: "", entries: [LocaleEntry { key: "tCart.items", value: "A" }, LocaleEntry { key: "cart.items", value: "B" }] }
+    let cross = LocaleData { ok: true, error: "", slots: [:], entries: [LocaleEntry { key: "tCart.items", value: "A" }, LocaleEntry { key: "cart.items", value: "B" }] }
     assert(keyCollisionErrors(cross, "./locales", "en").contains("collide through different doors"))
     // A key `Locale` derives the alias `locale` — the module's own export.
-    let reserved = LocaleData { ok: true, error: "", entries: [LocaleEntry { key: "Locale", value: "A" }] }
+    let reserved = LocaleData { ok: true, error: "", slots: [:], entries: [LocaleEntry { key: "Locale", value: "A" }] }
     assert(
         keyCollisionErrors(reserved, "./locales", "en")
         .contains("derives the name `locale`, which is the module's own export"),
     )
     // A clean key set collides with nothing.
-    let ok = LocaleData { ok: true, error: "", entries: [LocaleEntry { key: "home.title", value: "A" }, LocaleEntry { key: "cart.items", value: "B" }] }
+    let ok = LocaleData { ok: true, error: "", slots: [:], entries: [LocaleEntry { key: "home.title", value: "A" }, LocaleEntry { key: "cart.items", value: "B" }] }
     assertEq(keyCollisionErrors(ok, "./locales", "en"), "")
 }
