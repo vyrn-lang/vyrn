@@ -497,6 +497,43 @@ fn vhElem(
                 "`\{a.name}` on `<\{tag}>` was removed from HTML; the platform may ignore it — write CSS or current markup",
             )
         }
+        // html/attr-name. The census's last open row: the complete allowed
+        // sets, so `alt` on an `<input>` that is not `type="image"`... no —
+        // this rule is NAMES only, values are another censusable day. A name
+        // that is not global, not the element's own, and not in any of the
+        // spaces with their own rules is a typo or a misplacement — `scr`
+        // for `src`, `alt` on `<div>`. Foreign elements keep their own
+        // vocabulary: `<svg viewBox>` is not HTML's to judge, so the rule
+        // asks only inside the HTML vocabulary, on tags the element table
+        // knows. A WARNING, by the same table-exactness caveat as
+        // `html/element-name`.
+        if a.evt == false
+        && inForeign == false
+        && tag != "svg"
+        && tag != "math"
+        && contains(tag, "-") == false
+        && vhKnownTag(tag)
+        && startsWith(a.name, "v-") == false
+        && a.name != "key"
+        && startsWith(a.name, "data-") == false
+        && startsWith(a.name, "aria") == false
+        && a.name != "role"
+        && vhGlobalAttr(a.name) == false
+        && vhElementAttr(tag, a.name) == false
+        && vhDeprecatedAttrOn(tag, a.name) == false
+        {
+            out = out
+            + hint(
+                p,
+                "html/attr-name",
+                Warning,
+                src,
+                file,
+                a.line,
+                a.col,
+                "`\{a.name}` is not an attribute of `<\{tag}>` — a typo, or an attribute that belongs on another element?",
+            )
+        }
         // a11y/autoplay. `html-validate`'s `no-autoplay`, WCAG 1.4.2. Sound the
         // reader did not ask for, and they must find the page to stop it. Both
         // spellings count: the attribute is present either way.
@@ -1349,6 +1386,548 @@ fn vhDeprecatedAttrOn(tag: String, name: String) -> Bool {
     return false
 }
 
+/// The complete allowed-attribute tables — the census's last open row of
+/// table two, blocked until now on a source with the COMPLETE per-element
+/// sets (`html5.ts` lists only constrained attributes). Read from
+/// `wooorm/html-element-attributes` master, `index.js`, on 2026-08-29 —
+/// spec-derived and maintained: 31 global attributes, and 413 (element,
+/// attribute) rows across 77 elements, grouped by attribute name. `role`
+/// and `aria-*` are the ARIA space, exempted where the rule fires; `data-*`
+/// is custom by definition; `v-*` is the template's own vocabulary.
+fn vhGlobalAttr(name: String) -> Bool {
+    if name.byteLength == 0 {
+        return false
+    }
+    let lead = bytes(name)[0]
+    if lead == 'a' {
+        return name == "accesskey" || name == "autocapitalize" || name == "autocorrect" || name == "autofocus"
+    }
+    if lead == 'c' {
+        return name == "class" || name == "contenteditable"
+    }
+    if lead == 'd' {
+        return name == "dir" || name == "draggable"
+    }
+    if lead == 'e' {
+        return name == "enterkeyhint" || name == "exportparts"
+    }
+    if lead == 'h' {
+        return name == "hidden"
+    }
+    if lead == 'i' {
+        return name == "id" || name == "inert" || name == "inputmode" || name == "is" || name == "itemid" || name == "itemprop" || name == "itemref" || name == "itemscope" || name == "itemtype"
+    }
+    if lead == 'l' {
+        return name == "lang"
+    }
+    if lead == 'n' {
+        return name == "nonce"
+    }
+    if lead == 'p' {
+        return name == "part" || name == "popover"
+    }
+    if lead == 's' {
+        return name == "slot" || name == "spellcheck" || name == "style"
+    }
+    if lead == 't' {
+        return name == "tabindex" || name == "title" || name == "translate"
+    }
+    if lead == 'w' {
+        return name == "writingsuggestions"
+    }
+    return false
+}
+
+fn vhElementAttr(tag: String, name: String) -> Bool {
+    if name == "abbr" {
+        return tag == "td" || tag == "th"
+    }
+    if name == "accept" {
+        return tag == "form" || tag == "input"
+    }
+    if name == "accept-charset" {
+        return tag == "form"
+    }
+    if name == "action" {
+        return tag == "form"
+    }
+    if name == "align" {
+        return tag == "applet" || tag == "caption" || tag == "col" || tag == "colgroup" || tag == "div" || tag == "h1" || tag == "h2" || tag == "h3" || tag == "h4" || tag == "h5" || tag == "h6" || tag == "hr" || tag == "iframe" || tag == "img" || tag == "input" || tag == "legend" || tag == "object" || tag == "p" || tag == "table" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr"
+    }
+    if name == "alink" {
+        return tag == "body"
+    }
+    if name == "allow" {
+        return tag == "iframe"
+    }
+    if name == "allowfullscreen" {
+        return tag == "iframe"
+    }
+    if name == "allowpaymentrequest" {
+        return tag == "iframe"
+    }
+    if name == "allowusermedia" {
+        return tag == "iframe"
+    }
+    if name == "alpha" {
+        return tag == "input"
+    }
+    if name == "alt" {
+        return tag == "applet" || tag == "area" || tag == "img" || tag == "input"
+    }
+    if name == "archive" {
+        return tag == "applet" || tag == "object"
+    }
+    if name == "as" {
+        return tag == "link"
+    }
+    if name == "async" {
+        return tag == "script"
+    }
+    if name == "autocomplete" {
+        return tag == "form" || tag == "input" || tag == "select" || tag == "textarea"
+    }
+    if name == "autoplay" {
+        return tag == "audio" || tag == "video"
+    }
+    if name == "axis" {
+        return tag == "td" || tag == "th"
+    }
+    if name == "background" {
+        return tag == "body"
+    }
+    if name == "bgcolor" {
+        return tag == "body" || tag == "table" || tag == "td" || tag == "th" || tag == "tr"
+    }
+    if name == "blocking" {
+        return tag == "link" || tag == "script" || tag == "style"
+    }
+    if name == "border" {
+        return tag == "img" || tag == "object" || tag == "table"
+    }
+    if name == "cellpadding" {
+        return tag == "table"
+    }
+    if name == "cellspacing" {
+        return tag == "table"
+    }
+    if name == "char" {
+        return tag == "col" || tag == "colgroup" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr"
+    }
+    if name == "charoff" {
+        return tag == "col" || tag == "colgroup" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr"
+    }
+    if name == "charset" {
+        return tag == "a" || tag == "link" || tag == "meta" || tag == "script"
+    }
+    if name == "checked" {
+        return tag == "input"
+    }
+    if name == "cite" {
+        return tag == "blockquote" || tag == "del" || tag == "ins" || tag == "q"
+    }
+    if name == "classid" {
+        return tag == "object"
+    }
+    if name == "clear" {
+        return tag == "br"
+    }
+    if name == "closedby" {
+        return tag == "dialog"
+    }
+    if name == "code" {
+        return tag == "applet"
+    }
+    if name == "codebase" {
+        return tag == "applet" || tag == "object"
+    }
+    if name == "codetype" {
+        return tag == "object"
+    }
+    if name == "color" {
+        return tag == "basefont" || tag == "font" || tag == "link"
+    }
+    if name == "colorspace" {
+        return tag == "input"
+    }
+    if name == "cols" {
+        return tag == "frameset" || tag == "textarea"
+    }
+    if name == "colspan" {
+        return tag == "td" || tag == "th"
+    }
+    if name == "command" {
+        return tag == "button"
+    }
+    if name == "commandfor" {
+        return tag == "button"
+    }
+    if name == "compact" {
+        return tag == "dir" || tag == "dl" || tag == "menu" || tag == "ol" || tag == "ul"
+    }
+    if name == "content" {
+        return tag == "meta"
+    }
+    if name == "controls" {
+        return tag == "audio" || tag == "video"
+    }
+    if name == "coords" {
+        return tag == "a" || tag == "area"
+    }
+    if name == "crossorigin" {
+        return tag == "audio" || tag == "img" || tag == "link" || tag == "script" || tag == "video"
+    }
+    if name == "data" {
+        return tag == "object"
+    }
+    if name == "datetime" {
+        return tag == "del" || tag == "ins" || tag == "time"
+    }
+    if name == "declare" {
+        return tag == "object"
+    }
+    if name == "decoding" {
+        return tag == "img"
+    }
+    if name == "default" {
+        return tag == "track"
+    }
+    if name == "defer" {
+        return tag == "script"
+    }
+    if name == "dirname" {
+        return tag == "input" || tag == "textarea"
+    }
+    if name == "disabled" {
+        return tag == "button" || tag == "fieldset" || tag == "input" || tag == "link" || tag == "optgroup" || tag == "option" || tag == "select" || tag == "textarea"
+    }
+    if name == "download" {
+        return tag == "a" || tag == "area"
+    }
+    if name == "enctype" {
+        return tag == "form"
+    }
+    if name == "face" {
+        return tag == "basefont" || tag == "font"
+    }
+    if name == "fetchpriority" {
+        return tag == "img" || tag == "link" || tag == "script"
+    }
+    if name == "for" {
+        return tag == "label" || tag == "output"
+    }
+    if name == "form" {
+        return tag == "button" || tag == "fieldset" || tag == "input" || tag == "label" || tag == "object" || tag == "output" || tag == "select" || tag == "textarea"
+    }
+    if name == "formaction" {
+        return tag == "button" || tag == "input"
+    }
+    if name == "formenctype" {
+        return tag == "button" || tag == "input"
+    }
+    if name == "formmethod" {
+        return tag == "button" || tag == "input"
+    }
+    if name == "formnovalidate" {
+        return tag == "button" || tag == "input"
+    }
+    if name == "formtarget" {
+        return tag == "button" || tag == "input"
+    }
+    if name == "frame" {
+        return tag == "table"
+    }
+    if name == "frameborder" {
+        return tag == "frame" || tag == "iframe"
+    }
+    if name == "headers" {
+        return tag == "td" || tag == "th"
+    }
+    if name == "height" {
+        return tag == "applet" || tag == "canvas" || tag == "embed" || tag == "iframe" || tag == "img" || tag == "input" || tag == "object" || tag == "source" || tag == "td" || tag == "th" || tag == "video"
+    }
+    if name == "high" {
+        return tag == "meter"
+    }
+    if name == "href" {
+        return tag == "a" || tag == "area" || tag == "base" || tag == "link"
+    }
+    if name == "hreflang" {
+        return tag == "a" || tag == "area" || tag == "link"
+    }
+    if name == "hspace" {
+        return tag == "applet" || tag == "img" || tag == "object"
+    }
+    if name == "http-equiv" {
+        return tag == "meta"
+    }
+    if name == "imagesizes" {
+        return tag == "link"
+    }
+    if name == "imagesrcset" {
+        return tag == "link"
+    }
+    if name == "integrity" {
+        return tag == "link" || tag == "script"
+    }
+    if name == "ismap" {
+        return tag == "img" || tag == "input"
+    }
+    if name == "kind" {
+        return tag == "track"
+    }
+    if name == "label" {
+        return tag == "optgroup" || tag == "option" || tag == "track"
+    }
+    if name == "language" {
+        return tag == "script"
+    }
+    if name == "link" {
+        return tag == "body"
+    }
+    if name == "list" {
+        return tag == "input"
+    }
+    if name == "loading" {
+        return tag == "iframe" || tag == "img"
+    }
+    if name == "longdesc" {
+        return tag == "frame" || tag == "iframe" || tag == "img"
+    }
+    if name == "loop" {
+        return tag == "audio" || tag == "video"
+    }
+    if name == "low" {
+        return tag == "meter"
+    }
+    if name == "manifest" {
+        return tag == "html"
+    }
+    if name == "marginheight" {
+        return tag == "frame" || tag == "iframe"
+    }
+    if name == "marginwidth" {
+        return tag == "frame" || tag == "iframe"
+    }
+    if name == "max" {
+        return tag == "input" || tag == "meter" || tag == "progress"
+    }
+    if name == "maxlength" {
+        return tag == "input" || tag == "textarea"
+    }
+    if name == "media" {
+        return tag == "link" || tag == "meta" || tag == "source" || tag == "style"
+    }
+    if name == "method" {
+        return tag == "form"
+    }
+    if name == "min" {
+        return tag == "input" || tag == "meter"
+    }
+    if name == "minlength" {
+        return tag == "input" || tag == "textarea"
+    }
+    if name == "multiple" {
+        return tag == "input" || tag == "select"
+    }
+    if name == "muted" {
+        return tag == "audio" || tag == "video"
+    }
+    if name == "name" {
+        return tag == "a" || tag == "applet" || tag == "button" || tag == "details" || tag == "fieldset" || tag == "form" || tag == "frame" || tag == "iframe" || tag == "img" || tag == "input" || tag == "map" || tag == "meta" || tag == "object" || tag == "output" || tag == "param" || tag == "select" || tag == "slot" || tag == "textarea"
+    }
+    if name == "nohref" {
+        return tag == "area"
+    }
+    if name == "nomodule" {
+        return tag == "script"
+    }
+    if name == "noresize" {
+        return tag == "frame"
+    }
+    if name == "noshade" {
+        return tag == "hr"
+    }
+    if name == "novalidate" {
+        return tag == "form"
+    }
+    if name == "nowrap" {
+        return tag == "td" || tag == "th"
+    }
+    if name == "object" {
+        return tag == "applet"
+    }
+    if name == "open" {
+        return tag == "details" || tag == "dialog"
+    }
+    if name == "optimum" {
+        return tag == "meter"
+    }
+    if name == "pattern" {
+        return tag == "input"
+    }
+    if name == "ping" {
+        return tag == "a" || tag == "area"
+    }
+    if name == "placeholder" {
+        return tag == "input" || tag == "textarea"
+    }
+    if name == "playsinline" {
+        return tag == "video"
+    }
+    if name == "popovertarget" {
+        return tag == "button" || tag == "input"
+    }
+    if name == "popovertargetaction" {
+        return tag == "button" || tag == "input"
+    }
+    if name == "poster" {
+        return tag == "video"
+    }
+    if name == "preload" {
+        return tag == "audio" || tag == "video"
+    }
+    if name == "profile" {
+        return tag == "head"
+    }
+    if name == "prompt" {
+        return tag == "isindex"
+    }
+    if name == "readonly" {
+        return tag == "input" || tag == "textarea"
+    }
+    if name == "referrerpolicy" {
+        return tag == "a" || tag == "area" || tag == "iframe" || tag == "img" || tag == "link" || tag == "script"
+    }
+    if name == "rel" {
+        return tag == "a" || tag == "area" || tag == "link"
+    }
+    if name == "required" {
+        return tag == "input" || tag == "select" || tag == "textarea"
+    }
+    if name == "rev" {
+        return tag == "a" || tag == "link"
+    }
+    if name == "reversed" {
+        return tag == "ol"
+    }
+    if name == "rows" {
+        return tag == "frameset" || tag == "textarea"
+    }
+    if name == "rowspan" {
+        return tag == "td" || tag == "th"
+    }
+    if name == "rules" {
+        return tag == "table"
+    }
+    if name == "sandbox" {
+        return tag == "iframe"
+    }
+    if name == "scheme" {
+        return tag == "meta"
+    }
+    if name == "scope" {
+        return tag == "td" || tag == "th"
+    }
+    if name == "scrolling" {
+        return tag == "frame" || tag == "iframe"
+    }
+    if name == "selected" {
+        return tag == "option"
+    }
+    if name == "shadowrootclonable" {
+        return tag == "template"
+    }
+    if name == "shadowrootcustomelementregistry" {
+        return tag == "template"
+    }
+    if name == "shadowrootdelegatesfocus" {
+        return tag == "template"
+    }
+    if name == "shadowrootmode" {
+        return tag == "template"
+    }
+    if name == "shadowrootserializable" {
+        return tag == "template"
+    }
+    if name == "shape" {
+        return tag == "a" || tag == "area"
+    }
+    if name == "size" {
+        return tag == "basefont" || tag == "font" || tag == "hr" || tag == "input" || tag == "select"
+    }
+    if name == "sizes" {
+        return tag == "img" || tag == "link" || tag == "source"
+    }
+    if name == "span" {
+        return tag == "col" || tag == "colgroup"
+    }
+    if name == "src" {
+        return tag == "audio" || tag == "embed" || tag == "frame" || tag == "iframe" || tag == "img" || tag == "input" || tag == "script" || tag == "source" || tag == "track" || tag == "video"
+    }
+    if name == "srcdoc" {
+        return tag == "iframe"
+    }
+    if name == "srclang" {
+        return tag == "track"
+    }
+    if name == "srcset" {
+        return tag == "img" || tag == "source"
+    }
+    if name == "standby" {
+        return tag == "object"
+    }
+    if name == "start" {
+        return tag == "ol"
+    }
+    if name == "step" {
+        return tag == "input"
+    }
+    if name == "summary" {
+        return tag == "table"
+    }
+    if name == "target" {
+        return tag == "a" || tag == "area" || tag == "base" || tag == "form" || tag == "link"
+    }
+    if name == "text" {
+        return tag == "body"
+    }
+    if name == "type" {
+        return tag == "a" || tag == "area" || tag == "button" || tag == "embed" || tag == "input" || tag == "li" || tag == "link" || tag == "object" || tag == "ol" || tag == "param" || tag == "script" || tag == "source" || tag == "style" || tag == "ul"
+    }
+    if name == "typemustmatch" {
+        return tag == "object"
+    }
+    if name == "usemap" {
+        return tag == "img" || tag == "input" || tag == "object"
+    }
+    if name == "valign" {
+        return tag == "col" || tag == "colgroup" || tag == "tbody" || tag == "td" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "tr"
+    }
+    if name == "value" {
+        return tag == "button" || tag == "data" || tag == "input" || tag == "li" || tag == "meter" || tag == "option" || tag == "param" || tag == "progress"
+    }
+    if name == "valuetype" {
+        return tag == "param"
+    }
+    if name == "version" {
+        return tag == "html"
+    }
+    if name == "vlink" {
+        return tag == "body"
+    }
+    if name == "vspace" {
+        return tag == "applet" || tag == "img" || tag == "object"
+    }
+    if name == "width" {
+        return tag == "applet" || tag == "canvas" || tag == "col" || tag == "colgroup" || tag == "embed" || tag == "hr" || tag == "iframe" || tag == "img" || tag == "input" || tag == "object" || tag == "pre" || tag == "source" || tag == "table" || tag == "td" || tag == "th" || tag == "video"
+    }
+    if name == "wrap" {
+        return tag == "textarea"
+    }
+    return false
+}
+
 /// Whether `name` is an HTML event handler attribute.
 ///
 /// A NAMED LIST, not `startsWith("on")`, and the reason is that this rule is an
@@ -1669,6 +2248,23 @@ test "an external script or sheet without integrity fires; a local one does not"
     assert(fires("<link rel=\"stylesheet\" href=\"/style.css\"/>", "sec/require-sri") == false)
     assert(fires("<link rel=\"icon\" href=\"https://cdn.test/a.png\"/>", "sec/require-sri") == false)
     assert(fires("<script :src=\"url\"></script>", "sec/require-sri") == false)
+}
+
+test "an attribute foreign to its element fires; every owned space does not" {
+    assert(fires("<img scr=\"/a.png\" alt=\"\" width=\"1\" height=\"1\"/>", "html/attr-name"))
+    assert(fires("<div alt=\"misplaced\">x</div>", "html/attr-name"))
+    // The element's own, a global, and a binding of either say nothing.
+    assert(fires("<a href=\"/x\">x</a>", "html/attr-name") == false)
+    assert(fires("<div class=\"c\" id=\"i\" title=\"t\">x</div>", "html/attr-name") == false)
+    assert(fires("<img :src=\"u\" alt=\"\" width=\"1\" height=\"1\"/>", "html/attr-name") == false)
+    // The spaces with rules (or vocabularies) of their own.
+    assert(fires("<li :key=\"r.id\">x</li>", "html/attr-name") == false)
+    assert(fires("<div data-track=\"x\">x</div>", "html/attr-name") == false)
+    assert(fires("<div role=\"note\" aria-label=\"n\">x</div>", "html/attr-name") == false)
+    assert(fires("<svg viewBox=\"0 0 4 4\"><path d=\"M0 0\" fill=\"none\"/></svg>", "html/attr-name") == false)
+    assert(fires("<my-thing whatever=\"x\">x</my-thing>", "html/attr-name") == false)
+    // An unknown ELEMENT is `html/element-name`'s report, not this rule's.
+    assert(fires("<buton type=\"button\">x</buton>", "html/attr-name") == false)
 }
 
 test "an entity in text fires; plain text, a bare ampersand and interpolation do not" {
