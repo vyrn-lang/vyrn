@@ -1605,9 +1605,28 @@ impl MoveCheck<'_> {
                 .names_a_place(then_branch)
                 .or_else(|| else_branch.as_ref().and_then(|b| self.names_a_place(b))),
             // A block arm (RFC-0118) yields no value, so it names no place.
-            Expr::Match { arms, .. } => arms
-                .iter()
-                .find_map(|a| a.body.as_expr().and_then(|e| self.names_a_place(e))),
+            Expr::Match {
+                scrutinee, arms, ..
+            } => arms.iter().find_map(|a| {
+                let e = a.body.as_expr()?;
+                // RFC-0121: an arm that yields a binder its own pattern bound
+                // reads the scrutinee's PAYLOAD — a place whoever owns the
+                // scrutinee still owns. Only when the scrutinee itself names
+                // a place: matching a temporary hands its payload over, and
+                // calling that a borrow would leak it (the same line
+                // `Expr::Field` draws above). Without this, `let items =
+                // match g { JArr(items) => items, .. }` on module state read
+                // as a fresh owned value, and `own` freed the global's buffer
+                // out from under it.
+                if let Expr::Var { name, .. } = e {
+                    if pattern_bindings(&a.pattern).contains(&name.as_str())
+                        && self.names_a_place(scrutinee).is_some()
+                    {
+                        return Some("the payload of a place somebody owns");
+                    }
+                }
+                self.names_a_place(e)
+            }),
             // `x.copy()` allocates for exactly the types `owns_heap` counts
             // (RFC-0089 M1b). Everything else it is called on is a handle, and a
             // copied handle SHARES what it points at — releasing both copies of
@@ -1894,6 +1913,32 @@ impl MoveCheck<'_> {
     /// still owns it, so the new name may be read but not stored on. Everything
     /// else — a fresh value, or a place that just moved — binds an owner.
     fn borrow_from(&self, value: &Expr) -> Option<Borrow> {
+        // RFC-0121: `let x = match p { V(b) => b, .. }` — the refutable-`let`
+        // desugar, and its handwritten equivalent. Every value arm yields a
+        // binder its own pattern bound out of the scrutinee, so the binding
+        // is a projection of the scrutinee's place — the payload the enum
+        // still owns. Without this the binding read as a fresh OWNED value,
+        // `own` reclaimed it at block exit, and the enum's buffer was freed
+        // out from under the enum (`vyrn why --memory` said so verbatim).
+        if let Expr::Match {
+            scrutinee, arms, ..
+        } = value
+        {
+            let all_borrow = arms.iter().all(|arm| match arm.body.as_expr() {
+                None => false,
+                Some(Expr::Call { name, .. }) if crate::ast::is_panic(name) => true,
+                Some(Expr::Var { name, .. }) => {
+                    pattern_bindings(&arm.pattern).contains(&name.as_str())
+                }
+                Some(_) => false,
+            });
+            if all_borrow {
+                if let Some((root, _)) = place_path(scrutinee).or_else(|| element_path(scrutinee)) {
+                    return Some(self.borrow_of(&root).unwrap_or(Borrow::Projection));
+                }
+            }
+            return None;
+        }
         // Shape first, type second. Every other initializer is a fresh value, and
         // asking the type of one walks a concat chain for an answer nothing reads.
         if !matches!(
@@ -5558,7 +5603,7 @@ pub fn pattern_bindings(p: &Pattern) -> Vec<&str> {
         Pattern::Some(b) | Pattern::Ok(b) | Pattern::Err(b) => vec![b],
         Pattern::Success(b) | Pattern::Failure(b) => vec![b],
         Pattern::Variant(_, binds) => binds.iter().map(|s| s.as_str()).collect(),
-        Pattern::None => vec![],
+        Pattern::None | Pattern::Other => vec![],
     }
 }
 
@@ -5607,6 +5652,33 @@ mod tests {
             );
             assert!(!sinks(&decl, name, 0));
         }
+    }
+
+    /// RFC-0121: the refutable `let`'s binding is the PAYLOAD of the
+    /// scrutinee's place — a borrow, never a fresh owner. When the scrutinee
+    /// is module state, minting an owned row freed the global's buffer at
+    /// block exit, out from under the next read (`vyrn why --memory` said
+    /// "reclaimed at block exit — freeing the array buffer"; the loop
+    /// crashed at iteration two).
+    #[test]
+    fn a_payload_binding_from_module_state_gets_no_reclamation_row() {
+        let src = "type E = | Tag(Array<Int64>) | Blank\n\
+                   let mut g: E = Blank\n\
+                   fn main() -> Int64 {\n\
+                       let Tag(xs) = g\n\
+                       return xs.length\n\
+                   }";
+        let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
+        assert!(super::check(&program).is_ok());
+        let rows = super::ownership(&program);
+        let payload = rows
+            .values()
+            .find(|r| matches!(&r.ty, Some(crate::ast::Type::Array(_))))
+            .expect("the binding has a row");
+        assert!(
+            payload.gone.is_some(),
+            "the payload binding must be marked borrowed, not owned: {payload:?}"
+        );
     }
 
     #[test]

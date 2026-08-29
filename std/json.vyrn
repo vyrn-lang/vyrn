@@ -105,6 +105,38 @@ export fn copyJson(j: Json) -> Json {
     return j.copy()
 }
 
+/// The reading projections (RFC-0121): `j[i]` is the element PLACE of a
+/// `JArr`, `j.field(key)` the value place of an object member — no subtree is
+/// copied, and the read is consumed at its access site. Both trap on a kind
+/// mismatch and on absence, exactly as `a[i]` traps out of range: these are
+/// the spellings for a shape the caller has already checked. The tolerant,
+/// JNull-on-miss readers keep their names in `std/jsondec` (`elemAt`,
+/// `fieldAt`) and their copies — a copy is what lets a value outlive the
+/// document it came from.
+impl Index for Json {
+    fn at(read self, i: Int64) -> read Json {
+        let JArr(items) = self
+        return items[i]
+    }
+
+    fn field(read self, key: String) -> read Json {
+        let JObj(fields) = self
+        let mut hit = 0 - 1
+        let mut k = 0
+        while k < fields.length {
+            if fields[k].key == key {
+                hit = k
+                break
+            }
+            k = k + 1
+        }
+        if hit < 0 {
+            panic("json: no field `\{key}`")
+        }
+        return fields[hit].value
+    }
+}
+
 /// `copy` over a list of values. Exported because `xs.copy()` cannot be written
 /// for this element type — see the impl above.
 export fn copyJsonArray(xs: Array<Json>) -> Array<Json> {

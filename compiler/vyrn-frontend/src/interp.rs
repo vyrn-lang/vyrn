@@ -6977,6 +6977,9 @@ impl<'a> Interp<'a> {
             (Pattern::Variant(n, binds), Val::Enum(vn, payload)) if n == vn => {
                 Some(binds.iter().cloned().zip(payload.iter().cloned()).collect())
             }
+            // The refutable-`let` desugar's default arm (RFC-0121): any value,
+            // no bindings. Its producer places it last, so it never shadows.
+            (Pattern::Other, _) => Some(vec![]),
             _ => None,
         }
     }

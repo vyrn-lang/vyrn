@@ -6625,25 +6625,36 @@ impl<'a> Gen<'a> {
         let end_l = self.fresh_label("me.end");
         let default_l = self.fresh_label("me.default");
 
-        // One block per arm; map each arm to its variant's tag index.
-        let mut arm_labels: Vec<(usize, String)> = Vec::new();
+        // One block per arm; map each arm to its variant's tag index. The
+        // refutable-`let` desugar's default arm (RFC-0121) carries no tag: it
+        // IS the switch's default block, where an exhaustive match keeps an
+        // unreachable one.
+        let mut arm_labels: Vec<(Option<usize>, String)> = Vec::new();
         for arm in arms {
-            let vname = match &arm.pattern {
-                Pattern::Variant(n, _) => n,
+            let idx = match &arm.pattern {
+                Pattern::Variant(n, _) => Some(
+                    evs.iter()
+                        .position(|v| &v.name == n)
+                        .ok_or_else(|| format!("unknown variant `{n}`"))?,
+                ),
+                Pattern::Other => None,
                 _ => return Err("non-variant pattern in enum match".into()),
             };
-            let idx = evs
-                .iter()
-                .position(|v| &v.name == vname)
-                .ok_or_else(|| format!("unknown variant `{vname}`"))?;
             arm_labels.push((idx, self.fresh_label("me.arm")));
         }
         let cases: String = arm_labels
             .iter()
-            .map(|(idx, lbl)| format!("i64 {idx}, label %{lbl}"))
+            .filter_map(|(idx, lbl)| Some(format!("i64 {}, label %{lbl}", (*idx)?)))
             .collect::<Vec<_>>()
             .join(" ");
-        self.emit_term(format!("switch i64 {tag}, label %{default_l} [ {cases} ]"));
+        let switch_default = arm_labels
+            .iter()
+            .find(|(idx, _)| idx.is_none())
+            .map(|(_, lbl)| lbl.clone())
+            .unwrap_or_else(|| default_l.clone());
+        self.emit_term(format!(
+            "switch i64 {tag}, label %{switch_default} [ {cases} ]"
+        ));
 
         let mut incoming: Vec<(String, String)> = Vec::new();
         // Seeded `Never`, not `Unit`: a match whose EVERY arm diverges is itself
@@ -6654,7 +6665,7 @@ impl<'a> Gen<'a> {
         for (arm_ix, (arm, (idx, lbl))) in arms.iter().zip(&arm_labels).enumerate() {
             self.emit_label(lbl);
             self.scope.push(Vec::new());
-            if let Pattern::Variant(_, binds) = &arm.pattern {
+            if let (Pattern::Variant(_, binds), Some(idx)) = (&arm.pattern, idx) {
                 let payload_tys = &evs[*idx].payload;
                 for (i, bind) in binds.iter().enumerate() {
                     let pty = payload_tys.get(i).cloned().unwrap_or(Type::Int);
@@ -12967,7 +12978,7 @@ fn pattern_binding(p: &Pattern) -> Option<&str> {
         Pattern::Success(b) | Pattern::Failure(b) => Some(b),
         // Variants route through gen_match_enum, not this Option/Result helper.
         Pattern::Variant(_, b) => b.first().map(|s| s.as_str()),
-        Pattern::None => None,
+        Pattern::None | Pattern::Other => None,
     }
 }
 
@@ -13333,7 +13344,7 @@ fn pattern_names(p: &Pattern) -> Vec<String> {
         | Pattern::Success(n)
         | Pattern::Failure(n) => vec![n.clone()],
         Pattern::Variant(_, ns) => ns.clone(),
-        Pattern::None => Vec::new(),
+        Pattern::None | Pattern::Other => Vec::new(),
     }
 }
 

@@ -1,0 +1,37 @@
+/// The refutable `let` (RFC-0121): `let Variant(x) = v` binds the payload in
+/// the ENCLOSING scope, or traps — `a[i]`'s philosophy applied to a sum. The
+/// binder is a borrow of the payload the sum still owns, which the
+/// module-state loop below exists to prove: freeing the borrow would free
+/// the global's buffer out from under iteration two, and `vyrn why --memory`
+/// once said exactly that.
+
+type Entry =
+    | Tagged(String, Int64)
+    | Blank
+
+let mut ledger: Entry = Blank
+
+fn ensure() {
+    if let Blank = ledger {
+        ledger = Tagged("a payload string that lives on the heap", 40)
+    }
+}
+
+fn main() -> Int64 {
+    // Multi-payload: one binder per position, each read through the name.
+    let local = Tagged("first", 1)
+    let Tagged(tag, n) = local
+    print("local: \{tag} \{n}")
+
+    // Module state: the binder borrows the global's payload, every pass.
+    ensure()
+    let mut i = 0
+    let mut total = 0
+    while i < 1000 {
+        let Tagged(s, k) = ledger
+        total = total + s.byteLength + k
+        i = i + 1
+    }
+    print("total: \{total}")
+    return 0
+}

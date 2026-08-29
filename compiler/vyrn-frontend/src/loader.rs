@@ -3331,7 +3331,7 @@ impl NsResolver<'_> {
                         | Pattern::Failure(b) => {
                             inner.insert(b.clone());
                         }
-                        Pattern::None => {}
+                        Pattern::None | Pattern::Other => {}
                     }
                     match &mut arm.body {
                         ArmBody::Expr(e) => self.walk_expr(e, &mut inner),
@@ -4206,7 +4206,7 @@ fn scope_expr(e: &Expr, line: usize, locals: &HashSet<String>, out: &mut Vec<(St
                     | Pattern::Failure(b) => {
                         inner.insert(b.clone());
                     }
-                    Pattern::None => {}
+                    Pattern::None | Pattern::Other => {}
                 }
                 match &arm.body {
                     ArmBody::Expr(e) => scope_expr(e, *line, &inner, out),
@@ -4615,6 +4615,16 @@ fn rewrite_stmt(
             ..
         } => {
             rewrite_expr(scrutinee, map, ns, locals);
+            // The variant NAME follows the same rename a `match` arm's does —
+            // this walk missed it until RFC-0121 made `if let` over an
+            // imported enum's variants a written shape (the corpus never had
+            // one; `match` always renamed).
+            if let Pattern::Variant(v, _) = &mut *pattern {
+                let ctor = RW_VARIANTS.with(|w| w.borrow().contains(v.as_str()));
+                if !ctor {
+                    *v = ren(map, v);
+                }
+            }
             let mut inner = locals.clone();
             for b in crate::movecheck::pattern_bindings(pattern) {
                 inner.insert(b.to_string());

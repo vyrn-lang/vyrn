@@ -3672,6 +3672,109 @@ impl Parser {
         head
     }
 
+    /// `let Variant(a, b) = v` (RFC-0121): bind the payloads in the ENCLOSING
+    /// scope, or trap — `a[i]`'s philosophy applied to a sum. One `let` per
+    /// binder, each a `match` on the named scrutinee whose default arm
+    /// ([`Pattern::Other`]) panics with the canonical wording; positions the
+    /// statement does not keep get `@`-prefixed binders, unspellable and
+    /// never surfaced, exactly as other desugars mint them.
+    fn refutable_let(&mut self, line: usize, mutable: bool) -> Result<Stmt, Diagnostic> {
+        let col = self.col();
+        let variant = self.expect_ident()?;
+        if mutable {
+            return Err(Diagnostic::error(
+                line,
+                col,
+                "parse",
+                format!(
+                    "`let mut {variant}(..)` — a pattern binder is a borrow of the \
+                     scrutinee's payload; bind it, then `copy()` what you mutate"
+                ),
+            ));
+        }
+        self.eat(&Tok::LParen)?;
+        let mut binds: Vec<String> = Vec::new();
+        while *self.peek() != Tok::RParen {
+            binds.push(self.expect_ident()?);
+            if *self.peek() == Tok::Comma {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.eat(&Tok::RParen)?;
+        self.eat(&Tok::Eq)?;
+        let scrut = self.expr()?;
+        self.eat_semi();
+        if !matches!(scrut, Expr::Var { .. }) {
+            return Err(Diagnostic::error(
+                line,
+                col,
+                "parse",
+                format!(
+                    "the scrutinee of `let {variant}(..)` must be a name — a \
+                     multi-payload pattern reads it once per binder, so bind the \
+                     value with an ordinary `let` first"
+                ),
+            ));
+        }
+        if binds.is_empty() {
+            return Err(Diagnostic::error(
+                line,
+                col,
+                "parse",
+                format!(
+                    "`let {variant}()` binds nothing — a payload-free variant is a \
+                     question, and `if let`/`match` are how it is asked"
+                ),
+            ));
+        }
+        let msg = format!("let `{variant}(..)` did not match");
+        let mut stmts = Vec::new();
+        for (j, b) in binds.iter().enumerate() {
+            let arm_binds: Vec<String> = binds
+                .iter()
+                .enumerate()
+                .map(|(k, name)| {
+                    if k == j {
+                        name.clone()
+                    } else {
+                        format!("@rl{k}")
+                    }
+                })
+                .collect();
+            let m = Expr::Match {
+                scrutinee: Box::new(scrut.clone()),
+                arms: vec![
+                    MatchArm {
+                        pattern: Pattern::Variant(variant.clone(), arm_binds),
+                        body: ArmBody::Expr(Expr::Var {
+                            name: b.clone(),
+                            line,
+                        }),
+                    },
+                    MatchArm {
+                        pattern: Pattern::Other,
+                        body: ArmBody::Expr(Expr::Call {
+                            name: "panic".to_string(),
+                            args: vec![Expr::Str(msg.clone())],
+                            line,
+                        }),
+                    },
+                ],
+                line,
+            };
+            stmts.push(Stmt::Let {
+                name: b.clone(),
+                mutable: false,
+                ty: None,
+                value: m,
+                line,
+            });
+        }
+        Ok(self.spliced(stmts))
+    }
+
     fn stmt(&mut self) -> Result<Stmt, Diagnostic> {
         let line = self.line();
         match self.peek() {
@@ -3683,6 +3786,16 @@ impl Parser {
                 } else {
                     false
                 };
+                // `let Variant(a, b) = v` — the refutable `let` (RFC-0121):
+                // bind the payloads in the enclosing scope, or trap. The shape
+                // is unambiguous — an ordinary `let`'s name is never followed
+                // by `(` — and the whole feature is a desugar onto a `match`
+                // whose default arm panics; see [`Pattern::Other`].
+                if matches!(self.peek(), Tok::Ident(_))
+                    && self.tokens[self.pos + 1].tok == Tok::LParen
+                {
+                    return self.refutable_let(line, mutable);
+                }
                 let name = self.expect_ident()?;
                 let ty = if *self.peek() == Tok::Colon {
                     self.advance();
@@ -5653,6 +5766,88 @@ mod tests {
         assert!(
             errs.iter()
                 .any(|e| e.message.contains("cannot declare a projection")),
+            "{errs:?}"
+        );
+    }
+
+    // ---- RFC-0121: the refutable `let` ------------------------------------
+
+    #[test]
+    fn a_refutable_let_desugars_to_a_match_with_a_default_arm() {
+        let p = parse_src(
+            "type Shape = | Circle(Int64) | Dot\n\
+             fn main() -> Int64 { let c = Circle(7)\n let Circle(r) = c\n return r }",
+        );
+        let f = p.functions.iter().find(|f| f.name == "main").unwrap();
+        let Stmt::Let { name, value, .. } = &f.body.stmts[1] else {
+            panic!("expected the desugared let, got {:?}", f.body.stmts[1]);
+        };
+        assert_eq!(name, "r");
+        let Expr::Match { arms, .. } = value else {
+            panic!("expected a match initializer, got {value:?}");
+        };
+        assert_eq!(arms.len(), 2);
+        assert!(matches!(&arms[0].pattern, Pattern::Variant(v, b) if v == "Circle" && b == &["r"]));
+        assert!(matches!(&arms[1].pattern, Pattern::Other));
+        // The trap is an ordinary `panic`, so the wording has ONE source and
+        // the loader stamps the site — parity by construction.
+        let Some(Expr::Call { name, args, .. }) = arms[1].body.as_expr() else {
+            panic!("expected the panic arm");
+        };
+        assert!(crate::ast::is_panic(name));
+        assert!(matches!(&args[0], Expr::Str(s) if s == "let `Circle(..)` did not match"));
+    }
+
+    #[test]
+    fn a_multi_payload_refutable_let_binds_each_position() {
+        let p = parse_src(
+            "type Pair = | Two(Int64, Int64) | Zero\n\
+             fn main() -> Int64 { let q = Two(1, 2)\n let Two(a, b) = q\n return a + b }",
+        );
+        let f = p.functions.iter().find(|f| f.name == "main").unwrap();
+        // One `let` per binder; the positions a statement does not keep get
+        // `@`-prefixed binders.
+        let lets: Vec<&String> = f.body.stmts[1..3]
+            .iter()
+            .map(|s| match s {
+                Stmt::Let { name, .. } => name,
+                other => panic!("expected a let, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(lets, ["a", "b"]);
+    }
+
+    #[test]
+    fn a_refutable_let_needs_a_named_scrutinee() {
+        let src = "type Shape = | Circle(Int64) | Dot\n\
+                   fn make() -> Shape { return Circle(1) }\n\
+                   fn main() -> Int64 { let Circle(r) = make()\n return r }";
+        let (_, errs) = parse_accum(lex(src).unwrap());
+        assert!(
+            errs.iter().any(|e| e.message.contains("must be a name")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn a_refutable_let_that_binds_nothing_is_refused() {
+        let src = "type Shape = | Circle(Int64) | Dot\n\
+                   fn main() -> Int64 { let d = Dot\n let Dot() = d\n return 0 }";
+        let (_, errs) = parse_accum(lex(src).unwrap());
+        assert!(
+            errs.iter().any(|e| e.message.contains("binds nothing")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn a_refutable_let_refuses_mut() {
+        let src = "type Shape = | Circle(Int64) | Dot\n\
+                   fn main() -> Int64 { let c = Circle(1)\n let mut Circle(r) = c\n return r }";
+        let (_, errs) = parse_accum(lex(src).unwrap());
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("binder is a borrow")),
             "{errs:?}"
         );
     }
