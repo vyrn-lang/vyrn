@@ -171,7 +171,7 @@ fn decodeLine(raw: String) -> Decoded {
         Invalid(issues) => Decoded {
             ok: false,
             line: LogLine { ts: 0, level: "", msg: "" },
-            err: issues[0].message,
+            err: issues[0].message.copy(),
         },
     }
 }

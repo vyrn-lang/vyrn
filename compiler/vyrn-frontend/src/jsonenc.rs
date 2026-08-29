@@ -88,18 +88,37 @@ fn spell(ty: &Type) -> String {
     ty.to_string().replace(crate::loader::RT_PREFIX, PH)
 }
 
+/// The `toJson` wrapper for `ty`, by its reserved name — the function
+/// [`encode_expr`] calls. See the wrapper note in [`encoders`].
+pub fn wrap_name(ty: &Type) -> String {
+    format!(
+        "{}w{}",
+        crate::loader::RT_PREFIX,
+        crate::types::struct_key(ty)
+    )
+}
+
+/// The placeholder spelling of a wrapper, for use inside generated source.
+fn wrap_ph(ty: &Type) -> String {
+    format!("{PH}w{}", crate::types::struct_key(ty))
+}
+
 /// What `toJson(arg)` becomes when the argument's static type is `ty`:
-/// `json$emit(json$e<key>(arg))`. Every engine calls this at the point where it
-/// already knows `ty`, so the walk has one definition and no engine has a JSON
-/// encoder of its own.
+/// `json$w<key>(arg)`. Every engine calls this at the point where it already
+/// knows `ty`, so the walk has one definition and no engine has a JSON encoder
+/// of its own.
+///
+/// One call, not `json$emit(json$e<key>(arg))` as it used to be: the inner
+/// form made the whole encoded tree an ARGUMENT TEMPORARY, and a temporary
+/// whose release is a declared `impl Owned` call is exactly what the drains
+/// refuse — its body is user code whose timing all three engines must agree
+/// on. Every `toJson` leaked its tree (exit-residue round four: fourteen
+/// blocks for one small record). The wrapper makes the tree an ordinary
+/// BINDING, and block exit already releases those identically everywhere.
 pub fn encode_expr(arg: crate::ast::Expr, ty: &Type, line: usize) -> crate::ast::Expr {
     crate::ast::Expr::Call {
-        name: format!("{}emit", crate::loader::RT_PREFIX),
-        args: vec![crate::ast::Expr::Call {
-            name: enc_name(ty),
-            args: vec![arg],
-            line,
-        }],
+        name: wrap_name(ty),
+        args: vec![arg],
         line,
     }
 }
@@ -123,7 +142,29 @@ pub fn encoders(tys: &[Type], types: &HashMap<String, TypeDecl>) -> Result<Vec<F
     for ty in tys {
         // Best-effort per root: an unencodable type in the set is the call site's
         // problem, not this pass's.
-        let _ = w.encoder(ty);
+        let Ok(e) = w.encoder(ty) else { continue };
+        // The `toJson` wrapper (see `encode_expr`): the tree lives in a
+        // binding, so block exit runs `Json`'s declared release — the one
+        // point all three engines already agree on.
+        let wph = wrap_ph(ty);
+        if w.done.contains_key(&wph) {
+            continue;
+        }
+        w.done.insert(wph.clone(), ty.clone());
+        w.names.push(wph.clone());
+        let (json, emit) = (w.rt("Json"), w.rt("emit"));
+        // The render is bound before the return: `return emit(t)` reads as
+        // `t` moving into the return (the conservative lend-through-a-call
+        // reading), which skips the block-exit release this wrapper exists
+        // to get.
+        w.source.push_str(&format!(
+            "fn {wph}(v: {}) -> String {{\n\
+             \x20   let t: {json} = {e}(v)\n\
+             \x20   let s = {emit}(t)\n\
+             \x20   return s\n\
+             }}\n",
+            spell(ty)
+        ));
     }
     if w.source.is_empty() {
         return Ok(Vec::new());
@@ -427,7 +468,18 @@ mod tests {
         ] {
             let fns = gen(&ty);
             assert!(!fns.is_empty(), "no encoder for {ty}");
+            // One wrapper per root (exit-residue round four): the `toJson`
+            // entry binds the tree so block exit releases it, and hands back
+            // the rendered String. Everything else is an encoder and returns
+            // the tree.
+            let wrap = wrap_name(&ty);
+            let mut wraps = 0;
             for f in &fns {
+                if f.name == wrap {
+                    wraps += 1;
+                    assert_eq!(f.ret, Type::Str, "the wrapper returns the render");
+                    continue;
+                }
                 assert_eq!(
                     f.ret,
                     Type::Named(format!("{}Json", crate::loader::RT_PREFIX)),
@@ -435,6 +487,7 @@ mod tests {
                     f.name
                 );
             }
+            assert_eq!(wraps, 1, "exactly one `toJson` wrapper for {ty}");
         }
     }
 }
