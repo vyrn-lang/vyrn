@@ -226,6 +226,10 @@ pub struct ArgTemp {
     /// What the callee does with it, decided after the walk: the retention set
     /// is only closed over the call graph when every body has been read.
     pub verdict: ArgVerdict,
+    /// The function (or `test@i`/`bench@i` body) the site lives in — what lets
+    /// `plan.unconsumed` skip rows whose owner an emission never reached
+    /// (RFC-0114 §26's finish check).
+    pub owner: String,
 }
 
 /// What the callee at a call-argument position does with the temporary it is
@@ -273,8 +277,9 @@ pub struct Facts {
     /// temporary — `(Expr::Field address, producer)`, producer a function name
     /// or `@concat`/`@str`. Lenders are already filtered out; `own::analyze`
     /// keeps the rows whose producer transfers ownership, and the backends
-    /// free the receiver right after the header read.
-    pub receiver_temps: Vec<(usize, String)>,
+    /// free the receiver right after the header read. The third member is the
+    /// enclosing function — see [`ArgTemp::owner`].
+    pub receiver_temps: Vec<(usize, String, String)>,
     /// The walk-order positions of every early exit — see [`fold context`] in
     /// `own::fold_revived`, its only reader.
     pub exit_orders: Vec<u32>,
@@ -296,6 +301,8 @@ pub struct StoreEv {
     /// untake fold needs: a CONDITIONAL revive must not qualify.
     pub branch: Vec<u32>,
     pub kind: EvKind,
+    /// The enclosing function — see [`ArgTemp::owner`].
+    pub owner: String,
 }
 
 /// RFC-0114 Rule N: an `if` consumed a binding on exactly one branch, both
@@ -310,6 +317,8 @@ pub struct EdgeRel {
     pub key: usize,
     pub name: String,
     pub edge: u32,
+    /// The enclosing function — see [`ArgTemp::owner`].
+    pub owner: String,
 }
 
 pub enum EvKind {
@@ -402,7 +411,7 @@ pub fn facts(program: &Program) -> Facts {
         receiver_temps: r
             .receiver_temps
             .into_iter()
-            .filter(|(_, n)| {
+            .filter(|(_, n, _)| {
                 let base = n.strip_prefix("@fieldof:").unwrap_or(n);
                 !r.lending.contains(base)
             })
@@ -434,7 +443,7 @@ struct Run {
     store_events: Vec<StoreEv>,
     global_stores: HashSet<usize>,
     edge_releases: Vec<EdgeRel>,
-    receiver_temps: Vec<(usize, String)>,
+    receiver_temps: Vec<(usize, String, String)>,
     exit_orders: Vec<u32>,
 }
 
@@ -727,8 +736,11 @@ fn run(program: &Program, want: Want) -> Run {
     // use-after-consume inside a test is caught unchanged. The body is walked
     // **in place**: a clone would carry different node addresses, and Phase 4c
     // keys reclamation on them.
-    for t in &program.tests {
+    for (i, t) in program.tests.iter().enumerate() {
         mc.errors.borrow_mut().clear();
+        // The synthetic name `own::analyze` keys this body's rows by — the
+        // finish check (RFC-0114 §26) matches owners against emitted names.
+        *mc.cur_fn.borrow_mut() = format!("test@{i}");
         mc.body(&[], &Type::Unit, &t.body);
         drain(&mut projections, &mc, &t.module);
         stamp(&mc, &t.module);
@@ -739,8 +751,9 @@ fn run(program: &Program, want: Want) -> Run {
         }
     }
     // Bench bodies (RFC-0055) move-check identically.
-    for b in &program.benches {
+    for (i, b) in program.benches.iter().enumerate() {
         mc.errors.borrow_mut().clear();
+        *mc.cur_fn.borrow_mut() = format!("bench@{i}");
         mc.body(&[], &Type::Unit, &b.body);
         drain(&mut projections, &mc, &b.module);
         stamp(&mc, &b.module);
@@ -924,7 +937,7 @@ struct MoveCheck<'a> {
     store_events: Option<RefCell<Vec<StoreEv>>>,
     global_stores: Option<RefCell<HashSet<usize>>>,
     edge_releases: Option<RefCell<Vec<EdgeRel>>>,
-    receiver_temps: Option<RefCell<Vec<(usize, String)>>>,
+    receiver_temps: Option<RefCell<Vec<(usize, String, String)>>>,
     ev_order: std::cell::Cell<u32>,
     /// The stack of loop ids the walk is inside — pushed by `while`/`for`,
     /// stamped onto every event, so the fold can see which pairs of events a
@@ -1432,6 +1445,7 @@ impl MoveCheck<'_> {
             loops: self.loop_ids.borrow().clone(),
             branch: self.branch_ids.borrow().clone(),
             kind,
+            owner: self.cur_fn.borrow().clone(),
         });
     }
 
@@ -2588,6 +2602,7 @@ impl MoveCheck<'_> {
             kind,
             // Overwritten in `run` once the retention set is closed.
             verdict: ArgVerdict::Unknown,
+            owner: self.cur_fn.borrow().clone(),
         });
     }
 
@@ -3330,6 +3345,7 @@ impl MoveCheck<'_> {
                                     key,
                                     name: root.clone(),
                                     edge,
+                                    owner: self.cur_fn.borrow().clone(),
                                 });
                             }
                         }
@@ -3992,7 +4008,11 @@ impl MoveCheck<'_> {
                                 _ => None,
                             };
                             if let Some(t) = tag {
-                                sink.borrow_mut().push((e as *const Expr as usize, t));
+                                sink.borrow_mut().push((
+                                    e as *const Expr as usize,
+                                    t,
+                                    self.cur_fn.borrow().clone(),
+                                ));
                             }
                         }
                     }
@@ -4225,6 +4245,7 @@ impl MoveCheck<'_> {
                                     key: bkey,
                                     name: root.clone(),
                                     edge: i as u32,
+                                    owner: self.cur_fn.borrow().clone(),
                                 });
                             }
                         }
@@ -4306,6 +4327,7 @@ impl MoveCheck<'_> {
                                     key,
                                     name: root.clone(),
                                     edge: edge as u32,
+                                    owner: self.cur_fn.borrow().clone(),
                                 });
                             }
                         }

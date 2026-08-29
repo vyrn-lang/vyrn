@@ -1174,6 +1174,153 @@ pub struct ReleasePlan {
     /// frame owns — freed right after the read (the header for a projection,
     /// the whole record deep after a scalar field).
     pub receiver_frees: std::collections::HashSet<usize>,
+    /// §26's finish check: which function each row above lives in, so
+    /// [`ReleasePlan::unconsumed`] can skip rows whose owner an emission
+    /// never reached — dead code alarms nobody, a missed site in emitted
+    /// code fails the build.
+    pub owners: HashMap<usize, String>,
+    /// The rows the emitters actually consumed, recorded by the query
+    /// methods below. Interior-mutable because the backends hold the plan by
+    /// shared reference; codegen is single-threaded.
+    taken: std::cell::RefCell<std::collections::HashSet<usize>>,
+    /// Clone-to-original address pairs from `project::iterate_loop` (RFC-0114
+    /// §26): a user-container `for` clones its body, so the plan's addresses
+    /// live on nodes the emission never walks — every query resolves through
+    /// this map first, chaining for a clone of a clone (a nested loop).
+    alias: std::cell::RefCell<HashMap<usize, usize>>,
+    /// The keys [`ReleasePlan::alias_clones_scoped`] added, in order — what
+    /// [`ReleasePlan::alias_unwind`] removes. A TRANSIENT clone (a rewrite's
+    /// synthesized tree, a higher-order call's argument list) dies with its
+    /// site, and an alias that outlived it would fire on whatever later node
+    /// the allocator hands the same address.
+    alias_log: std::cell::RefCell<Vec<usize>>,
+}
+
+impl ReleasePlan {
+    /// Register clone→original pairs for a clone that LIVES as long as the
+    /// compile — `iterate_loop`'s leaked expansions, a queued shell's body.
+    pub fn alias_clones(&self, pairs: &[(usize, usize)]) {
+        self.alias.borrow_mut().extend(pairs.iter().copied());
+    }
+
+    /// Register pairs for a TRANSIENT clone, to be removed by
+    /// [`ReleasePlan::alias_unwind`] when the clone dies.
+    pub fn alias_clones_scoped(&self, pairs: &[(usize, usize)]) {
+        self.alias.borrow_mut().extend(pairs.iter().copied());
+        self.alias_log
+            .borrow_mut()
+            .extend(pairs.iter().map(|(c, _)| *c));
+    }
+
+    /// The watermark [`ReleasePlan::alias_unwind`] rolls back to.
+    pub fn alias_scope(&self) -> usize {
+        self.alias_log.borrow().len()
+    }
+
+    /// Remove every scoped alias registered since `mark` — called where the
+    /// transient clone goes out of scope.
+    pub fn alias_unwind(&self, mark: usize) {
+        let mut log = self.alias_log.borrow_mut();
+        let mut map = self.alias.borrow_mut();
+        for k in log.drain(mark..) {
+            map.remove(&k);
+        }
+    }
+
+    /// The plan-bearing address `at` stands for: itself, or — through the
+    /// alias map, chained for nested clones — the original node it copies.
+    fn resolve(&self, mut at: usize) -> usize {
+        let alias = self.alias.borrow();
+        // Chained lookups are bounded by clone nesting depth; the guard is
+        // against a cycle that a defect in the pair builder could create.
+        for _ in 0..64 {
+            match alias.get(&at) {
+                Some(next) => at = *next,
+                None => break,
+            }
+        }
+        at
+    }
+
+    /// RFC-0114 M1: does the caller release this argument after the call?
+    /// A hit is recorded as consumed — see [`ReleasePlan::unconsumed`].
+    pub fn arg_drop(&self, at: usize) -> bool {
+        let at = self.resolve(at);
+        let hit = self.arg_drops.contains(&at);
+        if hit {
+            self.taken.borrow_mut().insert(at);
+        }
+        hit
+    }
+
+    /// RFC-0114 M2: does this store release the value it replaces?
+    pub fn store_owned_at(&self, at: usize) -> bool {
+        let at = self.resolve(at);
+        let hit = self.store_owned.contains(&at);
+        if hit {
+            self.taken.borrow_mut().insert(at);
+        }
+        hit
+    }
+
+    /// RFC-0114 Rule N: the releases one edge of this join owes.
+    pub fn edge_releases_at(&self, at: usize) -> Option<&Vec<(String, u32)>> {
+        let at = self.resolve(at);
+        let ers = self.edge_releases.get(&at);
+        if ers.is_some() {
+            self.taken.borrow_mut().insert(at);
+        }
+        ers
+    }
+
+    /// RFC-0114 R1′: does this frame own (and free) the unnamed receiver?
+    pub fn receiver_free(&self, at: usize) -> bool {
+        let at = self.resolve(at);
+        let hit = self.receiver_frees.contains(&at);
+        if hit {
+            self.taken.borrow_mut().insert(at);
+        }
+        hit
+    }
+
+    /// §26's loudness: every planned row whose owner WAS emitted and that no
+    /// query ever hit — a release decision the emission walked past, which is
+    /// a silent leak the memory suite would otherwise find by measurement.
+    /// Rows in functions the emission never reached (dead code, an
+    /// uninstantiated generic, an uncompiled test body) are not the
+    /// emitters' to discharge and are skipped, which is the reachability
+    /// answer §26 said the check was waiting for. Residue, recorded: a
+    /// generic emitted under several instances shares one row per site, so
+    /// "taken at least once" cannot see an instance that missed it.
+    pub fn unconsumed(
+        &self,
+        emitted: &std::collections::HashSet<String>,
+    ) -> Vec<(String, &'static str)> {
+        let taken = self.taken.borrow();
+        let classes: [(&'static str, Box<dyn Iterator<Item = &usize> + '_>); 4] = [
+            ("an argument drop", Box::new(self.arg_drops.iter())),
+            ("a store release", Box::new(self.store_owned.iter())),
+            ("an edge release", Box::new(self.edge_releases.keys())),
+            ("a receiver free", Box::new(self.receiver_frees.iter())),
+        ];
+        let mut out: Vec<(String, &'static str)> = Vec::new();
+        for (label, it) in classes {
+            for at in it {
+                if taken.contains(at) {
+                    continue;
+                }
+                let Some(owner) = self.owners.get(at) else {
+                    continue;
+                };
+                if emitted.contains(owner) {
+                    out.push((owner.clone(), label));
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
 }
 
 /// Whole-program ownership facts.
@@ -1331,7 +1478,7 @@ pub fn analyze(program: &Program) -> Ownership {
     let receiver_frees: std::collections::HashSet<usize> = facts
         .receiver_temps
         .iter()
-        .filter(|(_, n)| {
+        .filter(|(_, n, _)| {
             n == "@concat"
                 || n == "@str"
                 || matches!(
@@ -1356,8 +1503,40 @@ pub fn analyze(program: &Program) -> Ownership {
                     .strip_prefix("@fieldof:")
                     .is_some_and(|p| matches!(owned_fns.get(p), Some(DropKind::Deep(_))))
         })
-        .map(|(k, _)| *k)
+        .map(|(k, _, _)| *k)
         .collect();
+    // §26's finish check: every plan row remembers its function, read off
+    // the walker's own attribution — the reachability half is then the
+    // emitters' emitted-set, and dead code alarms nobody.
+    let mut owners: HashMap<usize, String> = HashMap::new();
+    for t in &facts.arg_temps {
+        if t.verdict == crate::movecheck::ArgVerdict::Released {
+            if std::env::var("VYRN_PLAN_DEBUG").is_ok() {
+                eprintln!(
+                    "plan-debug arg_drop id={} owner={} callee={} ix={} line={}",
+                    t.id, t.owner, t.callee, t.ix, t.line
+                );
+            }
+            owners.insert(t.id, t.owner.clone());
+        }
+    }
+    for ev in &facts.store_events {
+        if let crate::movecheck::EvKind::Write { id, .. } = ev.kind {
+            if id != 0 && store_owned.contains(&id) {
+                owners.insert(id, ev.owner.clone());
+            }
+        }
+    }
+    for er in &facts.edge_releases {
+        if edge_releases.contains_key(&er.if_key) {
+            owners.insert(er.if_key, er.owner.clone());
+        }
+    }
+    for (k, _, owner) in &facts.receiver_temps {
+        if receiver_frees.contains(k) {
+            owners.insert(*k, owner.clone());
+        }
+    }
     let plan = ReleasePlan {
         arg_drops: facts
             .arg_temps
@@ -1368,6 +1547,10 @@ pub fn analyze(program: &Program) -> Ownership {
         store_owned,
         edge_releases,
         receiver_frees,
+        owners,
+        taken: Default::default(),
+        alias: Default::default(),
+        alias_log: Default::default(),
     };
     Ownership {
         plan,
@@ -2409,6 +2592,33 @@ pub(crate) mod tests {
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let s = a + b; let n = s.length; return n; }";
         assert_eq!(drop_count(src, "main"), 1);
+    }
+
+    /// RFC-0114 §26's finish check, mechanism-tested: a plan row in an
+    /// emitted function that no query hit is reported, a queried one is not,
+    /// and a row in an UNEMITTED function alarms nobody (the reachability
+    /// answer the check waited for).
+    #[test]
+    fn a_missed_plan_row_is_loud_and_a_taken_or_dead_one_is_not() {
+        // `takes(a + b)` releases the argument temporary after the call —
+        // one `arg_drops` row in `main`.
+        let src = "fn takes(s: String) -> Int64 { return s.byteLength }\n\
+                   fn main() -> Int64 { return takes(\"x\" + \"y\") }";
+        let (o, _) = analyze_src(src);
+        assert_eq!(o.plan.arg_drops.len(), 1, "the fixture's one row");
+        let at = *o.plan.arg_drops.iter().next().unwrap();
+        assert_eq!(o.plan.owners.get(&at).map(String::as_str), Some("main"));
+        let emitted: HashSet<String> = ["main".to_string(), "takes".to_string()].into();
+        // Unqueried and emitted: loud.
+        assert_eq!(
+            o.plan.unconsumed(&emitted),
+            vec![("main".to_string(), "an argument drop")]
+        );
+        // Unemitted: silent — dead code is not the emitters' to discharge.
+        assert!(o.plan.unconsumed(&HashSet::new()).is_empty());
+        // Queried: consumed, and quiet thereafter.
+        assert!(o.plan.arg_drop(at));
+        assert!(o.plan.unconsumed(&emitted).is_empty());
     }
 
     /// RFC-0089 rule 1, Phase 4c. `let t = s` MOVES: the new name owns the

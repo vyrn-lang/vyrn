@@ -9,8 +9,15 @@
   the classification defect where a field of a value nobody owns was called
   a borrow. Every landing is pinned by a `memory.rs` row that failed first,
   and the whole corpus runs under the double-free audit on every parity
-  pass. Still out: the §26 `ReleasePlan` consolidation, and full §25
-  free-trace bisimulation.
+  pass. The §26 consolidation landed in its right-sized form (one
+  `ReleasePlan` struct, both backends reading one reference), and its
+  finish check landed 2026-08-29: every plan row knows its function, both
+  drivers report any row in emitted code that no query consumed, and the
+  check's first corpus pass caught a real hole — a user-container `for`
+  clones its body, so rows planned on the original were invisible to both
+  backends until an alias map made the clone answer for it (see the proofs
+  document, §26 "as landed"). Still out: full §25 free-trace bisimulation,
+  priced there.
 - **Evidence:** [rfcs/census/declared-release-does-not-run.md](census/declared-release-does-not-run.md).
 - **Appendix A:** [the algorithm and its proofs](proofs/release-algorithm.md) —
   Part I: the invariant, three soundness theorems, and the assumption each of

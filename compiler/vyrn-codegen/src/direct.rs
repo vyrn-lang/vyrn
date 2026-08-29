@@ -571,6 +571,30 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         cx.dispatch.borrow_mut().done += 1;
     }
 
+    // RFC-0114 §26's finish, the textual driver's twin: every plan row in a
+    // function this emission walked must have been consumed by a query — a
+    // missed site is a silent leak, made loud at build time instead of at
+    // the memory suite's profile.
+    {
+        let mut fn_emitted: std::collections::HashSet<String> =
+            user.iter().map(|f| f.name.clone()).collect();
+        for p in cx.mono.borrow().insts.iter() {
+            match &p.key {
+                Key::Generic(n, _) | Key::Ho(n, _, _) => {
+                    fn_emitted.insert(n.clone());
+                }
+                Key::Lambda(..) => {}
+            }
+        }
+        let missed = cx.plan.unconsumed(&fn_emitted);
+        if let Some((owner, class)) = missed.first() {
+            return Err(format!(
+                "internal: RFC-0114 §26 — the release plan placed {} decision(s) the emission never consumed, first {class} in `{owner}`; a missed site is a silent leak, and this failure is the loudness the plan exists for",
+                missed.len()
+            ));
+        }
+    }
+
     // The registry is closed now, so the derived copy can be written.
     let fncopy = lower_fnval_copy(&cx)?;
     m.fill(cx.fnval_copy, fncopy);
@@ -3385,6 +3409,11 @@ impl<'p> Fn_<'_, 'p> {
                 if self.region_depth == 0 {
                     if let Some(own) = shadow {
                         if let Some(parts) = crate::self_append_spine(name, value) {
+                            // The spine handles this store's ownership itself
+                            // (§22's own state machine) — acknowledged so
+                            // §26's finish check knows the site was
+                            // considered, not walked past.
+                            let _ = self.cx.plan.store_owned_at(s as *const Stmt as usize);
                             for p in parts {
                                 self.append_once(m, b, place, own, p)?;
                             }
@@ -3409,12 +3438,10 @@ impl<'p> Fn_<'_, 'p> {
                 // shared with the textual backend — see `fold_store_owned` and
                 // the comment there. `place_owns` stays for the OTHER stores
                 // (fields, elements), which this slice does not touch.
-                let owned_here = self.region_depth == 0
-                    && self
-                        .cx
-                        .plan
-                        .store_owned
-                        .contains(&(s as *const Stmt as usize));
+                // Queried FIRST so a region-gated site still counts as
+                // considered (§26's finish check).
+                let owned_here = self.cx.plan.store_owned_at(s as *const Stmt as usize)
+                    && self.region_depth == 0;
                 let snap = if owned_here
                     && (fresh_str || !vyrn_frontend::movecheck::mentions_place(value, name))
                 {
@@ -3532,8 +3559,7 @@ impl<'p> Fn_<'_, 'p> {
                 let ers = self
                     .cx
                     .plan
-                    .edge_releases
-                    .get(&(s as *const Stmt as usize))
+                    .edge_releases_at(s as *const Stmt as usize)
                     .cloned()
                     .unwrap_or_default();
                 b.ins(&Instruction::If(BlockType::Empty));
@@ -3685,7 +3711,12 @@ impl<'p> Fn_<'_, 'p> {
                         let blk = vyrn_frontend::project::iterate_loop(
                             &size_fn, nth, var, iter, body, *line,
                         )?;
-                        return self.block(m, b, &blk);
+                        // RFC-0114 §26: resolve plan queries through the
+                        // clone — the textual driver's twin comment.
+                        self.cx
+                            .plan
+                            .alias_clones(vyrn_frontend::project::iterate_aliases(blk));
+                        return self.block(m, b, blk);
                     }
                 }
                 // `block { loop { br_if 1 (i >= len); bind; block { body }; i++;
@@ -4555,13 +4586,7 @@ impl<'p> Fn_<'_, 'p> {
     /// is at the allocation on both backends now: see [`Fn_::str_owned`].
     fn expr(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
         let t = self.expr_inner(m, b, e)?;
-        if self.region_depth == 0
-            && self
-                .cx
-                .plan
-                .arg_drops
-                .contains(&(e as *const Expr as usize))
-        {
+        if self.cx.plan.arg_drop(e as *const Expr as usize) && self.region_depth == 0 {
             let l = b.local(ValType::I32);
             b.ins(&Instruction::LocalTee(l));
             self.arg_frees.push((l, t.clone()));
@@ -4673,12 +4698,8 @@ impl<'p> Fn_<'_, 'p> {
                 // RFC-0114 R1′: an unnamed String receiver this frame owns is
                 // freed right after the header read — the pointer is teed to a
                 // local before `length_of` consumes it.
-                let rfree = self.region_depth == 0
-                    && self
-                        .cx
-                        .plan
-                        .receiver_frees
-                        .contains(&(e as *const Expr as usize));
+                let rfree =
+                    self.cx.plan.receiver_free(e as *const Expr as usize) && self.region_depth == 0;
                 let tee = if rfree {
                     let l = b.local(ValType::I32);
                     b.ins(&Instruction::LocalTee(l));
@@ -5131,8 +5152,7 @@ impl<'p> Fn_<'_, 'p> {
         let ers = self
             .cx
             .plan
-            .edge_releases
-            .get(&key)
+            .edge_releases_at(key)
             .cloned()
             .unwrap_or_default();
         self.cond(m, b, cond, line)?;
@@ -6873,7 +6893,17 @@ impl<'p> Fn_<'_, 'p> {
             "toJson" if args.len() == 1 => {
                 let ty = self.peek(&args[0], line)?;
                 let e = vyrn_frontend::jsonenc::encode_expr(args[0].clone(), &ty, line);
-                return self.expr(m, b, &e);
+                // RFC-0114 §26: the rewrite EMBEDS a clone of the argument —
+                // pair the whole synthesized tree's occurrences of it with
+                // the original for the emission, then unwind: the tree dies
+                // here.
+                let mark = self.cx.plan.alias_scope();
+                let mut pairs = Vec::new();
+                vyrn_frontend::ast::alias_embedded(&e, &args[0], &mut pairs);
+                self.cx.plan.alias_clones_scoped(&pairs);
+                let r = self.expr(m, b, &e);
+                self.cx.plan.alias_unwind(mark);
+                return r;
             }
             // `fromJson(T, s)` is the mirror (RFC-0078 M3), and it needs less: the
             // target is a type NAME, so there is nothing to peek. The reader is
@@ -6893,7 +6923,15 @@ impl<'p> Fn_<'_, 'p> {
                     return unsupported("`fromJson` without the JSON runtime linked", line);
                 }
                 let e = vyrn_frontend::jsondec::decode_expr(&target, args[1].clone(), line);
-                return self.expr(m, b, &e);
+                // RFC-0114 §26: the rewrite embeds a clone of the payload
+                // argument — `toJson`'s twin, treated identically.
+                let mark = self.cx.plan.alias_scope();
+                let mut pairs = Vec::new();
+                vyrn_frontend::ast::alias_embedded(&e, &args[1], &mut pairs);
+                self.cx.plan.alias_clones_scoped(&pairs);
+                let r = self.expr(m, b, &e);
+                self.cx.plan.alias_unwind(mark);
+                return r;
             }
             // `value(x)` boxes a scalar into the built-in `Value` enum. Its variant
             // is picked by the argument's type and built by the ordinary enum path,
@@ -8236,6 +8274,13 @@ impl<'p> Fn_<'_, 'p> {
         let mut call_args: Vec<Expr> = Vec::new();
         let mut binds: HashMap<String, FnBinding> = HashMap::new();
         let mut fi = 0usize;
+        let mark = self.cx.plan.alias_scope();
+        // RFC-0114 §26: `call_args` holds CLONES of the caller's argument
+        // expressions, so plan rows on the originals would go undischarged —
+        // each element remembers its source's node addresses, and the pairs
+        // are registered once the vector stops growing (elements only sit
+        // still after the last push).
+        let mut src_lists: Vec<Vec<usize>> = Vec::new();
         for (i, p) in f.params.iter().enumerate() {
             if !matches!(p.ty, Type::Fn(..)) {
                 params.push(Param {
@@ -8244,6 +8289,9 @@ impl<'p> Fn_<'_, 'p> {
                     ty: ftypes::substitute(&p.ty, &subst),
                 });
                 call_args.push(args[i].clone());
+                let mut v = Vec::new();
+                vyrn_frontend::ast::node_addrs_val(&args[i], &mut v);
+                src_lists.push(v);
                 continue;
             }
             let mut srcs = Vec::new();
@@ -8268,8 +8316,22 @@ impl<'p> Fn_<'_, 'p> {
             );
             // The capture values, read from the caller's own scope — which is
             // what fixes them at this site.
-            call_args.extend(cap_srcs[fi].iter().cloned());
+            for src in &cap_srcs[fi] {
+                call_args.push(src.clone());
+                let mut v = Vec::new();
+                vyrn_frontend::ast::node_addrs_val(src, &mut v);
+                src_lists.push(v);
+            }
             fi += 1;
+        }
+        {
+            let mut pairs: Vec<(usize, usize)> = Vec::new();
+            for (e, srcs) in call_args.iter().zip(&src_lists) {
+                let mut c = Vec::new();
+                vyrn_frontend::ast::node_addrs_val(e, &mut c);
+                pairs.extend(c.into_iter().zip(srcs.iter().copied()));
+            }
+            self.cx.plan.alias_clones_scoped(&pairs);
         }
         sf.params = params;
         sf.ret = ftypes::substitute(&f.ret, &subst);
@@ -8281,7 +8343,11 @@ impl<'p> Fn_<'_, 'p> {
             subst,
             binds,
         )?;
-        self.emit_call(m, b, &sig, &call_args)
+        let r = self.emit_call(m, b, &sig, &call_args);
+        // The clones die with this frame; their aliases must die first, or a
+        // later node at a recycled address would resolve to somebody's row.
+        self.cx.plan.alias_unwind(mark);
+        r
     }
 
     /// A call through a `fn`-typed parameter: the target, with this instance's
@@ -8314,7 +8380,23 @@ impl<'p> Fn_<'_, 'p> {
         if all.len() != bnd.target.sig.params.len() {
             return unsupported("a call through a `fn` parameter at another arity", line);
         }
-        self.emit_call(m, b, &bnd.target.sig, &all)
+        // RFC-0114 §26: the tail is a clone of the caller's arguments — pair
+        // it with the originals so their plan rows discharge (the capture
+        // reads ahead of it are synthesized and carry no rows).
+        let mark = self.cx.plan.alias_scope();
+        {
+            let mut pairs: Vec<(usize, usize)> = Vec::new();
+            for (e, src) in all[bnd.cap_srcs.len()..].iter().zip(args) {
+                let (mut c, mut o) = (Vec::new(), Vec::new());
+                vyrn_frontend::ast::node_addrs_val(e, &mut c);
+                vyrn_frontend::ast::node_addrs_val(src, &mut o);
+                pairs.extend(c.into_iter().zip(o));
+            }
+            self.cx.plan.alias_clones_scoped(&pairs);
+        }
+        let r = self.emit_call(m, b, &bnd.target.sig, &all);
+        self.cx.plan.alias_unwind(mark);
+        r
     }
 
     /// Resolve one `fn`-typed argument to a call target, giving the EXPRESSIONS to
@@ -8405,12 +8487,26 @@ impl<'p> Fn_<'_, 'p> {
                     );
                 }
                 let dsig = self.dispatcher(m, &norm, line)?;
+                // RFC-0114 §26: the capture source is a clone of the
+                // argument expression — pair it with the original so its
+                // plan rows discharge. A `Vec` never pushed again keeps its
+                // buffer, so the element's addresses are already final.
+                let srcs = vec![other.clone()];
+                {
+                    let (mut c, mut o) = (Vec::new(), Vec::new());
+                    vyrn_frontend::ast::node_addrs_val(&srcs[0], &mut c);
+                    vyrn_frontend::ast::node_addrs_val(other, &mut o);
+                    let pairs: Vec<(usize, usize)> = c.into_iter().zip(o).collect();
+                    // Scoped: the vector lives until the enclosing `ho_call`
+                    // returns, whose unwind removes these with its own.
+                    self.cx.plan.alias_clones_scoped(&pairs);
+                }
                 Ok((
                     FnTarget {
                         sig: dsig,
                         ncaps: 1,
                     },
-                    vec![other.clone()],
+                    srcs,
                     vec![norm],
                 ))
             }
@@ -8673,6 +8769,33 @@ impl<'p> Fn_<'_, 'p> {
                     }],
                 },
             };
+        }
+        // RFC-0114 §26: a SHELL's body is the one clone left (RFC-0101 M6),
+        // so plan rows inside the literal would go undischarged — the same
+        // hole the user-container `for` had, cured the same way: pair the
+        // clone's nodes with the source's and let every plan query resolve
+        // through them. Statement addresses live in the Vec's buffer and
+        // expression nodes behind boxes, so the pairs survive the move into
+        // the queue's `Rc`.
+        if let Body::Shell = queued {
+            let (mut orig, mut clone) = (Vec::new(), Vec::new());
+            match body {
+                LambdaBody::Block(src) => {
+                    vyrn_frontend::ast::node_addrs(src, &mut orig);
+                    vyrn_frontend::ast::node_addrs(&sf.body, &mut clone);
+                }
+                LambdaBody::Expr(src) => {
+                    vyrn_frontend::ast::node_addrs_val(src, &mut orig);
+                    match sf.body.stmts.first() {
+                        Some(Stmt::Expr(e)) | Some(Stmt::Return { value: Some(e), .. }) => {
+                            vyrn_frontend::ast::node_addrs_val(e, &mut clone)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let pairs: Vec<(usize, usize)> = clone.into_iter().zip(orig).collect();
+            self.cx.plan.alias_clones(&pairs);
         }
         // The key: the literal's node address, the concrete shape, AND the
         // substitution the body is under. One literal inside a generic body lifts a
@@ -11833,8 +11956,7 @@ impl<'p> Fn_<'_, 'p> {
         let ers = self
             .cx
             .plan
-            .edge_releases
-            .get(&key)
+            .edge_releases_at(key)
             .cloned()
             .unwrap_or_default();
         for (arm_ix, arm) in arms.iter().enumerate() {

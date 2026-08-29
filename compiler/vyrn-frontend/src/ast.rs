@@ -1568,6 +1568,277 @@ fn lambdas_stmt<'a>(s: &'a Stmt, out: &mut std::collections::HashMap<usize, &'a 
     }
 }
 
+/// Every statement and expression address in `b`, in one fixed walk order.
+/// This is the positional identity `project::iterate_loop` zips an original
+/// loop body against its clone with (RFC-0114 §26): two structurally equal
+/// trees walk to two same-length lists, and pairing them is the alias map
+/// that lets a release planned on the original discharge from the clone.
+/// Mirrors [`lambdas_block`]'s coverage; a variant missed here surfaces as a
+/// LOUD finish-check failure on the corpus, never a silent hole.
+pub fn node_addrs(b: &Block, out: &mut Vec<usize>) {
+    for s in &b.stmts {
+        node_addrs_stmt(s, out);
+    }
+}
+
+/// [`node_addrs`] for one statement — the entry `iterate_loop` walks the
+/// cloned tail with, statement by statement.
+pub fn node_addrs_one(s: &Stmt, out: &mut Vec<usize>) {
+    node_addrs_stmt(s, out)
+}
+
+/// [`node_addrs`] for one expression — the entry a lifted lambda SHELL's
+/// value form is zipped with (the wrapper statement is synthesized and has
+/// no original; the expression inside does).
+pub fn node_addrs_val(e: &Expr, out: &mut Vec<usize>) {
+    node_addrs_expr(e, out)
+}
+
+/// Pair every subtree of `tree` structurally equal to `orig` with it,
+/// node-for-node — how a rewrite's embedded argument clone is aliased
+/// (RFC-0114 §26): `toJson(x)` becomes a synthesized encoder call holding a
+/// clone of `x`, and the plan's rows live on the original.
+pub fn alias_embedded(tree: &Expr, orig: &Expr, out: &mut Vec<(usize, usize)>) {
+    if tree == orig {
+        let (mut c, mut o) = (Vec::new(), Vec::new());
+        node_addrs_expr(tree, &mut c);
+        node_addrs_expr(orig, &mut o);
+        out.extend(c.into_iter().zip(o));
+        return;
+    }
+    match tree {
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(inner) => alias_embedded(inner, orig, out),
+            LambdaBody::Block(b) => alias_embedded_block(b, orig, out),
+        },
+        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
+            alias_embedded(expr, orig, out)
+        }
+        Expr::Consume { place, .. } => alias_embedded(place, orig, out),
+        Expr::Binary { lhs, rhs, .. } => {
+            alias_embedded(lhs, orig, out);
+            alias_embedded(rhs, orig, out);
+        }
+        Expr::Call { args, .. }
+        | Expr::TryConstruct { args, .. }
+        | Expr::Spawn { args, .. }
+        | Expr::ArrayLit { elems: args, .. } => {
+            for a in args {
+                alias_embedded(a, orig, out);
+            }
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            alias_embedded(scrutinee, orig, out);
+            for a in arms {
+                match &a.body {
+                    ArmBody::Expr(e) => alias_embedded(e, orig, out),
+                    ArmBody::Block(b) => alias_embedded_block(b, orig, out),
+                }
+            }
+        }
+        Expr::IfExpr {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            alias_embedded(cond, orig, out);
+            alias_embedded(then_branch, orig, out);
+            if let Some(eb) = else_branch {
+                alias_embedded(eb, orig, out);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for (_, v) in fields {
+                alias_embedded(v, orig, out);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                alias_embedded(k, orig, out);
+                alias_embedded(v, orig, out);
+            }
+        }
+        Expr::Int(_)
+        | Expr::Byte(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::Str(_)
+        | Expr::Var { .. } => {}
+    }
+}
+
+fn alias_embedded_block(b: &Block, orig: &Expr, out: &mut Vec<(usize, usize)>) {
+    for s in &b.stmts {
+        match s {
+            Stmt::Let { value, .. }
+            | Stmt::Assign { value, .. }
+            | Stmt::SetField { value, .. }
+            | Stmt::Expr(value) => alias_embedded(value, orig, out),
+            Stmt::IndexSet { index, value, .. } => {
+                alias_embedded(index, orig, out);
+                alias_embedded(value, orig, out);
+            }
+            Stmt::Return { value, .. } => {
+                if let Some(e) = value {
+                    alias_embedded(e, orig, out);
+                }
+            }
+            Stmt::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
+                alias_embedded(cond, orig, out);
+                alias_embedded_block(then_block, orig, out);
+                if let Some(eb) = else_block {
+                    alias_embedded_block(eb, orig, out);
+                }
+            }
+            Stmt::IfLet {
+                scrutinee,
+                then_block,
+                else_block,
+                ..
+            } => {
+                alias_embedded(scrutinee, orig, out);
+                alias_embedded_block(then_block, orig, out);
+                if let Some(eb) = else_block {
+                    alias_embedded_block(eb, orig, out);
+                }
+            }
+            Stmt::While {
+                cond: e, body: bl, ..
+            }
+            | Stmt::ForIn {
+                iter: e, body: bl, ..
+            } => {
+                alias_embedded(e, orig, out);
+                alias_embedded_block(bl, orig, out);
+            }
+            Stmt::Region { body, .. } => alias_embedded_block(body, orig, out),
+            Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop { .. } => {}
+        }
+    }
+}
+
+fn node_addrs_stmt(s: &Stmt, out: &mut Vec<usize>) {
+    out.push(s as *const Stmt as usize);
+    match s {
+        Stmt::Let { value, .. }
+        | Stmt::Assign { value, .. }
+        | Stmt::SetField { value, .. }
+        | Stmt::Expr(value) => node_addrs_expr(value, out),
+        Stmt::IndexSet { index, value, .. } => {
+            node_addrs_expr(index, out);
+            node_addrs_expr(value, out);
+        }
+        Stmt::Return { value, .. } => {
+            if let Some(e) = value {
+                node_addrs_expr(e, out);
+            }
+        }
+        Stmt::If {
+            cond: scrutinee,
+            then_block,
+            else_block,
+            ..
+        }
+        | Stmt::IfLet {
+            scrutinee,
+            then_block,
+            else_block,
+            ..
+        } => {
+            node_addrs_expr(scrutinee, out);
+            node_addrs(then_block, out);
+            if let Some(eb) = else_block {
+                node_addrs(eb, out);
+            }
+        }
+        Stmt::While {
+            cond: e, body: bl, ..
+        }
+        | Stmt::ForIn {
+            iter: e, body: bl, ..
+        } => {
+            node_addrs_expr(e, out);
+            node_addrs(bl, out);
+        }
+        Stmt::Region { body, .. } => node_addrs(body, out),
+        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop { .. } => {}
+    }
+}
+
+fn node_addrs_expr(e: &Expr, out: &mut Vec<usize>) {
+    out.push(e as *const Expr as usize);
+    match e {
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(inner) => node_addrs_expr(inner, out),
+            LambdaBody::Block(b) => node_addrs(b, out),
+        },
+        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
+            node_addrs_expr(expr, out)
+        }
+        Expr::Consume { place, .. } => node_addrs_expr(place, out),
+        Expr::Binary { lhs, rhs, .. } => {
+            node_addrs_expr(lhs, out);
+            node_addrs_expr(rhs, out);
+        }
+        Expr::Call { args, .. }
+        | Expr::TryConstruct { args, .. }
+        | Expr::Spawn { args, .. }
+        | Expr::ArrayLit { elems: args, .. } => {
+            for a in args {
+                node_addrs_expr(a, out);
+            }
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            node_addrs_expr(scrutinee, out);
+            for a in arms {
+                match &a.body {
+                    ArmBody::Expr(e) => node_addrs_expr(e, out),
+                    ArmBody::Block(b) => node_addrs(b, out),
+                }
+            }
+        }
+        Expr::IfExpr {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            node_addrs_expr(cond, out);
+            node_addrs_expr(then_branch, out);
+            if let Some(eb) = else_branch {
+                node_addrs_expr(eb, out);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for (_, v) in fields {
+                node_addrs_expr(v, out);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                node_addrs_expr(k, out);
+                node_addrs_expr(v, out);
+            }
+        }
+        Expr::Int(_)
+        | Expr::Byte(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::Str(_)
+        | Expr::Var { .. } => {}
+    }
+}
+
 fn lambdas_expr<'a>(e: &'a Expr, out: &mut std::collections::HashMap<usize, &'a LambdaBody>) {
     match e {
         Expr::Lambda { body, .. } => {

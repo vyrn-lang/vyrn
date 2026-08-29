@@ -1997,6 +1997,10 @@ pub fn emit(program: &Program) -> Result<String, String> {
         stream_closers = std::mem::take(&mut gi.stream_closers);
     }
 
+    // RFC-0114 §26's finish check: the SOURCE names of every function whose
+    // body this emission walked — the reachability answer `plan.unconsumed`
+    // needs, so a row in dead code alarms nobody.
+    let mut fn_emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
     // 1. Non-generic functions (main + others), collecting instantiations.
     for f in &program.functions {
         if !f.type_params.is_empty() {
@@ -2027,6 +2031,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             fn_sym(&f.name)
         };
         observe::note_inst(observe::Site::Native, &f.name, &[]);
+        fn_emitted.insert(f.name.clone());
         let mut gen = Gen::new(
             &ret_types,
             &param_types,
@@ -2072,6 +2077,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 continue;
             }
             let f = funcs[&name];
+            fn_emitted.insert(name.clone());
             check_inst_depth(&name, type_args.iter(), f.line, &types)?;
             observe::note_inst(observe::Site::Native, &name, &type_args);
             let subst: HashMap<String, Type> = f
@@ -2119,6 +2125,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             if !emitted.insert(inst.sym.clone()) {
                 continue;
             }
+            fn_emitted.insert(inst.name.clone());
             check_inst_depth(
                 &inst.name,
                 inst.subst.values(),
@@ -2179,6 +2186,18 @@ pub fn emit(program: &Program) -> Result<String, String> {
             continue;
         }
         break;
+    }
+
+    // RFC-0114 §26's finish: every plan row in an emitted function must have
+    // been consumed by a query during emission — a missed site is a silent
+    // leak the memory suite would otherwise find by measurement, made loud
+    // here at build time instead.
+    let missed = plan.unconsumed(&fn_emitted);
+    if let Some((owner, class)) = missed.first() {
+        return Err(format!(
+            "internal: RFC-0114 §26 — the release plan placed {} decision(s) the emission never consumed, first {class} in `{owner}`; a missed site is a silent leak, and this failure is the loudness the plan exists for",
+            missed.len()
+        ));
     }
 
     // RFC-0037: the synthesized per-signature dispatchers, emitted after every
@@ -5130,6 +5149,11 @@ impl<'a> Gen<'a> {
                 // evaluated left to right, as the general path would.
                 if self.region_depth == 0 && self.str_append.contains_key(&slot) {
                     if let Some(parts) = self_append_spine(name, value) {
+                        // The spine handles this store's ownership itself
+                        // (§22's own state machine, not yet subsumed by the
+                        // plan) — acknowledged so §26's finish check knows
+                        // the site was considered, not walked past.
+                        let _ = self.plan.store_owned_at(stmt as *const Stmt as usize);
                         self.expect.push(tty.clone());
                         let vals: Result<Vec<String>, String> = parts
                             .iter()
@@ -5182,11 +5206,11 @@ impl<'a> Gen<'a> {
                 // see. The value-side test (`fresh_str` / `mentions_place`)
                 // stays: it answers whether the NEW value can alias the old,
                 // which is representation knowledge.
-                let owned_here = self.region_depth == 0
-                    && self
-                        .plan
-                        .store_owned
-                        .contains(&(stmt as *const Stmt as usize));
+                // The plan is asked FIRST: the query records the site as
+                // considered (§26's finish check), and a `region`'s arena
+                // ownership then gates the release without hiding the site.
+                let owned_here = self.plan.store_owned_at(stmt as *const Stmt as usize)
+                    && self.region_depth == 0;
                 let snap = if owned_here
                     && (fresh_str || !vyrn_frontend::movecheck::mentions_place(value, name))
                 {
@@ -5444,8 +5468,7 @@ impl<'a> Gen<'a> {
                 // is the one that owes a release.
                 let ers = self
                     .plan
-                    .edge_releases
-                    .get(&(stmt as *const Stmt as usize))
+                    .edge_releases_at(stmt as *const Stmt as usize)
                     .cloned()
                     .unwrap_or_default();
                 let else_owes = ers.iter().any(|(_, t)| *t == 1);
@@ -5617,7 +5640,12 @@ impl<'a> Gen<'a> {
                     let blk = vyrn_frontend::project::iterate_loop(
                         &size_fn, nth, var, iter, body, *line,
                     )?;
-                    return self.gen_block(&blk);
+                    // RFC-0114 §26: the expansion cloned the body, so the
+                    // plan's rows live on nodes this walk will never meet —
+                    // the pairs let every query resolve to the original.
+                    self.plan
+                        .alias_clones(vyrn_frontend::project::iterate_aliases(blk));
+                    return self.gen_block(blk);
                 }
                 // Evaluate the iterable once and snapshot a base element pointer
                 // plus a length — matching the interpreter, which iterates a
@@ -5863,12 +5891,7 @@ impl<'a> Gen<'a> {
     /// reclaims it, exactly as [`Gen::free_str_temp`] stands aside there.
     fn gen_expr(&mut self, expr: &Expr) -> Result<(String, Type), String> {
         let r = self.gen_expr_inner(expr)?;
-        if self.region_depth == 0
-            && self
-                .plan
-                .arg_drops
-                .contains(&(expr as *const Expr as usize))
-        {
+        if self.plan.arg_drop(expr as *const Expr as usize) && self.region_depth == 0 {
             self.arg_frees.push((r.0.clone(), r.1.clone()));
         }
         if crate::observe::on() {
@@ -6045,11 +6068,8 @@ impl<'a> Gen<'a> {
                         let len = self.str_len(&v);
                         // RFC-0114 R1′: an unnamed receiver this frame owns
                         // dies here — the header read was its last observer.
-                        if self.region_depth == 0
-                            && self
-                                .plan
-                                .receiver_frees
-                                .contains(&(expr as *const Expr as usize))
+                        if self.plan.receiver_free(expr as *const Expr as usize)
+                            && self.region_depth == 0
                         {
                             self.emit(format!("call void @__vyrn_str_free(ptr {v})"));
                         }
@@ -6063,11 +6083,8 @@ impl<'a> Gen<'a> {
                     // frame owns dies after the count is read. `own` admits
                     // only silent kinds into the set, so `free_arg_temp` never
                     // meets a declared release here.
-                    let rfree = self.region_depth == 0
-                        && self
-                            .plan
-                            .receiver_frees
-                            .contains(&(expr as *const Expr as usize));
+                    let rfree = self.plan.receiver_free(expr as *const Expr as usize)
+                        && self.region_depth == 0;
                     match self.resolve(&ety) {
                         Type::ArrayN(_, n) => return Ok((format!("{n}"), Type::Int)),
                         Type::Array(_) => {
@@ -6119,11 +6136,8 @@ impl<'a> Gen<'a> {
                 // heap field stays out: `names_a_place` made the binding its
                 // owner. A `lazy` field stays out too: forcing it reads the
                 // record after this point.
-                if self.region_depth == 0
-                    && self
-                        .plan
-                        .receiver_frees
-                        .contains(&(expr as *const Expr as usize))
+                if self.plan.receiver_free(expr as *const Expr as usize)
+                    && self.region_depth == 0
                     && self.owned.release_kind(&fty).is_none()
                     && vyrn_frontend::types::deferred(&fty).is_none()
                 {
@@ -6538,12 +6552,7 @@ impl<'a> Gen<'a> {
         }
         // RFC-0114 Rule N at a match join: the arms that still own what
         // another arm consumed, keyed by this match expression's address.
-        let ers = self
-            .plan
-            .edge_releases
-            .get(&key)
-            .cloned()
-            .unwrap_or_default();
+        let ers = self.plan.edge_releases_at(key).cloned().unwrap_or_default();
         let r = self.gen_match_body(&sv, &sty, arms, &ers);
         if !self.terminated {
             self.emit_releases(ExitKind::Scrutinee, key);
@@ -6644,12 +6653,7 @@ impl<'a> Gen<'a> {
         let else_branch =
             else_branch.ok_or("internal: `if` expression without `else` reached codegen")?;
         // RFC-0114 Rule N at an `if`-expression join.
-        let ers = self
-            .plan
-            .edge_releases
-            .get(&key)
-            .cloned()
-            .unwrap_or_default();
+        let ers = self.plan.edge_releases_at(key).cloned().unwrap_or_default();
         let (c, _) = self.gen_expr(cond)?;
         let then_l = self.fresh_label("ie.then");
         let else_l = self.fresh_label("ie.else");

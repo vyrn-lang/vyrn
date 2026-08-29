@@ -778,12 +778,60 @@ pub fn iterate_loop(
     let blk: &'static Block = Box::leak(Box::new(iterate_loop_build(
         size_fn, nth, var, iter, body, line,
     )?));
+    // RFC-0114 §26: the clone's nodes carry none of the plan's addresses, so
+    // a release planned on the original body would go undischarged — the
+    // leak the finish check caught on `slots.vyrn`'s own loop. The body
+    // clones VERBATIM as the `while`'s tail, so zipping the two walks pairs
+    // every cloned node with its original; the backends register the pairs
+    // and the plan resolves queries through them.
+    let tail_at = |b: &'static Block| -> &'static [Stmt] {
+        let Some(Stmt::While { body: inner, .. }) = b.stmts.last() else {
+            return &[];
+        };
+        let n = inner.stmts.len();
+        &inner.stmts[n - body.stmts.len()..]
+    };
+    let mut orig = Vec::new();
+    let mut clone = Vec::new();
+    crate::ast::node_addrs(body, &mut orig);
+    for s in tail_at(blk) {
+        crate::ast::node_addrs_one(s, &mut clone);
+    }
+    let pairs: &'static [(usize, usize)] = Box::leak(
+        clone
+            .into_iter()
+            .zip(orig)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    );
+    ALIASES.with(|m| {
+        m.borrow_mut().insert(blk as *const Block as usize, pairs);
+    });
     LOOPS.with(|m| {
         if let Some(m) = m.borrow_mut().as_mut() {
             m.insert(key, (iter.clone(), body.clone(), blk));
         }
     });
     Ok(blk)
+}
+
+thread_local! {
+    /// Per expansion: every cloned node's address paired with its original's
+    /// — see the note in [`iterate_loop`]. Keyed by the leaked block's
+    /// address, so a memo hit answers with the pairs built the first time.
+    static ALIASES: std::cell::RefCell<HashMap<usize, &'static [(usize, usize)]>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// The clone→original address pairs for an [`iterate_loop`] expansion, empty
+/// for a block this module did not build.
+pub fn iterate_aliases(blk: &Block) -> &'static [(usize, usize)] {
+    ALIASES.with(|m| {
+        m.borrow()
+            .get(&(blk as *const Block as usize))
+            .copied()
+            .unwrap_or(&[])
+    })
 }
 
 fn iterate_loop_build(
