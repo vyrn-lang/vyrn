@@ -5421,6 +5421,12 @@ impl<'a> Gen<'a> {
                 else_block,
                 ..
             } => {
+                // An OPTIONAL projection as the scrutinee (RFC-0122): no
+                // `Option` is built — prologue, one branch on the miss, and
+                // the hit arm's binder aliased to the place.
+                if self.optional_if_let(pattern, scrutinee, then_block, else_block)? {
+                    return Ok(());
+                }
                 // Evaluate the scrutinee once, test the pattern, and branch to the
                 // then-arm (payload bound into fresh locals) or the else-arm
                 // (RFC-0060). No `phi` — the arms carry no value (statement form).
@@ -7146,6 +7152,77 @@ impl<'a> Gen<'a> {
     /// Emit the `i1` "does `sv` (of resolved type `sr`) match `pattern`" test for
     /// an `if let`/`while let` (RFC-0060). Shares the tag-extraction shape with
     /// `gen_match`/`gen_match_enum`.
+    /// `if let Some(x) = s.tryAt(h)` (RFC-0122): lower an OPTIONAL projection
+    /// where it is tested. Answers `false` when the scrutinee is not one, and
+    /// the caller keeps the ordinary path.
+    fn optional_if_let(
+        &mut self,
+        pattern: &Pattern,
+        scrutinee: &Expr,
+        then_block: &vyrn_frontend::ast::Block,
+        else_block: &Option<vyrn_frontend::ast::Block>,
+    ) -> Result<bool, String> {
+        let Expr::Call { name, args, .. } = scrutinee else {
+            return Ok(false);
+        };
+        if args.is_empty()
+            || self.funcs.get(name.as_str()).is_some()
+            || !self
+                .impls
+                .iter()
+                .any(|i| i.places.iter().any(|p| p.name == *name))
+        {
+            return Ok(false);
+        }
+        let line = args[0].line();
+        let recv = self.static_ty(&args[0]);
+        let Some(p) = vyrn_frontend::project::optional_site(
+            self.impls,
+            recv.as_ref(),
+            name,
+            &args[0],
+            &args[1..],
+            line,
+        )?
+        else {
+            return Ok(false);
+        };
+        let hit_l = self.fresh_label("op.hit");
+        let miss_l = self.fresh_label("op.miss");
+        let end_l = self.fresh_label("op.end");
+        self.scope.push(Vec::new());
+        for s in &p.prologue {
+            self.gen_stmt(s)?;
+        }
+        let (mv, _) = self.gen_expr(&p.miss)?;
+        self.emit_term(format!("br i1 {mv}, label %{miss_l}, label %{hit_l}"));
+
+        self.emit_label(&hit_l);
+        // The binder aliases the place — a handle copy, never drop-tracked,
+        // exactly as a pattern payload binds.
+        let (pv, pty) = self.gen_expr(&p.place)?;
+        if let Pattern::Some(bind) = pattern {
+            let ll = self.llt(&pty);
+            let slot = self.declare(bind, &pty);
+            self.emit(format!("store {ll} {pv}, ptr {slot}"));
+        }
+        self.gen_block(then_block)?;
+        if !self.terminated {
+            self.emit_term(format!("br label %{end_l}"));
+        }
+
+        self.emit_label(&miss_l);
+        if let Some(eb) = else_block {
+            self.gen_block(eb)?;
+        }
+        if !self.terminated {
+            self.emit_term(format!("br label %{end_l}"));
+        }
+        self.emit_label(&end_l);
+        self.scope.pop();
+        Ok(true)
+    }
+
     fn gen_pattern_test(
         &mut self,
         sv: &str,

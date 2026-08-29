@@ -44,7 +44,7 @@ drifts: each header says which milestone landed and what did not, and the
 
 ## The index
 
-120 RFCs, numbered 0001 to 0121, with one gap. **There is no RFC-0066** — the
+121 RFCs, numbered 0001 to 0122, with one gap. **There is no RFC-0066** — the
 number was skipped and never used. The only mention of it in the repository is
 this sentence. Closing the gap would mean renumbering thirty files and breaking
 every cross-reference, so the gap stays.
@@ -177,6 +177,7 @@ claim is true — is written down in the test's own header.
 | [0119](RFC-0119-a-listing-carries-its-kinds.md) | a listing carries its kinds | Implemented; `listDirKinds` marks directories with a trailing `/`, and the three scanners that listed every subdirectory twice list it once |
 | [0120](RFC-0120-a-result-carries-a-capability.md) | a result carries a capability | Implemented; `-> read T` / `-> modify T` replace `place`/`yield`, and any method name dispatches a projection, not just `at`/`atSet`/`nth` |
 | [0121](RFC-0121-a-pattern-is-a-place.md) | a pattern is a place | Implemented; `let JArr(items) = j` binds the payload in the enclosing scope or traps, and `std/json` reads `j[i]` / `j.field(key)` in place — 3 ns against the census row's copy |
+| [0122](RFC-0122-an-option-of-a-place.md) | an option of a place | Implemented; `-> read Option<T>` is a projection that may miss, read only where `if let` tests it — `slots.tryAt` reads a live handle at 3 ns against `get`'s 50 ns copy |
 
 ## The other documents here
 

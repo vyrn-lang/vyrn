@@ -135,6 +135,29 @@ impl Index for Json {
         }
         return fields[hit].value
     }
+
+    /// The tolerant sibling of `field` (RFC-0122): the member's place on a
+    /// hit, the `else` arm on absence — `if let Some(v) = doc.tryField(key)`.
+    /// Nothing is copied on either path. A non-object still traps, exactly
+    /// as `field` does: kind confusion is a bug, absence is data, and only
+    /// the second is an answer. `fieldAt` in `std/jsondec` stays the reader
+    /// whose answer may outlive the document.
+    fn tryField(read self, key: String) -> read Option<Json> {
+        let JObj(fields) = self
+        let mut hit = 0 - 1
+        let mut k = 0
+        while k < fields.length {
+            if fields[k].key == key {
+                hit = k
+                break
+            }
+            k = k + 1
+        }
+        if hit < 0 {
+            return None
+        }
+        return Some(fields[hit].value)
+    }
 }
 
 /// `copy` over a list of values. Exported because `xs.copy()` cannot be written

@@ -1297,6 +1297,12 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
             d.file = f.module.clone();
             out.push(d);
         };
+        // The OPTIONAL kind (RFC-0122) has its own three-part shape and its
+        // own rules; everything below is the plain kind's.
+        if crate::project::is_optional(f) {
+            check_optional_place(checker, f, &mut push);
+            continue;
+        }
         let yields = count_yields(&f.body);
         if yields != 1
             || !matches!(
@@ -1376,6 +1382,119 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
             push(s);
         }
         let _ = imp;
+    }
+}
+
+/// Check one OPTIONAL projection (RFC-0122): `-> read Option<T>`, whose body
+/// is the flat shape one statement stricter than RFC-0121's — a prologue
+/// with no returns, then exactly `if <miss> { return None }`, then exactly
+/// `return Some(<place>)`. The rigidity is load-bearing: statements between
+/// two miss tests would run after the first miss decided, so there is one
+/// prologue, one decision, one place.
+fn check_optional_place(checker: &Checker, f: &Function, push: &mut impl FnMut(Diagnostic)) {
+    // `a[i]`, `a[i] = v` and `for` consume a place unconditionally, so the
+    // members their sugar dispatches cannot be the optional kind.
+    if ["at", "atSet", "nth"].contains(&f.name.as_str()) {
+        push(cerr_at!(
+            f.line,
+            f.name_span(),
+            "`{}` is dispatched by sugar that consumes a place unconditionally \
+             — an optional projection needs a name of its own",
+            f.name
+        ));
+        return;
+    }
+    if f.params.first().map(|p| p.capability) != Some(crate::ast::Capability::Read) {
+        push(cerr_at!(
+            f.line,
+            f.name_span(),
+            "optional projection `{}` must take `read self` — the hit is a \
+             borrow the `if let` arm reads, and nothing writes through a miss",
+            f.name
+        ));
+        return;
+    }
+    let shape = cerr_at!(
+        f.line,
+        f.name_span(),
+        "optional projection `{}` must end with `if <miss> {{ return None }}` \
+         then `return Some(<place>)` — one prologue, one decision, one place",
+        f.name
+    );
+    let n = f.body.stmts.len();
+    if n < 2 || count_yields(&f.body) != 2 {
+        push(shape);
+        return;
+    }
+    let (
+        Some(Stmt::If {
+            cond: _,
+            then_block,
+            else_block: None,
+            ..
+        }),
+        Some(Stmt::Return { value: Some(v), .. }),
+    ) = (f.body.stmts.get(n - 2), f.body.stmts.last())
+    else {
+        push(shape);
+        return;
+    };
+    let miss_ok = then_block.stmts.len() == 1
+        && matches!(
+            &then_block.stmts[0],
+            Stmt::Return { value: Some(Expr::Var { name, .. }), .. } if name == "None"
+        );
+    let Expr::Call { name, args, .. } = v else {
+        push(shape);
+        return;
+    };
+    if !miss_ok || name != "Some" || args.len() != 1 {
+        push(shape);
+        return;
+    }
+    let y = &args[0];
+    if crate::project::has_try(&f.body) {
+        push(cerr_at!(f.line, f.name_span(), "projection `{}` uses `?`, which returns — a projection is                  inlined at the access site, so there is no frame to return                  from. Check the condition and `panic` instead.", f.name));
+        return;
+    }
+    if !crate::project::is_place(y) {
+        push(cerr_at!(
+            f.line,
+            f.name_span(),
+            "optional projection `{}` answers `Some` of a value, not of a place \
+             — the hit must be a field or element of `self`; a computed value \
+             is an ordinary `fn` returning `-> Option<T>`",
+            f.name
+        ));
+        return;
+    }
+    let mut roots: std::collections::HashSet<String> =
+        f.params.iter().map(|p| p.name.clone()).collect();
+    for s in &f.body.stmts[..n - 2] {
+        if let Stmt::Let { name, value, .. } = s {
+            if let_borrows_from(value, &roots) {
+                roots.insert(name.clone());
+            }
+        }
+    }
+    match crate::project::place_root(y) {
+        Some(root) if roots.contains(&root) => {}
+        Some(root) => push(cerr_at!(
+            f.line,
+            f.name_span(),
+            "projection `{}` returns a place rooted at `{root}`, which the \
+             access site does not own — a projection may only return a place \
+             inside `self`, a parameter, or a prologue `let` that borrows \
+             from one",
+            f.name
+        )),
+        None => {}
+    }
+    if let Err(s) = checker.function(f) {
+        push(s);
+    }
+    for s in checker.errors.borrow_mut().drain(..) {
+        push(s);
     }
 }
 
@@ -1905,6 +2024,94 @@ impl<'a> Checker<'a> {
         Ok(())
     }
 
+    /// Type an `if let` scrutinee that is an OPTIONAL projection call
+    /// (RFC-0122), and record its expansion. `Ok(None)` means "not one" — an
+    /// ordinary scrutinee, typed by the caller's normal path. `Some` is the
+    /// projection's declared `Option<T>` with the impl head solved from the
+    /// receiver; the pattern must be `Some(..)`, because the hit is the arm
+    /// with a place to bind and the miss is just the other arm.
+    fn optional_scrutinee(
+        &self,
+        scrutinee: &Expr,
+        pattern: &crate::ast::Pattern,
+        scope: &Scope,
+        fn_ret: &Type,
+        line: usize,
+    ) -> Result<Option<Type>, Diagnostic> {
+        let Expr::Call { name, args, .. } = scrutinee else {
+            return Ok(None);
+        };
+        if args.is_empty()
+            || self.sigs.get(name.as_str()).is_some()
+            || !self
+                .impl_blocks
+                .iter()
+                .any(|i| i.places.iter().any(|p| p.name == *name))
+        {
+            return Ok(None);
+        }
+        let recv = self.expr(&args[0], scope, None, Some(fn_ret))?;
+        let found = crate::project::lookup_impl(self.impl_blocks, &recv, name)
+            .or_else(|| crate::project::lookup_impl(self.impl_blocks, &self.base(&recv), name));
+        let Some((imp, f)) = found else {
+            return Ok(None);
+        };
+        if !crate::project::is_optional(f) {
+            return Ok(None);
+        }
+        self.refuse_chained_projection(&args[0], line)?;
+        if !matches!(pattern, crate::ast::Pattern::Some(_)) {
+            return Err(cerr!(
+                line,
+                "an optional place is tested for its hit — write \
+                 `if let Some(x) = ..{name}(..)`; the miss is the `else` arm"
+            ));
+        }
+        if args.len() - 1 != f.params.len() - 1 {
+            return Err(cerr!(
+                line,
+                "projection `{name}` expects {} argument(s) besides `self`, got {}",
+                f.params.len() - 1,
+                args.len() - 1
+            ));
+        }
+        let mut subst: HashMap<String, Type> = HashMap::new();
+        self.unify(&imp.ty, &recv, &mut subst, line)?;
+        for (arg, p) in args[1..].iter().zip(&f.params[1..]) {
+            let want = crate::types::substitute(&p.ty, &subst);
+            let got = self.expr(arg, scope, Some(&want), Some(fn_ret))?;
+            if !self.coercible(&got, &want) {
+                return Err(cerr!(
+                    line,
+                    "projection `{name}` argument is {got}, expected {want}"
+                ));
+            }
+            self.prove_coercion(arg, &want, line)?;
+        }
+        if recording() {
+            if let Ok(Some(p)) = crate::project::optional_site(
+                self.impl_blocks,
+                Some(&recv),
+                name,
+                &args[0],
+                &args[1..],
+                line,
+            ) {
+                self.record_desugar(scope, |c, sc| {
+                    sc.push(HashMap::new());
+                    for s in &p.prologue {
+                        if c.stmt(s, fn_ret, sc).is_err() {
+                            return;
+                        }
+                    }
+                    let _ = c.expr(&p.miss, sc, None, Some(fn_ret));
+                    let _ = c.expr(&p.place, sc, None, Some(fn_ret));
+                });
+            }
+        }
+        Ok(Some(crate::types::substitute(&f.ret, &subst)))
+    }
+
     fn place_result(
         &self,
         recv: &Type,
@@ -1927,6 +2134,18 @@ impl<'a> Checker<'a> {
         let Some((imp, f)) = found else {
             return Ok(None);
         };
+        // An OPTIONAL projection (RFC-0122) has no value to be: its `Option`
+        // exists only as the two arms of the `if let` that consumes it, and
+        // every other position would need the payload copied into an owned
+        // `Option<T>` — which is what the copying readers are for.
+        if crate::project::is_optional(f) {
+            return Err(cerr!(
+                line,
+                "an optional place is read where it is tested — write \
+                 `if let Some(x) = ..{method}(..)`, or reach for the copying \
+                 reader when the value must outlive the test"
+            ));
+        }
         let recv = recv.clone();
         if args.len() - 1 != f.params.len() - 1 {
             return Err(cerr!(
@@ -3699,7 +3918,13 @@ impl<'a> Checker<'a> {
                 else_block,
                 line,
             } => {
-                let raw = self.expr(scrutinee, scope, None, Some(ret))?;
+                // An optional projection's ONE legal position (RFC-0122): the
+                // scrutinee of the `if let` that reads it. Typed here so the
+                // value-position refusal in `place_result` never sees it.
+                let raw = match self.optional_scrutinee(scrutinee, pattern, scope, ret, *line)? {
+                    Some(t) => t,
+                    None => self.expr(scrutinee, scope, None, Some(ret))?,
+                };
                 let sty = self.resolve_scrutinee(&raw);
                 let binders = self.pattern_binders(&sty, pattern, *line)?;
                 // The binders are in scope in `then_block` only, in a frame that
@@ -11335,6 +11560,82 @@ mod tests {
         ))
         .unwrap_err();
         assert!(e.contains("receiver must be a name"), "{e}");
+    }
+
+    // ---- RFC-0122: an option of a place --------------------------------------
+
+    /// A container with an optional projection, shared by the refusal tests.
+    const OPT: &str = "type Row = {{ n: Int64 }}\n\
+                       type B = {{ rows: Array<Row> }}\n\
+                       impl Index for B {{\n\
+                           fn tryAt(read self, i: Int64) -> read Option<Row> {{\n\
+                               if i < 0 || i >= self.rows.length {{\n\
+                                   return None\n\
+                               }}\n\
+                               return Some(self.rows[i])\n\
+                           }}\n\
+                       }}\n";
+
+    #[test]
+    fn an_optional_projection_is_read_where_it_is_tested() {
+        let head = format!(
+            "{}fn main() -> Int64 {{\n    let b = B {{ rows: [] }}\n",
+            OPT.replace("{{", "{").replace("}}", "}")
+        );
+        assert!(check_src(&format!(
+            "{head}    if let Some(r) = b.tryAt(0) {{ return r.n }}\n    return 0\n}}"
+        ))
+        .is_ok());
+        // Value position: the refusal names the rule and the alternative.
+        let e = check_src(&format!("{head}    let o = b.tryAt(0)\n    return 0\n}}")).unwrap_err();
+        assert!(e.contains("read where it is tested"), "{e}");
+        // The miss has no place to bind, so only `Some` tests it.
+        let e = check_src(&format!(
+            "{head}    if let None = b.tryAt(0) {{ return 1 }}\n    return 0\n}}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("tested for its hit"), "{e}");
+    }
+
+    #[test]
+    fn an_optional_projection_needs_its_three_part_shape() {
+        // Two miss tests: statements between them would run after the first
+        // miss decided, so the shape is one prologue, one decision, one place.
+        let e = check_src(
+            "type B = { rows: Array<Int64> }\n\
+             impl Index for B {\n\
+                 fn tryAt(read self, i: Int64) -> read Option<Int64> {\n\
+                     if i < 0 {\n\
+                         return None\n\
+                     }\n\
+                     if i >= self.rows.length {\n\
+                         return None\n\
+                     }\n\
+                     return Some(self.rows[i])\n\
+                 }\n\
+             }\n\
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("one prologue, one decision, one place"), "{e}");
+    }
+
+    #[test]
+    fn the_sugar_names_cannot_be_optional() {
+        let e = check_src(
+            "type B = { rows: Array<Int64> }\n\
+             impl Index for B {\n\
+                 fn at(read self, i: Int64) -> read Option<Int64> {\n\
+                     if i < 0 {\n\
+                         return None\n\
+                     }\n\
+                     return Some(self.rows[i])\n\
+                 }\n\
+             }\n\
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("consumes a place unconditionally"), "{e}");
     }
 
     // ---- RFC-0094 M3: `impl Show` --------------------------------------------

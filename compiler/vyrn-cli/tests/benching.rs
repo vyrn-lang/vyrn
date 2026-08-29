@@ -478,7 +478,9 @@ fn bench_corpus_is_exactly_the_bench_bearing_examples() {
     // `namedplace` arrived with RFC-0120: its two benches are the RFC's
     // before/after — the same label read through a projection and as an owned
     // copy. `jsonplace` is RFC-0121's: the census's 4096-element lookup, in
-    // place against the tolerant copying reader.
+    // place against the tolerant copying reader. `tryplace` is RFC-0122's:
+    // the same live handle through `tryAt` (an option of a place) and
+    // through the copying `get`.
     let mut found: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(examples_dir()).unwrap() {
         let path = entry.unwrap().path();
@@ -508,7 +510,8 @@ fn bench_corpus_is_exactly_the_bench_bearing_examples() {
             "revcomp".to_string(),
             "simdbench".to_string(),
             "smallarray".to_string(),
-            "spectralnorm".to_string()
+            "spectralnorm".to_string(),
+            "tryplace".to_string()
         ],
         "bench corpus drifted"
     );

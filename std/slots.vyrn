@@ -126,7 +126,9 @@ export fn alive<T>(s: Slots<T>, h: Handle<T>) -> Bool {
 /// handles instead of a trap it cannot.
 ///
 /// The element is COPIED out, because a return is owned (RFC-0089 rule 3). Read
-/// `s[h]` instead where the element should stay where it is.
+/// `s[h]` instead where the element should stay where it is, and
+/// `if let Some(v) = s.tryAt(h)` (RFC-0122) where the miss matters but the
+/// value does not outlive the test — neither of those copies anything.
 export fn get<T>(s: Slots<T>, h: Handle<T>) -> Option<T> {
     if !alive(s, h) {
         return None
@@ -182,6 +184,19 @@ export fn handles<T>(s: Slots<T>) -> Array<Handle<T>> {
 /// `s[h].field = v` writes where the element lives and nothing is copied. A dead
 /// handle stops the program, exactly as `a[i]` out of range does.
 impl<T> Index for Slots<T> {
+    /// The tolerant read (RFC-0122): a live handle's element as a PLACE, a
+    /// dead one as the `else` arm — `if let Some(v) = s.tryAt(h)`. Nothing is
+    /// copied on either path; `get` stays beside it for the value that must
+    /// outlive the test, and pays the copy that buys.
+    fn tryAt(read self, h: Handle<T>) -> read Option<T> {
+        if h.owner != self.owner || h.slot < 0 || h.slot >= self.gens.length
+        || self.gens[h.slot] != h.gen
+        {
+            return None
+        }
+        return Some(self.vals[h.slot])
+    }
+
     fn at(read self, h: Handle<T>) -> read T {
         if h.owner != self.owner || h.slot < 0 || h.slot >= self.gens.length
         || self.gens[h.slot] != h.gen

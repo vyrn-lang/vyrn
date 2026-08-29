@@ -399,6 +399,14 @@ the subtree; the place is flat). The tolerant `elemAt`/`fieldAt` stay for
 the JNull-on-miss paths. Still waiting: `slots.get` (an Option of a place)
 and `contract` (a receiver for a free function's result).
 
+**Same day again: RFC-0122 closed the `slots.get` row.** An optional
+projection (`-> read Option<T>`) misses to the `else` arm and hits as a
+place, read only where `if let` tests it — no `Option` built, nothing
+copied. `slots.tryAt` prices the same live handle at 3 ns against `get`'s
+50 ns, and `json.tryField` gives absence the same treatment. `get` stays for
+the value that must outlive the test. The last pattern-2 payer standing is
+`contract`, on a receiver for a free function's result.
+
 ### Question two: is there anywhere to put work that happens once?
 
 Pattern 3, seven modules, plus `std/openapi` and `std/http` and `std/rpc`
