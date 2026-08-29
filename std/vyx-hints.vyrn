@@ -52,7 +52,7 @@
 /// warning, and a project can move any of them in either direction.
 
 import { reportHere, Severity } from "std/diag"
-import { hint, noPolicy, policyOf, HintPolicy } from "std/hints"
+import { hint, noPolicy, policyOf, strictly, unusedWaivers, HintPolicy } from "std/hints"
 import { VyxAttr, VyxBody, VyxNode, vyxParseTemplate } from "std/vyx"
 import { contains, endsWith, slice, startsWith } from "std/strpred"
 import { toLower, trim } from "std/strings"
@@ -191,7 +191,17 @@ export gen fn vhCheck(p: HintPolicy, src: String, file: String) -> String {
         // bury it.
         return ""
     }
-    return vhNodes(p, src, file, t.nodes, false, false, false, false)
+    let out = vhNodes(p, src, file, t.nodes, false, false, false, false)
+    // hint/unused-waiver (`html-validate`'s `no-unused-disable`): a marker
+    // that waives nothing misleads the reader about the line below it. The
+    // audit needs what the rules WOULD have said, so a template that carries
+    // a marker is walked once more under `strictly` — and only such a
+    // template pays for the second walk.
+    if contains(src, "vyrn-ignore") {
+        let raw = vhNodes(strictly(p), src, file, t.nodes, false, false, false, false)
+        return out + unusedWaivers(p, src, file, raw)
+    }
+    return out
 }
 
 fn vhNodes(
@@ -1592,6 +1602,34 @@ test "an external script or sheet without integrity fires; a local one does not"
     assert(fires("<link rel=\"stylesheet\" href=\"/style.css\"/>", "sec/require-sri") == false)
     assert(fires("<link rel=\"icon\" href=\"https://cdn.test/a.png\"/>", "sec/require-sri") == false)
     assert(fires("<script :src=\"url\"></script>", "sec/require-sri") == false)
+}
+
+test "a waiver that waives nothing fires; one that earns its keep does not" {
+    // The marker covers a finding on its own line or the one below — this
+    // one covers sec/raw-html, which fires, so it is used.
+    let used = vhCheck(
+        noPolicy(),
+        "<template>\n<!-- vyrn-ignore sec/raw-html: sanitized upstream -->\n<div v-html=\"body\"></div>\n</template>\n",
+        "T.vyx",
+    )
+    assert(contains(used, "hint/unused-waiver") == false)
+    // The same marker over a plain div waives nothing.
+    let stale = vhCheck(
+        noPolicy(),
+        "<template>\n<!-- vyrn-ignore sec/raw-html: sanitized upstream -->\n<div>x</div>\n</template>\n",
+        "T.vyx",
+    )
+    assert(contains(stale, "hint/unused-waiver"))
+    assert(contains(stale, "waives nothing here"))
+    // A template with no marker never pays the audit pass, and says nothing.
+    assert(contains(vhCheck(noPolicy(), "<template>\n<div>x</div>\n</template>\n", "T.vyx"), "unused-waiver") == false)
+    // A marker may vouch for a marker: the audit rule is waivable like any other.
+    let vouched = vhCheck(
+        noPolicy(),
+        "<template>\n<!-- vyrn-ignore hint/unused-waiver: seasonal template, rule returns -->\n<!-- vyrn-ignore sec/raw-html -->\n<div>x</div>\n</template>\n",
+        "T.vyx",
+    )
+    assert(contains(vouched, "hint/unused-waiver") == false)
 }
 
 test "a misspelled aria attribute fires; the vocabulary and bound values do not" {

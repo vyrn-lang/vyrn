@@ -71,12 +71,27 @@ import { substring } from "std/strings"
 
 /// Per-code severity overrides, as parallel arrays (a code and its level word).
 /// Built by [`policyOf`]; [`noPolicy`] is the empty one, under which every rule
-/// runs at the severity its author chose.
-export type HintPolicy = { codes: Array<String>, levels: Array<String> }
+/// runs at the severity its author chose. `strict` ignores waivers — never a
+/// caller-facing mode, only the second pass [`unusedWaivers`] audits against.
+export type HintPolicy = { codes: Array<String>, levels: Array<String>, strict: Bool }
 
 /// The empty policy: no override, every rule at its default severity.
 export fn noPolicy() -> HintPolicy {
-    return HintPolicy { codes: [], levels: [] }
+    return HintPolicy { codes: [], levels: [], strict: false }
+}
+
+/// `p`, with waivers ignored — what a rule WOULD report. The audit half of
+/// the waiver contract: a marker is only as honest as the report it edits.
+export fn strictly(p: HintPolicy) -> HintPolicy {
+    let mut codes: Array<String> = []
+    let mut levels: Array<String> = []
+    let mut i = 0
+    while i < p.codes.length {
+        codes.push(p.codes[i].copy())
+        levels.push(p.levels[i].copy())
+        i = i + 1
+    }
+    return HintPolicy { codes: codes, levels: levels, strict: true }
 }
 
 /// Read a policy out of `configText`, from its top-level `key`.
@@ -116,7 +131,7 @@ export fn policyOf(configText: String, key: String) -> Result<HintPolicy, String
             )
         }
     }
-    return Ok(HintPolicy { codes: codes, levels: levels })
+    return Ok(HintPolicy { codes: codes, levels: levels, strict: false })
 }
 
 /// The level `code` runs at under `p`: its configured word, or the word for
@@ -156,7 +171,7 @@ export fn hint(
     if level == "off" {
         return ""
     }
-    if waived(src, line, code) {
+    if p.strict == false && waived(src, line, code) {
         return ""
     }
     let severity = if level == "error" { Error } else { Warning }
@@ -239,6 +254,102 @@ fn waivesLine(line: String, code: String) -> Bool {
         }
         if j == m && continuesCode(line, i + m) == false {
             return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/// Every `vyrn-ignore` marker in `src` that waived NOTHING (`html-validate`'s
+/// `no-unused-disable`, `hint/unused-waiver` here). `raw` is the same report
+/// built under [`strictly`] — what the rules WOULD have said with every
+/// waiver ignored — and a marker at line L is USED when a raw report of its
+/// code sits at L or L + 1, the two lines [`waived`] covers. A marker that
+/// waives nothing usually means the finding it apologized for was fixed;
+/// the marker now misleads the reader about the line below it.
+///
+/// Reported through [`hint`] with the CALLER's policy, so the audit rule is
+/// configured and waived like any other — a marker may vouch for a marker.
+export fn unusedWaivers(p: HintPolicy, src: String, file: String, raw: String) -> String {
+    let mut out = ""
+    let n = src.byteLength
+    let mut lineNo = 1
+    let mut start = 0
+    let mut i = 0
+    while i <= n {
+        if i == n || src[i] == '\n' {
+            let line = substring(src, start, i)
+            let code = waiverCode(line)
+            if code != "" {
+                if rawReports(raw, file, lineNo, code) == false
+                && rawReports(raw, file, lineNo + 1, code) == false
+                {
+                    out = out
+                    + hint(
+                        p,
+                        "hint/unused-waiver",
+                        Warning,
+                        src,
+                        file,
+                        lineNo,
+                        0,
+                        "`vyrn-ignore \{code}` waives nothing here — the finding it covered is gone, so the marker now misleads; delete it",
+                    )
+                }
+            }
+            lineNo = lineNo + 1
+            start = i + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// The code of the first `vyrn-ignore <code>` marker on `line`, or `""`.
+fn waiverCode(line: String) -> String {
+    let marker = "vyrn-ignore "
+    let n = line.byteLength
+    let m = marker.byteLength
+    let mb = bytes(marker)
+    let mut i = 0
+    while i + m <= n {
+        let mut j = 0
+        while j < m && line[i + j] == mb[j] {
+            j = j + 1
+        }
+        if j == m {
+            let mut e = i + m
+            while continuesCode(line, e) {
+                e = e + 1
+            }
+            if e > i + m {
+                return substring(line, i + m, e)
+            }
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+/// Whether `raw` carries a report of `code` at `file`:`line` — one
+/// `//@diag` row whose location and code both match.
+fn rawReports(raw: String, file: String, line: Int64, code: String) -> Bool {
+    return contains(raw, " \{file}:\{line}:") && rawLineHas(raw, "\{file}:\{line}:", "\{code}:")
+}
+
+/// Whether some line of `raw` contains BOTH needles — the location and the
+/// code must sit on one report, not on two.
+fn rawLineHas(raw: String, loc: String, code: String) -> Bool {
+    let n = raw.byteLength
+    let mut start = 0
+    let mut i = 0
+    while i <= n {
+        if i == n || raw[i] == '\n' {
+            let line = substring(raw, start, i)
+            if contains(line, loc) && contains(line, code) {
+                return true
+            }
+            start = i + 1
         }
         i = i + 1
     }
