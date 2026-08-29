@@ -171,7 +171,14 @@ sites before release (#2769, #2875); stable identifier derivation for hydration
 
 ## What std/vyx-hints.vyrn already covers
 
-Twelve rules today (`std/vyx-hints.vyrn:294-495`):
+**This section is a snapshot from the census's read date and has aged twice
+over.** The living record is `rfcs/census/vyx-hints-ported.md`: the seven
+rules of table one landed 2026-08-24 (severity provenance inside;
+`svg-focusable` dropped there with the reason), and table two's element
+vocabulary landed 2026-08-29 as `html/element-name` + `html/deprecated` —
+twenty-one rules at that date, against the twelve below.
+
+Twelve rules at the census's read date (`std/vyx-hints.vyrn:294-495`):
 
 | rule | line | shape |
 |---|---|---|
