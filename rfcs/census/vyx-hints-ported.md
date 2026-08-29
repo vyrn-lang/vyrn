@@ -178,10 +178,25 @@ the two lines a waiver covers. The audit reports through `hint` with the
 caller's own policy, so it is configured and waived like any rule — a
 marker may vouch for a marker, and the test pins that case.
 
-Still open from table two: the full per-element attribute tables
-(`no-unknown-attributes` — `html5.ts` lists constrained attributes, not the
-complete allowed set, so that rule needs a source this census has not read),
-the entity table (`unrecognized-char-ref`), and `no-raw-characters`.
+And the entity rows closed WITHOUT the 2,231-name table they were filed
+under, because the premise does not hold in this stack: `.vyx` text is
+emitted ESCAPED (`std/html`: "Text(s) — ALWAYS escaped"), so NO character
+reference decodes — `&nbsp;` in a template is seven literal bytes on the
+page, every time. `html/entity-in-text` (Warning) therefore fires on any
+entity-shaped sequence in a text node: the HTML habit meant it to decode,
+which is a bug here, and a docs page showing markup on purpose sees exactly
+what it wrote and waives the line. That one rule is `unrecognized-char-ref`
+and `no-raw-characters`' compile-time half, resolved by the renderer's own
+contract instead of a table. Anchored at the owning element — a text node
+carries no position of its own.
+
+Still open from table two, and now the only row: the full per-element
+attribute tables (`no-unknown-attributes` — `html5.ts` lists constrained
+attributes, not the complete allowed set, so that rule needs a source this
+census has not read). `no-unused-disable` landed as `hint/unused-waiver`;
+everything else in the table is either live above or recorded as vacuous
+under `.vyx` (the parse-structure rules a strict template parser refuses
+before any lint runs).
 
 ## Pages changed
 

@@ -55,7 +55,7 @@ import { reportHere, Severity } from "std/diag"
 import { hint, noPolicy, policyOf, strictly, unusedWaivers, HintPolicy } from "std/hints"
 import { VyxAttr, VyxBody, VyxNode, vyxParseTemplate } from "std/vyx"
 import { contains, endsWith, slice, startsWith } from "std/strpred"
-import { toLower, trim } from "std/strings"
+import { substring, toLower, trim } from "std/strings"
 
 /// The config key this library reads. A third-party library picks its own, so
 /// two hint libraries in one project configure independently. A function rather
@@ -515,6 +515,31 @@ fn vhElem(
         }
     }
 
+    // html/entity-in-text. `.vyx` text is emitted ESCAPED (`std/html`:
+    // "Text(s) — ALWAYS escaped"), so `&nbsp;` in a template never becomes a
+    // space — the page shows those seven bytes literally. Any
+    // entity-looking sequence in a text node is therefore worth a look: the
+    // HTML habit meant it to decode (a bug here), and a docs page showing
+    // markup on purpose sees exactly what it wrote and waives the line. No
+    // entity table is needed, because in this stack NO reference decodes —
+    // which closes `unrecognized-char-ref` and `no-raw-characters`' compile
+    // half without the 2,231-name table they need where references work.
+    // Anchored at the element, because a text node carries no position.
+    let ent = vhEntityInText(kids)
+    if ent != "" {
+        out = out
+        + hint(
+            p,
+            "html/entity-in-text",
+            Warning,
+            src,
+            file,
+            aLine,
+            aCol,
+            "`\{ent}` is not decoded here — text is emitted escaped, so the page shows those bytes literally; write the character itself",
+        )
+    }
+
     // --- element-shaped rules ------------------------------------------------
     // a11y/img-alt. The highest-value rule in every source, and the information
     // is already in hand. `alt=""` counts: an empty alt is how markup says
@@ -871,6 +896,48 @@ fn vhSlice(s: String, from: Int64, to: Int64) -> String {
         Ok(v) => v,
         Err(e) => "",
     }
+}
+
+/// The first entity-looking sequence in an element's DIRECT text children —
+/// `&name;` or `&#digits;` — or `""`. Nested elements answer for their own
+/// text when the walk reaches them.
+fn vhEntityInText(kids: Array<VyxNode>) -> String {
+    for k in kids {
+        if let VNText(s) = k {
+            let hit = vhEntityIn(s)
+            if hit != "" {
+                return hit
+            }
+        }
+    }
+    return ""
+}
+
+/// The first `&<name-or-#digits>;` in `s`, or `""`.
+fn vhEntityIn(s: String) -> String {
+    let n = s.byteLength
+    let mut i = 0
+    while i < n {
+        if s[i] == '&' && i + 2 < n {
+            let b = s[i + 1]
+            if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '#' {
+                let mut e = i + 2
+                while e < n
+                && ((s[e] >= 'a' && s[e] <= 'z') || (s[e] >= 'A' && s[e] <= 'Z')
+                    || (s[e] >= '0' && s[e] <= '9'))
+                {
+                    e = e + 1
+                }
+                if e < n && s[e] == ';' && e > i + 1 {
+                    return substring(s, i, e + 1)
+                }
+                i = e
+                continue
+            }
+        }
+        i = i + 1
+    }
+    return ""
 }
 
 /// The HTML vocabulary (RFC census `rfcs/census/ui/README.md`, table two:
@@ -1602,6 +1669,18 @@ test "an external script or sheet without integrity fires; a local one does not"
     assert(fires("<link rel=\"stylesheet\" href=\"/style.css\"/>", "sec/require-sri") == false)
     assert(fires("<link rel=\"icon\" href=\"https://cdn.test/a.png\"/>", "sec/require-sri") == false)
     assert(fires("<script :src=\"url\"></script>", "sec/require-sri") == false)
+}
+
+test "an entity in text fires; plain text, a bare ampersand and interpolation do not" {
+    assert(fires("<p>a &nbsp; b</p>", "html/entity-in-text"))
+    assert(fires("<p>dash &mdash; dash</p>", "html/entity-in-text"))
+    assert(fires("<p>em &#8212; em</p>", "html/entity-in-text"))
+    assert(fires("<p>salt &amp; pepper</p>", "html/entity-in-text"))
+    // A bare `&` is just an ampersand — the escaper handles it, nothing to say.
+    assert(fires("<p>salt & pepper</p>", "html/entity-in-text") == false)
+    assert(fires("<p>plain text</p>", "html/entity-in-text") == false)
+    // `& then;` with a space is not a reference shape.
+    assert(fires("<p>now & then; later</p>", "html/entity-in-text") == false)
 }
 
 test "a waiver that waives nothing fires; one that earns its keep does not" {
