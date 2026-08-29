@@ -2840,6 +2840,9 @@ impl MoveCheck<'_> {
     /// release, and note the plain `return f(..)` callees that pass it along.
     fn lends(&self) {
         if let Some(sink) = &self.lending {
+            if std::env::var_os("VYRN_LEND_DUMP").is_some() {
+                eprintln!("lend seed: {}", self.cur_fn.borrow());
+            }
             sink.borrow_mut().insert(self.cur_fn.borrow().clone());
         }
     }
@@ -2997,6 +3000,12 @@ impl MoveCheck<'_> {
     /// one.
     fn lends_through_a_wrapper(&self, e: &Expr) -> Option<(Borrow, String, String)> {
         match e {
+            // A borrow whose KNOWN type owns no heap is copied by value into
+            // the payload and lends nothing — `JBool(b) => JBool(b)` in a
+            // declared `copy` was read as a wrapped lend, which made the copy
+            // a LENDER and stopped every `.copy()` result in the corpus from
+            // being released (exit-residue round six). An unknown type keeps
+            // the lend, conservatively.
             Expr::Call { name, args, .. } if self.decl.constructs(name) => {
                 args.iter().find_map(|a| self.returned_borrow(a))
             }

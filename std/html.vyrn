@@ -201,7 +201,13 @@ export fn on(event: consume String, handler: consume String, payload: consume St
 /// borrow the caller was told it still held. Every call site already passes a
 /// fresh node or a consumed loop element.
 export fn keyed(k: consume String, node: consume Html) -> Html {
-    return match node {
+    // `consume node` in the scrutinee: the binders take the payloads (the
+    // param is this function's to give), so the rebuilt node is OWNED. A
+    // plain `match` read the binders as projections, the return as a borrow,
+    // and `keyed` as a lender — which spread through `itemRow`-shaped
+    // callers and stopped every tree they built from being released
+    // (exit-residue round six).
+    return match consume node {
         El(tag, attrs, kids) => El(tag, withKey(attrs, k), kids),
         Empty => Empty,
         Text(s) => Text(s),

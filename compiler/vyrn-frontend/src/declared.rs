@@ -309,12 +309,26 @@ impl Declared {
             // four: jchain's 24 blocks, and the json/html/graphql family
             // behind it). The guard against a shared or generic variant name
             // is in the table's construction.
-            Expr::Call { name, .. } => self.rets.get(name).cloned().or_else(|| {
-                self.variants
-                    .get(name)
-                    .and_then(|owner| owner.clone())
-                    .map(Type::Named)
-            }),
+            Expr::Call { name, .. } => self
+                .rets
+                .get(name)
+                .cloned()
+                // A call through a `fn`-typed BINDING (`df(13)` where `let df
+                // = d.run`) is deliberately NOT answered, though the binding's
+                // type names the return. Answering it records the result as a
+                // caller-owned temporary — and a lambda may return a CAPTURE
+                // or a parameter, which no reading of the CALL can see, so
+                // the free would be a use-after-free the moment such a value
+                // flows through. `fnvalarg`'s seven small blocks are the
+                // recorded price of fn-value opacity; an arm here needs a pin
+                // proving the capture-returning shape copies on return first
+                // (exit-residue round six).
+                .or_else(|| {
+                    self.variants
+                        .get(name)
+                        .and_then(|owner| owner.clone())
+                        .map(Type::Named)
+                }),
             // The one allocating operator is `+` on Strings, and its result has
             // its left operand's type. Every other operator is a scalar, whose
             // type owns no heap anyway.

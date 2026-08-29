@@ -219,6 +219,51 @@ What herofield still holds (7 blocks) is its outermost results and the
 float-bits appends; what the render family still holds is the decode
 scratch and per-library shapes, next in line.
 
+## Sixth triage: one conviction, two refusals, and a bisect that lied
+
+The conviction: **`keyed` read as a lender.** `std/html`'s `keyed`
+matched its `consume Html` param with a plain `match`, so the binders
+read as projections, the return as a borrow, and `keyed` as a lender —
+which the closure spread through `itemRow`-shaped callers and every
+tree they built was never released (htmltree 589→187 blocks). One
+word: `match consume node`. `VYRN_LEND_DUMP=1` prints the lending
+seeds — the round's instrument; the html corpus's seed list is now
+exactly `attrKey` (a real lender, by design) and `num$scan`.
+
+The refusals, each tried and backed out after the wasm generator host
+corrupted `std/vyx`'s output (a stray `\u{1}` in generated code):
+
+- **Answering a `fn`-typed binding's return type** (`df(13)` where
+  `let df = d.run`) records the result as a caller-owned temporary,
+  and a lambda may return a CAPTURE or a parameter, which no reading
+  of the call site can see. `fnvalarg`'s seven blocks are the recorded
+  price of fn-value opacity; an arm needs a pin proving the
+  capture-returning shape copies on return first.
+- **Dropping a wrapped lend when the borrow's type owns no heap**
+  (`JBool(b) => JBool(b)` in a declared `copy` taints the whole copy
+  as a lender). The filter read the type off movecheck's WIDENED
+  `type_of`, and somewhere in `std/vyx` that reading lies — a real
+  lend was dropped and the generator freed a borrowed buffer. This was
+  the actual corrupter; the declared-copy-as-lender defect it aimed at
+  is real and still open, and wants a narrower guard than a widened
+  type reading.
+
+Two operational lessons, both earned twice over: a revert-confirmation
+must run the SAME ENGINE that failed — a featureless rebuild ran the
+interpreter and "confirmed" an innocent change guilty — and a
+corrupting generator build poisons `~/.vyrn/cache/gen` past its
+revert (the cache key does not see a same-version compiler rebuild),
+so purge the gen cache after backing one out.
+
+Also recorded as-is: `argsdemo`'s single 0-byte block (an empty argv
+buffer pinned by an escape conservatism, zero bytes, not worth its
+fix); `fnvalstore`'s six blocks (the `Gone::Captured` class). `domdemo`
+(472 blocks) reclaims every binding and still leaks — its residue is
+machinery, not bindings, and it anchors round seven.
+
+Tallies after round six: **clean 63, leaking 87, zero double-frees** —
+counts hold; htmltree 589→187 under the one lending correction.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach
