@@ -1,0 +1,17 @@
+// RFC-0117 M2: a key must be heapless ALL the way down. A `String` field
+// owns heap, so the record around it cannot key a map — the map stores,
+// compares and frees its keys, and a heapless key makes all three trivial.
+import { Hashable } from "std/hash"
+
+type Tag = { name: String, n: Int64 }
+
+impl Hashable for Tag {
+    fn hash(self) -> UInt64 {
+        return UInt64(self.n)
+    }
+}
+
+fn main() -> Int64 {
+    let mut m: Map<Tag, Int64> = [:]
+    return m.length
+}

@@ -50,8 +50,23 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
     ),
     (
         "heapkey.vyrn",
-        "RFC-0117 M1: a Map key is String or Int64 today; the other Hashable          scalars and user types are M2's",
-        "is `String` or `Int64` today",
+        "RFC-0117: a Map key is String, Int64, or a heapless Hashable user          type (M2); an Array key is none of these",
+        "or a heapless `Hashable` type",
+    ),
+    (
+        "nohashkey.vyrn",
+        "RFC-0117 M2: a heapless user record keys a map only once it declares          `impl Hashable` — the refusal names the missing obligation",
+        "once it declares the obligation",
+    ),
+    (
+        "payloadkey.vyrn",
+        "RFC-0117 M2: a payload-bearing enum key waits for a packer something          real demands; fieldless enums and scalar records key today",
+        "waits for real demand",
+    ),
+    (
+        "heapfieldkey.vyrn",
+        "RFC-0117 M2: a key is heapless all the way down — a String field          disqualifies the record around it",
+        "heapless all the way down",
     ),
     (
         "blockvalarm.vyrn",

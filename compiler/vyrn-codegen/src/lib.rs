@@ -1244,6 +1244,10 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // wasm32 and i64 on x86-64 (an ABI clash). SmallArray never crosses
     // `extern`, so keeping the copy internal to generated code is sound.
     out.push_str("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n");
+    // `llvm.memset` — used by the user-keyed map (RFC-0117 M2) to zero a key
+    // buffer before the canonical field-wise pack, so padding is never
+    // anything but zero and `memcmp` is field-wise equality.
+    out.push_str("declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n");
     // Saturating float→int (RFC-0078 M4a). A bare `fptosi`/`fptoui` is POISON
     // for an out-of-range or NaN operand, which is not a semantics any engine
     // can agree with: the interpreter is Rust's `as` (saturating, NaN→0) and
@@ -1407,6 +1411,27 @@ pub fn emit(program: &Program) -> Result<String, String> {
     );
     out.push_str(
         "declare ptr @__vyrn_map_keys_copy_i64(ptr, i64)
+",
+    );
+    // The user-keyed family (RFC-0117 M2): packed fixed-stride keys.
+    out.push_str(
+        "declare i64 @__vyrn_map_find_pack(ptr, i64, ptr, i64, ptr, i64)
+",
+    );
+    out.push_str(
+        "declare void @__vyrn_map_reserve_pack(ptr, i64, i64)
+",
+    );
+    out.push_str(
+        "declare void @__vyrn_map_index_add_pack(ptr, i64, i64)
+",
+    );
+    out.push_str(
+        "declare void @__vyrn_map_remove_at_pack(ptr, i64, i64, i64)
+",
+    );
+    out.push_str(
+        "declare ptr @__vyrn_map_keys_copy_pack(ptr, i64, i64)
 ",
     );
     // `extern` imports (RFC-0012): each body-less `extern fn` becomes a wasm
@@ -1972,6 +1997,10 @@ pub fn emit(program: &Program) -> Result<String, String> {
         stream_closers = std::mem::take(&mut gi.stream_closers);
     }
 
+    // RFC-0114 §26's finish check: the SOURCE names of every function whose
+    // body this emission walked — the reachability answer `plan.unconsumed`
+    // needs, so a row in dead code alarms nobody.
+    let mut fn_emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
     // 1. Non-generic functions (main + others), collecting instantiations.
     for f in &program.functions {
         if !f.type_params.is_empty() {
@@ -2002,6 +2031,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             fn_sym(&f.name)
         };
         observe::note_inst(observe::Site::Native, &f.name, &[]);
+        fn_emitted.insert(f.name.clone());
         let mut gen = Gen::new(
             &ret_types,
             &param_types,
@@ -2047,6 +2077,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 continue;
             }
             let f = funcs[&name];
+            fn_emitted.insert(name.clone());
             check_inst_depth(&name, type_args.iter(), f.line, &types)?;
             observe::note_inst(observe::Site::Native, &name, &type_args);
             let subst: HashMap<String, Type> = f
@@ -2094,6 +2125,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             if !emitted.insert(inst.sym.clone()) {
                 continue;
             }
+            fn_emitted.insert(inst.name.clone());
             check_inst_depth(
                 &inst.name,
                 inst.subst.values(),
@@ -2154,6 +2186,18 @@ pub fn emit(program: &Program) -> Result<String, String> {
             continue;
         }
         break;
+    }
+
+    // RFC-0114 §26's finish: every plan row in an emitted function must have
+    // been consumed by a query during emission — a missed site is a silent
+    // leak the memory suite would otherwise find by measurement, made loud
+    // here at build time instead.
+    let missed = plan.unconsumed(&fn_emitted);
+    if let Some((owner, class)) = missed.first() {
+        return Err(format!(
+            "internal: RFC-0114 §26 — the release plan placed {} decision(s) the emission never consumed, first {class} in `{owner}`; a missed site is a silent leak, and this failure is the loudness the plan exists for",
+            missed.len()
+        ));
     }
 
     // RFC-0037: the synthesized per-signature dispatchers, emitted after every
@@ -3644,6 +3688,16 @@ impl<'a> Gen<'a> {
             // something.
             Type::Map(kt, vt) => {
                 let ik = self.key_is_int(&kt);
+                // A packed user key (RFC-0117 M2) copies with its buffer,
+                // exactly as an Int64 key does: the buffer holds the values.
+                let kll = if ik {
+                    "i64".to_string()
+                } else if self.key_is_pack(&kt) {
+                    self.llt(&kt)
+                } else {
+                    "ptr".to_string()
+                };
+                let heap_keys = !ik && !self.key_is_pack(&kt);
                 let vll = self.llt(&vt);
                 let keys = self.fresh_tmp();
                 let vals = self.fresh_tmp();
@@ -3654,8 +3708,8 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{vals} = extractvalue {m} {v}, 1"));
                 self.emit(format!("{len} = extractvalue {m} {v}, 2"));
                 self.emit(format!("{cap} = extractvalue {m} {v}, 3"));
-                let kb = self.copy_buf(&keys, &len, &cap, if ik { "i64" } else { "ptr" });
-                if !ik {
+                let kb = self.copy_buf(&keys, &len, &cap, &kll);
+                if heap_keys {
                     self.copy_elems(&kb, &len, &Type::Str)?;
                 }
                 let vb = self.copy_buf(&vals, &len, &cap, &vll);
@@ -3878,7 +3932,9 @@ impl<'a> Gen<'a> {
             // keys (RFC-0117) go with their buffer. The elements first, then
             // the buffers they live in.
             Type::Map(kt, vt) if matches!(self.rel_kind(ty), Some(DropKind::Deep(_))) => {
-                let ik = self.key_is_int(&kt);
+                // An Int64 key and a packed user key (RFC-0117 M2) both go
+                // with their buffer: neither owns heap of its own.
+                let heap_keys = !self.key_is_int(&kt) && !self.key_is_pack(&kt);
                 let m = "{ ptr, ptr, i64, i64, ptr }";
                 let keys = self.fresh_tmp();
                 let vals = self.fresh_tmp();
@@ -3888,7 +3944,7 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{len} = extractvalue {m} {v}, 2"));
                 let ix = self.fresh_tmp();
                 self.emit(format!("{ix} = extractvalue {m} {v}, 4"));
-                if !ik {
+                if heap_keys {
                     self.release_elems(&keys, &len, &Type::Str)?;
                 }
                 self.release_elems(&vals, &len, &vt)?;
@@ -5093,6 +5149,11 @@ impl<'a> Gen<'a> {
                 // evaluated left to right, as the general path would.
                 if self.region_depth == 0 && self.str_append.contains_key(&slot) {
                     if let Some(parts) = self_append_spine(name, value) {
+                        // The spine handles this store's ownership itself
+                        // (§22's own state machine, not yet subsumed by the
+                        // plan) — acknowledged so §26's finish check knows
+                        // the site was considered, not walked past.
+                        let _ = self.plan.store_owned_at(stmt as *const Stmt as usize);
                         self.expect.push(tty.clone());
                         let vals: Result<Vec<String>, String> = parts
                             .iter()
@@ -5145,11 +5206,11 @@ impl<'a> Gen<'a> {
                 // see. The value-side test (`fresh_str` / `mentions_place`)
                 // stays: it answers whether the NEW value can alias the old,
                 // which is representation knowledge.
-                let owned_here = self.region_depth == 0
-                    && self
-                        .plan
-                        .store_owned
-                        .contains(&(stmt as *const Stmt as usize));
+                // The plan is asked FIRST: the query records the site as
+                // considered (§26's finish check), and a `region`'s arena
+                // ownership then gates the release without hiding the site.
+                let owned_here = self.plan.store_owned_at(stmt as *const Stmt as usize)
+                    && self.region_depth == 0;
                 let snap = if owned_here
                     && (fresh_str || !vyrn_frontend::movecheck::mentions_place(value, name))
                 {
@@ -5407,8 +5468,7 @@ impl<'a> Gen<'a> {
                 // is the one that owes a release.
                 let ers = self
                     .plan
-                    .edge_releases
-                    .get(&(stmt as *const Stmt as usize))
+                    .edge_releases_at(stmt as *const Stmt as usize)
                     .cloned()
                     .unwrap_or_default();
                 let else_owes = ers.iter().any(|(_, t)| *t == 1);
@@ -5580,7 +5640,12 @@ impl<'a> Gen<'a> {
                     let blk = vyrn_frontend::project::iterate_loop(
                         &size_fn, nth, var, iter, body, *line,
                     )?;
-                    return self.gen_block(&blk);
+                    // RFC-0114 §26: the expansion cloned the body, so the
+                    // plan's rows live on nodes this walk will never meet —
+                    // the pairs let every query resolve to the original.
+                    self.plan
+                        .alias_clones(vyrn_frontend::project::iterate_aliases(blk));
+                    return self.gen_block(blk);
                 }
                 // Evaluate the iterable once and snapshot a base element pointer
                 // plus a length — matching the interpreter, which iterates a
@@ -5826,12 +5891,7 @@ impl<'a> Gen<'a> {
     /// reclaims it, exactly as [`Gen::free_str_temp`] stands aside there.
     fn gen_expr(&mut self, expr: &Expr) -> Result<(String, Type), String> {
         let r = self.gen_expr_inner(expr)?;
-        if self.region_depth == 0
-            && self
-                .plan
-                .arg_drops
-                .contains(&(expr as *const Expr as usize))
-        {
+        if self.plan.arg_drop(expr as *const Expr as usize) && self.region_depth == 0 {
             self.arg_frees.push((r.0.clone(), r.1.clone()));
         }
         if crate::observe::on() {
@@ -6008,11 +6068,8 @@ impl<'a> Gen<'a> {
                         let len = self.str_len(&v);
                         // RFC-0114 R1′: an unnamed receiver this frame owns
                         // dies here — the header read was its last observer.
-                        if self.region_depth == 0
-                            && self
-                                .plan
-                                .receiver_frees
-                                .contains(&(expr as *const Expr as usize))
+                        if self.plan.receiver_free(expr as *const Expr as usize)
+                            && self.region_depth == 0
                         {
                             self.emit(format!("call void @__vyrn_str_free(ptr {v})"));
                         }
@@ -6026,11 +6083,8 @@ impl<'a> Gen<'a> {
                     // frame owns dies after the count is read. `own` admits
                     // only silent kinds into the set, so `free_arg_temp` never
                     // meets a declared release here.
-                    let rfree = self.region_depth == 0
-                        && self
-                            .plan
-                            .receiver_frees
-                            .contains(&(expr as *const Expr as usize));
+                    let rfree = self.plan.receiver_free(expr as *const Expr as usize)
+                        && self.region_depth == 0;
                     match self.resolve(&ety) {
                         Type::ArrayN(_, n) => return Ok((format!("{n}"), Type::Int)),
                         Type::Array(_) => {
@@ -6082,11 +6136,8 @@ impl<'a> Gen<'a> {
                 // heap field stays out: `names_a_place` made the binding its
                 // owner. A `lazy` field stays out too: forcing it reads the
                 // record after this point.
-                if self.region_depth == 0
-                    && self
-                        .plan
-                        .receiver_frees
-                        .contains(&(expr as *const Expr as usize))
+                if self.plan.receiver_free(expr as *const Expr as usize)
+                    && self.region_depth == 0
                     && self.owned.release_kind(&fty).is_none()
                     && vyrn_frontend::types::deferred(&fty).is_none()
                 {
@@ -6218,10 +6269,18 @@ impl<'a> Gen<'a> {
             // validated declared type re-validates through the binding coercion.
             Expr::MapLit { entries, .. } => {
                 if entries.is_empty() {
-                    return Ok((
-                        "{ ptr null, ptr null, i64 0, i64 0, ptr null }".into(),
-                        Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
-                    ));
+                    // The representation is type-independent — five nulls
+                    // whatever the keys — so the TYPE answers the boundary's
+                    // expectation where one names a Map. The direct backend
+                    // already answered the declared type here, and RFC-0101's
+                    // corpus gate holds the two backends to one answer
+                    // (RFC-0117 M2 is what made the difference visible: a
+                    // user-keyed `[:]` is not `Map<String, Int64>`).
+                    let ty = match self.expect.last() {
+                        Some(t) if matches!(self.resolve(t), Type::Map(..)) => t.clone(),
+                        _ => Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
+                    };
+                    return Ok(("{ ptr null, ptr null, i64 0, i64 0, ptr null }".into(), ty));
                 }
                 let slot = self.fresh_alloca("{ ptr, ptr, i64, i64, ptr }");
                 self.emit(format!(
@@ -6493,12 +6552,7 @@ impl<'a> Gen<'a> {
         }
         // RFC-0114 Rule N at a match join: the arms that still own what
         // another arm consumed, keyed by this match expression's address.
-        let ers = self
-            .plan
-            .edge_releases
-            .get(&key)
-            .cloned()
-            .unwrap_or_default();
+        let ers = self.plan.edge_releases_at(key).cloned().unwrap_or_default();
         let r = self.gen_match_body(&sv, &sty, arms, &ers);
         if !self.terminated {
             self.emit_releases(ExitKind::Scrutinee, key);
@@ -6599,12 +6653,7 @@ impl<'a> Gen<'a> {
         let else_branch =
             else_branch.ok_or("internal: `if` expression without `else` reached codegen")?;
         // RFC-0114 Rule N at an `if`-expression join.
-        let ers = self
-            .plan
-            .edge_releases
-            .get(&key)
-            .cloned()
-            .unwrap_or_default();
+        let ers = self.plan.edge_releases_at(key).cloned().unwrap_or_default();
         let (c, _) = self.gen_expr(cond)?;
         let then_l = self.fresh_label("ie.then");
         let else_l = self.fresh_label("ie.else");
@@ -7881,6 +7930,57 @@ impl<'a> Gen<'a> {
         vyrn_frontend::types::resolve(key_ty, self.types) == Type::Int
     }
 
+    /// A user-keyed map (RFC-0117 M2): the key resolves to a heapless record
+    /// or a fieldless enum, admitted by the checker's key rule.
+    fn key_is_pack(&self, key_ty: &Type) -> bool {
+        matches!(
+            vyrn_frontend::types::resolve(key_ty, self.types),
+            Type::Record(_) | Type::Enum(_)
+        )
+    }
+
+    /// RFC-0117 M2: write a user key value into a ZEROED buffer of its own
+    /// layout, field by field — the canonical pack. `memcmp` over the stride
+    /// is then field-wise equality, because padding is never anything but
+    /// zero. Returns the buffer pointer and the stride SSA.
+    fn emit_key_pack(&mut self, v: &str, key_ty: &Type) -> (String, String) {
+        let kll = self.llt(key_ty);
+        let stride = self.fresh_tmp();
+        self.emit(format!(
+            "{stride} = ptrtoint ptr getelementptr ({kll}, ptr null, i64 1) to i64"
+        ));
+        let buf = self.fresh_alloca(&kll);
+        self.emit(format!(
+            "call void @llvm.memset.p0.i64(ptr {buf}, i8 0, i64 {stride}, i1 false)"
+        ));
+        self.emit_pack_into(v, key_ty, &buf);
+        (buf, stride)
+    }
+
+    /// One level of the pack: a record stores each field into its own slot
+    /// (recursively), everything else — a scalar, a fieldless enum's tag —
+    /// stores its value whole, which carries no padding of its own.
+    fn emit_pack_into(&mut self, v: &str, ty: &Type, dst: &str) {
+        match vyrn_frontend::types::resolve(ty, self.types) {
+            Type::Record(fs) => {
+                let ll = self.llt(ty);
+                for (i, f) in fs.iter().enumerate() {
+                    let fv = self.fresh_tmp();
+                    self.emit(format!("{fv} = extractvalue {ll} {v}, {i}"));
+                    let fp = self.fresh_tmp();
+                    self.emit(format!(
+                        "{fp} = getelementptr inbounds {ll}, ptr {dst}, i64 0, i32 {i}"
+                    ));
+                    self.emit_pack_into(&fv, &f.ty, &fp);
+                }
+            }
+            _ => {
+                let ll = self.llt(ty);
+                self.emit(format!("store {ll} {v}, ptr {dst}"));
+            }
+        }
+    }
+
     fn map_index_of(&mut self, agg: &str) -> (String, String) {
         let cap = self.fresh_tmp();
         let ix = self.fresh_tmp();
@@ -7906,6 +8006,9 @@ impl<'a> Gen<'a> {
         // themselves, so the probe takes the key by value, an insert stores it,
         // and nothing about a key is ever dup'd or freed.
         let ik = self.key_is_int(key_ty);
+        // A user key (RFC-0117 M2) probes and stores by its canonical pack.
+        let pk = self.key_is_pack(key_ty);
+        let packed = pk.then(|| self.emit_key_pack(key, key_ty));
         let vll = self.llt(val);
         let esz = self.fresh_tmp();
         self.emit(format!(
@@ -7928,6 +8031,10 @@ impl<'a> Gen<'a> {
         if ik {
             self.emit(format!(
                 "{idx} = call i64 @__vyrn_map_find_i64(ptr {keys}, i64 {len}, i64 {key}, ptr {ix}, i64 {cap})"
+            ));
+        } else if let Some((kbuf, stride)) = &packed {
+            self.emit(format!(
+                "{idx} = call i64 @__vyrn_map_find_pack(ptr {keys}, i64 {len}, ptr {kbuf}, i64 {stride}, ptr {ix}, i64 {cap})"
             ));
         } else {
             self.emit(format!(
@@ -7961,18 +8068,24 @@ impl<'a> Gen<'a> {
         // freeing it here would give one block two owners. The same partition
         // `deep_release` draws for a `String`, drawn here too. An `Int64` key
         // owns nothing, so it has no surplus to return.
-        if !ik && self.region_depth == 0 {
+        if !ik && !pk && self.region_depth == 0 {
             self.emit(format!("call void @__vyrn_str_free(ptr {key})"));
         }
         self.emit_term(format!("br label %{done_l}"));
         // insert: reserve (may realloc both buffers), reload, append, len += 1.
         self.emit_label(&ins_l);
-        let rsv = if ik {
-            "__vyrn_map_reserve_i64"
+        if let Some((_, stride)) = &packed {
+            self.emit(format!(
+                "call void @__vyrn_map_reserve_pack(ptr {slot}, i64 {esz}, i64 {stride})"
+            ));
         } else {
-            "__vyrn_map_reserve"
-        };
-        self.emit(format!("call void @{rsv}(ptr {slot}, i64 {esz})"));
+            let rsv = if ik {
+                "__vyrn_map_reserve_i64"
+            } else {
+                "__vyrn_map_reserve"
+            };
+            self.emit(format!("call void @{rsv}(ptr {slot}, i64 {esz})"));
+        }
         let hdr2 = self.fresh_tmp();
         let keys2 = self.fresh_tmp();
         let vals2 = self.fresh_tmp();
@@ -7989,6 +8102,13 @@ impl<'a> Gen<'a> {
         if ik {
             self.emit(format!("{kep} = getelementptr i64, ptr {keys2}, i64 {len}"));
             self.emit(format!("store i64 {key}, ptr {kep}"));
+        } else if let Some((kbuf, stride)) = &packed {
+            let off = self.fresh_tmp();
+            self.emit(format!("{off} = mul i64 {len}, {stride}"));
+            self.emit(format!("{kep} = getelementptr i8, ptr {keys2}, i64 {off}"));
+            self.emit(format!(
+                "call void @llvm.memcpy.p0.p0.i64(ptr {kep}, ptr {kbuf}, i64 {stride}, i1 false)"
+            ));
         } else {
             self.emit(format!("{kep} = getelementptr ptr, ptr {keys2}, i64 {len}"));
             self.emit(format!("store ptr {key}, ptr {kep}"));
@@ -7996,12 +8116,18 @@ impl<'a> Gen<'a> {
         // The key is in its slot, so the index can record where. `reserve` above
         // grew the bucket array and rebuilt it, so this is the only entry it is
         // missing — and the reason the append stays O(1).
-        let iadd = if ik {
-            "__vyrn_map_index_add_i64"
+        if let Some((_, stride)) = &packed {
+            self.emit(format!(
+                "call void @__vyrn_map_index_add_pack(ptr {slot}, i64 {len}, i64 {stride})"
+            ));
         } else {
-            "__vyrn_map_index_add"
-        };
-        self.emit(format!("call void @{iadd}(ptr {slot}, i64 {len})"));
+            let iadd = if ik {
+                "__vyrn_map_index_add_i64"
+            } else {
+                "__vyrn_map_index_add"
+            };
+            self.emit(format!("call void @{iadd}(ptr {slot}, i64 {len})"));
+        }
         let vep = self.fresh_tmp();
         self.emit(format!(
             "{vep} = getelementptr {vll}, ptr {vals2}, i64 {len}"
@@ -10983,11 +11109,15 @@ impl<'a> Gen<'a> {
             // The map's key type picks the probe family (RFC-0117): an Int64
             // key is passed by value, stored by value, and never copied or
             // freed.
-            let ik = match vyrn_frontend::types::resolve(&mty, self.types) {
-                Type::Map(k, _) => self.key_is_int(&k),
-                _ => false,
+            let (ik, pk_ty) = match vyrn_frontend::types::resolve(&mty, self.types) {
+                Type::Map(k, _) => (
+                    self.key_is_int(&k),
+                    self.key_is_pack(&k).then(|| (*k).clone()),
+                ),
+                _ => (false, None),
             };
             let (kv, _) = self.gen_expr(&args[1])?;
+            let packed = pk_ty.map(|kt| self.emit_key_pack(&kv, &kt));
             let (nv, _) = self.gen_expr(&args[2])?;
             let slot = self.fresh_alloca("{ ptr, ptr, i64, i64, ptr }");
             self.emit(format!(
@@ -11006,6 +11136,10 @@ impl<'a> Gen<'a> {
             if ik {
                 self.emit(format!(
                     "{idx} = call i64 @__vyrn_map_find_i64(ptr {keys}, i64 {len}, i64 {kv}, ptr {ix}, i64 {cap})"
+                ));
+            } else if let Some((kbuf, stride)) = &packed {
+                self.emit(format!(
+                    "{idx} = call i64 @__vyrn_map_find_pack(ptr {keys}, i64 {len}, ptr {kbuf}, i64 {stride}, ptr {ix}, i64 {cap})"
                 ));
             } else {
                 self.emit(format!(
@@ -11032,12 +11166,18 @@ impl<'a> Gen<'a> {
             self.emit(format!("store i64 {newv}, ptr {ep0}"));
             self.emit_term(format!("br label %{done_l}"));
             self.emit_label(&ins_l);
-            let rsv = if ik {
-                "__vyrn_map_reserve_i64"
+            if let Some((_, stride)) = &packed {
+                self.emit(format!(
+                    "call void @__vyrn_map_reserve_pack(ptr {slot}, i64 8, i64 {stride})"
+                ));
             } else {
-                "__vyrn_map_reserve"
-            };
-            self.emit(format!("call void @{rsv}(ptr {slot}, i64 8)"));
+                let rsv = if ik {
+                    "__vyrn_map_reserve_i64"
+                } else {
+                    "__vyrn_map_reserve"
+                };
+                self.emit(format!("call void @{rsv}(ptr {slot}, i64 8)"));
+            }
             let hdr2 = self.fresh_tmp();
             let keys2 = self.fresh_tmp();
             let vals2 = self.fresh_tmp();
@@ -11054,17 +11194,30 @@ impl<'a> Gen<'a> {
             if ik {
                 self.emit(format!("{kep} = getelementptr i64, ptr {keys2}, i64 {len}"));
                 self.emit(format!("store i64 {kv}, ptr {kep}"));
+            } else if let Some((kbuf, stride)) = &packed {
+                let off = self.fresh_tmp();
+                self.emit(format!("{off} = mul i64 {len}, {stride}"));
+                self.emit(format!("{kep} = getelementptr i8, ptr {keys2}, i64 {off}"));
+                self.emit(format!(
+                    "call void @llvm.memcpy.p0.p0.i64(ptr {kep}, ptr {kbuf}, i64 {stride}, i1 false)"
+                ));
             } else {
                 let kcopy = self.deep_copy(&kv, &Type::Str)?;
                 self.emit(format!("{kep} = getelementptr ptr, ptr {keys2}, i64 {len}"));
                 self.emit(format!("store ptr {kcopy}, ptr {kep}"));
             }
-            let iadd = if ik {
-                "__vyrn_map_index_add_i64"
+            if let Some((_, stride)) = &packed {
+                self.emit(format!(
+                    "call void @__vyrn_map_index_add_pack(ptr {slot}, i64 {len}, i64 {stride})"
+                ));
             } else {
-                "__vyrn_map_index_add"
-            };
-            self.emit(format!("call void @{iadd}(ptr {slot}, i64 {len})"));
+                let iadd = if ik {
+                    "__vyrn_map_index_add_i64"
+                } else {
+                    "__vyrn_map_index_add"
+                };
+                self.emit(format!("call void @{iadd}(ptr {slot}, i64 {len})"));
+            }
             let vep = self.fresh_tmp();
             self.emit(format!("{vep} = getelementptr i64, ptr {vals2}, i64 {len}"));
             self.emit(format!("store i64 {nv}, ptr {vep}"));
@@ -11648,6 +11801,9 @@ impl<'a> Gen<'a> {
                 // (RFC-0117).
                 Type::Map(key, val) => {
                     let ik = self.key_is_int(&key);
+                    let packed = self
+                        .key_is_pack(&key)
+                        .then(|| self.emit_key_pack(&iv, &key));
                     let val = *val;
                     let vll = self.llt(&val);
                     let keys = self.fresh_tmp();
@@ -11667,6 +11823,10 @@ impl<'a> Gen<'a> {
                     if ik {
                         self.emit(format!(
                             "{idx} = call i64 @__vyrn_map_find_i64(ptr {keys}, i64 {len}, i64 {iv}, ptr {ix}, i64 {cap})"
+                        ));
+                    } else if let Some((kbuf, stride)) = &packed {
+                        self.emit(format!(
+                            "{idx} = call i64 @__vyrn_map_find_pack(ptr {keys}, i64 {len}, ptr {kbuf}, i64 {stride}, ptr {ix}, i64 {cap})"
                         ));
                     } else {
                         self.emit(format!(
@@ -12158,11 +12318,15 @@ impl<'a> Gen<'a> {
         // is any Map-typed expression (an SSA aggregate).
         if name == "@has" {
             let (mv, mty) = self.gen_expr(&args[0])?;
-            let ik = match self.resolve(&mty) {
-                Type::Map(k, _) => self.key_is_int(&k),
-                _ => false,
+            let (ik, pk_ty) = match self.resolve(&mty) {
+                Type::Map(k, _) => (
+                    self.key_is_int(&k),
+                    self.key_is_pack(&k).then(|| (*k).clone()),
+                ),
+                _ => (false, None),
             };
             let (kv, _) = self.gen_expr(&args[1])?;
+            let packed = pk_ty.map(|kt| self.emit_key_pack(&kv, &kt));
             let keys = self.fresh_tmp();
             let len = self.fresh_tmp();
             self.emit(format!(
@@ -12176,6 +12340,10 @@ impl<'a> Gen<'a> {
             if ik {
                 self.emit(format!(
                     "{idx} = call i64 @__vyrn_map_find_i64(ptr {keys}, i64 {len}, i64 {kv}, ptr {ix}, i64 {cap})"
+                ));
+            } else if let Some((kbuf, stride)) = &packed {
+                self.emit(format!(
+                    "{idx} = call i64 @__vyrn_map_find_pack(ptr {keys}, i64 {len}, ptr {kbuf}, i64 {stride}, ptr {ix}, i64 {cap})"
                 ));
             } else {
                 self.emit(format!(
@@ -12210,6 +12378,9 @@ impl<'a> Gen<'a> {
             let keys = self.fresh_tmp();
             let len = self.fresh_tmp();
             let (kv, _) = self.gen_expr(&args[1])?;
+            let packed = self
+                .key_is_pack(&key_t)
+                .then(|| self.emit_key_pack(&kv, &key_t));
             self.emit(format!(
                 "{hdr} = load {{ ptr, ptr, i64, i64, ptr }}, ptr {slot}"
             ));
@@ -12224,6 +12395,10 @@ impl<'a> Gen<'a> {
             if ik {
                 self.emit(format!(
                     "{idx} = call i64 @__vyrn_map_find_i64(ptr {keys}, i64 {len}, i64 {kv}, ptr {ix}, i64 {cap})"
+                ));
+            } else if let Some((kbuf, stride)) = &packed {
+                self.emit(format!(
+                    "{idx} = call i64 @__vyrn_map_find_pack(ptr {keys}, i64 {len}, ptr {kbuf}, i64 {stride}, ptr {ix}, i64 {cap})"
                 ));
             } else {
                 self.emit(format!(
@@ -12248,8 +12423,9 @@ impl<'a> Gen<'a> {
                 self.emit(format!(
                     "{vals} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {hdr}, 1"
                 ));
-                // An Int64 key owns nothing to hand back (RFC-0117).
-                if !ik {
+                // An Int64 key owns nothing to hand back (RFC-0117), and a
+                // packed user key (M2) is heapless by the checker rule.
+                if !ik && packed.is_none() {
                     let kp = self.fresh_tmp();
                     self.emit(format!("{kp} = getelementptr ptr, ptr {keys}, i64 {idx}"));
                     self.release_entry(&kp, &Type::Str)?;
@@ -12258,14 +12434,20 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{vp} = getelementptr {vll}, ptr {vals}, i64 {idx}"));
                 self.release_entry(&vp, &val)?;
             }
-            let rmat = if ik {
-                "__vyrn_map_remove_at_i64"
+            if let Some((_, stride)) = &packed {
+                self.emit(format!(
+                    "call void @__vyrn_map_remove_at_pack(ptr {slot}, i64 {idx}, i64 {esz}, i64 {stride})"
+                ));
             } else {
-                "__vyrn_map_remove_at"
-            };
-            self.emit(format!(
-                "call void @{rmat}(ptr {slot}, i64 {idx}, i64 {esz})"
-            ));
+                let rmat = if ik {
+                    "__vyrn_map_remove_at_i64"
+                } else {
+                    "__vyrn_map_remove_at"
+                };
+                self.emit(format!(
+                    "call void @{rmat}(ptr {slot}, i64 {idx}, i64 {esz})"
+                ));
+            }
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&end_l);
             return Ok((found, Type::Bool));
@@ -12293,7 +12475,19 @@ impl<'a> Gen<'a> {
                 "{len} = extractvalue {{ ptr, ptr, i64, i64, ptr }} {mv}, 2"
             ));
             let buf = self.fresh_tmp();
-            if ik {
+            if self.key_is_pack(&key_t) {
+                // Packed keys copy by bytes; the pack IS the value layout
+                // (fields at their own offsets), so the buffer is already a
+                // valid Array<K> of heapless elements (RFC-0117 M2).
+                let kll = self.llt(&key_t);
+                let stride = self.fresh_tmp();
+                self.emit(format!(
+                    "{stride} = ptrtoint ptr getelementptr ({kll}, ptr null, i64 1) to i64"
+                ));
+                self.emit(format!(
+                    "{buf} = call ptr @__vyrn_map_keys_copy_pack(ptr {keys}, i64 {len}, i64 {stride})"
+                ));
+            } else if ik {
                 // Int64 keys copy by value — the snapshot IS the copy, and
                 // there is nothing per-element to duplicate (RFC-0117).
                 self.emit(format!(

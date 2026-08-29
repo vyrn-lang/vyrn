@@ -328,6 +328,24 @@ pub const ITERATE_SIZE: &str = "size";
 /// The projection [`ITERATE`] declares — a `place`, not a method.
 pub const ITERATE_NTH: &str = "nth";
 
+/// The protocol a type implements to say it may be a `Map` key (RFC-0117).
+pub const HASHABLE: &str = "Hashable";
+
+/// Whether `ty` declares `impl Hashable` (RFC-0117 M2). The declaration is
+/// the obligation that admits a user type as a `Map` key; the runtime never
+/// CALLS the impl — as with `Int64` and `String`, the map hashes the
+/// canonical key bytes itself, and the impl gives the type a callable hash
+/// that keeps the one contract: equal values return equal hashes.
+pub fn hashable_impl(impls: &[ImplBlock], ty: &Type) -> bool {
+    type_key(ty).is_some_and(|k| {
+        impls.iter().any(|i| {
+            i.protocol == HASHABLE
+                && type_key(&i.ty).as_deref() == Some(&k)
+                && i.methods.iter().any(|m| m.name == "hash")
+        })
+    })
+}
+
 /// The `impl Copy for T` method a receiver of type `ty` dispatches to
 /// (RFC-0091 M1), or `None` where the copy stays structural.
 ///

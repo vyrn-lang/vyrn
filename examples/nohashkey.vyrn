@@ -1,0 +1,9 @@
+// RFC-0117 M2: a heapless user record CAN key a map — once it declares the
+// obligation. Without `impl Hashable for Point` the checker refuses and
+// names exactly what is missing.
+type Point = { x: Int64, y: Int64 }
+
+fn main() -> Int64 {
+    let mut m: Map<Point, Int64> = [:]
+    return m.length
+}

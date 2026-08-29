@@ -881,11 +881,38 @@ handed to each backend as a single reference where four separate products
 used to thread through every constructor. (`droppable` and `releases` stay
 beside it: per-BINDING and per-EXIT, they feed the runtime registries.)
 Steps 3–4's remaining substance — deleting the per-binding store gates the
-backends keep for field and element stores, and `plan.finish()`'s loudness
-for a missed site — stays open: the finish check needs reachability
-knowledge only the lowering has, and instrumenting every construct for it
-is the sprawl the plan exists to remove, so it waits for a design rather
-than a patch.
+backends keep for field and element stores — stays open. **The finish
+check's loudness landed 2026-08-29**, and the design that unblocked it put
+the reachability answer where it already lived instead of instrumenting
+constructs: every plan row carries its owning function (the movecheck
+walker's own `cur_fn`, at the rows' push sites), the plan's sets are read
+through query methods that record consumption, and `plan.unconsumed(emitted)`
+— called by both drivers after their worklists drain — reports any row whose
+owner the emission walked and no query hit. Dead code alarms nobody because
+its owner is never emitted; a query at a `region`-gated site runs BEFORE the
+gate, so arena ownership suppresses the release without hiding the site; and
+the append spine acknowledges the store rows its own state machine handles.
+The check paid for itself the day it ran, four times over: every place an
+emission walks a CLONE of program AST is a place the plan's rows were
+invisible, and it found each one on the corpus. A user-container `for`
+clones its body (`project::iterate_loop`) — both backends. The direct
+backend's higher-order calls clone the whole argument list into the
+specialization's (`ho_call`/`target_call`), its `fn`-typed argument
+expressions into capture sources, and its `toJson`/`fromJson` rewrites embed
+a clone of the argument in the synthesized tree — so an argument temporary
+at any such site skipped its release on wasm while native freed it. The
+cure is one mechanism: an alias map built by zipping the original's
+node-address walk against the clone's (`ast::node_addrs`; structural
+equality makes the positional zip exact), resolved — chained, for a clone
+of a clone — inside every plan query. A clone that lives as long as the
+compile (a leaked loop expansion, a queued shell body) registers its pairs
+permanently; a TRANSIENT clone (an argument list, a rewrite's tree)
+registers scoped and unwinds them when it dies, because an alias outliving
+its nodes would fire on whatever later allocation reuses the address.
+Residue, recorded: a generic emitted under several instances shares one row
+per site, so "taken at least once" cannot see a single instance that missed
+it; per-instance discharge would need instance-keyed takes, which is the
+sprawl again.
 
 ## 27. What the three lenses agree on
 

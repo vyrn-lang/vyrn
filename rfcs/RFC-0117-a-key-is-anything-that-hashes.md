@@ -1,14 +1,11 @@
 # RFC-0117 — a key is anything that hashes
 
-- **Status:** M1 and M3 Implemented — `Map<Int64, V>` in all four execution
-  paths (2026-08-26), `Hashable` declared in `std/hash` with the `Int64` and
-  `String` impls, and the wire form chosen and built (2026-08-28): §5's
-  stringified keys, canonical decimal, schema-described, pinned three ways by
-  `examples/wirekey.vyrn`. See "M1 — as landed" for the three places that
-  milestone deviated from this document and why. M2 is what remains, reduced
-  to user heapless types and parked on real demand (its scalar half dissolved
-  — see the milestone note). The direction is the user's (2026-08-26): a
-  hashable protocol, not an `Int64` special case.
+- **Status:** Implemented — M1 and M3 on 2026-08-26/28 as below; M2 landed
+  2026-08-29 on the user's demand: heapless user records and fieldless enums
+  key a `Map` in all four execution paths once they declare `impl Hashable`
+  (see "M2 — as landed" for the two places it deviated from §2's sketch and
+  why). Payload-bearing enum keys remain refused by name, waiting where the
+  rest of M2 waited: on something real.
 - **Evidence:** the corrected census re-measurement
   (rfcs/census/knucleotide-needs-an-integer-key.md, "Corrected"): a rolling
   integer key costs 2.2–2.5 ns a window against 11 ns for the byte-keyed hit
@@ -195,6 +192,48 @@ through — the diagnostic names the offending map type rather than this RFC,
 because `toJson cannot encode Map<Int64, Int64>` is findable and a custom
 string at every consumer was not worth the thread.
 
+## M2 — as landed (2026-08-29)
+
+The rule: a user key is **heapless all the way down** — sized integers and
+`Bool` in the fields, records of such (nested records included), fieldless
+enums — and declares **`impl Hashable for T`**. Floats keep §2's refusal
+wherever they hide; a heap-owning field is named; a payload-bearing enum key
+is refused by name until something real demands its packer. Each refusal is
+pinned in EXPECTED_CHECK_FAILURE (`heapkey`, `nohashkey`, `payloadkey`,
+`heapfieldkey`), and `examples/mapkey.vyrn` runs the whole op surface —
+insert, update, tally, read, `has`, `keys`, `remove`, a record key and an
+enum key — identically three ways.
+
+Two deviations from §2's sketch, both cheaper than what was written:
+
+1. **Equality is generated as a CANONICAL PACK, not as field-wise compare
+   code.** The compiled backends write each key field by field into a ZEROED
+   buffer of the key's own layout, so `memcmp` over the stride IS field-wise
+   equality — padding is never compared because it is never anything but
+   zero. That one idea collapses the whole milestone into a fourth probe
+   family beside the string and `Int64` ones (`_pack` in the C shim;
+   `map_slot_pack`/`map_find_pack`/`map_put_pack`/`map_reindex_pack` in the
+   direct backend's runtime), each parameterized by the stride alone. The
+   interpreter's twin (`Val::MapU`) indexes by a canonical structural
+   encoding — fields in sorted-name order — which is the same equality by a
+   different spelling. A bonus the pack pays for itself with: the packed key
+   column is already a valid `Array<K>`, so `keys()` is one buffer copy,
+   exactly as it is for `Int64`.
+2. **The runtime never calls the user's `hash`.** §3 held that the hash
+   decides nothing observable; M1 landed both scalar impls as DESCRIPTIONS
+   of what the runtime already runs, called by no one. M2 keeps that
+   precedent rather than adding a callback: the map FNV-1a's the canonical
+   pack itself, and `impl Hashable for T` is the declared obligation — the
+   opt-in that admits the type as a key and gives it a callable hash — under
+   the one contract (equal values, equal hashes) that the runtime's own hash
+   satisfies by construction. This is also what keeps a side-effecting
+   `hash` body from becoming a parity hazard: no engine runs it at a map
+   op, so no two engines can disagree about when.
+
+The wire boundary still refuses a user-keyed map at `codec::wire`'s one
+choke point, naming the map type — §5 chose a spelling for `Int64` and no
+one has asked for a record key's.
+
 ## 7. Milestones
 
 - **M1** — `Hashable` in the prelude protocol table with scalar impls; the
@@ -212,8 +251,10 @@ string at every consumer was not worth the thread.
   `Map<Int64, V>`, and even a full-range `UInt64` survives `Int64(u)`
   faithfully, because the wrap is a bijection and equality is what a key
   needs. `Map<Int8, V>` would be implicit sugar the language deliberately does
-  not do anywhere else. What remains of M2 is the user types, and they wait
-  where RFC-0028 waited: until something real demands one.
+  not do anywhere else. What remained of M2 was the user types, and they
+  waited where RFC-0028 waited — until something real demanded one — which
+  happened 2026-08-29: **done**, as "M2 — as landed" above records, with
+  payload-bearing enum keys the one part still waiting by name.
 - **M3** — the wire form: **done** (2026-08-28). §5's option 1, stringified
   keys in canonical decimal, chosen and implemented — the refusals of M1
   became the codec, the schema names its key rule, and the round trip is

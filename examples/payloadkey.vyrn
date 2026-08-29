@@ -1,0 +1,22 @@
+// RFC-0117 M2: a payload-bearing enum key waits for a packer something real
+// demands — a fieldless enum or a record of scalars keys today, and the
+// refusal says so by name.
+import { Hashable } from "std/hash"
+
+type Shape =
+    | Dot
+    | Line(Int64)
+
+impl Hashable for Shape {
+    fn hash(self) -> UInt64 {
+        return match self {
+            Dot => UInt64(1),
+            Line(n) => UInt64(n),
+        }
+    }
+}
+
+fn main() -> Int64 {
+    let mut m: Map<Shape, Int64> = [:]
+    return m.length
+}

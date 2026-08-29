@@ -571,6 +571,30 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         cx.dispatch.borrow_mut().done += 1;
     }
 
+    // RFC-0114 §26's finish, the textual driver's twin: every plan row in a
+    // function this emission walked must have been consumed by a query — a
+    // missed site is a silent leak, made loud at build time instead of at
+    // the memory suite's profile.
+    {
+        let mut fn_emitted: std::collections::HashSet<String> =
+            user.iter().map(|f| f.name.clone()).collect();
+        for p in cx.mono.borrow().insts.iter() {
+            match &p.key {
+                Key::Generic(n, _) | Key::Ho(n, _, _) => {
+                    fn_emitted.insert(n.clone());
+                }
+                Key::Lambda(..) => {}
+            }
+        }
+        let missed = cx.plan.unconsumed(&fn_emitted);
+        if let Some((owner, class)) = missed.first() {
+            return Err(format!(
+                "internal: RFC-0114 §26 — the release plan placed {} decision(s) the emission never consumed, first {class} in `{owner}`; a missed site is a silent leak, and this failure is the loudness the plan exists for",
+                missed.len()
+            ));
+        }
+    }
+
     // The registry is closed now, so the derived copy can be written.
     let fncopy = lower_fnval_copy(&cx)?;
     m.fill(cx.fnval_copy, fncopy);
@@ -800,6 +824,15 @@ fn abi_section(m: &mut wasm::Module, user: &[&Function], program: &Program) {
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+/// Which key family a `Map` runs on (RFC-0117): `String` pointers, `Int64`
+/// values, or packed user keys of a fixed stride (M2).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MapKey {
+    Str,
+    I64,
+    Pack(u32),
+}
 
 /// How a value of some Vyrn type travels: nothing, a wasm value, or the address
 /// of a shadow-stack slot.
@@ -3376,6 +3409,11 @@ impl<'p> Fn_<'_, 'p> {
                 if self.region_depth == 0 {
                     if let Some(own) = shadow {
                         if let Some(parts) = crate::self_append_spine(name, value) {
+                            // The spine handles this store's ownership itself
+                            // (§22's own state machine) — acknowledged so
+                            // §26's finish check knows the site was
+                            // considered, not walked past.
+                            let _ = self.cx.plan.store_owned_at(s as *const Stmt as usize);
                             for p in parts {
                                 self.append_once(m, b, place, own, p)?;
                             }
@@ -3400,12 +3438,10 @@ impl<'p> Fn_<'_, 'p> {
                 // shared with the textual backend — see `fold_store_owned` and
                 // the comment there. `place_owns` stays for the OTHER stores
                 // (fields, elements), which this slice does not touch.
-                let owned_here = self.region_depth == 0
-                    && self
-                        .cx
-                        .plan
-                        .store_owned
-                        .contains(&(s as *const Stmt as usize));
+                // Queried FIRST so a region-gated site still counts as
+                // considered (§26's finish check).
+                let owned_here = self.cx.plan.store_owned_at(s as *const Stmt as usize)
+                    && self.region_depth == 0;
                 let snap = if owned_here
                     && (fresh_str || !vyrn_frontend::movecheck::mentions_place(value, name))
                 {
@@ -3523,8 +3559,7 @@ impl<'p> Fn_<'_, 'p> {
                 let ers = self
                     .cx
                     .plan
-                    .edge_releases
-                    .get(&(s as *const Stmt as usize))
+                    .edge_releases_at(s as *const Stmt as usize)
                     .cloned()
                     .unwrap_or_default();
                 b.ins(&Instruction::If(BlockType::Empty));
@@ -3676,7 +3711,12 @@ impl<'p> Fn_<'_, 'p> {
                         let blk = vyrn_frontend::project::iterate_loop(
                             &size_fn, nth, var, iter, body, *line,
                         )?;
-                        return self.block(m, b, &blk);
+                        // RFC-0114 §26: resolve plan queries through the
+                        // clone — the textual driver's twin comment.
+                        self.cx
+                            .plan
+                            .alias_clones(vyrn_frontend::project::iterate_aliases(blk));
+                        return self.block(m, b, blk);
                     }
                 }
                 // `block { loop { br_if 1 (i >= len); bind; block { body }; i++;
@@ -4546,13 +4586,7 @@ impl<'p> Fn_<'_, 'p> {
     /// is at the allocation on both backends now: see [`Fn_::str_owned`].
     fn expr(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
         let t = self.expr_inner(m, b, e)?;
-        if self.region_depth == 0
-            && self
-                .cx
-                .plan
-                .arg_drops
-                .contains(&(e as *const Expr as usize))
-        {
+        if self.cx.plan.arg_drop(e as *const Expr as usize) && self.region_depth == 0 {
             let l = b.local(ValType::I32);
             b.ins(&Instruction::LocalTee(l));
             self.arg_frees.push((l, t.clone()));
@@ -4664,12 +4698,8 @@ impl<'p> Fn_<'_, 'p> {
                 // RFC-0114 R1′: an unnamed String receiver this frame owns is
                 // freed right after the header read — the pointer is teed to a
                 // local before `length_of` consumes it.
-                let rfree = self.region_depth == 0
-                    && self
-                        .cx
-                        .plan
-                        .receiver_frees
-                        .contains(&(e as *const Expr as usize));
+                let rfree =
+                    self.cx.plan.receiver_free(e as *const Expr as usize) && self.region_depth == 0;
                 let tee = if rfree {
                     let l = b.local(ValType::I32);
                     b.ins(&Instruction::LocalTee(l));
@@ -5122,8 +5152,7 @@ impl<'p> Fn_<'_, 'p> {
         let ers = self
             .cx
             .plan
-            .edge_releases
-            .get(&key)
+            .edge_releases_at(key)
             .cloned()
             .unwrap_or_default();
         self.cond(m, b, cond, line)?;
@@ -6864,7 +6893,17 @@ impl<'p> Fn_<'_, 'p> {
             "toJson" if args.len() == 1 => {
                 let ty = self.peek(&args[0], line)?;
                 let e = vyrn_frontend::jsonenc::encode_expr(args[0].clone(), &ty, line);
-                return self.expr(m, b, &e);
+                // RFC-0114 §26: the rewrite EMBEDS a clone of the argument —
+                // pair the whole synthesized tree's occurrences of it with
+                // the original for the emission, then unwind: the tree dies
+                // here.
+                let mark = self.cx.plan.alias_scope();
+                let mut pairs = Vec::new();
+                vyrn_frontend::ast::alias_embedded(&e, &args[0], &mut pairs);
+                self.cx.plan.alias_clones_scoped(&pairs);
+                let r = self.expr(m, b, &e);
+                self.cx.plan.alias_unwind(mark);
+                return r;
             }
             // `fromJson(T, s)` is the mirror (RFC-0078 M3), and it needs less: the
             // target is a type NAME, so there is nothing to peek. The reader is
@@ -6884,7 +6923,15 @@ impl<'p> Fn_<'_, 'p> {
                     return unsupported("`fromJson` without the JSON runtime linked", line);
                 }
                 let e = vyrn_frontend::jsondec::decode_expr(&target, args[1].clone(), line);
-                return self.expr(m, b, &e);
+                // RFC-0114 §26: the rewrite embeds a clone of the payload
+                // argument — `toJson`'s twin, treated identically.
+                let mark = self.cx.plan.alias_scope();
+                let mut pairs = Vec::new();
+                vyrn_frontend::ast::alias_embedded(&e, &args[1], &mut pairs);
+                self.cx.plan.alias_clones_scoped(&pairs);
+                let r = self.expr(m, b, &e);
+                self.cx.plan.alias_unwind(mark);
+                return r;
             }
             // `value(x)` boxes a scalar into the built-in `Value` enum. Its variant
             // is picked by the argument's type and built by the ordinary enum path,
@@ -8227,6 +8274,13 @@ impl<'p> Fn_<'_, 'p> {
         let mut call_args: Vec<Expr> = Vec::new();
         let mut binds: HashMap<String, FnBinding> = HashMap::new();
         let mut fi = 0usize;
+        let mark = self.cx.plan.alias_scope();
+        // RFC-0114 §26: `call_args` holds CLONES of the caller's argument
+        // expressions, so plan rows on the originals would go undischarged —
+        // each element remembers its source's node addresses, and the pairs
+        // are registered once the vector stops growing (elements only sit
+        // still after the last push).
+        let mut src_lists: Vec<Vec<usize>> = Vec::new();
         for (i, p) in f.params.iter().enumerate() {
             if !matches!(p.ty, Type::Fn(..)) {
                 params.push(Param {
@@ -8235,6 +8289,9 @@ impl<'p> Fn_<'_, 'p> {
                     ty: ftypes::substitute(&p.ty, &subst),
                 });
                 call_args.push(args[i].clone());
+                let mut v = Vec::new();
+                vyrn_frontend::ast::node_addrs_val(&args[i], &mut v);
+                src_lists.push(v);
                 continue;
             }
             let mut srcs = Vec::new();
@@ -8259,8 +8316,22 @@ impl<'p> Fn_<'_, 'p> {
             );
             // The capture values, read from the caller's own scope — which is
             // what fixes them at this site.
-            call_args.extend(cap_srcs[fi].iter().cloned());
+            for src in &cap_srcs[fi] {
+                call_args.push(src.clone());
+                let mut v = Vec::new();
+                vyrn_frontend::ast::node_addrs_val(src, &mut v);
+                src_lists.push(v);
+            }
             fi += 1;
+        }
+        {
+            let mut pairs: Vec<(usize, usize)> = Vec::new();
+            for (e, srcs) in call_args.iter().zip(&src_lists) {
+                let mut c = Vec::new();
+                vyrn_frontend::ast::node_addrs_val(e, &mut c);
+                pairs.extend(c.into_iter().zip(srcs.iter().copied()));
+            }
+            self.cx.plan.alias_clones_scoped(&pairs);
         }
         sf.params = params;
         sf.ret = ftypes::substitute(&f.ret, &subst);
@@ -8272,7 +8343,11 @@ impl<'p> Fn_<'_, 'p> {
             subst,
             binds,
         )?;
-        self.emit_call(m, b, &sig, &call_args)
+        let r = self.emit_call(m, b, &sig, &call_args);
+        // The clones die with this frame; their aliases must die first, or a
+        // later node at a recycled address would resolve to somebody's row.
+        self.cx.plan.alias_unwind(mark);
+        r
     }
 
     /// A call through a `fn`-typed parameter: the target, with this instance's
@@ -8305,7 +8380,23 @@ impl<'p> Fn_<'_, 'p> {
         if all.len() != bnd.target.sig.params.len() {
             return unsupported("a call through a `fn` parameter at another arity", line);
         }
-        self.emit_call(m, b, &bnd.target.sig, &all)
+        // RFC-0114 §26: the tail is a clone of the caller's arguments — pair
+        // it with the originals so their plan rows discharge (the capture
+        // reads ahead of it are synthesized and carry no rows).
+        let mark = self.cx.plan.alias_scope();
+        {
+            let mut pairs: Vec<(usize, usize)> = Vec::new();
+            for (e, src) in all[bnd.cap_srcs.len()..].iter().zip(args) {
+                let (mut c, mut o) = (Vec::new(), Vec::new());
+                vyrn_frontend::ast::node_addrs_val(e, &mut c);
+                vyrn_frontend::ast::node_addrs_val(src, &mut o);
+                pairs.extend(c.into_iter().zip(o));
+            }
+            self.cx.plan.alias_clones_scoped(&pairs);
+        }
+        let r = self.emit_call(m, b, &bnd.target.sig, &all);
+        self.cx.plan.alias_unwind(mark);
+        r
     }
 
     /// Resolve one `fn`-typed argument to a call target, giving the EXPRESSIONS to
@@ -8396,12 +8487,26 @@ impl<'p> Fn_<'_, 'p> {
                     );
                 }
                 let dsig = self.dispatcher(m, &norm, line)?;
+                // RFC-0114 §26: the capture source is a clone of the
+                // argument expression — pair it with the original so its
+                // plan rows discharge. A `Vec` never pushed again keeps its
+                // buffer, so the element's addresses are already final.
+                let srcs = vec![other.clone()];
+                {
+                    let (mut c, mut o) = (Vec::new(), Vec::new());
+                    vyrn_frontend::ast::node_addrs_val(&srcs[0], &mut c);
+                    vyrn_frontend::ast::node_addrs_val(other, &mut o);
+                    let pairs: Vec<(usize, usize)> = c.into_iter().zip(o).collect();
+                    // Scoped: the vector lives until the enclosing `ho_call`
+                    // returns, whose unwind removes these with its own.
+                    self.cx.plan.alias_clones_scoped(&pairs);
+                }
                 Ok((
                     FnTarget {
                         sig: dsig,
                         ncaps: 1,
                     },
-                    vec![other.clone()],
+                    srcs,
                     vec![norm],
                 ))
             }
@@ -8664,6 +8769,33 @@ impl<'p> Fn_<'_, 'p> {
                     }],
                 },
             };
+        }
+        // RFC-0114 §26: a SHELL's body is the one clone left (RFC-0101 M6),
+        // so plan rows inside the literal would go undischarged — the same
+        // hole the user-container `for` had, cured the same way: pair the
+        // clone's nodes with the source's and let every plan query resolve
+        // through them. Statement addresses live in the Vec's buffer and
+        // expression nodes behind boxes, so the pairs survive the move into
+        // the queue's `Rc`.
+        if let Body::Shell = queued {
+            let (mut orig, mut clone) = (Vec::new(), Vec::new());
+            match body {
+                LambdaBody::Block(src) => {
+                    vyrn_frontend::ast::node_addrs(src, &mut orig);
+                    vyrn_frontend::ast::node_addrs(&sf.body, &mut clone);
+                }
+                LambdaBody::Expr(src) => {
+                    vyrn_frontend::ast::node_addrs_val(src, &mut orig);
+                    match sf.body.stmts.first() {
+                        Some(Stmt::Expr(e)) | Some(Stmt::Return { value: Some(e), .. }) => {
+                            vyrn_frontend::ast::node_addrs_val(e, &mut clone)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let pairs: Vec<(usize, usize)> = clone.into_iter().zip(orig).collect();
+            self.cx.plan.alias_clones(&pairs);
         }
         // The key: the literal's node address, the concrete shape, AND the
         // substitution the body is under. One literal inside a generic body lifts a
@@ -11824,8 +11956,7 @@ impl<'p> Fn_<'_, 'p> {
         let ers = self
             .cx
             .plan
-            .edge_releases
-            .get(&key)
+            .edge_releases_at(key)
             .cloned()
             .unwrap_or_default();
         for (arm_ix, arm) in arms.iter().enumerate() {
@@ -12535,7 +12666,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalSet(k));
         // The insert path — the probe already said the key is absent, and the
         // fresh key is ours, so it is stored, not copied.
-        self.map_reserve(b, hdr, &l, 8, false);
+        self.map_reserve(b, hdr, &l, 8, MapKey::Str);
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         b.ins(&Instruction::LocalGet(hdr));
@@ -12592,50 +12723,87 @@ impl<'p> Fn_<'_, 'p> {
             Type::Map(k, _) => *k,
             _ => return unsupported(&format!("`tally` on `{mty}`"), line),
         };
-        let ik = self.cx.resolve(&key_t) == Type::Int;
+        let mk = self.map_key(&key_t, line)?;
         let l = self.layout_of(&mty, line)?;
         let hdr = b.local(ValType::I32);
         b.ins(&Instruction::LocalSet(hdr));
-        let k = b.local(if ik { ValType::I64 } else { ValType::I32 });
-        self.expr_as(m, b, &args[1], if ik { &Type::Int } else { &Type::Str })?;
-        b.ins(&Instruction::LocalSet(k));
+        let k = match mk {
+            MapKey::I64 => {
+                let k = b.local(ValType::I64);
+                self.expr_as(m, b, &args[1], &Type::Int)?;
+                b.ins(&Instruction::LocalSet(k));
+                k
+            }
+            MapKey::Pack(_) => {
+                let raw = b.local(ValType::I32);
+                self.expr_as(m, b, &args[1], &key_t)?;
+                b.ins(&Instruction::LocalSet(raw));
+                self.pack_key(b, raw, &key_t, line)?
+            }
+            MapKey::Str => {
+                let k = b.local(ValType::I32);
+                self.expr_as(m, b, &args[1], &Type::Str)?;
+                b.ins(&Instruction::LocalSet(k));
+                k
+            }
+        };
         let n = b.local(ValType::I64);
         self.expr_as(m, b, &args[2], &Type::Int)?;
         b.ins(&Instruction::LocalSet(n));
         let idx = b.local(ValType::I32);
-        self.map_scan(b, hdr, &l, k, idx, ik);
+        self.map_scan(b, hdr, &l, k, idx, mk);
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::I32Const(0));
         b.ins(&Instruction::I32LtS);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
         // miss: reserve, append the key, index it, count starts at `n`. An
-        // Int64 key is stored by value — nothing dup'd (RFC-0117).
-        self.map_reserve(b, hdr, &l, 8, ik);
+        // Int64 key is stored by value, a packed user key by its canonical
+        // bytes — neither dup'd nor freed (RFC-0117).
+        self.map_reserve(b, hdr, &l, 8, mk);
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[2])));
         b.ins(&Instruction::I32WrapI64);
         b.ins(&Instruction::LocalTee(idx));
-        b.ins(&Instruction::I32Const(if ik { 8 } else { 4 }));
+        b.ins(&Instruction::I32Const(match mk {
+            MapKey::I64 => 8,
+            MapKey::Pack(n) => n as i32,
+            MapKey::Str => 4,
+        }));
         b.ins(&Instruction::I32Mul);
         b.ins(&Instruction::I32Add);
-        b.ins(&Instruction::LocalGet(k));
-        if ik {
-            b.ins(&Instruction::I64Store(word8()));
-        } else {
-            self.str_dup(b);
-            b.ins(&Instruction::I32Store(word()));
+        match mk {
+            MapKey::I64 => {
+                b.ins(&Instruction::LocalGet(k));
+                b.ins(&Instruction::I64Store(word8()));
+            }
+            MapKey::Pack(stride) => {
+                b.ins(&Instruction::LocalGet(k));
+                b.ins(&Instruction::I32Const(stride as i32));
+                b.ins(&Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
+            }
+            MapKey::Str => {
+                b.ins(&Instruction::LocalGet(k));
+                self.str_dup(b);
+                b.ins(&Instruction::I32Store(word()));
+            }
         }
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        if let MapKey::Pack(stride) = mk {
+            b.ins(&Instruction::I32Const(stride as i32));
+        }
         self.map_index(b, hdr, &l);
         b.ins(&Instruction::LocalGet(idx));
-        b.ins(&Instruction::Call(if ik {
-            self.cx.rt.map_put_i64
-        } else {
-            self.cx.rt.map_put
+        b.ins(&Instruction::Call(match mk {
+            MapKey::I64 => self.cx.rt.map_put_i64,
+            MapKey::Pack(_) => self.cx.rt.map_put_pack,
+            MapKey::Str => self.cx.rt.map_put,
         }));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::LocalGet(hdr));
@@ -12676,16 +12844,34 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<(), String> {
         // An Int64-keyed map (RFC-0117): the key by value, stored by value,
-        // never dup'd or freed.
-        let ik = self.cx.resolve(key_t) == Type::Int;
+        // never dup'd or freed. A packed user key (M2): canonical bytes in a
+        // fixed-stride column, the same nothing-to-free property.
+        let mk = self.map_key(key_t, line)?;
         let esz = self.stride(val, line)? as i32;
         let r = self.cx.repr(val, line)?;
         // Key then value, before the scan: the textual backend evaluates both
         // first, and a side-effecting value expression must not run at a
         // different point on the two backends.
-        let k = b.local(if ik { ValType::I64 } else { ValType::I32 });
-        self.expr_as(m, b, key, if ik { &Type::Int } else { &Type::Str })?;
-        b.ins(&Instruction::LocalSet(k));
+        let k = match mk {
+            MapKey::I64 => {
+                let k = b.local(ValType::I64);
+                self.expr_as(m, b, key, &Type::Int)?;
+                b.ins(&Instruction::LocalSet(k));
+                k
+            }
+            MapKey::Pack(_) => {
+                let raw = b.local(ValType::I32);
+                self.expr_as(m, b, key, key_t)?;
+                b.ins(&Instruction::LocalSet(raw));
+                self.pack_key(b, raw, key_t, line)?
+            }
+            MapKey::Str => {
+                let k = b.local(ValType::I32);
+                self.expr_as(m, b, key, &Type::Str)?;
+                b.ins(&Instruction::LocalSet(k));
+                k
+            }
+        };
         let v = b.local(match &r {
             Repr::Scalar(t) => *t,
             Repr::Agg(_) => ValType::I32,
@@ -12695,13 +12881,13 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalSet(v));
 
         let idx = b.local(ValType::I32);
-        self.map_scan(b, hdr, l, k, idx, ik);
+        self.map_scan(b, hdr, l, k, idx, mk);
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::I32Const(0));
         b.ins(&Instruction::I32LtS);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        self.map_reserve(b, hdr, l, esz, ik);
+        self.map_reserve(b, hdr, l, esz, mk);
         // keys[len] = k, and the new entry's index IS the old length.
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
@@ -12709,26 +12895,45 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64Load(at(l.fields[2])));
         b.ins(&Instruction::I32WrapI64);
         b.ins(&Instruction::LocalTee(idx));
-        b.ins(&Instruction::I32Const(if ik { 8 } else { 4 }));
+        b.ins(&Instruction::I32Const(match mk {
+            MapKey::I64 => 8,
+            MapKey::Pack(n) => n as i32,
+            MapKey::Str => 4,
+        }));
         b.ins(&Instruction::I32Mul);
         b.ins(&Instruction::I32Add);
-        b.ins(&Instruction::LocalGet(k));
-        if ik {
-            b.ins(&Instruction::I64Store(word8()));
-        } else {
-            b.ins(&Instruction::I32Store(word()));
+        match mk {
+            MapKey::I64 => {
+                b.ins(&Instruction::LocalGet(k));
+                b.ins(&Instruction::I64Store(word8()));
+            }
+            MapKey::Pack(stride) => {
+                b.ins(&Instruction::LocalGet(k));
+                b.ins(&Instruction::I32Const(stride as i32));
+                b.ins(&Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
+            }
+            MapKey::Str => {
+                b.ins(&Instruction::LocalGet(k));
+                b.ins(&Instruction::I32Store(word()));
+            }
         }
         // The key is in its slot, so the index can record where. `map_reserve`
         // above grew the bucket array and rebuilt it, so this is the only entry it
         // is missing — and the reason the append stays O(1).
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        if let MapKey::Pack(stride) = mk {
+            b.ins(&Instruction::I32Const(stride as i32));
+        }
         self.map_index(b, hdr, l);
         b.ins(&Instruction::LocalGet(idx));
-        b.ins(&Instruction::Call(if ik {
-            self.cx.rt.map_put_i64
-        } else {
-            self.cx.rt.map_put
+        b.ins(&Instruction::Call(match mk {
+            MapKey::I64 => self.cx.rt.map_put_i64,
+            MapKey::Pack(_) => self.cx.rt.map_put_pack,
+            MapKey::Str => self.cx.rt.map_put,
         }));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::LocalGet(hdr));
@@ -12753,7 +12958,7 @@ impl<'p> Fn_<'_, 'p> {
         // back at the exit — freeing it here would give one block two owners.
         // The same partition `rel_at` draws for a `String`, drawn here too. An
         // Int64 key owns nothing, so it has no surplus to return (RFC-0117).
-        if !ik && self.region_depth == 0 {
+        if mk == MapKey::Str && self.region_depth == 0 {
             b.ins(&Instruction::LocalGet(k));
             str_hdr(b);
             b.ins(&Instruction::Call(self.cx.rt.free));
@@ -12782,24 +12987,101 @@ impl<'p> Fn_<'_, 'p> {
 
     /// `map_find(keys, len, k, idx, cap)` into `idx` — or the `_i64` twin when
     /// the map is Int64-keyed (`k` is then an I64 local; RFC-0117).
-    fn map_scan(&mut self, b: &mut Frame, hdr: u32, l: &Layout, k: u32, idx: u32, ik: bool) {
+    fn map_scan(&mut self, b: &mut Frame, hdr: u32, l: &Layout, k: u32, idx: u32, mk: MapKey) {
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[2])));
         b.ins(&Instruction::I32WrapI64);
         b.ins(&Instruction::LocalGet(k));
+        // A packed key's probe takes the stride between the key pointer and
+        // the index (RFC-0117 M2).
+        if let MapKey::Pack(stride) = mk {
+            b.ins(&Instruction::I32Const(stride as i32));
+        }
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[4])));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[3])));
         b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::Call(if ik {
-            self.cx.rt.map_find_i64
-        } else {
-            self.cx.rt.map_find
+        b.ins(&Instruction::Call(match mk {
+            MapKey::I64 => self.cx.rt.map_find_i64,
+            MapKey::Pack(_) => self.cx.rt.map_find_pack,
+            MapKey::Str => self.cx.rt.map_find,
         }));
         b.ins(&Instruction::LocalSet(idx));
+    }
+
+    /// Which key family a map runs on (RFC-0117): `String` pointers, `Int64`
+    /// values, or packed user keys of a fixed stride (M2).
+    fn map_key(&mut self, key_t: &Type, line: usize) -> Result<MapKey, String> {
+        Ok(match self.cx.resolve(key_t) {
+            Type::Int => MapKey::I64,
+            Type::Record(_) | Type::Enum(_) => MapKey::Pack(self.layout_of(key_t, line)?.size),
+            _ => MapKey::Str,
+        })
+    }
+
+    /// RFC-0117 M2: pack a user key into a ZEROED frame slot — the canonical
+    /// bytes, so `map_slot_pack`'s byte compare IS field-wise equality. `src`
+    /// is a local holding the key value's address; gives a local holding the
+    /// slot's.
+    fn pack_key(
+        &mut self,
+        b: &mut Frame,
+        src: u32,
+        key_t: &Type,
+        line: usize,
+    ) -> Result<u32, String> {
+        let l = self.layout_of(key_t, line)?;
+        let off = b.alloc(l.size, l.align);
+        let dst = b.local(ValType::I32);
+        b.slot(off);
+        b.ins(&Instruction::LocalSet(dst));
+        b.ins(&Instruction::LocalGet(dst));
+        b.ins(&Instruction::I32Const(0));
+        b.ins(&Instruction::I32Const(l.size as i32));
+        b.ins(&Instruction::MemoryFill(0));
+        self.pack_fields(b, src, dst, 0, key_t, line)?;
+        Ok(dst)
+    }
+
+    /// One level of the pack: a record copies each field at its own offset
+    /// (recursively — a nested record's padding must stay zero); a scalar or
+    /// a fieldless enum copies its bytes whole, which carry no padding.
+    fn pack_fields(
+        &mut self,
+        b: &mut Frame,
+        src: u32,
+        dst: u32,
+        off: u32,
+        ty: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        if let Type::Record(fs) = self.cx.resolve(ty) {
+            let l = self.layout_of(ty, line)?;
+            for (i, f) in fs.iter().enumerate() {
+                self.pack_fields(b, src, dst, off + l.fields[i], &f.ty, line)?;
+            }
+            return Ok(());
+        }
+        let sz = self.layout_of(ty, line)?.size;
+        b.ins(&Instruction::LocalGet(dst));
+        if off != 0 {
+            b.ins(&Instruction::I32Const(off as i32));
+            b.ins(&Instruction::I32Add);
+        }
+        b.ins(&Instruction::LocalGet(src));
+        if off != 0 {
+            b.ins(&Instruction::I32Const(off as i32));
+            b.ins(&Instruction::I32Add);
+        }
+        b.ins(&Instruction::I32Const(sz as i32));
+        b.ins(&Instruction::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        });
+        Ok(())
     }
 
     /// The index's bucket array and its bucket count (`cap * 2`), pushed in that
@@ -12828,7 +13110,7 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// Allocate, copy, free the old — the shape `push` grows in, and what
     /// `__vyrn_map_reserve`'s `realloc` does for the textual backend.
-    fn map_reserve(&mut self, b: &mut Frame, hdr: u32, l: &Layout, esz: i32, ik: bool) {
+    fn map_reserve(&mut self, b: &mut Frame, hdr: u32, l: &Layout, esz: i32, mk: MapKey) {
         let (nc, nk, nv) = (
             b.local(ValType::I32),
             b.local(ValType::I32),
@@ -12861,10 +13143,12 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Mul);
         b.ins(&Instruction::End);
         b.ins(&Instruction::LocalSet(nc));
-        for (field, stride, into) in [
-            (l.fields[0], if ik { 8i32 } else { 4i32 }, nk),
-            (l.fields[1], esz, nv),
-        ] {
+        let kstride = match mk {
+            MapKey::I64 => 8i32,
+            MapKey::Pack(n) => n as i32,
+            MapKey::Str => 4i32,
+        };
+        for (field, stride, into) in [(l.fields[0], kstride, nk), (l.fields[1], esz, nv)] {
             // The count is safe in 32 bits — an entry costs at least twelve bytes,
             // so a wasm32 memory holds well under 2^31 of them — but `nc * stride`
             // is not, so the product is 64-bit and `malloc` decides.
@@ -12913,12 +13197,16 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Store(word_at(l.fields[4])));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        // `map_reindex_pack` takes the stride between the keys and the length.
+        if let MapKey::Pack(stride) = mk {
+            b.ins(&Instruction::I32Const(stride as i32));
+        }
         b.ins(&Instruction::LocalGet(len));
         self.map_index(b, hdr, l);
-        b.ins(&Instruction::Call(if ik {
-            self.cx.rt.map_reindex_i64
-        } else {
-            self.cx.rt.map_reindex
+        b.ins(&Instruction::Call(match mk {
+            MapKey::I64 => self.cx.rt.map_reindex_i64,
+            MapKey::Pack(_) => self.cx.rt.map_reindex_pack,
+            MapKey::Str => self.cx.rt.map_reindex,
         }));
         self.depth -= 1;
         b.ins(&Instruction::End);
@@ -12936,19 +13224,37 @@ impl<'p> Fn_<'_, 'p> {
         key: &Expr,
         line: usize,
     ) -> Result<Type, String> {
-        let ik = match self.cx.resolve(mty) {
-            Type::Map(k, _) => self.cx.resolve(&k) == Type::Int,
-            _ => false,
+        let key_t = match self.cx.resolve(mty) {
+            Type::Map(k, _) => *k,
+            _ => Type::Str,
         };
+        let mk = self.map_key(&key_t, line)?;
         let l = self.layout_of(mty, line)?;
         let esz = self.stride(val, line)? as i32;
         let hdr = b.local(ValType::I32);
         b.ins(&Instruction::LocalSet(hdr));
-        let k = b.local(if ik { ValType::I64 } else { ValType::I32 });
-        self.expr_as(m, b, key, if ik { &Type::Int } else { &Type::Str })?;
-        b.ins(&Instruction::LocalSet(k));
+        let k = match mk {
+            MapKey::I64 => {
+                let k = b.local(ValType::I64);
+                self.expr_as(m, b, key, &Type::Int)?;
+                b.ins(&Instruction::LocalSet(k));
+                k
+            }
+            MapKey::Pack(_) => {
+                let raw = b.local(ValType::I32);
+                self.expr_as(m, b, key, &key_t)?;
+                b.ins(&Instruction::LocalSet(raw));
+                self.pack_key(b, raw, &key_t, line)?
+            }
+            MapKey::Str => {
+                let k = b.local(ValType::I32);
+                self.expr_as(m, b, key, &Type::Str)?;
+                b.ins(&Instruction::LocalSet(k));
+                k
+            }
+        };
         let idx = b.local(ValType::I32);
-        self.map_scan(b, hdr, &l, k, idx, ik);
+        self.map_scan(b, hdr, &l, k, idx, mk);
 
         let oty = Type::Option(Box::new(val.clone()));
         let Repr::Agg(ol) = self.cx.repr(&oty, line)? else {
@@ -13036,8 +13342,12 @@ impl<'p> Fn_<'_, 'p> {
             Type::Map(k, v) => (*k, v),
             _ => return unsupported(&format!("`{name}` on `{mty}`"), line),
         };
-        let ik = self.cx.resolve(&key_t) == Type::Int;
-        let kstride = if ik { 8i32 } else { 4i32 };
+        let mk = self.map_key(&key_t, line)?;
+        let kstride = match mk {
+            MapKey::I64 => 8i32,
+            MapKey::Pack(n) => n as i32,
+            MapKey::Str => 4i32,
+        };
         let l = self.layout_of(&mty, line)?;
 
         if name == "@keys" {
@@ -13071,7 +13381,7 @@ impl<'p> Fn_<'_, 'p> {
                 src_mem: 0,
                 dst_mem: 0,
             });
-            if !ik {
+            if mk == MapKey::Str {
                 self.copy_each(b, buf, len, 4, &Type::Str, line)?;
             }
             let off = b.alloc(al.size, al.align);
@@ -13088,11 +13398,28 @@ impl<'p> Fn_<'_, 'p> {
             return Ok(aty);
         }
 
-        let k = b.local(if ik { ValType::I64 } else { ValType::I32 });
-        self.expr_as(m, b, &args[1], if ik { &Type::Int } else { &Type::Str })?;
-        b.ins(&Instruction::LocalSet(k));
+        let k = match mk {
+            MapKey::I64 => {
+                let k = b.local(ValType::I64);
+                self.expr_as(m, b, &args[1], &Type::Int)?;
+                b.ins(&Instruction::LocalSet(k));
+                k
+            }
+            MapKey::Pack(_) => {
+                let raw = b.local(ValType::I32);
+                self.expr_as(m, b, &args[1], &key_t)?;
+                b.ins(&Instruction::LocalSet(raw));
+                self.pack_key(b, raw, &key_t, line)?
+            }
+            MapKey::Str => {
+                let k = b.local(ValType::I32);
+                self.expr_as(m, b, &args[1], &Type::Str)?;
+                b.ins(&Instruction::LocalSet(k));
+                k
+            }
+        };
         let idx = b.local(ValType::I32);
-        self.map_scan(b, hdr, &l, k, idx, ik);
+        self.map_scan(b, hdr, &l, k, idx, mk);
         let found = b.local(ValType::I32);
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::I32Const(0));
@@ -13113,7 +13440,7 @@ impl<'p> Fn_<'_, 'p> {
             // An Int64 key owns nothing to hand back (RFC-0117).
             if owns {
                 let mut cols = vec![(l.fields[1], esz, val.as_ref().clone())];
-                if !ik {
+                if mk == MapKey::Str {
                     cols.insert(0, (l.fields[0], 4i32, Type::Str));
                 }
                 for (field, stride, ety) in cols {
@@ -13168,14 +13495,17 @@ impl<'p> Fn_<'_, 'p> {
             // nothing it was not paying.
             b.ins(&Instruction::LocalGet(hdr));
             b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+            if let MapKey::Pack(stride) = mk {
+                b.ins(&Instruction::I32Const(stride as i32));
+            }
             b.ins(&Instruction::LocalGet(hdr));
             b.ins(&Instruction::I64Load(at(l.fields[2])));
             b.ins(&Instruction::I32WrapI64);
             self.map_index(b, hdr, &l);
-            b.ins(&Instruction::Call(if ik {
-                self.cx.rt.map_reindex_i64
-            } else {
-                self.cx.rt.map_reindex
+            b.ins(&Instruction::Call(match mk {
+                MapKey::I64 => self.cx.rt.map_reindex_i64,
+                MapKey::Pack(_) => self.cx.rt.map_reindex_pack,
+                MapKey::Str => self.cx.rt.map_reindex,
             }));
             self.depth -= 1;
             b.ins(&Instruction::End);
@@ -13922,6 +14252,14 @@ struct Rt {
     map_slot_i64: u32,
     map_put_i64: u32,
     map_reindex_i64: u32,
+    /// The user-keyed chain (RFC-0117 M2): the same four shapes over a
+    /// fixed-stride column of CANONICALLY PACKED keys — the hash FNV-1a over
+    /// the pack, equality a byte compare that IS field-wise equality because
+    /// the pack zeroed the padding.
+    map_find_pack: u32,
+    map_slot_pack: u32,
+    map_put_pack: u32,
+    map_reindex_pack: u32,
     /// RFC-0046's `=~` (M2m): walk a complete DFA over a NUL-terminated string.
     /// One helper for every pattern in the module, because the pattern is entirely
     /// in the table it is handed — which is the same split the textual backend's
@@ -14110,6 +14448,10 @@ impl Rt {
             map_slot_i64: slot("map_slot_i64"),
             map_put_i64: slot("map_put_i64"),
             map_reindex_i64: slot("map_reindex_i64"),
+            map_slot_pack: slot("map_slot_pack"),
+            map_find_pack: slot("map_find_pack"),
+            map_put_pack: slot("map_put_pack"),
+            map_reindex_pack: slot("map_reindex_pack"),
             regex_run: slot("regex_run"),
             parse_i64: slot("parse_i64"),
             line_at: slot("line_at"),
@@ -16004,6 +16346,284 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
                     .ins(&Instruction::LocalGet(3))
                     .ins(&Instruction::LocalGet(ri))
                     .ins(&Instruction::Call(map_put_i64));
+                b.ins(&Instruction::LocalGet(ri))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::LocalSet(ri))
+                    .ins(&Instruction::Br(0))
+                    .ins(&Instruction::End)
+                    .ins(&Instruction::End);
+                b.ins(&Instruction::End);
+            },
+        );
+    }
+
+    // map_slot_pack(keys, stride, idx, nb, keyp) -> the bucket the packed key
+    // at `keyp` belongs in (RFC-0117 M2). The hash is FNV-1a over the key's
+    // `stride` canonical bytes — the map's own, exactly as the string map's
+    // FNV and the i64 map's SplitMix are its own — and equality is a byte
+    // compare over the stride, which IS field-wise equality because codegen
+    // zeroed the padding before packing the fields.
+    {
+        // Params 0..4, frame base at 5, ours from 6.
+        let (slot_b, mask, ent, h, i) = (6, 7, 8, 9, 10);
+        rt.next_is(m, rt.map_slot_pack);
+        m.func(
+            &[
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+            ],
+            &[ValType::I32],
+            &[
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I64,
+                ValType::I32,
+            ],
+            0,
+            |b| {
+                b.ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Sub)
+                    .ins(&Instruction::LocalSet(mask));
+                // FNV-1a over keyp[0..stride).
+                b.ins(&Instruction::I64Const(0xCBF29CE484222325u64 as i64))
+                    .ins(&Instruction::LocalSet(h));
+                b.ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::LocalSet(i));
+                b.ins(&Instruction::Block(BlockType::Empty))
+                    .ins(&Instruction::Loop(BlockType::Empty));
+                b.ins(&Instruction::LocalGet(i))
+                    .ins(&Instruction::LocalGet(1))
+                    .ins(&Instruction::I32GeS)
+                    .ins(&Instruction::BrIf(1));
+                b.ins(&Instruction::LocalGet(h))
+                    .ins(&Instruction::LocalGet(4))
+                    .ins(&Instruction::LocalGet(i))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I32Load8U(byte()))
+                    .ins(&Instruction::I64ExtendI32U)
+                    .ins(&Instruction::I64Xor)
+                    .ins(&Instruction::I64Const(1099511628211))
+                    .ins(&Instruction::I64Mul)
+                    .ins(&Instruction::LocalSet(h));
+                b.ins(&Instruction::LocalGet(i))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::LocalSet(i))
+                    .ins(&Instruction::Br(0))
+                    .ins(&Instruction::End)
+                    .ins(&Instruction::End);
+                b.ins(&Instruction::LocalGet(h))
+                    .ins(&Instruction::I32WrapI64)
+                    .ins(&Instruction::LocalGet(mask))
+                    .ins(&Instruction::I32And)
+                    .ins(&Instruction::LocalSet(slot_b));
+                // The walk: an empty bucket or an equal key ends it.
+                b.ins(&Instruction::Block(BlockType::Empty))
+                    .ins(&Instruction::Loop(BlockType::Empty));
+                b.ins(&Instruction::LocalGet(2))
+                    .ins(&Instruction::LocalGet(slot_b))
+                    .ins(&Instruction::I32Const(8))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I64Load(word8()))
+                    .ins(&Instruction::I32WrapI64)
+                    .ins(&Instruction::LocalTee(ent))
+                    .ins(&Instruction::I32Eqz)
+                    .ins(&Instruction::BrIf(1));
+                // Byte compare keys + (ent-1)*stride against keyp: equal exits
+                // the whole walk (depth 3), a differing byte exits the inner
+                // block (depth 1) into the advance.
+                b.ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::LocalSet(i));
+                b.ins(&Instruction::Block(BlockType::Empty))
+                    .ins(&Instruction::Loop(BlockType::Empty));
+                b.ins(&Instruction::LocalGet(i))
+                    .ins(&Instruction::LocalGet(1))
+                    .ins(&Instruction::I32GeS)
+                    .ins(&Instruction::BrIf(3));
+                b.ins(&Instruction::LocalGet(0))
+                    .ins(&Instruction::LocalGet(ent))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Sub)
+                    .ins(&Instruction::LocalGet(1))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::LocalGet(i))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I32Load8U(byte()))
+                    .ins(&Instruction::LocalGet(4))
+                    .ins(&Instruction::LocalGet(i))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I32Load8U(byte()))
+                    .ins(&Instruction::I32Ne)
+                    .ins(&Instruction::BrIf(1));
+                b.ins(&Instruction::LocalGet(i))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::LocalSet(i))
+                    .ins(&Instruction::Br(0))
+                    .ins(&Instruction::End)
+                    .ins(&Instruction::End);
+                b.ins(&Instruction::LocalGet(slot_b))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::LocalGet(mask))
+                    .ins(&Instruction::I32And)
+                    .ins(&Instruction::LocalSet(slot_b))
+                    .ins(&Instruction::Br(0))
+                    .ins(&Instruction::End)
+                    .ins(&Instruction::End);
+                b.ins(&Instruction::LocalGet(slot_b));
+            },
+        );
+    }
+
+    // map_find_pack(keys, len, keyp, stride, idx, cap) -> the entry's index,
+    // or -1 (RFC-0117 M2).
+    {
+        let bkt = 7;
+        rt.next_is(m, rt.map_find_pack);
+        let map_slot_pack = rt.map_slot_pack;
+        m.func(
+            &[
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+            ],
+            &[ValType::I32],
+            &[ValType::I32],
+            0,
+            |b| {
+                b.ins(&Instruction::Block(BlockType::Result(ValType::I32)));
+                b.ins(&Instruction::LocalGet(1))
+                    .ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::I32LeS)
+                    .ins(&Instruction::LocalGet(5))
+                    .ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::I32LeS)
+                    .ins(&Instruction::I32Or)
+                    .ins(&Instruction::If(BlockType::Empty))
+                    .ins(&Instruction::I32Const(-1))
+                    .ins(&Instruction::Br(1))
+                    .ins(&Instruction::End);
+                b.ins(&Instruction::LocalGet(0))
+                    .ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::LocalGet(4))
+                    .ins(&Instruction::LocalGet(5))
+                    .ins(&Instruction::I32Const(2))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::LocalGet(2))
+                    .ins(&Instruction::Call(map_slot_pack))
+                    .ins(&Instruction::I32Const(8))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::LocalGet(4))
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I64Load(word8()))
+                    .ins(&Instruction::I32WrapI64)
+                    .ins(&Instruction::LocalSet(bkt));
+                b.ins(&Instruction::LocalGet(bkt))
+                    .ins(&Instruction::I32Eqz)
+                    .ins(&Instruction::If(BlockType::Result(ValType::I32)))
+                    .ins(&Instruction::I32Const(-1))
+                    .ins(&Instruction::Else)
+                    .ins(&Instruction::LocalGet(bkt))
+                    .ins(&Instruction::I32Const(1))
+                    .ins(&Instruction::I32Sub)
+                    .ins(&Instruction::End);
+                b.ins(&Instruction::End);
+            },
+        );
+    }
+
+    // map_put_pack(keys, stride, idx, nb, i) — record the entry at position
+    // `i`, whose packed key is already in `keys + i*stride`.
+    {
+        rt.next_is(m, rt.map_put_pack);
+        let map_slot_pack = rt.map_slot_pack;
+        m.func(
+            &[
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+            ],
+            &[],
+            &[],
+            0,
+            |b| {
+                b.ins(&Instruction::LocalGet(2));
+                b.ins(&Instruction::LocalGet(0))
+                    .ins(&Instruction::LocalGet(1))
+                    .ins(&Instruction::LocalGet(2))
+                    .ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::LocalGet(0))
+                    .ins(&Instruction::LocalGet(4))
+                    .ins(&Instruction::LocalGet(1))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::Call(map_slot_pack))
+                    .ins(&Instruction::I32Const(8))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::I32Add);
+                b.ins(&Instruction::LocalGet(4))
+                    .ins(&Instruction::I64ExtendI32U)
+                    .ins(&Instruction::I64Const(1))
+                    .ins(&Instruction::I64Add)
+                    .ins(&Instruction::I64Store(word8()));
+            },
+        );
+    }
+
+    // map_reindex_pack(keys, stride, len, idx, nb) — rebuild the whole index.
+    {
+        let ri = 6;
+        rt.next_is(m, rt.map_reindex_pack);
+        let map_put_pack = rt.map_put_pack;
+        m.func(
+            &[
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+            ],
+            &[],
+            &[ValType::I32],
+            0,
+            |b| {
+                b.ins(&Instruction::Block(BlockType::Empty));
+                b.ins(&Instruction::LocalGet(4))
+                    .ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::I32LeS)
+                    .ins(&Instruction::BrIf(0));
+                b.ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::LocalGet(4))
+                    .ins(&Instruction::I32Const(8))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::MemoryFill(0));
+                b.ins(&Instruction::Block(BlockType::Empty))
+                    .ins(&Instruction::Loop(BlockType::Empty));
+                b.ins(&Instruction::LocalGet(ri))
+                    .ins(&Instruction::LocalGet(2))
+                    .ins(&Instruction::I32GeS)
+                    .ins(&Instruction::BrIf(1));
+                b.ins(&Instruction::LocalGet(0))
+                    .ins(&Instruction::LocalGet(1))
+                    .ins(&Instruction::LocalGet(3))
+                    .ins(&Instruction::LocalGet(4))
+                    .ins(&Instruction::LocalGet(ri))
+                    .ins(&Instruction::Call(map_put_pack));
                 b.ins(&Instruction::LocalGet(ri))
                     .ins(&Instruction::I32Const(1))
                     .ins(&Instruction::I32Add)
