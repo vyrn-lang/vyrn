@@ -2575,6 +2575,220 @@ pub fn generate(
     generate_interpreted(program, fn_name, args, inputs)
 }
 
+/// RFC-0124: the nullary functions of `program` whose transitive effects
+/// are NONE — safe to evaluate at most once inside a generation target.
+///
+/// The screen is deliberately one-sided: a name it excludes only loses the
+/// memo, never correctness. Effectful means: a logging builtin, a mediated
+/// or host I/O builtin, any `extern` (time and random arrive as externs), a
+/// call to a name that is neither a user function nor a known-silent
+/// builtin (a `fn`-typed parameter, an unrecognized surface), or reaching
+/// any of those through a callee. Everything else a comptime-pure body can
+/// do — arithmetic, containers, `Code` quotes, `render` — is pure by the
+/// sandbox's own rules, and `panic` needs no row: only an `Ok` result is
+/// ever cached.
+fn effect_free_nullary(program: &Program) -> std::collections::HashSet<String> {
+    const EFFECT: &[&str] = &[
+        "print",
+        "trace",
+        "debug",
+        "info",
+        "warn",
+        "error",
+        "logger",
+        "readFile",
+        "writeFile",
+        "read",
+        "readLine",
+        "args",
+        "listDir",
+        "moduleInterface",
+    ];
+    fn calls_block(b: &Block, out: &mut Vec<String>) {
+        for st in &b.stmts {
+            calls_stmt(st, out);
+        }
+    }
+    fn calls_stmt(st: &Stmt, out: &mut Vec<String>) {
+        match st {
+            Stmt::Let { value, .. }
+            | Stmt::Assign { value, .. }
+            | Stmt::SetField { value, .. }
+            | Stmt::Expr(value) => calls_expr(value, out),
+            Stmt::IndexSet { index, value, .. } => {
+                calls_expr(index, out);
+                calls_expr(value, out);
+            }
+            Stmt::Return { value, .. } => {
+                if let Some(e) = value {
+                    calls_expr(e, out);
+                }
+            }
+            Stmt::If {
+                cond: scrutinee,
+                then_block,
+                else_block,
+                ..
+            }
+            | Stmt::IfLet {
+                scrutinee,
+                then_block,
+                else_block,
+                ..
+            } => {
+                calls_expr(scrutinee, out);
+                calls_block(then_block, out);
+                if let Some(eb) = else_block {
+                    calls_block(eb, out);
+                }
+            }
+            Stmt::While {
+                cond: e, body: bl, ..
+            }
+            | Stmt::ForIn {
+                iter: e, body: bl, ..
+            } => {
+                calls_expr(e, out);
+                calls_block(bl, out);
+            }
+            Stmt::Region { body, .. } => calls_block(body, out),
+            Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop { .. } => {}
+        }
+    }
+    fn calls_expr(e: &Expr, out: &mut Vec<String>) {
+        match e {
+            Expr::Call { name, args, .. } | Expr::Spawn { name, args, .. } => {
+                out.push(name.clone());
+                for a in args {
+                    calls_expr(a, out);
+                }
+            }
+            // A lambda's effects count against the ENCLOSING function — the
+            // body may run through whoever the value is handed to, and the
+            // handoff itself is a `fn`-typed callee the screen treats as
+            // unknown anyway.
+            Expr::Lambda { body, .. } => match body {
+                LambdaBody::Expr(inner) => calls_expr(inner, out),
+                LambdaBody::Block(b) => calls_block(b, out),
+            },
+            Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
+                calls_expr(expr, out)
+            }
+            Expr::Consume { place, .. } => calls_expr(place, out),
+            Expr::Binary { lhs, rhs, .. } => {
+                calls_expr(lhs, out);
+                calls_expr(rhs, out);
+            }
+            Expr::TryConstruct { args, .. } | Expr::ArrayLit { elems: args, .. } => {
+                for a in args {
+                    calls_expr(a, out);
+                }
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                calls_expr(scrutinee, out);
+                for a in arms {
+                    match &a.body {
+                        crate::ast::ArmBody::Expr(e) => calls_expr(e, out),
+                        crate::ast::ArmBody::Block(b) => calls_block(b, out),
+                    }
+                }
+            }
+            Expr::IfExpr {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                calls_expr(cond, out);
+                calls_expr(then_branch, out);
+                if let Some(eb) = else_branch {
+                    calls_expr(eb, out);
+                }
+            }
+            Expr::StructLit { fields, .. } => {
+                for (_, v) in fields {
+                    calls_expr(v, out);
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    calls_expr(k, out);
+                    calls_expr(v, out);
+                }
+            }
+            Expr::Int(_)
+            | Expr::Byte(_)
+            | Expr::Float(_)
+            | Expr::Bool(_)
+            | Expr::Str(_)
+            | Expr::Var { .. } => {}
+        }
+    }
+    let names: std::collections::HashSet<&str> =
+        program.functions.iter().map(|f| f.name.as_str()).collect();
+    let mut callees: HashMap<String, Vec<String>> = HashMap::new();
+    let mut effectful: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for f in &program.functions {
+        if f.is_extern {
+            effectful.insert(f.name.clone());
+            continue;
+        }
+        let mut out = Vec::new();
+        calls_block(&f.body, &mut out);
+        let mut direct = false;
+        for c in &out {
+            if EFFECT.contains(&c.as_str()) {
+                direct = true;
+            } else if !names.contains(c.as_str()) && !c.starts_with('@') {
+                // Neither a user function nor a compiler-spelled builtin: a
+                // `fn`-typed parameter or an unrecognized surface name. The
+                // screen cannot see through it, so it counts as an effect.
+                let known_silent = matches!(
+                    c.as_str(),
+                    "render"
+                        | "raw"
+                        | "rawAt"
+                        | "lex"
+                        | "blackBox"
+                        | "panic"
+                        | "toJson"
+                        | "fromJson"
+                        | "jsonSchema"
+                        | "value"
+                        | "parse"
+                );
+                if !known_silent && crate::types::numeric_conv_target(c).is_none() {
+                    direct = true;
+                }
+            }
+        }
+        if direct {
+            effectful.insert(f.name.clone());
+        }
+        callees.insert(f.name.clone(), out);
+    }
+    // Effect spreads caller-ward to a fixpoint; the function count bounds it.
+    loop {
+        let before = effectful.len();
+        for (caller, cs) in &callees {
+            if !effectful.contains(caller) && cs.iter().any(|c| effectful.contains(c)) {
+                effectful.insert(caller.clone());
+            }
+        }
+        if effectful.len() == before {
+            break;
+        }
+    }
+    program
+        .functions
+        .iter()
+        .filter(|f| f.params.is_empty() && !f.is_extern && !effectful.contains(&f.name))
+        .map(|f| f.name.clone())
+        .collect()
+}
+
 /// The tree-walking generation path — the reference implementation, and the
 /// fallback whenever an installed engine declines.
 pub fn generate_interpreted(
@@ -2597,6 +2811,8 @@ pub fn generate_interpreted(
         aliased: inputs.aliased,
         reads: RefCell::new(Vec::new()),
         fuel: std::cell::Cell::new(inputs.fuel),
+        pure_nullary: effect_free_nullary(program),
+        memo: RefCell::new(HashMap::new()),
     });
     if let Err(Ctrl::Err(s)) = interp.init_globals(program) {
         return Err(s);
@@ -2859,6 +3075,14 @@ pub(crate) struct GenCtx<'a> {
     /// Remaining step budget; each statement spends one. Zero ⇒ the generator is
     /// killed with the canonical "exceeded its step budget" trap.
     fuel: std::cell::Cell<u64>,
+    /// RFC-0124: the nullary functions whose transitive effects are NONE —
+    /// no logging, no mediated read, no extern, no unknown callee — computed
+    /// once per generation target by [`effect_free_nullary`]. For these,
+    /// referential transparency is a theorem rather than an assumption, so
+    /// the memo below is unobservable.
+    pure_nullary: std::collections::HashSet<String>,
+    /// The at-most-once results, per generation target.
+    memo: RefCell<HashMap<String, Val>>,
 }
 
 /// A scope binding: the current value plus the declared type, when one exists
@@ -3259,6 +3483,25 @@ impl<'a> Interp<'a> {
     /// Like [`call`], but also returns the final values of the parameters (so the
     /// caller can copy `modify` parameters back — call-by-value-result).
     fn call_capturing(&self, name: &str, args: &[Val]) -> Result<(Val, Vec<Val>), Ctrl> {
+        // RFC-0124: inside a generation target, a nullary call whose
+        // transitive effects are none is evaluated at most once. The effect
+        // screen is what makes referential transparency's hypothesis TRUE
+        // here rather than assumed — a call that could print or read is
+        // never in the set, so the cache cannot change any observable.
+        let memoable = args.is_empty()
+            && self
+                .gen
+                .as_ref()
+                .is_some_and(|g| g.pure_nullary.contains(name));
+        if memoable {
+            if let Some(v) = self
+                .gen
+                .as_ref()
+                .and_then(|g| g.memo.borrow().get(name).cloned())
+            {
+                return Ok((v, Vec::new()));
+            }
+        }
         // An `extern` (RFC-0012) is the host's frame, not Vyrn's, and no backend
         // gives it one to count; an unknown name errors before any frame exists.
         // Both are excluded so the three engines count exactly the same calls.
@@ -3286,6 +3529,11 @@ impl<'a> Interp<'a> {
         }
         if counted {
             self.call_depth.set(self.call_depth.get() - 1);
+        }
+        if memoable {
+            if let (Ok((v, _)), Some(g)) = (&r, self.gen.as_ref()) {
+                g.memo.borrow_mut().insert(name.to_string(), v.clone());
+            }
         }
         r
     }
@@ -8471,6 +8719,39 @@ mod tests {
         code_splice, lex_tokens, render_code, reserve_str, reserve_vec, CodePiece, Ctrl, Val,
     };
     use crate::run;
+
+    /// RFC-0124's hypothesis, screened rather than assumed: the memo set
+    /// holds exactly the nullary functions whose transitive effects are
+    /// none. A printer is out, a caller of a printer is out, an extern
+    /// caller is out, a `fn`-typed callee is out — and the pure table
+    /// builder is in.
+    #[test]
+    fn the_effect_screen_admits_only_the_provably_silent() {
+        let src = "fn table() -> Array<Int64> {
+                       let mut t: Array<Int64> = []
+                       let mut i = 0
+                       while i < 8 { t.push(i * i); i = i + 1 }
+                       return t
+                   }
+                   fn viaTable() -> Int64 { return table().length }
+                   fn noisy() -> Int64 { print(\"x\"); return 1 }
+                   fn viaNoisy() -> Int64 { return noisy() }
+                   extern fn hostNowMillis() -> Int64
+                   fn clocky() -> Int64 { return hostNowMillis() }
+                   fn higher(f: fn(Int64) -> Int64) -> Int64 { return f(1) }
+                   fn viaUnknown() -> Int64 { return higher(x -> x) }
+                   fn main() -> Int64 { return 0 }";
+        let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
+        let pure = super::effect_free_nullary(&program);
+        assert!(pure.contains("table"), "{pure:?}");
+        assert!(pure.contains("viaTable"), "{pure:?}");
+        assert!(pure.contains("main"), "{pure:?}");
+        assert!(!pure.contains("noisy"), "{pure:?}");
+        assert!(!pure.contains("viaNoisy"), "{pure:?}");
+        assert!(!pure.contains("clocky"), "{pure:?}");
+        assert!(!pure.contains("higher"), "not nullary anyway: {pure:?}");
+        assert!(!pure.contains("viaUnknown"), "{pure:?}");
+    }
 
     // ---- RFC-0114 §24/§45: the freshness witnesses ------------------------
 

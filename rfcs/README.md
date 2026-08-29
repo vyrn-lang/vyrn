@@ -44,7 +44,7 @@ drifts: each header says which milestone landed and what did not, and the
 
 ## The index
 
-122 RFCs, numbered 0001 to 0123, with one gap. **There is no RFC-0066** — the
+123 RFCs, numbered 0001 to 0124, with one gap. **There is no RFC-0066** — the
 number was skipped and never used. The only mention of it in the repository is
 this sentence. Closing the gap would mean renumbering thirty files and breaking
 every cross-reference, so the gap stays.
@@ -164,7 +164,7 @@ claim is true — is written down in the test's own header.
 | [0106](RFC-0106-a-consumer-page-is-scanned-not-read.md) | A Consumer Page Is Scanned, Not Read | Implemented |
 | [0107](RFC-0107-a-template-component-is-a-library.md) | A Template Component Is a Library | Implemented |
 | [0108](RFC-0108-the-string-scan-is-interpreted.md) | The String Scan Is Interpreted | Prototyped; its own question answered no |
-| [0109](RFC-0109-a-read-that-does-not-copy.md) | A Read That Does Not Copy | Draft; three of four designs eliminated by measurement, the fourth not chosen |
+| [0109](RFC-0109-a-read-that-does-not-copy.md) | A Read That Does Not Copy | Decided; the stored view is a locator, not a pointer — the trilemma proves nothing freer exists, the projection arc built the read half (a subtree escape re-measures 168.7 µs against 3 ns through the chain), and a dedicated Range lands with its first payer |
 | [0110](RFC-0110-a-lambda-takes-its-parameters-before-an-arrow.md) | A Lambda Takes Its Parameters Before an Arrow | Implemented; `x -> e`, `(a, b) -> e`, `() -> e` |
 | [0111](RFC-0111-a-program-can-write-bytes.md) | A Program Can Write Bytes | Implemented; `writeFileBytes`, `writeStdout` — closes the mandelbrot gap |
 | [0112](RFC-0112-a-regular-expression-that-searches.md) | A Regular Expression That Searches | Implemented; `std/regex` in Vyrn — closes the regex-redux gap |
@@ -179,6 +179,7 @@ claim is true — is written down in the test's own header.
 | [0121](RFC-0121-a-pattern-is-a-place.md) | a pattern is a place | Implemented; `let JArr(items) = j` binds the payload in the enclosing scope or traps, and `std/json` reads `j[i]` / `j.field(key)` in place — 3 ns against the census row's copy |
 | [0122](RFC-0122-an-option-of-a-place.md) | an option of a place | Implemented; `-> read Option<T>` is a projection that may miss, read only where `if let` tests it — `slots.tryAt` reads a live handle at 3 ns against `get`'s 50 ns copy |
 | [0123](RFC-0123-the-arc-closes-its-gaps.md) | the arc closes its gaps | Implemented; staged tolerance, protocol-declared projections, chained receivers, and the writable name weighed and closed "not yet" |
+| [0124](RFC-0124-work-that-happens-once.md) | work that happens once | Implemented; generation-side at-most-once evaluation for provably effect-free nullary functions (referential transparency with its hypothesis screened, not assumed) — site export 16.7 s → 13.8 s; runtime once-only recorded as module state's answered question |
 
 ## The other documents here
 
