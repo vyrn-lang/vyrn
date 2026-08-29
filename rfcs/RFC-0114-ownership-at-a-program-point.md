@@ -16,8 +16,11 @@
   check's first corpus pass caught a real hole — a user-container `for`
   clones its body, so rows planned on the original were invisible to both
   backends until an alias map made the clone answer for it (see the proofs
-  document, §26 "as landed"). Still out: full §25 free-trace bisimulation,
-  priced there.
+  document, §26 "as landed"). The per-binding store gates followed the same
+  day: `slot_owns`/`place_owns` are deleted, and a field or element store's
+  ownedness is the plan's per-statement answer, proven byte-identical over
+  the whole corpus's IR and WAT. Still out: full §25 free-trace
+  bisimulation, priced there — nothing else.
 - **Evidence:** [rfcs/census/declared-release-does-not-run.md](census/declared-release-does-not-run.md).
 - **Appendix A:** [the algorithm and its proofs](proofs/release-algorithm.md) —
   Part I: the invariant, three soundness theorems, and the assumption each of

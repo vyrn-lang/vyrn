@@ -880,9 +880,20 @@ struct holding every per-NODE decision — `arg_drops`, `store_owned`,
 handed to each backend as a single reference where four separate products
 used to thread through every constructor. (`droppable` and `releases` stay
 beside it: per-BINDING and per-EXIT, they feed the runtime registries.)
-Steps 3–4's remaining substance — deleting the per-binding store gates the
-backends keep for field and element stores — stays open. **The finish
-check's loudness landed 2026-08-29**, and the design that unblocked it put
+**Steps 3–4's remaining substance landed 2026-08-29, same day as the
+finish check and gated by it**: the per-binding store gates
+(`Gen::slot_owns`, `Fn_::place_owns` — §22's "per-binding guess, twice")
+are deleted. A field or element store's ownedness is one plan answer now:
+movecheck records each `SetField`/`IndexSet` with its target's binding key
+(the alias guards applied at the record site), and `own::analyze` folds
+module-state rule 4 plus the droppable rows into `store_owned` — the same
+two ways to own the registries tested, decided once and read through the
+same recording query, so the finish check covers these sites for free. The
+migration is proven byte-identical: the full corpus's IR and WAT diff
+empty against the pre-migration build, and the fold is pinned by a unit
+test (droppable local owns, module state owns by rule, a value naming the
+target is the alias guard's). **The finish check's loudness landed
+2026-08-29**, and the design that unblocked it put
 the reachability answer where it already lived instead of instrumenting
 constructs: every plan row carries its owning function (the movecheck
 walker's own `cur_fn`, at the rows' push sites), the plan's sets are read

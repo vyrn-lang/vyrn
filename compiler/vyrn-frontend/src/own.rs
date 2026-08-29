@@ -1406,7 +1406,7 @@ pub fn analyze(program: &Program) -> Ownership {
     // by the pass that enforces the rules. One walk, one answer, no second
     // opinion (RFC-0087 records three defects that were two walkers disagreeing).
     let facts = crate::movecheck::facts(program);
-    let store_owned = fold_store_owned(&facts);
+    let mut store_owned = fold_store_owned(&facts);
     let edge_releases = fold_edge_releases(&facts);
     let revived = fold_revived(&facts);
     let lets = facts.lets;
@@ -1505,6 +1505,23 @@ pub fn analyze(program: &Program) -> Ownership {
         })
         .map(|(k, _, _)| *k)
         .collect();
+    // RFC-0114 §26 (steps 3–4): a field or element store releases what it
+    // displaces when the TARGET owns its contents — module state by rule
+    // (a global owns what it holds; rule 2 refuses storing a borrow into
+    // one), a local when this function releases the binding (its droppable
+    // row, read as a property of the slot exactly as RFC-0087 §4 asked).
+    // Folded here so both backends read one answer where each used to keep
+    // a per-binding registry guess (`slot_owns`/`place_owns`, §22's table).
+    for ps in &facts.place_stores {
+        let owned = ps.is_global
+            || (ps.key != 0
+                && droppable
+                    .get(&ps.owner)
+                    .is_some_and(|d| d.contains_key(&ps.key)));
+        if owned {
+            store_owned.insert(ps.id);
+        }
+    }
     // §26's finish check: every plan row remembers its function, read off
     // the walker's own attribution — the reachability half is then the
     // emitters' emitted-set, and dead code alarms nobody.
@@ -1525,6 +1542,11 @@ pub fn analyze(program: &Program) -> Ownership {
             if id != 0 && store_owned.contains(&id) {
                 owners.insert(id, ev.owner.clone());
             }
+        }
+    }
+    for ps in &facts.place_stores {
+        if store_owned.contains(&ps.id) {
+            owners.insert(ps.id, ps.owner.clone());
         }
     }
     for er in &facts.edge_releases {
@@ -2592,6 +2614,42 @@ pub(crate) mod tests {
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let s = a + b; let n = s.length; return n; }";
         assert_eq!(drop_count(src, "main"), 1);
+    }
+
+    /// §26 steps 3–4: a field store into a binding this function releases
+    /// gets a `store_owned` row (the displaced value is the store's to
+    /// free); the same store into module state gets one by rule 4; and a
+    /// store whose value mentions the target gets none — the alias guard
+    /// folded with the ownedness.
+    #[test]
+    fn a_place_store_owns_by_the_plan() {
+        let src = "type B = { s: String }\n\
+                   let mut g = B { s: \"m\" }\n\
+                   fn main() -> Int64 {\n\
+                       let mut b = B { s: \"x\" + \"y\" }\n\
+                       b.s = \"p\" + \"q\"\n\
+                       g.s = \"r\" + \"t\"\n\
+                       b.s = b.s + \"!\"\n\
+                       return b.s.byteLength\n\
+                   }";
+        let (o, p) = analyze_src(src);
+        let stores: Vec<usize> = p.functions[0]
+            .body
+            .stmts
+            .iter()
+            .filter(|s| matches!(s, crate::ast::Stmt::SetField { .. }))
+            .map(|s| s as *const crate::ast::Stmt as usize)
+            .collect();
+        assert_eq!(stores.len(), 3);
+        assert!(o.plan.store_owned_at(stores[0]), "droppable local owns");
+        assert!(
+            o.plan.store_owned_at(stores[1]),
+            "module state owns by rule"
+        );
+        assert!(
+            !o.plan.store_owned_at(stores[2]),
+            "a value naming the target is the alias guard's"
+        );
     }
 
     /// RFC-0114 §26's finish check, mechanism-tested: a plan row in an

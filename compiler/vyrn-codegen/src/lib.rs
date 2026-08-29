@@ -4952,20 +4952,6 @@ impl<'a> Gen<'a> {
             .release_kind(&vyrn_frontend::types::substitute(ty, self.subst))
     }
 
-    /// Whether a store into `slot` may release what `slot` holds now
-    /// (RFC-0089 rule 4).
-    ///
-    /// Module state owns its contents by rule: reading a global is a borrow and
-    /// storing into one stores an owned value, because rule 2 refuses a borrow at
-    /// a store. A local owns its contents when this function already releases it —
-    /// the `droppable` fact read as a property of the slot rather than of the
-    /// block, which is what RFC-0087 §4 asked for. Inside a `region` nothing is
-    /// released: the arena owns what was allocated there.
-    fn slot_owns(&self, slot: &str) -> bool {
-        self.region_depth == 0
-            && (slot.starts_with('@') || self.drop_slots.values().any(|d| d.slot == slot))
-    }
-
     /// The heap buffers the value in `slot` holds right now, loaded so a store may
     /// replace it before they are handed back.
     ///
@@ -5252,8 +5238,12 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{cur} = load {rec_ll}, ptr {slot}"));
                 // Rule 4 through a field: the record owns what its field holds, so
                 // storing over it releases the old one. Census §4's second row.
-                let snap = if self.slot_owns(&slot)
-                    && !vyrn_frontend::movecheck::mentions_place(value, name)
+                // §26 steps 3–4: the plan's per-statement answer replaces the
+                // per-binding registry guess (`slot_owns`), queried before the
+                // region gate so an arena-owned site still counts as
+                // considered. The value-alias guard folded with it.
+                let snap = if self.plan.store_owned_at(stmt as *const Stmt as usize)
+                    && self.region_depth == 0
                 {
                     let old = self.fresh_tmp();
                     self.emit(format!("{old} = extractvalue {rec_ll} {cur}, {idx}"));
@@ -5289,6 +5279,10 @@ impl<'a> Gen<'a> {
                 if let Some(blk) =
                     vyrn_frontend::project::store_index(self.impls, name, index, value, &aty)?
                 {
+                    // The projection's own statements decide the release —
+                    // acknowledged so §26's finish check knows the site was
+                    // considered, not walked past.
+                    let _ = self.plan.store_owned_at(stmt as *const Stmt as usize);
                     return self.gen_block(blk);
                 }
                 let bad_l = self.fresh_label("set.oob");
@@ -5323,9 +5317,8 @@ impl<'a> Gen<'a> {
                         self.emit(format!("{ep} = getelementptr {ell}, ptr {data}, i64 {iv}"));
                         // Rule 4 through an element: the container owns what its
                         // element holds, so storing over it releases the old one.
-                        let snap = if self.slot_owns(&slot)
-                            && !vyrn_frontend::movecheck::mentions_place(value, name)
-                            && !vyrn_frontend::movecheck::mentions_place(index, name)
+                        let snap = if self.plan.store_owned_at(stmt as *const Stmt as usize)
+                            && self.region_depth == 0
                         {
                             self.snap_old(&ep, &elem)
                         } else {
@@ -5363,9 +5356,8 @@ impl<'a> Gen<'a> {
                         // `sa[i] = other` abandoned the displaced element's
                         // buffer — reclaimed neither here nor at drop, which
                         // releases only the slots' current contents.
-                        let snap = if self.slot_owns(&slot)
-                            && !vyrn_frontend::movecheck::mentions_place(value, name)
-                            && !vyrn_frontend::movecheck::mentions_place(index, name)
+                        let snap = if self.plan.store_owned_at(stmt as *const Stmt as usize)
+                            && self.region_depth == 0
                         {
                             self.snap_old(&ep, &elem)
                         } else {
@@ -5394,11 +5386,18 @@ impl<'a> Gen<'a> {
                         self.emit(format!(
                             "{ep} = getelementptr {aggty}, ptr {slot}, i64 0, i64 {iv}"
                         ));
+                        // A fixed array's displaced element is not released
+                        // here today (a recorded residue, preserved by this
+                        // migration) — acknowledged for §26's finish check.
+                        let _ = self.plan.store_owned_at(stmt as *const Stmt as usize);
                         self.emit(format!("store {ell} {v}, ptr {ep}"));
                         Ok(())
                     }
                     // `m[k] = v` on a Map (RFC-0028): insert-or-update in place.
                     Type::Map(key, val) => {
+                        // A map entry's release is `emit_map_set`'s own two
+                        // questions — acknowledged for §26's finish check.
+                        let _ = self.plan.store_owned_at(stmt as *const Stmt as usize);
                         let key = *key;
                         let val = *val;
                         let (kv, _) = self.gen_expr(index)?;
