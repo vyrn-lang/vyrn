@@ -785,7 +785,12 @@ fn expr<'a>(e: &'a Expr, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) ->
             kids.push(expr(lhs, d, chain, w));
             kids.push(expr(rhs, d, chain, w));
         }
-        Expr::Call { name, args, .. } if name == vyrn_frontend::project::AT => {
+        Expr::Call { name, args, .. }
+            if name == vyrn_frontend::project::AT
+                || w.impls
+                    .iter()
+                    .any(|i| i.places.iter().any(|p| p.name == *name)) =>
+        {
             for a in args {
                 kids.push(expr(a, d, chain, w));
             }
@@ -793,8 +798,16 @@ fn expr<'a>(e: &'a Expr, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) ->
             // Not a child: `has_of` derives an `@at`'s has-type from the
             // receiver, and the expansion is the same answer arrived at the
             // long way. The rows are here so a backend walking those nodes is
-            // walking nodes this form has answers for.
-            desugar(e, args, d, chain, w);
+            // walking nodes this form has answers for. A named projection
+            // (RFC-0120) is the same site with its own method name — `x.f(..)`
+            // and `x[i]` differ only in which row of the impl the lookup
+            // answers from.
+            let method = if name == vyrn_frontend::project::AT {
+                "at"
+            } else {
+                name
+            };
+            desugar(e, method, args, d, chain, w);
         }
         Expr::Call { args, .. } | Expr::TryConstruct { args, .. } | Expr::Spawn { args, .. } => {
             for a in args {
@@ -951,8 +964,15 @@ fn has_of(e: &Expr, kids: &[usize], w: &Walk<'_, '_>) -> Option<Type> {
 /// `static_ty`, the other with `peek`. All three then ask
 /// [`vyrn_frontend::project::site`], which expands once and hands the same tree
 /// to each of them (RFC-0101's desugar-once milestone).
-fn desugar<'a>(e: &'a Expr, args: &'a [Expr], depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
-    if args.len() != 2 || w.impls.is_empty() {
+fn desugar<'a>(
+    e: &'a Expr,
+    method: &str,
+    args: &'a [Expr],
+    depth: u16,
+    chain: &mut Chain,
+    w: &mut Walk<'a, '_>,
+) {
+    if args.is_empty() || w.impls.is_empty() {
         return;
     }
     let key = &args[0] as *const Expr as usize;
@@ -960,7 +980,7 @@ fn desugar<'a>(e: &'a Expr, args: &'a [Expr], depth: u16, chain: &mut Chain, w: 
         return;
     };
     let Ok(Some(p)) =
-        vyrn_frontend::project::site(w.impls, Some(&recv), "at", &args[0], &args[1..], e.line())
+        vyrn_frontend::project::site(w.impls, Some(&recv), method, &args[0], &args[1..], e.line())
     else {
         return;
     };

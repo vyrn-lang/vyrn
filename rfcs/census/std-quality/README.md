@@ -381,6 +381,15 @@ Written up as RFC-0109, with four candidate designs and the one question it
 leaves open: whether a view can be STORED. The hot loop does not need that. These
 ten modules do.
 
+**2026-08-29: RFC-0120 answered the getter half.** Projections lost their
+three-name gate and their `place`/`yield` spelling — any impl member
+`fn f(read self, ..) -> read T` now reads in place at every engine, priced at
+3 ns against the 24 ns copy in its witness bench. The conversion pass then
+sharpened this question rather than closing it: `slots.get` waits on an
+Option of a place, `jsondec` on a place surviving a `match`, `contract` on a
+receiver for a free function's result. Each payer now names its missing
+extension instead of citing RFC-0109 wholesale.
+
 ### Question two: is there anywhere to put work that happens once?
 
 Pattern 3, seven modules, plus `std/openapi` and `std/http` and `std/rpc`

@@ -1307,7 +1307,7 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
             push(cerr_at!(
                 f.line,
                 f.name_span(),
-                "`place {}` must end with exactly one `yield <place>` — \
+                "projection `{}` must end with exactly one `return <place>` — \
                  a projection is inlined at the access site, so it has one exit",
                 f.name
             ));
@@ -1319,7 +1319,7 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
         // `e?` propagates by RETURNING, and a projection has no frame to
         // return from — inlined, it would exit the access site's function.
         if crate::project::has_try(&f.body) {
-            push(cerr_at!(f.line, f.name_span(), "`place {}` uses `?`, which returns — a projection is                  inlined at the access site, so there is no frame to return                  from. Check the condition and `panic` instead.", f.name
+            push(cerr_at!(f.line, f.name_span(), "projection `{}` uses `?`, which returns — a projection is                  inlined at the access site, so there is no frame to return                  from. Check the condition and `panic` instead.", f.name
             ));
             continue;
         }
@@ -1327,9 +1327,9 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
             push(cerr_at!(
                 f.line,
                 f.name_span(),
-                "`place {}` yields a value, not a place — write \
-                 `yield <field or element of self>`; a projection that computes \
-                 a new value is an ordinary `fn`",
+                "projection `{}` returns a value, not a place — a `read`/`modify` \
+                 result must be a field or element of `self`; a projection that \
+                 computes a new value is an ordinary `fn` returning `-> T`",
                 f.name
             ));
             continue;
@@ -1339,9 +1339,9 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
             Some(root) => push(cerr_at!(
                 f.line,
                 f.name_span(),
-                "`place {}` yields a place rooted at `{root}`, which the \
-                 access site does not own — a projection may only yield into \
-                 `self` or one of its parameters",
+                "projection `{}` returns a place rooted at `{root}`, which the \
+                 access site does not own — a projection may only return a place \
+                 inside `self` or one of its parameters",
                 f.name
             )),
             None => {}
@@ -1839,7 +1839,7 @@ impl<'a> Checker<'a> {
         if args.len() - 1 != f.params.len() - 1 {
             return Err(cerr!(
                 line,
-                "`place {method}` expects {} argument(s) besides `self`, got {}",
+                "projection `{method}` expects {} argument(s) besides `self`, got {}",
                 f.params.len() - 1,
                 args.len() - 1
             ));
@@ -1854,7 +1854,7 @@ impl<'a> Checker<'a> {
             if !self.coercible(&got, &want) {
                 return Err(cerr!(
                     line,
-                    "`place {method}` argument is {got}, expected {want}"
+                    "projection `{method}` argument is {got}, expected {want}"
                 ));
             }
             self.prove_coercion(arg, &want, line)?;
@@ -3507,7 +3507,8 @@ impl<'a> Checker<'a> {
                                 return Err(cerr!(
                                     line,
                                     "`{name}[i] = ..` needs an Array, a Map, or a \
-                                     type that declares `place atSet`, found {other}"
+                                     type whose impl declares the `atSet` projection \
+                                     (`fn atSet(modify self, ..) -> modify T`), found {other}"
                                 ))
                             }
                         }
@@ -3699,7 +3700,8 @@ impl<'a> Checker<'a> {
                                 return Err(cerr!(
                                     line,
                                     "`for` needs an Array, a String, or a type that \
-                                     declares `impl Iterate` (a `size` method and a `place nth`), \
+                                     declares `impl Iterate` (a `size` method and an `nth` \
+                                     projection, `fn nth(read self, ..) -> read T`), \
                                      found {other}"
                                 ))
                             }
@@ -8344,6 +8346,47 @@ impl<'a> Checker<'a> {
             }
         }
 
+        // RFC-0120: `x.f(..)` where `f` names a projection on `x`'s type is an
+        // access, not a call — typed exactly as `x[i]` is, through the
+        // projection's declared result with the impl head solved from the
+        // receiver, and lowered through the same shared expansion. Consulted
+        // only when no function answers to the name (the scan below is one
+        // walk over the impl list on the sole path that used to end in `call
+        // to unknown function`), so nothing that resolved before this existed
+        // changes meaning.
+        if self.sigs.get(name).is_none()
+            && !args.is_empty()
+            && self
+                .impl_blocks
+                .iter()
+                .any(|i| i.places.iter().any(|p| p.name == *name))
+        {
+            let recv = self.expr(&args[0], scope, None, fn_ret)?;
+            if let Some(t) = self.place_result(&recv, name, args, scope, fn_ret, line)? {
+                if recording() {
+                    if let Ok(Some(p)) = crate::project::site(
+                        self.impl_blocks,
+                        Some(&recv),
+                        name,
+                        &args[0],
+                        &args[1..],
+                        line,
+                    ) {
+                        let ret = fn_ret.cloned().unwrap_or(Type::Unit);
+                        self.record_desugar(scope, |c, sc| {
+                            sc.push(HashMap::new());
+                            for s in &p.prologue {
+                                if c.stmt(s, &ret, sc).is_err() {
+                                    return;
+                                }
+                            }
+                            let _ = c.expr(&p.place, sc, None, fn_ret);
+                        });
+                    }
+                }
+                return Ok(t);
+            }
+        }
         let (params, ret) = self
             .sigs
             .get(name)
@@ -10964,8 +11007,8 @@ mod tests {
     fn a_projection_types_an_index_of_a_user_container() {
         assert!(check_src(&format!(
             "{RING}\
-             impl Index for Ring {{ place at(read self, i: Int64) -> Int64 \
-             {{ yield self.data[i] }} }}\n\
+             impl Index for Ring {{ fn at(read self, i: Int64) -> read Int64 \
+             {{ return self.data[i] }} }}\n\
              fn main() -> Int64 {{ let mut d: Array<Int64> = []\n d.push(7)\n \
              let r = Ring {{ data: d }}\n return r[0] }}"
         ))
@@ -10979,8 +11022,8 @@ mod tests {
     fn a_projection_answers_the_method_form_too() {
         let head = format!(
             "{RING}\
-             impl Index for Ring {{ place at(read self, i: Int64) -> Int64 \
-             {{ yield self.data[i] }} }}\n\
+             impl Index for Ring {{ fn at(read self, i: Int64) -> read Int64 \
+             {{ return self.data[i] }} }}\n\
              fn main() -> Int64 {{ let mut d: Array<Int64> = []\n d.push(7)\n \
              let r = Ring {{ data: d }}\n"
         );
@@ -10996,8 +11039,8 @@ mod tests {
     fn a_projection_types_a_store_into_a_user_container() {
         assert!(check_src(&format!(
             "{RING}\
-             impl Index for Ring {{ place atSet(modify self, i: Int64) -> Int64 \
-             {{ yield self.data[i] }} }}\n\
+             impl Index for Ring {{ fn atSet(modify self, i: Int64) -> modify Int64 \
+             {{ return self.data[i] }} }}\n\
              fn main() -> Int64 {{ let mut d: Array<Int64> = []\n d.push(7)\n \
              let mut r = Ring {{ data: d }}\n r[0] = 9\n return 0 }}"
         ))
@@ -11009,7 +11052,7 @@ mod tests {
              fn main() -> Int64 {{ let mut r = Ring {{ data: [] }}\n r[0] = 9\n return 0 }}"
         ))
         .unwrap_err();
-        assert!(e.contains("place atSet"), "{e}");
+        assert!(e.contains("`atSet` projection"), "{e}");
     }
 
     /// RFC-0091 M3. A user container iterates through `Iterate`, and the loop
@@ -11019,7 +11062,7 @@ mod tests {
         let head = "type Ring = { data: Array<Int64> }\n\
                     impl Iterate for Ring {\n\
                       fn size(self) -> Int64 { return self.data.length }\n\
-                      place nth(read self, i: Int64) -> Int64 { yield self.data[i] }\n\
+                      fn nth(read self, i: Int64) -> read Int64 { return self.data[i] }\n\
                     }\n";
         assert!(check_src(&format!(
             "{head}fn main() -> Int64 {{ let r = Ring {{ data: [] }}\n let mut s = 0\n \
@@ -11035,33 +11078,33 @@ mod tests {
              for x in r { print(x) }\n return 0 }",
         )
         .unwrap_err();
-        assert!(e.contains("place nth"), "{e}");
+        assert!(e.contains("`nth` projection"), "{e}");
     }
 
     #[test]
     fn a_projection_must_yield_a_place_not_a_value() {
         let e = check_src(&format!(
             "{RING}\
-             impl Index for Ring {{ place at(read self, i: Int64) -> Int64 \
-             {{ yield i + 1 }} }}\n\
+             impl Index for Ring {{ fn at(read self, i: Int64) -> read Int64 \
+             {{ return i + 1 }} }}\n\
              fn main() -> Int64 {{ return 0 }}"
         ))
         .unwrap_err();
-        assert!(e.contains("yields a value, not a place"), "{e}");
+        assert!(e.contains("returns a value, not a place"), "{e}");
     }
 
     #[test]
     fn a_projection_yields_once_and_last() {
         let e = check_src(&format!(
             "{RING}\
-             impl Index for Ring {{ place at(read self, i: Int64) -> Int64 {{\n\
-                 if i < 0 {{ yield self.data[0] }}\n\
-                 yield self.data[i]\n\
+             impl Index for Ring {{ fn at(read self, i: Int64) -> read Int64 {{\n\
+                 if i < 0 {{ return self.data[0] }}\n\
+                 return self.data[i]\n\
              }} }}\n\
              fn main() -> Int64 {{ return 0 }}"
         ))
         .unwrap_err();
-        assert!(e.contains("exactly one `yield <place>`"), "{e}");
+        assert!(e.contains("exactly one `return <place>`"), "{e}");
     }
 
     #[test]
@@ -11069,8 +11112,8 @@ mod tests {
         let e = check_src(&format!(
             "let mut spare: Array<Int64> = []\n\
              {RING}\
-             impl Index for Ring {{ place at(read self, i: Int64) -> Int64 \
-             {{ yield spare[i] }} }}\n\
+             impl Index for Ring {{ fn at(read self, i: Int64) -> read Int64 \
+             {{ return spare[i] }} }}\n\
              fn main() -> Int64 {{ return 0 }}"
         ))
         .unwrap_err();
@@ -11081,8 +11124,8 @@ mod tests {
     fn a_projection_may_not_propagate_with_a_question_mark() {
         let e = check_src(&format!(
             "type Box = {{ v: Option<Array<Int64>> }}\n\
-             impl Index for Box {{ place at(read self, i: Int64) -> Int64 \
-             {{ yield self.v?[i] }} }}\n\
+             impl Index for Box {{ fn at(read self, i: Int64) -> read Int64 \
+             {{ return self.v?[i] }} }}\n\
              fn main() -> Int64 {{ return 0 }}"
         ))
         .unwrap_err();
@@ -11093,8 +11136,8 @@ mod tests {
     fn a_projection_body_is_checked_like_a_function_body() {
         let e = check_src(&format!(
             "{RING}\
-             impl Index for Ring {{ place at(read self, i: Int64) -> String \
-             {{ yield self.data[i] }} }}\n\
+             impl Index for Ring {{ fn at(read self, i: Int64) -> read String \
+             {{ return self.data[i] }} }}\n\
              fn main() -> Int64 {{ return 0 }}"
         ))
         .unwrap_err();

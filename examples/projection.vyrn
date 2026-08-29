@@ -1,23 +1,24 @@
 /// Place projections — a container of your own that indexes like a built-in
-/// (RFC-0091 M2).
+/// (RFC-0091 M2, spelled per RFC-0120).
 ///
-/// A `place` member yields a place inside its receiver instead of returning a
-/// value. It is not a function: the access site inlines its body, so the borrow
-/// it hands out lives inside the caller's frame and cannot escape. Rule 2 of
-/// RFC-0089 holds by construction rather than by a check.
+/// A member whose result carries a capability (`-> read T`) returns a place
+/// inside its receiver instead of an owned value. It is not a function: the
+/// access site inlines its body, so the borrow it hands out lives inside the
+/// caller's frame and cannot escape. Rule 2 of RFC-0089 holds by construction
+/// rather than by a check.
 ///
-/// `Array` itself indexes through the same table. Its seeded row yields the one
-/// primitive the compiler keeps — the element place — and every `a[i]` in this
-/// file reaches it that way.
+/// `Array` itself indexes through the same table. Its seeded row exits into the
+/// one primitive the compiler keeps — the element place — and every `a[i]` in
+/// this file reaches it that way.
 
 /// A fixed window over a buffer. `w[i]` reads element `start + i`, so the
 /// window's own zero is somewhere in the middle of what it borrows.
 type Window = { data: Array<Int64>, start: Int64 }
 
 impl Index for Window {
-    /// The simple shape: yield straight into a field.
-    place at(read self, i: Int64) -> Int64 {
-        yield self.data[self.start + i]
+    /// The simple shape: return straight into a field.
+    fn at(read self, i: Int64) -> read Int64 {
+        return self.data[self.start + i]
     }
 }
 
@@ -25,11 +26,11 @@ impl Index for Window {
 type Strided = { data: Array<Int64>, stride: Int64 }
 
 impl Index for Strided {
-    /// A prologue: the projection computes before it yields, and those
+    /// A prologue: the projection computes before it exits, and those
     /// statements run in the caller's frame ahead of the access.
-    place at(read self, i: Int64) -> Int64 {
+    fn at(read self, i: Int64) -> read Int64 {
         let k = i * self.stride
-        yield self.data[k]
+        return self.data[k]
     }
 }
 
@@ -38,10 +39,10 @@ impl Index for Strided {
 type Clamped = { data: Array<Int64> }
 
 impl Index for Clamped {
-    place at(read self, i: Int64) -> Int64 {
+    fn at(read self, i: Int64) -> read Int64 {
         let n = self.data.length
         let j = if i < n { i } else { n - 1 }
-        yield self.data[j]
+        return self.data[j]
     }
 }
 

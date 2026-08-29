@@ -1,0 +1,76 @@
+/// Named projections (RFC-0120): any member whose result carries a capability
+/// dispatches at a method call, not just `at`/`atSet`/`nth`.
+///
+/// `h.tag(i)` inlines exactly as `h[i]` does — same table, same expansion,
+/// same in-place read — so a caller can look into an element (here: bind one
+/// enum payload with `if let`) without copying the node it looks into.
+
+type Entry =
+    | Named(String)
+    | Blank
+
+type Ledger = { entries: Array<Entry>, labels: Array<String> }
+
+impl Index for Ledger {
+    fn at(read self, i: Int64) -> read Entry {
+        return self.entries[i]
+    }
+
+    /// A projection under its own name: the label column of the same row.
+    fn tag(read self, i: Int64) -> read String {
+        return self.labels[i]
+    }
+
+    /// A prologue before the exit, exactly as `at` has always allowed.
+    fn wrapped(read self, i: Int64) -> read Entry {
+        let n = self.entries.length
+        let j = i % n
+        return self.entries[j]
+    }
+}
+
+/// The same lookup as `tag`, priced the old way: a function that must hand
+/// the label out as an owned result pays a copy per read. The two benches
+/// below are RFC-0120's before/after.
+fn tagCopy(led: Ledger, i: Int64) -> String {
+    return led.labels[i].copy()
+}
+
+let mut benchLedger = Ledger { entries: [], labels: [] }
+
+fn ensureBench() {
+    if benchLedger.labels.length == 0 {
+        let mut i = 0
+        while i < 64 {
+            benchLedger.labels.push("a label long enough to live on the heap \{i}")
+            benchLedger.entries.push(Blank)
+            i = i + 1
+        }
+    }
+}
+
+bench "a read through the projection" {
+    ensureBench()
+    blackBox(benchLedger.tag(17).byteLength)
+}
+
+bench "the same read as an owned copy" {
+    ensureBench()
+    blackBox(benchLedger.tagCopy(17).byteLength)
+}
+
+fn main() -> Int64 {
+    let led = Ledger {
+        entries: [Named("first entry, long enough to live on the heap"), Blank],
+        labels: ["alpha", "beta"],
+    }
+    print("tag: \{led.tag(1)}")
+    print("tagLen: \{led.tag(0).byteLength}")
+    if let Named(s) = led[0] {
+        print("payload: \{s.byteLength}")
+    }
+    if let Named(s) = led.wrapped(2) {
+        print("wrapped: \{s.byteLength}")
+    }
+    return 0
+}

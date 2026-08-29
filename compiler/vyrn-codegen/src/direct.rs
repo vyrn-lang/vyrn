@@ -7788,6 +7788,32 @@ impl<'p> Fn_<'_, 'p> {
             }
             return Ok(ext.ret.clone());
         }
+        // RFC-0120: a named projection dispatches here exactly as `a[i]` does —
+        // the same table, its own method name. Last, so every callable of the
+        // same name won above, which is the checker's resolution order too.
+        if !args.is_empty()
+            && self.cx.sigs.get(name).is_none()
+            && self
+                .cx
+                .impls
+                .iter()
+                .any(|i| i.places.iter().any(|p| p.name == *name))
+        {
+            let recv = self.peek(&args[0], line).ok();
+            if let Some(p) = vyrn_frontend::project::site(
+                &self.cx.impls,
+                recv.as_ref(),
+                name,
+                &args[0],
+                &args[1..],
+                line,
+            )? {
+                for s in &p.prologue {
+                    self.stmt(m, b, s)?;
+                }
+                return self.expr(m, b, &p.place);
+            }
+        }
         let Some(sig) = self.cx.sigs.get(name).cloned() else {
             return unsupported(&format!("the call `{name}`"), line);
         };

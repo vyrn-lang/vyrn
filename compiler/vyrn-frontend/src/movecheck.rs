@@ -541,6 +541,32 @@ fn views(name: &str) -> bool {
     crate::prelude::lends(name)
 }
 
+thread_local! {
+    /// The user projection NAMES of the program under check (RFC-0120).
+    ///
+    /// This pass keys every element-read rule on the spelling `@at`, because
+    /// `@at` is reserved and therefore IS an element read wherever it appears.
+    /// A named projection is the same read under a user-chosen name, and the
+    /// name alone cannot say so — so [`run`] records the program's projection
+    /// names here and [`named_projection`] answers for the free functions
+    /// ([`element_path`]) that have no `&self` to carry a set through. A name
+    /// answers true whether or not the receiver at a given site is the
+    /// projection's own type; that over-approximation only widens a borrow
+    /// verdict, never narrows one, which is the conservative direction.
+    static PLACE_NAMES: std::cell::RefCell<HashSet<String>> =
+        std::cell::RefCell::new(HashSet::new());
+}
+
+/// Whether `name` is a user projection's name — see [`PLACE_NAMES`].
+fn named_projection(name: &str) -> bool {
+    PLACE_NAMES.with(|s| s.borrow().contains(name))
+}
+
+/// `@at`, or a user projection's own name: an element read either way.
+fn projection_call(name: &str) -> bool {
+    name == crate::project::AT || named_projection(name)
+}
+
 /// Check every function for use-after-consume, returning **all** problems found
 /// as structured [`Diagnostic`]s. Each function is checked independently, so
 /// a use-after-consume error in one function does not suppress errors in others.
@@ -572,6 +598,15 @@ pub fn borrow_store_sites(program: &Program) -> Vec<Diagnostic> {
 /// `want` turns each record on; with neither the pass still builds and carries
 /// its type environment, and asks `owns_heap` nowhere.
 fn run(program: &Program, want: Want) -> Run {
+    // The projection-name set for [`named_projection`], rebuilt per run so a
+    // long-lived process (the LSP) always answers for the program in hand.
+    PLACE_NAMES.with(|s| {
+        *s.borrow_mut() = program
+            .impls
+            .iter()
+            .flat_map(|i| i.places.iter().map(|p| p.name.clone()))
+            .collect();
+    });
     let mut caps: HashMap<String, Vec<Capability>> = program
         .functions
         .iter()
@@ -1661,8 +1696,13 @@ impl MoveCheck<'_> {
             // nothing, and costs the taken field the day M3 gives one a row.
             Expr::Consume { place, .. } => self.type_of(place),
             // An element read: `xs[i]` lowers to `@at`, and `x.copy()` is already
-            // answered by `Declared`. The element type is the container's.
-            Expr::Call { name, args, .. } if name == crate::project::AT => {
+            // answered by `Declared`. The element type is the container's. A
+            // NAMED projection (RFC-0120) reads an element too, but its result
+            // type is the projection's own declaration, which this pass does
+            // not resolve — `elem_of` answers only for builtin containers, so
+            // the named form falls through to `None` exactly as `@at` on a
+            // user container does.
+            Expr::Call { name, args, .. } if projection_call(name) => {
                 let c = self.type_of(args.first()?)?;
                 self.decl.elem_of(&c)
             }
@@ -1943,7 +1983,7 @@ impl MoveCheck<'_> {
     fn iterable_is_a_place(&self, e: &Expr) -> bool {
         match e {
             Expr::Var { .. } | Expr::Field { .. } => true,
-            Expr::Call { name, args, .. } if name == crate::project::AT => {
+            Expr::Call { name, args, .. } if projection_call(name) => {
                 args.first().is_some_and(|a| self.iterable_is_a_place(a))
             }
             _ => false,
@@ -5387,10 +5427,16 @@ fn calls_in(e: &Expr, out: &mut Vec<String>) {
 /// The instrument still counts them apart, under `elem-store` and `elem-return`.
 fn element_path(e: &Expr) -> Option<(String, String)> {
     match e {
-        Expr::Call { name, args, .. } if name == crate::project::AT => {
+        Expr::Call { name, args, .. } if projection_call(name) => {
             let a = args.first()?;
             let (root, path) = place_path(a).or_else(|| element_path(a))?;
-            Some((root, format!("{path}[{}]", index_text(args.get(1)))))
+            // A named projection quotes as the call the reader wrote; `@at`
+            // keeps the index spelling `xs[i]` it has always had.
+            if name == crate::project::AT {
+                Some((root, format!("{path}[{}]", index_text(args.get(1)))))
+            } else {
+                Some((root, format!("{path}.{name}(..)")))
+            }
         }
         // A field OF an element: `fs[0].key`. [`place_path`] walks a `Field` down
         // to a `Var` and answers `None` as soon as it meets the `@at(..)` call, so

@@ -329,7 +329,7 @@ pub fn store_index(
     };
     let Some(store) = store_stmts(&p.place, value, line) else {
         return Err(format!(
-            "line {line}: `{name}[..] = v` goes through a `place atSet` that yields              something with no address — a call result or a temporary. A projection              yields a place: a binding, a field of one, or an element of one"
+            "line {line}: `{name}[..] = v` goes through an `atSet` projection whose              result has no address — a call result or a temporary. A projection              returns a place: a binding, a field of one, or an element of one"
         ));
     };
     let mut out = p.prologue.clone();
@@ -374,7 +374,7 @@ pub fn stored(name: &str, index: &Expr, value: &Expr) -> Option<&'static Block> 
 pub fn inline(f: &Function, recv: &Expr, args: &[Expr], line: usize) -> Result<Projection, String> {
     if args.len() + 1 != f.params.len() {
         return Err(format!(
-            "line {line}: `place {}` takes {} argument(s), got {}",
+            "line {line}: projection `{}` takes {} argument(s), got {}",
             f.name,
             f.params.len() - 1,
             args.len()
@@ -448,8 +448,8 @@ pub fn inline(f: &Function, recv: &Expr, args: &[Expr], line: usize) -> Result<P
     }) = body.stmts.last()
     else {
         return Err(format!(
-            "line {line}: `place {}` has no `yield` — a projection ends by \
-             yielding the place it names",
+            "line {line}: projection `{}` has no exit — a projection ends by \
+             returning the place it names",
             f.name
         ));
     };
@@ -488,7 +488,7 @@ pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>>
             value: value.clone(),
             line,
         }]),
-        // A field of a place: `yield self.count`.
+        // A field of a place: `return self.count`.
         Expr::Field { expr, field, .. } => {
             let (recv, mut out, moves, post) = crate::parser::place_receiver(expr, line)?;
             let value = if moves.is_empty() {
@@ -511,7 +511,7 @@ pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>>
             out.extend(post);
             Some(out)
         }
-        // An element of a place: `yield self.data[j]`, and the seeded row's
+        // An element of a place: `return self.data[j]`, and the seeded row's
         // `yield @slot(self, i)`.
         Expr::Call { name, args, .. } if (name == AT || name == ELEM) && args.len() == 2 => {
             let (recv, mut out, moves, post) = crate::parser::place_receiver(&args[0], line)?;
@@ -1147,7 +1147,7 @@ mod tests {
         let p = parse(
             "type Ring = { data: Array<Int64> }\n\
              impl Index for Ring {\n\
-                 place at(read self, i: Int64) -> Int64 { yield self.data[i] }\n\
+                 fn at(read self, i: Int64) -> read Int64 { return self.data[i] }\n\
              }\n\
              fn main() { print(1) }\n",
         );
@@ -1162,7 +1162,7 @@ mod tests {
         let p = parse(
             "type Ring = { data: Array<Int64> }\n\
              impl Index for Ring {\n\
-                 place at(read self, i: Int64) -> Int64 { yield self.data[i] }\n\
+                 fn at(read self, i: Int64) -> read Int64 { return self.data[i] }\n\
              }\n\
              fn main() { print(1) }\n",
         );
@@ -1200,9 +1200,9 @@ mod tests {
         let p = parse(
             "type Ring = { data: Array<Int64> }\n\
              impl Index for Ring {\n\
-                 place at(read self, i: Int64) -> Int64 {\n\
+                 fn at(read self, i: Int64) -> read Int64 {\n\
                      let g = k -> self.data[i]\n\
-                     yield g(0)\n\
+                     return g(0)\n\
                  }\n\
              }\n\
              fn main() { print(1) }\n",
@@ -1268,7 +1268,7 @@ mod tests {
             "type Ring = { data: Array<Int64> }\n\
              impl Iterate for Ring {\n\
                  fn size(self) -> Int64 { return self.data.length }\n\
-                 place nth(read self, i: Int64) -> Int64 { yield self.data[i] }\n\
+                 fn nth(read self, i: Int64) -> read Int64 { return self.data[i] }\n\
              }\n\
              fn main() { print(1) }\n",
         );
@@ -1309,7 +1309,7 @@ mod tests {
             "type Ring = { data: Array<Int64> }\n\
              impl Iterate for Ring {\n\
                  fn size(self) -> Int64 { return self.data.length }\n\
-                 place nth(read self, i: Int64) -> Int64 { yield self.data[i] }\n\
+                 fn nth(read self, i: Int64) -> read Int64 { return self.data[i] }\n\
              }\n\
              fn main() { print(1) }\n",
         );
@@ -1350,9 +1350,9 @@ mod tests {
         let p = parse(
             "type Ring = { data: Array<Int64> }\n\
              impl Index for Ring {\n\
-                 place at(read self, i: Int64) -> Int64 {\n\
+                 fn at(read self, i: Int64) -> read Int64 {\n\
                      let j = i * 2\n\
-                     yield self.data[j]\n\
+                     return self.data[j]\n\
                  }\n\
              }\n\
              fn main() { print(1) }\n",
@@ -1378,15 +1378,15 @@ mod tests {
     /// out of the caller's namespace before substitution: `count_uses` walks
     /// through lambdas, so without the rename a single-use parameter was
     /// substituted IN PLACE inside the lambda body — `r[1]` on
-    /// `let g = |i| i + 1  yield self.data[g(0)]` read `data[2]`, not `data[1]`.
+    /// `let g = |i| i + 1  return self.data[g(0)]` read `data[2]`, not `data[1]`.
     #[test]
     fn a_lambda_parameter_is_renamed_out_of_the_callers_namespace() {
         let p = parse(
             "type Ring = { data: Array<Int64> }\n\
              impl Index for Ring {\n\
-                 place at(read self, i: Int64) -> Int64 {\n\
+                 fn at(read self, i: Int64) -> read Int64 {\n\
                      let g = i -> i + 1\n\
-                     yield self.data[g(0)]\n\
+                     return self.data[g(0)]\n\
                  }\n\
              }\n\
              fn main() { print(1) }\n",
