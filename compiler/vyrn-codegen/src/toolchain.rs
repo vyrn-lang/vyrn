@@ -412,6 +412,41 @@ void __vyrn_map_reserve_i64(VMapI* m, long long esz) { if (m->len + 1 > m->cap) 
 void __vyrn_map_index_add_i64(VMapI* m, long long i) { m->idx[map_slot_i64(m->keys, m->idx, m->cap * 2, m->keys[i])] = i + 1; }
 void __vyrn_map_remove_at_i64(VMapI* m, long long i, long long esz) { long long rest = m->len - i - 1; if (rest > 0) { memmove(m->keys + i, m->keys + i + 1, (size_t)(rest * (long long)sizeof(long long))); memmove(m->vals + i * esz, m->vals + (i + 1) * esz, (size_t)(rest * esz)); } m->len--; map_reindex_i64(m); }
 long long* __vyrn_map_keys_copy_i64(long long* keys, long long len) { long long* r = (long long*)__vyrn_malloc((unsigned long long)(len ? len : 1) * sizeof(long long)); long long i; for (i = 0; i < len; i++) r[i] = keys[i]; return r; }
+
+/* ---- the user-keyed map (RFC-0117 M2) ----------------------------------- */
+/* The same shape once more, the key column holding CANONICALLY PACKED values
+   of one fixed stride: codegen writes each key field-by-field into a zeroed
+   buffer, so memcmp over the stride IS field-wise equality and padding is
+   never compared. The hash is FNV-1a over the pack — the map's own, exactly
+   as the string map's FNV and the i64 map's SplitMix are its own; the type's
+   `impl Hashable` is the declared obligation, not a callback. */
+typedef struct { char* keys; char* vals; long long len, cap; long long* idx; } VMapP;
+static unsigned long long map_hash_pack(const unsigned char* p, long long n) {
+    unsigned long long h = 14695981039346656037ULL;
+    long long i;
+    for (i = 0; i < n; i++) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+static unsigned long long map_slot_pack(char* keys, long long stride, long long* idx, long long nb, const char* key) {
+    unsigned long long mask = (unsigned long long)nb - 1;
+    unsigned long long b = map_hash_pack((const unsigned char*)key, stride) & mask;
+    while (idx[b] && memcmp(keys + (idx[b] - 1) * stride, key, (size_t)stride) != 0) b = (b + 1) & mask;
+    return b;
+}
+static void map_reindex_pack(VMapP* m, long long stride) {
+    long long nb = m->cap * 2, i;
+    if (nb <= 0) return;
+    memset(m->idx, 0, (size_t)nb * sizeof(long long));
+    for (i = 0; i < m->len; i++) m->idx[map_slot_pack(m->keys, stride, m->idx, nb, m->keys + i * stride)] = i + 1;
+}
+long long __vyrn_map_find_pack(char* keys, long long len, const char* key, long long stride, long long* idx, long long cap) { unsigned long long b; if (len <= 0 || cap <= 0) return -1; b = map_slot_pack(keys, stride, idx, cap * 2, key); return idx[b] ? idx[b] - 1 : -1; }
+void __vyrn_map_reserve_pack(VMapP* m, long long esz, long long stride) { if (m->len + 1 > m->cap) { m->cap = m->cap ? m->cap * 2 : 4; m->keys = (char*)__vyrn_realloc(m->keys, (unsigned long long)m->cap * (unsigned long long)stride); m->vals = (char*)__vyrn_realloc(m->vals, (unsigned long long)m->cap * (unsigned long long)esz); m->idx = (long long*)__vyrn_realloc(m->idx, (unsigned long long)m->cap * 2 * sizeof(long long)); map_reindex_pack(m, stride); } }
+void __vyrn_map_index_add_pack(VMapP* m, long long i, long long stride) { m->idx[map_slot_pack(m->keys, stride, m->idx, m->cap * 2, m->keys + i * stride)] = i + 1; }
+void __vyrn_map_remove_at_pack(VMapP* m, long long i, long long esz, long long stride) { long long rest = m->len - i - 1; if (rest > 0) { memmove(m->keys + i * stride, m->keys + (i + 1) * stride, (size_t)(rest * stride)); memmove(m->vals + i * esz, m->vals + (i + 1) * esz, (size_t)(rest * esz)); } m->len--; map_reindex_pack(m, stride); }
+char* __vyrn_map_keys_copy_pack(char* keys, long long len, long long stride) { char* r = (char*)__vyrn_malloc((unsigned long long)((len ? len : 1) * stride)); if (len > 0) memcpy(r, keys, (size_t)(len * stride)); return r; }
 int __vyrn_snprintf(char* buf, unsigned long long n, const char* fmt, ...) {
     va_list ap;
     int r;

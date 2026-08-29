@@ -1,0 +1,70 @@
+// A user type as a Map key (RFC-0117 M2): a heapless record and a fieldless
+// enum, each admitted by its `impl Hashable` — the declared obligation that
+// equal values return equal hashes. Equality is field-wise (the runtime
+// compares canonical field bytes, never padding), and the impl is the type's
+// callable hash, exactly as `Int64`'s and `String`'s describe theirs.
+//
+//   $ vyrn run examples/mapkey.vyrn
+
+import { Hashable } from "std/hash"
+
+type Point = { x: Int64, y: Int64 }
+
+impl Hashable for Point {
+    fn hash(self) -> UInt64 {
+        return UInt64(self.x) * 31 + UInt64(self.y)
+    }
+}
+
+type Suit =
+    | Clubs
+    | Diamonds
+    | Hearts
+    | Spades
+
+impl Hashable for Suit {
+    fn hash(self) -> UInt64 {
+        return match self {
+            Clubs => UInt64(1),
+            Diamonds => UInt64(2),
+            Hearts => UInt64(3),
+            Spades => UInt64(4),
+        }
+    }
+}
+
+fn main() -> Int64 {
+    // The ops, one by one: insert, update, tally, read, membership, snapshot,
+    // removal — insertion order preserved throughout (RFC-0028's law).
+    let mut m: Map<Point, Int64> = [:]
+    m[Point { x: 1, y: 2 }] = 10
+    m[Point { x: 3, y: 4 }] = 20
+    m[Point { x: 1, y: 2 }] = 11
+    m.tally(Point { x: 1, y: 2 }, 4)
+    m.tally(Point { x: 5, y: 6 }, 1)
+    print("\{m.length}")
+    let first = match m[Point { x: 1, y: 2 }] {
+        Some(v) => v,
+        None => 0 - 1,
+    }
+    print("\{first}")
+    print("\{m.has(Point { x: 3, y: 4 })} \{m.has(Point { x: 9, y: 9 })}")
+    for k in m.keys() {
+        print("\{k.x},\{k.y}")
+    }
+    print("\{m.remove(Point { x: 3, y: 4 })} \{m.remove(Point { x: 3, y: 4 })} \{m.length}")
+
+    // A fieldless enum keys the same way.
+    let mut suits: Map<Suit, Int64> = [:]
+    suits.tally(Hearts, 2)
+    suits.tally(Spades, 1)
+    suits.tally(Hearts, 3)
+    print("\{suits.length}")
+    let hearts = match suits[Hearts] {
+        Some(v) => v,
+        None => 0 - 1,
+    }
+    print("\{hearts}")
+    print("\{suits.has(Clubs)}")
+    return 0
+}

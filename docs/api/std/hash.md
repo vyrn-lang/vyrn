@@ -44,6 +44,14 @@ return equal hashes. Beyond that the value is the implementation's — a
 `Map`'s index mixes and masks it itself, and the hash decides nothing
 observable (insertion order does, RFC-0028).
 
+A heapless user type — a record of sized integers and `Bool` (nested
+records and fieldless enums included), or a fieldless enum — keys a `Map`
+once it declares `impl Hashable` (M2). The declaration is the obligation
+and the type's callable hash; the builtin `Map` hashes the key's
+canonical field bytes itself, exactly as it always hashed a `String`'s
+bytes and an `Int64`'s bits without consulting the impls below. Equality
+between keys is field-wise — padding is never compared.
+
 ## sha1
 
 ```vyrn

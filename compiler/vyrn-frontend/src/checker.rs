@@ -2069,6 +2069,39 @@ impl<'a> Checker<'a> {
         crate::types::resolve(ty, self.types)
     }
 
+    /// RFC-0117 M2's shape half: a user `Map` key must be heapless ALL the
+    /// way down — sized integers and `Bool` in the fields, records of such,
+    /// fieldless enums. Floats keep §2's reflexivity refusal wherever they
+    /// hide; a heap-owning field is named, because a key is stored, compared
+    /// and freed by the map; and a payload-bearing enum waits for a packer
+    /// something real demands (the refusal says so).
+    fn check_key_shape(&self, key: &Type, ty: &Type, line: usize) -> Result<(), Diagnostic> {
+        match ty {
+            Type::Int | Type::IntN { .. } | Type::Bool => Ok(()),
+            Type::Float | Type::Float32 => Err(cerr!(
+                line,
+                "`{key}` holds a float, and a `Map` key must hash and compare by equality: `NaN != NaN`, and `+0.0 == -0.0` would hash apart (RFC-0117 refuses float keys by name)"
+            )),
+            Type::Record(fs) => fs
+                .iter()
+                .try_for_each(|f| self.check_key_shape(key, &self.base(&f.ty), line)),
+            Type::Enum(vs) => {
+                if vs.iter().all(|v| v.payload.is_empty()) {
+                    Ok(())
+                } else {
+                    Err(cerr!(
+                        line,
+                        "`{key}` has a variant with a payload, and a payload-bearing enum key waits for real demand — a fieldless enum or a record of scalars keys today (RFC-0117 M2)"
+                    ))
+                }
+            }
+            _ => Err(cerr!(
+                line,
+                "`{key}` owns heap somewhere in its fields, and a `Map` key is stored, compared and freed by the map — a key must be heapless all the way down (RFC-0117 M2)"
+            )),
+        }
+    }
+
     /// The type `recv[..]` has when `recv` is a container of the user's own
     /// (RFC-0091 M2): the `place` projection's declared return type, with the
     /// impl head's type variables solved from the receiver.
@@ -2995,14 +3028,13 @@ impl<'a> Checker<'a> {
                 }
                 self.ensure_type_exists(inner, line)?
             }
-            // `Map<K, V>` (RFC-0028, RFC-0117): a key is `String` or `Int64`
-            // today. A validated string type is a legal key (it resolves to
-            // `String`). Floats are refused BY NAME — `NaN != NaN` breaks the
-            // reflexivity a key needs, and `+0.0 == -0.0` hash-equal is a trap
-            // either way; a program that wants float keys must make that
-            // decision explicitly. The other scalars and user `Hashable` types
-            // are RFC-0117 M2's, where the declared-K coercion machinery they
-            // need exists for both.
+            // `Map<K, V>` (RFC-0028, RFC-0117): a key is `String`, `Int64`,
+            // or a user type that is heapless all the way down and declares
+            // `impl Hashable` (M2). A validated string type is a legal key
+            // (it resolves to `String`). Floats are refused BY NAME —
+            // `NaN != NaN` breaks the reflexivity a key needs, and
+            // `+0.0 == -0.0` hash-equal is a trap either way; a program that
+            // wants float keys must make that decision explicitly.
             Type::Map(key, val) => {
                 self.ensure_type_exists(key, line)?;
                 self.ensure_type_exists(val, line)?;
@@ -3014,10 +3046,19 @@ impl<'a> Checker<'a> {
                             "a `Map` key must hash and compare by equality, and `{key}` does neither well: `NaN != NaN`, and `+0.0 == -0.0` would hash apart (RFC-0117 refuses float keys by name)"
                         ));
                     }
+                    shape @ (Type::Record(_) | Type::Enum(_)) => {
+                        self.check_key_shape(key, &shape, line)?;
+                        if !crate::types::hashable_impl(self.impl_blocks, key) {
+                            return Err(cerr!(
+                                line,
+                                "`{key}` can be a `Map` key once it declares the obligation: `impl Hashable for {key}` — equal values must return equal hashes (RFC-0117 M2)"
+                            ));
+                        }
+                    }
                     _ => {
                         return Err(cerr!(
                             line,
-                            "a `Map` key is `String` or `Int64` today, found `{key}` (RFC-0117 M1; the other `Hashable` scalars and user types follow in M2)"
+                            "a `Map` key is `String`, `Int64`, or a heapless `Hashable` type, found `{key}` (RFC-0117)"
                         ));
                     }
                 }
@@ -5169,7 +5210,7 @@ impl<'a> Checker<'a> {
                 };
                 for (i, (k, v)) in entries.iter().enumerate() {
                     let kt = self.expr(k, scope, Some(&key_ty), fn_ret)?;
-                    if !self.coercible(&self.base(&kt), &key_ty) {
+                    if !self.coercible(&self.base(&kt), &self.base(&key_ty)) {
                         return Err(cerr!(
                             line,
                             "the map is keyed by {key_ty}, but this key is {kt}"
@@ -7583,7 +7624,7 @@ impl<'a> Checker<'a> {
                 }
             };
             let k = self.expr(&args[1], scope, Some(&key_ty), fn_ret)?;
-            if !self.coercible(&k, &key_ty) {
+            if !self.coercible(&self.base(&k), &self.base(&key_ty)) {
                 return Err(cerr!(
                     line,
                     "the map is keyed by {key_ty}, but the `tally` key is {k}"
@@ -7808,7 +7849,7 @@ impl<'a> Checker<'a> {
                 if matches!(k, Type::Err) {
                     return Ok(Type::Err);
                 }
-                if !self.coercible(&k, &key) {
+                if !self.coercible(&k, &self.base(&key)) {
                     return Err(cerr!(
                         line,
                         "the map is keyed by {key}, but the key here is {k}"
@@ -8216,7 +8257,7 @@ impl<'a> Checker<'a> {
                 }
             }
             let k = self.base(&self.expr(&args[1], scope, Some(&key_ty), fn_ret)?);
-            if !matches!(k, Type::Err) && !self.coercible(&k, &key_ty) {
+            if !matches!(k, Type::Err) && !self.coercible(&k, &self.base(&key_ty)) {
                 return Err(cerr!(
                     line,
                     "the map is keyed by {key_ty}, but the key here is {k}"
@@ -14746,7 +14787,7 @@ mod tests {
     #[test]
     fn map_accepts_int64_key_and_rejects_the_rest() {
         // RFC-0117 M1: `Int64` joined `String` as a key. Floats are refused
-        // by name; every other spelling gets the M1 diagnostic.
+        // by name; a heap container gets the general refusal.
         let ok = "fn f(m: Map<Int64, Int64>) -> Int64 { return 0 }\n\
                   fn main() -> Int64 { return 0 }";
         assert!(check_src(ok).is_ok(), "{:?}", check_src(ok));
@@ -14757,7 +14798,66 @@ mod tests {
         let heap = "fn f(m: Map<Array<UInt8>, Int64>) -> Int64 { return 0 }\n\
                     fn main() -> Int64 { return 0 }";
         let e = check_src(heap).unwrap_err();
-        assert!(e.contains("is `String` or `Int64` today"), "{e}");
+        assert!(e.contains("or a heapless `Hashable` type"), "{e}");
+    }
+
+    /// A `Hashable` protocol plus a heapless record impl, shared by the
+    /// RFC-0117 M2 key tests.
+    const HASHKEY: &str = "protocol Hashable {\n\
+                               fn hash(self) -> UInt64\n\
+                           }\n\
+                           type Point = { x: Int64, y: Int64 }\n\
+                           impl Hashable for Point {\n\
+                               fn hash(self) -> UInt64 {\n\
+                                   return UInt64(self.x)\n\
+                               }\n\
+                           }\n";
+
+    #[test]
+    fn a_hashable_record_keys_a_map() {
+        // RFC-0117 M2: heapless + `impl Hashable` = a legal key, the full op
+        // surface included.
+        let src = format!(
+            "{HASHKEY}\
+             fn main() -> Int64 {{\n\
+                 let mut m: Map<Point, Int64> = [:]\n\
+                 m[Point {{ x: 1, y: 2 }}] = 1\n\
+                 m.tally(Point {{ x: 1, y: 2 }}, 2)\n\
+                 let hit = match m[Point {{ x: 1, y: 2 }}] {{ Some(v) => v, None => 0 }}\n\
+                 let present = m.has(Point {{ x: 1, y: 2 }})\n\
+                 let gone = m.remove(Point {{ x: 1, y: 2 }})\n\
+                 for k in m.keys() {{ print(\"\\{{k.x}}\") }}\n\
+                 return hit + m.length }}"
+        );
+        assert!(check_src(&src).is_ok(), "{:?}", check_src(&src));
+    }
+
+    #[test]
+    fn a_record_key_needs_the_hashable_obligation() {
+        // The same record without the impl names exactly what is missing.
+        let src = "type Point = { x: Int64, y: Int64 }\n\
+                   fn f(m: Map<Point, Int64>) -> Int64 { return 0 }\n\
+                   fn main() -> Int64 { return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("once it declares the obligation"), "{e}");
+    }
+
+    #[test]
+    fn a_key_is_heapless_all_the_way_down() {
+        // A `String` field disqualifies the record around it, impl or not.
+        let src = "protocol Hashable {\n\
+                       fn hash(self) -> UInt64\n\
+                   }\n\
+                   type Tag = { name: String }\n\
+                   impl Hashable for Tag {\n\
+                       fn hash(self) -> UInt64 {\n\
+                           return UInt64(1)\n\
+                       }\n\
+                   }\n\
+                   fn f(m: Map<Tag, Int64>) -> Int64 { return 0 }\n\
+                   fn main() -> Int64 { return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("heapless all the way down"), "{e}");
     }
 
     #[test]
