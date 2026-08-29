@@ -112,6 +112,10 @@ pub struct Declared {
     /// It still under-approximates. A builtin whose row is held back has no
     /// type this reading can name, so a binding to it is left alone.
     rets: HashMap<String, Type>,
+    /// Declared parameter types per user function — what types an argument
+    /// whose own expression cannot answer (an array literal coerced at the
+    /// call boundary, RFC-0114 §25's heapify row).
+    params: HashMap<String, Vec<Type>>,
     /// Module state (RFC-0013), with its declared type where it has one. Seeded
     /// into the outermost scope frame by a pass that wants globals typed.
     globals: HashMap<String, Option<Type>>,
@@ -129,8 +133,13 @@ impl Declared {
         for (n, t) in crate::prelude::returns() {
             rets.insert(n.to_string(), t.clone());
         }
+        let mut params: HashMap<String, Vec<Type>> = HashMap::new();
         for f in &program.functions {
             rets.insert(f.name.clone(), f.ret.clone());
+            params.insert(
+                f.name.clone(),
+                f.params.iter().map(|p| p.ty.clone()).collect(),
+            );
         }
         let decls = crate::types::decl_map(program);
         let mut variants: std::collections::HashSet<String> =
@@ -148,6 +157,7 @@ impl Declared {
             variants,
             decls,
             rets,
+            params,
             globals: program
                 .globals
                 .iter()
@@ -233,6 +243,12 @@ impl Declared {
     /// It is a *declared-types* pass, not a re-run of the checker: parameters,
     /// `let` annotations, function return types and literal shapes, propagated
     /// through the scope stack. When unsure it answers `None`.
+    /// The declared type of `callee`'s parameter `ix`, for an argument whose
+    /// own expression cannot answer (see `params` above).
+    pub fn param_ty(&self, callee: &str, ix: usize) -> Option<&Type> {
+        self.params.get(callee).and_then(|ps| ps.get(ix))
+    }
+
     pub fn type_of(&self, vars: &Scopes<Option<Type>>, e: &Expr) -> Option<Type> {
         match e {
             Expr::Str(_) => Some(Type::Str),
