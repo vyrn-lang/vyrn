@@ -3056,33 +3056,14 @@ impl<'p> Fn_<'_, 'p> {
         })
     }
 
-    /// Whether a store into `p` may release what `p` holds now.
-    ///
-    /// Two ways to own. Module state owns its contents by rule 4: reading a global
-    /// is a borrow and storing into one stores an owned value, because rule 2
-    /// refuses a borrow at a store. A local owns its contents when this block
-    /// already releases it at the exit — the same `droppable` fact, read as a
-    /// property of the slot rather than of the block, which is what RFC-0087 §4
-    /// asked for. Inside a `region` nothing is released: the arena owns what was
-    /// allocated there, which is the sentence [`crate::Gen::slot_owns`] states in
-    /// the same words and this one did not.
-    ///
-    /// A global answers yes with no release row at all, so `g = a + b` in module
-    /// state inside a region snapshotted the old `g` and freed it — a block the
-    /// arena had already freed at the previous closing brace. The free list then
-    /// held it twice and the next two allocations of its size class were the same
-    /// address.
-    ///
-    /// The test is blunt where [`Fn_::rel_at`] is exact: only a `String` block is
-    /// ever the arena's, and an `Array` or `Map` buffer never is
-    /// (`Gen::array_n_to_heap`), so a container reassigned inside a region leaks
-    /// the buffer it held. Both backends leak it, which is the point; making both
-    /// exact means filtering [`Fn_::store_bufs`]'s `String` entry rather than
-    /// refusing the whole snapshot, on both sides at once.
-    fn place_owns(&self, p: Place) -> bool {
-        self.region_depth == 0
-            && (matches!(p, Place::Static(_)) || self.rel_slots.values().any(|r| r.place == p))
-    }
+    // `place_owns` lived here until §26 steps 3–4: the ownedness of a field
+    // or element store is the plan's per-statement answer now
+    // (`store_owned_at`), folded once in `own::analyze` from module-state
+    // rule 4 and the droppable rows — the same two ways to own it tested,
+    // read from one artifact instead of two per-binding registries. The
+    // region caveat its doc carried (a String reassigned in module state
+    // inside a `region` must not free arena memory) is the emission-side
+    // `region_depth` gate, unchanged.
 
     /// The address of `p` plus `off`, in a fresh local. A wasm local holding an
     /// aggregate holds its ADDRESS, which is the one case [`Place::addr`] cannot
@@ -3489,8 +3470,12 @@ impl<'p> Fn_<'_, 'p> {
                 let fr = self.cx.repr(&fty, *line)?;
                 // Rule 4 through a field: the record owns what its field holds, so
                 // storing over it releases the old one. Census §4's second row.
-                let snap = if self.place_owns(place)
-                    && !vyrn_frontend::movecheck::mentions_place(value, name)
+                // §26 steps 3–4: the plan's per-statement answer replaces the
+                // per-binding registry guess (`place_owns`), queried before
+                // the region gate so an arena-owned site still counts as
+                // considered. The value-alias guard folded with it.
+                let snap = if self.cx.plan.store_owned_at(s as *const Stmt as usize)
+                    && self.region_depth == 0
                 {
                     let a = self.addr_local(b, place, foff);
                     self.snap_at(b, a, &fty, *line)?
@@ -3851,6 +3836,9 @@ impl<'p> Fn_<'_, 'p> {
                 if let Some(blk) =
                     vyrn_frontend::project::store_index(&self.cx.impls, name, index, value, &ty)?
                 {
+                    // The projection's own statements decide the release —
+                    // acknowledged for §26's finish check.
+                    let _ = self.cx.plan.store_owned_at(s as *const Stmt as usize);
                     return self.block(m, b, blk);
                 }
                 place
@@ -3870,6 +3858,9 @@ impl<'p> Fn_<'_, 'p> {
                     let drop_old = self.region_depth == 0
                         && !vyrn_frontend::movecheck::mentions_place(value, name)
                         && !vyrn_frontend::movecheck::mentions_place(index, name);
+                    // The entry's release is `map_set`'s own two questions —
+                    // acknowledged for §26's finish check.
+                    let _ = self.cx.plan.store_owned_at(s as *const Stmt as usize);
                     return self
                         .map_set(m, b, hdr, &l, index, value, &key_t, &val, drop_old, *line);
                 }
@@ -3886,9 +3877,8 @@ impl<'p> Fn_<'_, 'p> {
                 // Rule 4 through an element. The element address is already on the
                 // stack, so it is teed rather than recomputed; the snapshot is
                 // stack-neutral and the store finds its address where it left it.
-                let snap = if self.place_owns(place)
-                    && !vyrn_frontend::movecheck::mentions_place(value, name)
-                    && !vyrn_frontend::movecheck::mentions_place(index, name)
+                let snap = if self.cx.plan.store_owned_at(s as *const Stmt as usize)
+                    && self.region_depth == 0
                 {
                     let ea = b.local(ValType::I32);
                     b.ins(&Instruction::LocalTee(ea));

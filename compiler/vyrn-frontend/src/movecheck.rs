@@ -283,6 +283,9 @@ pub struct Facts {
     /// The walk-order positions of every early exit — see [`fold context`] in
     /// `own::fold_revived`, its only reader.
     pub exit_orders: Vec<u32>,
+    /// RFC-0114 §26 (steps 3–4): the field and element stores — see
+    /// [`PlaceStore`].
+    pub place_stores: Vec<PlaceStore>,
 }
 
 /// One ownership-relevant event on one binding (RFC-0114 M2).
@@ -317,6 +320,23 @@ pub struct EdgeRel {
     pub key: usize,
     pub name: String,
     pub edge: u32,
+    /// The enclosing function — see [`ArgTemp::owner`].
+    pub owner: String,
+}
+
+/// RFC-0114 §26 (steps 3–4): one field or element store whose displaced
+/// value the target may own — `x.f = v` or `a[i] = v`, by the statement's
+/// node address. `own::analyze` decides ownedness against the droppable
+/// rows and module state; the value/index alias guards are applied at the
+/// record site, so a row's absence and a false answer mean the same thing.
+pub struct PlaceStore {
+    /// The `Stmt::SetField` / `Stmt::IndexSet` node address.
+    pub id: usize,
+    /// The target binding's `Stmt::Let` (or parameter) key; 0 when the
+    /// target is module state or unresolved.
+    pub key: usize,
+    /// Whether the target is a module-state global (frame 0, unshadowed).
+    pub is_global: bool,
     /// The enclosing function — see [`ArgTemp::owner`].
     pub owner: String,
 }
@@ -417,6 +437,7 @@ pub fn facts(program: &Program) -> Facts {
             })
             .collect(),
         exit_orders: r.exit_orders,
+        place_stores: r.place_stores,
     }
 }
 
@@ -444,6 +465,7 @@ struct Run {
     global_stores: HashSet<usize>,
     edge_releases: Vec<EdgeRel>,
     receiver_temps: Vec<(usize, String, String)>,
+    place_stores: Vec<PlaceStore>,
     exit_orders: Vec<u32>,
 }
 
@@ -687,6 +709,7 @@ fn run(program: &Program, want: Want) -> Run {
         global_stores: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
         edge_releases: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         receiver_temps: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
+        place_stores: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         ev_order: std::cell::Cell::new(0),
         loop_ids: RefCell::new(Vec::new()),
         next_loop: std::cell::Cell::new(0),
@@ -833,6 +856,7 @@ fn run(program: &Program, want: Want) -> Run {
             .receiver_temps
             .map(RefCell::into_inner)
             .unwrap_or_default(),
+        place_stores: mc.place_stores.map(RefCell::into_inner).unwrap_or_default(),
         exit_orders: mc.exit_orders.map(RefCell::into_inner).unwrap_or_default(),
     }
 }
@@ -938,6 +962,7 @@ struct MoveCheck<'a> {
     global_stores: Option<RefCell<HashSet<usize>>>,
     edge_releases: Option<RefCell<Vec<EdgeRel>>>,
     receiver_temps: Option<RefCell<Vec<(usize, String, String)>>>,
+    place_stores: Option<RefCell<Vec<PlaceStore>>>,
     ev_order: std::cell::Cell<u32>,
     /// The stack of loop ids the walk is inside — pushed by `while`/`for`,
     /// stamped onto every event, so the fold can see which pairs of events a
@@ -1547,6 +1572,23 @@ impl MoveCheck<'_> {
     /// place held — the buffer the take gave away. So the binding stops being
     /// skippable and leaks whole. Only a binding that already carries a hole is
     /// touched; a write to any other binding means nothing here.
+    /// RFC-0114 §26 (steps 3–4): record one field/element store for the
+    /// ownedness fold. The value/index alias guards are the CALLER's, so a
+    /// recorded row means only "the target may own what this displaces".
+    fn note_place_store(&self, s: &Stmt, name: &str) {
+        let Some(sink) = &self.place_stores else {
+            return;
+        };
+        let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
+        let is_global = self.globals.contains(name) && self.vars.borrow().frame_of(name) == Some(0);
+        sink.borrow_mut().push(PlaceStore {
+            id: s as *const Stmt as usize,
+            key,
+            is_global,
+            owner: self.cur_fn.borrow().clone(),
+        });
+    }
+
     fn wrote_into(&self, name: &str) {
         let Some(sink) = &self.lets else { return };
         let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
@@ -3208,6 +3250,9 @@ impl MoveCheck<'_> {
                 // down — and the reason no drop flag is needed to say it.
                 revive(consumed, &format!("{name}.{field}"));
                 self.wrote_into(name); // RFC-0093 M2: a filled hole is not skippable
+                if !mentions_place(value, name) {
+                    self.note_place_store(s, name);
+                }
                 Ok(false)
             }
             // `a[i] = v` — the stored value is consumed like a `push` argument
@@ -3251,6 +3296,9 @@ impl MoveCheck<'_> {
                 // OWNED element and the store still records the move.
                 let _ = self.store(index, &|| format!("`{name}`"), *line, true, consumed)?;
                 self.wrote_into(name); // RFC-0093 M2: a filled hole is not skippable
+                if !mentions_place(value, name) && !mentions_place(index, name) {
+                    self.note_place_store(s, name);
+                }
                 Ok(false)
             }
             Stmt::Return { value, line } => {
