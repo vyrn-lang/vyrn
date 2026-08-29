@@ -655,12 +655,28 @@ fn check_accum_inner(
     let mut protocol_methods: HashMap<String, Vec<(String, MethodSig)>> = HashMap::new();
     for p in &program.protocols {
         for m in &p.methods {
+            // A projection requirement (RFC-0123 M2) never dispatches as a
+            // method — its sites are access sites, resolved by receiver type
+            // through the places table — so it stays out of this map.
+            if m.result_cap.is_some() {
+                continue;
+            }
             protocol_methods
                 .entry(m.name.clone())
                 .or_default()
                 .push((p.name.clone(), m.clone()));
         }
     }
+    // The projection names protocols DECLARE (RFC-0123 M2) — only for the
+    // refusal a bounded receiver earns: a projection inlines, and a type
+    // variable has no body to inline into the access site.
+    let protocol_places: std::collections::HashSet<String> = program
+        .protocols
+        .iter()
+        .flat_map(|p| p.methods.iter())
+        .filter(|m| m.result_cap.is_some())
+        .map(|m| m.name.clone())
+        .collect();
     // A top-level function sharing a protocol method's SURFACE name could
     // never run: `call` dispatches method names to their impls before free
     // functions, so `frob(5)` would silently be `recv.frob(5)` and this
@@ -755,6 +771,64 @@ fn check_accum_inner(
             let opaque =
                 |t: &Type| crate::types::substitute(t, &probe) != *t || type_mentions_self(t);
             for sig in &p.methods {
+                // A projection requirement (RFC-0123 M2) is satisfied by a
+                // `places` member, matched on the same terms a method is —
+                // and the receiver capability carries the result's too, since
+                // the parser made them equal on both sides.
+                if sig.result_cap.is_some() {
+                    let Some(f) = imp.places.iter().find(|m| m.name == sig.name) else {
+                        out.push(cerr_at!(
+                            imp.line,
+                            imp.head_span(),
+                            "`impl {} for {}` does not provide the projection `{}`, \
+                             which protocol `{}` declares — a protocol's members are \
+                             all required",
+                            imp.protocol,
+                            imp.ty,
+                            render_method_sig(
+                                &sig.name,
+                                sig.recv,
+                                &sig.params,
+                                &sig.param_caps,
+                                &sig.ret
+                            ),
+                            imp.protocol
+                        ));
+                        continue;
+                    };
+                    let got: Vec<Type> = f.params.iter().skip(1).map(|p| p.ty.clone()).collect();
+                    let got_caps: Vec<Capability> =
+                        f.params.iter().skip(1).map(|p| p.capability).collect();
+                    let f_recv = f
+                        .params
+                        .first()
+                        .map(|p| p.capability)
+                        .unwrap_or(Capability::Read);
+                    let agrees = got.len() == sig.params.len()
+                        && (sig.ret == f.ret || opaque(&sig.ret))
+                        && f_recv == sig.recv
+                        && got_caps == sig.param_caps
+                        && std::iter::zip(&sig.params, &got).all(|(w, g)| w == g || opaque(w));
+                    if !agrees {
+                        out.push(cerr_at!(
+                            f.line,
+                            f.name_span(),
+                            "projection `{}` does not match protocol `{}` — it declares \
+                             `{}`, this provides `{}`",
+                            f.name,
+                            imp.protocol,
+                            render_method_sig(
+                                &sig.name,
+                                sig.recv,
+                                &sig.params,
+                                &sig.param_caps,
+                                &sig.ret
+                            ),
+                            render_method_sig(&f.name, f_recv, &got, &got_caps, &f.ret)
+                        ));
+                    }
+                    continue;
+                }
                 let Some(f) = imp.methods.iter().find(|m| m.name == sig.name) else {
                     out.push(cerr_at!(
                         imp.line,
@@ -993,6 +1067,7 @@ fn check_accum_inner(
         generics: &generics,
         all_bounds: &all_bounds,
         protocol_methods: &protocol_methods,
+        protocol_places: &protocol_places,
         impls: &impls,
         impl_blocks: &program.impls,
         cur_bounds: RefCell::new(HashMap::new()),
@@ -1388,9 +1463,11 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
 /// Check one OPTIONAL projection (RFC-0122): `-> read Option<T>`, whose body
 /// is the flat shape one statement stricter than RFC-0121's — a prologue
 /// with no returns, then exactly `if <miss> { return None }`, then exactly
-/// `return Some(<place>)`. The rigidity is load-bearing: statements between
-/// two miss tests would run after the first miss decided, so there is one
-/// prologue, one decision, one place.
+/// `return Some(<place>)`. The rigidity is load-bearing against a SECOND
+/// miss test — statements between two would run after the first decided —
+/// but statements after the one decision run only on the hit, and RFC-0123
+/// M1 admits them as the HIT prologue: one prologue, one decision, a hit's
+/// own statements, one place.
 fn check_optional_place(checker: &Checker, f: &Function, push: &mut impl FnMut(Diagnostic)) {
     // `a[i]`, `a[i] = v` and `for` consume a place unconditionally, so the
     // members their sugar dispatches cannot be the optional kind.
@@ -1417,8 +1494,9 @@ fn check_optional_place(checker: &Checker, f: &Function, push: &mut impl FnMut(D
     let shape = cerr_at!(
         f.line,
         f.name_span(),
-        "optional projection `{}` must end with `if <miss> {{ return None }}` \
-         then `return Some(<place>)` — one prologue, one decision, one place",
+        "optional projection `{}` must hold one `if <miss> {{ return None }}` \
+         and end with `return Some(<place>)` — one prologue, one decision, \
+         and statements after the decision run only on the hit (RFC-0123 M1)",
         f.name
     );
     let n = f.body.stmts.len();
@@ -1426,29 +1504,29 @@ fn check_optional_place(checker: &Checker, f: &Function, push: &mut impl FnMut(D
         push(shape);
         return;
     }
-    let (
-        Some(Stmt::If {
-            cond: _,
-            then_block,
-            else_block: None,
-            ..
-        }),
-        Some(Stmt::Return { value: Some(v), .. }),
-    ) = (f.body.stmts.get(n - 2), f.body.stmts.last())
-    else {
+    // The ONE miss exit may sit anywhere before the final `Some` (RFC-0123
+    // M1): what precedes it is the prologue, what follows is the HIT
+    // prologue — sound because those statements run only when the miss
+    // decided against, which is exactly when the place exists. TWO miss
+    // tests are still refused (count_yields covers it): statements between
+    // them would run after the first decided.
+    let Some(at) = f.body.stmts.iter().position(crate::project::is_miss_return) else {
         push(shape);
         return;
     };
-    let miss_ok = then_block.stmts.len() == 1
-        && matches!(
-            &then_block.stmts[0],
-            Stmt::Return { value: Some(Expr::Var { name, .. }), .. } if name == "None"
-        );
+    let Some(Stmt::Return { value: Some(v), .. }) = f.body.stmts.last() else {
+        push(shape);
+        return;
+    };
+    if at + 1 == n {
+        push(shape);
+        return;
+    }
     let Expr::Call { name, args, .. } = v else {
         push(shape);
         return;
     };
-    if !miss_ok || name != "Some" || args.len() != 1 {
+    if name != "Some" || args.len() != 1 {
         push(shape);
         return;
     }
@@ -1468,9 +1546,15 @@ fn check_optional_place(checker: &Checker, f: &Function, push: &mut impl FnMut(D
         ));
         return;
     }
+    // Roots trace through borrowing `let`s of BOTH segments: the prologue's,
+    // and the hit prologue's — the payload binding after the miss is decided
+    // is `tryField`'s whole reason to have one.
     let mut roots: std::collections::HashSet<String> =
         f.params.iter().map(|p| p.name.clone()).collect();
-    for s in &f.body.stmts[..n - 2] {
+    for (i, s) in f.body.stmts[..n - 1].iter().enumerate() {
+        if i == at {
+            continue;
+        }
         if let Stmt::Let { name, value, .. } = s {
             if let_borrows_from(value, &roots) {
                 roots.insert(name.clone());
@@ -1795,6 +1879,9 @@ struct Checker<'a> {
     all_bounds: &'a HashMap<String, HashMap<String, Vec<String>>>,
     /// Protocol methods (RFC-0002 §5): method name -> (protocol, signature).
     protocol_methods: &'a HashMap<String, Vec<(String, MethodSig)>>,
+    /// The projection names protocols declare (RFC-0123 M2), for the bounded
+    /// receiver's own refusal at an access site.
+    protocol_places: &'a std::collections::HashSet<String>,
     /// Implemented (protocol, type-key) pairs, for dispatch and bound checking.
     impls: &'a std::collections::HashSet<(String, String)>,
     /// Every `impl` block, for resolving a `place` projection by receiver type
@@ -1990,17 +2077,20 @@ impl<'a> Checker<'a> {
     /// with no such member — and the caller keeps its own typing and its own
     /// diagnostic. The arguments are checked here against the projection's
     /// parameters, exactly as an ordinary call checks its own.
-    /// Refuse a user-projection dispatch whose RECEIVER is itself a
-    /// projection-shaped call (RFC-0121's recorded gap). The checker can type
-    /// `doc.field("items")[1]`, but no engine can dispatch it — the receiver
-    /// probe at an access site resolves names, not call results — and three
-    /// engines trapping in three wordings on checked code is the outcome this
-    /// refusal exists to prevent. The workaround IS the message; a bound name
-    /// dispatches everywhere. Conservative on purpose: an index read feeding a
-    /// projection (`rows[i].field(k)`) is refused too, because the checker
-    /// cannot tell a builtin inner access from a user one by shape, and the
-    /// same one-line `let` fixes both.
-    fn refuse_chained_projection(&self, recv: &Expr, line: usize) -> Result<(), Diagnostic> {
+    /// Refuse a user-projection dispatch whose RECEIVER is a projection-shaped
+    /// call the ENGINES cannot resolve (RFC-0121's recorded gap, narrowed by
+    /// RFC-0123 M3). The engines' receiver probes resolve a chain when every
+    /// link's answer is written down: the inner member's RAW declared result
+    /// is a concrete named type, or the inner access is a builtin element
+    /// read. A link whose declared result is a type parameter — `Slots<T>`'s
+    /// `at` answers `T` — has no key without the substitution no engine
+    /// carries at a probe, and keeps the refusal, now saying exactly that.
+    fn refuse_chained_projection(
+        &self,
+        recv: &Expr,
+        scope: &Scope,
+        line: usize,
+    ) -> Result<(), Diagnostic> {
         let Expr::Call { name, args, .. } = recv else {
             return Ok(());
         };
@@ -2013,15 +2103,51 @@ impl<'a> Checker<'a> {
                     .impl_blocks
                     .iter()
                     .any(|i| i.places.iter().any(|p| p.name == *name)));
-        if projection_shaped {
+        if projection_shaped && self.chain_ty(recv, scope).is_none() {
             return Err(cerr!(
                 line,
-                "a projection reads at its access site, so its receiver must be \
-                 a name — bind the inner access with a `let`, then read through \
-                 the binding"
+                "the inner projection's result is not a concrete named type \
+                 here, so no engine can resolve the chain — bind the inner \
+                 access with a `let`, then read through the binding"
             ));
         }
         Ok(())
+    }
+
+    /// The receiver type a chained projection resolves to, by the SAME rules
+    /// every engine's probe follows (RFC-0123 M3): a name reads its scope
+    /// type; a projection call answers its member's RAW declared result when
+    /// that result keys concretely; `a[i]` on a builtin container answers the
+    /// element. `None` is "some engine cannot", and the refusal above says so.
+    fn chain_ty(&self, e: &Expr, scope: &Scope) -> Option<Type> {
+        match e {
+            Expr::Var { name, .. } => scope
+                .iter()
+                .rev()
+                .find_map(|f| f.get(name))
+                .map(|b| b.ty.clone()),
+            Expr::Call { name, args, .. } if !args.is_empty() => {
+                let m = if name == crate::project::AT {
+                    "at"
+                } else {
+                    name.as_str()
+                };
+                let inner = self.chain_ty(&args[0], scope)?;
+                if m == "at" {
+                    if let Type::Array(t) | Type::ArrayN(t, _) | Type::SmallArray(t, _) =
+                        self.base(&inner)
+                    {
+                        return Some(*t);
+                    }
+                }
+                let f = crate::project::lookup_in(self.impl_blocks, &inner, m).or_else(|| {
+                    crate::project::lookup_in(self.impl_blocks, &self.base(&inner), m)
+                })?;
+                crate::types::type_key(&f.ret)?;
+                Some(f.ret.clone())
+            }
+            _ => None,
+        }
     }
 
     /// Type an `if let` scrutinee that is an OPTIONAL projection call
@@ -2059,7 +2185,7 @@ impl<'a> Checker<'a> {
         if !crate::project::is_optional(f) {
             return Ok(None);
         }
-        self.refuse_chained_projection(&args[0], line)?;
+        self.refuse_chained_projection(&args[0], scope, line)?;
         if !matches!(pattern, crate::ast::Pattern::Some(_)) {
             return Err(cerr!(
                 line,
@@ -2105,6 +2231,11 @@ impl<'a> Checker<'a> {
                         }
                     }
                     let _ = c.expr(&p.miss, sc, None, Some(fn_ret));
+                    for s in &p.hit {
+                        if c.stmt(s, fn_ret, sc).is_err() {
+                            return;
+                        }
+                    }
                     let _ = c.expr(&p.place, sc, None, Some(fn_ret));
                 });
             }
@@ -7642,7 +7773,7 @@ impl<'a> Checker<'a> {
             // receiver. Lowering inlines the body; the type is the declaration.
             if name == crate::project::AT {
                 if let Some(t) = self.place_result(&at, "at", args, scope, fn_ret, line)? {
-                    self.refuse_chained_projection(&args[0], line)?;
+                    self.refuse_chained_projection(&args[0], scope, line)?;
                     // …and the nodes the site LOWERS through, which are the
                     // projection's body inlined here. See [`record_desugar`].
                     if recording() {
@@ -8715,7 +8846,7 @@ impl<'a> Checker<'a> {
         {
             let recv = self.expr(&args[0], scope, None, fn_ret)?;
             if let Some(t) = self.place_result(&recv, name, args, scope, fn_ret, line)? {
-                self.refuse_chained_projection(&args[0], line)?;
+                self.refuse_chained_projection(&args[0], scope, line)?;
                 if recording() {
                     if let Ok(Some(p)) = crate::project::site(
                         self.impl_blocks,
@@ -8738,6 +8869,22 @@ impl<'a> Checker<'a> {
                     }
                 }
                 return Ok(t);
+            }
+        }
+        // A protocol-declared projection called through a bound (RFC-0123
+        // M2): a projection INLINES at its access site, and a type variable
+        // has no body to inline — the same line RFC-0080 M2 drew for
+        // associated types through a bound.
+        if self.sigs.get(name).is_none() && !args.is_empty() && self.protocol_places.contains(name)
+        {
+            let recv = self.expr(&args[0], scope, None, fn_ret)?;
+            if matches!(self.base(&recv), Type::Param(_)) {
+                return Err(cerr!(
+                    line,
+                    "`{name}` is a projection, and a projection inlines at its \
+                     access site — a `<T: ..>` receiver has no body to inline, \
+                     so call `.{name}(..)` on a concrete type"
+                ));
             }
         }
         let (params, ret) = self
@@ -11544,8 +11691,11 @@ mod tests {
     }
 
     #[test]
-    fn a_projection_receiver_must_be_a_name() {
-        let e = check_src(&format!(
+    fn a_concrete_chain_dispatches() {
+        // RFC-0123 M3: every link's declared result is a concrete named type
+        // (`at` answers `E`, `s` answers `String`), so every engine's probe
+        // resolves the chain and the RFC-0121 refusal no longer fires.
+        assert!(check_src(&format!(
             "{LEDGER}\
              impl Index for E {{\n\
                  fn s(read self) -> read String {{\n\
@@ -11558,8 +11708,35 @@ mod tests {
                  return led.at(0).s().byteLength\n\
              }}"
         ))
+        .is_ok());
+    }
+
+    #[test]
+    fn a_generic_chain_is_still_refused() {
+        // The inner `at` declares `-> read T`, and `T` has no key without the
+        // substitution no engine's probe carries — so the NEXT projection has
+        // no impl to resolve against, and the refusal that remains says so.
+        let e = check_src(
+            "type E = | Tag(String) | Blank\n\
+             type Slab<T> = { vals: Array<T> }\n\
+             impl<T> Index for Slab<T> {\n\
+                 fn at(read self, i: Int64) -> read T {\n\
+                     return self.vals[i]\n\
+                 }\n\
+             }\n\
+             impl Index for E {\n\
+                 fn s(read self) -> read String {\n\
+                     let Tag(v) = self\n\
+                     return v\n\
+                 }\n\
+             }\n\
+             fn main() -> Int64 {\n\
+                 let s: Slab<E> = Slab { vals: [Tag(\"x\")] }\n\
+                 return s.at(0).s().byteLength\n\
+             }",
+        )
         .unwrap_err();
-        assert!(e.contains("receiver must be a name"), "{e}");
+        assert!(e.contains("not a concrete named type"), "{e}");
     }
 
     // ---- RFC-0122: an option of a place --------------------------------------
@@ -11598,9 +11775,9 @@ mod tests {
     }
 
     #[test]
-    fn an_optional_projection_needs_its_three_part_shape() {
-        // Two miss tests: statements between them would run after the first
-        // miss decided, so the shape is one prologue, one decision, one place.
+    fn an_optional_projection_needs_its_shape() {
+        // Two miss tests are still refused: statements between them would run
+        // after the first miss decided.
         let e = check_src(
             "type B = { rows: Array<Int64> }\n\
              impl Index for B {\n\
@@ -11617,7 +11794,33 @@ mod tests {
              fn main() -> Int64 { return 0 }",
         )
         .unwrap_err();
-        assert!(e.contains("one prologue, one decision, one place"), "{e}");
+        assert!(e.contains("one `if <miss> { return None }`"), "{e}");
+    }
+
+    #[test]
+    fn a_hit_prologue_binds_after_the_miss_is_decided() {
+        // RFC-0123 M1: statements after the ONE decision run only on the hit,
+        // which is where a payload binding may live — `tryField`'s shape.
+        assert!(check_src(
+            "type E = | Tag(Array<Int64>) | Blank\n\
+             type B = { v: E }\n\
+             impl Index for B {\n\
+                 fn tryAt(read self, i: Int64) -> read Option<Int64> {\n\
+                     let mut n = 0\n\
+                     if let Tag(scan) = self.v {\n\
+                         n = scan.length\n\
+                     }\n\
+                     if i < 0 || i >= n {\n\
+                         return None\n\
+                     }\n\
+                     let e = self.v\n\
+                     let Tag(xs) = e\n\
+                     return Some(xs[i])\n\
+                 }\n\
+             }\n\
+             fn main() -> Int64 { return 0 }",
+        )
+        .is_ok());
     }
 
     #[test]
@@ -11636,6 +11839,83 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("consumes a place unconditionally"), "{e}");
+    }
+
+    // ---- RFC-0123 M2: protocol-declared projections --------------------------
+
+    /// A protocol requiring a projection, and the impl that satisfies it.
+    const SHELF: &str = "protocol Shelf { fn tag(read self, i: Int64) -> read String }\n\
+                         type Crate = { labels: Array<String> }\n";
+
+    #[test]
+    fn a_protocol_projection_is_satisfied_by_a_places_member() {
+        assert!(check_src(&format!(
+            "{SHELF}\
+             impl Shelf for Crate {{\n\
+                 fn tag(read self, i: Int64) -> read String {{\n\
+                     return self.labels[i]\n\
+                 }}\n\
+             }}\n\
+             fn main() -> Int64 {{\n\
+                 let c = Crate {{ labels: [\"a\"] }}\n\
+                 return c.tag(0).byteLength\n\
+             }}"
+        ))
+        .is_ok());
+    }
+
+    #[test]
+    fn a_missing_or_mismatched_projection_is_a_conformance_error() {
+        // Missing entirely: the impl provides nothing under the name.
+        let e = check_src(&format!(
+            "{SHELF}\
+             impl Shelf for Crate {{}}\n\
+             fn main() -> Int64 {{ return 0 }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("does not provide the projection"), "{e}");
+        // Provided as a plain METHOD: a copy is not the contract.
+        let e = check_src(&format!(
+            "{SHELF}\
+             impl Shelf for Crate {{\n\
+                 fn tag(self, i: Int64) -> String {{\n\
+                     return self.labels[i].copy()\n\
+                 }}\n\
+             }}\n\
+             fn main() -> Int64 {{ return 0 }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("does not provide the projection"), "{e}");
+        // Wrong signature on the projection itself.
+        let e = check_src(&format!(
+            "{SHELF}\
+             impl Shelf for Crate {{\n\
+                 fn tag(read self, i: Int64, j: Int64) -> read String {{\n\
+                     return self.labels[i + j]\n\
+                 }}\n\
+             }}\n\
+             fn main() -> Int64 {{ return 0 }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("does not match protocol"), "{e}");
+    }
+
+    #[test]
+    fn a_bounded_receiver_cannot_dispatch_a_projection() {
+        let e = check_src(&format!(
+            "{SHELF}\
+             impl Shelf for Crate {{\n\
+                 fn tag(read self, i: Int64) -> read String {{\n\
+                     return self.labels[i]\n\
+                 }}\n\
+             }}\n\
+             fn first<T: Shelf>(s: T) -> Int64 {{\n\
+                 return s.tag(0).byteLength\n\
+             }}\n\
+             fn main() -> Int64 {{ return 0 }}"
+        ))
+        .unwrap_err();
+        assert!(e.contains("no body to inline"), "{e}");
     }
 
     // ---- RFC-0094 M3: `impl Show` --------------------------------------------

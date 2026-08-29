@@ -69,5 +69,16 @@ fn main() -> Int64 {
     } else {
         print("absent field: miss")
     }
+    // A non-object misses too (RFC-0123 M1): the scan runs inside an
+    // `if let`, and the payload binds only after the miss is decided —
+    // where `field` still traps, because there kind confusion is a bug.
+    let plain = JStr("not an object")
+    if let Some(v) = plain.tryField("any") {
+        if let JStr(s) = v {
+            print("unreached: \{s}")
+        }
+    } else {
+        print("non-object: miss")
+    }
     return 0
 }

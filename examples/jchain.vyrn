@@ -1,0 +1,28 @@
+/// A chained projection (RFC-0123 M3): a projection call may itself be the
+/// receiver of the next access, when every link's declared result is a
+/// concrete named type. `doc.field("items")[1]` resolves `field` to `Json`,
+/// then `Json`'s own `at` — each link inlines at the site, and no binding
+/// has to be spelled between them. A link whose declared result is generic
+/// still needs the `let`, and the checker says so.
+
+import { Json, JsonField } from "std/json"
+
+fn main() -> Int64 {
+    let doc = JObj([
+            JsonField { key: "name", value: JStr("vyrn") },
+            JsonField {
+                key: "items",
+                value: JArr([JNum("1"), JNum("2"), JNum("3")]),
+            },
+        ])
+
+    if let JNum(n) = doc.field("items")[1] {
+        print("second: \{n}")
+    }
+
+    let nested = JObj([JsonField { key: "inner", value: doc.copy() }])
+    if let JStr(s) = nested.field("inner").field("name") {
+        print("name: \{s}")
+    }
+    return 0
+}
