@@ -368,7 +368,14 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     let protocol_methods: HashMap<String, String> = program
         .protocols
         .iter()
-        .flat_map(|p| p.methods.iter().map(|m| (m.name.clone(), p.name.clone())))
+        .flat_map(|p| {
+            // Projection requirements (RFC-0123 M2) dispatch by receiver type
+            // through the places table, never as mangled methods.
+            p.methods
+                .iter()
+                .filter(|m| m.result_cap.is_none())
+                .map(|m| (m.name.clone(), p.name.clone()))
+        })
         .collect();
 
     let ownership = vyrn_frontend::own::analyze(program);
@@ -5678,6 +5685,39 @@ impl<'p> Fn_<'_, 'p> {
                         None => {
                             return unsupported(
                                 &format!("a branch yielding the ambiguous variant `{name}`"),
+                                line,
+                            )
+                        }
+                    }
+                }
+                // RFC-0123 M3: a projection call as a receiver or in a branch
+                // answers its member's RAW declared result when that result
+                // keys concretely — the chain rule the checker's `chain_ty`
+                // promised every engine keeps. A generic result has no key
+                // without a substitution, and the checker refused it upstream.
+                _ if !args.is_empty()
+                    && !self.cx.sigs.contains_key(name)
+                    && self
+                        .cx
+                        .impls
+                        .iter()
+                        .any(|i| i.places.iter().any(|p| p.name == *name)) =>
+                {
+                    let inner = self.peek(&args[0], line)?;
+                    match vyrn_frontend::project::lookup_in(&self.cx.impls, &inner, name)
+                        .or_else(|| {
+                            vyrn_frontend::project::lookup_in(
+                                &self.cx.impls,
+                                &self.cx.resolve(&inner),
+                                name,
+                            )
+                        })
+                        .and_then(|f| ftypes::type_key(&f.ret).map(|_| f.ret.clone()))
+                    {
+                        Some(t) => t,
+                        None => {
+                            return unsupported(
+                                &format!("a chain through the projection `{name}` on `{inner}`"),
                                 line,
                             )
                         }
@@ -12158,9 +12198,13 @@ impl<'p> Fn_<'_, 'p> {
             self.block(m, b, eb)?;
         }
         b.ins(&Instruction::Else);
-        // hit: bind the pattern's binder to the place by a synthetic `let` —
-        // no analysis row exists for it, so nothing drop-tracks the alias.
+        // hit: run the hit prologue (RFC-0123 M1), then bind the pattern's
+        // binder to the place by a synthetic `let` — no analysis row exists
+        // for it, so nothing drop-tracks the alias.
         let inner = self.scope.len();
+        for s in &p.hit {
+            self.stmt(m, b, s)?;
+        }
         if let Pattern::Some(bind) = pattern {
             let synth = Stmt::Let {
                 name: bind.clone(),

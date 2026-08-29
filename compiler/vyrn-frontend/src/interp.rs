@@ -2606,7 +2606,14 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
         protocol_methods: program
             .protocols
             .iter()
-            .flat_map(|p| p.methods.iter().map(|m| (m.name.clone(), p.name.clone())))
+            .flat_map(|p| {
+                // Projection requirements (RFC-0123 M2) dispatch by receiver
+                // type through the places table, never as mangled methods.
+                p.methods
+                    .iter()
+                    .filter(|m| m.result_cap.is_none())
+                    .map(|m| (m.name.clone(), p.name.clone()))
+            })
             .collect(),
         variant_enum: program
             .type_decls
@@ -4726,6 +4733,32 @@ impl<'a> Interp<'a> {
     /// literal may have no annotation to read and a record is otherwise
     /// anonymous.
     fn index_receiver_key(&self, recv: &Expr, scope: &mut Vec<Frame>) -> Option<String> {
+        // RFC-0123 M3: a projection call's key is its member's RAW declared
+        // result when that result keys concretely, and `a[i]` on a builtin
+        // container answers the element — the chain rules every engine's
+        // probe shares, and exactly what the checker's `chain_ty` promised.
+        if let Expr::Call { name, args, .. } = recv {
+            if !args.is_empty() {
+                let m = if name == crate::project::AT {
+                    "at"
+                } else {
+                    name.as_str()
+                };
+                if m == "at" {
+                    if let Some(
+                        Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _),
+                    ) = self.type_of(&args[0], scope)
+                    {
+                        if let Some(k) = crate::types::type_key(&inner) {
+                            return Some(k);
+                        }
+                    }
+                }
+                let k = self.index_receiver_key(&args[0], scope)?;
+                let f = crate::project::lookup_by_key(self.impls, &k, m)?;
+                return crate::types::type_key(&f.ret);
+            }
+        }
         if let Some(ty) = self.type_of(recv, scope) {
             if let Some(k) = crate::types::type_key(&ty) {
                 return Some(k);
@@ -4852,6 +4885,12 @@ impl<'a> Interp<'a> {
                     None => Ok(Flow::Normal),
                 }
             } else {
+                // The hit prologue (RFC-0123 M1): statements that run only
+                // when the place exists — the payload binding after the miss
+                // is decided, in `tryField`'s shape.
+                for s in &p.hit {
+                    self.stmt(s, scope)?;
+                }
                 let v = self.expr(&p.place, scope)?;
                 if let Pattern::Some(b) = pattern {
                     scope

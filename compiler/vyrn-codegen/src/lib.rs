@@ -1860,7 +1860,14 @@ pub fn emit(program: &Program) -> Result<String, String> {
     let protocol_methods: HashMap<String, String> = program
         .protocols
         .iter()
-        .flat_map(|p| p.methods.iter().map(|m| (m.name.clone(), p.name.clone())))
+        .flat_map(|p| {
+            // Projection requirements (RFC-0123 M2) dispatch by receiver type
+            // through the places table, never as mangled methods.
+            p.methods
+                .iter()
+                .filter(|m| m.result_cap.is_none())
+                .map(|m| (m.name.clone(), p.name.clone()))
+        })
         .collect();
 
     // ---- module state (RFC-0013) ----------------------------------------
@@ -4362,10 +4369,33 @@ impl<'a> Gen<'a> {
                 let base = self.static_ty(&args[0])?;
                 match self.resolve(&base) {
                     Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => Some(*i),
-                    _ => None,
+                    // RFC-0123 M3: `a[i]` on a user container is the `at`
+                    // projection, and its RAW declared result answers when
+                    // that result keys concretely — the chain rule the
+                    // checker's `chain_ty` promised every engine keeps.
+                    _ => {
+                        let f = vyrn_frontend::project::lookup_in(self.impls, &base, "at")?;
+                        vyrn_frontend::types::type_key(&f.ret)?;
+                        Some(f.ret.clone())
+                    }
                 }
             }
-            Expr::Call { name, .. } => self.ret_types.get(name).cloned(),
+            Expr::Call { name, args, .. } => self.ret_types.get(name).cloned().or_else(|| {
+                // RFC-0123 M3: a named projection call answers the same way
+                // `at` does above — its member's raw declared result, when
+                // concrete. A generic result has no key without the
+                // substitution no probe carries, and stays `None`.
+                if args.is_empty() {
+                    return None;
+                }
+                let inner = self.static_ty(&args[0])?;
+                let f =
+                    vyrn_frontend::project::lookup_in(self.impls, &inner, name).or_else(|| {
+                        vyrn_frontend::project::lookup_in(self.impls, &self.resolve(&inner), name)
+                    })?;
+                vyrn_frontend::types::type_key(&f.ret)?;
+                Some(f.ret.clone())
+            }),
             _ => None,
         }
     }
@@ -7198,6 +7228,11 @@ impl<'a> Gen<'a> {
         self.emit_term(format!("br i1 {mv}, label %{miss_l}, label %{hit_l}"));
 
         self.emit_label(&hit_l);
+        // The hit prologue (RFC-0123 M1): statements that run only when the
+        // place exists, ahead of the read.
+        for s in &p.hit {
+            self.gen_stmt(s)?;
+        }
         // The binder aliases the place — a handle copy, never drop-tracked,
         // exactly as a pattern payload binds.
         let (pv, pty) = self.gen_expr(&p.place)?;

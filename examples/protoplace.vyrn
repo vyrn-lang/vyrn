@@ -1,0 +1,44 @@
+/// A protocol may declare a projection (RFC-0123 M2): `-> read T` in a
+/// protocol body is a requirement an impl satisfies with a projection member
+/// — same name, same receiver capability, same signature. Dispatch is
+/// unchanged (a projection resolves by receiver type and inlines), so what
+/// the declaration buys is the CONTRACT: conformance speaks at the impl,
+/// not at the first call site that misses.
+
+protocol Shelf {
+    fn size(self) -> Int64
+    fn tag(read self, i: Int64) -> read String
+}
+
+type Crate = { labels: Array<String> }
+
+impl Shelf for Crate {
+    fn size(self) -> Int64 {
+        return self.labels.length
+    }
+    fn tag(read self, i: Int64) -> read String {
+        return self.labels[i]
+    }
+}
+
+type Bin = { names: Array<String>, offset: Int64 }
+
+impl Shelf for Bin {
+    fn size(self) -> Int64 {
+        return self.names.length - self.offset
+    }
+    fn tag(read self, i: Int64) -> read String {
+        return self.names[self.offset + i]
+    }
+}
+
+fn main() -> Int64 {
+    let c = Crate { labels: ["alpha", "beta"] }
+    let b = Bin { names: ["skip", "gamma", "delta"], offset: 1 }
+    print("crate: \{c.size()} \{c.tag(1)}")
+    print("bin: \{b.size()} \{b.tag(0)} \{b.tag(1)}")
+    let mut total = 0
+    total = total + c.tag(0).byteLength + b.tag(1).byteLength
+    print("total: \{total}")
+    return 0
+}

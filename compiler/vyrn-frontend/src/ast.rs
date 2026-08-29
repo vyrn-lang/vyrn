@@ -376,6 +376,11 @@ pub struct MethodSig {
     /// cannot select.
     pub param_caps: Vec<Capability>,
     pub ret: Type,
+    /// `Some` when the declared result carries a capability (RFC-0123 M2):
+    /// the member is a PROJECTION requirement, satisfied by a `places` member
+    /// of the impl rather than a method. Equal to `recv` by the same parser
+    /// rule impl members follow — the two capability columns name one access.
+    pub result_cap: Option<Capability>,
     pub line: usize,
 }
 

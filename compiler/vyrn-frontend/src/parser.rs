@@ -1726,21 +1726,32 @@ impl Parser {
                 params.push(self.type_()?);
             }
             self.eat(&Tok::RParen)?;
+            let mut result_cap = None;
             let ret = if *self.peek() == Tok::Arrow {
                 self.advance();
                 let (rline, rcol) = (self.line(), self.col());
-                if self.parse_result_capability()?.is_some() {
-                    return Err(Diagnostic::error(
-                        rline,
-                        rcol,
-                        "parse",
-                        format!(
-                            "a protocol cannot declare a projection yet — a capability \
-                             result (`-> read T` / `-> modify T`) is declared on the \
-                             `impl` (RFC-0120's recorded gap; `{name}` stays a protocol \
-                             of owned-result methods)"
-                        ),
-                    ));
+                result_cap = self.parse_result_capability()?;
+                // RFC-0123 M2: a protocol may declare a projection, under the
+                // same rule an impl member follows — the receiver's capability
+                // and the result's name one access.
+                if let Some(rc) = result_cap {
+                    if recv != rc {
+                        let want = if rc == Capability::Read {
+                            "read"
+                        } else {
+                            "modify"
+                        };
+                        return Err(Diagnostic::error(
+                            rline,
+                            rcol,
+                            "parse",
+                            format!(
+                                "`fn {mname}` returns `{want} T`, so its receiver must be \
+                                 `{want} self` — the result is a place inside the receiver, \
+                                 and the two capabilities name one access"
+                            ),
+                        ));
+                    }
                 }
                 self.type_()?
             } else {
@@ -1754,6 +1765,7 @@ impl Parser {
                 params,
                 param_caps,
                 ret,
+                result_cap,
                 line: mline,
             });
         }
@@ -5759,13 +5771,21 @@ mod tests {
     }
 
     #[test]
-    fn a_protocol_cannot_declare_a_projection_yet() {
-        let src = "protocol Pick { fn at(read self, i: Int64) -> read Int64 }\n\
+    fn a_protocol_declares_a_projection() {
+        // RFC-0123 M2: the result capability marks the requirement, under the
+        // same receiver rule an impl member follows.
+        let p = parse_src(
+            "protocol Pick { fn at(read self, i: Int64) -> read Int64 }\n\
+             fn main() -> Int64 { return 0 }",
+        );
+        let sig = &p.protocols[0].methods[0];
+        assert_eq!(sig.result_cap, Some(Capability::Read));
+        let src = "protocol Pick { fn at(self, i: Int64) -> modify Int64 }\n\
                    fn main() -> Int64 { return 0 }";
         let (_, errs) = parse_accum(lex(src).unwrap());
         assert!(
             errs.iter()
-                .any(|e| e.message.contains("cannot declare a projection")),
+                .any(|e| e.message.contains("receiver must be `modify self`")),
             "{errs:?}"
         );
     }

@@ -540,14 +540,16 @@ fn substituted(
     Ok((prologue, body.stmts))
 }
 
-/// One OPTIONAL access site's lowering (RFC-0122): statements, then a miss
-/// test, then the place a hit reads. The consumer is always an `if let` —
-/// the else arm on the miss, the then arm with its binder aliased to the
-/// place — so no `Option` exists on either path.
+/// One OPTIONAL access site's lowering (RFC-0122; the hit prologue is
+/// RFC-0123 M1): statements, then a miss test, then statements that run
+/// only on the hit, then the place the hit reads. The consumer is always an
+/// `if let` — the else arm on the miss, the then arm running `hit` and then
+/// binding its binder to the place — so no `Option` exists on either path.
 #[derive(Debug, Clone)]
 pub struct OptionalProjection {
     pub prologue: Vec<Stmt>,
     pub miss: Expr,
+    pub hit: Vec<Stmt>,
     pub place: Expr,
 }
 
@@ -558,8 +560,9 @@ pub fn is_optional(f: &Function) -> bool {
     matches!(f.ret, crate::ast::Type::Option(_))
 }
 
-/// [`inline`] for an optional projection: split the body's trailing
-/// `if <miss> { return None }` and `return Some(<place>)` off the prologue.
+/// [`inline`] for an optional projection: split the body into its four
+/// parts — prologue, the ONE `if <miss> { return None }`, the hit prologue
+/// (RFC-0123 M1), and the trailing `return Some(<place>)`.
 /// The shapes are the checker's (`check_places`) — a surprise here is a bug
 /// there, and errs rather than mis-lowers.
 pub fn optional_inline(
@@ -587,31 +590,43 @@ pub fn optional_inline(
     }
     let place = sa[0].clone();
     stmts.pop();
-    let Some(Stmt::If {
-        cond,
-        then_block,
-        else_block: None,
-        ..
-    }) = stmts.last()
-    else {
+    // The ONE miss exit sits anywhere before the exit (RFC-0123 M1): what
+    // precedes it is the prologue, what follows is the HIT prologue —
+    // statements that run only when the place exists.
+    let Some(at) = stmts.iter().position(is_miss_return) else {
         return Err(bad());
     };
-    if then_block.stmts.len() != 1
-        || !matches!(
-            &then_block.stmts[0],
-            Stmt::Return { value: Some(Expr::Var { name, .. }), .. } if name == "None"
-        )
-    {
-        return Err(bad());
-    }
+    let Some(Stmt::If { cond, .. }) = stmts.get(at) else {
+        unreachable!("positioned just above");
+    };
     let miss = cond.clone();
+    let hit: Vec<Stmt> = stmts.split_off(at + 1);
     stmts.pop();
     prologue.extend(stmts);
     Ok(OptionalProjection {
         prologue,
         miss,
+        hit,
         place,
     })
+}
+
+/// Whether `s` is the optional shape's miss exit: `if <cond> { return None }`
+/// with no `else`.
+pub fn is_miss_return(s: &Stmt) -> bool {
+    let Stmt::If {
+        then_block,
+        else_block: None,
+        ..
+    } = s
+    else {
+        return false;
+    };
+    then_block.stmts.len() == 1
+        && matches!(
+            &then_block.stmts[0],
+            Stmt::Return { value: Some(Expr::Var { name, .. }), .. } if name == "None"
+        )
 }
 
 /// What a store through a projected place becomes (RFC-0091 M3).

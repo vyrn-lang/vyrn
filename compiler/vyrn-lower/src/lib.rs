@@ -720,6 +720,9 @@ fn stmt<'a>(s: &'a Stmt, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
                                 stmt(ps, d, chain, w);
                             }
                             expr(&p.miss, d, chain, w);
+                            for hs in &p.hit {
+                                stmt(hs, d, chain, w);
+                            }
                             expr(&p.place, d, chain, w);
                         }
                     }
