@@ -19,8 +19,11 @@
   document, §26 "as landed"). The per-binding store gates followed the same
   day: `slot_owns`/`place_owns` are deleted, and a field or element store's
   ownedness is the plan's per-statement answer, proven byte-identical over
-  the whole corpus's IR and WAT. Still out: full §25 free-trace
-  bisimulation, priced there — nothing else.
+  the whole corpus's IR and WAT. §25's completeness half landed 2026-08-29
+  as the leak-check instrument (teardown + empty-table exit assertion,
+  two-sided pinned; first survey in rfcs/census/exit-residue.md). Still
+  out: the exit-residue triage that would let the instrument gate CI, and
+  the cross-engine multiset — re-priced in the proofs document.
 - **Evidence:** [rfcs/census/declared-release-does-not-run.md](census/declared-release-does-not-run.md).
 - **Appendix A:** [the algorithm and its proofs](proofs/release-algorithm.md) —
   Part I: the invariant, three soundness theorems, and the assumption each of

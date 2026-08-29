@@ -4704,3 +4704,86 @@ fn main() -> Int64 {
         "the record's field, then the option's payload"
     );
 }
+
+/// RFC-0114 SS25's completeness instrument, pinned from both sides: under
+/// `VYRN_LEAK_CHECK=1` a clean program (heap locals, heap module state — the
+/// teardown's job) exits 0 with an empty audit table, and a program holding
+/// the fold's recorded loop-store conservatism (`s = p.name.copy()` inside a
+/// `for` never releases the displaced copy) exits 135 naming the leak. The
+/// instrument being two-sided is what makes its silence on a program MEAN
+/// something.
+#[test]
+#[ignore]
+fn leak_check_is_two_sided() {
+    let dir = std::env::temp_dir().join("vyrn-leakcheck");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let build_and_run = |name: &str, src: &str| {
+        let path = dir.join(format!("{name}.vyrn"));
+        std::fs::write(&path, src).expect("write");
+        let exe = dir.join(format!("{name}.exe"));
+        let build = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .expect("build");
+        assert!(build.status.success(), "{name}: {}", norm(&build.stderr));
+        Command::new(&exe)
+            .env("VYRN_LEAK_CHECK", "1")
+            .output()
+            .expect("run")
+    };
+    let clean = build_and_run(
+        "leakclean",
+        r#"let mut tally: Array<Int64> = [1, 2, 3]
+let mut label = "module" + " state"
+
+fn main() -> Int64 {
+    let s = "a" + "b"
+    tally.push(s.byteLength)
+    label = label + "!"
+    print(label.byteLength)
+    return 0
+}
+"#,
+    );
+    assert_eq!(
+        clean.status.code(),
+        Some(0),
+        "clean program must pass the empty-table assertion:
+{}",
+        norm(&clean.stderr)
+    );
+    let leaky = build_and_run(
+        "leakleak",
+        r#"type P = { name: String }
+
+fn main() -> Int64 {
+    let people = [P { name: "a name long enough to allocate" }]
+    let mut s = ""
+    let mut i = 0
+    while i < 3 {
+        for p in people {
+            s = p.name.copy()
+        }
+        i = i + 1
+    }
+    print(s.byteLength)
+    return 0
+}
+"#,
+    );
+    assert_eq!(
+        leaky.status.code(),
+        Some(135),
+        "the recorded loop-store conservatism must be VISIBLE to the instrument:
+{}",
+        norm(&leaky.stderr)
+    );
+    assert!(
+        norm(&leaky.stderr).contains("never freed"),
+        "{}",
+        norm(&leaky.stderr)
+    );
+}

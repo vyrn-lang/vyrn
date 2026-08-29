@@ -839,14 +839,31 @@ The failure space has four classes, and three carry a standing gate:
 | a free BEFORE the last read | the audit's poison: a freed block is filled with `0xDD`, so a dangling read yields poison and the parity byte-compare fails — verified by a hand-doctored IR whose premature free prints stale-but-plausible text unaudited and pure poison audited |
 | an observable release at the wrong point | the `lowered.rs` trace gate (interpreter walk vs placement) plus parity's byte order on everything a declared release prints |
 
-What none of them see is a SILENT free at a later-than-planned point — extra
-residency, which is a performance property, not a safety one — and the formal
-multiset equality itself. Closing that residue needs the site-keyed identity
-this section describes: every allocation stamped with its source site and
-birth index, which is an ABI change at `__vyrn_malloc` and an
-instrumentation pass over the interpreter's `Rc` births. That is a project,
-and it buys a theorem's worth of assurance the four gates above approximate
-from four sides; it stays open, priced.
+**The completeness half landed 2026-08-29** as the leak-check instrument:
+`VYRN_LEAK_CHECK=1` arms the audit table, a synthesized
+`@__vyrn_globals_teardown` drops module state in reverse declaration order
+after `main` (the same per-slot drops a block exit runs; literal provenance
+needs no care because a static String carries `cap == -1` and
+`__vyrn_str_free` already skips it), and `__vyrn_audit_exit` fails the
+process with its own exit code if any block remains — births equal frees,
+per program, as a CHECKED exit condition instead of a peak-row
+approximation. The instrument is pinned from both sides in `parity.rs`: a
+clean program with heap module state exits 0, and the fold's recorded
+loop-store conservatism exits 135 naming the residue. Its first corpus
+survey is `rfcs/census/exit-residue.md` — roughly a hundred examples hold
+exit residue no peak row could see, in three visible classes
+(conservatisms, machinery, candidate real leaks) — and the instrument does
+not gate CI until that table reaches zero-or-exempted, which is its own
+arc.
+
+What remains of this section after that: the free at a LATER-than-planned
+point (residency, a performance property) and the formal multiset equality
+against the interpreter. The second is now RE-PRICED upward: beyond the
+`__vyrn_malloc` ABI stamp, the interpreter's container buffers grow inside
+Rust's own `Vec`, whose reallocation policy is invisible to any
+instrumentation short of wrapping every buffer — so cross-engine birth
+multisets diverge legitimately on growth. Whoever reopens this pays for
+buffer wrapping first.
 
 ## 26. Migration, in the order that keeps every step green
 
