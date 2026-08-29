@@ -132,6 +132,32 @@ A rule that no preset enables, that targets a dead browser, and that would fire
 on every inline `<svg>` in the site is not worth a port. Dropped. Seven, not
 eight.
 
+## 2026-08-29: two rules from table TWO — the vocabulary lands
+
+The census's second table ("Needs one fixed table beside the checker") begins
+with the element vocabulary, and the table now sits beside the checker: 143
+elements read from `html-validate` master, `src/elements/html5.ts`, on
+2026-08-29 — 118 current and 25 carrying the ELEMENT-level `deprecated` flag —
+grouped by first byte in `vhKnownTag`/`vhDeprecatedTag`.
+
+| Vyrn code | html-validate rule | severity | why |
+| --- | --- | --- | --- |
+| `html/deprecated` | `deprecated` | `Error` | `"error"` in `src/config/presets/recommended.ts`; a removed element has no specified behavior |
+| `html/element-name` | `element-name` + `no-unknown-elements` | `Warning` | deliberately quieter than upstream: the census's own caveat is that a table must be exact before a rule fires louder, and a vocabulary read at one date is the kind of table that grows |
+
+Scope, in the walk's own terms: a component call is excluded as ever
+(`isComp`); a tag with a `-` is a custom element, legal by definition; and the
+children of `<svg>`/`<math>` are FOREIGN CONTENT with a vocabulary of their
+own, gated by a new `inForeign` flag threaded exactly as `inFor`/`inLabel`/
+`inForm` are. A removed element reports `html/deprecated` only — the sharper
+sentence — never `html/element-name` as well.
+
+Zero noise on the repository's own corpus: `vyxHints("site/app")` reports the
+same 61 pre-existing findings before and after, none from the two new rules.
+Still open from table two: the per-element ATTRIBUTE tables
+(`no-unknown-attributes`, `no-deprecated-attr`), the entity table
+(`unrecognized-char-ref`), and `no-raw-characters`/`no-unused-disable`.
+
 ## Pages changed
 
 Six files. Every change is a `scope="col"` on a header cell or a `<tbody>`

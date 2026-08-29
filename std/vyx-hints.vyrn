@@ -191,7 +191,7 @@ export gen fn vhCheck(p: HintPolicy, src: String, file: String) -> String {
         // bury it.
         return ""
     }
-    return vhNodes(p, src, file, t.nodes, false, false, false)
+    return vhNodes(p, src, file, t.nodes, false, false, false, false)
 }
 
 fn vhNodes(
@@ -202,10 +202,11 @@ fn vhNodes(
     inFor: Bool,
     inLabel: Bool,
     inForm: Bool,
+    inForeign: Bool,
 ) -> String {
     let mut out = ""
     for n in nodes {
-        out = out + vhNode(p, src, file, n, inFor, inLabel, inForm)
+        out = out + vhNode(p, src, file, n, inFor, inLabel, inForm, inForeign)
     }
     return out
 }
@@ -218,15 +219,17 @@ fn vhNode(
     inFor: Bool,
     inLabel: Bool,
     inForm: Bool,
+    inForeign: Bool,
 ) -> String {
     return match n {
         VNElem(tag, isComp, attrs, kids, line) =>
-        vhElem(p, src, file, tag, isComp, attrs, kids, line, inFor, inLabel, inForm),
+        vhElem(p, src, file, tag, isComp, attrs, kids, line, inFor, inLabel, inForm, inForeign),
         // `vyxParseTemplate` does not group, so the two control-flow nodes cannot
         // appear. Walked anyway: a rule that reads a grouped tree stays correct.
-        VNFor(v, it, key, body, line, col) => vhNodes(p, src, file, body, true, inLabel, inForm),
+        VNFor(v, it, key, body, line, col) =>
+        vhNodes(p, src, file, body, true, inLabel, inForm, inForeign),
         VNIf(conds, cl, cc, bodies, els, has) =>
-        vhBodies(p, src, file, bodies, els, has, inFor, inLabel, inForm),
+        vhBodies(p, src, file, bodies, els, has, inFor, inLabel, inForm, inForeign),
         VNText(s) => "",
         VNInterp(x, line, col) => "",
         VNRaw(x, line, col) => "",
@@ -244,13 +247,14 @@ fn vhBodies(
     inFor: Bool,
     inLabel: Bool,
     inForm: Bool,
+    inForeign: Bool,
 ) -> String {
     let mut out = ""
     for b in bodies {
-        out = out + vhNodes(p, src, file, b.nodes, inFor, inLabel, inForm)
+        out = out + vhNodes(p, src, file, b.nodes, inFor, inLabel, inForm, inForeign)
     }
     if has {
-        out = out + vhNodes(p, src, file, els.nodes, inFor, inLabel, inForm)
+        out = out + vhNodes(p, src, file, els.nodes, inFor, inLabel, inForm, inForeign)
     }
     return out
 }
@@ -272,6 +276,7 @@ fn vhElem(
     inFor: Bool,
     inLabel: Bool,
     inForm: Bool,
+    inForeign: Bool,
 ) -> String {
     let kidsOut = vhNodes(
         p,
@@ -281,6 +286,7 @@ fn vhElem(
         inFor || vhHas(attrs, "v-for"),
         inLabel || tag == "label",
         inForm || tag == "form",
+        inForeign || tag == "svg" || tag == "math",
     )
     if isComp {
         // A component call is a Vyrn function, not an HTML element: its tag name
@@ -291,6 +297,44 @@ fn vhElem(
     let aLine = vhAnchorLine(attrs, line)
     let aCol = vhAnchorCol(attrs)
     let mut out = ""
+
+    // html/deprecated and html/element-name — the vocabulary rules, from the
+    // census's second table. Not inside `<svg>`/`<math>`: foreign content has
+    // a vocabulary of its own the table does not describe. A tag with a `-`
+    // is a custom element by definition and always legal.
+    if inForeign == false && contains(tag, "-") == false {
+        if vhDeprecatedTag(tag) {
+            // `html-validate` preset severity: `deprecated` is `"error"`
+            // (`src/config/presets/recommended.ts`, read 2026-08-29).
+            out = out
+            + hint(
+                p,
+                "html/deprecated",
+                Error,
+                src,
+                file,
+                line,
+                0,
+                "`<\{tag}>` was removed from HTML; the platform still renders it, but nothing specifies how — write current markup",
+            )
+        } else if vhKnownTag(tag) == false {
+            // A WARNING on purpose, where the two rules above are errors: the
+            // census's own caveat is that a table must be exact before a rule
+            // fires louder, and a vocabulary read at one date is the kind of
+            // table that grows.
+            out = out
+            + hint(
+                p,
+                "html/element-name",
+                Warning,
+                src,
+                file,
+                line,
+                0,
+                "`<\{tag}>` is not an HTML element — a typo? A custom element needs a `-` in its name; a component call starts with a capital",
+            )
+        }
+    }
 
     // --- attribute-shaped rules, reported at the offending attribute ---------
     for a in attrs {
@@ -783,6 +827,137 @@ fn vhSlice(s: String, from: Int64, to: Int64) -> String {
     }
 }
 
+/// The HTML vocabulary (RFC census `rfcs/census/ui/README.md`, table two:
+/// "Needs one fixed table beside the checker"). Read from `html-validate`
+/// master, `src/elements/html5.ts`, on 2026-08-29: 143 elements, of which 25
+/// carry the ELEMENT-level `deprecated` flag. Grouped by first byte so a
+/// lookup costs a handful of comparisons, not a walk over the alphabet.
+/// `svg` and `math` are in the vocabulary; their CHILDREN are foreign
+/// content the table does not describe, which is what `inForeign` gates.
+fn vhKnownTag(tag: String) -> Bool {
+    if tag.byteLength == 0 {
+        return false
+    }
+    let lead = bytes(tag)[0]
+    if lead == 'a' {
+        return tag == "a" || tag == "abbr" || tag == "acronym" || tag == "address" || tag == "applet" || tag == "area" || tag == "article" || tag == "aside" || tag == "audio"
+    }
+    if lead == 'b' {
+        return tag == "b" || tag == "base" || tag == "basefont" || tag == "bdi" || tag == "bdo" || tag == "bgsound" || tag == "big" || tag == "blink" || tag == "blockquote" || tag == "body" || tag == "br" || tag == "button"
+    }
+    if lead == 'c' {
+        return tag == "canvas" || tag == "caption" || tag == "center" || tag == "cite" || tag == "code" || tag == "col" || tag == "colgroup"
+    }
+    if lead == 'd' {
+        return tag == "data" || tag == "datalist" || tag == "dd" || tag == "del" || tag == "details" || tag == "dfn" || tag == "dialog" || tag == "dir" || tag == "div" || tag == "dl" || tag == "dt"
+    }
+    if lead == 'e' {
+        return tag == "em" || tag == "embed"
+    }
+    if lead == 'f' {
+        return tag == "fieldset" || tag == "figcaption" || tag == "figure" || tag == "font" || tag == "footer" || tag == "form" || tag == "frame" || tag == "frameset"
+    }
+    if lead == 'h' {
+        return tag == "h1" || tag == "h2" || tag == "h3" || tag == "h4" || tag == "h5" || tag == "h6" || tag == "head" || tag == "header" || tag == "hgroup" || tag == "hr" || tag == "html"
+    }
+    if lead == 'i' {
+        return tag == "i" || tag == "iframe" || tag == "img" || tag == "input" || tag == "ins" || tag == "isindex"
+    }
+    if lead == 'k' {
+        return tag == "kbd" || tag == "keygen"
+    }
+    if lead == 'l' {
+        return tag == "label" || tag == "legend" || tag == "li" || tag == "link" || tag == "listing"
+    }
+    if lead == 'm' {
+        return tag == "main" || tag == "map" || tag == "mark" || tag == "marquee" || tag == "math" || tag == "menu" || tag == "meta" || tag == "meter" || tag == "multicol"
+    }
+    if lead == 'n' {
+        return tag == "nav" || tag == "nextid" || tag == "nobr" || tag == "noembed" || tag == "noframes" || tag == "noscript"
+    }
+    if lead == 'o' {
+        return tag == "object" || tag == "ol" || tag == "optgroup" || tag == "option" || tag == "output"
+    }
+    if lead == 'p' {
+        return tag == "p" || tag == "param" || tag == "picture" || tag == "plaintext" || tag == "pre" || tag == "progress"
+    }
+    if lead == 'q' {
+        return tag == "q"
+    }
+    if lead == 'r' {
+        return tag == "rb" || tag == "rp" || tag == "rt" || tag == "rtc" || tag == "ruby"
+    }
+    if lead == 's' {
+        return tag == "s" || tag == "samp" || tag == "script" || tag == "search" || tag == "section" || tag == "select" || tag == "selectedcontent" || tag == "slot" || tag == "small" || tag == "source" || tag == "spacer" || tag == "span" || tag == "strike" || tag == "strong" || tag == "style" || tag == "sub" || tag == "summary" || tag == "sup" || tag == "svg"
+    }
+    if lead == 't' {
+        return tag == "table" || tag == "tbody" || tag == "td" || tag == "template" || tag == "textarea" || tag == "tfoot" || tag == "th" || tag == "thead" || tag == "time" || tag == "title" || tag == "tr" || tag == "track" || tag == "tt"
+    }
+    if lead == 'u' {
+        return tag == "u" || tag == "ul"
+    }
+    if lead == 'v' {
+        return tag == "var" || tag == "video"
+    }
+    if lead == 'w' {
+        return tag == "wbr"
+    }
+    if lead == 'x' {
+        return tag == "xmp"
+    }
+    return false
+}
+
+fn vhDeprecatedTag(tag: String) -> Bool {
+    if tag.byteLength == 0 {
+        return false
+    }
+    let lead = bytes(tag)[0]
+    if lead == 'a' {
+        return tag == "acronym" || tag == "applet"
+    }
+    if lead == 'b' {
+        return tag == "basefont" || tag == "bgsound" || tag == "big" || tag == "blink"
+    }
+    if lead == 'c' {
+        return tag == "center"
+    }
+    if lead == 'd' {
+        return tag == "dir"
+    }
+    if lead == 'f' {
+        return tag == "font" || tag == "frame" || tag == "frameset"
+    }
+    if lead == 'i' {
+        return tag == "isindex"
+    }
+    if lead == 'k' {
+        return tag == "keygen"
+    }
+    if lead == 'l' {
+        return tag == "listing"
+    }
+    if lead == 'm' {
+        return tag == "marquee" || tag == "multicol"
+    }
+    if lead == 'n' {
+        return tag == "nextid" || tag == "nobr" || tag == "noembed" || tag == "noframes"
+    }
+    if lead == 'p' {
+        return tag == "plaintext"
+    }
+    if lead == 's' {
+        return tag == "spacer" || tag == "strike"
+    }
+    if lead == 't' {
+        return tag == "tt"
+    }
+    if lead == 'x' {
+        return tag == "xmp"
+    }
+    return false
+}
+
 /// Whether `name` is an HTML event handler attribute.
 ///
 /// A NAMED LIST, not `startsWith("on")`, and the reason is that this rule is an
@@ -1103,6 +1278,27 @@ test "an external script or sheet without integrity fires; a local one does not"
     assert(fires("<link rel=\"stylesheet\" href=\"/style.css\"/>", "sec/require-sri") == false)
     assert(fires("<link rel=\"icon\" href=\"https://cdn.test/a.png\"/>", "sec/require-sri") == false)
     assert(fires("<script :src=\"url\"></script>", "sec/require-sri") == false)
+}
+
+test "an unknown element fires; the vocabulary, custom elements and foreign content do not" {
+    assert(fires("<buton>go</buton>", "html/element-name"))
+    assert(fires("<button type=\"button\">go</button>", "html/element-name") == false)
+    // A dash makes it a custom element, legal by definition.
+    assert(fires("<my-widget>x</my-widget>", "html/element-name") == false)
+    // `<svg>` is in the vocabulary; its CHILDREN are foreign content with a
+    // vocabulary of their own, which the table does not describe.
+    assert(fires("<svg><path d=\"M0 0\"/></svg>", "html/element-name") == false)
+    // The current-elements additions the census read date carries.
+    assert(fires("<search><p>x</p></search>", "html/element-name") == false)
+}
+
+test "a removed element fires; its replacement does not" {
+    assert(fires("<center>x</center>", "html/deprecated"))
+    assert(fires("<marquee>x</marquee>", "html/deprecated"))
+    assert(fires("<font size=\"3\">x</font>", "html/deprecated"))
+    assert(fires("<div>x</div>", "html/deprecated") == false)
+    // Removed, so it is not ALSO unknown — one report, the sharper one.
+    assert(fires("<center>x</center>", "html/element-name") == false)
 }
 
 test "a component call is not an HTML element" {
