@@ -190,13 +190,25 @@ and `no-raw-characters`' compile-time half, resolved by the renderer's own
 contract instead of a table. Anchored at the owning element — a text node
 carries no position of its own.
 
-Still open from table two, and now the only row: the full per-element
-attribute tables (`no-unknown-attributes` — `html5.ts` lists constrained
-attributes, not the complete allowed set, so that rule needs a source this
-census has not read). `no-unused-disable` landed as `hint/unused-waiver`;
-everything else in the table is either live above or recorded as vacuous
-under `.vyx` (the parse-structure rules a strict template parser refuses
-before any lint runs).
+And the last row closed the day a source existed for it. The complete
+allowed sets came from `wooorm/html-element-attributes` master (`index.js`,
+read 2026-08-29 — spec-derived and maintained): 31 global attributes and
+413 (element, attribute) rows across 77 elements. `html/attr-name`
+(Warning, the same table-exactness caveat) fires on a name that is not
+global, not the element's own, and not in any space with its own rule:
+`v-*` and `key` are the template's vocabulary, `data-*` is custom by
+definition, `role`/`aria*` are the ARIA space, foreign elements — `<svg>`
+and `<math>` themselves included, for this rule — keep vocabularies the
+table does not describe, and an unknown ELEMENT is `html/element-name`'s
+report alone. The corpus run that tuned it found exactly one exemption the
+first pass missed (`key`), and with it the site reports the same 61
+findings it always did.
+
+**Table two of the census is closed.** Every row is live above, resolved by
+the renderer's contract (the entity rows), landed as the waiver audit,
+recorded as vacuous under `.vyx` (the parse-structure rules a strict
+template parser refuses before any lint runs), or dropped with its reason
+(`svg-focusable`).
 
 ## Pages changed
 
