@@ -123,8 +123,12 @@ pub struct Declared {
     /// what it reaches. See [`Declared::releases`].
     owned: crate::own::Owned,
     /// Every enum variant name the program declares, plus the built-in sum
-    /// constructors. See [`Declared::constructs`].
-    variants: std::collections::HashSet<String>,
+    /// constructors, each mapped to the enum type it constructs — or `None`
+    /// where no single named type answers (the built-in sum constructors,
+    /// whose payload parameter this pass never solves; a variant name two
+    /// enums share; a generic enum, whose bare name would be an incomplete
+    /// type). See [`Declared::constructs`] and the `type_of` Call arm.
+    variants: HashMap<String, Option<String>>,
 }
 
 impl Declared {
@@ -142,14 +146,22 @@ impl Declared {
             );
         }
         let decls = crate::types::decl_map(program);
-        let mut variants: std::collections::HashSet<String> =
+        let mut variants: HashMap<String, Option<String>> =
             ["Some", "Ok", "Err", "Success", "Failure"]
                 .into_iter()
-                .map(String::from)
+                .map(|n| (n.to_string(), None))
                 .collect();
         for d in decls.values() {
             if let Type::Enum(vs) = &d.base {
-                variants.extend(vs.iter().map(|v| v.name.clone()));
+                for v in vs {
+                    // A generic enum's bare name is an incomplete type, and a
+                    // variant two enums share names neither — both answer
+                    // `None`, which `type_of` reads as "constructs, but the
+                    // type is not this pass's to name".
+                    let owner = (d.type_params.is_empty() && !variants.contains_key(&v.name))
+                        .then(|| d.name.clone());
+                    variants.insert(v.name.clone(), owner);
+                }
             }
         }
         Declared {
@@ -222,7 +234,7 @@ impl Declared {
     /// released while the constructed value holds it — `JArr(out)` handed a
     /// freed buffer to its caller and the walk over it never terminated.
     pub fn constructs(&self, name: &str) -> bool {
-        self.variants.contains(name)
+        self.variants.contains_key(name)
     }
 
     /// The element type of an iterable, where this reading can name it.
@@ -278,7 +290,31 @@ impl Declared {
             Expr::Call { name, args, .. } if name == "@tally" || name == "@tallyBytes" => {
                 args.first().and_then(|a| self.type_of(vars, a))
             }
-            Expr::Call { name, .. } => self.rets.get(name).cloned(),
+            // `fromJson(T, s)` answers `Validation<T>` — the call is
+            // type-directed, so `rets` has no row for it, and the binding it
+            // usually lands in typed as unknown: the decoded tree's owner had
+            // no release row (exit-residue round four, the decode half).
+            Expr::Call { name, args, .. } if name == "fromJson" => match args.first() {
+                Some(Expr::Var { name: tn, .. }) => Some(Type::App(
+                    "Validation".to_string(),
+                    vec![Type::Named(tn.clone())],
+                )),
+                _ => None,
+            },
+            // A variant constructor answers the enum it constructs — `JObj(..)`
+            // IS a `Json`, which is what lets an unannotated `let doc =
+            // JObj(..)` carry a release row at all. Without this arm the
+            // binding typed as unknown and the whole tree leaked at block
+            // exit, `impl Owned for Json` notwithstanding (exit-residue round
+            // four: jchain's 24 blocks, and the json/html/graphql family
+            // behind it). The guard against a shared or generic variant name
+            // is in the table's construction.
+            Expr::Call { name, .. } => self.rets.get(name).cloned().or_else(|| {
+                self.variants
+                    .get(name)
+                    .and_then(|owner| owner.clone())
+                    .map(Type::Named)
+            }),
             // The one allocating operator is `+` on Strings, and its result has
             // its left operand's type. Every other operator is a scalar, whose
             // type owns no heap anyway.

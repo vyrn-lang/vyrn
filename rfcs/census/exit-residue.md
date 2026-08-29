@@ -145,6 +145,48 @@ Tallies after round three: **clean 60, leaking 90, zero double-frees**,
 with the fn-value family (`capturefn`, `streamops`/`streamlazy`/
 `streamunfold` and the minimal probes) clean end to end.
 
+## Fourth triage: the bindings the ownership pass could not type
+
+One reading defect, three spellings — none of them a release-machinery
+hole. `Declared::type_of` is the ownership pass's typing, and a binding
+it answers `unknown` for gets no release row at all, `impl Owned`
+notwithstanding. Three call shapes answered nothing:
+
+- **A variant constructor.** `let doc = JObj([..])` — constructors are
+  not functions, so `rets` had no row, and every unannotated `let` over
+  an enum constructor leaked its whole tree (`jchain`'s 24 blocks; the
+  declared `impl Owned for Json` never ran because no row asked for it).
+  The variant table now maps each variant to the enum it constructs, and
+  the `Call` arm answers it — guarded to `None` for a variant name two
+  enums share, a generic enum (its bare name is an incomplete type), and
+  the built-in sum constructors.
+- **`toJson`.** The desugar was `json$emit(json$e<key>(arg))` — the whole
+  encoded tree an ARGUMENT TEMPORARY, and a temporary whose release is a
+  declared `impl Owned` call is exactly what the drains refuse (user
+  code, observable timing). Every `toJson` leaked its tree: fourteen
+  blocks for one small record. The desugar now calls a generated
+  per-type wrapper that BINDS the tree (`let t: Json = enc(v)`), and
+  block exit releases it the same way in all three engines. The render
+  is bound before the return, because `return emit(t)` reads as `t`
+  moving into the return and skips the release the wrapper exists for.
+- **`fromJson`.** Type-directed, so `rets` had no row and the
+  `Validation<T>` binding it lands in was unknown — the decoded value
+  never released. A `type_of` arm answers `Validation<T>` from the
+  call's own type argument.
+
+Tallies after round four: **clean 63, leaking 87, zero double-frees** —
+jchain clean; jsonbytes 600→385 blocks, enumcodec 279→175, domdemo
+1586→970, graphql 3083→2758. The typing also surfaced one real defect
+the unknown had been hiding: `vlog` stored `issues[0].message` — a
+projection out of the `Invalid` binder — into a record that outlives
+the arm; typed, the binder's release would have made that a dangle, and
+movecheck now refuses it with the `.copy()` menu the example takes.
+What remains in
+the family is the fold's recorded loop-store conservatism (`out = out +
+piece` in the emit/render loops — one grow-buffer block per append
+spine, already listed under recorded conservatisms) and per-library
+shapes (`htmltree`/`herofield` moved nothing and are next).
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach
