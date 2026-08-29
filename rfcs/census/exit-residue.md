@@ -95,6 +95,39 @@ the leaking count ROSE from 77 because the `jsonread`/`json5` move fixes
 restored nineteen json-heavy examples to the surveyable set; on the
 constant denominator every number moved down.
 
+## Third triage: an argument the coercion allocated, and a capture block that owned more than it freed
+
+Two classes, one round. First, **the heapify argument**: `f([1, 2, 3])`
+builds a fixed value the literal owns nothing of — and then the call
+boundary's coercion into a growable `Array<T>` allocates a triple nobody
+recorded, because the literal's own type deliberately answers nothing
+(`Declared::type_of`'s array-literal rule). The plan records it now: the
+argument-temporary machinery types such a literal FROM THE CALLEE'S
+DECLARED PARAMETER, and the two call paths that coerce (the ordinary loop
+and the higher-order twin) retarget the pushed free at the coerced
+product, since the hook fired before the coercion on a value that owned
+nothing. En route the finish check caught the NATIVE `fromJson` rewrite
+embedding a clone of its payload argument — the direct backend's disease,
+cured with the same scoped alias.
+
+Second, **the capture block**: capture is a take (`Gone::Captured` stops
+the binding's own release), so a closure's block OWNS every heap value it
+snapshot — and both the copy and the release were shallow. A copied fn
+value shared its captured buffers; a released one freed the block and
+left a captured String, or a nested fn value's own block, with no owner
+(the `capturefn` 16-byte specimen was exactly that: an onward lambda's
+inner value). All three deepened together, as they must — the old pin comment exposed the third piece (two lambdas over one binding shared ONE pointer, which is why the release had stayed shallow): `emit_capture` deep-copies heap values into the block, `__vyrn_fnval_copy`
+duplicates heap captures per variant, the new `__vyrn_fnval_release`
+walks them before the block goes, `deep_copy`/`deep_release` route `fn`
+values through the pair, and the stream closer hands its step value to
+the release twin instead of freeing the bare block. The direct backend
+keeps its shallow pair for now — internally consistent, recorded here as
+follow-up.
+
+Tallies after round three: **clean 60, leaking 90, zero double-frees**,
+with the fn-value family (`capturefn`, `streamops`/`streamlazy`/
+`streamunfold` and the minimal probes) clean end to end.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach

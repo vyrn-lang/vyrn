@@ -2622,6 +2622,40 @@ impl MoveCheck<'_> {
             // TYPE is what tells them apart — the check `own::str_temporary`'s
             // doc comment demands of every caller.
             Expr::Binary { op: BinOp::Add, .. } => None,
+            // An ARRAY LITERAL argument coerced at the call boundary
+            // (RFC-0114 §25's exit-residue census, round three): the literal
+            // itself is a fixed value and owns nothing, but a callee whose
+            // declared parameter is a growable `Array<T>` receives a
+            // HEAPIFIED copy the coercion allocates — a temporary the caller
+            // owns and nothing recorded. Typed from the DECLARATION, because
+            // the literal's own type deliberately answers nothing (see
+            // `Declared::type_of`'s array-literal note).
+            Expr::ArrayLit { .. } => {
+                let Some(pty) = self.decl.param_ty(callee, ix) else {
+                    return;
+                };
+                if !matches!(
+                    crate::types::resolve(pty, self.decl.decls()),
+                    Type::Array(_)
+                ) {
+                    return;
+                }
+                let Some(kind) = self.decl.release_kind(pty) else {
+                    return;
+                };
+                sink.borrow_mut().push(ArgTemp {
+                    id: arg as *const Expr as usize,
+                    callee: callee.to_string(),
+                    ix,
+                    line,
+                    module: None,
+                    producer: Some("@heapify".to_string()),
+                    kind,
+                    verdict: ArgVerdict::Unknown,
+                    owner: self.cur_fn.borrow().clone(),
+                });
+                return;
+            }
             _ => return,
         };
         let Some(ty) = self.decl.type_of(&self.vars.borrow(), arg) else {

@@ -1035,6 +1035,7 @@ const REL_RECV: &str = "@rel";
 
 /// The module's derived copy over the defunctionalized `fn` enum (Phase 10b).
 const FNVAL_COPY: &str = "__vyrn_fnval_copy";
+const FNVAL_RELEASE: &str = "__vyrn_fnval_release";
 
 pub const GEN_MODE_READ: i32 = 0;
 pub const GEN_MODE_READ_BYTES: i32 = 1;
@@ -2319,7 +2320,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // Phase 10b: the derived copy over the same enum, emitted here for the same
     // reason — a variant's capture layout is only complete once every body has
     // been read. `internal`, so a module that never copies a `fn` value drops it.
-    if !fnval_registry.is_empty() {
+    {
         let mut cgen = Gen::new(
             &ret_types,
             &param_types,
@@ -2338,7 +2339,8 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &program.type_decls,
         );
         cgen.fnval_variants = fnval_registry.clone();
-        cgen.emit_fnval_copy(&mut out);
+        cgen.emit_fnval_copy(&mut out)?;
+        cgen.emit_fnval_release(&mut out)?;
     }
 
     // RFC-0090 M3: one release per element type, emitted here for the reason the
@@ -3773,6 +3775,30 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{out} = load {sa_ll}, ptr {slot}"));
                 Ok(out)
             }
+            // A stored function value copies by its runtime twin: the same
+            // tag, the capture block duplicated — and DEEP since RFC-0114
+            // §25's round three: a block owns its heap captures (capture is
+            // a take, `Gone::Captured` stops the binding's own release), so
+            // a shallow copy left two owners of every captured buffer.
+            Type::Fn(..) => {
+                let tag = self.fresh_tmp();
+                let pay = self.fresh_tmp();
+                let pay2 = self.fresh_tmp();
+                self.emit(format!("{tag} = extractvalue {{ i64, i64 }} {v}, 0"));
+                self.emit(format!("{pay} = extractvalue {{ i64, i64 }} {v}, 1"));
+                self.emit(format!(
+                    "{pay2} = call i64 @{FNVAL_COPY}(i64 {tag}, i64 {pay})"
+                ));
+                let a = self.fresh_tmp();
+                let b = self.fresh_tmp();
+                self.emit(format!(
+                    "{a} = insertvalue {{ i64, i64 }} undef, i64 {tag}, 0"
+                ));
+                self.emit(format!(
+                    "{b} = insertvalue {{ i64, i64 }} {a}, i64 {pay2}, 1"
+                ));
+                Ok(b)
+            }
             // Two parallel buffers. String keys are duplicated per entry; Int64
             // keys (RFC-0117) copy with the buffer, since the buffer holds the
             // values themselves. Values duplicate only when the value type owns
@@ -4089,11 +4115,16 @@ impl<'a> Gen<'a> {
             // The captures are one heap block, read by value at the construction
             // site, and 0 when there are none — which `free` refuses. Census §16.
             Type::Fn(..) => {
-                let p = self.fresh_tmp();
-                let q = self.fresh_tmp();
-                self.emit(format!("{p} = extractvalue {{ i64, i64 }} {v}, 1"));
-                self.emit(format!("{q} = inttoptr i64 {p} to ptr"));
-                self.emit(format!("call void @__vyrn_free(ptr {q})"));
+                // The runtime twin walks the block's heap captures before the
+                // block goes (RFC-0114 §25 round three): capture is a take,
+                // so the block is the OWNER of what it snapshot, and the old
+                // shallow free left every heap capture — a String, a nested
+                // fn value's own block — with no owner at all.
+                let tag = self.fresh_tmp();
+                let pay = self.fresh_tmp();
+                self.emit(format!("{tag} = extractvalue {{ i64, i64 }} {v}, 0"));
+                self.emit(format!("{pay} = extractvalue {{ i64, i64 }} {v}, 1"));
+                self.emit(format!("call void @{FNVAL_RELEASE}(i64 {tag}, i64 {pay})"));
                 Ok(())
             }
             // A fixed `[N x T]` is a container, so its elements are U4's
@@ -8269,13 +8300,26 @@ impl<'a> Gen<'a> {
                 }
                 continue;
             }
+            let frees_mark = self.arg_frees.len();
             let (v, vty) = self.gen_expr(&args[i])?;
             let aty = vyrn_frontend::types::substitute(&vty, self.subst);
             if generic {
                 solve_param(&p.ty, &aty, &mut call_subst);
             }
+            let was_fixed = matches!(self.resolve(&aty), Type::ArrayN(..) | Type::SmallArray(..));
             let pty = vyrn_frontend::types::substitute(&p.ty, &call_subst);
             let (v, cty) = self.coerce(v, &aty, &pty)?;
+            // RFC-0114 §25's heapify row — the ordinary call path's twin: the
+            // hook fired on the fixed literal, the coercion allocated the
+            // growable triple, so the pushed entry retargets at the product.
+            if self.arg_frees.len() > frees_mark
+                && was_fixed
+                && matches!(self.resolve(&cty), Type::Array(_))
+            {
+                if let Some(last) = self.arg_frees.last_mut() {
+                    *last = (v.clone(), cty.clone());
+                }
+            }
             nonfn_ops.push(format!("{} {v}", self.llt(&cty)));
         }
         // Resolve each `fn`-typed argument: lift/forward the target and evaluate
@@ -8526,6 +8570,18 @@ impl<'a> Gen<'a> {
             let ll = self.llt(&cty);
             let v = self.fresh_tmp();
             self.emit(format!("{v} = load {ll}, ptr {slot}"));
+            // The snapshot OWNS its heap (RFC-0114 §25 round three): two
+            // lambdas over one binding used to build two blocks holding ONE
+            // pointer, which is why the release had to stay shallow and every
+            // heap capture leaked. A duplicated capture gives each block its
+            // own copy, which is what lets `__vyrn_fnval_release` walk it —
+            // and it is the by-value snapshot the capture-timing lock always
+            // claimed. The binding itself still answers `Gone::Captured`, so
+            // its own value keeps its recorded leak; that row is separate.
+            if self.owns_heap(&cty) {
+                let v2 = self.deep_copy(&v, &cty)?;
+                return Ok((v2, cty));
+            }
             return Ok((v, cty));
         }
         if let Some(b) = self.fn_bindings.get(cn).cloned() {
@@ -9223,15 +9279,14 @@ impl<'a> Gen<'a> {
         ));
         // The step's capture block. A stream owns the fn value it was built
         // with — `fromStep` is where it was constructed — so this is the one
-        // place that can hand it back. An empty capture set is payload 0.
+        // place that can hand it back. Deep since RFC-0114 §25 round three:
+        // the release twin walks the heap captures before the block goes,
+        // and a payload of 0 routes to its default arm harmlessly.
+        out.push_str("  %ctag = extractvalue { i64, i64 } %fv, 0\n");
         out.push_str("  %pay = extractvalue { i64, i64 } %fv, 1\n");
-        out.push_str("  %hascap = icmp ne i64 %pay, 0\n");
-        out.push_str("  br i1 %hascap, label %cap, label %done\n");
-        out.push_str("cap:\n");
-        out.push_str("  %cb = inttoptr i64 %pay to ptr\n");
-        out.push_str("  call void @__vyrn_free(ptr %cb)\n");
-        out.push_str("  br label %done\n");
-        out.push_str("done:\n");
+        out.push_str(&format!(
+            "  call void @{FNVAL_RELEASE}(i64 %ctag, i64 %pay)\n"
+        ));
         out.push_str("  ret void\n");
         out.push_str("}\n\n");
         Ok(())
@@ -9297,59 +9352,183 @@ impl<'a> Gen<'a> {
     /// release is shallow for the same reason, and the two stay mirrors.
     ///
     /// `internal`, so a module that never copies a `fn` value loses it entirely.
-    fn emit_fnval_copy(&mut self, out: &mut String) {
-        out.push_str(&format!(
-            "define internal i64 @{FNVAL_COPY}(i64 %tag, i64 %pay) {{\n"
-        ));
-        out.push_str("entry:\n");
-        // A variant with no captures carries payload 0 and copies to itself, so
-        // only the ones that allocate need an arm.
-        let sized: Vec<(usize, String)> = self
-            .fnval_variants
-            .clone()
+    fn emit_fnval_copy(&mut self, out: &mut String) -> Result<(), String> {
+        use std::fmt::Write as _;
+        self.allocas.clear();
+        self.body.clear();
+        self.tmp = 0;
+        self.label = 0;
+        self.terminated = false;
+        self.cur_block = "entry".into();
+        // A variant with no captures carries payload 0 and copies to itself,
+        // so only the ones that allocate need an arm — and since RFC-0114
+        // §25's round three the arm is DEEP: the block owns its heap
+        // captures (capture is a take), so a shallow memcpy left two owners
+        // of every captured buffer the moment anything copied a fn value.
+        let variants = self.fnval_variants.clone();
+        let sized: Vec<(usize, Vec<Type>)> = variants
             .iter()
             .enumerate()
             .filter(|(_, v)| !v.cap_tys.is_empty())
-            .map(|(i, v)| {
-                (
-                    i,
-                    format!(
-                        "{{ {} }}",
-                        v.cap_tys
-                            .iter()
-                            .map(|t| self.llt(t))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                )
-            })
+            .map(|(i, v)| (i, v.cap_tys.clone()))
             .collect();
+        if sized.is_empty() {
+            writeln!(
+                out,
+                "define internal i64 @{FNVAL_COPY}(i64 %tag, i64 %pay) {{"
+            )
+            .unwrap();
+            out.push_str("entry:\n  ret i64 %pay\n}\n\n");
+            return Ok(());
+        }
         let arms: Vec<String> = sized
             .iter()
             .map(|(i, _)| format!("i64 {i}, label %cp.v{i}"))
             .collect();
-        out.push_str(&format!(
-            "  switch i64 %tag, label %cp.share [ {} ]\n",
+        self.emit_term(format!(
+            "switch i64 %tag, label %cp.share [ {} ]",
             arms.join(" ")
         ));
-        for (i, block_ll) in &sized {
-            out.push_str(&format!("cp.v{i}:\n"));
-            out.push_str(&format!(
-                "  %s{i} = ptrtoint ptr getelementptr ({block_ll}, ptr null, i64 1) to i64\n"
+        for (i, caps) in &sized {
+            self.emit_label(&format!("cp.v{i}"));
+            let block_ll = format!(
+                "{{ {} }}",
+                caps.iter()
+                    .map(|t| self.llt(t))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let size = self.fresh_tmp();
+            let o = self.fresh_tmp();
+            let n = self.fresh_tmp();
+            self.emit(format!(
+                "{size} = ptrtoint ptr getelementptr ({block_ll}, ptr null, i64 1) to i64"
             ));
-            out.push_str(&format!("  %o{i} = inttoptr i64 %pay to ptr\n"));
-            out.push_str(&format!("  %n{i} = call ptr @__vyrn_malloc(i64 %s{i})\n"));
-            out.push_str(&format!(
-                "  call void @llvm.memcpy.p0.p0.i64(ptr %n{i}, ptr %o{i}, i64 %s{i}, i1 false)\n"
+            self.emit(format!("{o} = inttoptr i64 %pay to ptr"));
+            self.emit(format!("{n} = call ptr @__vyrn_malloc(i64 {size})"));
+            self.emit(format!(
+                "call void @llvm.memcpy.p0.p0.i64(ptr {n}, ptr {o}, i64 {size}, i1 false)"
             ));
-            out.push_str(&format!("  %r{i} = ptrtoint ptr %n{i} to i64\n"));
-            out.push_str(&format!("  ret i64 %r{i}\n"));
+            for (j, cty) in caps.iter().enumerate() {
+                if !self.owns_heap(cty) {
+                    continue;
+                }
+                let fp = self.fresh_tmp();
+                let cll = self.llt(cty);
+                self.emit(format!(
+                    "{fp} = getelementptr {block_ll}, ptr {n}, i64 0, i32 {j}"
+                ));
+                let cv = self.fresh_tmp();
+                self.emit(format!("{cv} = load {cll}, ptr {fp}"));
+                let cv2 = self.deep_copy(&cv, cty)?;
+                self.emit(format!("store {cll} {cv2}, ptr {fp}"));
+            }
+            let r = self.fresh_tmp();
+            self.emit(format!("{r} = ptrtoint ptr {n} to i64"));
+            self.emit_term(format!("ret i64 {r}"));
         }
-        // Every other tag has no block to copy: the payload is 0 and the copy is
-        // the value, exactly as a scalar's is.
-        out.push_str("cp.share:\n");
-        out.push_str("  ret i64 %pay\n");
+        self.emit_label("cp.share");
+        self.emit_term("ret i64 %pay".into());
+        writeln!(
+            out,
+            "define internal i64 @{FNVAL_COPY}(i64 %tag, i64 %pay) {{"
+        )
+        .unwrap();
+        out.push_str("entry:\n");
+        for a in &self.allocas {
+            out.push_str(a);
+            out.push('\n');
+        }
+        for b in &self.body {
+            out.push_str(b);
+            out.push('\n');
+        }
         out.push_str("}\n\n");
+        Ok(())
+    }
+
+    /// The release twin (RFC-0114 §25 round three): walk a fn value's heap
+    /// captures — a String snapshot, a nested fn value's own block — and then
+    /// free the block. One global function, because tags are global; a tag
+    /// with no captures routes to the default and releases nothing, which is
+    /// also what makes it safe to call with payload 0.
+    fn emit_fnval_release(&mut self, out: &mut String) -> Result<(), String> {
+        use std::fmt::Write as _;
+        self.allocas.clear();
+        self.body.clear();
+        self.tmp = 0;
+        self.label = 0;
+        self.terminated = false;
+        self.cur_block = "entry".into();
+        let variants = self.fnval_variants.clone();
+        let sized: Vec<(usize, Vec<Type>)> = variants
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| !v.cap_tys.is_empty())
+            .map(|(i, v)| (i, v.cap_tys.clone()))
+            .collect();
+        if sized.is_empty() {
+            writeln!(
+                out,
+                "define internal void @{FNVAL_RELEASE}(i64 %tag, i64 %pay) {{"
+            )
+            .unwrap();
+            out.push_str("entry:\n  ret void\n}\n\n");
+            return Ok(());
+        }
+        let arms: Vec<String> = sized
+            .iter()
+            .map(|(i, _)| format!("i64 {i}, label %rl.v{i}"))
+            .collect();
+        self.emit_term(format!(
+            "switch i64 %tag, label %rl.none [ {} ]",
+            arms.join(" ")
+        ));
+        for (i, caps) in &sized {
+            self.emit_label(&format!("rl.v{i}"));
+            let block_ll = format!(
+                "{{ {} }}",
+                caps.iter()
+                    .map(|t| self.llt(t))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let o = self.fresh_tmp();
+            self.emit(format!("{o} = inttoptr i64 %pay to ptr"));
+            for (j, cty) in caps.iter().enumerate() {
+                if !self.owns_heap(cty) {
+                    continue;
+                }
+                let fp = self.fresh_tmp();
+                let cll = self.llt(cty);
+                self.emit(format!(
+                    "{fp} = getelementptr {block_ll}, ptr {o}, i64 0, i32 {j}"
+                ));
+                let cv = self.fresh_tmp();
+                self.emit(format!("{cv} = load {cll}, ptr {fp}"));
+                self.deep_release(&cv, cty)?;
+            }
+            self.emit(format!("call void @__vyrn_free(ptr {o})"));
+            self.emit_term("ret void".into());
+        }
+        self.emit_label("rl.none");
+        self.emit_term("ret void".into());
+        writeln!(
+            out,
+            "define internal void @{FNVAL_RELEASE}(i64 %tag, i64 %pay) {{"
+        )
+        .unwrap();
+        out.push_str("entry:\n");
+        for a in &self.allocas {
+            out.push_str(a);
+            out.push('\n');
+        }
+        for b in &self.body {
+            out.push_str(b);
+            out.push('\n');
+        }
+        out.push_str("}\n\n");
+        Ok(())
     }
 
     fn emit_fnval_dispatcher(&mut self, sig: &Type, out: &mut String) -> Result<(), String> {
@@ -9806,7 +9985,17 @@ impl<'a> Gen<'a> {
                 ));
             }
             let e = vyrn_frontend::jsondec::decode_expr(&target, args[1].clone(), line);
-            return self.gen_expr(&e);
+            // RFC-0114 §26: the rewrite EMBEDS a clone of the payload
+            // argument — the direct backend's twin comment. Scoped: the tree
+            // dies with this call, and a stale alias would fire on whatever
+            // later node reuses the address.
+            let mark = self.plan.alias_scope();
+            let mut pairs = Vec::new();
+            vyrn_frontend::ast::alias_embedded(&e, &args[1], &mut pairs);
+            self.plan.alias_clones_scoped(&pairs);
+            let r = self.gen_expr(&e);
+            self.plan.alias_unwind(mark);
+            return r;
         }
         // Numeric conversion `Int32(x)`, `Float64(x)`, ...
         if let Some(target) = vyrn_frontend::types::numeric_conv_target(name) {
@@ -12994,15 +13183,31 @@ impl<'a> Gen<'a> {
             if let Some(p) = params.get(i) {
                 self.expect.push(p.clone());
             }
+            let frees_mark = self.arg_frees.len();
             let r = self.gen_expr(a);
             if pushed {
                 self.expect.pop();
             }
             let (v, vty) = r?;
+            let was_fixed = matches!(self.resolve(&vty), Type::ArrayN(..) | Type::SmallArray(..));
             let (v, pty) = match params.get(i) {
                 Some(p) => self.coerce_flow(v, a, &vty, p)?,
                 None => (v, vty),
             };
+            // RFC-0114 §25's heapify row: an array-literal argument the plan
+            // recorded is a temporary the CALLER releases — but the hook in
+            // `gen_expr` fired before the coercion, on the fixed VALUE the
+            // literal is, and a fixed value owns nothing to free. What the
+            // coercion allocated is the growable triple in `v` now, so the
+            // entry the hook pushed is retargeted at the coerced product.
+            if self.arg_frees.len() > frees_mark
+                && was_fixed
+                && matches!(self.resolve(&pty), Type::Array(_))
+            {
+                if let Some(last) = self.arg_frees.last_mut() {
+                    *last = (v.clone(), pty.clone());
+                }
+            }
             arg_ops.push(format!("{} {v}", self.llt(&pty)));
         }
         let sym = fn_sym(name);
@@ -16728,7 +16933,11 @@ mod tests {
 
     /// What one element type's release costs in `free`s: a buffer stream's data,
     /// and a producer's step capture block.
-    const STREAM_CLOSER_FREES: usize = 2;
+    // Down from 2 since RFC-0114 §25 round three: the step's capture block
+    // is handed to `__vyrn_fnval_release` now (whose stub, in a program with
+    // no fn-value constructions, contains no free of its own), so the closer
+    // text carries one raw free — the buffer arm's.
+    const STREAM_CLOSER_FREES: usize = 1;
     fn free_calls(ir: &str) -> usize {
         ir.matches("call void @__vyrn_free(ptr").count()
             + ir.matches("call void @__vyrn_str_free(ptr").count()
@@ -16803,19 +17012,21 @@ mod tests {
         // A stored closure holds the buffer by value (RFC-0037) and can outlive
         // this block, so nothing here may release the STRING — census §16.
         //
-        // Since Phase 10b the closure's own capture block is released, which is
-        // the one free below: the block, not what a capture points at. Two
-        // lambdas over one `s` build two blocks holding one pointer, so the
-        // shallow release is what keeps that pointer from being freed twice —
-        // and it is why `s` still leaks and `Gone::Captured` still says so.
+        // Since Phase 10b the closure's own capture block is released; since
+        // RFC-0114 §25 round three the capture is a DUPLICATE the block owns
+        // (two lambdas over one `s` used to share one pointer, which is why
+        // the release had to stay shallow), and `__vyrn_fnval_release` walks
+        // it before the block goes. So the two frees below are the copied
+        // String and the block — while `s` itself still answers
+        // `Gone::Captured` and keeps its recorded leak, unchanged.
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let s = a + b; let f: fn(Int64) -> Int64 = x -> x + s.byteLength; \
                    return f(1); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert_eq!(
             free_calls(&ir),
-            RUNTIME_FREES + 1,
-            "the capture block and nothing else: {ir}"
+            RUNTIME_FREES + 2,
+            "the copied capture and the block, nothing else: {ir}"
         );
     }
 
