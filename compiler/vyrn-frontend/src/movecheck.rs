@@ -2703,10 +2703,17 @@ impl MoveCheck<'_> {
     fn note_arg_temp(&self, arg: &Expr, callee: &str, ix: usize, line: usize) {
         let Some(sink) = &self.arg_temps else { return };
         let producer = match arg {
-            // A constructor's payload is the constructed value's, and a lending
-            // builtin hands back a place inside its receiver. Neither BUILT
-            // anything the caller may release.
-            Expr::Call { name, .. } if views(name) || self.decl.constructs(name) => return,
+            // A lending builtin hands back a place inside its receiver — it
+            // BUILT nothing the caller may release.
+            Expr::Call { name, .. } if views(name) => return,
+            // A CONSTRUCTOR-built argument (`emit(JObj(..))`) is a temporary
+            // the caller owns, exactly like any other producer — admitted in
+            // exit-residue round ten, the same round the constructor position
+            // stopped accepting borrows (which is what makes a deep free of
+            // the constructed value sound: everything inside was moved,
+            // taken, or copied in). The row's type comes from the variant
+            // table, so a built-in sum (`Some(x)`) still answers nothing and
+            // stands aside as before.
             Expr::Call { name, .. } => Some(name.clone()),
             // The one allocating operator. `+` is also integer addition, so the
             // TYPE is what tells them apart — the check `own::str_temporary`'s
@@ -4577,12 +4584,43 @@ impl MoveCheck<'_> {
                         // A variant constructor is a literal that reads like a
                         // call: the value it builds holds the argument and
                         // outlives the call, exactly as an array literal does.
-                        // Recorded, not refused. An aggregate releases nothing
-                        // until Phase 5, so a payload put here is a leak today;
-                        // making it a rule-2 store would refuse `return Some(s)`
-                        // on a `read` parameter across the whole corpus, which is
-                        // Phase 5's migration and not this one's.
+                        // A whole OWNED name moves in; a PROJECTION or a
+                        // borrowed name is REFUSED (exit-residue rounds seven
+                        // and ten): the constructor position was the one door
+                        // a borrow could smuggle through into a value the
+                        // machinery releases as owned — `JStr(sel.key)` freed
+                        // the selection key under `q.sels`, and admitting
+                        // constructor-built argument temporaries at all
+                        // requires the door closed. The store rule's `.copy()`
+                        // menu applies, exactly as it does everywhere else.
+                        // A `consume` take is a TRANSFER — the hole machinery
+                        // accounts the field, and the constructed value owns
+                        // what it took — so only a bare projection or borrow
+                        // is refused.
+                        let taken = matches!(arg, Expr::Consume { .. });
                         if let Some((root, path)) = place_path(arg) {
+                            let borrowed = self.borrow_of(&root).is_some();
+                            if !taken
+                                && (path != root || borrowed)
+                                && self.type_of(arg).is_some_and(|t| self.decl.owns_heap(&t))
+                            {
+                                self.note_retention(arg);
+                                return Err(menu(
+                                    *line,
+                                    format!(
+                                        "`{path}` may not be put into `{}(..)` — it is {}",
+                                        crate::parser::method_surface(name),
+                                        if borrowed {
+                                            self.borrow_of(&root)
+                                                .map(|b| b.what(&path))
+                                                .unwrap_or_else(|| "a borrow".to_string())
+                                        } else {
+                                            Borrow::Projection.what(&path)
+                                        }
+                                    ),
+                                    vec![format!("`{path}.copy()` if the value should own it")],
+                                ));
+                            }
                             if root == path {
                                 self.took(
                                     &root,
@@ -6226,7 +6264,13 @@ mod tests {
     /// The record is a LEND, never a refusal — refusing here would refuse
     /// `return Some(m)` over any loop element, which is most of the corpus.
     #[test]
-    fn a_borrow_wrapped_in_a_constructor_is_recorded_as_a_lend() {
+    fn a_borrow_wrapped_in_a_constructor_is_refused_and_the_copy_is_owned() {
+        // Exit-residue round ten flipped this pin: the constructor position
+        // was the one door a borrow could smuggle through into a value the
+        // machinery releases as owned — round seven's two graphql dangles
+        // walked through it — and admitting constructor-built argument
+        // temporaries at all requires the door closed. So the wrapped
+        // borrow is REFUSED now, with the store rule's `.copy()` menu.
         let src = "type M = { name: String } \
                    type C = { members: Array<M> } \
                    fn openRule(c: C) -> Option<M> { for m in c.members { return Some(m) } \
@@ -6234,16 +6278,16 @@ mod tests {
                    fn main() -> Int64 { let c = C { members: [] } \
                    if let Some(r) = openRule(c) { return r.name.byteLength } return 0 }";
         let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-        // It compiles: the wrapper is recorded, not refused.
-        assert!(super::check(&program).is_ok());
-        // And every row that names its result is off the release list, so the
-        // `if let` scrutinee is not freed under the arm that reads it.
+        let err = super::check(&program).unwrap_err();
         assert!(
-            super::ownership(&program)
-                .values()
-                .all(|r| r.from_call.as_deref() != Some("openRule") || r.gone.is_some()),
-            "a lender's result must never be reclaimed by its caller"
+            err.contains("may not be put into `Some(..)`"),
+            "the borrow is refused at the constructor position: {err}"
         );
+        // The menu's spelling compiles, and the result is owned — no row
+        // survives that would stop the caller reclaiming it.
+        let src2 = src.replace("Some(m)", "Some(m.copy())");
+        let program2 = crate::parser::parse(crate::lexer::lex(&src2).unwrap()).unwrap();
+        assert!(super::check(&program2).is_ok());
     }
 
     /// Phase 10a keyed the scrutinee row on `place_key == 0`, and 0 means two

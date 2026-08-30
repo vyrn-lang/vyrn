@@ -39,8 +39,14 @@ let mut middleware: Array<Middleware> = [
 /// Run the chain: the first `Some` wins; middleware after a hit never runs.
 fn runMiddleware(req: Request) -> Option<Response> {
     let mut hit: Option<Response> = None
+    let mut done = false
     for m in middleware {
-        hit = match hit { Some(r) => Some(r), None => m(req) }
+        if done == false {
+            if let Some(r) = m(req) {
+                hit = Some(r)
+                done = true
+            }
+        }
     }
     return hit
 }

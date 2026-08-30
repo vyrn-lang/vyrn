@@ -209,7 +209,7 @@ export fn benchJson(results: Array<BenchResult>, backend: String, opt: String) -
     let mut benches: Array<Json> = []
     for r in results {
         let entry: Array<JsonField> = [
-            JsonField { key: "name", value: JStr(r.name) },
+            JsonField { key: "name", value: JStr(r.name.copy()) },
             JsonField { key: "minNs", value: JNum("\{r.minNs}") },
             JsonField { key: "medianNs", value: JNum("\{r.medianNs}") },
             JsonField { key: "meanNs", value: JNum("\{r.meanNs}") },
@@ -219,8 +219,8 @@ export fn benchJson(results: Array<BenchResult>, backend: String, opt: String) -
         benches.push(JObj(entry))
     }
     let doc: Array<JsonField> = [
-        JsonField { key: "backend", value: JStr(backend) },
-        JsonField { key: "opt", value: JStr(opt) },
+        JsonField { key: "backend", value: JStr(backend.copy()) },
+        JsonField { key: "opt", value: JStr(opt.copy()) },
         JsonField { key: "benches", value: JArr(benches) },
     ]
     return emit(JObj(doc))

@@ -440,7 +440,7 @@ fn readRecord(p: modify VonP, name: String, depth: Int64) -> Result<Von, String>
         skipDocs(p)
         if atPunct(p, "}") {
             bump(p)
-            return Ok(VRecord(name, fs))
+            return Ok(VRecord(name.copy(), fs))
         }
         if kindAt(p) == "keyword" {
             return Err(errAt(p, "`" + textAt(p) + "` is a Vyrn keyword, so it is not a field name here — VON is Vyrn's own grammar, and the same words are spoken for"))
@@ -479,7 +479,7 @@ fn readVariantArgs(p: modify VonP, name: String, depth: Int64) -> Result<Von, St
         skipDocs(p)
         if atPunct(p, ")") {
             bump(p)
-            return Ok(VVariant(name, args))
+            return Ok(VVariant(name.copy(), args))
         }
         let v = readValue(p, depth)?
         args.push(v)
@@ -1271,7 +1271,7 @@ fn jsonTopToVon(fields: Array<JsonField>, typeName: String) -> Result<Von, Strin
         let v = jsonValueToVon(f.value, f.key)?
         fs.push(VonField { name: f.key.copy(), value: v, line: 0 })
     }
-    return Ok(VRecord(typeName, fs))
+    return Ok(VRecord(typeName.copy(), fs))
 }
 
 /// Convert a JSON document to VON text, headed by

@@ -23,7 +23,7 @@
 /// HTTP projection can write cache policy into it without this module learning
 /// what cache policy is. An empty `derived` is omitted rather than written `{}`.
 
-import { Json, JsonField, emit } from "std/json"
+import { Json, JsonField, copyJsonFields, emit } from "std/json"
 import { fnv1aStr } from "std/hash"
 
 /// One mapped symbol: the name the generated module exports, the declaration it
@@ -41,7 +41,7 @@ export fn symbol(name: String, origin: Origin, derived: consume Array<JsonField>
 
 /// `"key": "value"` — the shape almost every derived fact has.
 export fn strField(key: String, value: String) -> JsonField {
-    return JsonField { key: key.copy(), value: JStr(value) }
+    return JsonField { key: key.copy(), value: JStr(value.copy()) }
 }
 
 /// An origin as JSON. A `line`/`col` of 0 means the declaration could not be
@@ -50,10 +50,10 @@ export fn strField(key: String, value: String) -> JsonField {
 /// have to guess.
 fn originJson(o: Origin) -> Json {
     let fs: Array<JsonField> = [
-        JsonField { key: "file", value: JStr(o.file) },
+        JsonField { key: "file", value: JStr(o.file.copy()) },
         JsonField { key: "line", value: JNum(o.line.toString()) },
         JsonField { key: "col", value: JNum(o.col.toString()) },
-        JsonField { key: "name", value: JStr(o.name) },
+        JsonField { key: "name", value: JStr(o.name.copy()) },
     ]
     return JObj(fs)
 }
@@ -64,16 +64,16 @@ export fn mapJson(module: String, symbols: Array<Symbol>) -> String {
     let mut syms: Array<Json> = []
     for s in symbols {
         let mut fs: Array<JsonField> = [
-            JsonField { key: "name", value: JStr(s.name) },
+            JsonField { key: "name", value: JStr(s.name.copy()) },
             JsonField { key: "origin", value: originJson(s.origin) },
         ]
         if s.derived.length > 0 {
-            fs.push(JsonField { key: "derived", value: JObj(s.derived) })
+            fs.push(JsonField { key: "derived", value: JObj(copyJsonFields(s.derived)) })
         }
         syms.push(JObj(fs))
     }
     let doc: Array<JsonField> = [
-        JsonField { key: "module", value: JStr(module) },
+        JsonField { key: "module", value: JStr(module.copy()) },
         JsonField { key: "symbols", value: JArr(syms) },
     ]
     return emit(JObj(doc))

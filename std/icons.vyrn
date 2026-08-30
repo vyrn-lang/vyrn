@@ -461,12 +461,12 @@ fn iconHelper() -> String {
     out = out + "    return el(\n"
     out = out + "        \"svg\",\n"
     out = out + "        [\n"
-    out = out + "            A(\"viewBox\", box),\n"
+    out = out + "            A(\"viewBox\", box.copy()),\n"
     out = out + "            A(\"width\", \"1em\"),\n"
     out = out + "            A(\"height\", \"1em\"),\n"
     out = out + "            A(\"aria-hidden\", \"true\"),\n"
     out = out + "        ],\n"
-    out = out + "        [Raw(markup)],\n"
+    out = out + "        [Raw(markup.copy())],\n"
     out = out + "    )\n"
     out = out + "}\n"
     return out
@@ -816,7 +816,7 @@ gen fn lit(s: String) -> String {
 /// icon has to follow — an icon beside a label is hidden, an icon that IS the
 /// label is named. A `class` is appended and nothing else is touched.
 export fn iconAttrs(g: consume Html, size: String, label: String, class: String) -> Html {
-    return match g {
+    return match consume g {
         El(tag, attrs, kids) => el(tag, iconAttrList(attrs, size, label, class), kids),
         Empty => Empty,
         Text(s) => Text(s),
@@ -847,7 +847,7 @@ fn iconAttrList(
 
 /// One attribute of the drawn glyph: kept, resized, or dropped.
 fn iconAttrOne(a: consume Attr, size: String, label: String, out: modify Array<Attr>) -> Unit {
-    match a {
+    match consume a {
         A(n, v) => iconAttrNamed(n, v, size, label, out),
         Cls(c) => iconAttrKeep(Cls(c), out),
         Id(i) => iconAttrKeep(Id(i), out),

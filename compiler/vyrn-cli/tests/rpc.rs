@@ -355,7 +355,7 @@ fn emit_gen_client_shows_stubs_and_dispatchers() {
     // fault is `Failed` — the locked transport wording rides the `Failed` arm.
     assert!(src.contains("Valid(v) => Done(v),"), "2xx -> Done:\n{src}");
     assert!(
-        src.contains("Valid(bag) => Rejected(bag.issues),"),
+        src.contains("Valid(bag) => Rejected(consume bag.issues),"),
         "422 -> Rejected:\n{src}"
     );
     assert!(

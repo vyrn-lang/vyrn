@@ -85,7 +85,7 @@ export fn opt(a: Args, name: String) -> Option<String> {
                 if i + 1 < end {
                     let next = a.argv[i + 1]
                     if !next.startsWith("-") {
-                        return Some(next)
+                        return Some(next.copy())
                     }
                 }
                 return None
