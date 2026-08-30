@@ -421,6 +421,11 @@ pub struct PlaceStore {
     pub key: usize,
     /// Whether the target is a module-state global (frame 0, unshadowed).
     pub is_global: bool,
+    /// Round twenty-nine: whether the target roots at a `modify` parameter —
+    /// exclusive access to the caller's storage, whose displaced elements the
+    /// caller can never see again (`check_exclusive` refuses the aliasing
+    /// call shapes), so the store releases them like a local's.
+    pub is_modify_param: bool,
     /// The enclosing function — see [`ArgTemp::owner`].
     pub owner: String,
 }
@@ -1800,10 +1805,15 @@ impl MoveCheck<'_> {
         };
         let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
         let is_global = self.globals.contains(name) && self.vars.borrow().frame_of(name) == Some(0);
+        // The target may be a compound path (`s.vals[i] = v`); the borrow is
+        // the ROOT's.
+        let root = name.split('.').next().unwrap_or(name);
+        let is_modify_param = matches!(self.borrow_of(root), Some(Borrow::Modify(_)));
         sink.borrow_mut().push(PlaceStore {
             id: s as *const Stmt as usize,
             key,
             is_global,
+            is_modify_param,
             owner: self.cur_fn.borrow().clone(),
         });
     }
@@ -1944,6 +1954,17 @@ impl MoveCheck<'_> {
     /// only fires where this reading can name a type. Reclamation must be right
     /// where the type is unknown too, so this asks the SHAPE: a field read, a
     /// view builtin, module state, or a name that is itself a borrow.
+    /// Round twenty-nine: a bare name that is BOUND — a parameter included —
+    /// is never a temporary, whatever `names_a_place` says about it. A read
+    /// parameter whose type owns no heap carries no borrow (rule 2 has
+    /// nothing to borrow), so the temporary-row guards used to fall through
+    /// for exactly those and mint a row that released the CALLER's value —
+    /// masked while such types had no release kind, exposed the day
+    /// `Option<Handle>` got one.
+    fn is_bound_name(&self, e: &Expr) -> bool {
+        matches!(e, Expr::Var { name, .. } if self.vars.borrow().frame_of(name).is_some())
+    }
+
     fn names_a_place(&self, value: &Expr) -> Option<&'static str> {
         match value {
             // A field read is somebody's place only when its base chain roots
@@ -3756,7 +3777,15 @@ impl MoveCheck<'_> {
                 // released, or one value is released twice.
                 if place.is_none() && !moved {
                     if let Some((root, path)) = place_path(value) {
-                        if root == path {
+                        // A NULLARY constructor parses as a bare name — `let
+                        // mut head = None` is a construction, not an alias
+                        // (round twenty-nine: the mislabel was invisible
+                        // while `Option<Handle>` had no release kind, and
+                        // then it stood every such binding's release down).
+                        if root == path
+                            && !self.decl.constructs(&root)
+                            && !matches!(root.as_str(), "None" | "Some" | "Ok" | "Err")
+                        {
                             self.took(&root, Gone::Aliased { line: *line });
                             place = Some("a second name for a value it did not take");
                         }
@@ -4121,7 +4150,9 @@ impl MoveCheck<'_> {
                 // a borrow, module state, a field read or a view builtin owns
                 // nothing this block may release.
                 let key = match self.place_key(scrutinee) {
-                    0 if self.names_a_place(scrutinee).is_none() => {
+                    0 if self.names_a_place(scrutinee).is_none()
+                        && !self.is_bound_name(scrutinee) =>
+                    {
                         self.note_temporary(s, scrutinee)
                     }
                     k => k,
@@ -4255,7 +4286,10 @@ impl MoveCheck<'_> {
                 // exit gives back the visited and the unvisited elements alike,
                 // each exactly once.
                 let key = match self.place_key(iter) {
-                    0 if !*consuming && self.names_a_place(iter).is_none() => {
+                    0 if !*consuming
+                        && self.names_a_place(iter).is_none()
+                        && !self.is_bound_name(iter) =>
+                    {
                         self.note_temporary(s, iter)
                     }
                     _ if *consuming => self.note_temporary(s, iter),
@@ -4874,7 +4908,9 @@ impl MoveCheck<'_> {
                 // a match is an expression and has no statement to key on — and
                 // `own` releases exactly the rows nothing wrote on.
                 let key = match self.place_key(scrutinee) {
-                    0 if self.names_a_place(scrutinee).is_none() => {
+                    0 if self.names_a_place(scrutinee).is_none()
+                        && !self.is_bound_name(scrutinee) =>
+                    {
                         self.note_temporary_at(e as *const Expr as usize, scrutinee)
                     }
                     k => k,

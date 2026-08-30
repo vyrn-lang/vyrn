@@ -869,10 +869,63 @@ pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
             | Type::Map(..)
             | Type::Stream(_)
             | Type::Task(_) => true,
-            Type::Option(t) | Type::ArrayN(t, _) | Type::Lazy(t) => deeper(&t),
-            Type::Result(a, b) => deeper(&a) || deeper(&b),
+            // A SUM whose payload is wider than one word travels BOXED in the
+            // boxing representation, and that box is heap whatever else the
+            // payload holds — `Option<Handle>` is three words behind one
+            // pointer (round twenty-nine, the same argument the recursive-name
+            // rule above already made: the representation's box IS heap). The
+            // word-class four (`Int`, `Bool`, `Str`, `Fn`) mirror the
+            // emitter's `payload_boxed`.
+            Type::Option(t) => {
+                !matches!(
+                    crate::types::resolve(&t, types),
+                    Type::Int
+                        | Type::Bool
+                        | Type::Str
+                        | Type::Fn(..)
+                        | Type::Unit
+                        | Type::Never
+                        | Type::Param(_)
+                ) || deeper(&t)
+            }
+            Type::ArrayN(t, _) | Type::Lazy(t) => deeper(&t),
+            Type::Result(a, b) => {
+                !matches!(
+                    crate::types::resolve(&a, types),
+                    Type::Int
+                        | Type::Bool
+                        | Type::Str
+                        | Type::Fn(..)
+                        | Type::Unit
+                        | Type::Never
+                        | Type::Param(_)
+                ) || !matches!(
+                    crate::types::resolve(&b, types),
+                    Type::Int
+                        | Type::Bool
+                        | Type::Str
+                        | Type::Fn(..)
+                        | Type::Unit
+                        | Type::Never
+                        | Type::Param(_)
+                ) || deeper(&a)
+                    || deeper(&b)
+            }
             Type::Record(fs) => fs.iter().any(|f| deeper(&f.ty)),
-            Type::Enum(vs) => vs.iter().any(|v| v.payload.iter().any(&deeper)),
+            Type::Enum(vs) => vs.iter().any(|v| {
+                v.payload.iter().any(|t| {
+                    !matches!(
+                        crate::types::resolve(t, types),
+                        Type::Int
+                            | Type::Bool
+                            | Type::Str
+                            | Type::Fn(..)
+                            | Type::Unit
+                            | Type::Never
+                            | Type::Param(_)
+                    ) || deeper(t)
+                })
+            }),
             // A stored function value (RFC-0037) is `{ tag, captures }` and the
             // capture block IS heap — one `malloc` per evaluation of the lambda,
             // which is census §16.
@@ -1728,6 +1781,7 @@ pub fn analyze(program: &Program) -> Ownership {
     // a per-binding registry guess (`slot_owns`/`place_owns`, §22's table).
     for ps in &facts.place_stores {
         let owned = ps.is_global
+            || ps.is_modify_param
             || (ps.key != 0
                 && droppable
                     .get(&ps.owner)
@@ -1837,17 +1891,48 @@ fn fold_revived(facts: &crate::movecheck::Facts) -> std::collections::HashSet<us
         };
         if !matches!(first.kind, EvKind::Write { id: 0, .. })
             || !matches!(last.kind, EvKind::Write { owning: true, .. })
-            || last.loops != first.loops
-            || last.branch != first.branch
         {
             continue;
         }
+        // Round twenty-nine: the SELF-STORE pattern. A take that is part of
+        // the value of a store re-establishing the same binding — `head =
+        // Some(insert(s, Node { next: head }))` — never leaves the binding
+        // un-owned across a statement boundary, whatever loop it sits in: if
+        // the take ran, so did the write, in the same iteration. Every take
+        // paired with an immediately-following owning write in the same loop
+        // context revives the row without the let-level loop test; anything
+        // unpaired falls back to the original rule.
+        let paired = |t: &&crate::movecheck::StoreEv| {
+            evs.iter().any(|w| {
+                matches!(w.kind, EvKind::Write { owning: true, .. })
+                    && w.order > t.order
+                    && w.loops == t.loops
+                    && !evs.iter().any(|x| {
+                        matches!(x.kind, EvKind::Take) && x.order > t.order && x.order < w.order
+                    })
+                    && !facts
+                        .exit_orders
+                        .iter()
+                        .any(|&o| o > t.order && o < w.order)
+            })
+        };
+        let all_paired = evs
+            .iter()
+            .filter(|e| matches!(e.kind, EvKind::Take))
+            .all(paired);
         let takes: Vec<u32> = evs
             .iter()
             .filter(|e| matches!(e.kind, EvKind::Take))
             .map(|e| e.order)
             .collect();
         if takes.is_empty() || takes.iter().any(|&t| t >= last.order) {
+            continue;
+        }
+        if all_paired && std::env::var_os("VYRN_NO_SELFSTORE").is_none() {
+            out.insert(*key);
+            continue;
+        }
+        if last.loops != first.loops || last.branch != first.branch {
             continue;
         }
         let first_take = *takes.iter().min().expect("nonempty");

@@ -48,13 +48,13 @@ ecs	clean
 encoding	leak	1
 enum	other
 enumarray	clean
-enumcodec	leak	3
+enumcodec	clean
 eventloop	clean
 excl_alias	skip
 externdemo	other
 externdemo2	clean
 fallible	leak	4
-fannkuch	leak	1
+fannkuch	clean
 fasta	clean
 fib	other
 fieldmut	leak	4
@@ -65,7 +65,7 @@ floats	other
 fnvalarg	leak	2
 fnvalstore	leak	6
 foreach	other
-freelist	leak	100000
+freelist	other
 gendemo	clean
 genericpayload	clean
 generics	clean
@@ -86,7 +86,7 @@ intkeys	clean
 jchain	clean
 jsonbytes	leak	1
 jsoncodec	leak	1
-jsondecbytes	leak	33
+jsondecbytes	leak	30
 jsondepth	clean
 jsonplace	clean
 jsonschema	clean
@@ -94,7 +94,7 @@ knucleotide	clean
 lambdas	clean
 langbench	leak	5
 lazyfield	leak	5
-linkedlist	leak	5
+linkedlist	other
 logging	leak	3
 mandelbrot	clean
 map	clean
@@ -111,10 +111,10 @@ mustuse	leak	7
 mustuse_abandoned	skip
 namedplace	clean
 namespace	clean
-nbody	leak	1
+nbody	clean
 nohashkey	skip
 numbytes	clean
-numparse	leak	5
+numparse	leak	8
 option	clean
 ownedcontainer	leak	4
 ownership	other
@@ -170,7 +170,7 @@ sizedints	clean
 slots	other
 slottable	clean
 smallarray	clean
-spectralnorm	leak	3
+spectralnorm	clean
 statemod	clean
 storage	leak	10
 stream	clean
@@ -190,7 +190,7 @@ templates	clean
 testing	clean
 textbytes	clean
 threeengines	clean
-tree	leak	4
+tree	leak	1
 tryplace	clean
 twdemo	clean
 utility	clean
