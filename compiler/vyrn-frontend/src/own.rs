@@ -1681,6 +1681,7 @@ pub fn analyze(program: &Program) -> Ownership {
             first_take: Option<&'a crate::movecheck::StoreEv>,
             writes: usize,
             all_owning: bool,
+            write_sites: Vec<(u32, &'a Vec<u32>)>,
         }
         let mut per: HashMap<usize, Per> = HashMap::new();
         for ev in &facts.store_events {
@@ -1689,11 +1690,13 @@ pub fn analyze(program: &Program) -> Ownership {
                 first_take: None,
                 writes: 0,
                 all_owning: true,
+                write_sites: Vec::new(),
             });
             match ev.kind {
                 EvKind::Write { owning, .. } => {
                     e.writes += 1;
                     e.all_owning &= owning;
+                    e.write_sites.push((ev.order, &ev.loops));
                     if e.first_write.is_none() {
                         e.first_write = Some(ev);
                     }
@@ -1708,8 +1711,18 @@ pub fn analyze(program: &Program) -> Ownership {
         let mut early: HashMap<String, HashMap<usize, DropKind>> = HashMap::new();
         let mut extra: Vec<(String, Release)> = Vec::new();
         for (key, row) in &lets {
-            if !matches!(row.gone, Some(crate::movecheck::Gone::Moved { .. }))
-                || revived.contains(key)
+            // Moved rows since round twenty-one; HOLE rows join in round
+            // forty-four — a partial take (`consume bd.op` while the Regex is
+            // built) leaves the row releasing MINUS its holes at block exit,
+            // but at an exit BEFORE the first take nothing has left yet and
+            // the binding owns itself whole, so the placed release carries
+            // the FULL kind. The admission rules below (first take strictly
+            // after the exit) are exactly what make that sound.
+            if !matches!(
+                row.gone,
+                Some(crate::movecheck::Gone::Moved { .. })
+                    | Some(crate::movecheck::Gone::Hole { .. })
+            ) || revived.contains(key)
             {
                 continue;
             }
@@ -1764,10 +1777,25 @@ pub fn analyze(program: &Program) -> Ownership {
                 // met the append machinery's. Reverted; the in-loop exits
                 // keep their leak until the fold can order across a back
                 // edge.
+                // The single-write rule keeps round twenty-one's loop-context
+                // equality. The hoisted rule takes a function-level exit
+                // (round thirty-eight) or — round forty-four — an exit in the
+                // EXACT loop context of an earlier write: within one
+                // iteration the walk order is the runtime order, so the
+                // binding holds that write's owned value and the take (after
+                // every loop) has not run. An exit in a loop none of the
+                // writes share is refused — the wrapper's `for x in consume
+                // val { return Valid(x) }` puts a clean return INSIDE the
+                // loop whose entry already took `val`, and the first cut of
+                // this widening freed the taken buffer under the returned
+                // payload (the audit's rva line named it in one build).
                 let fits = if single {
                     ex.loops == w.loops
                 } else {
                     ex.loops.is_empty()
+                        || p.write_sites
+                            .iter()
+                            .any(|(o, ls)| *o < ex.order && **ls == ex.loops)
                 };
                 if !fits {
                     continue;
