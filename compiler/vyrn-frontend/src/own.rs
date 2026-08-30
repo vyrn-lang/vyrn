@@ -2310,17 +2310,34 @@ impl Emit<'_> {
                         if holes.is_empty() {
                             self.droppable.insert(id(s), kind);
                         }
+                    } else if self.region_depth == 0 {
+                        // A row an element handover marked gone stays gone —
+                        // but the BUFFER is still this loop's. Round fourteen
+                        // downgraded every such row to a buffer-only free and
+                        // was REFUSED: fourteen parity divergences,
+                        // `aliascontext` trapping outright on wasm, because a
+                        // `Fate::Moved` here did not always mean "an element
+                        // left" — a LENT or producer-owned snapshot has a
+                        // buffer that is somebody else's, and freeing it is a
+                        // use-after-free. The row says WHICH take marked it
+                        // now (`elem_only`, round sixteen): every write came
+                        // through the loop variable, so every departed value
+                        // was copied OUT of the buffer, and the buffer has no
+                        // other owner. Growable arrays only — a fixed or
+                        // small array is a value with no heap buffer, a map
+                        // or stream has its own machinery. Elements the body
+                        // kept in place still leak, which is the direction
+                        // this analysis is allowed to be wrong in.
+                        let row = self.lets.get(&id(s));
+                        let elem_only = row.is_some_and(|r| r.elem_only == Some(true));
+                        let growable = row
+                            .and_then(|r| r.ty.as_ref())
+                            .map(|t| crate::types::resolve(t, &self.proto.types))
+                            .is_some_and(|t| matches!(t, Type::Array(_)));
+                        if elem_only && growable {
+                            self.droppable.insert(id(s), DropKind::FreeArr);
+                        }
                     }
-                    // A row an element handover marked gone stays gone —
-                    // buffer included. Downgrading it to a buffer-only free
-                    // was tried in exit-residue round fourteen and REFUSED:
-                    // fourteen parity divergences, `aliascontext` trapping
-                    // outright on wasm — a `Fate::Moved` on this row does not
-                    // always mean "an element left", and freeing the buffer
-                    // on the ones where it means something else is a
-                    // use-after-free. The decode top's snapshot buffer is the
-                    // recorded price until the row can say WHICH take marked
-                    // it.
                 }
                 // No `BindingNote`: the snapshot is a temporary with no name to
                 // print, exactly as an `if let`'s scrutinee is.
@@ -3142,16 +3159,44 @@ pub(crate) mod tests {
             drop_kinds(src, "main"),
             vec![DropKind::Deep(Type::Array(Box::new(Type::Str)))]
         );
-        // A body that hands an element on marks the row gone, and the whole
-        // container leaks — a leak, never a double free.
+        // A body that hands an element on marks the row gone — the departed
+        // values were copied OUT of the buffer through the loop variable, so
+        // the buffer is the loop's alone and round sixteen frees exactly it.
+        // Elements the body kept would still leak; the buffer does not.
         let src = "fn make() -> Array<String> { let mut o: Array<String> = []; \
                    o.push(\"a\"); return o; } \
                    fn main() -> Int64 { let xs = make(); let mut out: Array<String> = []; \
                    for x in consume xs { out.push(x); } return out.length; }";
-        assert_eq!(
-            drop_kinds(src, "main"),
-            vec![DropKind::Deep(Type::Array(Box::new(Type::Str)))],
-            "only `out` may be released here"
+        let mut got: Vec<String> = drop_kinds(src, "main")
+            .iter()
+            .map(|k| format!("{k:?}"))
+            .collect();
+        got.sort();
+        let mut want = vec![
+            format!("{:?}", DropKind::Deep(Type::Array(Box::new(Type::Str)))),
+            format!("{:?}", DropKind::FreeArr),
+        ];
+        want.sort();
+        assert_eq!(got, want, "out's deep release, and the drained buffer");
+    }
+
+    /// Round sixteen's other half: the `elem_only` attribution is exactly what
+    /// keeps the downgrade off a buffer somebody else owns. A snapshot a LENDER
+    /// handed back is the recorded round-fourteen trap — freeing its buffer is
+    /// a use-after-free, and the poison in `movecheck::facts` must win over the
+    /// element handover the body also recorded.
+    #[test]
+    fn a_lent_snapshot_keeps_its_buffer_even_when_an_element_leaves() {
+        let src = "fn pick(xs: Array<String>) -> String \
+                   { for x in xs { return if true { x } else { \"\" } } return \"\" } \
+                   fn h(a: Array<String>) -> Array<String> { return [pick(a)] } \
+                   fn main() -> Int64 { let arr: Array<String> = [\"a\" + \"b\"] \
+                   let mut out: Array<String> = [] \
+                   for x in h(arr) { out.push(x) } \
+                   return out.length }";
+        assert!(
+            !drop_kinds(src, "main").contains(&DropKind::FreeArr),
+            "a lender's result is not the loop's to free"
         );
     }
 

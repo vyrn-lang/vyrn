@@ -194,6 +194,19 @@ pub struct LetOwnership {
     /// after the walk: a position that KEEPS what it is given means this block
     /// must not release the value.
     pub passed: Vec<(String, usize, usize)>,
+    /// Exit-residue round sixteen. `Some(true)` while every take recorded on
+    /// this row came through the loop variable bound to it — an element
+    /// departure, which COPIES the value out of the buffer. `Some(false)` once
+    /// any other writer touched the row: a foreign take, a lender's result, a
+    /// position that retains. `None` = nothing recorded. Read by `own.rs`'s
+    /// `ForIn` arm: a consumed array row whose value is gone but whose writes
+    /// were all elem-only still owns its BUFFER, and the buffer alone is freed
+    /// (`DropKind::FreeArr`). Round fourteen's blanket version of that
+    /// downgrade freed LENT buffers — this field is the WHICH-take attribution
+    /// the refusal note asked for.
+    pub elem_only: Option<bool>,
+    /// The loop variable bound to this row, set where `ForIn` binds one.
+    pub elem_name: Option<String>,
 }
 
 /// One call-argument position whose argument expression BUILT the value it
@@ -372,6 +385,23 @@ pub fn facts(program: &Program) -> Facts {
     // binding that names it may not be released. Applied here rather than at the
     // `let`, because a lender is only known once every body has been read.
     for row in lets.values_mut() {
+        // Round sixteen: these two rules answer "somebody else holds this
+        // value's storage". A row a body already marked gone SKIPS them below
+        // — but the elem-only attribution must still see them, because a
+        // buffer-only free of a LENT or producer-owned buffer is the
+        // use-after-free round fourteen's blanket downgrade shipped. Poison
+        // first, so the skip cannot hide a foreign owner.
+        if row
+            .from_call
+            .as_ref()
+            .is_some_and(|n| r.lending.contains(n))
+            || row
+                .passed
+                .iter()
+                .any(|(c, i, _)| r.retains.contains(&(c.clone(), *i)) || r.lending.contains(c))
+        {
+            row.elem_only = Some(false);
+        }
         // A HOLE row is not a decision yet — it says the binding is reclaimed
         // minus a few places (RFC-0093 M2), so the two rules below still apply
         // to it and still overwrite it. They only ever answer "somebody else
@@ -1340,6 +1370,8 @@ impl MoveCheck<'_> {
                                 gone: None,
                                 from_call: None,
                                 passed: Vec::new(),
+                                elem_only: None,
+                                elem_name: None,
                             },
                         );
                     }
@@ -1449,6 +1481,8 @@ impl MoveCheck<'_> {
                     _ => None,
                 },
                 passed: Vec::new(),
+                elem_only: None,
+                elem_name: None,
             },
         );
         key
@@ -1510,6 +1544,11 @@ impl MoveCheck<'_> {
             self.store_ev(key, EvKind::Take);
         }
         if let Some(row) = sink.borrow_mut().get_mut(&key) {
+            // Which-take attribution (round sixteen): a take through the loop
+            // variable bound to this row is an element leaving — the value was
+            // copied OUT of the buffer. Any other taker poisons the row.
+            let via_elem = row.elem_name.as_deref() == Some(name);
+            row.elem_only = Some(row.elem_only.unwrap_or(true) && via_elem);
             // A HOLE is not the last word (RFC-0093 M2): it says the binding is
             // reclaimed minus a few places, and every row written here says the
             // value LEFT — moved, returned, captured, lent. Those win, and they
@@ -1541,6 +1580,10 @@ impl MoveCheck<'_> {
         // — freeing around it is RFC-0093's job at block exit, not a store's.
         self.store_ev(key, EvKind::Take);
         if let Some(row) = sink.borrow_mut().get_mut(&key) {
+            // A hole taken out of the loop element still leaves through the
+            // element — the payload was copied out (round sixteen).
+            let via_elem = row.elem_name.as_deref() == Some(name);
+            row.elem_only = Some(row.elem_only.unwrap_or(true) && via_elem);
             match &mut row.gone {
                 None => {
                     row.gone = Some(Gone::Hole {
@@ -3366,6 +3409,8 @@ impl MoveCheck<'_> {
                                 _ => None,
                             },
                             passed: Vec::new(),
+                            elem_only: None,
+                            elem_name: None,
                         },
                     );
                 }
@@ -3838,6 +3883,14 @@ impl MoveCheck<'_> {
                 // analysis is allowed to be wrong in.
                 if key != 0 {
                     self.nodes.borrow_mut().bind(var, key);
+                    // Round sixteen: name the loop variable on the row, so
+                    // `took`/`hole` can tell an element departure — a take
+                    // THROUGH this name — from any other writer.
+                    if let Some(sink) = &self.lets {
+                        if let Some(row) = sink.borrow_mut().get_mut(&key) {
+                            row.elem_name = Some(var.clone());
+                        }
+                    }
                 }
                 let outer_continue = self.continue_seen.replace(false);
                 let body_div = self.block(body, &mut body_c, scope);

@@ -582,6 +582,67 @@ double-frees** — dead even, from 54/~100 at the first survey. The
 append-count pin moved to equality: one store-side free each,
 differently placed.
 
+## Sixteenth triage: the row learned which take marked it
+
+Two closures, one round. First, the round-fourteen refusal fell. A
+`for n in consume b0 { kr.push(n) }` loop hands its elements over and
+then frees NOTHING — the row says `Moved`, the fate machinery reclaims
+nothing from a moved row, and the drained buffer is abandoned. One
+32-byte block per handover loop in a five-line probe; one 128-byte
+block per rendered `.vyx` row (`kr`'s cap-four `Array<Html>` buffer),
+which is where six of vyxdemo's seven blocks lived. Downgrading every
+such row to a buffer-only free was tried in round fourteen and
+REFUSED: fourteen parity divergences, `aliascontext` trapping on wasm,
+because a `Moved` row does not always mean "an element left" — a LENT
+or producer-owned snapshot has a buffer that is somebody else's. The
+refusal note asked for the row to say WHICH take marked it, and now it
+does: `elem_only` on the ownership row stays true while every recorded
+take came through the loop variable (an element departure copies the
+value OUT of the buffer), and is poisoned by any other writer — a
+foreign take, a lender's result, a retaining position, applied in
+`facts()` BEFORE the gone-skip so a body's own move cannot hide a
+foreign owner. `own.rs`'s `ForIn` arm then downgrades exactly the
+elem-only, growable-array, region-free rows to `DropKind::FreeArr`:
+the buffer alone, elements the body kept still leak, which is the
+direction the analysis is allowed to be wrong in. Two pins: the
+handover loop now carries the FreeArr row beside the destination's
+deep release, and a lender-fed loop whose element leaves keeps NO
+FreeArr row — the round-fourteen trap, pinned as a refusal.
+
+Second, the direct backend's copy of round fifteen: its `str_append`
+runtime helper's not-ours branch copies the accumulator out and
+abandons it, and the general store above it resets the shadow flag on
+every reassign — so `s = a + b` then `s = s + c` abandoned the
+`a + b` buffer, a cost the flag-reset comment used to record as the
+price of honesty. The spine branch now reads the same per-statement
+`store_owned_at` answer the textual backend reads, saves the flag and
+the incoming pointer, and frees the abandoned buffer after the appends
+when the take actually ran — guarded on `cap != u32::MAX`, because an
+interned literal is nobody's to free.
+
+Movement: `vyxdemo` CLEAN (all seven blocks were handover buffers),
+`graphql` 14→6 blocks, three more rows flipped with them. `htmltree`
+holds at 9 — its residue is boxes and element payloads, a different
+class.
+
+The attribution alone did NOT clear parity — the same fourteen
+divergences came straight back, `aliascontext` first among them, and
+that reproduction is the round's real finding. Native under the free
+audit was clean; only the wasm column trapped; and the wasm column is
+the DIRECT backend (RFC-0077 M5). Its `ForIn` arm read the drops map
+only for EXISTENCE and then asked `rel_for` — the type's full deep
+release — for what to emit, so any buffer-only row was lowered as
+"free the elements too", elements the body had just handed over.
+Round fourteen's refusal had misdiagnosed an engine gap as analysis
+unsoundness: the fate rows were never the trap, the lowering that
+ignored their kind was. The arm reads the kind now and lowers a
+`FreeArr` row as `Rel::Buffers([0])` — the triple's data pointer,
+which is all the loop still owns.
+
+Tallies after round sixteen: **clean 80, leaking 70, zero
+double-frees** — clean leads for the first time. Parity at zero
+divergences with the free audit on, the fourteen restored.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach
