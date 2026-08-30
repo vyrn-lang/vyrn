@@ -358,6 +358,32 @@ everything so far and anchors round nine.
 
 Tallies after round eight: **clean 71, leaking 79, zero double-frees**.
 
+## Ninth triage: the closure's result becomes its caller's, and the fn-call arm comes home
+
+`graphql`'s ~1300 reduced to one shape in three probes: parse alone is
+CLEAN, and every leaked class flows from calls through `fn`-typed
+values — `let tref = schema(owner, s.name)` at every node of every
+walk, untyped since round six's refusal, so neither the binding nor
+the argument-temporary machinery ever released a result.
+
+Round six refused the typing for want of a pin, and round nine built
+the pin: the emitted lambda body for `n -> cap` is `ret ptr %t2` — the
+capture returned RAW, no copy, two calls handing back one pointer,
+saved from a double-free today only by the untyped leak itself. So
+rule 3 now reaches closures: **a lambda may not return a captured heap
+value raw** — movecheck refuses it with the same `.copy()` menu a
+function returning a borrow gets (an `Expr`-bodied lambda's result;
+block-bodied returns are recorded follow-up). The corpus needed ZERO
+fixes — no example or std lambda returns a capture — and with every
+`fn` value's result thereby owned, `Declared::type_of` answers the
+binding's own return type and the drains free what the calls build.
+
+Movement: graphql 1321→882 blocks, fnvalarg 7→2, gq micro-probe 24→20.
+
+Tallies after round nine: **clean 71, leaking 79, zero double-frees**
+— counts hold, with the fn-value family's block totals down by a
+third across the corpus.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach
