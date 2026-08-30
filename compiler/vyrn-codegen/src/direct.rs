@@ -6850,10 +6850,20 @@ impl<'p> Fn_<'_, 'p> {
                         b.ins(&Instruction::I32Const(n.signed as i32));
                         b.ins(&Instruction::Call(self.cx.rt.print_i64));
                     }
-                    // Fixed six decimals, which `std/num`'s `f64Str` owns.
+                    // Fixed six decimals, which `std/num`'s `f64Str` owns. Its
+                    // answer is a fresh allocation always — the doc on `f64Str`
+                    // pins that, non-finite words included — and the write was
+                    // its whole life, so it is freed here: one block per float
+                    // print, simd's entire residue table (exit-residue round
+                    // seventeen).
                     ref f if matches!(f, Type::Float | Type::Float32) => {
                         self.f64_str(b, f, line)?;
+                        let s = b.local(ValType::I32);
+                        b.ins(&Instruction::LocalTee(s));
                         b.ins(&Instruction::Call(self.cx.rt.print_str));
+                        b.ins(&Instruction::LocalGet(s));
+                        str_hdr(b);
+                        b.ins(&Instruction::Call(self.cx.rt.free));
                     }
                     Type::Str => {
                         b.ins(&Instruction::Call(self.cx.rt.print_str));

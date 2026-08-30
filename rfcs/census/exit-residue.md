@@ -643,6 +643,32 @@ Tallies after round sixteen: **clean 80, leaking 70, zero
 double-frees** — clean leads for the first time. Parity at zero
 divergences with the free audit on, the fourteen restored.
 
+## Seventeenth triage: the float that printed and stayed
+
+`print(x)` on a `Float` or `Float32` renders through `std/num`'s
+`f64Str` — RFC-0081 M2's one-spelling rule — and the rendered string
+is a fresh allocation whose whole life is the one write. Neither
+compiled backend freed it: the textual arm noted the `malloc`'s cost
+in its own comment and never emitted the free, and the direct arm
+handed `f64_str`'s result to `print_str` and walked on. One block per
+float print — the ENTIRE simd family's residue (`simd`'s 81 blocks
+are its 81 lane prints, and `simdwide`/`simdround`/`simdmem`/
+`simdmem2`/`simdbench` with it, ~539 blocks across six examples).
+The textual arm frees after the `printf`; the direct arm tees the
+pointer, prints, and frees — unconditionally in both, because
+`f64Str`'s doc pins "every answer is a fresh allocation", non-finite
+words included. Interpolation never had this hole: an `@str` result
+has an ownership row (`DropKind::FreeStr`) — only `print`'s internal
+rendering had no node for a row to key on.
+
+Movement: all six simd examples CLEAN. `floats` left the leak column
+and joined `other(1)` — it deliberately returns 1 (its own line 47),
+the interpreter agrees, and the residue's exit 135 had been shadowing
+the program's own exit code all along.
+
+Tallies after round seventeen: **clean 86, leaking 63, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach
