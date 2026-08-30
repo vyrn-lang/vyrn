@@ -1240,6 +1240,34 @@ residue-free (2 → its own exit), numparse 8 → 3, storage 10 → 6, vlog
 Tallies after round thirty-nine: **clean 115, leaking 30, zero
 double-frees**.
 
+## Fortieth triage: the arm that read and the arm that took
+
+The asymmetric match, convicted in `readDoc`: `Ok(j) => out.push(j)`
+beside `Err(e) => pushParse(iss, e)`. The mover marks the temporary
+scrutinee's row Moved, the whole-release stands down for the mover's
+sake, and the reading arm's payload was nobody's. Machinery: movecheck
+resets the temp row's verdict per arm (arms are ALTERNATIVES) and
+records an `ArmPayloadEv` for each arm that binds ONE heap-owning
+payload and never moves it, in a match where some sibling did — kinds
+screened silent through `reaches_declared`, expression-arm values
+screened through `value_cannot_alias`. Both backends release the
+binder's slot at the arm's end (`gen_arm_body`/`gen_match_enum` and
+the direct `match_expr`). The first cut reset the verdict AFTER
+`note_arm_value` wrote its alias mark and erased it — the
+whole-release then fired on a payload `ascii` had aliased out, and its
+caller freed a returned buffer twice; the audit caught it before
+anything shipped, and the audit's failure line now names the freeing
+site's rva. `std/jsondec`'s `pushParse` also takes its error by
+`consume` now — the Issue keeps the string whole instead of copying
+what then leaked.
+
+Movement: encoding CLEAN, codecbytes CLEAN, jsonbytes CLEAN,
+pagesdemo CLEAN, jsoncodec residue-free (its own exit, like clifail),
+jsondecbytes 28 → 22, mapdemo 8 → 7, storage 6 → 5, vlog 3 → 2.
+
+Tallies after round forty: **clean 119, leaking 25, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the

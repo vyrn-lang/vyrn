@@ -31,7 +31,7 @@ clidemo	other
 clifail	other
 clock	clean
 closures2	other
-codecbytes	leak	3
+codecbytes	clean
 concurrency	clean
 consume	other
 consume_borrowed	skip
@@ -45,7 +45,7 @@ copyfromowned	skip
 domdemo	clean
 dropparam	skip
 ecs	clean
-encoding	leak	1
+encoding	clean
 enum	other
 enumarray	clean
 enumcodec	clean
@@ -84,9 +84,9 @@ inlinewhere	clean
 input	clean
 intkeys	clean
 jchain	clean
-jsonbytes	leak	1
-jsoncodec	leak	1
-jsondecbytes	leak	28
+jsonbytes	clean
+jsoncodec	other
+jsondecbytes	leak	22
 jsondepth	clean
 jsonplace	clean
 jsonschema	clean
@@ -98,7 +98,7 @@ linkedlist	other
 logging	clean
 mandelbrot	clean
 map	clean
-mapdemo	leak	8
+mapdemo	leak	7
 mapkey	clean
 mapkeyborrowed	skip
 mapkeyowned	clean
@@ -118,7 +118,7 @@ numparse	leak	3
 option	clean
 ownedcontainer	clean
 ownership	other
-pagesdemo	leak	1
+pagesdemo	clean
 parallel	clean
 patchdemo	clean
 payloadkey	skip
@@ -172,7 +172,7 @@ slottable	clean
 smallarray	clean
 spectralnorm	clean
 statemod	clean
-storage	leak	6
+storage	leak	5
 stream	clean
 stream_abandoned	skip
 stream_combinator_abandoned	skip
@@ -201,7 +201,7 @@ validate_store	other
 validate_sum	other
 validatestr	clean
 validation	other
-vlog	leak	3
+vlog	leak	2
 vondemo	clean
 vyxdemo	clean
 wirekey	clean

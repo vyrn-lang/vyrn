@@ -322,6 +322,19 @@ pub struct ConsumeCand {
     pub loops: Vec<u32>,
 }
 
+/// Round forty: an arm of a match over a TEMPORARY scrutinee that binds a
+/// payload and never moves it, in a match where some OTHER arm does move its
+/// own — the row goes Moved for the mover's sake, the whole-release stands
+/// down, and this arm's payload was nobody's (`readDoc`'s `Err(e) =>
+/// pushParse(iss, e)` beside `Ok(j) => out.push(j)`, before pushParse
+/// consumed). The backends release the binder's slot at the arm's end.
+pub struct ArmPayloadEv {
+    pub match_id: usize,
+    pub arm_ix: u32,
+    pub kind: crate::own::DropKind,
+    pub owner: String,
+}
+
 pub struct Facts {
     /// What every `let` owns at the end of its block — see [`ownership`].
     pub lets: HashMap<usize, LetOwnership>,
@@ -357,6 +370,9 @@ pub struct Facts {
     pub mentions: Vec<MentionEv>,
     /// Round twenty-seven: the consuming-match candidates.
     pub consume_cands: Vec<ConsumeCand>,
+    /// Round forty: unmoved payload binders of temp-scrutinee matches whose
+    /// sibling arm moved — see [`ArmPayloadEv`].
+    pub arm_payloads: Vec<ArmPayloadEv>,
     /// Round twenty-eight: statement-position calls whose OWNED heap result
     /// nothing binds — `remove(s, h)` for the return value's side effect —
     /// with the callee name for the lender screen. The backends free the
@@ -552,6 +568,7 @@ pub fn facts(program: &Program) -> Facts {
         exit_sites: r.exit_sites,
         mentions: r.mentions,
         consume_cands: r.consume_cands,
+        arm_payloads: r.arm_payloads,
         // Round twenty-eight: a wrapped lender's result names storage inside
         // its argument — freeing a discarded one is a use-after-free, so the
         // closed lending set screens here.
@@ -611,6 +628,7 @@ struct Run {
     exit_sites: Vec<ExitEv>,
     mentions: Vec<MentionEv>,
     consume_cands: Vec<ConsumeCand>,
+    arm_payloads: Vec<ArmPayloadEv>,
     discarded: Vec<(usize, String)>,
 }
 
@@ -877,6 +895,7 @@ fn run(program: &Program, want: Want) -> Run {
         exit_sites: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         mentions: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         consume_cands: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
+        arm_payloads: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         discarded: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         walk_region: std::cell::Cell::new(0),
         ev_order: std::cell::Cell::new(0),
@@ -1041,6 +1060,7 @@ fn run(program: &Program, want: Want) -> Run {
             .consume_cands
             .map(RefCell::into_inner)
             .unwrap_or_default(),
+        arm_payloads: mc.arm_payloads.map(RefCell::into_inner).unwrap_or_default(),
         discarded: mc.discarded.map(RefCell::into_inner).unwrap_or_default(),
     }
 }
@@ -1152,6 +1172,7 @@ struct MoveCheck<'a> {
     exit_sites: Option<RefCell<Vec<ExitEv>>>,
     mentions: Option<RefCell<Vec<MentionEv>>>,
     consume_cands: Option<RefCell<Vec<ConsumeCand>>>,
+    arm_payloads: Option<RefCell<Vec<ArmPayloadEv>>>,
     discarded: Option<RefCell<Vec<(usize, String)>>>,
     walk_region: std::cell::Cell<u32>,
     ev_order: std::cell::Cell<u32>,
@@ -5167,6 +5188,19 @@ impl MoveCheck<'_> {
                     }
                     k => k,
                 };
+                // Round forty: whether this is the temp row minted just above
+                // — the per-arm payload accounting below acts only on those.
+                let minted_temp = key == e as *const Expr as usize && self.lets.is_some();
+                let pre_gone = if minted_temp {
+                    self.lets
+                        .as_ref()
+                        .and_then(|s| s.borrow().get(&key).and_then(|r| r.gone.clone()))
+                } else {
+                    None
+                };
+                let mut arm_frees: Vec<Option<crate::own::DropKind>> = Vec::new();
+                let mut any_moved = false;
+                let mut moved_gone: Option<Gone> = None;
                 // Round twenty-seven: a match over a WHOLE named local is a
                 // consuming-match candidate — if the fold can prove nothing
                 // reads the binding after this match, the extraction may free
@@ -5188,6 +5222,22 @@ impl MoveCheck<'_> {
                 let mut arm_heap: Vec<bool> = Vec::new();
                 for arm in arms {
                     let mut c = base.clone();
+                    // Round forty: each arm is an ALTERNATIVE — a take through
+                    // one arm's binder must not read as this arm's, so the
+                    // temp row's verdict is reset per arm and the worst one is
+                    // written back after the loop. Reset FIRST, before
+                    // `note_arm_value` below writes an alias verdict this
+                    // arm's accounting must see (resetting after it erased
+                    // the mark, the whole-release fired on an aliased-out
+                    // payload, and `ascii`'s caller freed a returned buffer
+                    // twice — the audit caught it before anything shipped).
+                    if minted_temp {
+                        if let Some(s) = &self.lets {
+                            if let Some(row) = s.borrow_mut().get_mut(&key) {
+                                row.gone = pre_gone.clone();
+                            }
+                        }
+                    }
                     scope.push(HashSet::new());
                     self.enter();
                     let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
@@ -5234,10 +5284,79 @@ impl MoveCheck<'_> {
                     };
                     self.leave_branch();
                     self.arm_binders.borrow_mut().pop();
+                    // Round forty, still inside the binder scope: an arm that
+                    // never moved its ONE heap-owning payload binder — in a
+                    // match where a sibling arm moves — leaves that payload
+                    // nobody's, and the backends may release the binder's
+                    // slot at the arm's end. Screens: the payload's release
+                    // is silent (the four buffer kinds, or a Deep walk that
+                    // cannot reach a declared release), and an expression
+                    // arm's value cannot alias the binder.
+                    if minted_temp {
+                        let now = self
+                            .lets
+                            .as_ref()
+                            .and_then(|s| s.borrow().get(&key).and_then(|r| r.gone.clone()));
+                        let moved_here = now.is_some() != pre_gone.is_some();
+                        if moved_here {
+                            any_moved = true;
+                            if moved_gone.is_none() {
+                                moved_gone = now;
+                            }
+                            arm_frees.push(None);
+                        } else {
+                            let free = (binders.len() == 1)
+                                .then(|| tys.first().cloned().flatten())
+                                .flatten()
+                                .filter(|t| self.decl.owns_heap(t))
+                                .and_then(|t| {
+                                    let k = self.decl.release_kind(&t)?;
+                                    let silent = matches!(
+                                        k,
+                                        DropKind::FreeStr
+                                            | DropKind::FreeArr
+                                            | DropKind::FreeSmallArr
+                                            | DropKind::FreeMap
+                                    ) || matches!(&k, DropKind::Deep(dt)
+                                        if !self.decl.reaches_declared(dt));
+                                    silent.then_some(k)
+                                })
+                                .filter(|_| match &arm.body {
+                                    ArmBody::Expr(b) => self.value_cannot_alias(b, &binders[0]),
+                                    ArmBody::Block(_) => true,
+                                });
+                            arm_frees.push(free);
+                        }
+                    }
                     self.exit();
                     r?;
                     scope.pop();
                     arm_cs.push(c);
+                }
+                if minted_temp {
+                    if let Some(s) = &self.lets {
+                        if let Some(row) = s.borrow_mut().get_mut(&key) {
+                            row.gone = if any_moved {
+                                moved_gone.clone()
+                            } else {
+                                pre_gone.clone()
+                            };
+                        }
+                    }
+                    if any_moved {
+                        if let Some(sink) = &self.arm_payloads {
+                            for (ix, f) in arm_frees.iter().enumerate() {
+                                if let Some(kind) = f {
+                                    sink.borrow_mut().push(ArmPayloadEv {
+                                        match_id: e as *const Expr as usize,
+                                        arm_ix: ix as u32,
+                                        kind: kind.clone(),
+                                        owner: self.cur_fn.borrow().clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
                 // Round twenty-seven, the candidate's other half: end order
                 // after the arms, so a binder's reads (which resolve to the
