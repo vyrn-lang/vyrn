@@ -6881,7 +6881,7 @@ impl<'a> Gen<'a> {
         // RFC-0114 Rule N at a match join: the arms that still own what
         // another arm consumed, keyed by this match expression's address.
         let ers = self.plan.edge_releases_at(key).cloned().unwrap_or_default();
-        let r = self.gen_match_body_boxed(&sv, &sty, arms, &ers, free_boxes);
+        let r = self.gen_match_body_boxed(&sv, &sty, arms, &ers, free_boxes, key);
         if !self.terminated {
             self.emit_releases(ExitKind::Scrutinee, key);
         }
@@ -6898,12 +6898,13 @@ impl<'a> Gen<'a> {
         arms: &[MatchArm],
         ers: &[(String, u32)],
         free_boxes: bool,
+        key: usize,
     ) -> Result<(String, Type), String> {
         let sv = sv.to_string();
         let sty = sty.clone();
         // A user enum dispatches to the switch-based path.
         if let Type::Enum(evs) = self.resolve(&sty) {
-            return self.gen_match_enum(&sv, &evs, arms, ers, free_boxes);
+            return self.gen_match_enum(&sv, &evs, arms, ers, free_boxes, key);
         }
         // The payload type carried by each arm: for Option<T> the one-arm binds
         // `T`; for Result<T, E> the one-arm binds `T` and the zero-arm binds `E`.
@@ -6925,7 +6926,9 @@ impl<'a> Gen<'a> {
             .iter()
             .position(|a| pattern_is_one(&a.pattern))
             .unwrap();
-        let (one_val, one_t) = self.gen_arm_body(&sv, &arms[one_ix], &one_ty, free_boxes)?;
+        let one_pf = self.plan.arm_payload_free(key, one_ix as u32).cloned();
+        let (one_val, one_t) =
+            self.gen_arm_body(&sv, &arms[one_ix], &one_ty, free_boxes, one_pf)?;
         if !self.terminated {
             self.emit_edge_releases(ers, one_ix as u32);
         }
@@ -6938,7 +6941,9 @@ impl<'a> Gen<'a> {
             .iter()
             .position(|a| !pattern_is_one(&a.pattern))
             .unwrap();
-        let (zero_val, zero_t) = self.gen_arm_body(&sv, &arms[zero_ix], &zero_ty, free_boxes)?;
+        let zero_pf = self.plan.arm_payload_free(key, zero_ix as u32).cloned();
+        let (zero_val, zero_t) =
+            self.gen_arm_body(&sv, &arms[zero_ix], &zero_ty, free_boxes, zero_pf)?;
         if !self.terminated {
             self.emit_edge_releases(ers, zero_ix as u32);
         }
@@ -7032,6 +7037,7 @@ impl<'a> Gen<'a> {
         arms: &[MatchArm],
         ers: &[(String, u32)],
         free_boxes: bool,
+        key: usize,
     ) -> Result<(String, Type), String> {
         let arity = evs.iter().map(|v| v.payload.len()).max().unwrap_or(0);
         let ell = enum_ll(arity);
@@ -7080,8 +7086,10 @@ impl<'a> Gen<'a> {
         for (arm_ix, (arm, (idx, lbl))) in arms.iter().zip(&arm_labels).enumerate() {
             self.emit_label(lbl);
             self.scope.push(Vec::new());
+            let mut bind_slot: Option<String> = None;
             if let (Pattern::Variant(_, binds), Some(idx)) = (&arm.pattern, idx) {
                 let payload_tys = &evs[*idx].payload;
+                let single = binds.len() == 1;
                 for (i, bind) in binds.iter().enumerate() {
                     let pty = payload_tys.get(i).cloned().unwrap_or(Type::Int);
                     let raw = self.fresh_tmp();
@@ -7090,6 +7098,9 @@ impl<'a> Gen<'a> {
                     let ll = self.llt(&pty);
                     let slot = self.declare(bind, &pty);
                     self.emit(format!("store {ll} {v}, ptr {slot}"));
+                    if single {
+                        bind_slot = Some(slot.clone());
+                    }
                     // A consumed scrutinee's boxes are this match's to give
                     // back once the value is out — see `gen_match`'s note.
                     if free_boxes && v != raw {
@@ -7126,6 +7137,15 @@ impl<'a> Gen<'a> {
                 && !(self.ty_is_concrete_app(&ty) && !self.ty_is_concrete_app(&t))
             {
                 ty = t;
+            }
+            // Round forty: the unmoved payload binder — see `gen_arm_body`.
+            if let Some(kind) = self.plan.arm_payload_free(key, arm_ix as u32).cloned() {
+                if let Some(slot) = &bind_slot {
+                    if !self.terminated && self.region_depth == 0 {
+                        let slot = slot.clone();
+                        self.emit_drop(&slot, &kind);
+                    }
+                }
             }
             self.scope.pop();
             if !self.terminated {
@@ -7541,8 +7561,10 @@ impl<'a> Gen<'a> {
         arm: &MatchArm,
         payload_ty: &Type,
         free_boxes: bool,
+        payload_free: Option<DropKind>,
     ) -> Result<(String, Type), String> {
         self.scope.push(Vec::new());
+        let mut bind_slot: Option<String> = None;
         if let Some(bind) = pattern_binding(&arm.pattern) {
             let w0 = self.fresh_tmp();
             let w1 = self.fresh_tmp();
@@ -7552,6 +7574,7 @@ impl<'a> Gen<'a> {
             let ll = self.llt(payload_ty);
             let slot = self.declare(bind, payload_ty);
             self.emit(format!("store {ll} {v}, ptr {slot}"));
+            bind_slot = Some(slot.clone());
             // A TEMPORARY scrutinee with no drop row: the boxed payload's
             // block is this match's to give back once the value is out —
             // `readDoc`'s `match parseJson(src)` left one 16-byte Result box
@@ -7578,6 +7601,16 @@ impl<'a> Gen<'a> {
                 (String::new(), Type::Unit)
             }
         };
+        // Round forty: an unmoved payload binder in a match whose sibling
+        // arm moved — the row went Moved for the mover's sake, the whole
+        // release stood down, and this payload is the arm's to give back
+        // once its body is done with it.
+        if let (Some(kind), Some(slot)) = (&payload_free, &bind_slot) {
+            if !self.terminated && self.region_depth == 0 {
+                let slot = slot.clone();
+                self.emit_drop(&slot, kind);
+            }
+        }
         self.scope.pop();
         Ok(out)
     }

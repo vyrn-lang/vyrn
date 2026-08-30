@@ -1306,6 +1306,10 @@ pub struct ReleasePlan {
     /// frame owns — freed right after the read (the header for a projection,
     /// the whole record deep after a scalar field).
     pub receiver_frees: std::collections::HashSet<usize>,
+    /// Round forty: `(match id, arm index) -> kind` — the arm's unmoved
+    /// payload binder, released at the arm's end. See
+    /// [`crate::movecheck::ArmPayloadEv`].
+    pub arm_frees: HashMap<(usize, u32), DropKind>,
     /// §26's finish check: which function each row above lives in, so
     /// [`ReleasePlan::unconsumed`] can skip rows whose owner an emission
     /// never reached — dead code alarms nobody, a missed site in emitted
@@ -1444,6 +1448,16 @@ impl ReleasePlan {
         hit
     }
 
+    /// Round forty: the release owed to this arm's unmoved payload binder.
+    pub fn arm_payload_free(&self, at: usize, arm: u32) -> Option<&DropKind> {
+        let at = self.resolve(at);
+        let r = self.arm_frees.get(&(at, arm));
+        if r.is_some() {
+            self.taken.borrow_mut().insert(at);
+        }
+        r
+    }
+
     /// §26's loudness: every planned row whose owner WAS emitted and that no
     /// query ever hit — a release decision the emission walked past, which is
     /// a silent leak the memory suite would otherwise find by measurement.
@@ -1458,11 +1472,15 @@ impl ReleasePlan {
         emitted: &std::collections::HashSet<String>,
     ) -> Vec<(String, &'static str)> {
         let taken = self.taken.borrow();
-        let classes: [(&'static str, Box<dyn Iterator<Item = &usize> + '_>); 4] = [
+        let classes: [(&'static str, Box<dyn Iterator<Item = &usize> + '_>); 5] = [
             ("an argument drop", Box::new(self.arg_drops.iter())),
             ("a store release", Box::new(self.store_owned.iter())),
             ("an edge release", Box::new(self.edge_releases.keys())),
             ("a receiver free", Box::new(self.receiver_frees.iter())),
+            (
+                "an arm payload",
+                Box::new(self.arm_frees.keys().map(|k| &k.0)),
+            ),
         ];
         let mut out: Vec<(String, &'static str)> = Vec::new();
         for (label, it) in classes {
@@ -1942,6 +1960,24 @@ pub fn analyze(program: &Program) -> Ownership {
             owners.insert(er.if_key, er.owner.clone());
         }
     }
+    // Round forty: unmoved payload binders of temp-scrutinee matches —
+    // pre-screened in movecheck (silence, single binder, no alias).
+    let arm_frees: HashMap<(usize, u32), DropKind> = facts
+        .arm_payloads
+        .iter()
+        .map(|a| ((a.match_id, a.arm_ix), a.kind.clone()))
+        .collect();
+    if std::env::var("VYRN_ARM_DUMP").is_ok() {
+        for a in &facts.arm_payloads {
+            eprintln!(
+                "arm-free: fn={} match={:x} arm={} kind={:?}",
+                a.owner, a.match_id, a.arm_ix, a.kind
+            );
+        }
+    }
+    for a in &facts.arm_payloads {
+        owners.insert(a.match_id, a.owner.clone());
+    }
     for (k, n, owner) in &facts.receiver_temps {
         if std::env::var("VYRN_PLAN_DEBUG").is_ok() {
             eprintln!(
@@ -1954,6 +1990,7 @@ pub fn analyze(program: &Program) -> Ownership {
         }
     }
     let plan = ReleasePlan {
+        arm_frees,
         arg_drops: facts
             .arg_temps
             .iter()

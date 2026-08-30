@@ -234,8 +234,12 @@ export fn readDoc(src: String, iss: modify Array<Issue>) -> Array<Json> {
     }
 }
 
-fn pushParse(iss: modify Array<Issue>, e: String) -> Array<Json> {
-    iss.push(Issue { key: "json.parse", path: "", message: e.copy() })
+fn pushParse(iss: modify Array<Issue>, e: consume String) -> Array<Json> {
+    // `consume`, and the Issue takes the string whole: as a read parameter the
+    // error was copied into the Issue and the original was nobody's — the
+    // sibling arm's `out.push(j)` marks the scrutinee row Moved, so the match
+    // released nothing (exit-residue round forty).
+    iss.push(Issue { key: "json.parse", path: "", message: e })
     return []
 }
 

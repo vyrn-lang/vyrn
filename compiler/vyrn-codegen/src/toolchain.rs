@@ -212,8 +212,9 @@ static unsigned long long vyrn_audit_remove(void* p) {
     }
     return n;
 }
-static void vyrn_audit_fail(void) {
-    fputs("free audit: double or foreign free\n", stderr);
+static void vyrn_audit_fail(void* ra) {
+    fprintf(stderr, "free audit: double or foreign free rva=0x%llx\n",
+            (unsigned long long)((char*)ra - (char*)VYRN_IMG_BASE));
     exit(134);
 }
 /* Set once, by the entry, before the leak-check teardown runs. Inside the
@@ -232,7 +233,7 @@ void __vyrn_free(void* p) {
         vyrn_audit_release();
         if (n == (unsigned long long)-1) {
             if (vyrn_teardown) return;
-            vyrn_audit_fail();
+            vyrn_audit_fail(VYRN_RA());
         }
         /* Poison before the block goes back: a dangling read now yields 0xDD
            bytes instead of stale-but-plausible data, so a use-after-free
@@ -301,7 +302,7 @@ void* __vyrn_realloc(void* p, unsigned long long n) {
     vyrn_audit_acquire();
     unsigned long long old = (p == NULL) ? 0 : vyrn_audit_remove(p);
     vyrn_audit_release();
-    if (old == (unsigned long long)-1) vyrn_audit_fail();
+    if (old == (unsigned long long)-1) vyrn_audit_fail(VYRN_RA());
     void* q = __vyrn_alloc_check(realloc(p, (size_t)n), n);
     vyrn_audit_acquire();
     vyrn_audit_add(q, n, VYRN_RA());
