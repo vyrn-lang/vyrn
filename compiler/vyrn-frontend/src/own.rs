@@ -2084,9 +2084,34 @@ fn fold_store_owned(facts: &crate::movecheck::Facts) -> std::collections::HashSe
                 continue;
             }
             let blocked = evs.iter().any(|t| {
-                matches!(t.kind, EvKind::Take)
-                    && ((t.order > prev.order && t.order < ev.order)
-                        || t.loops.iter().any(|l| ev.loops.contains(l)))
+                if !matches!(t.kind, EvKind::Take) {
+                    return false;
+                }
+                // Round thirty-one: a take that flows STRAIGHT to a function
+                // exit inside its own loop context — `return f` in the middle
+                // of the loop that also reassigns `f` — cannot collide with
+                // any later store: if the take ran, the function left.
+                // "Straight to" = a clean `return`/`?` between this take and
+                // the row's next event, at loop depth covering the take's
+                // (`parseRepeat`'s frag stores were refused by exactly this
+                // take, one leaked holes-buffer per repetition operator).
+                let next_ev = evs
+                    .iter()
+                    .filter(|x| x.order > t.order)
+                    .map(|x| x.order)
+                    .min()
+                    .unwrap_or(u32::MAX);
+                let exits = facts.exit_sites.iter().any(|x| {
+                    x.clean
+                        && x.order > t.order
+                        && x.order < next_ev
+                        && t.loops.iter().all(|l| x.loops.contains(l))
+                });
+                if exits {
+                    return false;
+                }
+                (t.order > prev.order && t.order < ev.order)
+                    || t.loops.iter().any(|l| ev.loops.contains(l))
             });
             if !blocked {
                 owned.insert(id);
