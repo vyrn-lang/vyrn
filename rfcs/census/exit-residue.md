@@ -1311,6 +1311,22 @@ Movement: fieldmut 4 → 3, simdmem2 CLEAN (2 → 0).
 Tallies after round forty-two: **clean 123, leaking 21, zero
 double-frees**.
 
+## Forty-third triage: the method the receiver had to name
+
+An associated-type return answers PER IMPL, so a protocol method like
+`valueOr` was never seeded under its surface name and every call typed
+as unknown — no argument-temporary row, no release. `Declared` keeps a
+method-to-protocol map now, and the Call arm's last fallback lets the
+RECEIVER's type pick the impl, exactly as the checker dispatches: the
+flattened impl row already spells the return concretely, and a generic
+impl's row — still mentioning its variables — stands down to the leak
+rather than a wrong answer.
+
+Movement: assoctype CLEAN (3 → 0).
+
+Tallies after round forty-three: **clean 124, leaking 20, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the

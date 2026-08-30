@@ -122,6 +122,11 @@ pub struct Declared {
     /// The `Owned` table, so a pass can ask what a type RELEASES and not only
     /// what it reaches. See [`Declared::releases`].
     owned: crate::own::Owned,
+    /// Protocol method name -> protocol name, for the receiver-directed
+    /// fallback in `type_of`'s Call arm: a method whose DECLARED return
+    /// mentions a type variable (an associated type) answers per impl, and
+    /// the flattened impl row spells it concretely.
+    method_protos: HashMap<String, String>,
     /// Every enum variant name the program declares, plus the built-in sum
     /// constructors, each mapped to the enum type it constructs — or `None`
     /// where no single named type answers (the built-in sum constructors,
@@ -156,10 +161,14 @@ impl Declared {
         // associated type arrives as `Type::Param`) is impl-dependent and
         // stays unnamed, and a projection member's result is a PLACE inside
         // the receiver — not rule 3's owned result — so it stays out too.
+        let mut method_protos: HashMap<String, String> = HashMap::new();
         for p in &program.protocols {
             for m in &p.methods {
                 if m.result_cap.is_none() && !crate::types::mentions_param(&m.ret) {
                     rets.entry(m.name.clone()).or_insert_with(|| m.ret.clone());
+                }
+                if m.result_cap.is_none() {
+                    method_protos.insert(m.name.clone(), p.name.clone());
                 }
             }
         }
@@ -184,6 +193,7 @@ impl Declared {
         }
         Declared {
             owned: crate::own::Owned::new(program),
+            method_protos,
             variants,
             decls,
             rets,
@@ -391,6 +401,25 @@ impl Declared {
                         .get(name)
                         .and_then(|owner| owner.clone())
                         .map(Type::Named)
+                })
+                // A protocol method whose declared return mentions a type
+                // variable — an associated type — was never seeded under its
+                // surface name, so the chain above answers nothing
+                // (exit-residue round forty-three: `s.valueOr("none")` typed
+                // as unknown and its result carried no row). The receiver's
+                // type picks the impl, exactly as the checker dispatches, and
+                // the flattened impl row already spells the return
+                // concretely; a generic impl's row still mentions its
+                // variables and stands down.
+                .or_else(|| {
+                    let proto = self.method_protos.get(name)?;
+                    let rt = self.type_of(vars, args.first()?)?;
+                    let k = crate::types::type_key(&rt)?;
+                    let m = crate::types::impl_method_name(proto, &k, name);
+                    self.rets
+                        .get(&m)
+                        .cloned()
+                        .filter(|r| !crate::types::mentions_param(r))
                 }),
             // The one allocating operator is `+` on Strings, and its result has
             // its left operand's type. Every other operator is a scalar, whose

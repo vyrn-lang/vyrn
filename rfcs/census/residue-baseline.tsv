@@ -14,7 +14,7 @@ appendreserve	clean
 args	clean
 argsdemo	clean
 arrays	clean
-assoctype	leak	3
+assoctype	clean
 assoctype_unbound	skip
 autorelease	clean
 autovalidate	clean
