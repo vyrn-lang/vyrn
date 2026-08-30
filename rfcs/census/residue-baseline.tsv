@@ -107,7 +107,7 @@ membench	clean
 modify	other
 modifyself	clean
 modules	clean
-mustuse	leak	7
+mustuse	clean
 mustuse_abandoned	skip
 namedplace	clean
 namespace	clean
@@ -116,7 +116,7 @@ nohashkey	skip
 numbytes	clean
 numparse	leak	8
 option	clean
-ownedcontainer	leak	4
+ownedcontainer	clean
 ownership	other
 pagesdemo	leak	3
 parallel	clean
@@ -144,8 +144,8 @@ region	other
 region_consume	skip
 regionarena	clean
 regionescape	leak	1
-releaseacrossexit	leak	10
-releaseacrosstry	leak	5
+releaseacrossexit	clean
+releaseacrosstry	clean
 rest	leak	363
 revcomp	clean
 rpc	leak	6
@@ -183,7 +183,7 @@ streamops	clean
 streamunfold	clean
 stringops	clean
 strings	other
-strpredbytes	leak	6
+strpredbytes	clean
 tagged	clean
 task_abandoned	skip
 templates	clean

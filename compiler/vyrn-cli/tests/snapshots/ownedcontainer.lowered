@@ -21,86 +21,91 @@ fn Owned__Ring__release(self: Ring) -> Unit                              @25
       field .slots : Array<Int64>                                        @29
         var self : Ring                                                  @29
   drop slots                                                             @30
+  let label : String                                                     @31
+    consume : String                                                     @31
+      field .label : String                                              @31
+        var self : Ring                                                  @31
+  drop label                                                             @32
 
-fn Owned__Tally__release(self: Tally) -> Unit                            @41
-  do                                                                     @42
-    call print : Unit                                                    @42
-      binary Add : String                                                @42
-        str "tally " : String                                            @42
-        call @str : String                                               @42
-          field .total : Int64                                           @42
-            var self : Tally                                             @42
+fn Owned__Tally__release(self: Tally) -> Unit                            @43
+  do                                                                     @44
+    call print : Unit                                                    @44
+      binary Add : String                                                @44
+        str "tally " : String                                            @44
+        call @str : String                                               @44
+          field .total : Int64                                           @44
+            var self : Tally                                             @44
 
-fn inner() -> Unit                                                       @62
-  let t : Tally                                                          @63
-    call tallyOf : Tally                                                 @63
-      int 4 : Int64                                                      @63
-  do                                                                     @64
-    call print : Unit                                                    @64
-      str "inside" : String                                              @64
-  release t : Release Owned__Tally__release exit=block                   @63
+fn inner() -> Unit                                                       @64
+  let t : Tally                                                          @65
+    call tallyOf : Tally                                                 @65
+      int 4 : Int64                                                      @65
+  do                                                                     @66
+    call print : Unit                                                    @66
+      str "inside" : String                                              @66
+  release t : Release Owned__Tally__release exit=block                   @65
 
-fn main() -> Int64                                                       @67
-  let mut i : Int64                                                      @70
-    int 1 : Int64                                                        @70
-  while                                                                  @71
-    binary LtEq : Bool                                                   @71
-      var i : Int64                                                      @71
-      int 3 : Int64                                                      @71
-    let r : Ring                                                         @72
-      call ringOf : Ring                                                 @72
-        binary Add : String                                              @72
-          str "ring" : String                                            @72
-          call @str : String                                             @72
-            var i : Int64                                                @72
-        var i : Int64                                                    @72
-    assign i                                                             @73
-      binary Add : Int64                                                 @73
-        var i : Int64                                                    @73
-        int 1 : Int64                                                    @73
-  do                                                                     @78
-    call inner : Unit                                                    @78
-  do                                                                     @79
-    call print : Unit                                                    @79
-      str "after" : String                                               @79
-  let last : Ring                                                        @81
-    call ringOf : Ring                                                   @81
-      str "last" : String                                                @81
-      int 2 : Int64                                                      @81
-  return                                                                 @82
-    int 0 : Int64                                                        @82
-  release r : Release Owned__Ring__release exit=block                    @72
-  release last : Release Owned__Ring__release exit=return                @81
-  release last : Release Owned__Ring__release exit=block                 @81
+fn main() -> Int64                                                       @69
+  let mut i : Int64                                                      @72
+    int 1 : Int64                                                        @72
+  while                                                                  @73
+    binary LtEq : Bool                                                   @73
+      var i : Int64                                                      @73
+      int 3 : Int64                                                      @73
+    let r : Ring                                                         @74
+      call ringOf : Ring                                                 @74
+        binary Add : String                                              @74
+          str "ring" : String                                            @74
+          call @str : String                                             @74
+            var i : Int64                                                @74
+        var i : Int64                                                    @74
+    assign i                                                             @75
+      binary Add : Int64                                                 @75
+        var i : Int64                                                    @75
+        int 1 : Int64                                                    @75
+  do                                                                     @80
+    call inner : Unit                                                    @80
+  do                                                                     @81
+    call print : Unit                                                    @81
+      str "after" : String                                               @81
+  let last : Ring                                                        @83
+    call ringOf : Ring                                                   @83
+      str "last" : String                                                @83
+      int 2 : Int64                                                      @83
+  return                                                                 @84
+    int 0 : Int64                                                        @84
+  release r : Release Owned__Ring__release exit=block                    @74
+  release last : Release Owned__Ring__release exit=return                @83
+  release last : Release Owned__Ring__release exit=block                 @83
 
-fn ringOf(label: String, n: Int64) -> Ring                               @48
-  let mut slots : Array<Int64>                                           @49
-    array : Array<Int64>                                                 @49
-  let mut i : Int64                                                      @50
-    int 0 : Int64                                                        @50
-  while                                                                  @51
-    binary Lt : Bool                                                     @51
-      var i : Int64                                                      @51
-      var n : Int64                                                      @51
-    assign slots                                                         @52
-      call @push : Array<Int64>                                          @52
-        var slots : Array<Int64>                                         @52
-        binary Mul : Int64                                               @52
-          var i : Int64                                                  @52
-          var i : Int64                                                  @52
-    assign i                                                             @53
-      binary Add : Int64                                                 @53
-        var i : Int64                                                    @53
-        int 1 : Int64                                                    @53
-  return                                                                 @55
-    record Ring : Ring                                                   @55
-      call @copy : String                                                @55
-        var label : String                                               @55
-      var slots : Array<Int64>                                           @55
+fn ringOf(label: String, n: Int64) -> Ring                               @50
+  let mut slots : Array<Int64>                                           @51
+    array : Array<Int64>                                                 @51
+  let mut i : Int64                                                      @52
+    int 0 : Int64                                                        @52
+  while                                                                  @53
+    binary Lt : Bool                                                     @53
+      var i : Int64                                                      @53
+      var n : Int64                                                      @53
+    assign slots                                                         @54
+      call @push : Array<Int64>                                          @54
+        var slots : Array<Int64>                                         @54
+        binary Mul : Int64                                               @54
+          var i : Int64                                                  @54
+          var i : Int64                                                  @54
+    assign i                                                             @55
+      binary Add : Int64                                                 @55
+        var i : Int64                                                    @55
+        int 1 : Int64                                                    @55
+  return                                                                 @57
+    record Ring : Ring                                                   @57
+      call @copy : String                                                @57
+        var label : String                                               @57
+      var slots : Array<Int64>                                           @57
 
-fn tallyOf(n: Int64) -> Tally                                            @58
-  return                                                                 @59
-    record Tally : Tally                                                 @59
-      binary Mul : Int64                                                 @59
-        var n : Int64                                                    @59
-        int 10 : Int64                                                   @59
+fn tallyOf(n: Int64) -> Tally                                            @60
+  return                                                                 @61
+    record Tally : Tally                                                 @61
+      binary Mul : Int64                                                 @61
+        var n : Int64                                                    @61
+        int 10 : Int64                                                   @61

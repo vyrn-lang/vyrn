@@ -24,6 +24,8 @@ type Ring = {
 impl Owned for Ring {
     fn release(consume self) {
         print("release " + self.label)
+        let label = consume self.label
+        drop label
     }
 }
 
