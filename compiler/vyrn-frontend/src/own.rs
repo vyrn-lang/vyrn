@@ -1754,6 +1754,16 @@ pub fn analyze(program: &Program) -> Ownership {
                 if !ex.clean || ex.order <= w.order || ex.order >= t.order {
                     continue;
                 }
+                // The single-write rule keeps round twenty-one's loop-context
+                // equality; the hoisted rule keeps round thirty-eight's
+                // function-level exits. Round forty-two tried relaxing the
+                // hoisted exit into loops — a return runs once per call — and
+                // the corpus double-freed: an in-loop `?` whose walk order
+                // sits between the init and the take is NOT ordered against
+                // the loop's own later writes at runtime, and the placed free
+                // met the append machinery's. Reverted; the in-loop exits
+                // keep their leak until the fold can order across a back
+                // edge.
                 let fits = if single {
                     ex.loops == w.loops
                 } else {

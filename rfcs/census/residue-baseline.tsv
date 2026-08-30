@@ -57,7 +57,7 @@ fallible	clean
 fannkuch	clean
 fasta	clean
 fib	other
-fieldmut	leak	4
+fieldmut	leak	3
 files	clean
 finitekeys	clean
 floatkey	skip
@@ -161,7 +161,7 @@ simd	clean
 simdbench	clean
 simdint	clean
 simdmem	clean
-simdmem2	leak	2
+simdmem2	clean
 simdoob	other
 simdoobstore	other
 simdround	clean
