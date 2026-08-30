@@ -1362,6 +1362,10 @@ pub struct Ownership {
     pub owned_fns: HashMap<String, DropKind>,
     /// Per function: identity of each droppable `let` and how to reclaim it.
     pub droppable: HashMap<String, HashMap<usize, DropKind>>,
+    /// Round twenty-one: per function, the MOVED bindings that still need a
+    /// slot registered — their releases are placed only at the early exits
+    /// that run before the take (`fold` in `analyze`), never at block exit.
+    pub early: HashMap<String, HashMap<usize, DropKind>>,
     /// Per function: the places a `consume` took out of a droppable `let`
     /// (RFC-0093 M2), keyed the same way and relative to the binding. A `let`
     /// with no row here has no hole, which is nearly all of them.
@@ -1429,11 +1433,12 @@ pub fn analyze(program: &Program) -> Ownership {
     // What every `let` in the program still owns where its block ends, decided
     // by the pass that enforces the rules. One walk, one answer, no second
     // opinion (RFC-0087 records three defects that were two walkers disagreeing).
-    let facts = crate::movecheck::facts(program);
+    let mut facts = crate::movecheck::facts(program);
     let mut store_owned = fold_store_owned(&facts);
     let edge_releases = fold_edge_releases(&facts);
     let revived = fold_revived(&facts);
     let store_fresh = facts.fresh_stores;
+    let exit_sites = std::mem::take(&mut facts.exit_sites);
     let lets = facts.lets;
 
     let mut droppable = HashMap::new();
@@ -1491,6 +1496,102 @@ pub fn analyze(program: &Program) -> Ownership {
     for (i, b) in program.benches.iter().enumerate() {
         emit(format!("bench@{i}"), &[], &b.body);
     }
+    // Round twenty-one: a binding whose row says `Moved` is still LIVE at
+    // every function exit that runs before its take — `let key =
+    // parseString(p)?` two statements above the `fields.push` that takes it,
+    // with a `?` between, leaked one key per unwound frame (jsondepth's 128).
+    // For each such binding, place a release at every clean `return`/`?`
+    // whose walk order sits strictly between the binding's one initializing
+    // write and its first take, all three sharing one loop context — a back
+    // edge makes the order meaningless otherwise. Silent kinds only: the
+    // interpreter reference-counts and runs no placed row, so a declared
+    // `release` (or a `Deep` walk that may reach one) fired here would print
+    // in two engines and not the third.
+    let early: HashMap<String, HashMap<usize, DropKind>> = {
+        use crate::movecheck::EvKind;
+        let mut per: HashMap<
+            usize,
+            (
+                Option<&crate::movecheck::StoreEv>,
+                Option<&crate::movecheck::StoreEv>,
+                usize,
+            ),
+        > = HashMap::new();
+        for ev in &facts.store_events {
+            let e = per.entry(ev.key).or_insert((None, None, 0));
+            match ev.kind {
+                EvKind::Write { .. } => {
+                    e.2 += 1;
+                    if e.0.is_none() {
+                        e.0 = Some(ev);
+                    }
+                }
+                EvKind::Take => {
+                    if e.1.is_none() {
+                        e.1 = Some(ev);
+                    }
+                }
+            }
+        }
+        let mut early: HashMap<String, HashMap<usize, DropKind>> = HashMap::new();
+        let mut extra: Vec<(String, Release)> = Vec::new();
+        for (key, row) in &lets {
+            if !matches!(row.gone, Some(crate::movecheck::Gone::Moved { .. }))
+                || revived.contains(key)
+            {
+                continue;
+            }
+            let Some(kind) = row.ty.as_ref().and_then(|t| proto.release_kind(t)) else {
+                continue;
+            };
+            if !matches!(
+                kind,
+                DropKind::FreeStr | DropKind::FreeArr | DropKind::FreeSmallArr | DropKind::FreeMap
+            ) {
+                continue;
+            }
+            let Some(&(Some(w), Some(t), writes)) = per.get(key).as_deref() else {
+                continue;
+            };
+            if writes != 1 || t.loops != w.loops {
+                continue;
+            }
+            for ex in &exit_sites {
+                if !ex.clean || ex.order <= w.order || ex.order >= t.order || ex.loops != w.loops {
+                    continue;
+                }
+                if std::env::var_os("VYRN_EARLY_DUMP").is_some() {
+                    eprintln!(
+                        "early: fn={} site={:x} try={} kind={:?} w={} t={} e={}",
+                        ex.fn_name, ex.site, ex.is_try, kind, w.order, t.order, ex.order
+                    );
+                }
+                extra.push((
+                    ex.fn_name.clone(),
+                    Release {
+                        site: ex.site,
+                        binding: *key,
+                        name: "(taken later)".into(),
+                        kind: kind.clone(),
+                        exit: if ex.is_try { Exit::Try } else { Exit::Return },
+                        line: 0,
+                    },
+                ));
+                early
+                    .entry(ex.fn_name.clone())
+                    .or_default()
+                    .insert(*key, kind.clone());
+            }
+        }
+        // The lets iteration is hash-ordered; the emitted IR must not be. Only
+        // the injected rows are sorted — the structural rows keep
+        // `place_body`'s frame order.
+        extra.sort_by(|a, b| (&a.0, a.1.site, a.1.binding).cmp(&(&b.0, b.1.site, b.1.binding)));
+        for (f, r) in extra {
+            releases.entry(f).or_default().push(r);
+        }
+        early
+    };
     // Rule 3: a return is owned. The return type is the whole answer.
     let owned_fns: HashMap<String, DropKind> = program
         .functions
@@ -1604,6 +1705,7 @@ pub fn analyze(program: &Program) -> Ownership {
         plan,
         owned_fns,
         droppable,
+        early,
         holes,
         notes,
         proto,

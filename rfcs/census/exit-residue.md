@@ -764,6 +764,42 @@ Movement: `revcomp` CLEAN (339 → 0), `rest` shed its line-loop share.
 Tallies after round twenty: **clean 89, leaking 60, zero
 double-frees**.
 
+## Twenty-first triage: live until the take, released at the exits before it
+
+`let key = parseString(p)?` two statements above the `fields.push`
+that takes it, with a `?` between: `key`'s row says `Moved`, block
+exit releases nothing of a moved row — and the `?` leaves with `key`
+live. One key per unwound frame, 128 of jsondepth's 130 blocks, and
+the same shape through `std/jsonread`'s error returns.
+
+The machinery: the walk now records every `return` and `?` it meets
+(`ExitEv` — order, site, loop context, and whether it is CLEAN:
+outside every `region` and every lambda body). A fold places a release
+for each single-write, unrevived `Moved` binding at every clean exit
+whose order sits strictly between the binding's initializing write and
+its first take, all three sharing one loop context — a back edge makes
+the order meaningless otherwise. Silent kinds only (`FreeStr`,
+`FreeArr`, `FreeSmallArr`, `FreeMap`): the interpreter
+reference-counts and runs no placed row, so a declared `release` — or
+a `Deep` walk that may reach one — fired here would print in two
+engines and not the third. The engines register a slot for these
+bindings and the placed rows do the rest; no `Block` row exists, so
+nothing runs at fall-through and nothing runs after the take.
+
+Parity's audit taught the rule its one subtlety before anything
+shipped: the walk recorded a `return`'s exit BEFORE walking its value,
+so `return Parser { src: ba, .. }` read as "an exit before `ba`'s
+take" and the fold freed `ba` at the very return that embeds it —
+`{"a":1}` double-freed. The exit is recorded after the value walk now,
+matching the runtime: the returned expression evaluates first, and
+only then does the exit release anything.
+
+Movement: jsondepth 130 → 2 (the remainder is a `.charCount()`
+receiver, R1-prime's `.byteLength` rule one method over).
+
+Tallies after round twenty-one: **clean 89, leaking 60, zero
+double-frees** — the tallies hold while the block counts drain.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach
