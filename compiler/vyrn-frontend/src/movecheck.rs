@@ -5290,6 +5290,35 @@ impl MoveCheck<'_> {
                                         ),
                                     },
                                 );
+                                // Round thirty-three: the move enters the
+                                // consumption map, exactly as `store()`'s
+                                // does — rule 1 refuses reuse, and Rule N's
+                                // recorder can finally SEE a constructor take
+                                // on one branch (`ops.push(Set(newAttrs))`
+                                // under an `if` leaked the untaken path's
+                                // value, std/html's whole differ). A scalar
+                                // copies, exactly as everywhere else.
+                                // A compiler-synthesized `@`-name is its
+                                // template's business, not rule 1's.
+                                if root.starts_with('@')
+                                    || !self.type_of(arg).is_some_and(|t| self.decl.owns_heap(&t))
+                                {
+                                    continue;
+                                }
+                                consumed.or_insert(
+                                    root.clone(),
+                                    Consumption {
+                                        line: *line,
+                                        by: format!(
+                                            "`{}(..)`",
+                                            crate::parser::method_surface(name)
+                                        ),
+                                        fixes: vec![format!(
+                                            "`{root}.copy()` if both sides need a value"
+                                        )],
+                                        hole: false,
+                                    },
+                                );
                             }
                         }
                     } else if self.sinks(name, i) {

@@ -120,7 +120,7 @@ ownedcontainer	leak	4
 ownership	other
 pagesdemo	leak	3
 parallel	clean
-patchdemo	leak	73
+patchdemo	clean
 payloadkey	skip
 pidigits	clean
 placeorder	leak	1
