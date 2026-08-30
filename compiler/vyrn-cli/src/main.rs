@@ -262,6 +262,13 @@ fn add_native_clang_flags(cmd: &mut Command, target: NativeTarget) {
     cmd.arg("-O2")
         .arg("-ffp-contract=off")
         .arg("-Wno-override-module");
+    // VYRN_DEBUG_SYMBOLS=1: keep debug info so `llvm-symbolizer --obj=<exe>`
+    // can name the rva offsets `VYRN_LEAK_CHECK=3` prints — the leak triage
+    // instrument (exit-residue round thirty-one). Off by default; -g changes
+    // no codegen under -O2, only the artifact's size.
+    if std::env::var_os("VYRN_DEBUG_SYMBOLS").is_some() {
+        cmd.arg("-g");
+    }
     if let Some(march) = target.march() {
         cmd.arg(format!("-march={march}"));
     }

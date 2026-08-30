@@ -1026,6 +1026,30 @@ syntax on `fn` TYPES — a language feature, not a triage round.
 
 Tallies hold at **clean 100, leaking 46, zero double-frees**.
 
+## Thirty-first triage: the instrument that names the function
+
+Two pieces. First, THE INSTRUMENT the size histogram could never be:
+`VYRN_LEAK_CHECK=3` records each block's allocating RETURN ADDRESS and
+prints it as an image-relative offset; `VYRN_DEBUG_SYMBOLS=1` keeps
+debug info through the native build, and `llvm-symbolizer
+--obj=<exe> --relative-address 0x<rva>` names the function. A
+fifteen-round-old guessing game — which 8-byte blocks are these? —
+became `vyrn_parseAtom`, `vyrn_joinHoles`, `vyrn_replaceAll` in one
+run.
+
+Second, what it found within minutes: `parseRepeat`'s frag stores were
+refused by the shared-loop take rule — the take being `return f` in
+the MIDDLE of the loop. A take that flows straight to a clean function
+exit inside its own loop context cannot collide with any later store:
+if the take ran, the function left. The fold exempts exactly those
+(the exit must sit between the take and the row's next event, at loop
+depth covering the take's), and one leaked holes-buffer per repetition
+operator came home.
+
+Movement: regexredux 184 → 35 blocks. The tallies hold at **clean
+100, leaking 46, zero double-frees** while the named-function era
+begins.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the

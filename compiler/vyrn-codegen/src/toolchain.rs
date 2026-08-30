@@ -114,7 +114,22 @@ static void* __vyrn_alloc_check(void* p, unsigned long long n) {
    default), the cost is one branch per free and one getenv ever.
    The table uses raw malloc/calloc so it never audits itself. */
 static int vyrn_audit_state = -1;
-typedef struct { void* p; unsigned long long n; } VyrnAuditEnt;
+typedef struct { void* p; unsigned long long n; void* ra; } VyrnAuditEnt;
+/* VYRN_LEAK_CHECK=3: each block remembers its allocator's RETURN ADDRESS, and
+   the exit report prints it as an image-relative offset a symbolizer can name
+   (llvm-symbolizer --obj=<exe> 0x<rva>). The instrument the size histogram
+   could never be. */
+#if defined(__wasm__)
+#define VYRN_RA() ((void*)0)
+#else
+#define VYRN_RA() __builtin_return_address(0)
+#endif
+#if defined(_WIN32)
+extern char __ImageBase;
+#define VYRN_IMG_BASE ((void*)&__ImageBase)
+#else
+#define VYRN_IMG_BASE ((void*)0)
+#endif
 static VyrnAuditEnt* vyrn_audit_tab = 0;
 static size_t vyrn_audit_cap = 0, vyrn_audit_len = 0;
 #if defined(__wasm__)
@@ -135,7 +150,8 @@ int __vyrn_leak_check_on(void) {
         const char* e = getenv("VYRN_LEAK_CHECK");
         /* "2" is the verbose form: the exit report lists each block's size,
            which is what a triage keys its first guess on. */
-        vyrn_leak_state = (e && e[0] && e[0] != '0') ? (e[0] == '2' ? 2 : 1) : 0;
+        vyrn_leak_state =
+            (e && e[0] && e[0] != '0') ? (e[0] == '3' ? 3 : (e[0] == '2' ? 2 : 1)) : 0;
     }
     return vyrn_leak_state;
 }
@@ -156,7 +172,7 @@ static size_t vyrn_audit_slot(void* p, VyrnAuditEnt* tab, size_t cap) {
     return i;
 }
 /* lock held */
-static void vyrn_audit_add(void* p, unsigned long long n) {
+static void vyrn_audit_add(void* p, unsigned long long n, void* ra) {
     if (vyrn_audit_len * 2 >= vyrn_audit_cap) {
         size_t ncap = vyrn_audit_cap ? vyrn_audit_cap * 2 : 1024;
         VyrnAuditEnt* nt = (VyrnAuditEnt*)calloc(ncap, sizeof(VyrnAuditEnt));
@@ -172,6 +188,7 @@ static void vyrn_audit_add(void* p, unsigned long long n) {
     if (!vyrn_audit_tab[i].p) {
         vyrn_audit_tab[i].p = p;
         vyrn_audit_tab[i].n = n;
+        vyrn_audit_tab[i].ra = ra;
         vyrn_audit_len++;
     }
 }
@@ -190,7 +207,7 @@ static unsigned long long vyrn_audit_remove(void* p) {
         VyrnAuditEnt q = vyrn_audit_tab[j];
         vyrn_audit_tab[j].p = 0;
         vyrn_audit_len--;
-        vyrn_audit_add(q.p, q.n);
+        vyrn_audit_add(q.p, q.n, q.ra);
         j = (j + 1) & (vyrn_audit_cap - 1);
     }
     return n;
@@ -243,11 +260,17 @@ void __vyrn_audit_exit(void) {
     }
     vyrn_audit_release();
     if (live > 0) {
-        if (vyrn_leak_state == 2) {
+        if (vyrn_leak_state >= 2) {
             vyrn_audit_acquire();
             for (i = 0; i < vyrn_audit_cap; i++)
-                if (vyrn_audit_tab[i].p)
-                    fprintf(stderr, "  leaked block: %llu bytes\n", vyrn_audit_tab[i].n);
+                if (vyrn_audit_tab[i].p) {
+                    if (vyrn_leak_state == 3)
+                        fprintf(stderr, "  leaked block: %llu bytes rva=0x%llx\n",
+                            vyrn_audit_tab[i].n,
+                            (unsigned long long)((char*)vyrn_audit_tab[i].ra - (char*)VYRN_IMG_BASE));
+                    else
+                        fprintf(stderr, "  leaked block: %llu bytes\n", vyrn_audit_tab[i].n);
+                }
             vyrn_audit_release();
         }
         fprintf(stderr, "free audit: %llu block(s), %llu bytes, never freed\n", live, bytes);
@@ -262,7 +285,7 @@ void* __vyrn_malloc(unsigned long long n) {
     void* p = __vyrn_alloc_check(malloc((size_t)n), n);
     if (vyrn_audit_on()) {
         vyrn_audit_acquire();
-        vyrn_audit_add(p, n);
+        vyrn_audit_add(p, n, VYRN_RA());
         vyrn_audit_release();
     }
     return p;
@@ -281,7 +304,7 @@ void* __vyrn_realloc(void* p, unsigned long long n) {
     if (old == (unsigned long long)-1) vyrn_audit_fail();
     void* q = __vyrn_alloc_check(realloc(p, (size_t)n), n);
     vyrn_audit_acquire();
-    vyrn_audit_add(q, n);
+    vyrn_audit_add(q, n, VYRN_RA());
     vyrn_audit_release();
     return q;
 }
