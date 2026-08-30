@@ -357,6 +357,11 @@ pub struct Facts {
     pub mentions: Vec<MentionEv>,
     /// Round twenty-seven: the consuming-match candidates.
     pub consume_cands: Vec<ConsumeCand>,
+    /// Round twenty-eight: statement-position calls whose OWNED heap result
+    /// nothing binds — `remove(s, h)` for the return value's side effect —
+    /// with the callee name for the lender screen. The backends free the
+    /// discarded value right after the call.
+    pub discarded: Vec<(usize, String)>,
     /// Exit-residue round eighteen: `Stmt::Assign` nodes whose value mentions
     /// the assigned place ONLY as the bare name in plain argument positions of
     /// user-declared, non-lending, non-retaining functions — so the stored
@@ -536,6 +541,14 @@ pub fn facts(program: &Program) -> Facts {
         exit_sites: r.exit_sites,
         mentions: r.mentions,
         consume_cands: r.consume_cands,
+        // Round twenty-eight: a wrapped lender's result names storage inside
+        // its argument — freeing a discarded one is a use-after-free, so the
+        // closed lending set screens here.
+        discarded: r
+            .discarded
+            .into_iter()
+            .filter(|(_, n)| !r.lending.contains(n))
+            .collect(),
         place_stores: r.place_stores,
         // The walk recorded the shape; the closures decide the callees. A
         // lender's result aliases its argument and a retaining position keeps
@@ -587,6 +600,7 @@ struct Run {
     exit_sites: Vec<ExitEv>,
     mentions: Vec<MentionEv>,
     consume_cands: Vec<ConsumeCand>,
+    discarded: Vec<(usize, String)>,
 }
 
 /// What the callee does with the temporary at `(callee, ix)`.
@@ -844,6 +858,7 @@ fn run(program: &Program, want: Want) -> Run {
         exit_sites: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         mentions: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         consume_cands: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
+        discarded: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         walk_region: std::cell::Cell::new(0),
         ev_order: std::cell::Cell::new(0),
         loop_ids: RefCell::new(Vec::new()),
@@ -1007,6 +1022,7 @@ fn run(program: &Program, want: Want) -> Run {
             .consume_cands
             .map(RefCell::into_inner)
             .unwrap_or_default(),
+        discarded: mc.discarded.map(RefCell::into_inner).unwrap_or_default(),
     }
 }
 
@@ -1117,6 +1133,7 @@ struct MoveCheck<'a> {
     exit_sites: Option<RefCell<Vec<ExitEv>>>,
     mentions: Option<RefCell<Vec<MentionEv>>>,
     consume_cands: Option<RefCell<Vec<ConsumeCand>>>,
+    discarded: Option<RefCell<Vec<(usize, String)>>>,
     walk_region: std::cell::Cell<u32>,
     ev_order: std::cell::Cell<u32>,
     /// The stack of loop ids the walk is inside — pushed by `while`/`for`,
@@ -4326,9 +4343,27 @@ impl MoveCheck<'_> {
             // and a consumption on this path never flows to the block's exit.
             // Matched by name rather than by type because this pass has no
             // types; `panic` is reserved, so no user function can be it.
-            Stmt::Expr(e) => self
-                .expr(e, consumed, scope)
-                .map(|_| matches!(e, Expr::Call { name, .. } if crate::ast::is_panic(name))),
+            Stmt::Expr(e) => {
+                // Round twenty-eight: a statement-position call whose OWNED
+                // heap result nothing binds — the value must be freed right
+                // after the call, or it is one leaked block per call
+                // (freelist's 100,000 discarded `remove` results). Views and
+                // lenders are screened later; a panic diverges and returns
+                // nothing to anyone.
+                if let (Some(sink), Expr::Call { name, .. }) = (&self.discarded, e) {
+                    if !crate::ast::is_panic(name)
+                        && !views(name)
+                        && !name.starts_with('@')
+                        && !self.decl.constructs(name)
+                        && self.type_of(e).is_some_and(|t| self.decl.owns_heap(&t))
+                    {
+                        sink.borrow_mut()
+                            .push((s as *const Stmt as usize, name.clone()));
+                    }
+                }
+                self.expr(e, consumed, scope)
+                    .map(|_| matches!(e, Expr::Call { name, .. } if crate::ast::is_panic(name)))
+            }
             // A `region` is an ordinary nested block for move checking; it
             // diverges iff its body does (a `break` inside it exits the loop).
             // Its map is a CLONE, like every other nested block's. Sharing it

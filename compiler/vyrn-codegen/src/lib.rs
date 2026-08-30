@@ -6104,7 +6104,14 @@ impl<'a> Gen<'a> {
                 Ok(())
             }
             Stmt::Expr(e) => {
-                self.gen_expr(e)?;
+                let (v, ty) = self.gen_expr(e)?;
+                // Round twenty-eight: a statement-position call whose OWNED
+                // result nothing binds — freed right after the call
+                // (freelist's 100,000 discarded `remove` results).
+                if self.plan.discarded_result(stmt as *const Stmt as usize) {
+                    let rty = self.resolve(&ty);
+                    self.free_arg_temp(&v, &rty);
+                }
                 Ok(())
             }
             Stmt::Region { body, .. } => {
