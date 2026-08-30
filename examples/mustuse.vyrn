@@ -48,6 +48,8 @@ impl Owned for Txn {
         print("end " + self.label + " (" + self.ops.length.toString() + ")")
         let ops = consume self.ops
         drop ops
+        let label = consume self.label
+        drop label
     }
 }
 

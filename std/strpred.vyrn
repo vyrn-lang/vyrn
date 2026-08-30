@@ -74,7 +74,12 @@
 /// `bytes` hands over the byte view and an array knows its own length, so this
 /// is the whole thing.
 export fn byteLengthV(s: String) -> Int64 {
-    return bytes(s).length
+    // Bound, not chained: `bytes(s)` is a fresh copy of the whole string, and
+    // a binding is what gives the copy an owner to release at block exit — as
+    // a bare receiver it was nobody's and leaked per call (exit-residue round
+    // thirty-six).
+    let b = bytes(s)
+    return b.length
 }
 
 /// Does `s` begin with `needle`? An empty needle is a prefix of everything

@@ -28,6 +28,8 @@ impl Owned for Ring {
         print("release " + self.label + " (" + self.slots.length.toString() + ")")
         let slots = consume self.slots
         drop slots // the buffer goes back, once, here and nowhere else
+        let label = consume self.label
+        drop label
     }
 }
 

@@ -1139,6 +1139,30 @@ Movement: protocol CLEAN (8 → 0), protorec CLEAN (4 → 0), show CLEAN
 Tallies after round thirty-five: **clean 106, leaking 40, zero
 double-frees**.
 
+## Thirty-sixth triage: the release that kept the receipt
+
+No compiler change this round — the residue was the corpus's own. A
+declared `release(consume self)` owns the WHOLE reclamation
+(RFC-0086/0096: the walk stops at a declaration, so nothing runs after
+the body), and four pin examples wrote releases that print the label
+and never drop it. `releaseacrossexit` and `releaseacrosstry` dropped
+nothing at all; `ownedcontainer` and `mustuse` dropped their arrays
+and kept the `label: String`. Each release now ends
+`let label = consume self.label` / `drop label` — the printed lines,
+which are what those pins pin, are unchanged, and the lowered-dump
+snapshots are re-blessed for the two that have them. The fifth row was
+`std/strpred`'s `byteLengthV`: `bytes(s).length` allocates a copy of
+the whole string and read one number off it as a bare receiver —
+nobody's, leaked per call. Bound to a `let` now, which is what gives
+the copy an owner to release at block exit.
+
+Movement: releaseacrossexit CLEAN (10 → 0), releaseacrosstry CLEAN
+(5 → 0), ownedcontainer CLEAN (4 → 0), mustuse CLEAN (7 → 0),
+strpredbytes CLEAN (6 → 0).
+
+Tallies after round thirty-six: **clean 111, leaking 35, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the
