@@ -555,6 +555,14 @@ impl Owned {
         !self.impls.is_empty()
     }
 
+    /// Whether `name` IS a declared `release` body. A consume-match inside
+    /// one must not free its payload boxes: the CALLER of a declared release
+    /// walks them afterward (`release_enum` with `payloads` false), and that
+    /// is the one place the walk and the match would meet twice.
+    pub fn is_release_fn(&self, name: &str) -> bool {
+        self.impls.values().any(|f| f == name)
+    }
+
     pub fn release_kind(&self, ty: &Type) -> Option<DropKind> {
         if let Some(f) = crate::types::type_key(ty).and_then(|k| self.impls.get(&k)) {
             return Some(DropKind::Release(f.clone(), ty.clone()));

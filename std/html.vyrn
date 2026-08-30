@@ -230,30 +230,23 @@ fn withKey(attrs: consume Array<Attr>, k: consume String) -> Array<Attr> {
 // byte of a multi-byte sequence).
 // ===========================================================================
 
-/// Append every byte of `src` onto `dst`, returning the grown array.
-///
-/// One `append` (RFC-0115) — this was the per-byte `push` loop that the
-/// benchmarks census costed at five doublings and sixty checked pushes per
-/// 60-byte line.
-fn appendBytes(dst: consume Array<UInt8>, src: Array<UInt8>) -> Array<UInt8> {
-    let mut out = dst
-    out.append(src)
-    return out
-}
-
-/// Escape a text node's content: `&` `<` `>` `"`.
+/// Escape a text node's content: `&` `<` `>` `"`. The entity spellings go
+/// in through `append` (RFC-0115) directly — the `appendBytes` wrapper that
+/// used to stand here took its destination by `consume`, and a consume
+/// re-bound inside a loop is a move the revive machinery refuses, so every
+/// escape buffer leaked (exit-residue round eight).
 fn escapeText(s: String) -> String {
     let raw = bytes(s)
     let mut out: Array<UInt8> = []
     for b in raw {
         if b == '&' {
-            out = appendBytes(out, bytes("&amp;"))
+            out.append(bytes("&amp;"))
         } else if b == '<' {
-            out = appendBytes(out, bytes("&lt;"))
+            out.append(bytes("&lt;"))
         } else if b == '>' {
-            out = appendBytes(out, bytes("&gt;"))
+            out.append(bytes("&gt;"))
         } else if b == '"' {
-            out = appendBytes(out, bytes("&quot;"))
+            out.append(bytes("&quot;"))
         } else {
             out.push(b)
         }
@@ -268,9 +261,9 @@ fn escapeAttr(s: String) -> String {
     let mut out: Array<UInt8> = []
     for b in raw {
         if b == '&' {
-            out = appendBytes(out, bytes("&amp;"))
+            out.append(bytes("&amp;"))
         } else if b == '"' {
-            out = appendBytes(out, bytes("&quot;"))
+            out.append(bytes("&quot;"))
         } else {
             out.push(b)
         }
