@@ -4195,7 +4195,19 @@ impl<'a> Gen<'a> {
         self.emit(format!("{tag} = extractvalue {ell} {v}, 0"));
         let end_l = self.fresh_label("rel.enum.end");
         for var in vs {
-            if !var.payload.iter().any(|p| self.owns_heap(p)) {
+            // A slot is releasable when its VALUE owns heap — or when the
+            // slot itself is BOXED, which `unbox_payload`'s criterion decides
+            // (any payload that is not an `i64` word travels in a box). The
+            // two are different questions: a `Bool` payload owns nothing and
+            // is boxed anyway (an i1 is not a word), and gating the walk on
+            // ownership alone leaked that box on every release — one 1-byte
+            // block per `JBool` in the corpus, exit-residue round seven's
+            // smallest specimen.
+            if !var
+                .payload
+                .iter()
+                .any(|p| self.owns_heap(p) || self.llt(p) != "i64")
+            {
                 continue;
             }
             let Some((n, _)) = self.variants.get(&var.name).cloned() else {
@@ -4208,17 +4220,18 @@ impl<'a> Gen<'a> {
             self.emit_term(format!("br i1 {is}, label %{hit_l}, label %{miss_l}"));
             self.emit_label(&hit_l);
             for (j, pty) in var.payload.iter().enumerate() {
-                if !self.owns_heap(pty) {
+                let boxed = self.llt(pty) != "i64";
+                if !self.owns_heap(pty) && !boxed {
                     continue;
                 }
                 let w = self.fresh_tmp();
                 self.emit(format!("{w} = extractvalue {ell} {v}, {}", j + 1));
-                let pv = self.unbox_payload(&w, pty);
-                if payloads {
+                if payloads && self.owns_heap(pty) {
+                    let pv = self.unbox_payload(&w, pty);
                     self.deep_release(&pv, pty)?;
                 }
                 // A boxed payload's block is the enum's too.
-                if pv != w {
+                if boxed {
                     let q = self.fresh_tmp();
                     self.emit(format!("{q} = inttoptr i64 {w} to ptr"));
                     self.emit(format!("call void @__vyrn_free(ptr {q})"));

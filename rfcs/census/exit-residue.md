@@ -264,6 +264,69 @@ machinery, not bindings, and it anchors round seven.
 Tallies after round six: **clean 63, leaking 87, zero double-frees** —
 counts hold; htmltree 589→187 under the one lending correction.
 
+## Seventh triage: a box the walk never saw, and a return that gave up too much
+
+Two classes, and between them most of `domdemo`'s anchor. Convicted by
+descent: `domdemo` 472 → one `toJson(view())` at 395 → one small tree
+at 13 → one node kind at a time — `emit(JBool(true))` leaked exactly
+one 1-byte block, and `let t: Json = JBool(true)` alone still did.
+
+- **The payload box.** `release_enum`'s walk was gated on
+  `owns_heap` per variant and per slot — but BOXED-ness is
+  `unbox_payload`'s criterion (any payload that is not an `i64` word
+  travels in a box), and the two are different questions: a `Bool`
+  payload owns nothing and is boxed anyway. Every `JBool` leaked its
+  1-byte box on every release, `String` payloads passing only because
+  they own heap. The walk now asks both questions.
+- **The return that marked everything.** Rule 3's conservative marking
+  at a `return` (`gave_up`) took every binding the returned expression
+  reads — so `return fromBytesOr(out, ..)`, `return match
+  stringFromBytes(out) {..}`, and `return acc + "}"` each left their
+  accumulator unreleased, one scratch buffer per call, twelve spellings
+  in `std/` and every caller's own. The marking is narrowed at returns
+  (`gave_up_returned`): a KNOWN function's owned result contains none
+  of its read arguments (rule 3 refuses returning borrows; lender and
+  retainer positions are settled by the `facts()` post-passes reading
+  `row.passed`), the value-position joins recurse per arm, an
+  addition's operands are always copied, and a condition is a test.
+  Constructors, views, `blackBox`-shaped param-identity rows, and
+  `fn`-typed locals keep the conservative walk.
+
+Movement: `herofield` CLEAN, `domdemo` 472→84 blocks, `jsonbytes`
+251→35, `enumcodec` 133→66, `graphql` 2275→1309; the `toJson`/`emit`
+micro-probes are at zero. `htmltree` holds 187 (its residue is
+elsewhere) and the decode side keeps ~6 per `fromJson` — both queued.
+
+The narrowing then UNPINNED two latent `std/graphql` defects the old
+conservatism had been keeping alive as leaks — parity's wasm run
+convicted them (`{"data":{:` where the key had been, then OOM; the
+native allocator's reuse pattern hid both):
+
+- `gqlAnswerOne` built its error path as `[JStr(sel.key)]` — a literal
+  holding a BORROW of the selection key through the constructor
+  position. Releasing `at` freed the key under `q.sels`. `.copy()`.
+- `gqlProjectCore`'s leaf arms re-wrapped borrowed payload strings
+  (`JStr(s)`, `JNum(n)`) into the owned answer — the nested path takes
+  that value into the response while the resolved document is
+  released. `.copy()`, exactly as the leaf position above them always
+  did.
+
+The class behind both: the constructor position ACCEPTS a projection
+(the value it builds "holds the argument"), so a literal can smuggle a
+borrow into a value the machinery then releases as owned. Recorded as
+an open language question — the store rule refuses this shape
+everywhere else. The bisect instrument that found them:
+`VYRN_RET_NARROW_OFF=all|call|join|add` disables the narrowing by arm,
+`VYRN_RET_NARROW_SKIP=fn1,fn2` per function — eight builds from 102
+candidates to one. (And the round-six cache rule earned a third
+telling: the bisect's broken intermediate builds re-poisoned
+`~/.vyrn/cache/gen`, and the site export failed from the cache after
+the code was already fixed.)
+
+Tallies after round seven: **clean 69, leaking 81, zero double-frees**
+— six examples flipped clean in one round, the largest single-round
+movement since the first triage.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach

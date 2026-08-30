@@ -261,6 +261,13 @@ impl Declared {
         self.params.get(callee).and_then(|ps| ps.get(ix))
     }
 
+    /// Whether `name` is a callable this table knows the return of — a user
+    /// function or a seeded builtin row. What the answer buys is rule 3:
+    /// such a function's owned result contains none of its read arguments.
+    pub fn is_function(&self, name: &str) -> bool {
+        self.rets.contains_key(name)
+    }
+
     pub fn type_of(&self, vars: &Scopes<Option<Type>>, e: &Expr) -> Option<Type> {
         match e {
             Expr::Str(_) => Some(Type::Str),
