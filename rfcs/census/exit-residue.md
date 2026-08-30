@@ -558,6 +558,30 @@ Movement: jsonbytes 35→1 blocks.
 Tallies after round fourteen: **clean 74, leaking 76, zero
 double-frees** — counts hold, parity at zero divergences.
 
+## Fifteenth triage: the copy that abandoned its original
+
+`onPair`'s 36 bytes, twelve times per htmltree run: the append fast
+path's take-ownership step (`app.own`) COPIES the accumulator's
+current value into a fresh shadow block — correct when the value is a
+borrow (`let mut out = someParam` must not free the param's buffer) —
+and ABANDONED the original when it was owned, which is what the
+opening line of every renderer (`let mut out = " data-on-" + event +
+..`) is. The plan already answers the question per statement:
+`store_owned_at` proved the place owns its value, so the take frees
+what it copied out of (`emit_str_append_owned`, `free_taken`); a
+borrow answers false and keeps the old behavior, and a static literal
+init is covered by `str_free`'s own cap guard. Loop stores still
+answer false — the loop conservatism keeps its recorded block
+(`cat1`'s 24 bytes).
+
+Movement: `domdemo` CLEAN, htmltree 25→9 blocks, vyxdemo 13→7, every
+`onPair`/`toHtmlString` micro-probe at zero.
+
+Tallies after round fifteen: **clean 75, leaking 75, zero
+double-frees** — dead even, from 54/~100 at the first survey. The
+append-count pin moved to equality: one store-side free each,
+differently placed.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach
