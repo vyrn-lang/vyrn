@@ -3130,14 +3130,22 @@ impl MoveCheck<'_> {
                     _ => place_path(a).is_some_and(|(r, _)| r == root),
                 };
                 if is_root_read {
-                    // Declared in Vyrn, and NOT a builtin: `is_function` also
-                    // answers for the seeded rows, and `a = @push(a, i)` — the
-                    // desugar every `.push` becomes — is exactly the callee
-                    // that hands its own argument's buffer back.
-                    if self.decl.is_function(name)
+                    // A callee that cannot forward its argument's storage —
+                    // `@concat` copies both operands — needs no screening at
+                    // all: `line = "\\{line}\\{d}"`, the interpolation
+                    // spelling of an accumulator, is round twenty-four's
+                    // witness (one abandoned line per appended digit).
+                    if !self.call_may_forward(name) {
+                        true
+                    } else if self.decl.is_function(name)
                         && !name.starts_with('@')
                         && crate::prelude::signature(name).is_none()
                     {
+                        // Declared in Vyrn, and NOT a builtin: `is_function`
+                        // also answers for the seeded rows, and `a = @push(a,
+                        // i)` — the desugar every `.push` becomes — is
+                        // exactly the callee that hands its own argument's
+                        // buffer back.
                         out.push((name.clone(), ix));
                         true
                     } else {
