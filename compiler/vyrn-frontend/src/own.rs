@@ -1173,6 +1173,14 @@ pub struct ReleasePlan {
     /// RFC-0114 M2: the `Stmt::Assign` nodes whose old value the store
     /// releases — see [`fold_store_owned`].
     pub store_owned: std::collections::HashSet<usize>,
+    /// Exit-residue round eighteen: the `Stmt::Assign` nodes whose stored
+    /// VALUE provably cannot hand the old value back — every mention of the
+    /// place is a read argument to a declared, non-lending, non-retaining
+    /// function (`movecheck::Facts::fresh_stores`). The backends consult this
+    /// only where their `mentions_place` guard would otherwise stand the
+    /// snapshot down, so it is exempt from the finish check: a row here that
+    /// no emission asks about is a store some other rule already handled.
+    pub store_fresh: std::collections::HashSet<usize>,
     /// RFC-0114 Rule N: per join address (`Stmt::If` or `Expr::Match`), the
     /// bindings to release on one edge because another edge consumed them —
     /// `(name, edge)`, 0/1 for an `if`'s then/else, the arm's source index
@@ -1259,6 +1267,14 @@ impl ReleasePlan {
             self.taken.borrow_mut().insert(at);
         }
         hit
+    }
+
+    /// Round eighteen: can this store's VALUE not hand the old one back?
+    /// Asked by the backends only after `store_owned_at` said the place owns
+    /// its value and `mentions_place` said the value reads it.
+    pub fn store_fresh_at(&self, at: usize) -> bool {
+        let at = self.resolve(at);
+        self.store_fresh.contains(&at)
     }
 
     /// RFC-0114 M2: does this store release the value it replaces?
@@ -1417,6 +1433,7 @@ pub fn analyze(program: &Program) -> Ownership {
     let mut store_owned = fold_store_owned(&facts);
     let edge_releases = fold_edge_releases(&facts);
     let revived = fold_revived(&facts);
+    let store_fresh = facts.fresh_stores;
     let lets = facts.lets;
 
     let mut droppable = HashMap::new();
@@ -1575,6 +1592,7 @@ pub fn analyze(program: &Program) -> Ownership {
             .map(|s| s.id)
             .collect(),
         store_owned,
+        store_fresh,
         edge_releases,
         receiver_frees,
         owners,
@@ -3178,6 +3196,44 @@ pub(crate) mod tests {
         ];
         want.sort();
         assert_eq!(got, want, "out's deep release, and the drained buffer");
+    }
+
+    /// Round eighteen: `dec = halve2(dec)` in a loop — the value mentions the
+    /// place, but only as a read argument to a declared non-lender, so the
+    /// store releases what it replaces. The bare mention (`x = x + ..` aside),
+    /// a builtin (`a = @push(a, i)` hands its own buffer back), and a lender
+    /// callee all stay out of the set.
+    #[test]
+    fn a_read_call_mention_lets_the_store_release_what_it_replaces() {
+        let src = "type D = { d: Array<Int64> } \
+                   fn halve2(x: D) -> D { let mut o: Array<Int64> = [] \
+                   let mut i = 0 \
+                   while i < x.d.length { o.push(x.d[i] / 2) i = i + 1 } \
+                   return D { d: o } } \
+                   fn main() -> Int64 { let mut dec = D { d: [8, 4] } \
+                   let mut k = 0 \
+                   while k < 3 { dec = halve2(dec) k = k + 1 } \
+                   return dec.d.length }";
+        let (o, _) = analyze_src(src);
+        assert_eq!(
+            o.plan.store_fresh.len(),
+            1,
+            "exactly the `dec = halve2(dec)` store"
+        );
+        // The lender screen: `h` forwards a lent element through an aggregate,
+        // so a store through it may NOT release — the result names storage
+        // inside the argument.
+        let src = "fn pick(xs: Array<String>) -> String \
+                   { for x in xs { return if true { x } else { \"\" } } return \"\" } \
+                   fn h(a: Array<String>) -> Array<String> { return [pick(a)] } \
+                   fn main() -> Int64 { let mut arr: Array<String> = [\"a\" + \"b\"] \
+                   arr = h(arr) \
+                   return arr.length }";
+        let (o, _) = analyze_src(src);
+        assert!(
+            o.plan.store_fresh.is_empty(),
+            "a lender's result may alias its argument"
+        );
     }
 
     /// Round sixteen's other half: the `elem_only` attribution is exactly what

@@ -5142,6 +5142,28 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{d} = extractvalue {{ ptr, i64, i64 }} {v}, 0"));
                 out.push((d, false));
             }
+            // A RECORD, shallowly (round eighteen): each heap-owning field's
+            // buffer pointer, read before the store overwrites the aggregate —
+            // the same rule as the arms around it, so elements and boxed
+            // payloads still leak rather than risk reading through a value the
+            // store is replacing. `Dec { d: Array<Int64> }` reassigned in
+            // `parseFloat64`'s halving loop was 360 blocks of exactly this. A
+            // declared `release` never reaches here — `rel_kind` answers
+            // `Release` for it, not `Deep`.
+            Some(DropKind::Deep(_)) if self.record_fields(ty).is_some() => {
+                let fields = self.record_fields(ty).expect("guarded");
+                let ll = self.llt(ty);
+                for (i, f) in fields.iter().enumerate() {
+                    if !self.owns_heap(&f.ty) {
+                        continue;
+                    }
+                    let fv = self.fresh_tmp();
+                    self.emit(format!("{fv} = extractvalue {ll} {v}, {i}"));
+                    let fty = f.ty.clone();
+                    let inner = self.snap_val(&fv, &fty);
+                    out.extend(inner);
+                }
+            }
             // `{ i64 len, i64 cap, ptr data, [N x T] inline }` — field 2, null
             // while the array is still inline, which `free` refuses.
             Some(DropKind::FreeSmallArr) => {
@@ -5335,8 +5357,14 @@ impl<'a> Gen<'a> {
                 // ownership then gates the release without hiding the site.
                 let owned_here = self.plan.store_owned_at(stmt as *const Stmt as usize)
                     && self.region_depth == 0;
+                // Round eighteen: a mention that is only ever a read
+                // argument to a declared non-lender cannot hand the old value
+                // back — `dec = halveBy(dec, m)` — and the plan says which
+                // stores those are (`store_fresh_at`).
                 let snap = if owned_here
-                    && (fresh_str || !vyrn_frontend::movecheck::mentions_place(value, name))
+                    && (fresh_str
+                        || !vyrn_frontend::movecheck::mentions_place(value, name)
+                        || self.plan.store_fresh_at(stmt as *const Stmt as usize))
                 {
                     self.snap_old(&slot, &tty)
                 } else {

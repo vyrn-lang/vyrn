@@ -299,6 +299,14 @@ pub struct Facts {
     /// RFC-0114 §26 (steps 3–4): the field and element stores — see
     /// [`PlaceStore`].
     pub place_stores: Vec<PlaceStore>,
+    /// Exit-residue round eighteen: `Stmt::Assign` nodes whose value mentions
+    /// the assigned place ONLY as the bare name in plain argument positions of
+    /// user-declared, non-lending, non-retaining functions — so the stored
+    /// value cannot hand the old one back, and the store may release what it
+    /// replaces. The value-side guard the backends carry (`mentions_place`)
+    /// refuses every mention alike, which is right for `a = @push(a, i)` and
+    /// a 360-block leak for `dec = halveBy(dec, m)`.
+    pub fresh_stores: std::collections::HashSet<usize>,
 }
 
 /// One ownership-relevant event on one binding (RFC-0114 M2).
@@ -468,6 +476,22 @@ pub fn facts(program: &Program) -> Facts {
             .collect(),
         exit_orders: r.exit_orders,
         place_stores: r.place_stores,
+        // The walk recorded the shape; the closures decide the callees. A
+        // lender's result aliases its argument and a retaining position keeps
+        // it — either one disqualifies the store from releasing what it
+        // replaces.
+        fresh_stores: r
+            .mention_stores
+            .into_iter()
+            .filter(|(_, ms)| {
+                ms.iter().all(|(c, i)| {
+                    !r.lending.contains(c)
+                        && !r.retains.contains(&(c.clone(), *i))
+                        && !r.param_escapers.contains(c)
+                })
+            })
+            .map(|(id, _)| id)
+            .collect(),
     }
 }
 
@@ -497,6 +521,8 @@ struct Run {
     receiver_temps: Vec<(usize, String, String)>,
     place_stores: Vec<PlaceStore>,
     exit_orders: Vec<u32>,
+    mention_stores: Vec<(usize, Vec<(String, usize)>)>,
+    param_escapers: HashSet<String>,
 }
 
 /// What the callee does with the temporary at `(callee, ix)`.
@@ -740,6 +766,8 @@ fn run(program: &Program, want: Want) -> Run {
         edge_releases: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         receiver_temps: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         place_stores: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
+        mention_stores: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
+        param_escapers: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
         ev_order: std::cell::Cell::new(0),
         loop_ids: RefCell::new(Vec::new()),
         next_loop: std::cell::Cell::new(0),
@@ -888,6 +916,14 @@ fn run(program: &Program, want: Want) -> Run {
             .unwrap_or_default(),
         place_stores: mc.place_stores.map(RefCell::into_inner).unwrap_or_default(),
         exit_orders: mc.exit_orders.map(RefCell::into_inner).unwrap_or_default(),
+        mention_stores: mc
+            .mention_stores
+            .map(RefCell::into_inner)
+            .unwrap_or_default(),
+        param_escapers: mc
+            .param_escapers
+            .map(RefCell::into_inner)
+            .unwrap_or_default(),
     }
 }
 
@@ -993,6 +1029,8 @@ struct MoveCheck<'a> {
     edge_releases: Option<RefCell<Vec<EdgeRel>>>,
     receiver_temps: Option<RefCell<Vec<(usize, String, String)>>>,
     place_stores: Option<RefCell<Vec<PlaceStore>>>,
+    mention_stores: Option<RefCell<Vec<(usize, Vec<(String, usize)>)>>>,
+    param_escapers: Option<RefCell<HashSet<String>>>,
     ev_order: std::cell::Cell<u32>,
     /// The stack of loop ids the walk is inside — pushed by `while`/`for`,
     /// stamped onto every event, so the fold can see which pairs of events a
@@ -3004,6 +3042,47 @@ impl MoveCheck<'_> {
         }
     }
 
+    /// Exit-residue round eighteen. For a store `x = <e>` whose value mentions
+    /// `x`: can the stored value hand the OLD value back? Every mention of
+    /// `root` must be the bare name in a plain (non-`consume`) argument
+    /// position of a USER-declared function — a builtin's hand-back rows are
+    /// seeded, not declared, and `a = @push(a, i)` is exactly the value that
+    /// returns its own argument's buffer. The callee positions are collected
+    /// for `facts()` to screen against the lending and retention closures,
+    /// which are only settled after every body is read. Any other mention
+    /// shape — the bare name itself, a projection, a `consume`, a scrutinee —
+    /// answers false, which is the leak direction.
+    fn read_only_mentions(&self, e: &Expr, root: &str, out: &mut Vec<(String, usize)>) -> bool {
+        if !mentions_place(e, root) {
+            return true;
+        }
+        match e {
+            Expr::Call { name, args, .. } => args.iter().enumerate().all(|(ix, a)| match a {
+                Expr::Var { name: v, .. } if v == root => {
+                    // Declared in Vyrn, and NOT a builtin: `is_function` also
+                    // answers for the seeded rows, and `a = @push(a, i)` — the
+                    // desugar every `.push` becomes — is exactly the callee
+                    // that hands its own argument's buffer back.
+                    if self.decl.is_function(name)
+                        && !name.starts_with('@')
+                        && crate::prelude::signature(name).is_none()
+                    {
+                        out.push((name.clone(), ix));
+                        true
+                    } else {
+                        false
+                    }
+                }
+                _ => self.read_only_mentions(a, root, out),
+            }),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.read_only_mentions(lhs, root, out) && self.read_only_mentions(rhs, root, out)
+            }
+            Expr::Unary { expr, .. } => self.read_only_mentions(expr, root, out),
+            _ => false,
+        }
+    }
+
     /// Record that a borrowed PARAMETER was put somewhere that outlives the call.
     fn note_retention(&self, e: &Expr) {
         let Some(sink) = &self.retains else { return };
@@ -3489,6 +3568,21 @@ impl MoveCheck<'_> {
                         self.took(name, Gone::Borrowed(why));
                     }
                     self.borrows.borrow_mut().rebind(name, b);
+                }
+                // Exit-residue round eighteen: record the store whose value
+                // mentions the place only through read arguments of declared
+                // functions — `dec = halveBy(dec, m)` — so `facts()` can
+                // screen the callees against the lending and retention
+                // closures and clear the store to release what it replaces.
+                if !global {
+                    if let Some(sink) = &self.mention_stores {
+                        if mentions_place(value, name) {
+                            let mut ms = Vec::new();
+                            if self.read_only_mentions(value, name, &mut ms) && !ms.is_empty() {
+                                sink.borrow_mut().push((s as *const Stmt as usize, ms));
+                            }
+                        }
+                    }
                 }
                 revive(consumed, name); // reassignment revives it
                 self.wrote_into(name); // RFC-0093 M2: a filled hole is not skippable
@@ -4678,6 +4772,34 @@ impl MoveCheck<'_> {
             Expr::Call { name, args, line } => {
                 self.check_exclusive(name, args, *line)?;
                 let caps = self.caps.get(name);
+                // Round eighteen's soundness screen: a heap-typed argument
+                // that mentions a BORROWED parameter, handed to a call whose
+                // result owns heap, can carry that parameter's storage into
+                // the result — `put(a, ..) { return a.push(..) }` hands the
+                // caller back the buffer it was passed, one builtin deep, and
+                // `let r = a.push(v); return r` launders the same buffer
+                // through a local. Any such site disqualifies the ENCLOSING
+                // function from `fresh_stores`' callee set. A consume
+                // parameter needs no screen — the take already blocks the
+                // store-side fold. A heap-free result carries nothing.
+                let call_carries = self.type_of(e).is_some_and(|t| self.decl.owns_heap(&t));
+                if call_carries {
+                    if let Some(sink) = &self.param_escapers {
+                        let hazard = args.iter().any(|a| {
+                            self.type_of(a).is_some_and(|t| self.decl.owns_heap(&t))
+                                && self.param_ix.borrow().keys().any(|p| {
+                                    mentions_place(a, p)
+                                        && matches!(
+                                            self.borrow_of(p),
+                                            Some(Borrow::Read(_)) | Some(Borrow::Modify(_))
+                                        )
+                                })
+                        });
+                        if hazard {
+                            sink.borrow_mut().insert(self.cur_fn.borrow().clone());
+                        }
+                    }
+                }
                 // Left-to-right: check each argument, then apply its consumption,
                 // so passing the same variable to two `consume` params is caught.
                 for (i, arg) in args.iter().enumerate() {
