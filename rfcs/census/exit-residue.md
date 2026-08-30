@@ -1071,6 +1071,25 @@ Movement: rest 629 → 525, the policy-chain field displacements freed.
 
 Tallies hold at **clean 100, leaking 46, zero double-frees**.
 
+## Thirty-third triage: the constructor joins rule one
+
+`ops.push(Set(newAttrs))` under an `if` — std/html's whole differ.
+The constructor discipline has said "a whole OWNED name moves in"
+since round ten, and marked the row so — but the move never entered
+the CONSUMPTION map, so rule 1 did not refuse reuse and Rule N's
+recorder, which reads that map, never saw a constructor take on one
+branch. It does now, with two stand-downs: a scalar copies (an `Int64`
+into `Some(..)` is not a consumption), and a compiler-synthesized
+`@`-name is its template's business (the storage codec's `Loaded(@v)`
+reuses its own synthesized binding by design). Rule N then releases
+the untaken edge exactly as it always could have.
+
+Movement: patchdemo CLEAN (73 → 0, the differ's attribute copies), one
+more row with it.
+
+Tallies after round thirty-three: **clean 101, leaking 45, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the
