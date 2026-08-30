@@ -2950,20 +2950,11 @@ impl MoveCheck<'_> {
                         return;
                     };
                     let all_owned = !elems.is_empty()
-                        && elems.iter().all(|e| {
-                            matches!(e, Expr::Call { name, .. }
-                                if self.decl.is_function(name)
-                                    && !name.starts_with('@')
-                                    && crate::prelude::signature(name).is_none()
-                                    && !self.decl.constructs(name))
-                        });
+                        && elems
+                            .iter()
+                            .all(|e| self.owned_literal_elem(e, &mut elem_producers));
                     if !all_owned {
                         return;
-                    }
-                    for e in elems {
-                        if let Expr::Call { name, .. } = e {
-                            elem_producers.push(name.clone());
-                        }
                     }
                 }
                 let Some(kind) = self.decl.release_kind(pty) else {
@@ -3270,6 +3261,32 @@ impl MoveCheck<'_> {
                     None => true,
                 }
             }
+        }
+    }
+
+    /// Round twenty-five's element test, recursively: an array-literal
+    /// element is OWNED when it is a call to a declared function (rule 3
+    /// makes the result the literal's own) or a nested literal whose elements
+    /// all are — `mount(req, [[surface(..)], routes()], ..)` nests one deep.
+    /// The producers are collected for `arg_verdict`'s lender screen.
+    fn owned_literal_elem(&self, e: &Expr, producers: &mut Vec<String>) -> bool {
+        match e {
+            Expr::Call { name, .. } => {
+                if self.decl.is_function(name)
+                    && !name.starts_with('@')
+                    && crate::prelude::signature(name).is_none()
+                    && !self.decl.constructs(name)
+                {
+                    producers.push(name.clone());
+                    true
+                } else {
+                    false
+                }
+            }
+            Expr::ArrayLit { elems, .. } => {
+                !elems.is_empty() && elems.iter().all(|x| self.owned_literal_elem(x, producers))
+            }
+            _ => false,
         }
     }
 
