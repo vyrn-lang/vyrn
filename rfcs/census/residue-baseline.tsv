@@ -88,7 +88,7 @@ jsonbytes	leak	1
 jsoncodec	leak	1
 jsondecbytes	leak	33
 jsondepth	clean
-jsonplace	leak	1
+jsonplace	clean
 jsonschema	clean
 knucleotide	clean
 lambdas	clean
@@ -102,7 +102,7 @@ mapdemo	leak	13
 mapkey	clean
 mapkeyborrowed	skip
 mapkeyowned	clean
-matchown	leak	158
+matchown	leak	4
 membench	clean
 modify	other
 modifyself	clean
@@ -137,13 +137,13 @@ protorec	leak	4
 recdepth	other
 record	clean
 reflection	clean
-refutablelet	leak	1
+refutablelet	clean
 regex	clean
 regexredux	leak	184
-region	leak	200
+region	other
 region_consume	skip
-regionarena	leak	3
-regionescape	leak	2
+regionarena	clean
+regionescape	leak	1
 releaseacrossexit	leak	10
 releaseacrosstry	leak	5
 rest	leak	629
@@ -205,5 +205,3 @@ vlog	leak	4
 vondemo	clean
 vyxdemo	clean
 wirekey	leak	3
-zzh1	leak	49
-zzh2	clean

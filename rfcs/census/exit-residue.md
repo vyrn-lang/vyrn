@@ -906,6 +906,46 @@ Tallies after round twenty-six: **clean 94, leaking 57, zero
 double-frees**, thirty-one thousand bytes of rest's residue down to
 seventeen.
 
+## Twenty-seventh triage: mentions, provenance, and the pop that keeps one
+
+Three mechanisms, one round, and parity's audit refereed all of it.
+
+First, MENTION LIVENESS. The walk records every read of a tracked
+binding now (`MentionEv` — resolved row, the name it was read through,
+walk order), and a `match` over a whole named local becomes a
+CONSUMING match when the fold proves nothing reads the binding after
+it: the extraction frees the payload BOX, the binding's row stays
+`Aliased` and releases nothing, and the alias owns only the payload.
+One 8-16 byte box per extraction — matchown's boxed shapes, htmltree's
+box column.
+
+Second, REGION PROVENANCE. The arena owns what a region LEXICALLY
+allocates; a callee's allocation is made under the callee's own
+region-free context and is malloc-side wherever the call sits. A
+scrutinee or `let` row inside a region whose value is provably
+malloc-side — a plain call, a static literal, a match over one whose
+arms yield only its payload — is minted and flagged, and the textual
+emission frees it with the region guard stood down. A CONSTRUCTOR is
+never malloc-side by itself: `Some(six + sixb)` is a Call node whose
+argument keeps its arena provenance, and regionescape's payload route
+double-freed on the first version until the variant-name screen went
+in — the detector example doing exactly its job.
+
+Third, THE POP THAT KEEPS ONE. `__vyrn_region_pop` abandoned every
+arena block when a `return` left a region, because it could not know
+which block escaped. For a `String` return the escapee is one
+computable block, and `__vyrn_region_pop_except` frees everything
+else — a static or malloc-side return simply matches nothing. An
+aggregate return keeps the abandon-all pop: freeing around an unknown
+pointer set is the double free the partition forbids.
+
+Movement: `region` CLEAN (200 → 0, output byte-identical),
+`matchown` 158 → 4, `regionarena` clean, `regionescape` back to its
+one recorded block.
+
+Tallies after round twenty-seven: **clean 96, leaking 52, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the

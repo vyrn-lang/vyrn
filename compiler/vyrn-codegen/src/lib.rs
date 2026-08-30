@@ -244,6 +244,38 @@ done:
   ret void
 }
 
+define void @__vyrn_region_pop_except(ptr %keep) {
+entry:
+  %base = getelementptr i8, ptr %keep, i64 -16
+  %sp = load i64, ptr @__vyrn_region_sp
+  %idx = sub i64 %sp, 1
+  store i64 %idx, ptr @__vyrn_region_sp
+  %slot = getelementptr [$NEST x ptr], ptr @__vyrn_region_blocks, i64 0, i64 %idx
+  %vec = load ptr, ptr %slot
+  %lenp = getelementptr [$NEST x i64], ptr @__vyrn_region_lens, i64 0, i64 %idx
+  %len = load i64, ptr %lenp
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %i1, %next ]
+  %spent = icmp uge i64 %i, %len
+  br i1 %spent, label %done, label %body
+body:
+  %el = getelementptr ptr, ptr %vec, i64 %i
+  %blk = load ptr, ptr %el
+  %escaped = icmp eq ptr %blk, %base
+  br i1 %escaped, label %next, label %freeit
+freeit:
+  call void @__vyrn_free(ptr %blk)
+  br label %next
+next:
+  %i1 = add i64 %i, 1
+  br label %loop
+done:
+  call void @__vyrn_free(ptr %vec)
+  store ptr null, ptr %slot
+  ret void
+}
+
 ";
 
 /// A boxed stream (RFC-0075 M2c, re-hosted by RFC-0090 M3). A lazy combinator
@@ -2458,6 +2490,9 @@ struct LoopCtx {
 struct DropSlot {
     slot: String,
     kind: DropKind,
+    /// Round twenty-seven: the value is provably malloc-side though the drop
+    /// site sits inside a `region` — the walk's region guard stands down.
+    malloc_side: bool,
     /// Registration order. Under a stack discipline the live bindings come off
     /// in reverse of it, which is the one thing a stream cursor's position still
     /// needs (see [`Gen::cursors`]).
@@ -4815,25 +4850,35 @@ impl<'a> Gen<'a> {
             ExitKind::Return | ExitKind::Try => self.cursors.clone(),
             _ => Vec::new(),
         };
-        let mut run: Vec<(String, Option<DropKind>)> = Vec::new();
+        let mut run: Vec<(String, Option<DropKind>, bool)> = Vec::new();
         for b in steps {
             let Some(d) = self.drop_slots.get(&b) else {
                 continue;
             };
-            let (slot, kind, seq) = (d.slot.clone(), d.kind.clone(), d.seq);
+            let (slot, kind, seq, ms) = (d.slot.clone(), d.kind.clone(), d.seq, d.malloc_side);
             while cursors.last().is_some_and(|(_, at)| *at > seq) {
-                run.push((cursors.pop().unwrap().0, None));
+                run.push((cursors.pop().unwrap().0, None, false));
             }
-            run.push((slot, Some(kind)));
+            run.push((slot, Some(kind), ms));
         }
         for (slot, _) in cursors.into_iter().rev() {
-            run.push((slot, None));
+            run.push((slot, None, false));
         }
-        for (slot, kind) in run {
+        for (slot, kind, malloc_side) in run {
+            // Round twenty-seven: a malloc-side scrutinee inside a `region` —
+            // the walk's region guard (which protects arena storage) stands
+            // down for exactly this value, because a callee's allocation was
+            // made under the callee's own region-free context.
+            let saved = if malloc_side {
+                std::mem::replace(&mut self.region_depth, 0)
+            } else {
+                self.region_depth
+            };
             match kind {
                 Some(k) => self.emit_drop(&slot, &k),
                 None => self.emit_drop(&slot, &DropKind::CloseStream),
             }
+            self.region_depth = saved;
         }
     }
 
@@ -4842,7 +4887,16 @@ impl<'a> Gen<'a> {
     fn register_drop(&mut self, key: usize, slot: String, kind: DropKind) {
         let seq = self.drop_seq;
         self.drop_seq += 1;
-        self.drop_slots.insert(key, DropSlot { slot, kind, seq });
+        let malloc_side = self.plan.malloc_scrutinee(key);
+        self.drop_slots.insert(
+            key,
+            DropSlot {
+                slot,
+                kind,
+                malloc_side,
+                seq,
+            },
+        );
     }
 
     /// A function exit: the placed releases, then the region stack balanced.
@@ -4852,9 +4906,24 @@ impl<'a> Gen<'a> {
     /// `__vyrn_region_pop` and not `__vyrn_region_exit`: see [`REGION_RUNTIME`]
     /// for why the returned value forbids the free.
     fn emit_all_drops(&mut self, exit: ExitKind, at: usize) {
+        self.emit_all_drops_keeping(exit, at, None)
+    }
+
+    /// Round twenty-seven: `keep` is the RETURNED String pointer when a
+    /// `return` leaves a region with a `String` in hand — the one value whose
+    /// arena block must survive the pop. Every other block of every popped
+    /// level is freed (`__vyrn_region_pop_except` compares block bases; a
+    /// static or malloc-side `keep` simply matches nothing). A non-String
+    /// return keeps today's abandon-all pop: an aggregate can hold several
+    /// arena pointers, and freeing around an unknown set is the double free
+    /// the partition forbids.
+    fn emit_all_drops_keeping(&mut self, exit: ExitKind, at: usize, keep: Option<&str>) {
         self.emit_releases(exit, at);
         for _ in 0..self.region_depth {
-            self.emit("call void @__vyrn_region_pop()".into());
+            match keep {
+                Some(v) => self.emit(format!("call void @__vyrn_region_pop_except(ptr {v})")),
+                None => self.emit("call void @__vyrn_region_pop()".into()),
+            }
         }
     }
 
@@ -5613,7 +5682,14 @@ impl<'a> Gen<'a> {
                         // Free in-scope owned temporaries before leaving (the
                         // return value never aliases one — droppable bindings by
                         // definition do not escape).
-                        self.emit_all_drops(ExitKind::Return, stmt as *const Stmt as usize);
+                        let keep = (self.region_depth > 0
+                            && matches!(self.resolve(&ret), Type::Str))
+                        .then_some(v.as_str());
+                        self.emit_all_drops_keeping(
+                            ExitKind::Return,
+                            stmt as *const Stmt as usize,
+                            keep,
+                        );
                         self.emit_modify_copyout();
                         self.emit_term(format!("ret {ll} {v}"));
                     }
@@ -6725,7 +6801,12 @@ impl<'a> Gen<'a> {
         // here too would be the double.
         let free_boxes = (matches!(scrutinee, Expr::Consume { .. })
             || (vyrn_frontend::movecheck::place_path(scrutinee).is_none()
-                && vyrn_frontend::movecheck::element_path(scrutinee).is_none()))
+                && vyrn_frontend::movecheck::element_path(scrutinee).is_none())
+            // Round twenty-seven: a PLACE scrutinee the fold proved nobody
+            // reads after this match — the binding's row is Aliased and never
+            // released, the alias owns the payload, and the box is this
+            // match's to free.
+            || self.plan.match_consumes(key))
             && scrut_drop.is_none()
             // Inside a declared `release` the CALLER walks the boxes after
             // the call (`release_enum`, payloads false) — freeing them here
@@ -17057,7 +17138,11 @@ mod tests {
     // Both spellings count. A `String` drop is `@__vyrn_str_free` since
     // RFC-0089 M1a — it reads the header cap and returns on a static — and the
     // tests below ask how many bindings are reclaimed, not which call does it.
-    const RUNTIME_FREES: usize = 5;
+    //
+    // Up from 5 in exit-residue round twenty-seven:
+    // `__vyrn_region_pop_except` carries two more — the non-escaping blocks
+    // and the side vector.
+    const RUNTIME_FREES: usize = 7;
 
     /// What one element type's release costs in `free`s: a buffer stream's data,
     /// and a producer's step capture block.
