@@ -277,6 +277,22 @@ pub enum ArgVerdict {
 
 /// Everything one `Want::Lets` walk answers. Two facts out of one walk, because
 /// [`crate::own::analyze`] needs both and the walk is not cheap.
+/// One function exit the walk met (round twenty-one): a `return` or a
+/// propagating `?`, with the walk order it happened at, the loop context it
+/// sits in, and whether it is CLEAN — outside every `region` and every lambda
+/// body, the two frames an early release must never be placed into (arena
+/// memory is not this walk's, and a lambda's exit is a different runtime
+/// frame).
+#[derive(Clone, Debug)]
+pub struct ExitEv {
+    pub order: u32,
+    pub site: usize,
+    pub is_try: bool,
+    pub fn_name: String,
+    pub loops: Vec<u32>,
+    pub clean: bool,
+}
+
 pub struct Facts {
     /// What every `let` owns at the end of its block — see [`ownership`].
     pub lets: HashMap<usize, LetOwnership>,
@@ -305,6 +321,9 @@ pub struct Facts {
     /// RFC-0114 §26 (steps 3–4): the field and element stores — see
     /// [`PlaceStore`].
     pub place_stores: Vec<PlaceStore>,
+    /// Round twenty-one: every `return` and `?` the walk met, with enough
+    /// context to place an early release — see `own::fold_early_releases`.
+    pub exit_sites: Vec<ExitEv>,
     /// Exit-residue round eighteen: `Stmt::Assign` nodes whose value mentions
     /// the assigned place ONLY as the bare name in plain argument positions of
     /// user-declared, non-lending, non-retaining functions — so the stored
@@ -481,6 +500,7 @@ pub fn facts(program: &Program) -> Facts {
             })
             .collect(),
         exit_orders: r.exit_orders,
+        exit_sites: r.exit_sites,
         place_stores: r.place_stores,
         // The walk recorded the shape; the closures decide the callees. A
         // lender's result aliases its argument and a retaining position keeps
@@ -529,6 +549,7 @@ struct Run {
     exit_orders: Vec<u32>,
     mention_stores: Vec<(usize, Vec<(String, usize)>)>,
     param_escapers: HashSet<String>,
+    exit_sites: Vec<ExitEv>,
 }
 
 /// What the callee does with the temporary at `(callee, ix)`.
@@ -778,6 +799,8 @@ fn run(program: &Program, want: Want) -> Run {
         place_stores: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         mention_stores: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         param_escapers: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
+        exit_sites: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
+        walk_region: std::cell::Cell::new(0),
         ev_order: std::cell::Cell::new(0),
         loop_ids: RefCell::new(Vec::new()),
         next_loop: std::cell::Cell::new(0),
@@ -934,6 +957,7 @@ fn run(program: &Program, want: Want) -> Run {
             .param_escapers
             .map(RefCell::into_inner)
             .unwrap_or_default(),
+        exit_sites: mc.exit_sites.map(RefCell::into_inner).unwrap_or_default(),
     }
 }
 
@@ -1041,6 +1065,8 @@ struct MoveCheck<'a> {
     place_stores: Option<RefCell<Vec<PlaceStore>>>,
     mention_stores: Option<RefCell<Vec<(usize, Vec<(String, usize)>)>>>,
     param_escapers: Option<RefCell<HashSet<String>>>,
+    exit_sites: Option<RefCell<Vec<ExitEv>>>,
+    walk_region: std::cell::Cell<u32>,
     ev_order: std::cell::Cell<u32>,
     /// The stack of loop ids the walk is inside — pushed by `while`/`for`,
     /// stamped onto every event, so the fold can see which pairs of events a
@@ -1570,6 +1596,20 @@ impl MoveCheck<'_> {
     /// `continue`). The untake fold refuses any binding whose take-to-revive
     /// window contains one: on that exit the binding still holds the taken
     /// state, and the exit path's releases must not touch it.
+    /// Round twenty-one: record a `return`/`?` with its placement context.
+    /// Called BEFORE `exit_ev`, so the two share the order the exit runs at.
+    fn exit_site(&self, site: usize, is_try: bool) {
+        let Some(sink) = &self.exit_sites else { return };
+        sink.borrow_mut().push(ExitEv {
+            order: self.ev_order.get(),
+            site,
+            is_try,
+            fn_name: self.cur_fn.borrow().clone(),
+            loops: self.loop_ids.borrow().clone(),
+            clean: self.walk_region.get() == 0 && self.lambda_base.borrow().is_empty(),
+        });
+    }
+
     fn exit_ev(&self) {
         if let Some(x) = &self.exit_orders {
             let o = self.ev_order.get();
@@ -3743,7 +3783,6 @@ impl MoveCheck<'_> {
                 Ok(false)
             }
             Stmt::Return { value, line } => {
-                self.exit_ev();
                 if let Some(e) = value {
                     self.site("return", *line, e, None);
                     self.expr(e, consumed, scope)?;
@@ -3766,6 +3805,14 @@ impl MoveCheck<'_> {
                         }
                     }
                 }
+                // AFTER the value walk, matching the runtime: the returned
+                // expression evaluates first, and only then does the exit
+                // release anything. Recorded first, a `return Parser { src:
+                // ba, .. }` read as "an exit before `ba`'s take" and round
+                // twenty-one's fold freed `ba` at the very return that embeds
+                // it (parity's audit caught it on `{\"a\":1}`).
+                self.exit_site(s as *const Stmt as usize, false);
+                self.exit_ev();
                 Ok(true)
             }
             // `break`/`continue` (RFC-0060) consume nothing but terminate the
@@ -4139,7 +4186,9 @@ impl MoveCheck<'_> {
             // record — a use-after-move after the region then compiled.
             Stmt::Region { body, .. } => {
                 let mut inner = consumed.clone();
+                self.walk_region.set(self.walk_region.get() + 1);
                 let div = self.block(body, &mut inner, scope);
+                self.walk_region.set(self.walk_region.get() - 1);
                 // Consumption of an OUTER binding inside the region survives
                 // it — that is the use-after-move the propagation exists for.
                 // A binding the region DECLARES dies with the region, and its
@@ -4585,6 +4634,7 @@ impl MoveCheck<'_> {
             Expr::Try { expr, .. } => {
                 let r = self.expr(expr, consumed, scope);
                 // `?` is a `return` in everything but the spelling.
+                self.exit_site(e as *const Expr as usize, true);
                 self.exit_ev();
                 r
             }

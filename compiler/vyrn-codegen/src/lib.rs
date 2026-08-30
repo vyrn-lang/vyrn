@@ -2513,6 +2513,7 @@ struct Gen<'a> {
     /// Identities of `let`s whose heap binding is reclaimed at block exit (and
     /// how), for the function currently being emitted (from `vyrn_frontend::own`).
     droppable: HashMap<usize, DropKind>,
+    early: HashMap<usize, DropKind>,
     /// The whole program's ownership answers, looked up per emit.
     ownership: &'a vyrn_frontend::own::Ownership,
     /// RFC-0101 M4: the release steps placed at every exit of the function being
@@ -2739,6 +2740,7 @@ impl<'a> Gen<'a> {
             instantiations: Vec::new(),
             region_depth: 0,
             droppable: HashMap::new(),
+            early: HashMap::new(),
             ownership,
             placed: HashMap::new(),
             holes_map,
@@ -4604,6 +4606,7 @@ impl<'a> Gen<'a> {
             .get(name)
             .cloned()
             .unwrap_or_default();
+        self.early = self.ownership.early.get(name).cloned().unwrap_or_default();
         // RFC-0101 M4: the order this body releases in, decided once in
         // `own::place_body` and read here. What used to stand in its place was a
         // stack of scope frames and a boundary index per loop.
@@ -5265,6 +5268,13 @@ impl<'a> Gen<'a> {
                     if let Some(h) = self.holes_map.get(&key) {
                         self.hole_slots.insert(slot.clone(), h.clone());
                     }
+                    self.register_drop(key, slot, kind);
+                } else if let Some(kind) = self.early.get(&key).cloned() {
+                    // Round twenty-one: a MOVED binding whose take runs later
+                    // than some early exit. Registering gives the placed rows
+                    // a slot to free at those exits; no Block row exists for
+                    // it, so nothing runs at fall-through and nothing runs
+                    // after the take.
                     self.register_drop(key, slot, kind);
                 }
                 Ok(())

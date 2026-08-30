@@ -405,6 +405,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         plan: ownership.plan.clone(),
         releases: ownership.releases,
         droppable: ownership.droppable,
+        early: ownership.early,
         // RFC-0093 M2, flattened across functions: the key is the `let`'s node
         // address, which is unique in the program.
         holes: ownership
@@ -1141,6 +1142,7 @@ struct Cx<'a> {
     /// — but the map's membership is `own`'s answer and stays authoritative about
     /// WHICH `let`s own their value.
     droppable: HashMap<String, HashMap<usize, DropKind>>,
+    early: HashMap<String, HashMap<usize, DropKind>>,
     /// Per function: [`droppable`](Cx::droppable)'s rows PLACED — every step, at
     /// the exit that runs it, in the order it runs (RFC-0101 M4). One order for
     /// three engines, read at the exit instead of derived from a frame stack.
@@ -1656,6 +1658,7 @@ struct Fn_<'a, 'p> {
     region_depth: u32,
     /// [`Cx::droppable`] for the function being lowered.
     drops: HashMap<usize, DropKind>,
+    early: HashMap<usize, DropKind>,
     /// The locals holding the argument temporaries this frame releases, innermost
     /// call last. Teed where the argument is EVALUATED and handed back where its
     /// call ends — see [`Fn_::call`].
@@ -1707,6 +1710,7 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         cursors: Vec::new(),
         region_depth: 0,
         drops: HashMap::new(),
+        early: HashMap::new(),
         arg_frees: Vec::new(),
         rel_holes: Vec::new(),
         expect: Vec::new(),
@@ -1822,6 +1826,7 @@ fn lower_body(
         cursors: Vec::new(),
         region_depth: 0,
         drops: cx.droppable.get(&f.name).cloned().unwrap_or_default(),
+        early: cx.early.get(&f.name).cloned().unwrap_or_default(),
         arg_frees: Vec::new(),
         rel_holes: Vec::new(),
         expect: Vec::new(),
@@ -3364,6 +3369,24 @@ impl<'p> Fn_<'_, 'p> {
                 // the same key, so the two cannot disagree about which `let` owns
                 // what.
                 self.scope.push((name.clone(), place, bound.clone()));
+                // Round twenty-one, the textual backend's twin: a MOVED
+                // binding whose take runs later than some early exit gets a
+                // registered place so the placed rows can free it there — no
+                // Block row exists for it, so nothing runs at fall-through.
+                if !owns {
+                    if let Some(kind) = self.early.get(&(s as *const Stmt as usize)) {
+                        let r = match kind {
+                            vyrn_frontend::own::DropKind::FreeStr => Some(Rel::Str),
+                            vyrn_frontend::own::DropKind::FreeArr => Some(Rel::Buffers(vec![0])),
+                            _ => self
+                                .rel_for(&bound, *line)?
+                                .filter(|r| matches!(r, Rel::Buffers(_))),
+                        };
+                        if let Some(r) = r {
+                            self.register_rel(s as *const Stmt as usize, place, r);
+                        }
+                    }
+                }
                 if owns {
                     if let Some(mut r) = self.rel_for(&bound, *line)? {
                         // RFC-0093 M2: a take gave one of this binding's places
@@ -19251,6 +19274,7 @@ mod tests {
             dispatch: RefCell::new(Dispatch::default()),
             globals: HashMap::new(),
             gappend: HashMap::new(),
+            early: HashMap::new(),
             externs: HashMap::new(),
             droppable: HashMap::new(),
             releases: HashMap::new(),
