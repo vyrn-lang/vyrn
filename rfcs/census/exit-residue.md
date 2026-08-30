@@ -707,6 +707,35 @@ Movement: `numparse` 360 blocks / 1,258,922 bytes → **5 blocks / 152
 bytes** — the last big byte outlier gone. Tallies hold at **clean 86,
 leaking 63, zero double-frees**; the row still exits 135 on its tail.
 
+## Nineteenth triage: carrying is storage flow, not mention
+
+`digest = sha1Hex(digest)` — threeengines' whole residue, 199 blocks
+of replaced digests — qualified for round eighteen's `fresh_stores` on
+paper and was screened out in practice: `sha1Hex` landed in
+`param_escapers` because its body says `bytes(s)` and `out.push(..)`,
+and the round-eighteen hazard test read MENTIONS. But `bytes` COPIES
+(round one settled that), `@concat` copies, `@str` copies: a value
+built from them is fresh however many parameters it read. The screen
+walks storage FLOW now (`carries_param_storage`): a borrowed
+parameter's name or projection carries; a call carries only if its
+callee may forward (`call_may_forward`) AND an argument carries; a
+value whose type owns no heap — a byte, an index, a length — carries
+nothing, asked first because the conservative fallback would otherwise
+mark on every unnamed expression shape.
+
+The refinement re-broke `map.vyrn` in the middle — parity's free audit
+caught the same double free a second time — because `@push`'s seeded
+row returns `Array<T>`, not a bare type parameter, so the
+identity-return test read it as fresh. Every `@`-desugar except the
+three copying ones counts as forwarding now; `put(a, k, v) { return
+a.push(..) }` stays screened, and the audit is the reason this class
+of rule can be iterated on at all.
+
+Movement: `threeengines` CLEAN (199 → 0).
+
+Tallies after round nineteen: **clean 87, leaking 62, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach

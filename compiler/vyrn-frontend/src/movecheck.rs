@@ -3083,6 +3083,72 @@ impl MoveCheck<'_> {
         }
     }
 
+    /// Can a call to `name` return storage one of its arguments holds? The
+    /// copying builtins cannot — `@concat`, `@str`, `@copy` and every seeded
+    /// row that neither hands an argument back (identity-typed return), views,
+    /// nor lends builds a fresh value. Everything else — an `@`-desugar like
+    /// `@push`, a user function — is assumed able to, which is the leak
+    /// direction.
+    fn call_may_forward(&self, name: &str) -> bool {
+        if matches!(name, "@concat" | "@str" | "@copy") {
+            return false;
+        }
+        // Every other `@`-desugar forwards until proven otherwise — `@push`'s
+        // seeded row returns `Array<T>`, not a bare parameter, and it hands
+        // its receiver's buffer back all the same (map.vyrn's double free,
+        // twice caught by parity's free audit).
+        if name.starts_with('@') {
+            return true;
+        }
+        if let Some(f) = crate::prelude::signature(name) {
+            let hands_back = matches!(&f.ret, Type::Param(r)
+                if f.params.iter().any(|p| matches!(&p.ty, Type::Param(q) if q == r)));
+            return hands_back || views(name) || crate::prelude::lends(name);
+        }
+        true
+    }
+
+    /// Can evaluating `e` yield a value that HOLDS a borrowed parameter's
+    /// storage? Storage flow, not mention (round nineteen): a copying builtin
+    /// (`bytes`, `@concat`, `@str`, `@copy`) and an operator both build fresh
+    /// values however many parameters they read, so a value built from them
+    /// carries nothing. A seeded builtin that neither hands an argument back
+    /// (identity-typed return), views, nor lends is fresh by its row. Every
+    /// other call — an `@`-desugar like `@push`, a user function — is assumed
+    /// to forward whatever its arguments carry, which is the leak direction.
+    fn carries_param_storage(&self, e: &Expr) -> bool {
+        // A value whose type owns no heap carries no storage — a byte literal,
+        // an index into a byte string, a length. Asked first, because the
+        // conservative fallback below would otherwise mark on every expression
+        // shape this walk does not name.
+        if self.type_of(e).is_some_and(|t| !self.decl.owns_heap(&t)) {
+            return false;
+        }
+        match e {
+            Expr::Var { name, .. } => matches!(
+                self.borrow_of(name),
+                Some(Borrow::Read(_)) | Some(Borrow::Modify(_))
+            ),
+            Expr::Str(_) | Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) => false,
+            Expr::Binary { .. } | Expr::Unary { .. } => false,
+            Expr::Consume { place, .. } => self.carries_param_storage(place),
+            Expr::Call { name, args, .. } => {
+                self.call_may_forward(name) && args.iter().any(|a| self.carries_param_storage(a))
+            }
+            other => {
+                // A projection roots in a place; anything else unrecognized is
+                // assumed to carry — the conservative direction.
+                match place_path(other) {
+                    Some((root, _)) => matches!(
+                        self.borrow_of(&root),
+                        Some(Borrow::Read(_)) | Some(Borrow::Modify(_))
+                    ),
+                    None => true,
+                }
+            }
+        }
+    }
+
     /// Record that a borrowed PARAMETER was put somewhere that outlives the call.
     fn note_retention(&self, e: &Expr) {
         let Some(sink) = &self.retains else { return };
@@ -4772,30 +4838,24 @@ impl MoveCheck<'_> {
             Expr::Call { name, args, line } => {
                 self.check_exclusive(name, args, *line)?;
                 let caps = self.caps.get(name);
-                // Round eighteen's soundness screen: a heap-typed argument
-                // that mentions a BORROWED parameter, handed to a call whose
-                // result owns heap, can carry that parameter's storage into
-                // the result — `put(a, ..) { return a.push(..) }` hands the
-                // caller back the buffer it was passed, one builtin deep, and
-                // `let r = a.push(v); return r` launders the same buffer
-                // through a local. Any such site disqualifies the ENCLOSING
-                // function from `fresh_stores`' callee set. A consume
-                // parameter needs no screen — the take already blocks the
-                // store-side fold. A heap-free result carries nothing.
+                // Round eighteen's soundness screen: an argument that CARRIES
+                // a borrowed parameter's storage, handed to a call whose
+                // result owns heap, can carry that storage into the result —
+                // `put(a, ..) { return a.push(..) }` hands the caller back
+                // the buffer it was passed, one builtin deep, and `let r =
+                // a.push(v); return r` launders the same buffer through a
+                // local. Any such site disqualifies the ENCLOSING function
+                // from `fresh_stores`' callee set. Carrying is storage flow,
+                // not mention: `bytes(s)` and a `+` both COPY, so a value
+                // built from them is fresh however many parameters it read —
+                // `sha1Hex(digest)` in a loop store is round nineteen's
+                // witness. A consume parameter needs no screen — the take
+                // already blocks the store-side fold — and a heap-free
+                // result carries nothing.
                 let call_carries = self.type_of(e).is_some_and(|t| self.decl.owns_heap(&t));
-                if call_carries {
+                if call_carries && self.call_may_forward(name) {
                     if let Some(sink) = &self.param_escapers {
-                        let hazard = args.iter().any(|a| {
-                            self.type_of(a).is_some_and(|t| self.decl.owns_heap(&t))
-                                && self.param_ix.borrow().keys().any(|p| {
-                                    mentions_place(a, p)
-                                        && matches!(
-                                            self.borrow_of(p),
-                                            Some(Borrow::Read(_)) | Some(Borrow::Modify(_))
-                                        )
-                                })
-                        });
-                        if hazard {
+                        if args.iter().any(|a| self.carries_param_storage(a)) {
                             sink.borrow_mut().insert(self.cur_fn.borrow().clone());
                         }
                     }
