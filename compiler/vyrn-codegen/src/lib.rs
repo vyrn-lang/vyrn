@@ -10445,6 +10445,11 @@ impl<'a> Gen<'a> {
                 ref f @ (Type::Float | Type::Float32) => {
                     let s = self.gen_f64_str(&v, f)?;
                     self.emit(format!("call i32 (ptr, ...) @printf(ptr @.fmt.s, ptr {s})"));
+                    // The rendered value is `gen_f64_str`'s fresh allocation and
+                    // the printf was its whole life — one block per float print,
+                    // 81 of simd's 81 residue rows (exit-residue round
+                    // seventeen).
+                    self.emit(format!("call void @__vyrn_str_free(ptr {s})"));
                 }
                 // A signed sized int sign-extends to i64 and prints with `%lld`;
                 // an unsigned one zero-extends and prints with `%llu` — same digits
