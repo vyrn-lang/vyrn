@@ -472,6 +472,28 @@ per call, graphql 308→94, enumcodec 66→25.
 Tallies after round eleven: **clean 72, leaking 78, zero double-frees**
 — counts hold; the decode family's block totals drop by two thirds.
 
+## Twelfth triage: the comparison nobody counted
+
+`gq1`'s last two blocks were two copies of `"Book"` — the results of
+`schema(ty, "") == ""` inside `gqlCheckSel`, one per executed GraphQL
+selection. A String COMPARISON's operands were in nobody's operand
+class: the lowering copies nothing and frees nothing, and no row named
+the temporary — the same finding-3 shape the census caught for `+`,
+one operator over. Three symmetric pieces close it: movecheck notes
+comparison operands under the `@concat` spelling (so `arg_verdict`'s
+partition holds — an operand that allocated its own value is the
+operator's, a call result is the drain's), the textual backend's
+strcmp arm runs `free_str_temp` on both halves, and the direct
+backend's tee does the same. `=~`'s left operand is the recorded
+remainder of the operator class.
+
+Movement: the gqlAnswer micro-pipeline is at ZERO (`gq1`, `gq3`, and
+every `parseJson`/`toJson`/`emit`/render probe), graphql 94→53.
+
+Tallies after round twelve: **clean 72, leaking 78, zero double-frees**
+— counts hold; graphql sits at 53 blocks, down from 3,905 at the first
+survey.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach

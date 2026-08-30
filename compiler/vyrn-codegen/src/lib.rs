@@ -7757,6 +7757,13 @@ impl<'a> Gen<'a> {
         {
             let c = self.fresh_tmp();
             self.emit(format!("{c} = call i32 @strcmp(ptr {l}, ptr {r})"));
+            // Both operands are read and neither is kept, so one this
+            // expression allocated is released here (RFC-0096 M3, the same
+            // consumer-site rule the `+` above applies — exit-residue round
+            // twelve: `schema(ty, "") == ""` dropped a fresh String per
+            // executed GraphQL selection).
+            self.free_str_temp(lhs, &l);
+            self.free_str_temp(rhs, &r);
             let t = self.fresh_tmp();
             let pred = match op {
                 BinOp::Eq => "eq",

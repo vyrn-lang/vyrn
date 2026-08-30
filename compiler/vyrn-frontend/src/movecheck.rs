@@ -4178,6 +4178,23 @@ impl MoveCheck<'_> {
                     self.note_arg_temp(lhs, "@concat", 0, *line);
                     self.note_arg_temp(rhs, "@concat", 1, *line);
                 }
+                // A String COMPARISON's operands take the same argument rule
+                // (exit-residue round twelve): `schema(ty, "") == ""` inside
+                // `gqlCheckSel` dropped a fresh String on every executed
+                // GraphQL selection, because a comparison position was in
+                // nobody's operand class — the lowering copies nothing and
+                // frees nothing, and no row named the temporary. The callee
+                // spelling stays `@concat` so `arg_verdict`'s partition
+                // holds: an operand that allocated its own value is the
+                // OPERATOR's to free (both lowerings run `free_str_temp`
+                // now), and a call result is the drain's.
+                if matches!(
+                    op,
+                    BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq
+                ) {
+                    self.note_arg_temp(lhs, "@concat", 0, *line);
+                    self.note_arg_temp(rhs, "@concat", 1, *line);
+                }
                 r
             }
             // A place chain asks ONE consumption question, of the whole path.
