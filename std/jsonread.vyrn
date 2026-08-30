@@ -358,6 +358,7 @@ fn parseValue(p: modify Parser, depth: Int64) -> Result<Json, String> {
 fn parseArray(p: modify Parser, depth: Int64) -> Result<Json, String> {
     step(p) // [
     let mut items: Array<Json> = []
+    let mut failMsg = ""
     skipWs(p)
     if cur(p) == ']' {
         step(p)
@@ -365,7 +366,23 @@ fn parseArray(p: modify Parser, depth: Int64) -> Result<Json, String> {
     }
     while true {
         skipWs(p)
-        let v = parseValue(p, depth)?
+        // A statement match, not `?`: the propagation must drop the
+        // partial tree first, `?` has no statement to hang a `drop` on, and
+        // a Moved binding releases nothing at a `break` — so the failure
+        // takes the message, BREAKS out, and the drop sits after the loop
+        // (round forty-five, the nested `[1,]` case).
+        let mut v = JNull
+        match parseValue(p, depth) {
+            Ok(ax) => {
+                v = ax
+            }
+            Err(ae) => {
+                failMsg = ae.copy()
+            }
+        }
+        if failMsg.byteLength > 0 {
+            break
+        }
         items.push(v)
         skipWs(p)
         let b = cur(p)
@@ -373,18 +390,29 @@ fn parseArray(p: modify Parser, depth: Int64) -> Result<Json, String> {
             step(p)
             skipWs(p)
             if cur(p) == ']' {
+                // The refusals below drop the PARTIAL tree by hand: `Json`
+                // declares its release, so no analysis may place one at an
+                // early return without printing in two engines and not the
+                // third — a `drop` is ordinary Vyrn and runs in all three
+                // (exit-residue round forty-five: four parse-then-refuse
+                // inputs held all twenty-two of jsondecbytes' blocks).
+                drop items
                 return Err(errAt(p, "trailing comma before ']'"))
             }
         } else if b == ']' {
             step(p)
             return Ok(JArr(items))
         } else if b < 0 {
+            drop items
             return Err(errAt(p, "unterminated array"))
         } else {
+            drop items
             return Err(errAt(p, "expected ',' or ']' in array"))
         }
     }
-    return Err(errAt(p, "unterminated array"))
+    // Reached only by the element-failure break above.
+    drop items
+    return Err(failMsg)
 }
 
 // ---- duplicate-key detection ----------------------------------------------
@@ -465,6 +493,7 @@ fn parseObject(p: modify Parser, depth: Int64) -> Result<Json, String> {
     step(p) // {
     let mut fields: Array<JsonField> = []
     let mut seen = newKeySet()
+    let mut failMsg = ""
     skipWs(p)
     if cur(p) == '}' {
         step(p)
@@ -473,19 +502,52 @@ fn parseObject(p: modify Parser, depth: Int64) -> Result<Json, String> {
     while true {
         skipWs(p)
         if cur(p) != '"' {
+            // Every refusal drops what the loop has built — see the array
+            // twin's note (round forty-five).
+            drop fields
             return Err(errAt(p, "expected a string key"))
         }
-        let key = parseString(p)?
+        let mut key = ""
+        match parseString(p) {
+            Ok(kx) => {
+                key = kx
+            }
+            Err(ke) => {
+                failMsg = ke.copy()
+            }
+        }
+        if failMsg.byteLength > 0 {
+            break
+        }
         if ksFind(seen, key) != -1 {
-            return Err(errAt(p, "duplicate object key: " + key))
+            let dupMsg = errAt(p, "duplicate object key: " + key)
+            drop key
+            drop fields
+            return Err(dupMsg)
         }
         skipWs(p)
         if cur(p) != ':' {
+            drop key
+            drop fields
             return Err(errAt(p, "expected ':' after object key"))
         }
         step(p) // :
         skipWs(p)
-        let v = parseValue(p, depth)?
+        let mut v = JNull
+        match parseValue(p, depth) {
+            Ok(vx) => {
+                v = vx
+            }
+            Err(ve) => {
+                failMsg = ve.copy()
+            }
+        }
+        if failMsg.byteLength > 0 {
+            // The key is still this iteration's — parked into the dropped
+            // partial so the break leaves nothing behind.
+            fields.push(JsonField { key: key, value: JNull })
+            break
+        }
         ksAdd(seen, key)
         fields.push(JsonField { key: key, value: v })
         skipWs(p)
@@ -494,18 +556,23 @@ fn parseObject(p: modify Parser, depth: Int64) -> Result<Json, String> {
             step(p)
             skipWs(p)
             if cur(p) == '}' {
+                drop fields
                 return Err(errAt(p, "trailing comma before '}'"))
             }
         } else if b == '}' {
             step(p)
             return Ok(JObj(fields))
         } else if b < 0 {
+            drop fields
             return Err(errAt(p, "unterminated object"))
         } else {
+            drop fields
             return Err(errAt(p, "expected ',' or '}' in object"))
         }
     }
-    return Err(errAt(p, "unterminated object"))
+    // Reached only by the key/value-failure breaks above.
+    drop fields
+    return Err(failMsg)
 }
 
 /// Parse a whole JSON document into a `Json` tree, or a `line N, col M: <reason>`
@@ -520,6 +587,10 @@ export fn parseJson(src: String) -> Result<Json, String> {
     let v = parseValue(p, 0)?
     skipWs(p)
     if p.pos < p.n {
+        // The value parsed whole and the document still refuses — the tree
+        // is dropped by hand for the release-declaration reason the array
+        // refusals record (round forty-five).
+        drop v
         return Err(errAt(p, "trailing content after the JSON value"))
     }
     return Ok(v)
