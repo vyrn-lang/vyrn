@@ -86,7 +86,7 @@ intkeys	clean
 jchain	clean
 jsonbytes	leak	1
 jsoncodec	leak	1
-jsondecbytes	leak	30
+jsondecbytes	leak	28
 jsondepth	clean
 jsonplace	clean
 jsonschema	clean
@@ -98,7 +98,7 @@ linkedlist	other
 logging	leak	3
 mandelbrot	clean
 map	clean
-mapdemo	leak	13
+mapdemo	leak	8
 mapkey	clean
 mapkeyborrowed	skip
 mapkeyowned	clean
@@ -204,4 +204,4 @@ validation	other
 vlog	leak	4
 vondemo	clean
 vyxdemo	clean
-wirekey	leak	3
+wirekey	leak	2

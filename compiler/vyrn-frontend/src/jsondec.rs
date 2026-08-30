@@ -128,6 +128,13 @@ pub fn decoders(
     if w.source.is_empty() {
         return Ok((w.preds, w.aliases));
     }
+    if std::env::var("VYRN_DEC_DUMP").is_ok() {
+        eprintln!(
+            "=== generated decoders ===
+{}",
+            w.source
+        );
+    }
     w.parse()
 }
 

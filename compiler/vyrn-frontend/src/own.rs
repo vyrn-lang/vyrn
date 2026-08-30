@@ -1658,26 +1658,31 @@ pub fn analyze(program: &Program) -> Ownership {
     // in two engines and not the third.
     let early: HashMap<String, HashMap<usize, DropKind>> = {
         use crate::movecheck::EvKind;
-        let mut per: HashMap<
-            usize,
-            (
-                Option<&crate::movecheck::StoreEv>,
-                Option<&crate::movecheck::StoreEv>,
-                usize,
-            ),
-        > = HashMap::new();
+        struct Per<'a> {
+            first_write: Option<&'a crate::movecheck::StoreEv>,
+            first_take: Option<&'a crate::movecheck::StoreEv>,
+            writes: usize,
+            all_owning: bool,
+        }
+        let mut per: HashMap<usize, Per> = HashMap::new();
         for ev in &facts.store_events {
-            let e = per.entry(ev.key).or_insert((None, None, 0));
+            let e = per.entry(ev.key).or_insert(Per {
+                first_write: None,
+                first_take: None,
+                writes: 0,
+                all_owning: true,
+            });
             match ev.kind {
-                EvKind::Write { .. } => {
-                    e.2 += 1;
-                    if e.0.is_none() {
-                        e.0 = Some(ev);
+                EvKind::Write { owning, .. } => {
+                    e.writes += 1;
+                    e.all_owning &= owning;
+                    if e.first_write.is_none() {
+                        e.first_write = Some(ev);
                     }
                 }
                 EvKind::Take => {
-                    if e.1.is_none() {
-                        e.1 = Some(ev);
+                    if e.first_take.is_none() {
+                        e.first_take = Some(ev);
                     }
                 }
             }
@@ -1693,20 +1698,50 @@ pub fn analyze(program: &Program) -> Ownership {
             let Some(kind) = row.ty.as_ref().and_then(|t| proto.release_kind(t)) else {
                 continue;
             };
-            if !matches!(
+            // The four buffer kinds are silent by construction; a `Deep` walk
+            // is silent exactly when it cannot reach a declared release —
+            // round thirty-eight widened the gate through
+            // [`Owned::reaches_declared`] for the decode wrappers, whose
+            // abandoned value is an `Array<Map<..>>` nothing declares for.
+            let silent = matches!(
                 kind,
                 DropKind::FreeStr | DropKind::FreeArr | DropKind::FreeSmallArr | DropKind::FreeMap
-            ) {
+            ) || matches!(&kind, DropKind::Deep(t) if !proto.reaches_declared(t));
+            if !silent {
                 continue;
             }
-            let Some(&(Some(w), Some(t), writes)) = per.get(key).as_deref() else {
+            let Some(p) = per.get(key) else {
                 continue;
             };
-            if writes != 1 || t.loops != w.loops {
+            let (Some(w), Some(t)) = (p.first_write, p.first_take) else {
+                continue;
+            };
+            // Two admissions. The single-write rule is round twenty-one's:
+            // write, exit and take share one loop context. Round thirty-eight
+            // adds the loop-written binding taken after its loop (`for j in
+            // consume doc { val = dec(j, ..) } .. return Invalid(..) .. for x
+            // in consume val`): at a FUNCTION-LEVEL exit — one that no loop
+            // repeats — the binding holds its last owning write, not yet
+            // taken, and the path ends, so one deep free is sound. Every
+            // write must be owning (the displaced-value stores answered for
+            // themselves), and both the exit and the take must sit outside
+            // every loop, or a second turn of an enclosing loop would free
+            // the same value twice.
+            let single = p.writes == 1 && t.loops == w.loops;
+            let hoisted = p.all_owning && t.loops.is_empty();
+            if !single && !hoisted {
                 continue;
             }
             for ex in &exit_sites {
-                if !ex.clean || ex.order <= w.order || ex.order >= t.order || ex.loops != w.loops {
+                if !ex.clean || ex.order <= w.order || ex.order >= t.order {
+                    continue;
+                }
+                let fits = if single {
+                    ex.loops == w.loops
+                } else {
+                    ex.loops.is_empty()
+                };
+                if !fits {
                     continue;
                 }
                 if std::env::var_os("VYRN_EARLY_DUMP").is_some() {
