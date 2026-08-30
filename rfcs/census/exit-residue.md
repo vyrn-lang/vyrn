@@ -669,6 +669,44 @@ the program's own exit code all along.
 Tallies after round seventeen: **clean 86, leaking 63, zero
 double-frees**.
 
+## Eighteenth triage: the store that learned to trust a read call
+
+`dec = halveBy(dec, m)` in `parseFloat64`'s halving loop: the store
+must release the `Dec` it replaces, and two guards stood in the way.
+The value-side guard (`mentions_place`) refuses ANY mention of the
+stored-to place — right for `a = @push(a, i)`, where the builtin hands
+the argument's own buffer back, and 360 blocks of bignum scratch for a
+call that only READ its argument. The row says more now:
+`fresh_stores` records the stores whose value mentions the place ONLY
+as the bare name in plain argument positions of user-declared
+functions, and `facts()` screens the callees against the lending and
+retention closures. Both backends consult it exactly where
+`mentions_place` would otherwise stand the snapshot down.
+
+The screen earned its third clause the honest way: parity's free audit
+caught `map.vyrn` double-freeing on the first version. `put(a, k, v)
+{ return a.push(..) }` is not a lender and retains nothing — it hands
+its argument's buffer back THROUGH the result, one builtin deep, and
+`let r = a.push(v); return r` would launder the same buffer through a
+local. So the walk marks every function where a heap-typed argument
+mentioning a borrowed parameter feeds a call whose result owns heap
+(`param_escapers`), and the screen excludes them. A consume parameter
+needs no screen — the take already blocks the store-side fold — and a
+heap-free result carries nothing.
+
+The second half: the shallow store-snapshot never covered RECORDS.
+`snap_val` knew `String`, `Array`, `SmallArray` and `Map`, and a
+record answered nothing — so even a cleared store freed nothing of a
+`Dec`. Both backends walk the record's fields now, shallowly and
+recursively (each heap field's buffer pointer, read before the store
+overwrites the aggregate); elements and boxed payloads still leak
+rather than risk reading through a value the store is replacing, and a
+declared `release` never reaches the walk.
+
+Movement: `numparse` 360 blocks / 1,258,922 bytes → **5 blocks / 152
+bytes** — the last big byte outlier gone. Tallies hold at **clean 86,
+leaking 63, zero double-frees**; the row still exits 135 on its tail.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach

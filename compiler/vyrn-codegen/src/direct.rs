@@ -3050,7 +3050,25 @@ impl<'p> Fn_<'_, 'p> {
                     ]
                 }
                 Type::SmallArray(..) => vec![(self.layout_of(&t, line)?.fields[2], false)],
-                _ => Vec::new(),
+                // A RECORD, shallowly (round eighteen) — the textual backend's
+                // `snap_val` twin: each heap-owning field's buffer, at the
+                // field's offset plus wherever the field's own shape keeps it,
+                // recursively. Elements and boxed payloads still leak rather
+                // than risk reading through a value the store is replacing.
+                ref rec => match vyrn_frontend::types::record_fields(rec, &self.cx.types) {
+                    Some(fields) => {
+                        let l = self.layout_of(&t, line)?;
+                        let bases: Vec<u32> = l.fields.clone();
+                        let mut out = Vec::new();
+                        for (i, f) in fields.iter().enumerate() {
+                            for (o, h) in self.store_bufs(&f.ty, line)? {
+                                out.push((bases[i] + o, h));
+                            }
+                        }
+                        out
+                    }
+                    None => Vec::new(),
+                },
             },
             _ => Vec::new(),
         })
@@ -3485,8 +3503,13 @@ impl<'p> Fn_<'_, 'p> {
                 // considered (§26's finish check).
                 let owned_here = self.cx.plan.store_owned_at(s as *const Stmt as usize)
                     && self.region_depth == 0;
+                // Round eighteen: the textual backend's twin — a mention
+                // that is only a read argument to a declared non-lender
+                // cannot hand the old value back (`store_fresh_at`).
                 let snap = if owned_here
-                    && (fresh_str || !vyrn_frontend::movecheck::mentions_place(value, name))
+                    && (fresh_str
+                        || !vyrn_frontend::movecheck::mentions_place(value, name)
+                        || self.cx.plan.store_fresh_at(s as *const Stmt as usize))
                 {
                     match (place, &r) {
                         // A scalar local IS the pointer; it has no address.
