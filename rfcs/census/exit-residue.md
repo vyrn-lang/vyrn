@@ -441,6 +441,37 @@ site metadata test caught the corrupted record.
 
 Tallies after round ten: **clean 72, leaking 78, zero double-frees**.
 
+## Eleventh triage: the error return that poisoned every path, and the box `?` left behind
+
+The decode side, convicted by shrinking `parseJson` probes: every call
+leaked exactly one input-sized block and one 16-byte block per parsed
+value, on every input, including `"7"`.
+
+- **The input-sized block** was the cursor record's byte buffer, and
+  the mechanism was round seven's marking one arm short: `return
+  Err(errAt(p, "trailing content ..."))` at the BOTTOM of `parseJson`
+  reads `p` through a constructor, the constructor arm fell to the
+  conservative walk, and `p` was marked Returned — on EVERY path of
+  the function, early returns included, because the marking is a
+  row property and not a path one. `gave_up_returned` now recurses
+  into a returned constructor's arguments (a call argument's reads
+  are rule 3's business, exactly as at the top level; a direct place
+  argument keeps the conservative walk, and the call walk has already
+  moved or refused it at the constructor position).
+- **The 16-byte block** was the `?` operator's: a success payload
+  wider than a word (a `Json` is two) travels BOXED inside its
+  `Result`, and `gen_try` loaded the value out and left the box — no
+  row anywhere names a `?` operand's temporary. The Ok branch frees
+  the box now, gated to NON-PLACE operands (`r?` over a binding leaves
+  the box to the binding's own release) — one block per
+  `parseValue(p, ..)?`, one per parsed JSON value in the corpus.
+
+Movement: every `parseJson` micro-probe CLEAN, `fromJson` 6→2 blocks
+per call, graphql 308→94, enumcodec 66→25.
+
+Tallies after round eleven: **clean 72, leaking 78, zero double-frees**
+— counts hold; the decode family's block totals drop by two thirds.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach
