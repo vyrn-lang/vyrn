@@ -3292,6 +3292,17 @@ impl<'a> Gen<'a> {
     /// `s.byteLength` mid-spine is now correct and O(1), and a drop of the
     /// accumulator recovers the capacity it was grown to.
     fn emit_str_append(&mut self, slot: &str, val: &str) {
+        self.emit_str_append_owned(slot, val, false)
+    }
+
+    /// `free_taken` — the take-ownership copy may FREE the buffer it copied
+    /// out of, because the plan proved the place owns its value at this store
+    /// (exit-residue round fifteen: the copy used to abandon it, one
+    /// initializer buffer per accumulator whose first value was a fresh
+    /// concat — `onPair`'s 36 bytes, twelve times per htmltree run). A
+    /// borrowed value answers `store_owned_at` false and keeps the old
+    /// behavior; a static literal is freed by `str_free`'s own cap guard.
+    fn emit_str_append_owned(&mut self, slot: &str, val: &str, free_taken: bool) {
         let flag = self.str_append_shadow(slot);
         let vlen = self.str_len(val);
 
@@ -3317,6 +3328,9 @@ impl<'a> Gen<'a> {
         self.emit(format!(
             "call void @llvm.memcpy.p0.p0.i64(ptr {nb0}, ptr {ob}, i64 {ol}, i1 false)"
         ));
+        if free_taken {
+            self.emit(format!("call void @__vyrn_str_free(ptr {ob})"));
+        }
         self.emit(format!("store ptr {nb0}, ptr {slot}"));
         self.emit(format!("store i64 1, ptr {flag}"));
         self.emit_term(format!("br label %{have_l}"));
@@ -5251,6 +5265,8 @@ impl<'a> Gen<'a> {
                         // the site was considered, not walked past.
                         let _ = self.plan.store_owned_at(stmt as *const Stmt as usize);
                         self.expect.push(tty.clone());
+                        let owned_here = self.plan.store_owned_at(stmt as *const Stmt as usize)
+                            && self.region_depth == 0;
                         let mark = self.arg_frees.len();
                         let vals: Result<Vec<String>, String> = parts
                             .iter()
@@ -5263,7 +5279,7 @@ impl<'a> Gen<'a> {
                         // the same `@str` temporary the general `+` path frees,
                         // reached through the fast path instead.
                         for (p, v) in parts.iter().zip(vals?) {
-                            self.emit_str_append(&slot, &v);
+                            self.emit_str_append_owned(&slot, &v, owned_here);
                             self.free_str_temp(p, &v);
                         }
                         // A CALL-producer part (`acc = acc + substring(..)`) is
@@ -16786,9 +16802,14 @@ mod tests {
         );
         assert_eq!(
             free_calls(&copying),
-            free_calls(&appending) + 1,
-            "the copying path frees the replaced value at the store and the \
-             in-place path reuses the buffer; any other difference is a \
+            free_calls(&appending),
+            // Equal since exit-residue round fifteen: the in-place path's
+            // take-ownership copy frees the buffer it copied out of when the
+            // plan proved the place owns it — one store-side free each,
+            // differently placed. (On this fixture's literal init the take's
+            // free is a runtime no-op — `str_free` skips a static — but the
+            // instruction is emitted, and the count is what this pin reads.)
+            "one store-side free each; any other difference is a \
              reclamation change:\n{appending}\n=== copying ===\n{copying}"
         );
     }
