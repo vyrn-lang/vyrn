@@ -426,6 +426,12 @@ pub struct PlaceStore {
     /// caller can never see again (`check_exclusive` refuses the aliasing
     /// call shapes), so the store releases them like a local's.
     pub is_modify_param: bool,
+    /// Round thirty-two: the store's walk order and loop context, so the fold
+    /// can own a field store that happens BEFORE the binding's take — `let
+    /// mut out = httpCopy(self); out.derived = out.derived + ..; return out`
+    /// displaced one copied field per policy call with nothing to free it.
+    pub order: u32,
+    pub loops: Vec<u32>,
     /// The enclosing function — see [`ArgTemp::owner`].
     pub owner: String,
 }
@@ -1809,11 +1815,15 @@ impl MoveCheck<'_> {
         // the ROOT's.
         let root = name.split('.').next().unwrap_or(name);
         let is_modify_param = matches!(self.borrow_of(root), Some(Borrow::Modify(_)));
+        let o = self.ev_order.get();
+        self.ev_order.set(o + 1);
         sink.borrow_mut().push(PlaceStore {
             id: s as *const Stmt as usize,
             key,
             is_global,
             is_modify_param,
+            order: o,
+            loops: self.loop_ids.borrow().clone(),
             owner: self.cur_fn.borrow().clone(),
         });
     }
@@ -3928,7 +3938,14 @@ impl MoveCheck<'_> {
                 // down — and the reason no drop flag is needed to say it.
                 revive(consumed, &format!("{name}.{field}"));
                 self.wrote_into(name); // RFC-0093 M2: a filled hole is not skippable
-                if !mentions_place(value, name) {
+                                       // Round thirty-two: a mention that provably cannot hand the
+                                       // old value back — a String `+` is a fresh concat — records
+                                       // like any other store (`out.derived = out.derived + " etag"`
+                                       // displaced one copied field per policy call).
+                if !mentions_place(value, name)
+                    || (matches!(value, Expr::Binary { op: BinOp::Add, .. })
+                        && self.concatenates(value))
+                {
                     self.note_place_store(s, name);
                 }
                 Ok(false)

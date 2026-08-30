@@ -1050,6 +1050,27 @@ Movement: regexredux 184 → 35 blocks. The tallies hold at **clean
 100, leaking 46, zero double-frees** while the named-function era
 begins.
 
+## Thirty-second triage: the field store before the take
+
+The instrument named `vyrn_httpCopy` as rest's biggest column inside a
+minute, and the class fell out of the copy's consumers: `let mut out =
+httpCopy(self); out.derived = out.derived + " etag"; return out` —
+std/http's whole Policy chain. Two guards stood between the displaced
+field copy and its free. The place-store fold owned a field store only
+through the DROPPABLE registry, and a returned binding is not
+droppable — so the store's order now rides on the row
+(`PlaceStore.order`, `loops`) and a store all of whose takes come
+strictly later (or flow straight to a clean exit — round thirty-one's
+exemption, reused) is owned whatever becomes of the binding
+afterwards. And the recording guard refused any value MENTIONING the
+target, which is right for a hand-back and wrong for a String `+` —
+a concat is fresh, and the self-append field store records like any
+other.
+
+Movement: rest 629 → 525, the policy-chain field displacements freed.
+
+Tallies hold at **clean 100, leaking 46, zero double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the

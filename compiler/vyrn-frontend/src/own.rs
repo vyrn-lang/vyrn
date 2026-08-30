@@ -1779,13 +1779,46 @@ pub fn analyze(program: &Program) -> Ownership {
     // row, read as a property of the slot exactly as RFC-0087 §4 asked).
     // Folded here so both backends read one answer where each used to keep
     // a per-binding registry guess (`slot_owns`/`place_owns`, §22's table).
+    // Round thirty-two: a field/element store into a binding whose take (if
+    // any) happens strictly AFTER the store, with no loop shared between a
+    // take and the store — the displaced value is the frame's at that point,
+    // whatever becomes of the binding later. Same exiting-take exemption as
+    // `fold_store_owned`, same final-gone veto.
+    let mut takes_of: HashMap<usize, Vec<&crate::movecheck::StoreEv>> = HashMap::new();
+    for ev in &facts.store_events {
+        if matches!(ev.kind, crate::movecheck::EvKind::Take) {
+            takes_of.entry(ev.key).or_default().push(ev);
+        }
+    }
     for ps in &facts.place_stores {
+        let plain_row = matches!(
+            lets.get(&ps.key).and_then(|r| r.gone.as_ref()),
+            None | Some(crate::movecheck::Gone::Moved { .. })
+                | Some(crate::movecheck::Gone::Dropped { .. })
+                | Some(crate::movecheck::Gone::Returned { .. })
+        );
+        let takes_clear = plain_row
+            && takes_of.get(&ps.key).map_or(true, |ts| {
+                ts.iter().all(|t| {
+                    let exits = facts.exit_sites.iter().any(|x| {
+                        x.clean
+                            && x.order > t.order
+                            && t.loops.iter().all(|l| x.loops.contains(l))
+                            && !facts
+                                .store_events
+                                .iter()
+                                .any(|e| e.key == ps.key && e.order > t.order && e.order < x.order)
+                    });
+                    exits || (t.order > ps.order && !t.loops.iter().any(|l| ps.loops.contains(l)))
+                })
+            });
         let owned = ps.is_global
             || ps.is_modify_param
             || (ps.key != 0
-                && droppable
-                    .get(&ps.owner)
-                    .is_some_and(|d| d.contains_key(&ps.key)));
+                && (takes_clear
+                    || droppable
+                        .get(&ps.owner)
+                        .is_some_and(|d| d.contains_key(&ps.key))));
         if owned {
             store_owned.insert(ps.id);
         }
