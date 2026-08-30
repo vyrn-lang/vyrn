@@ -800,6 +800,29 @@ receiver, R1-prime's `.byteLength` rule one method over).
 Tallies after round twenty-one: **clean 89, leaking 60, zero
 double-frees** — the tallies hold while the block counts drain.
 
+## Twenty-second triage: the mention analysis learns records
+
+std/regex's frag merges — `f = Frag { start: f.start, holes:
+joinHoles(f.holes, [h]) }` — replace a record while reading two things
+out of it, and round eighteen's mention analysis refused both: a
+struct literal was not a shape it walked, a projection was not a
+mention form it allowed, and a store whose only mentions were provably
+scalar recorded nothing at all (the empty-callee guard read "nothing
+to screen" as "nothing to admit"). Three generalizations, each the
+same principle: a mention hands nothing back when its TYPE owns no
+heap (`f.start`), when it is a projection read by a screened callee
+(`joinHoles(f.holes, ..)` — the lending, retention and
+parameter-escape screens answer for projections exactly as for bare
+names), or when it sits inside a struct or array literal whose parts
+all answer. An empty callee list passes the screen vacuously — it is
+the safest answer, not a non-answer. The recording also gained the
+heap gate the fold applied implicitly: `i = i + 1` is not a store
+release, however fresh its value.
+
+Movement: regexredux 198 → 184 (one holes-buffer per frag merge);
+the corpus tallies hold at **clean 89, leaking 60, zero double-frees**
+while the machinery reaches more of what remains.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach

@@ -3113,9 +3113,23 @@ impl MoveCheck<'_> {
         if !mentions_place(e, root) {
             return true;
         }
+        // A mention whose TYPE owns no heap hands nothing back however it is
+        // read — `f = Frag { start: f.start, .. }` reads one scalar out of the
+        // value it replaces (round twenty-two).
+        if self.type_of(e).is_some_and(|t| !self.decl.owns_heap(&t)) {
+            return true;
+        }
         match e {
-            Expr::Call { name, args, .. } => args.iter().enumerate().all(|(ix, a)| match a {
-                Expr::Var { name: v, .. } if v == root => {
+            Expr::Call { name, args, .. } => args.iter().enumerate().all(|(ix, a)| {
+                // The bare name, or a projection rooted at it — `f.holes` as
+                // an argument reads the same storage `f` does, and the same
+                // screens answer for it (the callee must not lend, retain, or
+                // forward a parameter's storage).
+                let is_root_read = match a {
+                    Expr::Var { name: v, .. } => v == root,
+                    _ => place_path(a).is_some_and(|(r, _)| r == root),
+                };
+                if is_root_read {
                     // Declared in Vyrn, and NOT a builtin: `is_function` also
                     // answers for the seeded rows, and `a = @push(a, i)` — the
                     // desugar every `.push` becomes — is exactly the callee
@@ -3129,13 +3143,23 @@ impl MoveCheck<'_> {
                     } else {
                         false
                     }
+                } else {
+                    self.read_only_mentions(a, root, out)
                 }
-                _ => self.read_only_mentions(a, root, out),
             }),
             Expr::Binary { lhs, rhs, .. } => {
                 self.read_only_mentions(lhs, root, out) && self.read_only_mentions(rhs, root, out)
             }
             Expr::Unary { expr, .. } => self.read_only_mentions(expr, root, out),
+            // A struct or array literal holds what its parts BUILT; the parts
+            // answer for themselves (round twenty-two: `f = Frag { start: sp,
+            // holes: joinHoles(f.holes, [h]) }`, std/regex's frag merges).
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .all(|(_, v)| self.read_only_mentions(v, root, out)),
+            Expr::ArrayLit { elems, .. } => {
+                elems.iter().all(|v| self.read_only_mentions(v, root, out))
+            }
             _ => false,
         }
     }
@@ -3699,9 +3723,15 @@ impl MoveCheck<'_> {
                 // closures and clear the store to release what it replaces.
                 if !global {
                     if let Some(sink) = &self.mention_stores {
-                        if mentions_place(value, name) {
+                        if mentions_place(value, name)
+                            && self.type_of(value).is_some_and(|t| self.decl.owns_heap(&t))
+                        {
                             let mut ms = Vec::new();
-                            if self.read_only_mentions(value, name, &mut ms) && !ms.is_empty() {
+                            // An EMPTY callee list is the safest answer of
+                            // all: every mention was provably scalar
+                            // (`f = Frag { start: f.start, .. }`), and the
+                            // facts() screen passes it vacuously.
+                            if self.read_only_mentions(value, name, &mut ms) {
                                 sink.borrow_mut().push((s as *const Stmt as usize, ms));
                             }
                         }

@@ -3345,6 +3345,34 @@ pub(crate) mod tests {
         );
     }
 
+    /// Round twenty-two: the mention analysis reads STRUCT LITERALS and
+    /// scalar projections — `f = Frag { start: f.start, holes: [h] }` reads
+    /// one heap-free scalar out of the value it replaces, and `holes:
+    /// joinH(f.holes, ..)` reads a projection through a screened callee.
+    /// Both stores release the old record's buffers (std/regex's frag
+    /// merges leaked one holes-buffer per merge).
+    #[test]
+    fn a_struct_literal_store_with_scalar_mentions_releases_what_it_replaces() {
+        let src = "type Frag = { start: Int64, holes: Array<Int64> } \
+                   fn joinH(a: Array<Int64>, b: Array<Int64>) -> Array<Int64> { \
+                   let mut o: Array<Int64> = [] \
+                   for x in a { o.push(x) } for x in b { o.push(x) } return o } \
+                   fn main() -> Int64 { \
+                   let mut f = Frag { start: 0, holes: [1, 2] } \
+                   let mut i = 0 \
+                   while i < 3 { \
+                   f = Frag { start: f.start, holes: [i] } \
+                   f = Frag { start: 9, holes: joinH(f.holes, [7]) } \
+                   i = i + 1 } \
+                   return f.holes.length }";
+        let (o, _) = analyze_src(src);
+        assert_eq!(
+            o.plan.store_fresh.len(),
+            2,
+            "both frag stores release what they replace"
+        );
+    }
+
     /// Round sixteen's other half: the `elem_only` attribution is exactly what
     /// keeps the downgrade off a buffer somebody else owns. A snapshot a LENDER
     /// handed back is the recorded round-fourteen trap — freeing its buffer is
