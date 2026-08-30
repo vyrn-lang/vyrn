@@ -4105,12 +4105,20 @@ impl<'p> Fn_<'_, 'p> {
             }
             Stmt::Expr(e) => {
                 // A call for its effect leaves its result on the stack; drop it,
-                // or the block's type will not check.
-                if !matches!(
-                    self.cx.repr(&self.expr(m, b, e)?, Expr::line(e))?,
-                    Repr::Unit
-                ) {
-                    b.ins(&Instruction::Drop);
+                // or the block's type will not check. Round twenty-eight: an
+                // OWNED result nothing binds is freed rather than dropped.
+                let ty = self.expr(m, b, e)?;
+                let line = Expr::line(e);
+                match self.cx.repr(&ty, line)? {
+                    Repr::Unit => {}
+                    _ if self.cx.plan.discarded_result(s as *const Stmt as usize) => {
+                        let l = b.local(ValType::I32);
+                        b.ins(&Instruction::LocalSet(l));
+                        self.free_arg_temp(m, b, l, &ty, line)?;
+                    }
+                    _ => {
+                        b.ins(&Instruction::Drop);
+                    }
                 }
             }
         }

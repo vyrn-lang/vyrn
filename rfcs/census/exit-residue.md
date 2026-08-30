@@ -946,6 +946,30 @@ one recorded block.
 Tallies after round twenty-seven: **clean 96, leaking 52, zero
 double-frees**.
 
+## Twenty-eighth triage: the result nobody bound
+
+A statement-position call whose OWNED heap result nothing binds —
+`give()` for its side effect — left the value with no owner at all:
+not a binding's, not an argument temporary's, one leaked block per
+call. The walk records these (`Stmt::Expr` over a plain call whose
+result type owns heap, panics and views and constructors excluded),
+`facts()` screens the callee against the closed lending set — a
+wrapped lender's result names storage inside its argument, and
+freeing a discarded one would be a use-after-free — and both compiled
+backends free the discarded value right after the call.
+
+The corpus, it turns out, never discards an owned result — the class
+closed on a probe, not a row. The round's real finding is the one it
+DIDN'T ship: freelist's 100,000 blocks are the payload boxes of
+`Option<Handle>` — a sum whose payload owns no heap but travels
+boxed, invisible to every `owns_heap` gate in the release walks. A
+first cut at kind-level box-reach rows double-freed freelist inside
+the hour and was reverted whole; the box lifecycle has three owners
+(extraction, displacement, walk) and wants its own round with the
+detector examples as canaries.
+
+Tallies hold at **clean 96, leaking 52, zero double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the

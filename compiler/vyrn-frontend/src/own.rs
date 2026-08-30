@@ -1187,6 +1187,10 @@ pub struct ReleasePlan {
     /// direct backend keeps skipping (a leak wasm cannot measure, never a
     /// double free).
     pub malloc_scrutinees: std::collections::HashSet<usize>,
+    /// Round twenty-eight: statement-position calls whose OWNED heap result
+    /// nothing binds, lenders screened — the backends free the discarded
+    /// value right after the call.
+    pub discarded_results: std::collections::HashSet<usize>,
     /// Round twenty-seven: `Expr::Match` nodes over a WHOLE named local whose
     /// binding nothing reads after the match — the extraction may free the
     /// payload BOX. The binding's row goes `Aliased` (never released), the
@@ -1297,6 +1301,12 @@ impl ReleasePlan {
     pub fn malloc_scrutinee(&self, at: usize) -> bool {
         let at = self.resolve(at);
         self.malloc_scrutinees.contains(&at)
+    }
+
+    /// Round twenty-eight: does this statement discard an owned result?
+    pub fn discarded_result(&self, at: usize) -> bool {
+        let at = self.resolve(at);
+        self.discarded_results.contains(&at)
     }
 
     pub fn match_consumes(&self, at: usize) -> bool {
@@ -1666,6 +1676,10 @@ pub fn analyze(program: &Program) -> Ownership {
             .map(|c| c.match_id)
             .collect()
     };
+    // Round twenty-eight: the discarded set, lenders already screened by
+    // `facts()`.
+    let discarded_results: std::collections::HashSet<usize> =
+        facts.discarded.iter().map(|(id, _)| *id).collect();
     // Rule 3: a return is owned. The return type is the whole answer.
     let owned_fns: HashMap<String, DropKind> = program
         .functions
@@ -1770,6 +1784,7 @@ pub fn analyze(program: &Program) -> Ownership {
         store_fresh,
         malloc_scrutinees,
         consuming_matches,
+        discarded_results,
         edge_releases,
         receiver_frees,
         owners,
