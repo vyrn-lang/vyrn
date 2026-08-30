@@ -1163,6 +1163,35 @@ strpredbytes CLEAN (6 → 0).
 Tallies after round thirty-six: **clean 111, leaking 35, zero
 double-frees**.
 
+## Thirty-seventh triage: the copy nobody would own
+
+Four closures around `.copy()` and generics. A GENERIC function's
+declared return mentions its type variables, so `let d = twice(s)`
+typed as unknown and carried no release row; the variables are solved
+from the arguments' own types now, in `Declared::type_of`. A chained
+`.copy().length` was a bare receiver the R1′ set refused by name —
+movecheck pre-screens the tag by the copy's own release kind, and the
+coarse program-wide `declares_any` gate is replaced by the per-type
+walk the record-producer comment had already named as the upgrade:
+`Owned::reaches_declared`, a structural walk asking whether releasing
+this type could CALL a declared release. `@copy` also had no
+capability row (its return row is held back on purpose), so a
+temporary RECEIVER (`("" + s).copy()`) fell to Unknown; its read
+capability is written into the verdict directly. And the round
+thirty-four unwrap-shape widened to the spelled forms — `Ok(s) => s`,
+`Some(v) => v`, `Err(e) => e` — with the type screen per shape: a
+spelled Result unwrap may hand out either side, so both must be
+`String`; the `??` desugar's failure arm never yields the err payload,
+so `Success` screens the ok side alone (the first cut screened both
+and un-fixed contractquery — the survey caught it before anything
+shipped).
+
+Movement: copy 10 → 2, langbench CLEAN (5 → 0), scan CLEAN (1 → 0),
+pagesdemo 3 → 1.
+
+Tallies after round thirty-seven: **clean 113, leaking 33, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the

@@ -286,6 +286,11 @@ impl Declared {
         self.rets.contains_key(name)
     }
 
+    /// See [`crate::own::Owned::reaches_declared`].
+    pub fn reaches_declared(&self, ty: &Type) -> bool {
+        self.owned.reaches_declared(ty)
+    }
+
     pub fn type_of(&self, vars: &Scopes<Option<Type>>, e: &Expr) -> Option<Type> {
         match e {
             Expr::Str(_) => Some(Type::Str),
@@ -334,10 +339,34 @@ impl Declared {
             // four: jchain's 24 blocks, and the json/html/graphql family
             // behind it). The guard against a shared or generic variant name
             // is in the table's construction.
-            Expr::Call { name, .. } => self
+            Expr::Call { name, args, .. } => self
                 .rets
                 .get(name)
                 .cloned()
+                // A GENERIC function's declared return mentions its type
+                // variables, and a binding to it typed as unknown — `let d =
+                // twice(s)` where `twice<T>` returns `Array<T>` had no
+                // release row and leaked the array with everything in it
+                // (exit-residue round thirty-seven). The variables are solved
+                // from the arguments' own types, exactly as the checker
+                // solves them at the call; a variable no argument names stays
+                // unsolved, and the callers' resolve guards stand down as
+                // before.
+                .map(|t| {
+                    if !crate::types::mentions_param(&t) {
+                        return t;
+                    }
+                    let Some(ps) = self.params.get(name) else {
+                        return t;
+                    };
+                    let mut subst = HashMap::new();
+                    for (p, a) in ps.iter().zip(args) {
+                        if let Some(at) = self.type_of(vars, a) {
+                            crate::types::solve_param(p, &at, &mut subst);
+                        }
+                    }
+                    crate::types::substitute(&t, &subst)
+                })
                 // A call through a `fn`-typed BINDING (`df(13)` where `let df
                 // = d.run`): the binding's own type names the return. Sound
                 // because a `fn` value's result is always OWNED — a lambda

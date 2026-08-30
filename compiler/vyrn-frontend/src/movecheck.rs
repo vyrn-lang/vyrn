@@ -686,6 +686,14 @@ fn arg_verdict(
             }
         }
     }
+    // `x.copy()` READS its receiver and returns a value that shares nothing
+    // with it (RFC-0089 M1b). Its row is held back from the return table —
+    // the type is its receiver's — so no capability answers for it below,
+    // and a temporary receiver (`("" + s).copy()`) fell to Unknown and
+    // leaked (exit-residue round thirty-seven).
+    if s.callee == "@copy" && s.ix == 0 {
+        return ArgVerdict::Released;
+    }
     let cap = caps
         .get(&s.callee)
         .and_then(|c| c.get(s.ix))
@@ -3052,35 +3060,58 @@ impl MoveCheck<'_> {
                 // typing it from the scrutinee freed an `Int` as a `String`
                 // (validate_sum's wasm run, caught by parity before this
                 // shipped).
-                let unwraps = arms.first().is_some_and(|a| {
+                // Which payload sides the arms can hand out decides which
+                // sides the type screen below must pass. The `??` desugar's
+                // failure arm yields its own right-hand side, never the err
+                // payload, so `Success` screens the ok side alone (round
+                // thirty-four); a SPELLED `Ok(s) => s` may sit beside an
+                // `Err(e) => e`, so the spelled Result unwraps screen both
+                // (round thirty-seven, which first screened both for
+                // `Success` too and un-fixed contractquery).
+                let both_sides = arms.first().is_some_and(|a| {
                     matches!(
                         (&a.pattern, &a.body),
-                        (Pattern::Success(b), ArmBody::Expr(Expr::Var { name, .. }))
+                        (Pattern::Ok(b) | Pattern::Err(b), ArmBody::Expr(Expr::Var { name, .. }))
                             if b == name
                     )
                 });
+                let unwraps = both_sides
+                    || arms.first().is_some_and(|a| {
+                        matches!(
+                            (&a.pattern, &a.body),
+                            (
+                                Pattern::Success(b) | Pattern::Some(b),
+                                ArmBody::Expr(Expr::Var { name, .. })
+                            ) if b == name
+                        )
+                    });
                 if !unwraps {
                     return;
                 }
-                // The value's type is the payload's — the ok side of a
-                // `Result`, the some side of an `Option` — because `type_of`
+                // The value's type is the payload's, because `type_of`
                 // cannot answer for a match whose binders are not yet bound.
                 let Some(sty) = self.type_of(scrutinee) else {
                     return;
                 };
-                let pty = match crate::types::resolve(&sty, self.decl.decls()) {
-                    Type::Result(ok, _) => *ok,
-                    Type::Option(t) => *t,
+                let sides = match crate::types::resolve(&sty, self.decl.decls()) {
+                    Type::Result(ok, err) if both_sides => vec![*ok, *err],
+                    Type::Result(ok, _) => vec![*ok],
+                    Type::Option(t) => vec![*t],
                     _ => return,
                 };
                 // `String` payloads only: the one shape the corpus leaks,
                 // and the one whose free is a single pointer on every
                 // backend (an aggregate payload's drain teed differently on
-                // the direct backend and validate_sum diverged).
-                if !matches!(crate::types::resolve(&pty, self.decl.decls()), Type::Str) {
+                // the direct backend and validate_sum diverged). A static
+                // arm value stays safe under the same free: its header
+                // carries `cap == 0` and the free stands down.
+                if !sides
+                    .iter()
+                    .all(|t| matches!(crate::types::resolve(t, self.decl.decls()), Type::Str))
+                {
                     return;
                 }
-                let Some(kind) = self.decl.release_kind(&pty) else {
+                let Some(kind) = self.decl.release_kind(&Type::Str) else {
                     return;
                 };
                 sink.borrow_mut().push(ArgTemp {
@@ -4912,6 +4943,40 @@ impl MoveCheck<'_> {
                             // the field to the type, and `own` filters by the
                             // producer's return KIND.
                             let tag = match (&**expr, field.as_str()) {
+                                // `.copy()` transfers ownership of a FRESH
+                                // value of the receiver's type, so the chained
+                                // projection (`m.copy().length`) is its last
+                                // observer. The name-keyed filter in `own`
+                                // cannot see the copy's type, so the silent
+                                // screen runs here, where the typing lives:
+                                // only the four buffer kinds pass, and a type
+                                // whose walk could reach a declared release
+                                // stands aside (exit-residue round
+                                // thirty-seven).
+                                (Expr::Call { name, args, .. }, _) if name == "@copy" => args
+                                    .first()
+                                    .and_then(|a| self.decl.type_of(&self.vars.borrow(), a))
+                                    .and_then(|t| self.decl.release_kind(&t))
+                                    .and_then(|k| match k {
+                                        crate::own::DropKind::FreeStr
+                                        | crate::own::DropKind::FreeArr
+                                        | crate::own::DropKind::FreeSmallArr
+                                        | crate::own::DropKind::FreeMap => {
+                                            Some("@copy".to_string())
+                                        }
+                                        // A Deep copy is still wholly the
+                                        // frame's — a copy shares nothing —
+                                        // but a walk that could CALL a
+                                        // declared release has user-visible
+                                        // timing, and only one that cannot
+                                        // is silent enough to run here.
+                                        crate::own::DropKind::Deep(t)
+                                            if !self.decl.reaches_declared(&t) =>
+                                        {
+                                            Some("@copy".to_string())
+                                        }
+                                        _ => None,
+                                    }),
                                 (Expr::Call { name, .. }, _) => Some(name.clone()),
                                 (Expr::Binary { op: BinOp::Add, .. }, "byteLength") => {
                                     Some("@concat".to_string())
