@@ -1613,6 +1613,96 @@ impl MoveCheck<'_> {
         }
     }
 
+    /// Rule 3's marking at a RETURN, narrowed (exit-residue round seven): a
+    /// returned call whose callee is a KNOWN function carries an owned
+    /// result that contains none of its read arguments — rule 3 refuses
+    /// returning a borrow, and the positions the rule excepts are settled
+    /// by the `facts()` post-passes reading `row.passed` (a lender marks
+    /// them Lent, a retaining position marks them too). Marking everything
+    /// under the call `Returned` left `out`'s buffer unreleased at every
+    /// `return fromBytesOr(out, ..)` in `std/` — one scratch buffer per
+    /// byte-building call, twelve sites and every caller's own spelling of
+    /// the shape.
+    ///
+    /// The narrowing asks three guards, and every "no" keeps the
+    /// conservative walk: a variant constructor RETAINS its arguments, a
+    /// view lends a place inside one, and a name any scope binds is a
+    /// `fn`-typed local whose body nothing can read.
+    fn gave_up_returned(&self, e: &Expr, gone: &Gone) {
+        let off = std::env::var("VYRN_RET_NARROW_OFF").unwrap_or_default();
+        if off == "all" {
+            return self.gave_up(e, gone);
+        }
+        if let Ok(skip) = std::env::var("VYRN_RET_NARROW_SKIP") {
+            let f = self.cur_fn.borrow();
+            if skip.split(',').any(|s| s == f.as_str()) {
+                return self.gave_up(e, gone);
+            }
+        }
+        match e {
+            Expr::Call { name, .. } if off.contains("call") => self.gave_up(e, gone),
+            Expr::Match { .. } if off.contains("join") => self.gave_up(e, gone),
+            Expr::IfExpr { .. } if off.contains("join") => self.gave_up(e, gone),
+            Expr::Binary { .. } if off.contains("add") => self.gave_up(e, gone),
+            Expr::Call { name, .. } => {
+                // A seeded row whose return is the same bare parameter as an
+                // argument's may hand that argument straight back —
+                // `blackBox` is the identity — which `views` does not cover
+                // (it lends no PLACE, it returns the value itself). Same
+                // guard as `arg_verdict`'s.
+                let hands_back = crate::prelude::signature(name).is_some_and(|f| {
+                    matches!(&f.ret, Type::Param(r)
+                        if f.params.iter().any(|p| matches!(&p.ty, Type::Param(q) if q == r)))
+                });
+                if self.decl.is_function(name)
+                    && !self.decl.constructs(name)
+                    && !views(name)
+                    && !hands_back
+                    && self.vars.borrow().get(name).is_none()
+                {
+                    return;
+                }
+                self.gave_up(e, gone);
+            }
+            // The value-position joins recurse per arm — `return match
+            // stringFromBytes(out) { Ok(v) => v, Err(e) => "" }` is the
+            // spelling every byte-builder in `std/` ends on, and marking the
+            // whole match conservatively re-leaked exactly what the call arm
+            // above releases.
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                self.gave_up_returned(scrutinee, gone);
+                for arm in arms {
+                    if let crate::ast::ArmBody::Expr(b) = &arm.body {
+                        self.gave_up_returned(b, gone);
+                    }
+                }
+            }
+            // The condition's reads are a test, not the result — nothing it
+            // names can be inside the returned value, so only the branches
+            // are walked.
+            Expr::IfExpr {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.gave_up_returned(then_branch, gone);
+                if let Some(eb) = else_branch {
+                    self.gave_up_returned(eb, gone);
+                }
+            }
+            Expr::Try { expr, .. } => self.gave_up_returned(expr, gone),
+            // `return acc + "}"` — the shape every `std/` emitter ends on. A
+            // String `+` is `@concat`, which copies both operands into a
+            // fresh buffer; a `Code +` concatenates arena handles; every
+            // other `+` is scalar. Nothing an addition reads is inside its
+            // result, so nothing is marked.
+            Expr::Binary { op: BinOp::Add, .. } => {}
+            _ => self.gave_up(e, gone),
+        }
+    }
+
     /// Whether a `let` of `value` names storage somebody else owns, for
     /// reclamation purposes.
     ///
@@ -3373,7 +3463,7 @@ impl MoveCheck<'_> {
                     // expression reads may be inside it, so this block releases
                     // none of it. Only a heap return type can carry anything out.
                     if self.decl.owns_heap(&self.ret.borrow()) {
-                        self.gave_up(e, &Gone::Returned { line: *line });
+                        self.gave_up_returned(e, &Gone::Returned { line: *line });
                     }
                     // A result handed straight back is lent if what it names is.
                     if self.decl.releases(&self.ret.borrow()) {

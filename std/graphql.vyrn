@@ -1490,10 +1490,17 @@ fn gqlProjectCore(
         // with a selection: `gqlCheckSel` refused it against the type before the
         // walk descended here. They answer themselves rather than trapping,
         // because a total match on the value tree is what this is.
+        // The String payloads COPY, exactly as the leaf position above
+        // does with `copyJson`: `s` is a borrow of the caller's `v`, and an
+        // answered value outlives it. Re-wrapping the borrow handed the
+        // response a pointer the caller's release then freed — visible the
+        // moment the caller's conservative no-release marking narrowed
+        // (exit-residue round seven: the wasm run printed `{"data":{:` where
+        // the key had been).
         JNull => gqlOk(JNull),
         JBool(b) => gqlOk(JBool(b)),
-        JNum(n) => gqlOk(JNum(n)),
-        JStr(s) => gqlOk(JStr(s)),
+        JNum(n) => gqlOk(JNum(n.copy())),
+        JStr(s) => gqlOk(JStr(s.copy())),
     }
 }
 
@@ -1885,7 +1892,13 @@ fn gqlAnswerOne(
     schema: fn(String, String) -> String,
 ) -> GqlOut {
     let tref = schema(rootType, sel.name)
-    let at: Array<Json> = [JStr(sel.key)]
+    // `.copy()`: the path element must OWN its key. The literal held a
+    // borrow of `sel.key` through the constructor position, and releasing
+    // `at` then freed the selection key under `q.sels` — invisible while
+    // the old conservative return-marking pinned `at` forever, and visible
+    // the round it stopped (exit-residue round seven: the wasm run printed
+    // `{"data":{:` where the key had been).
+    let at: Array<Json> = [JStr(sel.key.copy())]
     return match resolved {
         Err(why) => gqlFaultAt(why, at, tref),
         Ok(v) => gqlAnswerValue(rootType, sel, v, tref, at, schema),
