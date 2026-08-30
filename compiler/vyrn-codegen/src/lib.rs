@@ -7590,6 +7590,25 @@ impl<'a> Gen<'a> {
         self.emit(format!("{w0} = extractvalue {{ i1, i64, i64 }} {agg}, 1"));
         self.emit(format!("{w1} = extractvalue {{ i1, i64, i64 }} {agg}, 2"));
         let v = self.decode_payload(&w0, &w1, &ok_ty);
+        // A boxed success payload (any type wider than a word) travelled in a
+        // block the `?` is the last to see WHEN THE OPERAND IS A TEMPORARY:
+        // the call's result is consumed here, no row anywhere names it, and
+        // the value has just been loaded out. Free the box (exit-residue
+        // round eleven: one 16-byte block per `parseValue(p, ..)?` — one per
+        // parsed JSON value in the corpus). A PLACE operand (`r?` over a
+        // binding) still owns its box — the binding's own release walks it —
+        // and on the propagate path the whole aggregate travels on, box and
+        // all.
+        let operand_is_place = vyrn_frontend::movecheck::place_path(expr).is_some()
+            || vyrn_frontend::movecheck::element_path(expr).is_some();
+        if !operand_is_place
+            && v != w0
+            && !matches!(self.resolve(&ok_ty), Type::Bool | Type::Str | Type::Fn(..))
+        {
+            let q = self.fresh_tmp();
+            self.emit(format!("{q} = inttoptr i64 {w0} to ptr"));
+            self.emit(format!("call void @__vyrn_free(ptr {q})"));
+        }
         Ok((v, ok_ty))
     }
 

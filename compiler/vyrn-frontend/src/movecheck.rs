@@ -1644,6 +1644,21 @@ impl MoveCheck<'_> {
             Expr::Match { .. } if off.contains("join") => self.gave_up(e, gone),
             Expr::IfExpr { .. } if off.contains("join") => self.gave_up(e, gone),
             Expr::Binary { .. } if off.contains("add") => self.gave_up(e, gone),
+            // A returned CONSTRUCTOR recurses per argument (exit-residue
+            // round eleven): `return Err(errAt(p, ..))` read `p` through the
+            // constructor and the conservative walk marked it Returned on
+            // EVERY path of the function — `parseJson`'s cursor record, and
+            // its whole byte buffer, leaked once per call because of the
+            // error return at the bottom. A direct place argument still
+            // falls to the conservative walk below (and the call walk has
+            // already moved or refused it at the constructor position); a
+            // call argument's reads are rule 3's business, same as at the
+            // top level.
+            Expr::Call { name, args, .. } if self.decl.constructs(name) => {
+                for a in args {
+                    self.gave_up_returned(a, gone);
+                }
+            }
             Expr::Call { name, .. } => {
                 // A seeded row whose return is the same bare parameter as an
                 // argument's may hand that argument straight back —
@@ -5758,7 +5773,7 @@ fn calls_in(e: &Expr, out: &mut Vec<String>) {
 /// deciding anything. **M1 took the decision M0 left open and widened both**, so
 /// `out.push(xs[i])` and `return items[i]` are refused like the field they are.
 /// The instrument still counts them apart, under `elem-store` and `elem-return`.
-fn element_path(e: &Expr) -> Option<(String, String)> {
+pub fn element_path(e: &Expr) -> Option<(String, String)> {
     match e {
         Expr::Call { name, args, .. } if projection_call(name) => {
             let a = args.first()?;
@@ -5798,7 +5813,7 @@ fn index_text(e: Option<&Expr>) -> String {
     }
 }
 
-fn place_path(e: &Expr) -> Option<(String, String)> {
+pub fn place_path(e: &Expr) -> Option<(String, String)> {
     match e {
         Expr::Var { name, .. } => Some((name.clone(), name.clone())),
         Expr::Field { expr, field, .. } => {
