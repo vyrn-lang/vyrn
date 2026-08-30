@@ -40,7 +40,7 @@ consumeloop	clean
 container	leak	4
 contractquery	clean
 controlflow	clean
-copy	leak	10
+copy	leak	2
 copyfromowned	skip
 domdemo	clean
 dropparam	skip
@@ -92,7 +92,7 @@ jsonplace	clean
 jsonschema	clean
 knucleotide	clean
 lambdas	clean
-langbench	leak	5
+langbench	clean
 lazyfield	leak	5
 linkedlist	other
 logging	leak	3
@@ -118,7 +118,7 @@ numparse	leak	8
 option	clean
 ownedcontainer	clean
 ownership	other
-pagesdemo	leak	3
+pagesdemo	leak	1
 parallel	clean
 patchdemo	clean
 payloadkey	skip
@@ -150,7 +150,7 @@ rest	leak	363
 revcomp	clean
 rpc	leak	6
 rpcsplit	leak	5
-scan	leak	1
+scan	clean
 schemaimport	clean
 server	clean
 sha1	clean

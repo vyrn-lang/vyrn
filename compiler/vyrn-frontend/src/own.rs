@@ -555,6 +555,53 @@ impl Owned {
         !self.impls.is_empty()
     }
 
+    /// Whether releasing a value of `ty` could CALL a declared `impl Owned`
+    /// release — the per-type question the coarse [`Owned::declares_any`]
+    /// gates approximated (the upgrade the record-producer gate's comment
+    /// named). A walk that cannot reach a declaration is silent whatever it
+    /// frees, so a receiver temporary of such a type may die at its last
+    /// read without user-visible timing. Conservative where it cannot see:
+    /// a type variable, a stored `fn`, a `lazy` capture block and a task all
+    /// answer yes.
+    pub fn reaches_declared(&self, ty: &Type) -> bool {
+        let mut seen: std::collections::HashSet<String> = Default::default();
+        self.reaches_declared_in(ty, &mut seen)
+    }
+
+    fn reaches_declared_in(&self, ty: &Type, seen: &mut std::collections::HashSet<String>) -> bool {
+        if let Some(k) = crate::types::type_key(ty) {
+            if self.impls.contains_key(&k) {
+                return true;
+            }
+            if !seen.insert(k) {
+                // A cycle without a declaration on it: this path is done.
+                return false;
+            }
+        }
+        match crate::types::resolve(ty, &self.types) {
+            Type::Array(t)
+            | Type::ArrayN(t, _)
+            | Type::SmallArray(t, _)
+            | Type::Stream(t)
+            | Type::Option(t)
+            | Type::Partial(t) => self.reaches_declared_in(&t, seen),
+            Type::Result(a, b) | Type::Merge(a, b) => {
+                self.reaches_declared_in(&a, seen) || self.reaches_declared_in(&b, seen)
+            }
+            Type::Map(k, v) => {
+                self.reaches_declared_in(&k, seen) || self.reaches_declared_in(&v, seen)
+            }
+            Type::Record(fields) => fields.iter().any(|f| self.reaches_declared_in(&f.ty, seen)),
+            Type::Enum(vs) => vs
+                .iter()
+                .flat_map(|v| v.payload.iter())
+                .any(|p| self.reaches_declared_in(p, seen)),
+            Type::App(_, args) => args.iter().any(|a| self.reaches_declared_in(a, seen)),
+            Type::Param(_) | Type::Fn(..) | Type::Lazy(_) | Type::Task(_) => true,
+            _ => false,
+        }
+    }
+
     /// Whether `name` IS a declared `release` body. A consume-match inside
     /// one must not free its payload boxes: the CALLER of a declared release
     /// walks them afterward (`release_enum` with `payloads` false), and that
@@ -1748,6 +1795,11 @@ pub fn analyze(program: &Program) -> Ownership {
         .filter(|(_, n, _)| {
             n == "@concat"
                 || n == "@str"
+                // `.copy()` receivers arrive pre-screened: movecheck tags
+                // `@copy` only when the copy's own release is silent — the
+                // four buffer kinds, or a Deep walk that cannot reach a
+                // declared release (round thirty-seven).
+                || n == "@copy"
                 || matches!(
                     owned_fns.get(n),
                     Some(
@@ -1757,12 +1809,12 @@ pub fn analyze(program: &Program) -> Ownership {
                             | DropKind::FreeMap
                     )
                 )
-                // A record producer joins only while the program declares no
-                // `impl Owned` at all: a Deep walk may call a declared release,
-                // and that timing is user-visible. ponytail: program-wide
-                // emptiness; a per-type reaches-a-release walk is the upgrade.
-                || (matches!(owned_fns.get(n), Some(DropKind::Deep(_)))
-                    && !proto.declares_any())
+                // A record producer joins when ITS OWN walk cannot call a
+                // declared release — the timing of one is user-visible. The
+                // per-type walk replaced the program-wide emptiness gate in
+                // round thirty-seven.
+                || matches!(owned_fns.get(n),
+                    Some(DropKind::Deep(t)) if !proto.reaches_declared(t))
                 // The chained projection frees only the FIELD it read — a
                 // String or a container, silent either way — so the record's
                 // walk never runs and the gate above does not apply.
@@ -1855,7 +1907,13 @@ pub fn analyze(program: &Program) -> Ownership {
             owners.insert(er.if_key, er.owner.clone());
         }
     }
-    for (k, _, owner) in &facts.receiver_temps {
+    for (k, n, owner) in &facts.receiver_temps {
+        if std::env::var("VYRN_PLAN_DEBUG").is_ok() {
+            eprintln!(
+                "plan-debug receiver id={k} tag={n} owner={owner} kept={}",
+                receiver_frees.contains(k)
+            );
+        }
         if receiver_frees.contains(k) {
             owners.insert(*k, owner.clone());
         }
