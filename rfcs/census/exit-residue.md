@@ -1327,6 +1327,26 @@ Movement: assoctype CLEAN (3 → 0).
 Tallies after round forty-three: **clean 124, leaking 20, zero
 double-frees**.
 
+## Forty-fourth triage: ordering across the back edge, partially
+
+Two fold refinements, no row moved — machinery for the corpus to
+come. The hoisted early release admits an in-loop exit when it sits
+in the EXACT loop context of an earlier write: within one iteration
+the walk order is the runtime order, which is the ordering answer
+round forty-two's revert asked for. An exit in a loop no write shares
+stays refused — that is precisely the wrapper's `for x in consume val
+{ return Valid(x) }`, where the loop's entry already took the binding
+and the walk order lies about it. And HOLE rows join the fold's
+Moved rows: a partial take leaves block exits releasing minus the
+holes, but at an exit BEFORE the first take the binding owns itself
+whole, and the placed release carries the full kind. Neither
+admission fires on today's corpus; both are pinned by the same
+battery that refused their unsound drafts.
+
+Tallies after round forty-four: **clean 124, leaking 20, zero
+double-frees** — unchanged, and the fold is more precise than the
+rounds that needed it.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the
