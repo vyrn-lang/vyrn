@@ -3118,12 +3118,27 @@ impl MoveCheck<'_> {
             // a LENDER and stopped every `.copy()` result in the corpus from
             // being released (exit-residue round six). An unknown type keeps
             // the lend, conservatively.
+            // A borrow whose KNOWN type owns no heap is copied by value into
+            // the payload and lends nothing — `JBool(b) => JBool(b)` in a
+            // declared `copy` read as a wrapped lend, which made the copy a
+            // LENDER, the lending closure spread it through every
+            // `copyJson`-forwarding reader (`fieldAt`, `elemAt`), and every
+            // decoder's field snapshot was pinned Lent forever (exit-residue
+            // rounds six and thirteen — round six refused this filter while
+            // two real dangles behind it were still live; rounds seven and
+            // ten fixed those, and the door now refuses heap-owning borrows
+            // at constructor positions outright). An unknown type keeps the
+            // lend, conservatively.
             Expr::Call { name, args, .. } if self.decl.constructs(name) => {
-                args.iter().find_map(|a| self.returned_borrow(a))
+                args.iter().find_map(|a| {
+                    self.returned_borrow(a)
+                        .filter(|_| !self.type_of(a).is_some_and(|t| !self.decl.owns_heap(&t)))
+                })
             }
-            Expr::StructLit { fields, .. } => {
-                fields.iter().find_map(|(_, v)| self.returned_borrow(v))
-            }
+            Expr::StructLit { fields, .. } => fields.iter().find_map(|(_, v)| {
+                self.returned_borrow(v)
+                    .filter(|_| !self.type_of(v).is_some_and(|t| !self.decl.owns_heap(&t)))
+            }),
             Expr::IfExpr {
                 then_branch,
                 else_branch,

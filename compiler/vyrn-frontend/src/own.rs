@@ -2311,6 +2311,16 @@ impl Emit<'_> {
                             self.droppable.insert(id(s), kind);
                         }
                     }
+                    // A row an element handover marked gone stays gone —
+                    // buffer included. Downgrading it to a buffer-only free
+                    // was tried in exit-residue round fourteen and REFUSED:
+                    // fourteen parity divergences, `aliascontext` trapping
+                    // outright on wasm — a `Fate::Moved` on this row does not
+                    // always mean "an element left", and freeing the buffer
+                    // on the ones where it means something else is a
+                    // use-after-free. The decode top's snapshot buffer is the
+                    // recorded price until the row can say WHICH take marked
+                    // it.
                 }
                 // No `BindingNote`: the snapshot is a temporary with no name to
                 // print, exactly as an `if let`'s scrutinee is.

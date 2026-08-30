@@ -184,21 +184,27 @@ impl Walk<'_> {
         }
         let d = self.decoder(ty)?;
         let (rd, t) = (self.rd("readDoc"), spell(ty));
+        // The doc is walked by CONSUME (each root's tree is released as it is
+        // decoded, and the buffer with the loop), and the issue returns TAKE
+        // the accumulator — the spellings whose releases every engine already
+        // proves (exit-residue round thirteen: the plain walk and the bare
+        // returns left the doc buffer and the decoded snapshot behind, one
+        // pair per `fromJson`).
         self.source.push_str(&format!(
             "fn {ph}(src: String) -> Validation<{t}> {{\n\
              \x20   let mut iss: Array<Issue> = []\n\
              \x20   let doc = {rd}(src, iss)\n\
              \x20   let mut val: Array<{t}> = []\n\
-             \x20   for j in doc {{\n\
+             \x20   for j in consume doc {{\n\
              \x20       val = {d}(j, \"\", iss)\n\
              \x20   }}\n\
              \x20   if iss.length > 0 {{\n\
-             \x20       return Invalid(iss)\n\
+             \x20       return Invalid(consume iss)\n\
              \x20   }}\n\
              \x20   for x in consume val {{\n\
              \x20       return Valid(x)\n\
              \x20   }}\n\
-             \x20   return Invalid(iss)\n\
+             \x20   return Invalid(consume iss)\n\
              }}\n"
         ));
         Ok(ph)

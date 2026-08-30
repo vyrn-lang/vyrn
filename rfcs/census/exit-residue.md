@@ -494,6 +494,53 @@ Tallies after round twelve: **clean 72, leaking 78, zero double-frees**
 — counts hold; graphql sits at 53 blocks, down from 3,905 at the first
 survey.
 
+## Thirteenth triage: the temporary the match never released, and the lender question laid to rest
+
+Three pieces, all on the decode tail:
+
+- **The temp-scrutinee box.** `readDoc`'s `return match parseJson(src)
+  { Ok(j) => out.push(j), .. }` destructures a TEMPORARY whose boxed
+  payload (a `Json` is two words) nobody owns once an arm takes it —
+  the scrutinee's drop row is cancelled by the take, and round eight's
+  per-arm box free was gated to `consume` scrutinees only. The gate
+  widens to any NON-PLACE scrutinee, and the Option/Result match path
+  (`gen_arm_body`) frees the box exactly as the enum path has since
+  round eight. One 16-byte block per `fromJson`, gone; `fjW`-shaped
+  probes fully clean.
+- **The copy-lender filter, landed at last.** Round six refused it
+  while two real dangles sat behind it; rounds seven and ten fixed
+  those and closed the constructor door, and the filter now lands
+  clean: a wrapped borrow whose KNOWN type owns no heap is no lend, so
+  a declared `copy`'s scalar arms (`JBool(b) => JBool(b)`) no longer
+  taint it — and through it `fieldAt`/`elemAt` and every
+  `copyJson`-forwarding reader — into lenders. The decode link's
+  lending seed list is now EMPTY.
+- **Template hygiene.** The jsondec top walks its doc by `consume` and
+  its issue returns take the accumulator.
+
+- **The consume-for's abandoned buffer — tried and REFUSED.** The
+  32/64-byte scaling block is the decode top's snapshot: `for x in
+  consume val { return Valid(x) }` hands the element out, the handover
+  marks the snapshot row gone, and the documented conservatism drops
+  the whole row, buffer included. Downgrading the marked row to a
+  buffer-only free bought clean=78 and FOURTEEN parity divergences —
+  `aliascontext` trapping outright on wasm — because a `Fate::Moved`
+  on that row does not always mean "an element left", and freeing the
+  buffer where it means something else is a use-after-free. Reverted;
+  the snapshot buffer stays the recorded price until the row can say
+  WHICH take marked it. (The survey's honest gain for the round is
+  what the other two fixes bought.)
+
+Recorded for later: that row refinement, and the `Err(e)` arm's
+message when the arm only reads it (`fjE`'s 53 bytes).
+
+Movement: `fromJson` at 1 block per call, graphql 53→14 blocks (3,905
+at the first survey), enumcodec 25→12, `fjW` clean.
+
+Tallies after round thirteen: **clean 74, leaking 76, zero
+double-frees** — the survey crosses its halfway mark, parity holding
+at zero divergences after the refusal.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach
