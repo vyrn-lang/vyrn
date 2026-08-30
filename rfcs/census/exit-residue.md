@@ -1268,6 +1268,29 @@ jsondecbytes 28 → 22, mapdemo 8 → 7, storage 6 → 5, vlog 3 → 2.
 Tallies after round forty: **clean 119, leaking 25, zero
 double-frees**.
 
+## Forty-first triage: the forced field, the Fallible unwrap, the seeded receiver
+
+Three producers nothing named. A FORCED `lazy` field read is a call —
+RFC-0085 M4a caches nothing, every read is a fresh owned value — and
+in argument position no row named it; movecheck types it from the
+record's declaration and mints an ordinary producer row (`@lazy`). A
+`?` over a `Fallible` operand types as its impl's `success` return —
+the parser substituted the associated `Output` into the flattened
+method, so the mangled row already spells it concretely — which gives
+`let body = fetch(code)?` its release row; and the abandoned operand
+itself (success COPIES, rule 3) is released whole after the success
+call, place operands and declared-release walks excepted. And a
+SEEDED builtin producer joins the R1′ receiver set under
+`call_may_forward`'s own screen — fresh unless the row hands a
+parameter back or lends, silent by its declared return —
+`bytes(s).length` inside an interpolation being the witness.
+
+Movement: lazyfield CLEAN (5 → 0), fallible CLEAN (4 → 0), bytesrange
+CLEAN (5 → 0).
+
+Tallies after round forty-one: **clean 122, leaking 22, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the

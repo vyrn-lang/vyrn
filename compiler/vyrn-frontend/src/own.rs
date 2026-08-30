@@ -1853,6 +1853,28 @@ pub fn analyze(program: &Program) -> Ownership {
                 // four buffer kinds, or a Deep walk that cannot reach a
                 // declared release (round thirty-seven).
                 || n == "@copy"
+                // A SEEDED builtin producer (round forty-one): fresh unless
+                // its row hands a parameter back, lends, or spells an
+                // `@`-desugar — the same screen `call_may_forward` reads —
+                // and silent by its declared return. `bytes(s).length` inside
+                // an interpolation was the witness.
+                || (!n.starts_with('@')
+                    && !crate::prelude::lends(n)
+                    && crate::prelude::signature(n).is_some_and(|f| {
+                        let hands_back = matches!(&f.ret, Type::Param(r)
+                            if f.params.iter().any(
+                                |p| matches!(&p.ty, Type::Param(q) if q == r)));
+                        !hands_back
+                            && proto.release_kind(&f.ret).is_some_and(|k| {
+                                matches!(
+                                    k,
+                                    DropKind::FreeStr
+                                        | DropKind::FreeArr
+                                        | DropKind::FreeSmallArr
+                                        | DropKind::FreeMap
+                                )
+                            })
+                    }))
                 || matches!(
                     owned_fns.get(n),
                     Some(

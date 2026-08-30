@@ -7804,7 +7804,9 @@ impl<'a> Gen<'a> {
     fn gen_try(&mut self, expr: &Expr, at: usize) -> Result<(String, Type), String> {
         let (agg, aty) = self.gen_expr(expr)?;
         if !matches!(self.resolve(&aty), Type::Option(_) | Type::Result(..)) {
-            return self.gen_try_fallible(&agg, &aty, at);
+            let place = vyrn_frontend::movecheck::place_path(expr).is_some()
+                || vyrn_frontend::movecheck::element_path(expr).is_some();
+            return self.gen_try_fallible(&agg, &aty, at, place);
         }
         // The type unwrapped on the success path.
         let ok_ty = match self.resolve(&aty) {
@@ -7875,6 +7877,7 @@ impl<'a> Gen<'a> {
         agg: &str,
         aty: &Type,
         at: usize,
+        operand_is_place: bool,
     ) -> Result<(String, Type), String> {
         let concrete = vyrn_frontend::types::substitute(aty, self.subst);
         let key = vyrn_frontend::types::type_key(&concrete)
@@ -7898,7 +7901,20 @@ impl<'a> Gen<'a> {
         self.emit_term(format!("ret {} {agg}", self.llt(aty)));
 
         self.emit_label(&ok_l);
-        self.gen_call(&ask("success"), &recv)
+        let r = self.gen_call(&ask("success"), &recv)?;
+        // `success` COPIES its payload out (rule 3: an owned result contains
+        // none of its read arguments), so a TEMPORARY operand is abandoned
+        // here whole — box, payload and all (exit-residue round forty-one:
+        // one Http per `fetch(code)?`). A place operand's binding still owns
+        // it, and a type whose walk could call a declared release keeps its
+        // user-visible timing.
+        if !operand_is_place && self.region_depth == 0 && !self.owned.reaches_declared(&concrete) {
+            if let Some(kind) = self.owned.release_kind(&concrete) {
+                let slot = slot.clone();
+                self.emit_drop(&slot, &kind);
+            }
+        }
+        Ok(r)
     }
 
     /// `a + b` on Strings is `@concat` written as an operator, so its operands

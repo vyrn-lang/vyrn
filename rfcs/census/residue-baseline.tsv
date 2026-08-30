@@ -25,7 +25,7 @@ blockarms	clean
 blockvalarm	skip
 branchtypes	clean
 bytecount	clean
-bytesrange	leak	5
+bytesrange	clean
 capturefn	clean
 clidemo	other
 clifail	other
@@ -53,7 +53,7 @@ eventloop	clean
 excl_alias	skip
 externdemo	other
 externdemo2	clean
-fallible	leak	4
+fallible	clean
 fannkuch	clean
 fasta	clean
 fib	other
@@ -93,7 +93,7 @@ jsonschema	clean
 knucleotide	clean
 lambdas	clean
 langbench	clean
-lazyfield	leak	5
+lazyfield	clean
 linkedlist	other
 logging	clean
 mandelbrot	clean

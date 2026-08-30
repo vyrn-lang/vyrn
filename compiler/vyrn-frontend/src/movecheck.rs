@@ -3299,6 +3299,49 @@ impl MoveCheck<'_> {
                 });
                 return;
             }
+            // A FORCED `lazy` field in argument position (RFC-0085 M4a):
+            // the read IS a call — nothing is cached, every read is a fresh
+            // owned value — and no row named it, so `print("\{b.body}")`
+            // leaked one forced String per read (exit-residue round
+            // forty-one). Typed from the record's declaration; the thunk's
+            // result is owned by rule 3 (a lambda returning a captured heap
+            // value raw is refused).
+            Expr::Field {
+                expr: base, field, ..
+            } => {
+                let Some(bt) = self.decl.type_of(&self.vars.borrow(), base) else {
+                    return;
+                };
+                let Type::Record(fields) = crate::types::resolve(&bt, self.decl.decls()) else {
+                    return;
+                };
+                let Some(f) = fields.iter().find(|f| &f.name == field) else {
+                    return;
+                };
+                let Some(inner) = crate::types::deferred(&f.ty) else {
+                    return;
+                };
+                if !self.decl.owns_heap(inner) {
+                    return;
+                }
+                let Some(kind) = self.decl.release_kind(inner) else {
+                    return;
+                };
+                sink.borrow_mut().push(ArgTemp {
+                    id: arg as *const Expr as usize,
+                    callee: callee.to_string(),
+                    ix,
+                    line,
+                    module: None,
+                    producer: Some("@lazy".to_string()),
+                    kind,
+                    verdict: ArgVerdict::Unknown,
+                    owner: self.cur_fn.borrow().clone(),
+                    view_copies: false,
+                    elem_producers: Vec::new(),
+                });
+                return;
+            }
             _ => return,
         };
         let Some(ty) = self.decl.type_of(&self.vars.borrow(), arg) else {
