@@ -736,6 +736,34 @@ Movement: `threeengines` CLEAN (199 → 0).
 Tallies after round nineteen: **clean 87, leaking 62, zero
 double-frees**.
 
+## Twentieth triage: the view that copied, and the binder no write ever touched
+
+revcomp's 339 blocks reduced to two shapes from one `run()` loop, and
+both closed. First, `bytes(l)[0] == '>'` in the line condition: the
+`bytes(l)` temporary is an argument to a VIEW (`@at`), and the verdict
+table said Lent — a view's result names a place inside its argument —
+so nothing ever freed it, one buffer per input line. But the element
+here is a `UInt8`: a scalar the view hands out by copy, keeping no
+pointer into the buffer. The row says so now (`view_copies`, computed
+where the row is recorded: the callee is a view AND the argument's
+element type owns no heap), and `arg_verdict` lets such a row fall
+through to Released like any read argument.
+
+Second, `if .. { header = l } else { .. }` inside the `while let` line
+loop: the payload binder `l` is taken on one branch and abandoned on
+the other — exactly RFC-0114 Rule N's shape, and the recorder saw it,
+named it, and the fold then dropped it: `fold_edge_releases` required
+every write on the row to be owning, and a row with NO writes — an
+`if let` scrutinee TEMPORARY, which is what a payload binder keys to —
+answered `unwrap_or(false)`. Zero writes is vacuously all-owning, and
+the row minting already refused borrows, parameters and module state.
+One flipped default, one payload released per untaken line.
+
+Movement: `revcomp` CLEAN (339 → 0), `rest` shed its line-loop share.
+
+Tallies after round twenty: **clean 89, leaking 60, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach

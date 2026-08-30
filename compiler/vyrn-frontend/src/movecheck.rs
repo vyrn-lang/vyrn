@@ -243,6 +243,12 @@ pub struct ArgTemp {
     /// `plan.unconsumed` skip rows whose owner an emission never reached
     /// (RFC-0114 §26's finish check).
     pub owner: String,
+    /// Round twenty: the callee is a VIEW whose result for this argument is a
+    /// copy — the element type owns no heap, so the scalar the view hands out
+    /// cannot alias the temporary. `bytes(l)[0]` in a line loop was one
+    /// unfreed `bytes` buffer per line; with this the row is Released like
+    /// any read argument instead of standing down as Lent.
+    pub view_copies: bool,
 }
 
 /// What the callee at a call-argument position does with the temporary it is
@@ -565,7 +571,11 @@ fn arg_verdict(
     if retains.contains(&(s.callee.clone(), s.ix)) {
         return ArgVerdict::Retained;
     }
-    if lending.contains(&s.callee) || views(&s.callee) {
+    // A view LENDS — its result names a place inside this argument — except
+    // where the element it hands out is a heap-free copy (round twenty): a
+    // scalar read through `bytes(l)[0]` keeps no pointer into the buffer, so
+    // the temporary is the caller's to free like any read argument.
+    if lending.contains(&s.callee) || (views(&s.callee) && !s.view_copies) {
         return ArgVerdict::Lent;
     }
     // A row whose RETURN is the same bare type parameter as this argument's may
@@ -2850,6 +2860,7 @@ impl MoveCheck<'_> {
                     kind,
                     verdict: ArgVerdict::Unknown,
                     owner: self.cur_fn.borrow().clone(),
+                    view_copies: false,
                 });
                 return;
             }
@@ -2895,6 +2906,7 @@ impl MoveCheck<'_> {
                     kind,
                     verdict: ArgVerdict::Unknown,
                     owner: self.cur_fn.borrow().clone(),
+                    view_copies: false,
                 });
                 return;
             }
@@ -2921,6 +2933,11 @@ impl MoveCheck<'_> {
             // Overwritten in `run` once the retention set is closed.
             verdict: ArgVerdict::Unknown,
             owner: self.cur_fn.borrow().clone(),
+            view_copies: views(callee)
+                && self
+                    .decl
+                    .elem_of(&ty)
+                    .is_some_and(|et| !self.decl.owns_heap(&et)),
         });
     }
 
