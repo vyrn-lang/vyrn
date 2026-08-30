@@ -566,6 +566,15 @@ jobs:
         # the `tools/` walk — and the pin is what answers here. clang is still
         # needed, for the NATIVE column, and stays discovered (RFC-0102 M3).
         run: cargo test --quiet -p vyrn-cli --test parity -- --ignored --nocapture
+      - name: The exit-residue ratchet (RFC-0114 §25)
+        working-directory: compiler
+        # Every example built natively and run once under VYRN_LEAK_CHECK,
+        # compared against rfcs/census/residue-baseline.tsv. A double free
+        # fails outright; a clean row that leaks fails; a leak row may only
+        # shrink. This is the gate the exit-residue triage arc was building
+        # toward: the twenty-five rounds it took to get here can no longer
+        # regress quietly.
+        run: cargo test --quiet -p vyrn-cli --test residue -- --ignored --nocapture
       - name: The codegen integration tests that need a toolchain (RFC-0077)
         working-directory: compiler
         # THE JOB THAT MAKES `layout_vs_clang` A GATE. These eight tests —
