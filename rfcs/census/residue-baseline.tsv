@@ -146,7 +146,7 @@ regionarena	leak	3
 regionescape	leak	2
 releaseacrossexit	leak	10
 releaseacrosstry	leak	5
-rest	leak	928
+rest	leak	629
 revcomp	clean
 rpc	leak	6
 rpcsplit	leak	5

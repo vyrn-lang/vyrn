@@ -887,6 +887,25 @@ diff.
 Tallies at the gate's first turn: **clean 94, leaking 57, zero
 double-frees** — from 54/~100 when the first survey ran.
 
+## Twenty-sixth triage: the literal one level deeper
+
+`mount(req, [[surface("/_", rpcHandle)], usersHttp.routes()], [], [])`
+— rest's composition root nests a literal INSIDE the literal, and
+round twenty-five's owned-producer test read the nested literal as
+"not a call" and stood the whole row down. The test recurses now: an
+element is owned when it is a call to a declared function or a nested
+literal whose elements all are, and every producer found on the way
+rides on the row for the lender screen.
+
+Movement: rest 928 → 629 blocks — the double-decker route table
+freed. The baseline tightens in the same commit, which is the ratchet
+working as designed: every closing row is a diff the gate enforces
+from then on.
+
+Tallies after round twenty-six: **clean 94, leaking 57, zero
+double-frees**, thirty-one thousand bytes of rest's residue down to
+seventeen.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the
