@@ -1090,6 +1090,27 @@ more row with it.
 Tallies after round thirty-three: **clean 101, leaking 45, zero
 double-frees**.
 
+## Thirty-fourth triage: the unwrap nobody owned
+
+`trimSpaces(slice(spelling, 0, i) ?? panic(..))` — contractquery's
+whole table, twelve `slice` results. The `??` operator desugars to a
+match whose first arm yields its own success binder, and in ARGUMENT
+position that payload had no owner: the temp scrutinee's row goes
+Moved and releases nothing, the box free keeps only the box, and the
+unwrapped `String` was nobody's. Such an argument gets a producer row
+now (`@match`, Released like any read argument) — restricted to
+EXACTLY the desugar shape, because the first version typed the match
+from its scrutinee's payload and a general match's value is whatever
+its arms build: `print(match bad { Ok(s) => 0, Err(a) => a })` got a
+row typed `String` for a value that is an `Int`, and validate_sum's
+wasm run freed a number as a pointer. Parity's audit caught it before
+anything shipped, as it has every round.
+
+Movement: contractquery CLEAN (12 → 0), storage 10 → 4.
+
+Tallies after round thirty-four: **clean 102, leaking 44, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the

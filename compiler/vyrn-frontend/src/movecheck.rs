@@ -2984,6 +2984,72 @@ impl MoveCheck<'_> {
             // TYPE is what tells them apart — the check `own::str_temporary`'s
             // doc comment demands of every caller.
             Expr::Binary { op: BinOp::Add, .. } => None,
+            // A MATCH in argument position that yields no place — `slice(..)
+            // ?? panic(..)` desugars to one — hands its payload to the call
+            // with no owner behind it: the temp scrutinee's row goes Moved
+            // and releases nothing, the box free keeps only the box, and the
+            // payload string was nobody's (round thirty-four: contractquery's
+            // whole table). Recorded like any producer; an arm that yields a
+            // PLACE stands down through `names_a_place` exactly as a `let`
+            // does.
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                if self.names_a_place(arg).is_some() {
+                    return;
+                }
+                // Exactly the `??` desugar: the first arm's body IS its own
+                // success binder, so the match's value IS the payload. A
+                // general match's value is whatever its arms build, and
+                // typing it from the scrutinee freed an `Int` as a `String`
+                // (validate_sum's wasm run, caught by parity before this
+                // shipped).
+                let unwraps = arms.first().is_some_and(|a| {
+                    matches!(
+                        (&a.pattern, &a.body),
+                        (Pattern::Success(b), ArmBody::Expr(Expr::Var { name, .. }))
+                            if b == name
+                    )
+                });
+                if !unwraps {
+                    return;
+                }
+                // The value's type is the payload's — the ok side of a
+                // `Result`, the some side of an `Option` — because `type_of`
+                // cannot answer for a match whose binders are not yet bound.
+                let Some(sty) = self.type_of(scrutinee) else {
+                    return;
+                };
+                let pty = match crate::types::resolve(&sty, self.decl.decls()) {
+                    Type::Result(ok, _) => *ok,
+                    Type::Option(t) => *t,
+                    _ => return,
+                };
+                // `String` payloads only: the one shape the corpus leaks,
+                // and the one whose free is a single pointer on every
+                // backend (an aggregate payload's drain teed differently on
+                // the direct backend and validate_sum diverged).
+                if !matches!(crate::types::resolve(&pty, self.decl.decls()), Type::Str) {
+                    return;
+                }
+                let Some(kind) = self.decl.release_kind(&pty) else {
+                    return;
+                };
+                sink.borrow_mut().push(ArgTemp {
+                    id: arg as *const Expr as usize,
+                    callee: callee.to_string(),
+                    ix,
+                    line,
+                    module: None,
+                    producer: Some("@match".to_string()),
+                    kind,
+                    verdict: ArgVerdict::Unknown,
+                    owner: self.cur_fn.borrow().clone(),
+                    view_copies: false,
+                    elem_producers: Vec::new(),
+                });
+                return;
+            }
             // An ARRAY LITERAL argument coerced at the call boundary
             // (RFC-0114 §25's exit-residue census, round three): the literal
             // itself is a fixed value and owns nothing, but a callee whose

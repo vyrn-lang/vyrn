@@ -38,7 +38,7 @@ consume_borrowed	skip
 consume_handover	clean
 consumeloop	clean
 container	leak	4
-contractquery	leak	12
+contractquery	clean
 controlflow	clean
 copy	leak	10
 copyfromowned	skip
@@ -146,7 +146,7 @@ regionarena	clean
 regionescape	leak	1
 releaseacrossexit	leak	10
 releaseacrosstry	leak	5
-rest	leak	525
+rest	leak	519
 revcomp	clean
 rpc	leak	6
 rpcsplit	leak	5
