@@ -298,6 +298,30 @@ pub struct ExitEv {
     pub clean: bool,
 }
 
+/// One READ of a tracked binding (round twenty-seven): the resolved row key,
+/// the name it was read through (a binder over a scrutinee resolves to the
+/// scrutinee's row — the name tells the two apart), and the walk order.
+#[derive(Clone, Debug)]
+pub struct MentionEv {
+    pub key: usize,
+    pub name: String,
+    pub order: u32,
+}
+
+/// A `match` over a WHOLE named local (round twenty-seven): the candidate for
+/// the consuming-match upgrade. `start` is the order after the scrutinee walk,
+/// `end` after the arms; `loops` is the match's loop context, which must equal
+/// the binding's initializing write's for the per-iteration freshness argument.
+#[derive(Clone, Debug)]
+pub struct ConsumeCand {
+    pub match_id: usize,
+    pub key: usize,
+    pub scrut_name: String,
+    pub start: u32,
+    pub end: u32,
+    pub loops: Vec<u32>,
+}
+
 pub struct Facts {
     /// What every `let` owns at the end of its block — see [`ownership`].
     pub lets: HashMap<usize, LetOwnership>,
@@ -329,6 +353,10 @@ pub struct Facts {
     /// Round twenty-one: every `return` and `?` the walk met, with enough
     /// context to place an early release — see `own::fold_early_releases`.
     pub exit_sites: Vec<ExitEv>,
+    /// Round twenty-seven: every read of a tracked binding, in walk order.
+    pub mentions: Vec<MentionEv>,
+    /// Round twenty-seven: the consuming-match candidates.
+    pub consume_cands: Vec<ConsumeCand>,
     /// Exit-residue round eighteen: `Stmt::Assign` nodes whose value mentions
     /// the assigned place ONLY as the bare name in plain argument positions of
     /// user-declared, non-lending, non-retaining functions — so the stored
@@ -506,6 +534,8 @@ pub fn facts(program: &Program) -> Facts {
             .collect(),
         exit_orders: r.exit_orders,
         exit_sites: r.exit_sites,
+        mentions: r.mentions,
+        consume_cands: r.consume_cands,
         place_stores: r.place_stores,
         // The walk recorded the shape; the closures decide the callees. A
         // lender's result aliases its argument and a retaining position keeps
@@ -555,6 +585,8 @@ struct Run {
     mention_stores: Vec<(usize, Vec<(String, usize)>)>,
     param_escapers: HashSet<String>,
     exit_sites: Vec<ExitEv>,
+    mentions: Vec<MentionEv>,
+    consume_cands: Vec<ConsumeCand>,
 }
 
 /// What the callee does with the temporary at `(callee, ix)`.
@@ -810,6 +842,8 @@ fn run(program: &Program, want: Want) -> Run {
         mention_stores: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         param_escapers: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
         exit_sites: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
+        mentions: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
+        consume_cands: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         walk_region: std::cell::Cell::new(0),
         ev_order: std::cell::Cell::new(0),
         loop_ids: RefCell::new(Vec::new()),
@@ -968,6 +1002,11 @@ fn run(program: &Program, want: Want) -> Run {
             .map(RefCell::into_inner)
             .unwrap_or_default(),
         exit_sites: mc.exit_sites.map(RefCell::into_inner).unwrap_or_default(),
+        mentions: mc.mentions.map(RefCell::into_inner).unwrap_or_default(),
+        consume_cands: mc
+            .consume_cands
+            .map(RefCell::into_inner)
+            .unwrap_or_default(),
     }
 }
 
@@ -1076,6 +1115,8 @@ struct MoveCheck<'a> {
     mention_stores: Option<RefCell<Vec<(usize, Vec<(String, usize)>)>>>,
     param_escapers: Option<RefCell<HashSet<String>>>,
     exit_sites: Option<RefCell<Vec<ExitEv>>>,
+    mentions: Option<RefCell<Vec<MentionEv>>>,
+    consume_cands: Option<RefCell<Vec<ConsumeCand>>>,
     walk_region: std::cell::Cell<u32>,
     ev_order: std::cell::Cell<u32>,
     /// The stack of loop ids the walk is inside — pushed by `while`/`for`,
@@ -1606,6 +1647,25 @@ impl MoveCheck<'_> {
     /// `continue`). The untake fold refuses any binding whose take-to-revive
     /// window contains one: on that exit the binding still holds the taken
     /// state, and the exit path's releases must not touch it.
+    /// Round twenty-seven: record one READ of a tracked binding. Bumps the
+    /// event order so a read is strictly ordered against the writes, takes and
+    /// exits around it; the folds that compare among their own events are
+    /// unaffected by the extra increments.
+    fn mention_ev(&self, name: &str) {
+        let Some(sink) = &self.mentions else { return };
+        let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
+        if key == 0 {
+            return;
+        }
+        let o = self.ev_order.get();
+        self.ev_order.set(o + 1);
+        sink.borrow_mut().push(MentionEv {
+            key,
+            name: name.to_string(),
+            order: o,
+        });
+    }
+
     /// Round twenty-one: record a `return`/`?` with its placement context.
     /// Called BEFORE `exit_ev`, so the two share the order the exit runs at.
     fn exit_site(&self, site: usize, is_try: bool) {
@@ -1629,6 +1689,7 @@ impl MoveCheck<'_> {
     }
 
     fn took(&self, name: &str, gone: Gone) {
+        self.mention_ev(name);
         let Some(sink) = &self.lets else { return };
         let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
         if key == 0 {
@@ -4568,6 +4629,7 @@ impl MoveCheck<'_> {
         match e {
             Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => Ok(()),
             Expr::Var { name, line } => {
+                self.mention_ev(name);
                 self.capture_site(name, *line);
                 self.check_capture(name, *line)?;
                 self.note_capture(name, *line);
@@ -4618,6 +4680,7 @@ impl MoveCheck<'_> {
             Expr::Field { expr, field, line } => match place_path(e) {
                 Some((_, path)) => {
                     let (root, rline) = root_var(e);
+                    self.mention_ev(root);
                     self.capture_site(root, rline);
                     self.check_capture(root, rline)?;
                     self.note_capture(root, rline);
@@ -4781,6 +4844,21 @@ impl MoveCheck<'_> {
                     }
                     k => k,
                 };
+                // Round twenty-seven: a match over a WHOLE named local is a
+                // consuming-match candidate — if the fold can prove nothing
+                // reads the binding after this match, the extraction may free
+                // the payload BOX (the binding's row goes Aliased and never
+                // releases it, and the alias owns only the payload).
+                let cand_start = match &**scrutinee {
+                    Expr::Var { name, .. }
+                        if key != 0
+                            && self.consume_cands.is_some()
+                            && self.borrow_of(name).is_none() =>
+                    {
+                        Some((name.clone(), self.ev_order.get()))
+                    }
+                    _ => None,
+                };
                 let base = consumed.clone();
                 let mut arm_cs: Vec<Consumed> = Vec::new();
                 let mut all_binders: HashSet<String> = HashSet::new();
@@ -4837,6 +4915,22 @@ impl MoveCheck<'_> {
                     r?;
                     scope.pop();
                     arm_cs.push(c);
+                }
+                // Round twenty-seven, the candidate's other half: end order
+                // after the arms, so a binder's reads (which resolve to the
+                // scrutinee's row) sit inside the (start, end] window and the
+                // fold can tell them apart from a read of the scrutinee NAME.
+                if let Some((scrut_name, start)) = cand_start {
+                    if let Some(sink) = &self.consume_cands {
+                        sink.borrow_mut().push(ConsumeCand {
+                            match_id: e as *const Expr as usize,
+                            key,
+                            scrut_name,
+                            start,
+                            end: self.ev_order.get(),
+                            loops: self.loop_ids.borrow().clone(),
+                        });
+                    }
                 }
                 // RFC-0114 Rule N at a MATCH join: a binding cleanly whole-taken
                 // in some arms and untouched in the rest is released on each

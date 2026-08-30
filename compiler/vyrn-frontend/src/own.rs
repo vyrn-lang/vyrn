@@ -1181,6 +1181,18 @@ pub struct ReleasePlan {
     /// snapshot down, so it is exempt from the finish check: a row here that
     /// no emission asks about is a store some other rule already handled.
     pub store_fresh: std::collections::HashSet<usize>,
+    /// Round twenty-seven: droppable scrutinee rows minted INSIDE a region
+    /// because their value is a callee's (malloc-side) allocation — the
+    /// textual emission frees these with its region guard stood down; the
+    /// direct backend keeps skipping (a leak wasm cannot measure, never a
+    /// double free).
+    pub malloc_scrutinees: std::collections::HashSet<usize>,
+    /// Round twenty-seven: `Expr::Match` nodes over a WHOLE named local whose
+    /// binding nothing reads after the match — the extraction may free the
+    /// payload BOX. The binding's row goes `Aliased` (never released), the
+    /// alias owns the payload, and the box was nobody's. See the fold in
+    /// `analyze`.
+    pub consuming_matches: std::collections::HashSet<usize>,
     /// RFC-0114 Rule N: per join address (`Stmt::If` or `Expr::Match`), the
     /// bindings to release on one edge because another edge consumed them —
     /// `(name, edge)`, 0/1 for an `if`'s then/else, the arm's source index
@@ -1275,6 +1287,21 @@ impl ReleasePlan {
     pub fn store_fresh_at(&self, at: usize) -> bool {
         let at = self.resolve(at);
         self.store_fresh.contains(&at)
+    }
+
+    /// Round twenty-seven: may this match free the boxes its arms extract,
+    /// though its scrutinee is a PLACE? True only where the fold proved the
+    /// binding is never read after the match.
+    /// Round twenty-seven: is this droppable scrutinee provably malloc-side
+    /// though it sits inside a `region`?
+    pub fn malloc_scrutinee(&self, at: usize) -> bool {
+        let at = self.resolve(at);
+        self.malloc_scrutinees.contains(&at)
+    }
+
+    pub fn match_consumes(&self, at: usize) -> bool {
+        let at = self.resolve(at);
+        self.consuming_matches.contains(&at)
     }
 
     /// RFC-0114 M2: does this store release the value it replaces?
@@ -1445,8 +1472,20 @@ pub fn analyze(program: &Program) -> Ownership {
     let mut holes = HashMap::new();
     let mut notes = HashMap::new();
     let mut releases = HashMap::new();
+    // Variant constructor names, the builtins included — see `Emit::constructs`.
+    let mut constructs: std::collections::HashSet<String> = ["Some", "None", "Ok", "Err"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    for d in program.type_decls.iter() {
+        if let Type::Enum(vs) = &d.base {
+            constructs.extend(vs.iter().map(|v| v.name.clone()));
+        }
+    }
+    let mut malloc_scrutinees: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut emit = |name: String, params: &[crate::ast::Param], body: &Block| {
-        let mut r = emit_body(body, &lets, &proto, &revived);
+        let mut r = emit_body(body, &lets, &proto, &revived, &constructs);
+        malloc_scrutinees.extend(r.malloc_scrutinees.drain());
         // RFC-0114: a `consume` parameter whose row says nothing took its
         // value (or whose take was provably revived) is the callee's to
         // release at exit — the same decision a `let` gets, minus the
@@ -1592,6 +1631,41 @@ pub fn analyze(program: &Program) -> Ownership {
         }
         early
     };
+    // Round twenty-seven: the consuming-match upgrade. A `match o` over a
+    // whole named local whose arm hands the payload out marks `o` Aliased —
+    // o releases nothing, the alias owns the payload, and the payload's BOX
+    // was nobody's (one 8-16 byte block per extraction; matchown's table,
+    // htmltree's and regexredux's box columns). Where nothing reads `o`
+    // after the match — no mention with a later order, no read of the
+    // scrutinee NAME inside the arm window (binder reads resolve to the same
+    // row but keep their own name), and the binding's initializing write in
+    // the same loop context as the match (per-iteration freshness) — the
+    // match may free the boxes its arms extract, exactly as it does for a
+    // temporary scrutinee.
+    let consuming_matches: std::collections::HashSet<usize> = {
+        use crate::movecheck::EvKind;
+        let mut init_loops: HashMap<usize, &Vec<u32>> = HashMap::new();
+        for ev in &facts.store_events {
+            if let EvKind::Write { .. } = ev.kind {
+                init_loops.entry(ev.key).or_insert(&ev.loops);
+            }
+        }
+        facts
+            .consume_cands
+            .iter()
+            .filter(|c| {
+                matches!(
+                    lets.get(&c.key).and_then(|r| r.gone.as_ref()),
+                    Some(crate::movecheck::Gone::Aliased { .. })
+                ) && init_loops.get(&c.key).is_some_and(|l| **l == c.loops)
+                    && !facts.mentions.iter().any(|m| {
+                        m.key == c.key
+                            && (m.order > c.end || (m.order > c.start && m.name == c.scrut_name))
+                    })
+            })
+            .map(|c| c.match_id)
+            .collect()
+    };
     // Rule 3: a return is owned. The return type is the whole answer.
     let owned_fns: HashMap<String, DropKind> = program
         .functions
@@ -1694,6 +1768,8 @@ pub fn analyze(program: &Program) -> Ownership {
             .collect(),
         store_owned,
         store_fresh,
+        malloc_scrutinees,
+        consuming_matches,
         edge_releases,
         receiver_frees,
         owners,
@@ -2276,6 +2352,7 @@ fn stmt_line(s: &Stmt) -> usize {
 
 struct FnResult {
     droppable: HashMap<usize, DropKind>,
+    malloc_scrutinees: std::collections::HashSet<usize>,
     holes: HashMap<usize, Vec<String>>,
     notes: Vec<BindingNote>,
 }
@@ -2286,9 +2363,12 @@ fn emit_body(
     lets: &HashMap<usize, LetOwnership>,
     proto: &Owned,
     revived: &std::collections::HashSet<usize>,
+    constructs: &std::collections::HashSet<String>,
 ) -> FnResult {
     let mut e = Emit {
         droppable: HashMap::new(),
+        malloc_scrutinees: std::collections::HashSet::new(),
+        constructs,
         revived,
         holes: HashMap::new(),
         notes: Vec::new(),
@@ -2299,6 +2379,7 @@ fn emit_body(
     e.block(body);
     FnResult {
         droppable: e.droppable,
+        malloc_scrutinees: e.malloc_scrutinees,
         holes: e.holes,
         notes: e.notes,
     }
@@ -2316,6 +2397,15 @@ fn id(s: &Stmt) -> usize {
 /// [`crate::movecheck`]. There is no expression analysis here at all.
 struct Emit<'a> {
     droppable: HashMap<usize, DropKind>,
+    /// Variant constructor names — `Some(six + sixb)` is a Call node whose
+    /// arguments keep their own provenance, so a constructor is NEVER
+    /// malloc-side by itself (regionescape's payload route double-freed on
+    /// the first version of round twenty-seven).
+    constructs: &'a std::collections::HashSet<String>,
+    /// Round twenty-seven: droppable scrutinee rows minted INSIDE a region
+    /// because their value is a callee's (malloc-side) allocation — the
+    /// emission must free these with the region guard stood down.
+    malloc_scrutinees: std::collections::HashSet<usize>,
     /// RFC-0114 untake: bindings whose taken value was provably re-established
     /// — their FINAL value is this block's to release. See [`fold_revived`].
     revived: &'a std::collections::HashSet<usize>,
@@ -2337,6 +2427,41 @@ impl Emit<'_> {
         }
     }
 
+    /// Round twenty-seven: is `e`'s VALUE provably malloc-side — a callee's
+    /// allocation, a static literal, or a match over one whose arms yield only
+    /// its payload, a binder projection, another such value, or a literal?
+    /// Inside a `region` these are the values whose release must NOT stand
+    /// down: the arena never owned them. Anything unproven answers false,
+    /// which keeps the region partition safe (an arena block freed early is
+    /// the double free the guard exists for).
+    fn malloc_value(&self, e: &Expr, binders: &[String]) -> bool {
+        match e {
+            Expr::Call { name, .. } => !name.starts_with('@') && !self.constructs.contains(name),
+            Expr::Str(_) => true,
+            Expr::Var { name, .. } => binders.iter().any(|b| b == name),
+            Expr::Field { .. } => crate::movecheck::place_path(e)
+                .is_some_and(|(root, _)| binders.iter().any(|b| *b == root)),
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                self.malloc_value(scrutinee, binders)
+                    && arms.iter().all(|a| match &a.body {
+                        ArmBody::Expr(b) => {
+                            let mut bs: Vec<String> =
+                                crate::movecheck::pattern_bindings(&a.pattern)
+                                    .into_iter()
+                                    .map(str::to_string)
+                                    .collect();
+                            bs.extend(binders.iter().cloned());
+                            self.malloc_value(b, &bs)
+                        }
+                        ArmBody::Block(_) => false,
+                    })
+            }
+            _ => false,
+        }
+    }
+
     fn stmt(&mut self, s: &Stmt) {
         match s {
             Stmt::Let {
@@ -2348,6 +2473,12 @@ impl Emit<'_> {
                     self.droppable.insert(id(s), kind.clone());
                     if !holes.is_empty() {
                         self.holes.insert(id(s), holes.clone());
+                    }
+                    // Round twenty-seven: a region-lexical `let` holding a
+                    // malloc-side value frees for real — the emission's region
+                    // guard stands down for exactly this row.
+                    if self.region_depth > 0 && self.malloc_value(value, &[]) {
+                        self.malloc_scrutinees.insert(id(s));
                     }
                 }
                 self.notes.push(BindingNote {
@@ -2507,13 +2638,32 @@ impl Emit<'_> {
         // would then have two owners, so this stands aside exactly as the
         // `FreeStr` rule below does. That leaks a scrutinee a CALLEE allocated,
         // which is what a region-enclosed match does today.
-        if let (Expr::Match { scrutinee, .. }, 0) = (e, self.region_depth) {
+        if let Expr::Match { scrutinee, .. } = e {
             let key = e as *const Expr as usize;
-            // A hole is a path into a RECORD and a scrutinee is not one, so this
-            // says what `ForIn` says: a kind with holes is not this row's.
-            if let Fate::Reclaimed(kind, holes) = self.fate(key, false, scrutinee) {
-                if holes.is_empty() {
-                    self.droppable.insert(key, kind);
+            // Inside a `region` the arena owns what the region LEXICALLY
+            // allocated — but a plain call's result is the CALLEE's
+            // allocation, made under the callee's own (region-free) context,
+            // so it is malloc-side and this row may release it (round
+            // twenty-seven: `match tag(k + 1)` in a region loop leaked one
+            // callee string per turn, fifty times over in matchown's region
+            // block). An `@`-desugar stays refused — `@str`/`@concat` route
+            // through the arena lexically.
+            let malloc_side = self
+                .lets
+                .get(&key)
+                .and_then(|r| r.from_call.as_deref())
+                .is_some_and(|n| !n.starts_with('@') && !self.constructs.contains(n));
+            if self.region_depth == 0 || malloc_side {
+                // A hole is a path into a RECORD and a scrutinee is not one, so
+                // this says what `ForIn` says: a kind with holes is not this
+                // row's.
+                if let Fate::Reclaimed(kind, holes) = self.fate(key, false, scrutinee) {
+                    if holes.is_empty() {
+                        self.droppable.insert(key, kind);
+                        if self.region_depth > 0 {
+                            self.malloc_scrutinees.insert(key);
+                        }
+                    }
                 }
             }
         }
@@ -3057,16 +3207,31 @@ pub(crate) mod tests {
         assert_eq!(drop_kinds(src, "main"), vec![DropKind::FreeStr]);
     }
 
-    /// Inside a `region` the arena owns what the region allocated and the exit
-    /// hands it back, so the scrutinee row is not written at all — one block,
-    /// one owner.
+    /// Round twenty-seven: a CALLEE's allocation is malloc-side wherever the
+    /// call sits, so the region no longer stands the scrutinee row down — one
+    /// release row, flagged for the emission's region bypass. A
+    /// CONSTRUCTOR-built scrutinee still gets nothing: its parts keep their
+    /// own (arena) provenance, which is regionescape's payload route.
     #[test]
-    fn a_match_inside_a_region_leaves_the_scrutinee_to_the_arena() {
+    fn a_match_inside_a_region_frees_a_callee_built_scrutinee() {
         let src = "fn maybe(n: Int64) -> Option<String> { return Some(\"x\") } \
                    fn main() -> Int64 { let mut t = 0 \
                    region { let d = match maybe(1) { \
                    Some(s) => s.byteLength, None => 0, } t = Int64(d) } return t }";
-        assert_eq!(drop_kinds(src, "main"), Vec::new());
+        assert_eq!(drop_kinds(src, "main").len(), 1, "the callee-built row");
+        let src = "fn main() -> Int64 { let a = \"x\" + \"y\" \
+                   let mut t = 0 \
+                   region { let d = match Some(a.copy()) { \
+                   Some(s) => s.byteLength, None => 0, } t = Int64(d) } \
+                   return t + Int64(a.byteLength) }";
+        assert_eq!(
+            drop_kinds(src, "main")
+                .iter()
+                .filter(|k| !matches!(k, DropKind::FreeStr))
+                .count(),
+            0,
+            "a constructor-built scrutinee stays the arena's"
+        );
     }
 
     // ---- RFC-0093 M2: a take leaves a hole, and the walk skips it --------
