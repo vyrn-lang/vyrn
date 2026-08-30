@@ -638,6 +638,14 @@ pub fn capability(name: &str, i: usize) -> Option<Capability> {
     if name == "@charCount" && i == 0 {
         return Some(Capability::Read);
     }
+    // A log method (RFC-0008) writes its message to the sink and keeps
+    // nothing — the same seam as `@charCount`: the four level names have no
+    // seeded row and no user declaration, so an interpolated message
+    // temporary (`log.error("\{i.path}: \{i.message}")`) had no verdict and
+    // leaked one rendered String per record (exit-residue round thirty-nine).
+    if crate::ast::is_log_level(name) && i == 1 {
+        return Some(Capability::Read);
+    }
     signature(name)
         .and_then(|f| f.params.get(i))
         .map(|p| p.capability)

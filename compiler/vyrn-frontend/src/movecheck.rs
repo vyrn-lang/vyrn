@@ -3086,6 +3086,55 @@ impl MoveCheck<'_> {
                         )
                     });
                 if !unwraps {
+                    // Round thirty-nine, the other safe shape: EVERY arm
+                    // builds a `String` of its own — a literal (static, whose
+                    // free is a no-op by the cap guard), an allocating `+`,
+                    // an interpolation's `@str`/`@concat`, or an owned
+                    // producer call (rule 3). `print(match back[7] {
+                    // Some(v) => "\{v}", None => "?" })` printed the
+                    // rendered arm value and nothing ever freed it. No arm
+                    // yields a place or a binder here — those shapes keep
+                    // their own rules above and below.
+                    let fresh_str = arms.iter().all(|a| match &a.body {
+                        ArmBody::Expr(b) => match b {
+                            Expr::Str(_) => true,
+                            Expr::Binary { op: BinOp::Add, .. } => self.concatenates(b),
+                            Expr::Call { name, .. } => {
+                                name == "@str"
+                                    || name == "@concat"
+                                    || (self.decl.is_function(name)
+                                        && !name.starts_with('@')
+                                        && crate::prelude::signature(name).is_none()
+                                        && !self.decl.constructs(name)
+                                        && self.decl.type_of(&self.vars.borrow(), b).is_some_and(
+                                            |t| {
+                                                matches!(
+                                                    crate::types::resolve(&t, self.decl.decls()),
+                                                    Type::Str
+                                                )
+                                            },
+                                        ))
+                            }
+                            _ => false,
+                        },
+                        ArmBody::Block(_) => false,
+                    });
+                    if !fresh_str {
+                        return;
+                    }
+                    sink.borrow_mut().push(ArgTemp {
+                        id: arg as *const Expr as usize,
+                        callee: callee.to_string(),
+                        ix,
+                        line,
+                        module: None,
+                        producer: Some("@match".to_string()),
+                        kind: DropKind::FreeStr,
+                        verdict: ArgVerdict::Unknown,
+                        owner: self.cur_fn.borrow().clone(),
+                        view_copies: false,
+                        elem_producers: Vec::new(),
+                    });
                     return;
                 }
                 // The value's type is the payload's, because `type_of`
