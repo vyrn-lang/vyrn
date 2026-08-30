@@ -28,7 +28,7 @@ bytecount	clean
 bytesrange	leak	5
 capturefn	clean
 clidemo	other
-clifail	leak	2
+clifail	other
 clock	clean
 closures2	other
 codecbytes	leak	3
@@ -95,7 +95,7 @@ lambdas	clean
 langbench	clean
 lazyfield	leak	5
 linkedlist	other
-logging	leak	3
+logging	clean
 mandelbrot	clean
 map	clean
 mapdemo	leak	8
@@ -114,7 +114,7 @@ namespace	clean
 nbody	clean
 nohashkey	skip
 numbytes	clean
-numparse	leak	8
+numparse	leak	3
 option	clean
 ownedcontainer	clean
 ownership	other
@@ -172,7 +172,7 @@ slottable	clean
 smallarray	clean
 spectralnorm	clean
 statemod	clean
-storage	leak	10
+storage	leak	6
 stream	clean
 stream_abandoned	skip
 stream_combinator_abandoned	skip
@@ -201,7 +201,7 @@ validate_store	other
 validate_sum	other
 validatestr	clean
 validation	other
-vlog	leak	4
+vlog	leak	3
 vondemo	clean
 vyxdemo	clean
-wirekey	leak	2
+wirekey	clean

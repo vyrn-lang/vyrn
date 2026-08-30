@@ -1216,6 +1216,30 @@ Movement: mapdemo 13 → 8, jsondecbytes 30 → 28, wirekey 3 → 2.
 Tallies after round thirty-eight: **clean 113, leaking 33, zero
 double-frees** — fewer blocks behind the same row count.
 
+## Thirty-ninth triage: the message and the rendered arm
+
+Two seams, both the `@charCount` shape from round twenty-three. A log
+method (RFC-0008) has no seeded row and no user declaration, so an
+interpolated message temporary — `log.error("\{i.path}:
+\{i.message}")` — had no verdict and leaked one rendered String per
+record; the four level names answer `read` for the message now, and
+the ordinary drain does the rest. And a match in ARGUMENT position
+whose arms each BUILD a `String` — a literal (static, its free a
+no-op by the cap guard), an allocating `+`, an interpolation's
+`@str`/`@concat`, an owned producer call — had no row unless its first
+arm yielded its own binder: `print(match back[7] { Some(v) => "\{v}",
+None => "?" })` printed the rendered arm and nothing ever freed it.
+Every-arm-fresh mints a `FreeStr` row beside round thirty-four's
+unwrap shapes. clifail's own designed nonzero exit reappears from
+behind its leak — the row moves to `other`, not to `clean`.
+
+Movement: logging CLEAN (3 → 0), wirekey CLEAN (2 → 0), clifail
+residue-free (2 → its own exit), numparse 8 → 3, storage 10 → 6, vlog
+4 → 3.
+
+Tallies after round thirty-nine: **clean 115, leaking 30, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the
