@@ -970,6 +970,44 @@ detector examples as canaries.
 
 Tallies hold at **clean 96, leaking 52, zero double-frees**.
 
+## Twenty-ninth triage: the box is heap, whatever the payload holds
+
+The biggest round of the arc, and the detector examples earned their
+keep three times over. The finding: a sum whose payload is wider than
+one word travels BOXED in the boxing representation, and that box is
+heap whatever else the payload holds — `Option<Handle>` is three
+words behind one pointer, invisible to every `owns_heap` gate. The
+principled fix is the one the recursive-name rule already made:
+`owns_heap` itself answers true for boxed-payload sums (word-class
+payloads — `Int`, `Bool`, `Str`, `Fn`, and the payload-less `Unit`,
+`Never`, unresolved `Param` — excluded, mirroring the emitter's
+`payload_boxed`). Every discipline then follows: stores move them,
+kinds walk them, `release_sum` frees their boxes, the store snapshot
+selects the box by tag as pure data flow.
+
+Getting there surfaced four latent defects, each masked while such
+types had no release row: a `match` over a heap-free read PARAMETER
+minted a temporary scrutinee row and freed the caller's value (a read
+parameter whose type owns no heap carries no borrow, so the
+temporary guards fell through — `tree.vyrn` double-freed the day the
+kind arrived); `let mut head = None` was marked "a second name for a
+value it did not take", because a nullary constructor parses as a
+bare name and the alias rule read it as a place; a `modify`
+parameter's element stores never released what they displaced
+(`s.vals[i] = v` in `std/slots` — the caller's exclusive storage,
+key 0 in every fold); and the self-store pattern `head =
+Some(insert(s, Node { next: head }))` never revived, though a take
+inside the store that re-establishes the same binding cannot leave it
+un-owned across a statement.
+
+Movement: `freelist` CLEAN — 100,000 blocks to zero, output
+byte-identical — with `tree`, `arrays`, `smallarray` and the box
+columns across the corpus. `fnvalstore` and friends moved with the
+kinds.
+
+Tallies after round twenty-nine: **clean 100, leaking 46, zero
+double-frees** — the century, from 54 when the first survey ran.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the

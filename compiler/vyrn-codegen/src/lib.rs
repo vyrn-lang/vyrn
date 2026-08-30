@@ -4019,7 +4019,9 @@ impl<'a> Gen<'a> {
             self.call_release(v, ty)?;
             return self.free_declared_boxes(v, ty);
         }
-        if !self.owns_heap(ty) {
+        // Round twenty-nine: heap-free is not box-free — a type whose only
+        // release row is a boxed sum payload still walks.
+        if !self.owns_heap(ty) && self.owned.release_kind(ty).is_none() {
             return Ok(());
         }
         match self.resolve(ty) {
@@ -4103,7 +4105,10 @@ impl<'a> Gen<'a> {
                     .ok_or_else(|| format!("a release of a record with no fields: {ty:?}"))?;
                 let rll = self.llt(ty);
                 for (i, f) in fields.iter().enumerate() {
-                    if !self.owns_heap(&f.ty) {
+                    // Kind-driven since round twenty-nine: a heap-free field
+                    // whose type still carries a release row is a
+                    // boxed-payload sum the walk must reach.
+                    if !self.owns_heap(&f.ty) && self.owned.release_kind(&f.ty).is_none() {
                         continue;
                     }
                     // RFC-0093 M2. A `consume` took this field, so it has an
@@ -4162,7 +4167,13 @@ impl<'a> Gen<'a> {
     fn payload_boxed(&mut self, ty: &Type) -> bool {
         if matches!(
             self.resolve(ty),
-            Type::Int | Type::Bool | Type::Str | Type::Fn(..)
+            Type::Int
+                | Type::Bool
+                | Type::Str
+                | Type::Fn(..)
+                | Type::Unit
+                | Type::Never
+                | Type::Param(_)
         ) {
             return false;
         }
@@ -4176,7 +4187,9 @@ impl<'a> Gen<'a> {
         self.emit(format!("{tag} = extractvalue {sll} {v}, 0"));
         let end_l = self.fresh_label("rel.sum.end");
         for (want, pty) in arms {
-            if !self.owns_heap(pty) {
+            // Round twenty-nine: a payload that owns no heap can still TRAVEL
+            // in a box, and the box is the sum's to free.
+            if !self.owns_heap(pty) && !self.payload_boxed(pty) {
                 continue;
             }
             let hit_l = self.fresh_label("rel.sum.hit");
@@ -5210,6 +5223,43 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{d} = extractvalue {{ ptr, i64, i64 }} {v}, 0"));
                 out.push((d, false));
             }
+            // A SUM whose payload travels boxed (round twenty-nine): the box
+            // is the sum's own storage, and a store that displaces the sum
+            // must free it — selected by tag as pure data flow, so the snap
+            // stays straight-line (`free` refuses the null the other tag
+            // selects). The payload VALUE keeps the shallow rule: what it
+            // owns leaks rather than risk reading through a value the store
+            // is replacing.
+            Some(DropKind::Deep(t))
+                if matches!(self.resolve(&t), Type::Option(_) | Type::Result(..)) =>
+            {
+                let (box_some, box_zero) = match self.resolve(&t) {
+                    Type::Option(p) => (self.payload_boxed(&p), false),
+                    Type::Result(a, b) => (self.payload_boxed(&a), self.payload_boxed(&b)),
+                    _ => unreachable!(),
+                };
+                if box_some || box_zero {
+                    let sll = "{ i1, i64, i64 }";
+                    let tag = self.fresh_tmp();
+                    let w = self.fresh_tmp();
+                    self.emit(format!("{tag} = extractvalue {sll} {v}, 0"));
+                    self.emit(format!("{w} = extractvalue {sll} {v}, 1"));
+                    let word = if box_some && box_zero {
+                        w
+                    } else {
+                        let sel = self.fresh_tmp();
+                        if box_some {
+                            self.emit(format!("{sel} = select i1 {tag}, i64 {w}, i64 0"));
+                        } else {
+                            self.emit(format!("{sel} = select i1 {tag}, i64 0, i64 {w}"));
+                        }
+                        sel
+                    };
+                    let ptr = self.fresh_tmp();
+                    self.emit(format!("{ptr} = inttoptr i64 {word} to ptr"));
+                    out.push((ptr, false));
+                }
+            }
             // A RECORD, shallowly (round eighteen): each heap-owning field's
             // buffer pointer, read before the store overwrites the aggregate —
             // the same rule as the arms around it, so elements and boxed
@@ -5222,7 +5272,10 @@ impl<'a> Gen<'a> {
                 let fields = self.record_fields(ty).expect("guarded");
                 let ll = self.llt(ty);
                 for (i, f) in fields.iter().enumerate() {
-                    if !self.owns_heap(&f.ty) {
+                    // Kind-driven since round twenty-nine: a heap-free field
+                    // whose type still has a release row is a boxed-payload
+                    // sum, and the sum arm below snapshots its box.
+                    if !self.owns_heap(&f.ty) && self.owned.release_kind(&f.ty).is_none() {
                         continue;
                     }
                     let fv = self.fresh_tmp();
