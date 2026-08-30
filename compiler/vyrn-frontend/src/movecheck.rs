@@ -2742,6 +2742,36 @@ impl MoveCheck<'_> {
             // owns and nothing recorded. Typed from the DECLARATION, because
             // the literal's own type deliberately answers nothing (see
             // `Declared::type_of`'s array-literal note).
+            // A STRUCT-LITERAL argument (`toJson(Esc { s: ctl(b) })`) is a
+            // temporary the caller owns, admitted in exit-residue round
+            // fourteen on round ten's terms: the literal's fields take the
+            // store discipline (moves, takes, or refused borrows), so the
+            // constructed record owns everything in it and a deep free is
+            // sound. `jsonbytes` leaked one field buffer per `ctlJson` call
+            // — thirty-two identical blocks — with no row to free them.
+            Expr::StructLit { name, .. } => {
+                if self.caps.get(callee).and_then(|c| c.get(ix)) == Some(&Capability::Consume)
+                    || self.sinks(callee, ix)
+                {
+                    return;
+                }
+                let ty = Type::Named(name.clone());
+                let Some(kind) = self.decl.release_kind(&ty) else {
+                    return;
+                };
+                sink.borrow_mut().push(ArgTemp {
+                    id: arg as *const Expr as usize,
+                    callee: callee.to_string(),
+                    ix,
+                    line,
+                    module: None,
+                    producer: Some("@record".to_string()),
+                    kind,
+                    verdict: ArgVerdict::Unknown,
+                    owner: self.cur_fn.borrow().clone(),
+                });
+                return;
+            }
             Expr::ArrayLit { .. } => {
                 // A `consume` position stands the record down, exactly as the
                 // call walk stands down for every other temporary: the callee

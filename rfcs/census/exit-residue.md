@@ -541,6 +541,23 @@ Tallies after round thirteen: **clean 74, leaking 76, zero
 double-frees** — the survey crosses its halfway mark, parity holding
 at zero divergences after the refusal.
 
+## Fourteenth triage: the record nobody recorded
+
+`jsonbytes`' thirty-two identical 20-byte blocks — frozen since round
+seven — were one field buffer per `ctlJson` call: `toJson(Esc { s:
+ctl(b) })` builds a STRUCT-LITERAL argument, and struct literals were
+the one producer the argument-temporary record still fell through
+(`_ => return`). Admitted on round ten's terms: the literal's fields
+already take the store discipline (moves, takes, or refused borrows),
+so the constructed record owns everything in it and the drain's deep
+free is sound. The row types from the literal's own name, producer
+`@record`, `consume`/sink positions standing down as everywhere.
+
+Movement: jsonbytes 35→1 blocks.
+
+Tallies after round fourteen: **clean 74, leaking 76, zero
+double-frees** — counts hold, parity at zero divergences.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach
