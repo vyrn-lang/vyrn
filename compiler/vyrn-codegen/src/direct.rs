@@ -6011,8 +6011,18 @@ impl<'p> Fn_<'_, 'p> {
             // allocated is released once it has (RFC-0096 M3). The left one is
             // kept BEFORE the right is lowered, because lowering the right can
             // be a whole nested concatenation of its own.
+            // Comparisons read both halves and keep neither, so their
+            // operand temporaries are this site's to free too (RFC-0096 M3,
+            // exit-residue round twelve) — the textual backend's strcmp arm
+            // is the twin.
             let kl = match op {
-                BinOp::Add => self.tee_str_temp(b, lhs),
+                BinOp::Add
+                | BinOp::Eq
+                | BinOp::NotEq
+                | BinOp::Lt
+                | BinOp::LtEq
+                | BinOp::Gt
+                | BinOp::GtEq => self.tee_str_temp(b, lhs),
                 _ => None,
             };
             let r = self.expr(m, b, rhs)?;
@@ -6027,9 +6037,12 @@ impl<'p> Fn_<'_, 'p> {
                 self.free_str_temp(b, kr);
                 return Ok(Type::Str);
             }
+            let kr = self.tee_str_temp(b, rhs);
             b.ins(&Instruction::Call(self.cx.rt.strcmp));
             b.ins(&Instruction::I32Const(0));
             b.ins(&cmp_i32(op).ok_or_else(|| gap(&format!("`{op:?}` on strings"), line))?);
+            self.free_str_temp(b, kl);
+            self.free_str_temp(b, kr);
             return Ok(Type::Bool);
         }
         // `Code + Code` concatenates fragments with their origins carried

@@ -1468,6 +1468,20 @@ export fn gqlProject(
 /// The shape-driven half of a position, with the outer non-null wrapper already
 /// off: a list walks its elements, an object picks its members, a leaf answers
 /// itself.
+/// `gqlPick` over the NAMED form of `core` — bound here so the stripped
+/// name is a binding with a release, not an inline temporary (exit-residue
+/// round twelve's probe site).
+fn gqlPickNamed(
+    fields: Array<JsonField>,
+    sels: Array<GqlSel>,
+    core: String,
+    path: Array<Json>,
+    schema: fn(String, String) -> String,
+) -> GqlOut {
+    let named = gqlNamed(core)
+    return gqlPick(fields, sels, named, path, schema)
+}
+
 fn gqlProjectCore(
     v: Json,
     sels: Array<GqlSel>,
@@ -1484,7 +1498,7 @@ fn gqlProjectCore(
     }
     return match v {
         JArr(items) => gqlProjectEach(items, sels, gqlElemRef(core), path, schema),
-        JObj(fields) => gqlPick(fields, sels, gqlNamed(core), path, schema),
+        JObj(fields) => gqlPickNamed(fields, sels, core, path, schema),
         // `null` with a selection on it is an ordinary nullable object field that
         // came back absent, and it stays `null`. The other three cannot be reached
         // with a selection: `gqlCheckSel` refused it against the type before the
@@ -1916,7 +1930,8 @@ fn gqlAnswerValue(
     at: Array<Json>,
     schema: fn(String, String) -> String,
 ) -> GqlOut {
-    let bad = gqlCheckSel(rootType, sel.name, gqlNamed(tref), sel.subs.length > 0, schema)
+    let named = gqlNamed(tref)
+    let bad = gqlCheckSel(rootType, sel.name, named, sel.subs.length > 0, schema)
     if bad != "" {
         return gqlFaultAt(bad, at, tref)
     }
