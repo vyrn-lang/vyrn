@@ -897,6 +897,8 @@ fn run(program: &Program, want: Want) -> Run {
         consume_cands: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         arm_payloads: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         discarded: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
+        fnval_sigs: (want == Want::Lets).then(|| RefCell::new(HashMap::new())),
+        lambda_arities: (want == Want::Lets).then(|| RefCell::new(Default::default())),
         walk_region: std::cell::Cell::new(0),
         ev_order: std::cell::Cell::new(0),
         loop_ids: RefCell::new(Vec::new()),
@@ -1020,8 +1022,64 @@ fn run(program: &Program, want: Want) -> Run {
     // whether a position keeps what it is given is only settled once every body
     // has been read, which is why the walk records the site and decides nothing.
     let mut arg_temps = mc.arg_temps.map(RefCell::into_inner).unwrap_or_default();
+    // Round forty-six: the capability meet over a fn-value call's closed
+    // target set. Any runtime value of `Fn(ps) -> r` is either a program
+    // function of exactly that signature or a lambda; lambdas carry no
+    // capability or retention rows, so a signature any lambda could inhabit
+    // (by arity — the declared reading does not type lambdas) stands down.
+    // A signature whose EVERY function reads the position, retains nothing
+    // there and lends nothing lets the ordinary Released machinery run.
+    let fnval_sigs = mc
+        .fnval_sigs
+        .as_ref()
+        .map(|s| s.borrow().clone())
+        .unwrap_or_default();
+    let lambda_arities = mc
+        .lambda_arities
+        .as_ref()
+        .map(|s| s.borrow().clone())
+        .unwrap_or_default();
+    let mut sig_groups: HashMap<String, Vec<String>> = HashMap::new();
+    for f in &program.functions {
+        let ps: Vec<Type> = f
+            .params
+            .iter()
+            .map(|p| crate::types::resolve(&p.ty, decl.decls()))
+            .collect();
+        let key = format!("{ps:?}->{:?}", crate::types::resolve(&f.ret, decl.decls()));
+        sig_groups.entry(key).or_default().push(f.name.clone());
+    }
+    let mut arg_temps = arg_temps;
     for s in &mut arg_temps {
         s.verdict = arg_verdict(s, &caps, &retains, &lending, &decl);
+        if s.verdict != ArgVerdict::Unknown {
+            continue;
+        }
+        let Some((ps, r)) = fnval_sigs.get(&s.id) else {
+            continue;
+        };
+        if lambda_arities.contains(&ps.len()) {
+            continue;
+        }
+        let rps: Vec<Type> = ps
+            .iter()
+            .map(|t| crate::types::resolve(t, decl.decls()))
+            .collect();
+        let key = format!("{rps:?}->{:?}", crate::types::resolve(r, decl.decls()));
+        let Some(members) = sig_groups.get(&key) else {
+            continue;
+        };
+        let all_clear = !members.is_empty()
+            && members.iter().all(|m| {
+                caps.get(m)
+                    .and_then(|c| c.get(s.ix))
+                    .is_some_and(|c| *c == Capability::Read)
+                    && !retains.contains(&(m.clone(), s.ix))
+                    && !lending.contains(m)
+            });
+        if all_clear {
+            s.verdict = ArgVerdict::Released;
+        }
     }
     Run {
         diags: out,
@@ -1174,6 +1232,16 @@ struct MoveCheck<'a> {
     consume_cands: Option<RefCell<Vec<ConsumeCand>>>,
     arm_payloads: Option<RefCell<Vec<ArmPayloadEv>>>,
     discarded: Option<RefCell<Vec<(usize, String)>>>,
+    /// Round forty-six: for an argument of a call THROUGH A FN VALUE (a
+    /// `fn`-typed parameter, field or binding), the callee's declared
+    /// signature, keyed by the argument node — what lets the verdict meet
+    /// capabilities over the closed set of same-signature functions.
+    fnval_sigs: Option<RefCell<HashMap<usize, (Vec<Type>, Type)>>>,
+    /// Round forty-six: the arity of every lambda the walk met. A lambda has
+    /// no capability rows and no retention rows, so a signature any lambda
+    /// could inhabit (matched by arity — the declared reading does not type
+    /// lambdas) stands down from the meet.
+    lambda_arities: Option<RefCell<std::collections::HashSet<usize>>>,
     walk_region: std::cell::Cell<u32>,
     ev_order: std::cell::Cell<u32>,
     /// The stack of loop ids the walk is inside — pushed by `while`/`for`,
@@ -2996,6 +3064,18 @@ impl MoveCheck<'_> {
     /// FREES, and this decides a free.
     fn note_arg_temp(&self, arg: &Expr, callee: &str, ix: usize, line: usize) {
         let Some(sink) = &self.arg_temps else { return };
+        // Round forty-six: a call through a `fn`-typed binding or parameter
+        // has no capability row under its spelled name — record the DECLARED
+        // signature beside the argument, and the verdict meets over every
+        // function that signature could name.
+        if let Some(sigs) = &self.fnval_sigs {
+            if let Some(t) = self.vars.borrow().get(callee).cloned().flatten() {
+                if let Type::Fn(ps, r) = crate::types::resolve(&t, self.decl.decls()) {
+                    sigs.borrow_mut()
+                        .insert(arg as *const Expr as usize, (ps, *r));
+                }
+            }
+        }
         let producer = match arg {
             // A lending builtin hands back a place inside its receiver — it
             // BUILT nothing the caller may release.
@@ -5764,6 +5844,9 @@ impl MoveCheck<'_> {
             // so a reference to one that was already consumed surfaces the standard
             // use-after-consume error here too.
             Expr::Lambda { params, body, .. } => {
+                if let Some(la) = &self.lambda_arities {
+                    la.borrow_mut().insert(params.len());
+                }
                 // A lambda that is not a call argument can be stored and
                 // outlive the frame. One written AT a call argument still
                 // escapes when the callee may keep it: a `consume fn`
