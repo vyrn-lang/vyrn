@@ -6116,11 +6116,18 @@ impl<'p> Fn_<'_, 'p> {
             if self.cx.resolve(&s) != Type::Str {
                 return unsupported(&format!("`=~` on `{s}`"), line);
             }
+            // An allocated left operand is this operator's to free (round
+            // thirty), through the same tee the comparisons use.
+            let k = self.tee_str_temp(b, lhs);
             let (table, accept, start) = self.regex_dfa(m, pat, line)?;
             b.ins(&Instruction::I32Const(table as i32));
             b.ins(&Instruction::I32Const(start as i32));
             b.ins(&Instruction::I32Const(accept as i32));
             b.ins(&Instruction::Call(self.cx.rt.regex_run));
+            let flag = b.local(ValType::I32);
+            b.ins(&Instruction::LocalSet(flag));
+            self.free_str_temp(b, k);
+            b.ins(&Instruction::LocalGet(flag));
             return Ok(Type::Bool);
         }
 

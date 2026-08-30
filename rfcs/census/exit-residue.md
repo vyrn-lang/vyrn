@@ -1008,6 +1008,24 @@ kinds.
 Tallies after round twenty-nine: **clean 100, leaking 46, zero
 double-frees** — the century, from 54 when the first survey ran.
 
+## Thirtieth triage: the operator that read and never paid
+
+`("v" + i.toString()) =~ "v[0-9]"` — an ALLOCATED left operand read by
+the regex runner and freed by nobody, the last comparison-shaped
+operator outside the operand partition (round twelve put `==` and its
+siblings inside it). The left operand is noted under `@concat` like a
+comparison's, both lowerings free through the same tee, and the
+pattern stays a literal the checker already requires.
+
+The round's descent also NAMED the next wall: mount's per-request
+residue is the params map handed through `r.run(req, ps)` — a call
+through a `fn` VALUE, whose parameter capabilities RFC-0037 erases.
+The checker cannot know the handler reads `ps`, so the conservatism
+keeps it, one map per dispatched request. A sound fix is capability
+syntax on `fn` TYPES — a language feature, not a triage round.
+
+Tallies hold at **clean 100, leaking 46, zero double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the

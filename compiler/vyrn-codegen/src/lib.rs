@@ -7934,6 +7934,9 @@ impl<'a> Gen<'a> {
             self.emit(format!(
                 "{t} = call i1 @__vyrn_regex_run(ptr {s}, ptr {table}, i64 {start}, ptr {accept})"
             ));
+            // An allocated left operand is this operator's to free (round
+            // thirty) — the run read it, and nothing else ever will.
+            self.free_str_temp(lhs, &s);
             return Ok((t, Type::Bool));
         }
 
