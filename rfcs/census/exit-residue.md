@@ -842,6 +842,24 @@ Movement: jsondepth CLEAN (130 → 2 → 0 across two rounds).
 Tallies after round twenty-three: **clean 90, leaking 59, zero
 double-frees**.
 
+## Twenty-fourth triage: the interpolation that was an accumulator
+
+`line = "\{line}\{digits[i]}"` — pidigits' whole residue, one
+abandoned line per appended digit. The interpolation spelling of an
+accumulator desugars to `@concat`, and round eighteen's mention walk
+refused the `@`-name wholesale: the same guard that rightly refuses
+`@push` (which hands its receiver's buffer back) refused a callee that
+COPIES both operands and cannot alias anything. The walk asks
+`call_may_forward` first now — the question round nineteen already
+answered — and a mention read by a non-forwarding callee needs no
+screening at all.
+
+Movement: pidigits CLEAN (27 → 0, output byte-identical), one more
+row with it.
+
+Tallies after round twenty-four: **clean 92, leaking 57, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach
