@@ -430,11 +430,26 @@ impl Declared {
             } => self
                 .type_of(vars, then_branch)
                 .or_else(|| else_branch.as_ref().and_then(|e| self.type_of(vars, e))),
-            // `e?` yields the success payload of what `e` is.
+            // `e?` yields the success payload of what `e` is. A Fallible
+            // operand (RFC-0080 M3) yields what ITS `success` returns — the
+            // parser substituted the associated `Output` into the flattened
+            // impl method, so the mangled row already spells it concretely.
+            // Without this a `let body = fetch(code)?` typed as unknown and
+            // the copied-out payload carried no release row (exit-residue
+            // round forty-one).
             Expr::Try { expr, .. } => {
-                match crate::types::resolve(&self.type_of(vars, expr)?, &self.decls) {
+                let ot = self.type_of(vars, expr)?;
+                match crate::types::resolve(&ot, &self.decls) {
                     Type::Option(t) | Type::Result(t, _) => Some(*t),
-                    _ => None,
+                    _ => crate::types::type_key(&ot).and_then(|k| {
+                        self.rets
+                            .get(&crate::types::impl_method_name(
+                                crate::types::FALLIBLE,
+                                &k,
+                                "success",
+                            ))
+                            .cloned()
+                    }),
                 }
             }
             // A fallible construction (RFC-0009) answers an OPTION of its own
