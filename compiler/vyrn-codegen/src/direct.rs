@@ -6808,6 +6808,19 @@ impl<'p> Fn_<'_, 'p> {
                 if name == "@str" {
                     return self.call(m, b, &f, args, line);
                 }
+                // The textual backend's twin (round thirty-five): a printed
+                // render is freed at the print, because the synthesized call
+                // node has no plan row.
+                if name == "print" {
+                    self.call(m, b, &f, args, line)?;
+                    let sv = b.local(ValType::I32);
+                    b.ins(&Instruction::LocalTee(sv));
+                    b.ins(&Instruction::Call(self.cx.rt.print_str));
+                    b.ins(&Instruction::LocalGet(sv));
+                    str_hdr(b);
+                    b.ins(&Instruction::Call(self.cx.rt.free));
+                    return Ok(Type::Unit);
+                }
                 let rendered = [Expr::Call {
                     name: f,
                     args: args.to_vec(),

@@ -126,14 +126,14 @@ pidigits	clean
 placeorder	leak	1
 polyrecursion	skip
 projection	clean
-protocol	leak	8
+protocol	clean
 protocol_conformance	skip
 protocol_extra	skip
 protocol_incomplete	skip
 protocol_overlap	skip
 protocol_scalar	skip
 protoplace	clean
-protorec	leak	4
+protorec	clean
 recdepth	other
 record	clean
 reflection	clean
@@ -146,7 +146,7 @@ regionarena	clean
 regionescape	leak	1
 releaseacrossexit	leak	10
 releaseacrosstry	leak	5
-rest	leak	519
+rest	leak	363
 revcomp	clean
 rpc	leak	6
 rpcsplit	leak	5
@@ -156,7 +156,7 @@ server	clean
 sha1	clean
 shadowbuiltin	clean
 shadowing	clean
-show	leak	6
+show	clean
 simd	clean
 simdbench	clean
 simdint	clean
@@ -184,7 +184,7 @@ streamunfold	clean
 stringops	clean
 strings	other
 strpredbytes	leak	6
-tagged	leak	3
+tagged	clean
 task_abandoned	skip
 templates	clean
 testing	clean

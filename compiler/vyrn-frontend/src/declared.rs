@@ -145,6 +145,24 @@ impl Declared {
                 f.params.iter().map(|p| p.ty.clone()).collect(),
             );
         }
+        // A protocol method call reaches every pass under its SURFACE name —
+        // `n.show()` is `show(n)` — because the impl is selected by the
+        // receiver's type, and this pass never selects impls. The protocol's
+        // declared return is the one thing every impl agrees on, so a CONCRETE
+        // return seeds a row under the surface name. Without it the call typed
+        // as unknown, no argument-temporary row was minted, and
+        // `print(n.show())` leaked one rendered String per call (exit-residue
+        // round thirty-five). A return that mentions a type variable (an
+        // associated type arrives as `Type::Param`) is impl-dependent and
+        // stays unnamed, and a projection member's result is a PLACE inside
+        // the receiver — not rule 3's owned result — so it stays out too.
+        for p in &program.protocols {
+            for m in &p.methods {
+                if m.result_cap.is_none() && !crate::types::mentions_param(&m.ret) {
+                    rets.entry(m.name.clone()).or_insert_with(|| m.ret.clone());
+                }
+            }
+        }
         let decls = crate::types::decl_map(program);
         let mut variants: HashMap<String, Option<String>> =
             ["Some", "Ok", "Err", "Success", "Failure"]

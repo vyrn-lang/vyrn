@@ -2971,6 +2971,54 @@ impl MoveCheck<'_> {
             // A lending builtin hands back a place inside its receiver — it
             // BUILT nothing the caller may release.
             Expr::Call { name, .. } if views(name) => return,
+            // The tagged-template desugar (RFC-0007) wraps both built arrays
+            // in `@list`, so the array-literal arm below never sees them and
+            // both heapified triples leaked per call (exit-residue round
+            // thirty-five: `tag"…"` in a loop). `@list` is held back from the
+            // return table on purpose — its type is its element's — so the
+            // row is minted from the two exact shapes the desugar builds and
+            // nothing else. The PARTS list is string literals, whose static
+            // pointers the lowering stores as they are: the row frees the
+            // buffer alone. The VALUES list is `value(..)` boxes, each a
+            // fresh allocation the callee only reads and copies out of: the
+            // row releases deep, and the walk's encoding rules decide what
+            // each variant's payload owes.
+            Expr::Call { name, args: la, .. } if name == "@list" => {
+                let Some(Expr::ArrayLit { elems, .. }) = la.first() else {
+                    return;
+                };
+                if elems.is_empty() {
+                    return;
+                }
+                let kind = if elems.iter().all(|e| matches!(e, Expr::Str(_))) {
+                    DropKind::FreeArr
+                } else if elems
+                    .iter()
+                    .all(|e| matches!(e, Expr::Call { name, .. } if name == "value"))
+                {
+                    let vt = Type::Array(Box::new(Type::Named("Value".to_string())));
+                    let Some(k) = self.decl.release_kind(&vt) else {
+                        return;
+                    };
+                    k
+                } else {
+                    return;
+                };
+                sink.borrow_mut().push(ArgTemp {
+                    id: arg as *const Expr as usize,
+                    callee: callee.to_string(),
+                    ix,
+                    line,
+                    module: None,
+                    producer: Some("@list".to_string()),
+                    kind,
+                    verdict: ArgVerdict::Unknown,
+                    owner: self.cur_fn.borrow().clone(),
+                    view_copies: false,
+                    elem_producers: Vec::new(),
+                });
+                return;
+            }
             // A CONSTRUCTOR-built argument (`emit(JObj(..))`) is a temporary
             // the caller owns, exactly like any other producer — admitted in
             // exit-residue round ten, the same round the constructor position

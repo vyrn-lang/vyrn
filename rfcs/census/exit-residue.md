@@ -1111,6 +1111,34 @@ Movement: contractquery CLEAN (12 → 0), storage 10 → 4.
 Tallies after round thirty-four: **clean 102, leaking 44, zero
 double-frees**.
 
+## Thirty-fifth triage: the declaration that renders
+
+Three closures in one round, all downstream of `protocol Show`. First,
+`print(p)` on a `Show` type: the dispatch synthesizes a call node at
+codegen time, after every analysis has run, so the rendered String had
+no plan row and no owner — freed at the print now, in both backends,
+exactly as the float print was in round seventeen (`@str` keeps
+returning it raw, and `value` keeps it: the box owns the pointer).
+Second, `n.show()` anywhere else: a protocol method call reaches every
+pass under its SURFACE name, and `Declared::rets` only knew top-level
+functions — the call typed as unknown and no argument-temporary row
+was minted. The protocol's declared return is the one thing every impl
+agrees on, so a concrete return seeds a row under the surface name
+(a return that mentions a type variable stays unnamed, and a
+projection member's place is not rule 3's owned result). Third, the
+tagged template: the desugar wraps both built arrays in `@list`, which
+is held back from the return table on purpose, so the array-literal
+row from round three never fired and both heapified triples leaked per
+call. The row is minted from the two exact shapes the desugar builds —
+string-literal parts free the buffer alone (the lowering stores the
+static pointers as they are), `value(..)` lists release deep.
+
+Movement: protocol CLEAN (8 → 0), protorec CLEAN (4 → 0), show CLEAN
+(6 → 0), tagged CLEAN (3 → 0), rest 519 → 363.
+
+Tallies after round thirty-five: **clean 106, leaking 40, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the
