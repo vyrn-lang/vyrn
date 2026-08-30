@@ -286,7 +286,7 @@ fn didYouMean(c: ContractInfo, name: String) -> Option<String> {
         }
     }
     if bestD <= nearThreshold() {
-        return Some(best)
+        return Some(best.copy())
     }
     return None
 }
@@ -398,7 +398,7 @@ fn exportIndex(exports: Array<Export>, name: String) -> Int64 {
 fn openRule(c: ContractInfo) -> Option<MemberInfo> {
     for m in c.members {
         if m.name == "*" {
-            return Some(m)
+            return Some(m.copy())
         }
     }
     return None

@@ -474,7 +474,7 @@ export fn compile(pattern: String) -> Result<Regex, String> {
     }
     let f = parseAlt(bd)
     if bd.err.byteLength > 0 {
-        return Err(bd.err)
+        return Err(bd.err.copy())
     }
     if bd.at < bd.pat.length {
         // The only way out of `parseAlt` with input left is an unbalanced `)`.

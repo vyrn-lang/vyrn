@@ -6698,16 +6698,6 @@ impl<'a> Gen<'a> {
     /// Lower a `match` over an Option/Result to a tag test + `phi`. Payloads are
     /// i64 (native restriction), so bindings are i64 locals. The `Some`/`Ok` arm
     /// has tag 1; the `None`/`Err` arm has tag 0.
-    fn gen_match_body(
-        &mut self,
-        sv: &str,
-        sty: &Type,
-        arms: &[MatchArm],
-        ers: &[(String, u32)],
-    ) -> Result<(String, Type), String> {
-        self.gen_match_body_boxed(sv, sty, arms, ers, false)
-    }
-
     fn gen_match_body_boxed(
         &mut self,
         sv: &str,

@@ -659,9 +659,9 @@ fn linkedData(path: String, kind: String, title: String, description: String, ur
     let about = decodeEntities(description)
     let mut fields: Array<JsonField> = []
     if path == rootPath() {
-        fields = [JsonField { key: "@context", value: JStr("https://schema.org") }, JsonField { key: "@type", value: JStr("SoftwareApplication") }, JsonField { key: "name", value: JStr(name) }, JsonField { key: "description", value: JStr(about) }, JsonField { key: "url", value: JStr(url) }, JsonField { key: "applicationCategory", value: JStr("DeveloperApplication") }]
+        fields = [JsonField { key: "@context", value: JStr("https://schema.org") }, JsonField { key: "@type", value: JStr("SoftwareApplication") }, JsonField { key: "name", value: JStr(name) }, JsonField { key: "description", value: JStr(about) }, JsonField { key: "url", value: JStr(url.copy()) }, JsonField { key: "applicationCategory", value: JStr("DeveloperApplication") }]
     } else if kind == "article" {
-        fields = [JsonField { key: "@context", value: JStr("https://schema.org") }, JsonField { key: "@type", value: JStr("TechArticle") }, JsonField { key: "headline", value: JStr(name) }, JsonField { key: "description", value: JStr(about) }, JsonField { key: "url", value: JStr(url) }, JsonField { key: "inLanguage", value: JStr("en") }]
+        fields = [JsonField { key: "@context", value: JStr("https://schema.org") }, JsonField { key: "@type", value: JStr("TechArticle") }, JsonField { key: "headline", value: JStr(name) }, JsonField { key: "description", value: JStr(about) }, JsonField { key: "url", value: JStr(url.copy()) }, JsonField { key: "inLanguage", value: JStr("en") }]
     }
     if fields.length == 0 {
         return ""

@@ -384,6 +384,63 @@ Tallies after round nine: **clean 71, leaking 79, zero double-frees**
 — counts hold, with the fn-value family's block totals down by a
 third across the corpus.
 
+## Tenth triage: the constructor door closes, and the constructed temporary is finally owned
+
+One `gqlErrorBody` call leaked seven blocks, and the descent named the
+oldest exclusion in the argument-temporary machinery: a
+CONSTRUCTOR-built argument (`emit(JObj(..))`) was never recorded — "a
+constructor's payload is the constructed value's" — so no
+`emit(tree)`-shaped call ever freed its tree, across `std/json`,
+`std/graphql`, `std/symbolmap` and every caller.
+
+Admitting those temporaries requires that a constructed value OWN its
+payloads — which is exactly round seven's open language question, now
+settled as a rule: **a constructor position no longer accepts a bare
+projection or borrowed name** (a `consume` take transfers ownership
+and stays legal; a whole owned name still moves in). The store rule's
+`.copy()` menu applies, and the old pin that asserted
+recorded-not-refused flipped to assert the refusal. The corpus sweep
+found ~25 real borrow-smuggles across ten std modules — `Some(next)`
+in `std/args`, `Some(best)` in `std/contract`, `attrKey`'s
+`Some(k)` (the one DESIGNED lender, now an owner), `JStr(message)` in
+`gqlErrorBody`, `VNElem(tag.name, ..)` through `std/vyx`'s parser,
+`vyxShiftNode`'s whole rebuild-from-binders — plus two examples and
+one generator template (`Err(consume arg.err)` in `graphqlServer`'s
+emitted dispatcher). Every fix is the copy or take the value always
+owed.
+
+With the door closed, `note_arg_temp` records constructor producers
+like any other; the variant table types them (round four's machinery),
+and the drains free them. Movement: `gqlErrorBody` 7→0, the gqlAnswer
+micro-probe 20→3, `emit`/`toJson` probes stay 0, graphql 882→308,
+vyxdemo 22→13.
+
+The sweep then had to mean "every": the subdirectory apps
+(`bin`/`shelf`/`fullstack`), the site tree, and the GENERATOR TEMPLATES
+whose emitted code is also a corpus. The refusal surfaced and closed:
+`std/rpc`'s `Rejected(bag.issues)` (→ `consume`), `std/openapi`'s
+`$ref`-walk rebuilding from binders and its `$id` field, `std/vyx`'s
+dynamic `:attr` hoist (`A(name, (expr).copy())` in emitted text — a
+user's `:value={prop}` must not smuggle the prop) and its lazy-page
+wrapper (`page(d: consume T)` so `Ready(consume d)` is a transfer),
+`std/icons`' two plain matches over `consume` params (→ `match
+consume`, the `keyed` lesson again) and its `glyph` template, the two
+apps' middleware fold (`hit = match hit { Some(r) => Some(r), .. }` in
+a loop — restructured to an `if let` over the fresh call), and a dozen
+site view helpers. A mechanical fixer (scratchpad `autocopy2.py`)
+applied the menu's `.copy()` wherever the diagnostic named a line;
+`match consume` and `consume` were chosen by hand where a transfer was
+the truth. Late finds: `std/bench`'s report writer, the vyx `v-html`
+hoist (`Raw((expr).copy())` in emitted text), and three test pins that
+asserted the old spellings — including parity's retained-argument
+fixture, whose doc already said "until the constructor hole was
+closed" and whose day this was. One tooling lesson: the mechanical
+fixer must never touch QUOTED text — it rewrote a JSON-LD key string
+`"url"` to `"url.copy()"` alongside the value it was fixing, and the
+site metadata test caught the corrupted record.
+
+Tallies after round ten: **clean 72, leaking 78, zero double-frees**.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach

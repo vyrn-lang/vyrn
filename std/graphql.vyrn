@@ -74,7 +74,7 @@ import { fromBytesOr } from "std/strings"
 // The executor's half (RFC-0085 M1). The value tree is what a projection is
 // written over — see `gqlProject` — and the shared cursor is what the query
 // language is parsed with (RFC-0054).
-import { Json, JsonField, copyJson, emit } from "std/json"
+import { Json, JsonField, copyJson, copyJsonArray, emit } from "std/json"
 import { parseJson } from "std/jsonread"
 import { Scanner, scanner, skipWs, ident, peek, advance, atEnd, quotedString } from "std/scan"
 
@@ -1560,7 +1560,7 @@ fn gqlPick(
     let mut failed = false
     for s in sels {
         let fref = schema(ty, s.name)
-        let at = gqlStep(path, JStr(s.key))
+        let at = gqlStep(path, JStr(s.key.copy()))
         let bad = gqlFieldFault(ty, s, fref, schema)
         let mi = gqlFieldIndex(fields, s.name)
         let r = if bad != "" {
@@ -1668,7 +1668,7 @@ fn gqlStrOr(j: Json, fallback: String) -> String {
 /// ever reached, so there is no position to attribute and no partial `data` to
 /// carry. Everything reached during execution goes through `gqlExecBody`.
 export fn gqlErrorBody(message: String) -> String {
-    let one: Array<JsonField> = [JsonField { key: "message", value: JStr(message) }]
+    let one: Array<JsonField> = [JsonField { key: "message", value: JStr(message.copy()) }]
     return emit(JObj([JsonField { key: "errors", value: JArr([JObj(one)]) }]))
 }
 
@@ -1694,8 +1694,8 @@ fn gqlErrJson(errs: Array<GqlErr>) -> Json {
     let mut out: Array<Json> = []
     for e in errs {
         out.push(JObj([
-                    JsonField { key: "message", value: JStr(e.message) },
-                    JsonField { key: "path", value: JArr(e.path) },
+                    JsonField { key: "message", value: JStr(e.message.copy()) },
+                    JsonField { key: "path", value: JArr(copyJsonArray(e.path)) },
                 ]))
     }
     return JArr(out)
@@ -2054,7 +2054,7 @@ fn gqlResolverArm(f: FnInfo) -> String {
         }
         let reqType = f.params[0].spelling
         let mut out = "        let arg = gqlArgOf(\"" + f.name + "\", args, \"input\")\n"
-        out = out + "        if arg.err != \"\" {\n            return Err(arg.err)\n        }\n"
+        out = out + "        if arg.err != \"\" {\n            return Err(consume arg.err)\n        }\n"
         out = out + "        return match fromJson(" + reqType + ", arg.json) {\n"
         out = out + "            Valid(input) => gqlRun_" + f.name + "(input),\n"
         out = out + "            Invalid(issues) => Err(gqlArgError(\"" + f.name + "\", issues)),\n"
@@ -2068,7 +2068,7 @@ fn gqlResolverArm(f: FnInfo) -> String {
     }
     let reqType = f.params[0].spelling
     let mut out = "        let arg = gqlArgOf(\"" + f.name + "\", args, \"input\")\n"
-    out = out + "        if arg.err != \"\" {\n            return Err(arg.err)\n        }\n"
+    out = out + "        if arg.err != \"\" {\n            return Err(consume arg.err)\n        }\n"
     out = out + "        return match fromJson(" + reqType + ", arg.json) {\n"
     out = out + "            Valid(input) => Ok(gqlValueOf(toJson(" + f.name + "(input)))),\n"
     out = out + "            Invalid(issues) => Err(gqlArgError(\"" + f.name + "\", issues)),\n"

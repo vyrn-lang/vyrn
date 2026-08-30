@@ -446,7 +446,7 @@ fn clientUnifyFn(f: FnInfo) -> String {
     }
     out = out + "    if status == 422 {\n"
     out = out + "        return match fromJson(RpcIssues, body) {\n"
-    out = out + "            Valid(bag) => Rejected(bag.issues),\n"
+    out = out + "            Valid(bag) => Rejected(consume bag.issues),\n"
     out = out + "            Invalid(iss) => Failed(\"procedure `" + f.name + "` sent an unparseable 422 body\"),\n"
     out = out + "        }\n"
     out = out + "    }\n"
@@ -1266,7 +1266,7 @@ fn rpcDirUnifyFn(f: FnInfo, qual: String) -> String {
     }
     out = out + "    if status == 422 {\n"
     out = out + "        return match fromJson(RpcIssues, body) {\n"
-    out = out + "            Valid(bag) => Rejected(bag.issues),\n"
+    out = out + "            Valid(bag) => Rejected(consume bag.issues),\n"
     out = out + "            Invalid(iss) => Failed(\"procedure `" + qual + "` sent an unparseable 422 body\"),\n"
     out = out + "        }\n"
     out = out + "    }\n"

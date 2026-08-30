@@ -1206,9 +1206,11 @@ fn main() -> Int64 {
 /// - `Retained` by a constructor — `Fork(label(i + 2), [])`, the literal that
 ///   reads like a call.
 /// - `Retained` by a recorded position — `stash(s)` puts a borrowed parameter
-///   into a tree this module KEEPS, so `note_retention` records `(stash, 0)`,
-///   and `restash` forwards into it, which is the "handed on" edge the retention
-///   set closes over the call graph.
+///   into a tree this module KEEPS through the `.copy()` the constructor
+///   position demands since exit-residue round ten (the bare borrow is
+///   refused now), so `note_retention` records `(stash, 0)`, and `restash`
+///   forwards into it, which is the "handed on" edge the retention set
+///   closes over the call graph.
 ///
 /// It carries the operator class too (`rfcs/census-call-arguments.md` §9,
 /// finding 3): `show` builds `s + "/\{kids.length}"`, so a `+` runs over an
@@ -1268,7 +1270,7 @@ fn relabel(s: consume String) -> Twig {
 /// call, which is what `movecheck::note_retention` writes down. Nothing is
 /// returned, so the tree this module keeps is the only owner.
 fn stash(s: String) -> Int64 {
-    kept.push(Tip(s))
+    kept.push(Tip(s.copy()))
     return Int64(kept.length)
 }
 

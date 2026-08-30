@@ -1095,7 +1095,7 @@ fn laziness_comes_from_the_declared_type() {
     );
     // A lazy page's view is over `PageData<T>` and the server renders `Ready(d)`.
     assert!(
-        src.contains("Ready(d)"),
+        src.contains("Ready(consume d)"),
         "the view is wrapped for SSR:\n{src}"
     );
 }

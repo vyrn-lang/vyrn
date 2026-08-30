@@ -151,7 +151,7 @@ export fn noHead() -> Head {
 
 /// `h` with the document title set. The page's title wins over its layouts'.
 export fn withTitle(h: Head, title: String) -> Head {
-    return Head { title: Some(title), stylesheets: h.stylesheets.copy(), modules: h.modules.copy(), scripts: h.scripts.copy(), meta: h.meta.copy() }
+    return Head { title: Some(title.copy()), stylesheets: h.stylesheets.copy(), modules: h.modules.copy(), scripts: h.scripts.copy(), meta: h.meta.copy() }
 }
 
 /// `h` with a `<link rel="stylesheet" href=…>` appended.
@@ -188,16 +188,16 @@ export fn withMeta(h: Head, name: String, content: String) -> Head {
 export fn headHtml(h: Head) -> Array<Html> {
     let mut out: Array<Html> = []
     for href in h.stylesheets {
-        out.push(el("link", [A("rel", "stylesheet"), A("href", href)], []))
+        out.push(el("link", [A("rel", "stylesheet"), A("href", href.copy())], []))
     }
     for src in h.modules {
-        out.push(el("script", [A("type", "module"), A("src", src)], []))
+        out.push(el("script", [A("type", "module"), A("src", src.copy())], []))
     }
     for src in h.scripts {
-        out.push(el("script", [A("src", src)], []))
+        out.push(el("script", [A("src", src.copy())], []))
     }
     for m in h.meta {
-        out.push(el("meta", [A("name", m.name), A("content", m.content)], []))
+        out.push(el("meta", [A("name", m.name.copy()), A("content", m.content.copy())], []))
     }
     return out
 }

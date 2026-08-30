@@ -1111,7 +1111,7 @@ fn httpErrOf(body: String) -> Option<String> {
 
 fn httpStrOf(v: Json) -> Option<String> {
     return match v {
-        JStr(s) => Some(s),
+        JStr(s) => Some(s.copy()),
         JNum(n) => None,
         JBool(b) => None,
         JNull => None,

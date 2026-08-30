@@ -849,7 +849,7 @@ fn vyxParseElem(ba: Array<UInt8>, i: Int64, e: Int64, srcFile: String) -> VyxNod
         if isSlot {
             return VyxNodeR { node: VNChildren, next: pa.next, err: "" }
         }
-        return VyxNodeR { node: VNElem(tag.name, tag.isComp, pa.attrs, [], line), next: pa.next, err: "" }
+        return VyxNodeR { node: VNElem(tag.name.copy(), tag.isComp, consume pa.attrs, [], line), next: pa.next, err: "" }
     }
     // Paired tag: parse children, then require the matching close tag.
     let kids = vyxParseNodes(ba, pa.next, e, srcFile)
@@ -871,7 +871,7 @@ fn vyxParseElem(ba: Array<UInt8>, i: Int64, e: Int64, srcFile: String) -> VyxNod
     if isSlot {
         return VyxNodeR { node: VNChildren, next: m + 1, err: "" }
     }
-    return VyxNodeR { node: VNElem(tag.name, tag.isComp, pa.attrs, kids.nodes, line), next: m + 1, err: "" }
+    return VyxNodeR { node: VNElem(tag.name.copy(), tag.isComp, consume pa.attrs, consume kids.nodes, line), next: m + 1, err: "" }
 }
 
 // ===========================================================================
@@ -1004,7 +1004,7 @@ fn vyxProcessElemInner(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: c
     let mut childNodes: Array<VyxNode> = []
     let mut err = ""
     if vhtml.found {
-        childNodes = [VNRaw(vhtml.value, vhtml.line, vhtml.col)]
+        childNodes = [VNRaw(consume vhtml.value, vhtml.line, vhtml.col)]
     } else {
         let g = vyxGroupNodes(kids, srcFile)
         childNodes = consume g.nodes
@@ -1018,10 +1018,10 @@ fn vyxProcessElemInner(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: c
         }
         let h = vyxParseForHead(vfor.value, srcFile, vfor.line)
         err = err + h.err
-        let elem = VNElem(tag, isComp, vyxStripDirectives(attrs, true), childNodes, line)
-        return VyxOne { node: VNFor(h.var, h.iter, key.value, [elem], vfor.line, vfor.col), err: err }
+        let elem = VNElem(tag.copy(), isComp, vyxStripDirectives(attrs, true), childNodes, line)
+        return VyxOne { node: VNFor(h.var.copy(), h.iter.copy(), key.value.copy(), [elem], vfor.line, vfor.col), err: err }
     }
-    return VyxOne { node: VNElem(tag, isComp, vyxStripDirectives(attrs, false), childNodes, line), err: err }
+    return VyxOne { node: VNElem(tag.copy(), isComp, vyxStripDirectives(attrs, false), childNodes, line), err: err }
 }
 
 /// Group a flat sibling list into the control-flow AST.
@@ -1933,13 +1933,13 @@ fn vyxShiftNodes(nodes: Array<VyxNode>, d: Int64) -> Array<VyxNode> {
 /// One template node with every line field shifted by `d` (RFC-0048 §2).
 fn vyxShiftNode(n: VyxNode, d: Int64) -> VyxNode {
     return match n {
-        VNText(s) => VNText(s),
-        VNInterp(x, l, c) => VNInterp(x, l + d, c),
-        VNRaw(x, l, c) => VNRaw(x, l + d, c),
+        VNText(s) => VNText(s.copy()),
+        VNInterp(x, l, c) => VNInterp(x.copy(), l + d, c),
+        VNRaw(x, l, c) => VNRaw(x.copy(), l + d, c),
         VNChildren => VNChildren,
-        VNElem(t, comp, a, k, l) => VNElem(t, comp, vyxShiftAttrs(a, d), vyxShiftNodes(k, d), l + d),
+        VNElem(t, comp, a, k, l) => VNElem(t.copy(), comp, vyxShiftAttrs(a, d), vyxShiftNodes(k, d), l + d),
         VNIf(conds, cl, cc, bodies, els, has) => vyxShiftIf(conds, cl, cc, bodies, els, has, d),
-        VNFor(v, it, k, body, l, c) => VNFor(v, it, k, vyxShiftNodes(body, d), l + d, c),
+        VNFor(v, it, k, body, l, c) => VNFor(v.copy(), it.copy(), k.copy(), vyxShiftNodes(body, d), l + d, c),
     }
 }
 
@@ -2126,7 +2126,7 @@ gen fn vyxEmitPush(n: VyxNode, acc: String, path: String, reg: VyxRegistry, src:
     return match n {
         VNText(s) => VyxEmit { code: acc + ".push(text(" + vyxStrLit(s) + "))\n", err: "", imports: "" },
         VNInterp(x, l, c) => VyxEmit { code: vyxRegion(acc + ".push(text((" + x + ").toString()))\n", src, l, c), err: "", imports: "" },
-        VNRaw(x, l, c) => VyxEmit { code: vyxRegion(acc + ".push(Raw(" + x + "))\n", src, l, c), err: "", imports: "" },
+        VNRaw(x, l, c) => VyxEmit { code: vyxRegion(acc + ".push(Raw((" + x + ").copy()))\n", src, l, c), err: "", imports: "" },
         VNChildren => VyxEmit { code: "for vyxCh in consume children {\n" + acc + ".push(vyxCh)\n}\n", err: "", imports: "" },
         VNElem(tag, isComp, attrs, kids, l) => vyxEmitElem(tag, isComp, attrs, kids, l, acc, path, reg, src),
         VNIf(conds, cl, cc, bodies, els, has) => vyxEmitIf(conds, cl, cc, bodies, els, has, acc, path, reg, src),
@@ -2415,7 +2415,7 @@ gen fn vyxEmitAttrs(attrs: Array<VyxAttr>, reg: VyxRegistry, src: String, clsBas
             } else {
                 let cv = if a.dyn { a.value } else { vyxStrLit(a.value) }
                 if a.dyn {
-                    pre = pre + vyxRegion("let " + slot + ": Attr = Cls(" + cv + ")\n", src, a.line, a.col)
+                    pre = pre + vyxRegion("let " + slot + ": Attr = Cls((" + cv + ").copy())\n", src, a.line, a.col)
                     parts.push(slot)
                 } else {
                     parts.push("Cls(" + cv + ")")
@@ -2423,7 +2423,7 @@ gen fn vyxEmitAttrs(attrs: Array<VyxAttr>, reg: VyxRegistry, src: String, clsBas
             }
         } else if a.dyn {
             // A dynamic `:attr` value hoisted under a column-exact origin.
-            pre = pre + vyxRegion("let " + slot + ": Attr = A(" + vyxStrLit(a.name) + ", " + a.value + ")\n", src, a.line, a.col)
+            pre = pre + vyxRegion("let " + slot + ": Attr = A(" + vyxStrLit(a.name) + ", (" + a.value + ").copy())\n", src, a.line, a.col)
             parts.push(slot)
         } else {
             parts.push("A(" + vyxStrLit(a.name) + ", " + vyxStrLit(a.value) + ")")
@@ -4302,6 +4302,14 @@ export gen fn vyxBuildPageModuleAt(source: String, srcPath: String, dir: String,
 
 /// The shared page-module builder. `client` (RFC-0069 §1) strips `load` + its dead
 /// imports and omits `head`/`headTitle`, producing the client-bundle view module.
+/// `consume ` when the lazy wrapper takes the loaded data into `Ready(..)`.
+fn vyxDataCap(lazy: Bool) -> String {
+    if lazy {
+        return "consume "
+    }
+    return ""
+}
+
 gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, themed: Bool, theme: String, client: Bool) -> String {
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
@@ -4485,14 +4493,14 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
     // takes the RAW `T` (the load result) unchanged; a LAZY page wraps it as
     // `Ready(d)` for the `PageData<T>` view (RFC-0070) — SSR always has data, so the
     // server only ever renders the `Ready` arm.
-    let dataArg = if lazy { "Ready(d)" } else { "d" }
+    let dataArg = if lazy { "Ready(consume d)" } else { "d" }
     if hasLoad {
         if paramNames.length > 0 {
-            out = out + "export fn page(p: Params, d: " + dataType + ") -> Html {\n    return uiPageBody(" + vyxPageArgs(paramNames) + ", " + dataArg + ")\n}\n"
+            out = out + "export fn page(p: Params, d: " + vyxDataCap(lazy) + dataType + ") -> Html {\n    return uiPageBody(" + vyxPageArgs(paramNames) + ", " + dataArg + ")\n}\n"
         } else {
             // A zero-parameter static loader (RFC-0069 §0): no `Params`, the body
             // takes only the loaded data.
-            out = out + "export fn page(d: " + dataType + ") -> Html {\n    return uiPageBody(" + dataArg + ")\n}\n"
+            out = out + "export fn page(d: " + vyxDataCap(lazy) + dataType + ") -> Html {\n    return uiPageBody(" + dataArg + ")\n}\n"
         }
     } else if paramNames.length > 0 {
         out = out + "export fn page(p: Params) -> Html {\n    return uiPageBody(" + vyxPageArgs(paramNames) + ")\n}\n"
@@ -4998,7 +5006,7 @@ test "v-html lowers to a Raw content node" {
     let comp = vyxCompileComponent("R", src, "./c")
     assertEq(comp.err, "")
     let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("Raw(html)"))
+    assert(out.contains("Raw((html).copy())"))
 }
 
 test "a dynamic attr is hoisted under an origin directive" {
@@ -5006,7 +5014,7 @@ test "a dynamic attr is hoisted under an origin directive" {
     let comp = vyxCompileComponent("Lnk", src, "./c")
     assertEq(comp.err, "")
     let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("A(\"href\", u)"))
+    assert(out.contains("A(\"href\", (u).copy())"))
 }
 
 test "a single-quoted attr value carries a string literal expression" {
@@ -5014,7 +5022,7 @@ test "a single-quoted attr value carries a string literal expression" {
     let comp = vyxCompileComponent("Lnk", src, "./c")
     assertEq(comp.err, "")
     let out = vyxBuildModule([comp], false, "")
-    assert(out.contains("A(\"href\", \"/raw/\" + id)"))
+    assert(out.contains("A(\"href\", (\"/raw/\" + id).copy())"))
 }
 
 // ---- RFC-0039 §2: the real scanner — comments/strings never miscompile ------
