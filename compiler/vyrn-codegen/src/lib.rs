@@ -3293,10 +3293,6 @@ impl<'a> Gen<'a> {
     /// to the String header, not to shadow slots beside the variable. So
     /// `s.byteLength` mid-spine is now correct and O(1), and a drop of the
     /// accumulator recovers the capacity it was grown to.
-    fn emit_str_append(&mut self, slot: &str, val: &str) {
-        self.emit_str_append_owned(slot, val, false)
-    }
-
     /// `free_taken` — the take-ownership copy may FREE the buffer it copied
     /// out of, because the plan proved the place owns its value at this store
     /// (exit-residue round fifteen: the copy used to abandon it, one

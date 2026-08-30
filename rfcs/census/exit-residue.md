@@ -860,11 +860,41 @@ row with it.
 Tallies after round twenty-four: **clean 92, leaking 57, zero
 double-frees**.
 
+## Twenty-fifth triage: the ratchet
+
+Two pieces. First, one more class: `mount(req, [usersHttp.routes()],
+..)` rebuilds the whole route table per request, and the heapified
+array-literal argument stood down from its release row because `Route`
+owns heap — round three's refusal, which protected `[root]` where
+`root`'s type hides its heap. The refusal narrows: a heap-owning
+element type is admitted when every element expression is an OWNED
+producer (a call to a declared function — rule 3 makes its result the
+literal's own), and the element callees ride on the row so the closed
+lending set can still veto a lender in `arg_verdict`. A bare name or a
+projection stands down exactly as before.
+
+Second, THE GATE. The instrument gates CI now — not at zero, at the
+ratchet: `compiler/vyrn-cli/tests/residue.rs` builds every example
+natively, runs it once under `VYRN_LEAK_CHECK=1`, and compares the
+verdict against `rfcs/census/residue-baseline.tsv`. A double free
+fails outright. A `clean` row that leaks fails. A `leak N` row may
+only shrink — and when it does, the run says so, a nudge to tighten
+the baseline. A new example must be clean or take a row. It runs in
+the parity job, which already has clang. Twenty-five rounds of triage
+can no longer regress quietly, and every future round is a baseline
+diff.
+
+Tallies at the gate's first turn: **clean 94, leaking 57, zero
+double-frees** — from 54/~100 when the first survey ran.
+
 ## The rule going forward
 
-The instrument does NOT gate CI yet: gating requires this table to reach
-zero rows or exemptions-with-reasons, and that triage is its own arc. What
-gates today is the instrument itself (the two-sided pin) and the clean
-examples staying clean wherever a row is closed. A row closed here should
-name its mechanism the way the twenty-list did — this file is a list that
-must be re-read, because a list that stops being re-read starts lying.
+The instrument GATES CI at the ratchet now (round twenty-five): the
+committed baseline may only shrink, a clean example stays clean, and a
+double free fails whatever the table says. The remaining rows are the
+documented conservatisms — the named-scrutinee payload handover
+(`matchown`, deliberately), the `region` standing-asides, `freelist`'s
+by-design hold — and tails this file names per round. A row closed
+here should name its mechanism the way the twenty-list did — this
+file is a list that must be re-read, because a list that stops being
+re-read starts lying.

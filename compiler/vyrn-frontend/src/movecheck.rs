@@ -249,6 +249,11 @@ pub struct ArgTemp {
     /// unfreed `bytes` buffer per line; with this the row is Released like
     /// any read argument instead of standing down as Lent.
     pub view_copies: bool,
+    /// Round twenty-five: for a heapified array-literal argument with
+    /// heap-owning elements, the callee of each element expression — screened
+    /// in `arg_verdict` against the CLOSED lending set, because a lender's
+    /// result inside the literal would make the deep free a use-after-free.
+    pub elem_producers: Vec<String>,
 }
 
 /// What the callee at a call-argument position does with the temporary it is
@@ -572,6 +577,11 @@ fn arg_verdict(
     // temporary here at all — the same rule [`ownership`] applies to a `let`
     // whose initializer is a call to a lender.
     if s.producer.as_deref().is_some_and(|p| lending.contains(p)) {
+        return ArgVerdict::Lent;
+    }
+    // Round twenty-five: a heapified literal whose ELEMENTS came from a lender
+    // holds borrowed storage — the deep free must stand down.
+    if s.elem_producers.iter().any(|p| lending.contains(p)) {
         return ArgVerdict::Lent;
     }
     // RFC-0096 M3's four consumer sites free this operand already. The two
@@ -2901,6 +2911,7 @@ impl MoveCheck<'_> {
                     verdict: ArgVerdict::Unknown,
                     owner: self.cur_fn.borrow().clone(),
                     view_copies: false,
+                    elem_producers: Vec::new(),
                 });
                 return;
             }
@@ -2921,17 +2932,39 @@ impl MoveCheck<'_> {
                 let Type::Array(elem) = crate::types::resolve(pty, self.decl.decls()) else {
                     return;
                 };
-                // Only an element type that owns no heap. The coerced triple's
-                // BUFFER is always freshly the caller's, but its elements are
-                // word copies of whatever the literal held — and a binding the
-                // literal did not take (`[root]` where `root`'s type stands
-                // down from `owns_heap`, as a self-referring `VyxNode` does)
-                // still owns that heap. A deep free here freed `root`'s
-                // attributes out from under the record that kept it, which the
-                // wasm generator host turned into a trap. Heap-owning element
-                // types stay a recorded leak (`rfcs/census/exit-residue.md`).
+                let mut elem_producers: Vec<String> = Vec::new();
+                // An element type that owns no heap is always safe: the
+                // coerced triple's BUFFER is freshly the caller's, and word
+                // elements carry nothing. A HEAP-OWNING element type is safe
+                // only when every element expression is an OWNED producer — a
+                // call to a declared function, whose result rule 3 makes the
+                // literal's own (round twenty-five: `mount(req,
+                // [usersHttp.routes()], ..)` rebuilt the whole route table
+                // per request and leaked all of it). A bare name or a
+                // projection stands the row down, exactly as round three
+                // recorded: `[root]` where `root`'s type stands down from
+                // `owns_heap` (a self-referring `VyxNode`) still owns its
+                // heap, and a deep free here trapped the wasm generator host.
                 if self.decl.owns_heap(&elem) {
-                    return;
+                    let Expr::ArrayLit { elems, .. } = arg else {
+                        return;
+                    };
+                    let all_owned = !elems.is_empty()
+                        && elems.iter().all(|e| {
+                            matches!(e, Expr::Call { name, .. }
+                                if self.decl.is_function(name)
+                                    && !name.starts_with('@')
+                                    && crate::prelude::signature(name).is_none()
+                                    && !self.decl.constructs(name))
+                        });
+                    if !all_owned {
+                        return;
+                    }
+                    for e in elems {
+                        if let Expr::Call { name, .. } = e {
+                            elem_producers.push(name.clone());
+                        }
+                    }
                 }
                 let Some(kind) = self.decl.release_kind(pty) else {
                     return;
@@ -2947,6 +2980,7 @@ impl MoveCheck<'_> {
                     verdict: ArgVerdict::Unknown,
                     owner: self.cur_fn.borrow().clone(),
                     view_copies: false,
+                    elem_producers,
                 });
                 return;
             }
@@ -2978,6 +3012,7 @@ impl MoveCheck<'_> {
                     .decl
                     .elem_of(&ty)
                     .is_some_and(|et| !self.decl.owns_heap(&et)),
+            elem_producers: Vec::new(),
         });
     }
 
