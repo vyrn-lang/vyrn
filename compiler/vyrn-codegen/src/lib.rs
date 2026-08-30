@@ -5870,6 +5870,29 @@ impl<'a> Gen<'a> {
                 // is freed twice — the same rule `gen_block` follows.
                 if !self.terminated {
                     self.emit_releases(ExitKind::Scrutinee, key);
+                    // A MAP lookup's `Option` box is a fresh allocation even
+                    // though `m[k]` spells a place — the `match` path's rule
+                    // (round forty-two), on the `if let` spelling mapdemo
+                    // uses. The payload shares the map's storage, so only the
+                    // box goes back; `None` carries a zero word and `free`
+                    // refuses null.
+                    let map_lookup = matches!(scrutinee, Expr::Call { name, args, .. }
+                        if name == "@at"
+                            && args.first().and_then(|a| self.static_ty(a)).is_some_and(
+                                |t| matches!(self.resolve(&t), Type::Map(..))));
+                    if map_lookup && self.droppable.get(&key).is_none() && self.region_depth == 0 {
+                        if let Type::Option(inner) = &sr {
+                            if self.payload_boxed(inner) {
+                                let w0 = self.fresh_tmp();
+                                let q = self.fresh_tmp();
+                                self.emit(format!(
+                                    "{w0} = extractvalue {{ i1, i64, i64 }} {sv}, 1"
+                                ));
+                                self.emit(format!("{q} = inttoptr i64 {w0} to ptr"));
+                                self.emit(format!("call void @__vyrn_free(ptr {q})"));
+                            }
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -6859,7 +6882,17 @@ impl<'a> Gen<'a> {
         // `El`'s boxes behind, once per keyed row). Where a drop row EXISTS
         // the fall-through release walks the boxes instead, and freeing them
         // here too would be the double.
+        // A MAP lookup's `Option` box is a fresh allocation per call even
+        // though `m[k]` spells a place — the payload SHARES the map's value
+        // storage, so only the box is the match's to free, which is exactly
+        // what `free_boxes` frees (exit-residue round forty-two: one 24-byte
+        // box per matched lookup, fieldmut's litMap and mapdemo's tables).
+        let map_lookup = matches!(scrutinee, Expr::Call { name, args, .. }
+            if name == "@at"
+                && args.first().and_then(|a| self.static_ty(a)).is_some_and(
+                    |t| matches!(self.resolve(&t), Type::Map(..))));
         let free_boxes = (matches!(scrutinee, Expr::Consume { .. })
+            || map_lookup
             || (vyrn_frontend::movecheck::place_path(scrutinee).is_none()
                 && vyrn_frontend::movecheck::element_path(scrutinee).is_none())
             // Round twenty-seven: a PLACE scrutinee the fold proved nobody

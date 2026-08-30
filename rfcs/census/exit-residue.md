@@ -1291,6 +1291,42 @@ CLEAN (5 → 0).
 Tallies after round forty-one: **clean 122, leaking 22, zero
 double-frees**.
 
+## Forty-second triage: the box a place lookup left behind
+
+A MAP lookup's `Option` is a fresh allocation per call, even though
+`m[k]` spells a place: the payload SHARES the map's value storage —
+only the box is anybody's to free, and freeing more would meet the
+map's own release. The `match` path admits a lookup scrutinee into
+`free_boxes` now, and the `if let` spelling frees the boxed word at
+its fall-through (`None`'s zero word rides the null guard). One
+speculative widening did NOT ship: letting round thirty-eight's
+hoisted early releases fire at IN-LOOP exits double-freed the corpus
+in four rows — an in-loop `?`'s walk order says nothing about the
+loop's own later writes at runtime — and the survey caught it in the
+same session it was written. The in-loop exit keeps its leak until
+the fold can order across a back edge.
+
+Movement: fieldmut 4 → 3, simdmem2 CLEAN (2 → 0).
+
+Tallies after round forty-two: **clean 123, leaking 21, zero
+double-frees**.
+
+## Forty-third triage: the method the receiver had to name
+
+An associated-type return answers PER IMPL, so a protocol method like
+`valueOr` was never seeded under its surface name and every call typed
+as unknown — no argument-temporary row, no release. `Declared` keeps a
+method-to-protocol map now, and the Call arm's last fallback lets the
+RECEIVER's type pick the impl, exactly as the checker dispatches: the
+flattened impl row already spells the return concretely, and a generic
+impl's row — still mentioning its variables — stands down to the leak
+rather than a wrong answer.
+
+Movement: assoctype CLEAN (3 → 0).
+
+Tallies after round forty-three: **clean 124, leaking 20, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the
