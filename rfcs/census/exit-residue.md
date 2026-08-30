@@ -1347,6 +1347,33 @@ Tallies after round forty-four: **clean 124, leaking 20, zero
 double-frees** — unchanged, and the fold is more precise than the
 rounds that needed it.
 
+## Forty-fifth triage: the tree the parser refused to hand back
+
+Delta-debugging jsondecbytes named four inputs holding all
+twenty-two blocks: parse-then-refuse — trailing content, trailing
+commas, a duplicate key. `std/jsonread` built the tree and abandoned
+it at the error return, and no analysis may place the release: `Json`
+declares `impl Owned`, so a placed early release would print in two
+engines and not the third. The fix is std-side and ordinary Vyrn —
+every refusal `drop`s the partial value by hand, which runs in all
+three engines. Getting there mapped four corners of the surface: a
+value match refuses block arms, a `drop` early in a loop body reads
+as consuming what the body still uses, a Moved binding releases
+nothing at a `break`, and `?` over a PLACE hands out a payload the
+binding still frees (the audit caught that draft as a double free).
+The shape that satisfies all four: a statement match parks the
+payload or copies the message, the failure breaks out, and the drop
+sits after the loop — with the mid-value failure parking its key into
+the partial before breaking, so the one drop covers everything. The
+first cut regressed jsondepth to 384 blocks — the survey caught it
+before the commit — because the consume-`?` form left the operand
+Moved at every depth level's break.
+
+Movement: jsondecbytes CLEAN (22 → 0), mapdemo CLEAN (7 → 0).
+
+Tallies after round forty-five: **clean 126, leaking 18, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the
