@@ -3391,10 +3391,47 @@ impl<'p> Fn_<'_, 'p> {
                     if let Some(own) = shadow {
                         if let Some(parts) = crate::self_append_spine(name, value) {
                             // The spine handles this store's ownership itself
-                            // (§22's own state machine) — acknowledged so
-                            // §26's finish check knows the site was
-                            // considered, not walked past.
-                            let _ = self.cx.plan.store_owned_at(s as *const Stmt as usize);
+                            // (§22's own state machine) — and the fold's
+                            // per-statement answer decides one more thing
+                            // here, exactly as in the textual backend's
+                            // `emit_str_append_owned`: when the shadow flag
+                            // says the buffer is not this path's, the first
+                            // append COPIES out of it and abandons it. Right
+                            // for a borrow; a leak when the store that put the
+                            // buffer there was owned — the general store below
+                            // resets the flag on every reassign, so `s = a + b`
+                            // then `s = s + c` abandoned the `a + b` buffer
+                            // (exit-residue round sixteen).
+                            let owned_here = self.cx.plan.store_owned_at(s as *const Stmt as usize);
+                            // Save the flag and the incoming pointer before the
+                            // appends; free after them, only if the take ran
+                            // (entry flag was 0) and the buffer is heap — an
+                            // interned literal's `cap` is `u32::MAX` and is
+                            // nobody's to free.
+                            let taken = if owned_here {
+                                let f0 = b.local(ValType::I32);
+                                let op = b.local(ValType::I32);
+                                own.addr(b, 0)
+                                    .ok_or_else(|| gap("an append flag with no address", *line))?;
+                                b.ins(&Instruction::I32Load(word()))
+                                    .ins(&Instruction::LocalSet(f0));
+                                match place {
+                                    Place::Local(l) => {
+                                        b.ins(&Instruction::LocalGet(l));
+                                    }
+                                    Place::Static(at) => {
+                                        b.ins(&Instruction::I32Const(at as i32))
+                                            .ins(&Instruction::I32Load(word()));
+                                    }
+                                    Place::Slot(_) => {
+                                        return unsupported("an in-place append into a slot", *line)
+                                    }
+                                }
+                                b.ins(&Instruction::LocalSet(op));
+                                Some((f0, op))
+                            } else {
+                                None
+                            };
                             // A CALL-producer part's `Released` row is teed by
                             // `expr` into `arg_frees`, and this fast path was
                             // the one consumer with no drain — the textual
@@ -3406,6 +3443,22 @@ impl<'p> Fn_<'_, 'p> {
                             }
                             for (l, t2) in self.arg_frees.split_off(mark) {
                                 self.free_arg_temp(m, b, l, &t2, *line)?;
+                            }
+                            if let Some((f0, op)) = taken {
+                                b.ins(&Instruction::LocalGet(f0))
+                                    .ins(&Instruction::I32Eqz)
+                                    .ins(&Instruction::If(BlockType::Empty))
+                                    .ins(&Instruction::LocalGet(op));
+                                str_hdr(b);
+                                b.ins(&Instruction::I32Load(cap_at()))
+                                    .ins(&Instruction::I32Const(-1))
+                                    .ins(&Instruction::I32Ne)
+                                    .ins(&Instruction::If(BlockType::Empty))
+                                    .ins(&Instruction::LocalGet(op));
+                                str_hdr(b);
+                                b.ins(&Instruction::Call(self.cx.rt.free))
+                                    .ins(&Instruction::End)
+                                    .ins(&Instruction::End);
                             }
                             return Ok(());
                         }
@@ -3458,10 +3511,12 @@ impl<'p> Fn_<'_, 'p> {
                 self.store_into(m, b, place, &r, value, &ty.clone())?;
                 self.free_snap(b, snap.as_slice());
                 // The place now holds a pointer this path did not allocate, so the
-                // next append copies rather than grows. That costs one abandoned
-                // buffer per general store into an accumulator; claiming ownership
-                // here instead would free a borrowed buffer wherever rule 2 still
-                // lets one through, and a leak is a task where that is a bug.
+                // next append copies rather than grows. Claiming ownership here
+                // instead would free a borrowed buffer wherever rule 2 still lets
+                // one through — so the flag stays honest and the APPEND recovers
+                // the buffer, freeing what its take copied out of when the fold
+                // proves the store that put it there was owned (round sixteen;
+                // the spine branch above).
                 if let Some(own) = shadow {
                     own.addr(b, 0);
                     b.ins(&Instruction::I32Const(0))
@@ -3731,8 +3786,21 @@ impl<'p> Fn_<'_, 'p> {
                 // it is pushed BEFORE the loop's boundary so `break` and
                 // `continue` leave it to the fall-through below.
                 let key = s as *const Stmt as usize;
-                if self.drops.contains_key(&key) {
+                if let Some(kind) = self.drops.get(&key).cloned() {
                     if let Some(r) = self.rel_for(&it, *line)? {
+                        // The row's KIND decides, not the type alone. A
+                        // `FreeArr` row is round sixteen's element handover:
+                        // the body took the elements out through the loop
+                        // variable, so the deep walk `rel_for` builds would
+                        // free values somebody else now owns — the trap that
+                        // turned round fourteen's blanket downgrade back. The
+                        // buffer is the triple's field 0, and it is all the
+                        // loop still owns.
+                        let r = if matches!(kind, DropKind::FreeArr) {
+                            Rel::Buffers(vec![0])
+                        } else {
+                            r
+                        };
                         // `expr` leaves one I32 — an aggregate's address or a
                         // String's pointer — and `walk` wants it back, so it is
                         // stashed rather than teed into two shapes.
