@@ -327,6 +327,37 @@ Tallies after round seven: **clean 69, leaking 81, zero double-frees**
 — six examples flipped clean in one round, the largest single-round
 movement since the first triage.
 
+## Eighth triage: the wrapper that moved its accumulator, and the boxes a consume-match left behind
+
+Two classes, both convicted from `htmltree`'s stubborn 187 by per-kind
+probes of `toHtmlString`:
+
+- **The consume-wrapper spine.** `std/html`'s escape loops wrote `out =
+  appendBytes(out, ..)` where `appendBytes` took `dst: consume` — a
+  consume re-bound inside a loop is a take the revive machinery
+  refuses, so every escape buffer was marked moved and never released,
+  even on strings that never took the escaping arm (the take is
+  static). The wrapper predates RFC-0115's `append`, whose receiver is
+  `modify` — no move at all. Six sites now call `out.append(..)`
+  directly and the wrapper is gone.
+- **The consume-match's boxes.** `match consume node` TAKES the
+  scrutinee, so the fn-exit release that used to walk the payload
+  boxes never runs — and the ordinary match lowering extracted the
+  payloads and left the boxes behind (`keyed` after round six leaked
+  all three of `El`'s per node). The match frees each extracted slot's
+  box now, gated three ways: the scrutinee must be a `consume`, no
+  drop row may exist for the match (the fall-through release walks
+  boxes where one does), and the body must not be a declared `release`
+  — whose CALLER walks the boxes after the call, which is where the
+  first attempt double-freed the whole corpus before the gate landed.
+
+Movement: htmltree 187→25 blocks, domdemo 84→6, vyxdemo 22→13.
+`cat1`-style single blocks map to the recorded round-3 heapify class
+(heap-owning element literals); `graphql`'s ~1300 is untouched by
+everything so far and anchors round nine.
+
+Tallies after round eight: **clean 71, leaking 79, zero double-frees**.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach

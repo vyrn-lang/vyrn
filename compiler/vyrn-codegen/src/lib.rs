@@ -6665,6 +6665,20 @@ impl<'a> Gen<'a> {
     ) -> Result<(String, Type), String> {
         let (sv, sty) = self.gen_expr(scrutinee)?;
         let scrut_drop = self.droppable.get(&key).cloned();
+        // A CONSUMED scrutinee with no drop row: the arms take the payloads,
+        // and nothing else will ever see the enum value again — so the boxes
+        // the payloads travelled in are the match's to free, per arm, after
+        // extraction (exit-residue round eight: `keyed`'s `match consume
+        // node` rebuilt the node from its binders and left all three of
+        // `El`'s boxes behind, once per keyed row). Where a drop row EXISTS
+        // the fall-through release walks the boxes instead, and freeing them
+        // here too would be the double.
+        let free_boxes = matches!(scrutinee, Expr::Consume { .. })
+            && scrut_drop.is_none()
+            // Inside a declared `release` the CALLER walks the boxes after
+            // the call (`release_enum`, payloads false) — freeing them here
+            // too was a double on every declared-release destructure.
+            && !self.owned.is_release_fn(&self.cur_fn_name);
         if let Some(kind) = scrut_drop {
             let ll = self.llt(&self.resolve(&sty)).clone();
             let slot = self.fresh_alloca(&ll);
@@ -6674,7 +6688,7 @@ impl<'a> Gen<'a> {
         // RFC-0114 Rule N at a match join: the arms that still own what
         // another arm consumed, keyed by this match expression's address.
         let ers = self.plan.edge_releases_at(key).cloned().unwrap_or_default();
-        let r = self.gen_match_body(&sv, &sty, arms, &ers);
+        let r = self.gen_match_body_boxed(&sv, &sty, arms, &ers, free_boxes);
         if !self.terminated {
             self.emit_releases(ExitKind::Scrutinee, key);
         }
@@ -6691,11 +6705,22 @@ impl<'a> Gen<'a> {
         arms: &[MatchArm],
         ers: &[(String, u32)],
     ) -> Result<(String, Type), String> {
+        self.gen_match_body_boxed(sv, sty, arms, ers, false)
+    }
+
+    fn gen_match_body_boxed(
+        &mut self,
+        sv: &str,
+        sty: &Type,
+        arms: &[MatchArm],
+        ers: &[(String, u32)],
+        free_boxes: bool,
+    ) -> Result<(String, Type), String> {
         let sv = sv.to_string();
         let sty = sty.clone();
         // A user enum dispatches to the switch-based path.
         if let Type::Enum(evs) = self.resolve(&sty) {
-            return self.gen_match_enum(&sv, &evs, arms, ers);
+            return self.gen_match_enum(&sv, &evs, arms, ers, free_boxes);
         }
         // The payload type carried by each arm: for Option<T> the one-arm binds
         // `T`; for Result<T, E> the one-arm binds `T` and the zero-arm binds `E`.
@@ -6823,6 +6848,7 @@ impl<'a> Gen<'a> {
         evs: &[EnumVariant],
         arms: &[MatchArm],
         ers: &[(String, u32)],
+        free_boxes: bool,
     ) -> Result<(String, Type), String> {
         let arity = evs.iter().map(|v| v.payload.len()).max().unwrap_or(0);
         let ell = enum_ll(arity);
@@ -6881,6 +6907,13 @@ impl<'a> Gen<'a> {
                     let ll = self.llt(&pty);
                     let slot = self.declare(bind, &pty);
                     self.emit(format!("store {ll} {v}, ptr {slot}"));
+                    // A consumed scrutinee's boxes are this match's to give
+                    // back once the value is out — see `gen_match`'s note.
+                    if free_boxes && v != raw {
+                        let q = self.fresh_tmp();
+                        self.emit(format!("{q} = inttoptr i64 {raw} to ptr"));
+                        self.emit(format!("call void @__vyrn_free(ptr {q})"));
+                    }
                 }
             }
             let (v, t) = match &arm.body {
