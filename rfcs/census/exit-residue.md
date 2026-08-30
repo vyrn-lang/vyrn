@@ -1192,6 +1192,30 @@ pagesdemo 3 → 1.
 Tallies after round thirty-seven: **clean 113, leaking 33, zero
 double-frees**.
 
+## Thirty-eighth triage: the value the wrapper walked past
+
+The decode wrappers' shape, read straight off the emitted IR: `for j
+in consume doc { val = decode(j, "", iss) }` then `return
+Invalid(consume iss)` then `for x in consume val`. The consume-for
+after the returns marks `val` Moved, so its droppable row is
+cancelled; the early-release fold (round twenty-one) refused the rows
+twice over — `val` is written INSIDE a loop while the exit is outside
+(the loop-context equality guard), and its kind is a Deep walk (the
+silent-kinds guard). Both guards widened: a loop-written binding taken
+after its loop releases at a FUNCTION-LEVEL exit (one no loop repeats
+— the double-free argument needs exactly that), provided every write
+is owning; and a Deep walk joins the silent set when
+`reaches_declared` says it cannot call a declared release — round
+thirty-seven's per-type walk, reused one round later. The probes of
+the same shape in plain Vyrn were all clean, which is what pointed at
+the consume-for: the difference between the wrapper and every probe
+was the take after the exit.
+
+Movement: mapdemo 13 → 8, jsondecbytes 30 → 28, wirekey 3 → 2.
+
+Tallies after round thirty-eight: **clean 113, leaking 33, zero
+double-frees** — fewer blocks behind the same row count.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the
