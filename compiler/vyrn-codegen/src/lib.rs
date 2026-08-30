@@ -10111,6 +10111,20 @@ impl<'a> Gen<'a> {
                 if name == "@str" {
                     return self.gen_call(&m, args);
                 }
+                // `print` of a rendered value: the show's result is a fresh
+                // owned String (rule 3) whose whole life is the one write —
+                // and the synthesized call node has no plan row, so nothing
+                // else would ever free it (round thirty-five, the float
+                // print's twin). `value` keeps the plain path: it BOXES the
+                // pointer and owns it.
+                if name == "print" {
+                    let (sv, _) = self.gen_call(&m, args)?;
+                    self.emit(format!(
+                        "call i32 (ptr, ...) @printf(ptr @.fmt.s, ptr {sv})"
+                    ));
+                    self.emit(format!("call void @__vyrn_str_free(ptr {sv})"));
+                    return Ok(("".into(), Type::Unit));
+                }
                 let rendered = [Expr::Call {
                     name: m,
                     args: args.to_vec(),
