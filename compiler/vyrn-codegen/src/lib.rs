@@ -6673,7 +6673,9 @@ impl<'a> Gen<'a> {
         // `El`'s boxes behind, once per keyed row). Where a drop row EXISTS
         // the fall-through release walks the boxes instead, and freeing them
         // here too would be the double.
-        let free_boxes = matches!(scrutinee, Expr::Consume { .. })
+        let free_boxes = (matches!(scrutinee, Expr::Consume { .. })
+            || (vyrn_frontend::movecheck::place_path(scrutinee).is_none()
+                && vyrn_frontend::movecheck::element_path(scrutinee).is_none()))
             && scrut_drop.is_none()
             // Inside a declared `release` the CALLER walks the boxes after
             // the call (`release_enum`, payloads false) — freeing them here
@@ -6732,7 +6734,7 @@ impl<'a> Gen<'a> {
             .iter()
             .position(|a| pattern_is_one(&a.pattern))
             .unwrap();
-        let (one_val, one_t) = self.gen_arm_body(&sv, &arms[one_ix], &one_ty)?;
+        let (one_val, one_t) = self.gen_arm_body(&sv, &arms[one_ix], &one_ty, free_boxes)?;
         if !self.terminated {
             self.emit_edge_releases(ers, one_ix as u32);
         }
@@ -6745,7 +6747,7 @@ impl<'a> Gen<'a> {
             .iter()
             .position(|a| !pattern_is_one(&a.pattern))
             .unwrap();
-        let (zero_val, zero_t) = self.gen_arm_body(&sv, &arms[zero_ix], &zero_ty)?;
+        let (zero_val, zero_t) = self.gen_arm_body(&sv, &arms[zero_ix], &zero_ty, free_boxes)?;
         if !self.terminated {
             self.emit_edge_releases(ers, zero_ix as u32);
         }
@@ -7347,6 +7349,7 @@ impl<'a> Gen<'a> {
         sv: &str,
         arm: &MatchArm,
         payload_ty: &Type,
+        free_boxes: bool,
     ) -> Result<(String, Type), String> {
         self.scope.push(Vec::new());
         if let Some(bind) = pattern_binding(&arm.pattern) {
@@ -7358,6 +7361,22 @@ impl<'a> Gen<'a> {
             let ll = self.llt(payload_ty);
             let slot = self.declare(bind, payload_ty);
             self.emit(format!("store {ll} {v}, ptr {slot}"));
+            // A TEMPORARY scrutinee with no drop row: the boxed payload's
+            // block is this match's to give back once the value is out —
+            // `readDoc`'s `match parseJson(src)` left one 16-byte Result box
+            // per `fromJson` (exit-residue round thirteen; the enum path's
+            // twin landed in round eight).
+            if free_boxes
+                && v != w0
+                && !matches!(
+                    self.resolve(payload_ty),
+                    Type::Bool | Type::Str | Type::Fn(..)
+                )
+            {
+                let q = self.fresh_tmp();
+                self.emit(format!("{q} = inttoptr i64 {w0} to ptr"));
+                self.emit(format!("call void @__vyrn_free(ptr {q})"));
+            }
         }
         let out = match &arm.body {
             ArmBody::Expr(e) => self.gen_expr(e)?,
