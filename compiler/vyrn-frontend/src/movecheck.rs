@@ -4740,6 +4740,13 @@ impl MoveCheck<'_> {
                     self.note_arg_temp(lhs, "@concat", 0, *line);
                     self.note_arg_temp(rhs, "@concat", 1, *line);
                 }
+                // `=~` reads its left operand and its pattern is a literal —
+                // an ALLOCATED left operand is the operator's to free, same
+                // partition as a comparison's (round thirty: one block per
+                // route-refinement check across the REST corpus).
+                if *op == BinOp::Match {
+                    self.note_arg_temp(lhs, "@concat", 0, *line);
+                }
                 r
             }
             // A place chain asks ONE consumption question, of the whole path.
