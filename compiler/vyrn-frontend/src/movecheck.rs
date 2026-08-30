@@ -4669,6 +4669,34 @@ impl MoveCheck<'_> {
                 self.lambda_base
                     .borrow_mut()
                     .push(self.vars.borrow().depth() - 1);
+                // Rule 3 reaches closures (exit-residue round nine): a
+                // lambda's result is its CALLER's, and a captured heap value
+                // returned raw hands out storage the capture block still owns
+                // — the emitted body is `ret ptr %cap`, no copy, so the first
+                // caller to release its result frees the block's buffer and
+                // the next call reads it freed. Refused with the same menu a
+                // function returning a borrow gets. This is also what makes a
+                // call through a `fn` value type-able at all: every result is
+                // owned, so `Declared::type_of` may answer the binding's own
+                // return type and the drains may free it.
+                if let LambdaBody::Expr(inner) = body {
+                    if let Some((root, _)) = place_path(inner) {
+                        let base = self.lambda_base.borrow().last().copied().unwrap_or(0);
+                        let captured = self.vars.borrow().frame_of(&root).is_some_and(|f| f < base);
+                        if captured && self.type_of(inner).is_some_and(|t| self.decl.owns_heap(&t))
+                        {
+                            return Err(menu(
+                                Expr::line(inner),
+                                format!(
+                                    "`{root}` may not be returned from a closure — it is \
+                                     a captured binding, and the closure's result is its \
+                                     caller's"
+                                ),
+                                vec![format!("`{root}.copy()` if the caller needs its own value")],
+                            ));
+                        }
+                    }
+                }
                 let r = match body {
                     LambdaBody::Expr(inner) => self.expr(inner, consumed, scope),
                     LambdaBody::Block(b) => {

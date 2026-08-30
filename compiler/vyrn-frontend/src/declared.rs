@@ -321,15 +321,24 @@ impl Declared {
                 .get(name)
                 .cloned()
                 // A call through a `fn`-typed BINDING (`df(13)` where `let df
-                // = d.run`) is deliberately NOT answered, though the binding's
-                // type names the return. Answering it records the result as a
-                // caller-owned temporary — and a lambda may return a CAPTURE
-                // or a parameter, which no reading of the CALL can see, so
-                // the free would be a use-after-free the moment such a value
-                // flows through. `fnvalarg`'s seven small blocks are the
-                // recorded price of fn-value opacity; an arm here needs a pin
-                // proving the capture-returning shape copies on return first
-                // (exit-residue round six).
+                // = d.run`): the binding's own type names the return. Sound
+                // because a `fn` value's result is always OWNED — a lambda
+                // returning a captured heap value raw is refused by movecheck
+                // (rule 3 reaches closures; exit-residue round nine's pin
+                // showed the emitted body was `ret ptr %cap`, no copy), and a
+                // function's return was already owned by rule 3. Round six
+                // refused this arm for want of exactly that guarantee.
+                .or_else(|| {
+                    match vars
+                        .get(name)
+                        .cloned()
+                        .flatten()
+                        .map(|t| crate::types::resolve(&t, &self.decls))
+                    {
+                        Some(Type::Fn(_, ret)) => Some(*ret),
+                        _ => None,
+                    }
+                })
                 .or_else(|| {
                     self.variants
                         .get(name)
