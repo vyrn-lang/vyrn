@@ -1712,7 +1712,14 @@ fn fold_edge_releases(facts: &crate::movecheck::Facts) -> HashMap<usize, Vec<(St
 
     let mut out: HashMap<usize, Vec<(String, u32)>> = HashMap::new();
     for er in &facts.edge_releases {
-        if vetoed.contains(&er.key) || !all_owning.get(&er.key).copied().unwrap_or(false) {
+        // A row with NO write events is vacuously all-owning: it is an `if
+        // let` scrutinee temporary, whose payload binder can be taken on one
+        // branch like any binding — `if .. { header = l } else { .. }` inside
+        // a line loop leaked one payload per untaken line (round twenty).
+        // The row minting already refused borrows, parameters and module
+        // state (`names_a_place`), so a write-less row's value is this
+        // frame's own.
+        if vetoed.contains(&er.key) || !all_owning.get(&er.key).copied().unwrap_or(true) {
             continue;
         }
         out.entry(er.if_key)
