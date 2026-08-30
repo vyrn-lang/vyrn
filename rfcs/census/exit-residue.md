@@ -823,6 +823,25 @@ Movement: regexredux 198 → 184 (one holes-buffer per frag merge);
 the corpus tallies hold at **clean 89, leaking 60, zero double-frees**
 while the machinery reaches more of what remains.
 
+## Twenty-third triage: the seam with no capability row
+
+`emit(j).charCount()` — jsondepth's last two blocks, and a scattering
+through the corpus. `charCount` lowers through the `@charCount` seam
+to `std/text`'s reader, an internal spelling no import can name — so
+it has no seeded prelude row and no user declaration, and
+`prelude::capability` answered `None` for its receiver. A call-result
+receiver's temporary then had no verdict at all: not Released, not
+Lent, just unspoken — and unspoken is a leak. The seam's siblings
+(`contains`, `startsWith`, `endsWith`, `slice`) route through
+DECLARED `std/strpred` functions whose read parameters answer for
+themselves; only `@charCount` had nothing to read. One seeded answer —
+the receiver is read — and the ordinary Released machinery frees it.
+
+Movement: jsondepth CLEAN (130 → 2 → 0 across two rounds).
+
+Tallies after round twenty-three: **clean 90, leaking 59, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument does NOT gate CI yet: gating requires this table to reach

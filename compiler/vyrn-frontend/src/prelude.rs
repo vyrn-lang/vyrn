@@ -630,6 +630,14 @@ pub fn returns() -> impl Iterator<Item = (&'static str, &'static Type)> {
 
 /// The capability parameter `i` of `name` declares.
 pub fn capability(name: &str, i: usize) -> Option<Capability> {
+    // `s.charCount()` lowers through the `@charCount` seam to `std/text`'s
+    // reader — an internal spelling no import can name, so it has no seeded
+    // row and no user declaration to read a capability from. The receiver is
+    // read; without this answer a call-result receiver's temporary had no
+    // verdict and leaked (exit-residue round twenty-three).
+    if name == "@charCount" && i == 0 {
+        return Some(Capability::Read);
+    }
     signature(name)
         .and_then(|f| f.params.get(i))
         .map(|p| p.capability)
