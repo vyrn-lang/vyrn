@@ -172,7 +172,7 @@ slottable	clean
 smallarray	clean
 spectralnorm	clean
 statemod	clean
-storage	leak	5
+storage	clean
 stream	clean
 stream_abandoned	skip
 stream_combinator_abandoned	skip

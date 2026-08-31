@@ -3235,7 +3235,59 @@ impl MoveCheck<'_> {
                         },
                         ArmBody::Block(_) => false,
                     });
-                    if !fresh_str {
+                    if fresh_str {
+                        sink.borrow_mut().push(ArgTemp {
+                            id: arg as *const Expr as usize,
+                            callee: callee.to_string(),
+                            ix,
+                            line,
+                            module: None,
+                            producer: Some("@match".to_string()),
+                            kind: DropKind::FreeStr,
+                            verdict: ArgVerdict::Unknown,
+                            owner: self.cur_fn.borrow().clone(),
+                            view_copies: false,
+                            elem_producers: Vec::new(),
+                        });
+                        return;
+                    }
+                    // Round forty-seven, the third safe shape: EVERY arm
+                    // BUILDS a variant — a constructor call (whose borrow
+                    // door round ten closed, so the built value owns its
+                    // payload) or a bare nullary variant. The `load`
+                    // desugar's whole LoadResult was this match, passed
+                    // straight into `describe`, and no row named it. Typed
+                    // from the CALLEE's declared parameter, exactly as the
+                    // heapify row is — the match's own arms deliberately
+                    // answer no single type — and screened silent through
+                    // `reaches_declared`, as every deep row is.
+                    let all_ctors = arms.iter().all(|a| match &a.body {
+                        ArmBody::Expr(b) => self.ctor_valued(b),
+                        ArmBody::Block(_) => false,
+                    });
+                    if !all_ctors {
+                        return;
+                    }
+                    if self.caps.get(callee).and_then(|c| c.get(ix)) == Some(&Capability::Consume)
+                        || self.sinks(callee, ix)
+                    {
+                        return;
+                    }
+                    let Some(pty) = self.decl.param_ty(callee, ix) else {
+                        return;
+                    };
+                    let Some(kind) = self.decl.release_kind(pty) else {
+                        return;
+                    };
+                    let silent = matches!(
+                        kind,
+                        DropKind::FreeStr
+                            | DropKind::FreeArr
+                            | DropKind::FreeSmallArr
+                            | DropKind::FreeMap
+                    ) || matches!(&kind, DropKind::Deep(dt)
+                        if !self.decl.reaches_declared(dt));
+                    if !silent {
                         return;
                     }
                     sink.borrow_mut().push(ArgTemp {
@@ -3245,7 +3297,7 @@ impl MoveCheck<'_> {
                         line,
                         module: None,
                         producer: Some("@match".to_string()),
-                        kind: DropKind::FreeStr,
+                        kind,
                         verdict: ArgVerdict::Unknown,
                         owner: self.cur_fn.borrow().clone(),
                         view_copies: false,
@@ -3467,6 +3519,30 @@ impl MoveCheck<'_> {
                     .is_some_and(|et| !self.decl.owns_heap(&et)),
             elem_producers: Vec::new(),
         });
+    }
+
+    /// Whether every value this expression can yield is a freshly BUILT
+    /// variant — a constructor call (round ten closed its borrow door, so the
+    /// value owns its payload) or a bare nullary variant, through however
+    /// many nested matches and if-expressions the desugars stack (the `load`
+    /// desugar is a match inside a match). Round forty-seven's screen.
+    fn ctor_valued(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Call { name, .. } | Expr::Var { name, .. } => self.decl.constructs(name),
+            Expr::Match { arms, .. } => arms.iter().all(|a| match &a.body {
+                ArmBody::Expr(b) => self.ctor_valued(b),
+                ArmBody::Block(_) => false,
+            }),
+            Expr::IfExpr {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.ctor_valued(then_branch)
+                    && else_branch.as_ref().is_some_and(|b| self.ctor_valued(b))
+            }
+            _ => false,
+        }
     }
 
     /// Whether this `+` builds a **String** — the one shape of the operator that
