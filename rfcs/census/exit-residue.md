@@ -1374,6 +1374,27 @@ Movement: jsondecbytes CLEAN (22 → 0), mapdemo CLEAN (7 → 0).
 Tallies after round forty-five: **clean 126, leaking 18, zero
 double-frees**.
 
+## Forty-sixth triage: the wall gets a gate, and the field gets a type
+
+Two pieces at the fn-value retention wall. The capability MEET: any
+runtime value of `Fn(ps) -> r` is either a program function of exactly
+that signature or a lambda, so an argument of a call through a
+fn-typed binding may take the ordinary Released verdict when EVERY
+same-signature function reads the position, retains nothing there and
+lends nothing — and no lambda in the program could inhabit the
+signature (matched by arity; the declared reading does not type
+lambdas). And `Declared::type_of` gained its FIELD arm — `let df =
+d.run` typed as unknown, and everything downstream of the binding
+followed. The arm turned one pin around honestly: with the field
+read typed, the mention screen can see that `b.s + "!"` only COPIES
+out of its target, so the store owns what it displaces — round
+fifteen's append semantics, now reaching field stores.
+
+Movement: rest 363 → 282, fnvalarg 2 → 1.
+
+Tallies after round forty-six: **clean 126, leaking 18, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the

@@ -62,7 +62,7 @@ files	clean
 finitekeys	clean
 floatkey	skip
 floats	other
-fnvalarg	leak	2
+fnvalarg	leak	1
 fnvalstore	leak	6
 foreach	other
 freelist	other
@@ -146,7 +146,7 @@ regionarena	clean
 regionescape	leak	1
 releaseacrossexit	clean
 releaseacrosstry	clean
-rest	leak	363
+rest	leak	282
 revcomp	clean
 rpc	leak	6
 rpcsplit	leak	5

@@ -421,6 +421,22 @@ impl Declared {
                         .cloned()
                         .filter(|r| !crate::types::mentions_param(r))
                 }),
+            // A FIELD READ answers the record's declaration — `let df =
+            // d.run` on a fn-typed field typed as unknown, and everything
+            // downstream of the binding followed (exit-residue round
+            // forty-six). `forced` unwraps a `lazy T` to the value a read
+            // yields. A generic record's field may still mention its
+            // variables; the caller's resolve guards stand down as usual.
+            Expr::Field { expr, field, .. } => {
+                let bt = self.type_of(vars, expr)?;
+                match crate::types::resolve(&bt, &self.decls) {
+                    Type::Record(fields) => fields
+                        .iter()
+                        .find(|f| &f.name == field)
+                        .map(|f| crate::types::forced(&f.ty)),
+                    _ => None,
+                }
+            }
             // The one allocating operator is `+` on Strings, and its result has
             // its left operand's type. Every other operator is a scalar, whose
             // type owns no heap anyway.

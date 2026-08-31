@@ -3306,9 +3306,14 @@ pub(crate) mod tests {
             o.plan.store_owned_at(stores[1]),
             "module state owns by rule"
         );
+        // Round forty-six: the field read types now (`Declared::type_of`
+        // gained its Field arm), so the mention screen can see that
+        // `b.s + \"!\"` only COPIES out of the target — the store owns what
+        // it displaces, exactly as round fifteen's append semantics say. The
+        // emission's own value-side guard still decides what is emitted.
         assert!(
-            !o.plan.store_owned_at(stores[2]),
-            "a value naming the target is the alias guard's"
+            o.plan.store_owned_at(stores[2]),
+            "a copying mention of the target no longer stands the store down"
         );
     }
 
