@@ -106,7 +106,7 @@ server is bundled and no `--target` is passed; the result is platform-neutral.
 The version inside `package.json` must equal the release tag without its leading
 `v` (the release workflow refuses to publish otherwise). `vsce` and
 `code --install-extension` both accept a semver pre-release identifier, so the
-mapping is identity: tag `v0.1.0-alpha.2`, `"version": "0.1.0-alpha.2"`.
+mapping is identity: tag `v0.1.0-alpha.3`, `"version": "0.1.0-alpha.3"`.
 
 ## Layout
 
