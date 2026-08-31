@@ -1526,6 +1526,63 @@ an error. The post-pass reads the local.
 Tallies after round fifty-two: **clean 129, leaking 15, zero
 double-frees**.
 
+## Fifty-third triage: the literal that is a constructor in braces
+
+The return-narrowing's last blind spot: a returned STRUCT LITERAL
+fell to the conservative walk, so `return Ok(Regex { op: consume
+bd.op, nsets: bd.nsets, .. })` marked `bd` moved-into-the-return on
+its SUCCESS path — and the un-consumed `pat` buffer lost its owner
+once per compile. Two arms join `gave_up_returned`: a struct
+literal's fields take the same per-argument reading a constructor
+call's arguments do (consumed fields account for themselves, the
+borrow door is round ten's), and a place read whose type owns no heap
+travels by value and marks nothing. With `bd` finally holed rather
+than Returned, the round fifty-two full-walk fires at the pre-take
+error returns and the minus-holes release at the success return —
+regexredux drops from thirty-five blocks to five.
+
+Movement: regexredux 35 → 5.
+
+Tallies after round fifty-three: **clean 129, leaking 15, zero
+double-frees** — the same rows, a third of the blocks.
+
+## Fifty-fourth triage: the cast the walk could not see through
+
+`return Some(Float32(toFloat(sc, ..)))` — a numeric width cast is a
+call spelled with a type's name, and the conservative return-walk
+marked `sc` straight through it, so parseFloat32's Scanned record
+lost its owner and its digit buffer leaked once per slow-path parse.
+The twelve width names join `gave_up_returned` as a transparent arm —
+a cast returns a scalar copy, and its argument keeps its own reading
+(the inner `toFloat(sc, ..)` clears through the call arm as any read
+does).
+
+Movement: numparse CLEAN (3 → 0).
+
+Tallies after round fifty-four: **clean 130, leaking 14, zero
+double-frees**.
+
+## Fifty-fifth triage: the wall's gate opens
+
+Two refinements and the fn-value meet finally fires. A lambda in an
+argument position whose declared parameter is a fn type has a KNOWN
+signature — it poisons only that signature now, not its whole arity,
+so the handler signatures the rpc stubs dispatch through stop being
+collateral of every one-argument map callback in the link. And a
+constructor-built argument of a call through a fn value —
+`cb(Done(getItem(req)))`, the generated in-process stub's whole
+body — answers no type of its own (a generic variant's bare name is
+incomplete), but the callee's declared parameter names it exactly,
+the same way the heapify and ctor-match rows are typed. With the
+row typed and the signature clean, the round forty-six meet clears
+the argument: every same-signature function reads the position, and
+no lambda can inhabit it.
+
+Movement: rpc CLEAN (6 → 0), rpcsplit CLEAN (5 → 0).
+
+Tallies after round fifty-five: **clean 132, leaking 12, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the

@@ -114,7 +114,7 @@ namespace	clean
 nbody	clean
 nohashkey	skip
 numbytes	clean
-numparse	leak	3
+numparse	clean
 option	clean
 ownedcontainer	clean
 ownership	other
@@ -139,7 +139,7 @@ record	clean
 reflection	clean
 refutablelet	clean
 regex	clean
-regexredux	leak	35
+regexredux	leak	5
 region	other
 region_consume	skip
 regionarena	clean
@@ -148,8 +148,8 @@ releaseacrossexit	clean
 releaseacrosstry	clean
 rest	leak	282
 revcomp	clean
-rpc	leak	6
-rpcsplit	leak	5
+rpc	clean
+rpcsplit	clean
 scan	clean
 schemaimport	clean
 server	clean
