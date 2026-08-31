@@ -4011,6 +4011,17 @@ import {{ benchOne }} from \"std/bench\"
     // Run the compiled harness. When `capture` is set (`--compare`), grab its
     // stdout as the JSON report to feed the comparator; otherwise let stdout and
     // stderr stream straight through (the `--json` and human paths both print live).
+    // VYRN_BENCH_KEEP: leave the temp dir (the .ll, the shim, the binary) for
+    // a debugger — a bench binary that heap-faults dies before its report
+    // line, and the artifacts are all there is to read (round fifty-eight).
+    let keep = std::env::var_os("VYRN_BENCH_KEEP").is_some();
+    let cleanup = |dir: &std::path::Path| {
+        if keep {
+            eprintln!("VYRN_BENCH_KEEP: artifacts left in {}", dir.display());
+        } else {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    };
     let (code, out) = if capture {
         match Command::new(&out_path).output() {
             Ok(o) => {
@@ -4027,7 +4038,7 @@ import {{ benchOne }} from \"std/bench\"
                     "error: failed to run bench binary ({}): {e}",
                     out_path.display()
                 );
-                let _ = std::fs::remove_dir_all(&dir);
+                cleanup(&dir);
                 return (ExitCode::FAILURE, None);
             }
         }
@@ -4039,12 +4050,12 @@ import {{ benchOne }} from \"std/bench\"
                     "error: failed to run bench binary ({}): {e}",
                     out_path.display()
                 );
-                let _ = std::fs::remove_dir_all(&dir);
+                cleanup(&dir);
                 return (ExitCode::FAILURE, None);
             }
         }
     };
-    let _ = std::fs::remove_dir_all(&dir);
+    cleanup(&dir);
     (ExitCode::from(code), out)
 }
 

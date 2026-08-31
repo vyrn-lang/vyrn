@@ -1727,6 +1727,32 @@ Tallies after round fifty-seven: **clean 143, leaking 0, zero
 double-frees** — the residue is zero, and the ratchet's only
 remaining job is to keep it there.
 
+## Fifty-eighth triage: the bench corpus is a gate too
+
+Main's first post-zero CI run failed — not the ratchet, the BENCH
+job: every bench body that passes a binding through `blackBox`
+heap-faulted (0xC0000374) before its report line. Round fifty-seven's
+param-typing fallback had started minting released rows for
+`copyString(n, blackBox(s))` — a temporary whose value IS `s`,
+because `blackBox` hands its argument back — and the drain freed the
+binding through the alias, then the block exit freed it again. The
+producer screen now stands such a row down the way the views screen
+always has: a seeded row returning the same bare type parameter as a
+parameter's mints nothing.
+
+Two lessons worth their lines. The local battery (workspace + parity
++ genwasm + survey + site) never RUNS the bench corpus natively —
+`blackBox` is bench/test-only, so no example's main path can reach
+the shape, and only CI's bench job executes those bodies. `vyrn bench`
+over the corpus joins the local gate list for any round that touches
+the argument machinery. And a bench binary that dies before its
+report line leaves nothing to read — `VYRN_BENCH_KEEP` now leaves the
+temp dir (the .ll, the shim, the binary) for a debugger, which is how
+this one was read.
+
+Tallies after round fifty-eight: unchanged — **clean 143, leaking 0,
+zero double-frees** — and the bench corpus runs green end to end.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the

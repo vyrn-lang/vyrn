@@ -3788,6 +3788,31 @@ pub(crate) mod tests {
         );
     }
 
+    /// Round fifty-eight: an argument produced by a HANDS-BACK row mints no
+    /// released row — `copyString(n, blackBox(s))`'s temporary IS `s`, and
+    /// round fifty-seven's param-typing fallback briefly minted it: the
+    /// drain freed `s` through the alias and every bench body passing a
+    /// binding through `blackBox` heap-faulted before its report line.
+    #[test]
+    fn a_hands_back_producer_mints_no_row() {
+        let src = "fn takes(s: String) -> Int64 { return s.byteLength }\n\
+                   fn main() -> Int64 { return 0 }\n\
+                   bench \"alias\" {\n\
+                       let s = \"x\" + \"y\"\n\
+                       blackBox(takes(blackBox(s)))\n\
+                   }";
+        let (o, _) = analyze_src(src);
+        assert!(
+            o.plan.arg_drops.iter().all(|at| {
+                o.plan
+                    .owners
+                    .get(at)
+                    .is_none_or(|f| !f.starts_with("bench@"))
+            }),
+            "no released row inside the bench body"
+        );
+    }
+
     /// Round fifty-seven: a scalar literal is an owned heapify element, so a
     /// nested literal in argument position mints its row — `sumFirst([[10,
     /// 11], [12]])` leaked both inner buffers and the outer one.

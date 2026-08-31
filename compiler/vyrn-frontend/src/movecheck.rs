@@ -3248,6 +3248,21 @@ impl MoveCheck<'_> {
             // A lending builtin hands back a place inside its receiver — it
             // BUILT nothing the caller may release.
             Expr::Call { name, .. } if views(name) => return,
+            // A seeded row that HANDS ITS ARGUMENT BACK is `blackBox`: its
+            // result IS the argument, so the caller may not free it. Round
+            // fifty-eight: round fifty-seven's param-typing fallback started
+            // minting rows for `copyString(n, blackBox(s))`, and the drain
+            // freed `s` through the alias — every bench body that passes a
+            // binding through `blackBox` heap-faulted (0xC0000374) before
+            // its report line.
+            Expr::Call { name, .. }
+                if crate::prelude::signature(name).is_some_and(|f| {
+                    matches!(&f.ret, Type::Param(r)
+                        if f.params.iter().any(|p| matches!(&p.ty, Type::Param(q) if q == r)))
+                }) =>
+            {
+                return
+            }
             // The tagged-template desugar (RFC-0007) wraps both built arrays
             // in `@list`, so the array-literal arm below never sees them and
             // both heapified triples leaked per call (exit-residue round
