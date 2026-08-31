@@ -51,8 +51,13 @@ impl Index for Slice {
 type Pool = { slots: Array<Int64>, taken: Int64 }
 
 impl Owned for Pool {
-    fn release(self) {
+    fn release(consume self) {
+        // A declared release owns the WHOLE reclamation — the walk stops at
+        // the declaration, so the slots go back here or nowhere (the round
+        // thirty-six family, one member late).
         print("pool released")
+        let slots = consume self.slots
+        drop slots
     }
 }
 
@@ -70,6 +75,22 @@ impl Copy for Pool {
 /// M1b refused one and named a recursive function as the answer. This is where
 /// that function goes.
 type Chain = { next: Option<Chain>, tag: Int64 }
+
+/// A self-referring type declares its release (RFC-0096) for the same reason
+/// it declares its copy: a structural walk has no bottom, so without this the
+/// boxes leak by the recorded rule. The recursion lives in `drop`, which
+/// releases a `Chain` the way this very declaration says.
+impl Owned for Chain {
+    fn release(consume self) {
+        let n = consume self.next
+        match consume n {
+            Some(c) => {
+                drop c
+            }
+            None => {}
+        }
+    }
+}
 
 impl Copy for Chain {
     fn copy(self) -> Chain {

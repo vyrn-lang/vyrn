@@ -37,7 +37,7 @@ consume	other
 consume_borrowed	skip
 consume_handover	clean
 consumeloop	clean
-container	leak	4
+container	clean
 contractquery	clean
 controlflow	clean
 copy	leak	2
