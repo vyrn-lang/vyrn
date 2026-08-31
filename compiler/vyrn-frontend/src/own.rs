@@ -268,6 +268,11 @@ pub struct Release {
     pub kind: DropKind,
     pub exit: Exit,
     pub line: u32,
+    /// Round fifty-two: at this exit the binding's holes have NOT been taken
+    /// yet — every take is later and outside loops — so the release walks the
+    /// WHOLE value, hole fields included. False everywhere else, and the
+    /// emission skips the holes as it always has.
+    pub full: bool,
 }
 
 /// How a droppable binding is reclaimed at block exit.
@@ -1834,12 +1839,77 @@ pub fn analyze(program: &Program) -> Ownership {
                         kind: kind.clone(),
                         exit: if ex.is_try { Exit::Try } else { Exit::Return },
                         line: 0,
+                        full: false,
                     },
                 ));
                 early
                     .entry(ex.fn_name.clone())
                     .or_default()
                     .insert(*key, kind.clone());
+            }
+        }
+        // Round fifty-two: a holed binding releases MINUS its holes everywhere,
+        // which is right wherever the take may already have run — and blind at a
+        // `return`/`?` that provably precedes EVERY take: on that path nothing
+        // left, the binding owns itself whole, and the walk may take the hole
+        // fields with it (regexredux's `compile`, whose early `Err` returns each
+        // abandoned four consumed-later Builder arrays). Sound only when every
+        // take and the exit sit outside loops — a loop makes walk order lie
+        // about runtime order, which is round forty-two's lesson.
+        {
+            use crate::movecheck::EvKind;
+            let mut takes: HashMap<usize, (u32, bool)> = HashMap::new();
+            for ev in &facts.store_events {
+                if matches!(ev.kind, EvKind::Take) {
+                    let e = takes.entry(ev.key).or_insert((u32::MAX, true));
+                    e.0 = e.0.min(ev.order);
+                    e.1 &= ev.loops.is_empty();
+                }
+            }
+            let exits2: HashMap<usize, (u32, bool)> = exit_sites
+                .iter()
+                .map(|x| (x.site, (x.order, x.loops.is_empty() && x.clean)))
+                .collect();
+            let dbg52 = std::env::var_os("VYRN_PLACED_DUMP").is_some();
+            for (f, rs) in releases.iter_mut() {
+                let Some(hs) = holes.get(f) else {
+                    if dbg52 {
+                        eprintln!("full-skip: fn={f} no holes map");
+                    }
+                    continue;
+                };
+                for r in rs.iter_mut() {
+                    if !matches!(r.exit, Exit::Return | Exit::Try) {
+                        continue;
+                    }
+                    if !hs.contains_key(&r.binding) {
+                        if dbg52 {
+                            eprintln!("full-skip: fn={f} binding={:x} not holed", r.binding);
+                        }
+                        continue;
+                    }
+                    let Some(&(t_order, t_free)) = takes.get(&r.binding) else {
+                        if dbg52 {
+                            eprintln!("full-skip: fn={f} binding={:x} no takes", r.binding);
+                        }
+                        continue;
+                    };
+                    let Some(&(e_order, e_ok)) = exits2.get(&r.site) else {
+                        if dbg52 {
+                            eprintln!("full-skip: fn={f} site={:x} no exit ev", r.site);
+                        }
+                        continue;
+                    };
+                    if std::env::var_os("VYRN_PLACED_DUMP").is_some() {
+                        eprintln!(
+                            "full?: fn={f} site={:x} t=({t_order},{t_free}) e=({e_order},{e_ok})",
+                            r.site
+                        );
+                    }
+                    if t_free && e_ok && e_order < t_order {
+                        r.full = true;
+                    }
+                }
             }
         }
         if std::env::var_os("VYRN_PLACED_DUMP").is_some() {
@@ -2381,10 +2451,12 @@ fn fold_store_owned(facts: &crate::movecheck::Facts) -> std::collections::HashSe
 /// value WITH — an alloca name, a wasm place, a scope entry. What it never does
 /// again is decide the order, or derive a boundary index to find where its own
 /// frames stop.
-pub fn placed(steps: &[Release]) -> HashMap<(Exit, usize), Vec<usize>> {
-    let mut out: HashMap<(Exit, usize), Vec<usize>> = HashMap::new();
+pub fn placed(steps: &[Release]) -> HashMap<(Exit, usize), Vec<(usize, bool)>> {
+    let mut out: HashMap<(Exit, usize), Vec<(usize, bool)>> = HashMap::new();
     for r in steps {
-        out.entry((r.exit, r.site)).or_default().push(r.binding);
+        out.entry((r.exit, r.site))
+            .or_default()
+            .push((r.binding, r.full));
     }
     out
 }
@@ -2486,6 +2558,7 @@ impl Place<'_> {
                 kind: l.kind.clone(),
                 exit,
                 line: l.line,
+                full: false,
             })
             .collect();
         self.out.extend(steps);

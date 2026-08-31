@@ -1505,6 +1505,27 @@ Tallies after round fifty-one: **clean 129, leaking 15, zero
 double-frees** — rows unchanged, blocks down inside regexredux's
 class, and the fold is finally shaped the way round twenty-one meant.
 
+## Fifty-second triage: the walk that finishes what nothing took
+
+The field-level half round fifty-one recorded: a holed binding
+releases MINUS its holes everywhere, which is blind exactly at a
+`return`/`?` that provably precedes EVERY take — on that path nothing
+left, and the binding owns itself whole. `Release` rows carry a
+`full` flag now, set in a post-pass when every take of the binding
+and the exit itself sit outside loops and the exit's walk order
+precedes the first take's; the emission parks the hole skip-list
+around that one step, in both backends. The corpus is unchanged
+today — the class's remaining corpus instance (regexredux's compile)
+turns out to leak on its SUCCESS path, a different descent — but the
+Builder probe that named this machinery goes from two blocks to
+clean, and the debugging that got here surfaced one more fact worth a
+line: `facts.exit_sites` is DRAINED into a local early in `analyze`,
+and a later reader of the facts struct reads an empty vector without
+an error. The post-pass reads the local.
+
+Tallies after round fifty-two: **clean 129, leaking 15, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the
