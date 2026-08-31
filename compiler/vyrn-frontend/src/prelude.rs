@@ -646,6 +646,16 @@ pub fn capability(name: &str, i: usize) -> Option<Capability> {
     if crate::ast::is_log_level(name) && i == 1 {
         return Some(Capability::Read);
     }
+    // The codec forms (RFC-0009) parse or render what they are given and
+    // keep nothing — the same seam again: no seeded row, no user
+    // declaration, so `fromJson(T, httpInput(..))` and `toJson(f(..))` gave
+    // their call-built arguments no verdict, and every generated projection
+    // leaked one input String and one answer value per request
+    // (exit-residue round fifty-six, `rest`'s 282 blocks). `fromJson`'s
+    // argument 0 is a TYPE name, which no temporary ever inhabits.
+    if (name == "fromJson" && i == 1) || (name == "toJson" && i == 0) {
+        return Some(Capability::Read);
+    }
     signature(name)
         .and_then(|f| f.params.get(i))
         .map(|p| p.capability)

@@ -63,7 +63,7 @@ finitekeys	clean
 floatkey	skip
 floats	other
 fnvalarg	leak	1
-fnvalstore	leak	6
+fnvalstore	leak	2
 foreach	other
 freelist	other
 gendemo	clean
@@ -72,7 +72,7 @@ generics	clean
 genref	leak	1
 gentable	clean
 gentablefail	skip
-graphql	leak	6
+graphql	clean
 heapfieldkey	skip
 heapkey	skip
 herofield	clean
@@ -139,14 +139,14 @@ record	clean
 reflection	clean
 refutablelet	clean
 regex	clean
-regexredux	leak	5
+regexredux	clean
 region	other
 region_consume	skip
 regionarena	clean
 regionescape	leak	1
 releaseacrossexit	clean
 releaseacrosstry	clean
-rest	leak	282
+rest	leak	3
 revcomp	clean
 rpc	clean
 rpcsplit	clean

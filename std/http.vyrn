@@ -36,7 +36,7 @@
 /// there must be a declared type name, which is precisely what a type parameter
 /// is not.
 
-import { Json, JsonField, copyJsonFields, emit } from "std/json"
+import { Json, JsonField, copyJson, copyJsonFields, emit } from "std/json"
 import { parseJson } from "std/jsonread"
 import { fromBytesOr, indexOf, joinWith, padStart, replace, split, substring, toHex, trim } from "std/strings"
 // The ETag hash and the `Last-Modified` calendar, both already in std and both
@@ -907,8 +907,14 @@ export fn mount(req: Request, groups: Array<Array<Route>>, live: Array<Live>, so
         for r in g {
             if let Some(ps) = httpMatch(r, req) {
                 let answer = if r.prefix { httpInvokeWhole(r.whole, req) } else { httpInvoke(r.run, req, ps) }
-                if let Some(resp) = answer {
-                    return Some(httpApply(r, req, resp))
+                // A consuming match, not `if let`: the payload travels in a
+                // box the `Option` owns, and taking `resp` out with a hole
+                // left the box itself with no owner — one 72-byte block per
+                // answered request (exit-residue round fifty-six). The
+                // consumed scrutinee's extraction frees the box.
+                match consume answer {
+                    Some(resp) => { return Some(httpApply(r, req, resp)) }
+                    None => {}
                 }
             }
         }
@@ -1133,7 +1139,14 @@ fn httpSingleOf(j: Json, key: String) -> Option<Json> {
     if fs.length != 1 {
         return None
     }
-    return if fs[0].key == key { Some(fs[0].value) } else { None }
+    // An OWNED copy, not `fs[0].value`: handing out the element made this
+    // a lender, which pinned every caller's parsed document — the whole
+    // response-body parse leaked once per request (exit-residue round
+    // fifty-six).
+    if fs[0].key == key {
+        return Some(copyJson(fs[0].value))
+    }
+    return None
 }
 
 /// The object a `Location` template and `Last-Modified` read their fields from:
