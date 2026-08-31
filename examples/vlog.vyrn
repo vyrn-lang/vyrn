@@ -166,14 +166,27 @@ fn humanizeDuration(ms: Int64) -> String {
 
 /// Decode one line, wrapping the `Validation` in a bool-tagged record.
 fn decodeLine(raw: String) -> Decoded {
-    return match fromJson(LogLine, raw) {
-        Valid(l) => Decoded { ok: true, line: l, err: "" },
-        Invalid(issues) => Decoded {
-            ok: false,
-            line: LogLine { ts: 0, level: "", msg: "" },
-            err: issues[0].message.copy(),
-        },
+    match fromJson(LogLine, raw) {
+        Valid(l) => {
+            return Decoded { ok: true, line: l, err: "" }
+        }
+        Invalid(issues) => {
+            // A consuming walk, not `issues[0].message.copy()`: the element
+            // view stood the payload's release down, and the whole issue
+            // list leaked once per malformed line (exit-residue round
+            // fifty-seven). The loop owns each row and frees it behind us.
+            let mut msg = ""
+            for i in consume issues {
+                if msg == "" {
+                    msg = i.message.copy()
+                }
+            }
+            return Decoded { ok: false, line: LogLine { ts: 0, level: "", msg: "" }, err: msg }
+        }
     }
+    // Unreachable: both arms return. The checker reads a statement match
+    // arm-blind, so the function still needs a spelled tail.
+    return Decoded { ok: false, line: LogLine { ts: 0, level: "", msg: "" }, err: "" }
 }
 
 /// All stdin lines, buffered. The NATURAL surface: `readLine()` already strips

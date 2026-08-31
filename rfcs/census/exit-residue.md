@@ -1648,6 +1648,85 @@ Movement: graphql CLEAN (6 → 0), regexredux CLEAN (5 → 0), rest 282 →
 Tallies after round fifty-six: **clean 134, leaking 10, zero
 double-frees**.
 
+## Fifty-seventh triage: zero
+
+The last ten rows, each its own conviction — and at the end of them
+the survey reads **zero leaking rows** for the first time since it
+was built.
+
+**vlog** read its `Invalid` payload through `issues[0].message` — an
+element view that stood the payload's release down — and leaked the
+whole issue list per malformed line. A consuming walk owns each row.
+
+**rest's last block** was the 304 branch: `answered.body = ""`
+displaces the representation it suppresses, and the displaced free
+never fired because the place-store fold read `facts.exit_sites`
+AFTER the field is drained into a local — round fifty-two's lesson,
+relearned at the second reader. The fold reads the local now, so the
+exiting-take exemption finally works for field stores too.
+
+**matchown**'s multi-payload arms bind two payloads and hand one out;
+the sibling is the arm's to finish, and the example now spells that
+with a consuming match and a `drop` (the automatic sibling free for
+multi-binder arms stays a recorded gap).
+
+**fieldmut**'s nested literal as a call argument — `sumFirst([[10,
+11], [12]])` — stood down because a SCALAR literal was not an "owned
+element"; it owns nothing at all, and saying so frees both inner
+buffers and the outer one.
+
+**fnvalarg and fnvalstore's `greet`** were the generic fn-value
+result: `force(defer(greet), ..)` could not solve `Deferred<P, T>`
+because a bare top-level function name types as nothing. It types as
+its own fn row FOR SOLVING ONLY — typing it everywhere made
+`Deferred { run: label }` a move of `label`, which the corpus caught
+in one probe.
+
+**copy** was `print(words[0] + "|" + words[1])`: a `+` chain over
+element reads answers no declared type, so the rendered line had no
+row. One provably-String operand settles a homogeneous chain
+(`adds_strings`), and the row is typed `Str`.
+
+**The arm-mention screen.** The generated adapters' `Invalid` arm
+moves `issues` into a field, which marks the scrutinee row Moved and
+stands the whole release down; the `Valid` arm's binder then needs
+the round-forty arm free, which refused any arm value MENTIONING the
+binder. The mention callees ride with the row now and `facts()`
+screens them against the lending/retention/escaper closures — the
+`fresh_stores` pattern, applied to arm payloads.
+
+**genref, and every user-container element overwrite.** The facts
+walk never read the `place atSet` desugar, so the write-back inside
+it had no plan row — and the desugar's own hoists still spelled
+`{recv}[]idx`, which reads as DERIVED and vetoed the row even once
+walked. The walk reads the shared expansion when a compile-scope
+memo is open (the LSP keeps its per-keystroke path), and the hoists
+take round fifty's `#` spelling.
+
+**tree** was `let root = Some(insert(..))` typed as bare `Option`:
+`Some(x)` types as `Option<type_of(x)>` now, and the payload box has
+an owner. (tree's `main` returns its total, so the row moves to
+`other` — its designed exit was hidden behind the leak exit all
+along.)
+
+**regionescape** was `joinWith(parts, "-").byteLength` inside a
+`region`: the receiver free stood down lexically, but a CALLEE's
+allocation is malloc-side whatever region is open at the call site —
+the round twenty-seven scrutinee reading, extended to receivers
+(`receiver_malloc`).
+
+**fnvalstore's capture.** The §25 round-three rule — the snapshot
+OWNS its heap — was the textual backend's alone: the direct backend
+packed captures shallowly, so the binding's value could never be
+released anywhere. The direct backend duplicates heap captures into
+the block now, and `Gone::Captured` splits: a LAMBDA capture is a
+deep snapshot, so the binding reclaims at block exit; a `spawn`'s
+capture crosses to a task and stays the recorded leak.
+
+Tallies after round fifty-seven: **clean 143, leaking 0, zero
+double-frees** — the residue is zero, and the ratchet's only
+remaining job is to keep it there.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the

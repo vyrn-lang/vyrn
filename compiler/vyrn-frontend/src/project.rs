@@ -325,6 +325,15 @@ impl Drop for Memo {
     }
 }
 
+/// Whether a compile-scope [`Memo`] is open. The facts walk expands a
+/// projection store only then (round fifty-seven): inside a compile the
+/// lowering walks the same leaked nodes and reads the same plan rows; the LSP
+/// analyzes per keystroke with no memo, and expanding there would leak one
+/// tree per keystroke per store site for rows nothing will ever emit.
+pub fn memo_open() -> bool {
+    STORES.with(|m| m.borrow().is_some())
+}
+
 /// The shared expansion for `key`, or `build`'s, leaked so its addresses outlive
 /// every consumer.
 fn memo(
@@ -690,15 +699,21 @@ pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>>
             let (index, value) = if moves.is_empty() {
                 (args[1].clone(), value.clone())
             } else {
+                // `#`, not `[]`: the round-fifty rename, mirrored — a name
+                // spelled `{recv}[]idx` reads as DERIVED from the `{recv}[]`
+                // container temp under `mentions_place`, which vetoed the
+                // inner store's displaced-element row and left every
+                // overwritten user-container element with no owner
+                // (exit-residue round fifty-seven, std/slots).
                 let i = crate::parser::hoist_operand(
                     args[1].clone(),
-                    format!("{recv}[]idx"),
+                    format!("{recv}#idx"),
                     &mut out,
                     line,
                 );
                 let v = crate::parser::hoist_operand(
                     value.clone(),
-                    format!("{recv}[]val"),
+                    format!("{recv}#val"),
                     &mut out,
                     line,
                 );

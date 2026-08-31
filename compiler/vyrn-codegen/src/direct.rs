@@ -4848,8 +4848,9 @@ impl<'p> Fn_<'_, 'p> {
                 // RFC-0114 R1′: an unnamed String receiver this frame owns is
                 // freed right after the header read — the pointer is teed to a
                 // local before `length_of` consumes it.
-                let rfree =
-                    self.cx.plan.receiver_free(e as *const Expr as usize) && self.region_depth == 0;
+                let rfree = self.cx.plan.receiver_free(e as *const Expr as usize)
+                    && (self.region_depth == 0
+                        || self.cx.plan.receiver_malloc_at(e as *const Expr as usize));
                 let tee = if rfree {
                     let l = b.local(ValType::I32);
                     b.ins(&Instruction::LocalTee(l));
@@ -9118,8 +9119,16 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::I32Add);
                 }
                 self.expr_as(m, b, src, ty)?;
+                // The snapshot OWNS its heap (RFC-0114 §25 round three, the
+                // textual backend's rule, mirrored here in round fifty-seven):
+                // a heap capture is DUPLICATED into the block, which is what
+                // lets the release twin walk it and the captured binding keep
+                // releasing its own value at block exit.
                 match self.cx.repr(ty, line)? {
                     Repr::Scalar(_) => {
+                        if self.owns_heap(ty) {
+                            self.copy_stack(b, ty, line)?;
+                        }
                         b.ins(&store_of(&self.cx.ll(ty)));
                     }
                     Repr::Agg(fl) => {
@@ -9128,6 +9137,16 @@ impl<'p> Fn_<'_, 'p> {
                             src_mem: 0,
                             dst_mem: 0,
                         });
+                        if self.owns_heap(ty) {
+                            let a = b.local(ValType::I32);
+                            b.ins(&Instruction::LocalGet(p));
+                            if bl.fields[i] != 0 {
+                                b.ins(&Instruction::I32Const(bl.fields[i] as i32));
+                                b.ins(&Instruction::I32Add);
+                            }
+                            b.ins(&Instruction::LocalSet(a));
+                            self.copy_at(b, a, ty, line)?;
+                        }
                     }
                     Repr::Unit => return unsupported("a captured Unit value", line),
                 }

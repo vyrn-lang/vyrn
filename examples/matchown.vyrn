@@ -132,19 +132,34 @@ fn main() -> Int64 {
     }
     print("arr=\{arr.length}")
 
-    // A USER enum's payload, and a payload out of a NESTED enum.
+    // A USER enum's payload, and a payload out of a NESTED enum. A
+    // multi-payload arm binds BOTH payloads, and the one it does not hand
+    // out is the arm's to finish — the consuming match takes the value, so
+    // `drop` on the ignored sibling is the spelling of "I bound it, I own
+    // it" (exit-residue round fifty-seven; the automatic sibling free is a
+    // recorded gap for multi-binder arms).
     let nd = mkNode(5)
-    let xs = match nd {
-        Leaf(k) => emptyInts(),
-        Bunch(v, t) => v,
+    let mut xs: Array<Int64> = []
+    match consume nd {
+        Leaf(kx) => { xs = emptyInts() }
+        Bunch(vx, tx) => {
+            xs = vx
+            drop tx
+        }
     }
     print("enum=\{xs.length}")
-    let deep = match nested(4) {
-        Some(inner) => match inner {
-            Bunch(v, t) => t,
-            Leaf(k) => "leaf",
-        },
-        None => "none",
+    let mut deep = "none"
+    match nested(4) {
+        Some(inner) => {
+            match consume inner {
+                Bunch(vy, ty) => {
+                    deep = ty
+                    drop vy
+                }
+                Leaf(ky) => { deep = "leaf" }
+            }
+        }
+        None => {}
     }
     print("deep=\{deep}")
 

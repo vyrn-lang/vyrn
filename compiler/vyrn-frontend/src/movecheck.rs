@@ -147,8 +147,13 @@ pub enum Gone {
     Returned { line: usize },
     /// `drop name` reclaims it, so the automatic path must not.
     Dropped { line: usize },
-    /// A lambda or a `spawn` holds it, and either can outlive this block.
-    Captured { line: usize },
+    /// A lambda or a `spawn` holds it. A LAMBDA's capture is a by-value deep
+    /// snapshot since RFC-0114 §25 round three (both compiling backends
+    /// duplicate heap captures into the block, and the release twin walks
+    /// them), so the binding's own value is still this frame's to release —
+    /// round fifty-seven turns that release on. A `spawn`'s capture crosses
+    /// to a task that outlives the frame, and stays a recorded leak.
+    Captured { line: usize, spawned: bool },
     /// A second name reads it without taking it: `let d = c` on a type rule 1
     /// leaves alone. `Ref<T>` was the built-in case and is deleted (RFC-0090 M4);
     /// what reaches here now is a type that DECLARES `impl Owned` and holds no
@@ -333,6 +338,12 @@ pub struct ArmPayloadEv {
     pub arm_ix: u32,
     pub kind: crate::own::DropKind,
     pub owner: String,
+    /// Round fifty-seven: the callee positions through which the arm's value
+    /// mentions the binder — `Some(Response { body: toJson(create(input)) })`
+    /// reads `input` only as a read argument. `facts()` screens them against
+    /// the lending/retention/escaper closures, exactly as `fresh_stores`
+    /// screens a mention store; an empty list needed no screen.
+    pub mentions: Vec<(String, usize)>,
 }
 
 pub struct Facts {
@@ -568,7 +579,23 @@ pub fn facts(program: &Program) -> Facts {
         exit_sites: r.exit_sites,
         mentions: r.mentions,
         consume_cands: r.consume_cands,
-        arm_payloads: r.arm_payloads,
+        // Round fifty-seven: a row whose arm value mentions the binder
+        // through call positions survives only when every callee neither
+        // lends, retains that position, nor forwards a parameter's storage —
+        // the same trio `fresh_stores` screens with, for the same reason: a
+        // callee that can hand the binder's storage onward makes the arm-end
+        // free a use-after-free, not a leak.
+        arm_payloads: r
+            .arm_payloads
+            .into_iter()
+            .filter(|a| {
+                a.mentions.iter().all(|(c, i)| {
+                    !r.lending.contains(c)
+                        && !r.retains.contains(&(c.clone(), *i))
+                        && !r.param_escapers.contains(c)
+                })
+            })
+            .collect(),
         // Round twenty-eight: a wrapped lender's result names storage inside
         // its argument — freeing a discarded one is a use-after-free, so the
         // closed lending set screens here.
@@ -854,6 +881,7 @@ fn run(program: &Program, want: Want) -> Run {
     let decl = Declared::new(program);
     let mc = MoveCheck {
         caps: &caps,
+        impls: &program.impls,
         globals: &globals,
         exported: &exported,
         errors: RefCell::new(Vec::new()),
@@ -1162,6 +1190,10 @@ pub fn check(program: &Program) -> Result<(), String> {
 
 struct MoveCheck<'a> {
     caps: &'a HashMap<String, Vec<Capability>>,
+    /// The program's impl blocks — what selects a `place atSet` projection,
+    /// so the facts walk can read a projection store as the desugared group
+    /// the lowering emits (round fifty-seven).
+    impls: &'a [crate::ast::ImplBlock],
     /// Module-state binding names (RFC-0013). A global may never be passed to a
     /// `consume` parameter — nothing may take ownership of module state.
     globals: &'a HashSet<String>,
@@ -1942,6 +1974,9 @@ impl MoveCheck<'_> {
     /// ownedness fold. The value/index alias guards are the CALLER's, so a
     /// recorded row means only "the target may own what this displaces".
     fn note_place_store(&self, s: &Stmt, name: &str) {
+        if std::env::var_os("VYRN_PLACE_DUMP").is_some() {
+            eprintln!("note_place_store: fn={} name={name}", self.cur_fn.borrow());
+        }
         let Some(sink) = &self.place_stores else {
             return;
         };
@@ -3630,7 +3665,19 @@ impl MoveCheck<'_> {
                 // (fnvalstore's registry section). The declared parameter
                 // names the instantiation; a generic parameter answers no
                 // release kind below and stands aside as before.
-                match from_sig.or_else(|| self.decl.param_ty(callee, ix).cloned()) {
+                match from_sig
+                    .or_else(|| self.decl.param_ty(callee, ix).cloned())
+                    // Round fifty-seven: a `+` chain over ELEMENT reads
+                    // answers no declared type — `print(xs[0] + "|" +
+                    // xs[1])` leaked its rendered line — but a String `+`
+                    // is fresh by construction (`own::str_temporary`'s own
+                    // doctrine), and one provably-String operand settles a
+                    // homogeneous chain.
+                    .or_else(|| {
+                        (matches!(arg, Expr::Binary { op: BinOp::Add, .. })
+                            && self.adds_strings(arg))
+                        .then_some(Type::Str)
+                    }) {
                     Some(t) => t,
                     None => return,
                 }
@@ -3721,6 +3768,26 @@ impl MoveCheck<'_> {
         self.decl
             .type_of(&self.vars.borrow(), e)
             .is_some_and(|t| matches!(crate::types::resolve(&t, self.decl.decls()), Type::Str))
+    }
+
+    /// Round fifty-seven: whether this `+` chain builds a STRING, read
+    /// structurally where the declared reading cannot type it — a chain over
+    /// ELEMENT reads (`xs[0] + "|" + xs[1]`) answers no declared type, but
+    /// the checker has already made a `+` homogeneous, so one operand that is
+    /// provably a String settles the whole chain. No evidence answers false,
+    /// which stands the row aside as before.
+    fn adds_strings(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Str(_) => true,
+            Expr::Call { name, .. } if name == "@concat" || name == "@str" => true,
+            Expr::Binary {
+                op: BinOp::Add,
+                lhs,
+                rhs,
+                ..
+            } => self.adds_strings(lhs) || self.adds_strings(rhs),
+            _ => self.concatenates(e),
+        }
     }
 
     /// An arm of an if-expression or a `match` can yield a PLACE, and the value
@@ -4065,7 +4132,11 @@ impl MoveCheck<'_> {
             // frees the coerced buffer and the element frees are no-ops
             // (exit-residue round fifty-six: `httpInput(ps, body, ["id"])`
             // in every generated REST adapter leaked one buffer per request).
-            Expr::Str(_) => true,
+            // A SCALAR literal owns nothing at all, and refusing it stood the
+            // whole nested literal down — `sumFirst([[10, 11], [12]])` leaked
+            // both inner buffers and the outer one (round fifty-seven,
+            // fieldmut's fn-arg row).
+            Expr::Str(_) | Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) => true,
             _ => false,
         }
     }
@@ -4662,6 +4733,30 @@ impl MoveCheck<'_> {
                 value,
                 line,
             } => {
+                // Round fifty-seven: a store a `place atSet` PROJECTION
+                // governs runs as the desugared statement group the checker
+                // recorded (`project::stored`, the same leaked nodes the
+                // lowering walks). The facts walk reads that group here, so
+                // the element write-back inside it gets a plan row and the
+                // displaced value a free — `strs[s] = tail` through
+                // `std/slots` leaked every overwritten element (genref, and
+                // the user-container half of §26's stand-aside). The CHECK
+                // walk keeps the plain reading: its diagnostics name the
+                // spelling the user wrote.
+                if self.lets.is_some() && crate::project::memo_open() {
+                    let aty = self.vars.borrow().get(name).cloned().flatten();
+                    if let Some(aty) = aty {
+                        if let Ok(Some(blk)) =
+                            crate::project::store_index(self.impls, name, index, value, &aty)
+                        {
+                            if std::env::var_os("VYRN_PROJ_DUMP").is_some() {
+                                eprintln!("proj-store walked: {name} line {line}");
+                            }
+                            self.block(blk, consumed, scope);
+                            return Ok(false);
+                        }
+                    }
+                }
                 self.expr(index, consumed, scope)?;
                 self.site("element", *line, value, None);
                 self.expr(value, consumed, scope)?;
@@ -5297,7 +5392,13 @@ impl MoveCheck<'_> {
             .frame_of(name)
             .is_some_and(|f| f < inside)
         {
-            self.took(name, Gone::Captured { line });
+            self.took(
+                name,
+                Gone::Captured {
+                    line,
+                    spawned: false,
+                },
+            );
         }
     }
 
@@ -5702,7 +5803,8 @@ impl MoveCheck<'_> {
                 } else {
                     None
                 };
-                let mut arm_frees: Vec<Option<crate::own::DropKind>> = Vec::new();
+                let mut arm_frees: Vec<Option<(crate::own::DropKind, Vec<(String, usize)>)>> =
+                    Vec::new();
                 let mut any_moved = false;
                 let mut moved_gone: Option<Gone> = None;
                 // Round twenty-seven: a match over a WHOLE named local is a
@@ -5825,9 +5927,26 @@ impl MoveCheck<'_> {
                                         if !self.decl.reaches_declared(dt));
                                     silent.then_some(k)
                                 })
-                                .filter(|_| match &arm.body {
-                                    ArmBody::Expr(b) => self.value_cannot_alias(b, &binders[0]),
-                                    ArmBody::Block(_) => true,
+                                .and_then(|k| match &arm.body {
+                                    // Round fifty-seven: an arm value that
+                                    // mentions the binder only as a READ
+                                    // argument of declared functions is a
+                                    // candidate too — the callees ride with
+                                    // the row and `facts()` screens them
+                                    // against the closed lending/retention/
+                                    // escaper sets. The structural
+                                    // cannot-alias answer keeps its
+                                    // screen-free fast path.
+                                    ArmBody::Expr(b) => {
+                                        if self.value_cannot_alias(b, &binders[0]) {
+                                            Some((k, Vec::new()))
+                                        } else {
+                                            let mut ms = Vec::new();
+                                            self.read_only_mentions(b, &binders[0], &mut ms)
+                                                .then_some((k, ms))
+                                        }
+                                    }
+                                    ArmBody::Block(_) => Some((k, Vec::new())),
                                 });
                             arm_frees.push(free);
                         }
@@ -5850,12 +5969,13 @@ impl MoveCheck<'_> {
                     if any_moved {
                         if let Some(sink) = &self.arm_payloads {
                             for (ix, f) in arm_frees.iter().enumerate() {
-                                if let Some(kind) = f {
+                                if let Some((kind, mentions)) = f {
                                     sink.borrow_mut().push(ArmPayloadEv {
                                         match_id: e as *const Expr as usize,
                                         arm_ix: ix as u32,
                                         kind: kind.clone(),
                                         owner: self.cur_fn.borrow().clone(),
+                                        mentions: mentions.clone(),
                                     });
                                 }
                             }
@@ -6358,7 +6478,13 @@ impl MoveCheck<'_> {
                     self.expr(arg, consumed, scope)?;
                     // A spawned frame outlives the statement that spawns it
                     // (census §10), so this block releases nothing it was handed.
-                    self.gave_up(arg, &Gone::Captured { line: *line });
+                    self.gave_up(
+                        arg,
+                        &Gone::Captured {
+                            line: *line,
+                            spawned: true,
+                        },
+                    );
                     if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
                         self.check_handover(arg, name, *line)?;
                         if let Expr::Var { name: v, line: vl } = arg {
