@@ -1395,6 +1395,26 @@ Movement: rest 363 → 282, fnvalarg 2 → 1.
 Tallies after round forty-six: **clean 126, leaking 18, zero
 double-frees**.
 
+## Forty-seventh triage: the desugar's tree in argument position
+
+The `load` desugar is a match inside a match — readFile tested
+outside, fromJson inside — and its whole `LoadResult` flowed straight
+into `describe(...)` with no row: the match's own arms deliberately
+answer no single type. The third safe match-argument shape: every arm
+BUILDS a variant — a constructor call (round ten closed its borrow
+door, so the built value owns its payload) or a bare nullary variant,
+recursively through nested matches and if-expressions (`ctor_valued`).
+Typed from the CALLEE's declared parameter, exactly as the heapify
+row is; screened silent through `reaches_declared`; consume and sink
+positions stand down as everywhere. Both of `load`'s paths cleared at
+once — the decoded record's fields on the success path, the Issue
+array and its parse message on the corrupt path.
+
+Movement: storage CLEAN (5 → 0).
+
+Tallies after round forty-seven: **clean 127, leaking 17, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the
