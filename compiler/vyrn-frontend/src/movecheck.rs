@@ -2024,19 +2024,28 @@ impl MoveCheck<'_> {
             // top level.
             Expr::Call { name, args, .. } if self.decl.constructs(name) => {
                 for a in args {
+                    // A CONSUMED place argument accounts for itself: the
+                    // take already recorded its hole, only the taken field
+                    // is in the returned value, and marking the ROOT
+                    // Returned made the whole binding unreleasable —
+                    // `return Ok(consume bd.op)` left every OTHER Builder
+                    // field with no owner (exit-residue round fifty-one).
+                    if matches!(a, Expr::Consume { .. }) {
+                        continue;
+                    }
                     self.gave_up_returned(a, gone);
                 }
             }
-            // KNOWN CONSERVATISM (round fifty's finding, reverted the same
-            // session): `@copy` here should contribute nothing — its result
-            // is fresh — but clearing it (plus the consume-arg skip below)
-            // un-marks a partially-taken record at its returns, and the
-            // emission then frees the record's remaining field TWICE at an
-            // early return: the placed row for a holed binding with several
-            // returns registers double. Fix the duplicate placement first;
-            // the audit's rva line and `examples`-shaped probe zzz2 (a
-            // Builder-like record, `return Err(bd.err.copy())` before
-            // `return Ok(consume bd.op)`) reproduce it in one build.
+            // The copying builtins build fresh storage out of what they
+            // READ — `@copy`'s row is held back from the return table (its
+            // type is its receiver's), so the is_function screen below never
+            // clears it, and `return Err(bd.err.copy())` marked the whole
+            // record moved into the return: every OTHER field lost its
+            // owner. Round fifty's first cut of this un-masked a DOUBLE
+            // release — round forty-four's Hole rows in the early fold — and
+            // round fifty-one removed those (a holed binding places
+            // structurally), which is what makes this narrowing sound.
+            Expr::Call { name, .. } if name == "@copy" || name == "@str" || name == "@concat" => {}
             Expr::Call { name, .. } => {
                 // A seeded row whose return is the same bare parameter as an
                 // argument's may hand that argument straight back —

@@ -4878,6 +4878,11 @@ impl<'a> Gen<'a> {
             run.push((slot, None, false));
         }
         for (slot, kind, malloc_side) in run {
+            if std::env::var_os("VYRN_STEP_TRACE").is_some() {
+                self.emit(format!(
+                    "; release-step exit={exit:?} at={at:x} slot={slot}"
+                ));
+            }
             // Round twenty-seven: a malloc-side scrutinee inside a `region` —
             // the walk's region guard (which protects arena storage) stands
             // down for exactly this value, because a callee's allocation was

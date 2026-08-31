@@ -1726,18 +1726,16 @@ pub fn analyze(program: &Program) -> Ownership {
                     eprintln!("early-why: key={key:x} gone={:?} -> {m}", row.gone);
                 }
             };
-            // Moved rows since round twenty-one; HOLE rows join in round
-            // forty-four — a partial take (`consume bd.op` while the Regex is
-            // built) leaves the row releasing MINUS its holes at block exit,
-            // but at an exit BEFORE the first take nothing has left yet and
-            // the binding owns itself whole, so the placed release carries
-            // the FULL kind. The admission rules below (first take strictly
-            // after the exit) are exactly what make that sound.
-            if !matches!(
-                row.gone,
-                Some(crate::movecheck::Gone::Moved { .. })
-                    | Some(crate::movecheck::Gone::Hole { .. })
-            ) || revived.contains(key)
+            // Moved rows ONLY. Round forty-four admitted Hole rows here and
+            // round fifty-one took them back out: a partially-taken binding
+            // is DROPPABLE — it already releases (minus its holes) at every
+            // structural exit — so an early row for it was a SECOND release
+            // at the same return, and the audit caught the double the moment
+            // the return-marking stopped hiding these rows. What a holed
+            // binding is still owed is its HOLE FIELDS at pre-take exits,
+            // which is field-level machinery this fold does not have.
+            if !matches!(row.gone, Some(crate::movecheck::Gone::Moved { .. }))
+                || revived.contains(key)
             {
                 why("gone/revived");
                 continue;
@@ -1842,6 +1840,16 @@ pub fn analyze(program: &Program) -> Ownership {
                     .entry(ex.fn_name.clone())
                     .or_default()
                     .insert(*key, kind.clone());
+            }
+        }
+        if std::env::var_os("VYRN_PLACED_DUMP").is_some() {
+            for (f, rs) in &releases {
+                for r in rs {
+                    eprintln!(
+                        "placed: fn={f} exit={:?} site={:x} binding={:x} name={} kind={:?}",
+                        r.exit, r.site, r.binding, r.name, r.kind
+                    );
+                }
             }
         }
         // The lets iteration is hash-ordered; the emitted IR must not be. Only

@@ -1481,6 +1481,30 @@ Movement: placeorder CLEAN (1 → 0), copy 2 → 1.
 Tallies after round fifty: **clean 129, leaking 15, zero
 double-frees**.
 
+## Fifty-first triage: the hole that placed itself twice
+
+Round fifty's reverted probe is unwound properly. The double release
+it exposed was round forty-four's own Hole admission: a
+partially-taken binding is DROPPABLE — it already releases, minus its
+holes, at every structural exit — so an early-fold row for it was a
+second release at the same return. Hole rows leave the early fold
+(Moved rows only, as round twenty-one built it), and the two
+narrowings then ship soundly: a returned constructor's CONSUMED place
+argument accounts for itself (the take recorded its hole; marking the
+root Returned made the whole binding unreleasable), and the copying
+builtins (`@copy`/`@str`/`@concat`) contribute nothing to the
+return-marking — their results are fresh. A partially-taken binding's
+remaining fields now release at every exit; what stays recorded is
+the HOLE FIELDS at pre-take exits (the un-taken `op` at an early
+`Err`), which is field-level machinery the fold does not have.
+Instruments kept: `VYRN_PLACED_DUMP` prints the structural release
+rows, `VYRN_STEP_TRACE` annotates each emitted release step in the
+IR — the pair that told two identical frees apart in one build.
+
+Tallies after round fifty-one: **clean 129, leaking 15, zero
+double-frees** — rows unchanged, blocks down inside regexredux's
+class, and the fold is finally shaped the way round twenty-one meant.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the
