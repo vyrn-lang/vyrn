@@ -1562,6 +1562,27 @@ Movement: numparse CLEAN (3 → 0).
 Tallies after round fifty-four: **clean 130, leaking 14, zero
 double-frees**.
 
+## Fifty-fifth triage: the wall's gate opens
+
+Two refinements and the fn-value meet finally fires. A lambda in an
+argument position whose declared parameter is a fn type has a KNOWN
+signature — it poisons only that signature now, not its whole arity,
+so the handler signatures the rpc stubs dispatch through stop being
+collateral of every one-argument map callback in the link. And a
+constructor-built argument of a call through a fn value —
+`cb(Done(getItem(req)))`, the generated in-process stub's whole
+body — answers no type of its own (a generic variant's bare name is
+incomplete), but the callee's declared parameter names it exactly,
+the same way the heapify and ctor-match rows are typed. With the
+row typed and the signature clean, the round forty-six meet clears
+the argument: every same-signature function reads the position, and
+no lambda can inhabit it.
+
+Movement: rpc CLEAN (6 → 0), rpcsplit CLEAN (5 → 0).
+
+Tallies after round fifty-five: **clean 132, leaking 12, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the

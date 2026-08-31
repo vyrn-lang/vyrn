@@ -899,6 +899,8 @@ fn run(program: &Program, want: Want) -> Run {
         discarded: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         fnval_sigs: (want == Want::Lets).then(|| RefCell::new(HashMap::new())),
         lambda_arities: (want == Want::Lets).then(|| RefCell::new(Default::default())),
+        typed_lambdas: (want == Want::Lets).then(|| RefCell::new(Default::default())),
+        lambda_sigs: (want == Want::Lets).then(|| RefCell::new(Default::default())),
         walk_region: std::cell::Cell::new(0),
         ev_order: std::cell::Cell::new(0),
         loop_ids: RefCell::new(Vec::new()),
@@ -1039,6 +1041,11 @@ fn run(program: &Program, want: Want) -> Run {
         .as_ref()
         .map(|s| s.borrow().clone())
         .unwrap_or_default();
+    let lambda_sigs = mc
+        .lambda_sigs
+        .as_ref()
+        .map(|s| s.borrow().clone())
+        .unwrap_or_default();
     let mut sig_groups: HashMap<String, Vec<String>> = HashMap::new();
     for f in &program.functions {
         let ps: Vec<Type> = f
@@ -1058,10 +1065,15 @@ fn run(program: &Program, want: Want) -> Run {
         let Some((ps, r)) = fnval_sigs.get(&s.id) else {
             continue;
         };
-        if lambda_arities.contains(&ps.len()) {
+        let rps: Vec<Type> = ps
+            .iter()
+            .map(|t| crate::types::resolve(t, decl.decls()))
+            .collect();
+        let key = format!("{rps:?}->{:?}", crate::types::resolve(r, decl.decls()));
+        if lambda_arities.contains(&ps.len()) || lambda_sigs.contains(&key) {
             if std::env::var("VYRN_MEET_DUMP").is_ok() {
                 eprintln!(
-                    "meet: fn={} callee={} ix={} REFUSED lambda-arity {}",
+                    "meet: fn={} callee={} ix={} REFUSED lambda arity {} or sig",
                     s.owner,
                     s.callee,
                     s.ix,
@@ -1070,11 +1082,6 @@ fn run(program: &Program, want: Want) -> Run {
             }
             continue;
         }
-        let rps: Vec<Type> = ps
-            .iter()
-            .map(|t| crate::types::resolve(t, decl.decls()))
-            .collect();
-        let key = format!("{rps:?}->{:?}", crate::types::resolve(r, decl.decls()));
         let Some(members) = sig_groups.get(&key) else {
             continue;
         };
@@ -1257,6 +1264,12 @@ struct MoveCheck<'a> {
     /// could inhabit (matched by arity — the declared reading does not type
     /// lambdas) stands down from the meet.
     lambda_arities: Option<RefCell<std::collections::HashSet<usize>>>,
+    /// Round fifty-five: lambdas whose type IS known — they sit in an
+    /// argument position whose declared parameter is a fn type. They poison
+    /// only their own signature, not their whole arity.
+    typed_lambdas: Option<RefCell<std::collections::HashSet<usize>>>,
+    /// The signature keys those typed lambdas inhabit.
+    lambda_sigs: Option<RefCell<std::collections::HashSet<String>>>,
     walk_region: std::cell::Cell<u32>,
     ev_order: std::cell::Cell<u32>,
     /// The stack of loop ids the walk is inside — pushed by `while`/`for`,
@@ -3576,8 +3589,26 @@ impl MoveCheck<'_> {
             }
             _ => return,
         };
-        let Some(ty) = self.decl.type_of(&self.vars.borrow(), arg) else {
-            return;
+        let ty = match self.decl.type_of(&self.vars.borrow(), arg) {
+            Some(t) => t,
+            // Round fifty-five: a constructor-built argument of a call
+            // through a FN VALUE (`cb(Done(getItem(req)))` in the generated
+            // in-process stubs) answers no type of its own — a generic
+            // variant's bare name is an incomplete type — but the callee's
+            // declared parameter names it exactly, the same way the heapify
+            // and ctor-match rows are typed.
+            None => {
+                let sig = self.vars.borrow().get(callee).cloned().flatten();
+                let Some(Type::Fn(ps, _)) =
+                    sig.map(|t| crate::types::resolve(&t, self.decl.decls()))
+                else {
+                    return;
+                };
+                let Some(t) = ps.get(ix) else {
+                    return;
+                };
+                t.clone()
+            }
         };
         if producer.is_none() && !matches!(crate::types::resolve(&ty, self.decl.decls()), Type::Str)
         {
@@ -5855,6 +5886,31 @@ impl MoveCheck<'_> {
                 // Left-to-right: check each argument, then apply its consumption,
                 // so passing the same variable to two `consume` params is caught.
                 for (i, arg) in args.iter().enumerate() {
+                    // Round fifty-five: a lambda in an argument position
+                    // whose declared parameter is a fn type has a KNOWN
+                    // signature — recorded before the walk meets the lambda,
+                    // so the arity poison stands down for it and the meet
+                    // refuses only its own signature.
+                    if matches!(arg, Expr::Lambda { .. }) {
+                        if let (Some(tl), Some(ls)) = (&self.typed_lambdas, &self.lambda_sigs) {
+                            if let Some(pt) = self.decl.param_ty(name, i) {
+                                if let Type::Fn(ps, r) =
+                                    crate::types::resolve(pt, self.decl.decls())
+                                {
+                                    let rps: Vec<Type> = ps
+                                        .iter()
+                                        .map(|t| crate::types::resolve(t, self.decl.decls()))
+                                        .collect();
+                                    let key = format!(
+                                        "{rps:?}->{:?}",
+                                        crate::types::resolve(&r, self.decl.decls())
+                                    );
+                                    tl.borrow_mut().insert(arg as *const Expr as usize);
+                                    ls.borrow_mut().insert(key);
+                                }
+                            }
+                        }
+                    }
                     self.site("arg", *line, arg, None);
                     self.call_keeps.set(Some(self.callee_keeps(name, i)));
                     let r = self.expr(arg, consumed, scope);
@@ -6021,7 +6077,13 @@ impl MoveCheck<'_> {
             // use-after-consume error here too.
             Expr::Lambda { params, body, .. } => {
                 if let Some(la) = &self.lambda_arities {
-                    la.borrow_mut().insert(params.len());
+                    let typed = self
+                        .typed_lambdas
+                        .as_ref()
+                        .is_some_and(|t| t.borrow().contains(&(e as *const Expr as usize)));
+                    if !typed {
+                        la.borrow_mut().insert(params.len());
+                    }
                 }
                 // A lambda that is not a call argument can be stored and
                 // outlive the frame. One written AT a call argument still

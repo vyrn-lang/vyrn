@@ -148,8 +148,8 @@ releaseacrossexit	clean
 releaseacrosstry	clean
 rest	leak	282
 revcomp	clean
-rpc	leak	6
-rpcsplit	leak	5
+rpc	clean
+rpcsplit	clean
 scan	clean
 schemaimport	clean
 server	clean
