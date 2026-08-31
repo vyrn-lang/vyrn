@@ -1059,6 +1059,15 @@ fn run(program: &Program, want: Want) -> Run {
             continue;
         };
         if lambda_arities.contains(&ps.len()) {
+            if std::env::var("VYRN_MEET_DUMP").is_ok() {
+                eprintln!(
+                    "meet: fn={} callee={} ix={} REFUSED lambda-arity {}",
+                    s.owner,
+                    s.callee,
+                    s.ix,
+                    ps.len()
+                );
+            }
             continue;
         }
         let rps: Vec<Type> = ps
@@ -1077,6 +1086,12 @@ fn run(program: &Program, want: Want) -> Run {
                     && !retains.contains(&(m.clone(), s.ix))
                     && !lending.contains(m)
             });
+        if std::env::var("VYRN_MEET_DUMP").is_ok() {
+            eprintln!(
+                "meet: fn={} callee={} ix={} members={members:?} clear={all_clear}",
+                s.owner, s.callee, s.ix
+            );
+        }
         if all_clear {
             s.verdict = ArgVerdict::Released;
         }
