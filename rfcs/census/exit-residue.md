@@ -1415,6 +1415,28 @@ Movement: storage CLEAN (5 → 0).
 Tallies after round forty-seven: **clean 127, leaking 17, zero
 double-frees**.
 
+## Forty-eighth triage: the release that could not free its own take
+
+container, in two halves. Pool's release was the round thirty-six
+family one member late — it printed and reclaimed nothing; it
+consumes and drops its slots now. Chain was RFC-0096's own case
+walking free: a self-referring type with a declared COPY and no
+declared RELEASE, so the boxes leaked by the recorded rule — the
+example now declares `impl Owned for Chain`, recursing through
+`drop`. That declaration exposed a compiler gate set too broad in
+round eight: inside a declared release, consumed-match box frees
+stand down because the CALLER walks the receiver's boxes after the
+call — but only the receiver's. A scrutinee rooted anywhere else
+(`let n = consume self.next` then `match consume n`) is invisible to
+the caller and is the match's own to free; the stand-down now asks
+where the scrutinee roots, and the declared-release-heavy examples
+(htmltree, domdemo) hold clean on both sides of it.
+
+Movement: container CLEAN (4 → 0).
+
+Tallies after round forty-eight: **clean 128, leaking 16, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the

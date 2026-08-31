@@ -6904,7 +6904,21 @@ impl<'a> Gen<'a> {
             // Inside a declared `release` the CALLER walks the boxes after
             // the call (`release_enum`, payloads false) — freeing them here
             // too was a double on every declared-release destructure.
-            && !self.owned.is_release_fn(&self.cur_fn_name);
+            // Inside a declared release the CALLER walks the RECEIVER's
+            // boxes after the call — but only the receiver's. A scrutinee
+            // rooted anywhere else (`let n = consume self.next` then `match
+            // consume n` — the recursive Chain release, round forty-eight)
+            // is this match's to free, exactly as outside (the caller cannot
+            // see a local). Rootless scrutinees keep the conservative
+            // stand-down.
+            && !(self.owned.is_release_fn(&self.cur_fn_name)
+                && match scrutinee {
+                    Expr::Consume { place, .. } => {
+                        vyrn_frontend::movecheck::place_path(place)
+                            .is_none_or(|(root, _)| root == "self")
+                    }
+                    _ => true,
+                });
         if let Some(kind) = scrut_drop {
             let ll = self.llt(&self.resolve(&sty)).clone();
             let slot = self.fresh_alloca(&ll);
