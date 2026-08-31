@@ -1526,6 +1526,26 @@ an error. The post-pass reads the local.
 Tallies after round fifty-two: **clean 129, leaking 15, zero
 double-frees**.
 
+## Fifty-third triage: the literal that is a constructor in braces
+
+The return-narrowing's last blind spot: a returned STRUCT LITERAL
+fell to the conservative walk, so `return Ok(Regex { op: consume
+bd.op, nsets: bd.nsets, .. })` marked `bd` moved-into-the-return on
+its SUCCESS path — and the un-consumed `pat` buffer lost its owner
+once per compile. Two arms join `gave_up_returned`: a struct
+literal's fields take the same per-argument reading a constructor
+call's arguments do (consumed fields account for themselves, the
+borrow door is round ten's), and a place read whose type owns no heap
+travels by value and marks nothing. With `bd` finally holed rather
+than Returned, the round fifty-two full-walk fires at the pre-take
+error returns and the minus-holes release at the success return —
+regexredux drops from thirty-five blocks to five.
+
+Movement: regexredux 35 → 5.
+
+Tallies after round fifty-three: **clean 129, leaking 15, zero
+double-frees** — the same rows, a third of the blocks.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the

@@ -139,7 +139,7 @@ record	clean
 reflection	clean
 refutablelet	clean
 regex	clean
-regexredux	leak	35
+regexredux	leak	5
 region	other
 region_consume	skip
 regionarena	clean

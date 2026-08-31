@@ -2095,6 +2095,28 @@ impl MoveCheck<'_> {
                 }
             }
             Expr::Try { expr, .. } => self.gave_up_returned(expr, gone),
+            // A returned STRUCT LITERAL is a constructor spelled with braces
+            // (exit-residue round fifty-three): its fields take the same
+            // per-argument reading a constructor call's arguments do, and
+            // marking the whole literal re-marked what the fields already
+            // account for — `return Ok(Regex { op: consume bd.op, nsets:
+            // bd.nsets, .. })` marked bd moved-into-the-return on its
+            // SUCCESS path, and the un-consumed `pat` buffer lost its owner
+            // once per compile.
+            Expr::StructLit { fields, .. } => {
+                for (_, v) in fields {
+                    if matches!(v, Expr::Consume { .. }) {
+                        continue;
+                    }
+                    self.gave_up_returned(v, gone);
+                }
+            }
+            // A place read whose type owns no heap travels BY VALUE — a
+            // scalar copied into the result carries none of the binding's
+            // storage, so it marks nothing (the same top-level screen
+            // `read_only_mentions` applies, one position over).
+            e2 if place_path(e2).is_some()
+                && self.type_of(e2).is_some_and(|t| !self.decl.owns_heap(&t)) => {}
             // `return acc + "}"` — the shape every `std/` emitter ends on. A
             // String `+` is `@concat`, which copies both operands into a
             // fresh buffer; a `Code +` concatenates arena handles; every
