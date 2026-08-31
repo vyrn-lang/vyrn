@@ -1921,7 +1921,24 @@ impl MoveCheck<'_> {
         let Some(sink) = &self.place_stores else {
             return;
         };
-        let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
+        let mut key = self.nodes.borrow().get(name).copied().unwrap_or(0);
+        // A write-through desugar temp (`grid[0][1] = v` stores into
+        // `grid[][]`; RFC-0082 names the temps after the paths they took) is
+        // nobody's binding, but the CHAIN is: every level is an `@at` view
+        // into the level above, so the ultimate root's ownedness is the
+        // element's — the container owns what its elements hold, however
+        // deep. The write-BACK stores stand down on their own (their targets
+        // are the bound view temps, which are borrows), so only the
+        // innermost store gains the displaced free (exit-residue round
+        // fifty).
+        if name.ends_with("[]") || name.contains("[]") {
+            let stripped = name.trim_end_matches("[]");
+            let base = stripped.split('.').next().unwrap_or(stripped);
+            let base = base.trim_end_matches("[]");
+            if let Some(k) = self.nodes.borrow().get(base).copied() {
+                key = k;
+            }
+        }
         let is_global = self.globals.contains(name) && self.vars.borrow().frame_of(name) == Some(0);
         // The target may be a compound path (`s.vals[i] = v`); the borrow is
         // the ROOT's.
@@ -2007,9 +2024,28 @@ impl MoveCheck<'_> {
             // top level.
             Expr::Call { name, args, .. } if self.decl.constructs(name) => {
                 for a in args {
+                    // A CONSUMED place argument accounts for itself: the
+                    // take already recorded its hole, only the taken field
+                    // is in the returned value, and marking the ROOT
+                    // Returned made the whole binding unreleasable —
+                    // `return Ok(consume bd.op)` left every OTHER Builder
+                    // field with no owner (exit-residue round fifty-one).
+                    if matches!(a, Expr::Consume { .. }) {
+                        continue;
+                    }
                     self.gave_up_returned(a, gone);
                 }
             }
+            // The copying builtins build fresh storage out of what they
+            // READ — `@copy`'s row is held back from the return table (its
+            // type is its receiver's), so the is_function screen below never
+            // clears it, and `return Err(bd.err.copy())` marked the whole
+            // record moved into the return: every OTHER field lost its
+            // owner. Round fifty's first cut of this un-masked a DOUBLE
+            // release — round forty-four's Hole rows in the early fold — and
+            // round fifty-one removed those (a holed binding places
+            // structurally), which is what makes this narrowing sound.
+            Expr::Call { name, .. } if name == "@copy" || name == "@str" || name == "@concat" => {}
             Expr::Call { name, .. } => {
                 // A seeded row whose return is the same bare parameter as an
                 // argument's may hand that argument straight back —

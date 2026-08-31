@@ -3989,15 +3989,25 @@ impl Parser {
                                 let (index, value) = if moves.is_empty() {
                                     (index, value)
                                 } else {
+                                    // `#`, not `[]`: a hoisted operand is
+                                    // its own binding, and a name spelled
+                                    // `{recv}[]val` reads as DERIVED from the
+                                    // `{recv}[]` container temp under
+                                    // `mentions_place` (the byte after the
+                                    // base is `[`), which stood the inner
+                                    // store's displaced-element release down
+                                    // forever (exit-residue round fifty). `#`
+                                    // is just as unspellable and derives from
+                                    // nothing.
                                     let i = hoist_operand(
                                         index,
-                                        format!("{recv}[]idx"),
+                                        format!("{recv}#idx"),
                                         &mut hoists,
                                         line,
                                     );
                                     let v = hoist_operand(
                                         value,
-                                        format!("{recv}[]val"),
+                                        format!("{recv}#val"),
                                         &mut hoists,
                                         line,
                                     );
@@ -6876,11 +6886,11 @@ mod tests {
         let stmts = &p.functions[0].body.stmts;
         let shape: Vec<String> = stmts[1..=4].iter().map(|s| format!("{s:?}")).collect();
         assert!(
-            shape[0].starts_with(r#"Let { name: "s.xs[][]idx""#) && shape[0].contains(r#""f""#),
+            shape[0].starts_with(r#"Let { name: "s.xs[]#idx""#) && shape[0].contains(r#""f""#),
             "the index runs first, into its own temp: {shape:#?}"
         );
         assert!(
-            shape[1].starts_with(r#"Let { name: "s.xs[][]val""#) && shape[1].contains(r#""g""#),
+            shape[1].starts_with(r#"Let { name: "s.xs[]#val""#) && shape[1].contains(r#""g""#),
             "then the value, left to right: {shape:#?}"
         );
         assert!(

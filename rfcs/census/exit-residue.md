@@ -1456,6 +1456,55 @@ Tallies after round forty-nine: **clean 128, leaking 16, zero
 double-frees** — unchanged; the row is for the generic corpus to
 come.
 
+## Fiftieth triage: the temp whose name lied about its family
+
+The nested element store, `grid[0][1] = v`. RFC-0082's write-through
+desugar loads the inner container into a `grid[]` temp, stores, and
+writes back — and the hoisted VALUE temp was spelled `grid[][]val`,
+which `mentions_place` reads as DERIVED from `grid[]` (the byte after
+the base is `[`). The inner store's displaced-element release stood
+down forever on a false self-mention. The operand temps spell
+`{recv}#val` / `{recv}#idx` now — `#` is just as unspellable and
+derives from nothing — and the place-store fold resolves a desugar
+temp's ownedness through its ULTIMATE root: every level of the chain
+is an `@at` view into the level above, so the root container's
+ownership is the element's, however deep; the write-back stores stand
+down on their own, their targets being the bound view temps. Also
+recorded, from a reverted probe: narrowing `@copy` out of the
+return-marking un-masks a duplicate placed-release row for a
+partially-taken binding with several returns — the emission frees the
+remaining field twice at an early return. The duplicate placement is
+the trailhead; the conservative mark stays until it is fixed.
+
+Movement: placeorder CLEAN (1 → 0), copy 2 → 1.
+
+Tallies after round fifty: **clean 129, leaking 15, zero
+double-frees**.
+
+## Fifty-first triage: the hole that placed itself twice
+
+Round fifty's reverted probe is unwound properly. The double release
+it exposed was round forty-four's own Hole admission: a
+partially-taken binding is DROPPABLE — it already releases, minus its
+holes, at every structural exit — so an early-fold row for it was a
+second release at the same return. Hole rows leave the early fold
+(Moved rows only, as round twenty-one built it), and the two
+narrowings then ship soundly: a returned constructor's CONSUMED place
+argument accounts for itself (the take recorded its hole; marking the
+root Returned made the whole binding unreleasable), and the copying
+builtins (`@copy`/`@str`/`@concat`) contribute nothing to the
+return-marking — their results are fresh. A partially-taken binding's
+remaining fields now release at every exit; what stays recorded is
+the HOLE FIELDS at pre-take exits (the un-taken `op` at an early
+`Err`), which is field-level machinery the fold does not have.
+Instruments kept: `VYRN_PLACED_DUMP` prints the structural release
+rows, `VYRN_STEP_TRACE` annotates each emitted release step in the
+IR — the pair that told two identical frees apart in one build.
+
+Tallies after round fifty-one: **clean 129, leaking 15, zero
+double-frees** — rows unchanged, blocks down inside regexredux's
+class, and the fold is finally shaped the way round twenty-one meant.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the
