@@ -40,7 +40,7 @@ consumeloop	clean
 container	clean
 contractquery	clean
 controlflow	clean
-copy	leak	1
+copy	clean
 copyfromowned	skip
 domdemo	clean
 dropparam	skip
@@ -57,19 +57,19 @@ fallible	clean
 fannkuch	clean
 fasta	clean
 fib	other
-fieldmut	leak	3
+fieldmut	clean
 files	clean
 finitekeys	clean
 floatkey	skip
 floats	other
-fnvalarg	leak	1
-fnvalstore	leak	2
+fnvalarg	clean
+fnvalstore	clean
 foreach	other
 freelist	other
 gendemo	clean
 genericpayload	clean
 generics	clean
-genref	leak	1
+genref	clean
 gentable	clean
 gentablefail	skip
 graphql	clean
@@ -102,7 +102,7 @@ mapdemo	clean
 mapkey	clean
 mapkeyborrowed	skip
 mapkeyowned	clean
-matchown	leak	4
+matchown	clean
 membench	clean
 modify	other
 modifyself	clean
@@ -143,10 +143,10 @@ regexredux	clean
 region	other
 region_consume	skip
 regionarena	clean
-regionescape	leak	1
+regionescape	clean
 releaseacrossexit	clean
 releaseacrosstry	clean
-rest	leak	3
+rest	clean
 revcomp	clean
 rpc	clean
 rpcsplit	clean
@@ -190,7 +190,7 @@ templates	clean
 testing	clean
 textbytes	clean
 threeengines	clean
-tree	leak	1
+tree	other
 tryplace	clean
 twdemo	clean
 utility	clean
@@ -201,7 +201,7 @@ validate_store	other
 validate_sum	other
 validatestr	clean
 validation	other
-vlog	leak	2
+vlog	clean
 vondemo	clean
 vyxdemo	clean
 wirekey	clean

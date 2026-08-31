@@ -371,7 +371,22 @@ impl Declared {
                     };
                     let mut subst = HashMap::new();
                     for (p, a) in ps.iter().zip(args) {
-                        if let Some(at) = self.type_of(vars, a) {
+                        // A bare top-level FUNCTION name types as its own fn
+                        // row FOR SOLVING ONLY (round fifty-seven): without
+                        // it `defer(greet)` never solved `Deferred<P, T>` and
+                        // `force(..)`'s printed result had no release row.
+                        // Kept out of the general `Var` arm on purpose — a
+                        // fn name is static, and typing it everywhere made
+                        // `Deferred { run: label }` a MOVE of `label`.
+                        let at = self.type_of(vars, a).or_else(|| match a {
+                            Expr::Var { name: f, .. } if vars.get(f).is_none() => {
+                                let fps = self.params.get(f)?;
+                                let ret = self.rets.get(f)?;
+                                Some(Type::Fn(fps.clone(), Box::new(ret.clone())))
+                            }
+                            _ => None,
+                        });
+                        if let Some(at) = at {
                             crate::types::solve_param(p, &at, &mut subst);
                         }
                     }
@@ -395,6 +410,20 @@ impl Declared {
                         Some(Type::Fn(_, ret)) => Some(*ret),
                         _ => None,
                     }
+                })
+                // `Some(x)` is `Option<type_of(x)>` (round fifty-seven): the
+                // bare owner name the variants table answers is a generic
+                // with no instantiation, so `let root = Some(insert(..))`
+                // carried no release row and its payload box leaked. `Ok`/
+                // `Err` stay with the table — one arm cannot name the other
+                // side's type.
+                .or_else(|| {
+                    if name != "Some" {
+                        return None;
+                    }
+                    args.first()
+                        .and_then(|a| self.type_of(vars, a))
+                        .map(|t| Type::Option(Box::new(t)))
                 })
                 .or_else(|| {
                     self.variants

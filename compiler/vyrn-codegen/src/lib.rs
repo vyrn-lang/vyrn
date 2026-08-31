@@ -6415,7 +6415,8 @@ impl<'a> Gen<'a> {
                         // RFC-0114 R1′: an unnamed receiver this frame owns
                         // dies here — the header read was its last observer.
                         if self.plan.receiver_free(expr as *const Expr as usize)
-                            && self.region_depth == 0
+                            && (self.region_depth == 0
+                                || self.plan.receiver_malloc_at(expr as *const Expr as usize))
                         {
                             self.emit(format!("call void @__vyrn_str_free(ptr {v})"));
                         }
@@ -6430,7 +6431,8 @@ impl<'a> Gen<'a> {
                     // only silent kinds into the set, so `free_arg_temp` never
                     // meets a declared release here.
                     let rfree = self.plan.receiver_free(expr as *const Expr as usize)
-                        && self.region_depth == 0;
+                        && (self.region_depth == 0
+                            || self.plan.receiver_malloc_at(expr as *const Expr as usize));
                     match self.resolve(&ety) {
                         Type::ArrayN(_, n) => return Ok((format!("{n}"), Type::Int)),
                         Type::Array(_) => {
@@ -6483,7 +6485,8 @@ impl<'a> Gen<'a> {
                 // owner. A `lazy` field stays out too: forcing it reads the
                 // record after this point.
                 if self.plan.receiver_free(expr as *const Expr as usize)
-                    && self.region_depth == 0
+                    && (self.region_depth == 0
+                        || self.plan.receiver_malloc_at(expr as *const Expr as usize))
                     && self.owned.release_kind(&fty).is_none()
                     && vyrn_frontend::types::deferred(&fty).is_none()
                 {
@@ -17410,7 +17413,7 @@ mod tests {
     }
 
     #[test]
-    fn a_captured_temporary_is_not_freed() {
+    fn a_captured_binding_reclaims_beside_its_snapshot() {
         // A stored closure holds the buffer by value (RFC-0037) and can outlive
         // this block, so nothing here may release the STRING — census §16.
         //
@@ -17418,17 +17421,18 @@ mod tests {
         // RFC-0114 §25 round three the capture is a DUPLICATE the block owns
         // (two lambdas over one `s` used to share one pointer, which is why
         // the release had to stay shallow), and `__vyrn_fnval_release` walks
-        // it before the block goes. So the two frees below are the copied
-        // String and the block — while `s` itself still answers
-        // `Gone::Captured` and keeps its recorded leak, unchanged.
+        // it before the block goes. Round fifty-seven closed the last third:
+        // the snapshot being the block's OWN copy is exactly what makes `s`
+        // the frame's to release again, so the three frees below are the
+        // copied String, the block, and the binding's own buffer at exit.
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let s = a + b; let f: fn(Int64) -> Int64 = x -> x + s.byteLength; \
                    return f(1); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert_eq!(
             free_calls(&ir),
-            RUNTIME_FREES + 2,
-            "the copied capture and the block, nothing else: {ir}"
+            RUNTIME_FREES + 3,
+            "the copied capture, the block, and the binding itself: {ir}"
         );
     }
 

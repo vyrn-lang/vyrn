@@ -305,7 +305,8 @@ fn main() -> Int64 {
     let ticket = mint(1)
     let second = ticket
     let held = a + b
-    let job = spawn score(2)
+    let sent = a + b
+    let job = spawn takes(sent)
     let doubled = job.join()
     let f: Sizer = x -> x + held.byteLength
     region {
@@ -359,7 +360,10 @@ fn why_memory_names_the_reason_each_binding_is_not_reclaimed() {
     // Every reason the printer can still name.
     has("arena            NOT reclaimed — it is inside a `region`");
     has("c                NOT reclaimed — the type Bool owns no heap");
-    has("held             NOT reclaimed — a lambda or a spawn captures it at line");
+    // Round fifty-seven: a LAMBDA's capture is a deep snapshot, so the
+    // captured binding reclaims; only a `spawn`'s capture stays a leak.
+    has("held             reclaimed at block exit — freeing the String buffer");
+    has("sent             NOT reclaimed — a lambda or a spawn captures it at line");
     has("named            NOT reclaimed — it is a borrow of somebody else's value");
     has("ticket           NOT reclaimed — another binding aliases it at line");
     has("second           NOT reclaimed — it is a second name for a value it did not take");

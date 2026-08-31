@@ -1320,6 +1320,12 @@ pub struct ReleasePlan {
     /// frame owns — freed right after the read (the header for a projection,
     /// the whole record deep after a scalar field).
     pub receiver_frees: std::collections::HashSet<usize>,
+    /// Round fifty-seven: the receiver frees whose producer is a CALL — the
+    /// block is the callee's own (region-free) allocation, so the free stands
+    /// even inside a `region` (the round twenty-seven malloc-side reading,
+    /// extended from match scrutinees to receivers). The `@`-spelled
+    /// producers route through the arena lexically and stay region-gated.
+    pub receiver_malloc: std::collections::HashSet<usize>,
     /// Round forty: `(match id, arm index) -> kind` — the arm's unmoved
     /// payload binder, released at the arm's end. See
     /// [`crate::movecheck::ArmPayloadEv`].
@@ -1460,6 +1466,12 @@ impl ReleasePlan {
             self.taken.borrow_mut().insert(at);
         }
         hit
+    }
+
+    /// Round fifty-seven: is this receiver's block a CALLEE allocation —
+    /// malloc-side even inside a `region`?
+    pub fn receiver_malloc_at(&self, at: usize) -> bool {
+        self.receiver_malloc.contains(&self.resolve(at))
     }
 
     /// Round forty: the release owed to this arm's unmoved payload binder.
@@ -2036,6 +2048,17 @@ pub fn analyze(program: &Program) -> Ownership {
         })
         .map(|(k, _, _)| *k)
         .collect();
+    // Round fifty-seven: which of those receivers a CALL produced — a
+    // callee's allocation is malloc-side whatever region is open at the call
+    // site (`joinWith(parts, "-").byteLength` inside a `region` leaked one
+    // joined String per call; the round twenty-seven scrutinee reading,
+    // extended). The `@` spellings route through the arena lexically.
+    let receiver_malloc: std::collections::HashSet<usize> = facts
+        .receiver_temps
+        .iter()
+        .filter(|(k, n, _)| receiver_frees.contains(k) && !n.starts_with('@'))
+        .map(|(k, _, _)| *k)
+        .collect();
     // RFC-0114 §26 (steps 3–4): a field or element store releases what it
     // displaces when the TARGET owns its contents — module state by rule
     // (a global owns what it holds; rule 2 refuses storing a borrow into
@@ -2061,10 +2084,17 @@ pub fn analyze(program: &Program) -> Ownership {
                 | Some(crate::movecheck::Gone::Dropped { .. })
                 | Some(crate::movecheck::Gone::Returned { .. })
         );
+        // Round fifty-seven: the LOCAL `exit_sites`, not `facts.exit_sites` —
+        // the field is drained into the local at the top of `analyze`
+        // (round fifty-two's lesson, relearned here), so this screen read an
+        // empty vector and the exiting-take exemption never fired: httpApply's
+        // early `return answered` blocked the 304 branch's `answered.body =
+        // ""` from freeing the body it displaces, one representation per
+        // conditional GET.
         let takes_clear = plain_row
             && takes_of.get(&ps.key).map_or(true, |ts| {
                 ts.iter().all(|t| {
-                    let exits = facts.exit_sites.iter().any(|x| {
+                    let exits = exit_sites.iter().any(|x| {
                         x.clean
                             && x.order > t.order
                             && t.loops.iter().all(|l| x.loops.contains(l))
@@ -2083,6 +2113,12 @@ pub fn analyze(program: &Program) -> Ownership {
                     || droppable
                         .get(&ps.owner)
                         .is_some_and(|d| d.contains_key(&ps.key))));
+        if std::env::var("VYRN_PLACE_DUMP").is_ok() {
+            eprintln!(
+                "place-store: owner={} key={} global={} modify={} takes_clear={takes_clear} owned={owned}",
+                ps.owner, ps.key, ps.is_global, ps.is_modify_param
+            );
+        }
         if owned {
             store_owned.insert(ps.id);
         }
@@ -2163,6 +2199,7 @@ pub fn analyze(program: &Program) -> Ownership {
         discarded_results,
         edge_releases,
         receiver_frees,
+        receiver_malloc,
         owners,
         taken: Default::default(),
         alias: Default::default(),
@@ -3120,7 +3157,15 @@ impl Emit<'_> {
                 // A hole is a path into a RECORD and a scrutinee is not one, so
                 // this says what `ForIn` says: a kind with holes is not this
                 // row's.
-                if let Fate::Reclaimed(kind, holes) = self.fate(key, false, scrutinee) {
+                let f = self.fate(key, false, scrutinee);
+                if std::env::var("VYRN_SCRUT_DUMP").is_ok() {
+                    eprintln!(
+                        "scrut: ty={:?} from={:?} fate={f:?}",
+                        self.lets.get(&key).and_then(|r| r.ty.as_ref()),
+                        self.lets.get(&key).and_then(|r| r.from_call.as_deref())
+                    );
+                }
+                if let Fate::Reclaimed(kind, holes) = f {
                     if holes.is_empty() {
                         self.droppable.insert(key, kind);
                         if self.region_depth > 0 {
@@ -3319,7 +3364,11 @@ impl Emit<'_> {
                 callee: to.clone(),
                 line: *line,
             }),
-            Some(Gone::Captured { line }) => Fate::Leaked(Leak::Captured { line: *line }),
+            // Round fifty-seven: a lambda's capture is its own deep snapshot
+            // (§25 round three), so the binding's value is still this frame's.
+            // A spawn's capture crosses to a task and stays leaked.
+            Some(Gone::Captured { spawned: false, .. }) => Fate::Reclaimed(kind, Vec::new()),
+            Some(Gone::Captured { line, .. }) => Fate::Leaked(Leak::Captured { line: *line }),
             // RFC-0093 M2. The walk is the type and the type does not know that
             // a place left, so the hole set travels with the verdict and the
             // walk skips exactly these places. Where it cannot be told — a
@@ -3644,6 +3693,133 @@ pub(crate) mod tests {
             matches!(fs[0], Fate::Reclaimed(..)),
             "`arg` is reclaimed, not {:?}",
             fs[0]
+        );
+    }
+
+    /// Round fifty-seven: `Some(x)` types as `Option<type_of(x)>`, so the
+    /// binding carries a release row — `let root = Some(insert(..))` typed
+    /// as bare `Option` and its payload box had no owner (tree's last block).
+    #[test]
+    fn a_some_binding_types_as_the_option_it_is() {
+        let src = "fn mk() -> String { return \"a\" + \"b\" }\n\
+                   fn main() -> Int64 {\n\
+                       let o = Some(mk())\n\
+                       return 0\n\
+                   }";
+        let fs = fates(src, "main");
+        assert_eq!(fs.len(), 1);
+        assert!(
+            matches!(fs[0], Fate::Reclaimed(..)),
+            "`o` is reclaimed, not {:?}",
+            fs[0]
+        );
+    }
+
+    /// Round fifty-seven: a lambda's capture is a deep snapshot (both
+    /// compiling backends duplicate heap captures into the block), so the
+    /// captured binding still reclaims at block exit; a `spawn`'s capture
+    /// crosses to a task and stays the recorded leak.
+    #[test]
+    fn a_lambda_capture_reclaims_and_a_spawn_capture_does_not() {
+        let src = "type Sink = fn(Int64)\n\
+                   let mut pending: Array<Sink> = []\n\
+                   fn keep(cb: consume Sink) {\n\
+                       pending.push(cb)\n\
+                   }\n\
+                   fn main() -> Int64 {\n\
+                       let tag = \"t\" + \"g\"\n\
+                       keep(n -> print(\"\\{tag}:\\{n}\"))\n\
+                       return 0\n\
+                   }";
+        let fs = fates(src, "main");
+        assert_eq!(fs.len(), 1, "one binding: tag");
+        assert!(
+            matches!(fs[0], Fate::Reclaimed(..)),
+            "a lambda-captured binding reclaims, not {:?}",
+            fs[0]
+        );
+    }
+
+    /// Round fifty-seven: the place-store fold reads the DRAINED
+    /// `exit_sites` local (round fifty-two's lesson, at its second reader),
+    /// so a field store AFTER an early `return` of the binding still frees
+    /// what it displaces — httpApply's 304 branch leaked one representation
+    /// per conditional GET on exactly this shape.
+    #[test]
+    fn a_field_store_past_an_early_return_still_owns() {
+        let src = "type R = { body: String }\n\
+                   fn mk() -> R { return R { body: \"x\" + \"y\" } }\n\
+                   fn go(c: Bool) -> R {\n\
+                       let mut answered = mk()\n\
+                       if c {\n\
+                           return answered\n\
+                       }\n\
+                       answered.body = \"\"\n\
+                       return answered\n\
+                   }\n\
+                   fn main() -> Int64 { return 0 }";
+        let (o, p) = analyze_src(src);
+        let mut sets = Vec::new();
+        fn collect(b: &crate::ast::Block, out: &mut Vec<usize>) {
+            for s in &b.stmts {
+                match s {
+                    crate::ast::Stmt::SetField { .. } => {
+                        out.push(s as *const crate::ast::Stmt as usize);
+                    }
+                    crate::ast::Stmt::If {
+                        then_block,
+                        else_block,
+                        ..
+                    } => {
+                        collect(then_block, out);
+                        if let Some(eb) = else_block {
+                            collect(eb, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        collect(&p.functions[1].body, &mut sets);
+        assert_eq!(sets.len(), 1);
+        assert!(
+            o.plan.store_owned_at(sets[0]),
+            "the early exiting take does not block the later field store"
+        );
+    }
+
+    /// Round fifty-seven: a scalar literal is an owned heapify element, so a
+    /// nested literal in argument position mints its row — `sumFirst([[10,
+    /// 11], [12]])` leaked both inner buffers and the outer one.
+    #[test]
+    fn a_nested_scalar_literal_argument_mints_a_row() {
+        let src = "fn sum(g: Array<Array<Int64>>) -> Int64 { return g.length }\n\
+                   fn main() -> Int64 { return sum([[10, 11], [12]]) }";
+        let (o, _) = analyze_src(src);
+        assert!(
+            !o.plan.arg_drops.is_empty(),
+            "the nested literal has a released row"
+        );
+    }
+
+    /// Round fifty-seven: a `+` chain over element reads types as `Str` when
+    /// one operand settles it (`adds_strings`), so `print(xs[0] + \"|\" +
+    /// xs[1])` frees its rendered line.
+    #[test]
+    fn a_concat_over_elements_mints_a_print_row() {
+        let src = "fn main() -> Int64 {\n\
+                       let mut xs: Array<String> = []\n\
+                       xs.push(\"a\" + \"b\")\n\
+                       print(xs[0] + \"|\" + xs[0])\n\
+                       return 0\n\
+                   }";
+        let (o, _) = analyze_src(src);
+        assert!(
+            o.plan
+                .arg_drops
+                .iter()
+                .any(|at| o.plan.owners.get(at).map(String::as_str) == Some("main")),
+            "the rendered line has a released row in main"
         );
     }
 
