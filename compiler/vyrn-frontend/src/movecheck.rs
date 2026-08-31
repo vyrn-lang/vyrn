@@ -1921,7 +1921,24 @@ impl MoveCheck<'_> {
         let Some(sink) = &self.place_stores else {
             return;
         };
-        let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
+        let mut key = self.nodes.borrow().get(name).copied().unwrap_or(0);
+        // A write-through desugar temp (`grid[0][1] = v` stores into
+        // `grid[][]`; RFC-0082 names the temps after the paths they took) is
+        // nobody's binding, but the CHAIN is: every level is an `@at` view
+        // into the level above, so the ultimate root's ownedness is the
+        // element's — the container owns what its elements hold, however
+        // deep. The write-BACK stores stand down on their own (their targets
+        // are the bound view temps, which are borrows), so only the
+        // innermost store gains the displaced free (exit-residue round
+        // fifty).
+        if name.ends_with("[]") || name.contains("[]") {
+            let stripped = name.trim_end_matches("[]");
+            let base = stripped.split('.').next().unwrap_or(stripped);
+            let base = base.trim_end_matches("[]");
+            if let Some(k) = self.nodes.borrow().get(base).copied() {
+                key = k;
+            }
+        }
         let is_global = self.globals.contains(name) && self.vars.borrow().frame_of(name) == Some(0);
         // The target may be a compound path (`s.vals[i] = v`); the borrow is
         // the ROOT's.
@@ -2010,6 +2027,16 @@ impl MoveCheck<'_> {
                     self.gave_up_returned(a, gone);
                 }
             }
+            // KNOWN CONSERVATISM (round fifty's finding, reverted the same
+            // session): `@copy` here should contribute nothing — its result
+            // is fresh — but clearing it (plus the consume-arg skip below)
+            // un-marks a partially-taken record at its returns, and the
+            // emission then frees the record's remaining field TWICE at an
+            // early return: the placed row for a holed binding with several
+            // returns registers double. Fix the duplicate placement first;
+            // the audit's rva line and `examples`-shaped probe zzz2 (a
+            // Builder-like record, `return Err(bd.err.copy())` before
+            // `return Ok(consume bd.op)`) reproduce it in one build.
             Expr::Call { name, .. } => {
                 // A seeded row whose return is the same bare parameter as an
                 // argument's may hand that argument straight back —
