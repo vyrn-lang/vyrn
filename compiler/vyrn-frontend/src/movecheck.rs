@@ -892,6 +892,7 @@ fn run(program: &Program, want: Want) -> Run {
         place_stores: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         mention_stores: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         param_escapers: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
+        carrying_locals: RefCell::new(HashSet::new()),
         exit_sites: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         mentions: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         consume_cands: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
@@ -1019,6 +1020,10 @@ fn run(program: &Program, want: Want) -> Run {
         if retains.len() == before {
             break;
         }
+    }
+    if std::env::var_os("VYRN_LEND_DUMP").is_some() {
+        eprintln!("lending closed: {lending:?}");
+        eprintln!("retains closed: {retains:?}");
     }
     // The verdict per call-argument temporary. It waits for both closures above:
     // whether a position keeps what it is given is only settled once every body
@@ -1249,6 +1254,11 @@ struct MoveCheck<'a> {
     place_stores: Option<RefCell<Vec<PlaceStore>>>,
     mention_stores: Option<RefCell<Vec<(usize, Vec<(String, usize)>)>>>,
     param_escapers: Option<RefCell<HashSet<String>>>,
+    /// Round fifty-six: per-body provenance for the escape screen — locals
+    /// whose value may HOLD a borrowed parameter's storage (`let r =
+    /// a.push(v)`), so a later `return r` reads as the escape it is. Cleared
+    /// per body; consulted only where `param_escapers` records.
+    carrying_locals: RefCell<HashSet<String>>,
     exit_sites: Option<RefCell<Vec<ExitEv>>>,
     mentions: Option<RefCell<Vec<MentionEv>>>,
     consume_cands: Option<RefCell<Vec<ConsumeCand>>>,
@@ -1679,6 +1689,7 @@ impl MoveCheck<'_> {
         *self.ret.borrow_mut() = ret.clone();
         self.lambda_base.borrow_mut().clear();
         self.lambda_escapes.borrow_mut().clear();
+        self.carrying_locals.borrow_mut().clear();
         self.block(body, &mut consumed, &mut scope);
     }
 
@@ -2059,6 +2070,15 @@ impl MoveCheck<'_> {
             // round fifty-one removed those (a holed binding places
             // structurally), which is what makes this narrowing sound.
             Expr::Call { name, .. } if name == "@copy" || name == "@str" || name == "@concat" => {}
+            // The codec forms build FRESH values out of what they read —
+            // `fromJson(T, s)` parses and copies, `toJson(v)` renders — so
+            // neither result can carry an argument's storage, and neither is
+            // a program function the screen below could clear (exit-residue
+            // round fifty-six: `return match fromJson(IdReq, arg.json) { .. }`
+            // — the generated GraphQL resolver arm — marked `arg` moved into
+            // the return on every path, and the argument JSON leaked once per
+            // argument-carrying resolve).
+            Expr::Call { name, .. } if name == "fromJson" || name == "toJson" => {}
             // A NUMERIC CAST is a call spelled with a type's name and returns
             // a scalar copy — `return Some(Float32(toFloat(sc, ..)))` marked
             // `sc` through the cast the conservative walk could not see
@@ -3599,20 +3619,49 @@ impl MoveCheck<'_> {
             // and ctor-match rows are typed.
             None => {
                 let sig = self.vars.borrow().get(callee).cloned().flatten();
-                let Some(Type::Fn(ps, _)) =
-                    sig.map(|t| crate::types::resolve(&t, self.decl.decls()))
-                else {
-                    return;
+                let from_sig = match sig.map(|t| crate::types::resolve(&t, self.decl.decls())) {
+                    Some(Type::Fn(ps, _)) => ps.get(ix).cloned(),
+                    _ => None,
                 };
-                let Some(t) = ps.get(ix) else {
-                    return;
-                };
-                t.clone()
+                // Round fifty-six: the same reading for an ORDINARY callee —
+                // `showResult(Ok(User { .. }))` answers no type of its own
+                // (a generic variant's bare name is incomplete), and the row
+                // bailed here, so the payload box leaked once per call
+                // (fnvalstore's registry section). The declared parameter
+                // names the instantiation; a generic parameter answers no
+                // release kind below and stands aside as before.
+                match from_sig.or_else(|| self.decl.param_ty(callee, ix).cloned()) {
+                    Some(t) => t,
+                    None => return,
+                }
             }
         };
         if producer.is_none() && !matches!(crate::types::resolve(&ty, self.decl.decls()), Type::Str)
         {
             return;
+        }
+        // Round fifty-six: a generic variant's bare owner name is an
+        // incomplete type — `Ok(User { .. })` answers `Result`, whose rows
+        // mention parameters, so no release kind answers and the temporary
+        // stood aside (`showResult(Ok(User { .. }))` leaked one payload box
+        // per call, fnvalstore's whole registry section). The callee's
+        // declared parameter names the instantiation exactly — the checker
+        // has already made the two agree — and a callee whose own parameter
+        // is generic answers no kind either, so nothing widens.
+        let ty = if self.decl.release_kind(&ty).is_none() {
+            match self.decl.param_ty(callee, ix) {
+                Some(pt) if self.decl.release_kind(pt).is_some() => pt.clone(),
+                _ => ty,
+            }
+        } else {
+            ty
+        };
+        if std::env::var_os("VYRN_ARG_TY_DUMP").is_some() {
+            eprintln!(
+                "arg-temp: fn={} callee={callee} ix={ix} ty={ty:?} kind={:?}",
+                self.cur_fn.borrow(),
+                self.decl.release_kind(&ty)
+            );
         }
         let Some(kind) = self.decl.release_kind(&ty) else {
             return;
@@ -3894,16 +3943,66 @@ impl MoveCheck<'_> {
             return false;
         }
         match e {
-            Expr::Var { name, .. } => matches!(
-                self.borrow_of(name),
-                Some(Borrow::Read(_)) | Some(Borrow::Modify(_))
-            ),
+            // Round fifty-six: a LOCAL assigned a carrying value carries it in
+            // turn — `let r = a.push(v); return r` launders the buffer through
+            // a name, and the per-body provenance set is what still sees it
+            // now that the escape is recorded at the return rather than at
+            // every interior call.
+            Expr::Var { name, .. } => {
+                matches!(
+                    self.borrow_of(name),
+                    Some(Borrow::Read(_)) | Some(Borrow::Modify(_))
+                ) || self.carrying_locals.borrow().contains(name)
+            }
             Expr::Str(_) | Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) => false,
             Expr::Binary { .. } | Expr::Unary { .. } => false,
             Expr::Consume { place, .. } => self.carries_param_storage(place),
             Expr::Call { name, args, .. } => {
                 self.call_may_forward(name) && args.iter().any(|a| self.carries_param_storage(a))
             }
+            // The value-position joins yield one of their arms, so they carry
+            // what an arm (or the scrutinee, through a binder) carries. The
+            // binders SHADOW while an arm body is read — `sha1Hex(s: String)`
+            // ends on `match stringFromBytes(out) { Ok(s) => s, .. }`, and
+            // reading the arm's `s` as the parameter made the whole function
+            // an escaper (199 digests leaked in `threeengines`' chain loop).
+            // A binder over a CARRYING scrutinee is covered by the scrutinee
+            // check short-circuiting first.
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                self.carries_param_storage(scrutinee)
+                    || arms.iter().any(|a| {
+                        let Some(b) = a.body.as_expr() else {
+                            return false;
+                        };
+                        self.enter();
+                        for n in pattern_bindings(&a.pattern) {
+                            self.bind(n, None, None);
+                        }
+                        let r = self.carries_param_storage(b);
+                        self.exit();
+                        r
+                    })
+            }
+            Expr::IfExpr {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.carries_param_storage(then_branch)
+                    || else_branch
+                        .as_ref()
+                        .is_some_and(|b| self.carries_param_storage(b))
+            }
+            // An aggregate literal carries what its parts carry.
+            Expr::StructLit { fields, .. } => {
+                fields.iter().any(|(_, v)| self.carries_param_storage(v))
+            }
+            Expr::ArrayLit { elems, .. } => elems.iter().any(|x| self.carries_param_storage(x)),
+            Expr::MapLit { entries, .. } => entries
+                .iter()
+                .any(|(k, v)| self.carries_param_storage(k) || self.carries_param_storage(v)),
             other => {
                 // A projection roots in a place; anything else unrecognized is
                 // assumed to carry — the conservative direction.
@@ -3915,6 +4014,27 @@ impl MoveCheck<'_> {
                     None => true,
                 }
             }
+        }
+    }
+
+    /// Round fifty-six: one field/element store's contribution to the escape
+    /// screen. A carrying value written through a `modify` parameter or into
+    /// module state leaves the call — the enclosing function is an escaper;
+    /// written into a local place, the local carries it onward.
+    fn note_carrying_store(&self, target: &str, value: &Expr) {
+        if self.param_escapers.is_none() || !self.carries_param_storage(value) {
+            return;
+        }
+        let root = target.split('.').next().unwrap_or(target);
+        let root = root.trim_end_matches("[]");
+        let outward = matches!(self.borrow_of(root), Some(Borrow::Modify(_)))
+            || (self.globals.contains(root) && self.vars.borrow().frame_of(root) == Some(0));
+        if outward {
+            if let Some(sink) = &self.param_escapers {
+                sink.borrow_mut().insert(self.cur_fn.borrow().clone());
+            }
+        } else {
+            self.carrying_locals.borrow_mut().insert(root.to_string());
         }
     }
 
@@ -3940,6 +4060,12 @@ impl MoveCheck<'_> {
             Expr::ArrayLit { elems, .. } => {
                 !elems.is_empty() && elems.iter().all(|x| self.owned_literal_elem(x, producers))
             }
+            // A string LITERAL element lives in the data segment: the deep
+            // free's `str_free` reads its cap of 0 and refuses, so the row
+            // frees the coerced buffer and the element frees are no-ops
+            // (exit-residue round fifty-six: `httpInput(ps, body, ["id"])`
+            // in every generated REST adapter leaked one buffer per request).
+            Expr::Str(_) => true,
             _ => false,
         }
     }
@@ -3957,6 +4083,12 @@ impl MoveCheck<'_> {
             return;
         }
         if let Some(&ix) = self.param_ix.borrow().get(&root) {
+            if std::env::var_os("VYRN_LEND_DUMP").is_some() {
+                eprintln!(
+                    "retain seed: fn={} ix={ix} root={root} e={e:?}",
+                    self.cur_fn.borrow()
+                );
+            }
             sink.borrow_mut().insert((self.cur_fn.borrow().clone(), ix));
         }
     }
@@ -4142,16 +4274,20 @@ impl MoveCheck<'_> {
             // ten fixed those, and the door now refuses heap-owning borrows
             // at constructor positions outright). An unknown type keeps the
             // lend, conservatively.
-            Expr::Call { name, args, .. } if self.decl.constructs(name) => {
-                args.iter().find_map(|a| {
-                    self.returned_borrow(a)
-                        .filter(|_| !self.type_of(a).is_some_and(|t| !self.decl.owns_heap(&t)))
-                })
-            }
-            Expr::StructLit { fields, .. } => fields.iter().find_map(|(_, v)| {
-                self.returned_borrow(v)
-                    .filter(|_| !self.type_of(v).is_some_and(|t| !self.decl.owns_heap(&t)))
-            }),
+            // The filter is [`MoveCheck::arm_carries_heap`], not a bare
+            // `type_of` probe (exit-residue round fifty-six): `Ok(s.byteLength)`
+            // answers no type — a builtin scalar projection is not a record
+            // field — and the old filter kept the lend, which made the whole
+            // function a LENDER, pinned every caller's argument row Lent, and
+            // stood the caller's own scrutinee release down with it. A scalar
+            // projection carries no heap, so it lends nothing; unknown shapes
+            // still keep the lend, conservatively.
+            Expr::Call { name, args, .. } if self.decl.constructs(name) => args
+                .iter()
+                .find_map(|a| self.returned_borrow(a).filter(|_| self.arm_carries_heap(a))),
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .find_map(|(_, v)| self.returned_borrow(v).filter(|_| self.arm_carries_heap(v))),
             Expr::IfExpr {
                 then_branch,
                 else_branch,
@@ -4362,6 +4498,12 @@ impl MoveCheck<'_> {
                         },
                     );
                 }
+                // Round fifty-six provenance: a binding initialized with a
+                // carrying value carries it (read pre-bind, so `let x = x + b`
+                // asks about the old `x`).
+                if self.param_escapers.is_some() && self.carries_param_storage(value) {
+                    self.carrying_locals.borrow_mut().insert(name.clone());
+                }
                 self.bind(name, bty, borrow);
                 self.nodes.borrow_mut().bind(name, let_id(s));
                 // RFC-0114 M2: the initializer is the binding's first write.
@@ -4459,6 +4601,19 @@ impl MoveCheck<'_> {
                         }
                     }
                 }
+                // Round fifty-six: a store of a carrying value into module
+                // state parks the storage where it outlives the call — the
+                // enclosing function is an escaper; into a local, the local
+                // carries.
+                if self.param_escapers.is_some() && self.carries_param_storage(value) {
+                    if global {
+                        if let Some(sink) = &self.param_escapers {
+                            sink.borrow_mut().insert(self.cur_fn.borrow().clone());
+                        }
+                    } else {
+                        self.carrying_locals.borrow_mut().insert(name.clone());
+                    }
+                }
                 revive(consumed, name); // reassignment revives it
                 self.wrote_into(name); // RFC-0093 M2: a filled hole is not skippable
                 Ok(false)
@@ -4493,6 +4648,7 @@ impl MoveCheck<'_> {
                 {
                     self.note_place_store(s, name);
                 }
+                self.note_carrying_store(name, value);
                 Ok(false)
             }
             // `a[i] = v` — the stored value is consumed like a `push` argument
@@ -4539,12 +4695,23 @@ impl MoveCheck<'_> {
                 if !mentions_place(value, name) && !mentions_place(index, name) {
                     self.note_place_store(s, name);
                 }
+                self.note_carrying_store(name, value);
                 Ok(false)
             }
             Stmt::Return { value, line } => {
                 if let Some(e) = value {
                     self.site("return", *line, e, None);
                     self.expr(e, consumed, scope)?;
+                    // Round fifty-six: the escape screen's record, at the one
+                    // site a result actually leaves — BEFORE `check_return`'s
+                    // own refusals, so a shape the checker also refuses still
+                    // marks the function while this walk's diagnostics are
+                    // being collected rather than acted on.
+                    if let Some(sink) = &self.param_escapers {
+                        if self.carries_param_storage(e) {
+                            sink.borrow_mut().insert(self.cur_fn.borrow().clone());
+                        }
+                    }
                     self.check_return(e, *line)?;
                     // Rule 3: the caller owns the result. Everything the returned
                     // expression reads may be inside it, so this block releases
@@ -5458,7 +5625,14 @@ impl MoveCheck<'_> {
             }
             Expr::Try { expr, .. } => {
                 let r = self.expr(expr, consumed, scope);
-                // `?` is a `return` in everything but the spelling.
+                // `?` is a `return` in everything but the spelling — the
+                // escape screen records here too (round fifty-six): the err
+                // payload it hands the caller is a projection of the operand.
+                if let Some(sink) = &self.param_escapers {
+                    if self.carries_param_storage(expr) {
+                        sink.borrow_mut().insert(self.cur_fn.borrow().clone());
+                    }
+                }
                 self.exit_site(e as *const Expr as usize, true);
                 self.exit_ev();
                 r
@@ -5861,28 +6035,19 @@ impl MoveCheck<'_> {
             Expr::Call { name, args, line } => {
                 self.check_exclusive(name, args, *line)?;
                 let caps = self.caps.get(name);
-                // Round eighteen's soundness screen: an argument that CARRIES
-                // a borrowed parameter's storage, handed to a call whose
-                // result owns heap, can carry that storage into the result —
-                // `put(a, ..) { return a.push(..) }` hands the caller back
-                // the buffer it was passed, one builtin deep, and `let r =
-                // a.push(v); return r` launders the same buffer through a
-                // local. Any such site disqualifies the ENCLOSING function
-                // from `fresh_stores`' callee set. Carrying is storage flow,
-                // not mention: `bytes(s)` and a `+` both COPY, so a value
-                // built from them is fresh however many parameters it read —
-                // `sha1Hex(digest)` in a loop store is round nineteen's
-                // witness. A consume parameter needs no screen — the take
-                // already blocks the store-side fold — and a heap-free
-                // result carries nothing.
-                let call_carries = self.type_of(e).is_some_and(|t| self.decl.owns_heap(&t));
-                if call_carries && self.call_may_forward(name) {
-                    if let Some(sink) = &self.param_escapers {
-                        if args.iter().any(|a| self.carries_param_storage(a)) {
-                            sink.borrow_mut().insert(self.cur_fn.borrow().clone());
-                        }
-                    }
-                }
+                // Round eighteen's soundness screen, re-anchored in round
+                // fifty-six: the question is whether the enclosing function's
+                // RESULT can hand back a borrowed parameter's storage, and
+                // recording every interior carrying call answered a different
+                // question — `replace`'s `slice(s, ..)` operand is copied by
+                // the `+` that consumes it, yet the record made `replace` an
+                // escaper and stood down every `out = replace(out, ..)` store
+                // in the corpus (`httpFill` leaked one filled template per
+                // request, `regexredux` one sequence buffer per pattern). The
+                // record now happens where storage actually leaves — a
+                // `return`, a `?`, a store into module state or a `modify`
+                // parameter — with `carrying_locals` carrying the provenance
+                // through `let r = a.push(v); return r`.
                 // Left-to-right: check each argument, then apply its consumption,
                 // so passing the same variable to two `consume` params is caught.
                 for (i, arg) in args.iter().enumerate() {
@@ -5940,7 +6105,20 @@ impl MoveCheck<'_> {
                             );
                         }
                     } else if self.decl.constructs(name) {
-                        self.note_retention(arg);
+                        // Round fifty-six: only a value that can CARRY heap is
+                        // retained. `Ok(s.byteLength)` copies a scalar out of
+                        // the parameter — recording it made the whole function
+                        // a retainer of its argument, pinned every caller's
+                        // binding Lent, and stood the callers' releases down
+                        // (`return match decode(arg.json) { .. }` leaked `arg`
+                        // at every call). The screen is the one
+                        // `arm_carries_heap` already states: a typed value
+                        // answers `owns_heap`, an untyped field read on a
+                        // non-record base is a builtin scalar projection, and
+                        // anything else stays retained, conservatively.
+                        if self.arm_carries_heap(arg) {
+                            self.note_retention(arg);
+                        }
                         // A variant constructor is a literal that reads like a
                         // call: the value it builds holds the argument and
                         // outlives the call, exactly as an array literal does.

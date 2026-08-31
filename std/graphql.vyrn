@@ -1779,8 +1779,16 @@ export fn gqlNoArgs(field: String, args: Array<JsonField>) -> String {
 /// RPC, since it is the same decode.
 export fn gqlArgError(field: String, issues: Array<Issue>) -> String {
     let mut out = "Field `" + field + "` got an invalid argument"
+    // One arm of `if i.path == "" { i.message } else { i.path + ": " + .. }`
+    // borrows and the other allocates, so no consumer may free the answer
+    // unconditionally — the allocating arm leaked (exit-residue round
+    // fifty-six). Spelled as appends, every temporary has one owner.
     for i in issues {
-        out = out + "; " + if i.path == "" { i.message } else { i.path + ": " + i.message }
+        out = out + "; "
+        if i.path != "" {
+            out = out + i.path + ": "
+        }
+        out = out + i.message
     }
     return out + "."
 }

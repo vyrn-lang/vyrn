@@ -1583,6 +1583,71 @@ Movement: rpc CLEAN (6 → 0), rpcsplit CLEAN (5 → 0).
 Tallies after round fifty-five: **clean 132, leaking 12, zero
 double-frees**.
 
+## Fifty-sixth triage: the screens asked the wrong questions
+
+The biggest single round since the fold shipped, and every fix is a
+screen that answered a different question than the one it was asked.
+Seven convictions, each with its own witness:
+
+**The loop-local pairing.** `fold_store_owned` refused any store
+sharing a loop with a take — but a loop the binding's own `let` sits
+inside re-initializes the binding at the back edge, so the take and
+the store are events of ONE incarnation and walk order is execution
+order. `let mut name = first.copy()` conditionally reassigned then
+pushed (std/graphql's alias path) leaked the copy at every alias.
+
+**The scalar projection that made a lender.** `lends_through_a_wrapper`
+kept the lend for any wrapped argument it could not type, and
+`Ok(s.byteLength)` answers no type — a builtin scalar projection is
+not a record field. One such return made the whole function a LENDER,
+pinned every caller's argument row Lent, and stood the caller's own
+scrutinee release down with it. The filter is `arm_carries_heap` now,
+which already knew a field read on a non-record base carries nothing.
+
+**The retention that retained a number.** The constructor arm recorded
+`note_retention(arg)` unconditionally, so `Ok(s.byteLength)` also made
+the function a RETAINER of its argument. Same screen, same fix.
+
+**The codec seams.** `fromJson`/`toJson` have no seeded row and no
+user declaration, so a call-built argument in either position had no
+verdict, and `gave_up_returned` could not see through a returned
+`match fromJson(T, arg.json)` — the generated REST and GraphQL
+projections leaked one input String and one abandoned binding per
+argument-carrying request. Both forms read and build fresh: a
+capability answer in the prelude and a transparency arm in the
+return walk.
+
+**The heapified literal of literals.** `["id"]` in argument position
+minted no row — a string LITERAL was not an "owned element", though
+its element free is `str_free` on a cap-0 static, a no-op. One 8-byte
+buffer per generated REST adapter call.
+
+**The lender-shaped element hand-out.** `std/http`'s `httpSingleOf`
+returned `fs[0].value` through `Some(..)` — a borrowed element through
+a wrapper — which pinned every response body's parsed tree: 22 blocks
+per request. An owned `copyJson` copy, and `mount`'s `if let` over the
+route answer became a consuming match so the payload box goes with it.
+
+**The escape screen re-anchored.** Round eighteen's screen recorded an
+escaper at every interior call that handed a borrowed parameter to a
+forwarding callee — but `replace`'s `slice(s, ..)` operand is COPIED
+by the `+` that consumes it, and the coarse record stood down every
+`out = replace(out, ..)` store in the corpus: one filled template per
+REST request, one 10 KB sequence buffer per regexredux pattern. The
+record now happens where storage actually leaves — a `return`, a `?`,
+a store into module state or a `modify` parameter — with a per-body
+`carrying_locals` set carrying provenance through `let r =
+blackBox(s); return r`, and arm binders SHADOWING while an arm body is
+read (`sha1Hex` ends on `match .. { Ok(s) => s }`, and reading that
+`s` as the parameter briefly leaked 199 digests in threeengines'
+chain — caught by the survey before anything shipped).
+
+Movement: graphql CLEAN (6 → 0), regexredux CLEAN (5 → 0), rest 282 →
+3, fnvalstore 6 → 2.
+
+Tallies after round fifty-six: **clean 134, leaking 10, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the

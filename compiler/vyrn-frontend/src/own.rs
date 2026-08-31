@@ -2381,6 +2381,17 @@ fn fold_store_owned(facts: &crate::movecheck::Facts) -> std::collections::HashSe
         if vetoed.contains(key) {
             continue;
         }
+        // Round fifty-six: the loops the binding's own `let` sits inside. A
+        // back edge through such a loop re-initializes the binding, so a take
+        // and a store sharing it are events of ONE incarnation, where walk
+        // order is execution order — `let mut name = first.copy()` inside the
+        // loop, conditionally reassigned, then pushed, leaked the copy at
+        // every reassignment (std/graphql's alias path). A loop the `let`
+        // does NOT sit inside still refuses: the value crosses its back edge.
+        let init_loops: Option<&Vec<u32>> = evs.iter().find_map(|e| match e.kind {
+            EvKind::Write { id: 0, .. } => Some(&e.loops),
+            _ => None,
+        });
         for (i, ev) in evs.iter().enumerate() {
             let EvKind::Write { id, .. } = ev.kind else {
                 continue;
@@ -2433,7 +2444,9 @@ fn fold_store_owned(facts: &crate::movecheck::Facts) -> std::collections::HashSe
                     return false;
                 }
                 (t.order > prev.order && t.order < ev.order)
-                    || t.loops.iter().any(|l| ev.loops.contains(l))
+                    || t.loops.iter().any(|l| {
+                        ev.loops.contains(l) && !init_loops.is_some_and(|il| il.contains(l))
+                    })
             });
             if !blocked {
                 owned.insert(id);
@@ -3416,6 +3429,221 @@ pub(crate) mod tests {
         assert!(
             o.plan.store_owned_at(stores[2]),
             "a copying mention of the target no longer stands the store down"
+        );
+    }
+
+    /// Exit-residue round fifty-six, the loop-local pairing: a take sharing a
+    /// loop with a store refuses the release ONLY when the binding's own `let`
+    /// sits outside that loop. Declared inside, the back edge re-initializes
+    /// the binding, so the conditional reassignment frees the copy it
+    /// displaces (`std/graphql`'s alias path leaked one per alias).
+    #[test]
+    fn a_loop_local_store_owns_past_a_same_loop_take() {
+        let src = "type P = { k: String, n: String }\n\
+                   fn tok(i: Int64) -> String { return \"t\" + \"x\" }\n\
+                   fn main() -> Int64 {\n\
+                       let mut out: Array<P> = []\n\
+                       let mut i = 0\n\
+                       while i < 4 {\n\
+                           let first = tok(i)\n\
+                           let mut name = first.copy()\n\
+                           if i > 1 {\n\
+                               name = tok(i)\n\
+                           }\n\
+                           out.push(P { k: first, n: name })\n\
+                           i = i + 1\n\
+                       }\n\
+                       return out.length\n\
+                   }";
+        let (o, p) = analyze_src(src);
+        fn collect(b: &crate::ast::Block, out: &mut Vec<usize>) {
+            for s in &b.stmts {
+                match s {
+                    crate::ast::Stmt::Assign { name, .. } if name == "name" => {
+                        out.push(s as *const crate::ast::Stmt as usize);
+                    }
+                    crate::ast::Stmt::While { body, .. } => collect(body, out),
+                    crate::ast::Stmt::If {
+                        then_block,
+                        else_block,
+                        ..
+                    } => {
+                        collect(then_block, out);
+                        if let Some(eb) = else_block {
+                            collect(eb, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut assigns: Vec<usize> = Vec::new();
+        collect(&p.functions[1].body, &mut assigns);
+        assert_eq!(assigns.len(), 1);
+        assert!(
+            o.plan.store_owned_at(assigns[0]),
+            "the loop-local reassignment owns the copy it displaces"
+        );
+    }
+
+    /// Round fifty-six: a scalar projection wrapped in a returned constructor
+    /// lends nothing (`Ok(s.byteLength)` copies a number), so the function is
+    /// neither a lender nor a retainer of its argument — and the caller's
+    /// binding, read through it at a `return match`, is still reclaimed.
+    #[test]
+    fn a_wrapped_scalar_projection_neither_lends_nor_retains() {
+        let src = "type Pack = { j: String, e: String }\n\
+                   fn mk() -> Pack { return Pack { j: \"x\" + \"y\", e: \"\" } }\n\
+                   fn dec(s: String) -> Result<Int64, String> {\n\
+                       if s.byteLength > 10 { return Ok(s.byteLength) }\n\
+                       return Err(\"short: \" + s)\n\
+                   }\n\
+                   fn go() -> Result<String, String> {\n\
+                       let arg = mk()\n\
+                       return match dec(arg.j) {\n\
+                           Ok(n) => Ok(\"n\" + \"m\"),\n\
+                           Err(e) => Err(consume e),\n\
+                       }\n\
+                   }\n\
+                   fn main() -> Int64 { return 0 }";
+        let fs = fates(src, "go");
+        assert_eq!(fs.len(), 1, "one binding: arg");
+        assert!(
+            matches!(fs[0], Fate::Reclaimed(..)),
+            "`arg` is reclaimed, not {:?}",
+            fs[0]
+        );
+    }
+
+    /// Round fifty-six, the escape screen re-anchored: a function whose
+    /// interior hands a parameter to a lender is NOT an escaper when its
+    /// returns are all fresh — `replace(s, ..)` reads `s` through `slice`
+    /// but returns only copies and concats, so `out = replace(out, ..)`
+    /// releases what it displaces. A function that RETURNS the forwarded
+    /// buffer (directly or laundered through a local) still is one.
+    #[test]
+    fn the_escape_screen_reads_returns_not_interiors() {
+        let src = "fn tail(s: String) -> String {\n\
+                       let piece = slice(s, 0, 1) ?? panic(\"cut\")\n\
+                       return \"\" + piece\n\
+                   }\n\
+                   fn launder(a: Array<Int64>, v: Int64) -> Array<Int64> {\n\
+                       let r = a.push(v)\n\
+                       return r\n\
+                   }\n\
+                   fn go() -> String {\n\
+                       let mut out = \"x\" + \"y\"\n\
+                       let mut i = 0\n\
+                       while i < 3 {\n\
+                           out = tail(out)\n\
+                           i = i + 1\n\
+                       }\n\
+                       return out\n\
+                   }\n\
+                   fn main() -> Int64 { return 0 }";
+        let (o, p) = analyze_src(src);
+        // `tail` copies its way out, so `go`'s loop store owns the old value.
+        let assigns: Vec<usize> = {
+            let mut v = Vec::new();
+            fn collect(b: &crate::ast::Block, out: &mut Vec<usize>) {
+                for s in &b.stmts {
+                    match s {
+                        crate::ast::Stmt::Assign { name, .. } if name == "out" => {
+                            out.push(s as *const crate::ast::Stmt as usize);
+                        }
+                        crate::ast::Stmt::While { body, .. } => collect(body, out),
+                        _ => {}
+                    }
+                }
+            }
+            collect(&p.functions[2].body, &mut v);
+            v
+        };
+        assert_eq!(assigns.len(), 1);
+        assert!(
+            o.plan.store_owned_at(assigns[0]),
+            "a lender read consumed by a copy does not stand the store down"
+        );
+        assert!(
+            o.plan.store_fresh_at(assigns[0]),
+            "the mention screen clears `out = tail(out)`"
+        );
+    }
+
+    /// The UAF direction of the same screen: a store through a callee that
+    /// launders a forwarded buffer through a local must NOT be marked fresh.
+    #[test]
+    fn a_laundered_forward_still_blocks_the_mention_store() {
+        let src = "fn launder(s: String) -> String {\n\
+                       let r = blackBox(s)\n\
+                       return r\n\
+                   }\n\
+                   fn go() -> Int64 {\n\
+                       let mut acc = \"x\" + \"y\"\n\
+                       acc = launder(acc)\n\
+                       return acc.byteLength\n\
+                   }\n\
+                   fn main() -> Int64 { return 0 }";
+        let (o, p) = analyze_src(src);
+        let mut assigns = Vec::new();
+        for s in &p.functions[1].body.stmts {
+            if let crate::ast::Stmt::Assign { name, .. } = s {
+                if name == "acc" {
+                    assigns.push(s as *const crate::ast::Stmt as usize);
+                }
+            }
+        }
+        assert_eq!(assigns.len(), 1);
+        assert!(
+            !o.plan.store_fresh_at(assigns[0]),
+            "`launder` hands its argument's buffer back through a local"
+        );
+    }
+
+    /// Round fifty-six: a constructor-built argument of a plain call answers
+    /// no type of its own (`Ok(User { .. })` names only `Result`), so the row
+    /// is typed from the callee's declared parameter — and the temporary
+    /// frees the payload box it travels in.
+    #[test]
+    fn a_generic_ctor_argument_is_typed_from_the_callee() {
+        let src = "type User = { id: Int64, name: String }\n\
+                   fn show(r: Result<User, String>) -> Int64 {\n\
+                       return match r {\n\
+                           Ok(u) => u.id,\n\
+                           Err(e) => 0,\n\
+                       }\n\
+                   }\n\
+                   fn main() -> Int64 {\n\
+                       return show(Ok(User { id: 42, name: \"z\" + \"d\" }))\n\
+                   }";
+        let (o, _) = analyze_src(src);
+        assert!(
+            !o.plan.arg_drops.is_empty(),
+            "the ctor-built argument has a released row"
+        );
+    }
+
+    /// Round fifty-six: the codec forms build fresh values, so a binding read
+    /// through `fromJson` in a returned match is not moved into the return.
+    #[test]
+    fn a_from_json_read_does_not_give_the_binding_up() {
+        let src = "type R = { id: Int64 }\n\
+                   type Pack = { j: String }\n\
+                   fn mk() -> Pack { return Pack { j: \"x\" + \"y\" } }\n\
+                   fn go() -> Int64 {\n\
+                       let arg = mk()\n\
+                       return match fromJson(R, arg.j) {\n\
+                           Valid(v) => v.id,\n\
+                           Invalid(i) => 0,\n\
+                       }\n\
+                   }\n\
+                   fn main() -> Int64 { return 0 }";
+        let fs = fates(src, "go");
+        assert_eq!(fs.len(), 1, "one binding: arg");
+        assert!(
+            matches!(fs[0], Fate::Reclaimed(..)),
+            "`arg` is reclaimed, not {:?}",
+            fs[0]
         );
     }
 
