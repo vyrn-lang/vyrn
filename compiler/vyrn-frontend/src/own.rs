@@ -644,8 +644,17 @@ impl Owned {
             // [`Owned::unbounded`] rather than [`self_referring`]: a declared
             // release is a call, so the walk stops there and `Array<Node>` gets
             // its element row back the day `impl Owned for Node` is written.
+            // A PARAM element answers Deep too (round forty-nine): inside a
+            // generic body the element is unknowable, the emitters substitute
+            // the instance's type before walking, and a walk over heap-free
+            // elements frees nothing — `drop vals` in `impl<T> Owned for
+            // Slots<T>` was buffer-only under the shared generic row and the
+            // String instance leaked its elements.
             Type::Array(e) => Some(
-                if self.unbounded(&e).is_none() && self.release_kind(&e).is_some() {
+                if self.unbounded(&e).is_none()
+                    && (self.release_kind(&e).is_some()
+                        || matches!(crate::types::resolve(&e, &self.types), Type::Param(_)))
+                {
                     DropKind::Deep(Type::Array(e))
                 } else {
                     DropKind::FreeArr

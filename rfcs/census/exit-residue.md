@@ -1437,6 +1437,25 @@ Movement: container CLEAN (4 → 0).
 Tallies after round forty-eight: **clean 128, leaking 16, zero
 double-frees**.
 
+## Forty-ninth triage: the generic walk learns to wait for its type
+
+One analysis correction, measured neutral today: an `Array<T>` whose
+element is a type VARIABLE answered the buffer-alone kind, because
+`release_kind(Param)` answers nothing — so `drop vals` inside
+`impl<T> Owned for Slots<T>` carried a buffer-only row shared by
+every instance, and a String instance's elements depended on which
+emitter asked. A Param element answers `Deep` now: the emitters
+substitute the instance's type before walking, and a walk over
+heap-free elements frees nothing, so the Int instances lose nothing
+and the String instances gain their elements wherever the shared row
+is the one consulted. genref's remaining block turned out to be the
+OTHER §26 stand-aside — the displaced element of a user-container
+projection store — and stays recorded rather than fixed.
+
+Tallies after round forty-nine: **clean 128, leaking 16, zero
+double-frees** — unchanged; the row is for the generic corpus to
+come.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the
