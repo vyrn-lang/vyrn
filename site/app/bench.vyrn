@@ -1,6 +1,6 @@
 /// The Benchmarks Game radar, computed while the site builds (RFC-0104 M3).
 ///
-/// WHERE THE NUMBERS COME FROM. `rfcs/bench-0104/results/2026-08-28.json`
+/// WHERE THE NUMBERS COME FROM. `rfcs/bench-0104/results/2026-09-01.json`
 /// and `-run2.json`, written by `rfcs/bench-0104/harness/run.py`, read here at
 /// export time. Nothing on the two pages this module feeds is typed in by hand:
 /// change the record, rebuild, and
@@ -91,21 +91,21 @@ export type Panel = { key: String, name: String, n: String, note: String, cause:
 
 /// The dataset the site publishes. One machine, one afternoon, twice.
 ///
-/// The 2026-08-28 pair is the re-run the previous dataset's own provenance
-/// note asked for: the same eight programs, the same five contestants, the
-/// same cross-verification, on the same machine — measured AFTER the arcs the
-/// old rows predated. RFC-0114 made the releases real (binary-trees' native
-/// leg peaks at 37 MB in these rows, within one per cent of Rust's, where the
-/// old record's leaked 2,093), and RFC-0116/0117 rebuilt the map (k-nucleotide's
-/// native leg is 6.5 ms where the old record held 2.9 s — from 211x C to
-/// faster than C). The two earlier datasets stay committed beside this one
-/// and are not edited; they are the before that makes these rows an after.
+/// The 2026-09-01 pair is measured at v0.1.0-alpha.3 — the release where the
+/// exit-residue survey reads zero (RFC-0114 §25, rounds 35–58): every leak
+/// class the 57-round triage closed is in these binaries, and the ratios the
+/// page draws are unchanged from the 2026-08-28 pair within run-to-run noise
+/// — the native leg still tracks C on nbody and pidigits, and k-nucleotide's
+/// map stays faster than C — which is itself the measurement: a memory model
+/// that frees everything costs nothing the radar can see. The three earlier
+/// datasets stay committed beside this one and are not edited; they are the
+/// before that makes these rows an after.
 export fn run1File() -> String {
-    return "rfcs/bench-0104/results/2026-08-28.json"
+    return "rfcs/bench-0104/results/2026-09-01.json"
 }
 
 fn run2File() -> String {
-    return "rfcs/bench-0104/results/2026-08-28-run2.json"
+    return "rfcs/bench-0104/results/2026-09-01-run2.json"
 }
 
 /// The text after the first `needle`, or nothing.
@@ -1471,40 +1471,40 @@ test "the record still has the shape this reader cuts" {
         assert(c.spread1.byteLength > 0)
         assert(c.runs1.byteLength > 0)
     }
-    assertEq(benchDate(), "2026-08-28")
+    assertEq(benchDate(), "2026-09-01")
     assertEq(benchRuns(), "10")
 }
 
 test "the medians are the ones the published record holds" {
-    // Every figure below is read off `2026-08-28.json` by hand. They
+    // Every figure below is read off `2026-09-01.json` by hand. They
     // are pins, and they are meant to be: the day the record is replaced they
     // fail, which is what makes a repointed reader visible instead of silent.
     // The earlier datasets' tables are not this one — the 2026-08-19 rows
     // predate RFC-0114's releases and RFC-0116/0117's hashed map.
-    assertEq(msOf(medianUs("nbody", "c")), "853 ms")
-    assertEq(msOf(medianUs("nbody", "rust")), "642 ms")
-    assertEq(msOf(medianUs("nbody", "js")), "1067 ms")
-    assertEq(msOf(medianUs("nbody", "vyrn-native")), "848 ms")
-    assertEq(msOf(medianUs("nbody", "vyrn-wasm")), "11674 ms")
-    assertEq(msOf(medianUs("knucleotide", "c")), "9.7 ms")
-    assertEq(msOf(medianUs("knucleotide", "rust")), "8.0 ms")
-    assertEq(msOf(medianUs("knucleotide", "vyrn-native")), "6.5 ms")
-    assertEq(msOf(medianUs("binarytrees", "js")), "404 ms")
-    assertEq(msOf(medianUs("pidigits", "vyrn-native")), "1284 ms")
+    assertEq(msOf(medianUs("nbody", "c")), "890 ms")
+    assertEq(msOf(medianUs("nbody", "rust")), "659 ms")
+    assertEq(msOf(medianUs("nbody", "js")), "1147 ms")
+    assertEq(msOf(medianUs("nbody", "vyrn-native")), "894 ms")
+    assertEq(msOf(medianUs("nbody", "vyrn-wasm")), "12091 ms")
+    assertEq(msOf(medianUs("knucleotide", "c")), "10.2 ms")
+    assertEq(msOf(medianUs("knucleotide", "rust")), "9.5 ms")
+    assertEq(msOf(medianUs("knucleotide", "vyrn-native")), "7.1 ms")
+    assertEq(msOf(medianUs("binarytrees", "js")), "432 ms")
+    assertEq(msOf(medianUs("pidigits", "vyrn-native")), "1325 ms")
 }
 
 test "the normalized figures are the ones the record computes" {
-    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "c")), "0.99x")
-    assertEq(ratioText(ratioOf("nbody", "vyrn-wasm", "c")), "13.68x")
-    assertEq(ratioText(ratioOf("spectralnorm", "vyrn-native", "c")), "1.00x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "c")), "1.00x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-wasm", "c")), "13.58x")
+    assertEq(ratioText(ratioOf("spectralnorm", "vyrn-native", "c")), "1.03x")
     assertEq(ratioText(ratioOf("binarytrees", "js", "c")), "0.50x")
-    assertEq(ratioText(ratioOf("revcomp", "rust", "c")), "0.23x")
-    assertEq(ratioText(ratioOf("knucleotide", "vyrn-native", "c")), "0.67x")
-    assertEq(ratioText(ratioOf("knucleotide", "vyrn-wasm", "c")), "1.80x")
+    assertEq(ratioText(ratioOf("revcomp", "rust", "c")), "0.21x")
+    assertEq(ratioText(ratioOf("knucleotide", "vyrn-native", "c")), "0.70x")
+    assertEq(ratioText(ratioOf("knucleotide", "vyrn-wasm", "c")), "1.79x")
     // And against Rust, which is the comparison the gate was written about.
-    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "rust")), "1.32x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "rust")), "1.36x")
     assertEq(ratioText(ratioOf("pidigits", "vyrn-native", "rust")), "1.00x")
-    assertEq(ratioText(ratioOf("revcomp", "vyrn-native", "rust")), "8.34x")
+    assertEq(ratioText(ratioOf("revcomp", "vyrn-native", "rust")), "8.39x")
 }
 
 test "the log scale puts a doubling on every ring" {
@@ -1623,9 +1623,9 @@ test "the table is the whole dataset and the panels are the same numbers" {
         assertEq(r.cells.length, 5)
     }
     assertEq(rows[0].n, "25,000,000")
-    assertEq(rows[0].cells[0].ms, "853 ms")
-    assertEq(rows[0].cells[3].vsC, "0.99x")
-    assertEq(rows[0].cells[3].vsRust, "1.32x")
+    assertEq(rows[0].cells[0].ms, "890 ms")
+    assertEq(rows[0].cells[3].vsC, "1.00x")
+    assertEq(rows[0].cells[3].vsRust, "1.36x")
     let panels = axisPanels()
     assertEq(panels.length, 8)
     for i in [0, 1, 2, 3, 4, 5, 6, 7] {
@@ -1673,7 +1673,7 @@ test "the caption names the hardware and the toolchain, and never the machine" {
     let cap = benchMachine()
     assert(has(cap, "Ryzen"))
     assert(has(cap, "wasmtime 46.0.1"))
-    assert(has(cap, "2026-08-28"))
+    assert(has(cap, "2026-09-01"))
     assertEq(envRows().length, 14)
     for row in envRows() {
         assert(row[0].byteLength > 0)
@@ -1688,8 +1688,8 @@ test "the caption names the hardware and the toolchain, and never the machine" {
     // The floor is published beside the medians, because a whole-process time
     // that hides its floor cannot be checked.
     assertEq(floorRows().length, 5)
-    assertEq(floorRows()[0].ms, "3.8 ms")
-    assertEq(floorRows()[4].ms, "13.6 ms")
+    assertEq(floorRows()[0].ms, "4.4 ms")
+    assertEq(floorRows()[4].ms, "13.7 ms")
 }
 
 test "both runs are published, and the drift is computed from them" {
@@ -1701,11 +1701,11 @@ test "both runs are published, and the drift is computed from them" {
         assert(r.drift.byteLength > 2)
         assertEq(split(r.runs, "  ").length, 10)
     }
-    // The gate's own sentence, computed: thirty-nine of forty cells moved by
-    // less than five per cent between the two runs, and the one that moved
-    // more is the near-floor cell — k-nucleotide's 6.5 ms native leg.
-    assertEq(steadyCells(), "39 of 40")
-    assertEq(detailRows("binarytrees")[1].drift, "-1.76%")
+    // The gate's own sentence, computed: thirty-seven of forty cells moved by
+    // less than five per cent between the two runs, and the worst mover is
+    // the near-floor cell — k-nucleotide's 7.1 ms native leg.
+    assertEq(steadyCells(), "37 of 40")
+    assertEq(detailRows("binarytrees")[1].drift, "+0.07%")
     assert(has(worstDrift(), "knucleotide / vyrn-native"))
 }
 
