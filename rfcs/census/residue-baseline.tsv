@@ -114,7 +114,7 @@ namespace	clean
 nbody	clean
 nohashkey	skip
 numbytes	clean
-numparse	leak	3
+numparse	clean
 option	clean
 ownedcontainer	clean
 ownership	other

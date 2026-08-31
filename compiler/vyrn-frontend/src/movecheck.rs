@@ -2046,6 +2046,33 @@ impl MoveCheck<'_> {
             // round fifty-one removed those (a holed binding places
             // structurally), which is what makes this narrowing sound.
             Expr::Call { name, .. } if name == "@copy" || name == "@str" || name == "@concat" => {}
+            // A NUMERIC CAST is a call spelled with a type's name and returns
+            // a scalar copy — `return Some(Float32(toFloat(sc, ..)))` marked
+            // `sc` through the cast the conservative walk could not see
+            // through (exit-residue round fifty-four). The width names are
+            // the checker's own cast set; the argument keeps its own
+            // reading.
+            Expr::Call { name, args, .. }
+                if matches!(
+                    name.as_str(),
+                    "Int"
+                        | "Int8"
+                        | "Int16"
+                        | "Int32"
+                        | "Int64"
+                        | "UInt8"
+                        | "UInt16"
+                        | "UInt32"
+                        | "UInt64"
+                        | "Float"
+                        | "Float32"
+                        | "Float64"
+                ) =>
+            {
+                for a in args {
+                    self.gave_up_returned(a, gone);
+                }
+            }
             Expr::Call { name, .. } => {
                 // A seeded row whose return is the same bare parameter as an
                 // argument's may hand that argument straight back —

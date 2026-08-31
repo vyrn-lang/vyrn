@@ -1546,6 +1546,22 @@ Movement: regexredux 35 → 5.
 Tallies after round fifty-three: **clean 129, leaking 15, zero
 double-frees** — the same rows, a third of the blocks.
 
+## Fifty-fourth triage: the cast the walk could not see through
+
+`return Some(Float32(toFloat(sc, ..)))` — a numeric width cast is a
+call spelled with a type's name, and the conservative return-walk
+marked `sc` straight through it, so parseFloat32's Scanned record
+lost its owner and its digit buffer leaked once per slow-path parse.
+The twelve width names join `gave_up_returned` as a transparent arm —
+a cast returns a scalar copy, and its argument keeps its own reading
+(the inner `toFloat(sc, ..)` clears through the call arm as any read
+does).
+
+Movement: numparse CLEAN (3 → 0).
+
+Tallies after round fifty-four: **clean 130, leaking 14, zero
+double-frees**.
+
 ## The rule going forward
 
 The instrument GATES CI at the ratchet now (round twenty-five): the
