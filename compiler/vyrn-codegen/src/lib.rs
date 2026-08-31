@@ -2553,7 +2553,7 @@ struct Gen<'a> {
     ownership: &'a vyrn_frontend::own::Ownership,
     /// RFC-0101 M4: the release steps placed at every exit of the function being
     /// emitted, keyed by the node the exit is AT. Read, never derived.
-    placed: HashMap<(vyrn_frontend::own::Exit, usize), Vec<usize>>,
+    placed: HashMap<(vyrn_frontend::own::Exit, usize), Vec<(usize, bool)>>,
     /// RFC-0093 M2: per `let` node, the places a `consume` took out of it. The
     /// release walk skips them, because the take already gave them away.
     holes_map: &'a HashMap<usize, Vec<String>>,
@@ -4863,24 +4863,24 @@ impl<'a> Gen<'a> {
             ExitKind::Return | ExitKind::Try => self.cursors.clone(),
             _ => Vec::new(),
         };
-        let mut run: Vec<(String, Option<DropKind>, bool)> = Vec::new();
-        for b in steps {
+        let mut run: Vec<(String, Option<DropKind>, bool, bool)> = Vec::new();
+        for (b, full) in steps {
             let Some(d) = self.drop_slots.get(&b) else {
                 continue;
             };
             let (slot, kind, seq, ms) = (d.slot.clone(), d.kind.clone(), d.seq, d.malloc_side);
             while cursors.last().is_some_and(|(_, at)| *at > seq) {
-                run.push((cursors.pop().unwrap().0, None, false));
+                run.push((cursors.pop().unwrap().0, None, false, false));
             }
-            run.push((slot, Some(kind), ms));
+            run.push((slot, Some(kind), ms, full));
         }
         for (slot, _) in cursors.into_iter().rev() {
-            run.push((slot, None, false));
+            run.push((slot, None, false, false));
         }
-        for (slot, kind, malloc_side) in run {
+        for (slot, kind, malloc_side, full) in run {
             if std::env::var_os("VYRN_STEP_TRACE").is_some() {
                 self.emit(format!(
-                    "; release-step exit={exit:?} at={at:x} slot={slot}"
+                    "; release-step exit={exit:?} at={at:x} slot={slot} full={full}"
                 ));
             }
             // Round twenty-seven: a malloc-side scrutinee inside a `region` —
@@ -4892,9 +4892,20 @@ impl<'a> Gen<'a> {
             } else {
                 self.region_depth
             };
+            // Round fifty-two: a pre-take exit walks the WHOLE value — the
+            // hole fields included, since nothing has taken them on this
+            // path. The skip-list is parked around the one emit.
+            let saved_holes = if full {
+                self.hole_slots.remove(&slot)
+            } else {
+                None
+            };
             match kind {
                 Some(k) => self.emit_drop(&slot, &k),
                 None => self.emit_drop(&slot, &DropKind::CloseStream),
+            }
+            if let Some(h) = saved_holes {
+                self.hole_slots.insert(slot.clone(), h);
             }
             self.region_depth = saved;
         }

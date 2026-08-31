@@ -1639,7 +1639,7 @@ struct Fn_<'a, 'p> {
     rel_seq: u32,
     /// RFC-0101 M4: the release steps placed at every exit of this body, keyed
     /// by the node the exit is AT. Read, never derived.
-    placed: HashMap<(ExitKind, usize), Vec<usize>>,
+    placed: HashMap<(ExitKind, usize), Vec<(usize, bool)>>,
     /// The stream cursors a `for x in pull()` opened, innermost last, with the
     /// registration count each was opened at.
     ///
@@ -2423,11 +2423,19 @@ impl<'p> Fn_<'_, 'p> {
             _ => Vec::new(),
         };
         let mut run: Vec<(Place, Rel)> = Vec::new();
-        for step in steps {
+        for (step, full) in steps {
             let Some(r) = self.rel_slots.get(&step) else {
                 continue;
             };
-            let (place, rel, seq) = (r.place, r.rel.clone(), r.seq);
+            let (place, mut rel, seq) = (r.place, r.rel.clone(), r.seq);
+            // Round fifty-two: a pre-take exit walks the WHOLE value — the
+            // hole fields included, since nothing has taken them on this
+            // path (the textual backend's twin).
+            if full {
+                if let Rel::Deep(ty, _) = rel {
+                    rel = Rel::Deep(ty, Vec::new());
+                }
+            }
             while cursors.last().is_some_and(|(_, _, at)| *at > seq) {
                 let (p, elem, _) = cursors.pop().unwrap();
                 run.push((p, Rel::Stream(elem)));
