@@ -644,8 +644,17 @@ impl Owned {
             // [`Owned::unbounded`] rather than [`self_referring`]: a declared
             // release is a call, so the walk stops there and `Array<Node>` gets
             // its element row back the day `impl Owned for Node` is written.
+            // A PARAM element answers Deep too (round forty-nine): inside a
+            // generic body the element is unknowable, the emitters substitute
+            // the instance's type before walking, and a walk over heap-free
+            // elements frees nothing — `drop vals` in `impl<T> Owned for
+            // Slots<T>` was buffer-only under the shared generic row and the
+            // String instance leaked its elements.
             Type::Array(e) => Some(
-                if self.unbounded(&e).is_none() && self.release_kind(&e).is_some() {
+                if self.unbounded(&e).is_none()
+                    && (self.release_kind(&e).is_some()
+                        || matches!(crate::types::resolve(&e, &self.types), Type::Param(_)))
+                {
                     DropKind::Deep(Type::Array(e))
                 } else {
                     DropKind::FreeArr
@@ -1710,7 +1719,13 @@ pub fn analyze(program: &Program) -> Ownership {
         }
         let mut early: HashMap<String, HashMap<usize, DropKind>> = HashMap::new();
         let mut extra: Vec<(String, Release)> = Vec::new();
+        let dbg = std::env::var_os("VYRN_EARLY_WHY").is_some();
         for (key, row) in &lets {
+            let why = |m: &str| {
+                if dbg {
+                    eprintln!("early-why: key={key:x} gone={:?} -> {m}", row.gone);
+                }
+            };
             // Moved rows since round twenty-one; HOLE rows join in round
             // forty-four — a partial take (`consume bd.op` while the Regex is
             // built) leaves the row releasing MINUS its holes at block exit,
@@ -1724,9 +1739,11 @@ pub fn analyze(program: &Program) -> Ownership {
                     | Some(crate::movecheck::Gone::Hole { .. })
             ) || revived.contains(key)
             {
+                why("gone/revived");
                 continue;
             }
             let Some(kind) = row.ty.as_ref().and_then(|t| proto.release_kind(t)) else {
+                why("no kind");
                 continue;
             };
             // The four buffer kinds are silent by construction; a `Deep` walk
@@ -1739,12 +1756,15 @@ pub fn analyze(program: &Program) -> Ownership {
                 DropKind::FreeStr | DropKind::FreeArr | DropKind::FreeSmallArr | DropKind::FreeMap
             ) || matches!(&kind, DropKind::Deep(t) if !proto.reaches_declared(t));
             if !silent {
+                why("not silent");
                 continue;
             }
             let Some(p) = per.get(key) else {
+                why("no events");
                 continue;
             };
             let (Some(w), Some(t)) = (p.first_write, p.first_take) else {
+                why("no write/take");
                 continue;
             };
             // Two admissions. The single-write rule is round twenty-one's:
@@ -1761,6 +1781,7 @@ pub fn analyze(program: &Program) -> Ownership {
             let single = p.writes == 1 && t.loops == w.loops;
             let hoisted = p.all_owning && t.loops.is_empty();
             if !single && !hoisted {
+                why("neither single nor hoisted");
                 continue;
             }
             for ex in &exit_sites {
