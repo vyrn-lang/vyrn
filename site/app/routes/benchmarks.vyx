@@ -15,8 +15,9 @@
 // with (RFC-0104) and the reason this page can be a claim at all.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
-import { programs, contestants, radarBox, radarCx, radarCy, radarRings, radarSpokes, radarLines, tableRows, ratioWay, axisPanels, panelBars, panelNote, panelSpeed, panelMemLine, benchMachine, benchRuns, envRows, run1File, Prog, Series, Ring, Spoke, Line, Mark, Reading, Row, Panel, BarRow } from "../bench"
+import { programs, contestants, radarBox, radarCx, radarCy, radarRings, radarSpokes, radarLines, tableRows, ratioWay, axisPanels, srcHref, benchMachine, benchRuns, envRows, run1File, Prog, Series, Ring, Spoke, Line, Mark, Reading, Row, Panel } from "../bench"
 import { TreeGroup, docSubnav } from "../docshell"
+import { inlineCode } from "../code"
 
 export fn head() -> Head {
     return pageHeadOf("/benchmarks")
@@ -33,11 +34,27 @@ fn wayRust(program: String, engine: String) -> String {
     return ratioWay(program, engine, "rust")
 }
 
-/// The width of one engine's bar, as the percentage the record measured. A
-/// template attribute is delimited by the same quote a String literal is, so
-/// the style string is built here.
+/// The width of one engine's bar, as the share of the track the record
+/// measured. A template attribute is delimited by the same quote a String
+/// literal is, so the style string is built here.
 fn barStyle(pct: String) -> String {
     return "width: " + pct + "%"
+}
+
+/// Whether a bar ran past the end of the track, as the attribute value the
+/// stylesheet serrates on. An attribute is a String, and a Bool is not one.
+fn overFlag(over: Bool) -> String {
+    if over {
+        return "true"
+    }
+    return "false"
+}
+
+/// A program's own block on this page. The radar's axes point at these, which
+/// is what the wedges were for before the panels left the chart's plate: a
+/// name on the rim is a link to the ten rows behind it.
+fn progHref(key: String) -> String {
+    return "#" + key
 }
 </script>
 
@@ -45,31 +62,53 @@ fn barStyle(pct: String) -> String {
 <main class="page benchpage">
     <section class="hero benchhero">
         <p class="eyebrow">Measured</p>
-        <h1 class="display">Eight programs, five engines,<br/>one machine, one afternoon.</h1>
+        <h1 class="display">Ten programs, five engines,<br/>one machine, one afternoon.</h1>
         <p class="lede">The Benchmarks Game programs, written five ways: plain C, safe Rust, plain node, Vyrn native and Vyrn as WebAssembly. One machine, and every reading published. Where Vyrn is behind, the cause is named.</p>
         <p class="pkgmeta">{{ benchMachine() }} · medians of {{ benchRuns() }}</p>
     </section>
 
     <section class="band" id="programs">
         <p class="eyebrow">program by program</p>
-        <div class="benchgrid">
-            <article class="benchcard" v-for="p in axisPanels()" :key="p.key" :id="p.key">
-                <h3>{{ p.name }}<span class="size">{{ p.n }}</span></h3>
-                <p class="what">{{ panelNote(p.key) }}</p>
-                <ul class="bars">
-                    <li v-for="b in panelBars(p.key)" :key="b.key" :data-tone="b.tone">
-                        <span class="who">{{ b.name }}</span>
-                        <span class="track"><span class="fill" :style="barStyle(b.pct)"></span></span>
-                        <span class="ms">{{ b.ms }}</span>
-                    </li>
-                </ul>
-                <p class="bfoot">
-                    <span class="bspeed">{{ panelSpeed(p.key) }}</span>
-                    <span class="bram">RAM {{ panelMemLine(p.key) }}</span>
-                </p>
-                <p class="bcause">{{ p.label }}</p>
-            </article>
-        </div>
+        <h2>Every measured column, one program at a time</h2>
+        <p>Five engines and the Benchmarks Game's own five columns, with the cause named where Vyrn is behind. <b>Every bar is the same track — nought to four times C</b> — so the quarter mark is C on all ten, and a column can be read down as well as across. Each engine's name links to the program that produced its row.</p>
+        <article class="progrow" v-for="p in axisPanels()" :key="p.key" :id="p.key">
+            <header>
+                <h3><a :href="p.game" rel="noreferrer">{{ p.name }}</a></h3>
+                <span class="size">N = {{ p.n }}</span>
+                <span class="spacer"></span>
+                <span class="bverdict">{{ p.verdict }}</span>
+            </header>
+            <p class="what" v-if="p.note.byteLength > 0" v-html="inlineCode(p.note)"></p>
+            <div class="scroller">
+                <table class="matrix bench progtable">
+                    <thead>
+                        <tr>
+                            <th scope="col">Engine</th>
+                            <th scope="col" class="trackhead">0 → 4x C</th>
+                            <th scope="col">time</th>
+                            <th scope="col">vs C</th>
+                            <th scope="col">cpu s</th>
+                            <th scope="col">peak</th>
+                            <th scope="col">gz</th>
+                            <th scope="col">build s</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="c in p.cells" :key="c.key" :data-tone="c.tone">
+                            <th scope="row"><a :href="srcHref(p.key, c.key)" rel="noreferrer">{{ c.name }}</a></th>
+                            <td class="track"><span class="btrack"><span class="fill" :style="barStyle(c.pct)" :data-over="overFlag(c.over)"></span></span></td>
+                            <td class="ms">{{ c.ms }}</td>
+                            <td class="vs" :data-way="wayC(p.key, c.key)">{{ c.vsC }}</td>
+                            <td>{{ c.cpu }}</td>
+                            <td>{{ c.mem }}</td>
+                            <td>{{ c.gz }}</td>
+                            <td>{{ c.make }}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <p class="bcause"><b>{{ p.label }}</b> — {{ p.cause }}</p>
+        </article>
     </section>
 
     <section class="band" id="radar">
@@ -79,11 +118,6 @@ fn barStyle(pct: String) -> String {
         <div class="plate" data-widget="radar">
             <div class="plate-head">
                 <span class="eyebrow">{{ run1File() }}</span>
-                <span class="spacer"></span>
-                <div class="controls" role="group" aria-label="Normalize the chart to">
-                    <button type="button" data-norm="c" aria-pressed="true">C = 1</button>
-                    <button type="button" data-norm="rust" aria-pressed="false">Rust = 1</button>
-                </div>
             </div>
             <div class="stage">
                 <svg class="chart radar" :viewBox="radarBox()" role="img" aria-label="A radar with one axis per Benchmarks Game program and one polygon per contestant. Every reading it plots is in the table below it.">
@@ -93,26 +127,23 @@ fn barStyle(pct: String) -> String {
                         <text v-for="r in radarRings()" :key="r.id" :x="radarCx()" :y="r.y" dx="6" dy="-3">{{ r.label }}</text>
                     </g>
                     <g class="series" v-for="l in radarLines()" :key="l.key" :data-series="l.key">
-                        <polygon :class="l.tone" :points="l.points" :data-alt="l.alt"/>
-                        <g class="marks" data-norm="c">
+                        <polygon :class="l.tone" :points="l.points"/>
+                        <g class="marks">
                             <path v-for="m in l.marks" :key="m.id" class="offscale" :d="m.d"><title>{{ l.name }} — {{ m.title }}</title></path>
-                        </g>
-                        <g class="marks" data-norm="rust">
-                            <path v-for="m in l.altMarks" :key="m.id" class="offscale" :d="m.d"><title>{{ l.name }} — {{ m.title }}</title></path>
                         </g>
                     </g>
                     <g class="wedges">
-                        <polygon v-for="s in radarSpokes()" :key="s.key" class="wedge" :points="s.wedge" :data-axis-hit="s.key"><title>{{ s.name }}</title></polygon>
+                        <a v-for="s in radarSpokes()" :key="s.key" :href="progHref(s.key)"><polygon class="wedge" :points="s.wedge"><title>{{ s.name }} — its ten rows</title></polygon></a>
                     </g>
                     <g class="names">
-                        <text v-for="s in radarSpokes()" :key="s.key" :x="s.lx" :y="s.ly" :text-anchor="s.anchor" :data-axis-name="s.key">{{ s.name }}</text>
+                        <a v-for="s in radarSpokes()" :key="s.key" :href="progHref(s.key)"><text :x="s.lx" :y="s.ly" :text-anchor="s.anchor">{{ s.name }}</text></a>
                     </g>
                 </svg>
             </div>
             <div class="serieskeys" role="group" aria-label="Show or hide a contestant">
                 <button type="button" v-for="s in contestants()" :key="s.key" :class="s.tone" :data-series-toggle="s.key" aria-pressed="true">{{ s.name }}</button>
             </div>
-            <p class="cap">The radial axis is log2 around the baseline — the rim is sixteen times it.</p>
+            <p class="cap">The radial axis is log2 around C — the rim is sixteen times it. An axis name is a link to that program's rows.</p>
         </div>
     </section>
 
@@ -148,7 +179,8 @@ fn barStyle(pct: String) -> String {
         <p class="eyebrow">how this was measured</p>
         <h2>The method, and what it does not claim</h2>
         <ul class="docprose">
-            <li>Eight of the ten Benchmarks Game programs. The other two are absent because the language cannot express them, which is recorded rather than worked around.</li>
+            <li>All ten Benchmarks Game programs. Two of them were absent from the first dataset because the language could not express them: mandelbrot needs a byte sink for its binary bitmap, which RFC-0111 gave it, and regex-redux needs a regular-expression engine, which RFC-0112 wrote in Vyrn.</li>
+            <li>Regex-redux does not compare like the other nine, and it is the first thing that row says. The Vyrn leg runs a general Thompson NFA; the C and Rust legs carry a purpose-built first-branch scanner of about sixty lines, and node runs V8's engine. 15.2x is the shape of that comparison, not a finding about the language.</li>
             <li>The C is plain C11, the Rust is safe and standard-library only, the JavaScript is plain node. No intrinsics and no threads in any of them.</li>
             <li>All five printed the same bytes before anything was timed.</li>
             <li>Medians of {{ benchRuns() }} runs, every engine at its own defaults, one machine, one afternoon.</li>

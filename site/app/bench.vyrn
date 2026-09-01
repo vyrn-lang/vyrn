@@ -31,6 +31,7 @@
 import { indexOf, substring, trim, split, joinWith } from "std/strings"
 import { parseFloat64 } from "std/num"
 import { sin, cos } from "std/math"
+import { ghBlob } from "./github"
 
 /// One measured cell: one program on one engine, in both recorded runs.
 ///
@@ -68,7 +69,7 @@ export type Ring = { id: String, r: String, points: String, label: String, y: St
 export type Spoke = { key: String, name: String, x: String, y: String, lx: String, ly: String, anchor: String, wedge: String }
 
 /// One contestant's polygon, in both normalizations, with its off-scale marks.
-export type Line = { key: String, name: String, tone: String, points: String, alt: String, marks: Array<Mark>, altMarks: Array<Mark> }
+export type Line = { key: String, name: String, tone: String, points: String, marks: Array<Mark> }
 
 /// A point that did not fit: drawn at the rim, named here, never dropped.
 export type Mark = { id: String, d: String, title: String }
@@ -77,7 +78,7 @@ export type Mark = { id: String, d: String, title: String }
 /// are the Benchmarks Game's own columns, in its own order — cpu secs, secs,
 /// mem, gz, make secs — because a reader who has read one of its per-program
 /// pages should not have to learn a second layout to read this one.
-export type Reading = { key: String, name: String, tone: String, cpu: String, secs: String, mem: String, gz: String, make: String, norm: String, ms: String, vsC: String, vsRust: String, spread: String, noisy: Bool }
+export type Reading = { key: String, name: String, tone: String, cpu: String, secs: String, mem: String, gz: String, make: String, norm: String, ms: String, vsC: String, vsRust: String, spread: String, noisy: Bool, pct: String, over: Bool }
 
 /// One row of the static table: a program and its five readings.
 export type Row = { key: String, name: String, n: String, game: String, cells: Array<Reading> }
@@ -184,14 +185,14 @@ fn recordText(file: String) -> String {
 // ---------------------------------------------------------------------------
 // The fixed sets
 //
-// The eight programs and the five contestants are the milestone's own set, named
+// The ten programs and the five contestants are the milestone's own set, named
 // in RFC-0104's table, and they are written out here rather than discovered in
 // the record — because a program that vanished from a re-run should break this
 // page loudly rather than shrink the chart quietly. `every program and every
 // contestant is in both records` is where that break happens.
 // ---------------------------------------------------------------------------
 
-/// The eight expressible Benchmarks Game programs, in the record's order.
+/// All ten Benchmarks Game programs, in the record's order.
 let mut progs: Array<Prog> = []
 
 export fn programs() -> Array<Prog> {
@@ -234,7 +235,7 @@ fn progNames() -> Array<Array<String>> {
     ]
 }
 
-/// The game's own page for one program. Every one of the eight was fetched and
+/// The game's own page for one program. Every one of the ten was fetched and
 /// resolved on the date `ceilingFetched` states.
 fn gameHref(slug: String) -> String {
     return "https://benchmarksgame-team.pages.debian.net/benchmarksgame/performance/" + slug + ".html"
@@ -639,7 +640,7 @@ fn ringLabel(power: Int64) -> String {
     return pow2(power).toString() + "x"
 }
 
-/// The eight spokes: the line, the name at its end, and the wedge a pointer
+/// The ten spokes: the line, the name at its end, and the wedge a pointer
 /// hovers to select the axis.
 export fn radarSpokes() -> Array<Spoke> {
     let progs = programs()
@@ -737,15 +738,13 @@ export fn radarLines() -> Array<Line> {
                 name: s.name.copy(),
                 tone: s.tone.copy(),
                 points: polygonFor(s.key, "c"),
-                alt: polygonFor(s.key, "rust"),
                 marks: marksFor(s.key, "c"),
-                altMarks: marksFor(s.key, "rust"),
             })
     }
     return out
 }
 
-/// One contestant's eight vertices against `base`.
+/// One contestant's ten vertices against `base`.
 fn polygonFor(contestant: String, base: String) -> String {
     let progs = programs()
     let mut out: Array<String> = []
@@ -813,11 +812,12 @@ fn chevronAt(i: Int64) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// The numbers, as a table and as eight panels
+// The numbers, as a table and as ten program blocks
 // ---------------------------------------------------------------------------
 
 /// One program's five readings.
 fn readingsFor(program: String) -> Array<Reading> {
+    let base = medianUs(program, "c")
     let mut out: Array<Reading> = []
     for s in contestants() {
         let cell = cellOf(program, s.key)
@@ -837,9 +837,58 @@ fn readingsFor(program: String) -> Array<Reading> {
                 vsRust: ratioText(ratioOf(program, s.key, "rust")),
                 spread: spread,
                 noisy: noisy(cell.spread1),
+                pct: trackPct(cell.us1, base),
+                over: base > 0 && cell.us1 > base * trackTimes(),
             })
     }
     return out
+}
+
+/// How far the bar track runs, as a multiple of C. Four holds every reading in
+/// the set except the two wasm legs the radar already draws off-scale, and it
+/// puts C itself a quarter of the way along — the same place on all ten rows,
+/// which is what lets the column be read DOWN as well as across.
+fn trackTimes() -> Int64 {
+    return 4
+}
+
+/// One reading as its share of that track, to one decimal.
+///
+/// The bar this replaces divided by the SLOWEST engine on its own card, so
+/// every card carried a different scale. On nbody, where the wasm leg is
+/// fourteen times C, that gave the other four engines the first seven per cent
+/// of the track between them — indistinguishable slivers, in the one place the
+/// comparison matters. Against a fixed track the same four land at 18 to 31
+/// per cent. A reading past the end is drawn AT the end and its row carries
+/// `over`, which is the same rule the radar keeps: nothing is truncated
+/// quietly.
+fn trackPct(us: Int64, base: Int64) -> String {
+    if us <= 0 || base <= 0 {
+        return "0.0"
+    }
+    let full = base * trackTimes()
+    let tenths = if us >= full { 1000 } else { us * 1000 / full }
+    return (tenths / 10).toString() + "." + (tenths % 10).toString()
+}
+
+/// Where one engine's program for one benchmark lives.
+///
+/// A page that publishes a ratio and not the two programs behind it is asking
+/// to be taken on trust — the same objection the game's own link answers for
+/// the task. Both Vyrn legs are built from ONE source: `examples/<name>.vyrn`
+/// is compiled native and to WebAssembly with nothing changed between them,
+/// which is why the two rows point at the same file.
+export fn srcHref(program: String, engine: String) -> String {
+    if engine == "c" {
+        return ghBlob("rfcs/bench-0104/harness/c/" + program + ".c")
+    }
+    if engine == "rust" {
+        return ghBlob("rfcs/bench-0104/harness/rust/" + program + ".rs")
+    }
+    if engine == "js" {
+        return ghBlob("rfcs/bench-0104/harness/js/" + program + ".js")
+    }
+    return ghBlob("examples/" + program + ".vyrn")
 }
 
 /// Both normalizations of one cell in one string: what the radar plots.
@@ -873,7 +922,7 @@ fn noisy(spread: String) -> Bool {
     }
 }
 
-/// The whole dataset as the table this page falls back to. Eight rows, five
+/// The whole dataset as the table this page falls back to. Ten rows, five
 /// contestants, the median and both normalizations in every cell.
 export fn tableRows() -> Array<Row> {
     let mut out: Array<Row> = []
@@ -888,7 +937,7 @@ export fn tableRows() -> Array<Row> {
 export type BarRow = { key: String, name: String, tone: String, ms: String, pct: String, mem: String }
 
 /// One program's bars, fastest first, each measured against the slowest of
-/// them — a card is its own scale, which is what makes eight cards readable
+/// them — a card is its own scale, which is what makes six cards readable
 /// side by side (RFC-0106 M5 round 21).
 export fn panelBars(program: String) -> Array<BarRow> {
     let cells = readingsFor(program)
@@ -939,7 +988,7 @@ fn barPct(us: Int64, top: Int64) -> String {
     return whole.toString() + "." + rest.toString()
 }
 
-/// The first six panels — what the index shows before its More card. Eight
+/// The first six panels — what the index shows before its More card. Ten
 /// cards is a wall; six and a door is a section (user).
 export fn frontPanels() -> Array<Panel> {
     let all = axisPanels()
@@ -1098,38 +1147,8 @@ export fn panelMemLine(program: String) -> String {
     return pair + " · " + ratio
 }
 
-/// The line under a card's bars: what the reading means, in the milestone's
-/// own words, and the memory the fastest engine needed against the hungriest.
-export fn panelFoot(program: String) -> String {
-    let cells = readingsFor(program)
-    if cells.length == 0 {
-        return ""
-    }
-    let mut lean = cells[0].mem.copy()
-    let mut fat = cells[0].mem.copy()
-    let mut fatName = cells[0].name.copy()
-    let mut fatBytes = 0
-    let mut leanBytes = 0
-    for c in cells {
-        let b = cellOf(program, c.key).peakBytes
-        if c.key == "vyrn-native" {
-            lean = c.mem.copy()
-            leanBytes = b
-        }
-        if b > fatBytes {
-            fatBytes = b
-            fat = c.mem.copy()
-            fatName = c.name.copy()
-        }
-    }
-    if leanBytes == 0 || fatBytes <= leanBytes {
-        return ""
-    }
-    return "RAM " + lean + " vs " + fatName + " " + fat
-}
-
-/// The eight axis panels. One is shown at a time; without script the first is
-/// the one in the markup and the table below carries the other seven.
+/// The ten program blocks: everything the record and the milestone know
+/// about one program, in one place.
 export fn axisPanels() -> Array<Panel> {
     let mut out: Array<Panel> = []
     for p in programs() {
@@ -1182,7 +1201,7 @@ fn verdictOf(program: String) -> String {
 /// one program's deviation (RFC-0104 M3 amendment).
 ///
 /// The paragraph it stands for is still written and still sourced. What changed
-/// is where it is read: eight paragraphs of diagnosis under a chart is a page
+/// is where it is read: ten paragraphs of diagnosis under a chart is a page
 /// nobody finishes, and a label beside the number is the same claim at a length
 /// that gets read.
 fn labelOf(program: String) -> String {
@@ -1320,6 +1339,8 @@ export fn floorRows() -> Array<Reading> {
                 vsRust: "",
                 spread: "",
                 noisy: false,
+                pct: "0.0",
+                over: false,
             })
     }
     return out
@@ -1552,21 +1573,6 @@ test "no cell is ever silently truncated" {
     // complement's wasm leg and both of k-nucleotide's — came inside when the
     // map was hashed and stdin stopped being read a byte at a time.
     assertEq(clamped, 0)
-    let mut altClamped = 0
-    let mut altMarked = 0
-    for line in radarLines() {
-        altMarked = altMarked + line.altMarks.length
-        for p in programs() {
-            if offScale(ratioOf(p.key, line.key, "rust")) {
-                altClamped = altClamped + 1
-            }
-        }
-    }
-    assertEq(altClamped, altMarked)
-    // Two against Rust: nbody's wasm leg at 18.97x — the backend that runs no
-    // optimizer — and regex-redux's native leg at 16.77x, which is std/regex's
-    // general NFA against a special-cased scan and says so in its own panel.
-    assertEq(altClamped, 2)
     // And no reading falls off the INNER end: the fastest cell in the set is
     // 0.22x, still comfortably outside the centre.
     for line in radarLines() {
@@ -1576,10 +1582,9 @@ test "no cell is ever silently truncated" {
     }
 }
 
-test "every polygon has one vertex per program, in both normalizations" {
+test "every polygon has one vertex per program" {
     for line in radarLines() {
         assertEq(split(line.points, " ").length, programs().length)
-        assertEq(split(line.alt, " ").length, programs().length)
     }
     assertEq(radarLines().length, 5)
     // The C polygon against C is the baseline ring itself, vertex for vertex.
@@ -1609,7 +1614,7 @@ test "no axis name runs off the sheet" {
     }
 }
 
-test "every axis carries a name, a spoke and a wedge to select it" {
+test "every axis carries a name, a spoke and a wedge to reach it" {
     let spokes = radarSpokes()
     assertEq(spokes.length, 10)
     assertEq(spokes[0].key, "nbody")
@@ -1769,6 +1774,62 @@ test "every cell carries the five columns the game prints" {
         assertEq(r.cells[2].make, "—")
         assert(r.cells[0].make != "—")
         assert(r.cells[3].make != "—")
+    }
+}
+
+test "every bar is measured against the same track, and none is clipped in silence" {
+    // THE DEFECT THIS PINS. The bar used to be a share of the SLOWEST engine on
+    // its own card, so each card carried its own scale and no two could be
+    // compared. nbody is the case that showed it: the wasm leg is fourteen
+    // times C, so the four engines a reader actually wants to tell apart
+    // shared the first seven per cent of the track. Against a fixed track —
+    // four times C — the same four are 18 to 31 per cent, C is a quarter of
+    // the way along on EVERY program, and the column reads down.
+    assertEq(trackPct(medianUs("nbody", "c"), medianUs("nbody", "c")), "25.0")
+    for p in programs() {
+        let base = medianUs(p.key, "c")
+        for c in readingsFor(p.key) {
+            // C is the baseline and lands on its own quarter mark, everywhere.
+            if c.key == "c" {
+                assertEq(c.pct, "25.0")
+            }
+            // A reading past the end is drawn AT the end and says so; one
+            // inside it is not flagged. Same rule as the radar's rim.
+            assertEq(c.over, medianUs(p.key, c.key) > base * 4)
+            if c.over {
+                assertEq(c.pct, "100.0")
+            } else {
+                assert(c.pct != "100.0")
+            }
+        }
+    }
+    // THREE cells run past the end of the track, and they are named here
+    // because a clipped bar is a claim: nbody's wasm leg at 13.95x — the
+    // backend that runs no optimizer — and BOTH regex-redux legs, which are
+    // std/regex's general NFA against a purpose-built scan and say so in that
+    // row's own cause. No other row on any program reaches four times C.
+    let mut past: Array<String> = []
+    for p in programs() {
+        for c in readingsFor(p.key) {
+            if c.over {
+                past.push(p.key + "/" + c.key)
+            }
+        }
+    }
+    assertEq(joinWith(past, " "), "nbody/vyrn-wasm regexredux/vyrn-native regexredux/vyrn-wasm")
+}
+
+test "every row points at the program behind it" {
+    // A ratio without its two programs is a number a reader has to take on
+    // trust. Both Vyrn legs are ONE source compiled two ways, so they point at
+    // the same file — which is itself the claim that the wasm column is not a
+    // different program.
+    for p in programs() {
+        assertEq(srcHref(p.key, "c"), "https://github.com/vyrn-lang/vyrn/blob/main/rfcs/bench-0104/harness/c/" + p.key + ".c")
+        assertEq(srcHref(p.key, "rust"), "https://github.com/vyrn-lang/vyrn/blob/main/rfcs/bench-0104/harness/rust/" + p.key + ".rs")
+        assertEq(srcHref(p.key, "js"), "https://github.com/vyrn-lang/vyrn/blob/main/rfcs/bench-0104/harness/js/" + p.key + ".js")
+        assertEq(srcHref(p.key, "vyrn-native"), srcHref(p.key, "vyrn-wasm"))
+        assertEq(srcHref(p.key, "vyrn-native"), "https://github.com/vyrn-lang/vyrn/blob/main/examples/" + p.key + ".vyrn")
     }
 }
 

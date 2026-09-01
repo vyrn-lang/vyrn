@@ -494,24 +494,27 @@ function tabsWidget(root, opts = {}) {
   const wanted = opts.initial && paneFor(opts.initial) ? opts.initial : keyOf(tabs[0], tabAttr);
   select(wanted, false);
   // Handed back so another widget can drive the same group without owning a
-  // second copy of the contract. The radar's axis wedges are exactly that: a
-  // pointer shortcut to a tab a keyboard already reaches.
+  // second copy of the contract. Nothing takes it up today — the radar's axis
+  // wedges did, and are plain anchors now — and it stays because the contract
+  // is the useful half: one selector, and `aria-selected` as the only truth.
   return select;
 }
 
 // ---------------------------------------------------------------------------
 // W9 — the benchmark radar (RFC-0104 M3).
 //
-// Vyrn computed every coordinate, both normalizations, and the off-scale marks
-// for each. This does three things and none of them is arithmetic:
+// Vyrn computed every coordinate and every off-scale mark. This does one thing
+// and it is not arithmetic: the legend hides a series by putting one class on
+// one group.
 //
-//   - the axis panels are a TAB GROUP, so they are `tabsWidget`'s and not this
-//     one's: roving tabindex, arrow keys, aria-selected, paired ids. The wedges
-//     in the SVG call the same `select`, which is why hovering an axis and
-//     tabbing to it land in the same state instead of two states that look alike;
-//   - the legend hides a series by putting one class on one group;
-//   - the normalization switch swaps `points` for the polygon's `data-alt` and
-//     puts one class on the SVG, which is what moves the off-scale marks.
+// IT USED TO DO TWO MORE, AND BOTH ARE GONE WITH WHAT THEY DROVE. The axis
+// wedges called a tab group that left this plate when the program panels
+// became the page's own blocks — no `[data-axis]` element has existed since,
+// so `select` was null, `syncLit` lit nothing, and no wedge ever got a
+// listener. The wedges and the axis names are ANCHORS now, straight to the
+// block for that program, which works with no script at all. And the C/Rust
+// switch went with the second baseline: every bar and every polygon on the
+// page is measured against C, so there is one scale and nothing to swap.
 //
 // Nothing animates. There is no motion to reduce, which is how this widget
 // respects `prefers-reduced-motion` — by not having any.
@@ -521,45 +524,6 @@ function radarWidget(root) {
   const svg = $("svg.radar", root);
   if (!svg) return;
 
-  // The markup ships every panel visible, one after another, because that is
-  // what this section IS with no script: eight compact tables in the game's own
-  // columns, each with the cause in a few words and a link to the whole of it.
-  // `tabsWidget` hides the other seven the moment it mounts, so nothing here
-  // has to.
-  const select = tabsWidget(root, { tab: "axis", pane: "axis-pane" });
-  const names = $$("[data-axis-name]", svg);
-  const tabs = $$("[data-axis]", root);
-
-  /// Light the spoke of whichever axis the group has selected.
-  ///
-  /// It READS the selection back rather than being told what it is. That is the
-  /// whole reason the chart and the panel cannot disagree: there is one source
-  /// of truth — the group's own `aria-selected` — and both the arrow keys and a
-  /// wedge move it before this runs. Remembering the key separately was the
-  /// first version, and a keyboard walk moved the panel while leaving the spoke
-  /// lit on the axis before it.
-  const syncLit = () => {
-    const on = tabs.find((t) => t.getAttribute("aria-selected") === "true");
-    const key = on ? on.getAttribute("data-axis") : "";
-    for (const t of names) t.classList.toggle("lit", t.dataset.axisName === key);
-  };
-  const list = tabs.length ? tabs[0].parentElement : null;
-  if (list) {
-    // After the group's own handlers, whichever of them moved the selection.
-    list.addEventListener("click", syncLit);
-    list.addEventListener("keyup", syncLit);
-    list.addEventListener("focusin", syncLit);
-  }
-  if (select) {
-    for (const wedge of $$("[data-axis-hit]", svg)) {
-      wedge.addEventListener("mouseenter", () => {
-        select(wedge.dataset.axisHit, false);
-        syncLit();
-      });
-    }
-  }
-  syncLit();
-
   for (const btn of $$("[data-series-toggle]", root)) {
     const group = $('g[data-series="' + btn.dataset.seriesToggle + '"]', svg);
     if (!group) continue;
@@ -567,19 +531,6 @@ function radarWidget(root) {
       const on = btn.getAttribute("aria-pressed") !== "true";
       btn.setAttribute("aria-pressed", String(on));
       group.classList.toggle("off", !on);
-    });
-  }
-
-  const polys = $$("g.series > polygon", svg);
-  for (const p of polys) p.dataset.home = p.getAttribute("points");
-  for (const btn of $$("[data-norm]", root)) {
-    btn.addEventListener("click", () => {
-      const alt = btn.dataset.norm === "rust";
-      svg.classList.toggle("alt", alt);
-      for (const p of polys) p.setAttribute("points", alt ? p.dataset.alt : p.dataset.home);
-      for (const other of $$("[data-norm]", root)) {
-        other.setAttribute("aria-pressed", String(other === btn));
-      }
     });
   }
 }
