@@ -1311,16 +1311,16 @@ fn labelOf(program: String) -> String {
 /// the cause in a few words, for the consumer page.
 export fn causeRows() -> Array<Array<String>> {
     return [
-        ["nbody", "a deviation", "Rust's compiler folds the inner loop into instructions that do four sums at once. Ours emits them one at a time. Vyrn matches plain C to within one per cent, and both are a third behind Rust for that single reason. What the transformation needs to be safe — that two arrays in the loop are not the same array — the language already proves, because it uses the same fact to free memory; it does not yet reach the part of the compiler that would act on it.", "no vector instructions"],
-        ["spectralnorm", "inside the noise band", "Not a deviation. Level with Rust, in the middle of the ten per cent band.", "nothing to explain"],
-        ["fannkuch", "inside the noise band", "Not a deviation any more. Level with Rust, where the previous dataset was 679 ms behind. Most of that gap was one array built fresh 39,916,800 times, about 600 ms of it. The language gained a way to refill a buffer in place instead of allocating a new one, and this row moved inside the band the day it landed.", "the copy that cost 600 ms"],
-        ["binarytrees", "at the edge of the band", "Just past the ten per cent line, and the memory question behind it is settled: Vyrn peaks at 37.3 MB against Rust's 37.6, where this row once measured 2,093 MB because nothing was being freed. The finding left is elsewhere. Node wins this program outright, and Vyrn's WebAssembly build — which runs no optimiser at all — is twice as fast as the native one, because it brings its own allocator with it and the native build asks the operating system for every node.", "who allocates the memory"],
-        ["fasta", "a deviation", "What one 60-byte output line costs: an array grown from nothing by doubling, then a check that its bytes are valid text — over bytes already known to be plain ASCII — and a second allocation, because this program still builds a piece of text per line. A way to write raw bytes straight out exists now. The gap left is a program that has not been moved onto it, which is work not done rather than something the language cannot do.", "the price of one output line"],
-        ["revcomp", "a deviation", "Three passes over every byte, and a cost per output line on top: about 120 million appends for 40 million bases, each one a bounds and capacity check into an array that grows by doubling, where Rust's output loop allocates nothing at all. The widest gap left. The spread of the whole set is in this one program: the C entry itself is 4.3 times slower than Rust here, for reading its input a line at a time.", "a pass per byte, and a cost per line"],
-        ["knucleotide", "ahead of the band", "Outside the band on the fast side, which is not a deviation: 0.57 times Rust's time, 0.40 times C's, and 13 MB against the C entry's 262. This row once measured 211 times C, when looking a key up in a map meant reading every key in it. Maps carry a hash index now, and this program's key is a single number rolled along the sequence rather than a fresh piece of text per position. Its N moved a hundredfold with this dataset: the small one was chosen for the slow version and outlived it.", "faster than C, and why"],
-        ["pidigits", "inside the noise band", "Not a deviation. Level with Rust: every entry does the same 64-bit integer arithmetic, all the way down.", "nothing to explain"],
-        ["mandelbrot", "inside the noise band", "Not a deviation, and the closest five readings in the set: every entry lands within 15% of C, Vyrn at 1.05 times and even the WebAssembly build at 1.15 — where WebAssembly pays two to fourteen times everywhere else. The work is floating-point arithmetic with no allocation and no output shaping, so what is measured is the arithmetic itself. The program is here at all because Vyrn can write raw bytes now: this image's pixels are arbitrary bytes, and text cannot carry them.", "the closest five readings here"],
-        ["regexredux", "a deviation", "The widest gap in the set, and the one row whose entries are not running comparable engines — which is the first thing to say about it. Vyrn runs a general-purpose regular-expression engine, written in Vyrn and compiled like any other program. The C and Rust entries carry the smallest matcher that covers this one corpus: about sixty lines, hand-fitted to these patterns, no backtracking. Node uses the engine built into it. So fifteen times C is the shape of a general engine measured against a special-cased scan, and not a finding about the language. What the row does measure honestly is that Vyrn's engine has had no optimisation work at all.", "not the same engine on both sides"],
+        ["nbody", "a deviation", "Rust's compiler folds the inner loop into instructions that do four sums at once; ours emits them one at a time. What that transformation needs to be safe — that two arrays in the loop are never the same array — the language already proves, because it uses the same fact to free memory. It does not yet reach the part of the compiler that would act on it.", "no vector instructions"],
+        ["spectralnorm", "inside the noise band", "", ""],
+        ["fannkuch", "inside the noise band", "The previous dataset was 679 ms behind Rust, and most of that was one array built fresh 39,916,800 times. The language gained a way to refill a buffer in place instead, and the row moved inside the band the day it landed.", "the copy that cost 600 ms"],
+        ["binarytrees", "at the edge of the band", "Node wins this one outright, and the WebAssembly build is twice as fast as the native one — because it brings its own allocator with it, and the native build asks the operating system for every node. The memory this row used to carry is settled: it peaked above two gigabytes when nothing was being freed, and now sits level with Rust.", "who allocates the memory"],
+        ["fasta", "a deviation", "What one 60-byte output line costs: an array grown from nothing by doubling, then a check that its bytes are valid text — over bytes already known to be plain ASCII — and a second allocation, because the program still builds a piece of text per line. A way to write raw bytes straight out exists; this program has not been moved onto it.", "the price of one output line"],
+        ["revcomp", "a deviation", "Three passes over every byte, and a cost per output line on top: about 120 million appends for 40 million bases, each one a bounds and capacity check into an array that grows by doubling, where Rust's output loop allocates nothing at all. The spread of the whole set is in this one program — the C entry is itself four times slower than Rust here, for reading its input a line at a time.", "a pass per byte, and a cost per line"],
+        ["knucleotide", "ahead of the band", "This row once took 211 times C's time, when looking a key up in a map meant reading every key in it. Maps carry a hash index now, and this program's key is a single number rolled along the sequence rather than a fresh piece of text at every position. Its N moved a hundredfold with this dataset: the old one was chosen for the slow version and outlived it.", "faster than C, and why"],
+        ["pidigits", "inside the noise band", "", ""],
+        ["mandelbrot", "inside the noise band", "Floating-point arithmetic with no allocation and no output shaping, so what is measured is the arithmetic — which is why even the WebAssembly build, two to fourteen times slower everywhere else, is within 15% of C here. The program is on the list at all because Vyrn can write raw bytes now: this image's pixels are arbitrary bytes, and text cannot carry them.", "the closest five readings here"],
+        ["regexredux", "a deviation", "The entries are not running comparable engines, which is the first thing to say about the number. Vyrn runs a general-purpose regular-expression engine, written in Vyrn and compiled like any other program. The C and Rust entries carry the smallest matcher that covers this one corpus — about sixty lines, hand-fitted to these patterns, no backtracking — and node uses the engine built into it. So the gap is the shape of a general engine against a special-cased scan, and not a finding about the language. What it does measure honestly is that Vyrn's engine has had no optimisation work at all.", "not the same engine on both sides"],
     ]
 }
 
@@ -1726,7 +1726,6 @@ test "a block is the whole of what is known about one program" {
     assertEq(panels.length, 10)
     for p in panels {
         assertEq(p.cells.length, 5)
-        assert(p.cause.byteLength > 40)
         assert(p.verdict.byteLength > 0)
     }
     assertEq(panels[0].n, "25,000,000")
@@ -1927,14 +1926,35 @@ test "every row points at the program behind it" {
     }
 }
 
-test "a cause on the consumer page is a label and a link, not a paragraph" {
-    // RFC-0104 M3: the diagnosis is written and sourced, and what the page
-    // prints is a label short enough to scan beside a cause long enough to be
-    // one.
+test "a row with nothing to explain explains nothing" {
+    // A cause is a label short enough to scan beside a paragraph long enough
+    // to be one — OR IT IS NOTHING AT ALL. Two rows are level with Rust and
+    // have no finding, and what they used to print was `nothing to explain —
+    // Not a deviation. Level with Rust, in the middle of the ten per cent
+    // band`: one fact, said four times, under a header that had already said
+    // it (user). They print no line now.
+    let mut silent = 0
     for p in axisPanels() {
+        if p.cause.byteLength == 0 {
+            assertEq(p.label, "")
+            assertEq(p.verdict, "inside the noise band")
+            silent = silent + 1
+            continue
+        }
         assert(p.label.byteLength > 0)
         assert(p.label.byteLength < 40)
         assert(p.cause.byteLength > 40)
+        // And a cause states what a reader cannot read off the table above it.
+        // Every one of these opened by restating the verdict in the header.
+        assert(!has(p.cause, "Not a deviation"))
+        assert(!has(p.cause, "noise band"))
+    }
+    assertEq(silent, 2)
+    // Every deviation has one, which is the milestone's own claim.
+    for p in axisPanels() {
+        if p.verdict == "a deviation" {
+            assert(p.cause.byteLength > 40)
+        }
     }
     for row in causeRows() {
         assertEq(row.length, 4)

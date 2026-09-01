@@ -62,14 +62,14 @@ fn progHref(key: String) -> String {
     <section class="hero benchhero">
         <p class="eyebrow">Measured</p>
         <h1 class="display">How fast Vyrn is, and where it is not</h1>
-        <p class="lede">The ten Benchmarks Game programs, written five ways and run on one machine. Every reading is published, and every deviation is named.</p>
+        <p class="lede">The ten Benchmarks Game programs, written five ways and run on one machine.</p>
         <p class="pkgmeta">{{ benchMachine() }} · medians of {{ benchRuns() }}</p>
     </section>
 
     <section class="band" id="programs" data-tabs>
         <p class="eyebrow">program by program</p>
         <h2>Every measured column, one program at a time</h2>
-        <p>Every bar runs the same track, nought to four times C, so the quarter mark is C on all ten and a column reads down as well as across. An engine's name links to the program that produced its row. <b>A row is a deviation when Vyrn's own build is more than ten per cent off Rust</b> — the run-to-run noise of this machine — and each verdict prints the ratio it was read from.</p>
+        <p>A row is a deviation when Vyrn's own build is more than ten per cent off Rust — the run-to-run noise of this machine.</p>
         <div class="tabs axes" aria-label="Choose a program">
             <button type="button" v-for="p in axisPanels()" :key="p.key" :data-tab="p.key">{{ p.name }}</button>
         </div>
@@ -110,14 +110,14 @@ fn progHref(key: String) -> String {
                     </tbody>
                 </table>
             </div>
-            <p class="bcause"><b>{{ p.label }}</b> — {{ p.cause }}</p>
+            <p class="bcause" v-if="p.cause.byteLength > 0"><b>{{ p.label }}</b> — {{ p.cause }}</p>
         </article>
     </section>
 
     <section class="band" id="radar">
         <p class="eyebrow">all of it at once</p>
         <h2>Further from the centre is slower</h2>
-        <p>One axis per program, one polygon per engine. A small shape is a fast one; a reading past the rim is drawn at the rim with a stroke continuing outward.</p>
+        <p>One axis per program, one polygon per engine.</p>
         <div class="plate" data-widget="radar">
             <div class="plate-head">
                 <a class="eyebrow" :href="run1Href()" rel="noreferrer">{{ run1File() }}</a>
@@ -146,7 +146,7 @@ fn progHref(key: String) -> String {
             <div class="serieskeys" role="group" aria-label="Show or hide a contestant">
                 <button type="button" v-for="s in contestants()" :key="s.key" :class="s.tone" :data-series-toggle="s.key" aria-pressed="true">{{ s.name }}</button>
             </div>
-            <p class="cap">Every ring out from C is a doubling, so the rim is sixteen times C. An axis name opens that program above.</p>
+            <p class="cap">Every ring out from C is a doubling; the rim is sixteen times C, and a reading past it is drawn at the rim with a stroke continuing outward. An axis name opens that program above.</p>
         </div>
     </section>
 
@@ -154,12 +154,11 @@ fn progHref(key: String) -> String {
         <p class="eyebrow">how this was measured</p>
         <h2>The method, and what it does not claim</h2>
         <ul class="docprose">
-            <li>All ten Benchmarks Game programs. Two of them were missing from the first dataset because the language could not express them: mandelbrot writes a binary image and needed a way to write raw bytes, and regex-redux needed a regular-expression engine. Both exist now.</li>
             <li>The C is plain C11, the Rust is safe and standard-library only, the JavaScript is plain node. No hand-written vector instructions and no threads in any of them.</li>
             <li>All five printed the same bytes before anything was timed.</li>
             <li>Medians of {{ benchRuns() }} runs, every engine at its own defaults, one machine, one afternoon.</li>
             <li>CI does not run this harness — it needs clang, rustc, node and wasmtime together — so it is run by hand and the committed JSON is the record.</li>
-            <li>Nothing here claims a trend over time. <a href="/tooling/testing.html">Testing and bench</a> is the per-operation instrument.</li>
+            <li>Nothing here claims a trend over time. For that there is <a href="/tooling/testing.html">vyrn bench</a>, which times one operation rather than one program.</li>
         </ul>
         <div class="scroller">
             <table class="matrix">
