@@ -1,0 +1,189 @@
+//! RFC-0125 M2 — the named core and the linear judgment, run over the corpus.
+//!
+//! For every example, every function instance is lowered into the named core
+//! (`vyrn_lower::core`) with the ownership plan's releases as explicit drops,
+//! and the kernel (`vyrn_lower::kernel`) judges it: every owned name consumed
+//! exactly once on every path. Three outcomes per instance:
+//!
+//!   - accepted: the plan's decisions are linear for this body;
+//!   - refused: the kernel found a name released twice, used after release,
+//!     or never released — either a leak the plan missed (the finding M2 exists
+//!     to make) or a lowering that misread the plan (a bug in `core.rs`); the
+//!     message says which name and line, and a person decides which;
+//!   - unlowered: a construct this slice does not lower yet, counted by name.
+//!
+//! The prediction, written before the first run: the kernel refuses nothing
+//! in the corpus, because the ratchet holds every example at zero leaks and
+//! the plan is what the engines emit. **It was wrong, and the way it was wrong
+//! is the finding.** The first slice ends at 5,292 instances accepted and 53
+//! refused, and the refusals are four classes (RFC-0125 §3 M2):
+//!
+//!   1. `push` in expression position whose result escapes while the plan
+//!      still releases the receiver (`jsondec$readDoc`, 9 instances) — a
+//!      double free natively, reproduced by
+//!      `rfcs/probes-0125/push-in-expression-position.vyrn`;
+//!   2. a String bound by `let`, returned on one path and never released on
+//!      the fall-through (`gqlArgOf`, `rpcPathFor`, `mapSlug` and ten more)
+//!      — a leak of the String per untaken turn, measured by
+//!      `rfcs/probes-0125/returned-on-one-path.vyrn`;
+//!   3. a payload binder an arm never reads (`parseErr`'s `Ok(v)`, 12
+//!      instances) — the same class as 2, predicted and not yet probed;
+//!   4. a `match` arm the program cannot reach (`None` for a key just
+//!      listed), where the kernel judges every path and the plan judged the
+//!      reachable ones (4 generated encoders);
+//!
+//! plus one instance (`smallarray.vyrn`'s `main`) this lowering misreads.
+//! The gate is a ratchet on that count: it may fall, never rise. Each class
+//! is closed by fixing the plan, at which point the count drops and the
+//! ratchet is lowered with it. The tally of gaps is printed so the work left
+//! is a list and not a feeling.
+
+use std::path::PathBuf;
+
+use vyrn_frontend::ast::Program;
+
+struct Fs;
+
+impl vyrn_frontend::loader::ModuleResolver for Fs {
+    fn read(&self, resolved: &str) -> Result<String, String> {
+        std::fs::read_to_string(resolved).map_err(|e| e.to_string())
+    }
+}
+
+fn repo_root() -> PathBuf {
+    let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    d.pop();
+    d.pop();
+    d
+}
+
+fn load(path: &std::path::Path) -> Result<Program, String> {
+    let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let root = path.to_string_lossy().replace('\\', "/");
+    let opts = vyrn_frontend::loader::LoadOptions {
+        std_root: Some(repo_root().join("std").to_string_lossy().replace('\\', "/")),
+        ..Default::default()
+    };
+    vyrn_frontend::load(&src, &root, &opts, &Fs).map_err(|d| {
+        d.first()
+            .map(|d| d.render())
+            .unwrap_or_else(|| "load failed".into())
+    })
+}
+
+fn corpus() -> Vec<PathBuf> {
+    let mut names: Vec<PathBuf> = std::fs::read_dir(repo_root().join("examples"))
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "vyrn"))
+        .collect();
+    names.sort();
+    assert!(!names.is_empty(), "no examples found");
+    names
+}
+
+#[test]
+fn the_kernel_over_the_corpus() {
+    // The frontend recurses deeply on a realistic program; the CLI runs it on
+    // a thread with the interpreter's reserve, and so does this.
+    std::thread::Builder::new()
+        .stack_size(vyrn_frontend::interp::INTERP_STACK_BYTES)
+        .spawn(run_corpus)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn run_corpus() {
+    let mut accepted = 0usize;
+    let mut refused: Vec<String> = Vec::new();
+    let mut gaps: std::collections::BTreeMap<&'static str, usize> = Default::default();
+    let mut details: std::collections::BTreeMap<(&'static str, String), usize> = Default::default();
+    let dump = std::env::var("VYRN_KERNEL_DUMP").ok();
+    let mut unloadable = 0usize;
+    let mut programs = 0usize;
+    for path in corpus() {
+        let program = match load(&path) {
+            Ok(p) => p,
+            Err(_) => {
+                unloadable += 1;
+                continue;
+            }
+        };
+        programs += 1;
+        // Projections are expanded once per compile (RFC-0123); the lowering
+        // and the ownership analysis must see the same expansion.
+        let _memo = vyrn_frontend::project::Memo::open();
+        let lowered = vyrn_lower::lower(&program);
+        let own = vyrn_frontend::own::analyze(&program);
+        let file = path.file_name().unwrap().to_string_lossy().to_string();
+        for inst in &lowered.instances {
+            match vyrn_lower::core::build(&program, inst, &own) {
+                Err(g) => {
+                    *gaps.entry(g.what).or_default() += 1;
+                    if !g.detail.is_empty() {
+                        *details.entry((g.what, g.detail)).or_default() += 1;
+                    }
+                }
+                Ok(body) => match vyrn_lower::kernel::check(&body) {
+                    Ok(()) => accepted += 1,
+                    Err(r) => {
+                        let tag = format!("{file}:{}", body.name);
+                        if dump
+                            .as_deref()
+                            .is_some_and(|d| d.split(',').any(|w| tag.contains(w)))
+                        {
+                            eprintln!("{}", body.render());
+                            let arms: Vec<String> = own
+                                .plan
+                                .arm_frees
+                                .iter()
+                                .filter(|((at, _), _)| {
+                                    own.plan.owners.get(at) == Some(&inst.func.name)
+                                })
+                                .map(|((_, arm), k)| format!("arm {arm}: {k:?}"))
+                                .collect();
+                            eprintln!("  plan arm frees: {}", arms.join("; "));
+                            let rel: Vec<String> = inst
+                                .releases
+                                .iter()
+                                .map(|r| format!("{}@{:?}:{}", r.name, r.exit, r.line))
+                                .collect();
+                            eprintln!("  plan releases: {}", rel.join("; "));
+                        }
+                        refused.push(format!("{file}: {}", r.message));
+                    }
+                },
+            }
+        }
+    }
+    let total_gaps: usize = gaps.values().sum();
+    eprintln!(
+        "kernel over the corpus: {programs} programs ({unloadable} not loadable here), \
+         {accepted} instances accepted, {} refused, {total_gaps} unlowered",
+        refused.len()
+    );
+    for (what, n) in &gaps {
+        eprintln!("  unlowered: {n:5}  {what}");
+    }
+    let mut top: Vec<(&(&'static str, String), &usize)> = details.iter().collect();
+    top.sort_by(|a, b| b.1.cmp(a.1));
+    for ((what, detail), n) in top.iter().take(25) {
+        eprintln!("    {n:5}  {what}: {detail}");
+    }
+    for r in refused.iter().take(40) {
+        eprintln!("  refused: {r}");
+    }
+    // The ratchet: 53 at the end of the first slice, all four classes above.
+    const RATCHET: usize = 53;
+    assert!(
+        refused.len() <= RATCHET,
+        "{} instances refused by the kernel, more than the {RATCHET} recorded; the first new          one is worth reading before the number is raised: {}",
+        refused.len(),
+        refused[0]
+    );
+    assert!(
+        accepted > 0,
+        "the kernel accepted nothing, so it judged nothing"
+    );
+}

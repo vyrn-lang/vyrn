@@ -28,6 +28,8 @@
 //! table, which is the derivation `peek` and `static_ty` are — written once
 //! below both backends instead of twice inside them.
 
+pub mod core;
+pub mod kernel;
 mod render;
 pub use render::render;
 

@@ -7,8 +7,11 @@
   written — Cranelift within twice native on nbody, spectral-norm and
   fannkuch — is NOT met (2.25x, 2.9x, 1.8x); the release path, wasm2c and
   clang, IS within it on all three (1.5x, 1.9x, 1.8x). The route decision of
-  §2.5 is recorded with those numbers and left to be taken on purpose.
-  Nothing after M1 has landed.
+  §2.5 is recorded with those numbers and left to be taken on purpose. M2's
+  first slice landed the same day: the named core, the linear judgment, and
+  a corpus test — 5,292 instances accepted, 53 refused, and two of the
+  refusal classes are verified defects in the current release placement
+  (§3 M2, `rfcs/probes-0125/`). Nothing after M2 has landed.
 - **Depends on:** RFC-0101 (the lowered form — this RFC is what its own ledger
   says it could not become), RFC-0077 (the direct wasm backend — the emitter
   this RFC keeps), RFC-0087..0091 (ownership is defined, not inferred — the
@@ -552,6 +555,71 @@ reverted on a branch.
 
 **Gate:** the corpus accepted, the reverted witnesses refused, the leak ratchet
 still at zero.
+
+**The first slice landed (2026-09-02), and the prediction was wrong in the
+way M2 exists to find.** `vyrn-lower/src/core.rs` builds the named core for a
+function instance from the checker's types, the plan's decisions and the
+declarations' answer to "does this type own heap", and derives nothing
+about ownership itself; `vyrn-lower/src/kernel.rs` makes the linear
+judgment over it; `vyrn-cli/tests/kernel.rs` runs both over every example.
+Over 164 programs the tally is:
+
+| instances | count |
+|---|---|
+| accepted by the kernel | 5,292 |
+| refused | 53 |
+| unlowered, by construct | 1,229 |
+
+The unlowered constructs are a list, not a feeling: a read of module state
+that owns heap in a take position (719), a `consume` hole (177), a move out
+of a field or an element (155), a lambda (28), a `consume` of a place that
+is not a name (31), a map lookup as a place (7), a `region` (7), and a few
+dozen expressions the checker never typed or calls this slice cannot
+attribute. Each is a rule to state, and none is a guess.
+
+The 53 refusals are four classes, and two of them are verified defects:
+
+1. **`push` in expression position whose result escapes.** `return match
+   parseJson(src) { Ok(j) => out.push(j), .. }` in `std/jsondec`'s
+   `readDoc`: the plan releases `out` at the return, `@push` hands `out`'s
+   buffer back as the result, and the caller receives a freed buffer. It has
+   worked because `out` was empty there. `rfcs/probes-0125/push-in-expression-position.vyrn`
+   does it with three elements: the interpreter prints `4 1 2 3 4`; the
+   native binary dies with `free audit: double or foreign free` under the
+   audit and crashes without it. Nine instances in the corpus.
+2. **A String returned on one path and left on the other.** `let stray =
+   gqlNoArgs(..)` then `if .. { return .. stray .. }` and nothing after: the
+   plan places no release for `stray` on the fall-through, and neither does
+   Rule N, because the taking edge returned rather than joined.
+   `rfcs/probes-0125/returned-on-one-path.vyrn` calls such a function on the
+   untaken path 200,000 and 400,000 times: peak working set 20.1 MB and
+   27.8 MB, about 38 bytes per turn, which is the String. Thirteen instances
+   in `std/graphql`, `std/rpc` and `std/tw`.
+3. **A payload binder an arm never reads** — `parseErr`'s `Ok(v) => ""` —
+   the same shape as 2 one construct over. Twelve instances, predicted from
+   the kernel's refusal and not yet probed.
+4. **An arm the program cannot reach**, the `None` arm of a lookup by a key
+   the loop just listed, in four generated map encoders. The kernel judges
+   every path; the plan judged the reachable ones. Not a defect; a rule the
+   kernel is stricter about, recorded.
+
+One more instance, `smallarray.vyrn`'s `main`, the lowering misreads and
+the plan does not. The corpus test's gate is a ratchet on the count, 53,
+which may fall and not rise; each class closes by fixing the plan.
+
+**What the slice learned about the plan, recorded because M3 replaces it.**
+The plan is not one table but nine, and a body is right only when all nine
+are read together: the placed release rows, the argument-temporary drops,
+the store releases with their `mentions_place` stand-down and the
+`store_fresh` override of that, the edge releases at joins, the receiver
+frees, the arm payload frees, the consuming matches, the per-binding fate
+notes, and the per-loop drop kind whose `FreeArr` value means "the body took
+the elements". Two rules live in the emitters and not in the plan at all: a
+String temporary is freed by the site that reads it (RFC-0096 M3), and a
+builtin whose result is its receiver's type hands the buffer back, so the
+receiver is taken by the call. The kernel reproduces every one of these to
+judge the plan, which is the measure of how much M3's one liveness pass
+deletes.
 
 ### M3 — the emitter reads the core
 
