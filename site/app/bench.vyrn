@@ -80,9 +80,6 @@ export type Mark = { id: String, d: String, title: String }
 /// pages should not have to learn a second layout to read this one.
 export type Reading = { key: String, name: String, tone: String, cpu: String, secs: String, mem: String, gz: String, make: String, norm: String, ms: String, vsC: String, vsRust: String, spread: String, noisy: Bool, pct: String, over: Bool }
 
-/// One row of the static table: a program and its five readings.
-export type Row = { key: String, name: String, n: String, game: String, cells: Array<Reading> }
-
 /// One axis panel: everything known about one program, shown on focus.
 export type Panel = { key: String, name: String, n: String, note: String, cause: String, label: String, verdict: String, game: String, cells: Array<Reading> }
 
@@ -144,13 +141,102 @@ fn scalarAt(src: String, indent: String, key: String) -> String {
     return trim(cut)
 }
 
-/// A string scalar with its quotes taken off.
+/// A string scalar with its quotes taken off and its escapes undone.
 fn textAt(src: String, indent: String, key: String) -> String {
     let raw = scalarAt(src, indent, key)
     if raw.byteLength >= 2 && substring(raw, 0, 1) == "\"" {
-        return substring(raw, 1, raw.byteLength - 1)
+        return unescaped(substring(raw, 1, raw.byteLength - 1))
     }
-    return raw.copy()
+    return unescaped(raw)
+}
+
+/// A JSON string body as the characters it stands for.
+///
+/// THE SLICER IS NOT A PARSER, and this is the one place that costs something.
+/// `json.dump` writes every character outside ASCII as `\uXXXX`, so the em
+/// dashes in the harness's own program notes reached the page as the six
+/// literal characters a reader saw on `regex-redux`, and the regex patterns in
+/// those notes carry `\\w` and `\\d` for the same reason. The BMP and the six
+/// short escapes cover everything `run.py` can emit; a surrogate pair would
+/// need a second branch, and `no escape survives into the page` below is what
+/// says so if one ever appears.
+fn unescaped(text: String) -> String {
+    if !has(text, "\\") {
+        return text.copy()
+    }
+    let raw = bytes(text)
+    let mut out = ""
+    let mut i = 0
+    while i < raw.length {
+        if raw[i] != '\\' || i + 1 >= raw.length {
+            out = out + substring(text, i, i + 1)
+            i = i + 1
+            continue
+        }
+        let c = raw[i + 1]
+        if c == 'u' && i + 5 < raw.length {
+            out = out + charOf(hexAt(text, i + 2))
+            i = i + 6
+            continue
+        }
+        if c == 'n' {
+            out = out + "\n"
+        } else if c == 't' {
+            out = out + "\t"
+        } else if c == 'r' {
+            out = out + "\r"
+        } else {
+            // `\\`, `\"` and `\/` all stand for the character after the
+            // backslash, which is also the safest thing to do with an escape
+            // this reader does not know.
+            out = out + substring(text, i + 1, i + 2)
+        }
+        i = i + 2
+    }
+    return out
+}
+
+/// The four hex digits at `at`, as a number.
+fn hexAt(text: String, at: Int64) -> Int64 {
+    let raw = bytes(text)
+    let mut n = 0
+    let mut i = at
+    while i < at + 4 {
+        let b = Int64(raw[i])
+        let d = if b >= 48 && b <= 57 {
+            b - 48
+        } else if b >= 97 && b <= 102 {
+            b - 87
+        } else {
+            b - 55
+        }
+        n = n * 16 + d
+        i = i + 1
+    }
+    return n
+}
+
+/// One code point below U+10000, as UTF-8. A byte literal is a `UInt8` and
+/// arithmetic on a code point is not, so the boundaries are written as numbers.
+fn charOf(cp: Int64) -> String {
+    let mut raw: Array<UInt8> = []
+    if cp < 128 {
+        raw.push(UInt8(cp))
+    } else if cp < 2048 {
+        raw.push(UInt8(192 + cp / 64))
+        raw.push(UInt8(128 + cp % 64))
+    } else {
+        raw.push(UInt8(224 + cp / 4096))
+        raw.push(UInt8(128 + (cp / 64) % 64))
+        raw.push(UInt8(128 + cp % 64))
+    }
+    return match stringFromBytes(raw) {
+        Ok(text) => text,
+        // Unreachable for a scalar value. A lone surrogate is the one thing
+        // `run.py` could write that this does not encode, and it comes back as
+        // nothing rather than as invalid UTF-8.
+        Err(_) => "",
+    }
 }
 
 /// Seconds, as the record writes them, in whole microseconds. A reading the
@@ -922,16 +1008,6 @@ fn noisy(spread: String) -> Bool {
     }
 }
 
-/// The whole dataset as the table this page falls back to. Ten rows, five
-/// contestants, the median and both normalizations in every cell.
-export fn tableRows() -> Array<Row> {
-    let mut out: Array<Row> = []
-    for p in programs() {
-        out.push(Row { key: p.key.copy(), name: p.name.copy(), n: p.n.copy(), game: p.game.copy(), cells: readingsFor(p.key) })
-    }
-    return out
-}
-
 /// One engine's bar on a card: what it is called, how long it took, and how
 /// much of the card's widest bar that is.
 export type BarRow = { key: String, name: String, tone: String, ms: String, pct: String, mem: String }
@@ -1145,6 +1221,16 @@ export fn panelMemLine(program: String) -> String {
         return pair
     }
     return pair + " · " + ratio
+}
+
+/// Vyrn's own build against Rust on one program.
+///
+/// The verdict beside a program is a reading of THIS number and nothing else —
+/// a deviation past ten per cent either way, inside the band under it — and it
+/// was the one figure the verdict depended on that the page never printed. A
+/// label a reader cannot check is a label a reader has to trust.
+export fn nativeVsRust(program: String) -> String {
+    return ratioText(ratioOf(program, "vyrn-native", "rust"))
 }
 
 /// The ten program blocks: everything the record and the milestone know
@@ -1628,24 +1714,23 @@ test "every axis carries a name, a spoke and a wedge to reach it" {
     }
 }
 
-test "the table is the whole dataset and the panels are the same numbers" {
-    let rows = tableRows()
-    assertEq(rows.length, 10)
-    for r in rows {
-        assertEq(r.cells.length, 5)
-    }
-    assertEq(rows[0].n, "25,000,000")
-    assertEq(rows[0].cells[0].ms, "897 ms")
-    assertEq(rows[0].cells[3].vsC, "0.98x")
-    assertEq(rows[0].cells[3].vsRust, "1.34x")
+test "a block is the whole of what is known about one program" {
     let panels = axisPanels()
     assertEq(panels.length, 10)
-    for i in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] {
-        assertEq(panels[i].key, rows[i].key)
-        assertEq(panels[i].cells[0].ms, rows[i].cells[0].ms)
-        assert(panels[i].cause.byteLength > 40)
-        assert(panels[i].verdict.byteLength > 0)
+    for p in panels {
+        assertEq(p.cells.length, 5)
+        assert(p.cause.byteLength > 40)
+        assert(p.verdict.byteLength > 0)
     }
+    assertEq(panels[0].n, "25,000,000")
+    assertEq(panels[0].cells[0].ms, "897 ms")
+    assertEq(panels[0].cells[3].vsC, "0.98x")
+    assertEq(panels[0].cells[3].vsRust, "1.34x")
+    // The verdict is a reading of the native leg against Rust, and the block
+    // prints both so a reader can check the label against its own number.
+    assertEq(nativeVsRust("nbody"), "1.34x")
+    assertEq(nativeVsRust("pidigits"), "1.00x")
+    assertEq(nativeVsRust("knucleotide"), "0.57x")
     // The rows that are not deviations say so rather than naming a defect, the
     // one that sits on the line says THAT rather than picking a side, and the
     // one that is outside the band on the FAST side is not called a deviation.
@@ -1662,12 +1747,13 @@ test "the noisy cells are flagged where they are printed" {
     // page is the spread of that program on that contestant, and not of the cell
     // beside it — and that the mechanism is exercised by at least one cell.
     let mut flagged = 0
-    for r in tableRows() {
+    for p in programs() {
+        let cells = readingsFor(p.key)
         let mut i = 0
-        while i < r.cells.length {
-            assertEq(r.cells[i].noisy, noisy(cellOf(r.key, contestants()[i].key).spread1))
-            assertEq(r.cells[i].spread, pctOf(cellOf(r.key, contestants()[i].key).spread1))
-            if r.cells[i].noisy {
+        while i < cells.length {
+            assertEq(cells[i].noisy, noisy(cellOf(p.key, contestants()[i].key).spread1))
+            assertEq(cells[i].spread, pctOf(cellOf(p.key, contestants()[i].key).spread1))
+            if cells[i].noisy {
                 flagged = flagged + 1
             }
             i = i + 1
@@ -1760,9 +1846,10 @@ test "every program links to the game's own page for it" {
 }
 
 test "every cell carries the five columns the game prints" {
-    for r in tableRows() {
-        assertEq(r.cells.length, 5)
-        for c in r.cells {
+    for p in programs() {
+        let cells = readingsFor(p.key)
+        assertEq(cells.length, 5)
+        for c in cells {
             assert(c.cpu.byteLength > 0)
             assert(c.secs.byteLength > 0)
             assert(c.mem.byteLength > 2)
@@ -1771,9 +1858,9 @@ test "every cell carries the five columns the game prints" {
         }
         // node is the one contestant with no build step, and the column says so
         // rather than printing a zero somebody would read as a fast build.
-        assertEq(r.cells[2].make, "—")
-        assert(r.cells[0].make != "—")
-        assert(r.cells[3].make != "—")
+        assertEq(cells[2].make, "—")
+        assert(cells[0].make != "—")
+        assert(cells[3].make != "—")
     }
 }
 
@@ -1863,6 +1950,31 @@ test "a second, a memory size and a byte count read the way the game prints them
     assertEq(memOf(0), "—")
     assertEq(bytesOf(1168), "1,168")
     assertEq(bytesOf(0), "—")
+}
+
+test "no escape survives into the page" {
+    // `json.dump` writes every non-ASCII character as a `\uXXXX` escape, and the
+    // slicer handed those six characters straight to the template: `regex-redux`
+    // printed `100,000 \u2014 a hundred times the fixture` where the record means
+    // an em dash. The regex patterns in the same notes carry doubled
+    // backslashes for the same reason.
+    assertEq(unescaped("100,000 \\u2014 a hundred"), "100,000 — a hundred")
+    assertEq(unescaped("\\\\w+"), "\\w+")
+    assertEq(unescaped("line\\nbreak"), "line\nbreak")
+    assertEq(unescaped("nothing to undo"), "nothing to undo")
+    assertEq(charOf(65), "A")
+    assertEq(charOf(233), "é")
+    assertEq(charOf(8212), "—")
+    assertEq(hexAt("\\u2014", 2), 8212)
+    assertEq(hexAt("00ff", 0), 255)
+    assertEq(hexAt("00FF", 0), 255)
+    // And nothing the page prints from the record still carries one.
+    for prog in programs() {
+        assert(!has(prog.note, "\\"))
+    }
+    for row in envRows() {
+        assert(!has(row[1], "\\"))
+    }
 }
 
 test "a thousands separator lands every three digits and nowhere else" {

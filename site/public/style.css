@@ -1689,15 +1689,6 @@ pre.code::-webkit-scrollbar { display: none; }
  * as a stack instead of collapsing to nothing. */
 .specplate .panes > div + div { border-top: 1px solid var(--hair); }
 
-/* A RATIO WITHOUT A DIRECTION IS A NUMBER NOBODY CAN READ (user). The table's
- * cells say which way they point, and the legend over it says what the tones
- * mean — the same three words in both places. */
-.legend { display: flex; flex-wrap: wrap; gap: var(--s2); margin: var(--s1) 0 var(--s2); font: var(--t-key)/1 var(--mono); color: var(--muted); }
-.legend .key::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 2px; background: currentColor; vertical-align: 0; }
-.legend .ahead, .matrix.bench [data-way="ahead"] { color: var(--accent); }
-.legend .behind, .matrix.bench [data-way="behind"] { color: var(--muted); }
-.legend .level, .matrix.bench [data-way="level"] { color: var(--n2); }
-.matrix.bench [data-way="ahead"] { font-weight: 600; }
 .benchcard h3 .size { margin-left: var(--s1); font: var(--t-key)/1 var(--mono); color: var(--n2); }
 
 /* PROGRAM BY PROGRAM IS A STACK OF FULL-WIDTH BLOCKS, NOT A GRID OF CARDS.
@@ -1725,19 +1716,28 @@ pre.code::-webkit-scrollbar { display: none; }
 .progrow > header .size { font: var(--t-key)/1 var(--mono); color: var(--n2); }
 .progrow > header .spacer { flex: 1; }
 .progrow > header .bverdict { font: var(--t-key)/1 var(--mono); color: var(--muted); letter-spacing: 0.04em; }
-/* A note is written for four of the ten programs. `v-if` on the paragraph, not
- * an empty one styled to nothing: a blank line still reserved its space, which
- * is the gap that sat under binary-trees and fasta. */
-.progrow .what { margin: var(--s1) 0 0; max-width: var(--measure); color: var(--muted); font: var(--t-meta)/1.5 var(--sans); }
+/* A note is written for four of the ten programs, and it says what N counts.
+ * It was a paragraph of its own under the header, which repeated half of the
+ * cause below the table on the two rows that have most to say; it is the first
+ * sentence, on the header line beside N, and `v-if` keeps the other six from
+ * reserving a blank one. */
+.progrow > header .what { min-width: 0; flex: 1 1 20rem; color: var(--muted); font: var(--t-meta)/1.5 var(--sans); }
 .progrow .scroller { margin-top: var(--s2); }
-.progrow table.matrix { min-width: 44rem; width: 100%; }
-.progrow table.matrix th[scope="row"] { width: 7.5rem; }
+.progrow table.matrix { min-width: 50rem; width: 100%; }
+/* A bare `th` is an uppercase mono label sheet-wide, which is right for a
+ * matrix whose row heads are field names and wrong for one whose row heads are
+ * proper nouns: `Vyrn wasm` came out `VYRN WASM`. The deleted `.matrix.bench`
+ * block reset this, and deleting it took the reset with it. */
+.progrow table.matrix th[scope="row"] { width: 7.5rem; text-transform: none; letter-spacing: 0; }
 .progrow table.matrix th[scope="row"] a { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--rule); }
 .progrow table.matrix th[scope="row"] a:hover { color: var(--accent); }
 .progrow table.matrix thead th { font: var(--t-tick)/1 var(--mono); color: var(--n2); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 400; text-align: left; padding-bottom: var(--s1); white-space: nowrap; }
 .progrow .what code { font: var(--t-code-s)/1 var(--mono); }
 .progrow table.matrix td { padding: 5px var(--s2) 5px 0; vertical-align: middle; font: var(--t-key)/1.5 var(--mono); color: var(--muted); white-space: nowrap; }
-.progrow table.matrix .ms, .progrow table.matrix .vs { color: var(--ink); }
+.progrow table.matrix .ms { color: var(--ink); }
+.progrow .vs[data-way="ahead"] { color: var(--accent); font-weight: 600; }
+.progrow .vs[data-way="level"] { color: var(--n2); }
+.progrow .vs[data-way="behind"] { color: var(--ink); }
 .progrow tr[data-tone~="sr-vyrn"] th[scope="row"] { color: var(--ink); font-weight: 600; }
 
 /* ONE TRACK, THE SAME ON ALL TEN: nought to four times C, with C on the
@@ -1765,7 +1765,7 @@ pre.code::-webkit-scrollbar { display: none; }
  * own rule forbids. The end is serrated, and the exact figure is the `vs C`
  * cell beside it. */
 .progrow .fill[data-over="true"] { -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 7px), transparent 100%); mask-image: linear-gradient(90deg, #000 calc(100% - 7px), transparent 100%); }
-.progrow .bcause { margin: var(--s2) 0 0; max-width: var(--measure); color: var(--n2); font: var(--t-meta)/1.6 var(--sans); }
+.progrow .bcause { margin: var(--s2) 0 0; max-width: 88ch; color: var(--n2); font: var(--t-meta)/1.6 var(--sans); }
 .progrow .bcause b { color: var(--ink); font-weight: 600; }
 /* The benchmarks page: the same cards, the full sheet. */
 .page.benchpage > * { grid-column: 1 / 13; }
@@ -2181,31 +2181,6 @@ table.matrix td.yes { color: var(--ink); font-weight: 520; }
 table.matrix td { padding-right: var(--s2); }
 table.matrix tbody tr:hover td, table.matrix tbody tr:hover th { background: color-mix(in oklab, var(--accent) 7%, transparent); }
 
-/* The benchmark table: a median, and the same figure normalized two ways under
- * it. It is the chart's fallback and it is on the page whether the script
- * arrives or not — a chart with no table beside it invites distrust. */
-table.matrix.bench th[scope="row"] { text-transform: none; letter-spacing: 0; width: 11rem; }
-/* A cell holds two lines here, not one, so it takes MORE air than the shared
- * rule gives and not less. The first version cut the row padding to 6px and the
- * eight rows read as one block of type. */
-table.matrix.bench th, table.matrix.bench td { padding-block: var(--s2); }
-table.matrix.bench .ms { display: block; color: var(--ink); }
-table.matrix.bench .norm { display: block; font-size: 0.78rem; color: var(--n2); }
-table.matrix.bench td.n { font: var(--t-key)/1.6 var(--mono); color: var(--n2); }
-table.matrix.bench td.runs code { font-size: var(--t-tick); white-space: nowrap; }
-/* The Benchmarks Game's own columns, in its own order: a source name and then
- * cpu secs, secs, mem, gz, make secs (RFC-0104 M3, amended). A reader who has
- * read one of the game's per-program pages should not have to learn a second
- * layout to read this one.
- *
- * The figures are mono and right-aligned. A column of numbers that does not
- * line up on its last digit cannot be compared down its own length, which is
- * the only thing a column of numbers is for. Six columns fit an axis panel, so
- * nothing here scrolls sideways at reading width. */
-table.matrix.bench.game th[scope="row"] { width: 9rem; }
-table.matrix.bench.game th, table.matrix.bench.game td { padding-block: 8px; white-space: nowrap; }
-table.matrix.bench.game td.num { font: var(--t-eyebrow)/1.6 var(--mono); text-align: right; color: var(--ink); }
-table.matrix.bench.game thead th + th { text-align: right; }
 /* A reading whose within-run spread is over 15% is one measured near the
  * process floor. Saying so beside it is cheaper than a footnote nobody reads. */
 table.matrix .flag { color: var(--amber); font: var(--t-tick)/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; }

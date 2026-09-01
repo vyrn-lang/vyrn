@@ -15,7 +15,7 @@
 // with (RFC-0104) and the reason this page can be a claim at all.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
-import { programs, contestants, radarBox, radarCx, radarCy, radarRings, radarSpokes, radarLines, tableRows, ratioWay, axisPanels, srcHref, benchMachine, benchRuns, envRows, run1File, Prog, Series, Ring, Spoke, Line, Mark, Reading, Row, Panel } from "../bench"
+import { contestants, radarBox, radarCx, radarCy, radarRings, radarSpokes, radarLines, ratioWay, axisPanels, srcHref, nativeVsRust, panelNote, benchMachine, benchRuns, envRows, run1File, Series, Ring, Spoke, Line, Mark, Reading, Panel } from "../bench"
 import { TreeGroup, docSubnav } from "../docshell"
 import { inlineCode } from "../code"
 
@@ -62,31 +62,32 @@ fn progHref(key: String) -> String {
 <main class="page benchpage">
     <section class="hero benchhero">
         <p class="eyebrow">Measured</p>
-        <h1 class="display">Ten programs, five engines,<br/>one machine, one afternoon.</h1>
-        <p class="lede">The Benchmarks Game programs, written five ways: plain C, safe Rust, plain node, Vyrn native and Vyrn as WebAssembly. One machine, and every reading published. Where Vyrn is behind, the cause is named.</p>
+        <h1 class="display">How fast Vyrn is, and where it is not</h1>
+        <p class="lede">The ten Benchmarks Game programs, written five ways and run on one machine. Every reading is published, and every deviation is named.</p>
         <p class="pkgmeta">{{ benchMachine() }} · medians of {{ benchRuns() }}</p>
     </section>
 
     <section class="band" id="programs">
         <p class="eyebrow">program by program</p>
         <h2>Every measured column, one program at a time</h2>
-        <p>Five engines and the Benchmarks Game's own five columns, with the cause named where Vyrn is behind. <b>Every bar is the same track — nought to four times C</b> — so the quarter mark is C on all ten, and a column can be read down as well as across. Each engine's name links to the program that produced its row.</p>
+        <p>Every bar runs the same track, nought to four times C, so the quarter mark is C on all ten and a column reads down as well as across. An engine's name links to the program that produced its row. <b>A row is a deviation when Vyrn's own build is more than ten per cent off Rust</b> — the run-to-run noise of this machine — and each verdict prints the ratio it was read from.</p>
         <article class="progrow" v-for="p in axisPanels()" :key="p.key" :id="p.key">
             <header>
                 <h3><a :href="p.game" rel="noreferrer">{{ p.name }}</a></h3>
                 <span class="size">N = {{ p.n }}</span>
+                <span class="what" v-if="p.note.byteLength > 0" v-html="inlineCode(panelNote(p.key))"></span>
                 <span class="spacer"></span>
-                <span class="bverdict">{{ p.verdict }}</span>
+                <span class="bverdict">{{ nativeVsRust(p.key) }} Rust · {{ p.verdict }}</span>
             </header>
-            <p class="what" v-if="p.note.byteLength > 0" v-html="inlineCode(p.note)"></p>
             <div class="scroller">
-                <table class="matrix bench progtable">
+                <table class="matrix progtable">
                     <thead>
                         <tr>
                             <th scope="col">Engine</th>
                             <th scope="col" class="trackhead">0 → 4x C</th>
                             <th scope="col">time</th>
                             <th scope="col">vs C</th>
+                            <th scope="col">vs Rust</th>
                             <th scope="col">cpu s</th>
                             <th scope="col">peak</th>
                             <th scope="col">gz</th>
@@ -99,6 +100,7 @@ fn progHref(key: String) -> String {
                             <td class="track"><span class="btrack"><span class="fill" :style="barStyle(c.pct)" :data-over="overFlag(c.over)"></span></span></td>
                             <td class="ms">{{ c.ms }}</td>
                             <td class="vs" :data-way="wayC(p.key, c.key)">{{ c.vsC }}</td>
+                            <td class="vs" :data-way="wayRust(p.key, c.key)">{{ c.vsRust }}</td>
                             <td>{{ c.cpu }}</td>
                             <td>{{ c.mem }}</td>
                             <td>{{ c.gz }}</td>
@@ -144,34 +146,6 @@ fn progHref(key: String) -> String {
                 <button type="button" v-for="s in contestants()" :key="s.key" :class="s.tone" :data-series-toggle="s.key" aria-pressed="true">{{ s.name }}</button>
             </div>
             <p class="cap">The radial axis is log2 around C — the rim is sixteen times it. An axis name is a link to that program's rows.</p>
-        </div>
-    </section>
-
-    <section class="band" id="table">
-        <p class="eyebrow">the same thing, as a table</p>
-        <h2>How long each engine took, against C and against Rust</h2>
-        <p>Every cell is a <em>time</em>, divided by the baseline's time on the same program. <b>1.00x is the baseline itself</b>; under 1 is faster than it, over 1 is slower. So <code>0.74x C</code> means three quarters of C's time, and <code>1.35x Rust</code> means a third longer than Rust.</p>
-        <p class="legend"><span class="key ahead">under 1 — faster</span><span class="key level">about 1 — level</span><span class="key behind">over 1 — slower</span></p>
-        <div class="scroller">
-        <table class="matrix bench">
-            <thead>
-                <tr>
-                    <th scope="col">Program</th>
-                    <th scope="col">N</th>
-                    <th scope="col" v-for="s in contestants()" :key="s.key"><span :class="s.tone">{{ s.name }}</span></th>
-                </tr>
-            </thead>
-            <tbody>
-                <tr v-for="r in tableRows()" :key="r.key">
-                    <th scope="row">{{ r.name }}</th>
-                    <td class="n">{{ r.n }}</td>
-                    <td v-for="c in r.cells" :key="c.key">
-                        <span class="ms" :data-way="wayC(r.key, c.key)">{{ c.vsC }} C</span>
-                        <span class="norm" :data-way="wayRust(r.key, c.key)">{{ c.vsRust }} Rust</span>
-                    </td>
-                </tr>
-            </tbody>
-        </table>
         </div>
     </section>
 
