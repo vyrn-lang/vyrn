@@ -1651,7 +1651,13 @@ pre.code::-webkit-scrollbar { display: none; }
  * time takes the whole measure. `.tabs` above styles the strip; the panes
  * stack in one grid cell so the plate keeps the tallest pane's height and
  * does not jump as a reader switches. */
-.specplate { margin: var(--s2) 0 var(--s3); border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; background: color-mix(in oklab, var(--plate) 35%, transparent); }
+/* SQUARE, like every other code plate. The sheet keeps two families: cards
+ * round their corners (`.benchcard`, `.showpane`, `.demo .term`) and CODE
+ * PLATES do not — `.plate`, `.doccode` and a bare `pre.code` are all square.
+ * This rule carried a 10px radius over from `/compare`, where the plate sat
+ * among cards; in the guide it sits in the same prose as the runnable blocks
+ * and was the only rounded one among them. */
+.specplate { margin: var(--s2) 0 var(--s3); border: 1px solid var(--rule); overflow: hidden; background: color-mix(in oklab, var(--plate) 35%, transparent); }
 /* THE STRIP IS A HEAD, NOT A ROW OF BUTTONS. `button, .btn` puts a wash and a
  * border on every control, so restoring these tabs put four grey boxes on top
  * of the plate — chrome the rest of the site does not wear. The strip reads
