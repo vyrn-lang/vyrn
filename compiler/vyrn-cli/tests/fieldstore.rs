@@ -136,6 +136,17 @@ fn a_loop_that_only_reads_an_array_loads_its_header_once() {
         1,
         "the header is reloaded inside the loop:\n{body}"
     );
+    // And the two bounds checks share ONE trap call, after the function's
+    // body: the check branches out with its index parked in a local. Each
+    // check carrying its own call was what Cranelift charged for — nbody's
+    // loop measured 3.56 s with the calls and 1.71 s without them, the
+    // compares kept both times. The only other call in `sum` is the
+    // call-depth budget's trap in the prologue, so two calls in all.
+    assert_eq!(
+        body.matches("call ").count(),
+        2,
+        "a bounds check carries its own trap call:\n{body}"
+    );
 }
 
 /// The refusal: a loop that grows the array it indexes moves the header, so

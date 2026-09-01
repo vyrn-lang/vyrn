@@ -1617,6 +1617,11 @@ struct Fn_<'a, 'p> {
     /// RFC-0125 M1: the header parts of every binding a `while` hoisted
     /// (`hoist_walks`), keyed by name, live for the loop's extent.
     walks: HashMap<String, Walk>,
+    /// RFC-0125 M1: the two locals a failed bounds check parks its message
+    /// and index in before branching to the function's one trap site — see
+    /// `bounds_check`. `None` for a frame that has no site (the globals
+    /// initializer), which keeps the call at the check.
+    trap_site: Option<(u32, u32)>,
     ret: Repr,
     ret_ty: Type,
     /// The wasm local holding the hidden aggregate-return pointer, if any.
@@ -1704,6 +1709,7 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         depth: 0,
         loops: Vec::new(),
         walks: HashMap::new(),
+        trap_site: None,
         ret: Repr::Unit,
         ret_ty: Type::Unit,
         dest: None,
@@ -1812,6 +1818,7 @@ fn lower_body(
         depth: 0,
         loops: Vec::new(),
         walks: HashMap::new(),
+        trap_site: None,
         ret: sig.ret.clone(),
         // As DECLARED, not resolved. A function returning `Age` has to validate
         // at its `return`, and `Age` resolved to `Int64` is the flow that does
@@ -1925,6 +1932,13 @@ fn lower_body(
     if counted {
         call_depth_enter(&mut b, cx);
     }
+    // RFC-0125 M1: the trap site. A bounds check that fails parks its message
+    // and its index in these two locals and branches OUT of this block; the
+    // one call to the trap helper stands after it. Measured on nbody's inner
+    // loop under Cranelift: twenty-nine checks each carrying their own call
+    // cost 3.56 s against 1.71 s with the compare kept and the call gone —
+    // the call site, not the check, was what the engine paid for.
+    cx_fn.trap_site = Some((b.local(ValType::I32), b.local(ValType::I64)));
     // The one block every `return` targets. Its result IS the function's when
     // that is a scalar; an aggregate return travels through `dest` instead, so
     // the block carries nothing.
@@ -1932,6 +1946,14 @@ fn lower_body(
         Repr::Scalar(v) => BlockType::Result(*v),
         _ => BlockType::Empty,
     }));
+    // Inside it, the trap block wraps the body: a failed check branches out of
+    // THIS block and lands on the trap call below, while a `return` branches
+    // out of the function block as it always did — past the call, into the
+    // epilogue and the frame's own stack pop. A body must never emit `return`
+    // (the M1 note on `Frame::ins`), and this structure is how the trap site
+    // obeys that: the first cut returned from inside and leaked the frame.
+    b.ins(&Instruction::Block(BlockType::Empty));
+    cx_fn.depth += 1;
     match stmts {
         Some(blk) => cx_fn.block(m, &mut b, blk)?,
         None => match body {
@@ -1946,10 +1968,23 @@ fn lower_body(
     cx_fn.arg_frees.clear();
     // Falling off the end of a value-returning function is unreachable — the
     // checker proves every path returns — but the validator needs to be told,
-    // since it cannot see the proof.
+    // since it cannot see the proof. A unit or aggregate body that falls off
+    // its end leaves the trap block the way a `return` does, over the call.
     if matches!(sig.ret, Repr::Scalar(_)) {
         b.ins(&Instruction::Unreachable);
+    } else {
+        b.ins(&Instruction::Br(cx_fn.depth));
     }
+    b.ins(&Instruction::End);
+    cx_fn.depth -= 1;
+    if let Some((tpre, tidx)) = cx_fn.trap_site {
+        b.ins(&Instruction::LocalGet(tpre));
+        b.ins(&Instruction::LocalGet(tidx));
+        b.ins(&Instruction::I32Const(cx.rt.msg_oob_end as i32));
+        b.ins(&Instruction::Call(cx.rt.trap_idx));
+    }
+    // The helper exits the process; the validator is told so.
+    b.ins(&Instruction::Unreachable);
     b.ins(&Instruction::End);
 
     // The copy-out, once, AFTER the block every `return` branches to — which is
@@ -10495,10 +10530,25 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64GeU);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        b.ins(&Instruction::I32Const(pre as i32));
-        b.ins(&Instruction::LocalGet(idx));
-        b.ins(&Instruction::I32Const(post as i32));
-        b.ins(&Instruction::Call(trap));
+        match self.trap_site {
+            // The function's one trap site (RFC-0125 M1): park the message and
+            // the index, and branch out of the trap block. `depth` counts that
+            // block and this `if`; the function block every `return` targets
+            // is one label further out, so the trap block is `depth - 1`.
+            Some((tpre, tidx)) => {
+                b.ins(&Instruction::I32Const(pre as i32));
+                b.ins(&Instruction::LocalSet(tpre));
+                b.ins(&Instruction::LocalGet(idx));
+                b.ins(&Instruction::LocalSet(tidx));
+                b.ins(&Instruction::Br(self.depth - 1));
+            }
+            None => {
+                b.ins(&Instruction::I32Const(pre as i32));
+                b.ins(&Instruction::LocalGet(idx));
+                b.ins(&Instruction::I32Const(post as i32));
+                b.ins(&Instruction::Call(trap));
+            }
+        }
         self.depth -= 1;
         b.ins(&Instruction::End);
     }
