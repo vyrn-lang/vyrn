@@ -1,11 +1,13 @@
 # RFC-0125 — a rule is stated once
 
-- **Status:** Draft (2026-09-02). M0 is a repository setting. M1's write
-  half, header hoist and trap site all landed the same day and are measured
-  in §3 M1: nbody 11.8 s to 1.98 s under Cranelift against 0.88 s native,
-  output byte-identical throughout. M1's gate — Cranelift within twice
-  native on nbody, spectral-norm and fannkuch — is NOT met (2.25x, 2.9x,
-  1.8x), and the route decision of §2.5 is recorded as open, not taken.
+- **Status:** Draft (2026-09-02). M0 is done: `main` requires the CI
+  checks. M1's write half, header hoist and trap site all landed the same
+  day and are measured in §3 M1: nbody 11.8 s to 1.98 s under Cranelift
+  against 0.88 s native, output byte-identical throughout. M1's gate as
+  written — Cranelift within twice native on nbody, spectral-norm and
+  fannkuch — is NOT met (2.25x, 2.9x, 1.8x); the release path, wasm2c and
+  clang, IS within it on all three (1.5x, 1.9x, 1.8x). The route decision of
+  §2.5 is recorded with those numbers and left to be taken on purpose.
   Nothing after M1 has landed.
 - **Depends on:** RFC-0101 (the lowered form — this RFC is what its own ledger
   says it could not become), RFC-0077 (the direct wasm backend — the emitter
@@ -340,6 +342,16 @@ Not code. `main` gets branch protection requiring the workspace tests and the
 parity job. On 2026-09-01 a PR merged with four jobs still running because
 nothing required them. Every gate below is optional until this is on.
 
+**Done (2026-09-02).** `main` requires eleven checks before a merge: the
+workspace tests on all four platforms, three-way parity, cross-engine
+generation, the four `checks` jobs, and the site `build`. The branch need
+not be up to date with `main`, and administrators are not bound — on
+purpose, and for one reason: `ci.yml` ignores `rfcs/**` and `**.md`, so a
+PR that touches only a design record runs no CI at all, reports none of the
+eleven, and would be unmergeable by anyone. Until CI runs a job on every PR,
+the owner merging a docs-only PR by hand is the escape, and it is the only
+one.
+
 ### M1 — places, and the probe re-run
 
 The current lowering and the direct emitter learn places: a field read is a
@@ -490,6 +502,45 @@ does not remove it, and the route that would (wasm2c and clang) is the
 release path §2.5 already names and has not been run on this machine, because
 wasm2c is not installed. That measurement is what the route decision waits
 on now, not more emitter work.
+
+**The release path, measured.** wabt 1.0.41 (`wasm2c`) and simde v0.8.2
+(the SIMD header wasm2c's output includes, for the one `f64x2.sqrt`) were
+installed into the gitignored `tools/`, recorded here the way clang is
+recorded and not pinned. Each program's wasm — the same bytes the Cranelift
+and V8 columns ran — was translated to C and compiled with the native
+path's own flags, `clang -O2 -ffp-contract=off`, against a two-hundred-line
+WASI host (`fd_write`, `proc_exit`). Output byte-identical to native in
+every cell. Guard-page memory checking is wasm-rt's default on 64-bit and was
+confirmed to be in effect, so no row below pays an explicit bounds check per
+memory access.
+
+| program | native | Cranelift | V8 | wasm2c + clang | the same, without wasm-rt's stack counter |
+|---|---|---|---|---|---|
+| nbody | 0.88 s | 1.98 s | 1.60 s | 1.30 s (1.5x) | 1.06 s (1.2x) |
+| spectral-norm | 0.98 s | 2.83 s | 1.29 s | 1.90 s (1.9x) | 1.25 s (1.3x) |
+| fannkuch | 2.0 s | 3.58 s | 7.1 s | 3.64 s (1.8x) | 3.55 s (1.8x) |
+
+The last column is a bound, not a route: on Windows wasm-rt has no
+signal-based stack exhaustion, so it counts call depth in every function
+prologue, which is a second counter beside Vyrn's own. The build with
+`WASM_RT_NONCONFORMING_UNCHECKED_STACK_EXHAUSTION` removes it and is named
+non-conforming by wabt for a reason; it says what a host with signal-based
+exhaustion (Linux, macOS) would see, and it is 0.25 s on nbody and 0.65 s on
+spectral-norm — spectral-norm's 121 million calls again. LLVM inlined `cell`
+as predicted: the conforming column already halves spectral-norm's gap.
+
+fannkuch does not move through any of it: 1.8x on the release path, 1.8x
+under Cranelift, with or without either counter. Its remaining cost is in
+the emitted shape itself, not in what runs it, and it is not explained by
+anything measured in this milestone. It is the next thing to read.
+
+**What the gate says now.** As written, the gate named Cranelift, and
+Cranelift does not meet it. The release path meets it on all three programs
+in its conforming form, 1.5x, 1.9x and 1.8x, and the Cranelift build is the
+development build in that route, the way the interpreter is today. So the
+measured answer is: one emitter is viable if the release build is wasm2c and
+clang, and the default build is accepted at two to three times native. That
+is a trade to make on purpose, and it is the route decision §2.5 left open.
 
 ### M2 — the named core and the linear judgment, beside the pipeline
 
