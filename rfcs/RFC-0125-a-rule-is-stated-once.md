@@ -1,7 +1,10 @@
 # RFC-0125 — a rule is stated once
 
-- **Status:** Draft (2026-09-02). M0 is a repository setting. M1 is measured
-  below and is the gate for everything after it. Nothing else has landed.
+- **Status:** Draft (2026-09-02). M0 is a repository setting. M1 is in
+  progress: its write half landed the same day and is measured in §3 M1 —
+  11.8 s to 3.7 s under Cranelift, 18.5 s to 3.0 s under V8, against 0.88 s
+  native — and its read half is what remains before M1's gate is decided.
+  Nothing after M1 has landed.
 - **Depends on:** RFC-0101 (the lowered form — this RFC is what its own ledger
   says it could not become), RFC-0077 (the direct wasm backend — the emitter
   this RFC keeps), RFC-0087..0091 (ownership is defined, not inferred — the
@@ -350,6 +353,38 @@ taken. If not, the two-emitter fallback is written into §2.5 and the rest of
 the migration proceeds unchanged.
 
 M1 is useful on its own: it is the wasm column's thirteen-times defect, fixed.
+
+**The write half landed (2026-09-02), and here is its number.** The copies
+in §1.4 come from the write side only: the direct emitter already read
+`b[i].x` through the element's address, and the parser's `a[i].f = v` idiom
+(copy the element out into an unspellable temp, store the field, copy it back)
+made every field write two 56-byte copies. `Fn_::elem_field_store` in
+`direct.rs` recognises the idiom on a heapless element and emits one bounds
+check, one address and one store — the same prefix `Stmt::IndexSet` emits, plus
+a field offset. The plan's store decisions on the three statements are
+acknowledged so RFC-0114 §26's finish check sees them considered; a heapless
+element owes no release. `vyrn-cli/tests/fieldstore.rs` pins both halves of the
+rule: zero element-sized copies for a heapless element, the idiom kept for an
+element that holds heap. Parity: 41 passed, three engines byte-identical.
+
+| nbody, 25 M steps | before | after |
+|---|---|---|
+| `memory.copy` per inner iteration of `advance` | 21 | 3, all 24-byte header copies once per call |
+| wasmtime 46, Cranelift | 11.8 s | 3.74 s |
+| node 24, V8 | 18.5 s | 2.97 s |
+| native, LLVM `-O2` | 0.88 s | 0.88 s |
+
+Three times faster, and still four times off native. What the loop still
+pays, per inner iteration, read from the new wat: 29 array-header reloads
+(`walk` re-reads `data` and `len` from the binding's slot at every access,
+because a `f64.store` into linear memory may alias the slot and no engine can
+prove it does not), 29 bounds checks with their address arithmetic, and the
+`sqrtF` call's depth accounting around one instruction. `-C inlining=y` made
+wasmtime slower (4.5 s), so the call is not the cost; the reloads and checks
+are. That is the read half of M1: a `walk` cached per binding for the extent
+of a loop the binding is not written in, and one check per binding-and-index
+pair. The gate is not decided until that half is measured. The prediction
+stands as written: within twice native, or the fallback.
 
 ### M2 — the named core and the linear judgment, beside the pipeline
 

@@ -2387,8 +2387,14 @@ impl<'p> Fn_<'_, 'p> {
 
     fn block(&mut self, m: &mut Module, b: &mut Frame, blk: &Block) -> Result<(), String> {
         let mark = self.scope.len();
-        for s in &blk.stmts {
-            self.stmt(m, b, s)?;
+        let mut k = 0;
+        while k < blk.stmts.len() {
+            if let Some(n) = self.elem_field_store(m, b, &blk.stmts[k..])? {
+                k += n;
+                continue;
+            }
+            self.stmt(m, b, &blk.stmts[k])?;
+            k += 1;
         }
         // The fall-through exit. An early `return`/`break`/`continue` releases the
         // same frames before its branch, so this runs after a branch only in code
@@ -2396,6 +2402,116 @@ impl<'p> Fn_<'_, 'p> {
         self.emit_releases(m, b, ExitKind::Block, blk as *const Block as usize)?;
         self.scope.truncate(mark);
         Ok(())
+    }
+
+    /// `a[i].f = v` as ONE store through the element's address — RFC-0125 M1.
+    ///
+    /// The parser hands every engine the RFC-0082 idiom for this statement:
+    /// `let mut a[] = @at(a, a[]idx)`, then `a[].f = v`, then `a[a[]idx] = a[]`.
+    /// That is a copy of the whole element out, one field store, and a copy
+    /// back — two `memory.copy` per field write for a store of one scalar. In
+    /// nbody's inner loop it is 21 copies per iteration, and it is why the same
+    /// program runs 13x slower under Cranelift than under LLVM: LLVM's scalar
+    /// replacement deletes the copies and a wasm engine keeps them (§1.4).
+    ///
+    /// The three statements are recognised here by the unspellable temp and
+    /// lowered as a bounds check, an address and a store — exactly what
+    /// `Stmt::IndexSet` does for `a[i] = v`, plus a field offset. HEAPLESS
+    /// elements only: with nothing to release, the skipped `let` has no placed
+    /// release to leave behind, and the old field value owes none either. An
+    /// element that holds heap keeps the idiom, whose releases the placement
+    /// already accounted for.
+    ///
+    /// Returns how many statements were consumed, or `None` when the window is
+    /// not the idiom and the caller lowers the statement as it always did.
+    fn elem_field_store(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        stmts: &[Stmt],
+    ) -> Result<Option<usize>, String> {
+        let [Stmt::Let {
+            name: tmp,
+            mutable: true,
+            value: load,
+            ..
+        }, Stmt::SetField {
+            name: t2,
+            field,
+            value,
+            line,
+        }, Stmt::IndexSet {
+            name: parent,
+            index: Expr::Var { name: idx2, .. },
+            value: Expr::Var { name: t3, .. },
+            ..
+        }, ..] = stmts
+        else {
+            return Ok(None);
+        };
+        if !tmp.ends_with("[]") || t2 != tmp || t3 != tmp {
+            return Ok(None);
+        }
+        let Expr::Call { name: at, args, .. } = load else {
+            return Ok(None);
+        };
+        if at != "@at" || args.len() != 2 {
+            return Ok(None);
+        }
+        let (Expr::Var { name: p2, .. }, Expr::Var { name: idx, .. }) = (&args[0], &args[1]) else {
+            return Ok(None);
+        };
+        if p2 != parent || idx != idx2 {
+            return Ok(None);
+        }
+        let (place, ty) = self.lookup(parent, *line)?;
+        let elem = match self.cx.resolve(&ty) {
+            Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => *i,
+            _ => return Ok(None),
+        };
+        if self.rel_for(&elem, *line)?.is_some() {
+            return Ok(None);
+        }
+        let (foff, fty) = self.field_of(&elem, field, *line)?;
+        let fr = self.cx.repr(&fty, *line)?;
+        if matches!(fr, Repr::Unit) || matches!(place, Place::Local(_)) {
+            return Ok(None);
+        }
+        // The plan placed its store decision on the idiom's own statements. A
+        // heapless element owes no release, so the decision is acknowledged and
+        // nothing is emitted for it — acknowledged, because §26's finish check
+        // counts a placed decision the emission never looked at as a leak.
+        for st in &stmts[..3] {
+            let _ = self.cx.plan.store_owned_at(st as *const Stmt as usize);
+        }
+        // From here on, code is emitted: the same prefix as `Stmt::IndexSet`.
+        place.addr(b, 0);
+        let w = self.walk(b, &ty, *line)?;
+        self.expr_as(m, b, &args[1], &Type::Int)?;
+        let i = b.local(ValType::I64);
+        b.ins(&Instruction::LocalSet(i));
+        self.bounds_check(b, &w, i, false);
+        self.elem_addr(b, &w, i);
+        if foff != 0 {
+            b.ins(&Instruction::I32Const(foff as i32));
+            b.ins(&Instruction::I32Add);
+        }
+        match &fr {
+            Repr::Scalar(_) => {
+                self.expr_as(m, b, value, &fty)?;
+                b.ins(&store_of(&self.cx.ll(&fty)));
+            }
+            Repr::Agg(l) => {
+                self.expr_as(m, b, value, &fty)?;
+                b.ins(&Instruction::I32Const(l.size as i32));
+                b.ins(&Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
+            }
+            Repr::Unit => unreachable!("refused above"),
+        }
+        Ok(Some(3))
     }
 
     /// Emit the releases the lowering PLACED at one exit — RFC-0101 M4.
