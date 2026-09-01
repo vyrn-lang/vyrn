@@ -31,6 +31,7 @@
 import { indexOf, substring, trim, split, joinWith } from "std/strings"
 import { parseFloat64 } from "std/num"
 import { sin, cos } from "std/math"
+import { ghBlob } from "./github"
 
 /// One measured cell: one program on one engine, in both recorded runs.
 ///
@@ -68,7 +69,7 @@ export type Ring = { id: String, r: String, points: String, label: String, y: St
 export type Spoke = { key: String, name: String, x: String, y: String, lx: String, ly: String, anchor: String, wedge: String }
 
 /// One contestant's polygon, in both normalizations, with its off-scale marks.
-export type Line = { key: String, name: String, tone: String, points: String, alt: String, marks: Array<Mark>, altMarks: Array<Mark> }
+export type Line = { key: String, name: String, tone: String, points: String, marks: Array<Mark> }
 
 /// A point that did not fit: drawn at the rim, named here, never dropped.
 export type Mark = { id: String, d: String, title: String }
@@ -77,10 +78,7 @@ export type Mark = { id: String, d: String, title: String }
 /// are the Benchmarks Game's own columns, in its own order — cpu secs, secs,
 /// mem, gz, make secs — because a reader who has read one of its per-program
 /// pages should not have to learn a second layout to read this one.
-export type Reading = { key: String, name: String, tone: String, cpu: String, secs: String, mem: String, gz: String, make: String, norm: String, ms: String, vsC: String, vsRust: String, spread: String, noisy: Bool }
-
-/// One row of the static table: a program and its five readings.
-export type Row = { key: String, name: String, n: String, game: String, cells: Array<Reading> }
+export type Reading = { key: String, name: String, tone: String, cpu: String, secs: String, mem: String, gz: String, make: String, norm: String, ms: String, vsC: String, vsRust: String, spread: String, noisy: Bool, pct: String, over: Bool }
 
 /// One axis panel: everything known about one program, shown on focus.
 export type Panel = { key: String, name: String, n: String, note: String, cause: String, label: String, verdict: String, game: String, cells: Array<Reading> }
@@ -102,6 +100,13 @@ export type Panel = { key: String, name: String, n: String, note: String, cause:
 /// before that makes these rows an after.
 export fn run1File() -> String {
     return "rfcs/bench-0104/results/2026-09-01.json"
+}
+
+/// The dataset itself, in the repository. The page's whole claim is that no
+/// figure on it was typed in, and a provenance line nobody can open is a claim
+/// a reader has to take on faith.
+export fn run1Href() -> String {
+    return ghBlob(run1File())
 }
 
 fn run2File() -> String {
@@ -143,13 +148,102 @@ fn scalarAt(src: String, indent: String, key: String) -> String {
     return trim(cut)
 }
 
-/// A string scalar with its quotes taken off.
+/// A string scalar with its quotes taken off and its escapes undone.
 fn textAt(src: String, indent: String, key: String) -> String {
     let raw = scalarAt(src, indent, key)
     if raw.byteLength >= 2 && substring(raw, 0, 1) == "\"" {
-        return substring(raw, 1, raw.byteLength - 1)
+        return unescaped(substring(raw, 1, raw.byteLength - 1))
     }
-    return raw.copy()
+    return unescaped(raw)
+}
+
+/// A JSON string body as the characters it stands for.
+///
+/// THE SLICER IS NOT A PARSER, and this is the one place that costs something.
+/// `json.dump` writes every character outside ASCII as `\uXXXX`, so the em
+/// dashes in the harness's own program notes reached the page as the six
+/// literal characters a reader saw on `regex-redux`, and the regex patterns in
+/// those notes carry `\\w` and `\\d` for the same reason. The BMP and the six
+/// short escapes cover everything `run.py` can emit; a surrogate pair would
+/// need a second branch, and `no escape survives into the page` below is what
+/// says so if one ever appears.
+fn unescaped(text: String) -> String {
+    if !has(text, "\\") {
+        return text.copy()
+    }
+    let raw = bytes(text)
+    let mut out = ""
+    let mut i = 0
+    while i < raw.length {
+        if raw[i] != '\\' || i + 1 >= raw.length {
+            out = out + substring(text, i, i + 1)
+            i = i + 1
+            continue
+        }
+        let c = raw[i + 1]
+        if c == 'u' && i + 5 < raw.length {
+            out = out + charOf(hexAt(text, i + 2))
+            i = i + 6
+            continue
+        }
+        if c == 'n' {
+            out = out + "\n"
+        } else if c == 't' {
+            out = out + "\t"
+        } else if c == 'r' {
+            out = out + "\r"
+        } else {
+            // `\\`, `\"` and `\/` all stand for the character after the
+            // backslash, which is also the safest thing to do with an escape
+            // this reader does not know.
+            out = out + substring(text, i + 1, i + 2)
+        }
+        i = i + 2
+    }
+    return out
+}
+
+/// The four hex digits at `at`, as a number.
+fn hexAt(text: String, at: Int64) -> Int64 {
+    let raw = bytes(text)
+    let mut n = 0
+    let mut i = at
+    while i < at + 4 {
+        let b = Int64(raw[i])
+        let d = if b >= 48 && b <= 57 {
+            b - 48
+        } else if b >= 97 && b <= 102 {
+            b - 87
+        } else {
+            b - 55
+        }
+        n = n * 16 + d
+        i = i + 1
+    }
+    return n
+}
+
+/// One code point below U+10000, as UTF-8. A byte literal is a `UInt8` and
+/// arithmetic on a code point is not, so the boundaries are written as numbers.
+fn charOf(cp: Int64) -> String {
+    let mut raw: Array<UInt8> = []
+    if cp < 128 {
+        raw.push(UInt8(cp))
+    } else if cp < 2048 {
+        raw.push(UInt8(192 + cp / 64))
+        raw.push(UInt8(128 + cp % 64))
+    } else {
+        raw.push(UInt8(224 + cp / 4096))
+        raw.push(UInt8(128 + (cp / 64) % 64))
+        raw.push(UInt8(128 + cp % 64))
+    }
+    return match stringFromBytes(raw) {
+        Ok(text) => text,
+        // Unreachable for a scalar value. A lone surrogate is the one thing
+        // `run.py` could write that this does not encode, and it comes back as
+        // nothing rather than as invalid UTF-8.
+        Err(_) => "",
+    }
 }
 
 /// Seconds, as the record writes them, in whole microseconds. A reading the
@@ -184,14 +278,14 @@ fn recordText(file: String) -> String {
 // ---------------------------------------------------------------------------
 // The fixed sets
 //
-// The eight programs and the five contestants are the milestone's own set, named
+// The ten programs and the five contestants are the milestone's own set, named
 // in RFC-0104's table, and they are written out here rather than discovered in
 // the record — because a program that vanished from a re-run should break this
 // page loudly rather than shrink the chart quietly. `every program and every
 // contestant is in both records` is where that break happens.
 // ---------------------------------------------------------------------------
 
-/// The eight expressible Benchmarks Game programs, in the record's order.
+/// All ten Benchmarks Game programs, in the record's order.
 let mut progs: Array<Prog> = []
 
 export fn programs() -> Array<Prog> {
@@ -234,7 +328,7 @@ fn progNames() -> Array<Array<String>> {
     ]
 }
 
-/// The game's own page for one program. Every one of the eight was fetched and
+/// The game's own page for one program. Every one of the ten was fetched and
 /// resolved on the date `ceilingFetched` states.
 fn gameHref(slug: String) -> String {
     return "https://benchmarksgame-team.pages.debian.net/benchmarksgame/performance/" + slug + ".html"
@@ -639,7 +733,7 @@ fn ringLabel(power: Int64) -> String {
     return pow2(power).toString() + "x"
 }
 
-/// The eight spokes: the line, the name at its end, and the wedge a pointer
+/// The ten spokes: the line, the name at its end, and the wedge a pointer
 /// hovers to select the axis.
 export fn radarSpokes() -> Array<Spoke> {
     let progs = programs()
@@ -737,15 +831,13 @@ export fn radarLines() -> Array<Line> {
                 name: s.name.copy(),
                 tone: s.tone.copy(),
                 points: polygonFor(s.key, "c"),
-                alt: polygonFor(s.key, "rust"),
                 marks: marksFor(s.key, "c"),
-                altMarks: marksFor(s.key, "rust"),
             })
     }
     return out
 }
 
-/// One contestant's eight vertices against `base`.
+/// One contestant's ten vertices against `base`.
 fn polygonFor(contestant: String, base: String) -> String {
     let progs = programs()
     let mut out: Array<String> = []
@@ -813,11 +905,12 @@ fn chevronAt(i: Int64) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// The numbers, as a table and as eight panels
+// The numbers, as a table and as ten program blocks
 // ---------------------------------------------------------------------------
 
 /// One program's five readings.
 fn readingsFor(program: String) -> Array<Reading> {
+    let base = medianUs(program, "c")
     let mut out: Array<Reading> = []
     for s in contestants() {
         let cell = cellOf(program, s.key)
@@ -837,9 +930,58 @@ fn readingsFor(program: String) -> Array<Reading> {
                 vsRust: ratioText(ratioOf(program, s.key, "rust")),
                 spread: spread,
                 noisy: noisy(cell.spread1),
+                pct: trackPct(cell.us1, base),
+                over: base > 0 && cell.us1 > base * trackTimes(),
             })
     }
     return out
+}
+
+/// How far the bar track runs, as a multiple of C. Four holds every reading in
+/// the set except the two wasm legs the radar already draws off-scale, and it
+/// puts C itself a quarter of the way along — the same place on all ten rows,
+/// which is what lets the column be read DOWN as well as across.
+fn trackTimes() -> Int64 {
+    return 4
+}
+
+/// One reading as its share of that track, to one decimal.
+///
+/// The bar this replaces divided by the SLOWEST engine on its own card, so
+/// every card carried a different scale. On nbody, where the wasm leg is
+/// fourteen times C, that gave the other four engines the first seven per cent
+/// of the track between them — indistinguishable slivers, in the one place the
+/// comparison matters. Against a fixed track the same four land at 18 to 31
+/// per cent. A reading past the end is drawn AT the end and its row carries
+/// `over`, which is the same rule the radar keeps: nothing is truncated
+/// quietly.
+fn trackPct(us: Int64, base: Int64) -> String {
+    if us <= 0 || base <= 0 {
+        return "0.0"
+    }
+    let full = base * trackTimes()
+    let tenths = if us >= full { 1000 } else { us * 1000 / full }
+    return (tenths / 10).toString() + "." + (tenths % 10).toString()
+}
+
+/// Where one engine's program for one benchmark lives.
+///
+/// A page that publishes a ratio and not the two programs behind it is asking
+/// to be taken on trust — the same objection the game's own link answers for
+/// the task. Both Vyrn legs are built from ONE source: `examples/<name>.vyrn`
+/// is compiled native and to WebAssembly with nothing changed between them,
+/// which is why the two rows point at the same file.
+export fn srcHref(program: String, engine: String) -> String {
+    if engine == "c" {
+        return ghBlob("rfcs/bench-0104/harness/c/" + program + ".c")
+    }
+    if engine == "rust" {
+        return ghBlob("rfcs/bench-0104/harness/rust/" + program + ".rs")
+    }
+    if engine == "js" {
+        return ghBlob("rfcs/bench-0104/harness/js/" + program + ".js")
+    }
+    return ghBlob("examples/" + program + ".vyrn")
 }
 
 /// Both normalizations of one cell in one string: what the radar plots.
@@ -873,22 +1015,12 @@ fn noisy(spread: String) -> Bool {
     }
 }
 
-/// The whole dataset as the table this page falls back to. Eight rows, five
-/// contestants, the median and both normalizations in every cell.
-export fn tableRows() -> Array<Row> {
-    let mut out: Array<Row> = []
-    for p in programs() {
-        out.push(Row { key: p.key.copy(), name: p.name.copy(), n: p.n.copy(), game: p.game.copy(), cells: readingsFor(p.key) })
-    }
-    return out
-}
-
 /// One engine's bar on a card: what it is called, how long it took, and how
 /// much of the card's widest bar that is.
 export type BarRow = { key: String, name: String, tone: String, ms: String, pct: String, mem: String }
 
 /// One program's bars, fastest first, each measured against the slowest of
-/// them — a card is its own scale, which is what makes eight cards readable
+/// them — a card is its own scale, which is what makes six cards readable
 /// side by side (RFC-0106 M5 round 21).
 export fn panelBars(program: String) -> Array<BarRow> {
     let cells = readingsFor(program)
@@ -939,7 +1071,7 @@ fn barPct(us: Int64, top: Int64) -> String {
     return whole.toString() + "." + rest.toString()
 }
 
-/// The first six panels — what the index shows before its More card. Eight
+/// The first six panels — what the index shows before its More card. Ten
 /// cards is a wall; six and a door is a section (user).
 export fn frontPanels() -> Array<Panel> {
     let all = axisPanels()
@@ -1098,38 +1230,18 @@ export fn panelMemLine(program: String) -> String {
     return pair + " · " + ratio
 }
 
-/// The line under a card's bars: what the reading means, in the milestone's
-/// own words, and the memory the fastest engine needed against the hungriest.
-export fn panelFoot(program: String) -> String {
-    let cells = readingsFor(program)
-    if cells.length == 0 {
-        return ""
-    }
-    let mut lean = cells[0].mem.copy()
-    let mut fat = cells[0].mem.copy()
-    let mut fatName = cells[0].name.copy()
-    let mut fatBytes = 0
-    let mut leanBytes = 0
-    for c in cells {
-        let b = cellOf(program, c.key).peakBytes
-        if c.key == "vyrn-native" {
-            lean = c.mem.copy()
-            leanBytes = b
-        }
-        if b > fatBytes {
-            fatBytes = b
-            fat = c.mem.copy()
-            fatName = c.name.copy()
-        }
-    }
-    if leanBytes == 0 || fatBytes <= leanBytes {
-        return ""
-    }
-    return "RAM " + lean + " vs " + fatName + " " + fat
+/// Vyrn's own build against Rust on one program.
+///
+/// The verdict beside a program is a reading of THIS number and nothing else —
+/// a deviation past ten per cent either way, inside the band under it — and it
+/// was the one figure the verdict depended on that the page never printed. A
+/// label a reader cannot check is a label a reader has to trust.
+export fn nativeVsRust(program: String) -> String {
+    return ratioText(ratioOf(program, "vyrn-native", "rust"))
 }
 
-/// The eight axis panels. One is shown at a time; without script the first is
-/// the one in the markup and the table below carries the other seven.
+/// The ten program blocks: everything the record and the milestone know
+/// about one program, in one place.
 export fn axisPanels() -> Array<Panel> {
     let mut out: Array<Panel> = []
     for p in programs() {
@@ -1182,7 +1294,7 @@ fn verdictOf(program: String) -> String {
 /// one program's deviation (RFC-0104 M3 amendment).
 ///
 /// The paragraph it stands for is still written and still sourced. What changed
-/// is where it is read: eight paragraphs of diagnosis under a chart is a page
+/// is where it is read: ten paragraphs of diagnosis under a chart is a page
 /// nobody finishes, and a label beside the number is the same claim at a length
 /// that gets read.
 fn labelOf(program: String) -> String {
@@ -1199,16 +1311,16 @@ fn labelOf(program: String) -> String {
 /// the cause in a few words, for the consumer page.
 export fn causeRows() -> Array<Array<String>> {
     return [
-        ["nbody", "a deviation", "The vectorizer runs on rustc's IR and not on ours: Rust's inner loop is 342 packed-double instructions and four sqrtpd, ours is thirteen scalar ops and one sqrtsd. The native leg matches plain C to one per cent and both lose to Rust by a third. noalias rides the allocator family now — a slice that measured a wash — but the loop itself still carries no aliasing facts, so what ownership already proves never reaches the vectorizer.", "no vector code, and no noalias"],
-        ["spectralnorm", "inside the noise band", "Not a deviation. 1.00x Rust, dead centre of the +/-10% band.", "no deviation to explain"],
-        ["fannkuch", "inside the noise band", "Not a deviation any more. 1.03x Rust, where the last dataset measured a 679 ms gap. The copy per permutation this row used to name — a fresh array 39,916,800 times, about 600 ms of that gap — is gone: dst.copyFrom(src) (RFC-0115) refills the buffer in place, and the row moved inside the band when it landed.", "a copy per permutation, closed"],
-        ["binarytrees", "at the edge of the band", "1.11x Rust, just past the +/-10% line, and the memory story is closed: the native leg peaks at 37.3 MB against Rust's 37.6, where before RFC-0114 it leaked 2,093. The row's own finding is elsewhere: node wins it outright, and the Vyrn wasm leg — which runs no optimizer — beats the native one twice over, because the wasm backend carries its own segregated free list and the native leg calls the platform malloc.", "the platform malloc"],
-        ["fasta", "a deviation", "What a 60-byte output line costs: a fresh array grown from empty by doubling, then stringFromBytes, which is a byte-at-a-time UTF-8 validation over bytes known to be ASCII plus a second allocation — because this program still prints a String per line. The byte sink it lacked exists now (writeStdout, RFC-0111); the remaining gap is a program that has not moved onto it, not a missing feature.", "the price of one output line"],
-        ["revcomp", "a deviation", "Three per-byte passes and a per-line assembly tax: about 120 M push operations for 40 M bases, each a bounds and capacity check into an array grown by doubling, where Rust's output loop allocates nothing at all. The widest row left, and the whole set's spread in one program: the C leg itself pays 4.3x Rust for reading line-at-a-time with fgets.", "per-byte passes and a per-line tax"],
-        ["knucleotide", "ahead of the band", "Outside the band on the wrong side to be a deviation: 0.57x Rust and 0.40x C, and 13 MB against the C entry's 262. The row that measured 211x C when Map lookup was a linear scan now runs a rolling Int64 key into a hashed Map<Int64, Int64> (RFC-0116 gave every map a hash index and tally; RFC-0117 made the key an integer). Its N moved a hundredfold with this dataset: the small one was chosen for the quadratic scan and outlived it, leaving the row at 7 ms where a scheduler hiccup was a multiple.", "a rolling key into a hashed map"],
-        ["pidigits", "inside the noise band", "Not a deviation. 1.00x Rust — the arithmetic is Int64 all the way down in every leg.", "no deviation to explain"],
-        ["mandelbrot", "inside the noise band", "Not a deviation, and the tightest row in the set: every contestant lands within 15% of C, the native leg at 1.05x and even the wasm leg at 1.15x — where wasm pays 2x to 14x everywhere else. The kernel is scalar float arithmetic with no allocation and no output shaping, so what is left is the arithmetic itself. The row exists because RFC-0111's writeStdout takes packed bytes as they are: a P4 bitmap's pixels are arbitrary bytes and a String cannot carry them.", "the bitmap RFC-0111 unblocked"],
-        ["regexredux", "a deviation", "The widest gap in the set, 15.2x C, and the one row whose contestants do not run comparable engines — which is the first thing to say about it. The Vyrn leg is std/regex, a general Thompson NFA walk written in Vyrn and compiled like any other program (RFC-0112). The C and Rust legs carry the smallest matcher that covers this corpus: a first-branch scanner, no backtracking, every starred class excluding its own delimiter, perhaps sixty lines. Node runs V8's engine. So the row measures a general NFA against a special-cased scan, and 15x is the expected shape of that comparison rather than a finding about the language. What it does measure honestly is that std/regex has had no optimizer pass at all: no literal prefilter, no DFA cache, one allocation per step set.", "a general NFA against a special scan"],
+        ["nbody", "a deviation", "Rust's compiler folds the inner loop into instructions that do four sums at once; ours emits them one at a time. What that transformation needs to be safe — that two arrays in the loop are never the same array — the language already proves, because it uses the same fact to free memory. It does not yet reach the part of the compiler that would act on it.", "no vector instructions"],
+        ["spectralnorm", "inside the noise band", "", ""],
+        ["fannkuch", "inside the noise band", "The previous dataset was 679 ms behind Rust, and most of that was one array built fresh 39,916,800 times. The language gained a way to refill a buffer in place instead, and the row moved inside the band the day it landed.", "the copy that cost 600 ms"],
+        ["binarytrees", "at the edge of the band", "Node wins this one outright, and the WebAssembly build is twice as fast as the native one — because it brings its own allocator with it, and the native build asks the operating system for every node. The memory this row used to carry is settled: it peaked above two gigabytes when nothing was being freed, and now sits level with Rust.", "who allocates the memory"],
+        ["fasta", "a deviation", "What one 60-byte output line costs: an array grown from nothing by doubling, then a check that its bytes are valid text — over bytes already known to be plain ASCII — and a second allocation, because the program still builds a piece of text per line. A way to write raw bytes straight out exists; this program has not been moved onto it.", "the price of one output line"],
+        ["revcomp", "a deviation", "Three passes over every byte, and a cost per output line on top: about 120 million appends for 40 million bases, each one a bounds and capacity check into an array that grows by doubling, where Rust's output loop allocates nothing at all. The spread of the whole set is in this one program — the C entry is itself four times slower than Rust here, for reading its input a line at a time.", "a pass per byte, and a cost per line"],
+        ["knucleotide", "ahead of the band", "This row once took 211 times C's time, when looking a key up in a map meant reading every key in it. Maps carry a hash index now, and this program's key is a single number rolled along the sequence rather than a fresh piece of text at every position. Its N moved a hundredfold with this dataset: the old one was chosen for the slow version and outlived it.", "faster than C, and why"],
+        ["pidigits", "inside the noise band", "", ""],
+        ["mandelbrot", "inside the noise band", "Floating-point arithmetic with no allocation and no output shaping, so what is measured is the arithmetic — which is why even the WebAssembly build, two to fourteen times slower everywhere else, is within 15% of C here. The program is on the list at all because Vyrn can write raw bytes now: this image's pixels are arbitrary bytes, and text cannot carry them.", "the closest five readings here"],
+        ["regexredux", "a deviation", "The entries are not running comparable engines, which is the first thing to say about the number. Vyrn runs a general-purpose regular-expression engine, written in Vyrn and compiled like any other program. The C and Rust entries carry the smallest matcher that covers this one corpus — about sixty lines, hand-fitted to these patterns, no backtracking — and node uses the engine built into it. So the gap is the shape of a general engine against a special-cased scan, and not a finding about the language. What it does measure honestly is that Vyrn's engine has had no optimisation work at all.", "not the same engine on both sides"],
     ]
 }
 
@@ -1320,6 +1432,8 @@ export fn floorRows() -> Array<Reading> {
                 vsRust: "",
                 spread: "",
                 noisy: false,
+                pct: "0.0",
+                over: false,
             })
     }
     return out
@@ -1552,21 +1666,6 @@ test "no cell is ever silently truncated" {
     // complement's wasm leg and both of k-nucleotide's — came inside when the
     // map was hashed and stdin stopped being read a byte at a time.
     assertEq(clamped, 0)
-    let mut altClamped = 0
-    let mut altMarked = 0
-    for line in radarLines() {
-        altMarked = altMarked + line.altMarks.length
-        for p in programs() {
-            if offScale(ratioOf(p.key, line.key, "rust")) {
-                altClamped = altClamped + 1
-            }
-        }
-    }
-    assertEq(altClamped, altMarked)
-    // Two against Rust: nbody's wasm leg at 18.97x — the backend that runs no
-    // optimizer — and regex-redux's native leg at 16.77x, which is std/regex's
-    // general NFA against a special-cased scan and says so in its own panel.
-    assertEq(altClamped, 2)
     // And no reading falls off the INNER end: the fastest cell in the set is
     // 0.22x, still comfortably outside the centre.
     for line in radarLines() {
@@ -1576,10 +1675,9 @@ test "no cell is ever silently truncated" {
     }
 }
 
-test "every polygon has one vertex per program, in both normalizations" {
+test "every polygon has one vertex per program" {
     for line in radarLines() {
         assertEq(split(line.points, " ").length, programs().length)
-        assertEq(split(line.alt, " ").length, programs().length)
     }
     assertEq(radarLines().length, 5)
     // The C polygon against C is the baseline ring itself, vertex for vertex.
@@ -1609,7 +1707,7 @@ test "no axis name runs off the sheet" {
     }
 }
 
-test "every axis carries a name, a spoke and a wedge to select it" {
+test "every axis carries a name, a spoke and a wedge to reach it" {
     let spokes = radarSpokes()
     assertEq(spokes.length, 10)
     assertEq(spokes[0].key, "nbody")
@@ -1623,24 +1721,22 @@ test "every axis carries a name, a spoke and a wedge to select it" {
     }
 }
 
-test "the table is the whole dataset and the panels are the same numbers" {
-    let rows = tableRows()
-    assertEq(rows.length, 10)
-    for r in rows {
-        assertEq(r.cells.length, 5)
-    }
-    assertEq(rows[0].n, "25,000,000")
-    assertEq(rows[0].cells[0].ms, "897 ms")
-    assertEq(rows[0].cells[3].vsC, "0.98x")
-    assertEq(rows[0].cells[3].vsRust, "1.34x")
+test "a block is the whole of what is known about one program" {
     let panels = axisPanels()
     assertEq(panels.length, 10)
-    for i in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] {
-        assertEq(panels[i].key, rows[i].key)
-        assertEq(panels[i].cells[0].ms, rows[i].cells[0].ms)
-        assert(panels[i].cause.byteLength > 40)
-        assert(panels[i].verdict.byteLength > 0)
+    for p in panels {
+        assertEq(p.cells.length, 5)
+        assert(p.verdict.byteLength > 0)
     }
+    assertEq(panels[0].n, "25,000,000")
+    assertEq(panels[0].cells[0].ms, "897 ms")
+    assertEq(panels[0].cells[3].vsC, "0.98x")
+    assertEq(panels[0].cells[3].vsRust, "1.34x")
+    // The verdict is a reading of the native leg against Rust, and the block
+    // prints both so a reader can check the label against its own number.
+    assertEq(nativeVsRust("nbody"), "1.34x")
+    assertEq(nativeVsRust("pidigits"), "1.00x")
+    assertEq(nativeVsRust("knucleotide"), "0.57x")
     // The rows that are not deviations say so rather than naming a defect, the
     // one that sits on the line says THAT rather than picking a side, and the
     // one that is outside the band on the FAST side is not called a deviation.
@@ -1657,12 +1753,13 @@ test "the noisy cells are flagged where they are printed" {
     // page is the spread of that program on that contestant, and not of the cell
     // beside it — and that the mechanism is exercised by at least one cell.
     let mut flagged = 0
-    for r in tableRows() {
+    for p in programs() {
+        let cells = readingsFor(p.key)
         let mut i = 0
-        while i < r.cells.length {
-            assertEq(r.cells[i].noisy, noisy(cellOf(r.key, contestants()[i].key).spread1))
-            assertEq(r.cells[i].spread, pctOf(cellOf(r.key, contestants()[i].key).spread1))
-            if r.cells[i].noisy {
+        while i < cells.length {
+            assertEq(cells[i].noisy, noisy(cellOf(p.key, contestants()[i].key).spread1))
+            assertEq(cells[i].spread, pctOf(cellOf(p.key, contestants()[i].key).spread1))
+            if cells[i].noisy {
                 flagged = flagged + 1
             }
             i = i + 1
@@ -1755,9 +1852,10 @@ test "every program links to the game's own page for it" {
 }
 
 test "every cell carries the five columns the game prints" {
-    for r in tableRows() {
-        assertEq(r.cells.length, 5)
-        for c in r.cells {
+    for p in programs() {
+        let cells = readingsFor(p.key)
+        assertEq(cells.length, 5)
+        for c in cells {
             assert(c.cpu.byteLength > 0)
             assert(c.secs.byteLength > 0)
             assert(c.mem.byteLength > 2)
@@ -1766,23 +1864,118 @@ test "every cell carries the five columns the game prints" {
         }
         // node is the one contestant with no build step, and the column says so
         // rather than printing a zero somebody would read as a fast build.
-        assertEq(r.cells[2].make, "—")
-        assert(r.cells[0].make != "—")
-        assert(r.cells[3].make != "—")
+        assertEq(cells[2].make, "—")
+        assert(cells[0].make != "—")
+        assert(cells[3].make != "—")
     }
 }
 
-test "a cause on the consumer page is a label and a link, not a paragraph" {
-    // RFC-0104 M3: the diagnosis is written and sourced, and what the page
-    // prints is a label short enough to scan beside a cause long enough to be
-    // one.
+test "every bar is measured against the same track, and none is clipped in silence" {
+    // THE DEFECT THIS PINS. The bar used to be a share of the SLOWEST engine on
+    // its own card, so each card carried its own scale and no two could be
+    // compared. nbody is the case that showed it: the wasm leg is fourteen
+    // times C, so the four engines a reader actually wants to tell apart
+    // shared the first seven per cent of the track. Against a fixed track —
+    // four times C — the same four are 18 to 31 per cent, C is a quarter of
+    // the way along on EVERY program, and the column reads down.
+    assertEq(trackPct(medianUs("nbody", "c"), medianUs("nbody", "c")), "25.0")
+    for p in programs() {
+        let base = medianUs(p.key, "c")
+        for c in readingsFor(p.key) {
+            // C is the baseline and lands on its own quarter mark, everywhere.
+            if c.key == "c" {
+                assertEq(c.pct, "25.0")
+            }
+            // A reading past the end is drawn AT the end and says so; one
+            // inside it is not flagged. Same rule as the radar's rim.
+            assertEq(c.over, medianUs(p.key, c.key) > base * 4)
+            if c.over {
+                assertEq(c.pct, "100.0")
+            } else {
+                assert(c.pct != "100.0")
+            }
+        }
+    }
+    // THREE cells run past the end of the track, and they are named here
+    // because a clipped bar is a claim: nbody's wasm leg at 13.95x — the
+    // backend that runs no optimizer — and BOTH regex-redux legs, which are
+    // std/regex's general NFA against a purpose-built scan and say so in that
+    // row's own cause. No other row on any program reaches four times C.
+    let mut past: Array<String> = []
+    for p in programs() {
+        for c in readingsFor(p.key) {
+            if c.over {
+                past.push(p.key + "/" + c.key)
+            }
+        }
+    }
+    assertEq(joinWith(past, " "), "nbody/vyrn-wasm regexredux/vyrn-native regexredux/vyrn-wasm")
+}
+
+test "every row points at the program behind it" {
+    // A ratio without its two programs is a number a reader has to take on
+    // trust. Both Vyrn legs are ONE source compiled two ways, so they point at
+    // the same file — which is itself the claim that the wasm column is not a
+    // different program.
+    for p in programs() {
+        assertEq(srcHref(p.key, "c"), "https://github.com/vyrn-lang/vyrn/blob/main/rfcs/bench-0104/harness/c/" + p.key + ".c")
+        assertEq(srcHref(p.key, "rust"), "https://github.com/vyrn-lang/vyrn/blob/main/rfcs/bench-0104/harness/rust/" + p.key + ".rs")
+        assertEq(srcHref(p.key, "js"), "https://github.com/vyrn-lang/vyrn/blob/main/rfcs/bench-0104/harness/js/" + p.key + ".js")
+        assertEq(srcHref(p.key, "vyrn-native"), srcHref(p.key, "vyrn-wasm"))
+        assertEq(srcHref(p.key, "vyrn-native"), "https://github.com/vyrn-lang/vyrn/blob/main/examples/" + p.key + ".vyrn")
+    }
+}
+
+test "a row with nothing to explain explains nothing" {
+    // A cause is a label short enough to scan beside a paragraph long enough
+    // to be one — OR IT IS NOTHING AT ALL. Two rows are level with Rust and
+    // have no finding, and what they used to print was `nothing to explain —
+    // Not a deviation. Level with Rust, in the middle of the ten per cent
+    // band`: one fact, said four times, under a header that had already said
+    // it (user). They print no line now.
+    let mut silent = 0
     for p in axisPanels() {
+        if p.cause.byteLength == 0 {
+            assertEq(p.label, "")
+            assertEq(p.verdict, "inside the noise band")
+            silent = silent + 1
+            continue
+        }
         assert(p.label.byteLength > 0)
         assert(p.label.byteLength < 40)
         assert(p.cause.byteLength > 40)
+        // And a cause states what a reader cannot read off the table above it.
+        // Every one of these opened by restating the verdict in the header.
+        assert(!has(p.cause, "Not a deviation"))
+        assert(!has(p.cause, "noise band"))
+    }
+    assertEq(silent, 2)
+    // Every deviation has one, which is the milestone's own claim.
+    for p in axisPanels() {
+        if p.verdict == "a deviation" {
+            assert(p.cause.byteLength > 40)
+        }
     }
     for row in causeRows() {
         assertEq(row.length, 4)
+    }
+}
+
+test "the page names no design record and no internal symbol" {
+    // WHY THIS EXISTS (user, twice). These causes were written while the
+    // milestone was open, for the people closing it, and they reached
+    // `/benchmarks` carrying RFC numbers, function names and instruction
+    // mnemonics. The site publishes no design records, so those numbers
+    // pointed a reader at nothing at all. The diagnosis in full is
+    // `rfcs/RFC-0104-a-benchmark-is-a-claim-about-a-gap.md`; what the page
+    // carries is the same finding in words somebody outside the project can
+    // use.
+    let banned = ["RFC-", "std/", "noalias", "malloc", "sqrt", "()", "Int64", "wasm ", "UTF-8", "V8"]
+    for row in causeRows() {
+        for word in banned {
+            assert(!has(row[2], word))
+            assert(!has(row[3], word))
+        }
     }
 }
 
@@ -1802,6 +1995,31 @@ test "a second, a memory size and a byte count read the way the game prints them
     assertEq(memOf(0), "—")
     assertEq(bytesOf(1168), "1,168")
     assertEq(bytesOf(0), "—")
+}
+
+test "no escape survives into the page" {
+    // `json.dump` writes every non-ASCII character as a `\uXXXX` escape, and the
+    // slicer handed those six characters straight to the template: `regex-redux`
+    // printed `100,000 \u2014 a hundred times the fixture` where the record means
+    // an em dash. The regex patterns in the same notes carry doubled
+    // backslashes for the same reason.
+    assertEq(unescaped("100,000 \\u2014 a hundred"), "100,000 — a hundred")
+    assertEq(unescaped("\\\\w+"), "\\w+")
+    assertEq(unescaped("line\\nbreak"), "line\nbreak")
+    assertEq(unescaped("nothing to undo"), "nothing to undo")
+    assertEq(charOf(65), "A")
+    assertEq(charOf(233), "é")
+    assertEq(charOf(8212), "—")
+    assertEq(hexAt("\\u2014", 2), 8212)
+    assertEq(hexAt("00ff", 0), 255)
+    assertEq(hexAt("00FF", 0), 255)
+    // And nothing the page prints from the record still carries one.
+    for prog in programs() {
+        assert(!has(prog.note, "\\"))
+    }
+    for row in envRows() {
+        assert(!has(row[1], "\\"))
+    }
 }
 
 test "a thousands separator lands every three digits and nowhere else" {

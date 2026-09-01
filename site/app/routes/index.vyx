@@ -303,7 +303,7 @@ fn barStyle(pct: String) -> String {
                         <span class="bspeed">{{ panelSpeed(p.key) }}</span>
                         <span class="bram">RAM {{ panelMemLine(p.key) }}</span>
                     </p>
-                    <p class="bcause">{{ p.label }}</p>
+                    <p class="bcause" v-if="p.label.byteLength > 0">{{ p.label }}</p>
                 </article>
             </div>
 

@@ -147,7 +147,7 @@ fn capabilities() -> Array<Capability> {
         <section class="band" id="predictable">
             <p class="eyebrow">predictability</p>
             <h2>The same program means the same thing</h2>
-            <p>The native binary and the WebAssembly module must agree with the interpreter byte for byte, floating point included. A language whose backends disagree has no meaning, only implementations. <a href="/benchmarks.html#table">Every reading is published</a>, and the parity harness fails CI when the bytes disagree.</p>
+            <p>The native binary and the WebAssembly module must agree with the interpreter byte for byte, floating point included. A language whose backends disagree has no meaning, only implementations. <a href="/benchmarks.html#programs">Every reading is published</a>, and the parity harness fails CI when the bytes disagree.</p>
         </section>
 </main>
 </template>
