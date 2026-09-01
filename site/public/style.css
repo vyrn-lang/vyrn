@@ -1666,13 +1666,15 @@ pre.code::-webkit-scrollbar { display: none; }
  * wash was tried here and read WRONG: `--ink` is the light end in the dark
  * theme, so mixing it lifted the strip above the code it heads instead of
  * settling under it. */
-.specplate .tabs {
+.specplate .tabs,
+.tabs.axes {
   margin-top: 0;
   padding: 0 var(--s1);
   background: none;
   border-bottom: 1px solid var(--hair);
 }
-.specplate .tabs button {
+.specplate .tabs button,
+.tabs.axes button {
   background: none;
   border: 0;
   border-bottom: 2px solid transparent;
@@ -1682,8 +1684,8 @@ pre.code::-webkit-scrollbar { display: none; }
   color: var(--muted);
   letter-spacing: 0.04em;
 }
-.specplate .tabs button:hover { color: var(--ink); background: none; }
-.specplate .tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); background: none; }
+.specplate .tabs button:hover, .tabs.axes button:hover { color: var(--ink); background: none; }
+.specplate .tabs button[aria-selected="true"], .tabs.axes button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); background: none; }
 .specplate pre.code { margin: 0; border: 0; background: none; font-size: var(--t-code-s); max-height: 26em; overflow: auto; }
 /* Without script no tab is selected and every pane is shown, so the four read
  * as a stack instead of collapsing to nothing. */
@@ -1708,7 +1710,8 @@ pre.code::-webkit-scrollbar { display: none; }
  * third summary. Six cards on the front page keep the grid — a teaser is a
  * different job from an audit, and `.benchcard` above is still theirs. */
 .progrow { padding: var(--s3) 0; border-top: 1px solid var(--hair); scroll-margin-top: var(--s4); }
-.progrow:first-of-type { border-top: 0; }
+.progrow:first-of-type, .progrow[role="tabpanel"] { border-top: 0; }
+.tabs.axes { margin-bottom: 0; }
 .progrow > header { display: flex; align-items: baseline; gap: var(--s2); flex-wrap: wrap; }
 .progrow > header h3 { margin: 0; font: 600 var(--t-h5)/1.3 var(--sans); }
 .progrow > header h3 a { color: inherit; text-decoration: none; border-bottom: 1px solid var(--hair); }

@@ -503,18 +503,21 @@ function tabsWidget(root, opts = {}) {
 // ---------------------------------------------------------------------------
 // W9 — the benchmark radar (RFC-0104 M3).
 //
-// Vyrn computed every coordinate and every off-scale mark. This does one thing
-// and it is not arithmetic: the legend hides a series by putting one class on
-// one group.
+// Vyrn computed every coordinate and every off-scale mark. This does two
+// things and neither is arithmetic: the legend hides a series by putting one
+// class on one group, and an axis opens that program's block above.
 //
-// IT USED TO DO TWO MORE, AND BOTH ARE GONE WITH WHAT THEY DROVE. The axis
-// wedges called a tab group that left this plate when the program panels
-// became the page's own blocks — no `[data-axis]` element has existed since,
-// so `select` was null, `syncLit` lit nothing, and no wedge ever got a
-// listener. The wedges and the axis names are ANCHORS now, straight to the
-// block for that program, which works with no script at all. And the C/Rust
-// switch went with the second baseline: every bar and every polygon on the
-// page is measured against C, so there is one scale and nothing to swap.
+// THE AXIS IS AN ANCHOR FIRST. Every name and every hit wedge is an `<a>` to
+// `#<program>`, so with no script at all it jumps to that block — which is on
+// the page, because with no script every block is. The click below is what
+// makes it work once the blocks ARE a tab group: it presses the matching tab,
+// and the browser's own jump then lands on a pane that is showing. Wiring it
+// the other way round — this widget owning the selection — is what rotted
+// last time: the wedges called a group that had left the plate, and no wedge
+// had a listener at all for as long as that lasted.
+//
+// The C/Rust switch went with the second baseline: every bar and every
+// polygon on the page is measured against C, so there is nothing to swap.
 //
 // Nothing animates. There is no motion to reduce, which is how this widget
 // respects `prefers-reduced-motion` — by not having any.
@@ -523,6 +526,15 @@ function tabsWidget(root, opts = {}) {
 function radarWidget(root) {
   const svg = $("svg.radar", root);
   if (!svg) return;
+
+  const tabs = $$("[data-tab]");
+  for (const link of $$(".names a, .wedges a", svg)) {
+    link.addEventListener("click", () => {
+      const key = (link.getAttribute("href") || "").slice(1);
+      const tab = tabs.find((t) => t.getAttribute("data-tab") === key);
+      if (tab) tab.click();
+    });
+  }
 
   for (const btn of $$("[data-series-toggle]", root)) {
     const group = $('g[data-series="' + btn.dataset.seriesToggle + '"]', svg);

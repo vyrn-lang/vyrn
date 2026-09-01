@@ -102,6 +102,13 @@ export fn run1File() -> String {
     return "rfcs/bench-0104/results/2026-09-01.json"
 }
 
+/// The dataset itself, in the repository. The page's whole claim is that no
+/// figure on it was typed in, and a provenance line nobody can open is a claim
+/// a reader has to take on faith.
+export fn run1Href() -> String {
+    return ghBlob(run1File())
+}
+
 fn run2File() -> String {
     return "rfcs/bench-0104/results/2026-09-01-run2.json"
 }
@@ -1304,16 +1311,16 @@ fn labelOf(program: String) -> String {
 /// the cause in a few words, for the consumer page.
 export fn causeRows() -> Array<Array<String>> {
     return [
-        ["nbody", "a deviation", "The vectorizer runs on rustc's IR and not on ours: Rust's inner loop is 342 packed-double instructions and four sqrtpd, ours is thirteen scalar ops and one sqrtsd. The native leg matches plain C to one per cent and both lose to Rust by a third. noalias rides the allocator family now — a slice that measured a wash — but the loop itself still carries no aliasing facts, so what ownership already proves never reaches the vectorizer.", "no vector code, and no noalias"],
-        ["spectralnorm", "inside the noise band", "Not a deviation. 1.00x Rust, dead centre of the +/-10% band.", "no deviation to explain"],
-        ["fannkuch", "inside the noise band", "Not a deviation any more. 1.03x Rust, where the last dataset measured a 679 ms gap. The copy per permutation this row used to name — a fresh array 39,916,800 times, about 600 ms of that gap — is gone: dst.copyFrom(src) (RFC-0115) refills the buffer in place, and the row moved inside the band when it landed.", "a copy per permutation, closed"],
-        ["binarytrees", "at the edge of the band", "1.11x Rust, just past the +/-10% line, and the memory story is closed: the native leg peaks at 37.3 MB against Rust's 37.6, where before RFC-0114 it leaked 2,093. The row's own finding is elsewhere: node wins it outright, and the Vyrn wasm leg — which runs no optimizer — beats the native one twice over, because the wasm backend carries its own segregated free list and the native leg calls the platform malloc.", "the platform malloc"],
-        ["fasta", "a deviation", "What a 60-byte output line costs: a fresh array grown from empty by doubling, then stringFromBytes, which is a byte-at-a-time UTF-8 validation over bytes known to be ASCII plus a second allocation — because this program still prints a String per line. The byte sink it lacked exists now (writeStdout, RFC-0111); the remaining gap is a program that has not moved onto it, not a missing feature.", "the price of one output line"],
-        ["revcomp", "a deviation", "Three per-byte passes and a per-line assembly tax: about 120 M push operations for 40 M bases, each a bounds and capacity check into an array grown by doubling, where Rust's output loop allocates nothing at all. The widest row left, and the whole set's spread in one program: the C leg itself pays 4.3x Rust for reading line-at-a-time with fgets.", "per-byte passes and a per-line tax"],
-        ["knucleotide", "ahead of the band", "Outside the band on the wrong side to be a deviation: 0.57x Rust and 0.40x C, and 13 MB against the C entry's 262. The row that measured 211x C when Map lookup was a linear scan now runs a rolling Int64 key into a hashed Map<Int64, Int64> (RFC-0116 gave every map a hash index and tally; RFC-0117 made the key an integer). Its N moved a hundredfold with this dataset: the small one was chosen for the quadratic scan and outlived it, leaving the row at 7 ms where a scheduler hiccup was a multiple.", "a rolling key into a hashed map"],
-        ["pidigits", "inside the noise band", "Not a deviation. 1.00x Rust — the arithmetic is Int64 all the way down in every leg.", "no deviation to explain"],
-        ["mandelbrot", "inside the noise band", "Not a deviation, and the tightest row in the set: every contestant lands within 15% of C, the native leg at 1.05x and even the wasm leg at 1.15x — where wasm pays 2x to 14x everywhere else. The kernel is scalar float arithmetic with no allocation and no output shaping, so what is left is the arithmetic itself. The row exists because RFC-0111's writeStdout takes packed bytes as they are: a P4 bitmap's pixels are arbitrary bytes and a String cannot carry them.", "the bitmap RFC-0111 unblocked"],
-        ["regexredux", "a deviation", "The widest gap in the set, 15.2x C, and the one row whose contestants do not run comparable engines — which is the first thing to say about it. The Vyrn leg is std/regex, a general Thompson NFA walk written in Vyrn and compiled like any other program (RFC-0112). The C and Rust legs carry the smallest matcher that covers this corpus: a first-branch scanner, no backtracking, every starred class excluding its own delimiter, perhaps sixty lines. Node runs V8's engine. So the row measures a general NFA against a special-cased scan, and 15x is the expected shape of that comparison rather than a finding about the language. What it does measure honestly is that std/regex has had no optimizer pass at all: no literal prefilter, no DFA cache, one allocation per step set.", "a general NFA against a special scan"],
+        ["nbody", "a deviation", "Rust's compiler folds the inner loop into instructions that do four sums at once. Ours emits them one at a time. Vyrn matches plain C to within one per cent, and both are a third behind Rust for that single reason. What the transformation needs to be safe — that two arrays in the loop are not the same array — the language already proves, because it uses the same fact to free memory; it does not yet reach the part of the compiler that would act on it.", "no vector instructions"],
+        ["spectralnorm", "inside the noise band", "Not a deviation. Level with Rust, in the middle of the ten per cent band.", "nothing to explain"],
+        ["fannkuch", "inside the noise band", "Not a deviation any more. Level with Rust, where the previous dataset was 679 ms behind. Most of that gap was one array built fresh 39,916,800 times, about 600 ms of it. The language gained a way to refill a buffer in place instead of allocating a new one, and this row moved inside the band the day it landed.", "the copy that cost 600 ms"],
+        ["binarytrees", "at the edge of the band", "Just past the ten per cent line, and the memory question behind it is settled: Vyrn peaks at 37.3 MB against Rust's 37.6, where this row once measured 2,093 MB because nothing was being freed. The finding left is elsewhere. Node wins this program outright, and Vyrn's WebAssembly build — which runs no optimiser at all — is twice as fast as the native one, because it brings its own allocator with it and the native build asks the operating system for every node.", "who allocates the memory"],
+        ["fasta", "a deviation", "What one 60-byte output line costs: an array grown from nothing by doubling, then a check that its bytes are valid text — over bytes already known to be plain ASCII — and a second allocation, because this program still builds a piece of text per line. A way to write raw bytes straight out exists now. The gap left is a program that has not been moved onto it, which is work not done rather than something the language cannot do.", "the price of one output line"],
+        ["revcomp", "a deviation", "Three passes over every byte, and a cost per output line on top: about 120 million appends for 40 million bases, each one a bounds and capacity check into an array that grows by doubling, where Rust's output loop allocates nothing at all. The widest gap left. The spread of the whole set is in this one program: the C entry itself is 4.3 times slower than Rust here, for reading its input a line at a time.", "a pass per byte, and a cost per line"],
+        ["knucleotide", "ahead of the band", "Outside the band on the fast side, which is not a deviation: 0.57 times Rust's time, 0.40 times C's, and 13 MB against the C entry's 262. This row once measured 211 times C, when looking a key up in a map meant reading every key in it. Maps carry a hash index now, and this program's key is a single number rolled along the sequence rather than a fresh piece of text per position. Its N moved a hundredfold with this dataset: the small one was chosen for the slow version and outlived it.", "faster than C, and why"],
+        ["pidigits", "inside the noise band", "Not a deviation. Level with Rust: every entry does the same 64-bit integer arithmetic, all the way down.", "nothing to explain"],
+        ["mandelbrot", "inside the noise band", "Not a deviation, and the closest five readings in the set: every entry lands within 15% of C, Vyrn at 1.05 times and even the WebAssembly build at 1.15 — where WebAssembly pays two to fourteen times everywhere else. The work is floating-point arithmetic with no allocation and no output shaping, so what is measured is the arithmetic itself. The program is here at all because Vyrn can write raw bytes now: this image's pixels are arbitrary bytes, and text cannot carry them.", "the closest five readings here"],
+        ["regexredux", "a deviation", "The widest gap in the set, and the one row whose entries are not running comparable engines — which is the first thing to say about it. Vyrn runs a general-purpose regular-expression engine, written in Vyrn and compiled like any other program. The C and Rust entries carry the smallest matcher that covers this one corpus: about sixty lines, hand-fitted to these patterns, no backtracking. Node uses the engine built into it. So fifteen times C is the shape of a general engine measured against a special-cased scan, and not a finding about the language. What the row does measure honestly is that Vyrn's engine has had no optimisation work at all.", "not the same engine on both sides"],
     ]
 }
 
@@ -1931,6 +1938,24 @@ test "a cause on the consumer page is a label and a link, not a paragraph" {
     }
     for row in causeRows() {
         assertEq(row.length, 4)
+    }
+}
+
+test "the page names no design record and no internal symbol" {
+    // WHY THIS EXISTS (user, twice). These causes were written while the
+    // milestone was open, for the people closing it, and they reached
+    // `/benchmarks` carrying RFC numbers, function names and instruction
+    // mnemonics. The site publishes no design records, so those numbers
+    // pointed a reader at nothing at all. The diagnosis in full is
+    // `rfcs/RFC-0104-a-benchmark-is-a-claim-about-a-gap.md`; what the page
+    // carries is the same finding in words somebody outside the project can
+    // use.
+    let banned = ["RFC-", "std/", "noalias", "malloc", "sqrt", "()", "Int64", "wasm ", "UTF-8", "V8"]
+    for row in causeRows() {
+        for word in banned {
+            assert(!has(row[2], word))
+            assert(!has(row[3], word))
+        }
     }
 }
 

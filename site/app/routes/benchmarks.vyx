@@ -15,9 +15,8 @@
 // with (RFC-0104) and the reason this page can be a claim at all.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
-import { contestants, radarBox, radarCx, radarCy, radarRings, radarSpokes, radarLines, ratioWay, axisPanels, srcHref, nativeVsRust, panelNote, benchMachine, benchRuns, envRows, run1File, Series, Ring, Spoke, Line, Mark, Reading, Panel } from "../bench"
+import { contestants, radarBox, radarCx, radarCy, radarRings, radarSpokes, radarLines, ratioWay, axisPanels, srcHref, nativeVsRust, benchMachine, benchRuns, envRows, run1File, run1Href, Series, Ring, Spoke, Line, Mark, Reading, Panel } from "../bench"
 import { TreeGroup, docSubnav } from "../docshell"
-import { inlineCode } from "../code"
 
 export fn head() -> Head {
     return pageHeadOf("/benchmarks")
@@ -67,15 +66,17 @@ fn progHref(key: String) -> String {
         <p class="pkgmeta">{{ benchMachine() }} · medians of {{ benchRuns() }}</p>
     </section>
 
-    <section class="band" id="programs">
+    <section class="band" id="programs" data-tabs>
         <p class="eyebrow">program by program</p>
         <h2>Every measured column, one program at a time</h2>
         <p>Every bar runs the same track, nought to four times C, so the quarter mark is C on all ten and a column reads down as well as across. An engine's name links to the program that produced its row. <b>A row is a deviation when Vyrn's own build is more than ten per cent off Rust</b> — the run-to-run noise of this machine — and each verdict prints the ratio it was read from.</p>
-        <article class="progrow" v-for="p in axisPanels()" :key="p.key" :id="p.key">
+        <div class="tabs axes" aria-label="Choose a program">
+            <button type="button" v-for="p in axisPanels()" :key="p.key" :data-tab="p.key">{{ p.name }}</button>
+        </div>
+        <article class="progrow" v-for="p in axisPanels()" :key="p.key" :id="p.key" :data-pane="p.key">
             <header>
                 <h3><a :href="p.game" rel="noreferrer">{{ p.name }}</a></h3>
                 <span class="size">N = {{ p.n }}</span>
-                <span class="what" v-if="p.note.byteLength > 0" v-html="inlineCode(panelNote(p.key))"></span>
                 <span class="spacer"></span>
                 <span class="bverdict">{{ nativeVsRust(p.key) }} Rust · {{ p.verdict }}</span>
             </header>
@@ -89,8 +90,8 @@ fn progHref(key: String) -> String {
                             <th scope="col">vs C</th>
                             <th scope="col">vs Rust</th>
                             <th scope="col">cpu s</th>
-                            <th scope="col">peak</th>
-                            <th scope="col">gz</th>
+                            <th scope="col">peak ram</th>
+                            <th scope="col">source gz</th>
                             <th scope="col">build s</th>
                         </tr>
                     </thead>
@@ -119,7 +120,7 @@ fn progHref(key: String) -> String {
         <p>One axis per program, one polygon per engine. A small shape is a fast one; a reading past the rim is drawn at the rim with a stroke continuing outward.</p>
         <div class="plate" data-widget="radar">
             <div class="plate-head">
-                <span class="eyebrow">{{ run1File() }}</span>
+                <a class="eyebrow" :href="run1Href()" rel="noreferrer">{{ run1File() }}</a>
             </div>
             <div class="stage">
                 <svg class="chart radar" :viewBox="radarBox()" role="img" aria-label="A radar with one axis per Benchmarks Game program and one polygon per contestant. Every reading it plots is in the table below it.">
@@ -145,7 +146,7 @@ fn progHref(key: String) -> String {
             <div class="serieskeys" role="group" aria-label="Show or hide a contestant">
                 <button type="button" v-for="s in contestants()" :key="s.key" :class="s.tone" :data-series-toggle="s.key" aria-pressed="true">{{ s.name }}</button>
             </div>
-            <p class="cap">The radial axis is log2 around C — the rim is sixteen times it. An axis name is a link to that program's rows.</p>
+            <p class="cap">Every ring out from C is a doubling, so the rim is sixteen times C. An axis name opens that program above.</p>
         </div>
     </section>
 
@@ -153,9 +154,8 @@ fn progHref(key: String) -> String {
         <p class="eyebrow">how this was measured</p>
         <h2>The method, and what it does not claim</h2>
         <ul class="docprose">
-            <li>All ten Benchmarks Game programs. Two of them were absent from the first dataset because the language could not express them: mandelbrot needs a byte sink for its binary bitmap, which RFC-0111 gave it, and regex-redux needs a regular-expression engine, which RFC-0112 wrote in Vyrn.</li>
-            <li>Regex-redux does not compare like the other nine, and it is the first thing that row says. The Vyrn leg runs a general Thompson NFA; the C and Rust legs carry a purpose-built first-branch scanner of about sixty lines, and node runs V8's engine. 15.2x is the shape of that comparison, not a finding about the language.</li>
-            <li>The C is plain C11, the Rust is safe and standard-library only, the JavaScript is plain node. No intrinsics and no threads in any of them.</li>
+            <li>All ten Benchmarks Game programs. Two of them were missing from the first dataset because the language could not express them: mandelbrot writes a binary image and needed a way to write raw bytes, and regex-redux needed a regular-expression engine. Both exist now.</li>
+            <li>The C is plain C11, the Rust is safe and standard-library only, the JavaScript is plain node. No hand-written vector instructions and no threads in any of them.</li>
             <li>All five printed the same bytes before anything was timed.</li>
             <li>Medians of {{ benchRuns() }} runs, every engine at its own defaults, one machine, one afternoon.</li>
             <li>CI does not run this harness — it needs clang, rustc, node and wasmtime together — so it is run by hand and the committed JSON is the record.</li>
