@@ -156,7 +156,24 @@ env:
   # renamed release asset reads as green while a third of the gate does not run.
   # `tests/common/mod.rs` and `tests/memory.rs` read this and panic instead.
   VYRN_REQUIRE_TOOLS: "1"
-  # THE REGRESSION THRESHOLD, in one place. `vyrn bench --compare` calls a bench
+  # THE REGRESSION THRESHOLD, in one place. Two mechanisms keep it meaningful
+  # across a runner fleet that is not one machine, and both are worth knowing
+  # before reading the number:
+  #
+  #   * The HOST CORRECTION. `--compare` divides every factor by the median of
+  #     the matched benches, which is this runner's speed against the one the
+  #     baseline was seeded on. The corpus measures that median drifting 1.2x to
+  #     1.35x between `ubuntu-latest` runners - a third of this threshold spent
+  #     before any Vyrn changes. A real regression lands in one bench and barely
+  #     moves a median of dozens; a slow runner moves them all and cancels.
+  #     Below eight matched benches the correction stands down (the median would
+  #     BE the regression), so a small example compares raw.
+  #
+  #   * The UNGATE LIST, `bench/ungated.txt`: benches recorded but not failed
+  #     on, each with its evidence written beside it. One entry today, an 8 KB
+  #     alloc-copy-free loop that spans 39x across runners on identical code.
+  #
+  # `vyrn bench --compare` calls a bench
   # regressed when its `min` exceeds `baseline min * BENCH_THRESHOLD`.
   #
   # 2.0, chosen against the noise rather than against a wish:
@@ -737,7 +754,7 @@ jobs:
             "$vyrn" bench "$f" --json > "../bench/out/$stem.json"
             # The gate. A nonzero exit here fails the job.
             "$vyrn" bench "$f" --compare ../bench/baseline.json \
-              --threshold "$BENCH_THRESHOLD" || regressed=1
+              --threshold "$BENCH_THRESHOLD" --ungate ../bench/ungated.txt || regressed=1
           done
           exit $regressed
       - name: Assemble a seedable baseline

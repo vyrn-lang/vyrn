@@ -3654,6 +3654,7 @@ fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {
     let mut json = false;
     let mut compare: Option<String> = None;
     let mut threshold: f64 = 1.5;
+    let mut ungate: Option<String> = None;
     let mut i = 0;
     while i < rest.len() {
         if rest[i] == "--name" && i + 1 < rest.len() {
@@ -3667,6 +3668,9 @@ fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {
             i += 1;
         } else if rest[i] == "--compare" && i + 1 < rest.len() {
             compare = Some(rest[i + 1].clone());
+            i += 2;
+        } else if rest[i] == "--ungate" && i + 1 < rest.len() {
+            ungate = Some(rest[i + 1].clone());
             i += 2;
         } else if rest[i] == "--threshold" && i + 1 < rest.len() {
             match rest[i + 1].parse::<f64>() {
@@ -3718,7 +3722,13 @@ fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {
         return bench_check(&program, filter.as_deref());
     }
     if let Some(baseline) = compare {
-        return bench_compare(path, filter.as_deref(), &baseline, threshold);
+        return bench_compare(
+            path,
+            filter.as_deref(),
+            &baseline,
+            threshold,
+            ungate.as_deref(),
+        );
     }
     // `--json` streams the machine-readable report; the default streams the human
     // report. Neither captures the child's stdout.
@@ -4063,6 +4073,22 @@ import {{ benchOne }} from \"std/bench\"
 /// a `bench/baseline.json` baseline. Declaration order is preserved (a `Vec`, not a
 /// map) so the comparison prints in the run's order. Returns `None` if `doc` is not
 /// the expected `{ benches: [ { name, minNs } ] }` shape.
+/// The bench names an ungate file lists: one per line, `#` starts a comment,
+/// blank lines ignored. The reasons live in the file beside the names, which is
+/// the point of it being a file — a gate turned off without a written reason is
+/// a gate nobody can turn back on.
+fn bench_ungate_list(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|l| match l.find('#') {
+            Some(i) => &l[..i],
+            None => l,
+        })
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 fn bench_min_table(doc: &vyrn_frontend::schema::Json) -> Option<Vec<(String, f64)>> {
     use vyrn_frontend::schema::Json;
     let benches = match doc.get("benches") {
@@ -4112,6 +4138,7 @@ fn bench_compare(
     filter: Option<&str>,
     baseline_path: &str,
     threshold: f64,
+    ungate_path: Option<&str>,
 ) -> ExitCode {
     // Read + parse the baseline first — a broken baseline is a usage error, and
     // failing before the (slow) native run gives quick feedback.
@@ -4167,7 +4194,28 @@ fn bench_compare(
         eprintln!("note: {baseline_path} is a placeholder baseline — every bench reports `new` (refresh it from a CI --json artifact)");
     }
 
-    let (verdicts, regressed) = bench_verdicts(&run, &baseline, threshold);
+    // The ungate list is policy, not data: it lives in its own committed file
+    // because `bench/baseline.json` is replaced verbatim from a CI artifact
+    // every time it is reseeded, and a flag hand-added there would be wiped by
+    // the next seeding.
+    let ungated = match ungate_path {
+        None => Vec::new(),
+        Some(p) => match std::fs::read_to_string(p) {
+            Ok(t) => bench_ungate_list(&t),
+            Err(e) => {
+                eprintln!("error: cannot read ungate list {p}: {e}");
+                return ExitCode::from(2);
+            }
+        },
+    };
+
+    let scale = bench_host_scale(&run, &baseline);
+    if scale != 1.0 {
+        println!(
+            "host scale x{scale:.3} (median of the matched benches; every factor below is corrected by it)"
+        );
+    }
+    let (verdicts, regressed) = bench_verdicts(&run, &baseline, threshold, &ungated);
     for (name, v) in &verdicts {
         println!("bench {name:?} ... {}", v.render());
     }
@@ -4183,10 +4231,14 @@ fn bench_compare(
 /// One bench's comparison outcome (RFC-0063 §2).
 #[derive(Debug, PartialEq)]
 enum Verdict {
-    /// Within threshold.
+    /// Within threshold. The factor is the host-normalized `min / baselineMin`.
     Ok,
-    /// Slower than `baselineMin * threshold`; the factor is `min / baselineMin`.
+    /// Slower than `baselineMin * threshold`; the factor is `min / baselineMin`
+    /// after host normalization (see [`bench_host_scale`]).
     Regressed(f64),
+    /// Over the threshold in a bench the ungate list names: reported with its
+    /// factor and NOT counted as a regression. See `bench/ungated.txt`.
+    Ungated(f64),
     /// In the run, absent from the baseline (informational).
     New,
     /// In the baseline, absent from the run (informational).
@@ -4198,11 +4250,57 @@ impl Verdict {
         match self {
             Verdict::Ok => "ok".to_string(),
             Verdict::Regressed(f) => format!("REGRESSED x{f:.2}"),
+            Verdict::Ungated(f) => format!("x{f:.2} — not gated on this fleet"),
             Verdict::New => "new".to_string(),
             Verdict::MissingFromRun => "missing-from-run".to_string(),
         }
     }
 }
+
+/// How much slower this HOST is than the one the baseline was seeded on, as the
+/// median of every matched bench's `min / baselineMin` (RFC-0063, amended).
+///
+/// A benchmark gate compares nanoseconds measured on one machine against
+/// nanoseconds measured on another. GitHub's `ubuntu-latest` is a label over
+/// several CPU generations, and the corpus measures whole-run medians drifting
+/// 1.2x to 1.35x between runners — a third of a 2.0x threshold spent before a
+/// single line of Vyrn changes. The median is the honest correction: a real
+/// regression lands in one bench or a few and barely moves the median of
+/// dozens, while a slow runner moves every row together and cancels out.
+///
+/// **It needs a quorum.** With three benches in front of it the median IS the
+/// regression, and normalizing would divide the signal away. Below
+/// [`BENCH_SCALE_QUORUM`] matched rows the answer is 1.0 and the comparison is
+/// raw, which is what a per-example invocation over a whole-corpus baseline
+/// mostly gets.
+fn bench_host_scale(run: &[(String, f64)], baseline: &[(String, f64)]) -> f64 {
+    let mut factors: Vec<f64> = run
+        .iter()
+        .filter_map(|(name, min)| {
+            baseline
+                .iter()
+                .find(|(n, _)| n == name)
+                .filter(|(_, base)| *base > 0.0)
+                .map(|(_, base)| min / base)
+        })
+        .collect();
+    if factors.len() < BENCH_SCALE_QUORUM {
+        return 1.0;
+    }
+    factors.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = factors.len() / 2;
+    if factors.len() % 2 == 0 {
+        (factors[mid - 1] + factors[mid]) / 2.0
+    } else {
+        factors[mid]
+    }
+}
+
+/// How many matched benches [`bench_host_scale`] needs before it will correct
+/// anything. Eight: enough that no single regressed row can carry the median,
+/// and low enough that the corpus's larger files (membench's twenty-two rows,
+/// benching's nine) still get the correction.
+const BENCH_SCALE_QUORUM: usize = 8;
 
 /// The pure comparison core (RFC-0063 §2), factored out so it is unit-testable
 /// against synthetic min tables with NO clang and NO real timing. Each run bench
@@ -4215,17 +4313,27 @@ fn bench_verdicts(
     run: &[(String, f64)],
     baseline: &[(String, f64)],
     threshold: f64,
+    ungated: &[String],
 ) -> (Vec<(String, Verdict)>, usize) {
     let lookup = |name: &str| baseline.iter().find(|(n, _)| n == name).map(|(_, m)| *m);
+    let scale = bench_host_scale(run, baseline);
     let mut out = Vec::new();
     let mut regressed = 0usize;
     for (name, min) in run {
         let v = match lookup(name) {
             Some(base) if base > 0.0 => {
-                let factor = min / base;
-                if *min > base * threshold {
-                    regressed += 1;
-                    Verdict::Regressed(factor)
+                // The host correction divides the BASELINE up to this runner's
+                // speed rather than dividing the measurement down, so the
+                // factor a reader sees is still `this run / that baseline` on
+                // comparable hardware.
+                let factor = (min / base) / scale;
+                if factor > threshold {
+                    if ungated.iter().any(|u| u == name) {
+                        Verdict::Ungated(factor)
+                    } else {
+                        regressed += 1;
+                        Verdict::Regressed(factor)
+                    }
                 } else {
                     Verdict::Ok
                 }
@@ -5688,11 +5796,89 @@ mod tests {
         entries.iter().map(|(n, m)| (n.to_string(), *m)).collect()
     }
 
+    /// The host correction (RFC-0063, amended): a runner uniformly slower than
+    /// the one that seeded the baseline cancels out, because the median moves
+    /// with every row. Ten rows all 1.3x slow read `ok` at a 2.0 threshold,
+    /// where the raw comparison spends two thirds of the headroom on the
+    /// machine before Vyrn changes anything.
+    #[test]
+    fn a_uniformly_slower_host_is_corrected_away() {
+        let base: Vec<(String, f64)> = (0..10).map(|i| (format!("b{i}"), 100.0)).collect();
+        let run: Vec<(String, f64)> = (0..10).map(|i| (format!("b{i}"), 130.0)).collect();
+        assert!((bench_host_scale(&run, &base) - 1.3).abs() < 1e-9);
+        let (v, regressed) = bench_verdicts(&run, &base, 2.0, &[]);
+        assert_eq!(regressed, 0);
+        assert!(v.iter().all(|(_, x)| matches!(x, Verdict::Ok)));
+    }
+
+    /// And it does not hide a real one: nine rows steady on a host that is
+    /// itself 1.3x slow, one row at 3x. The median is 1.3, so the regressed
+    /// row still reads 2.3x and fails.
+    #[test]
+    fn one_regressed_row_survives_the_host_correction() {
+        let base: Vec<(String, f64)> = (0..10).map(|i| (format!("b{i}"), 100.0)).collect();
+        let mut run: Vec<(String, f64)> = (0..10).map(|i| (format!("b{i}"), 130.0)).collect();
+        run[3].1 = 300.0;
+        let (v, regressed) = bench_verdicts(&run, &base, 2.0, &[]);
+        assert_eq!(regressed, 1);
+        match v.iter().find(|(n, _)| n == "b3").map(|(_, x)| x) {
+            Some(Verdict::Regressed(f)) => assert!((f - 300.0 / 130.0).abs() < 1e-9),
+            other => panic!("expected b3 regressed, got {other:?}"),
+        }
+    }
+
+    /// THE QUORUM. With three benches in front of it the median IS the
+    /// regression, so the correction stands down and the comparison is raw —
+    /// otherwise a file whose every bench tripled would report no change.
+    #[test]
+    fn a_small_file_compares_raw_because_its_median_is_the_regression() {
+        let base = table(&[("a", 100.0), ("b", 100.0), ("c", 100.0)]);
+        let run = table(&[("a", 300.0), ("b", 300.0), ("c", 300.0)]);
+        assert_eq!(bench_host_scale(&run, &base), 1.0);
+        assert_eq!(bench_verdicts(&run, &base, 2.0, &[]).1, 3);
+    }
+
+    /// An ungated bench is REPORTED with its factor and not counted — the
+    /// point being that it stays visible. Its neighbours still gate.
+    #[test]
+    fn an_ungated_bench_is_reported_and_not_counted() {
+        let base = table(&[("slow", 100.0), ("other", 100.0)]);
+        let run = table(&[("slow", 900.0), ("other", 900.0)]);
+        let ungated = vec!["slow".to_string()];
+        let (v, regressed) = bench_verdicts(&run, &base, 2.0, &ungated);
+        assert_eq!(regressed, 1, "only `other` counts");
+        let slow = v.iter().find(|(n, _)| n == "slow").map(|(_, x)| x.render());
+        assert!(matches!(
+            v.iter().find(|(n, _)| n == "slow").map(|(_, x)| x),
+            Some(Verdict::Ungated(_))
+        ));
+        assert!(slow.is_some_and(|r| r.contains("x9.00") && r.contains("not gated")));
+    }
+
+    /// The ungate file is names and reasons: `#` comments and blanks are not
+    /// bench names.
+    #[test]
+    fn the_ungate_list_reads_names_and_ignores_reasons() {
+        let text = "# why this file exists
+
+copy of a 1000-element Array<Int64>, 1000 times
+   # indented
+another bench   # trailing reason
+";
+        assert_eq!(
+            bench_ungate_list(text),
+            vec![
+                "copy of a 1000-element Array<Int64>, 1000 times".to_string(),
+                "another bench".to_string(),
+            ]
+        );
+    }
+
     #[test]
     fn within_threshold_is_ok() {
         let run = table(&[("a", 100.0)]);
         let base = table(&[("a", 100.0)]);
-        let (v, regressed) = bench_verdicts(&run, &base, 1.5);
+        let (v, regressed) = bench_verdicts(&run, &base, 1.5, &[]);
         assert_eq!(v, vec![("a".to_string(), Verdict::Ok)]);
         assert_eq!(regressed, 0);
     }
@@ -5702,7 +5888,7 @@ mod tests {
         // min == baseline * threshold is NOT a regression (strict `>`).
         let run = table(&[("a", 150.0)]);
         let base = table(&[("a", 100.0)]);
-        let (v, regressed) = bench_verdicts(&run, &base, 1.5);
+        let (v, regressed) = bench_verdicts(&run, &base, 1.5, &[]);
         assert_eq!(v, vec![("a".to_string(), Verdict::Ok)]);
         assert_eq!(regressed, 0);
     }
@@ -5711,7 +5897,7 @@ mod tests {
     fn beyond_threshold_regresses_with_the_factor() {
         let run = table(&[("a", 250.0)]);
         let base = table(&[("a", 100.0)]);
-        let (v, regressed) = bench_verdicts(&run, &base, 1.5);
+        let (v, regressed) = bench_verdicts(&run, &base, 1.5, &[]);
         assert_eq!(v, vec![("a".to_string(), Verdict::Regressed(2.5))]);
         assert_eq!(regressed, 1);
     }
@@ -5721,15 +5907,15 @@ mod tests {
         // Same 2x slowdown: a regression at 1.5, ok at 3.0.
         let run = table(&[("a", 200.0)]);
         let base = table(&[("a", 100.0)]);
-        assert_eq!(bench_verdicts(&run, &base, 1.5).1, 1);
-        assert_eq!(bench_verdicts(&run, &base, 3.0).1, 0);
+        assert_eq!(bench_verdicts(&run, &base, 1.5, &[]).1, 1);
+        assert_eq!(bench_verdicts(&run, &base, 3.0, &[]).1, 0);
     }
 
     #[test]
     fn a_run_bench_absent_from_baseline_is_new() {
         let run = table(&[("a", 100.0)]);
         let base = table(&[]);
-        let (v, regressed) = bench_verdicts(&run, &base, 1.5);
+        let (v, regressed) = bench_verdicts(&run, &base, 1.5, &[]);
         assert_eq!(v, vec![("a".to_string(), Verdict::New)]);
         assert_eq!(regressed, 0);
     }
@@ -5738,7 +5924,7 @@ mod tests {
     fn a_baseline_bench_absent_from_run_is_missing_from_run() {
         let run = table(&[("a", 100.0)]);
         let base = table(&[("a", 100.0), ("ghost", 100.0)]);
-        let (v, _) = bench_verdicts(&run, &base, 1.5);
+        let (v, _) = bench_verdicts(&run, &base, 1.5, &[]);
         assert_eq!(
             v,
             vec![
@@ -5752,7 +5938,7 @@ mod tests {
     fn run_verdicts_preserve_declaration_order() {
         let run = table(&[("c", 100.0), ("a", 100.0), ("b", 100.0)]);
         let base = table(&[("a", 100.0), ("b", 100.0), ("c", 100.0)]);
-        let (v, _) = bench_verdicts(&run, &base, 1.5);
+        let (v, _) = bench_verdicts(&run, &base, 1.5, &[]);
         let names: Vec<&str> = v.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["c", "a", "b"]);
     }
@@ -5761,7 +5947,7 @@ mod tests {
     fn zero_baseline_min_is_new_not_a_division_by_zero() {
         let run = table(&[("a", 100.0)]);
         let base = table(&[("a", 0.0)]);
-        let (v, regressed) = bench_verdicts(&run, &base, 1.5);
+        let (v, regressed) = bench_verdicts(&run, &base, 1.5, &[]);
         assert_eq!(v, vec![("a".to_string(), Verdict::New)]);
         assert_eq!(regressed, 0);
     }

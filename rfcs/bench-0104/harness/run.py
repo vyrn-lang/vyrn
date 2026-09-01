@@ -135,13 +135,17 @@ PROGRAMS: list[Program] = [
         "knucleotide",
         "knucleotide-1000.expected",
         1000,
-        4_000,
-        stdin_fasta_n=4_000,
+        400_000,
+        stdin_fasta_n=400_000,
         note=(
             "N is the fasta n; k-nucleotide reads the 5n-base THREE sequence. "
-            "This N is three orders of magnitude below the others because "
-            "`Map` lookup is a linear scan, so the program is quadratic in the "
-            "number of distinct keys — see RFC-0104's M2 section"
+            "This N was three orders of magnitude below the others while `Map` "
+            "lookup was a linear scan and the program was quadratic in the "
+            "number of distinct keys. RFC-0116 gave every map a hash index and "
+            "RFC-0117 made the key an integer, so the reason is gone — and the "
+            "old N left the row at 7 ms, close enough to the process floor "
+            "that its cells drifted by multiples between runs while every "
+            "other row held inside five per cent"
         ),
     ),
     Program("pidigits", "pidigits-27.expected", 27, 12000, n_let="order"),
@@ -157,21 +161,29 @@ PROGRAMS: list[Program] = [
         "mandelbrot",
         "mandelbrot-200.expected",
         200,
-        200,
+        4000,
         n_let="order",
-        note="writes a binary PBM through `writeStdout` (RFC-0111)",
+        note=(
+            "writes a binary PBM through `writeStdout` (RFC-0111). The fixture "
+            "stays at 200 because a PBM states its own dimensions; the timing N "
+            "is 4,000 so the row lands in the same 0.5-5 s band as the others "
+            "rather than at the process floor, where a scheduler hiccup is a "
+            "multiple"
+        ),
     ),
     Program(
         "regexredux",
         "regexredux-1000.expected",
         1000,
-        1000,
-        stdin_fasta_n=1000,
+        100_000,
+        stdin_fasta_n=100_000,
         note=(
             "N is the fasta n. The engine is `std/regex`, written in Vyrn and "
-            "run by all three backends (RFC-0112); the timing N stays at the "
-            "fixture size because a Thompson walk in the interpreter is the "
-            "slowest leg by a wide margin"
+            "run by all three backends (RFC-0112). The timing N is 100,000 — a "
+            "hundred times the fixture — so the row lands in the same 0.5-5 s "
+            "band as the others; at the fixture size the whole run was 17 ms, "
+            "close enough to the process floor that a scheduler hiccup showed "
+            "up as a multiple"
         ),
     ),
 ]
