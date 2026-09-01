@@ -229,6 +229,8 @@ fn progNames() -> Array<Array<String>> {
         ["revcomp", "reverse-complement", "revcomp"],
         ["knucleotide", "k-nucleotide", "knucleotide"],
         ["pidigits", "pidigits", "pidigits"],
+        ["mandelbrot", "mandelbrot", "mandelbrot"],
+        ["regexredux", "regex-redux", "regexredux"],
     ]
 }
 
@@ -1203,8 +1205,10 @@ export fn causeRows() -> Array<Array<String>> {
         ["binarytrees", "at the edge of the band", "1.11x Rust, just past the +/-10% line, and the memory story is closed: the native leg peaks at 37.3 MB against Rust's 37.6, where before RFC-0114 it leaked 2,093. The row's own finding is elsewhere: node wins it outright, and the Vyrn wasm leg — which runs no optimizer — beats the native one twice over, because the wasm backend carries its own segregated free list and the native leg calls the platform malloc.", "the platform malloc"],
         ["fasta", "a deviation", "What a 60-byte output line costs: a fresh array grown from empty by doubling, then stringFromBytes, which is a byte-at-a-time UTF-8 validation over bytes known to be ASCII plus a second allocation — because this program still prints a String per line. The byte sink it lacked exists now (writeStdout, RFC-0111); the remaining gap is a program that has not moved onto it, not a missing feature.", "the price of one output line"],
         ["revcomp", "a deviation", "Three per-byte passes and a per-line assembly tax: about 120 M push operations for 40 M bases, each a bounds and capacity check into an array grown by doubling, where Rust's output loop allocates nothing at all. The widest row left, and the whole set's spread in one program: the C leg itself pays 4.3x Rust for reading line-at-a-time with fgets.", "per-byte passes and a per-line tax"],
-        ["knucleotide", "ahead of the band", "Outside the band on the wrong side to be a deviation: 0.81x Rust and 0.67x C. The row that measured 211x C when Map lookup was a linear scan now runs a rolling Int64 key into a hashed Map<Int64, Int64> (RFC-0116 gave every map a hash index and tally; RFC-0117 made the key an integer), and at 6.5 ms the whole row sits near the process floor.", "a rolling key into a hashed map"],
+        ["knucleotide", "ahead of the band", "Outside the band on the wrong side to be a deviation: 0.57x Rust and 0.40x C, and 13 MB against the C entry's 262. The row that measured 211x C when Map lookup was a linear scan now runs a rolling Int64 key into a hashed Map<Int64, Int64> (RFC-0116 gave every map a hash index and tally; RFC-0117 made the key an integer). Its N moved a hundredfold with this dataset: the small one was chosen for the quadratic scan and outlived it, leaving the row at 7 ms where a scheduler hiccup was a multiple.", "a rolling key into a hashed map"],
         ["pidigits", "inside the noise band", "Not a deviation. 1.00x Rust — the arithmetic is Int64 all the way down in every leg.", "no deviation to explain"],
+        ["mandelbrot", "inside the noise band", "Not a deviation, and the tightest row in the set: every contestant lands within 15% of C, the native leg at 1.05x and even the wasm leg at 1.15x — where wasm pays 2x to 14x everywhere else. The kernel is scalar float arithmetic with no allocation and no output shaping, so what is left is the arithmetic itself. The row exists because RFC-0111's writeStdout takes packed bytes as they are: a P4 bitmap's pixels are arbitrary bytes and a String cannot carry them.", "the bitmap RFC-0111 unblocked"],
+        ["regexredux", "a deviation", "The widest gap in the set, 15.2x C, and the one row whose contestants do not run comparable engines — which is the first thing to say about it. The Vyrn leg is std/regex, a general Thompson NFA walk written in Vyrn and compiled like any other program (RFC-0112). The C and Rust legs carry the smallest matcher that covers this corpus: a first-branch scanner, no backtracking, every starred class excluding its own delimiter, perhaps sixty lines. Node runs V8's engine. So the row measures a general NFA against a special-cased scan, and 15x is the expected shape of that comparison rather than a finding about the language. What it does measure honestly is that std/regex has had no optimizer pass at all: no literal prefilter, no DFA cache, one allocation per step set.", "a general NFA against a special scan"],
     ]
 }
 
@@ -1438,13 +1442,15 @@ export fn ceilingRows() -> Array<Array<String>> {
         ["reverse-complement", "25,000,000 bases", "0.549 s", "0.44 s"],
         ["k-nucleotide", "25,000,000", "2.568 s", "3.58 s"],
         ["pidigits", "10,000", "0.714 s", "0.74 s"],
+        ["mandelbrot", "16,000", "0.95 s", "1.64 s"],
+        ["regex-redux", "25,627,472-byte FASTA", "0.78 s", "0.97 s"],
     ]
 }
 
 /// Where the ceiling was read, and when. A reference number without a fetch date
 /// is a number that has already drifted.
 export fn ceilingFetched() -> String {
-    return "benchmarksgame-team.pages.debian.net, read 2026-08-19"
+    return "benchmarksgame-team.pages.debian.net, read 2026-08-19; mandelbrot and regex-redux read 2026-09-01"
 }
 
 // ---------------------------------------------------------------------------
@@ -1464,7 +1470,7 @@ test "the record still has the shape this reader cuts" {
     // the indentation of `json.dump(indent=2)`. If that changes, every number on
     // two pages becomes an em-dash, and this is where it fails instead.
     loadCells()
-    assertEq(cells.length, 40)
+    assertEq(cells.length, 50)
     for c in cells {
         assert(c.us1 > 0)
         assert(c.us2 > 0)
@@ -1481,30 +1487,30 @@ test "the medians are the ones the published record holds" {
     // fail, which is what makes a repointed reader visible instead of silent.
     // The earlier datasets' tables are not this one — the 2026-08-19 rows
     // predate RFC-0114's releases and RFC-0116/0117's hashed map.
-    assertEq(msOf(medianUs("nbody", "c")), "890 ms")
+    assertEq(msOf(medianUs("nbody", "c")), "897 ms")
     assertEq(msOf(medianUs("nbody", "rust")), "659 ms")
-    assertEq(msOf(medianUs("nbody", "js")), "1147 ms")
-    assertEq(msOf(medianUs("nbody", "vyrn-native")), "894 ms")
-    assertEq(msOf(medianUs("nbody", "vyrn-wasm")), "12091 ms")
-    assertEq(msOf(medianUs("knucleotide", "c")), "10.2 ms")
-    assertEq(msOf(medianUs("knucleotide", "rust")), "9.5 ms")
-    assertEq(msOf(medianUs("knucleotide", "vyrn-native")), "7.1 ms")
-    assertEq(msOf(medianUs("binarytrees", "js")), "432 ms")
-    assertEq(msOf(medianUs("pidigits", "vyrn-native")), "1325 ms")
+    assertEq(msOf(medianUs("nbody", "js")), "1125 ms")
+    assertEq(msOf(medianUs("nbody", "vyrn-native")), "882 ms")
+    assertEq(msOf(medianUs("nbody", "vyrn-wasm")), "12511 ms")
+    assertEq(msOf(medianUs("knucleotide", "c")), "313 ms")
+    assertEq(msOf(medianUs("knucleotide", "rust")), "221 ms")
+    assertEq(msOf(medianUs("knucleotide", "vyrn-native")), "125 ms")
+    assertEq(msOf(medianUs("binarytrees", "js")), "436 ms")
+    assertEq(msOf(medianUs("pidigits", "vyrn-native")), "1330 ms")
 }
 
 test "the normalized figures are the ones the record computes" {
-    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "c")), "1.00x")
-    assertEq(ratioText(ratioOf("nbody", "vyrn-wasm", "c")), "13.58x")
-    assertEq(ratioText(ratioOf("spectralnorm", "vyrn-native", "c")), "1.03x")
-    assertEq(ratioText(ratioOf("binarytrees", "js", "c")), "0.50x")
-    assertEq(ratioText(ratioOf("revcomp", "rust", "c")), "0.21x")
-    assertEq(ratioText(ratioOf("knucleotide", "vyrn-native", "c")), "0.70x")
-    assertEq(ratioText(ratioOf("knucleotide", "vyrn-wasm", "c")), "1.79x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "c")), "0.98x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-wasm", "c")), "13.95x")
+    assertEq(ratioText(ratioOf("spectralnorm", "vyrn-native", "c")), "1.04x")
+    assertEq(ratioText(ratioOf("binarytrees", "js", "c")), "0.47x")
+    assertEq(ratioText(ratioOf("revcomp", "rust", "c")), "0.22x")
+    assertEq(ratioText(ratioOf("knucleotide", "vyrn-native", "c")), "0.40x")
+    assertEq(ratioText(ratioOf("knucleotide", "vyrn-wasm", "c")), "0.96x")
     // And against Rust, which is the comparison the gate was written about.
-    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "rust")), "1.36x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "rust")), "1.34x")
     assertEq(ratioText(ratioOf("pidigits", "vyrn-native", "rust")), "1.00x")
-    assertEq(ratioText(ratioOf("revcomp", "vyrn-native", "rust")), "8.39x")
+    assertEq(ratioText(ratioOf("revcomp", "vyrn-native", "rust")), "7.83x")
 }
 
 test "the log scale puts a doubling on every ring" {
@@ -1557,11 +1563,12 @@ test "no cell is ever silently truncated" {
         }
     }
     assertEq(altClamped, altMarked)
-    // Two against Rust, both wasm legs — the backend that runs no optimizer:
-    // nbody at 18.17x and reverse-complement at 16.85x.
+    // Two against Rust: nbody's wasm leg at 18.97x — the backend that runs no
+    // optimizer — and regex-redux's native leg at 16.77x, which is std/regex's
+    // general NFA against a special-cased scan and says so in its own panel.
     assertEq(altClamped, 2)
     // And no reading falls off the INNER end: the fastest cell in the set is
-    // 0.23x, still comfortably outside the centre.
+    // 0.22x, still comfortably outside the centre.
     for line in radarLines() {
         for p in programs() {
             assert(radiusOf(ratioOf(p.key, line.key, "c")) > 0)
@@ -1604,12 +1611,12 @@ test "no axis name runs off the sheet" {
 
 test "every axis carries a name, a spoke and a wedge to select it" {
     let spokes = radarSpokes()
-    assertEq(spokes.length, 8)
+    assertEq(spokes.length, 10)
     assertEq(spokes[0].key, "nbody")
     assertEq(spokes[0].anchor, "middle")
     assertEq(spokes[2].anchor, "start")
-    assertEq(spokes[4].anchor, "middle")
-    assertEq(spokes[6].anchor, "end")
+    assertEq(spokes[5].anchor, "middle")
+    assertEq(spokes[7].anchor, "end")
     for s in spokes {
         assert(s.name.byteLength > 0)
         assert(split(s.wedge, " ").length == 4)
@@ -1618,17 +1625,17 @@ test "every axis carries a name, a spoke and a wedge to select it" {
 
 test "the table is the whole dataset and the panels are the same numbers" {
     let rows = tableRows()
-    assertEq(rows.length, 8)
+    assertEq(rows.length, 10)
     for r in rows {
         assertEq(r.cells.length, 5)
     }
     assertEq(rows[0].n, "25,000,000")
-    assertEq(rows[0].cells[0].ms, "890 ms")
-    assertEq(rows[0].cells[3].vsC, "1.00x")
-    assertEq(rows[0].cells[3].vsRust, "1.36x")
+    assertEq(rows[0].cells[0].ms, "897 ms")
+    assertEq(rows[0].cells[3].vsC, "0.98x")
+    assertEq(rows[0].cells[3].vsRust, "1.34x")
     let panels = axisPanels()
-    assertEq(panels.length, 8)
-    for i in [0, 1, 2, 3, 4, 5, 6, 7] {
+    assertEq(panels.length, 10)
+    for i in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] {
         assertEq(panels[i].key, rows[i].key)
         assertEq(panels[i].cells[0].ms, rows[i].cells[0].ms)
         assert(panels[i].cause.byteLength > 40)
@@ -1688,8 +1695,8 @@ test "the caption names the hardware and the toolchain, and never the machine" {
     // The floor is published beside the medians, because a whole-process time
     // that hides its floor cannot be checked.
     assertEq(floorRows().length, 5)
-    assertEq(floorRows()[0].ms, "4.4 ms")
-    assertEq(floorRows()[4].ms, "13.7 ms")
+    assertEq(floorRows()[0].ms, "4.7 ms")
+    assertEq(floorRows()[4].ms, "13.4 ms")
 }
 
 test "both runs are published, and the drift is computed from them" {
@@ -1701,12 +1708,13 @@ test "both runs are published, and the drift is computed from them" {
         assert(r.drift.byteLength > 2)
         assertEq(split(r.runs, "  ").length, 10)
     }
-    // The gate's own sentence, computed: thirty-seven of forty cells moved by
-    // less than five per cent between the two runs, and the worst mover is
-    // the near-floor cell — k-nucleotide's 7.1 ms native leg.
-    assertEq(steadyCells(), "37 of 40")
-    assertEq(detailRows("binarytrees")[1].drift, "+0.07%")
-    assert(has(worstDrift(), "knucleotide / vyrn-native"))
+    // The gate's own sentence, computed: forty-four of fifty cells moved by
+    // less than five per cent between the two runs, and no cell moved by
+    // as much as ten — which is what sizing every row above the process
+    // floor bought (see the N notes in the harness's program table).
+    assertEq(steadyCells(), "44 of 50")
+    assertEq(detailRows("binarytrees")[1].drift, "-3.38%")
+    assert(has(worstDrift(), "binarytrees / c"))
 }
 
 test "the published ceiling is dated, and never mixed with the measured rows" {
@@ -1715,7 +1723,7 @@ test "the published ceiling is dated, and never mixed with the measured rows" {
     // and on no chart — which is what "recorded, not vendored"
     // means in RFC-0104's third principle.
     let rows = ceilingRows()
-    assertEq(rows.length, 8)
+    assertEq(rows.length, 10)
     for row in rows {
         assertEq(row.length, 4)
         assert(row[1].byteLength > 0)
@@ -1729,9 +1737,9 @@ test "the published ceiling is dated, and never mixed with the measured rows" {
 test "every program links to the game's own page for it" {
     // The link is the amendment's own gate: a benchmark that names a program
     // and does not point at the original is asking to be taken on trust. All
-    // eight were fetched and resolved on the date `ceilingFetched` states.
+    // ten were fetched and resolved on the dates `ceilingFetched` states.
     let progs = programs()
-    assertEq(progs.length, 8)
+    assertEq(progs.length, 10)
     for p in progs {
         assert(has(p.game, "https://benchmarksgame-team.pages.debian.net/benchmarksgame/performance/"))
         assert(has(p.game, ".html"))
