@@ -165,9 +165,14 @@ fn escapeSrc(s: String) -> String {
 
 /// How many lines `s` holds — the textarea's own height, so a block is as
 /// tall as its program and not a viewport fraction.
+///
+/// A file ends with a newline, and that last one opens no line a reader
+/// sees: counting it gave every runnable block one blank row under its
+/// closing brace.
 fn lineCount(s: String) -> Int64 {
+    let body = trimEnd(s)
     let mut n = 1
-    for b in bytes(s) {
+    for b in bytes(body) {
         if b == '\n' {
             n = n + 1
         }
@@ -864,24 +869,50 @@ fn noDemo() -> Demo {
 /// the export by name, the link carries that block — a program this site
 /// compiled and ran while the page was built.
 export fn demoFor(module: String, name: String) -> Demo {
+    for d in demosFor(module, name) {
+        return d
+    }
+    return noDemo()
+}
+
+/// How many programs in the book import `name` from `std/<module>`.
+///
+/// `std/strings`' `joinWith` is imported by nineteen of them, which is the
+/// case this count exists for: a page that links ONE of nineteen should say
+/// so rather than presenting an arbitrary chapter as the place.
+export fn guideUseCount(module: String, name: String) -> Int64 {
+    return demosFor(module, name).length
+}
+
+/// Every program that imports `name`, IN THE BOOK'S OWN ORDER.
+///
+/// `guideBlocks()` is the directory, so it is alphabetical: `arrays` before
+/// `getting-started` before `text`. Reading the first of those and calling it
+/// "used in the guide" pointed a reader at whichever chapter happened to sort
+/// first, which for `joinWith` is not the chapter where anyone meets it. The
+/// order here is `chapters()` — the order the book is read in — so the first
+/// element is the first place a reader encounters the export.
+fn demosFor(module: String, name: String) -> Array<Demo> {
     let wanted = module + ":" + name
-    for id in guideBlocks() {
-        for pair in guideImports(id) {
-            if pair == wanted && guidePlayable(id) {
-                let slug = chapterOfBlock(id)
-                if slug.byteLength > 0 {
-                    return Demo {
-                        block: id.copy(),
-                        chapter: slug.copy(),
-                        section: sectionOfBlock(id),
-                        title: chapterOf(slug).title,
-                        play: playHref(guideSrc(id)),
+    let mut out: Array<Demo> = []
+    for c in chapters() {
+        for id in guideBlocks() {
+            if chapterOfBlock(id) == c.slug && guidePlayable(id) {
+                for pair in guideImports(id) {
+                    if pair == wanted {
+                        out.push(Demo {
+                                block: id.copy(),
+                                chapter: c.slug.copy(),
+                                section: sectionOfBlock(id),
+                                title: c.title.copy(),
+                                play: playHref(guideSrc(id)),
+                            })
                     }
                 }
             }
         }
     }
-    return noDemo()
+    return out
 }
 
 // ---------------------------------------------------------------------------

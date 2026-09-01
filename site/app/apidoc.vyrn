@@ -296,9 +296,20 @@ gen fn blockHtml(kind: String, rows: Array<String>) -> String {
         return ""
     }
     if kind == "code" {
+        // A code line the author ALSO wrapped in backticks is marked
+        // twice. A backtick is not Vyrn, so `lex` gives up on the line
+        // and the whole block comes out grey with two stray marks in it,
+        // which is how `opt` read on the `std/args` page. Undoing the
+        // second marking here costs nothing and colours the block.
         let mut body = ""
         for row in rows {
-            body = body + row + "\n"
+            let mut inner = trimEnd(row)
+            let core = trim(inner)
+            if core.byteLength > 1 && startsWith(core, "`") && endsWith(core, "`") {
+                let lead = substring(inner, 0, inner.byteLength - core.byteLength)
+                inner = lead + substring(core, 1, core.byteLength - 1)
+            }
+            body = body + inner + "\n"
         }
         let src = trimEnd(body) + "\n"
         return "<pre class=\"doccode\">" + highlightSrc(src, lex(src)) + "</pre>"
