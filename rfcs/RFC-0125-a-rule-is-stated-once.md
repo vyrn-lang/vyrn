@@ -1,9 +1,11 @@
 # RFC-0125 — a rule is stated once
 
-- **Status:** Draft (2026-09-02). M0 is a repository setting. M1 is in
-  progress: its write half landed the same day and is measured in §3 M1 —
-  11.8 s to 3.7 s under Cranelift, 18.5 s to 3.0 s under V8, against 0.88 s
-  native — and its read half is what remains before M1's gate is decided.
+- **Status:** Draft (2026-09-02). M0 is a repository setting. M1's write
+  half, header hoist and trap site all landed the same day and are measured
+  in §3 M1: nbody 11.8 s to 1.98 s under Cranelift against 0.88 s native,
+  output byte-identical throughout. M1's gate — Cranelift within twice
+  native on nbody, spectral-norm and fannkuch — is NOT met (2.25x, 2.9x,
+  1.8x), and the route decision of §2.5 is recorded as open, not taken.
   Nothing after M1 has landed.
 - **Depends on:** RFC-0101 (the lowered form — this RFC is what its own ledger
   says it could not become), RFC-0077 (the direct wasm backend — the emitter
@@ -411,6 +413,64 @@ checks with their address arithmetic and one `sqrtF` call. Which of those
 Cranelift pays for is the next measurement, and it is cheap to take: a
 throwaway build with the check emitted as nothing puts a ceiling on what
 check elimination can be worth before any of it is designed.
+
+**The ceilings, measured, and what they said.** Three throwaway builds, each
+a one-line refusal behind an environment variable, none of them kept:
+
+| nbody under Cranelift | time |
+|---|---|
+| as landed above | 3.56 s |
+| depth accounting emitted as nothing | 3.31 s |
+| bounds checks emitted as nothing | 1.71 s |
+| checks kept, the trap CALL replaced by `unreachable` | 1.71 s |
+| both accounting and checks gone | 1.34 s |
+
+The last two rows are the finding. Twenty-nine compare-and-branch pairs cost
+nothing measurable; twenty-nine call sites inside them cost 1.85 s. The engine
+was paying for the call, not the check, so no check elimination was designed.
+Instead every check now parks its message and its index in two locals and
+branches to one trap site per function, where the one call stands. Every
+message, every exit code and every trap is byte-identical: parity 41 passed.
+
+**The defect this found.** The first cut of the trap site put the call after
+the function block and returned from inside it. The frame's own note on
+`Frame::ins` says a body must never emit `return`, because the shadow-stack
+pop is appended at finalization and a `return` jumps past it. It did: 48
+bytes leaked per call, nbody and fannkuch died with a wasm memory fault
+after enough calls, spectral-norm survived by making fewer. The trap block
+now nests inside the function block, so a `return` still branches out over
+the trap call into the epilogue, and only a failed check can reach the call.
+Reported here because the rule was written down and was still broken once.
+
+**M1's number, on the three programs the gate names.** Native is the
+text-IR path through clang at `-O2`; the wasm is the same program, output
+byte-identical to native in every cell.
+
+| program | native | wasmtime 46, Cranelift | V8 | Cranelift ÷ native |
+|---|---|---|---|---|
+| nbody, 25 M steps | 0.88 s | 1.98 s | 1.60 s | 2.25x |
+| spectral-norm, n = 5500 | 0.98 s | 2.83 s | 1.29 s | 2.9x |
+| fannkuch, n = 11 | 2.0 s | 3.58 s | 7.1 s | 1.8x |
+
+Where the day started, nbody's cell read 11.8 s. Two more throwaway
+measurements bound what is left. With depth accounting emitted as nothing,
+nbody is 1.70 s and inside the gate; spectral-norm moves from 2.83 to 2.75
+s and fannkuch not at all. With Cranelift's inliner on (`-C inlining=y`),
+spectral-norm does not move and nbody gets slower. So spectral-norm's
+remaining 2.8x is not the checks, not the depth counter, and not the calls
+the engine can inline, and it is not explained by anything measured here.
+
+**The gate is not met.** Cranelift is outside twice native on two of three.
+One of our own items would bring nbody inside: emit the depth check only in
+functions that are part of a recursive cycle, which is a call-graph question
+the frontend can answer. spectral-norm needs a profile before anything is
+designed for it. Per §2.5 that means the two-emitter fallback is the route
+unless the read half continues; that is a decision about how much of M1 to
+spend before choosing, and it is recorded here as open rather than taken.
+
+What the record's wasm column will show when the harness is re-run is a
+separate step of this milestone and has not been done: these numbers are the
+probe's, on the probe's machine, at the record's N.
 
 ### M2 — the named core and the linear judgment, beside the pipeline
 
