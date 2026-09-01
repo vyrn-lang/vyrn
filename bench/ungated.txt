@@ -1,0 +1,28 @@
+# Benches the regression gate RECORDS but does not FAIL on, one name per line.
+#
+# A gate turned off without a written reason is a gate nobody can turn back on,
+# so every entry here carries its evidence. The bar for an entry is not "this
+# row is noisy" — every row is noisy — it is "the spread this row shows across
+# the runner fleet is larger than any regression the gate could catch in it",
+# which makes a threshold arithmetic on unlike quantities.
+#
+# This list is policy and lives beside the numbers rather than inside them:
+# `bench/baseline.json` is replaced verbatim from a CI artifact whenever it is
+# reseeded, so a flag hand-added there would be wiped by the next seeding.
+#
+# Everything else is gated, and the whole-run host correction (the median of
+# every matched bench, printed as `host scale`) is what keeps the threshold
+# meaningful for them: a runner that is uniformly slower moves every row
+# together and cancels, while a real regression lands in one row and survives.
+
+# Measured on three CI hosts and one local machine, on identical code: 67 us,
+# 183 us and 2,643 us per thousand copies on ubuntu-latest, 68 us locally — a
+# 39x spread between runners carrying the same binary. The emitted code is one
+# `__vyrn_malloc`, one `llvm.memcpy` of 8,000 bytes and one `__vyrn_free` per
+# iteration, with no per-element walk, so what varies is the host's page and
+# allocator behaviour for an 8 KB alloc-copy-free cycle and not anything this
+# compiler decides. It flagged at x27.44 before the exit-residue rounds that
+# emptied the leak column, at x18.01 and x14.39 after, and at x1.00 on the
+# hosts that seeded the two baselines it has had — the same code each time.
+# A threshold wide enough to admit 39x would gate nothing at all.
+copy of a 1000-element Array<Int64>, 1000 times
