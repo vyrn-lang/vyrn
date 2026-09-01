@@ -95,6 +95,78 @@ fn a_field_write_into_a_heapless_element_is_one_store_and_no_copy() {
     );
 }
 
+/// How many header reads `body` holds. An `Array<T>` header is a pointer and
+/// two `i64`s, so the pointer half of every header read is one `i32.load` from
+/// an address in a local — `local.get` then `i32.load`. The call-depth counter
+/// is read with `i32.load` too, from a constant address (`i32.const` then
+/// `i32.load`), on every entry and exit, and is not counted.
+fn word_loads(body: &str) -> usize {
+    let lines: Vec<&str> = body.lines().map(str::trim).collect();
+    lines
+        .windows(2)
+        .filter(|w| w[0].starts_with("local.get") && w[1].starts_with("i32.load"))
+        .count()
+}
+
+/// The read half of RFC-0125 M1: a `while` that indexes a binding it never
+/// moves reads the header once, before the loop, not once per access.
+#[test]
+fn a_loop_that_only_reads_an_array_loads_its_header_once() {
+    let body = wat_func_containing(
+        "fn sum(xs: Array<Int64>, n: Int64) -> Int64 {\n\
+         let mut i = 0\n\
+         let mut s = 1234567\n\
+         while i < n {\n\
+         s = s + xs[i] + xs[i]\n\
+         i = i + 1\n\
+         }\n\
+         return s\n\
+         }\n\
+         fn main() -> Int64 {\n\
+         let xs: Array<Int64> = [1, 2, 3]\n\
+         print(sum(xs, 3))\n\
+         return 0\n\
+         }\n",
+        MARK,
+    );
+    // Two accesses per iteration once reloaded the pointer twice; hoisted,
+    // the pointer is read once for the whole loop.
+    assert_eq!(
+        word_loads(&body),
+        1,
+        "the header is reloaded inside the loop:\n{body}"
+    );
+}
+
+/// The refusal: a loop that grows the array it indexes moves the header, so
+/// nothing is hoisted and every access reloads it.
+#[test]
+fn a_loop_that_grows_the_array_it_indexes_reloads_the_header() {
+    let body = wat_func_containing(
+        "fn grow(n: Int64) -> Int64 {\n\
+         let mut xs: Array<Int64> = [1234567]\n\
+         let mut i = 0\n\
+         let mut s = 0\n\
+         while i < n {\n\
+         xs.push(i)\n\
+         s = s + xs[i] + xs[i]\n\
+         i = i + 1\n\
+         }\n\
+         return s\n\
+         }\n\
+         fn main() -> Int64 {\n\
+         print(grow(3))\n\
+         return 0\n\
+         }\n",
+        MARK,
+    );
+    assert!(
+        word_loads(&body) >= 2,
+        "a loop that pushes into the array must reload its header at each \
+         access:\n{body}"
+    );
+}
+
 #[test]
 fn a_field_write_into_an_element_that_holds_heap_keeps_the_idiom() {
     let body = wat_func_containing(

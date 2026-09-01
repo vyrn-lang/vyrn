@@ -1614,6 +1614,9 @@ struct Fn_<'a, 'p> {
     /// (RFC-0101 M4): a `break` reads the steps the placement put at that
     /// `break`, so no engine derives an index into its own frames any more.
     loops: Vec<(u32, u32, u32)>,
+    /// RFC-0125 M1: the header parts of every binding a `while` hoisted
+    /// (`hoist_walks`), keyed by name, live for the loop's extent.
+    walks: HashMap<String, Walk>,
     ret: Repr,
     ret_ty: Type,
     /// The wasm local holding the hidden aggregate-return pointer, if any.
@@ -1700,6 +1703,7 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         scope: Vec::new(),
         depth: 0,
         loops: Vec::new(),
+        walks: HashMap::new(),
         ret: Repr::Unit,
         ret_ty: Type::Unit,
         dest: None,
@@ -1807,6 +1811,7 @@ fn lower_body(
         scope: Vec::new(),
         depth: 0,
         loops: Vec::new(),
+        walks: HashMap::new(),
         ret: sig.ret.clone(),
         // As DECLARED, not resolved. A function returning `Age` has to validate
         // at its `return`, and `Age` resolved to `Int64` is the flow that does
@@ -2485,8 +2490,13 @@ impl<'p> Fn_<'_, 'p> {
             let _ = self.cx.plan.store_owned_at(st as *const Stmt as usize);
         }
         // From here on, code is emitted: the same prefix as `Stmt::IndexSet`.
-        place.addr(b, 0);
-        let w = self.walk(b, &ty, *line)?;
+        let w = match self.walks.get(parent.as_str()).cloned() {
+            Some(w) => w,
+            None => {
+                place.addr(b, 0);
+                self.walk(b, &ty, *line)?
+            }
+        };
         self.expr_as(m, b, &args[1], &Type::Int)?;
         let i = b.local(ValType::I64);
         b.ins(&Instruction::LocalSet(i));
@@ -2512,6 +2522,76 @@ impl<'p> Fn_<'_, 'p> {
             Repr::Unit => unreachable!("refused above"),
         }
         Ok(Some(3))
+    }
+
+    /// The hoisted header of `e`, when `e` names a binding a `while` hoisted.
+    fn cached_walk(&self, e: &Expr) -> Option<Walk> {
+        match e {
+            Expr::Var { name, .. } => self.walks.get(name.as_str()).cloned(),
+            _ => None,
+        }
+    }
+
+    /// The read half of RFC-0125 M1. Before a `while`, take apart every
+    /// array, fixed array, small array or String this frame binds that the
+    /// loop indexes and never moves, so the body reads `data` and `len` from
+    /// locals instead of reloading the header at every access.
+    ///
+    /// `walk` reloads because a store into linear memory may alias the
+    /// header's slot and no wasm engine can prove it does not — nbody's inner
+    /// loop paid 29 reloads per iteration for that (§1.4). The proof is made
+    /// here instead, on the syntax, and it is conservative: `header_invariant`
+    /// refuses the hoist on anything that could move the header. Module state
+    /// is never hoisted, because a callee can grow it. An element store moves
+    /// no header, so `a[i] = v` and the field-store idiom keep the hoist.
+    ///
+    /// Returns what each hoisted name held before, for `While` to put back.
+    fn hoist_walks(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        cond: &Expr,
+        body: &Block,
+        line: usize,
+    ) -> Result<Vec<(String, Option<Walk>)>, String> {
+        let mut out = Vec::new();
+        for name in indexed_names(cond, body) {
+            if self.walks.contains_key(&name) {
+                continue;
+            }
+            let Some((place, ty)) = self
+                .scope
+                .iter()
+                .rev()
+                .find(|(n, _, _)| *n == name)
+                .map(|(_, p, t)| (*p, t.clone()))
+            else {
+                continue;
+            };
+            if matches!(place, Place::Static(_)) {
+                continue;
+            }
+            if !matches!(
+                self.cx.resolve(&ty),
+                Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..) | Type::Str
+            ) {
+                continue;
+            }
+            if !header_invariant(cond, body, &name) {
+                continue;
+            }
+            self.expr(
+                m,
+                b,
+                &Expr::Var {
+                    name: name.clone(),
+                    line,
+                },
+            )?;
+            let w = self.walk(b, &ty, line)?;
+            out.push((name.clone(), self.walks.insert(name, w)));
+        }
+        Ok(out)
     }
 
     /// Emit the releases the lowering PLACED at one exit — RFC-0101 M4.
@@ -3887,6 +3967,9 @@ impl<'p> Fn_<'_, 'p> {
                 self.emit_releases(m, b, ExitKind::Scrutinee, key)?;
             }
             Stmt::While { cond, body, line } => {
+                // RFC-0125 M1: the headers this loop reads and never moves,
+                // taken apart once, before the loop.
+                let hoisted = self.hoist_walks(m, b, cond, body, *line)?;
                 // `block { loop { br_if 1 (!cond); body; br 0 } }` — the block is
                 // where `break` goes, the loop is where `continue` goes, and
                 // neither needs a relooper because both are in the AST already.
@@ -3909,6 +3992,16 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::End);
                 self.depth -= 1;
                 b.ins(&Instruction::End);
+                for (name, prev) in hoisted {
+                    match prev {
+                        Some(w) => {
+                            self.walks.insert(name, w);
+                        }
+                        None => {
+                            self.walks.remove(&name);
+                        }
+                    }
+                }
             }
             Stmt::ForIn {
                 var,
@@ -4088,9 +4181,14 @@ impl<'p> Fn_<'_, 'p> {
                     let _ = self.cx.plan.store_owned_at(s as *const Stmt as usize);
                     return self.block(m, b, blk);
                 }
-                place
-                    .addr(b, 0)
-                    .ok_or_else(|| gap("an element assignment to a non-array", *line))?;
+                // RFC-0125 M1: a header a `while` hoisted is already in
+                // locals, and an element store moves no header.
+                let cached = self.walks.get(name.as_str()).cloned();
+                if cached.is_none() {
+                    place
+                        .addr(b, 0)
+                        .ok_or_else(|| gap("an element assignment to a non-array", *line))?;
+                }
                 // `m[k] = v` (RFC-0028) inserts or updates; it is not a bounded
                 // element store and has no index to check.
                 if let Type::Map(key_t, val) = self.cx.resolve(&ty) {
@@ -4111,7 +4209,10 @@ impl<'p> Fn_<'_, 'p> {
                     return self
                         .map_set(m, b, hdr, &l, index, value, &key_t, &val, drop_old, *line);
                 }
-                let w = self.walk(b, &ty, *line)?;
+                let w = match cached {
+                    Some(w) => w,
+                    None => self.walk(b, &ty, *line)?,
+                };
                 if w.byte {
                     return unsupported("an element assignment into a String", *line);
                 }
@@ -9595,6 +9696,7 @@ impl<'p> Fn_<'_, 'p> {
 /// them out of an SSA aggregate, and the reason a `for` that grows its own array
 /// keeps walking the buffer it started on rather than following a `realloc` to a
 /// new one. Both backends agree with the interpreter, which iterates a copy.
+#[derive(Clone)]
 struct Walk {
     /// `i32` local: the address of element 0.
     data: u32,
@@ -11110,16 +11212,26 @@ impl<'p> Fn_<'_, 'p> {
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
-        let aty = self.expr(m, b, &args[0])?;
-        // A Map is not walkable and must not be reached as one: its length is
-        // field 2 where an Array's is field 1, so a `Walk` over it would index off
-        // the value pointer (M2c's refusal, now a branch instead).
-        if let Type::Map(_, val) = self.cx.resolve(&aty) {
-            let mty = self.cx.resolve(&aty);
-            return self.map_at(m, b, &mty, &val, &args[1], line);
-        }
-        let string = self.cx.resolve(&aty) == Type::Str;
-        let w = self.walk(b, &aty, line)?;
+        // RFC-0125 M1: a header a `while` hoisted is already in locals.
+        let (w, string) = match self.cached_walk(&args[0]) {
+            Some(w) => {
+                let string = w.byte;
+                (w, string)
+            }
+            None => {
+                let aty = self.expr(m, b, &args[0])?;
+                // A Map is not walkable and must not be reached as one: its
+                // length is field 2 where an Array's is field 1, so a `Walk`
+                // over it would index off the value pointer (M2c's refusal,
+                // now a branch instead).
+                if let Type::Map(_, val) = self.cx.resolve(&aty) {
+                    let mty = self.cx.resolve(&aty);
+                    return self.map_at(m, b, &mty, &val, &args[1], line);
+                }
+                let string = self.cx.resolve(&aty) == Type::Str;
+                (self.walk(b, &aty, line)?, string)
+            }
+        };
         self.expr_as(m, b, &args[1], &Type::Int)?;
         let idx = b.local(ValType::I64);
         b.ins(&Instruction::LocalSet(idx));
@@ -14486,6 +14598,225 @@ fn load_of(ll: &str, off: u32, signed: bool) -> Instruction<'static> {
         "<4 x float>" | "<4 x i32>" | "<2 x double>" | "<2 x i64>" => Instruction::V128Load(m(0)),
         _ => Instruction::I32Load8U(m(0)),
     }
+}
+
+/// Every expression under `e`, pre-order, `e` itself first, and every
+/// statement under it through `fs`. A lambda is a leaf: its body is lowered as
+/// its own function, so nothing inside it is this loop's to hoist, and
+/// `header_invariant` refuses a lambda that so much as mentions the binding.
+fn each_expr(e: &Expr, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt)) {
+    fe(e);
+    match e {
+        Expr::Int(_)
+        | Expr::Byte(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::Str(_)
+        | Expr::Var { .. }
+        | Expr::Lambda { .. } => {}
+        Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
+            each_expr(expr, fe, fs)
+        }
+        Expr::Consume { place, .. } => each_expr(place, fe, fs),
+        Expr::Binary { lhs, rhs, .. } => {
+            each_expr(lhs, fe, fs);
+            each_expr(rhs, fe, fs);
+        }
+        Expr::Call { args, .. }
+        | Expr::Spawn { args, .. }
+        | Expr::TryConstruct { args, .. }
+        | Expr::ArrayLit { elems: args, .. } => {
+            for a in args {
+                each_expr(a, fe, fs);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                each_expr(k, fe, fs);
+                each_expr(v, fe, fs);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for (_, v) in fields {
+                each_expr(v, fe, fs);
+            }
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            each_expr(scrutinee, fe, fs);
+            for a in arms {
+                match &a.body {
+                    ArmBody::Expr(e) => each_expr(e, fe, fs),
+                    ArmBody::Block(blk) => each_block(blk, fe, fs),
+                }
+            }
+        }
+        Expr::IfExpr {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            each_expr(cond, fe, fs);
+            each_expr(then_branch, fe, fs);
+            if let Some(e) = else_branch {
+                each_expr(e, fe, fs);
+            }
+        }
+    }
+}
+
+fn each_block(blk: &Block, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt)) {
+    for s in &blk.stmts {
+        each_stmt(s, fe, fs);
+    }
+}
+
+fn each_stmt(s: &Stmt, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt)) {
+    fs(s);
+    match s {
+        Stmt::Let { value, .. }
+        | Stmt::Assign { value, .. }
+        | Stmt::SetField { value, .. }
+        | Stmt::Expr(value) => each_expr(value, fe, fs),
+        Stmt::IndexSet { index, value, .. } => {
+            each_expr(index, fe, fs);
+            each_expr(value, fe, fs);
+        }
+        Stmt::Return { value, .. } => {
+            if let Some(v) = value {
+                each_expr(v, fe, fs);
+            }
+        }
+        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop { .. } => {}
+        Stmt::If {
+            cond,
+            then_block,
+            else_block,
+            ..
+        } => {
+            each_expr(cond, fe, fs);
+            each_block(then_block, fe, fs);
+            if let Some(blk) = else_block {
+                each_block(blk, fe, fs);
+            }
+        }
+        Stmt::IfLet {
+            scrutinee,
+            then_block,
+            else_block,
+            ..
+        } => {
+            each_expr(scrutinee, fe, fs);
+            each_block(then_block, fe, fs);
+            if let Some(blk) = else_block {
+                each_block(blk, fe, fs);
+            }
+        }
+        Stmt::While { cond, body, .. } => {
+            each_expr(cond, fe, fs);
+            each_block(body, fe, fs);
+        }
+        Stmt::ForIn { iter, body, .. } => {
+            each_expr(iter, fe, fs);
+            each_block(body, fe, fs);
+        }
+        Stmt::Region { body, .. } => each_block(body, fe, fs),
+    }
+}
+
+fn is_var(e: &Expr, name: &str) -> bool {
+    matches!(e, Expr::Var { name: n, .. } if n == name)
+}
+
+/// Does `p` bind `name`? A binder inside the loop would shadow the hoisted
+/// binding, so the hoist is refused.
+fn binds(p: &Pattern, name: &str) -> bool {
+    match p {
+        Pattern::Some(n)
+        | Pattern::Ok(n)
+        | Pattern::Err(n)
+        | Pattern::Success(n)
+        | Pattern::Failure(n) => n == name,
+        Pattern::Variant(_, ns) => ns.iter().any(|n| n == name),
+        Pattern::None | Pattern::Other => false,
+    }
+}
+
+/// The names a `while` indexes: every `@at(name, _)` in its condition or body.
+fn indexed_names(cond: &Expr, body: &Block) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut fe = |e: &Expr| {
+        if let Expr::Call { name, args, .. } = e {
+            if name == "@at" && args.len() == 2 {
+                if let Expr::Var { name: n, .. } = &args[0] {
+                    names.push(n.clone());
+                }
+            }
+        }
+    };
+    each_expr(cond, &mut fe, &mut |_| {});
+    each_block(body, &mut fe, &mut |_| {});
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Can nothing in `cond` or `body` move `name`'s header? Conservative, on the
+/// syntax alone: an assignment to it, a `let` or a pattern that shadows it, a
+/// `drop`, a `consume`, a `for .. in consume` over it, the binding handed
+/// whole to any call other than `@at` (a `push` is an assignment; a `pop` and
+/// a user method are such calls), or a lambda that mentions it — each refuses.
+/// An `@at` read, a `.length` read and an element store are the only things
+/// the hoist admits.
+fn header_invariant(cond: &Expr, body: &Block, name: &str) -> bool {
+    let ok = std::cell::Cell::new(true);
+    let mut fe = |e: &Expr| {
+        if !ok.get() {
+            return;
+        }
+        let fine = match e {
+            Expr::Call { name: f, args, .. }
+                if f == "@at" && args.len() == 2 && is_var(&args[0], name) =>
+            {
+                true
+            }
+            Expr::Call { args, .. }
+            | Expr::Spawn { args, .. }
+            | Expr::TryConstruct { args, .. } => !args.iter().any(|a| {
+                is_var(a, name) || matches!(a, Expr::Consume { place, .. } if is_var(place, name))
+            }),
+            Expr::Consume { place, .. } => !is_var(place, name),
+            Expr::Lambda { .. } => !vyrn_frontend::movecheck::mentions_place(e, name),
+            Expr::Match { arms, .. } => !arms.iter().any(|a| binds(&a.pattern, name)),
+            _ => true,
+        };
+        ok.set(fine);
+    };
+    let mut fs = |s: &Stmt| {
+        if !ok.get() {
+            return;
+        }
+        let fine = match s {
+            Stmt::Let { name: n, .. }
+            | Stmt::Assign { name: n, .. }
+            | Stmt::SetField { name: n, .. }
+            | Stmt::Drop { name: n, .. } => n != name,
+            Stmt::IfLet { pattern, .. } => !binds(pattern, name),
+            Stmt::ForIn {
+                var,
+                iter,
+                consuming,
+                ..
+            } => var != name && !(*consuming && is_var(iter, name)),
+            _ => true,
+        };
+        ok.set(fine);
+    };
+    each_expr(cond, &mut fe, &mut fs);
+    each_block(body, &mut fe, &mut fs);
+    ok.get()
 }
 
 fn store_of(ll: &str) -> Instruction<'static> {

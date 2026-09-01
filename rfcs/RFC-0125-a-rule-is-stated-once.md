@@ -386,6 +386,32 @@ of a loop the binding is not written in, and one check per binding-and-index
 pair. The gate is not decided until that half is measured. The prediction
 stands as written: within twice native, or the fallback.
 
+**The header half of the read side landed the same day.** `Fn_::hoist_walks`
+takes the header of every array, fixed array, small array or String a `while`
+indexes apart once, before the loop, when `header_invariant` can show on the
+syntax that nothing in the loop moves it: no assignment to the binding, no
+shadowing `let` or pattern, no `drop`, no `consume`, the binding never handed
+whole to a call other than `@at` (a `push` is an assignment, a `pop` is such
+a call), and no lambda that mentions it. Module state is never hoisted. An
+element store and the field-store idiom keep the hoist, because neither moves
+a header. `at`, `Stmt::IndexSet` and `elem_field_store` read the hoisted
+locals. Two tests in `fieldstore.rs` pin it: one header read for a loop that
+only reads, a reload per access for a loop that pushes. Parity: 41 passed.
+
+| nbody, 25 M steps | write half | + header hoist |
+|---|---|---|
+| header reloads per inner iteration of `advance` | 32 | 5, none in the loop |
+| wasmtime 46, Cranelift | 3.74 s | 3.56 s |
+| node 24, V8 | 2.97 s | 2.16 s |
+| native, LLVM `-O2` | 0.88 s | 0.88 s |
+
+V8 took the reloads' cost and moved; Cranelift barely did, so the reloads were
+not what Cranelift was paying for. What is left per iteration is 29 bounds
+checks with their address arithmetic and one `sqrtF` call. Which of those
+Cranelift pays for is the next measurement, and it is cheap to take: a
+throwaway build with the check emitted as nothing puts a ceiling on what
+check elimination can be worth before any of it is designed.
+
 ### M2 — the named core and the linear judgment, beside the pipeline
 
 The lowering emits the core of §2.1. The kernel makes the linear judgment. In
