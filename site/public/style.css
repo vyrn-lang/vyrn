@@ -1645,10 +1645,20 @@ pre.code::-webkit-scrollbar { display: none; }
 
 /* THE BOOK'S ONE CROSS-LANGUAGE FIGURE (RFC-0106 M5): the same task, four
  * times, in a grid that stays readable at a chapter's column width. */
-.specrow { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: var(--s2); margin: var(--s2) 0 var(--s3); }
-.specplate { margin: 0; border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; background: color-mix(in oklab, var(--plate) 35%, transparent); }
-.specplate figcaption { padding: 7px var(--s2); border-bottom: 1px solid var(--hair); font: var(--t-key)/1 var(--mono); color: var(--muted); }
-.specplate pre.code { margin: 0; border: 0; background: none; font-size: var(--t-code-s); max-height: 22em; overflow: auto; }
+/* THE CROSS-LANGUAGE PLATE IS TABBED, and the grid it briefly was is why:
+ * four panes side by side gave each language about 375px at 1440px to hold
+ * lines 461px long, so every comparison clipped mid-word. One language at a
+ * time takes the whole measure. `.tabs` above styles the strip; the panes
+ * stack in one grid cell so the plate keeps the tallest pane's height and
+ * does not jump as a reader switches. */
+.specplate { margin: var(--s2) 0 var(--s3); border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; background: color-mix(in oklab, var(--plate) 35%, transparent); }
+.specplate .tabs { margin-top: 0; padding: 0 var(--s1); }
+.specplate .tabs button { padding: 7px var(--s2); font: var(--t-key)/1 var(--mono); color: var(--muted); }
+.specplate .tabs button[aria-selected="true"] { color: var(--accent); }
+.specplate pre.code { margin: 0; border: 0; background: none; font-size: var(--t-code-s); max-height: 26em; overflow: auto; }
+/* Without script no tab is selected and every pane is shown, so the four read
+ * as a stack instead of collapsing to nothing. */
+.specplate .panes > div + div { border-top: 1px solid var(--hair); }
 
 /* A RATIO WITHOUT A DIRECTION IS A NUMBER NOBODY CAN READ (user). The table's
  * cells say which way they point, and the legend over it says what the tones
@@ -1676,6 +1686,12 @@ pre.code::-webkit-scrollbar { display: none; }
  * (user). */
 .minutecap { border-top: 0; padding-left: 0; padding-right: 0; margin-top: var(--s3); }
 
+/* The api page's "Used in the guide" caption is a SENTENCE, not a layout, and
+ * it used to carry `class="cap demo"` — which picked up the two-column grid
+ * below by accident, so the em dash between its two links and the full stop
+ * after them each became a grid cell and rendered as a stray mark on its own
+ * row. One name, two unrelated meanings; the caption is `.usedin` now. */
+.cap.usedin { display: block; }
 .demo { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: var(--s4); align-items: start; }
 /* `.demo` collapses at 900px, in the block further down that also drops the
  * list's right rule. A second rule here at 860px was DEAD: every width it
@@ -2334,11 +2350,21 @@ pre.doccode::-webkit-scrollbar { display: none; }
 /* COMPACT, AND RUNNABLE WHERE IT STANDS (user): a guide block is the hero
  * editor's anatomy at reading density — smaller code, tighter head, the
  * built output in the run pane until a live run replaces it. */
+/* A RUNNABLE BLOCK IS MOSTLY ITS PROGRAM. Measured on /guide/values at
+ * 1440px the plate stood 779px: 61px of head, 533px of code, 131px of output
+ * and a 36px caption row saying what the head already named. The code's own
+ * face and leading are left alone — they are the thing being read — and the
+ * chrome around it gives back about 90px a block. */
 .plate.block { margin-top: var(--s4); }
-.plate.block .plate-head { min-height: 36px; }
-.plate.block .plate-head .btn { min-height: 28px; padding: 4px 10px; }
+.plate.block .plate-head { min-height: 32px; padding: 6px var(--s2); }
+.plate.block .plate-head .btn { min-height: 26px; padding: 3px 10px; }
+/* The filename IS the link to the file (the caption row it replaces is gone),
+ * so it takes a link's underline on hover and the head's quiet colour at
+ * rest. */
+.plate.block .plate-head .src { color: var(--muted); text-decoration: none; }
+.plate.block .plate-head .src:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
 .plate.block pre.code { padding: 12px var(--s2); font-size: var(--t-code-s); line-height: 1.5; }
-.plate.block .out { margin: 0; border-left: 0; border-top: 1px solid var(--hair); max-height: 16em; overflow: auto; scrollbar-width: none; }
+.plate.block .out { margin: 0; padding: 8px var(--s2); border-left: 0; border-top: 1px solid var(--hair); max-height: 16em; overflow: auto; scrollbar-width: none; }
 .plate.block .out::-webkit-scrollbar { display: none; }
 .plate.block .cap a { color: inherit; }
 /* The runnable half: the editor is flush in the plate, sized by its own rows
