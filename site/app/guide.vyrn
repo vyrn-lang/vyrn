@@ -183,18 +183,21 @@ fn lineCount(s: String) -> Int64 {
 /// plate.
 fn blockHtml(b: Block) -> String {
     if b.play.byteLength == 0 {
+        // THE NAME IS THE LINK. Every block carried a caption row under it
+        // reading "The file in the repository" — a bordered row, 36px of
+        // chrome, to say what the filename in the head already names. The
+        // head's filename is the link now and the row goes.
         let mut plain = "<div class=\"plate block\">"
-        plain = plain + "<div class=\"plate-head\"><span class=\"eyebrow\">site/guide/" + b.id + ".vyrn</span></div>"
+        plain = plain + "<div class=\"plate-head\"><a class=\"eyebrow src\" href=\"" + b.source + "\">site/guide/" + b.id + ".vyrn</a></div>"
         plain = plain + "<pre class=\"code\">" + joinWith(b.lines, "\n") + "</pre>"
         if b.output.byteLength > 0 {
             plain = plain + "<div class=\"out\">" + terminalHtml(b.output) + "</div>"
         }
-        plain = plain + "<p class=\"cap\">"
-        return plain + "<a href=\"" + b.source + "\">The file in the repository</a>.</p></div>"
+        return plain + "</div>"
     }
     let src = blockSource(b.id)
     let mut out = "<div class=\"plate block play\" data-widget=\"playhero\">"
-    out = out + "<div class=\"plate-head\"><span class=\"eyebrow\">site/guide/" + b.id + ".vyrn</span>"
+    out = out + "<div class=\"plate-head\"><a class=\"eyebrow src\" href=\"" + b.source + "\">site/guide/" + b.id + ".vyrn</a>"
     out = out + "<span class=\"spacer\"></span><span class=\"eyebrow\" data-play-status>Built</span>"
     out = out + "<button type=\"button\" class=\"btn jsonly\" data-play-reset>Reset</button>"
     out = out + "<button type=\"button\" class=\"btn primary jsonly\" data-play-run title=\"Ctrl+Enter\">Run</button></div>"
@@ -207,8 +210,7 @@ fn blockHtml(b: Block) -> String {
     } else {
         out = out + "<div class=\"out\" data-play-out aria-live=\"polite\"><span class=\"dim\">Prints nothing.</span></div>"
     }
-    out = out + "<p class=\"cap\">"
-    return out + "<a href=\"" + b.source + "\">The file in the repository</a>.</p></div>"
+    return out + "</div>"
 }
 
 /// The eyebrow above a section: its number in the chapter, and what the chapter

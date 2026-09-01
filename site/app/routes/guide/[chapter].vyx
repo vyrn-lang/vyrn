@@ -106,11 +106,22 @@ fn claudeHref(slug: String, title: String) -> String {
         <!-- The same task in four languages, for the chapter a reader opens
              before they have written any Vyrn. The three others are QUOTED —
              this site runs Vyrn and does not pretend to run the rest. -->
-        <div class="specrow" v-if="s.specs.byteLength > 0">
-            <figure class="specplate" v-for="n in specSet(s.specs)" :key="n.id">
-                <figcaption>{{ n.label }}</figcaption>
-                <pre class="code" v-html="n.html"></pre>
-            </figure>
+        <!-- TABS, not a grid of four. Retiring `/compare` moved these plates
+             here as a two-column grid, and at 1440px that gives each language
+             375px to hold lines 461px long: every comparison was clipped
+             mid-word, which is the one thing a comparison may not be. One
+             language at a time takes the whole measure and the lines fit.
+             `tabsWidget` pairs the ids, roves the tabindex and answers the
+             arrow keys; without script the panes stack and all four read. -->
+        <div class="plate specplate" data-tabs v-if="s.specs.byteLength > 0">
+            <div class="tabs">
+                <button type="button" v-for="n in specSet(s.specs)" :key="n.id" :data-tab="n.id">{{ n.label }}</button>
+            </div>
+            <div class="panes">
+                <div v-for="n in specSet(s.specs)" :key="n.id" :data-pane="n.id">
+                    <pre class="code" v-html="n.html"></pre>
+                </div>
+            </div>
         </div>
     </section>
 

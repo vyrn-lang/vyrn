@@ -233,7 +233,7 @@ fn claudeHref(m: String) -> String {
             <pre class="code" v-html="e.sig"></pre>
             <div class="prose" v-html="e.prose"></div>
             <p class="cap"><a :href="apiSourceLine(data.name, e.line)">std/{{ data.name }}.vyrn, line {{ e.line }}</a></p>
-            <p class="cap demo" v-if="hasDemo(data.name, e)">Used in the guide: <a :href="demoChapterHref(data.name, e)">{{ demoOf(data.name, e).title }}</a> — <a :href="demoOf(data.name, e).play">run it in the playground</a>.</p>
+            <p class="cap usedin" v-if="hasDemo(data.name, e)">Used in the guide: <a :href="demoChapterHref(data.name, e)">{{ demoOf(data.name, e).title }}</a> — <a :href="demoOf(data.name, e).play">run it in the playground</a>.</p>
         </article>
     </section>
 
