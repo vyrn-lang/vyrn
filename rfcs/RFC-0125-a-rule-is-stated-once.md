@@ -472,6 +472,25 @@ What the record's wasm column will show when the harness is re-run is a
 separate step of this milestone and has not been done: these numbers are the
 probe's, on the probe's machine, at the record's N.
 
+**spectral-norm, read rather than profiled.** wasmtime's guest profiler
+writes nothing for a program that leaves through `proc_exit`, which every
+Vyrn program does, so the wat was read instead. The inner loop of
+`multiplyAv` is already tight: one call to `cell`, one bounds check that
+branches, a load, a multiply, an add. `cell` itself is a fifty-instruction
+function: the depth accounting, the two guards an `i64.div_s` by a runtime
+value carries (zero, and MIN by -1), the division, a convert and an `f64.div`.
+It is called 121 million times. LLVM inlines it to nothing and folds the
+divide by two into a shift. Cranelift calls it, and under wasmtime's calling
+convention every value live across a call — the sum, both indices, the
+bound, the vector's data and length — is spilled and reloaded around each
+one. That is the 1.85 s, and `-C inlining=y` did not take it because the
+engine's inliner declined a function of that size. So spectral-norm's gap is
+the cost an external optimizer needs inlining to remove, Cranelift's inliner
+does not remove it, and the route that would (wasm2c and clang) is the
+release path §2.5 already names and has not been run on this machine, because
+wasm2c is not installed. That measurement is what the route decision waits
+on now, not more emitter work.
+
 ### M2 — the named core and the linear judgment, beside the pipeline
 
 The lowering emits the core of §2.1. The kernel makes the linear judgment. In
