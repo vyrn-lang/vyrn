@@ -165,9 +165,14 @@ fn escapeSrc(s: String) -> String {
 
 /// How many lines `s` holds — the textarea's own height, so a block is as
 /// tall as its program and not a viewport fraction.
+///
+/// A file ends with a newline, and that last one opens no line a reader
+/// sees: counting it gave every runnable block one blank row under its
+/// closing brace.
 fn lineCount(s: String) -> Int64 {
+    let body = trimEnd(s)
     let mut n = 1
-    for b in bytes(s) {
+    for b in bytes(body) {
         if b == '\n' {
             n = n + 1
         }

@@ -68,7 +68,7 @@ export fn flag(a: Args, name: String) -> Bool {
 /// The FIRST occurrence wins; later duplicates are ignored (deterministic).
 ///
 /// There is no `intOpt` — `parse` composes:
-///   `match opt(a, "--port") { Some(s) => parse(s), None => None }`.
+///   match opt(a, "--port") { Some(s) => parse(s), None => None }
 export fn opt(a: Args, name: String) -> Option<String> {
     let end = terminatorAt(a)
     let mut i = 0

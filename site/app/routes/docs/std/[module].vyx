@@ -109,6 +109,12 @@ fn demoOf(m: String, e: ApiEntry) -> Demo {
 
 /// Whether that program exists. A `v-if` here is the whole "skip where it is not
 /// derivable" rule: no program, no link, and nothing invented to fill the gap.
+/// The tooltip on the guide icon. A helper because a `.vyx` binding is Vyrn
+/// and a single quote there is a byte literal, not a string.
+fn usedInLabel(title: String) -> String {
+    return "Used in the guide: " + title
+}
+
 fn hasDemo(m: String, e: ApiEntry) -> Bool {
     return demoFor(m, e.name).block.byteLength > 0
 }
@@ -232,8 +238,19 @@ fn claudeHref(m: String) -> String {
             <h2><a :href="hrefFor(e.name)">{{ e.name }}</a> <span class="kindpill">{{ e.kind }}</span></h2>
             <pre class="code" v-html="e.sig"></pre>
             <div class="prose" v-html="e.prose"></div>
-            <p class="cap"><a :href="apiSourceLine(data.name, e.line)">std/{{ data.name }}.vyrn, line {{ e.line }}</a></p>
-            <p class="cap usedin" v-if="hasDemo(data.name, e)">Used in the guide: <a :href="demoChapterHref(data.name, e)">{{ demoOf(data.name, e).title }}</a> — <a :href="demoOf(data.name, e).play">run it in the playground</a>.</p>
+            <!-- ONE FOOTER ROW PER ENTRY. The guide link and the playground
+                 link were a sentence of their own under every function — a
+                 second full-width paragraph, on a page that carries dozens of
+                 entries, to say two things a reader either wants or scrolls
+                 past. They are icon links on the source row now, and they
+                 keep their words in the tooltip and for a screen reader. -->
+            <p class="cap entrycap">
+                <a :href="apiSourceLine(data.name, e.line)">std/{{ data.name }}.vyrn, line {{ e.line }}</a>
+                <span class="entryacts" v-if="hasDemo(data.name, e)">
+                    <a class="iconlink" :href="demoChapterHref(data.name, e)" :title="usedInLabel(demoOf(data.name, e).title)"><Icon name="bytesize:book"/><span class="sr-only">Used in the guide: {{ demoOf(data.name, e).title }}</span></a>
+                    <a class="iconlink" :href="demoOf(data.name, e).play" title="Run it in the playground"><Icon name="bytesize:play"/><span class="sr-only">Run it in the playground</span></a>
+                </span>
+            </p>
         </article>
     </section>
 

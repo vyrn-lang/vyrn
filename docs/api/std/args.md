@@ -66,7 +66,7 @@ The value of option `name`, or `None`. Two forms, before the `--` terminator:
 The FIRST occurrence wins; later duplicates are ignored (deterministic).
 
 There is no `intOpt` — `parse` composes:
-  `match opt(a, "--port") { Some(s) => parse(s), None => None }`.
+  match opt(a, "--port") { Some(s) => parse(s), None => None }
 
 ## positionals
 

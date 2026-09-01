@@ -1652,9 +1652,32 @@ pre.code::-webkit-scrollbar { display: none; }
  * stack in one grid cell so the plate keeps the tallest pane's height and
  * does not jump as a reader switches. */
 .specplate { margin: var(--s2) 0 var(--s3); border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; background: color-mix(in oklab, var(--plate) 35%, transparent); }
-.specplate .tabs { margin-top: 0; padding: 0 var(--s1); }
-.specplate .tabs button { padding: 7px var(--s2); font: var(--t-key)/1 var(--mono); color: var(--muted); }
-.specplate .tabs button[aria-selected="true"] { color: var(--accent); }
+/* THE STRIP IS A HEAD, NOT A ROW OF BUTTONS. `button, .btn` puts a wash and a
+ * border on every control, so restoring these tabs put four grey boxes on top
+ * of the plate — chrome the rest of the site does not wear. The strip reads
+ * like `.plate-head` instead: no ground of its own — the plate's — a hairline
+ * under it, quiet mono labels, and the accent kept for the selected one. A
+ * wash was tried here and read WRONG: `--ink` is the light end in the dark
+ * theme, so mixing it lifted the strip above the code it heads instead of
+ * settling under it. */
+.specplate .tabs {
+  margin-top: 0;
+  padding: 0 var(--s1);
+  background: none;
+  border-bottom: 1px solid var(--hair);
+}
+.specplate .tabs button {
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 9px var(--s2);
+  font: var(--t-key)/1 var(--mono);
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+.specplate .tabs button:hover { color: var(--ink); background: none; }
+.specplate .tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); background: none; }
 .specplate pre.code { margin: 0; border: 0; background: none; font-size: var(--t-code-s); max-height: 26em; overflow: auto; }
 /* Without script no tab is selected and every pane is shown, so the four read
  * as a stack instead of collapsing to nothing. */
@@ -1691,7 +1714,27 @@ pre.code::-webkit-scrollbar { display: none; }
  * below by accident, so the em dash between its two links and the full stop
  * after them each became a grid cell and rendered as a stray mark on its own
  * row. One name, two unrelated meanings; the caption is `.usedin` now. */
-.cap.usedin { display: block; }
+/* THE ENTRY FOOTER IS ONE ROW. The source line sits left, the guide and
+ * playground links sit right as icons — they were a full-width sentence
+ * apiece under every function, which on a page of forty entries is forty
+ * paragraphs of chrome. The words survive in the tooltip and for a screen
+ * reader; a caption is a sentence and never a layout, which is what the
+ * `.demo` collision taught. */
+.cap.entrycap { display: flex; align-items: center; gap: var(--s2); }
+.entryacts { margin-left: auto; display: inline-flex; align-items: center; gap: 2px; }
+.iconlink {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  color: var(--muted);
+  text-decoration: none;
+  transition: color 160ms var(--expo), background 160ms var(--expo);
+}
+.iconlink:hover { color: var(--accent); background: color-mix(in oklab, var(--accent) 10%, transparent); }
+.iconlink svg { width: 15px; height: 15px; }
 .demo { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: var(--s4); align-items: start; }
 /* `.demo` collapses at 900px, in the block further down that also drops the
  * list's right rule. A second rule here at 860px was DEAD: every width it
@@ -2364,7 +2407,13 @@ pre.doccode::-webkit-scrollbar { display: none; }
 .plate.block .plate-head .src { color: var(--muted); text-decoration: none; }
 .plate.block .plate-head .src:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
 .plate.block pre.code { padding: 12px var(--s2); font-size: var(--t-code-s); line-height: 1.5; }
-.plate.block .out { margin: 0; padding: 8px var(--s2); border-left: 0; border-top: 1px solid var(--hair); max-height: 16em; overflow: auto; scrollbar-width: none; }
+/* A ONE-LINE PROGRAM PRINTS ONE LINE. `.play .out` reserves `min-height: 6em`
+ * for the PLAYGROUND, where the pane is a fixed frame a reader types into and
+ * a box that resized on every run would jump. A guide block is not that: it
+ * prints what it printed, and the floor gave "hello, world" a 78px box with
+ * 47px of nothing under it. Two lines' worth of floor keeps the box from
+ * collapsing to a sliver when a program prints nothing at all. */
+.plate.block .out { margin: 0; padding: 8px var(--s2); border-left: 0; border-top: 1px solid var(--hair); min-height: 2.4em; max-height: 16em; overflow: auto; scrollbar-width: none; }
 .plate.block .out::-webkit-scrollbar { display: none; }
 .plate.block .cap a { color: inherit; }
 /* The runnable half: the editor is flush in the plate, sized by its own rows
