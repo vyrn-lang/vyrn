@@ -630,6 +630,69 @@ why neither column reaches §1.4's 0.88 s, taken on an idle one):
 The head moves inside the noise of the base every round, which is §7.3's
 prediction; no grow or class profile was needed. Depth 10 prints the fixture.
 
+**Results, step 3, first slice (2026-09-02, branch `track-j`).** The native
+route of RFC-0125 §2.5 exists as a flag, `vyrn build --route wasm2c`, and the
+text-IR route is untouched and still the default: this slice puts the numbers
+on the table and deletes nothing, so the route decision of §8's question 3 is
+taken with them and not before. What the flag does: `direct::compile` writes
+`<out>.wasm`; `wasm2c -n prog` writes `<out>.w2c.c` and `.h`; the driver writes
+`<out>.host.c` from `vyrn-codegen/src/wasi_host.c` (574 lines, the host RFC-0125
+§2.4 names) and runs clang over the two, wabt's `wasm-rt-impl.c` and
+`wasm-rt-mem-impl.c`, with `add_native_clang_flags` (`-O2 -ffp-contract=off
+-march=x86-64-v2`), `-I` for wabt's `include/`, `share/wabt/wasm2c/` and simde,
+and `-DWASM_RT_MAX_CALL_STACK_DEPTH=4000`: wasm-rt counts call depth on Windows,
+at 500 frames by default, and Vyrn's own counter traps at 1,000 user frames
+with the runtime's frames uncounted, so the host's limit sits above the
+program's and `error: call depth exceeds 1000` stays the program's wording. The
+host: the fifteen `wasi_snapshot_preview1` imports of §2.2, each doing what
+`wasmrun.rs` does — the same errno per failure, `.` and `..` first in
+`fd_readdir`, `MOVEFILE_REPLACE_EXISTING` for `path_rename`, `BCryptGenRandom`
+for `random_get`, binary stdio so the bytes are the guest's. A trap the program
+did not spell (a wasm `unreachable`, a memory access past the guard page)
+prints `error: <wasm-rt's wording>` and exits 1, the shape `wasmrun.rs` gives;
+the `wasmtime` CLI prints its own backtrace and exits 3 for the same trap, so
+that one line is the one import behaviour that is not byte-identical, and no
+corpus program reaches it. Tools: `toolchain::wasm2c_from` and `simde_from`
+follow `wasmtime_from`'s order without the pin step (`$VYRN_WASM2C` and
+`$VYRN_SIMDE`, then `tools/wabt-*/bin/wasm2c` and `tools/simde/`), the version
+is what `wasm2c --version` prints, and a missing tool is the refusal "could
+not find `wasm2c`. Unpack a wabt release under tools/ (tools/wabt-<version>/
+bin/wasm2c) or set VYRN_WASM2C to the executable." CI has no wabt, so
+`tests/route.rs` is ignored by default and skips without the tools, under the
+same `VYRN_REQUIRE_TOOLS` rule as every other tool; nothing required changed.
+The route gate: 171 corpus programs byte-identical against the `wasmtime` CLI
+on raw stdout, stderr and exit code, 33 skipped (the parity loop's refusals and
+the one host-only program; `listdir.vyrn` is checked, because the route runs
+the wasm). Gates: fmt, workspace, the seven `vyrn-cli` suites, parity 41 of 41,
+residue, `wasmhash` manifest unchanged (the route reads the wasm and emits
+nothing), `doc --verify`; the cross-engine generator gate fails on the same five
+programs at base and head. Timing, `rfcs/bench-0104/harness/run.py` with the
+new `vyrn-wasm2c` contestant, RFC-0104's timing sizes, medians of five, one
+machine, contestants interleaved per program:
+
+| program | native (text-IR) | wasmtime 46 | wasm2c + clang | wasm2c ÷ native | make, native / wasm / wasm2c |
+|---|---|---|---|---|---|
+| nbody, 25 M steps | 0.95 s | 2.23 s | 1.54 s | 1.6x | 0.63 s / 0.03 s / 1.47 s |
+| spectral-norm, n = 5500 | 1.06 s | 4.13 s | 2.31 s | 2.2x | 0.66 s / 0.03 s / 1.54 s |
+| fannkuch, n = 11 | 2.09 s | 3.98 s | 3.93 s | 1.9x | 0.62 s / 0.02 s / 1.48 s |
+| binary-trees, depth 18 | 2.14 s | 1.05 s | 1.07 s | 0.5x | 0.66 s / 0.03 s / 1.43 s |
+| fasta, n = 5 M | 0.80 s | 0.91 s | 0.76 s | 0.9x | 1.22 s / 0.03 s / 1.77 s |
+| reverse-complement, fasta n = 4 M | 0.38 s | 1.05 s | 0.97 s | 2.6x | 0.66 s / 0.03 s / 1.49 s |
+| k-nucleotide, fasta n = 400 k | 0.13 s | 0.29 s | 0.20 s | 1.5x | 0.80 s / 0.04 s / 1.63 s |
+
+The spread of the wasmtime column on spectral-norm was 47 percent (the
+others under 15), so read that cell against RFC-0125 M1's 2.83 s. The three
+kernels hold M1's shape within the run's noise. binary-trees under the route
+is at its wasmtime time, which is what M4's gate asks of the native route
+once the route is this one, and it is the allocator of step 2 running natively
+for the first time. reverse-complement's 2.6x and k-nucleotide's 1.5x are the
+string and map families the route now runs from the wasm, before steps 4 and
+5 rewrite them; they are the next numbers to move, and the route is not what
+moves them. Not in this slice: an `extern fn` (RFC-0012) has no stub on the
+route, so `externdemo.vyrn` fails at link rather than trapping with the
+canonical message as the text-IR route's stub does; the shim's audit, poison
+and the residue ratchet's re-basing, which wait for the decision.
+
 ---
 
 ## 7. What it costs
