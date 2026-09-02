@@ -39,6 +39,12 @@
 /// copies of reserve, remove and keys are deleted; the C shim's stay until
 /// step 3 moves the native route.
 ///
+/// **Step 6, the arrays:** `arrPush`, `arrReserve`, `arrAppend`, `arrCopyFrom`
+/// and `arrClear`, the first runtime functions the array family has had in
+/// any engine (PLAN-0125-runtime §1.1), over `malloc`, `free`, `copy` and the
+/// header loads, told the element stride by the emitter. The wasm emitter's
+/// five inline copies are deleted; `a[i]` stays at its site.
+///
 /// **Call depth.** The emitter does not count these frames against the
 /// language's call-depth budget: the hand-emitted copies had no prologue, and
 /// a program that traps at the limit must trap where it did.
@@ -754,4 +760,141 @@ export fn mapKeysCopy(kind: Int32, klen: Int32, hdr: Int32) -> Int32 {
     let buf = malloc(Int64(UInt32((len + 1) * ks)))
     copy(buf, Int32(load32(hdr)), len * ks)
     return buf
+}
+
+// ---------------------------------------------------------------------------
+// Step 6, the arrays (PLAN-0125-runtime §6)
+// ---------------------------------------------------------------------------
+//
+// An `Array<T>` is a 24-byte triple, `{ data, len, cap }`: the buffer's
+// address at 0, the two counts at 8 and 16 as `Int64`. The element type never
+// reaches this module. The emitter passes the element STRIDE, its size rounded
+// to its alignment, the way the maps are passed a layout, and an element is
+// `stride` bytes at `data + i * stride`; the checker holds `append` and
+// `copyFrom` to heapless element types (RFC-0115), so bytes are the elements
+// and one `copy` moves any number of them. Alignment is not passed: `malloc`
+// returns eight-aligned blocks and no element aligns coarser.
+//
+// Every function here reads the triple at `src` and writes the rebuilt triple
+// at `dst`, never through `src`: `xs.push(v)` is `xs = @push(xs, v)` and the
+// write-back is the assignment, so a `push` yields a NEW value (the emitter's
+// rule since RFC-0011). `dst` and `src` may be one address; each function
+// reads all of `src` before it stores.
+//
+// The growth is `malloc`, `copy`, `free`, the shape the hand-emitted copies
+// grew in and what `realloc` does for the native route (M6). `push` doubles,
+// from four; `append` grows to the larger of the doubled capacity and the
+// need; `reserve` and `copyFrom` grow to exactly the need, since a caller
+// that reserves has said how many it wants. Products are taken in 64 bits and
+// `malloc` judges them: doubling a 2 GiB buffer traps with `out of memory`
+// rather than wrapping (`tests/parity.rs`). The bounds check of `a[i]` is not
+// here: the results block of step 6 records why it stays at the site.
+
+/// `push`, all but the element: room for one more, the triple at `dst` with
+/// `len + 1`, and the buffer that the growth left behind, or 0 when nothing
+/// grew. The emitter stores the element at `data + len * stride` and releases
+/// that buffer AFTER the store, because the value expression may read the
+/// array through the caller's header, which still names the old buffer
+/// (`std/hash` reads `w[t - 3]` inside `w.push(..)`; freed first, SHA-1 came
+/// out wrong from the seventeenth word).
+export fn arrPush(dst: Int32, src: Int32, stride: Int32) -> Int32 {
+    let mut data = Int32(load32(src))
+    let len = Int64(load64(src + 8))
+    let mut cap = Int64(load64(src + 16))
+    let mut stale: Int32 = 0
+    if len == cap {
+        if cap == 0 {
+            cap = 4
+        } else {
+            cap = cap * 2
+        }
+        let grown = malloc(cap * Int64(stride))
+        copy(grown, data, Int32(len) * stride)
+        stale = data
+        data = grown
+    }
+    store32(dst, UInt32(data))
+    store64(dst + 8, UInt64(len + 1))
+    store64(dst + 16, UInt64(cap))
+    return stale
+}
+
+/// `reserve` (RFC-0115): room for `n` more elements, grown once to exactly
+/// `len + n` when the capacity is short.
+export fn arrReserve(dst: Int32, src: Int32, stride: Int32, n: Int64) {
+    let mut data = Int32(load32(src))
+    let len = Int64(load64(src + 8))
+    let mut cap = Int64(load64(src + 16))
+    let need = len + n
+    if need > cap {
+        let grown = malloc(need * Int64(stride))
+        copy(grown, data, Int32(len) * stride)
+        free(data)
+        data = grown
+        cap = need
+    }
+    store32(dst, UInt32(data))
+    store64(dst + 8, UInt64(len))
+    store64(dst + 16, UInt64(cap))
+}
+
+/// `append` (RFC-0115): the elements of the array at `xs` copied on after the
+/// receiver's, in order; one growth to the larger of `cap * 2` and the need.
+/// A self-append's source moved with the growth's copy, so it is retargeted
+/// at the grown buffer before the old one is freed.
+export fn arrAppend(dst: Int32, src: Int32, stride: Int32, xs: Int32) {
+    let mut data = Int32(load32(src))
+    let len = Int64(load64(src + 8))
+    let mut cap = Int64(load64(src + 16))
+    let mut xdata = Int32(load32(xs))
+    let xlen = Int64(load64(xs + 8))
+    let need = len + xlen
+    if need > cap {
+        let mut nc = cap * 2
+        if nc < need {
+            nc = need
+        }
+        let grown = malloc(nc * Int64(stride))
+        copy(grown, data, Int32(len) * stride)
+        if xdata == data {
+            xdata = grown
+        }
+        free(data)
+        data = grown
+        cap = nc
+    }
+    copy(data + Int32(len) * stride, xdata, Int32(xlen) * stride)
+    store32(dst, UInt32(data))
+    store64(dst + 8, UInt64(need))
+    store64(dst + 16, UInt64(cap))
+}
+
+/// `copyFrom` (RFC-0115): the receiver's buffer refilled with the elements of
+/// the array at `xs`. Grows only when the source is longer, and then without
+/// copying the old contents, which are dead; a self-copy moves nothing.
+export fn arrCopyFrom(dst: Int32, src: Int32, stride: Int32, xs: Int32) {
+    let mut data = Int32(load32(src))
+    let mut cap = Int64(load64(src + 16))
+    let xdata = Int32(load32(xs))
+    let xlen = Int64(load64(xs + 8))
+    if xlen > cap {
+        let grown = malloc(xlen * Int64(stride))
+        free(data)
+        data = grown
+        cap = xlen
+    }
+    if xdata != data {
+        copy(data, xdata, Int32(xlen) * stride)
+    }
+    store32(dst, UInt32(data))
+    store64(dst + 8, UInt64(xlen))
+    store64(dst + 16, UInt64(cap))
+}
+
+/// `clear` (RFC-0115 addendum): the triple with its length zeroed. The buffer
+/// and the capacity travel unchanged, which is what keeps the next fill from
+/// allocating.
+export fn arrClear(dst: Int32, src: Int32) {
+    copy(dst, src, 24)
+    store64(dst + 8, 0)
 }
