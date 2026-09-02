@@ -300,6 +300,9 @@ fn run_corpus() {
 
     let mut rows: Vec<Row> = Vec::new();
     let mut unknown: BTreeMap<String, usize> = BTreeMap::new();
+    // Every spawn site, and the ones whose callee's set is outside the rule.
+    let mut spawn_sites = 0usize;
+    let mut spawn_outside: Vec<String> = Vec::new();
     let mut gaps: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut unloadable = 0usize;
     let mut programs = 0usize;
@@ -411,6 +414,18 @@ fn run_corpus() {
             Callee::Unknown
         };
         let judged = effects::judge(&refs, &mut resolve);
+        spawn_sites += judged.spawns.len();
+        for sp in &judged.spawns {
+            if !sp.outside().is_pure() {
+                spawn_outside.push(format!(
+                    "{file}:{} spawn {}(..) in {} — {}",
+                    sp.line,
+                    sp.callee,
+                    bodies[sp.body].name,
+                    sp.outside()
+                ));
+            }
+        }
         for (i, name) in &judged.unknown {
             *unknown
                 .entry(format!("{name} (in {})", bodies[*i].name))
@@ -546,6 +561,13 @@ fn run_corpus() {
     for (e, n) in &per_effect {
         eprintln!("  effect {n:5}  {}", e.name());
     }
+    eprintln!(
+        "  spawn:      {spawn_sites} sites judged, {} outside `alloc, trap`",
+        spawn_outside.len()
+    );
+    for s in &spawn_outside {
+        eprintln!("  spawn outside the rule: {s}");
+    }
     eprintln!("  floor:");
     for (k, n) in &floor_kinds {
         eprintln!("    {n:5}  {k:?}");
@@ -585,10 +607,17 @@ fn run_corpus() {
             eprintln!("  module {m}: {e}");
         }
     }
-    // The ratchet: the disagreements, by function. It may fall, never rise.
-    // 1 when the slice landed: `listdir.vyrn`'s `main`, whose `listDir` the
-    // floor has no row for (RFC-0125 §3 M6 finding 6).
+    // The ratchet: the disagreements, by function, and the spawn sites
+    // outside the rule. It may fall, never rise. 1 when the slice landed:
+    // `listdir.vyrn`'s `main`, whose `listDir` the floor has no row for
+    // (RFC-0125 §3 M6 finding 6).
     const RATCHET: usize = 1;
+    assert!(
+        spawn_outside.is_empty(),
+        "{} spawn sites whose callee's effects are outside the rule the checker accepted; the first: {}",
+        spawn_outside.len(),
+        spawn_outside[0]
+    );
     assert!(
         disagreements.len() <= RATCHET,
         "{} functions where a pass and the effect judgment disagree, more than the {RATCHET} recorded; \

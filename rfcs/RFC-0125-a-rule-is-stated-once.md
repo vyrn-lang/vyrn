@@ -1742,15 +1742,20 @@ whether it allocated. `pure` is the bottom.
 | `random` | `hostRandomSeed` | `random_get`; `environ_get` for `VYRN_FIXED_SEED` | yes | yes | yes | no (an extern) |
 | `extern` | every other extern declaration, resolved by name | the `vyrn` namespace | trap | no instantiation | yes | no |
 | `serve` | `serveStream` | — | trap | trap | trap | no |
+| `spawn` | no name: the marker the core keeps on a spawned call (§2.1; the spawn flag of a core call, second slice) | — | yes | yes, eager | yes, eager | no |
 | `trap` | `panic`, `@panicAt`, `assert`, `assertEq`, `runtime$trap`, `mem$trap`; and the core's trap statement | `proc_exit` | yes | yes | yes | yes |
 | `gen-only` | `moduleInterface`, `contractOf`, `lex`, `render`, `raw`, `rawAt`, `@codeText`, `@codeSplice` | — | no | no | no | yes |
 
 Every one of the fifteen preview1 imports `direct.rs` declares is in the
 third column; `environ_sizes_get` and `environ_get` serve the clock and the
 seed and nothing else. The runtime module's own primitives (`std/mem`,
-`std/runtime`) are pure but for the four rows that name them. `spawn` is not
-a row: the core lowers `spawn f(..)` as a call to `f`, so the judgment
-cannot see it (finding 1).
+`std/runtime`) are pure but for the four rows that name them. `spawn` has
+no atom: the core keeps a marker on the call (`Rhs::Call::spawn`, second
+slice), and the spawning body carries the effect. The spawn-isolation rule
+of RFC-0004 §Q4 is the one inclusion check the judgment makes today: the
+spawned callee's set within `effects::Effects::SPAWN_ALLOWS`, which is
+`alloc, trap`. The harness counts every spawn site and puts one outside the
+rule in the ratchet.
 
 #### The comparison
 

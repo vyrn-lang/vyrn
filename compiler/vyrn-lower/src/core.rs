@@ -106,6 +106,10 @@ pub enum Rhs {
     Call {
         callee: String,
         args: Vec<(Val, Capability)>,
+        /// `spawn callee(..)`: the call runs as a task. The effect judgment
+        /// reads the marker (RFC-0125 §2.2, the fourth effect); the linear
+        /// judgment and the emitters see an ordinary call.
+        spawn: bool,
     },
     /// Arithmetic, comparison, interpolation, conversion: reads its operands.
     Prim(Vec<Val>),
@@ -279,8 +283,13 @@ impl Body {
             Rhs::Val(v) => self.val(v),
             Rhs::Read(p) => format!("read {}", self.place(p)),
             Rhs::Take(p) => format!("take {}", self.place(p)),
-            Rhs::Call { callee, args } => format!(
-                "{callee}({})",
+            Rhs::Call {
+                callee,
+                args,
+                spawn,
+            } => format!(
+                "{}{callee}({})",
+                if *spawn { "spawn " } else { "" },
                 args.iter()
                     .map(|(v, c)| format!("{:?} {}", c, self.val(v)).to_lowercase())
                     .collect::<Vec<_>>()
@@ -1830,6 +1839,7 @@ impl<'a> Builder<'a> {
                 Ok(Rhs::Call {
                     callee: name.clone(),
                     args: vs,
+                    spawn: true,
                 })
             }
             Expr::IfExpr {
@@ -2040,6 +2050,7 @@ impl<'a> Builder<'a> {
             Rhs::Call {
                 callee: success,
                 args: vec![(sv.clone(), Capability::Consume)],
+                spawn: false,
             },
         ));
         ok.push(St::Store {
@@ -2248,6 +2259,7 @@ impl<'a> Builder<'a> {
         Ok(Rhs::Call {
             callee: name.to_string(),
             args: vs,
+            spawn: false,
         })
     }
 
