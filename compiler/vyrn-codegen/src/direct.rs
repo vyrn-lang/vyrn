@@ -3987,7 +3987,7 @@ impl<'p> Fn_<'_, 'p> {
                         self.register_rel(key, Place::Slot(own), r);
                     }
                 }
-                let free_box = self.frees_boxes(scrutinee, key, *line)?;
+                let free_box = self.frees_boxes(scrutinee, key);
                 self.tag_test(b, addr, &sum, pattern, *line)?;
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
@@ -4189,7 +4189,7 @@ impl<'p> Fn_<'_, 'p> {
                 // the rest of its element, and the placer's rows for it —
                 // keyed by the variable's spelling, since it has no `let` —
                 // release that rest at every exit of the body.
-                let vkey = var as *const String as usize;
+                let vkey = vyrn_frontend::own::for_var_key(var);
                 if self.drops.contains_key(&vkey) {
                     if let Some(mut r) = self.rel_for(&w.elem, *line)? {
                         if let (Rel::Deep(_, holes), Some(h)) = (&mut r, self.cx.holes.get(&vkey)) {
@@ -12536,7 +12536,7 @@ impl<'p> Fn_<'_, 'p> {
             .edge_releases_at(key)
             .cloned()
             .unwrap_or_default();
-        let free_box = self.frees_boxes(scrutinee, key, line)?;
+        let free_box = self.frees_boxes(scrutinee, key);
         for (arm_ix, arm) in arms.iter().enumerate() {
             self.tag_test(b, addr, &sum, &arm.pattern, line)?;
             b.ins(&Instruction::If(BlockType::Empty));
@@ -13102,21 +13102,21 @@ impl<'p> Fn_<'_, 'p> {
     /// Whether a `match` or `if let` at `key` over `scrutinee` frees the boxes
     /// its binders were read out of — the textual backend's rule (`gen_match`),
     /// stated once more here: the construct consumed the value (a `consume`, a
-    /// temporary, a map lookup's fresh box, or a place the plan proved nobody
-    /// reads afterwards), no drop row walks the value whole after it, the
-    /// memory is not an arena's, and this is not a declared `release`
-    /// destructuring its own receiver, whose caller walks the boxes.
-    fn frees_boxes(&mut self, scrutinee: &Expr, key: usize, line: usize) -> Result<bool, String> {
+    /// temporary, or a place the plan proved nobody reads afterwards), no drop
+    /// row walks the value whole after it, the memory is not an arena's, and
+    /// this is not a declared `release` destructuring its own receiver, whose
+    /// caller walks the boxes.
+    ///
+    /// The textual rule also frees a MAP LOOKUP's box, which `map_at` builds
+    /// fresh here too. Not this one: telling a map lookup from an element read
+    /// needs the receiver's type, and `peek` on the receiver before the arms
+    /// is not free of effect in this backend — with the free itself off, that
+    /// one call made every `std/vyx` generator trap under the wasm engine
+    /// (the cross-engine generator gate). The lookup's box stays the leak it
+    /// was here; `element_path` keeps every `@at` scrutinee out of the free.
+    fn frees_boxes(&self, scrutinee: &Expr, key: usize) -> bool {
         use vyrn_frontend::movecheck::{element_path, place_path};
-        let map_lookup = match scrutinee {
-            Expr::Call { name, args, .. } if name == "@at" && !args.is_empty() => {
-                let t = self.peek(&args[0], line)?;
-                matches!(self.cx.resolve(&t), Type::Map(..))
-            }
-            _ => false,
-        };
         let consumed = matches!(scrutinee, Expr::Consume { .. })
-            || map_lookup
             || (place_path(scrutinee).is_none() && element_path(scrutinee).is_none())
             || self.cx.plan.match_consumes(key);
         let own_receiver = self.is_release
@@ -13126,10 +13126,7 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 _ => true,
             };
-        Ok(consumed
-            && !self.drops.contains_key(&key)
-            && self.region_depth == 0
-            && !own_receiver)
+        consumed && !self.drops.contains_key(&key) && self.region_depth == 0 && !own_receiver
     }
 }
 

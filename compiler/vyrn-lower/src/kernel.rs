@@ -819,7 +819,10 @@ impl<'b> Kernel<'b> {
 
     /// The holes of `n` in `st`, owned.
     fn holes_owned(&self, st: &State, n: Name) -> Vec<String> {
-        self.holes_of(st, n).into_iter().map(str::to_string).collect()
+        self.holes_of(st, n)
+            .into_iter()
+            .map(str::to_string)
+            .collect()
     }
 
     fn line_of(&self, v: &Val) -> usize {

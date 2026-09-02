@@ -2190,13 +2190,13 @@ pub fn analyze(program: &Program) -> Ownership {
     }
     // Round forty: unmoved payload binders of temp-scrutinee matches —
     // pre-screened in movecheck (silence, single binder, no alias).
-    let mut arm_frees: HashMap<(usize, u32), Vec<(String, DropKind, Vec<String>)>> =
-        HashMap::new();
+    let mut arm_frees: HashMap<(usize, u32), Vec<(String, DropKind, Vec<String>)>> = HashMap::new();
     for a in &facts.arm_payloads {
-        arm_frees
-            .entry((a.match_id, a.arm_ix))
-            .or_default()
-            .push((a.binder.clone(), a.kind.clone(), Vec::new()));
+        arm_frees.entry((a.match_id, a.arm_ix)).or_default().push((
+            a.binder.clone(),
+            a.kind.clone(),
+            Vec::new(),
+        ));
     }
     if std::env::var("VYRN_ARM_DUMP").is_ok() {
         for a in &facts.arm_payloads {
@@ -2264,6 +2264,15 @@ pub fn analyze(program: &Program) -> Ownership {
         }
     }
     ownership
+}
+
+/// The plan's key for a `for` variable, which has no `let` node: the heap
+/// buffer of its spelling in the statement (RFC-0125 M3). Not the `String`'s
+/// own address: that is the first field of `Stmt::ForIn`, at offset 0 under
+/// a niche-encoded discriminant, so it equals the statement's address, which
+/// is the container row's key — and the two rows overwrote each other.
+pub fn for_var_key(var: &str) -> usize {
+    var.as_ptr() as usize
 }
 
 /// A pass that adds release rows to a finished analysis — RFC-0125 M3's

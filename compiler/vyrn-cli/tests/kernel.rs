@@ -91,18 +91,23 @@
 //! **M3's second slice placed them** (RFC-0125 §3 M3, "the second slice"):
 //! a placed row carries its own hole set, an arm row carries the binder's,
 //! an edge row may name a sub-place, a `for` variable has a key, and a taken
-//! field's receiver is freed around the hole. The count fell from 9 to 1,
-//! and the five probes are flat on both engines. The one left:
+//! field's receiver is freed around the hole. A `for` has an exit in the
+//! core now (it had none, so the kernel never judged what followed one —
+//! the cross-engine generator gate found the row that rewrite placed on a
+//! dead edge's word). The count fell from 9 to 3, and the five probes are
+//! flat on both engines. The class left:
 //!
-//!  10. a heap field READ off a temporary nobody names (`gqlIsRecord`'s
-//!      `gqlSplitDecl(src).rhs.startsWith("{")`): the analysis puts the
+//!  10. a heap field or element READ off a temporary nobody names
+//!      (`gqlIsRecord`'s `gqlSplitDecl(src).rhs.startsWith("{")`,
+//!      `arrays.vyrn`'s `weekdayLetters()[1]`, `slots.vyrn`'s
+//!      `(people.get(bob) ?? Person { .. }).name`): the analysis puts the
 //!      receiver in R1′'s table, both compiled backends run that row after a
 //!      scalar read only, and the borrowed field outlives the read —
 //!      `field-read-off-a-temporary.vyrn`, 25.9 MB and 58.7 MB natively. The
 //!      lowering used to read the dead row as a `drop`; it reads it as
 //!      nothing now, which is what the emitters do.
 //!
-//! The ratchet is 1, for this and no other. `VYRN_KERNEL_GAPS=<substring>`
+//! The ratchet is 3, for these and no other. `VYRN_KERNEL_GAPS=<substring>`
 //! lists where each remaining gap is; `VYRN_KERNEL_TRACE=1` prints what the
 //! placer found owed in every body, and `VYRN_KERNEL_TRACE=<fn>` prints that
 //! body's core.
@@ -265,9 +270,10 @@ fn run_corpus() {
     // The ratchet: 53 at the end of the first slice; 42 once class 1 closed;
     // 1 once the placer (M3's first slice) filled the plan's three tables; 9
     // once every construct lowered and the five hole-family classes above
-    // came into view (the one lowering misread, `smallarray`, is fixed); 1
-    // once the placer could place a holed name (M3's second slice).
-    const RATCHET: usize = 1;
+    // came into view (the one lowering misread, `smallarray`, is fixed); 3
+    // once the placer could place a holed name and a `for` had its exit
+    // (M3's second slice).
+    const RATCHET: usize = 3;
     assert!(
         refused.len() <= RATCHET,
         "{} instances refused by the kernel, more than the {RATCHET} recorded; the first new          one is worth reading before the number is raised: {}",

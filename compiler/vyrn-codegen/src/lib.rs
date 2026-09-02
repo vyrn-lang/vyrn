@@ -6134,7 +6134,7 @@ impl<'a> Gen<'a> {
                 // the rest of its element, and the placer's rows for it —
                 // keyed by the variable's spelling, since it has no `let` —
                 // release that rest at every exit of the body.
-                let vkey = var as *const String as usize;
+                let vkey = vyrn_frontend::own::for_var_key(var);
                 if let Some(kind) = self.droppable.get(&vkey).cloned() {
                     if let Some(h) = self.holes_map.get(&vkey) {
                         self.hole_slots.insert(vslot.clone(), h.clone());
@@ -10259,7 +10259,9 @@ impl<'a> Gen<'a> {
                 };
                 let rll = self.llt(&ty);
                 let fp = self.fresh_tmp();
-                self.emit(format!("{fp} = getelementptr {rll}, ptr {slot}, i32 0, i32 {idx}"));
+                self.emit(format!(
+                    "{fp} = getelementptr {rll}, ptr {slot}, i32 0, i32 {idx}"
+                ));
                 slot = fp;
                 ty = fields[idx].ty.clone();
                 sub = true;

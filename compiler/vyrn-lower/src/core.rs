@@ -943,7 +943,7 @@ impl<'a> Builder<'a> {
                         if *consuming {
                             let t = self.temp(ity.clone(), *line);
                             out.push(St::Let(t, Rhs::Val(Val::Name(n))));
-                            self.by_binding.insert(sid, t);
+                            self.keyed(t, sid);
                             t
                         } else {
                             n
@@ -963,8 +963,10 @@ impl<'a> Builder<'a> {
                             return gap("a `for` over a literal", *line);
                         };
                         // The construct owns the temporary; the plan keys its
-                        // release by the statement.
-                        self.by_binding.insert(sid, t);
+                        // release by the statement, and so does a row the
+                        // placer adds for it (`for t in lex(src)` with a
+                        // `return` inside the loop).
+                        self.keyed(t, sid);
                         t
                     }
                 };
@@ -987,11 +989,25 @@ impl<'a> Builder<'a> {
                     .get(&self.func_name)
                     .and_then(|m| m.get(&sid))
                     .is_some_and(|k| matches!(k, DropKind::FreeArr));
+                // The loop leaves when the container is walked: the same
+                // `if .. else break` a `while` has at its top. Without it the
+                // kernel sees a loop nothing leaves, and the path after the
+                // `for` — the rest of its block, and its edge at every join
+                // above — is dead to the judgment. The placer's rewrite of a
+                // row's hole set then read a join's other edge alone, and
+                // walked a field the dead edge had taken (`std/vyx`'s
+                // `vyxMergeImports`, found by the cross-engine generator gate).
+                l.push(St::If {
+                    cond: Val::Lit,
+                    then: Vec::new(),
+                    els: vec![St::Break { site: 0 }],
+                    site: 0,
+                });
                 let owned = handed_over && self.owns(&ety);
                 let x = self.name(var, ety, owned, *line);
                 // The variable has no `let` node; the plan keys it by its
-                // spelling in the statement, which is one address per loop.
-                self.keyed(x, var as *const String as usize);
+                // spelling's buffer, which is one address per loop.
+                self.keyed(x, vyrn_frontend::own::for_var_key(var));
                 let head = vec![St::Let(
                     x,
                     Rhs::Read(Place::Elem(Box::new(Place::Name(it)), Val::Lit)),
@@ -1619,6 +1635,10 @@ impl<'a> Builder<'a> {
                 line,
             } => {
                 let ty = self.ty_of(e)?;
+                // The plan keys an if-expression's edge rows by the expression
+                // (RFC-0114 Rule N at an if-expression join), and every engine
+                // runs them there.
+                let site = e as *const Expr as usize;
                 let res = self.temp(ty, *line);
                 let c = self.read_val(cond, out)?;
                 let mut t = Vec::new();
@@ -1628,6 +1648,7 @@ impl<'a> Builder<'a> {
                     value: tv,
                     old: Old::Nothing,
                 });
+                self.edge_drops(site, 0, &mut t)?;
                 let mut f = Vec::new();
                 match else_branch {
                     Some(eb) => {
@@ -1637,6 +1658,7 @@ impl<'a> Builder<'a> {
                             value: ev,
                             old: Old::Nothing,
                         });
+                        self.edge_drops(site, 1, &mut f)?;
                     }
                     None => return gap("an `if` expression without `else`", *line),
                 }
@@ -1644,7 +1666,7 @@ impl<'a> Builder<'a> {
                     cond: c,
                     then: t,
                     els: f,
-                    site: 0,
+                    site,
                 });
                 Ok(Rhs::Val(Val::Name(res)))
             }
@@ -2175,6 +2197,12 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 rows.iter_mut()
                     .find(|r| r.exit == m.exit && r.site == m.site && r.binding == binding)
             }) {
+                if trace {
+                    eprintln!(
+                        "placer: rewrite {} `{}` {:?} -> {:?}",
+                        inst.func.name, info.source, m.exit, holes
+                    );
+                }
                 r.full = false;
                 r.holes = Some(holes);
                 continue;
