@@ -1308,6 +1308,24 @@ reverse-complement's 2.6x against native (step 3's table) is not in the
 runtime's transcription; it is in the program's own loops as the emitter
 lowers them. Details under the plan's §6 table.*
 
+*Step 5 landed 2026-09-02 (`track-m`): the maps — the String, Int64 and
+packed-key chains of RFC-0028 and RFC-0117, `tallyBytes`'s byte-window probe
+of RFC-0116, and the reserve, remove and keys operations that were inline —
+are one body in `std/runtime` (`mapFind`, `mapPut`, `mapReindex`,
+`mapReserve`, `mapRemoveAt`, `mapKeysCopy`) over the step-2 allocator and
+`std/mem`, the layout a pair of constants the emitter passes at each call, and
+the wasm emitter's fourteen hand-emitted map functions and three inline copies
+are deleted: 1,194 lines out of `direct.rs`, 272 in the module. Parity 41 of
+41, residue green. k-nucleotide under wasmtime, base and head interleaved,
+medians of five: 0.297 s against 0.284 s, 5 percent, which is the layout's
+two compares per probe, and 0.297 s against the 0.29 s step 3's table holds for
+the row. On the way there the plan's §7.3 assumption failed on the record: a
+function level between the caller and the probe loop cost one call per probe,
+20 percent on this row, and wasmtime 46 took none of it back, so the module
+keeps the hand-emitted copy's two levels. `std/hash`'s `fnv1a` stays a
+separate function of the same arithmetic (the plan's §8 question 5, closed).
+Details under the plan's §6 table.*
+
 ### M5 — `vyrn run` is compiled
 
 `run`, `test` and `bench --check` execute the wasm in the embedded wasmtime.

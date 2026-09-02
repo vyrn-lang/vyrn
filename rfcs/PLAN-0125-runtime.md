@@ -745,6 +745,78 @@ and are not comparable; the compiled rows are flat across the change, which
 is §7.3's prediction. fasta and reverse-complement sit at the step-1 record
 (0.89 s and 1.07 s) and RFC-0125 §1.5b's 0.93 s and 1.06 s.
 
+**Results, step 5 (2026-09-02, branch `track-m`).** The three map families
+are one body in `std/runtime.vyrn`: `mapFind`, `mapPut`, `mapReindex`,
+`mapReserve`, `mapRemoveAt` and `mapKeysCopy` (272 lines with their comment,
+over `load8`, `load32`, `load64`, `store32`, `store64`, `copy`, `fill`,
+`malloc`, `free` and `strCmp`), and the wasm emitter's fourteen hand-emitted
+map functions — the String, Int64 and pack chains of `find`, `slot`, `put` and
+`reindex`, with `map_find_bytes` and `map_hash` — are deleted together with the
+inline `reserve`, `remove_at` and `keys_copy` at their single sites: 1,194
+lines out of `direct.rs`, 131 in (five rows of the `VyrnRt` table,
+`MapKey::kind`, the call sites). The key layout is a pair of constants the
+emitter passes at every call, `kind` and `klen`: 0 for a String column
+(FNV-1a to the NUL, `strCmp`), 1 for an `Int64` column (SplitMix64's
+finalizer, the bits), 2 for a packed user key of `klen` bytes (FNV-1a over
+them, a byte compare), and 3 for `tallyBytes`'s byte window against a String
+column (RFC-0116), which was `map_find_bytes` and is `mapFind` with the
+window's length as `klen`. The key travels as an `Int64` whatever the layout,
+the value for kind 1 and an address zero-extended for the rest, so one
+signature serves the four and the emitter spills nothing. So the three
+instantiations are not instantiations: not RFC-0023 fn values (a `hash` and an
+`eq` parameter would put a call behind every compare, and the probe loop is
+the row below) and not three entry points; the layout is a compare, and a map
+program carries the body once. `knucleotide.wasm` is 14,146 bytes at base and
+15,388 at head, because an Int64-keyed program now carries the byte lane and
+`strCmp` too. `reserve`, `remove_at` and `keys_copy` are functions for the
+first time on this backend, because the header is one fixed 32-byte shape
+(`{ ptr, ptr, i64, i64, ptr }`) the module can read; the emitter keeps the
+`len + 1 > cap` test in front of `mapReserve`, the release of a removed entry's
+key and value in front of `mapRemoveAt`, and the per-element dup of String keys
+after `mapKeysCopy`, because those three know the types and the functions do
+not. The hashes are the C shim's three and stay unobservable: the columns
+decide every order a program can see. `std/hash`'s `fnv1a` (§8 question 5) is
+the same arithmetic over an `Array<UInt8>` value, and the runtime hashes bytes
+at an address with no array to hand it; neither calls the other, and the
+question closes as two functions of one arithmetic at two value boundaries,
+not a layering decision. Gates: fmt, workspace, kernel (the ratchet held),
+lowered (1,334 synthesized, under the 1,400 ceiling), the nine `vyrn-cli`
+suites, parity 41 of 41, residue, the cross-engine generator gate, `doc
+--verify`, site export 33 of 34 (the version test fails on local fixture
+data); the wasm2c route gate skipped for a missing wabt. The extra gate,
+k-nucleotide at RFC-0104's timing size (fasta n = 400,000, the 2 M-base THREE
+sequence) under wasmtime 46, the same base `.wasm` on every row and the head
+rebuilt per design, base and head interleaved, medians of five on a quiet
+machine, with the three designs the row rejected on the way to the one that
+ships:
+
+| design | base (hand-emitted) | head (`std/runtime`) |
+|---|---|---|
+| the hash and the compare behind calls (`mapHash`, `mapKeyEq`) under one probe body | 0.30 s | 0.36 s |
+| the `Int64` lane written into the one probe body, calls only for the byte layouts | 0.28 s | 0.34 s |
+| two lane functions behind a `mapSlot` dispatcher | 0.28 s | 0.34 s |
+| `mapFind` and `mapPut` choose the lane themselves (ships), round 1 | 0.283 s | 0.299 s |
+| round 2 | 0.283 s | 0.306 s |
+| round 3 | 0.284 s | 0.297 s |
+
+The rejected rows say what a level costs: a wasm call under wasmtime 46 is
+about four nanoseconds, this program makes fourteen million probes, and every
+function between the caller and the probe loop was one call per probe, which
+is the 20 percent, and nothing took it back: `wasmtime run -O help` at 46
+lists no inlining option, and the rows say none ran (§7.3 assumed one, and
+the record now says otherwise for this engine). What ships is
+the hand-emitted copy's two levels, find then slot, the layout chosen by one
+compare in `mapFind` and one in `mapPut`. The head is 5 percent over the base,
+outside this run's 2 percent spread, and 0.297 s against the 0.29 s step 3's
+table recorded for the same row on this machine; the 5 percent is the two
+compares and the two extra arguments per probe. A layout-specific entry point
+would remove them and put the probe loop in the module a second time, and
+this step does not take it. `finitekeys`, `heapkey` and `floatkey`: the second
+and third are RFC-0117's compile-time refusals and print the same line as
+before; `finitekeys` is a String-keyed map and is byte-identical across the
+three engines under parity and the fixtures. The interpreter keeps its own
+`Map` (§5.1), as at every step before this one.
+
 ---
 
 ## 7. What it costs
@@ -826,4 +898,8 @@ written as a test.
    Vyrn. After step 5 the Map should call it rather than carry a fifth, which
    makes `std/hash` an import of `std/runtime`; whether the standard library
    may be imported by the runtime module, or the function moves the other way,
-   is a layering question this document leaves to step 5.
+   is a layering question this document leaves to step 5. *Closed at step 5
+   (§6, results): the two are one arithmetic at two value boundaries —
+   `fnv1a` takes an `Array<UInt8>` value, the map hashes bytes at an address
+   and has no array to hand it — so neither calls the other and no layering
+   decision was needed.*
