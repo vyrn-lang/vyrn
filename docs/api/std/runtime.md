@@ -23,9 +23,19 @@ module holds an address, which is the whole of PLAN-0125-runtime §3.3.
 and `regexRun`. Their C twins stay in the shim until step 3 moves the
 native route.
 
+**Step 2, the allocator:** `malloc` and `free`, the segregated free list
+of PLAN-0125-runtime §4.2, over `load32`, `store32`, `memorySize`, `grow`
+and `heapBase`. The wasm emitter's hand-emitted copy is deleted; the C
+shim's stays until step 3 moves the native route.
+
 **Call depth.** The emitter does not count these frames against the
 language's call-depth budget: the hand-emitted copies had no prologue, and
 a program that traps at the limit must trap where it did.
+
+**Traps.** A `panic` in this module prints the trap table's line and no
+site: the loader does not stamp this module's `panic` sites, because a
+runtime trap is one of `trap.rs`'s fixed wordings and every engine prints
+it the same way.
 
 ## strLen
 
@@ -141,3 +151,21 @@ the string: a full match is "the state the last byte left us in accepts".
 
 The byte is read unsigned: a signed read would turn a UTF-8 continuation
 byte into a negative index and answer wrongly rather than trap.
+
+## malloc
+
+```vyrn
+fn malloc(n: Int64) -> Int32
+```
+
+`malloc`: `n` bytes, eight-aligned, from the class's free list or the bump
+region. Traps with the `out of memory` line every engine prints when the
+request cannot fit a wasm32 memory or `grow` refuses.
+
+## free
+
+```vyrn
+fn free(p: Int32) -> Unit
+```
+
+`free`: push `p`'s block on its class's list. See the refusals above.

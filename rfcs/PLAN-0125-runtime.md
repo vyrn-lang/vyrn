@@ -590,6 +590,46 @@ interpreter's copies anyway. The lowered-form gate's synthesized count went
 from 1,296 at step 0 to 1,233 with the module linked (1,261 on an earlier run;
 the count is address-collision noisy by construction), under the 1,400 ceiling.
 
+**Results, step 2 (2026-09-02, branch `track-g`).** `malloc` and `free` are
+Vyrn in `std/runtime.vyrn` (106 lines with their comment, over `load32`,
+`store32`, `memorySize`, `grow` and `heapBase`), and the wasm emitter's copy is
+deleted: 286 lines out of `direct.rs`, 20 in (two rows of the `VyrnRt` table
+and the wiring), the `HEAP` global out of `wasm.rs`. The design is §4.1's and
+§4.2's — 113 classes, four per power of two, the class in an eight-byte header,
+the link in the freed payload, `Int64` request, the width check before the
+rounding — with four differences from the transcription. (1) The class heads
+and the bump offset live in the heap's own first 480 bytes (116 words of
+heads, the offset at 464, the first block at 480), not in a reserved table and
+a mutable global: wasm memory arrives zeroed, so nothing initializes them, and
+`std/mem` needed no `getHeap`/`setHeap` pair. (2) The bump path grows memory by
+the pages the new top needs in one `grow`, not one page per loop turn; a
+refusal still traps with `out of memory`. (3) There is no `clz` primitive, so
+the shift is a loop over `t >> 2`, which runs `shift` times — zero or one for
+a block under 32 bytes. (4) The trap is `panic("out of memory")`, and the loader
+does not stamp the runtime module's `panic` sites with a file and line (census
+U5's rewrite), because the wording is `trap.rs`'s and parity compares stderr
+byte for byte. §4.2 decision 1 (the audit and the poison go): the wasm copy
+never had either, and the C shim's stay behind `VYRN_FREE_AUDIT` and
+`VYRN_LEAK_CHECK` until step 3 deletes the shim's allocator; the residue
+ratchet still measures natively. Nothing outside the allocator read the
+header: `args`'s comment on the header slack is the one mention, and it
+describes a refusal that still holds (the second header word is never
+written). Gates: workspace, kernel (ratchet held), lowered, fixtures, parity 41
+of 41, residue green; the cross-engine generator gate fails on the same five
+programs at base and at head (the placement defect another branch owns). The
+extra gate, binary-trees at depth 18 under wasmtime, median of five, base and
+head interleaved on a machine shared with six other worktrees' builds (which is
+why neither column reaches §1.4's 0.88 s, taken on an idle one):
+
+| round | base (hand-emitted) | head (`std/runtime`) |
+|---|---|---|
+| 1, six builds running | 1.41 s | 1.41 s |
+| 2, gates finished | 1.00 s | 0.99 s |
+| 3, quietest | 0.95 s | 0.94 s |
+
+The head moves inside the noise of the base every round, which is §7.3's
+prediction; no grow or class profile was needed. Depth 10 prints the fixture.
+
 ---
 
 ## 7. What it costs

@@ -1362,10 +1362,14 @@ fn load_modules(
         // After the parse cache, deliberately: the cache is keyed by content
         // hash, so two files with identical text share one parse and would
         // otherwise share one file name.
-        stamp_panic_sites(
-            &mut program,
-            &site_file(key, root_key, opts.std_root.as_deref()),
-        );
+        //
+        // Not the runtime module (RFC-0125 §2.4): a `panic` there is one of
+        // `trap.rs`'s fixed wordings — `malloc`'s `out of memory` — and every
+        // engine prints that line without a site, byte for byte.
+        let site = site_file(key, root_key, opts.std_root.as_deref());
+        if site != format!("{RUNTIME_SPEC}.vyrn") {
+            stamp_panic_sites(&mut program, &site);
+        }
 
         // RFC-0062: `std/result` / `std/option` are validated NO-OP imports —
         // their only job is to spell the ambient builtins (`Ok`/`Err`/`Result`,

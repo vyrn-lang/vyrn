@@ -48,7 +48,7 @@ use vyrn_frontend::types::INT32;
 
 use crate::layout::{self, Layout};
 use crate::llt_of;
-use crate::wasm::{self, BlockType, Frame, Instruction, MemArg, Module, ValType, HEAP, HEAP_BASE};
+use crate::wasm::{self, BlockType, Frame, Instruction, MemArg, Module, ValType, HEAP_BASE};
 
 /// What the direct backend cannot lower yet: the construct, and where.
 ///
@@ -15140,8 +15140,8 @@ fn store_of(ll: &str) -> Instruction<'static> {
 /// is why the whole table costs `fib.wasm` 290 bytes of code rather than 4,420.
 /// The data each interned on its way past is NOT swept.
 /// The runtime functions written in Vyrn (`std/runtime`, PLAN-0125-runtime §6
-/// step 1): each by the name the module declares it under, with the wasm
-/// signature this emitter calls it with.
+/// steps 1 and 2): each by the name the module declares it under, with the
+/// wasm signature this emitter calls it with.
 ///
 /// The index is reserved before the hand-emitted runtime is written, because
 /// that runtime calls these (`trap` calls `strLen`, `env_get` calls `starts`,
@@ -15152,6 +15152,11 @@ fn store_of(ll: &str) -> Instruction<'static> {
 /// `std/runtime` — a resolver serving a partial std tree — rather than letting
 /// `Module::sweep` panic on an unfilled body.
 const VYRN_RUNTIME: &[(&str, &[ValType], &[ValType])] = &[
+    // Step 2: the allocator. The request is an `i64` for the reason the
+    // module's own comment gives (`push` once wrapped `cap * stride` at an
+    // `i32` call site), and it is the signature `__vyrn_malloc` exports.
+    ("malloc", &[ValType::I64], &[ValType::I32]),
+    ("free", &[ValType::I32], &[]),
     ("strLen", &[ValType::I32], &[ValType::I32]),
     ("strCmp", &[ValType::I32, ValType::I32], &[ValType::I32]),
     ("starts", &[ValType::I32, ValType::I32], &[ValType::I32]),
@@ -15202,7 +15207,7 @@ impl VyrnRt {
         self.index[name]
     }
 
-    /// The reserved index for `name` when it is one of the ten, after checking
+    /// The reserved index for `name` when it is one of the twelve, after checking
     /// the signature the module declares against the one the emitter calls.
     fn take(
         &mut self,
@@ -15252,9 +15257,10 @@ struct Rt {
     /// (PLAN-0125-runtime §2.3) is the write to descriptor 2 and this call.
     proc_exit: u32,
     write_all: u32,
+    /// The allocator, written in Vyrn since PLAN-0125-runtime §6 step 2: a
+    /// segregated free list whose heads and bump offset live in the heap's
+    /// first 480 bytes. Reserved by [`VyrnRt`] like the strings below.
     malloc: u32,
-    /// Hand a block back to its size class (RFC-0077 M6). Paired with `malloc` in
-    /// the table because the two share the header format and nothing else does.
     free: u32,
     /// Allocate a `String` buffer: its `{ len, cap }` header, `cap` bytes of
     /// room, and the NUL (RFC-0089 M1a). Returns the address of the BYTES, so
@@ -15409,10 +15415,6 @@ struct Rt {
     region_vec: u32,
     region_len: u32,
     region_cap: u32,
-    /// The free list head of each size class (RFC-0077 M6), `MAX_CLASS -
-    /// MIN_CLASS + 1` words. Zero-filled by `reserve`, which is what an empty
-    /// list is.
-    heads: u32,
     /// The standard input read-ahead buffer, and how far into it reading has
     /// got. [`STDIN_BUF`] bytes, then two words: the count `fd_read` returned
     /// and the offset of the next byte. Both start at zero, which `reserve`
@@ -15438,18 +15440,6 @@ struct Rt {
 /// complement over a 40 MB sequence made 40.7 million of them, and the read path
 /// was 19.56 s of that leg's 20.45 s.
 const STDIN_BUF: u32 = 4096;
-
-/// The bytes in front of every heap block, holding its size class.
-///
-/// See `malloc` for why there is a header at all — one of the six things `own`
-/// releases cannot recover its own size.
-const HDR: u32 = 8;
-/// The smallest class index: `shift = 0, sub = 3`, which is eight bytes — the
-/// width of the list link `free` writes into a released payload.
-const MIN_CLASS: u32 = 3;
-/// The largest: `shift = 28, sub = 3`, which is 2 GiB. Past it a block plus its
-/// header cannot fit a wasm32 memory at all.
-const MAX_CLASS: u32 = 115;
 
 impl Rt {
     /// Hand out the index of every runtime function, in the order the bodies are
@@ -15485,8 +15475,8 @@ impl Rt {
         let mut rt = Rt {
             proc_exit: 0,
             write_all: slot("write_all"),
-            malloc: slot("malloc"),
-            free: slot("free"),
+            malloc: 0,
+            free: 0,
             str_new: slot("str_new"),
             strlen: 0,
             utf8d: 0,
@@ -15562,7 +15552,6 @@ impl Rt {
             region_vec: 0,
             region_len: 0,
             region_cap: 0,
-            heads: 0,
             stdin_buf: 0,
             stdin_len: 0,
             stdin_pos: 0,
@@ -15682,6 +15671,8 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>, v: &VyrnRt) -> Rt {
     let base = m.next_func();
     let (mut rt, _table) = Rt::slots(base, gen.is_some());
     rt.proc_exit = proc_exit;
+    rt.malloc = v.get("malloc");
+    rt.free = v.get("free");
     rt.strlen = v.get("strLen");
     rt.strcmp = v.get("strCmp");
     rt.starts = v.get("starts");
@@ -15912,269 +15903,10 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>, v: &VyrnRt) -> Rt {
         },
     );
 
-    // malloc(n) — a bump pointer over `HEAP`.
-    //
-    // `n` is an `i64`, not the `i32` a wasm32 pointer is, and that is the native
-    // shim's signature (`__vyrn_malloc(unsigned long long)`, `toolchain.rs`) for
-    // the native shim's stated reason. Every interesting caller computes
-    // `count * stride` out of a Vyrn length, which IS an `i64`; taking an `i32`
-    // put the truncation at the call site where nothing could see it. `push`
-    // doubling a 2 GiB buffer wrapped `cap * stride` to a handful of bytes,
-    // allocated those, and then copied 2 GiB into them — heap corruption out of
-    // an allocation that reported success.
-    //
-    // It frees since M6, and the shape is a segregated free list over size classes
-    // with an eight-byte header holding the class index.
-    //
-    // The header was not the first choice. A compile-time ownership model knows
-    // the size at the release as well as at the allocation, so it can size-class
-    // with no header at all — and for four of `own`'s six kinds it does: an array,
-    // a map and a `SmallArray` all carry their `cap` in the aggregate, and a cell
-    // payload's type is a compile-time fact. The fifth breaks it. A `String` is a
-    // bare NUL-terminated pointer, so a drop site can recover its LENGTH with
-    // `strlen` and cannot recover its CAPACITY — and RFC-0081's `str_append`
-    // exists precisely to allocate capacity beyond length. Sizing a headerless
-    // free from `strlen` would file a 1024-byte block on the 128-byte list and
-    // hand out overlapping memory later. Eight bytes per live block, in one
-    // function each way, is cheaper than threading a capacity to every drop.
-    //
-    // The classes are four steps per power of two — `(4 + sub) << shift` for
-    // `sub` in 0..3 — and that is not decoration either. Plain powers of two were
-    // written first and measured: they doubled `vyrnView`'s never-freed leak from
-    // 24 MB per 500 calls to 48 MB, because rounding a payload UP is a cost every
-    // block pays and only a REUSED block earns back. Four steps cap the round-up
-    // at 25%. The header sits outside the class for the same reason: a block is
-    // `8 + size`, so an 8192-byte array buffer is not pushed into the next class
-    // by its own header.
-    let (p, end, cls, h) = (2, 3, 4, 5);
-    let (want, shift, sub, sz) = (6, 7, 8, 9);
-    let trap = rt.trap;
-    let oom = rt.intern(
-        m,
-        &vyrn_frontend::trap::line(vyrn_frontend::trap::OUT_OF_MEMORY),
-    );
-    // One head per class, indexed by the class directly — the three below
-    // `MIN_CLASS` are unreachable and cost twelve bytes, against a subtraction at
-    // both ends. In reserved memory rather than in globals for M2f's reason:
-    // module state showed that one mechanism in memory beats two.
-    rt.heads = m.reserve(4 * (MAX_CLASS + 1), 4);
-    let heads = rt.heads;
-    rt.next_is(m, rt.malloc);
-    m.func(
-        &[ValType::I64],
-        &[ValType::I32],
-        &[
-            ValType::I32,
-            ValType::I64,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-        ],
-        0,
-        |b| {
-            // The width check, BEFORE the rounding — the native shim puts it
-            // before the `(size_t)` cast for the same reason, and here `n + 7` is
-            // the cast: a request of 2^64-1 rounds to 0 and would bump the heap by
-            // nothing, handing back a pointer for sixteen exabytes.
-            //
-            // The ceiling is 2 GiB rather than 4, because the class rounds UP and
-            // the largest class is 2 GiB. A request between them could never have
-            // been served anyway: the block would have to be its own class plus
-            // the header, past where a wasm32 memory ends.
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I64Const(0x8000_0000))
-                .ins(&Instruction::I64GtU)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(oom as i32))
-                .ins(&Instruction::Call(trap))
-                .ins(&Instruction::End);
-            // `t = max(round8(n), 8) - 1`. The floor of 8 is what makes a freed
-            // block wide enough to hold the list link `free` writes into it, and
-            // it also puts `t >= 7`, so the `shift` below cannot go negative.
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I64Const(7))
-                .ins(&Instruction::I64Add)
-                .ins(&Instruction::I64Const(-8))
-                .ins(&Instruction::I64And)
-                .ins(&Instruction::I32WrapI64)
-                .ins(&Instruction::LocalTee(want))
-                .ins(&Instruction::I32Const(8))
-                .ins(&Instruction::I32LtU)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(8))
-                .ins(&Instruction::LocalSet(want))
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(want))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::LocalSet(want));
-            // `shift = floor_log2(t) - 2`, i.e. `29 - clz(t)`, and `sub` is the
-            // two bits under the leading one. Then `cls = shift * 4 + sub` and
-            // `size = (sub + 5) << shift` — the class covers
-            // `((sub + 4) << shift, (sub + 5) << shift]`, so every size is a
-            // multiple of 8 and the smallest is 8.
-            b.ins(&Instruction::I32Const(29))
-                .ins(&Instruction::LocalGet(want))
-                .ins(&Instruction::I32Clz)
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::LocalSet(shift));
-            b.ins(&Instruction::LocalGet(want))
-                .ins(&Instruction::LocalGet(shift))
-                .ins(&Instruction::I32ShrU)
-                .ins(&Instruction::I32Const(3))
-                .ins(&Instruction::I32And)
-                .ins(&Instruction::LocalSet(sub));
-            b.ins(&Instruction::LocalGet(shift))
-                .ins(&Instruction::I32Const(2))
-                .ins(&Instruction::I32Shl)
-                .ins(&Instruction::LocalGet(sub))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(cls));
-            b.ins(&Instruction::LocalGet(sub))
-                .ins(&Instruction::I32Const(5))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(shift))
-                .ins(&Instruction::I32Shl)
-                .ins(&Instruction::LocalSet(sz));
-            // `h = &heads[cls]`, then the class's first block if it has one. A
-            // recycled block already carries the right header, so the reuse path
-            // writes only the list.
-            b.ins(&Instruction::LocalGet(cls))
-                .ins(&Instruction::I32Const(4))
-                .ins(&Instruction::I32Mul)
-                .ins(&Instruction::I32Const(heads as i32))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalTee(h))
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalTee(p))
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(h))
-                .ins(&Instruction::LocalGet(p))
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::I32Store(word()))
-                .ins(&Instruction::Else);
-            // The bump itself, in 64 bits so the SUM cannot wrap either: a 3 GiB
-            // heap plus a 2 GiB request is 5 GiB, which as an `i32` was a small
-            // pointer that then passed the `memory.size` test below. A wasm32
-            // memory stops at 4 GiB, so a top past it is a request that can never
-            // be served — reported with the words `memory.grow` failing reports,
-            // since it is the same failure reached one step earlier.
-            b.ins(&Instruction::GlobalGet(HEAP))
-                .ins(&Instruction::LocalTee(p))
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::LocalGet(sz))
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::I64Const(HDR as i64))
-                .ins(&Instruction::I64Add)
-                .ins(&Instruction::I64Add)
-                .ins(&Instruction::LocalTee(end))
-                .ins(&Instruction::I64Const(0xFFFF_FFFF))
-                .ins(&Instruction::I64GtU)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(oom as i32))
-                .ins(&Instruction::Call(trap))
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(end))
-                .ins(&Instruction::I32WrapI64)
-                .ins(&Instruction::GlobalSet(HEAP))
-                .ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::Loop(BlockType::Empty))
-                .ins(&Instruction::GlobalGet(HEAP))
-                .ins(&Instruction::MemorySize(0))
-                .ins(&Instruction::I32Const(16))
-                .ins(&Instruction::I32Shl)
-                .ins(&Instruction::I32LeU)
-                .ins(&Instruction::BrIf(1))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::MemoryGrow(0))
-                // A grow that fails returns -1 and leaves `memory.size` where it
-                // was, so dropping the result re-tests the same condition and grows
-                // again — forever, with no output. Not academic: a browser
-                // `WebAssembly.Memory` is routinely constructed with a `maximum`,
-                // and the browser is a first-class target, so the capped memory is
-                // the normal case and the hang is what a user would see. Uncapped
-                // it was masked, badly: growth ran to the 4 GiB ceiling and the
-                // wrapped bump pointer trapped out of bounds instead.
-                //
-                // The wording is the native shim's `__vyrn_alloc_check`
-                // (`toolchain.rs`), not new words, because parity compares stderr
-                // byte for byte across the three engines.
-                .ins(&Instruction::I32Const(-1))
-                .ins(&Instruction::I32Eq)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(oom as i32))
-                .ins(&Instruction::Call(trap))
-                .ins(&Instruction::End)
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            // Header, then hand back the payload past it.
-            b.ins(&Instruction::LocalGet(p))
-                .ins(&Instruction::LocalGet(cls))
-                .ins(&Instruction::I32Store(word()))
-                .ins(&Instruction::LocalGet(p))
-                .ins(&Instruction::I32Const(HDR as i32))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(p))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(p));
-        },
-    );
-
-    // free(p) — push the block back on its class's list.
-    //
-    // Everything it refuses, it refuses SILENTLY, and that is the design: a wrong
-    // free is worse than no free, and this backend has no ASan behind it. A
-    // pointer below `HEAP_BASE` never came out of `malloc` — `drop s` on a
-    // `String` bound to a literal hands over a data-segment address, and null is
-    // the `SmallArray` that never spilled and the `Map` that never grew. A header
-    // outside the class range is memory this allocator did not write. Both leak
-    // rather than corrupt.
-    rt.next_is(m, rt.free);
-    m.func(
-        &[ValType::I32],
-        &[],
-        &[ValType::I32, ValType::I32],
-        0,
-        |b| {
-            let (cls, h) = (2, 3);
-            b.ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::GlobalGet(HEAP_BASE))
-                .ins(&Instruction::I32LtU)
-                .ins(&Instruction::BrIf(0));
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(HDR as i32))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalTee(cls))
-                .ins(&Instruction::I32Const(MIN_CLASS as i32))
-                .ins(&Instruction::I32LtS)
-                .ins(&Instruction::BrIf(0));
-            b.ins(&Instruction::LocalGet(cls))
-                .ins(&Instruction::I32Const(MAX_CLASS as i32))
-                .ins(&Instruction::I32GtS)
-                .ins(&Instruction::BrIf(0));
-            // `*p = heads[cls]; heads[cls] = p` — the link lives in the payload, which
-            // the `MIN_CLASS` floor guarantees is wide enough to hold it.
-            b.ins(&Instruction::LocalGet(cls))
-                .ins(&Instruction::I32Const(4))
-                .ins(&Instruction::I32Mul)
-                .ins(&Instruction::I32Const(heads as i32))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalTee(h))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(h))
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::I32Store(word()))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Store(word()))
-                .ins(&Instruction::End);
-        },
-    );
+    // `malloc` and `free` are `std/runtime`'s (PLAN-0125-runtime §6 step 2):
+    // the segregated free list this function used to spell out in wasm, with
+    // its class heads and bump offset in the heap's own first 480 bytes rather
+    // than in a reserved table and the `HEAP` global.
 
     // str_new(len, cap) — one heap block holding the `{ len, cap }` header, `cap`
     // bytes of room and the NUL, and the address of the bytes (RFC-0089 M1a).

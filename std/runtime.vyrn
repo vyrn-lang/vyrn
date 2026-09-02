@@ -21,11 +21,21 @@
 /// and `regexRun`. Their C twins stay in the shim until step 3 moves the
 /// native route.
 ///
+/// **Step 2, the allocator:** `malloc` and `free`, the segregated free list
+/// of PLAN-0125-runtime §4.2, over `load32`, `store32`, `memorySize`, `grow`
+/// and `heapBase`. The wasm emitter's hand-emitted copy is deleted; the C
+/// shim's stays until step 3 moves the native route.
+///
 /// **Call depth.** The emitter does not count these frames against the
 /// language's call-depth budget: the hand-emitted copies had no prologue, and
 /// a program that traps at the limit must trap where it did.
+///
+/// **Traps.** A `panic` in this module prints the trap table's line and no
+/// site: the loader does not stamp this module's `panic` sites, because a
+/// runtime trap is one of `trap.rs`'s fixed wordings and every engine prints
+/// it the same way.
 
-import { load8, load32, load64 } from "std/mem"
+import { load8, load32, load64, store32, memorySize, grow, heapBase } from "std/mem"
 
 /// `strlen`: the bytes before the NUL at `p`.
 export fn strLen(p: Int32) -> Int32 {
@@ -261,4 +271,102 @@ export fn regexRun(s: Int32, table: Int32, start: Int32, accept: Int32) -> Bool 
         p = p + 1
     }
     return load8(accept + st) != 0
+}
+
+// ---------------------------------------------------------------------------
+// Step 2, the allocator (PLAN-0125-runtime §4.2)
+// ---------------------------------------------------------------------------
+//
+// A segregated free list, four classes per power of two. A request rounds up
+// to eight and floors at eight; with `t = size - 1`, `shift = floorLog2(t) - 2`
+// and `sub` the two bits under `t`'s leading one, the class is
+// `shift * 4 + sub` and its size `(sub + 5) << shift`. Classes 3 to 115 are in
+// use: 8 bytes to 2 GiB, every size a multiple of eight, and the round-up is
+// at most 25 percent. Every block carries an eight-byte header whose first
+// word is the class (§4.2 decision 3: `free` needs the class and nothing needs
+// the size). The second header word is never written and reads as zero.
+//
+// The heap's first 480 bytes are the allocator's own: one head per class,
+// 116 words, then the bump offset at 464, then padding so the first block
+// starts sixteen-aligned at 480. All of it starts at zero, which is what an
+// empty list and an empty heap are, so nothing initializes it: the emitter's
+// `HEAP` global and its reserved head table are gone with the hand-emitted
+// allocator. A freed block's list link lives in its payload; the eight-byte
+// floor is what makes room for it.
+//
+// `malloc` pops the class's head if there is one, else bumps and grows memory
+// by exactly the pages the new top needs. `free` refuses, silently, a pointer
+// below `heapBase()` (`drop` on a `String` bound to a literal hands over a
+// data-segment address, and null is the `SmallArray` that never spilled) and
+// a header outside the class range (memory this allocator did not write).
+// Both leak rather than corrupt, which is what the copy it replaces did.
+//
+// The request is an `Int64` because every interesting caller computes
+// `count * stride` out of a Vyrn length, which IS an `Int64`, and `push`
+// doubling a 2 GiB buffer once wrapped that product at an `i32` call site
+// (`tests/parity.rs`, `a_malloc_whose_bump_pointer_would_wrap_traps_instead_of_lying`).
+// The width check comes before the rounding for the same reason: `n + 7` is
+// the cast.
+
+/// `malloc`: `n` bytes, eight-aligned, from the class's free list or the bump
+/// region. Traps with the `out of memory` line every engine prints when the
+/// request cannot fit a wasm32 memory or `grow` refuses.
+export fn malloc(n: Int64) -> Int32 {
+    if UInt64(n) > 2147483648 {
+        panic("out of memory")
+    }
+    let mut t = Int32((n + 7) & -8)
+    if t < 8 {
+        t = 8
+    }
+    t = t - 1
+    // `shift = floorLog2(t) - 2`; `t >= 7`, so `u >= 1` and the loop runs
+    // `shift` times, which is 0 or 1 for a block under 32 bytes.
+    let mut shift: Int32 = 0
+    let mut u = t >> 2
+    while u > 1 {
+        u = u >> 1
+        shift = shift + 1
+    }
+    let sub = (t >> shift) & 3
+    let cls = (shift << 2) + sub
+    let size = (sub + 5) << shift
+    let base = heapBase()
+    let h = base + (cls << 2)
+    let head = Int32(load32(h))
+    if head != 0 {
+        store32(h, load32(head))
+        return head
+    }
+    let p = base + 480 + Int32(load32(base + 464))
+    // In 64 bits so the sum cannot wrap: a top past 4 GiB is a request no
+    // wasm32 memory can serve, reported in `grow`'s words.
+    let end = Int64(UInt32(p)) + Int64(size) + 8
+    if end > 4294967295 {
+        panic("out of memory")
+    }
+    let need = Int32((end + 65535) >> 16) - memorySize()
+    if need > 0 {
+        if grow(need) == -1 {
+            panic("out of memory")
+        }
+    }
+    store32(base + 464, UInt32(end - Int64(base) - 480))
+    store32(p, UInt32(cls))
+    return p + 8
+}
+
+/// `free`: push `p`'s block on its class's list. See the refusals above.
+export fn free(p: Int32) {
+    let base = heapBase()
+    if UInt32(p) < UInt32(base) {
+        return
+    }
+    let cls = Int32(load32(p - 8))
+    if cls < 3 || cls > 115 {
+        return
+    }
+    let h = base + (cls << 2)
+    store32(p, load32(h))
+    store32(h, UInt32(p))
 }

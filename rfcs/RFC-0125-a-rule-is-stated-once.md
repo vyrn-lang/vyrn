@@ -1059,6 +1059,15 @@ wasmtime: 0.89 s and 1.07 s against §1.5b's 0.93 s and 1.06 s, on a machine
 shared with another parity job; the native route is unchanged until step 3. The
 numbers and the gates are recorded under the plan's §6 table.*
 
+*Step 2 landed 2026-09-02 (`track-g`): `malloc` and `free` are Vyrn in
+`std/runtime` — the 113-class segregated free list of the plan's §4, its heads
+and bump offset in the heap's first 480 bytes — and the wasm emitter's 286
+lines of allocator and its `HEAP` global are deleted. binary-trees at depth 18
+under wasmtime: 0.94 s against the base's 0.95 s, medians of five, base and
+head interleaved on a shared machine. The
+audit and poison are the C shim's and go with it at step 3; the wasm copy never
+had them. Details under the plan's §6 table.*
+
 ### M5 — `vyrn run` is compiled
 
 `run`, `test` and `bench --check` execute the wasm in the embedded wasmtime.

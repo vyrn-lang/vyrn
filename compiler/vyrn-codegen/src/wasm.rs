@@ -664,20 +664,10 @@ impl Module {
             },
             &ConstExpr::i32_const(STACK_TOP as i32),
         );
-        // The bump heap starts where the statics end, 16-aligned so a `malloc`
+        // The heap starts where the statics end, 16-aligned so a `malloc`
         // result is aligned for anything `layout` can put in it. This is the
         // number M0 said a direct emitter would know by construction instead of
-        // reading back out of linked bytes.
-        globals.global(
-            GlobalType {
-                val_type: ValType::I32,
-                mutable: true,
-                shared: false,
-            },
-            &ConstExpr::i32_const(round_up(self.data_end(), 16) as i32),
-        );
-        // The same address, immutable, because [`HEAP`] moves and a `free` has to
-        // ask where the heap STARTS (RFC-0077 M6). See [`HEAP_BASE`].
+        // reading back out of linked bytes. See [`HEAP_BASE`].
         globals.global(
             GlobalType {
                 val_type: ValType::I32,
@@ -690,8 +680,7 @@ impl Module {
         // Runs of zeros are not written. A wasm memory arrives zeroed, so a
         // segment of them is bytes in the file that change nothing, and what pays
         // for them is [`Module::reserve`] — every reservation is zero-filled
-        // scratch. RFC-0077 M6's 116 free-list heads are 464 of them, in the
-        // middle of the pool, in every module this backend emits including `fib`.
+        // scratch.
         //
         // A segment costs about nine bytes of its own, so a gap has to be wider
         // than that to be worth splitting on. `data_end` does not move: the
@@ -806,22 +795,18 @@ fn encode(f: Frame, n_params: usize) -> Function {
 /// state of its own that is not in memory.
 pub const SP: u32 = 0;
 
-/// The module's bump-allocation cursor, initialized past the statics by
-/// [`Module::finish`]. RFC-0076's shim owns `malloc` for the split build; a
-/// standalone module has no shim to ask, so the direct backend emits its own
-/// against this global.
-pub const HEAP: u32 = 1;
-
-/// The first byte of the heap — [`HEAP`]'s initial value, kept immutable so a
+/// The first byte of the heap, 16-aligned past the statics. Immutable, so a
 /// `free` can tell a heap pointer from one that never came out of `malloc`
-/// (RFC-0077 M6).
+/// (RFC-0077 M6). `std/runtime`'s allocator keeps its class heads and its bump
+/// offset in the heap's own first bytes (PLAN-0125-runtime §6 step 2), so the
+/// mutable `HEAP` cursor that used to sit beside this global is gone.
 ///
 /// It is not a refinement. `drop s` on a `String` bound to a literal hands `free`
 /// a data-segment address; the textual backend passes that to C's `free`, which
 /// reads a header that is not there. Here the address is BELOW this global and
 /// the release is a no-op — a leak of nothing, instead of a free list threaded
 /// through the string pool.
-pub const HEAP_BASE: u32 = 2;
+pub const HEAP_BASE: u32 = 1;
 
 /// A function body under construction, plus the frame it is accumulating.
 ///
