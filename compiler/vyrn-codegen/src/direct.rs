@@ -7175,6 +7175,125 @@ impl<'p> Fn_<'_, 'p> {
             // fused into the constant `trap` already receives — `"\n"` becomes
             // `" (std/slots.vyrn:189)\n"` — so the code is the same three calls
             // with one different immediate, and only the data segment grows.
+            // `blackBox(v)` (RFC-0055) is `v`. The interpreter runs it as the
+            // identity, and this backend never optimizes (RFC-0125 §2.3), so
+            // there is nothing to hide the value from.
+            "blackBox" if args.len() == 1 => return self.expr(m, b, &args[0]),
+            // `assert(c)` (RFC-0015): the interpreter's trap, in its words. Lowered
+            // here rather than rewritten into `panic` by the CLI before the compile
+            // (RFC-0125 §3 M5), so the rule is stated once.
+            "assert" if args.len() == 1 => {
+                self.expr_as(m, b, &args[0], &Type::Bool)?;
+                let msg = self.cx.rt.intern(
+                    m,
+                    &vyrn_frontend::trap::line(&format!("assertion failed at line {line}")),
+                );
+                b.ins(&Instruction::I32Eqz)
+                    .ins(&Instruction::If(BlockType::Empty))
+                    .ins(&Instruction::I32Const(msg as i32))
+                    .ins(&Instruction::Call(self.cx.rt.trap))
+                    .ins(&Instruction::End);
+                return Ok(Type::Unit);
+            }
+            // `assertEq(a, b)` (RFC-0015): each operand evaluated once into a
+            // local, the two compared by their type — the checker allows one
+            // equatable scalar type for both — and on a mismatch rendered the way
+            // `toString` renders them, around ` != `, after the interpreter's
+            // `scalar_to_string`. The line is written in pieces the way `panic`
+            // writes its message, and `trap` writes the last piece and exits. An
+            // operand that allocated is released by [`Fn_::call`] after this
+            // returns, as every call argument is (`rfcs/census-call-arguments.md`).
+            "assertEq" if args.len() == 2 => {
+                let t = self.expr(m, b, &args[0])?;
+                let t = self.cx.resolve(&t);
+                let Some(vt) = self.cx.repr(&t, line)?.val() else {
+                    return unsupported("`assertEq` on a non-scalar", line);
+                };
+                let la = b.local(vt);
+                b.ins(&Instruction::LocalSet(la));
+                self.expr_as(m, b, &args[1], &t)?;
+                let lb = b.local(vt);
+                b.ins(&Instruction::LocalSet(lb));
+                b.ins(&Instruction::LocalGet(la))
+                    .ins(&Instruction::LocalGet(lb));
+                match &t {
+                    Type::Str => {
+                        b.ins(&Instruction::Call(self.cx.rt.strcmp))
+                            .ins(&Instruction::I32Const(0))
+                            .ins(&Instruction::I32Ne);
+                    }
+                    Type::Float => {
+                        b.ins(&Instruction::F64Ne);
+                    }
+                    Type::Float32 => {
+                        b.ins(&Instruction::F32Ne);
+                    }
+                    Type::Bool => {
+                        b.ins(&Instruction::I32Ne);
+                    }
+                    it => match Num::of(it) {
+                        Some(n) if n.wide() => {
+                            b.ins(&Instruction::I64Ne);
+                        }
+                        Some(_) => {
+                            b.ins(&Instruction::I32Ne);
+                        }
+                        None => return unsupported(&format!("`assertEq` on `{t}`"), line),
+                    },
+                }
+                let (write_all, trap, strlen) =
+                    (self.cx.rt.write_all, self.cx.rt.trap, self.cx.rt.strlen);
+                let head = format!("error: assertion failed at line {line}: ");
+                let (head_at, sep_at, nl_at) = (
+                    self.cx.rt.intern(m, &head),
+                    self.cx.rt.intern(m, " != "),
+                    self.cx.rt.intern(m, "\n"),
+                );
+                let rendered = self.scratch(b, ValType::I32, 7);
+                b.ins(&Instruction::If(BlockType::Empty))
+                    .ins(&Instruction::I32Const(2))
+                    .ins(&Instruction::I32Const(head_at as i32))
+                    .ins(&Instruction::I32Const(head.len() as i32))
+                    .ins(&Instruction::Call(write_all))
+                    .ins(&Instruction::Drop);
+                for (side, local) in [(0, la), (1, lb)] {
+                    if side == 1 {
+                        b.ins(&Instruction::I32Const(2))
+                            .ins(&Instruction::I32Const(sep_at as i32))
+                            .ins(&Instruction::I32Const(4))
+                            .ins(&Instruction::Call(write_all))
+                            .ins(&Instruction::Drop);
+                    }
+                    // The same three renderings `@str` uses, on a value that is
+                    // about to be the last thing the program prints, so nothing
+                    // rendered here is released.
+                    b.ins(&Instruction::LocalGet(local));
+                    match &t {
+                        Type::Str => {}
+                        Type::Float | Type::Float32 => self.f64_str(b, &t, line)?,
+                        Type::Bool => {
+                            b.ins(&Instruction::Call(self.cx.rt.bool_str));
+                        }
+                        it => {
+                            let n = Num::of(it).expect("compared as a number above");
+                            widen(b, n);
+                            b.ins(&Instruction::I32Const(n.signed as i32));
+                            b.ins(&Instruction::Call(self.cx.rt.int_str));
+                        }
+                    }
+                    b.ins(&Instruction::LocalSet(rendered))
+                        .ins(&Instruction::I32Const(2))
+                        .ins(&Instruction::LocalGet(rendered))
+                        .ins(&Instruction::LocalGet(rendered))
+                        .ins(&Instruction::Call(strlen))
+                        .ins(&Instruction::Call(write_all))
+                        .ins(&Instruction::Drop);
+                }
+                b.ins(&Instruction::I32Const(nl_at as i32))
+                    .ins(&Instruction::Call(trap))
+                    .ins(&Instruction::End);
+                return Ok(Type::Unit);
+            }
             "panic" | vyrn_frontend::ast::PANIC_AT => {
                 if args.is_empty() || args.len() > 2 {
                     return unsupported("`panic` with other than one argument", line);

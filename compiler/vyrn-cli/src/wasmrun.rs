@@ -122,7 +122,7 @@ fn engine() -> &'static Engine {
 /// because that is the program's output and not this host's.
 pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
     let engine = engine();
-    let module = Module::new(engine, bytes).map_err(|e| format!("wasm: {e}"))?;
+    let module = Module::new(engine, bytes).map_err(|e| format!("wasm: {e:?}"))?;
     let mut linker: Linker<Host> = Linker::new(engine);
     link_wasi(&mut linker).map_err(|e| e.to_string())?;
     // A directly-emitted module imports only what it calls after `sweep`; an

@@ -794,7 +794,10 @@ pub const RT_MODULES: &[RtModule] = &[
     RtModule {
         spec: "std/num",
         prefix: "num$",
-        desugared: &["@str", "print"],
+        // `assertEq` renders a mismatched float the way `@str` does (RFC-0125 §3
+        // M5), so a test that compares floats and prints nothing still links
+        // the formatter.
+        desugared: &["@str", "print", "assertEq"],
         routes: &[],
         always: false,
     },

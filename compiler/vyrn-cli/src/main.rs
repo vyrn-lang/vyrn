@@ -5793,9 +5793,11 @@ struct Body {
 /// the process's own input. That is how the host knows which body a trap
 /// belongs to without reading the program's output: a trap ends the instance
 /// with `error: <message>` on fd 2 and exit 1, and the host turns the message
-/// into the `FAILED:` line. What differs from the interpreter, on record in
-/// RFC-0125 §3 M5: module state is initialized once per body rather than once
-/// per run, and input a body read ahead is not seen by the next.
+/// into the `FAILED:` line. `assert`, `assertEq` and `blackBox` are lowered by
+/// the direct backend like every other builtin; nothing is rewritten here.
+/// What differs from the interpreter, on record in RFC-0125 §3 M5: module
+/// state is initialized once per body rather than once per run, and input a
+/// body read ahead is not seen by the next.
 fn bodies_wasm(
     path: &str,
     program: &vyrn_frontend::ast::Program,
@@ -5834,21 +5836,8 @@ fn bodies_wasm(
     let mut dispatch: Vec<Stmt> = Vec::new();
     for (k, b) in bodies.iter().enumerate() {
         let name = format!("__vyrn_body_{k}");
-        let mut body = b.body.clone();
-        let mut fresh = 0usize;
-        desugar_asserts(&mut body, &mut fresh);
-        // `blackBox(v)` (RFC-0055) is `v`: the interpreter runs it as the
-        // identity, and `--check` measures nothing, so there is no optimizer to
-        // defeat. The direct backend has no lowering for it (RFC-0125 §3 M5).
-        vyrn_frontend::project::walk_block(&mut body, &mut |e| {
-            if let Expr::Call { name, args, .. } = e {
-                if name == "blackBox" && args.len() == 1 {
-                    *e = args.remove(0);
-                }
-            }
-        });
         prog.functions
-            .push(function(name.clone(), body, Type::Unit, b.line));
+            .push(function(name.clone(), b.body.clone(), Type::Unit, b.line));
         dispatch.push(Stmt::If {
             cond: Expr::Binary {
                 op: BinOp::Eq,
@@ -5952,143 +5941,6 @@ fn bodies_wasm(
     } else {
         ExitCode::SUCCESS
     }
-}
-
-/// `assert` and `assertEq` (RFC-0015) as the interpreter traps them, spelled
-/// with `panic` so the direct backend can lower a body that uses them:
-///
-///   assert(c)       ->  if !c { panic("assertion failed at line L") }
-///   assertEq(a, b)  ->  if a != b { panic("assertion failed at line L: " + a + " != " + b) }
-///
-/// A call operand is bound to a fresh local first, so it runs once and its
-/// result is owned by one name; any other operand — a variable, a literal, a
-/// field, an arithmetic expression — is pure and is written twice.
-fn desugar_asserts(block: &mut vyrn_frontend::ast::Block, fresh: &mut usize) {
-    use vyrn_frontend::ast::{ArmBody, BinOp, Block, Expr, Stmt, UnOp};
-    let panic = |msg: Expr, line: usize| {
-        Stmt::Expr(Expr::Call {
-            name: "panic".to_string(),
-            args: vec![msg],
-            line,
-        })
-    };
-    let call = |name: &str, args: Vec<Expr>, line: usize| Expr::Call {
-        name: name.to_string(),
-        args,
-        line,
-    };
-    let mut out = Vec::with_capacity(block.stmts.len());
-    for stmt in std::mem::take(&mut block.stmts) {
-        match stmt {
-            Stmt::Expr(Expr::Call { name, args, line }) if name == "assert" && args.len() == 1 => {
-                let cond = args.into_iter().next().unwrap();
-                out.push(Stmt::If {
-                    cond: Expr::Unary {
-                        op: UnOp::Not,
-                        expr: Box::new(cond),
-                        line,
-                    },
-                    then_block: Block {
-                        stmts: vec![panic(
-                            Expr::Str(format!("assertion failed at line {line}")),
-                            line,
-                        )],
-                    },
-                    else_block: None,
-                    line,
-                });
-            }
-            Stmt::Expr(Expr::Call { name, args, line })
-                if name == "assertEq" && args.len() == 2 =>
-            {
-                let mut operands = Vec::new();
-                for a in args {
-                    if matches!(a, Expr::Call { .. }) {
-                        let tmp = format!("__vyrnEq{fresh}");
-                        *fresh += 1;
-                        out.push(Stmt::Let {
-                            name: tmp.clone(),
-                            mutable: false,
-                            ty: None,
-                            value: a,
-                            line,
-                        });
-                        operands.push(Expr::Var { name: tmp, line });
-                    } else {
-                        operands.push(a);
-                    }
-                }
-                let (a, b) = (operands.remove(0), operands.remove(0));
-                let msg = call(
-                    "@concat",
-                    vec![
-                        call(
-                            "@concat",
-                            vec![
-                                call(
-                                    "@concat",
-                                    vec![
-                                        Expr::Str(format!("assertion failed at line {line}: ")),
-                                        call("@str", vec![a.clone()], line),
-                                    ],
-                                    line,
-                                ),
-                                Expr::Str(" != ".to_string()),
-                            ],
-                            line,
-                        ),
-                        call("@str", vec![b.clone()], line),
-                    ],
-                    line,
-                );
-                out.push(Stmt::If {
-                    cond: Expr::Binary {
-                        op: BinOp::NotEq,
-                        lhs: Box::new(a),
-                        rhs: Box::new(b),
-                        line,
-                    },
-                    then_block: Block {
-                        stmts: vec![panic(msg, line)],
-                    },
-                    else_block: None,
-                    line,
-                });
-            }
-            mut s => {
-                match &mut s {
-                    Stmt::If {
-                        then_block,
-                        else_block,
-                        ..
-                    }
-                    | Stmt::IfLet {
-                        then_block,
-                        else_block,
-                        ..
-                    } => {
-                        desugar_asserts(then_block, fresh);
-                        if let Some(e) = else_block {
-                            desugar_asserts(e, fresh);
-                        }
-                    }
-                    Stmt::While { body, .. }
-                    | Stmt::ForIn { body, .. }
-                    | Stmt::Region { body, .. } => desugar_asserts(body, fresh),
-                    Stmt::Expr(Expr::Match { arms, .. }) => {
-                        for arm in arms {
-                            if let ArmBody::Block(b) = &mut arm.body {
-                                desugar_asserts(b, fresh);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                out.push(s);
-            }
-        }
-    }
-    block.stmts = out;
 }
 
 fn build(path: &str, rest: &[String]) -> ExitCode {
