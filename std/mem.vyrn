@@ -1,0 +1,121 @@
+/// std/mem — the raw-memory primitives the runtime module stands on
+/// (RFC-0125 §2.4, PLAN-0125-runtime §2.1 and §2.3).
+///
+/// Every function here is a declaration. The emitter never reads a body: it
+/// maps each call to one wasm instruction (`load8` is `i32.load8_u`, `copy` is
+/// `memory.copy`, `grow` is `memory.grow`). The bodies below exist so the
+/// module parses and checks like any other; an engine that reaches one — the
+/// interpreter, which has no linear memory — stops with the message.
+///
+/// The audience of this module is `std/runtime` and nothing else. The loader
+/// declares that audience itself (PLAN-0125-runtime §3.2), so no `vyrn.json`
+/// can widen it: a user import of `std/mem` is refused with a diagnostic, and
+/// the safe surface over these instructions is what `std/runtime` exports.
+///
+/// An address is an `Int32` because the route is wasm32 (RFC-0125 §2.8). The
+/// runtime module is the only reader of addresses, so there is no `Ptr<T>`.
+
+fn noBody() {
+    panic("std/mem: a primitive has no body; the emitter lowers it to one instruction")
+}
+
+/// `i32.load8_u`: the byte at `addr`.
+export fn load8(addr: Int32) -> UInt8 {
+    noBody()
+    return 0
+}
+
+/// `i32.load16_u`.
+export fn load16(addr: Int32) -> UInt16 {
+    noBody()
+    return 0
+}
+
+/// `i32.load`.
+export fn load32(addr: Int32) -> UInt32 {
+    noBody()
+    return 0
+}
+
+/// `i64.load`.
+export fn load64(addr: Int32) -> UInt64 {
+    noBody()
+    return 0
+}
+
+/// `f32.load`.
+export fn loadF32(addr: Int32) -> Float32 {
+    noBody()
+    return 0.0
+}
+
+/// `f64.load`.
+export fn loadF64(addr: Int32) -> Float64 {
+    noBody()
+    return 0.0
+}
+
+/// `i32.store8`.
+export fn store8(addr: Int32, v: UInt8) {
+    noBody()
+}
+
+/// `i32.store16`.
+export fn store16(addr: Int32, v: UInt16) {
+    noBody()
+}
+
+/// `i32.store`.
+export fn store32(addr: Int32, v: UInt32) {
+    noBody()
+}
+
+/// `i64.store`.
+export fn store64(addr: Int32, v: UInt64) {
+    noBody()
+}
+
+/// `f32.store`.
+export fn storeF32(addr: Int32, v: Float32) {
+    noBody()
+}
+
+/// `f64.store`.
+export fn storeF64(addr: Int32, v: Float64) {
+    noBody()
+}
+
+/// `memory.copy`: `n` bytes from `src` to `dst`. The ranges may overlap.
+export fn copy(dst: Int32, src: Int32, n: Int32) {
+    noBody()
+}
+
+/// `memory.fill`: `n` bytes of `byte` at `dst`.
+export fn fill(dst: Int32, byte: UInt8, n: Int32) {
+    noBody()
+}
+
+/// `memory.size`: the memory's size in 64 KiB pages.
+export fn pages() -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `memory.grow`: add `delta` pages. The old size in pages, or -1 when the
+/// engine refuses.
+export fn grow(delta: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// The `HEAP_BASE` global: where the data segment ends and the heap begins.
+export fn heapBase() -> Int32 {
+    noBody()
+    return 0
+}
+
+/// The trap primitive (PLAN-0125-runtime §2.3): `len` bytes at `msg` to
+/// descriptor 2, then `proc_exit(1)`. It does not return.
+export fn trap(msg: Int32, len: Int32) {
+    noBody()
+}

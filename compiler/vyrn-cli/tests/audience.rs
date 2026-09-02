@@ -660,3 +660,68 @@ fn why_says_so_when_the_project_declared_no_audience() {
         "{text}"
     );
 }
+
+/// PLAN-0125-runtime §3: the fence the compiler declares. `std/mem` is in the
+/// audience of `std/runtime` alone, and `std/runtime` is in nobody's, whatever
+/// `vyrn.json` says or does not say — the one audience no manifest can widen.
+#[test]
+fn a_user_import_of_std_mem_is_refused_with_or_without_a_declared_audience() {
+    for (tag, manifest) in [("fence", MANIFEST_WITH_AUDIENCE), ("fencenone", MANIFEST_WITHOUT)] {
+        let dir = scratch(tag);
+        write(&dir, "vyrn.json", manifest);
+        write(
+            &dir,
+            "main.vyrn",
+            "import { load8 } from \"std/mem\"\nfn main() -> Int64 {\n    return Int64(load8(0))\n}\n",
+        );
+        let out = vyrn()
+            .arg("check")
+            .arg(dir.join("main.vyrn"))
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{tag}: the primitives leaked");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("cannot import `std/mem`, whose audience is the runtime"),
+            "{tag}:\n{err}"
+        );
+        assert!(err.contains("declared by the compiler"), "{tag}:\n{err}");
+    }
+}
+
+#[test]
+fn a_user_import_of_std_runtime_is_refused_in_the_namespace_form_too() {
+    let dir = scratch("fencert");
+    write(&dir, "vyrn.json", MANIFEST_WITHOUT);
+    write(
+        &dir,
+        "main.vyrn",
+        "import * as rt from \"std/runtime\"\nfn main() -> Int64 {\n    return 0\n}\n",
+    );
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("main.vyrn"))
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("cannot import `std/runtime`, whose audience is the runtime"),
+        "{err}"
+    );
+}
+
+#[test]
+fn why_names_the_compiler_as_the_declarer_of_std_mems_audience() {
+    let out = vyrn()
+        .arg("why")
+        .arg(repo_dir("std").join("mem.vyrn"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("audience: `std/runtime`, declared by the compiler"),
+        "{text}"
+    );
+}

@@ -1428,12 +1428,30 @@ fn why_audience(file: &str) -> ExitCode {
     let map = manifest.as_ref().and_then(|m| m.audience.clone());
 
     println!("{path}");
-    match &map {
-        Some(map) => {
+    // PLAN-0125-runtime §3.2: the two modules whose audience the compiler
+    // declares. Decided by path identity against the std root, the way the
+    // loader's fence decides it, and before the manifest is consulted because
+    // no manifest has a say.
+    let fenced = std_root().and_then(|root| {
+        use vyrn_frontend::loader::{MEM_SPEC, RUNTIME_SPEC};
+        let is = |spec: &str| {
+            real_path(&format!("{root}/{}.vyrn", &spec["std/".len()..])).as_deref() == Some(&*path)
+        };
+        if is(MEM_SPEC) {
+            Some(format!("`{RUNTIME_SPEC}`, declared by the compiler (RFC-0125 §2.4)"))
+        } else if is(RUNTIME_SPEC) {
+            Some("the compiler, which links it into every program (RFC-0125 §2.4)".to_string())
+        } else {
+            None
+        }
+    });
+    match (&fenced, &map) {
+        (Some(who), _) => println!("  audience: {who}"),
+        (None, Some(map)) => {
             let v = vyrn_frontend::audience::audience_of(&path, map);
             println!("  audience: {} — {}", v.audience.phrase(), v.because());
         }
-        None => {
+        (None, None) => {
             println!(
                 "  audience: universal — this project declares no `audience` in vyrn.json, \
                  so every module is universal and no import is rejected"

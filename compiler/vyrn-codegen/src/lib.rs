@@ -2152,6 +2152,15 @@ pub fn emit(program: &Program) -> Result<String, String> {
         if f.is_gen {
             continue;
         }
+        // `std/runtime` and `std/mem` (RFC-0125 §2.4) belong to the wasm
+        // emitter. Until PLAN-0125-runtime §6 step 3 moves the native route onto
+        // the wasm, this backend keeps its C copies and emits neither the
+        // runtime's bodies nor the primitives' declarations.
+        if f.name.starts_with(vyrn_frontend::loader::RUNTIME_PREFIX)
+            || f.name.starts_with(vyrn_frontend::loader::MEM_PREFIX)
+        {
+            continue;
+        }
         // A function that takes `fn`-typed parameters (RFC-0023) has no first-order
         // definition — it exists only as monomorphized specializations, emitted on
         // demand from the higher-order worklist. Skip its (unspecializable) shell.

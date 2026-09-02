@@ -595,6 +595,54 @@ fn audience_objection(
     Some(d)
 }
 
+/// The fence of PLAN-0125-runtime §3: `std/mem` may be imported by
+/// `std/runtime` and by nothing else, and `std/runtime` by nothing at all.
+///
+/// The audience is a constant here beside the standard-library table rather
+/// than a key `vyrn.json` reads, so no manifest widens it. It runs whether or
+/// not the project declared an `audience` key, which is what separates it from
+/// [`audience_objection`]: that one is a fence a project opts into, this one is
+/// the compiler's own. The diagnostic keeps the audience shape (RFC-0072
+/// §Enforcement) so a reader meets one wording for "you may not import this".
+///
+/// Identity is by resolved path, the same resolution every import takes. A
+/// file that merely calls itself `std/runtime.vyrn` inside a project resolves
+/// to its own path, not to the std root's, and gets no primitives.
+fn runtime_fence(
+    importer: &str,
+    imported: &str,
+    line: usize,
+    opts: &LoadOptions,
+) -> Option<Diagnostic> {
+    let std_key = |spec: &str| resolve_spec(spec, importer, opts).ok();
+    let fenced = if Some(imported) == std_key(MEM_SPEC).as_deref() {
+        if Some(importer) == std_key(RUNTIME_SPEC).as_deref() {
+            return None;
+        }
+        MEM_SPEC
+    } else if Some(imported) == std_key(RUNTIME_SPEC).as_deref() {
+        RUNTIME_SPEC
+    } else {
+        return None;
+    };
+    let shown = match &opts.audience {
+        Some(map) => crate::audience::display_path(importer, map),
+        None => importer.to_string(),
+    };
+    let mut d = Diagnostic::error(
+        line,
+        0,
+        "audience",
+        format!("`{shown}` cannot import `{fenced}`, whose audience is the runtime"),
+    );
+    d.note = Some(format!(
+        "audience `{RUNTIME_SPEC}` is declared by the compiler (RFC-0125 §2.4), not by \
+         vyrn.json; the safe surface over `std/mem` is what `{RUNTIME_SPEC}` exports, \
+         and the compiler links that into every program"
+    ));
+    Some(d)
+}
+
 /// One parsed module awaiting linking.
 struct Module {
     key: String,
@@ -649,7 +697,29 @@ pub struct RtModule {
     /// expression takes. `every_route_is_spelled_with_its_modules_prefix` is what
     /// keeps the redundancy honest.
     pub routes: &'static [(&'static str, &'static str)],
+    /// Linked into every program, mentioned or not. Only [`RUNTIME_SPEC`] is:
+    /// the wasm emitter calls its functions from lowerings no builtin name
+    /// announces (a `String` comparison is a call to `strCmp`), so no mention
+    /// scan could gate it (PLAN-0125-runtime §3.2 step 4).
+    pub always: bool,
 }
+
+/// The module the compiler carries as its runtime (RFC-0125 §2.4). It is the
+/// one member of `std/mem`'s audience, and nothing may import it.
+pub const RUNTIME_SPEC: &str = "std/runtime";
+
+/// The raw-memory primitives (PLAN-0125-runtime §2.1). Its audience is
+/// `{ std/runtime }`, declared here rather than by any `vyrn.json`, which is
+/// what makes the fence a floor: no manifest key widens it. [`runtime_fence`]
+/// is the check.
+pub const MEM_SPEC: &str = "std/mem";
+
+/// The reserved prefix of every `std/mem` declaration. The emitter matches on
+/// it to lower a call to one instruction rather than to a `call`.
+pub const MEM_PREFIX: &str = "mem$";
+
+/// The reserved prefix of every `std/runtime` declaration.
+pub const RUNTIME_PREFIX: &str = "runtime$";
 
 /// Every runtime module, in load order.
 pub const RT_MODULES: &[RtModule] = &[
@@ -662,6 +732,7 @@ pub const RT_MODULES: &[RtModule] = &[
         prefix: RT_PREFIX,
         desugared: &["toJson", "fromJson"],
         routes: &[],
+        always: false,
     },
     // RFC-0078 M3: `fromJson`'s untyped half — the reader (via `std/jsonread`),
     // the RFC-0018 Issue vocabulary, the path arithmetic and the scalar decoders.
@@ -673,6 +744,7 @@ pub const RT_MODULES: &[RtModule] = &[
         prefix: "jsondec$",
         desugared: &["fromJson"],
         routes: &[],
+        always: false,
     },
     // RFC-0078 M4b(2)/M4c: `@charCount` — the census's one builtin with no
     // justification for being one. It is spelled with the `@` because that is what
@@ -691,6 +763,7 @@ pub const RT_MODULES: &[RtModule] = &[
         prefix: "text$",
         desugared: &[],
         routes: &[("@charCount", "text$charCountV")],
+        always: false,
     },
     // RFC-0081 M2: the six decimal places. Listed as DESUGARED rather than routed
     // for the same reason `toJson` is — `@str` is type-directed and only its float
@@ -710,6 +783,24 @@ pub const RT_MODULES: &[RtModule] = &[
         prefix: "num$",
         desugared: &["@str", "print"],
         routes: &[],
+        always: false,
+    },
+    // RFC-0125 §2.4 / PLAN-0125-runtime §3.2: the runtime module, in every
+    // program. `std/mem` is not listed here because nothing injects it: it
+    // enters as `std/runtime`'s import and is marked with its prefix below.
+    RtModule {
+        spec: RUNTIME_SPEC,
+        prefix: RUNTIME_PREFIX,
+        desugared: &[],
+        routes: &[],
+        always: true,
+    },
+    RtModule {
+        spec: MEM_SPEC,
+        prefix: MEM_PREFIX,
+        desugared: &[],
+        routes: &[],
+        always: false,
     },
 ];
 
@@ -1331,7 +1422,9 @@ fn load_modules(
                 // RFC-0072 M1: an import may not WIDEN audience. Checked here,
                 // before the target is visited, so the first illegal edge is the
                 // one reported rather than whatever its subtree fails at.
-                if let Some(mut d) = audience_objection(key, &target, imp.line, opts) {
+                if let Some(mut d) = audience_objection(key, &target, imp.line, opts)
+                    .or_else(|| runtime_fence(key, &target, imp.line, opts))
+                {
                     if !is_root {
                         d.file = Some(key.to_string());
                     }
@@ -1450,11 +1543,12 @@ fn load_modules(
         .flat_map(|m| program_ref_names(&m.program))
         .collect();
     for rt in RT_MODULES {
-        let wanted = rt
-            .desugared
-            .iter()
-            .chain(rt.routes.iter().map(|(b, _)| b))
-            .any(|b| mentioned.contains(*b));
+        let wanted = rt.always
+            || rt
+                .desugared
+                .iter()
+                .chain(rt.routes.iter().map(|(b, _)| b))
+                .any(|b| mentioned.contains(*b));
         // A missing std root is not an error HERE: the diagnostic for a program
         // that needs the runtime and cannot find it belongs to whoever needs it,
         // not to a scan. Each engine refuses loudly at the call instead.

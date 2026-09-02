@@ -351,6 +351,11 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         if f.is_extern || f.is_gen {
             continue;
         }
+        // PLAN-0125-runtime §3.2: a `std/mem` declaration has no body this
+        // emitter reads. `Fn_::mem_prim` lowers each call to one instruction.
+        if f.name.starts_with(vyrn_frontend::loader::MEM_PREFIX) {
+            continue;
+        }
         // RFC-0023: a function taking a `fn`-typed parameter exists only as
         // higher-order specializations, one per set of resolved targets. The shell
         // has no first-order definition to emit — a `fn` parameter is not a value
@@ -7047,6 +7052,12 @@ impl<'p> Fn_<'_, 'p> {
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
+        // PLAN-0125-runtime §2.1: a `std/mem` primitive is one instruction,
+        // never a call. Before every other resolution, because the loader's
+        // prefix is the whole of the identity and no table below has a row.
+        if let Some(prim) = name.strip_prefix(vyrn_frontend::loader::MEM_PREFIX) {
+            return self.mem_prim(m, b, prim, args, line);
+        }
         // RFC-0078 M4c: a builtin whose implementation IS a Vyrn function needs no
         // lowering here at all — it is a call to the reserved spelling the loader
         // injected. This backend had no lowering for any of the ten (the six
@@ -8367,6 +8378,96 @@ impl<'p> Fn_<'_, 'p> {
             return unsupported(&format!("the call `{name}` at this arity"), line);
         }
         self.emit_call(m, b, &sig, args)
+    }
+
+    /// One `std/mem` primitive (PLAN-0125-runtime §2.1 and §2.3) as its
+    /// instruction. `std/mem.vyrn` holds the signatures and this holds the whole
+    /// of their lowering; the bodies there are never read by this emitter.
+    ///
+    /// The argument types are spelled here as well as in the module because
+    /// `expr_as` needs the target type to coerce a literal, and the row is the
+    /// one place the two lists meet. A mismatch is a checker error at the call
+    /// in `std/runtime` before it is anything here.
+    fn mem_prim(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        prim: &str,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let u = |bits: u8| Type::IntN {
+            bits,
+            signed: false,
+        };
+        let at = |align: u32| MemArg {
+            offset: 0,
+            align,
+            memory_index: 0,
+        };
+        let (params, ret): (Vec<Type>, Type) = match prim {
+            "load8" => (vec![INT32], u(8)),
+            "load16" => (vec![INT32], u(16)),
+            "load32" => (vec![INT32], u(32)),
+            "load64" => (vec![INT32], u(64)),
+            "loadF32" => (vec![INT32], Type::Float32),
+            "loadF64" => (vec![INT32], Type::Float),
+            "store8" => (vec![INT32, u(8)], Type::Unit),
+            "store16" => (vec![INT32, u(16)], Type::Unit),
+            "store32" => (vec![INT32, u(32)], Type::Unit),
+            "store64" => (vec![INT32, u(64)], Type::Unit),
+            "storeF32" => (vec![INT32, Type::Float32], Type::Unit),
+            "storeF64" => (vec![INT32, Type::Float], Type::Unit),
+            "copy" => (vec![INT32, INT32, INT32], Type::Unit),
+            "fill" => (vec![INT32, u(8), INT32], Type::Unit),
+            "pages" => (vec![], INT32),
+            "grow" => (vec![INT32], INT32),
+            "heapBase" => (vec![], INT32),
+            "trap" => (vec![INT32, INT32], Type::Unit),
+            _ => return unsupported(&format!("the `std/mem` primitive `{prim}`"), line),
+        };
+        if args.len() != params.len() {
+            return unsupported(&format!("`std/mem.{prim}` at this arity"), line);
+        }
+        if prim == "trap" {
+            // The descriptor, under the message and its length.
+            b.ins(&Instruction::I32Const(2));
+        }
+        for (a, p) in args.iter().zip(&params) {
+            self.expr_as(m, b, a, p)?;
+        }
+        match prim {
+            "load8" => b.ins(&Instruction::I32Load8U(at(0))),
+            "load16" => b.ins(&Instruction::I32Load16U(at(1))),
+            "load32" => b.ins(&Instruction::I32Load(at(2))),
+            "load64" => b.ins(&Instruction::I64Load(at(3))),
+            "loadF32" => b.ins(&Instruction::F32Load(at(2))),
+            "loadF64" => b.ins(&Instruction::F64Load(at(3))),
+            "store8" => b.ins(&Instruction::I32Store8(at(0))),
+            "store16" => b.ins(&Instruction::I32Store16(at(1))),
+            "store32" => b.ins(&Instruction::I32Store(at(2))),
+            "store64" => b.ins(&Instruction::I64Store(at(3))),
+            "storeF32" => b.ins(&Instruction::F32Store(at(2))),
+            "storeF64" => b.ins(&Instruction::F64Store(at(3))),
+            "copy" => b.ins(&Instruction::MemoryCopy {
+                src_mem: 0,
+                dst_mem: 0,
+            }),
+            "fill" => b.ins(&Instruction::MemoryFill(0)),
+            "pages" => b.ins(&Instruction::MemorySize(0)),
+            "grow" => b.ins(&Instruction::MemoryGrow(0)),
+            "heapBase" => b.ins(&Instruction::GlobalGet(HEAP_BASE)),
+            // `write_all` first, so the stdout buffer is flushed ahead of the
+            // message — the order `trap` keeps.
+            "trap" => b
+                .ins(&Instruction::Call(self.cx.rt.write_all))
+                .ins(&Instruction::Drop)
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::Call(self.cx.rt.proc_exit))
+                .ins(&Instruction::Unreachable),
+            _ => unreachable!("matched above"),
+        };
+        Ok(ret)
     }
 
     /// One log line: `[LEVEL] name: message\n`, to the configured descriptor.
@@ -14939,6 +15040,10 @@ fn store_of(ll: &str) -> Instruction<'static> {
 /// The data each interned on its way past is NOT swept.
 #[derive(Clone, Copy, Default)]
 struct Rt {
+    /// `wasi_snapshot_preview1.proc_exit`, kept here so a lowering outside
+    /// `runtime` can end the process: `std/mem`'s `trap` primitive
+    /// (PLAN-0125-runtime §2.3) is the write to descriptor 2 and this call.
+    proc_exit: u32,
     write_all: u32,
     malloc: u32,
     /// Hand a block back to its size class (RFC-0077 M6). Paired with `malloc` in
@@ -15162,6 +15267,7 @@ impl Rt {
         // Every field is named, so a field added to `Rt` and forgotten here is a
         // compile error rather than an index of zero pointing at `write_all`.
         let mut rt = Rt {
+            proc_exit: 0,
             write_all: slot("write_all"),
             malloc: slot("malloc"),
             free: slot("free"),
@@ -15356,6 +15462,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     let (fd_write, proc_exit) = (wasi.fd_write, wasi.proc_exit);
     let base = m.n_imports();
     let (mut rt, _table) = Rt::slots(base, gen.is_some());
+    rt.proc_exit = proc_exit;
     let nl = rt.intern(m, "\n");
     let t = rt.intern(m, "true");
     let f = rt.intern(m, "false");

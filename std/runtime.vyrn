@@ -1,0 +1,9 @@
+/// std/runtime — the runtime in Vyrn (RFC-0125 §2.4, PLAN-0125-runtime).
+///
+/// The compiler links this module into every program it loads; nothing
+/// imports it. It is the one module in the audience of `std/mem`, and the
+/// loader declares that audience itself (PLAN-0125-runtime §3.2). A user
+/// import of `std/runtime` or of `std/mem` is refused.
+///
+/// The families move in here one at a time, in PLAN-0125-runtime §6's order.
+/// Each function keeps the byte-level semantics of the copy it replaces.
