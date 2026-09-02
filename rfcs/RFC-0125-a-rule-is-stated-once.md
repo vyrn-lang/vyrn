@@ -621,6 +621,153 @@ measured answer is: one emitter is viable if the release build is wasm2c and
 clang, and the default build is accepted at two to three times native. That
 is a trade to make on purpose, and it is the route decision §2.5 left open.
 
+**The second slice landed (2026-09-02): aggregates are built in place, and a
+statement's temporaries are its own.** M5's second slice priced the site
+export at the frame limit: `chapters` needed 11,360 bytes of frame and the
+generated `uiPageBody__from0` 25,984, against `FRAME_LIMIT`'s 8,192, and
+raising the constant only moved the wall. Both numbers were §1.4's per-node
+copy in a different coat: every nested aggregate of a literal was built in a
+slot of its own and copied into its consumer's, and every slot a body ever
+took was added up. Two changes in `direct.rs` and one in `wasm.rs`, on
+`track-i`:
+
+- **Destination passing.** A record literal, an array literal, a sum
+  constructor and a call that returns an aggregate write straight into the
+  consumer's storage when the consumer owns storage that holds that very
+  type (`Dest`, `Fn_::agg_into`). The consumers: a `let`'s slot (annotated or
+  not; the typer names the type first), a field of a record literal, an
+  element of an array literal, a `return`'s hidden destination, and a field
+  or element store. A hint is taken at the top of `expr_inner` so only the
+  immediate expression sees it; a call carries it into `call_inner` before
+  any argument is lowered, so a nested call cannot claim it. An array literal
+  in an `Array<T>` position takes its heap buffer first and builds the
+  elements in it, hinted or not, so the fixed `[N x T]` frame extent and
+  `heapify`'s second copy never exist for it. **The rule, stated once: a
+  value is built in place only into storage nothing can name while it is
+  being built.** A fresh `let`, a literal under construction and a call's
+  result are such storage. An assignment, module state, and a field or
+  element store whose value mentions the binding or contains a call keep the
+  copy, because the interpreter builds the whole value before it stores and
+  a field written early would be readable by a later field's initializer. A
+  variable, a field read, a coercion and a builtin's result still copy.
+- **A statement's temporaries are its own.** `Frame::alloc` handed out
+  offsets for the whole function and never reused one. `Fn_::block` now takes
+  `Frame::mark` before each statement and `Frame::reset`s to it after one that
+  left the scope's length as it found it; a `let` keeps everything it took.
+  The prologue claims the high-water mark, which `Frame::bytes` now reports.
+  The first cut claimed the final `frame` instead, and every program printed
+  its lines without newlines: `print_str`'s buffer sat in the part of the
+  frame the prologue no longer claimed. Reported here because the encoder
+  had two spellings of one number and the wrong one was reached first.
+- Field reads and element reads were already addresses in this emitter
+  (the first slice above): a scalar field is one load, an aggregate field is
+  `i32.add`. Nothing changed there.
+
+`VYRN_FRAME_TRACE=1` prints every body's frame to stderr, refused or not.
+The ten largest in the site export, at the base commit and here:
+
+| body | base | this slice |
+|---|---|---|
+| `chapters` | 11,360 | 2,240 |
+| `docLines` | 4,288 | — |
+| `guideLines` | 3,328 | — |
+| `docKinds`, `docNames`, `docProse`, `docSigs` | 2,768 each | — |
+| `docTests` | 2,480 | — |
+| `vyxGroupNodes` | 2,416 | 1,568 |
+| `vyxParseElem` | 1,424 | — |
+| `routes` | — | 3,072 |
+| `uiPageBody__from13` | — | 2,432 |
+| `uiPageBody__from5` | — | 2,384 |
+| `uiPageBody__from16`, `__from7` | — | 2,032 each |
+| `uiPageBody__from3` | — | 1,872 |
+| `uiPageBody__from19` | — | 1,792 |
+| `uiPageBody__from4` | — | 1,744 |
+
+The base column stops where the drain stopped: 672 bodies were sized before
+the refusal, and `uiPageBody__from0` was never reached. With the first
+change alone it is 23,424; with the second alone `chapters` is still 11,360,
+because a literal's temporaries all live in one statement. Together: 1,822
+bodies, the largest 3,072, `FRAME_LIMIT` unchanged. `chapters`'s remaining
+2,240 is the argument temporaries of its `section(..)` calls: an aggregate
+argument still travels as the caller's address and the callee copies it in,
+so an argument keeps a slot of its own by design.
+
+The three gate programs under wasmtime 46 (Cranelift), RFC-0104's recipe,
+medians of five, the base binary and this one built from the same tree on
+the same afternoon:
+
+| program | base | this slice |
+|---|---|---|
+| nbody, 25 M steps | 1.99 s | 2.26 s |
+| spectral-norm, n = 5500 | 2.90 s | 2.99 s |
+| fannkuch, n = 11 | 3.76 s | 3.62 s |
+
+`advance` is byte for byte the same function in both modules (795 lines of
+wat, three copies), so nbody's spread is the machine and not the lowering:
+re-timed with the two binaries interleaved, five each, the medians are 2.11 s
+and 2.13 s. The three modules are 76, 87 and 132 bytes smaller. The release route (wasm2c and
+clang) was not re-run: the WASI host the earlier measurement used is not in
+the repository.
+
+**The site export: compiled, and stopped by a defect this slice did not
+make.** `vyrn run --engine wasm site/export.vyrn out` (from the repository
+root, with `out/` and its six subdirectories present, `site/data/history.json`
+and `demo.json` generated) compiles every body under the limit and starts
+running. On the machine of §1.4, generator cache warm:
+
+| | `run site/export.vyrn out` | files written |
+|---|---|---|
+| interpreter | 137.5 s | 247 |
+| `--engine wasm` | trapped after 5.6 s (compile and load inside) | 0 |
+
+The trap is `out of bounds memory access` inside `malloc`, reading a free
+block whose first word had become string bytes. A `name` section
+(`VYRN_WASM_NAMES=1`, new in this slice, written by `Module::finish` and
+renumbered with the calls in `prune`) named the path — `route`, `uiTry13`,
+`uiRender13`, `headTitle__from14`, `uiPgHead__from13`, `pageHeadOf`,
+`pageHeadWith` — and a check added to `free` for the measurement found the
+double free in `pageHeadWith`. The program below reproduces it with nothing
+from the site. It prints `1` under the interpreter and natively, and traps
+in `free` under `--engine wasm` at the base commit as at this one, with every
+in-place path switched off:
+
+    type M = { name: String }
+    type H = { title: Option<String>, meta: Array<M> }
+    fn empty() -> H { return H { title: None, meta: [] } }
+    fn withT(h: H, t: String) -> H {
+        return H { title: Some(t.copy()), meta: h.meta.copy() }
+    }
+    fn withM(h: H, name: String) -> H {
+        let mut mt = h.meta
+        mt.push(M { name: name.copy() })
+        return H { title: h.title.copy(), meta: mt.copy() }
+    }
+    fn main() -> Int64 {
+        let titled = withT(empty(), "T")
+        let sized = withM(titled, "v")
+        print(sized.meta.length)
+        return 0
+    }
+
+`let mut mt = h.meta` takes the array out of a `read` parameter's copy, and
+the caller's `titled` still owns the same buffer: two releases of one
+buffer. That is the placement, not this slice's lowering, and it is the
+class of defect M5 recorded as being fixed on its own branch
+(`placeorder.vyrn`'s alias write). So the export's byte comparison against
+the interpreter is not made here: the compiled route reaches the first route
+and stops. The interpreter's 247 files are the target, on record above.
+
+Gates run before the commit: `cargo fmt --all --check`; `cargo build
+--release -p vyrn-cli`; `cargo test --workspace` (one test moved with the
+lowering: `limits.rs`'s frame refusal needs a third 4 KB binding now that a
+`let` of a call costs one record, not two); the kernel, lowered, fixtures,
+fieldstore (two new tests: a nested literal costs the frame of its outermost
+value, 48 bytes not 144; three call results in three statements cost one
+slot, not three), places, simd, wasmabi, wasmio, traps and bytesink suites;
+parity in release with `--ignored`; the residue ratchet; the cross-engine
+generator test, red for the same five programs as at the base; and `vyrn doc
+--std --verify`. The wasm manifest is not regenerated in this slice.
+
 ### M2 — the named core and the linear judgment, beside the pipeline
 
 The lowering emits the core of §2.1. The kernel makes the linear judgment. In

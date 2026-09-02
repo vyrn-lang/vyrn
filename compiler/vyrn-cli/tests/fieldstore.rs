@@ -205,3 +205,83 @@ fn a_field_write_into_an_element_that_holds_heap_keeps_the_idiom() {
          the placement accounted for:\n{body}"
     );
 }
+
+/// The bytes `body`'s prologue claims from the shadow stack: the `i32.const`
+/// between the `global.get 0` and the `i32.sub` that opens every function
+/// with a frame. Zero for a body that claims nothing.
+fn frame_of(body: &str) -> u32 {
+    let lines: Vec<&str> = body.lines().map(str::trim).collect();
+    lines
+        .windows(3)
+        .find(|w| w[0] == "global.get 0" && w[2] == "i32.sub")
+        .and_then(|w| w[1].strip_prefix("i32.const "))
+        .map(|n| n.parse().expect("a frame size"))
+        .unwrap_or(0)
+}
+
+/// The second slice of RFC-0125 M1: a literal is built where its consumer
+/// wants it. `o`'s slot is the whole frame — the three `Inner` literals and
+/// the `Outer` literal are written into it, not built beside it and copied,
+/// and the `return` copies `o` to the caller's storage without a slot of its
+/// own. Before this the same body needed 144 bytes: 48 for `o` and 96 for the
+/// four temporaries a nested literal left in the frame.
+#[test]
+fn a_nested_literal_costs_the_frame_of_its_outermost_value_only() {
+    let body = wat_func_containing(
+        "type Inner = { a: Float64, b: Float64 }\n\
+         type Outer = { p: Inner, q: Inner, r: Inner }\n\
+         fn build() -> Outer {\n\
+         let o = Outer { p: Inner { a: 1234567.0, b: 1.0 }, q: Inner { a: 2.0, b: 3.0 }, \
+         r: Inner { a: 4.0, b: 5.0 } }\n\
+         return o\n\
+         }\n\
+         fn main() -> Int64 {\n\
+         let o = build()\n\
+         print(o.q.b)\n\
+         return 0\n\
+         }\n",
+        MARK,
+    );
+    assert_eq!(
+        frame_of(&body),
+        48,
+        "a nested literal took a slot of its own:\n{body}"
+    );
+    assert_eq!(
+        copies_of(&body, 16),
+        0,
+        "an `Inner` literal was built beside its field and copied in:\n{body}"
+    );
+}
+
+/// The same slice's other half: a statement's temporaries are the next
+/// statement's to reuse. Three calls each need a 16-byte slot for their
+/// result; none is live past its statement, so the frame is one slot, not
+/// three. Before this the frame was the sum of every temporary a body ever
+/// took, which is what put a nine-hundred-statement page body at 23 KB.
+#[test]
+fn a_statements_temporaries_are_given_back_at_its_end() {
+    let body = wat_func_containing(
+        "type Inner = { a: Float64, b: Float64 }\n\
+         fn make(x: Float64) -> Inner {\n\
+         return Inner { a: x, b: x }\n\
+         }\n\
+         fn work() -> Float64 {\n\
+         let mut s = 1234567.0\n\
+         s = s + make(1.0).a\n\
+         s = s + make(2.0).a\n\
+         s = s + make(3.0).a\n\
+         return s\n\
+         }\n\
+         fn main() -> Int64 {\n\
+         print(work())\n\
+         return 0\n\
+         }\n",
+        MARK,
+    );
+    assert_eq!(
+        frame_of(&body),
+        16,
+        "a call's result slot outlived its statement:\n{body}"
+    );
+}

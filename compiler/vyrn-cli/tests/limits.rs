@@ -369,8 +369,8 @@ fn a_frame_that_cannot_fit_is_a_diagnostic_not_a_module_that_traps() {
                return K64 { a: q, b: q, c: q, d: q, e: q, f: q, g: q, h: q }\n}\n\n\
                fn mk512(n: Int64) -> K512 {\n    let q = mk64(n)\n    \
                return K512 { a: q, b: q, c: q, d: q, e: q, f: q, g: q, h: q }\n}\n\n\
-               fn wide(n: Int64) -> Int64 {\n    let one = mk512(n)\n    let two = mk512(n + 1)\n    \
-               return one.a.a.h - two.b.b.h\n}\n\n\
+               fn wide(n: Int64) -> Int64 {\n    let one = mk512(n)\n    let two = mk512(n + 1)\n    let three = mk512(n + 2)\n    \
+               return one.a.a.h - two.b.b.h + three.c.c.h\n}\n\n\
                fn main() -> Int64 {\n    print(\"\\{wide(3)}\")\n    return 0\n}\n";
     let (out, module) = build_wasm(src, "bigframe");
     let got = text(&out);
