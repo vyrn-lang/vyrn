@@ -344,6 +344,19 @@ every fixture is byte-identical across the CI matrix.** One hash per fixture,
 seconds against the parity job's five minutes, and it catches a compiler that
 depends on its host.
 
+That invariant is a test today, before M5: `compiler/vyrn-cli/tests/wasmhash.rs`
+builds every example `vyrn check` accepts with `--target wasm` and writes one
+SHA-256 per example to `rfcs/census/wasm-sha256.tsv`. The committed file is the
+reference. CI's `wasmhash` job runs the test with `VYRN_WASM_MANIFEST=check` on
+each platform of the matrix, and a leg whose bytes differ fails and names the
+example. A change to the direct backend regenerates the file with
+`VYRN_WASM_MANIFEST=write` and commits it beside the change. The test builds
+each example from `examples/` by its bare name: a generated module's symbol map
+(RFC-0073) keys origins by the path the loader was given, so an absolute path
+puts the checkout's location into the bytes. That is the first host dependence
+the manifest found. It is recorded here rather than fixed, because the key is
+the LSP's contract.
+
 The interpreter is deleted, not shrunk. Its value model is the third picture
 of memory in §1.1, and `vyrn run` executing the wasm is faster than the
 tree-walker by the factor the site export already measured for generators.

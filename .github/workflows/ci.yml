@@ -647,6 +647,42 @@ jobs:
         working-directory: compiler
         run: cargo test --quiet -p vyrn-cli --test benching -- --ignored
 
+  wasmhash:
+    name: wasm bytes identical across the matrix — ${{ matrix.os }}
+    # RFC-0125 §2.6: the same source must produce the same wasm on every host.
+    # `tests/wasmhash.rs` builds every example `vyrn check` accepts with
+    # `--target wasm` and compares one sha256 per example against the committed
+    # `rfcs/census/wasm-sha256.tsv`. The committed file is the platform that
+    # "writes"; each leg here only checks, so no artifact moves between jobs
+    # and a red leg names the example whose bytes differ.
+    #
+    # Its own job, not a step in `test`: that job builds nothing to wasm, and
+    # this one needs no wasmtime, no clang and no sysroot — the direct backend
+    # emits the module itself. The debug `vyrn` is the one the test spawns; the
+    # manifest was written by a release build, so a leg that differs also
+    # catches a compiler whose output depends on its optimization level.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Rust cache
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: compiler
+      - name: Every example's wasm hashes to the recorded manifest
+        working-directory: compiler
+        env:
+          VYRN_WASM_MANIFEST: check
+        run: cargo test --quiet -p vyrn-cli --test wasmhash -- --ignored
+
   gen-engine:
     name: cross-engine generation (interp == wasm)
     # Its own job rather than a step in `test`: it is the only thing in CI that
