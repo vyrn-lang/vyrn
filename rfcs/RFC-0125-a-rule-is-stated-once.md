@@ -190,9 +190,24 @@ the parity harness had to normalise.
 | reverse-complement | 0.56 s | 0.41 s | 1.09 s | 0.98 s |
 
 Neither program uses the byte sink yet; the whole gain is the validator, one
-call per output line. The third of the trio, an array `clear` that keeps its
-capacity, is a builtin and touches the prelude, the checker and three
-engines — the product this RFC is about, priced once more.
+call per output line.
+
+**The third, `clear`, landed as RFC-0115's addendum** and touched the ten
+sites the builtin checklist names: parser, prelude, checker, interpreter,
+both backends, the editor's rows, the primitive census (97 to 98), two
+examples and the refusal registry — the product this RFC is about, priced
+once more at ten places for one word. With the two line builders rewritten
+to keep one buffer per sequence (`examples/fasta.vyrn`,
+`examples/revcomp.vyrn`), outputs byte-identical:
+
+| program, record's N | native, validator only | native, with `clear` | wasm, with `clear` |
+|---|---|---|---|
+| fasta | 0.86 s | 0.80 s | 0.93 s |
+| reverse-complement | 0.41 s | 0.46 s (noisy run; 0.44 best) | 1.06 s |
+
+The reverse-complement native number did not move outside its noise on this
+run; its remaining cost is the three per-byte passes and the bounds checks,
+which are the fixed-array and views items, not the allocator.
 
 ### 1.6 The proportion
 

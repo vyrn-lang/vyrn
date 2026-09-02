@@ -27,6 +27,7 @@ branchtypes	clean
 bytecount	clean
 bytesrange	clean
 capturefn	clean
+clearowned	skip
 clidemo	other
 clifail	other
 clock	clean

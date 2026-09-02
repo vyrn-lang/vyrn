@@ -68,7 +68,10 @@ fn writeWrapped(bs: Array<UInt8>) {
         w.push(bs[i])
         if w.length == 60 {
             print(line(w))
-            w = []
+            // `clear` keeps the buffer (RFC-0115 addendum): the next line is a
+            // fill, not a free and a fresh growth chain — eight allocator calls
+            // per line was the "per-line assembly tax" RFC-0125 §1.4 named.
+            w.clear()
         }
         i = i + 1
     }

@@ -87,9 +87,12 @@ fn repeatFasta(header: String, src: String, count: Int64) {
     let b = bytes(src)
     let mut k = 0
     let mut todo = count
+    // One line buffer for the whole sequence: `clear` keeps its capacity
+    // (RFC-0115 addendum), so every line after the first is a fill.
+    let mut w: Array<UInt8> = []
     while todo > 0 {
         let m = lineWidth(todo)
-        let mut w: Array<UInt8> = []
+        w.clear()
         let mut i = 0
         while i < m {
             w.push(b[k])
@@ -105,9 +108,12 @@ fn repeatFasta(header: String, src: String, count: Int64) {
 fn randomFasta(header: String, syms: Array<UInt8>, cum: Array<Float64>, count: Int64) {
     print(header)
     let mut todo = count
+    // One line buffer for the whole sequence: `clear` keeps its capacity
+    // (RFC-0115 addendum), so every line after the first is a fill.
+    let mut w: Array<UInt8> = []
     while todo > 0 {
         let m = lineWidth(todo)
-        let mut w: Array<UInt8> = []
+        w.clear()
         let mut i = 0
         while i < m {
             w.push(pick(syms, cum))
@@ -145,9 +151,12 @@ fn run(n: Int64) {
 fn generate(syms: Array<UInt8>, cum: Array<Float64>, count: Int64) -> Int64 {
     let mut written = 0
     let mut todo = count
+    // One line buffer for the whole sequence: `clear` keeps its capacity
+    // (RFC-0115 addendum), so every line after the first is a fill.
+    let mut w: Array<UInt8> = []
     while todo > 0 {
         let m = lineWidth(todo)
-        let mut w: Array<UInt8> = []
+        w.clear()
         let mut i = 0
         while i < m {
             w.push(pick(syms, cum))
