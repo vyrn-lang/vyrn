@@ -9298,11 +9298,12 @@ impl<'a> Gen<'a> {
         let saved_label = self.label;
         let saved_drop = std::mem::take(&mut self.drop_slots);
         let saved_cursors = std::mem::take(&mut self.cursors);
-        // A lifted lambda is a different function: it owns no release rows here
-        // (the shell that lowers it has none), so it must not read the enclosing
-        // body's placement either.
-        let saved_placed = std::mem::take(&mut self.placed);
-        let saved_droppable = std::mem::take(&mut self.droppable);
+        // A lifted lambda is a different frame, and its slots are its own
+        // (`drop_slots` above). Its release rows are not: the analysis records
+        // them under the ENCLOSING function's name, keyed by the lambda's own
+        // nodes, so `placed` and `droppable` stay in force across the lift
+        // (RFC-0125 M3, third slice). Taking them away is what left every row
+        // inside a lambda placed and never run.
         let saved_modify = std::mem::take(&mut self.modify_copyout);
         let saved_bindings = std::mem::take(&mut self.fn_bindings);
         // The lifted body is a different function: the enclosing one's append
@@ -9415,8 +9416,6 @@ impl<'a> Gen<'a> {
         self.label = saved_label;
         self.drop_slots = saved_drop;
         self.cursors = saved_cursors;
-        self.placed = saved_placed;
-        self.droppable = saved_droppable;
         self.modify_copyout = saved_modify;
         self.fn_bindings = saved_bindings;
         self.append_ok = saved_append_ok;
@@ -10199,10 +10198,35 @@ impl<'a> Gen<'a> {
     fn gen_call(&mut self, name: &str, args: &[Expr]) -> Result<(String, Type), String> {
         let mark = self.arg_frees.len();
         let r = self.gen_call_inner(name, args);
+        // RFC-0125 M3, third slice: a lending call's result points into an
+        // argument (`a[i]`, a projection). A temporary its arguments recorded
+        // — the receiver `weekdayLetters()[1]` reads its element out of — must
+        // outlive the call when the result owns heap, so the call or operator
+        // that consumes the result drains it instead.
+        if let Ok((_, t)) = &r {
+            if self.lends(name) && self.owned.release_kind(t).is_some() {
+                return r;
+            }
+        }
         for (v, ty) in self.arg_frees.split_off(mark) {
             self.free_arg_temp(&v, &ty);
         }
         r
+    }
+
+    /// Whether a call by this name lends: `a[i]` and the seeded element row
+    /// it dispatches to, a lending prelude row, the `value` box, a projection
+    /// (a function of the same name wins, as it does at the dispatch).
+    fn lends(&self, name: &str) -> bool {
+        name == vyrn_frontend::project::AT
+            || name == vyrn_frontend::project::ELEM
+            || vyrn_frontend::prelude::lends(name)
+            || name == "value"
+            || (self.funcs.get(name).is_none()
+                && self
+                    .impls
+                    .iter()
+                    .any(|i| i.places.iter().any(|p| p.name == name)))
     }
 
     /// Release one argument temporary, by its TYPE (RFC-0114 M1).

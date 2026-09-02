@@ -1640,18 +1640,23 @@ impl Dest {
         }
     }
 }
+/// The spelling a lifted lambda's shell is named by, followed by the name of
+/// the function that holds the literal: `@lambda main`. Reserved, so no Vyrn
+/// identifier can be it.
+const LAMBDA: &str = "@lambda";
 
 /// An empty `Function` to fill in for a lifted lambda (RFC-0023).
 ///
 /// A synthesized declaration rather than a bespoke lowering path: the captures
 /// become ordinary read parameters, so [`lower_fn`] emits it with no case of its
-/// own. The name is a reserved spelling no Vyrn identifier can be, which matters
-/// once — `Cx::droppable` is keyed by function name, and a lifted body must not
-/// inherit the enclosing function's release list (the textual backend takes the
-/// same map away for the same reason).
+/// own. [`Fn_::lift_lambda`] names it `@lambda <owner>`: the analysis records
+/// a lambda's release rows under the ENCLOSING function's name, keyed by the
+/// lambda's own nodes, and [`lower_body`] reads `Cx::droppable` and
+/// `Cx::releases` under the owner (RFC-0125 M3, third slice). Before that the
+/// shell owned no rows, and a row inside a lambda was placed and never run.
 fn f_shell(line: usize) -> Function {
     Function {
-        name: "@lambda".to_string(),
+        name: LAMBDA.to_string(),
         exported: false,
         module: None,
         doc: None,
@@ -1800,6 +1805,10 @@ struct Fn_<'a, 'p> {
     /// The hint an `Expr::Call` carried into [`Fn_::call_inner`], which takes it
     /// before any argument is lowered so a nested call cannot claim it.
     call_dest: Option<(Dest, Type)>,
+    /// The declared function this frame's plan rows are under: the function
+    /// itself, or for a lifted lambda the function that holds the literal
+    /// (RFC-0125 M3, third slice).
+    owner: String,
 }
 
 /// A lowering context with nothing in scope and nothing to return to: what the
@@ -1834,6 +1843,7 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         dest_hint: None,
         dest_used: false,
         call_dest: None,
+        owner: String::new(),
     }
 }
 
@@ -1920,6 +1930,13 @@ fn lower_body(
     let (params, _results) = cx.wasm_sig(&sig, f.line)?;
     let dest = sig.ret.agg().map(|_| 0u32);
     let shift = dest.map_or(0, |_| 1);
+    // A lifted lambda's rows are the enclosing function's (see `f_shell`).
+    let owner = f
+        .name
+        .strip_prefix(LAMBDA)
+        .map(|rest| rest.trim_start().to_string())
+        .filter(|o| !o.is_empty())
+        .unwrap_or_else(|| f.name.clone());
 
     let mut b = Frame::new(params.len(), &[], 0);
     let mut cx_fn = Fn_ {
@@ -1942,13 +1959,13 @@ fn lower_body(
         // `own::place_body` and read here.
         placed: cx
             .releases
-            .get(&f.name)
+            .get(&owner)
             .map(|steps| vyrn_frontend::own::placed(steps))
             .unwrap_or_default(),
         cursors: Vec::new(),
         region_depth: 0,
-        drops: cx.droppable.get(&f.name).cloned().unwrap_or_default(),
-        early: cx.early.get(&f.name).cloned().unwrap_or_default(),
+        drops: cx.droppable.get(&owner).cloned().unwrap_or_default(),
+        early: cx.early.get(&owner).cloned().unwrap_or_default(),
         arg_frees: Vec::new(),
         rel_holes: Vec::new(),
         expect: Vec::new(),
@@ -1962,6 +1979,7 @@ fn lower_body(
         dest_hint: None,
         dest_used: false,
         call_dest: None,
+        owner,
     };
 
     // By-value parameter semantics: an aggregate arrives as the caller's
@@ -2045,7 +2063,8 @@ fn lower_body(
     // Nor a `std/runtime` function (PLAN-0125-runtime §6 step 1): the
     // hand-emitted copies it replaces had no prologue, and a program that
     // traps at the limit has to trap where it did.
-    let counted = f.name != "@lambda" && !f.name.starts_with(vyrn_frontend::loader::RUNTIME_PREFIX);
+    let counted =
+        !f.name.starts_with(LAMBDA) && !f.name.starts_with(vyrn_frontend::loader::RUNTIME_PREFIX);
     if counted {
         call_depth_enter(&mut b, cx);
     }
@@ -7272,10 +7291,34 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<Type, String> {
         let mark = self.arg_frees.len();
         let r = self.call_inner(m, b, name, args, line);
+        // RFC-0125 M3, third slice: a lending call's result points into an
+        // argument (`a[i]`, a projection). A temporary its arguments teed —
+        // the receiver `weekdayLetters()[1]` reads its element out of — must
+        // outlive the call when the result owns heap, so the call or operator
+        // that consumes the result drains it instead.
+        if let Ok(t) = &r {
+            if self.lends(name) && self.rel_for(t, line)?.is_some() {
+                return r;
+            }
+        }
         for (l, ty) in self.arg_frees.split_off(mark) {
             self.free_arg_temp(m, b, l, &ty, line)?;
         }
         r
+    }
+
+    /// Whether a call by this name lends: `a[i]` and the seeded element row
+    /// it dispatches to, a lending prelude row, the `value` box, a projection.
+    fn lends(&self, name: &str) -> bool {
+        name == vyrn_frontend::project::AT
+            || name == vyrn_frontend::project::ELEM
+            || vyrn_frontend::prelude::lends(name)
+            || name == "value"
+            || self
+                .cx
+                .impls
+                .iter()
+                .any(|i| i.places.iter().any(|p| p.name == name))
     }
 
     fn call_inner(
@@ -9663,6 +9706,7 @@ impl<'p> Fn_<'_, 'p> {
             None => Body::Shell,
         };
         let mut sf = f_shell(line);
+        sf.name = format!("{LAMBDA} {}", self.owner);
         sf.params = cap_names
             .iter()
             .zip(&cap_tys)

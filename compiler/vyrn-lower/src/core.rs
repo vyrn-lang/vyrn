@@ -26,7 +26,7 @@
 use std::collections::HashMap;
 
 use vyrn_frontend::ast::{
-    ArmBody, Block, Capability, Expr, Function, Pattern, Program, Stmt, Type,
+    ArmBody, Block, Capability, Expr, Function, LambdaBody, Pattern, Program, Stmt, Type,
 };
 use vyrn_frontend::own::{DropKind, Exit, Fate, Leak, Owned, Ownership, Release};
 use vyrn_frontend::prelude;
@@ -57,6 +57,13 @@ pub struct NameInfo {
     /// (RFC-0114 R1′). The placer frees such a receiver right after the read,
     /// minus the field the read took.
     pub receiver: Option<usize>,
+    /// For the unnamed receiver of a heap field or element read the
+    /// consumer BORROWS (`f(x).rhs.startsWith("{")`, `weekdayLetters()[1]`):
+    /// the node that produced the receiver, which is the key of the
+    /// argument-temporary drop the placer writes (RFC-0125 M3, third
+    /// slice). Set only where the consumer is a call or an operator, the
+    /// two sites each compiled backend drains such temporaries at.
+    pub producer: Option<usize>,
     /// The holes the plan's release walk skips for this binding (RFC-0093
     /// M2's table), spelled as the kernel spells them (`.f.g`). A `Drop` of
     /// the name walks around exactly these; a placed row may carry its own.
@@ -127,6 +134,10 @@ pub enum St {
         place: Place,
         value: Val,
         old: Old,
+        /// The source line, for a refusal's wording (RFC-0125 M3, third
+        /// slice): the kernel names the line a value was moved on and the
+        /// line it is used again on, as the checker does.
+        line: usize,
     },
     Drop(Name),
     /// A release row the plan placed at an exit, keyed as the plan keys it,
@@ -167,6 +178,7 @@ pub enum St {
         /// The `return` statement, or the `?` expression when `is_try`.
         site: usize,
         is_try: bool,
+        line: usize,
     },
     Switch {
         on: Val,
@@ -174,8 +186,10 @@ pub enum St {
         /// The construct took the value: its payloads moved into the arms'
         /// binders, so nothing releases the scrutinee itself afterwards.
         consuming: bool,
+        line: usize,
     },
-    Do(Rhs),
+    /// An expression for its effect, on its line.
+    Do(Rhs, usize),
     /// A refusal or a `panic`: the path ends here and owes nothing.
     Trap,
 }
@@ -194,12 +208,28 @@ pub struct Arm {
 #[derive(Debug, Clone)]
 pub struct Body {
     pub name: String,
+    /// The module file the function came from; `None` for the root.
+    pub file: Option<String>,
     pub names: Vec<NameInfo>,
     pub params: Vec<Name>,
     pub stmts: Vec<St>,
+    /// The bodies of the lambdas this body holds, each a frame of its own
+    /// (RFC-0125 M3, third slice): its parameters and its captures are
+    /// borrowed inputs, its own bindings are ordinary, and the plan keys its
+    /// rows by its own nodes under the enclosing function's name.
+    pub lambdas: Vec<Body>,
 }
 
 impl Body {
+    /// This body and every lambda body under it, outermost first.
+    pub fn frames(&self) -> Vec<&Body> {
+        let mut out = vec![self];
+        for l in &self.lambdas {
+            out.extend(l.frames());
+        }
+        out
+    }
+
     /// The body as text, one statement per line, for reading a refusal.
     pub fn render(&self) -> String {
         let mut out = format!("fn {}(", self.name);
@@ -211,6 +241,10 @@ impl Body {
         }
         out.push_str(")\n");
         self.render_stmts(&self.stmts, 1, &mut out);
+        for l in &self.lambdas {
+            out.push('\n');
+            out.push_str(&l.render());
+        }
         out
     }
 
@@ -276,7 +310,9 @@ impl Body {
                 St::Let(n, r) => {
                     out.push_str(&format!("{pad}let {} = {}\n", self.spell(*n), self.rhs(r)))
                 }
-                St::Store { place, value, old } => out.push_str(&format!(
+                St::Store {
+                    place, value, old, ..
+                } => out.push_str(&format!(
                     "{pad}{} = {}  ({:?})\n",
                     self.place(place),
                     self.val(value),
@@ -316,6 +352,7 @@ impl Body {
                     on,
                     arms,
                     consuming,
+                    ..
                 } => {
                     out.push_str(&format!(
                         "{pad}switch {}{}\n",
@@ -334,7 +371,7 @@ impl Body {
                         self.render_stmts(&a.body, depth + 2, out);
                     }
                 }
-                St::Do(r) => out.push_str(&format!("{pad}do {}\n", self.rhs(r))),
+                St::Do(r, _) => out.push_str(&format!("{pad}do {}\n", self.rhs(r))),
                 St::Trap => out.push_str(&format!("{pad}trap\n")),
             }
         }
@@ -433,15 +470,18 @@ pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<
         placed,
         body: Body {
             name: inst.spelling(),
+            file: inst.func.module.clone(),
             names: Vec::new(),
             params: Vec::new(),
             stmts: Vec::new(),
+            lambdas: Vec::new(),
         },
         scope: Vec::new(),
         by_binding: HashMap::new(),
         temps: 0,
         func_name: inst.func.name.clone(),
         pending_receiver: None,
+        drain: 0,
         after: Vec::new(),
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
@@ -478,9 +518,14 @@ struct Builder<'a> {
     temps: u32,
     /// The function's declared name — the key the plan's binding notes use.
     func_name: String,
-    /// An unnamed receiver `place` minted for a field read, so the read can
-    /// release it afterwards when the plan says the frame owns it (R1').
-    pending_receiver: Option<Name>,
+    /// An unnamed receiver `place` minted for a field or element read, with
+    /// the node that produced it, so the read can release it afterwards when
+    /// the plan says the frame owns it (R1').
+    pending_receiver: Option<(Name, usize)>,
+    /// How many calls that do not lend, and operators, enclose the expression
+    /// being built. Each is a site the compiled backends drain argument
+    /// temporaries at, so a receiver borrowed under one can be freed there.
+    drain: u32,
     /// Temporaries the expression being built has read and must release once
     /// it is bound — see `read_val`, `call`, `rhs` and `bind`.
     after: Vec<Name>,
@@ -505,6 +550,7 @@ impl<'a> Builder<'a> {
             line,
             binding: None,
             receiver: None,
+            producer: None,
             holes: Vec::new(),
         });
         (self.body.names.len() - 1) as Name
@@ -569,11 +615,19 @@ impl<'a> Builder<'a> {
     /// `value` box, or a projection an `impl` declares (RFC-0120).
     fn lends(&self, e: &Expr) -> bool {
         match e {
-            Expr::Call { name, .. } => {
-                prelude::lends(name) || name == "value" || self.projection(name).is_some()
-            }
+            Expr::Call { name, .. } => self.lends_name(name),
             _ => false,
         }
+    }
+
+    /// Whether a call by this name lends: `a[i]` and the seeded element row
+    /// it dispatches to, a lending prelude row, the `value` box, a projection.
+    fn lends_name(&self, name: &str) -> bool {
+        name == vyrn_frontend::project::AT
+            || name == vyrn_frontend::project::ELEM
+            || prelude::lends(name)
+            || name == "value"
+            || self.projection(name).is_some()
     }
 
     fn projection(&self, name: &str) -> Option<&'a Function> {
@@ -717,7 +771,7 @@ impl<'a> Builder<'a> {
                     let place = self.place(value, out)?;
                     let n = self.name(name, ty, false, *line);
                     out.push(St::Let(n, Rhs::Read(place)));
-                    self.release_receiver(value, out);
+                    self.release_receiver(value, out, true);
                     self.scope.push((name.clone(), n));
                     self.keyed(n, sid);
                     return Ok(());
@@ -742,7 +796,7 @@ impl<'a> Builder<'a> {
                 // this frame owns it, held — and seen by the kernel — where
                 // it does not.
                 if let Expr::Field { .. } = value {
-                    self.release_receiver(value, out);
+                    self.release_receiver(value, out, false);
                 }
                 self.scope.push((name.clone(), n));
                 self.keyed(n, sid);
@@ -757,6 +811,7 @@ impl<'a> Builder<'a> {
                         place: Place::Global(name.clone()),
                         value: v,
                         old,
+                        line: *line,
                     });
                     return Ok(());
                 };
@@ -782,6 +837,7 @@ impl<'a> Builder<'a> {
                     place: Place::Name(n),
                     value: v,
                     old,
+                    line: *line,
                 });
             }
             Stmt::SetField {
@@ -798,6 +854,7 @@ impl<'a> Builder<'a> {
                     place: Place::Field(Box::new(base), field.clone()),
                     value: v,
                     old,
+                    line: *line,
                 });
             }
             Stmt::IndexSet {
@@ -826,9 +883,10 @@ impl<'a> Builder<'a> {
                     place,
                     value: v,
                     old,
+                    line: *line,
                 });
             }
-            Stmt::Return { value, .. } => {
+            Stmt::Return { value, line } => {
                 let v = match value {
                     Some(e) => Some(self.val(e, out)?),
                     None => None,
@@ -839,6 +897,7 @@ impl<'a> Builder<'a> {
                     value: v,
                     site: sid,
                     is_try: false,
+                    line: *line,
                 });
             }
             Stmt::Break { .. } => {
@@ -906,6 +965,7 @@ impl<'a> Builder<'a> {
                         },
                     ],
                     consuming,
+                    line: *line,
                 });
                 self.drops_at(Exit::Scrutinee, sid, out)?;
             }
@@ -953,6 +1013,10 @@ impl<'a> Builder<'a> {
                         // `for p in e.path`: the loop walks a container
                         // somebody else owns.
                         let place = self.place(iter, out)?;
+                        // A temporary the container was read out of has no
+                        // consumer a drain encloses: it stays held, and the
+                        // judgment says so.
+                        self.pending_receiver = None;
                         let t = self.name("@borrow", ity.clone(), false, *line);
                         out.push(St::Let(t, Rhs::Read(place)));
                         t
@@ -1061,7 +1125,7 @@ impl<'a> Builder<'a> {
                         out.push(St::Drop(t));
                     }
                 } else {
-                    out.push(St::Do(rhs));
+                    out.push(St::Do(rhs, e.line()));
                     for t in std::mem::take(&mut self.after_of_rhs) {
                         out.push(St::Drop(t));
                     }
@@ -1383,13 +1447,14 @@ impl<'a> Builder<'a> {
                 let place = self.place(e, out)?;
                 let t = self.name("@borrow", ty.unwrap(), false, e.line());
                 out.push(St::Let(t, Rhs::Read(place)));
-                self.release_receiver(e, out);
+                self.release_receiver(e, out, true);
                 Ok(Val::Name(t))
             }
             Expr::Call { name, args, .. } if owns && name == "@at" && args.len() == 2 => {
                 let place = self.place(e, out)?;
                 let t = self.name("@borrow", ty.unwrap(), false, e.line());
                 out.push(St::Let(t, Rhs::Read(place)));
+                self.release_receiver(e, out, true);
                 Ok(Val::Name(t))
             }
             Expr::Var { .. } | Expr::Consume { .. } => self.val(e, out),
@@ -1407,27 +1472,49 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// RFC-0114 R1': the unnamed receiver of a field read, freed after the
-    /// read when the plan says this frame owns it. Where the plan did not
-    /// place the free, the receiver stays held and the kernel says so.
-    fn release_receiver(&mut self, e: &Expr, out: &mut Vec<St>) {
-        if let Some(r) = self.pending_receiver.take() {
-            let node = e as *const Expr as usize;
-            if !self.own.plan.receiver_free(node) {
-                return;
+    /// RFC-0114 R1': the unnamed receiver of a field or element read, freed
+    /// after the read when the plan says this frame owns it. Where the plan
+    /// did not place the free, the receiver stays held and the kernel says so.
+    ///
+    /// `borrowed` says the read yields a heap value its consumer borrows
+    /// (`f(x).rhs.startsWith("{")`, `weekdayLetters()[1]`) rather than a
+    /// scalar, or a field a binding took. Such a receiver must outlive the
+    /// consumer, so its free is an argument-temporary drop keyed by the node
+    /// that PRODUCED the receiver (RFC-0125 M3, third slice): each compiled
+    /// backend tees that node's value and frees it after the call or
+    /// operator that consumed the read. The core drops it after the
+    /// consumer's binding, the same point. The placer writes the row only
+    /// where such a drain encloses the read; elsewhere the receiver stays
+    /// held and the judgment refuses it.
+    fn release_receiver(&mut self, e: &Expr, out: &mut Vec<St>, borrowed: bool) {
+        let Some((r, producer)) = self.pending_receiver.take() else {
+            return;
+        };
+        let node = e as *const Expr as usize;
+        let took = self.ty_of(e).is_ok_and(|t| self.owns(&t));
+        if borrowed && took {
+            if self.own.plan.arg_drop(producer) {
+                if !self.after.contains(&r) {
+                    self.after.push(r);
+                }
+            } else if self.drain > 0 {
+                self.body.names[r as usize].producer = Some(producer);
             }
-            // Both emitters run the row after a SCALAR field read only, and
-            // after a heap field's take when the row carries the hole
-            // (RFC-0125 M3): a row without one stands for nothing there,
-            // and the receiver stays held for the kernel to see.
-            let holes = self.own.plan.receiver_holes_at(node);
-            let took = self.ty_of(e).is_ok_and(|t| self.owns(&t));
-            if took && holes.is_empty() {
-                return;
-            }
-            self.body.names[r as usize].holes = holes.iter().map(|h| format!(".{h}")).collect();
-            out.push(St::Drop(r));
+            return;
         }
+        if !self.own.plan.receiver_free(node) {
+            return;
+        }
+        // Both emitters run the row after a SCALAR field read only, and
+        // after a heap field's take when the row carries the hole
+        // (RFC-0125 M3): a row without one stands for nothing there,
+        // and the receiver stays held for the kernel to see.
+        let holes = self.own.plan.receiver_holes_at(node);
+        if took && holes.is_empty() {
+            return;
+        }
+        self.body.names[r as usize].holes = holes.iter().map(|h| format!(".{h}")).collect();
+        out.push(St::Drop(r));
     }
 
     /// An expression in a TAKE position: a `let`, a `return`, a store, a part
@@ -1484,7 +1571,7 @@ impl<'a> Builder<'a> {
                     let place = self.place(e, out)?;
                     let t = self.name("@borrow", ty, false, e.line());
                     out.push(St::Let(t, Rhs::Read(place)));
-                    self.release_receiver(e, out);
+                    self.release_receiver(e, out, true);
                     return Ok(Val::Name(t));
                 }
                 let rhs = self.rhs(e, out)?;
@@ -1495,7 +1582,7 @@ impl<'a> Builder<'a> {
                 };
                 self.bind(t, rhs, out);
                 if let Expr::Field { .. } = e {
-                    self.release_receiver(e, out);
+                    self.release_receiver(e, out, false);
                 }
                 Ok(Val::Name(t))
             }
@@ -1507,30 +1594,142 @@ impl<'a> Builder<'a> {
     /// captured (RFC-0037), so the enclosing frame still owns its value. In an
     /// argument position the literal is monomorphized away and owns nothing;
     /// as a `let`'s initializer the plan's note says whether the closure
-    /// value is this frame's. The lambda's own body is a separate frame and
-    /// is not judged here.
+    /// value is this frame's. The lambda's own body is a separate frame,
+    /// built by [`Builder::lambda_frame`].
     fn lambda(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
         let caps = self.captures(e);
         let ty = self.ty_of(e).unwrap_or(Type::Unit);
         let t = self.name("@lambda", ty, false, e.line());
-        out.push(St::Let(t, Rhs::Prim(caps)));
+        out.push(St::Let(t, Rhs::Prim(caps.clone())));
+        self.lambda_frame(e, &caps)?;
         Ok(Val::Name(t))
     }
 
-    /// The names of this body a lambda mentions. Over-approximate: a name the
-    /// lambda shadows is counted, and a block-bodied lambda counts every name
-    /// in scope (`mentions_place` answers true for one); either costs a read
-    /// of a held name and nothing else.
+    /// The lambda's own frame (RFC-0125 M3, third slice), judged like a
+    /// function's. Its captures are the enclosing names spelled again as
+    /// borrowed inputs — the closure reads what it captured and the enclosing
+    /// frame keeps owning it — and its parameters are `read` (RFC-0023). Its
+    /// own bindings are ordinary: the plan keys their rows by the lambda's
+    /// nodes under the enclosing function's name, which is where both
+    /// compiled backends now read them (`direct.rs`'s shell carries the
+    /// owner's name; `lib.rs` keeps `placed` across the lift). An expression
+    /// body is a `return` of its value at no site: nothing an engine runs
+    /// stands there, so a name still held at it is refused, not placed.
+    fn lambda_frame(&mut self, e: &'a Expr, caps: &[Val]) -> Result<(), Gap> {
+        let Expr::Lambda { params, body, line } = e else {
+            return Ok(());
+        };
+        let decls = vyrn_frontend::types::decl_map(self.program);
+        let ptys: Vec<Type> = match self.ty_of(e).ok() {
+            // A `lazy T` field's initializer is a nullary closure (RFC-0085).
+            Some(t) if vyrn_frontend::types::deferred(&t).is_some() => Vec::new(),
+            Some(t) => match vyrn_frontend::types::resolve(&t, &decls) {
+                Type::Fn(ptys, _) => ptys,
+                _ => return gap("a lambda the checker did not type as a function", *line),
+            },
+            // The checker did not type the literal: an argument of a generic
+            // the instance monomorphized away. Its body is typed, so each
+            // parameter has the type of its first use there.
+            None => {
+                let (mut vars, mut calls) = (Vec::new(), Vec::new());
+                mentions_in_lambda(body, &mut vars, &mut calls);
+                params
+                    .iter()
+                    .map(|p| {
+                        vars.iter()
+                            .find(|v| matches!(v, Expr::Var { name, .. } if name == p))
+                            .and_then(|v| self.types.get(&(*v as *const Expr as usize)))
+                            .cloned()
+                            .unwrap_or(Type::Unit)
+                    })
+                    .collect()
+            }
+        };
+        if ptys.len() != params.len() {
+            return gap("a lambda with the wrong arity for its type", *line);
+        }
+        let file = self.body.file.clone();
+        let outer = std::mem::replace(
+            &mut self.body,
+            Body {
+                name: String::new(),
+                file,
+                names: Vec::new(),
+                params: Vec::new(),
+                stmts: Vec::new(),
+                lambdas: Vec::new(),
+            },
+        );
+        self.body.name = format!("{}@lambda:{line}", outer.name);
+        let saved = (
+            std::mem::take(&mut self.scope),
+            std::mem::take(&mut self.by_binding),
+            std::mem::take(&mut self.after),
+            std::mem::take(&mut self.after_of_rhs),
+            self.pending_receiver.take(),
+            std::mem::replace(&mut self.drain, 0),
+            std::mem::take(&mut self.stream_loops),
+        );
+        for c in caps {
+            let Val::Name(n) = c else {
+                continue;
+            };
+            let info = &outer.names[*n as usize];
+            let (source, ty) = (info.source.clone(), info.ty.clone());
+            let m = self.name(&source, ty, false, *line);
+            self.scope.push((source, m));
+            self.body.params.push(m);
+        }
+        for (p, pt) in params.iter().zip(ptys) {
+            let m = self.name(p, pt, false, *line);
+            self.scope.push((p.clone(), m));
+            self.body.params.push(m);
+        }
+        let mut stmts = Vec::new();
+        let r = match body {
+            LambdaBody::Block(b) => self.block(b, &mut stmts),
+            LambdaBody::Expr(x) => self.val(x, &mut stmts).map(|v| {
+                stmts.push(St::Return {
+                    value: Some(v),
+                    site: 0,
+                    is_try: false,
+                    line: *line,
+                })
+            }),
+        };
+        self.body.stmts = stmts;
+        let frame = std::mem::replace(&mut self.body, outer);
+        (
+            self.scope,
+            self.by_binding,
+            self.after,
+            self.after_of_rhs,
+            self.pending_receiver,
+            self.drain,
+            self.stream_loops,
+        ) = saved;
+        r?;
+        self.body.lambdas.push(frame);
+        Ok(())
+    }
+
+    /// The names of this body a lambda mentions, as a place or as a callee
+    /// (`n -> f(n) + 1` captures the function value `f`). Over-approximate: a
+    /// name the lambda shadows is counted, and a block-bodied lambda counts
+    /// every name in scope (`mentions_place` answers true for one); either
+    /// costs a read of a held name and nothing else.
     fn captures(&self, e: &Expr) -> Vec<Val> {
-        let Expr::Lambda { params, .. } = e else {
+        let Expr::Lambda { params, body, .. } = e else {
             return Vec::new();
         };
+        let (mut vars, mut calls) = (Vec::new(), Vec::new());
+        mentions_in_lambda(body, &mut vars, &mut calls);
         let mut caps = Vec::new();
         for (name, n) in &self.scope {
             if params.contains(name) || caps.contains(&Val::Name(*n)) {
                 continue;
             }
-            if vyrn_frontend::movecheck::mentions_place(e, name) {
+            if vyrn_frontend::movecheck::mentions_place(e, name) || calls.contains(&name.as_str()) {
                 caps.push(Val::Name(*n));
             }
         }
@@ -1543,6 +1742,7 @@ impl<'a> Builder<'a> {
     fn take_place(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
         let ty = self.ty_of(e)?;
         let place = self.place(e, out)?;
+        self.pending_receiver = None;
         let t = self.temp(ty, e.line());
         out.push(St::Let(t, Rhs::Take(place)));
         Ok(Val::Name(t))
@@ -1569,14 +1769,18 @@ impl<'a> Builder<'a> {
             Expr::Var { .. } | Expr::Consume { .. } => Ok(Rhs::Val(self.val(e, out)?)),
             Expr::Unary { expr, .. } => Ok(Rhs::Prim(vec![self.read_val(expr, out)?])),
             Expr::Binary { lhs, rhs, .. } => {
+                // An operator drains its operands' temporaries in both
+                // compiled backends (`binary`, `gen_binary`).
+                self.drain += 1;
                 let a = self.read_val(lhs, out)?;
                 let b = self.read_val(rhs, out)?;
+                self.drain -= 1;
                 Ok(Rhs::Prim(vec![a, b]))
             }
             Expr::Field { expr, field, .. } => {
                 let fty = self.ty_of(e)?;
                 let place = self.place(expr, out)?;
-                if let Some(r) = self.pending_receiver {
+                if let Some((r, _)) = self.pending_receiver {
                     self.body.names[r as usize].receiver = Some(e as *const Expr as usize);
                 }
                 if self.owns(&fty) {
@@ -1591,7 +1795,7 @@ impl<'a> Builder<'a> {
             }
             Expr::Call { name, args, line } if name == "panic" || name == "@panicAt" => {
                 let r = self.call(name, args, *line, out)?;
-                out.push(St::Do(r));
+                out.push(St::Do(r, *line));
                 out.push(St::Trap);
                 Ok(Rhs::Val(Val::Lit))
             }
@@ -1647,6 +1851,7 @@ impl<'a> Builder<'a> {
                     place: Place::Name(res),
                     value: tv,
                     old: Old::Nothing,
+                    line: *line,
                 });
                 self.edge_drops(site, 0, &mut t)?;
                 let mut f = Vec::new();
@@ -1657,6 +1862,7 @@ impl<'a> Builder<'a> {
                             place: Place::Name(res),
                             value: ev,
                             old: Old::Nothing,
+                            line: *line,
                         });
                         self.edge_drops(site, 1, &mut f)?;
                     }
@@ -1693,6 +1899,7 @@ impl<'a> Builder<'a> {
                                 place: Place::Name(res),
                                 value: v,
                                 old: Old::Nothing,
+                                line: *line,
                             });
                         }
                         ArmBody::Block(blk) => self.block(blk, &mut body)?,
@@ -1720,6 +1927,7 @@ impl<'a> Builder<'a> {
                     on: sv,
                     arms: core_arms,
                     consuming,
+                    line: *line,
                 });
                 self.drops_at(Exit::Scrutinee, mid, out)?;
                 Ok(Rhs::Val(Val::Name(res)))
@@ -1750,6 +1958,7 @@ impl<'a> Builder<'a> {
                     value: fb.first().map(|n| Val::Name(*n)),
                     site: tid,
                     is_try: true,
+                    line: *line,
                 });
                 self.scope.truncate(mark);
                 let mut ok = Vec::new();
@@ -1765,6 +1974,7 @@ impl<'a> Builder<'a> {
                     place: Place::Name(res),
                     value: ob.first().map(|n| Val::Name(*n)).unwrap_or(Val::Lit),
                     old: Old::Nothing,
+                    line: *line,
                 });
                 self.scope.truncate(mark);
                 out.push(St::Switch {
@@ -1784,10 +1994,15 @@ impl<'a> Builder<'a> {
                         },
                     ],
                     consuming,
+                    line: *line,
                 });
                 Ok(Rhs::Val(Val::Name(res)))
             }
-            Expr::Lambda { .. } => Ok(Rhs::Prim(self.captures(e))),
+            Expr::Lambda { .. } => {
+                let caps = self.captures(e);
+                self.lambda_frame(e, &caps)?;
+                Ok(Rhs::Prim(caps))
+            }
         }
     }
 
@@ -1816,6 +2031,7 @@ impl<'a> Builder<'a> {
             value: Some(sv.clone()),
             site: tid,
             is_try: true,
+            line,
         });
         let mut ok = Vec::new();
         let t = self.temp(self.body.names[res as usize].ty.clone(), line);
@@ -1830,6 +2046,7 @@ impl<'a> Builder<'a> {
             place: Place::Name(res),
             value: Val::Name(t),
             old: Old::Nothing,
+            line,
         });
         out.push(St::Switch {
             on: sv,
@@ -1848,6 +2065,7 @@ impl<'a> Builder<'a> {
                 },
             ],
             consuming: false,
+            line,
         });
         Ok(Rhs::Val(Val::Name(res)))
     }
@@ -1885,7 +2103,7 @@ impl<'a> Builder<'a> {
                 match v {
                     Val::Name(t) => {
                         if self.body.names[t as usize].owned {
-                            self.pending_receiver = Some(t);
+                            self.pending_receiver = Some((t, e as *const Expr as usize));
                         }
                         Ok(Place::Name(t))
                     }
@@ -1986,6 +2204,13 @@ impl<'a> Builder<'a> {
         }
         let mut vs = Vec::new();
         let mut temps_to_drop = Vec::new();
+        // A call drains its arguments' temporaries after it runs, unless its
+        // result points into one of them: a lending call leaves them to the
+        // call or operator above (both backends' `call` drain).
+        let drains = !self.lends_name(name);
+        if drains {
+            self.drain += 1;
+        }
         for (k, (a, cap)) in args.iter().zip(caps.iter()).enumerate() {
             let v = if *cap == Capability::Consume {
                 if k == 0
@@ -2016,6 +2241,9 @@ impl<'a> Builder<'a> {
             }
             vs.push((v, *cap));
         }
+        if drains {
+            self.drain -= 1;
+        }
         self.after.extend(temps_to_drop);
         Ok(Rhs::Call {
             callee: name.to_string(),
@@ -2031,8 +2259,138 @@ impl<'a> Builder<'a> {
     }
 }
 
+/// Every `Var` node and every callee name in a lambda's body, nested
+/// lambdas included: what the frame captures, and where an untyped
+/// parameter's type can be read.
+fn mentions_in_lambda<'e>(
+    body: &'e LambdaBody,
+    vars: &mut Vec<&'e Expr>,
+    calls: &mut Vec<&'e str>,
+) {
+    match body {
+        LambdaBody::Expr(e) => mentions_in_expr(e, vars, calls),
+        LambdaBody::Block(b) => mentions_in_block(b, vars, calls),
+    }
+}
+
+fn mentions_in_block<'e>(b: &'e Block, vars: &mut Vec<&'e Expr>, calls: &mut Vec<&'e str>) {
+    for s in &b.stmts {
+        match s {
+            Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => {
+                mentions_in_expr(value, vars, calls)
+            }
+            Stmt::IndexSet { index, value, .. } => {
+                mentions_in_expr(index, vars, calls);
+                mentions_in_expr(value, vars, calls);
+            }
+            Stmt::Return { value, .. } => {
+                if let Some(v) = value {
+                    mentions_in_expr(v, vars, calls);
+                }
+            }
+            Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop { .. } => {}
+            Stmt::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
+                mentions_in_expr(cond, vars, calls);
+                mentions_in_block(then_block, vars, calls);
+                if let Some(e) = else_block {
+                    mentions_in_block(e, vars, calls);
+                }
+            }
+            Stmt::IfLet {
+                scrutinee,
+                then_block,
+                else_block,
+                ..
+            } => {
+                mentions_in_expr(scrutinee, vars, calls);
+                mentions_in_block(then_block, vars, calls);
+                if let Some(e) = else_block {
+                    mentions_in_block(e, vars, calls);
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                mentions_in_expr(cond, vars, calls);
+                mentions_in_block(body, vars, calls);
+            }
+            Stmt::ForIn { iter, body, .. } => {
+                mentions_in_expr(iter, vars, calls);
+                mentions_in_block(body, vars, calls);
+            }
+            Stmt::Expr(e) => mentions_in_expr(e, vars, calls),
+            Stmt::Region { body, .. } => mentions_in_block(body, vars, calls),
+        }
+    }
+}
+
+fn mentions_in_expr<'e>(e: &'e Expr, vars: &mut Vec<&'e Expr>, calls: &mut Vec<&'e str>) {
+    match e {
+        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
+        Expr::Var { .. } => vars.push(e),
+        Expr::Unary { expr, .. }
+        | Expr::Field { expr, .. }
+        | Expr::Try { expr, .. }
+        | Expr::Consume { place: expr, .. } => mentions_in_expr(expr, vars, calls),
+        Expr::Binary { lhs, rhs, .. } => {
+            mentions_in_expr(lhs, vars, calls);
+            mentions_in_expr(rhs, vars, calls);
+        }
+        Expr::Call { name, args, .. } | Expr::Spawn { name, args, .. } => {
+            calls.push(name.as_str());
+            for a in args {
+                mentions_in_expr(a, vars, calls);
+            }
+        }
+        Expr::TryConstruct { args, .. } | Expr::ArrayLit { elems: args, .. } => {
+            for a in args {
+                mentions_in_expr(a, vars, calls);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for (_, a) in fields {
+                mentions_in_expr(a, vars, calls);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                mentions_in_expr(k, vars, calls);
+                mentions_in_expr(v, vars, calls);
+            }
+        }
+        Expr::IfExpr {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            mentions_in_expr(cond, vars, calls);
+            mentions_in_expr(then_branch, vars, calls);
+            if let Some(b) = else_branch {
+                mentions_in_expr(b, vars, calls);
+            }
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            mentions_in_expr(scrutinee, vars, calls);
+            for arm in arms {
+                match &arm.body {
+                    ArmBody::Expr(a) => mentions_in_expr(a, vars, calls),
+                    ArmBody::Block(b) => mentions_in_block(b, vars, calls),
+                }
+            }
+        }
+        Expr::Lambda { body, .. } => mentions_in_lambda(body, vars, calls),
+    }
+}
+
 thread_local! {
-    static STRICT_REFUSALS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    static STRICT_REFUSALS: std::cell::RefCell<Vec<crate::kernel::Refusal>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Whether `VYRN_KERNEL_STRICT=1` is set: a hard refusal by the kernel fails
@@ -2044,7 +2402,7 @@ pub fn strict() -> bool {
 /// The hard refusals the placer met since the last call, on this thread: a
 /// double free, a use after release, a join whose edges disagree — what no
 /// placement repairs. Drained by the CLI in strict mode after an analysis.
-pub fn take_strict_refusals() -> Vec<String> {
+pub fn take_strict_refusals() -> Vec<crate::kernel::Refusal> {
     STRICT_REFUSALS.with(|v| std::mem::take(&mut *v.borrow_mut()))
 }
 
@@ -2076,7 +2434,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     let trace = std::env::var("VYRN_KERNEL_TRACE").is_ok();
     let mut added: Vec<(String, Release, DropKind)> = Vec::new();
     for inst in &lowered.instances {
-        let body = match build(program, inst, own) {
+        let top = match build(program, inst, own) {
             Ok(b) => b,
             Err(g) => {
                 if trace {
@@ -2090,143 +2448,162 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 continue;
             }
         };
-        // `VYRN_KERNEL_TRACE=<fn>` prints that body's core.
-        if std::env::var("VYRN_KERNEL_TRACE").is_ok_and(|v| v != "1" && body.name.contains(&v)) {
-            eprintln!("{}", body.render());
+        // `VYRN_KERNEL_TRACE=<fn>` prints that body's core, lambdas included.
+        if std::env::var("VYRN_KERNEL_TRACE").is_ok_and(|v| v != "1" && top.name.contains(&v)) {
+            eprintln!("{}", top.render());
         }
-        let missing = match crate::kernel::placement(&body) {
-            Ok(m) => m,
-            Err(r) => {
-                if trace {
-                    eprintln!("placer: refused: {}", r.message);
+        // The body and every lambda frame under it: a lambda's rows are keyed
+        // by its own nodes under the enclosing function's name, so a row
+        // placed here lands where the emitters read (RFC-0125 M3, third slice).
+        for body in top.frames() {
+            let missing = match crate::kernel::placement(body) {
+                Ok(m) => m,
+                Err(r) => {
+                    if trace {
+                        eprintln!("placer: refused: {}: {}", r.body, r.message);
+                    }
+                    // A refusal no placement repairs: a double free, a use after
+                    // release, a join whose edges disagree. Kept for the CLI's
+                    // strict mode.
+                    STRICT_REFUSALS.with(|v| v.borrow_mut().push(r));
+                    continue;
                 }
-                // A refusal no placement repairs: a double free, a use after
-                // release, a join whose edges disagree. Kept for the CLI's
-                // strict mode.
-                STRICT_REFUSALS.with(|v| v.borrow_mut().push(r.message.clone()));
-                continue;
-            }
-        };
-        for m in missing {
-            let info = &body.names[m.name as usize];
-            let kind = own.proto.release_kind(&info.ty);
-            if trace {
-                eprintln!(
-                    "placer: {} `{}` (line {}) {:?} at {:?} site {} kind {:?} holes {:?}",
-                    body.name, info.source, info.line, m.kind, m.exit, m.site, kind, m.holes
-                );
-            }
-            if m.site == 0 {
-                continue;
-            }
-            let Some(kind) = kind else {
-                continue;
             };
-            // The kernel spells a hole `.f.g`; the plan's tables spell it
-            // `f.g`, relative to the binding (RFC-0093 M2). An element hole
-            // (`.[]`) is one the walk cannot skip: no row, and the judgment
-            // refuses the name.
-            if m.holes.iter().any(|h| h.contains("[]")) {
-                continue;
-            }
-            let holes: Vec<String> = m
-                .holes
-                .iter()
-                .map(|h| h.trim_start_matches('.').to_string())
-                .collect();
-            // A declared release takes the whole value (RFC-0086): it cannot
-            // be told a hole.
-            if !holes.is_empty() && matches!(kind, DropKind::Release(..)) {
-                continue;
-            }
-            match m.kind {
-                // Rule N's table: one edge of a join still holds what another
-                // took. Consumed by name, so a loop variable qualifies.
-                MissingKind::Edge { edge } => {
-                    let rows = own.plan.edge_releases.entry(m.site).or_default();
-                    if !rows.iter().any(|(n, e)| *n == info.source && *e == edge) {
-                        rows.push((info.source.clone(), edge));
-                        own.plan.owners.insert(m.site, inst.func.name.clone());
-                    }
-                    continue;
-                }
-                // The same table, one level down: the sub-place one edge took,
-                // released on the edge that did not. Spelled `d.line`, which
-                // every reader of the table resolves as a place.
-                MissingKind::EdgePlace { edge, path } => {
-                    let name = format!("{}{}", info.source, path);
-                    let rows = own.plan.edge_releases.entry(m.site).or_default();
-                    if !rows.iter().any(|(n, e)| *n == name && *e == edge) {
-                        rows.push((name, edge));
-                        own.plan.owners.insert(m.site, inst.func.name.clone());
-                    }
-                    continue;
-                }
-                // Round forty's table: the arm's unmoved payload binders, one
-                // entry per binder so an emitter frees exactly those, each
-                // with the holes its arm left in it.
-                MissingKind::ArmBinder { arm } => {
-                    let rows = own.plan.arm_frees.entry((m.site, arm)).or_default();
-                    if !rows.iter().any(|(n, _, _)| *n == info.source) {
-                        rows.push((info.source.clone(), kind.clone(), holes));
-                    }
-                    own.plan.owners.insert(m.site, inst.func.name.clone());
-                    continue;
-                }
-                MissingKind::Exit => {}
-            }
-            // The unnamed receiver of a field read: R1′'s table, with the
-            // field the read took as its hole. Freed right after the read,
-            // whichever exit found it held.
-            if let Some(node) = info.receiver {
-                own.plan.receiver_frees.insert(node);
-                if !holes.is_empty() {
-                    own.plan.receiver_holes.insert(node, holes);
-                }
-                own.plan.owners.insert(node, inst.func.name.clone());
-                continue;
-            }
-            let Some(binding) = info.binding else {
-                continue;
-            };
-            // A row the plan already placed here whose hole set is not the
-            // kernel's at this exit (the analysis's set is per binding, the
-            // kernel's is per path): the row keeps its key and takes the
-            // kernel's set.
-            if let Some(r) = own.releases.get_mut(&inst.func.name).and_then(|rows| {
-                rows.iter_mut()
-                    .find(|r| r.exit == m.exit && r.site == m.site && r.binding == binding)
-            }) {
+            for m in missing {
+                let info = &body.names[m.name as usize];
+                let kind = own.proto.release_kind(&info.ty);
                 if trace {
                     eprintln!(
-                        "placer: rewrite {} `{}` {:?} -> {:?}",
-                        inst.func.name, info.source, m.exit, holes
+                        "placer: {} `{}` (line {}) {:?} at {:?} site {} kind {:?} holes {:?}",
+                        body.name, info.source, info.line, m.kind, m.exit, m.site, kind, m.holes
                     );
                 }
-                r.full = false;
-                r.holes = Some(holes);
-                continue;
+                // The receiver a call or an operator borrowed a heap field or
+                // element out of (`f(x).rhs.startsWith("{")`): an argument
+                // temporary of that consumer, keyed by the node that produced
+                // the receiver, which both backends tee and free after the
+                // consumer's drain (RFC-0125 M3, third slice).
+                if let Some(producer) = info.producer {
+                    if own.plan.arg_drops.insert(producer) {
+                        own.plan.owners.insert(producer, inst.func.name.clone());
+                    }
+                    continue;
+                }
+                if m.site == 0 {
+                    continue;
+                }
+                let Some(kind) = kind else {
+                    continue;
+                };
+                // The kernel spells a hole `.f.g`; the plan's tables spell it
+                // `f.g`, relative to the binding (RFC-0093 M2). An element hole
+                // (`.[]`) is one the walk cannot skip: no row, and the judgment
+                // refuses the name.
+                if m.holes.iter().any(|h| h.contains("[]")) {
+                    continue;
+                }
+                let holes: Vec<String> = m
+                    .holes
+                    .iter()
+                    .map(|h| h.trim_start_matches('.').to_string())
+                    .collect();
+                // A declared release takes the whole value (RFC-0086): it cannot
+                // be told a hole.
+                if !holes.is_empty() && matches!(kind, DropKind::Release(..)) {
+                    continue;
+                }
+                match m.kind {
+                    // Rule N's table: one edge of a join still holds what another
+                    // took. Consumed by name, so a loop variable qualifies.
+                    MissingKind::Edge { edge } => {
+                        let rows = own.plan.edge_releases.entry(m.site).or_default();
+                        if !rows.iter().any(|(n, e)| *n == info.source && *e == edge) {
+                            rows.push((info.source.clone(), edge));
+                            own.plan.owners.insert(m.site, inst.func.name.clone());
+                        }
+                        continue;
+                    }
+                    // The same table, one level down: the sub-place one edge took,
+                    // released on the edge that did not. Spelled `d.line`, which
+                    // every reader of the table resolves as a place.
+                    MissingKind::EdgePlace { edge, path } => {
+                        let name = format!("{}{}", info.source, path);
+                        let rows = own.plan.edge_releases.entry(m.site).or_default();
+                        if !rows.iter().any(|(n, e)| *n == name && *e == edge) {
+                            rows.push((name, edge));
+                            own.plan.owners.insert(m.site, inst.func.name.clone());
+                        }
+                        continue;
+                    }
+                    // Round forty's table: the arm's unmoved payload binders, one
+                    // entry per binder so an emitter frees exactly those, each
+                    // with the holes its arm left in it.
+                    MissingKind::ArmBinder { arm } => {
+                        let rows = own.plan.arm_frees.entry((m.site, arm)).or_default();
+                        if !rows.iter().any(|(n, _, _)| *n == info.source) {
+                            rows.push((info.source.clone(), kind.clone(), holes));
+                        }
+                        own.plan.owners.insert(m.site, inst.func.name.clone());
+                        continue;
+                    }
+                    MissingKind::Exit => {}
+                }
+                // The unnamed receiver of a field read: R1′'s table, with the
+                // field the read took as its hole. Freed right after the read,
+                // whichever exit found it held.
+                if let Some(node) = info.receiver {
+                    own.plan.receiver_frees.insert(node);
+                    if !holes.is_empty() {
+                        own.plan.receiver_holes.insert(node, holes);
+                    }
+                    own.plan.owners.insert(node, inst.func.name.clone());
+                    continue;
+                }
+                let Some(binding) = info.binding else {
+                    continue;
+                };
+                // A row the plan already placed here whose hole set is not the
+                // kernel's at this exit (the analysis's set is per binding, the
+                // kernel's is per path): the row keeps its key and takes the
+                // kernel's set.
+                if let Some(r) = own.releases.get_mut(&inst.func.name).and_then(|rows| {
+                    rows.iter_mut()
+                        .find(|r| r.exit == m.exit && r.site == m.site && r.binding == binding)
+                }) {
+                    if trace {
+                        eprintln!(
+                            "placer: rewrite {} `{}` {:?} -> {:?}",
+                            inst.func.name, info.source, m.exit, holes
+                        );
+                    }
+                    r.full = false;
+                    r.holes = Some(holes);
+                    continue;
+                }
+                let dup = added.iter().any(|(f, r, _)| {
+                    *f == inst.func.name
+                        && r.exit == m.exit
+                        && r.site == m.site
+                        && r.binding == binding
+                });
+                if dup {
+                    continue;
+                }
+                added.push((
+                    inst.func.name.clone(),
+                    Release {
+                        site: m.site,
+                        binding,
+                        name: info.source.clone(),
+                        kind: kind.clone(),
+                        exit: m.exit,
+                        line: info.line as u32,
+                        full: false,
+                        holes: if holes.is_empty() { None } else { Some(holes) },
+                    },
+                    kind,
+                ));
             }
-            let dup = added.iter().any(|(f, r, _)| {
-                *f == inst.func.name && r.exit == m.exit && r.site == m.site && r.binding == binding
-            });
-            if dup {
-                continue;
-            }
-            added.push((
-                inst.func.name.clone(),
-                Release {
-                    site: m.site,
-                    binding,
-                    name: info.source.clone(),
-                    kind: kind.clone(),
-                    exit: m.exit,
-                    line: info.line as u32,
-                    full: false,
-                    holes: if holes.is_empty() { None } else { Some(holes) },
-                },
-                kind,
-            ));
         }
     }
     for (f, row, kind) in added {

@@ -183,7 +183,12 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
             Err(e) => diags.push(diagnostics::Diagnostic::error(0, 0, "check", e)),
         }
     }
-    if diags.is_empty() {
+    // RFC-0125 M3, third slice: `VYRN_NO_MOVECHECK=1` lets the move check
+    // stand aside so the kernel's own refusal (`VYRN_KERNEL_STRICT=1`) can be
+    // read on a program the checker refuses first — the wording comparison
+    // the deletion track needs. A knob for that comparison, not a mode a
+    // program is built under.
+    if diags.is_empty() && !std::env::var("VYRN_NO_MOVECHECK").is_ok_and(|v| v == "1") {
         diags.extend(movecheck::check_accum(program));
     }
     diags

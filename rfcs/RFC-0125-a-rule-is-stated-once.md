@@ -1211,6 +1211,157 @@ with an argument-temporary drop of the receiver after the read's consumer,
 which is the shape `arg_drops` has for the argument itself and not for what
 the argument was read out of.
 
+**The third slice closed it (2026-09-02).** The row is the argument-temporary
+drop the analysis already has, keyed one node down: not the read
+(`gqlSplitDecl(src).rhs`), whose value is the borrowed field, but the node
+that PRODUCED the receiver — `gqlSplitDecl(src)`, `weekdayLetters()`, the
+`match` a `??` spells. Both compiled backends already tee the value of any
+node in `arg_drops` where they evaluate it and free it after the call or
+operator that encloses it (`direct.rs` `expr` and `call`, `lib.rs` `gen_expr`
+and `gen_call`), which is after the read's consumer; the core drops the
+receiver at the same point, by queueing it with the String temporaries the
+consumer's binding releases. The placer writes the row where the kernel finds
+such a receiver held and a call or an operator encloses the read
+(`NameInfo::producer`); a read nothing drains encloses — `for p in
+f().items`, `let x = f().a.b` — gets no row and stays refused, and none is in
+the corpus. One emitter rule came with it: a lending call (`a[i]`, a
+projection) whose result owns heap must not drain its arguments' temporaries,
+because its result points into one of them; the call or operator above
+drains them. Without the rule `print(weekdayLetters()[1])` would free the
+array after `[1]` and print out of it.
+
+| kernel over the corpus | holed names placed | the receiver placed |
+|---|---|---|
+| accepted | 8,595 | 8,598 |
+| refused | 3 | 0 |
+
+(The corpus is 166 programs at this branch's base, so the accepted count is
+not the 6,587 of the second slice's record; the refused count is.) The
+probe, peak working set at 200,000 and 400,000 turns, measured as the table
+above; the "placer off" columns are this build with `VYRN_NO_PLACER=1`, and
+a flat probe reads 18.2 / 14.9 MB under the pinned wasmtime on this host:
+
+| probe | native, placer off | native after | wasm, placer off | wasm after |
+|---|---|---|---|---|
+| field-read-off-a-temporary | 36.7 / 68.8 MB | 4.4 / 4.4 MB | 43.7 / 72.6 MB | 14.9 / 14.8 MB |
+
+The corpus test's ratchet is 0.
+
+**Lambda frames are judged (2026-09-02, the third slice).** The reason
+they were not was in the emitters, and it was one change in each.
+`direct.rs` names a lifted lambda's shell `@lambda <owner>` and `lower_body`
+reads `Cx::droppable` and `Cx::releases` under the owner; `lib.rs` keeps
+`placed` and `droppable` across the lift and takes only the slots away. The
+analysis had always recorded a lambda's rows under the enclosing function's
+name, keyed by the lambda's own nodes, so both backends now run what it
+wrote and what the placer adds. The core builds each lambda literal as a
+frame of its own (`Body::lambdas`, `Builder::lambda_frame`): its captures are
+the enclosing names spelled again as borrowed inputs, its parameters are
+`read` (RFC-0023), its bindings are ordinary, and an expression body is a
+`return` of its value at no site. The kernel judges every frame and the
+placer places in every frame; the corpus test counts each as an instance.
+`rfcs/probes-0125/lambda-holds-on-one-path.vyrn` is the witness: a lambda
+that binds a String, hands it to a `consume` parameter on every third turn
+and returns without it on the others — the analysis's fate is "moved", so it
+places no release on the untaken path, and before this slice no row inside a
+lambda ran at all. Peak working set at 200,000 and 400,000 turns, the
+"placer off" column being this build with `VYRN_NO_PLACER=1` (the emitter
+change alone):
+
+| probe | native before | native, placer off | native after | wasm before | wasm after |
+|---|---|---|---|---|---|
+| lambda-holds-on-one-path | 15.2 / 25.9 MB | 15.6 / 26.2 MB | 4.8 / 4.8 MB | 32.1 / 41.7 MB | 22.2 / 22.0 MB |
+
+| kernel over the corpus | the receiver placed | lambda frames judged |
+|---|---|---|
+| accepted | 8,598 | 8,653 |
+| refused | 0 | 0 |
+| unlowered | 0 | 0 |
+
+Two things the frames taught. A lambda's type is often an alias
+(`Transform`, `Middleware`) or a `lazy` field's, so the frame resolves it
+before it reads the parameters; and a literal in the argument position of a
+generic has no type of its own — the instance monomorphized it away — while
+its body is typed, so each parameter takes the type of its first use there.
+And `mentions_place` does not see a callee: `n -> f(n) + 1` captures the
+function value `f`, which the frame now counts (`mentions_in_lambda`), or
+the call could not be attributed. Every frame in the corpus is accepted
+with the placer on, so the rows the placer adds inside lambdas are the
+whole difference between the two probe columns above.
+
+**Wordings (2026-09-02, the third slice).** A hard refusal by the kernel
+under `VYRN_KERNEL_STRICT=1` prints as the checker's move diagnostics print:
+`file:line:0: message`, the message in `movecheck.rs`'s voice. The kernel
+now keeps, per consumed name, the line and the taker in the checker's words
+("the binding `t`", "`take(..)`", "`consume`", "a `return`"), and the core's
+taking statements carry their source line, which is what the wording needs
+and the judgment did not. The comparison was made on five small programs
+under `VYRN_NO_MOVECHECK=1` — a knob added for exactly this, since the
+checker refuses each before the kernel is reached:
+
+| program | the checker (`vyrn check`) | the kernel (`VYRN_NO_MOVECHECK=1 VYRN_KERNEL_STRICT=1`) |
+|---|---|---|
+| `let t = s` then `print(s)` | w1.vyrn:3:0: `s` was moved here into the binding `t` / line 4: ... and `s` is used again here / fix: `s.copy()` if both sides need a value | the same two lines, no fix |
+| `take(s)` twice, `take(v: consume String)` | w2.vyrn:8:0: `s` is used here but was already consumed by `take(..)` on line 7 / (a `consume` parameter takes ownership; the value can't be used afterward) | the same two lines |
+| `take(s)` inside a `while` | w3.vyrn:10:0: `s` is consumed by `take(..)` inside a loop, so it would be used again on the next iteration | the same line |
+| `take(consume p.name)` then `print(p.name)` | w4.vyrn:9:0: `p.name` was moved here into `consume` / line 10: ... and `p.name` is used again here / fix: `p.name.copy()` if both sides need a value | the same two lines, no fix |
+| `take(consume p.name)` then `keep(p)` | w5.vyrn:13:0: `p.name` was taken out of `p` here / line 14: ... and `p` is used as a whole here, with the hole still in it / two fix lines | the same two lines, no fix |
+
+Where the two differ the kernel's is the same sentence with the `fix:` menu
+missing: the menu names `.copy()` and write-back as ways out, which are the
+checker's knowledge of the surface and not the kernel's. The join refusal
+has no checker equivalent (the checker accepts a conditional move and the
+plan's Rule N releases the other edge; the kernel says so only when the
+placer is off), so its sentence is the kernel's own.
+
+**What the analysis answers that the kernel does not, recorded for the
+deletion track.** Neither `movecheck.rs` nor `own.rs` is deleted here. The
+answers below have no kernel equivalent today; each is a rule the kernel or
+the core must state before its source can go.
+
+From `movecheck.rs`:
+
+- Rule 2, borrows: a `read` or `modify` parameter, a place read
+  (`names_a_place`), a loop variable or a projection's result may not be
+  returned, stored, or handed to a `consume` parameter without `.copy()`.
+  The core binds such a name as not owned, and the kernel does not refuse a
+  take of a name it does not own.
+- Module state may not be taken (RFC-0013): the core reads a global as a
+  borrow and says nothing about a `consume` of it.
+- A `region`'s escape rule (RFC-0004 §4): a value the arena allocated may
+  not leave the region. The core lowers a `region` as an ordinary block.
+- A capture's rules: a moved name may not be captured, and a closure that
+  captures a borrowed parameter may not escape (`a2_capture_escape`). The
+  frame reads its captures as borrowed inputs and judges nothing about
+  their lifetime.
+- `consume` with nothing to take, and the `for .. in consume` forms.
+- The `fix:` menus and `vyrn fix`.
+- An exported function returning a borrow.
+- The argument verdicts over the call graph (`ArgVerdict`, `note_handover`):
+  whether a callee keeps what it is handed, which is what `arg_drops` is
+  built from. The kernel judges the row; it does not derive it.
+- `sinks`: a rebuilding builtin takes its receiver, and the write-back
+  statement excepted. The core restates the first half (`call`, `rebuilds`)
+  and reads the plan for the second.
+
+From `own.rs`:
+
+- Every per-node table the core reads and does not derive: `arg_drops`,
+  `store_owned` and `store_fresh` with `mentions_place`, `discarded_results`,
+  `consuming_matches`, `malloc_scrutinees` and `receiver_malloc` (the region
+  stand-downs), `receiver_frees` for a scalar read, the `for` handover
+  (`DropKind::FreeArr`), the binding notes (`Fate`, and `vyrn why --memory`).
+- The release kind of a type (`DropKind`) and a declared `release`'s
+  ordering: the emitters read kinds from the plan; the kernel asks only
+  whether a type owns heap.
+- `Leak::Hole` (a hole the walk cannot skip) and `Leak::Region`: not
+  modelled; a binding under the first is a gap.
+- An edge row's hole set, and an element hole (`.[]`): no row.
+- A lambda expression body's exit: a name still held at it has no site an
+  engine runs, so it is refused, not placed.
+
+
+
 **Lambda bodies are not judged, and the reason is in the emitters.** Both
 compiled backends lift a lambda under a shell that owns no rows: `direct.rs`
 `f_shell` names it `@lambda`, so `Cx::droppable` and the placed steps answer

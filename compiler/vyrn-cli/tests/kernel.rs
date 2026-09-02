@@ -107,7 +107,27 @@
 //!      lowering used to read the dead row as a `drop`; it reads it as
 //!      nothing now, which is what the emitters do.
 //!
-//! The ratchet is 3, for these and no other. `VYRN_KERNEL_GAPS=<substring>`
+//! **M3's third slice closed class 10** (RFC-0125 §3 M3, "the third
+//! slice"): the placer writes an argument-temporary drop keyed by the node
+//! that PRODUCED the receiver, which both backends tee and free after the
+//! call or operator enclosing the read — after the read's consumer. A
+//! lending call (`a[i]`, a projection) whose result owns heap no longer
+//! drains its arguments' temporaries, so the tee reaches the consumer
+//! above. The count fell from 3 to 0 and the probe is flat: 4.4 MB at
+//! 200,000 and at 400,000 turns natively.
+//!
+//! **Lambda frames are judged in the same slice.** Both compiled backends
+//! read a lifted lambda's rows under the enclosing function's name now, the
+//! core builds each lambda as a frame of its own (`Body::lambdas`), and
+//! this test judges every frame; the tally counts each as an instance.
+//! `lambda-holds-on-one-path.vyrn` went from 15.2 / 25.9 MB to 4.8 / 4.8 MB.
+//!
+//! **Wordings, the same slice.** A refusal carries its line and file and is
+//! worded as `movecheck.rs` words a move; `VYRN_KERNEL_STRICT=1` prints it
+//! as `file:line:0: message`, and `VYRN_NO_MOVECHECK=1` shows it on a
+//! program the checker refuses first (RFC-0125 §3 M3, "wordings").
+//!
+//! The ratchet is 0. `VYRN_KERNEL_GAPS=<substring>`
 //! lists where each remaining gap is; `VYRN_KERNEL_TRACE=1` prints what the
 //! placer found owed in every body, and `VYRN_KERNEL_TRACE=<fn>` prints that
 //! body's core.
@@ -218,35 +238,46 @@ fn run_corpus() {
                         *details.entry((g.what, g.detail)).or_default() += 1;
                     }
                 }
-                Ok(body) => match vyrn_lower::kernel::check(&body) {
-                    Ok(()) => accepted += 1,
-                    Err(r) => {
-                        let tag = format!("{file}:{}", body.name);
-                        if dump
-                            .as_deref()
-                            .is_some_and(|d| d.split(',').any(|w| tag.contains(w)))
-                        {
-                            eprintln!("{}", body.render());
-                            let arms: Vec<String> = own
-                                .plan
-                                .arm_frees
-                                .iter()
-                                .filter(|((at, _), _)| {
-                                    own.plan.owners.get(at) == Some(&inst.func.name)
-                                })
-                                .map(|((_, arm), k)| format!("arm {arm}: {k:?}"))
-                                .collect();
-                            eprintln!("  plan arm frees: {}", arms.join("; "));
-                            let rel: Vec<String> = inst
-                                .releases
-                                .iter()
-                                .map(|r| format!("{}@{:?}:{}", r.name, r.exit, r.line))
-                                .collect();
-                            eprintln!("  plan releases: {}", rel.join("; "));
+                // The body and every lambda frame under it (RFC-0125 M3,
+                // third slice), each judged as a frame of its own.
+                Ok(top) => {
+                    for body in top.frames() {
+                        match vyrn_lower::kernel::check(body) {
+                            Ok(()) => accepted += 1,
+                            Err(r) => {
+                                let tag = format!("{file}:{}", body.name);
+                                if dump
+                                    .as_deref()
+                                    .is_some_and(|d| d.split(',').any(|w| tag.contains(w)))
+                                {
+                                    eprintln!("{}", body.render());
+                                    let arms: Vec<String> = own
+                                        .plan
+                                        .arm_frees
+                                        .iter()
+                                        .filter(|((at, _), _)| {
+                                            own.plan.owners.get(at) == Some(&inst.func.name)
+                                        })
+                                        .map(|((_, arm), k)| format!("arm {arm}: {k:?}"))
+                                        .collect();
+                                    eprintln!("  plan arm frees: {}", arms.join("; "));
+                                    let rel: Vec<String> = inst
+                                        .releases
+                                        .iter()
+                                        .map(|r| format!("{}@{:?}:{}", r.name, r.exit, r.line))
+                                        .collect();
+                                    eprintln!("  plan releases: {}", rel.join("; "));
+                                }
+                                refused.push(format!(
+                                    "{file}: {}: line {}: {}",
+                                    r.body,
+                                    r.line,
+                                    r.message.replace('\n', " / ")
+                                ));
+                            }
                         }
-                        refused.push(format!("{file}: {}", r.message));
                     }
-                },
+                }
             }
         }
     }
@@ -272,8 +303,9 @@ fn run_corpus() {
     // once every construct lowered and the five hole-family classes above
     // came into view (the one lowering misread, `smallarray`, is fixed); 3
     // once the placer could place a holed name and a `for` had its exit
-    // (M3's second slice).
-    const RATCHET: usize = 3;
+    // (M3's second slice); 0 once the receiver of a borrowed heap read was
+    // an argument temporary of the read's consumer (M3's third slice).
+    const RATCHET: usize = 0;
     assert!(
         refused.len() <= RATCHET,
         "{} instances refused by the kernel, more than the {RATCHET} recorded; the first new          one is worth reading before the number is raised: {}",
