@@ -1,0 +1,25 @@
+ok {"sur":"a","kids":[]}
+ok {"sur":"a","kids":[{"name":"k","age":7}],"note":"n"}
+ok {"sur":"a","kids":[]}
+ok {"i":9007199254740993,"i8v":-128,"u32v":4294967295,"u64v":18446744073709551615,"f":-0.500000,"b":true}
+ok 42
+ok "Green"
+ok "Dot"
+ok {"Circle":3}
+ok {"Rect":[2,5]}
+json.missing@sur: missing required field `sur` | json.missing@kids: missing required field `kids`
+json.type@sur: expected string, found number | json.type@kids: expected array, found object
+validate@kids[0].age: validation failed for `Age` | json.missing@kids[1].name: missing required field `name` | validate@kids[1].age: validation failed for `Age`
+json.type@i: expected integer, found number | json.type@i8v: expected integer, found number | json.type@u32v: expected integer, found number | json.type@u64v: expected integer, found boolean | json.type@f: expected number, found string | json.type@b: expected boolean, found number
+validate@: validation failed for `Age`
+json.type@: expected integer, found string
+json.type@: expected one of `Red`, `Green`, found string
+json.type@: expected one of `Dot`, `Circle`, `Rect`, found object
+json.type@: expected one of `Dot`, `Circle`, `Rect`, found string
+json.parse@: line 1, col 3: expected a string key
+json.parse@: line 1, col 1: unexpected end of input
+json.parse@: line 1, col 23: trailing content after the JSON value
+json.parse@: line 1, col 22: trailing comma before ']'
+ok {"s":"😀"}
+json.parse@: line 1, col 13: duplicate object key: s
+json.parse@: line 1, col 10: trailing comma before '}'

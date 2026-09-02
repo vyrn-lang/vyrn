@@ -683,6 +683,40 @@ jobs:
           VYRN_WASM_MANIFEST: check
         run: cargo test --quiet -p vyrn-cli --test wasmhash -- --ignored
 
+  fixtures:
+    name: compiled run prints the recorded output — ${{ matrix.os }}
+    # RFC-0125 §2.6, M5: `tests/fixtures.rs` runs every example with
+    # `vyrn run --engine wasm` — the direct backend's module, in the wasmtime
+    # the CLI embeds — and compares stdout, stderr and the exit code byte for
+    # byte against `examples/expected/`, which was recorded once from the
+    # interpreter. With `wasmhash` (the same bytes everywhere) it is what the
+    # parity job becomes once the interpreter is gone; until then it is not a
+    # required check, and a red leg names the example and the first line that
+    # differs.
+    #
+    # Its own job for the reason `wasmhash` is one: no clang, no sysroot, no
+    # external wasmtime, and the whole matrix, since the host it runs under is
+    # hand-written and each platform's file and stream calls are its own.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Rust cache
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: compiler
+      - name: Every example prints what was recorded, as compiled wasm
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test fixtures -- --nocapture
+
   gen-engine:
     name: cross-engine generation (interp == wasm)
     # Its own job rather than a step in `test`: it is the only thing in CI that

@@ -1,0 +1,16 @@
+verbose=true
+quiet=false
+name=app
+miss=none
+dup=one
+count=5
+positionals:
+- build
+- -raw
+- tail
+rest:
+- -raw
+- tail
+countdown:
+5
+4

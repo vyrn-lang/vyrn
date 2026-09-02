@@ -1,0 +1,1 @@
+error: html: `src" onload="alert(1)` is not a usable attribute name — a name holds only letters, digits, `-`, `_` and `:`; untrusted text belongs in a VALUE, which is escaped (std/html.vyrn:308)

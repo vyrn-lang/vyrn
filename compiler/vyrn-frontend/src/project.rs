@@ -1220,8 +1220,10 @@ fn subst_block(b: &mut Block, map: &HashMap<String, Expr>) {
 /// after its children, so a substituted expression is never re-walked.
 ///
 /// `pub(crate)` since census U5: the loader stamps every `panic` with its source
-/// site and needs the same complete walk this one already is.
-pub(crate) fn walk_block(b: &mut Block, f: &mut impl FnMut(&mut Expr)) {
+/// site and needs the same complete walk this one already is. `pub` since
+/// RFC-0125 M5: `vyrn test --engine wasm` rewrites a body's test-only builtins
+/// before the direct backend sees them, and needs the same walk again.
+pub fn walk_block(b: &mut Block, f: &mut impl FnMut(&mut Expr)) {
     for s in &mut b.stmts {
         walk_stmt(s, f);
     }

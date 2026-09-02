@@ -1,0 +1,4 @@
+[ERROR] serve: unknown option `--roott`
+[ERROR] serve: verbose: option `--verbose` takes no value
+[ERROR] serve: port: option `--port` expects a whole number, 1 to 65535
+[ERROR] serve: root: required option `--root` is missing

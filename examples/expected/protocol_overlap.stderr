@@ -1,0 +1,1 @@
+protocol_overlap.vyrn:44:1: `impl Show for Option<Int64>` collides with `impl<T> Show for Option<T>` (line 34) — Vyrn dispatches on the type constructor, so `Option` may have only one impl of `Show`; write one generic impl (`impl<T> Show for Option<T>`) to cover every instantiation

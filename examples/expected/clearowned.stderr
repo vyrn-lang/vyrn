@@ -1,0 +1,1 @@
+clearowned.vyrn:6:0: `clear` forgets its elements without releasing them, and `String` owns heap — pop each element in a loop instead

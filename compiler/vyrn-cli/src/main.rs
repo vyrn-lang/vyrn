@@ -66,11 +66,20 @@ use std::process::{Command, ExitCode};
 // engine does. `vyrn deps` reads all four to REPORT them (RFC-0102 M3).
 use vyrn_codegen::toolchain::{extern_trap_stubs, find_clang, runtime_shim};
 
-/// RFC-0076: generators compiled to wasm instead of interpreted. Behind a
-/// feature so the default build keeps its zero external dependencies.
 mod remote;
+/// RFC-0125 M5: the WASI host `--engine wasm` runs a program's wasm under.
+mod wasmrun;
 
-const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn run --profile [file.vyrn] [args...]   (where the interpreted run spent its time, to stderr; the flag counts only BEFORE the file, so a program can have one of its own)\n       vyrn check --profile [file.vyrn]   (the same, for generation alone: `check` runs every `gen fn` and stops. Needs a cold generator cache to mean anything)\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
+/// What executes a program under `run`, `test` and `bench --check` (RFC-0125
+/// §2.5). The interpreter is the default in M5's first slice; `wasm` compiles
+/// through the direct backend and runs the module in the embedded wasmtime.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Engine {
+    Interp,
+    Wasm,
+}
+
+const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn run --profile [file.vyrn] [args...]   (where the interpreted run spent its time, to stderr; the flag counts only BEFORE the file, so a program can have one of its own)\n       vyrn run|test|bench --check --engine interp|wasm [file.vyrn]   (RFC-0125 M5: `wasm` compiles the program with the direct backend and runs it in the embedded wasmtime; `interp` is the default. Counts only BEFORE the file, like --profile)\n       vyrn check --profile [file.vyrn]   (the same, for generation alone: `check` runs every `gen fn` and stops. Needs a cold generator cache to mean anything)\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
        vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact-name>   (every import chain that pulls that capability into the artifact's closure)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
        vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [--locked] [alias] | vyrn vendor [--check] | vyrn deps [artifact]   (deps: every declared artifact's module graph, then the toolchain)\n       vyrn --version   (also -V)";
 
@@ -360,6 +369,33 @@ fn real_main() -> ExitCode {
     if let Some(i) = at {
         args.remove(i + 2);
     }
+    // `--engine <name>` (RFC-0125 M5) counts only BEFORE the file, for the same
+    // reason `--profile` does. Read after `--profile` is removed, since the
+    // head is the same span and one removal shifts it.
+    let head = args
+        .iter()
+        .skip(2)
+        .position(|a| !a.starts_with('-'))
+        .map_or(args.len(), |i| i + 2)
+        .max(2.min(args.len()));
+    let at = args
+        .get(2.min(args.len())..head)
+        .and_then(|h| h.iter().position(|a| a == "--engine"));
+    let mut engine = Engine::Interp;
+    if let Some(i) = at {
+        engine = match args.get(i + 3).map(String::as_str) {
+            Some("interp") => Engine::Interp,
+            Some("wasm") => Engine::Wasm,
+            other => {
+                eprintln!(
+                    "error: --engine needs `interp` or `wasm`, got {}",
+                    other.map_or("nothing".to_string(), |o| format!("`{o}`"))
+                );
+                return ExitCode::from(2);
+            }
+        };
+        args.drain(i + 2..i + 4);
+    }
     // `--version` / `-V`, before the usage screen: the published alpha printed
     // usage and exited 2 for both, which is what a package manager reads as a
     // broken install. The string is the crate's own `version`, so the binary and
@@ -447,7 +483,7 @@ fn real_main() -> ExitCode {
         if want_profile {
             vyrn_frontend::prof::start();
         }
-        let code = test_cmd(&path, rest);
+        let code = test_cmd(&path, rest, engine);
         if want_profile {
             let rows = vyrn_frontend::prof::take();
             eprint!("{}", vyrn_frontend::prof::table(&rows, 25));
@@ -455,7 +491,7 @@ fn real_main() -> ExitCode {
         return code;
     }
     if cmd == "bench" {
-        return bench_cmd(&path, rest);
+        return bench_cmd(&path, rest, engine);
     }
     if cmd == "serve" {
         return serve_cmd(&path, rest);
@@ -532,6 +568,9 @@ fn real_main() -> ExitCode {
                 Err(code) => return code,
             };
             let _memo = shared_desugars();
+            if engine == Engine::Wasm {
+                return run_wasm(path, &program, &prog_args);
+            }
             let out = vyrn_frontend::interp::run_with_args(&program, &prog_args);
             // The table goes to STDERR, and on the failing path too. A profile is
             // not the program's output — a run whose stdout is piped somewhere
@@ -3611,7 +3650,7 @@ fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
 /// Prints `test "name" ... ok` / `... FAILED: <message>` per test and a
 /// `N passed, M failed` summary; exits 1 if any test failed. A file with no
 /// tests prints `no tests` and exits 0.
-fn test_cmd(path: &str, rest: &[String]) -> ExitCode {
+fn test_cmd(path: &str, rest: &[String], engine: Engine) -> ExitCode {
     // Optional `--name <substring>` filter.
     let mut filter: Option<String> = None;
     let mut i = 0;
@@ -3642,6 +3681,19 @@ fn test_cmd(path: &str, rest: &[String]) -> ExitCode {
     if !has_tests {
         println!("no tests");
         return ExitCode::SUCCESS;
+    }
+    if engine == Engine::Wasm {
+        let bodies: Vec<Body> = program
+            .tests
+            .iter()
+            .filter(|t| t.module.is_none() && filter.as_deref().is_none_or(|s| t.name.contains(s)))
+            .map(|t| Body {
+                name: t.name.clone(),
+                body: t.body.clone(),
+                line: t.line,
+            })
+            .collect();
+        return bodies_wasm(path, &program, "test", &bodies);
     }
 
     use std::io::Write;
@@ -3697,7 +3749,7 @@ fn test_cmd(path: &str, rest: &[String]) -> ExitCode {
 /// `--check` is mutually exclusive with `--json`/`--compare` (deterministic vs
 /// timing). Root-file benches only, declaration order (the RFC-0015 rules
 /// verbatim); `--name` filters by substring; manifest-aware like every command.
-fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {
+fn bench_cmd(path: &str, rest: &[String], engine: Engine) -> ExitCode {
     let mut filter: Option<String> = None;
     let mut check = false;
     let mut json = false;
@@ -3767,6 +3819,19 @@ fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    if check && engine == Engine::Wasm {
+        let bodies: Vec<Body> = program
+            .benches
+            .iter()
+            .filter(|b| b.module.is_none() && matches(&b.name))
+            .map(|b| Body {
+                name: b.name.clone(),
+                body: b.body.clone(),
+                line: b.line,
+            })
+            .collect();
+        return bodies_wasm(path, &program, "bench", &bodies);
+    }
     if check {
         return bench_check(&program, filter.as_deref());
     }
@@ -5676,6 +5741,352 @@ fn write_response_vary(
     let _ = stream.write_all(header.as_bytes());
     let _ = stream.write_all(body);
     let _ = stream.flush();
+}
+
+/// `vyrn run --engine wasm` (RFC-0125 M5): the program compiled by the direct
+/// backend and run in the embedded wasmtime, with the arguments, streams and
+/// exit code `vyrn run` gives the interpreter. The kernel's refusals apply as
+/// they do to `build`, since this is the same route.
+fn run_wasm(path: &str, program: &vyrn_frontend::ast::Program, prog_args: &[String]) -> ExitCode {
+    if let Err(code) = kernel_strict(program) {
+        return code;
+    }
+    let bytes = match vyrn_codegen::direct::compile(program) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut argv = vec![path.to_string()];
+    argv.extend(prog_args.iter().cloned());
+    let run = wasmrun::Run {
+        argv,
+        stdin_prefix: Vec::new(),
+        capture_stderr: false,
+    };
+    match wasmrun::run(&bytes, run) {
+        Ok(out) => ExitCode::from((out.code & 0xff) as u8),
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// One `test` or `bench` body, as [`bodies_wasm`] runs it.
+struct Body {
+    name: String,
+    body: vyrn_frontend::ast::Block,
+    line: usize,
+}
+
+/// `vyrn test --engine wasm` and `vyrn bench --check --engine wasm` (RFC-0125
+/// M5): the selected bodies, each run once as compiled wasm, with the lines
+/// the interpreter prints.
+///
+/// One module, one instance per body. Each body is lifted into a function
+/// `__vyrn_body_<k>`, and the synthesized `main` reads ONE line from standard
+/// input and calls the body that line names; the host serves that line before
+/// the process's own input. That is how the host knows which body a trap
+/// belongs to without reading the program's output: a trap ends the instance
+/// with `error: <message>` on fd 2 and exit 1, and the host turns the message
+/// into the `FAILED:` line. What differs from the interpreter, on record in
+/// RFC-0125 §3 M5: module state is initialized once per body rather than once
+/// per run, and input a body read ahead is not seen by the next.
+fn bodies_wasm(
+    path: &str,
+    program: &vyrn_frontend::ast::Program,
+    kind: &str,
+    bodies: &[Body],
+) -> ExitCode {
+    use vyrn_frontend::ast::{BinOp, Block, Expr, Function, Pattern, Stmt, Type};
+    if bodies.is_empty() {
+        // `test` said `no tests` before the filter; `bench` says it after.
+        println!("no {kind}es");
+        return ExitCode::SUCCESS;
+    }
+    let mut prog = program.clone();
+    // The root's `main` is not run by `test` or `bench`; the harness is `main`.
+    prog.functions
+        .retain(|f| !(f.name == "main" && f.module.is_none()));
+    prog.tests.clear();
+    prog.benches.clear();
+    let function = |name: String, body: Block, ret: Type, line: usize| Function {
+        name,
+        exported: false,
+        module: None,
+        doc: None,
+        type_params: Vec::new(),
+        type_bounds: Default::default(),
+        params: Vec::new(),
+        ret,
+        body,
+        line,
+        col: 0,
+        is_extern: false,
+        is_export_extern: false,
+        is_gen: false,
+        is_mut: false,
+    };
+    let mut dispatch: Vec<Stmt> = Vec::new();
+    for (k, b) in bodies.iter().enumerate() {
+        let name = format!("__vyrn_body_{k}");
+        let mut body = b.body.clone();
+        let mut fresh = 0usize;
+        desugar_asserts(&mut body, &mut fresh);
+        // `blackBox(v)` (RFC-0055) is `v`: the interpreter runs it as the
+        // identity, and `--check` measures nothing, so there is no optimizer to
+        // defeat. The direct backend has no lowering for it (RFC-0125 §3 M5).
+        vyrn_frontend::project::walk_block(&mut body, &mut |e| {
+            if let Expr::Call { name, args, .. } = e {
+                if name == "blackBox" && args.len() == 1 {
+                    *e = args.remove(0);
+                }
+            }
+        });
+        prog.functions
+            .push(function(name.clone(), body, Type::Unit, b.line));
+        dispatch.push(Stmt::If {
+            cond: Expr::Binary {
+                op: BinOp::Eq,
+                lhs: Box::new(Expr::Var {
+                    name: "__vyrnSlot".to_string(),
+                    line: 0,
+                }),
+                rhs: Box::new(Expr::Str(k.to_string())),
+                line: 0,
+            },
+            then_block: Block {
+                stmts: vec![Stmt::Expr(Expr::Call {
+                    name,
+                    args: Vec::new(),
+                    line: 0,
+                })],
+            },
+            else_block: None,
+            line: 0,
+        });
+    }
+    let main = Block {
+        stmts: vec![
+            Stmt::IfLet {
+                pattern: Pattern::Some("__vyrnSlot".to_string()),
+                scrutinee: Expr::Call {
+                    name: "readLine".to_string(),
+                    args: Vec::new(),
+                    line: 0,
+                },
+                then_block: Block { stmts: dispatch },
+                else_block: None,
+                line: 0,
+            },
+            Stmt::Return {
+                value: Some(Expr::Int(0)),
+                line: 0,
+            },
+        ],
+    };
+    prog.functions
+        .push(function("main".to_string(), main, Type::Int, 0));
+
+    let bytes = match vyrn_codegen::direct::compile(&prog) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    use std::io::Write;
+    let (mut ok, mut failed) = (0usize, 0usize);
+    for (k, b) in bodies.iter().enumerate() {
+        let run = wasmrun::Run {
+            argv: vec![path.to_string()],
+            stdin_prefix: format!("{k}\n").into_bytes(),
+            capture_stderr: true,
+        };
+        let out = match wasmrun::run(&bytes, run) {
+            Ok(out) => out,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        // The trap's line is the last `error: ..` on fd 2; everything the body
+        // wrote there before it passes through.
+        let (rest, message) = if out.code == 0 {
+            (out.stderr.as_slice(), None)
+        } else {
+            let text = String::from_utf8_lossy(&out.stderr);
+            match text.rfind("error: ") {
+                Some(at) if at == 0 || text.as_bytes()[at - 1] == b'\n' => (
+                    &out.stderr[..at],
+                    Some(text[at + 7..].trim_end_matches('\n').to_string()),
+                ),
+                _ => (out.stderr.as_slice(), Some(format!("exit {}", out.code))),
+            }
+        };
+        let mut stderr = std::io::stderr().lock();
+        let _ = stderr.write_all(rest);
+        let _ = stderr.flush();
+        let mut stdout = std::io::stdout().lock();
+        match message {
+            None => {
+                ok += 1;
+                let _ = writeln!(stdout, "{kind} {:?} ... ok", b.name);
+            }
+            Some(msg) => {
+                failed += 1;
+                let _ = writeln!(stdout, "{kind} {:?} ... FAILED: {msg}", b.name);
+            }
+        }
+        let _ = stdout.flush();
+    }
+    let verdict = if kind == "test" { "passed" } else { "ok" };
+    println!("\n{ok} {verdict}, {failed} failed");
+    if failed > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// `assert` and `assertEq` (RFC-0015) as the interpreter traps them, spelled
+/// with `panic` so the direct backend can lower a body that uses them:
+///
+///   assert(c)       ->  if !c { panic("assertion failed at line L") }
+///   assertEq(a, b)  ->  if a != b { panic("assertion failed at line L: " + a + " != " + b) }
+///
+/// A call operand is bound to a fresh local first, so it runs once and its
+/// result is owned by one name; any other operand — a variable, a literal, a
+/// field, an arithmetic expression — is pure and is written twice.
+fn desugar_asserts(block: &mut vyrn_frontend::ast::Block, fresh: &mut usize) {
+    use vyrn_frontend::ast::{ArmBody, BinOp, Block, Expr, Stmt, UnOp};
+    let panic = |msg: Expr, line: usize| {
+        Stmt::Expr(Expr::Call {
+            name: "panic".to_string(),
+            args: vec![msg],
+            line,
+        })
+    };
+    let call = |name: &str, args: Vec<Expr>, line: usize| Expr::Call {
+        name: name.to_string(),
+        args,
+        line,
+    };
+    let mut out = Vec::with_capacity(block.stmts.len());
+    for stmt in std::mem::take(&mut block.stmts) {
+        match stmt {
+            Stmt::Expr(Expr::Call { name, args, line }) if name == "assert" && args.len() == 1 => {
+                let cond = args.into_iter().next().unwrap();
+                out.push(Stmt::If {
+                    cond: Expr::Unary {
+                        op: UnOp::Not,
+                        expr: Box::new(cond),
+                        line,
+                    },
+                    then_block: Block {
+                        stmts: vec![panic(
+                            Expr::Str(format!("assertion failed at line {line}")),
+                            line,
+                        )],
+                    },
+                    else_block: None,
+                    line,
+                });
+            }
+            Stmt::Expr(Expr::Call { name, args, line })
+                if name == "assertEq" && args.len() == 2 =>
+            {
+                let mut operands = Vec::new();
+                for a in args {
+                    if matches!(a, Expr::Call { .. }) {
+                        let tmp = format!("__vyrnEq{fresh}");
+                        *fresh += 1;
+                        out.push(Stmt::Let {
+                            name: tmp.clone(),
+                            mutable: false,
+                            ty: None,
+                            value: a,
+                            line,
+                        });
+                        operands.push(Expr::Var { name: tmp, line });
+                    } else {
+                        operands.push(a);
+                    }
+                }
+                let (a, b) = (operands.remove(0), operands.remove(0));
+                let msg = call(
+                    "@concat",
+                    vec![
+                        call(
+                            "@concat",
+                            vec![
+                                call(
+                                    "@concat",
+                                    vec![
+                                        Expr::Str(format!("assertion failed at line {line}: ")),
+                                        call("@str", vec![a.clone()], line),
+                                    ],
+                                    line,
+                                ),
+                                Expr::Str(" != ".to_string()),
+                            ],
+                            line,
+                        ),
+                        call("@str", vec![b.clone()], line),
+                    ],
+                    line,
+                );
+                out.push(Stmt::If {
+                    cond: Expr::Binary {
+                        op: BinOp::NotEq,
+                        lhs: Box::new(a),
+                        rhs: Box::new(b),
+                        line,
+                    },
+                    then_block: Block {
+                        stmts: vec![panic(msg, line)],
+                    },
+                    else_block: None,
+                    line,
+                });
+            }
+            mut s => {
+                match &mut s {
+                    Stmt::If {
+                        then_block,
+                        else_block,
+                        ..
+                    }
+                    | Stmt::IfLet {
+                        then_block,
+                        else_block,
+                        ..
+                    } => {
+                        desugar_asserts(then_block, fresh);
+                        if let Some(e) = else_block {
+                            desugar_asserts(e, fresh);
+                        }
+                    }
+                    Stmt::While { body, .. }
+                    | Stmt::ForIn { body, .. }
+                    | Stmt::Region { body, .. } => desugar_asserts(body, fresh),
+                    Stmt::Expr(Expr::Match { arms, .. }) => {
+                        for arm in arms {
+                            if let ArmBody::Block(b) = &mut arm.body {
+                                desugar_asserts(b, fresh);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                out.push(s);
+            }
+        }
+    }
+    block.stmts = out;
 }
 
 fn build(path: &str, rest: &[String]) -> ExitCode {

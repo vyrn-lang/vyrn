@@ -18,9 +18,14 @@
 #
 # `vyrn-lsp` and `vyrn-genwasm` are EXCLUDED because they are heavy and neither
 # is needed to build or test the language: `lsp-server`/`lsp-types` for the
-# former, an embedded `wasmtime` for the latter (RFC-0076). `vyrn-cli` and
+# former, the generator engine for the latter (RFC-0076). `vyrn-cli` and
 # `vyrn-lsp` depend on `vyrn-genwasm` OPTIONALLY, behind a feature spelled
 # `wasm-gen` in each, so it enters the resolve only when asked for.
+#
+# `wasmtime` itself is in the default resolve since RFC-0125 M5: `vyrn-cli`
+# embeds it to run a program's wasm (`vyrn run --engine wasm`). It is pure
+# Rust, so the property above holds; what it costs the build is recorded in
+# RFC-0125 §3 M5.
 #   cargo build --manifest-path compiler/vyrn-lsp/Cargo.toml
 #
 # `vyrn-play` is EXCLUDED for a different reason: it only makes sense for one
