@@ -934,6 +934,107 @@ its payload out. Peak working set natively, before and after:
 About 112 bytes a turn, the two Strings. Parity 41 passed, the residue
 ratchet held.
 
+**The second slice placed the holed names (2026-09-02).** M2's nine
+refusals were names the placer could not place because a placed row walked
+the whole value minus the binding's own hole set, and the kernel's hole set
+at an exit is per path. The plan's tables now carry the set per row, and the
+placer fills them:
+
+- A placed release row (`own::Release`) has `holes: Option<Vec<String>>`,
+  the set THIS row walks around. `placed` hands each engine `(binding,
+  Option<holes>)`; round fifty-two's `full` is the empty set. Both compiled
+  backends park the binding's own set around the one emit (`direct.rs`
+  `emit_releases`, `lib.rs`'s release step). The core reads such a row as
+  `St::Row`, and the kernel checks its set against the state: a row that
+  walks a place a take left is a double free; a row that skips a place
+  still held is a leak, and in placement mode the row takes the state's set.
+  That check is what found class 7's probe, where the analysis had placed
+  `drop d` at both returns with the binding's set and the kernel had trusted
+  it.
+- An arm row is `(binder, kind, holes)`; the placer writes the binder's
+  holes and each engine skips them (class 5).
+- An edge row's name may be a sub-place, `d.line`: where two held edges of
+  a join disagree on a hole, the edge that did not take releases the
+  sub-place and holds the hole afterwards — Rule N one level down. The core
+  lowers it as a take into a temporary that is dropped at once, so the
+  judgment sees the hole; each compiled backend resolves the path to the
+  field's address inside the binding (class 7 at a live join).
+- A `for` variable is keyed by the address of its spelling in the
+  statement, since it has no `let`; the core binds it inside the body's
+  block, and each compiled backend registers a slot for it when the plan's
+  droppable table names the key. Its rows release the rest of the element
+  at every exit of the body; the handover row still frees the buffer alone
+  (class 8).
+- The receiver a read TOOK a heap field out of (`let sels = parse(q).sels`)
+  goes into R1′'s table with `receiver_holes`; each compiled backend frees
+  it around the field right after the read (class 6). Both had run R1′'s row
+  after a scalar field read only, so the analysis's own row for a heap
+  field stood for nothing, and the core no longer reads it as a `drop`.
+- Class 9 needed nothing beyond the first item: a "moved" binding held with
+  a hole at a block's end gets an exit row with that hole.
+- The direct backend's `bind_payload` now frees a consumed scrutinee's
+  payload box under the textual backend's `free_boxes` rule (`frees_boxes`).
+  That box was "the safe leak every boxed enum payload already is" in this
+  backend, and the payload-binder probe measured it under wasmtime once the
+  rest was flat.
+
+| kernel over the corpus | every construct | holed names placed |
+|---|---|---|
+| accepted | 6,581 | 6,589 |
+| refused | 9 | 1 |
+| unlowered | 0 | 0 |
+
+The probes, peak working set at 200,000 and 400,000 turns. The native
+"before" column is M2's record; the wasm one is this build with
+`VYRN_NO_PLACER=1`. The sampler polls every 5 ms, so a fast process may
+read low; the criterion is the pair being equal.
+
+| probe | native before | native after | wasm, placer off | wasm after |
+|---|---|---|---|---|
+| payload-binder-with-a-hole | 53 / 102 MB | 3.8 / 3.8 MB | 55.5 / 115.9 MB | 19.4 / 19.5 MB |
+| field-out-of-a-temporary | 35 / 66 MB | 3.8 / 3.8 MB | 30.6 / 67.2 MB | 12.7 / 12.8 MB |
+| consume-on-one-edge | 12 / 20 MB | 3.8 / 3.8 MB | 21.0 / 20.4 MB | 12.7 / 12.7 MB |
+| for-variable-with-a-hole | 66 / 127 MB | 3.8 / 3.8 MB | 63.3 / 119.1 MB | 12.7 / 12.7 MB |
+| moved-on-one-path-holed-on-the-other | 20 / 35 MB | 3.8 / 3.8 MB | 32.3 / 40.9 MB | 14.1 / 14.2 MB |
+
+`consume-on-one-edge-live-join.vyrn` is the same shape with the binding read
+after the join, which is the corpus's shape (`recordsFrom`, `rpcApplyConfig`)
+and the one the sub-place edge row exists for: 4.1 / 4.1 MB natively and
+19.1 / 18.7 MB under wasmtime.
+
+**The one refusal left is a leak the corrected lowering uncovered.**
+`std/graphql`'s `gqlIsRecord` returns `gqlSplitDecl(src).rhs.startsWith("{")`:
+a heap field READ off a temporary nobody names, in a read position. The
+analysis puts the receiver in R1′'s table, both compiled backends run that
+row after a scalar read only, and the borrowed field outlives the read, so
+no table keys the free that is owed after the read's consumer.
+`rfcs/probes-0125/field-read-off-a-temporary.vyrn`: 25.9 MB and 58.7 MB
+natively, 32.6 MB and 76 MB under wasmtime, the whole temporary per turn.
+The corpus test's ratchet is 1, for this and no other. It closes with an
+argument-temporary drop of the receiver after the consuming call, which is
+the shape `arg_drops` has for the argument itself and not for what the
+argument was read out of.
+
+**Lambda bodies are not judged, and the reason is in the emitters.** Both
+compiled backends lift a lambda under a shell that owns no rows: `direct.rs`
+`f_shell` names it `@lambda`, so `Cx::droppable` and the placed steps answer
+nothing for it, and `lib.rs` takes `drop_slots` away for the lifted body.
+The analysis records rows inside a lambda under the enclosing function's
+name, keyed by the lambda's blocks, and no engine looks them up there
+(`vyrn_lower::Lowered::lambda_bodies` records the same finding: zero steps
+placed inside a lambda across the corpus). A row the placer put there would
+be placed and not run, which is the caveat the arm table had. So the kernel
+does not judge lambda bodies until the emitters' lambda lowering reads the
+plan's rows under a name the plan writes them under; that is one change in
+each backend and the placer needs none.
+
+**Not done, recorded.** An edge row still carries no hole set, so a name
+holed on a held edge while another edge took it whole gets no row and is
+left to the judgment; none is in the corpus. An element hole (`.[]`) has no
+row either, because no walk skips inside an element. The kernel trusts the
+hole set the plan's own table gives a binding; only a placed row's set is
+checked against the state.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The

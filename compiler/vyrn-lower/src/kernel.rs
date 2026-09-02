@@ -56,14 +56,23 @@ pub struct Missing {
     pub site: usize,
     pub name: Name,
     pub kind: MissingKind,
+    /// The holes in `name` where the release runs — the sub-places a take
+    /// left, each as `.f.g` or `.[]` — so the row walks the rest and no more.
+    /// Empty for a whole name, and for a sub-place row.
+    pub holes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MissingKind {
     /// At an exit: the plan's placed-release rows.
     Exit,
     /// On one edge of a join, RFC-0114 Rule N: the plan's edge table.
     Edge { edge: u32 },
+    /// A sub-place of `name` released on one edge of a join because another
+    /// edge took it (`if d.ok { keep(consume d.line) } else { .. }`): Rule N
+    /// one level down, so both edges reach the join with the same hole. The
+    /// plan's edge table, with the path spelled onto the name.
+    EdgePlace { edge: u32, path: String },
     /// An arm's payload binder the arm never moved: the plan's arm table.
     ArmBinder { arm: u32 },
 }
@@ -105,6 +114,13 @@ fn overlaps(a: &str, b: &str) -> bool {
         || a == b
         || a.strip_prefix(b).is_some_and(|r| r.starts_with('.'))
         || b.strip_prefix(a).is_some_and(|r| r.starts_with('.'))
+}
+
+/// Whether skipping `r` skips `h`: equal, or `h` under `r`. One direction,
+/// unlike [`overlaps`]: a row that skips `.line.text` still walks the rest of
+/// `line`, which is wrong when all of `.line` has left.
+fn covers(r: &str, h: &str) -> bool {
+    r == h || h.strip_prefix(r).is_some_and(|x| x.starts_with('.'))
 }
 
 /// The root name of a place and the path under it; `None` for module state.
@@ -229,23 +245,19 @@ impl<'b> Kernel<'b> {
                 Self::gone(st, *n);
             }
             if self.owned(*n) && st.own[*n as usize] == Own::Held {
-                // A placed row releases the whole value, minus the holes the
-                // plan's own table lists for the binding — and a binding the
-                // plan never meant to release has no entry there. So a name
-                // with a hole here gets no row: the row would free what left
-                // through the hole. Placement goes on past it as if it were
-                // released, so the body's other rows are still placed, and
-                // the judgment refuses the name.
+                // A placed row releases the whole value minus the holes it
+                // carries (RFC-0125 M3): the row is told the holes this
+                // state has here, which may differ from the binding's own
+                // set on another path.
                 if self.mode == Mode::Place {
-                    let holed = st.holes.iter().any(|(h, _)| h == n);
-                    if !holed {
-                        self.missing.push(Missing {
-                            exit,
-                            site,
-                            name: *n,
-                            kind: MissingKind::Exit,
-                        });
-                    }
+                    let holes = self.holes_owned(st, *n);
+                    self.missing.push(Missing {
+                        exit,
+                        site,
+                        name: *n,
+                        kind: MissingKind::Exit,
+                        holes,
+                    });
                     Self::gone(st, *n);
                     continue;
                 }
@@ -263,6 +275,65 @@ impl<'b> Kernel<'b> {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// A release of `n` that walks around `holes`. The set must be the holes
+    /// the state has: a place the walk reaches after a take left it is a
+    /// double free; a place the walk skips while it is still held is a leak,
+    /// which a placed row (`at`) repairs by taking the state's set.
+    fn drop(
+        &mut self,
+        st: &mut State,
+        n: Name,
+        holes: &[String],
+        at: Option<(Exit, usize)>,
+    ) -> Result<(), Refusal> {
+        if !self.owned(n) {
+            return self.refuse(format!(
+                "{} is released although the body does not own it",
+                self.info(n)
+            ));
+        }
+        if st.own[n as usize] == Own::Gone {
+            return self.refuse(format!(
+                "{} is released twice, or released after it was taken",
+                self.info(n)
+            ));
+        }
+        if st.own[n as usize] == Own::Held {
+            let state = self.holes_owned(st, n);
+            // Every place that left must be under a hole the row skips.
+            if let Some(h) = state.iter().find(|h| !holes.iter().any(|r| covers(r, h))) {
+                return self.refuse(format!(
+                    "{} is released whole although a `consume` took `{h}` out of it",
+                    self.info(n)
+                ));
+            }
+            // Every hole the row skips must be under a place that left.
+            let left: Vec<&String> = holes
+                .iter()
+                .filter(|r| !state.iter().any(|h| covers(h, r)))
+                .collect();
+            if let Some(r) = left.first() {
+                match (self.mode, at) {
+                    (Mode::Place, Some((exit, site))) => self.missing.push(Missing {
+                        exit,
+                        site,
+                        name: n,
+                        kind: MissingKind::Exit,
+                        holes: state,
+                    }),
+                    _ => {
+                        return self.refuse(format!(
+                            "{} is released around `{r}` on a path that did not take it",
+                            self.info(n)
+                        ))
+                    }
+                }
+            }
+        }
+        Self::gone(st, n);
         Ok(())
     }
 
@@ -492,19 +563,16 @@ impl<'b> Kernel<'b> {
                 }
             }
             St::Drop(n) => {
-                if !self.owned(*n) {
-                    return self.refuse(format!(
-                        "{} is released although the body does not own it",
-                        self.info(*n)
-                    ));
-                }
-                if st.own[*n as usize] == Own::Gone {
-                    return self.refuse(format!(
-                        "{} is released twice, or released after it was taken",
-                        self.info(*n)
-                    ));
-                }
-                Self::gone(st, *n);
+                let holes = self.body.names[*n as usize].holes.clone();
+                self.drop(st, *n, &holes, None)?;
+            }
+            St::Row {
+                name,
+                holes,
+                exit,
+                site,
+            } => {
+                self.drop(st, *name, holes, Some((*exit, *site)))?;
             }
             St::If {
                 cond,
@@ -651,16 +719,17 @@ impl<'b> Kernel<'b> {
                 Self::gone(st, *n);
             }
             if self.owned(*n) && st.own[*n as usize] == Own::Held {
-                // The plan's arm table frees a binder whole, and a binder
-                // with a hole must not be: what left through the hole is
-                // somebody else's now. Such a binder is refused, not placed.
-                let holed = st.holes.iter().any(|(h, _)| h == n);
-                if self.mode == Mode::Place && site != 0 && !holed {
+                // The arm row carries the binder's holes (RFC-0125 M3), so a
+                // binder one of whose fields the arm handed out is freed
+                // minus that field.
+                if self.mode == Mode::Place && site != 0 {
+                    let holes = self.holes_owned(st, *n);
                     self.missing.push(Missing {
                         exit: Exit::Block,
                         site,
                         name: *n,
                         kind: MissingKind::ArmBinder { arm },
+                        holes,
                     });
                     Self::gone(st, *n);
                     continue;
@@ -687,17 +756,49 @@ impl<'b> Kernel<'b> {
                 continue;
             }
             let live: Vec<usize> = (0..edges.len()).filter(|i| !edges[*i].ended).collect();
-            // An edge row too releases the whole value: a name holed on any
-            // live edge gets none, and is left to the judgment.
-            let holed = live
-                .iter()
-                .any(|i| edges[*i].holes.iter().any(|(h, _)| *h == n));
-            let gone = live.iter().any(|i| edges[*i].own[n as usize] == Own::Gone);
             let held: Vec<usize> = live
                 .iter()
                 .copied()
                 .filter(|i| edges[*i].own[n as usize] != Own::Gone)
                 .collect();
+            // Rule N one level down: a hole one held edge has and another
+            // lacks is released as a sub-place on the edge that lacks it,
+            // which then holds the same hole. An edge whose own hole
+            // overlaps the path (a take above or below it) cannot release
+            // the path, and is left to the judgment.
+            let mut union: Vec<String> = held
+                .iter()
+                .flat_map(|i| self.holes_owned(&edges[*i], n))
+                .collect();
+            union.sort();
+            union.dedup();
+            for i in &held {
+                for h in &union {
+                    let mine = self.holes_owned(&edges[*i], n);
+                    if mine.iter().any(|hp| overlaps(hp, h)) {
+                        continue;
+                    }
+                    self.missing.push(Missing {
+                        exit: Exit::Block,
+                        site,
+                        name: n,
+                        kind: MissingKind::EdgePlace {
+                            edge: *i as u32,
+                            path: h.clone(),
+                        },
+                        holes: Vec::new(),
+                    });
+                    edges[*i].holes.push((n, h.clone()));
+                    edges[*i].holes.sort();
+                }
+            }
+            // An edge row releases the whole value, and the edge table
+            // carries no holes: a name holed on any live edge gets none,
+            // and is left to the judgment.
+            let holed = live
+                .iter()
+                .any(|i| edges[*i].holes.iter().any(|(h, _)| *h == n));
+            let gone = live.iter().any(|i| edges[*i].own[n as usize] == Own::Gone);
             if !gone || held.is_empty() {
                 continue;
             }
@@ -708,11 +809,17 @@ impl<'b> Kernel<'b> {
                         site,
                         name: n,
                         kind: MissingKind::Edge { edge: i as u32 },
+                        holes: Vec::new(),
                     });
                 }
                 Self::gone(&mut edges[i], n);
             }
         }
+    }
+
+    /// The holes of `n` in `st`, owned.
+    fn holes_owned(&self, st: &State, n: Name) -> Vec<String> {
+        self.holes_of(st, n).into_iter().map(str::to_string).collect()
     }
 
     fn line_of(&self, v: &Val) -> usize {

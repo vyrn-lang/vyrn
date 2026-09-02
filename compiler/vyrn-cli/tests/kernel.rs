@@ -82,16 +82,30 @@
 //!      three corpus instances the untaken field is an empty error String,
 //!      which costs no bytes; the probe gives it a value.
 //!
-//! The placer places nothing for a name with a hole: the emitters' release
-//! walk skips only the holes the plan's own table lists, and a binding the
-//! plan never meant to release has no entry there, so a row would free what
-//! left through the hole. The first cut placed such rows and `graphql` died
-//! natively of a use after free; parity and the residue ratchet caught it.
+//! The placer placed nothing for a name with a hole while the emitters'
+//! release walk skipped only the holes the plan's own table lists for a
+//! binding; a row for such a name would have freed what left through the
+//! hole. The first cut placed such rows and `graphql` died natively of a use
+//! after free; parity and the residue ratchet caught it.
 //!
-//! The ratchet is raised from 1 to 9 for these, and for these only: each is a
-//! defect in the plan, not in the lowering, and closes by fixing the plan.
-//! `VYRN_KERNEL_GAPS=<substring>` lists where each remaining gap is;
-//! `VYRN_KERNEL_TRACE=1` prints what the placer found owed in every body.
+//! **M3's second slice placed them** (RFC-0125 §3 M3, "the second slice"):
+//! a placed row carries its own hole set, an arm row carries the binder's,
+//! an edge row may name a sub-place, a `for` variable has a key, and a taken
+//! field's receiver is freed around the hole. The count fell from 9 to 1,
+//! and the five probes are flat on both engines. The one left:
+//!
+//!  10. a heap field READ off a temporary nobody names (`gqlIsRecord`'s
+//!      `gqlSplitDecl(src).rhs.startsWith("{")`): the analysis puts the
+//!      receiver in R1′'s table, both compiled backends run that row after a
+//!      scalar read only, and the borrowed field outlives the read —
+//!      `field-read-off-a-temporary.vyrn`, 25.9 MB and 58.7 MB natively. The
+//!      lowering used to read the dead row as a `drop`; it reads it as
+//!      nothing now, which is what the emitters do.
+//!
+//! The ratchet is 1, for this and no other. `VYRN_KERNEL_GAPS=<substring>`
+//! lists where each remaining gap is; `VYRN_KERNEL_TRACE=1` prints what the
+//! placer found owed in every body, and `VYRN_KERNEL_TRACE=<fn>` prints that
+//! body's core.
 
 use std::path::PathBuf;
 
@@ -251,8 +265,9 @@ fn run_corpus() {
     // The ratchet: 53 at the end of the first slice; 42 once class 1 closed;
     // 1 once the placer (M3's first slice) filled the plan's three tables; 9
     // once every construct lowered and the five hole-family classes above
-    // came into view (the one lowering misread, `smallarray`, is fixed).
-    const RATCHET: usize = 9;
+    // came into view (the one lowering misread, `smallarray`, is fixed); 1
+    // once the placer could place a holed name (M3's second slice).
+    const RATCHET: usize = 1;
     assert!(
         refused.len() <= RATCHET,
         "{} instances refused by the kernel, more than the {RATCHET} recorded; the first new          one is worth reading before the number is raised: {}",

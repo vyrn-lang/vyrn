@@ -1654,7 +1654,7 @@ struct Fn_<'a, 'p> {
     rel_seq: u32,
     /// RFC-0101 M4: the release steps placed at every exit of this body, keyed
     /// by the node the exit is AT. Read, never derived.
-    placed: HashMap<(ExitKind, usize), Vec<(usize, bool)>>,
+    placed: HashMap<(ExitKind, usize), Vec<(usize, Option<Vec<String>>)>>,
     /// The stream cursors a `for x in pull()` opened, innermost last, with the
     /// registration count each was opened at.
     ///
@@ -1699,6 +1699,10 @@ struct Fn_<'a, 'p> {
     /// clears, not a second one. Two copies of that rule would be two answers to
     /// "may this buffer move", and one of them a use-after-free.
     append_ok: std::collections::HashSet<String>,
+    /// Whether this body is a declared `release` (RFC-0086): the CALLER walks
+    /// the receiver's payload boxes after the call, so a `match consume self`
+    /// inside one must not free them — see [`Fn_::frees_boxes`].
+    is_release: bool,
     /// wasm local holding the accumulator's pointer → the frame slot holding its
     /// ownership flag. Keyed by local index rather than by name because the
     /// local IS the binding: two `let out`s in one body are two accumulators, and
@@ -1733,6 +1737,7 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         expect: Vec::new(),
         fn_binds: HashMap::new(),
         append_ok: std::collections::HashSet::new(),
+        is_release: false,
         str_append: HashMap::new(),
     }
 }
@@ -1854,6 +1859,7 @@ fn lower_body(
         // grown by `x = x + ..`, which is a STATEMENT, and there is one
         // expression here.
         append_ok: stmts.map(crate::append_candidates).unwrap_or_default(),
+        is_release: cx.owned.is_release_fn(&f.name),
         str_append: HashMap::new(),
     };
 
@@ -2670,17 +2676,19 @@ impl<'p> Fn_<'_, 'p> {
             _ => Vec::new(),
         };
         let mut run: Vec<(Place, Rel)> = Vec::new();
-        for (step, full) in steps {
+        for (step, holes) in steps {
             let Some(r) = self.rel_slots.get(&step) else {
                 continue;
             };
             let (place, mut rel, seq) = (r.place, r.rel.clone(), r.seq);
-            // Round fifty-two: a pre-take exit walks the WHOLE value — the
-            // hole fields included, since nothing has taken them on this
-            // path (the textual backend's twin).
-            if full {
+            // A row that carries its own hole set walks around exactly
+            // those: round fifty-two's pre-take exit walks the WHOLE value
+            // (the empty set), and the placer's row walks the rest of what
+            // the kernel saw taken at this exit (RFC-0125 M3). The textual
+            // backend's twin.
+            if let Some(h) = holes {
                 if let Rel::Deep(ty, _) = rel {
-                    rel = Rel::Deep(ty, Vec::new());
+                    rel = Rel::Deep(ty, h);
                 }
             }
             while cursors.last().is_some_and(|(_, _, at)| *at > seq) {
@@ -3990,6 +3998,7 @@ impl<'p> Fn_<'_, 'p> {
                         self.register_rel(key, Place::Slot(own), r);
                     }
                 }
+                let free_box = self.frees_boxes(scrutinee, key, *line)?;
                 self.tag_test(b, addr, &sum, pattern, *line)?;
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
@@ -3999,7 +4008,7 @@ impl<'p> Fn_<'_, 'p> {
                     .into_iter()
                     .enumerate()
                 {
-                    let place = self.bind_payload(b, addr, &sum, &sl, i, &t, *line)?;
+                    let place = self.bind_payload(b, addr, &sum, &sl, i, &t, *line, free_box)?;
                     self.scope.push((n, place, t));
                 }
                 self.block(m, b, then_block)?;
@@ -4187,6 +4196,19 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 let mark = self.scope.len();
                 self.scope.push((var.clone(), place, w.elem.clone()));
+                // RFC-0125 M3: a variable the body drains a field of keeps
+                // the rest of its element, and the placer's rows for it —
+                // keyed by the variable's spelling, since it has no `let` —
+                // release that rest at every exit of the body.
+                let vkey = var as *const String as usize;
+                if self.drops.contains_key(&vkey) {
+                    if let Some(mut r) = self.rel_for(&w.elem, *line)? {
+                        if let (Rel::Deep(_, holes), Some(h)) = (&mut r, self.cx.holes.get(&vkey)) {
+                            *holes = h.clone();
+                        }
+                        self.register_rel(vkey, place, r);
+                    }
+                }
 
                 let cont = self.depth;
                 b.ins(&Instruction::Block(BlockType::Empty));
@@ -5151,7 +5173,15 @@ impl<'p> Fn_<'_, 'p> {
                 // the record; a heap or `lazy` one is read again later. All
                 // three stay out.
                 if let Some(l) = tee {
-                    if matches!(frepr, Repr::Scalar(_))
+                    // RFC-0125 M3: the read TOOK a heap field (`let sels =
+                    // parse(q).sels`), and the placer's row frees the rest of
+                    // the receiver around that hole.
+                    let rh = self.cx.plan.receiver_holes_at(e as *const Expr as usize);
+                    if !rh.is_empty() {
+                        if let Some(Rel::Deep(t, _)) = self.rel_for(&base, *line)? {
+                            self.emit_rel(m, b, Place::Local(l), &Rel::Deep(t, rh), *line)?;
+                        }
+                    } else if matches!(frepr, Repr::Scalar(_))
                         && self.rel_for(&fty, *line)?.is_none()
                         && vyrn_frontend::types::deferred(&fty).is_none()
                     {
@@ -6321,9 +6351,28 @@ impl<'p> Fn_<'_, 'p> {
             if *t != edge {
                 continue;
             }
-            let Ok((place, ty)) = self.lookup(name, line) else {
+            // `d.line` (RFC-0125 M3): the sub-place the other edge took,
+            // released here from its address inside the binding.
+            let mut parts = name.split('.');
+            let root = parts.next().unwrap_or_default();
+            let Ok((place, mut ty)) = self.lookup(root, line) else {
                 continue;
             };
+            let mut off = 0u32;
+            let mut sub = false;
+            for f in parts {
+                let (o, fty) = self.field_of(&ty, f, line)?;
+                off += o;
+                ty = fty;
+                sub = true;
+            }
+            if sub {
+                if self.rel_for(&ty, line)?.is_some() {
+                    let a = self.addr_local(b, place, off);
+                    self.rel_at(m, b, a, &ty, line)?;
+                }
+                continue;
+            }
             match self.rel_for(&ty, line)? {
                 Some(Rel::Call(..)) | None => {}
                 Some(rel) => self.emit_rel(m, b, place, &rel, line)?,
@@ -10422,7 +10471,7 @@ impl<'p> Fn_<'_, 'p> {
         let sum = Sum::Opt(elem.clone());
         self.tag_test(b, oaddr, &sum, &Pattern::Some(String::new()), line)?;
         b.ins(&Instruction::If(BlockType::Empty));
-        let got = self.bind_payload(b, oaddr, &sum, &ol, 0, elem, line)?;
+        let got = self.bind_payload(b, oaddr, &sum, &ol, 0, elem, line, false)?;
         match (place, got, &r) {
             (Place::Local(d), Place::Local(v), _) => {
                 b.ins(&Instruction::LocalGet(v));
@@ -12596,6 +12645,7 @@ impl<'p> Fn_<'_, 'p> {
             .edge_releases_at(key)
             .cloned()
             .unwrap_or_default();
+        let free_box = self.frees_boxes(scrutinee, key, line)?;
         for (arm_ix, arm) in arms.iter().enumerate() {
             self.tag_test(b, addr, &sum, &arm.pattern, line)?;
             b.ins(&Instruction::If(BlockType::Empty));
@@ -12605,7 +12655,7 @@ impl<'p> Fn_<'_, 'p> {
             let binds = self.pattern_binds(&sum, &arm.pattern, line)?;
             let mut bound: Vec<(String, Place, Type)> = Vec::new();
             for (i, (n, t)) in binds.into_iter().enumerate() {
-                let place = self.bind_payload(b, addr, &sum, &sl, i, &t, line)?;
+                let place = self.bind_payload(b, addr, &sum, &sl, i, &t, line, free_box)?;
                 bound.push((n.clone(), place.clone(), t.clone()));
                 self.scope.push((n, place, t));
             }
@@ -12637,11 +12687,15 @@ impl<'p> Fn_<'_, 'p> {
             let owed = self.cx.plan.arm_payload_free(key, arm_ix as u32).cloned();
             if let Some(rows) = owed.filter(|_| self.region_depth == 0) {
                 for (n, place, ty) in &bound {
-                    if !rows.iter().any(|(r, _)| r == n) {
+                    let Some((_, _, holes)) = rows.iter().find(|(r, _, _)| r == n) else {
                         continue;
-                    }
+                    };
                     let (place, ty) = (place.clone(), ty.clone());
-                    if let Some(rel) = self.rel_for(&ty, line)? {
+                    if let Some(mut rel) = self.rel_for(&ty, line)? {
+                        // RFC-0125 M3: the arm handed part of the binder out.
+                        if let Rel::Deep(t, _) = rel {
+                            rel = Rel::Deep(t, holes.clone());
+                        }
                         self.emit_rel(m, b, place, &rel, line)?;
                     }
                 }
@@ -12752,7 +12806,7 @@ impl<'p> Fn_<'_, 'p> {
         // Reusing `bind_payload` costs one local or slot that nothing else reads,
         // and buys the four payload shapes (direct, extended, inline pair, boxed)
         // already being right here because they are right in `match`.
-        let place = self.bind_payload(b, addr, &sum, &sl, 0, &ok_ty, line)?;
+        let place = self.bind_payload(b, addr, &sum, &sl, 0, &ok_ty, line, false)?;
         match place {
             Place::Local(l) => {
                 b.ins(&Instruction::LocalGet(l));
@@ -13059,6 +13113,7 @@ impl<'p> Fn_<'_, 'p> {
         i: usize,
         t: &Type,
         line: usize,
+        free_box: bool,
     ) -> Result<Place, String> {
         let is_enum = matches!(sum, Sum::Enum(_));
         let off = sl.fields[1 + if is_enum { i } else { 0 }];
@@ -13119,7 +13174,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I64Load(at(off)));
                 b.ins(&Instruction::I32WrapI64);
                 b.ins(&Instruction::LocalSet(p));
-                match self.cx.repr(t, line)? {
+                let place = match self.cx.repr(t, line)? {
                     Repr::Scalar(v) => {
                         let l = b.local(v);
                         b.ins(&Instruction::LocalGet(p));
@@ -13139,9 +13194,51 @@ impl<'p> Fn_<'_, 'p> {
                         Place::Slot(slot)
                     }
                     Repr::Unit => return unsupported("a Unit payload", line),
+                };
+                // The value is out; a consumed scrutinee's box is this
+                // construct's to give back (the textual backend's
+                // `free_boxes`, RFC-0125 M3 for this backend). It used to be
+                // the safe leak every boxed payload was here.
+                if free_box {
+                    b.ins(&Instruction::LocalGet(p));
+                    b.ins(&Instruction::Call(self.cx.rt.free));
                 }
+                place
             }
         })
+    }
+
+    /// Whether a `match` or `if let` at `key` over `scrutinee` frees the boxes
+    /// its binders were read out of — the textual backend's rule (`gen_match`),
+    /// stated once more here: the construct consumed the value (a `consume`, a
+    /// temporary, a map lookup's fresh box, or a place the plan proved nobody
+    /// reads afterwards), no drop row walks the value whole after it, the
+    /// memory is not an arena's, and this is not a declared `release`
+    /// destructuring its own receiver, whose caller walks the boxes.
+    fn frees_boxes(&mut self, scrutinee: &Expr, key: usize, line: usize) -> Result<bool, String> {
+        use vyrn_frontend::movecheck::{element_path, place_path};
+        let map_lookup = match scrutinee {
+            Expr::Call { name, args, .. } if name == "@at" && !args.is_empty() => {
+                let t = self.peek(&args[0], line)?;
+                matches!(self.cx.resolve(&t), Type::Map(..))
+            }
+            _ => false,
+        };
+        let consumed = matches!(scrutinee, Expr::Consume { .. })
+            || map_lookup
+            || (place_path(scrutinee).is_none() && element_path(scrutinee).is_none())
+            || self.cx.plan.match_consumes(key);
+        let own_receiver = self.is_release
+            && match scrutinee {
+                Expr::Consume { place, .. } => {
+                    place_path(place).is_none_or(|(root, _)| root == "self")
+                }
+                _ => true,
+            };
+        Ok(consumed
+            && !self.drops.contains_key(&key)
+            && self.region_depth == 0
+            && !own_receiver)
     }
 }
 
