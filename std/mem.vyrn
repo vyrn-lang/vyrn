@@ -96,7 +96,7 @@ export fn fill(dst: Int32, byte: UInt8, n: Int32) {
 }
 
 /// `memory.size`: the memory's size in 64 KiB pages.
-export fn pages() -> Int32 {
+export fn memorySize() -> Int32 {
     noBody()
     return 0
 }

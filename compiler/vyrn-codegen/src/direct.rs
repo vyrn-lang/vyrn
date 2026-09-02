@@ -8428,7 +8428,7 @@ impl<'p> Fn_<'_, 'p> {
             "storeF64" => (vec![INT32, Type::Float], Type::Unit),
             "copy" => (vec![INT32, INT32, INT32], Type::Unit),
             "fill" => (vec![INT32, u(8), INT32], Type::Unit),
-            "pages" => (vec![], INT32),
+            "memorySize" => (vec![], INT32),
             "grow" => (vec![INT32], INT32),
             "heapBase" => (vec![], INT32),
             "trap" => (vec![INT32, INT32], Type::Unit),
@@ -8462,7 +8462,7 @@ impl<'p> Fn_<'_, 'p> {
                 dst_mem: 0,
             }),
             "fill" => b.ins(&Instruction::MemoryFill(0)),
-            "pages" => b.ins(&Instruction::MemorySize(0)),
+            "memorySize" => b.ins(&Instruction::MemorySize(0)),
             "grow" => b.ins(&Instruction::MemoryGrow(0)),
             "heapBase" => b.ins(&Instruction::GlobalGet(HEAP_BASE)),
             // `write_all` first, so the stdout buffer is flushed ahead of the
