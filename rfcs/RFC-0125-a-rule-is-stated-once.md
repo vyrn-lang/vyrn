@@ -318,8 +318,10 @@ payloads inline in one box. Half the allocations, a third the bytes.
 
 Allocator, Map, String, Array operations, validation functions, the trap
 table and their wording live in one Vyrn module. The raw-memory primitives it
-needs (load, store, allocate pages) are the only unsafe surface in the
-language, fenced in that module, and reviewed there. Both the C shim's logic
+needs (load, store, allocate pages) and the host imports it calls (the WASI
+table, each a declaration the emitter lowers to one `call`) are the only
+unsafe surface in the language, fenced in that module, and reviewed there
+(`PLAN-0125-runtime.md` §2.1 and §2.2). Both the C shim's logic
 and the runtime the wasm backend hand-emits are replaced by it. The allocator
 is the segregated free list the wasm runtime already has, because §1.4
 measured it winning. The design for this — the inventory of all three
@@ -1617,6 +1619,25 @@ nbody 1.974 s against 1.960 s, spectral-norm 2.845 s against 2.849 s,
 fannkuch 3.413 s against 3.403 s (M1's 1.98 s, 2.83 s, 3.58 s), binary-trees
 0.845 s against 0.833 s, k-nucleotide 0.298 s against 0.289 s. Details under
 the plan's §6 table.*
+
+*Step 7 landed 2026-09-03 (`track-r`): the I/O family — `write_all` and
+its stdout buffer, `getbyte` and its stdin buffer, `read_line`, `open_at`,
+`read_all`, the two readers, the two writers, `rename_file`, `fsync_file`,
+`args`, `env_get`, `err3`, `readdir_blob`, `list_dir` and the clock and seed
+readers — is Vyrn in `std/runtime` (782 lines with its comment) over the
+fifteen `wasi_snapshot_preview1` imports, which `std/mem` now declares beside
+the raw-memory primitives with their witx signatures and the emitter lowers to
+one `call` each (the plan's §2.2); the wasm emitter's twenty-one hand-emitted
+bodies are deleted, 2,250 lines out of `direct.rs`. The generator's mediated
+read is two more `std/mem` rows an ordinary build lowers as `unreachable`, and
+the three readers have a generation twin the emitter calls at the builtin's
+site. The wording stays `trap.rs`'s, interned by the emitter and passed as
+arguments. Parity 41 of 41, residue green, the kernel and effect ratchets held;
+`files`, `storage` and `clock` byte-identical to the base wasm under the fixed
+clock and seed; the RFC-0103 census re-run with no row change. fasta and
+reverse-complement under wasmtime, base and head interleaved, medians of five:
+1.043 s against 1.012 s and 1.171 s against 1.164 s. Details under the plan's
+§6 table.*
 
 ### M5 — `vyrn run` is compiled
 
