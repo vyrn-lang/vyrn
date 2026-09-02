@@ -1,0 +1,9 @@
+  bytes=0  chars=0
+hello  bytes=5  chars=5
+héllo  bytes=6  chars=5
+☕  bytes=3  chars=1
+😀  bytes=4  chars=1
+digits in a1b2c3: 3
+brace depth of {a{b}}: 2
+'{' is the byte 123
+true

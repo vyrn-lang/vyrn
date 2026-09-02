@@ -1,0 +1,24 @@
+split: a|b||c
+count: 4
+empty-sep: xyz
+lines: 3
+line0: café
+line1: résumé
+ws: the-quick-brown
+trim: [hi]
+trimStart: [hi  ]
+trimEnd: [  hi]
+lower: café latte
+upper: CAFé LATTE
+indexOf llo: 3
+indexOf zzz: none
+lastIndexOf l: 4
+substr: llo
+firstChar: h
+replace: a/b/c
+padStart: [0007]
+padEnd: [7...]
+repeat: ababab
+hex: 00000000000000ff
+slice declined: the cut is inside a character
+about to split a codepoint...

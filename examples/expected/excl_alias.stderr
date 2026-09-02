@@ -1,0 +1,3 @@
+excl_alias.vyrn:1:0: `xs` is passed to `g` as `modify` and read again in the same call — a `modify` borrow is exclusive
+  fix: `xs.copy()` for the second argument
+  fix: or split the call so the two accesses do not overlap

@@ -1,0 +1,1 @@
+nohashkey.vyrn:7:0: `Point` can be a `Map` key once it declares the obligation: `impl Hashable for Point` — equal values must return equal hashes (RFC-0117 M2)

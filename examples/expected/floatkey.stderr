@@ -1,0 +1,1 @@
+floatkey.vyrn:5:0: a `Map` key must hash and compare by equality, and `Float64` does neither well: `NaN != NaN`, and `+0.0 == -0.0` would hash apart (RFC-0117 refuses float keys by name)

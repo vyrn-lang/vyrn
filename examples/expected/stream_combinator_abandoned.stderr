@@ -1,0 +1,6 @@
+stream_combinator_abandoned.vyrn:40:0: `mapped` is a `Stream` and is never disposed
+  note: a stream must be consumed with `for … in`, forwarded by returning it, or released with `close(mapped)` — on every path
+stream_combinator_abandoned.vyrn:45:0: `chained` is a `Stream` and is never disposed
+  note: a stream must be consumed with `for … in`, forwarded by returning it, or released with `close(chained)` — on every path
+stream_combinator_abandoned.vyrn:50:0: `twice` is a `Stream` and is disposed more than once
+  note: a stream must be consumed with `for … in`, forwarded by returning it, or released with `close(twice)` — on every path

@@ -1,0 +1,17 @@
+AppConfig
+name, port, workers, tls, level, hosts, limits
+import type { AppConfig } from "./vondemo"
+
+AppConfig {
+    name: "vondemo",
+    port: 8443,
+    workers: Some(8),
+    tls: Enabled(TlsFiles {
+            cert: "/etc/vondemo/fullchain.pem",
+            key: "/etc/vondemo/privkey.pem",
+        }),
+    level: Warn,
+    hosts: ["0.0.0.0", "::1"],
+    limits: ["maxBodyBytes": 1048576, "requestTimeoutMs": 30000],
+}
+
