@@ -1326,10 +1326,12 @@ pub struct ReleasePlan {
     /// extended from match scrutinees to receivers). The `@`-spelled
     /// producers route through the arena lexically and stay region-gated.
     pub receiver_malloc: std::collections::HashSet<usize>,
-    /// Round forty: `(match id, arm index) -> kind` — the arm's unmoved
-    /// payload binder, released at the arm's end. See
-    /// [`crate::movecheck::ArmPayloadEv`].
-    pub arm_frees: HashMap<(usize, u32), DropKind>,
+    /// Round forty: `(match id, arm index) -> [(binder, kind)]` — the arm's
+    /// unmoved payload binders, each released at the arm's end. See
+    /// [`crate::movecheck::ArmPayloadEv`]. The analysis writes one binder per
+    /// row; RFC-0125 M3's placer writes every unmoved binder of an arm, so an
+    /// emitter frees the binders the row names and no other.
+    pub arm_frees: HashMap<(usize, u32), Vec<(String, DropKind)>>,
     /// §26's finish check: which function each row above lives in, so
     /// [`ReleasePlan::unconsumed`] can skip rows whose owner an emission
     /// never reached — dead code alarms nobody, a missed site in emitted
@@ -1474,8 +1476,9 @@ impl ReleasePlan {
         self.receiver_malloc.contains(&self.resolve(at))
     }
 
-    /// Round forty: the release owed to this arm's unmoved payload binder.
-    pub fn arm_payload_free(&self, at: usize, arm: u32) -> Option<&DropKind> {
+    /// Round forty: the releases owed to this arm's unmoved payload binders,
+    /// by binder name.
+    pub fn arm_payload_free(&self, at: usize, arm: u32) -> Option<&Vec<(String, DropKind)>> {
         let at = self.resolve(at);
         let r = self.arm_frees.get(&(at, arm));
         if r.is_some() {
@@ -2157,16 +2160,18 @@ pub fn analyze(program: &Program) -> Ownership {
     }
     // Round forty: unmoved payload binders of temp-scrutinee matches —
     // pre-screened in movecheck (silence, single binder, no alias).
-    let arm_frees: HashMap<(usize, u32), DropKind> = facts
-        .arm_payloads
-        .iter()
-        .map(|a| ((a.match_id, a.arm_ix), a.kind.clone()))
-        .collect();
+    let mut arm_frees: HashMap<(usize, u32), Vec<(String, DropKind)>> = HashMap::new();
+    for a in &facts.arm_payloads {
+        arm_frees
+            .entry((a.match_id, a.arm_ix))
+            .or_default()
+            .push((a.binder.clone(), a.kind.clone()));
+    }
     if std::env::var("VYRN_ARM_DUMP").is_ok() {
         for a in &facts.arm_payloads {
             eprintln!(
-                "arm-free: fn={} match={:x} arm={} kind={:?}",
-                a.owner, a.match_id, a.arm_ix, a.kind
+                "arm-free: fn={} match={:x} arm={} binder={} kind={:?}",
+                a.owner, a.match_id, a.arm_ix, a.binder, a.kind
             );
         }
     }

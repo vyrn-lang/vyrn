@@ -12494,13 +12494,10 @@ impl<'p> Fn_<'_, 'p> {
 
             let mark = self.scope.len();
             let binds = self.pattern_binds(&sum, &arm.pattern, line)?;
-            let single = binds.len() == 1;
-            let mut bound: Option<(Place, Type)> = None;
+            let mut bound: Vec<(String, Place, Type)> = Vec::new();
             for (i, (n, t)) in binds.into_iter().enumerate() {
                 let place = self.bind_payload(b, addr, &sum, &sl, i, &t, line)?;
-                if single {
-                    bound = Some((place.clone(), t.clone()));
-                }
+                bound.push((n.clone(), place.clone(), t.clone()));
                 self.scope.push((n, place, t));
             }
             match (&arm.body, dest) {
@@ -12526,11 +12523,14 @@ impl<'p> Fn_<'_, 'p> {
                 (ArmBody::Expr(body), None) => self.expr_as(m, b, body, &want)?,
                 (ArmBody::Block(blk), _) => self.block(m, b, blk)?,
             }
-            // Round forty: the unmoved payload binder — the textual
-            // backend's `gen_arm_body` twin.
-            if self.cx.plan.arm_payload_free(key, arm_ix as u32).is_some() && self.region_depth == 0
-            {
-                if let Some((place, ty)) = &bound {
+            // Round forty: the unmoved payload binders the row names — the
+            // textual backend's `gen_arm_body` twin.
+            let owed = self.cx.plan.arm_payload_free(key, arm_ix as u32).cloned();
+            if let Some(rows) = owed.filter(|_| self.region_depth == 0) {
+                for (n, place, ty) in &bound {
+                    if !rows.iter().any(|(r, _)| r == n) {
+                        continue;
+                    }
                     let (place, ty) = (place.clone(), ty.clone());
                     if let Some(rel) = self.rel_for(&ty, line)? {
                         self.emit_rel(m, b, place, &rel, line)?;

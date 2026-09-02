@@ -736,10 +736,29 @@ emitters need not read the core until the plan is deleted; until then the
 core corrects the plan, and each correction is an exit row, an edge row or an
 arm row the emitters already know how to run. The event-log fold that could
 not order across a back edge is not repaired; it is overruled, per body, by
-a walk that can. One caveat the emitters carry: the arm table frees a
-single binder only, so a multi-binder arm's row is placed and not run, which
-is a leak the ratchet does not yet see and the next slice removes by
-freeing every binder the row names.
+a walk that can. One caveat the emitters carried: the arm table freed a
+single binder only, so a multi-binder arm's row was placed and not run, which
+is a leak the ratchet does not see.
+
+**The caveat closed the same day.** The arm row is `(match, arm) ->
+[(binder, kind)]` now: the analysis writes its one screened binder, the
+placer writes every binder the kernel found held at the arm's end, and each
+engine frees the binders its row names and no other (`direct.rs` `match_expr`,
+`lib.rs` `gen_arm_body` and `gen_match_enum`, the core's `St::Drop` per named
+binder). The interpreter gained its first consumer of the table, because a
+declared `release` on a payload binder is observable there and the placer
+can place one; a buffer it frees by `Rc` as before.
+`rfcs/probes-0125/two-binders-neither-read.vyrn` is the witness: a
+two-`String` variant whose arm reads neither payload beside an arm that hands
+its payload out. Peak working set natively, before and after:
+
+| turns | before | after |
+|---|---|---|
+| 200,000 | 28.8 MB | 4.1 MB |
+| 400,000 | 50.7 MB | 4.1 MB |
+
+About 112 bytes a turn, the two Strings. Parity 41 passed, the residue
+ratchet held.
 
 ### M4 — the runtime in Vyrn
 

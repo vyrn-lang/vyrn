@@ -1243,9 +1243,12 @@ impl<'a> Builder<'a> {
                         }
                         ArmBody::Block(blk) => self.block(blk, &mut body)?,
                     }
-                    if self.own.plan.arm_payload_free(mid, i as u32).is_some() {
+                    if let Some(rows) = self.own.plan.arm_payload_free(mid, i as u32) {
                         for b in &binds {
-                            body.push(St::Drop(*b));
+                            let src = &self.body.names[*b as usize].source;
+                            if rows.iter().any(|(n, _)| n == src) {
+                                body.push(St::Drop(*b));
+                            }
                         }
                     }
                     self.edge_drops(mid, i as u32, &mut body)?;
@@ -1528,12 +1531,13 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                     }
                     continue;
                 }
-                // Round forty's table: the arm's unmoved payload binder.
+                // Round forty's table: the arm's unmoved payload binders, one
+                // entry per binder so an emitter frees exactly those.
                 MissingKind::ArmBinder { arm } => {
-                    own.plan
-                        .arm_frees
-                        .entry((m.site, arm))
-                        .or_insert_with(|| kind.clone());
+                    let rows = own.plan.arm_frees.entry((m.site, arm)).or_default();
+                    if !rows.iter().any(|(n, _)| *n == info.source) {
+                        rows.push((info.source.clone(), kind.clone()));
+                    }
                     own.plan.owners.insert(m.site, inst.func.name.clone());
                     continue;
                 }

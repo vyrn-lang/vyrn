@@ -1,0 +1,38 @@
+// RFC-0125 M3 probe: a two-payload variant whose arm reads neither payload,
+// beside an arm that hands its payload out. The sibling's move stands the
+// scrutinee's whole release down, so the two Strings are the arm's to free.
+// The placer writes one arm row for the arm; the emitters ran a row only for
+// a single-binder arm, so both Strings were placed and never freed.
+let turns = 200000
+
+type Pair =
+    | Two(String, String)
+    | One(String)
+
+fn make(i: Int64) -> Pair {
+    if i < 0 {
+        return One("lone-" + i.toString())
+    }
+    return Two(
+        "left-" + i.toString() + "-with-some-length-to-see",
+        "right-" + i.toString() + "-with-some-length-to-see",
+    )
+}
+
+fn pick(i: Int64) -> String {
+    return match make(i) {
+        Two(a, b) => "two",
+        One(s) => s,
+    }
+}
+
+fn main() -> Int64 {
+    let mut i = 0
+    let mut total = 0
+    while i < turns {
+        total = total + pick(i).byteLength
+        i = i + 1
+    }
+    print(total)
+    return 0
+}
