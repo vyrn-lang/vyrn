@@ -697,6 +697,54 @@ route, so `externdemo.vyrn` fails at link rather than trapping with the
 canonical message as the text-IR route's stub does; the shim's audit, poison
 and the residue ratchet's re-basing, which wait for the decision.
 
+**Results, step 4 (2026-09-02, branch `track-l`).** `str_new`, `concat`,
+`str_append` and `str_from_bytes` are Vyrn in `std/runtime.vyrn` (`strNew`,
+`strConcat`, `strAppend`, `strFromBytes`: 115 lines with their comment, over
+`load32`, `store8`, `store32`, `copy`, `malloc`, `free` and `utf8Valid`), and
+the wasm emitter's four bodies are deleted: 342 lines out of `direct.rs`, 55
+in (four rows of the `VyrnRt` table, the wiring, and the two interned failure
+messages handed to `strFromBytes` as arguments). The growth policy is the one
+it replaces: an accumulator that is not the frame's is copied into a buffer of
+at least 32 bytes, and a full one doubles. A doubling always leaves its size
+class at four classes per power of two, so §8's class-aware `realloc` has no
+in-class case on the append path; the probe is not taken, and the builder rows
+below are the record either way. `strFromBytes` returns a
+`Result<Int64, Int64>` whose payloads are addresses: `build_sum2` writes the
+tag, one word and a zero, which is the `Result<String, String>` shape both
+call sites already read, so the emitter's copy of that layout went with the
+body. `concat` is a reserved name (`checker.rs`, `RESERVED`), hence
+`strConcat`. The three `STRING_RUNTIME` accessors of §1.1 (`str_len`,
+`str_setlen`, `str_bytes`) are the native IR's; the wasm emitter never had a
+function for them, because a header read is one inline `i32.load` (`str_len`
+and `cap_at` in `direct.rs`), so there is no wasm copy to delete and they
+leave with the IR constants at step 3. The native route does not run the Vyrn
+copies until step 3 flips it, so `std/json`'s six append sites are proved
+unchanged by parity (41 of 41, three engines) and the fixtures. Gates:
+fmt, workspace, kernel (3 refused, at the ratchet), lowered, the nine
+`vyrn-cli` suites, parity 41 of 41 (one native run failed on a transient
+`NotFound` while the shared tools tree was being emptied, and passed alone),
+residue, the cross-engine generator gate, `doc --verify` (41 files unchanged),
+site export 33 of 34 (the version test fails on local fixture data); the
+wasm2c route gate skipped for a missing wabt. The lowered-form gate's
+synthesized count is 1,281, under the
+1,400 ceiling. The extra gate, `census-strings.md` §3's builder
+(`out = out + piece`, N appends of one piece) and the two string programs of
+step 1, under wasmtime, base and head interleaved, medians of five, on a
+machine shared with other worktrees' builds; outputs compared byte for byte
+between the two:
+
+| program | base (hand-emitted) | head (`std/runtime`) |
+|---|---|---|
+| the builder at the census's four sizes (1,000 to 8,000 appends of ten bytes) and at a thousand times each, 15 M appends in all | 0.106 s | 0.107 s |
+| the builder at 48 M appends of one byte | 0.192 s | 0.194 s |
+| fasta, n = 5 M | 0.845 s | 0.847 s |
+| reverse-complement, fasta n = 4 M | 0.989 s | 0.990 s |
+
+The census's own numbers (0.08 s to 0.10 s per size) were the interpreter's
+and are not comparable; the compiled rows are flat across the change, which
+is §7.3's prediction. fasta and reverse-complement sit at the step-1 record
+(0.89 s and 1.07 s) and RFC-0125 §1.5b's 0.93 s and 1.06 s.
+
 ---
 
 ## 7. What it costs

@@ -26,6 +26,12 @@
 /// and `heapBase`. The wasm emitter's hand-emitted copy is deleted; the C
 /// shim's stays until step 3 moves the native route.
 ///
+/// **Step 4, the allocating strings:** `strNew`, `strConcat`, `strAppend`
+/// and `strFromBytes`, over `malloc`, `free`, `copy` and the header loads.
+/// The wasm emitter's four hand-emitted bodies are deleted; the C shim's
+/// `vstr_*` and the native IR's `STRING_RUNTIME` stay until step 3 moves the
+/// native route.
+///
 /// **Call depth.** The emitter does not count these frames against the
 /// language's call-depth budget: the hand-emitted copies had no prologue, and
 /// a program that traps at the limit must trap where it did.
@@ -35,7 +41,7 @@
 /// runtime trap is one of `trap.rs`'s fixed wordings and every engine prints
 /// it the same way.
 
-import { load8, load32, load64, store32, memorySize, grow, heapBase } from "std/mem"
+import { load8, load32, load64, store8, store32, copy, memorySize, grow, heapBase } from "std/mem"
 
 /// `strlen`: the bytes before the NUL at `p`.
 export fn strLen(p: Int32) -> Int32 {
@@ -369,4 +375,112 @@ export fn free(p: Int32) {
     let h = base + (cls << 2)
     store32(p, load32(h))
     store32(h, UInt32(p))
+}
+
+// ---------------------------------------------------------------------------
+// Step 4, the allocating strings (PLAN-0125-runtime §6)
+// ---------------------------------------------------------------------------
+//
+// A `String` is the address of its bytes, and the eight bytes in front of them
+// are its `{ len, cap }` header (RFC-0089 M1a): `len` at -8, `cap` at -4, both
+// 32-bit, and a NUL at `len`. A `cap` of all ones marks a data-segment literal,
+// which `free` refuses by address anyway. Every String an engine allocates
+// comes through `strNew`, which is what makes the header a fact rather than a
+// hope. Lengths are `Int32` because they are offsets into a wasm32 memory.
+
+/// `str_new`: one block holding the header, `cap` bytes of room and the NUL;
+/// the address of the bytes. `malloc` judges the size, so the one 64-bit
+/// length in the module (a host-named file size) is judged here too.
+export fn strNew(len: Int32, cap: Int32) -> Int32 {
+    let base = malloc(Int64(cap) + 9)
+    store32(base, UInt32(len))
+    store32(base + 4, UInt32(cap))
+    let p = base + 8
+    store8(p + len, 0)
+    return p
+}
+
+/// `concat`: `a + b` as a fresh String sized exactly. Both lengths are header
+/// loads; the second copy carries `b`'s NUL.
+export fn strConcat(a: Int32, b: Int32) -> Int32 {
+    let la = Int32(load32(a - 8))
+    let lb = Int32(load32(b - 8))
+    let r = strNew(la + lb, la + lb)
+    copy(r, a, la)
+    copy(r + la, b, lb + 1)
+    return r
+}
+
+/// `str_append`: append `v` to the accumulator `p` in place and return the
+/// (possibly new) pointer, since a wasm local has no address to write through
+/// (RFC-0081). `own` addresses one word in the caller's frame: did this path
+/// allocate the buffer `p` holds? Not ours: copy into a buffer that is, 32
+/// bytes at least, the textual backend's floor. Ours: grow by doubling when
+/// `len + vlen` passes `cap`, so N appends copy O(N) bytes in total. The grow
+/// is `strNew`, `copy` and `free`, not a realloc: this allocator has no
+/// in-place extend, and a doubling always leaves its size class (four classes
+/// per power of two), so PLAN-0125-runtime §8's class-aware realloc would
+/// never hit on this path. Only the grow branch frees; the other branch copied
+/// a pointer that was never ours.
+export fn strAppend(own: Int32, p: Int32, v: Int32) -> Int32 {
+    let vlen = Int32(load32(v - 8))
+    let len = Int32(load32(p - 8))
+    let mut q = p
+    let mut cap: Int32 = 0
+    if Int32(load32(own)) == 0 {
+        cap = len + vlen
+        if UInt32(cap) < 32 {
+            cap = 32
+        }
+        q = strNew(len, cap)
+        copy(q, p, len)
+        store32(own, 1)
+    } else {
+        cap = Int32(load32(p - 4))
+    }
+    let need = len + vlen
+    if UInt32(need) > UInt32(cap) {
+        let mut nc = cap << 1
+        if UInt32(nc) < UInt32(need) {
+            nc = need
+        }
+        let nb = strNew(len, nc)
+        copy(nb, q, len)
+        free(q - 8)
+        q = nb
+    }
+    // The operand's bytes AND its NUL over the old terminator, then the new
+    // length in the header.
+    copy(q + len, v, vlen + 1)
+    store32(q - 8, UInt32(need))
+    return q
+}
+
+/// `str_from_bytes`: RFC-0014's `stringFromBytes`. The `len` bytes at `data`
+/// copied into a fresh String, or one of two canonical messages parity
+/// compares: an embedded NUL is refused BEFORE the UTF-8 check (a String is
+/// NUL-terminated, so it could not carry one), and the DFA at `table` decides
+/// the rest. The messages are `bnul` and `butf8`, interned by the emitter from
+/// `io_message`, so the wording stays one table; an `Err` is that address, not
+/// a heap copy, and nothing ever frees it. The buffer built for the bytes has
+/// no owner left on either failure, so both free it before they leave. The
+/// payloads are addresses as `Int64`, which is the `Result<String, String>`
+/// shape the caller reads (tag, one word, zero).
+export fn strFromBytes(data: Int32, len: Int32, table: Int32, bnul: Int32, butf8: Int32) -> Result<Int64, Int64> {
+    let buf = strNew(len, len)
+    let mut i: Int32 = 0
+    while i < len {
+        let c = load8(data + i)
+        if c == 0 {
+            free(buf - 8)
+            return Err(Int64(UInt32(bnul)))
+        }
+        store8(buf + i, c)
+        i = i + 1
+    }
+    if !utf8Valid(buf, len, table) {
+        free(buf - 8)
+        return Err(Int64(UInt32(butf8)))
+    }
+    return Ok(Int64(UInt32(buf)))
 }

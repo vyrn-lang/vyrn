@@ -1294,6 +1294,20 @@ reverse-complement is the widest gap and the one not yet explained: the route
 runs the wasm's runtime, so the answer is in step 4's string family, not in
 the route. The full record is under the plan's §6 table.*
 
+*Step 4 landed 2026-09-02 (`track-l`): the allocating strings — `str_new`,
+`concat`, `str_append`, `str_from_bytes` — are Vyrn in `std/runtime`
+(`strNew`, `strConcat`, `strAppend`, `strFromBytes`) over the step-2 allocator
+and `std/mem`'s `copy`, with the same growth policy and the same two failure
+wordings, and the wasm emitter's 342 lines for them are deleted. The three
+`STRING_RUNTIME` accessors are the native IR's and have no wasm twin; they
+leave at step 3. Parity 41 of 41, residue green. Under wasmtime, base and head
+interleaved, medians of five: the census's append builder 0.106 s against
+0.107 s, fasta 0.845 s against 0.847 s, reverse-complement 0.989 s against
+0.990 s. Every string function the wasm route runs is now Vyrn, so
+reverse-complement's 2.6x against native (step 3's table) is not in the
+runtime's transcription; it is in the program's own loops as the emitter
+lowers them. Details under the plan's §6 table.*
+
 ### M5 — `vyrn run` is compiled
 
 `run`, `test` and `bench --check` execute the wasm in the embedded wasmtime.
