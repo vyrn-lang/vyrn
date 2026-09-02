@@ -16286,6 +16286,33 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
         &[ValType::I32, ValType::I32],
         0,
         |b| {
+            // The ASCII prefix, eight bytes at a time — the textual backend's
+            // `fast` loop (RFC-0125 §1): a word with no high bit is eight
+            // steps the DFA would take from state 0 to state 0.
+            b.ins(&Instruction::Block(BlockType::Empty))
+                .ins(&Instruction::Loop(BlockType::Empty))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::I32Sub)
+                .ins(&Instruction::I32Const(8))
+                .ins(&Instruction::I32LtU)
+                .ins(&Instruction::BrIf(1))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I64Load(byte()))
+                .ins(&Instruction::I64Const(-9187201950435737472))
+                .ins(&Instruction::I64And)
+                .ins(&Instruction::I64Eqz)
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::BrIf(1))
+                .ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::I32Const(8))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(i))
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End)
+                .ins(&Instruction::End);
             b.ins(&Instruction::Block(BlockType::Empty))
                 .ins(&Instruction::Loop(BlockType::Empty))
                 .ins(&Instruction::LocalGet(i))

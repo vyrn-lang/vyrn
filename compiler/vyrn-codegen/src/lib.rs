@@ -324,6 +324,12 @@ good:
 /// backend (RFC-0077 M2g). It matches Rust's `from_utf8` exactly, which is what
 /// makes `stringFromBytes` the single gate on what a `String` may hold.
 ///
+/// An ASCII prefix is skipped eight bytes at a time first (RFC-0125 §1, the
+/// output-path trio): a word with no high bit set is eight bytes the DFA would
+/// walk from state 0 back to state 0, so the DFA starts where the first
+/// non-ASCII word does, in state 0, and answers the same thing. fasta and
+/// reverse-complement validate one all-ASCII line per line of output.
+///
 /// It used to have company: the hex, base64 and percent codecs were ~520 lines of
 /// hand-written IR here, with the hex-digit helpers and the base64 alphabet table.
 /// RFC-0078 M4c routed those six builtins to `std/codecs`, so what remains is the
@@ -332,10 +338,26 @@ good:
 const ENCODING_RUNTIME: &str = "\
 define i1 @__vyrn_utf8valid(ptr %s, i64 %len) {
 entry:
+  br label %fast
+fast:
+  %fi = phi i64 [ 0, %entry ], [ %fi2, %fastnext ]
+  %rem = sub i64 %len, %fi
+  %has8 = icmp uge i64 %rem, 8
+  br i1 %has8, label %fastload, label %slow
+fastload:
+  %wp = getelementptr i8, ptr %s, i64 %fi
+  %w = load i64, ptr %wp, align 1
+  %hi = and i64 %w, -9187201950435737472
+  %ascii = icmp eq i64 %hi, 0
+  br i1 %ascii, label %fastnext, label %slow
+fastnext:
+  %fi2 = add i64 %fi, 8
+  br label %fast
+slow:
   br label %loop
 loop:
-  %i = phi i64 [ 0, %entry ], [ %i2, %body ]
-  %st = phi i64 [ 0, %entry ], [ %st2, %body ]
+  %i = phi i64 [ %fi, %slow ], [ %i2, %body ]
+  %st = phi i64 [ 0, %slow ], [ %st2, %body ]
   %done = icmp uge i64 %i, %len
   br i1 %done, label %fin, label %body
 body:

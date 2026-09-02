@@ -170,6 +170,30 @@ why the record shows Vyrn at 1.11x Rust and 2.31x C on this program. The
 representation is a compiler decision, invisible to the language, and it is
 made in two backends.
 
+### 1.5b Two of the output-path trio, measured
+
+The runtime's byte sink flushed stdout twice per call and, on Windows,
+switched the stream to binary mode and back around each write; the UTF-8
+validator walked its DFA one byte at a time over lines known to be ASCII.
+Both are runtime-only. stdout is binary from `main` now on every platform,
+`writeStdout` is one buffered `fwrite`, and the validator skips an ASCII
+prefix eight bytes at a time in both backends before the DFA starts, in
+state 0, where the prefix would have left it. Output byte-identical to the
+previous compiler's after CRLF normalisation — and on Windows the native
+binary now writes the bare `0x0A` the interpreter and every other platform
+always wrote, which removes the one byte-level difference between engines
+the parity harness had to normalise.
+
+| program, record's N | native before | native after | wasm before | wasm after |
+|---|---|---|---|---|
+| fasta | 0.96 s | 0.86 s | 1.08 s | 0.89 s |
+| reverse-complement | 0.56 s | 0.41 s | 1.09 s | 0.98 s |
+
+Neither program uses the byte sink yet; the whole gain is the validator, one
+call per output line. The third of the trio, an array `clear` that keeps its
+capacity, is a builtin and touches the prelude, the checker and three
+engines — the product this RFC is about, priced once more.
+
 ### 1.6 The proportion
 
 Of 139,332 lines: about 35,500 are one semantics written three times, about

@@ -665,24 +665,19 @@ int __vyrn_write_file_bytes(const char* path, const char* data, unsigned long lo
 
 /* writeStdout (RFC-0111): raw bytes to fd 1, no newline, no formatting.
 
-   THE WINDOWS TRAP. C stdio opens stdout in TEXT mode, where fwrite turns a
-   0x0A into 0x0D 0x0A. For `print` that is the platform's own newline and it is
-   correct. For a packed pixel row it is corruption that no line-ending
-   normalisation can undo, because nothing downstream can tell which 0x0D 0x0A
-   was a real pair of pixels. So stdout goes to binary mode for the write and
-   back afterwards -- back, because a `print` after a `writeStdout` must still
-   get the platform's newline. Every other platform is binary already and the
-   guard compiles to nothing. */
+   It used to flush before and after every call and, on Windows, switch stdout
+   to binary mode and back around each one -- a system call or three per
+   write, which made the byte sink unusable for a 60-byte line (RFC-0125 §1,
+   the output-path trio). stdout is binary from `main` now, on every platform,
+   and the write is one buffered fwrite; stdio flushes at exit, and `print`
+   shares the buffer so the two keep their order.
+
+   The consequence, on purpose: `print` writes a bare 0x0A on Windows too,
+   which is what the interpreter and every other platform have always
+   written. The 0x0D 0x0A that text mode used to add was the one byte-level
+   difference between engines the parity harness had to normalise away. */
 void __vyrn_write_stdout(const char* data, unsigned long long len) {
-#if defined(_WIN32)
-    fflush(stdout);
-    int prev = _setmode(_fileno(stdout), _O_BINARY);
-#endif
     fwrite(data, 1, (size_t)len, stdout);
-    fflush(stdout);
-#if defined(_WIN32)
-    if (prev != -1) _setmode(_fileno(stdout), prev);
-#endif
 }
 
 /* writeFile: create/truncate + write all bytes. Status 0 ok / 1 io-error. A
@@ -1092,6 +1087,10 @@ extern int vyrn_entry(void);
 int main(int argc, char** argv) {
     __vyrn_argc = argc;
     __vyrn_argv = argv;
+#if defined(_WIN32)
+    /* Binary stdout, once: see __vyrn_write_stdout. */
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
     int code = vyrn_entry();
     __vyrn_join_all();
     return code;
