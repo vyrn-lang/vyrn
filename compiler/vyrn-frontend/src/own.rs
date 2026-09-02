@@ -2266,6 +2266,15 @@ pub fn analyze(program: &Program) -> Ownership {
     ownership
 }
 
+/// The plan's key for a `for` variable, which has no `let` node: the heap
+/// buffer of its spelling in the statement (RFC-0125 M3). Not the `String`'s
+/// own address: that is the first field of `Stmt::ForIn`, at offset 0 under
+/// a niche-encoded discriminant, so it equals the statement's address, which
+/// is the container row's key — and the two rows overwrote each other.
+pub fn for_var_key(var: &str) -> usize {
+    var.as_ptr() as usize
+}
+
 /// A pass that adds release rows to a finished analysis — RFC-0125 M3's
 /// placer over the named core, which lives in `vyrn-lower` and cannot be
 /// named from here.

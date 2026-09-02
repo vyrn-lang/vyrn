@@ -978,47 +978,91 @@ placer fills them:
 - Class 9 needed nothing beyond the first item: a "moved" binding held with
   a hole at a block's end gets an exit row with that hole.
 - The direct backend's `bind_payload` now frees a consumed scrutinee's
-  payload box under the textual backend's `free_boxes` rule (`frees_boxes`).
-  That box was "the safe leak every boxed enum payload already is" in this
-  backend, and the payload-binder probe measured it under wasmtime once the
-  rest was flat.
+  payload box under the textual backend's `free_boxes` rule (`frees_boxes`),
+  less its map-lookup clause: telling a map lookup from an element read
+  needs the receiver's type, and `peek` on the receiver before the arms is
+  not free of effect in this backend. A lookup's box stays the leak it was
+  here. The rest of the rule is what the payload-binder probe measured under
+  wasmtime once everything else was flat: that box was "the safe leak every
+  boxed enum payload already is" in this backend.
+
+**What the cross-engine generator gate caught in this slice, and neither
+gate in the brief could.** `genwasm`'s
+`every_generator_example_emits_the_same_source_under_both_engines` runs the
+`std/vyx`, `std/html` and `std/ui` generators as compiled wasm and compares
+their output with the interpreter's; parity and the residue ratchet never
+execute those bodies. The gate is part of this slice's list from here on.
+
+The root cause was in the kernel's model, not in an emitter: the core
+lowered a `for` as a loop with no exit — only a `while` got the `if .. else
+break` at its top — and a loop nothing leaves ends the path. Everything
+after a `for` in its block was never judged, and at every join above it the
+edge holding the `for` was dead. That was silent while the placer only
+added rows. The rewrite of a row's hole set reads the kernel's state at the
+exit, and in `vyxMergeImports` that state came from the one live edge of the
+`if imp.ns` join (holes `alias`, `spec`) while the dead edge had taken
+`imp.names`; the rewritten row walked `names`, and the generator freed it
+twice. A `for` has the same exit a `while` has now, and the corpus tally
+moved: the kernel judges the rest of every such block, `gqlAnswer`'s
+if-expression join (which the core had given no site, though the plan keys
+edge rows by the expression) is placed, and three temporaries read off a
+call result after a loop came into view.
+
+Two smaller defects went with it. The `for` variable was keyed by the
+address of its `var` string, which is the first field of `Stmt::ForIn` — at
+offset 0 under a niche-encoded discriminant, so it equals the statement's
+own address, the container row's key; each backend then registered the
+variable's slot over the container's. The key is the spelling's heap buffer
+now (`own::for_var_key`), stated once. And `frees_boxes` lost its map-lookup
+clause: it was removed on a bisect result that the generator artifact cache
+had contaminated (artifacts are keyed by the binary's identity, not by the
+environment, so a knob run after a clean run loads the clean run's module),
+and it stays out because `peek` on a receiver before the arms is a path this
+backend has not run before, while the cost is the lookup box leaking as it
+did before this slice.
 
 | kernel over the corpus | every construct | holed names placed |
 |---|---|---|
-| accepted | 6,581 | 6,589 |
-| refused | 9 | 1 |
+| accepted | 6,581 | 6,587 |
+| refused | 9 | 3 |
 | unlowered | 0 | 0 |
 
 The probes, peak working set at 200,000 and 400,000 turns. The native
 "before" column is M2's record; the wasm one is this build with
-`VYRN_NO_PLACER=1`. The sampler polls every 5 ms, so a fast process may
-read low; the criterion is the pair being equal.
+`VYRN_NO_PLACER=1`. The "after" cells poll every millisecond and take the
+larger of three runs. Under wasmtime every cell reads 12.7 or 14.2 MB
+whatever the turn count — the engine's own footprint, which steps between
+those two levels from run to run — so the native column is the tight
+measurement and the wasm column shows the absence of growth.
 
 | probe | native before | native after | wasm, placer off | wasm after |
 |---|---|---|---|---|
-| payload-binder-with-a-hole | 53 / 102 MB | 3.8 / 3.8 MB | 55.5 / 115.9 MB | 19.4 / 19.5 MB |
-| field-out-of-a-temporary | 35 / 66 MB | 3.8 / 3.8 MB | 30.6 / 67.2 MB | 12.7 / 12.8 MB |
-| consume-on-one-edge | 12 / 20 MB | 3.8 / 3.8 MB | 21.0 / 20.4 MB | 12.7 / 12.7 MB |
-| for-variable-with-a-hole | 66 / 127 MB | 3.8 / 3.8 MB | 63.3 / 119.1 MB | 12.7 / 12.7 MB |
-| moved-on-one-path-holed-on-the-other | 20 / 35 MB | 3.8 / 3.8 MB | 32.3 / 40.9 MB | 14.1 / 14.2 MB |
+| payload-binder-with-a-hole | 53 / 102 MB | 3.8 / 3.8 MB | 55.5 / 115.9 MB | 14.2 / 12.7 MB |
+| field-out-of-a-temporary | 35 / 66 MB | 3.8 / 3.9 MB | 30.6 / 67.2 MB | 12.7 / 14.2 MB |
+| consume-on-one-edge | 12 / 20 MB | 3.8 / 3.8 MB | 21.0 / 20.4 MB | 14.2 / 14.2 MB |
+| for-variable-with-a-hole | 66 / 127 MB | 3.8 / 3.8 MB | 63.3 / 119.1 MB | 12.7 / 14.1 MB |
+| moved-on-one-path-holed-on-the-other | 20 / 35 MB | 3.8 / 3.8 MB | 32.3 / 40.9 MB | 12.8 / 14.2 MB |
 
 `consume-on-one-edge-live-join.vyrn` is the same shape with the binding read
 after the join, which is the corpus's shape (`recordsFrom`, `rpcApplyConfig`)
-and the one the sub-place edge row exists for: 4.1 / 4.1 MB natively and
-19.1 / 18.7 MB under wasmtime.
+and the one the sub-place edge row exists for: 4.2 / 4.1 MB natively and
+12.6 / 12.7 MB under wasmtime.
 
-**The one refusal left is a leak the corrected lowering uncovered.**
-`std/graphql`'s `gqlIsRecord` returns `gqlSplitDecl(src).rhs.startsWith("{")`:
-a heap field READ off a temporary nobody names, in a read position. The
-analysis puts the receiver in R1′'s table, both compiled backends run that
-row after a scalar read only, and the borrowed field outlives the read, so
-no table keys the free that is owed after the read's consumer.
+**The refusals left are one class, a leak the corrected lowering
+uncovered.** `std/graphql`'s `gqlIsRecord` returns
+`gqlSplitDecl(src).rhs.startsWith("{")`: a heap field READ off a temporary
+nobody names, in a read position. The analysis puts the receiver in R1′'s
+table, both compiled backends run that row after a scalar read only, and
+the borrowed field outlives the read, so no table keys the free that is
+owed after the read's consumer. `arrays.vyrn`'s `weekdayLetters()[1]` and
+`slots.vyrn`'s `(people.get(bob) ?? Person { .. }).name` are the same shape
+one construct over, an element read and a field read off a call result.
 `rfcs/probes-0125/field-read-off-a-temporary.vyrn`: 25.9 MB and 58.7 MB
 natively, 32.6 MB and 76 MB under wasmtime, the whole temporary per turn.
-The corpus test's ratchet is 1, for this and no other. It closes with an
-argument-temporary drop of the receiver after the consuming call, which is
-the shape `arg_drops` has for the argument itself and not for what the
-argument was read out of.
+The corpus test's ratchet is 3, for these and no other. The class closes
+with an argument-temporary drop of the receiver after the read's consumer,
+which is the shape `arg_drops` has for the argument itself and not for what
+the argument was read out of.
 
 **Lambda bodies are not judged, and the reason is in the emitters.** Both
 compiled backends lift a lambda under a shell that owns no rows: `direct.rs`
