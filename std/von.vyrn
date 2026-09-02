@@ -750,7 +750,7 @@ export gen fn parseVon(src: String) -> Result<VonDoc, String> {
 gen fn vonLex(src: String) -> Array<VonTok> {
     let mut out: Array<VonTok> = []
     for t in lex(src) {
-        out.push(VonTok { kind: t.kind, text: t.text, line: t.line, col: t.col })
+        out.push(VonTok { kind: t.kind.copy(), text: t.text.copy(), line: t.line, col: t.col })
     }
     return out
 }

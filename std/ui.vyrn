@@ -156,30 +156,30 @@ export fn withTitle(h: Head, title: String) -> Head {
 
 /// `h` with a `<link rel="stylesheet" href=…>` appended.
 export fn withStylesheet(h: Head, href: String) -> Head {
-    let mut ss = h.stylesheets
+    let mut ss = h.stylesheets.copy()
     ss.push(href.copy())
-    return Head { title: h.title.copy(), stylesheets: ss.copy(), modules: h.modules.copy(), scripts: h.scripts.copy(), meta: h.meta.copy() }
+    return Head { title: h.title.copy(), stylesheets: ss, modules: h.modules.copy(), scripts: h.scripts.copy(), meta: h.meta.copy() }
 }
 
 /// `h` with a `<script type="module" src=…>` appended.
 export fn withModule(h: Head, src: String) -> Head {
-    let mut ms = h.modules
+    let mut ms = h.modules.copy()
     ms.push(src.copy())
-    return Head { title: h.title.copy(), stylesheets: h.stylesheets.copy(), modules: ms.copy(), scripts: h.scripts.copy(), meta: h.meta.copy() }
+    return Head { title: h.title.copy(), stylesheets: h.stylesheets.copy(), modules: ms, scripts: h.scripts.copy(), meta: h.meta.copy() }
 }
 
 /// `h` with a classic `<script src=…>` appended.
 export fn withScript(h: Head, src: String) -> Head {
-    let mut sc = h.scripts
+    let mut sc = h.scripts.copy()
     sc.push(src.copy())
-    return Head { title: h.title.copy(), stylesheets: h.stylesheets.copy(), modules: h.modules.copy(), scripts: sc.copy(), meta: h.meta.copy() }
+    return Head { title: h.title.copy(), stylesheets: h.stylesheets.copy(), modules: h.modules.copy(), scripts: sc, meta: h.meta.copy() }
 }
 
 /// `h` with a `<meta name=… content=…>` appended.
 export fn withMeta(h: Head, name: String, content: String) -> Head {
-    let mut mt = h.meta
+    let mut mt = h.meta.copy()
     mt.push(Meta { name: name.copy(), content: content.copy() })
-    return Head { title: h.title.copy(), stylesheets: h.stylesheets.copy(), modules: h.modules.copy(), scripts: h.scripts.copy(), meta: mt.copy() }
+    return Head { title: h.title.copy(), stylesheets: h.stylesheets.copy(), modules: h.modules.copy(), scripts: h.scripts.copy(), meta: mt }
 }
 
 /// A head's elements, in the document order `document(title, head, body)` emits.

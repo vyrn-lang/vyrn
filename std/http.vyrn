@@ -1623,7 +1623,7 @@ gen fn httpFields(name: String, iface: ModuleInterface) -> Array<HttpField> {
                 if depth == 1 && tk.kind == "ident" && i + 2 < toks.length {
                     let nx = toks[i + 1]
                     if nx.kind == "punct" && nx.text == ":" {
-                        out.push(HttpField { name: tk.text, numeric: httpIsNumeric(toks[i + 2], iface) })
+                        out.push(HttpField { name: tk.text.copy(), numeric: httpIsNumeric(toks[i + 2], iface) })
                     }
                 }
                 i = i + 1

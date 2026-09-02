@@ -52,6 +52,11 @@ impl<T> Scopes<T> {
         self.0.last_mut().unwrap().insert(name.to_string(), value);
     }
 
+    /// Every frame, outermost first, for a walk over all bindings.
+    pub fn frames(&self) -> &[HashMap<String, T>] {
+        &self.0
+    }
+
     /// The innermost binding of `name`, or `None` if nothing binds it.
     pub fn get(&self, name: &str) -> Option<&T> {
         self.0.iter().rev().find_map(|frame| frame.get(name))
