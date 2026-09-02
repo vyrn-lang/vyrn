@@ -336,6 +336,10 @@ pub struct ConsumeCand {
 pub struct ArmPayloadEv {
     pub match_id: usize,
     pub arm_ix: u32,
+    /// The binder the arm frees. One per event; the plan groups the events of
+    /// an arm into one row, so a multi-binder arm placed by RFC-0125 M3's
+    /// placer names each unmoved binder and the emitters free exactly those.
+    pub binder: String,
     pub kind: crate::own::DropKind,
     pub owner: String,
     /// Round fifty-seven: the callee positions through which the arm's value
@@ -6024,6 +6028,7 @@ impl MoveCheck<'_> {
                                     sink.borrow_mut().push(ArmPayloadEv {
                                         match_id: e as *const Expr as usize,
                                         arm_ix: ix as u32,
+                                        binder: pattern_bindings(&arms[ix].pattern)[0].to_string(),
                                         kind: kind.clone(),
                                         owner: self.cur_fn.borrow().clone(),
                                         mentions: mentions.clone(),

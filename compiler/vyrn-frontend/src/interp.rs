@@ -2869,6 +2869,7 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
     // Identities are `Stmt` node addresses — unique program-wide, so the
     // per-function maps flatten into one.
     let ownership = crate::own::analyze(program);
+    let arm_frees = ownership.plan.arm_frees.clone();
     let droppable: HashMap<usize, crate::own::DropKind> =
         ownership.droppable.into_values().flatten().collect();
     let funcs: HashMap<&str, &Function> = program
@@ -2932,6 +2933,7 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
         variant_lead,
         variants,
         droppable,
+        arm_frees,
         boxes: RefCell::new(HashMap::new()),
         next_box: std::cell::Cell::new(1),
         log_level: program.log_level,
@@ -3000,6 +3002,10 @@ struct Interp<'a> {
     /// Droppable `let` bindings (by `Stmt` node address) and their reclamation
     /// kind — the ownership analysis shared with the native backend.
     droppable: HashMap<usize, crate::own::DropKind>,
+    /// Round forty's arm table, `(match, arm) -> [(binder, kind)]`: the
+    /// payload binders an arm never moved, released at the arm's end. Only a
+    /// declared release is observable in this engine; the buffers are `Rc`s.
+    arm_frees: HashMap<(usize, u32), Vec<(String, crate::own::DropKind)>>,
     /// The boxed streams (RFC-0075 M2c, re-hosted by RFC-0090 M3): what
     /// `boxStream` moved out of the program and `unboxStream` moves back in, keyed by
     /// the address it handed back. The compiled backends `malloc` one header and
@@ -5142,8 +5148,9 @@ impl<'a> Interp<'a> {
                 } = e
                 {
                     let sv = self.expr(scrutinee, scope)?;
-                    let r = self.eval_match_stmt(sv.clone(), arms, scope);
-                    return self.release_temp(e as *const Expr as usize, &sv, r.is_err(), r);
+                    let key = e as *const Expr as usize;
+                    let r = self.eval_match_stmt(key, sv.clone(), arms, scope);
+                    return self.release_temp(key, &sv, r.is_err(), r);
                 }
                 self.expr(e, scope)?;
                 Ok(Flow::Normal)
@@ -7260,8 +7267,9 @@ impl<'a> Interp<'a> {
                 scrutinee, arms, ..
             } => {
                 let sv = self.expr(scrutinee, scope)?;
-                let r = self.eval_match(sv.clone(), arms, scope);
-                self.release_temp(expr as *const Expr as usize, &sv, r.is_err(), r)
+                let key = expr as *const Expr as usize;
+                let r = self.eval_match(key, sv.clone(), arms, scope);
+                self.release_temp(key, &sv, r.is_err(), r)
             }
             // `if` as an expression (RFC-0030): evaluate the condition, then ONLY
             // the taken branch (laziness identical to statement-`if`/match). The
@@ -7542,8 +7550,14 @@ impl<'a> Interp<'a> {
     }
 
     /// Evaluate a `match` over an Option or Result, binding the payload.
-    fn eval_match(&self, sv: Val, arms: &[MatchArm], scope: &mut Vec<Frame>) -> Result<Val, Ctrl> {
-        for arm in arms {
+    fn eval_match(
+        &self,
+        key: usize,
+        sv: Val,
+        arms: &[MatchArm],
+        scope: &mut Vec<Frame>,
+    ) -> Result<Val, Ctrl> {
+        for (ix, arm) in arms.iter().enumerate() {
             let Some(bindings) = Self::match_pattern(&arm.pattern, &sv) else {
                 continue;
             };
@@ -7557,10 +7571,37 @@ impl<'a> Interp<'a> {
                 // which routes through `eval_match_stmt` below.
                 ArmBody::Block(_) => Err("a block arm in expression position (RFC-0118)".into()),
             };
+            let result = result.and_then(|v| self.release_arm_binders(key, ix, scope).map(|_| v));
             scope.pop();
             return result;
         }
         Err("non-exhaustive match (should have been caught)".into())
+    }
+
+    /// Round forty at an arm's end: call the declared `release` of every
+    /// payload binder the plan's arm row names, in the order the row lists
+    /// them. The compiled backends free the buffers too; here they are `Rc`s,
+    /// so only a declared release and what a `Deep` walk reaches can be seen.
+    fn release_arm_binders(&self, key: usize, arm: usize, scope: &[Frame]) -> Result<(), Ctrl> {
+        let Some(rows) = self.arm_frees.get(&(key, arm as u32)) else {
+            return Ok(());
+        };
+        if self.region_depth.get() != 0 {
+            return Ok(());
+        }
+        for (name, kind) in rows {
+            let Some(v) = scope.last().and_then(|f| f.get(name)).map(|s| s.v.clone()) else {
+                continue;
+            };
+            match kind {
+                crate::own::DropKind::Release(f, _) => {
+                    self.call(f, std::slice::from_ref(&v))?;
+                }
+                crate::own::DropKind::Deep(_) if self.has_owned => self.release_nested(&v)?,
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// A `match` in STATEMENT position (RFC-0118): the same pattern walk, but
@@ -7569,11 +7610,12 @@ impl<'a> Interp<'a> {
     /// answers with.
     fn eval_match_stmt(
         &self,
+        key: usize,
         sv: Val,
         arms: &[MatchArm],
         scope: &mut Vec<Frame>,
     ) -> Result<Flow, Ctrl> {
-        for arm in arms {
+        for (ix, arm) in arms.iter().enumerate() {
             let Some(bindings) = Self::match_pattern(&arm.pattern, &sv) else {
                 continue;
             };
@@ -7585,6 +7627,14 @@ impl<'a> Interp<'a> {
                 ArmBody::Expr(e) => self.expr(e, scope).map(|_| Flow::Normal),
                 ArmBody::Block(b) => self.block(b, scope),
             };
+            // The compiled backends skip the arm free when the arm left by a
+            // signal; a `Flow` that is not `Normal` is that signal here.
+            let result = result.and_then(|f| match f {
+                Flow::Normal => self
+                    .release_arm_binders(key, ix, scope)
+                    .map(|_| Flow::Normal),
+                other => Ok(other),
+            });
             scope.pop();
             return result;
         }

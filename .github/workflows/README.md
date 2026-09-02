@@ -1,14 +1,15 @@
-# The three workflows, and what to do with them
+# The four workflows, and what to do with them
 
 This file is for someone who has just arrived. The workflow files themselves
 carry long comments explaining why each step exists; this one explains what the
-three are for, when they run, and how to do the jobs people actually need to do.
+four are for, when they run, and how to do the jobs people actually need to do.
 
-## The three
+## The four
 
 | workflow | what it proves | when it runs |
 | --- | --- | --- |
 | `ci.yml` | the compiler builds, the tests pass, and the three backends agree | every push, and on demand |
+| `docs.yml` | `rfcs/README.md` agrees with `rfcs/` | every pull request, docs-only ones included; `ci.yml` skips those |
 | `site.yml` | the site builds and every route answers | on a pull request, after CI passes on `main`, and when a release is published |
 | `release.yml` | a tagged commit becomes a published release with binaries | when a tag starting with `v` is pushed |
 

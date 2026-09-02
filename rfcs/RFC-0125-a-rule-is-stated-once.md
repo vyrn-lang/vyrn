@@ -311,7 +311,9 @@ needs (load, store, allocate pages) are the only unsafe surface in the
 language, fenced in that module, and reviewed there. Both the C shim's logic
 and the runtime the wasm backend hand-emits are replaced by it. The allocator
 is the segregated free list the wasm runtime already has, because §1.4
-measured it winning.
+measured it winning. The design for this — the inventory of all three
+runtimes with counts, the primitive set, the fence, the allocator, the
+migration order and the cost — is `PLAN-0125-runtime.md`.
 
 The C side of a native binary becomes the WASI host: read, write, clock, exit,
 arguments. About two hundred lines, supplied by the route in §2.5.
@@ -409,6 +411,17 @@ PR that touches only a design record runs no CI at all, reports none of the
 eleven, and would be unmergeable by anyone. Until CI runs a job on every PR,
 the owner merging a docs-only PR by hand is the escape, and it is the only
 one.
+
+**One check runs on every PR now.** `.github/workflows/docs.yml` has no
+path filter and one job, `rfc-index`, reported as "the RFC index agrees with
+the directory". It runs `cargo test -p vyrn-cli --test rfc_index`, the gate
+that says `rfcs/README.md` is derived from `rfcs/` — the one check a docs-only
+PR most needs, and the one `paths-ignore` had been skipping on exactly those
+PRs. It is a twelfth check, not a replacement: the eleven still do not
+report on a docs-only PR, so the owner's hand merge stays the escape for
+those until the required list on `main` is changed to say what a docs-only
+PR must pass. That list is a repository setting, and this RFC records the
+choice rather than making it.
 
 ### M1 — places, and the probe re-run
 
@@ -749,10 +762,29 @@ emitters need not read the core until the plan is deleted; until then the
 core corrects the plan, and each correction is an exit row, an edge row or an
 arm row the emitters already know how to run. The event-log fold that could
 not order across a back edge is not repaired; it is overruled, per body, by
-a walk that can. One caveat the emitters carry: the arm table frees a
-single binder only, so a multi-binder arm's row is placed and not run, which
-is a leak the ratchet does not yet see and the next slice removes by
-freeing every binder the row names.
+a walk that can. One caveat the emitters carried: the arm table freed a
+single binder only, so a multi-binder arm's row was placed and not run, which
+is a leak the ratchet does not see.
+
+**The caveat closed the same day.** The arm row is `(match, arm) ->
+[(binder, kind)]` now: the analysis writes its one screened binder, the
+placer writes every binder the kernel found held at the arm's end, and each
+engine frees the binders its row names and no other (`direct.rs` `match_expr`,
+`lib.rs` `gen_arm_body` and `gen_match_enum`, the core's `St::Drop` per named
+binder). The interpreter gained its first consumer of the table, because a
+declared `release` on a payload binder is observable there and the placer
+can place one; a buffer it frees by `Rc` as before.
+`rfcs/probes-0125/two-binders-neither-read.vyrn` is the witness: a
+two-`String` variant whose arm reads neither payload beside an arm that hands
+its payload out. Peak working set natively, before and after:
+
+| turns | before | after |
+|---|---|---|
+| 200,000 | 28.8 MB | 4.1 MB |
+| 400,000 | 50.7 MB | 4.1 MB |
+
+About 112 bytes a turn, the two Strings. Parity 41 passed, the residue
+ratchet held.
 
 ### M4 — the runtime in Vyrn
 

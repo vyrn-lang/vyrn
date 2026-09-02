@@ -191,6 +191,7 @@ the same test as the index: a file here that nothing links to fails it.
 | File | What it is |
 |------|------------|
 | [`PLAN-memory-model.md`](PLAN-memory-model.md) | The execution plan for the memory-model arc: ten phases, in the order they landed. Complete, and it records the chain that continued past it into RFC-0092 and RFC-0093. |
+| [`PLAN-0125-runtime.md`](PLAN-0125-runtime.md) | The design for RFC-0125 M4, the runtime in Vyrn: the inventory of the three runtimes with counts and where they disagree, the raw primitives, the fence, the allocator and the arena, what the interpreter can use before M5, the migration order with a gate per family, and the cost. |
 | [`NOTES-dogfood-bin.md`](NOTES-dogfood-bin.md) | Friction record from writing `examples/bin`, the pastebin that survives restarts — the first persistent app. |
 | [`NOTES-dogfood-shelf.md`](NOTES-dogfood-shelf.md) | Friction record from writing `examples/shelf`, the full-stack app. |
 | [`NOTES-dogfood-vlog.md`](NOTES-dogfood-vlog.md) | Friction record from writing `examples/vlog.vyrn`, the CLI and text app. |

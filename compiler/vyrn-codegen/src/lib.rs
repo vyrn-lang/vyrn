@@ -7174,10 +7174,9 @@ impl<'a> Gen<'a> {
         for (arm_ix, (arm, (idx, lbl))) in arms.iter().zip(&arm_labels).enumerate() {
             self.emit_label(lbl);
             self.scope.push(Vec::new());
-            let mut bind_slot: Option<String> = None;
+            let mut bind_slots: Vec<(String, String)> = Vec::new();
             if let (Pattern::Variant(_, binds), Some(idx)) = (&arm.pattern, idx) {
                 let payload_tys = &evs[*idx].payload;
-                let single = binds.len() == 1;
                 for (i, bind) in binds.iter().enumerate() {
                     let pty = payload_tys.get(i).cloned().unwrap_or(Type::Int);
                     let raw = self.fresh_tmp();
@@ -7186,9 +7185,7 @@ impl<'a> Gen<'a> {
                     let ll = self.llt(&pty);
                     let slot = self.declare(bind, &pty);
                     self.emit(format!("store {ll} {v}, ptr {slot}"));
-                    if single {
-                        bind_slot = Some(slot.clone());
-                    }
+                    bind_slots.push((bind.clone(), slot.clone()));
                     // A consumed scrutinee's boxes are this match's to give
                     // back once the value is out — see `gen_match`'s note.
                     if free_boxes && v != raw {
@@ -7226,12 +7223,15 @@ impl<'a> Gen<'a> {
             {
                 ty = t;
             }
-            // Round forty: the unmoved payload binder — see `gen_arm_body`.
-            if let Some(kind) = self.plan.arm_payload_free(key, arm_ix as u32).cloned() {
-                if let Some(slot) = &bind_slot {
+            // Round forty: the unmoved payload binders the row names — see
+            // `gen_arm_body`.
+            if let Some(rows) = self.plan.arm_payload_free(key, arm_ix as u32).cloned() {
+                for (bind, slot) in &bind_slots {
+                    let Some((_, kind)) = rows.iter().find(|(n, _)| n == bind) else {
+                        continue;
+                    };
                     if !self.terminated && self.region_depth == 0 {
-                        let slot = slot.clone();
-                        self.emit_drop(&slot, &kind);
+                        self.emit_drop(slot, kind);
                     }
                 }
             }
@@ -7649,10 +7649,10 @@ impl<'a> Gen<'a> {
         arm: &MatchArm,
         payload_ty: &Type,
         free_boxes: bool,
-        payload_free: Option<DropKind>,
+        payload_free: Option<Vec<(String, DropKind)>>,
     ) -> Result<(String, Type), String> {
         self.scope.push(Vec::new());
-        let mut bind_slot: Option<String> = None;
+        let mut bind_slot: Option<(String, String)> = None;
         if let Some(bind) = pattern_binding(&arm.pattern) {
             let w0 = self.fresh_tmp();
             let w1 = self.fresh_tmp();
@@ -7662,7 +7662,7 @@ impl<'a> Gen<'a> {
             let ll = self.llt(payload_ty);
             let slot = self.declare(bind, payload_ty);
             self.emit(format!("store {ll} {v}, ptr {slot}"));
-            bind_slot = Some(slot.clone());
+            bind_slot = Some((bind.to_string(), slot.clone()));
             // A TEMPORARY scrutinee with no drop row: the boxed payload's
             // block is this match's to give back once the value is out —
             // `readDoc`'s `match parseJson(src)` left one 16-byte Result box
@@ -7693,10 +7693,12 @@ impl<'a> Gen<'a> {
         // arm moved — the row went Moved for the mover's sake, the whole
         // release stood down, and this payload is the arm's to give back
         // once its body is done with it.
-        if let (Some(kind), Some(slot)) = (&payload_free, &bind_slot) {
-            if !self.terminated && self.region_depth == 0 {
-                let slot = slot.clone();
-                self.emit_drop(&slot, kind);
+        if let (Some(rows), Some((bind, slot))) = (&payload_free, &bind_slot) {
+            if let Some((_, kind)) = rows.iter().find(|(n, _)| n == bind) {
+                if !self.terminated && self.region_depth == 0 {
+                    let (slot, kind) = (slot.clone(), kind.clone());
+                    self.emit_drop(&slot, &kind);
+                }
             }
         }
         self.scope.pop();
