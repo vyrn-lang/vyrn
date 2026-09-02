@@ -352,11 +352,39 @@ fn run_corpus() {
                 Err(g) => *gaps.entry(g.what).or_default() += 1,
             }
         }
+        // Every frame, outermost first: the judgment's slice. `top[i]` is
+        // the slot of instance `i`'s own body; a lambda frame is keyed by
+        // the function it was written in and its line, which is how the
+        // checker names a lambda source (RFC-0037).
+        let mut refs: Vec<&vyrn_lower::core::Body> = Vec::new();
+        let mut top: Vec<usize> = Vec::new();
+        let mut lambda_frames: BTreeMap<(&str, usize), Vec<usize>> = BTreeMap::new();
+        for (i, b) in bodies.iter().enumerate() {
+            for f in b.frames() {
+                if std::ptr::eq(f, b) {
+                    top.push(refs.len());
+                } else if let Some(line) = f
+                    .name
+                    .rsplit("@lambda:")
+                    .next()
+                    .and_then(|l| l.parse::<usize>().ok())
+                {
+                    lambda_frames
+                        .entry((insts[i].func.name.as_str(), line))
+                        .or_default()
+                        .push(refs.len());
+                }
+                refs.push(f);
+            }
+        }
         // A callee's name: every instance of the function by that name, and
         // every impl method with that surface name.
         let mut by_name: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
         for (i, inst) in insts.iter().enumerate() {
-            by_name.entry(inst.func.name.as_str()).or_default().push(i);
+            by_name
+                .entry(inst.func.name.as_str())
+                .or_default()
+                .push(top[i]);
         }
         let mut impl_methods: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
         for im in &program.impls {
@@ -389,7 +417,6 @@ fn run_corpus() {
             .filter(|f| f.is_extern)
             .map(|f| f.name.as_str())
             .collect();
-        let refs: Vec<&vyrn_lower::core::Body> = bodies.iter().collect();
         let mut resolve = |name: &str| -> Callee {
             if let Some(e) = effects::atom(name) {
                 return Callee::Atom(Effects::of(e));
@@ -419,10 +446,15 @@ fn run_corpus() {
         };
         // RFC-0037: the closed set of functions a value of a function type
         // may hold, as the checker's defunctionalization collected it. A
-        // named source is its instances; a lambda source is judged nowhere
-        // yet (finding 2), so a type with one is open.
+        // named source is its instances; a lambda source is its frame.
         let stored = vyrn_frontend::checker::stored_fn_effects(&program);
         let mut through = |ty: &Type| -> Callee {
+            // The sources are collected with aliases resolved; a local is
+            // typed as the program spelled it.
+            let ty = &vyrn_frontend::types::resolve(ty, &decls);
+            if !matches!(ty, Type::Fn(..)) {
+                return Callee::Unknown;
+            }
             let mut idx: Vec<usize> = Vec::new();
             let mut missing: Vec<String> = Vec::new();
             for src in &stored.sources {
@@ -436,7 +468,12 @@ fn run_corpus() {
                     }
                 }
                 if let Some(l) = &src.lambda {
-                    missing.push(format!("a lambda in {} at line {}", l.defined_in, l.line));
+                    match lambda_frames.get(&(l.defined_in.as_str(), l.line)) {
+                        Some(i) => idx.extend(i.iter().copied()),
+                        None => {
+                            missing.push(format!("a lambda in {} at line {}", l.defined_in, l.line))
+                        }
+                    }
                 }
             }
             if !missing.is_empty() {
@@ -444,6 +481,8 @@ fn run_corpus() {
                     "{file}: a `{ty}` value may hold {}",
                     missing.join(", ")
                 ));
+            } else if idx.is_empty() {
+                open.push(format!("{file}: a `{ty}` value has no source"));
             }
             idx.sort_unstable();
             idx.dedup();
@@ -462,14 +501,14 @@ fn run_corpus() {
                     "{file}:{} spawn {}(..) in {} — {}",
                     sp.line,
                     sp.callee,
-                    bodies[sp.body].name,
+                    refs[sp.body].name,
                     sp.outside()
                 ));
             }
         }
         for (i, name) in &judged.unknown {
             *unknown
-                .entry(format!("{name} (in {})", bodies[*i].name))
+                .entry(format!("{name} (in {})", refs[*i].name))
                 .or_default() += 1;
         }
 
@@ -486,7 +525,7 @@ fn run_corpus() {
         }
 
         for (i, inst) in insts.iter().enumerate() {
-            let e = judged.effects[i];
+            let e = judged.effects[top[i]];
             let want = caps_of(e);
             let have = floor_carries(inst.func);
             let floor = if inst.func.is_gen && !want.is_empty() {
@@ -545,14 +584,17 @@ fn run_corpus() {
                         have
                     );
                     let mut callees: BTreeSet<String> = BTreeSet::new();
-                    collect_callees(&bodies[i].stmts, &mut callees);
+                    for f in bodies[i].frames() {
+                        collect_callees(&f.stmts, &mut callees);
+                    }
                     for c in callees {
                         let mut r = resolve(&c);
                         if matches!(r, Callee::Unknown) {
                             if let Some(n) = bodies[i]
-                                .names
+                                .frames()
                                 .iter()
-                                .find(|n| n.source == c && matches!(n.ty, Type::Fn(..)))
+                                .flat_map(|f| f.names.iter())
+                                .find(|n| n.source == c)
                             {
                                 r = through(&n.ty);
                             }

@@ -13,9 +13,10 @@
 //! owned name born of a primitive or a literal (an allocation), and a trap.
 //! A call through a function value names a local, and the caller answers
 //! for its type with the closed set of functions a value of that type may
-//! hold — RFC-0037's stored sources (finding 3 of the first slice). It does
-//! not see inside a lambda body (the core lowers a lambda as a read of its
-//! captures, and judges the body nowhere — finding 2).
+//! hold — RFC-0037's stored sources (finding 3 of the first slice). A lambda
+//! body is a frame of its own (RFC-0125 M3) and the caller hands every frame
+//! in; a body joins the frames of the lambdas it holds, because the value it
+//! builds can run them (finding 2).
 //!
 //! One inclusion check lives here: the spawn-isolation rule of RFC-0004 §Q4,
 //! stated as RFC-0125 §2.2 states it — a spawned callee's set within
@@ -267,15 +268,22 @@ pub struct Judged {
     pub spawns: Vec<Spawned>,
 }
 
-/// The effect set of every body in `bodies`, each the join of its own atoms
-/// and its callees', to a fixpoint. `resolve` says what a callee name is;
-/// `through` says what a function TYPE may hold, for a call whose callee is
-/// a name of the body (a parameter or a binding of function type).
+/// The effect set of every body in `bodies`, each the join of its own atoms,
+/// its callees' and its lambda frames', to a fixpoint. `resolve` says what
+/// a callee name is; `through` says what a function TYPE may hold, for a
+/// call whose callee is a name of the body (a parameter or a binding of
+/// function type). `bodies` holds every frame the caller wants judged: a
+/// body's lambdas are joined only when they are in the slice.
 pub fn judge(
     bodies: &[&Body],
     resolve: &mut dyn FnMut(&str) -> Callee,
     through: &mut dyn FnMut(&Type) -> Callee,
 ) -> Judged {
+    let index: HashMap<*const Body, usize> = bodies
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (*b as *const Body, i))
+        .collect();
     let mut own: Vec<Effects> = Vec::with_capacity(bodies.len());
     let mut edges: Vec<Vec<usize>> = Vec::with_capacity(bodies.len());
     let mut unknown = Vec::new();
@@ -301,6 +309,14 @@ pub fn judge(
         w.stmts(&b.stmts);
         own.push(w.own);
         let mut e = w.edges;
+        // A lambda's frame runs when the value is invoked, and the body that
+        // built the value is where the invocation is possible: presence, as
+        // the floor counts it.
+        e.extend(
+            b.lambdas
+                .iter()
+                .filter_map(|l| index.get(&(l as *const Body))),
+        );
         e.sort_unstable();
         e.dedup();
         edges.push(e);
@@ -408,8 +424,9 @@ impl Walk<'_> {
         }
     }
 
-    /// What `callee` is: by name first, and for a name of this body with a
-    /// function type, by that type.
+    /// What `callee` is: by name first, and for a name of this body, by its
+    /// type — a callable local holds a function value, whatever alias the
+    /// type is spelled through.
     fn callee(&mut self, callee: &str) -> Callee {
         let c = match self.memo.get(callee) {
             Some(c) => c.clone(),
@@ -426,7 +443,7 @@ impl Walk<'_> {
             .body
             .names
             .iter()
-            .find(|n| n.source == callee && matches!(n.ty, Type::Fn(..)))
+            .find(|n| n.source == callee)
             .map(|n| &n.ty)
         else {
             return Callee::Unknown;
