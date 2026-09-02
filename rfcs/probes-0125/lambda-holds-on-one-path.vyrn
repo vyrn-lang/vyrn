@@ -5,8 +5,12 @@
 // `returned-on-one-path.vyrn`, inside a lambda). Before this slice no row
 // inside a lambda ran at all: both compiled backends lifted a lambda under a
 // shell that owned no rows, and the kernel did not judge lambda frames.
-// Peak working set at 200,000 and 400,000 turns, before: see RFC-0125 §3 M3,
-// "lambda frames".
+// Peak working set at 200,000 and 400,000 turns, before: 15.2 / 25.9 MB
+// natively, 32.1 / 41.7 MB under wasmtime. With the emitters reading the
+// plan under the owner's name but the placer off (`VYRN_NO_PLACER=1`):
+// 15.6 / 26.2 MB natively, because the analysis places nothing on the
+// `return 0` path. With the kernel judging the frame and the placer's row:
+// 4.8 / 4.8 MB natively, 22.2 / 22.0 MB under wasmtime.
 let turns = 200000
 
 fn make(i: Int64) -> String {

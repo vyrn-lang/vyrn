@@ -1100,6 +1100,50 @@ a flat probe reads 18.2 / 14.9 MB under the pinned wasmtime on this host:
 
 The corpus test's ratchet is 0.
 
+**Lambda frames are judged (2026-09-02, the third slice).** The reason
+they were not was in the emitters, and it was one change in each.
+`direct.rs` names a lifted lambda's shell `@lambda <owner>` and `lower_body`
+reads `Cx::droppable` and `Cx::releases` under the owner; `lib.rs` keeps
+`placed` and `droppable` across the lift and takes only the slots away. The
+analysis had always recorded a lambda's rows under the enclosing function's
+name, keyed by the lambda's own nodes, so both backends now run what it
+wrote and what the placer adds. The core builds each lambda literal as a
+frame of its own (`Body::lambdas`, `Builder::lambda_frame`): its captures are
+the enclosing names spelled again as borrowed inputs, its parameters are
+`read` (RFC-0023), its bindings are ordinary, and an expression body is a
+`return` of its value at no site. The kernel judges every frame and the
+placer places in every frame; the corpus test counts each as an instance.
+`rfcs/probes-0125/lambda-holds-on-one-path.vyrn` is the witness: a lambda
+that binds a String, hands it to a `consume` parameter on every third turn
+and returns without it on the others — the analysis's fate is "moved", so it
+places no release on the untaken path, and before this slice no row inside a
+lambda ran at all. Peak working set at 200,000 and 400,000 turns, the
+"placer off" column being this build with `VYRN_NO_PLACER=1` (the emitter
+change alone):
+
+| probe | native before | native, placer off | native after | wasm before | wasm after |
+|---|---|---|---|---|---|
+| lambda-holds-on-one-path | 15.2 / 25.9 MB | 15.6 / 26.2 MB | 4.8 / 4.8 MB | 32.1 / 41.7 MB | 22.2 / 22.0 MB |
+
+| kernel over the corpus | the receiver placed | lambda frames judged |
+|---|---|---|
+| accepted | 8,598 | 8,653 |
+| refused | 0 | 0 |
+| unlowered | 0 | 0 |
+
+Two things the frames taught. A lambda's type is often an alias
+(`Transform`, `Middleware`) or a `lazy` field's, so the frame resolves it
+before it reads the parameters; and a literal in the argument position of a
+generic has no type of its own — the instance monomorphized it away — while
+its body is typed, so each parameter takes the type of its first use there.
+And `mentions_place` does not see a callee: `n -> f(n) + 1` captures the
+function value `f`, which the frame now counts (`mentions_in_lambda`), or
+the call could not be attributed. Every frame in the corpus is accepted
+with the placer on, so the rows the placer adds inside lambdas are the
+whole difference between the two probe columns above.
+
+
+
 **Lambda bodies are not judged, and the reason is in the emitters.** Both
 compiled backends lift a lambda under a shell that owns no rows: `direct.rs`
 `f_shell` names it `@lambda`, so `Cx::droppable` and the placed steps answer

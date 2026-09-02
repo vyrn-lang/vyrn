@@ -9298,11 +9298,12 @@ impl<'a> Gen<'a> {
         let saved_label = self.label;
         let saved_drop = std::mem::take(&mut self.drop_slots);
         let saved_cursors = std::mem::take(&mut self.cursors);
-        // A lifted lambda is a different function: it owns no release rows here
-        // (the shell that lowers it has none), so it must not read the enclosing
-        // body's placement either.
-        let saved_placed = std::mem::take(&mut self.placed);
-        let saved_droppable = std::mem::take(&mut self.droppable);
+        // A lifted lambda is a different frame, and its slots are its own
+        // (`drop_slots` above). Its release rows are not: the analysis records
+        // them under the ENCLOSING function's name, keyed by the lambda's own
+        // nodes, so `placed` and `droppable` stay in force across the lift
+        // (RFC-0125 M3, third slice). Taking them away is what left every row
+        // inside a lambda placed and never run.
         let saved_modify = std::mem::take(&mut self.modify_copyout);
         let saved_bindings = std::mem::take(&mut self.fn_bindings);
         // The lifted body is a different function: the enclosing one's append
@@ -9415,8 +9416,6 @@ impl<'a> Gen<'a> {
         self.label = saved_label;
         self.drop_slots = saved_drop;
         self.cursors = saved_cursors;
-        self.placed = saved_placed;
-        self.droppable = saved_droppable;
         self.modify_copyout = saved_modify;
         self.fn_bindings = saved_bindings;
         self.append_ok = saved_append_ok;

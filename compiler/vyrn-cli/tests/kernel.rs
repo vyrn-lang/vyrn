@@ -116,6 +116,12 @@
 //! above. The count fell from 3 to 0 and the probe is flat: 4.4 MB at
 //! 200,000 and at 400,000 turns natively.
 //!
+//! **Lambda frames are judged in the same slice.** Both compiled backends
+//! read a lifted lambda's rows under the enclosing function's name now, the
+//! core builds each lambda as a frame of its own (`Body::lambdas`), and
+//! this test judges every frame; the tally counts each as an instance.
+//! `lambda-holds-on-one-path.vyrn` went from 15.2 / 25.9 MB to 4.8 / 4.8 MB.
+//!
 //! The ratchet is 0. `VYRN_KERNEL_GAPS=<substring>`
 //! lists where each remaining gap is; `VYRN_KERNEL_TRACE=1` prints what the
 //! placer found owed in every body, and `VYRN_KERNEL_TRACE=<fn>` prints that
@@ -227,35 +233,41 @@ fn run_corpus() {
                         *details.entry((g.what, g.detail)).or_default() += 1;
                     }
                 }
-                Ok(body) => match vyrn_lower::kernel::check(&body) {
-                    Ok(()) => accepted += 1,
-                    Err(r) => {
-                        let tag = format!("{file}:{}", body.name);
-                        if dump
-                            .as_deref()
-                            .is_some_and(|d| d.split(',').any(|w| tag.contains(w)))
-                        {
-                            eprintln!("{}", body.render());
-                            let arms: Vec<String> = own
-                                .plan
-                                .arm_frees
-                                .iter()
-                                .filter(|((at, _), _)| {
-                                    own.plan.owners.get(at) == Some(&inst.func.name)
-                                })
-                                .map(|((_, arm), k)| format!("arm {arm}: {k:?}"))
-                                .collect();
-                            eprintln!("  plan arm frees: {}", arms.join("; "));
-                            let rel: Vec<String> = inst
-                                .releases
-                                .iter()
-                                .map(|r| format!("{}@{:?}:{}", r.name, r.exit, r.line))
-                                .collect();
-                            eprintln!("  plan releases: {}", rel.join("; "));
+                // The body and every lambda frame under it (RFC-0125 M3,
+                // third slice), each judged as a frame of its own.
+                Ok(top) => {
+                    for body in top.frames() {
+                        match vyrn_lower::kernel::check(body) {
+                            Ok(()) => accepted += 1,
+                            Err(r) => {
+                                let tag = format!("{file}:{}", body.name);
+                                if dump
+                                    .as_deref()
+                                    .is_some_and(|d| d.split(',').any(|w| tag.contains(w)))
+                                {
+                                    eprintln!("{}", body.render());
+                                    let arms: Vec<String> = own
+                                        .plan
+                                        .arm_frees
+                                        .iter()
+                                        .filter(|((at, _), _)| {
+                                            own.plan.owners.get(at) == Some(&inst.func.name)
+                                        })
+                                        .map(|((_, arm), k)| format!("arm {arm}: {k:?}"))
+                                        .collect();
+                                    eprintln!("  plan arm frees: {}", arms.join("; "));
+                                    let rel: Vec<String> = inst
+                                        .releases
+                                        .iter()
+                                        .map(|r| format!("{}@{:?}:{}", r.name, r.exit, r.line))
+                                        .collect();
+                                    eprintln!("  plan releases: {}", rel.join("; "));
+                                }
+                                refused.push(format!("{file}: {}", r.message));
+                            }
                         }
-                        refused.push(format!("{file}: {}", r.message));
                     }
-                },
+                }
             }
         }
     }
