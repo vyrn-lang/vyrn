@@ -614,13 +614,26 @@ fn runtime_fence(
     line: usize,
     opts: &LoadOptions,
 ) -> Option<Diagnostic> {
-    let std_key = |spec: &str| resolve_spec(spec, importer, opts).ok();
-    let fenced = if Some(imported) == std_key(MEM_SPEC).as_deref() {
-        if Some(importer) == std_key(RUNTIME_SPEC).as_deref() {
+    // A key and a std spec can spell one file two ways — `vyrn check
+    // std/runtime.vyrn` names the root relative to the shell and the std root
+    // absolutely — so identity falls back to the real path. Computed only once
+    // an import has resolved to one of the two fenced modules.
+    let is = |key: &str, spec: &str| {
+        let Ok(k) = resolve_spec(spec, importer, opts) else {
+            return false;
+        };
+        key == k
+            || matches!(
+                (crate::manifest::real_path(key), crate::manifest::real_path(&k)),
+                (Some(a), Some(b)) if a == b
+            )
+    };
+    let fenced = if is(imported, MEM_SPEC) {
+        if is(importer, RUNTIME_SPEC) {
             return None;
         }
         MEM_SPEC
-    } else if Some(imported) == std_key(RUNTIME_SPEC).as_deref() {
+    } else if is(imported, RUNTIME_SPEC) {
         RUNTIME_SPEC
     } else {
         return None;

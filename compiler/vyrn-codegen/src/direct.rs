@@ -319,7 +319,10 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         );
     }
 
-    let rt = runtime(&mut m, &wasi, gen.as_ref());
+    // PLAN-0125-runtime §6 step 1: the runtime functions written in Vyrn are
+    // reserved before the hand-emitted runtime, which calls them.
+    let mut vyrn_rt = VyrnRt::reserve(&mut m);
+    let rt = runtime(&mut m, &wasi, gen.as_ref(), &vyrn_rt);
 
     let types: HashMap<String, TypeDecl> = program
         .type_decls
@@ -442,14 +445,13 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     for f in user.iter() {
         let s = cx.signature(f)?;
         let (wp, wr) = cx.wasm_sig(&s, f.line)?;
-        cx.sigs.insert(
-            f.name.clone(),
-            Sig {
-                index: m.reserve_func(&wp, &wr),
-                ..s
-            },
-        );
+        let index = match vyrn_rt.take(&f.name, &wp, &wr, f.line)? {
+            Some(reserved) => reserved,
+            None => m.reserve_func(&wp, &wr),
+        };
+        cx.sigs.insert(f.name.clone(), Sig { index, ..s });
     }
+    vyrn_rt.check()?;
 
     // Module state (RFC-0013), before any body: a top-level `let` is one fixed
     // address per binding, reserved zeroed, and every read and write anywhere in
@@ -1933,7 +1935,11 @@ fn lower_body(
     // is skipped — it has no name to call itself by (RFC-0037), so it cannot
     // recurse without passing through a named function, and counting it here
     // would count a call the interpreter and the textual backend do not.
-    let counted = f.name != "@lambda";
+    // Nor a `std/runtime` function (PLAN-0125-runtime §6 step 1): the
+    // hand-emitted copies it replaces had no prologue, and a program that
+    // traps at the limit has to trap where it did.
+    let counted =
+        f.name != "@lambda" && !f.name.starts_with(vyrn_frontend::loader::RUNTIME_PREFIX);
     if counted {
         call_depth_enter(&mut b, cx);
     }
@@ -7696,13 +7702,15 @@ impl<'p> Fn_<'_, 'p> {
             //
             // `parse` writes its `Option<Int64>` through a slot allocated here,
             // which is the same hidden destination `readLine` gets — the M2b
-            // aggregate rule rather than a case of its own.
+            // aggregate rule rather than a case of its own. `parseI64` is a
+            // `std/runtime` function returning the `Option`, so the destination
+            // leads, as it does for every aggregate result (`wasm_sig`).
             "parse" if args.len() == 1 => {
                 let ty = Type::Option(Box::new(Type::Int));
                 let l = self.layout_of(&ty, line)?;
-                self.expr_as(m, b, &args[0], &Type::Str)?;
                 let off = b.alloc(l.size, l.align);
                 b.slot(off);
+                self.expr_as(m, b, &args[0], &Type::Str)?;
                 b.ins(&Instruction::Call(self.cx.rt.parse_i64));
                 b.slot(off);
                 return Ok(ty);
@@ -15038,6 +15046,100 @@ fn store_of(ll: &str) -> Instruction<'static> {
 /// and then [`wasm::Module::sweep`] (M2p) drops the ones no export reaches, which
 /// is why the whole table costs `fib.wasm` 290 bytes of code rather than 4,420.
 /// The data each interned on its way past is NOT swept.
+/// The runtime functions written in Vyrn (`std/runtime`, PLAN-0125-runtime §6
+/// step 1): each by the name the module declares it under, with the wasm
+/// signature this emitter calls it with.
+///
+/// The index is reserved before the hand-emitted runtime is written, because
+/// that runtime calls these (`trap` calls `strLen`, `env_get` calls `starts`,
+/// the fixed-clock preamble calls `strI64`). The body arrives when the
+/// module's function is lowered like any other user function, and
+/// [`VyrnRt::take`] is where the declared signature and the one spelled here
+/// have to agree. [`VyrnRt::check`] refuses a program whose link has no
+/// `std/runtime` — a resolver serving a partial std tree — rather than letting
+/// `Module::sweep` panic on an unfilled body.
+const VYRN_RUNTIME: &[(&str, &[ValType], &[ValType])] = &[
+    ("strLen", &[ValType::I32], &[ValType::I32]),
+    ("strCmp", &[ValType::I32, ValType::I32], &[ValType::I32]),
+    ("starts", &[ValType::I32, ValType::I32], &[ValType::I32]),
+    ("intStr", &[ValType::I64, ValType::I32], &[ValType::I32]),
+    // `Option<Int64>` is an aggregate result: the hidden destination leads.
+    ("parseI64", &[ValType::I32, ValType::I32], &[]),
+    ("strI64", &[ValType::I32], &[ValType::I64]),
+    ("utf8Valid", &[ValType::I32, ValType::I32, ValType::I32], &[ValType::I32]),
+    ("lineAt", &[ValType::I32, ValType::I64, ValType::I64], &[ValType::I64]),
+    ("colAt", &[ValType::I32, ValType::I64, ValType::I64], &[ValType::I64]),
+    (
+        "regexRun",
+        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+        &[ValType::I32],
+    ),
+];
+
+struct VyrnRt {
+    index: HashMap<&'static str, u32>,
+    filled: std::collections::HashSet<&'static str>,
+}
+
+impl VyrnRt {
+    fn reserve(m: &mut Module) -> Self {
+        let index = VYRN_RUNTIME
+            .iter()
+            .map(|(name, params, results)| (*name, m.reserve_func(params, results)))
+            .collect();
+        VyrnRt {
+            index,
+            filled: Default::default(),
+        }
+    }
+
+    fn get(&self, name: &str) -> u32 {
+        self.index[name]
+    }
+
+    /// The reserved index for `name` when it is one of the ten, after checking
+    /// the signature the module declares against the one the emitter calls.
+    fn take(
+        &mut self,
+        name: &str,
+        params: &[ValType],
+        results: &[ValType],
+        line: usize,
+    ) -> Result<Option<u32>, String> {
+        let Some(short) = name.strip_prefix(vyrn_frontend::loader::RUNTIME_PREFIX) else {
+            return Ok(None);
+        };
+        let Some((key, want_p, want_r)) = VYRN_RUNTIME.iter().find(|(k, ..)| *k == short) else {
+            return Ok(None);
+        };
+        if params != *want_p || results != *want_r {
+            return Err(format!(
+                "std/runtime.{short} (line {line}) is declared as {params:?} -> {results:?}; \
+                 the emitter calls it as {want_p:?} -> {want_r:?}"
+            ));
+        }
+        self.filled.insert(key);
+        Ok(Some(self.index[key]))
+    }
+
+    fn check(&self) -> Result<(), String> {
+        let missing: Vec<&str> = VYRN_RUNTIME
+            .iter()
+            .map(|(k, ..)| *k)
+            .filter(|k| !self.filled.contains(k))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "direct backend: `std/runtime` is not linked (no body for {}); the loader \
+             injects it from the std root, so the std tree this program was loaded \
+             against is missing it",
+            missing.join(", ")
+        ))
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct Rt {
     /// `wasi_snapshot_preview1.proc_exit`, kept here so a lowering outside
@@ -15053,8 +15155,17 @@ struct Rt {
     /// room, and the NUL (RFC-0089 M1a). Returns the address of the BYTES, so
     /// everything downstream still holds an ordinary NUL-terminated pointer.
     str_new: u32,
+    /// The ten functions `std/runtime` supplies (PLAN-0125-runtime §6 step 1):
+    /// `strlen`, `strcmp`, `int_str`, `utf8valid`, `starts`, `str_i64`,
+    /// `regex_run`, `parse_i64`, `line_at`, `col_at`. Not slots of this table —
+    /// [`VyrnRt`] reserves them before `runtime` runs and `runtime` copies the
+    /// indices in, so every call site reads one field whichever side wrote the
+    /// body.
     strlen: u32,
     strcmp: u32,
+    /// The address of the UTF-8 DFA table `utf8Valid` walks, interned by
+    /// `runtime`; every caller passes it as the third argument.
+    utf8d: u32,
     trap: u32,
     print_str: u32,
     print_i64: u32,
@@ -15272,21 +15383,22 @@ impl Rt {
             malloc: slot("malloc"),
             free: slot("free"),
             str_new: slot("str_new"),
-            strlen: slot("strlen"),
-            strcmp: slot("strcmp"),
+            strlen: 0,
+            utf8d: 0,
+            strcmp: 0,
             trap: slot("trap"),
             print_str: slot("print_str"),
             print_i64: slot("print_i64"),
-            int_str: slot("int_str"),
+            int_str: 0,
             bool_str: slot("bool_str"),
             concat: slot("concat"),
             str_append: slot("str_append"),
             trap_idx: slot("trap_idx"),
-            utf8valid: slot("utf8valid"),
+            utf8valid: 0,
             str_from_bytes: slot("str_from_bytes"),
-            starts: slot("starts"),
+            starts: 0,
             env_get: slot("env_get"),
-            str_i64: slot("str_i64"),
+            str_i64: 0,
             now_millis: slot("now_millis"),
             mono_nanos: slot("mono_nanos"),
             random_seed: slot("random_seed"),
@@ -15321,10 +15433,10 @@ impl Rt {
             map_find_pack: slot("map_find_pack"),
             map_put_pack: slot("map_put_pack"),
             map_reindex_pack: slot("map_reindex_pack"),
-            regex_run: slot("regex_run"),
-            parse_i64: slot("parse_i64"),
-            line_at: slot("line_at"),
-            col_at: slot("col_at"),
+            regex_run: 0,
+            parse_i64: 0,
+            line_at: 0,
+            col_at: 0,
             region_keep: slot("region_keep"),
             region_free: slot("region_free"),
             region_pop: slot("region_pop"),
@@ -15458,11 +15570,23 @@ fn cap_at() -> MemArg {
     }
 }
 
-fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
+fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>, v: &VyrnRt) -> Rt {
     let (fd_write, proc_exit) = (wasi.fd_write, wasi.proc_exit);
-    let base = m.n_imports();
+    // After the imports AND the ten functions `VyrnRt` reserved: the table
+    // below is dense from wherever the module is when it starts.
+    let base = m.next_func();
     let (mut rt, _table) = Rt::slots(base, gen.is_some());
     rt.proc_exit = proc_exit;
+    rt.strlen = v.get("strLen");
+    rt.strcmp = v.get("strCmp");
+    rt.starts = v.get("starts");
+    rt.int_str = v.get("intStr");
+    rt.parse_i64 = v.get("parseI64");
+    rt.str_i64 = v.get("strI64");
+    rt.utf8valid = v.get("utf8Valid");
+    rt.line_at = v.get("lineAt");
+    rt.col_at = v.get("colAt");
+    rt.regex_run = v.get("regexRun");
     let nl = rt.intern(m, "\n");
     let t = rt.intern(m, "true");
     let f = rt.intern(m, "false");
@@ -15987,75 +16111,6 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
         },
     );
 
-    // strlen(s)
-    rt.next_is(m, rt.strlen);
-    m.func(&[ValType::I32], &[ValType::I32], &[ValType::I32], 0, |b| {
-        b.ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::LocalSet(p))
-            .ins(&Instruction::Block(BlockType::Empty))
-            .ins(&Instruction::Loop(BlockType::Empty))
-            .ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::I32Load8U(byte()))
-            .ins(&Instruction::I32Eqz)
-            .ins(&Instruction::BrIf(1))
-            .ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(p))
-            .ins(&Instruction::Br(0))
-            .ins(&Instruction::End)
-            .ins(&Instruction::End)
-            .ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::I32Sub);
-    });
-
-    // strcmp(a, b) — byte order, unsigned, which is what a Vyrn `String`
-    // comparison is (RFC-0022) since a String is UTF-8 bytes.
-    let (ca, cb) = (3, 4);
-    rt.next_is(m, rt.strcmp);
-    m.func(
-        &[ValType::I32, ValType::I32],
-        &[ValType::I32],
-        &[ValType::I32, ValType::I32],
-        0,
-        |b| {
-            b.ins(&Instruction::Block(BlockType::Result(ValType::I32)))
-                .ins(&Instruction::Loop(BlockType::Empty))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalTee(ca))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalTee(cb))
-                .ins(&Instruction::I32Ne)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(ca))
-                .ins(&Instruction::LocalGet(cb))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::Br(2))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(ca))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::Br(2))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(0))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(1))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::Unreachable)
-                .ins(&Instruction::End);
-        },
-    );
-
     // trap(msg) — the message on stderr and exit 1, which is what the
     // interpreter and the native build both do. Not a wasm `unreachable`: that
     // would print wasmtime's wording, and parity compares stderr.
@@ -16092,94 +16147,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     rt.next_is(m, rt.print_i64);
     print_i64(m, write_all);
 
-    // int_str(v, signed) — the same digit loop as `print_i64`, into a fresh
-    // 24-byte String. The digits are written backwards from the end, then moved
-    // to the front: a String pointer is the start of its own buffer, because its
-    // header is the eight bytes before it (RFC-0089 M1a).
-    let (pp, neg, buf0) = (3, 4, 5);
     let str_new = rt.str_new;
-    rt.next_is(m, rt.int_str);
-    m.func(
-        &[ValType::I64, ValType::I32],
-        &[ValType::I32],
-        &[ValType::I32, ValType::I32, ValType::I32],
-        0,
-        |b| {
-            b.ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Const(24))
-                .ins(&Instruction::Call(str_new))
-                .ins(&Instruction::LocalTee(buf0))
-                .ins(&Instruction::I32Const(24))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalTee(pp))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Store8(byte()));
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::I64LtS)
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32And)
-                .ins(&Instruction::LocalTee(neg))
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I64Sub)
-                .ins(&Instruction::LocalSet(0))
-                .ins(&Instruction::End);
-            b.ins(&Instruction::Loop(BlockType::Empty))
-                .ins(&Instruction::LocalGet(pp))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::LocalTee(pp))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I64Const(10))
-                .ins(&Instruction::I64RemU)
-                .ins(&Instruction::I32WrapI64)
-                .ins(&Instruction::I32Const(b'0' as i32))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Store8(byte()))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I64Const(10))
-                .ins(&Instruction::I64DivU)
-                .ins(&Instruction::LocalTee(0))
-                .ins(&Instruction::I64Eqz)
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::BrIf(0))
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(neg))
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(pp))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::LocalTee(pp))
-                .ins(&Instruction::I32Const(b'-' as i32))
-                .ins(&Instruction::I32Store8(byte()))
-                .ins(&Instruction::End);
-            // The digits ended somewhere inside the room, and a String pointer
-            // has to be the start of its own buffer or its header is not in
-            // front of it. Move them down and publish the length.
-            b.ins(&Instruction::LocalGet(buf0))
-                .ins(&Instruction::LocalGet(pp))
-                .ins(&Instruction::LocalGet(buf0))
-                .ins(&Instruction::I32Const(25))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(pp))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-            b.ins(&Instruction::LocalGet(buf0));
-            str_hdr(b);
-            b.ins(&Instruction::LocalGet(buf0))
-                .ins(&Instruction::I32Const(24))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(pp))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::I32Store(word()));
-            b.ins(&Instruction::LocalGet(buf0));
-        },
-    );
 
     // bool_str(v) — the interned literal itself, not a copy of it. `print` wants
     // exactly that and frees nothing; `@str` copies at its own call site, because
@@ -16409,82 +16377,14 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     // the first runtime function this table has LOST, which is what made the
     // self-registering `next_is` worth doing in 5d6a857.)
 
-    // utf8valid(s, len) — Björn Höhrmann's DFA, over the SAME table the textual
-    // backend emits (`crate::utf8d_table`). Sharing the bytes is the point: two
-    // tables would be two answers to "is this valid UTF-8", free to drift by one
-    // entry, and the thing they decide is whether a program traps.
-    //
-    // 256 byte-class entries, then 9 states × 12 classes of transitions. State 0
-    // accepts, 12 rejects, and every rejecting transition stays at 12 — so the
-    // loop never needs an early exit.
+    // Björn Höhrmann's UTF-8 DFA, the SAME table the textual backend emits
+    // (`crate::utf8d_table`). Sharing the bytes is the point: two tables would
+    // be two answers to "is this valid UTF-8", free to drift by one entry, and
+    // the thing they decide is whether a program traps. The walk over it is
+    // `std/runtime`'s `utf8Valid` (PLAN-0125-runtime §6 step 1), which takes
+    // the table's address as its third argument; every call below passes it.
     let utf8d = m.data(&crate::utf8d_table(), 1);
-    let (i, st) = (3, 4);
-    rt.next_is(m, rt.utf8valid);
-    m.func(
-        &[ValType::I32, ValType::I32],
-        &[ValType::I32],
-        &[ValType::I32, ValType::I32],
-        0,
-        |b| {
-            // The ASCII prefix, eight bytes at a time — the textual backend's
-            // `fast` loop (RFC-0125 §1): a word with no high bit is eight
-            // steps the DFA would take from state 0 to state 0.
-            b.ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::Loop(BlockType::Empty))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::I32Const(8))
-                .ins(&Instruction::I32LtU)
-                .ins(&Instruction::BrIf(1))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I64Load(byte()))
-                .ins(&Instruction::I64Const(-9187201950435737472))
-                .ins(&Instruction::I64And)
-                .ins(&Instruction::I64Eqz)
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::BrIf(1))
-                .ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::I32Const(8))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(i))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::Loop(BlockType::Empty))
-                .ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32GeU)
-                .ins(&Instruction::BrIf(1))
-                // st = utf8d[256 + st + utf8d[s[i]]]
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::I32Const(utf8d as i32))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalGet(st))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Const((utf8d + 256) as i32))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalSet(st))
-                .ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(i))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(st))
-                .ins(&Instruction::I32Eqz);
-        },
-    );
-
+    rt.utf8d = utf8d;
     // str_from_bytes(data, len, dest) — RFC-0014's `stringFromBytes`, writing a
     // whole `Result<String, String>` through `dest`.
     //
@@ -16558,6 +16458,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
                 .ins(&Instruction::I32Store8(byte()))
                 .ins(&Instruction::LocalGet(buf))
                 .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::I32Const(utf8d as i32))
                 .ins(&Instruction::Call(utf8valid))
                 .ins(&Instruction::I32Eqz)
                 .ins(&Instruction::If(BlockType::Empty))
@@ -17533,68 +17434,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
         );
     }
 
-    // regex_run(s, table, start, accept) -> whether `s` matches in full.
-    //
-    // RFC-0046 compiles a `=~` pattern to a COMPLETE DFA — every state has all 256
-    // transitions and a dead state absorbs a non-match — so the walk has no
-    // conditional but the end of the string, and no anchoring to check: a full
-    // match is "the state the last byte left us in accepts". The pattern is
-    // entirely in the table, which is why one helper serves every pattern in the
-    // module, and why this reads the same as `@__vyrn_regex_run` in the textual
-    // backend and `Dfa::matches` in the interpreter. Three spellings of one walk is
-    // two too many, but the other two already existed; what matters is that the
-    // TABLE has one source (`vyrn_frontend::regex::compile`), so a disagreement
-    // would have to be in the walk rather than in the language.
-    let (st, ch) = (5, 6);
-    rt.next_is(m, rt.regex_run);
-    m.func(
-        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
-        &[ValType::I32],
-        &[ValType::I32, ValType::I32],
-        0,
-        |b| {
-            b.ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::LocalSet(st));
-            b.ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::Loop(BlockType::Empty));
-            b.ins(&Instruction::LocalGet(0))
-                // UNSIGNED, and the whole corpus is ASCII so nothing here says so:
-                // a signed load turns a UTF-8 continuation byte into a negative
-                // table index, which reads memory below the table and answers
-                // wrongly rather than trapping. `the_dfa_walk_...` is the test.
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalTee(ch))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::BrIf(1));
-            // table[st * 256 + ch], four bytes per entry: `st << 10` is the row.
-            b.ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(st))
-                .ins(&Instruction::I32Const(10))
-                .ins(&Instruction::I32Shl)
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(ch))
-                .ins(&Instruction::I32Const(2))
-                .ins(&Instruction::I32Shl)
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalSet(st));
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(0))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(3))
-                .ins(&Instruction::LocalGet(st))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Ne);
-        },
-    );
-
-    text_runtime(m, &rt);
+    region_runtime(m, &rt);
 
     // And the total: `count` is derived from the declarations, so this is the one
     // place it meets the emission.
@@ -17602,243 +17442,12 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     rt
 }
 
-/// `parse`, `lineAt` and `colAt` — the three loops RFC-0078 deliberately left as
-/// builtins, and therefore the three this backend owes a lowering.
+/// The region runtime (RFC-0004 §4's arena on this backend): `region_keep`,
+/// `region_free` and `region_pop`. PLAN-0125-runtime §6 step 8 moves it.
 ///
-/// They are together because they are refused for the same *kind* of reason and
-/// not the same reason. `parse` is a semantics refusal: `std/num`'s `parseInt64`
-/// is the same digit loop and DECLINES where this one wraps, so routing `parse`
-/// through it would change what every existing caller does with
-/// `parse("18446744073709551615")` — which is `Some(-1)` here and on the other two
-/// engines. `lineAt`/`colAt` are a cache refusal: the loop is four lines of Vyrn,
-/// but it is O(offset) and a scanner asks once per node, so the interpreter
-/// memoizes a line-start table per buffer that a generator — barred from module
-/// state by comptime purity — could not hold.
-///
-/// **No cache here, and that is a decision.** The native shim does not memoize
-/// either (`__vyrn_line_at` counts from byte 0 on every call), so counting
-/// directly makes this backend agree with the engine it is closest to rather than
-/// inventing a third behaviour; and the 122 ms RFC-0078 M4b(2) measured is a
-/// GENERATION-time cost, paid by whichever engine runs the generator. A module
-/// emitted by this backend reaches these only where compiled code calls them at
-/// run time, which in the corpus is `textbytes.vyrn` comparing the builtin against
-/// `std/text` over twelve short buffers. A cache would be per-buffer state in
-/// linear memory keyed on an address the bump allocator can recycle — the
-/// interpreter avoids that by holding the `Rc` — so it is not a small change, and
-/// nothing measured wants it yet.
-fn text_runtime(m: &mut Module, rt: &Rt) {
-    let sum2 = layout::of_ll("{ i1, i64, i64 }").expect("the Option/Result shape");
-
-    // parse_i64(s, dest) — RFC-0014's `parse` as an `Option<Int64>` written
-    // through `dest`: an optional `-`, then digits, ALL of them consumed.
-    //
-    // Every decline is the same decline (`None`), and there are three ways to
-    // reach it: nothing after the sign (`""` and `"-"`), a byte that is not a
-    // digit anywhere in the rest (`"+1"`, `" 1"`, `"1 "`, `"1.5"`, `"abc"`,
-    // `"12a"`, `"--1"`), and that is all — there is no third category, in
-    // particular NOT overflow. `acc * 10 + d` in wrapping `i64` is the
-    // interpreter's `wrapping_mul`/`wrapping_add` instruction for instruction, so
-    // `"9223372036854775808"` is `Int64.min` and `"18446744073709551615"` is `-1`
-    // on all three engines. `examples/numbytes.vyrn` pins every row of that table.
-    //
-    // Deliberately NOT `str_i64` next door, which reads `+` and stops at the first
-    // byte that is not a digit — that is `strtoll`'s contract for an injected
-    // `VYRN_FIXED_TIME`, and it is the opposite of this one's on exactly the inputs
-    // `numbytes` prints.
-    let (acc, neg, c) = (3, 4, 5); // params 0..1, the frame base 2, then ours
-    rt.next_is(m, rt.parse_i64);
-    m.func(
-        &[ValType::I32, ValType::I32],
-        &[],
-        &[ValType::I64, ValType::I32, ValType::I32],
-        0,
-        |b| {
-            b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
-                .ins(&Instruction::Block(BlockType::Empty)); // 0: none
-                                                             // The sign, and then the first byte AFTER it — which is the byte the
-                                                             // emptiness test is about.
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalTee(c))
-                .ins(&Instruction::I32Const(b'-' as i32))
-                .ins(&Instruction::I32Eq)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::LocalSet(neg))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalTee(0))
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalSet(c))
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::BrIf(0));
-            b.ins(&Instruction::Block(BlockType::Empty)) // 1: the digits ran out
-                .ins(&Instruction::Loop(BlockType::Empty)); // 0
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalTee(c))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::BrIf(1));
-            // Not a digit: out of the `none` block, which is two levels further
-            // out than the loop's own exit.
-            b.ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I32Const(b'0' as i32))
-                .ins(&Instruction::I32LtU)
-                .ins(&Instruction::BrIf(2))
-                .ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I32Const(b'9' as i32))
-                .ins(&Instruction::I32GtU)
-                .ins(&Instruction::BrIf(2));
-            b.ins(&Instruction::LocalGet(acc))
-                .ins(&Instruction::I64Const(10))
-                .ins(&Instruction::I64Mul)
-                .ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::I64Const(b'0' as i64))
-                .ins(&Instruction::I64Sub)
-                .ins(&Instruction::I64Add)
-                .ins(&Instruction::LocalSet(acc))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(0))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            // `Some(±acc)`. Negated in place so the three stores below have no
-            // branch in the middle of them; `wrapping_neg` of `Int64.min` is
-            // `Int64.min`, which is `i64.sub` from zero and needs no note.
-            b.ins(&Instruction::LocalGet(neg))
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::LocalGet(acc))
-                .ins(&Instruction::I64Sub)
-                .ins(&Instruction::LocalSet(acc))
-                .ins(&Instruction::End);
-            // The same three stores `sum2_write_to` makes, at the same
-            // `layout::of_ll ∘ llt` offsets — spelled out only because the payload
-            // is already an `i64` rather than a word to zero-extend.
-            b.ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Store8(MemArg {
-                    offset: sum2.fields[0] as u64,
-                    align: 0,
-                    memory_index: 0,
-                }))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(acc))
-                .ins(&Instruction::I64Store(at(sum2.fields[1])))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::I64Store(at(sum2.fields[2])));
-            b.ins(&Instruction::Br(1)).ins(&Instruction::End); // none
-            sum2_write_to(b, 1, &sum2, 0, None);
-            b.ins(&Instruction::End); // fin
-        },
-    );
-
-    // line_at(d, len, off) / col_at(d, len, off) — the 1-based line and column of
-    // a byte offset, and a column counts BYTES.
-    //
-    // That last part is measured rather than assumed (RFC-0078 M4b(2)): the
-    // interpreter computes `off - lineStart + 1` over a byte table and the shim
-    // walks bytes backwards, so the `x` in `éx` is column 3. `std/vyx.vyrn`'s
-    // wrapper documents it as "chars since the last LF", which is wrong for any
-    // line with non-ASCII in it, and RFC-0033's `#line` directives want the byte
-    // column anyway.
-    //
-    // Both clamp `off` to `len` and neither clamps it below zero, because a
-    // negative `off` falls out of the loop conditions being SIGNED: `0 >= off`
-    // ends the forward count before it starts and `off <= 0` ends the backward
-    // walk, which is 1 either way and is what the interpreter's `.max(0)` and the
-    // shim's `i < off` / `i > 0` both give.
-    let (i, out) = (4, 5); // params 0..2, the frame base 3, then ours
-    rt.next_is(m, rt.line_at);
-    m.func(
-        &[ValType::I32, ValType::I64, ValType::I64],
-        &[ValType::I64],
-        &[ValType::I64, ValType::I64],
-        0,
-        |b| {
-            b.ins(&Instruction::I64Const(1))
-                .ins(&Instruction::LocalSet(out));
-            clamp_off(b);
-            b.ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::Loop(BlockType::Empty));
-            b.ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I64GeS)
-                .ins(&Instruction::BrIf(1));
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::I32WrapI64)
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::I32Const(b'\n' as i32))
-                .ins(&Instruction::I32Eq)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(out))
-                .ins(&Instruction::I64Const(1))
-                .ins(&Instruction::I64Add)
-                .ins(&Instruction::LocalSet(out))
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::I64Const(1))
-                .ins(&Instruction::I64Add)
-                .ins(&Instruction::LocalSet(i))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(out));
-        },
-    );
-
-    rt.next_is(m, rt.col_at);
-    m.func(
-        &[ValType::I32, ValType::I64, ValType::I64],
-        &[ValType::I64],
-        &[ValType::I64],
-        0,
-        |b| {
-            let out = 4;
-            b.ins(&Instruction::I64Const(1))
-                .ins(&Instruction::LocalSet(out));
-            clamp_off(b);
-            // `off` IS the cursor, walked down to the byte after the previous LF.
-            b.ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::Loop(BlockType::Empty));
-            b.ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::I64LeS)
-                .ins(&Instruction::BrIf(1));
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I32WrapI64)
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Const(-1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::I32Const(b'\n' as i32))
-                .ins(&Instruction::I32Eq)
-                .ins(&Instruction::BrIf(1));
-            b.ins(&Instruction::LocalGet(out))
-                .ins(&Instruction::I64Const(1))
-                .ins(&Instruction::I64Add)
-                .ins(&Instruction::LocalSet(out))
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I64Const(-1))
-                .ins(&Instruction::I64Add)
-                .ins(&Instruction::LocalSet(2))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(out));
-        },
-    );
-
+/// `parse_i64`, `line_at` and `col_at` were emitted here until step 1 moved
+/// them into `std/runtime` as `parseI64`, `lineAt` and `colAt`.
+fn region_runtime(m: &mut Module, rt: &Rt) {
     // region_keep(bytes) -> bytes — the arena's record of one `String` block.
     //
     // RFC-0004 §4's arena, on this backend at last. What it stores is
@@ -18028,20 +17637,6 @@ fn text_runtime(m: &mut Module, rt: &Rt) {
     }
 }
 
-/// `if (off > len) off = len`, over parameters 1 and 2 of a `line_at`-shaped
-/// signature. One place, because the two helpers must clamp identically or they
-/// disagree past the end of the buffer — the offset RFC-0078's oracle sweeps to
-/// `len + 3` precisely to catch.
-fn clamp_off(b: &mut Frame) {
-    b.ins(&Instruction::LocalGet(2))
-        .ins(&Instruction::LocalGet(1))
-        .ins(&Instruction::I64GtS)
-        .ins(&Instruction::If(BlockType::Empty))
-        .ins(&Instruction::LocalGet(1))
-        .ins(&Instruction::LocalSet(2))
-        .ins(&Instruction::End);
-}
-
 /// Rights and flags from the `wasi_snapshot_preview1` witx, named rather than
 /// spelled at the call: a wrong bit in `path_open` is an `ENOTCAPABLE` that reads
 /// exactly like a missing file, i.e. a canonical `Err` for the wrong reason.
@@ -18096,48 +17691,6 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
     // The monotonic counter under a fixed clock: a static, because successive
     // calls have to differ and the interpreter's own base/step is `1e9 + n·1e6`.
     let mono_ctr = m.reserve(8, 8);
-
-    // starts(a, b) — whether NUL-terminated `a` begins with NUL-terminated `b`.
-    rt.next_is(m, rt.starts);
-    m.func(
-        &[ValType::I32, ValType::I32],
-        &[ValType::I32],
-        &[ValType::I32],
-        0,
-        |b| {
-            let c = 3; // params 0..1, the frame base 2, then ours
-            b.ins(&Instruction::Block(BlockType::Result(ValType::I32)))
-                .ins(&Instruction::Loop(BlockType::Empty))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalTee(c))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::Br(2))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I32Ne)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::Br(2))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(0))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(1))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::Unreachable)
-                .ins(&Instruction::End);
-        },
-    );
 
     // env_get(key) — the value of the environment entry `key` names (`key`
     // includes its `=`), or 0. WASI hands the whole environment over in one go,
@@ -18231,85 +17784,6 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::End)
                 .ins(&Instruction::End);
             b.ins(&Instruction::I32Const(0)).ins(&Instruction::End);
-        },
-    );
-
-    // str_i64(p) — `strtoll(p, 0, 10)` for everything an injected value can be:
-    // an optional sign then decimal digits, stopping at the first byte that is not
-    // one.
-    //
-    // ponytail: no leading-whitespace skip and no overflow clamp to
-    // `LLONG_MAX`/`MIN`. Both are `strtoll` behaviours nothing reaches — the only
-    // callers are `VYRN_FIXED_TIME` and `VYRN_FIXED_SEED`, which the harness writes
-    // as bare decimals. A program that could pass arbitrary text here would need
-    // the real thing.
-    rt.next_is(m, rt.str_i64);
-    m.func(
-        &[ValType::I32],
-        &[ValType::I64],
-        &[ValType::I64, ValType::I32, ValType::I32],
-        0,
-        |b| {
-            let (v, neg, c) = (2, 3, 4);
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalTee(c))
-                .ins(&Instruction::I32Const(b'-' as i32))
-                .ins(&Instruction::I32Eq)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::LocalSet(neg))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(0))
-                .ins(&Instruction::Else)
-                .ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I32Const(b'+' as i32))
-                .ins(&Instruction::I32Eq)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::Loop(BlockType::Empty))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalTee(c))
-                .ins(&Instruction::I32Const(b'0' as i32))
-                .ins(&Instruction::I32LtU)
-                .ins(&Instruction::BrIf(1))
-                .ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I32Const(b'9' as i32))
-                .ins(&Instruction::I32GtU)
-                .ins(&Instruction::BrIf(1))
-                .ins(&Instruction::LocalGet(v))
-                .ins(&Instruction::I64Const(10))
-                .ins(&Instruction::I64Mul)
-                .ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::I64Const(b'0' as i64))
-                .ins(&Instruction::I64Sub)
-                .ins(&Instruction::I64Add)
-                .ins(&Instruction::LocalSet(v))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(0))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(neg))
-                .ins(&Instruction::If(BlockType::Result(ValType::I64)))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::LocalGet(v))
-                .ins(&Instruction::I64Sub)
-                .ins(&Instruction::Else)
-                .ins(&Instruction::LocalGet(v))
-                .ins(&Instruction::End);
         },
     );
 
@@ -18747,6 +18221,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::BrIf(0))
                 .ins(&Instruction::LocalGet(buf))
                 .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Const(rt.utf8d as i32))
                 .ins(&Instruction::Call(utf8valid))
                 .ins(&Instruction::I32Eqz)
                 .ins(&Instruction::BrIf(0));
@@ -19137,6 +18612,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                 .ins(&Instruction::End);
             b.ins(&Instruction::LocalGet(buf))
                 .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Const(rt.utf8d as i32))
                 .ins(&Instruction::Call(utf8valid))
                 .ins(&Instruction::I32Eqz)
                 .ins(&Instruction::If(BlockType::Empty))
@@ -19954,6 +19430,36 @@ fn expr_name(e: &Expr) -> String {
 mod tests {
     use super::*;
 
+    /// A single-source program with the runtime linked. Since PLAN-0125-runtime
+    /// §6 step 1 the string family is `std/runtime`, which the loader injects
+    /// into every program, so a test that compiles anything loads the way the
+    /// CLI does rather than through the bare `vyrn_frontend::check`.
+    fn linked(src: &str) -> Result<Program, String> {
+        let files = vyrn_frontend::loader::MapResolver(
+            [
+                ("main.vyrn", src),
+                (
+                    "std/runtime.vyrn",
+                    include_str!("../../../std/runtime.vyrn"),
+                ),
+                ("std/mem.vyrn", include_str!("../../../std/mem.vyrn")),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        );
+        let opts = vyrn_frontend::loader::LoadOptions {
+            std_root: Some("std".into()),
+            ..Default::default()
+        };
+        vyrn_frontend::load(src, "main.vyrn", &opts, &files).map_err(|ds| {
+            ds.iter()
+                .map(|d| d.render())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    }
+
     /// The gap message is the ladder's grouping key, so its shape is pinned:
     /// one construct, one line, no site-specific text in between.
     #[test]
@@ -20130,7 +19636,7 @@ mod tests {
                       fn f(n: Int64) -> Int64 { let u = U { age: n } return u.age }
                       fn main() -> Int64 { return f(20) }";
         for (what, src) in [("bare", bare), ("in a record", hidden)] {
-            let p = vyrn_frontend::check(src).expect(what);
+            let p = linked(src).expect(what);
             let bytes = compile(&p).expect(what);
             assert!(
                 bytes.windows(msg.len()).any(|w| w == msg.as_bytes()),
@@ -20142,7 +19648,7 @@ mod tests {
         // same declaration, with nothing flowing into it.
         let unreached = "type Age = Int64 where value >= 18 \
                          fn main() -> Int64 { return 20 }";
-        let p = vyrn_frontend::check(unreached).unwrap();
+        let p = linked(unreached).unwrap();
         let bytes = compile(&p).unwrap();
         assert!(
             !bytes.windows(msg.len()).any(|w| w == msg.as_bytes()),
@@ -20167,7 +19673,7 @@ mod tests {
                        } } \
                    fn main() -> Int64 { \
                        return match f(bytes(\"hi\")) { Ok(s) => s.byteLength, Err(e) => 0 - 1 } }";
-        let p = vyrn_frontend::check(src).unwrap();
+        let p = linked(src).unwrap();
         assert!(compile(&p).is_ok());
     }
 
@@ -20193,7 +19699,7 @@ mod tests {
                      let o: Option<Int64> = Some(1) \
                      return match o {{ Some(n) => v.{field}, None => 0 }} }}"
             );
-            let p = vyrn_frontend::check(&src).expect(what);
+            let p = linked(&src).expect(what);
             assert!(
                 compile(&p).is_ok(),
                 "{what}: {:?}",
@@ -20248,7 +19754,7 @@ mod tests {
             ),
         ];
         for (what, src) in cases {
-            let p = vyrn_frontend::check(src).expect(what);
+            let p = linked(src).expect(what);
             assert!(compile(&p).is_ok(), "{what}: {}", compile(&p).unwrap_err());
         }
     }

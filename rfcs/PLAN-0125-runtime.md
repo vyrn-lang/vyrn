@@ -1,6 +1,7 @@
 # RFC-0125 — the runtime in Vyrn: design for M4
 
-- **Status:** Design (2026-09-02). Nothing here has landed. This document is
+- **Status:** Design (2026-09-02); §6 steps 0 and 1 landed on `track-e` the same
+  day, see the results under the §6 table. This document is
   the design RFC-0125 §2.4 states in one paragraph, written out so M4 can be
   built one family at a time and each family can be gated. It decides the
   primitive set, the fence, the allocator and the migration order; §8 lists
@@ -552,6 +553,42 @@ C twin stays.
 
 Each step's prediction, per RFC-0101 §3.0's first rule, is the number in its
 extra-gate column, and the report goes into RFC-0125 §3 M4 either way.
+
+**Results, steps 0 and 1 (2026-09-02, branch `track-e`).** Step 0: `std/mem`
+declares the eighteen primitives of §2.1 and §2.3 as exported functions whose
+bodies the emitter never reads (`Fn_::mem_prim` lowers each call to its
+instruction; `vyrn-lower` builds no instance for them); its audience is the
+constant `runtime_fence` in the loader, beside `RT_MODULES`, and a user import
+of `std/mem` or `std/runtime` is refused with the RFC-0072 wording whether or
+not `vyrn.json` declares an audience (`tests/audience.rs`, three new tests;
+`vyrn why std/mem.vyrn` prints "declared by the compiler"). `std/runtime` is an
+`RtModule` with `always: true`, so every load links it. Step 1: the ten pure
+string functions are Vyrn in `std/runtime.vyrn` (264 lines with their doc, over
+`load8`, `load32` and `load64`); the wasm emitter reserves their indices before
+its hand-emitted runtime, which calls them, and the ten hand-emitted bodies
+are deleted — 692 lines out of `direct.rs`, 198 in (the `VyrnRt` table and its
+signature check). `utf8Valid` takes the DFA table's address as a third
+argument, and `parseI64` returns the `Option` rather than writing through a
+pointer. The runtime's frames are not counted against the call-depth budget,
+because the copies they replace had no prologue. Gates: frontend, codegen and
+the ten `vyrn-cli` suites green; parity 41 of 41 byte-identical; residue
+green. Timing, same machine, `run.py --runs 10` with another worktree's parity
+job sharing the CPU (spread 13 to 68 percent, so read the wasm column against
+the baseline taken the same way before the change):
+
+| program | native before | native after | wasm before | wasm after | recorded (RFC-0125 §1.5b) |
+|---|---|---|---|---|---|
+| fasta | 0.74 s | 0.80 s | 0.85 s | 0.89 s (cpu 0.89 s) | 0.80 s / 0.93 s |
+| reverse-complement | 0.35 s | 0.37 s | 1.01 s | 1.07 s to 1.12 s (cpu 1.06 s) | 0.46 s / 1.06 s |
+
+The native column does not run the Vyrn copies (step 3 moves that route), so
+its movement is the noise floor of the run; the wasm column moves inside it.
+The interpreter does not call through (§5.1): RFC-0076's engine compiles a
+whole generator program, not one function of a linked module, so a per-call
+bridge would be a mechanism this plan has not designed, and M5 deletes the
+interpreter's copies anyway. The lowered-form gate's synthesized count went
+from 1,296 at step 0 to 1,233 with the module linked (1,261 on an earlier run;
+the count is address-collision noisy by construction), under the 1,400 ceiling.
 
 ---
 

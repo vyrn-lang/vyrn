@@ -418,11 +418,17 @@ fn build<'a>(
 
     // The roots are every non-generic function: that is what both backends emit
     // before either worklist turns, and a generic body is reachable only from
-    // one of them.
+    // one of them. A `std/mem` primitive is a declaration whose lowering is one
+    // instruction at each call (PLAN-0125-runtime §2.1, §3.2); like an
+    // `extern`, it has no body of its own to build.
     let mut queue: VecDeque<(&Function, Vec<Type>)> = program
         .functions
         .iter()
-        .filter(|f| f.type_params.is_empty() && !f.is_extern)
+        .filter(|f| {
+            f.type_params.is_empty()
+                && !f.is_extern
+                && !f.name.starts_with(vyrn_frontend::loader::MEM_PREFIX)
+        })
         .map(|f| (f, Vec::new()))
         .collect();
     let mut seen: Vec<(String, String)> = queue

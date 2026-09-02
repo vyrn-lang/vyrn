@@ -943,6 +943,16 @@ the shim becomes the WASI host.
 **Gate:** parity green, the free audit and poison deleted, binary-trees under
 the native route at or below its wasmtime time from §1.4.
 
+*Steps 0 and 1 of `PLAN-0125-runtime.md` §6 landed 2026-09-02 (`track-e`):
+`std/mem` fenced by an audience the compiler declares, `std/runtime` linked into
+every program, and the ten pure string functions (`strLen`, `strCmp`, `starts`,
+`intStr`, `parseI64`, `strI64`, `utf8Valid`, `lineAt`, `colAt`, `regexRun`)
+written in Vyrn with their 692 lines of hand-emitted wasm deleted from
+`direct.rs`. Parity 41 of 41, residue green. fasta and reverse-complement under
+wasmtime: 0.89 s and 1.07 s against §1.5b's 0.93 s and 1.06 s, on a machine
+shared with another parity job; the native route is unchanged until step 3. The
+numbers and the gates are recorded under the plan's §6 table.*
+
 ### M5 — `vyrn run` is compiled
 
 `run`, `test` and `bench --check` execute the wasm in the embedded wasmtime.
