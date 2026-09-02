@@ -2583,7 +2583,6 @@ impl<'p> Fn_<'_, 'p> {
     /// Returns what each hoisted name held before, for `While` to put back.
     fn hoist_walks(
         &mut self,
-        m: &mut Module,
         b: &mut Frame,
         cond: &Expr,
         body: &Block,
@@ -2615,14 +2614,20 @@ impl<'p> Fn_<'_, 'p> {
             if !header_invariant(cond, body, &name) {
                 continue;
             }
-            self.expr(
-                m,
-                b,
-                &Expr::Var {
-                    name: name.clone(),
-                    line,
-                },
-            )?;
+            // The binding's value, the way `Expr::Var` leaves it — a local's
+            // value or a slot's address — emitted here rather than through a
+            // synthesized `Var` node: the lowered-form gate counts backend
+            // answers about nodes no instantiation holds, and a node made up
+            // here would be one.
+            match place {
+                Place::Local(l) => {
+                    b.ins(&Instruction::LocalGet(l));
+                }
+                Place::Slot(off) => {
+                    b.slot(off);
+                }
+                Place::Static(_) => continue,
+            }
             let w = self.walk(b, &ty, line)?;
             out.push((name.clone(), self.walks.insert(name, w)));
         }
@@ -4004,7 +4009,7 @@ impl<'p> Fn_<'_, 'p> {
             Stmt::While { cond, body, line } => {
                 // RFC-0125 M1: the headers this loop reads and never moves,
                 // taken apart once, before the loop.
-                let hoisted = self.hoist_walks(m, b, cond, body, *line)?;
+                let hoisted = self.hoist_walks(b, cond, body, *line)?;
                 // `block { loop { br_if 1 (!cond); body; br 0 } }` — the block is
                 // where `break` goes, the loop is where `continue` goes, and
                 // neither needs a relooper because both are in the AST already.
