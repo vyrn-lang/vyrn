@@ -664,9 +664,13 @@ The route gate: 171 corpus programs byte-identical against the `wasmtime` CLI
 on raw stdout, stderr and exit code, 33 skipped (the parity loop's refusals and
 the one host-only program; `listdir.vyrn` is checked, because the route runs
 the wasm). Gates: fmt, workspace, the seven `vyrn-cli` suites, parity 41 of 41,
-residue, `wasmhash` manifest unchanged (the route reads the wasm and emits
-nothing), `doc --verify`; the cross-engine generator gate fails on the same five
-programs at base and head. Timing, `rfcs/bench-0104/harness/run.py` with the
+residue, `doc --verify`; the cross-engine generator gate fails on the same five
+programs at base and head. The `wasmhash` manifest check is red on 172 of 172
+examples at base and at head with the same emitted hashes on both: the route
+reads the wasm and emits nothing (the branch touches no emitter file), and the
+committed `rfcs/census/wasm-sha256.tsv` predates the five emitter commits of
+steps 1 and 2 and `listDir`; whoever lands next on the emitter regenerates it
+with `VYRN_WASM_MANIFEST=write`. Timing, `rfcs/bench-0104/harness/run.py` with the
 new `vyrn-wasm2c` contestant, RFC-0104's timing sizes, medians of five, one
 machine, contestants interleaved per program:
 
