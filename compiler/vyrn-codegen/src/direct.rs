@@ -3475,6 +3475,16 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::Call(self.cx.rt.region_free));
     }
 
+    /// Call `std/runtime`'s `strFromBytes` with the destination, the bytes and
+    /// their count already on the stack: the DFA table and the two interned
+    /// messages are its constant tail (PLAN-0125-runtime §6 step 4).
+    fn str_from_bytes_tail(&self, b: &mut Frame) {
+        b.ins(&Instruction::I32Const(self.cx.rt.utf8d as i32))
+            .ins(&Instruction::I32Const(self.cx.rt.bnul as i32))
+            .ins(&Instruction::I32Const(self.cx.rt.butf8 as i32))
+            .ins(&Instruction::Call(self.cx.rt.str_from_bytes));
+    }
+
     /// The `String` on the stack is a block THIS emitter just allocated. Inside a
     /// `region` it is the arena's, so record it; the closing brace hands it back
     /// ([`Fn_::region_exit`]). Stack-neutral: `region_keep` takes the pointer and
@@ -7624,14 +7634,14 @@ impl<'p> Fn_<'_, 'p> {
                 let src = self.scratch(b, ValType::I32, 0);
                 let al = self.layout_of(&bytes, line)?;
                 b.ins(&Instruction::LocalSet(src));
+                let off = b.alloc(l.size, l.align);
+                b.slot(off);
                 b.ins(&Instruction::LocalGet(src));
                 b.ins(&Instruction::I32Load(word_at(al.fields[0])));
                 b.ins(&Instruction::LocalGet(src));
                 b.ins(&Instruction::I64Load(at(al.fields[1])));
                 b.ins(&Instruction::I32WrapI64);
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                b.ins(&Instruction::Call(self.cx.rt.str_from_bytes));
+                self.str_from_bytes_tail(b);
                 b.slot(off);
                 return Ok(ty);
             }
@@ -13500,10 +13510,10 @@ impl<'p> Fn_<'_, 'p> {
         // miss: NOW the key exists — str_from_bytes, whose Err is the trap.
         let rl = layout::of_ll("{ i1, i64, i64 }").expect("the Result shape");
         let dest = b.alloc(rl.size, rl.align);
+        b.slot(dest);
         b.ins(&Instruction::LocalGet(wdata));
         b.ins(&Instruction::LocalGet(wlen));
-        b.slot(dest);
-        b.ins(&Instruction::Call(self.cx.rt.str_from_bytes));
+        self.str_from_bytes_tail(b);
         b.slot(dest + rl.fields[0]);
         b.ins(&Instruction::I32Load8U(MemArg {
             offset: 0,
@@ -15274,6 +15284,17 @@ const VYRN_RUNTIME: &[(&str, &[ValType], &[ValType])] = &[
     // `i32` call site), and it is the signature `__vyrn_malloc` exports.
     ("malloc", &[ValType::I64], &[ValType::I32]),
     ("free", &[ValType::I32], &[]),
+    // Step 4: the allocating strings. `strFromBytes` returns a
+    // `Result<Int64, Int64>`, an aggregate, so the hidden destination leads;
+    // the DFA table and the two interned messages are its last three arguments.
+    ("strNew", &[ValType::I32, ValType::I32], &[ValType::I32]),
+    ("strConcat", &[ValType::I32, ValType::I32], &[ValType::I32]),
+    (
+        "strAppend",
+        &[ValType::I32, ValType::I32, ValType::I32],
+        &[ValType::I32],
+    ),
+    ("strFromBytes", &[ValType::I32; 6], &[]),
     ("strLen", &[ValType::I32], &[ValType::I32]),
     ("strCmp", &[ValType::I32, ValType::I32], &[ValType::I32]),
     ("starts", &[ValType::I32, ValType::I32], &[ValType::I32]),
@@ -15324,7 +15345,7 @@ impl VyrnRt {
         self.index[name]
     }
 
-    /// The reserved index for `name` when it is one of the twelve, after checking
+    /// The reserved index for `name` when it is one of the table's, after checking
     /// the signature the module declares against the one the emitter calls.
     fn take(
         &mut self,
@@ -15382,6 +15403,8 @@ struct Rt {
     /// Allocate a `String` buffer: its `{ len, cap }` header, `cap` bytes of
     /// room, and the NUL (RFC-0089 M1a). Returns the address of the BYTES, so
     /// everything downstream still holds an ordinary NUL-terminated pointer.
+    /// Vyrn since PLAN-0125-runtime §6 step 4, with `concat`, `str_append`
+    /// and `str_from_bytes` below.
     str_new: u32,
     /// The ten functions `std/runtime` supplies (PLAN-0125-runtime §6 step 1):
     /// `strlen`, `strcmp`, `int_str`, `utf8valid`, `starts`, `str_i64`,
@@ -15400,13 +15423,17 @@ struct Rt {
     int_str: u32,
     bool_str: u32,
     concat: u32,
-    /// Grow a `String` accumulator in place (RFC-0081). A function rather than an
-    /// inline sequence at every `s = s + …`: the body is forty instructions with
-    /// two `if`s in it, and `std/json` alone has six append sites.
+    /// Grow a `String` accumulator in place (RFC-0081): `std/runtime`'s
+    /// `strAppend`, called at every `s = s + …`; `std/json` alone has six.
     str_append: u32,
     trap_idx: u32,
     utf8valid: u32,
+    /// `std/runtime`'s `strFromBytes`; its two failure messages, interned by
+    /// `runtime` from `io_message`, go in as its last two arguments so the
+    /// wording stays `trap.rs`'s.
     str_from_bytes: u32,
+    bnul: u32,
+    butf8: u32,
     // RFC-0014 input I/O and RFC-0043's host boundary, served straight from WASI
     // (M2j) rather than through the shim — a standalone module has no shim, and
     // `clock_time_get`/`random_get`/`args_get`/`fd_read`/`path_open` are the same
@@ -15593,20 +15620,22 @@ impl Rt {
             write_all: slot("write_all"),
             malloc: 0,
             free: 0,
-            str_new: slot("str_new"),
+            str_new: 0,
             strlen: 0,
             utf8d: 0,
+            bnul: 0,
+            butf8: 0,
             strcmp: 0,
             trap: slot("trap"),
             print_str: slot("print_str"),
             print_i64: slot("print_i64"),
             int_str: 0,
             bool_str: slot("bool_str"),
-            concat: slot("concat"),
-            str_append: slot("str_append"),
+            concat: 0,
+            str_append: 0,
             trap_idx: slot("trap_idx"),
             utf8valid: 0,
-            str_from_bytes: slot("str_from_bytes"),
+            str_from_bytes: 0,
             starts: 0,
             env_get: slot("env_get"),
             str_i64: 0,
@@ -15790,6 +15819,10 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>, v: &VyrnRt) -> Rt {
     rt.proc_exit = proc_exit;
     rt.malloc = v.get("malloc");
     rt.free = v.get("free");
+    rt.str_new = v.get("strNew");
+    rt.concat = v.get("strConcat");
+    rt.str_append = v.get("strAppend");
+    rt.str_from_bytes = v.get("strFromBytes");
     rt.strlen = v.get("strLen");
     rt.strcmp = v.get("strCmp");
     rt.starts = v.get("starts");
@@ -16023,47 +16056,9 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>, v: &VyrnRt) -> Rt {
     // `malloc` and `free` are `std/runtime`'s (PLAN-0125-runtime §6 step 2):
     // the segregated free list this function used to spell out in wasm, with
     // its class heads and bump offset in the heap's own first 480 bytes rather
-    // than in a reserved table and the `HEAP` global.
-
-    // str_new(len, cap) — one heap block holding the `{ len, cap }` header, `cap`
-    // bytes of room and the NUL, and the address of the bytes (RFC-0089 M1a).
-    // Every String this module allocates comes from here, which is what makes
-    // "the eight bytes in front of a String are its header" true rather than
-    // hoped: a pointer that reached a Vyrn `String` binding without passing this
-    // function is a boundary that has to materialize one, and there are five.
-    rt.next_is(m, rt.str_new);
-    let malloc0 = rt.malloc;
-    m.func(
-        &[ValType::I32, ValType::I32],
-        &[ValType::I32],
-        &[ValType::I32],
-        0,
-        |b| {
-            let (base, malloc) = (2, malloc0);
-            b.ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Const((SHDR + 1) as i32))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::Call(malloc))
-                .ins(&Instruction::LocalTee(base));
-            // header: len, then cap
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Store(word()));
-            b.ins(&Instruction::LocalGet(base))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Store(cap_at()));
-            // the terminator at `len`
-            b.ins(&Instruction::LocalGet(base))
-                .ins(&Instruction::I32Const(SHDR as i32))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalTee(base))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Store8(byte()));
-            b.ins(&Instruction::LocalGet(base));
-        },
-    );
+    // than in a reserved table and the `HEAP` global. `str_new`, `concat`,
+    // `str_append` and `str_from_bytes` are `std/runtime`'s too (step 4); the
+    // functions below call them through the indices `VyrnRt` reserved.
 
     // trap(msg) — the message on stderr and exit 1, which is what the
     // interpreter and the native build both do. Not a wasm `unreachable`: that
@@ -16101,8 +16096,6 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>, v: &VyrnRt) -> Rt {
     rt.next_is(m, rt.print_i64);
     print_i64(m, write_all);
 
-    let str_new = rt.str_new;
-
     // bool_str(v) — the interned literal itself, not a copy of it. `print` wants
     // exactly that and frees nothing; `@str` copies at its own call site, because
     // a rendered value owns its storage and a data-segment pointer cannot.
@@ -16115,181 +16108,6 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>, v: &VyrnRt) -> Rt {
             .ins(&Instruction::I32Const(f as i32))
             .ins(&Instruction::End);
     });
-
-    // concat(a, b)
-    let (la, lb, r) = (3, 4, 5);
-    rt.next_is(m, rt.concat);
-    m.func(
-        &[ValType::I32, ValType::I32],
-        &[ValType::I32],
-        &[ValType::I32, ValType::I32, ValType::I32],
-        0,
-        |bb| {
-            // Both lengths are header loads since RFC-0089 M1a — `a + b` used to
-            // scan both operands before it could size the result.
-            bb.ins(&Instruction::LocalGet(0));
-            str_len(bb);
-            bb.ins(&Instruction::LocalSet(la))
-                .ins(&Instruction::LocalGet(1));
-            str_len(bb);
-            bb.ins(&Instruction::LocalSet(lb))
-                .ins(&Instruction::LocalGet(la))
-                .ins(&Instruction::LocalGet(lb))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(la))
-                .ins(&Instruction::LocalGet(lb))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::Call(str_new))
-                .ins(&Instruction::LocalSet(r))
-                .ins(&Instruction::LocalGet(r))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(la))
-                .ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                })
-                .ins(&Instruction::LocalGet(r))
-                .ins(&Instruction::LocalGet(la))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(lb))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                })
-                .ins(&Instruction::LocalGet(r));
-        },
-    );
-
-    // str_append(own, p, v) -> p' — append `v` to the accumulator `p`, in place,
-    // growing geometrically. The new pointer comes back as the result because a
-    // wasm local has no address to write through (RFC-0081).
-    //
-    // `own` addresses ONE word in the caller's frame: did this path allocate the
-    // buffer `p` holds? Until RFC-0089 M1a that word was a `(len, cap)` pair,
-    // because a String carried neither. Both now live in the String's header, and
-    // what is left is the ownership question — which the conventions answer
-    // (RFC-0089 M2), and this word retires with them. A `concat` result has a real
-    // capacity and is still not ours to grow, because `s = t` may alias it.
-    //
-    // The grow is `str_new`, copy and `free`, not a `realloc`: this allocator has
-    // no in-place extend, because the block after an accumulator belongs to
-    // whatever the writer allocated between two appends. Doubling is what makes N
-    // appends copy O(N) bytes in total, where `concat` per element copied O(N²) —
-    // which is why 40k `Int64` did not merely take 1.4 s, it walked the heap past
-    // 4 GiB and trapped out of bounds on 229 KB of JSON.
-    let (own, p, v) = (0, 1, 2);
-    let (vlen, cap, len, need, nc, nb) = (4, 5, 6, 7, 8, 9);
-    let free = rt.free;
-    let str_new = rt.str_new;
-    rt.next_is(m, rt.str_append);
-    m.func(
-        &[ValType::I32, ValType::I32, ValType::I32],
-        &[ValType::I32],
-        &[ValType::I32; 6],
-        0,
-        |b| {
-            b.ins(&Instruction::LocalGet(v));
-            str_len(b);
-            b.ins(&Instruction::LocalSet(vlen));
-            b.ins(&Instruction::LocalGet(p));
-            str_len(b);
-            b.ins(&Instruction::LocalSet(len));
-            // Not ours: copy into a buffer that is. 32 bytes minimum, matching
-            // the textual backend's floor so the two grow in step.
-            b.ins(&Instruction::LocalGet(own))
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::LocalGet(vlen))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalTee(cap))
-                .ins(&Instruction::I32Const(32))
-                .ins(&Instruction::I32LtU)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(32))
-                .ins(&Instruction::LocalSet(cap))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::LocalGet(cap))
-                .ins(&Instruction::Call(str_new))
-                .ins(&Instruction::LocalTee(nb))
-                .ins(&Instruction::LocalGet(p))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                })
-                .ins(&Instruction::LocalGet(nb))
-                .ins(&Instruction::LocalSet(p))
-                .ins(&Instruction::LocalGet(own))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Store(word()))
-                .ins(&Instruction::Else);
-            b.ins(&Instruction::LocalGet(p));
-            str_hdr(b);
-            b.ins(&Instruction::I32Load(cap_at()))
-                .ins(&Instruction::LocalSet(cap))
-                .ins(&Instruction::End);
-            // Reserve `len + vlen` content bytes, doubling so N appends are O(N).
-            b.ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::LocalGet(vlen))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalTee(need))
-                .ins(&Instruction::LocalGet(cap))
-                .ins(&Instruction::I32GtU)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(cap))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Shl)
-                .ins(&Instruction::LocalTee(nc))
-                .ins(&Instruction::LocalGet(need))
-                .ins(&Instruction::I32LtU)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(need))
-                .ins(&Instruction::LocalSet(nc))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::LocalGet(nc))
-                .ins(&Instruction::Call(str_new))
-                .ins(&Instruction::LocalTee(nb))
-                .ins(&Instruction::LocalGet(p))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-            // Only this branch frees. The flag is what says the buffer is ours;
-            // the branch above copies a pointer that is not.
-            b.ins(&Instruction::LocalGet(p));
-            str_hdr(b);
-            b.ins(&Instruction::Call(free))
-                .ins(&Instruction::LocalGet(nb))
-                .ins(&Instruction::LocalSet(p))
-                .ins(&Instruction::End);
-            // Copy the operand's bytes AND its NUL over the old terminator, then
-            // publish the new length in the header.
-            b.ins(&Instruction::LocalGet(p))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(v))
-                .ins(&Instruction::LocalGet(vlen))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-            b.ins(&Instruction::LocalGet(p));
-            str_hdr(b);
-            b.ins(&Instruction::LocalGet(need))
-                .ins(&Instruction::I32Store(word()))
-                .ins(&Instruction::LocalGet(p));
-        },
-    );
 
     // trap_idx(pre, i, post) — `error: array index 7 out of bounds`, which the
     // interpreter and the native build both print with the index interpolated.
@@ -16339,117 +16157,12 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>, v: &VyrnRt) -> Rt {
     // the table's address as its third argument; every call below passes it.
     let utf8d = m.data(&crate::utf8d_table(), 1);
     rt.utf8d = utf8d;
-    // str_from_bytes(data, len, dest) — RFC-0014's `stringFromBytes`, writing a
-    // whole `Result<String, String>` through `dest`.
-    //
-    // A runtime function rather than inline lowering because the two failures are
-    // where the semantics live, and both are canonical wording parity compares:
-    // an embedded NUL is rejected BEFORE the UTF-8 check (a Vyrn `String` is
-    // NUL-terminated, so it could not carry one), and the DFA decides the rest.
-    // An `Err` payload is the interned message itself rather than a heap copy of
-    // it — the textual backend copies only so that every I/O error payload is
-    // owned storage, and nothing here ever frees a message.
-    //
-    // The BUFFER is a different question, and it was answered wrong: it is
-    // allocated before the scan and both failures left by the side door without
-    // it, so `stringFromBytes` over invalid input in a loop lost one block a turn
-    // on this backend alone. One free at the join covers both exits. The block is
-    // not the region's on any path — `Fn_::expr` records a `String` in the arena
-    // only for the `str_temporary` shapes, and this call's type is a `Result` —
-    // so there is no second owner to take it from.
-    let bnul = rt.intern(m, crate::io_message("bnul"));
-    let butf8 = rt.intern(m, crate::io_message("butf8"));
-    let res = layout::of_ll("{ i1, i64, i64 }").expect("the Result<String, String> shape");
-    // params 0..2, the frame base 3, then ours — `i` is NOT `utf8valid`'s `i`
-    // above, whose 3 is this function's base.
-    let (buf, err, c, at_i) = (4, 5, 6, 7);
-    let (utf8valid, str_new) = (rt.utf8valid, rt.str_new);
-    rt.next_is(m, rt.str_from_bytes);
-    m.func(
-        &[ValType::I32, ValType::I32, ValType::I32],
-        &[],
-        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
-        0,
-        |b| {
-            b.ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::Call(str_new))
-                .ins(&Instruction::LocalSet(buf));
-            b.ins(&Instruction::Block(BlockType::Empty)) // fin
-                .ins(&Instruction::Block(BlockType::Empty)) // copied
-                .ins(&Instruction::Loop(BlockType::Empty))
-                .ins(&Instruction::LocalGet(at_i))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32GeU)
-                .ins(&Instruction::BrIf(1))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(at_i))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalTee(c))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(bnul as i32))
-                .ins(&Instruction::LocalSet(err))
-                .ins(&Instruction::Br(3))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::LocalGet(at_i))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I32Store8(byte()))
-                .ins(&Instruction::LocalGet(at_i))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(at_i))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Store8(byte()))
-                .ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Const(utf8d as i32))
-                .ins(&Instruction::Call(utf8valid))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(butf8 as i32))
-                .ins(&Instruction::LocalSet(err))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End); // fin
-                                         // A failure hands back a message, so the buffer built for the bytes
-                                         // has no owner left. Both exits arrive here.
-            b.ins(&Instruction::LocalGet(err))
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(buf));
-            str_hdr(b);
-            b.ins(&Instruction::Call(free)).ins(&Instruction::End);
-            // The tag is `no error`, and the word is whichever pointer that named.
-            b.ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::LocalGet(err))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::I32Store8(MemArg {
-                    offset: res.fields[0] as u64,
-                    align: 0,
-                    memory_index: 0,
-                }));
-            b.ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::LocalGet(err))
-                .ins(&Instruction::If(BlockType::Result(ValType::I32)))
-                .ins(&Instruction::LocalGet(err))
-                .ins(&Instruction::Else)
-                .ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::End)
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::I64Store(at(res.fields[1])));
-            b.ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::I64Store(at(res.fields[2])));
-        },
-    );
+    // `str_from_bytes` is `std/runtime`'s `strFromBytes` (PLAN-0125-runtime §6
+    // step 4). Its two failure wordings are parity's: an embedded NUL is
+    // refused before the UTF-8 check, and both are `io_message`'s. Interned here
+    // and handed to every call as arguments, so the module never spells them.
+    rt.bnul = rt.intern(m, crate::io_message("bnul"));
+    rt.butf8 = rt.intern(m, crate::io_message("butf8"));
 
     // (`slice` was emitted here — 60 instructions: a signed three-clause bounds
     // test, a continuation-byte probe at each cut point, two interned trap strings
