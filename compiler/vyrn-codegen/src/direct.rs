@@ -1944,8 +1944,7 @@ fn lower_body(
     // Nor a `std/runtime` function (PLAN-0125-runtime §6 step 1): the
     // hand-emitted copies it replaces had no prologue, and a program that
     // traps at the limit has to trap where it did.
-    let counted =
-        f.name != "@lambda" && !f.name.starts_with(vyrn_frontend::loader::RUNTIME_PREFIX);
+    let counted = f.name != "@lambda" && !f.name.starts_with(vyrn_frontend::loader::RUNTIME_PREFIX);
     if counted {
         call_depth_enter(&mut b, cx);
     }
@@ -13235,10 +13234,7 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 _ => true,
             };
-        Ok(consumed
-            && !self.drops.contains_key(&key)
-            && self.region_depth == 0
-            && !own_receiver)
+        Ok(consumed && !self.drops.contains_key(&key) && self.region_depth == 0 && !own_receiver)
     }
 }
 
@@ -15163,9 +15159,21 @@ const VYRN_RUNTIME: &[(&str, &[ValType], &[ValType])] = &[
     // `Option<Int64>` is an aggregate result: the hidden destination leads.
     ("parseI64", &[ValType::I32, ValType::I32], &[]),
     ("strI64", &[ValType::I32], &[ValType::I64]),
-    ("utf8Valid", &[ValType::I32, ValType::I32, ValType::I32], &[ValType::I32]),
-    ("lineAt", &[ValType::I32, ValType::I64, ValType::I64], &[ValType::I64]),
-    ("colAt", &[ValType::I32, ValType::I64, ValType::I64], &[ValType::I64]),
+    (
+        "utf8Valid",
+        &[ValType::I32, ValType::I32, ValType::I32],
+        &[ValType::I32],
+    ),
+    (
+        "lineAt",
+        &[ValType::I32, ValType::I64, ValType::I64],
+        &[ValType::I64],
+    ),
+    (
+        "colAt",
+        &[ValType::I32, ValType::I64, ValType::I64],
+        &[ValType::I64],
+    ),
     (
         "regexRun",
         &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
@@ -19549,12 +19557,8 @@ mod tests {
             std_root: Some("std".into()),
             ..Default::default()
         };
-        vyrn_frontend::load(src, "main.vyrn", &opts, &files).map_err(|ds| {
-            ds.iter()
-                .map(|d| d.render())
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
+        vyrn_frontend::load(src, "main.vyrn", &opts, &files)
+            .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))
     }
 
     /// The gap message is the ladder's grouping key, so its shape is pinned:

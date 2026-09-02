@@ -10268,7 +10268,9 @@ impl<'a> Gen<'a> {
                 };
                 let rll = self.llt(&ty);
                 let fp = self.fresh_tmp();
-                self.emit(format!("{fp} = getelementptr {rll}, ptr {slot}, i32 0, i32 {idx}"));
+                self.emit(format!(
+                    "{fp} = getelementptr {rll}, ptr {slot}, i32 0, i32 {idx}"
+                ));
                 slot = fp;
                 ty = fields[idx].ty.clone();
                 sub = true;

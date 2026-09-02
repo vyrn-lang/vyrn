@@ -2190,13 +2190,13 @@ pub fn analyze(program: &Program) -> Ownership {
     }
     // Round forty: unmoved payload binders of temp-scrutinee matches —
     // pre-screened in movecheck (silence, single binder, no alias).
-    let mut arm_frees: HashMap<(usize, u32), Vec<(String, DropKind, Vec<String>)>> =
-        HashMap::new();
+    let mut arm_frees: HashMap<(usize, u32), Vec<(String, DropKind, Vec<String>)>> = HashMap::new();
     for a in &facts.arm_payloads {
-        arm_frees
-            .entry((a.match_id, a.arm_ix))
-            .or_default()
-            .push((a.binder.clone(), a.kind.clone(), Vec::new()));
+        arm_frees.entry((a.match_id, a.arm_ix)).or_default().push((
+            a.binder.clone(),
+            a.kind.clone(),
+            Vec::new(),
+        ));
     }
     if std::env::var("VYRN_ARM_DUMP").is_ok() {
         for a in &facts.arm_payloads {

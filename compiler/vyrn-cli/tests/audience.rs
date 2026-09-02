@@ -666,7 +666,10 @@ fn why_says_so_when_the_project_declared_no_audience() {
 /// `vyrn.json` says or does not say — the one audience no manifest can widen.
 #[test]
 fn a_user_import_of_std_mem_is_refused_with_or_without_a_declared_audience() {
-    for (tag, manifest) in [("fence", MANIFEST_WITH_AUDIENCE), ("fencenone", MANIFEST_WITHOUT)] {
+    for (tag, manifest) in [
+        ("fence", MANIFEST_WITH_AUDIENCE),
+        ("fencenone", MANIFEST_WITHOUT),
+    ] {
         let dir = scratch(tag);
         write(&dir, "vyrn.json", manifest);
         write(
@@ -718,7 +721,11 @@ fn why_names_the_compiler_as_the_declarer_of_std_mems_audience() {
         .arg(repo_dir("std").join("mem.vyrn"))
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
         text.contains("audience: `std/runtime`, declared by the compiler"),

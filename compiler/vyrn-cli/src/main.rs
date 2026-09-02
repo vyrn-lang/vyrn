@@ -1477,7 +1477,9 @@ fn why_audience(file: &str) -> ExitCode {
             real_path(&format!("{root}/{}.vyrn", &spec["std/".len()..])).as_deref() == Some(&*path)
         };
         if is(MEM_SPEC) {
-            Some(format!("`{RUNTIME_SPEC}`, declared by the compiler (RFC-0125 §2.4)"))
+            Some(format!(
+                "`{RUNTIME_SPEC}`, declared by the compiler (RFC-0125 §2.4)"
+            ))
         } else if is(RUNTIME_SPEC) {
             Some("the compiler, which links it into every program (RFC-0125 §2.4)".to_string())
         } else {
