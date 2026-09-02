@@ -317,21 +317,21 @@ fn reflection_outside_a_generator_is_still_the_same_error() {
     }
 }
 
-/// `listDir` is the one the checker does NOT gate, and both backends word it the
-/// same way.
+/// `listDir` is the one the checker does NOT gate: the native backend refuses
+/// it in a user's sentence, and the wasm target builds it.
 ///
 /// It has a runtime under `vyrn run` — the interpreter lists the real filesystem
 /// (`list_dir_is_not_generation_only`) — so the front end cannot refuse the call
-/// the way it refuses the three above. What is missing is a LOWERING, in the two
-/// compiling backends, so each refuses it itself. Before RFC-0096's addendum the
-/// direct backend said `direct backend: no lowering for the call 'listDir'` —
-/// this file's own words about its own gaps, in a user's diagnostic — where the
-/// text-IR backend already said the sentence below. One constant serves both now
-/// (`vyrn_codegen::LIST_DIR_NO_LOWERING`), so neither can drift.
+/// the way it refuses the three above. The direct backend lowers it over
+/// `fd_readdir` (RFC-0125 §3 M5; `examples/listdir.vyrn` pins the output). The
+/// text-IR backend has no lowering and says so itself, from
+/// `vyrn_codegen::LIST_DIR_NO_LOWERING` rather than in the emitter's own words
+/// about its own gaps (RFC-0096's addendum).
 #[test]
-fn list_dir_is_refused_in_the_same_words_by_both_backends() {
-    let want = "`listDir` runs in the interpreter / at generation time (RFC-0021); it has no \
-                native or wasm lowering in v1 — use it in a `gen fn` or under `vyrn run`";
+fn list_dir_is_refused_natively_and_built_for_wasm() {
+    let want = "`listDir` runs in the interpreter, at generation time and on the wasm target \
+                (RFC-0021, RFC-0125); it has no native lowering in v1 — use it in a `gen fn`, \
+                under `vyrn run` or with `--target wasm`";
     let f = std::env::temp_dir().join(format!("vyrn_listdir_{}.vyrn", std::process::id()));
     std::fs::write(
         &f,
@@ -341,25 +341,33 @@ fn list_dir_is_refused_in_the_same_words_by_both_backends() {
          }\n",
     )
     .unwrap();
-    for target in [&[][..], &["--target", "wasm"][..]] {
-        let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
-            .arg("build")
-            .arg(&f)
-            .args(target)
-            .output()
-            .unwrap();
-        let err = String::from_utf8_lossy(&out.stderr).to_string();
-        assert!(!out.status.success(), "{target:?} compiled: {err}");
-        assert!(
-            err.contains(want),
-            "unexpected refusal for {target:?}: {err}"
-        );
-        assert!(
-            !err.contains("no lowering for the call"),
-            "the emitter's own words reached the user for {target:?}: {err}"
-        );
-    }
+    let native = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("build")
+        .arg(&f)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&native.stderr).to_string();
+    assert!(!native.status.success(), "native compiled: {err}");
+    assert!(err.contains(want), "unexpected native refusal: {err}");
+    assert!(
+        !err.contains("no lowering for the call"),
+        "the emitter's own words reached the user: {err}"
+    );
+    let wasm = f.with_extension("wasm");
+    let built = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("build")
+        .arg(&f)
+        .args(["--target", "wasm", "-o"])
+        .arg(&wasm)
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "the wasm target refused `listDir`: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
     let _ = std::fs::remove_file(&f);
+    let _ = std::fs::remove_file(&wasm);
 }
 
 /// A value that has no splice rule in its hole's position aborts generation with

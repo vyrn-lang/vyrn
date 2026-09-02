@@ -311,6 +311,10 @@ export async function runVyrn(wasmBytes, hooks = {}) {
     // instantiates and degrades gracefully rather than failing to link.
     path_rename: () => ERRNO_NOENT,
     fd_sync: () => ERRNO_SUCCESS,
+    // RFC-0125 M5: `listDir` pulls in fd_readdir. Its open already failed
+    // (path_open above), so the stub is never reached; it exists so the
+    // module links.
+    fd_readdir: () => ERRNO_BADF,
   };
 
   // Build the `vyrn` import namespace (RFC-0012) from the host's extern hooks.

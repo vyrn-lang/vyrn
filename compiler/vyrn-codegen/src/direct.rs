@@ -85,10 +85,10 @@ fn too_big(what: &str, bytes: u64, line: usize) -> String {
 /// standalone instantiation walker for the same reason.
 ///
 /// M2p is the other end of it: [`wasm::Module::sweep`] drops what no export
-/// reaches AFTER the bodies exist, so the fourteen here cost a program only what
+/// reaches AFTER the bodies exist, so the fifteen here cost a program only what
 /// it calls (`fib.wasm` imports two). Which is why `path_rename` could be added at
 /// all — M2o refused it as a thirteenth UNCONDITIONAL import, renumbering every
-/// module in the corpus — and `fd_sync` joins on the same terms.
+/// module in the corpus — and `fd_sync` and `fd_readdir` join on the same terms.
 ///
 /// The set is implemented twice over: wasmtime provides all of preview1, and
 /// `web/wasi-min.js` implements exactly these for the browser — with RFC-0014's
@@ -110,6 +110,9 @@ struct Wasi {
     environ_get: u32,
     clock_time_get: u32,
     random_get: u32,
+    /// `listDir` (RFC-0125 §3 M5): the directory's entries, in the host's
+    /// order, which `list_dir` sorts.
+    fd_readdir: u32,
 }
 
 fn wasi_imports(m: &mut Module) -> Wasi {
@@ -136,6 +139,7 @@ fn wasi_imports(m: &mut Module) -> Wasi {
         environ_get: im("environ_get", &[I32, I32], &[I32]),
         clock_time_get: im("clock_time_get", &[I32, I64, I32], &[I32]),
         random_get: im("random_get", &[I32, I32], &[I32]),
+        fd_readdir: im("fd_readdir", &[I32, I32, I32, I64, I32], &[I32]),
     }
 }
 
@@ -526,6 +530,14 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // value — so this reads both lists afresh every turn rather than iterating a
     // snapshot. That is what "the worklists feed each other" is here: appending to
     // the list being read.
+    //
+    // A frame past the limit waits for the drain to end. In a polymorphic
+    // recursion the frames double every instance, so the frame limit trips turns
+    // before the instantiation limit does — and the instantiation refusal is the
+    // one `vyrn check` and the textual backend give for that program (audit
+    // A5.2, RFC-0125 §3 M5). One program, one sentence: the drain goes on, and the
+    // frame refusal is returned only when no instantiation refusal came.
+    let mut deferred: Option<String> = None;
     loop {
         let p = {
             let mono = cx.mono.borrow();
@@ -559,10 +571,15 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
             });
             let body = lower_body(&mut m, &p.f, p.body, &p.sig, &cx, p.binds.clone());
             crate::observe::set_ctx(was);
-            let body = body?;
             cx.subst = HashMap::new();
-            m.fill(p.sig.index, body);
             cx.mono.borrow_mut().done += 1;
+            match body {
+                Ok(body) => m.fill(p.sig.index, body),
+                Err(e) if e.contains(crate::FRAME_LIMIT_NEEDLE) => {
+                    deferred.get_or_insert(e);
+                }
+                Err(e) => return Err(e),
+            }
             continue;
         }
         // A dispatcher's body is the one thing that cannot be written when its
@@ -577,6 +594,9 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         let body = lower_dispatcher(&mut m, &cx, &sig_ty, &dsig)?;
         m.fill(dsig.index, body);
         cx.dispatch.borrow_mut().done += 1;
+    }
+    if let Some(e) = deferred {
+        return Err(e);
     }
 
     // RFC-0114 §26's finish, the textual driver's twin: every plan row in a
@@ -6980,38 +7000,6 @@ impl<'p> Fn_<'_, 'p> {
                 self.fetch_str(b, g);
                 Ok(Some(Type::Str))
             }
-            // `listDir` (RFC-0021) has no runtime lowering in the language and must
-            // keep having none, so it lives behind this flag rather than in the
-            // table below. The listing comes from the loader's resolver — sorted and
-            // recorded host-side, in the interpreter's own encoding.
-            ("listDir", 1) => {
-                let Some(f) = self.cx.rt.list_dir else {
-                    return unsupported("`listDir` without a generator host", line);
-                };
-                let ty = gen_list_dir_ty();
-                let l = self.layout_of(&ty, line)?;
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                b.ins(&Instruction::Call(f));
-                b.slot(off);
-                Ok(Some(ty))
-            }
-            // `listDirKinds` (RFC-0119): the same lowering against its own
-            // runtime fn, whose host mode appends `/` to directory names.
-            ("listDirKinds", 1) => {
-                let Some(f) = self.cx.rt.list_dir_kinds else {
-                    return unsupported("`listDirKinds` without a generator host", line);
-                };
-                let ty = gen_list_dir_ty();
-                let l = self.layout_of(&ty, line)?;
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                b.ins(&Instruction::Call(f));
-                b.slot(off);
-                Ok(Some(ty))
-            }
             _ => Ok(None),
         }
     }
@@ -7161,24 +7149,34 @@ impl<'p> Fn_<'_, 'p> {
             }
         }
         // RFC-0076 M7: the builtins that exist only while a generator runs — the
-        // `Code` handle operations, M3b's atom stream, and `listDir`, none of which
-        // has a row in the table below because none of them has a runtime meaning
+        // `Code` handle operations and M3b's atom stream, none of which has a
+        // row in the table below because none of them has a runtime meaning
         // outside generation.
         if self.cx.gen.is_some() {
             if let Some(t) = self.gen_builtin(m, b, name, args, line)? {
                 return Ok(t);
             }
         }
-        // `listDir` OUTSIDE a generation reaches here on an ordinary build, and
-        // the front end cannot stop it on the way: the call is legal under `vyrn
-        // run`, where the interpreter lists the real filesystem
-        // (`list_dir_is_not_generation_only`). Only the two compiling backends
-        // lack a lowering, so each says so itself — in one sentence, from
-        // `crate::LIST_DIR_NO_LOWERING`, rather than in this file's own words
-        // about its own gaps (RFC-0096 M3's addendum: `no lowering for the call`
-        // is an emitter's note to itself, not a user's diagnostic).
-        if name == "listDir" {
-            return Err(crate::LIST_DIR_NO_LOWERING.to_string());
+        // `listDir` (RFC-0021) and `listDirKinds` (RFC-0119): one path in, a
+        // `Result<Array<String>, String>` out through a destination slot, the
+        // shape `readFile` has. The runtime function decides where the listing
+        // comes from: the generator host's resolver under a generation, and
+        // WASI's `fd_readdir` on an ordinary build (RFC-0125 §3 M5), so `vyrn
+        // run --engine wasm` lists the real filesystem the way the interpreter
+        // does.
+        if matches!(name, "listDir" | "listDirKinds") && args.len() == 1 {
+            let ty = gen_list_dir_ty();
+            let l = self.layout_of(&ty, line)?;
+            self.expr_as(m, b, &args[0], &Type::Str)?;
+            let off = b.alloc(l.size, l.align);
+            b.slot(off);
+            b.ins(&Instruction::Call(if name == "listDir" {
+                self.cx.rt.list_dir
+            } else {
+                self.cx.rt.list_dir_kinds
+            }));
+            b.slot(off);
+            return Ok(ty);
         }
         match name {
             // RFC-0079: `panic(msg)` — `error: `, the caller's message, a
@@ -7193,6 +7191,125 @@ impl<'p> Fn_<'_, 'p> {
             // fused into the constant `trap` already receives — `"\n"` becomes
             // `" (std/slots.vyrn:189)\n"` — so the code is the same three calls
             // with one different immediate, and only the data segment grows.
+            // `blackBox(v)` (RFC-0055) is `v`. The interpreter runs it as the
+            // identity, and this backend never optimizes (RFC-0125 §2.3), so
+            // there is nothing to hide the value from.
+            "blackBox" if args.len() == 1 => return self.expr(m, b, &args[0]),
+            // `assert(c)` (RFC-0015): the interpreter's trap, in its words. Lowered
+            // here rather than rewritten into `panic` by the CLI before the compile
+            // (RFC-0125 §3 M5), so the rule is stated once.
+            "assert" if args.len() == 1 => {
+                self.expr_as(m, b, &args[0], &Type::Bool)?;
+                let msg = self.cx.rt.intern(
+                    m,
+                    &vyrn_frontend::trap::line(&format!("assertion failed at line {line}")),
+                );
+                b.ins(&Instruction::I32Eqz)
+                    .ins(&Instruction::If(BlockType::Empty))
+                    .ins(&Instruction::I32Const(msg as i32))
+                    .ins(&Instruction::Call(self.cx.rt.trap))
+                    .ins(&Instruction::End);
+                return Ok(Type::Unit);
+            }
+            // `assertEq(a, b)` (RFC-0015): each operand evaluated once into a
+            // local, the two compared by their type — the checker allows one
+            // equatable scalar type for both — and on a mismatch rendered the way
+            // `toString` renders them, around ` != `, after the interpreter's
+            // `scalar_to_string`. The line is written in pieces the way `panic`
+            // writes its message, and `trap` writes the last piece and exits. An
+            // operand that allocated is released by [`Fn_::call`] after this
+            // returns, as every call argument is (`rfcs/census-call-arguments.md`).
+            "assertEq" if args.len() == 2 => {
+                let t = self.expr(m, b, &args[0])?;
+                let t = self.cx.resolve(&t);
+                let Some(vt) = self.cx.repr(&t, line)?.val() else {
+                    return unsupported("`assertEq` on a non-scalar", line);
+                };
+                let la = b.local(vt);
+                b.ins(&Instruction::LocalSet(la));
+                self.expr_as(m, b, &args[1], &t)?;
+                let lb = b.local(vt);
+                b.ins(&Instruction::LocalSet(lb));
+                b.ins(&Instruction::LocalGet(la))
+                    .ins(&Instruction::LocalGet(lb));
+                match &t {
+                    Type::Str => {
+                        b.ins(&Instruction::Call(self.cx.rt.strcmp))
+                            .ins(&Instruction::I32Const(0))
+                            .ins(&Instruction::I32Ne);
+                    }
+                    Type::Float => {
+                        b.ins(&Instruction::F64Ne);
+                    }
+                    Type::Float32 => {
+                        b.ins(&Instruction::F32Ne);
+                    }
+                    Type::Bool => {
+                        b.ins(&Instruction::I32Ne);
+                    }
+                    it => match Num::of(it) {
+                        Some(n) if n.wide() => {
+                            b.ins(&Instruction::I64Ne);
+                        }
+                        Some(_) => {
+                            b.ins(&Instruction::I32Ne);
+                        }
+                        None => return unsupported(&format!("`assertEq` on `{t}`"), line),
+                    },
+                }
+                let (write_all, trap, strlen) =
+                    (self.cx.rt.write_all, self.cx.rt.trap, self.cx.rt.strlen);
+                let head = format!("error: assertion failed at line {line}: ");
+                let (head_at, sep_at, nl_at) = (
+                    self.cx.rt.intern(m, &head),
+                    self.cx.rt.intern(m, " != "),
+                    self.cx.rt.intern(m, "\n"),
+                );
+                let rendered = self.scratch(b, ValType::I32, 7);
+                b.ins(&Instruction::If(BlockType::Empty))
+                    .ins(&Instruction::I32Const(2))
+                    .ins(&Instruction::I32Const(head_at as i32))
+                    .ins(&Instruction::I32Const(head.len() as i32))
+                    .ins(&Instruction::Call(write_all))
+                    .ins(&Instruction::Drop);
+                for (side, local) in [(0, la), (1, lb)] {
+                    if side == 1 {
+                        b.ins(&Instruction::I32Const(2))
+                            .ins(&Instruction::I32Const(sep_at as i32))
+                            .ins(&Instruction::I32Const(4))
+                            .ins(&Instruction::Call(write_all))
+                            .ins(&Instruction::Drop);
+                    }
+                    // The same three renderings `@str` uses, on a value that is
+                    // about to be the last thing the program prints, so nothing
+                    // rendered here is released.
+                    b.ins(&Instruction::LocalGet(local));
+                    match &t {
+                        Type::Str => {}
+                        Type::Float | Type::Float32 => self.f64_str(b, &t, line)?,
+                        Type::Bool => {
+                            b.ins(&Instruction::Call(self.cx.rt.bool_str));
+                        }
+                        it => {
+                            let n = Num::of(it).expect("compared as a number above");
+                            widen(b, n);
+                            b.ins(&Instruction::I32Const(n.signed as i32));
+                            b.ins(&Instruction::Call(self.cx.rt.int_str));
+                        }
+                    }
+                    b.ins(&Instruction::LocalSet(rendered))
+                        .ins(&Instruction::I32Const(2))
+                        .ins(&Instruction::LocalGet(rendered))
+                        .ins(&Instruction::LocalGet(rendered))
+                        .ins(&Instruction::Call(strlen))
+                        .ins(&Instruction::Call(write_all))
+                        .ins(&Instruction::Drop);
+                }
+                b.ins(&Instruction::I32Const(nl_at as i32))
+                    .ins(&Instruction::Call(trap))
+                    .ins(&Instruction::End);
+                return Ok(Type::Unit);
+            }
             "panic" | vyrn_frontend::ast::PANIC_AT => {
                 if args.is_empty() || args.len() > 2 {
                     return unsupported("`panic` with other than one argument", line);
@@ -15312,18 +15429,17 @@ struct Rt {
     write_file_bytes: u32,
     rename_file: u32,
     fsync_file: u32,
-    /// `listDir` (RFC-0021), on the generator path ONLY — the language gives it no
-    /// runtime lowering at all, so the slot is handed out only when there is a
-    /// `vyrn_gen.read` to serve it (RFC-0076 M7). An `Option` rather than an index
-    /// that is sometimes a lie: the one call site has to be unreachable without it.
-    ///
-    /// It sits mid-table beside the other readers because the numbering is
-    /// COMPUTED — `slot` appends — so an absent entry shifts the ones after it and
-    /// nothing outside one compile depends on where they land.
-    list_dir: Option<u32>,
-    /// `listDirKinds` (RFC-0119): `list_dir`'s twin against the mode whose
-    /// directory names carry a trailing `/`.
-    list_dir_kinds: Option<u32>,
+    /// `listDir`'s listing over WASI `fd_readdir` (RFC-0125 §3 M5): the entry
+    /// names joined with `\n`, the encoding the generator host already answers
+    /// in, so `list_dir` splits one shape whichever host filled it.
+    readdir_blob: u32,
+    /// `listDir` (RFC-0021). Under a generation the listing comes from the
+    /// loader's resolver through `vyrn_gen.read` (RFC-0076 M7); on an ordinary
+    /// build it comes from `readdir_blob`.
+    list_dir: u32,
+    /// `listDirKinds` (RFC-0119): `list_dir`'s twin, directory names carrying
+    /// a trailing `/`.
+    list_dir_kinds: u32,
     /// RFC-0028's `Map<String, V>` lookup (M2l), and the three helpers the hash
     /// index put under it. `reserve`, `remove_at` and `keys_copy` are each reached
     /// from a single site and are a `malloc` plus a copy, so they are emitted
@@ -15463,7 +15579,7 @@ impl Rt {
     ///
     /// The returned table is that record: name beside index, which is what the
     /// consistency test checks and what a reader wanting the emission order reads.
-    fn slots(base: u32, gen_host: bool) -> (Rt, Vec<(&'static str, u32)>) {
+    fn slots(base: u32) -> (Rt, Vec<(&'static str, u32)>) {
         let mut table: Vec<(&'static str, u32)> = Vec::new();
         let mut slot = |name: &'static str| {
             let i = base + table.len() as u32;
@@ -15512,8 +15628,9 @@ impl Rt {
             write_file: slot("write_file"),
             rename_file: slot("rename_file"),
             fsync_file: slot("fsync_file"),
-            list_dir: gen_host.then(|| slot("list_dir")),
-            list_dir_kinds: gen_host.then(|| slot("list_dir_kinds")),
+            readdir_blob: slot("readdir_blob"),
+            list_dir: slot("list_dir"),
+            list_dir_kinds: slot("list_dir_kinds"),
             map_find: slot("map_find"),
             map_find_bytes: slot("map_find_bytes"),
             map_hash: slot("map_hash"),
@@ -15669,7 +15786,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>, v: &VyrnRt) -> Rt {
     // After the imports AND the ten functions `VyrnRt` reserved: the table
     // below is dense from wherever the module is when it starts.
     let base = m.next_func();
-    let (mut rt, _table) = Rt::slots(base, gen.is_some());
+    let (mut rt, _table) = Rt::slots(base);
     rt.proc_exit = proc_exit;
     rt.malloc = v.get("malloc");
     rt.free = v.get("free");
@@ -17483,6 +17600,15 @@ const RIGHT_FD_WRITE: i64 = 1 << 6;
 /// descriptor opened without it may refuse the sync with `ENOTCAPABLE`.
 const RIGHT_FD_SYNC: i64 = 1 << 4;
 const OFLAGS_CREAT_TRUNC: i32 = 1 | 8;
+/// `oflags::directory` and `right::fd_readdir`, what `listDir` opens a
+/// directory with (RFC-0125 §3 M5).
+const OFLAGS_DIRECTORY: i32 = 2;
+const RIGHT_FD_READDIR: i64 = 1 << 14;
+/// `filetype::directory`, the `d_type` byte a directory entry carries.
+const FILETYPE_DIRECTORY: i32 = 3;
+/// A `dirent` is a 24-byte header — `d_next: u64, d_ino: u64, d_namlen: u32,
+/// d_type: u8` and three bytes of padding — followed by the name.
+const DIRENT_HDR: i32 = 24;
 /// `lookupflags`: follow a symlink, which is what `fopen` does.
 const LOOKUP_SYMLINK_FOLLOW: i32 = 1;
 /// `errno::xdev`, the last of preview1's alphabetical errno list — and NOT POSIX's
@@ -18781,15 +18907,254 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
         },
     );
 
-    // list_dir(path, dest) — `listDir` as a `Result<Array<String>, String>`, on the
-    // generator path only (RFC-0021 gives it no runtime meaning at all, and an
-    // ordinary build still refuses it by name).
+    // readdir_blob(path, kinds, outlen) — the directory's entry names joined
+    // with `\n`, NUL-terminated, in a fresh block; or 0 when the directory
+    // cannot be opened or read (RFC-0125 §3 M5). This is `listDir`'s listing on
+    // an ordinary build, in the encoding the generator host already answers
+    // `GEN_MODE_LIST` in, so `list_dir` below splits one shape whichever host
+    // filled it. `.` and `..` are dropped, since `read_dir` never reports them;
+    // with `kinds` set a directory's name gets its `/` (RFC-0119). The order is
+    // the host's, and `list_dir` sorts.
     //
-    // The host sorts the entries and joins them with `\n` — the interpreter's own
-    // recording encoding, so a directory whose contents change invalidates the same
-    // cache entry under either engine — and this splits them in place. That is what
-    // the C shim's `__vyrn_gen_list_dir` does, and it is safe for the same reason:
-    // an entry name cannot contain a newline, so the join is invertible.
+    // `fd_readdir` fills a buffer with as many entries as fit; the last may be
+    // cut, and a cut entry is re-read by asking again from its predecessor's
+    // `d_next` cookie. A fill shorter than the buffer is the end.
+    //
+    // ponytail: a 4 KiB buffer, so a name longer than that re-reads forever; no
+    // filesystem allows one, NAME_MAX being 255.
+    let (fd_readdir, fd_close, open_at) = (wasi.fd_readdir, wasi.fd_close, rt.open_at);
+    const READDIR_BUF: i32 = 4096;
+    rt.next_is(m, rt.readdir_blob);
+    m.func(
+        &[ValType::I32, ValType::I32, ValType::I32],
+        &[ValType::I32],
+        &[ValType::I32; 12],
+        8,
+        |b| {
+            // params 0..2, the frame base 3, then ours; `slot(0)` is `bufused`.
+            let (fd, buf, cap, len, rb, used, off, namlen) = (4, 5, 6, 7, 8, 9, 10, 11);
+            let (name, nb, need, dtype) = (12, 13, 14, 15);
+            let cookie = b.local(ValType::I64);
+            b.ins(&Instruction::Block(BlockType::Empty)) // fin
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(OFLAGS_DIRECTORY))
+                .ins(&Instruction::I64Const(RIGHT_FD_READDIR))
+                .ins(&Instruction::Call(open_at))
+                .ins(&Instruction::LocalTee(fd))
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32LtS)
+                .ins(&Instruction::BrIf(0))
+                .ins(&Instruction::I32Const(1024))
+                .ins(&Instruction::LocalTee(cap))
+                .ins(&Instruction::I64ExtendI32U)
+                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::LocalSet(buf))
+                .ins(&Instruction::I64Const(READDIR_BUF as i64))
+                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::LocalSet(rb))
+                .ins(&Instruction::Block(BlockType::Empty)) // done
+                .ins(&Instruction::Loop(BlockType::Empty)) // fill
+                .ins(&Instruction::LocalGet(fd))
+                .ins(&Instruction::LocalGet(rb))
+                .ins(&Instruction::I32Const(READDIR_BUF))
+                .ins(&Instruction::LocalGet(cookie));
+            b.slot(0);
+            b.ins(&Instruction::Call(fd_readdir))
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::Call(free))
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::LocalSet(buf))
+                .ins(&Instruction::Br(2))
+                .ins(&Instruction::End);
+            b.slot(0);
+            b.ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::LocalSet(used))
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::LocalSet(off))
+                .ins(&Instruction::Block(BlockType::Empty)) // walked
+                .ins(&Instruction::Loop(BlockType::Empty)) // walk
+                .ins(&Instruction::LocalGet(off))
+                .ins(&Instruction::I32Const(DIRENT_HDR))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalGet(used))
+                .ins(&Instruction::I32GtU)
+                .ins(&Instruction::BrIf(1))
+                .ins(&Instruction::LocalGet(rb))
+                .ins(&Instruction::LocalGet(off))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalTee(name))
+                .ins(&Instruction::I32Load(word_at(16)))
+                .ins(&Instruction::LocalTee(namlen))
+                .ins(&Instruction::LocalGet(off))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(DIRENT_HDR))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalGet(used))
+                .ins(&Instruction::I32GtU)
+                .ins(&Instruction::BrIf(1))
+                .ins(&Instruction::LocalGet(name))
+                .ins(&Instruction::I64Load(at(0)))
+                .ins(&Instruction::LocalSet(cookie))
+                .ins(&Instruction::LocalGet(name))
+                .ins(&Instruction::I32Load8U(MemArg {
+                    offset: 20,
+                    align: 0,
+                    memory_index: 0,
+                }))
+                .ins(&Instruction::LocalSet(dtype))
+                .ins(&Instruction::LocalGet(name))
+                .ins(&Instruction::I32Const(DIRENT_HDR))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(name))
+                // Skip `.` and `..`: a name of one or two bytes that are all `.`.
+                .ins(&Instruction::LocalGet(namlen))
+                .ins(&Instruction::I32Const(2))
+                .ins(&Instruction::I32LeU)
+                .ins(&Instruction::LocalGet(name))
+                .ins(&Instruction::I32Load8U(byte()))
+                .ins(&Instruction::I32Const(b'.' as i32))
+                .ins(&Instruction::I32Eq)
+                .ins(&Instruction::I32And)
+                .ins(&Instruction::LocalGet(name))
+                .ins(&Instruction::LocalGet(namlen))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Sub)
+                .ins(&Instruction::I32Load8U(byte()))
+                .ins(&Instruction::I32Const(b'.' as i32))
+                .ins(&Instruction::I32Eq)
+                .ins(&Instruction::I32And)
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::If(BlockType::Empty))
+                // Room for the name, a `/`, the `\n` and the NUL.
+                .ins(&Instruction::LocalGet(namlen))
+                .ins(&Instruction::I32Const(3))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalTee(need))
+                .ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::I32GtU)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Shl)
+                .ins(&Instruction::LocalGet(need))
+                .ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Shl)
+                .ins(&Instruction::LocalGet(need))
+                .ins(&Instruction::I32GtU)
+                .ins(&Instruction::Select)
+                .ins(&Instruction::LocalTee(cap))
+                .ins(&Instruction::I64ExtendI32U)
+                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::LocalTee(nb))
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                })
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::Call(free))
+                .ins(&Instruction::LocalGet(nb))
+                .ins(&Instruction::LocalSet(buf))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalGet(name))
+                .ins(&Instruction::LocalGet(namlen))
+                .ins(&Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                })
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::LocalGet(namlen))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(len))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::LocalGet(dtype))
+                .ins(&Instruction::I32Const(FILETYPE_DIRECTORY))
+                .ins(&Instruction::I32Eq)
+                .ins(&Instruction::I32And)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(b'/' as i32))
+                .ins(&Instruction::I32Store8(byte()))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(len))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(b'\n' as i32))
+                .ins(&Instruction::I32Store8(byte()))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(len))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(off))
+                .ins(&Instruction::I32Const(DIRENT_HDR))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalGet(namlen))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(off))
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End) // walk
+                .ins(&Instruction::End) // walked
+                .ins(&Instruction::LocalGet(used))
+                .ins(&Instruction::I32Const(READDIR_BUF))
+                .ins(&Instruction::I32LtU)
+                .ins(&Instruction::BrIf(1))
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End) // fill
+                .ins(&Instruction::End) // done
+                .ins(&Instruction::LocalGet(fd))
+                .ins(&Instruction::Call(fd_close))
+                .ins(&Instruction::Drop)
+                .ins(&Instruction::LocalGet(rb))
+                .ins(&Instruction::Call(free))
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::BrIf(0))
+                // The last `\n` is a separator with nothing after it.
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Sub)
+                .ins(&Instruction::LocalSet(len))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32Store8(byte()))
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Store(word()))
+                .ins(&Instruction::End) // fin
+                .ins(&Instruction::LocalGet(buf));
+        },
+    );
+
+    // list_dir(path, dest) — `listDir` as a `Result<Array<String>, String>`.
+    //
+    // The listing arrives joined with `\n`: from the generator host under a
+    // generation — sorted and recorded there, the interpreter's own encoding, so
+    // a directory whose contents change invalidates the same cache entry under
+    // either engine — and from `readdir_blob` on an ordinary build. This splits
+    // it, and sorts what `readdir_blob` gave, since the interpreter sorts. The
+    // split is safe for the reason the join is: an entry name cannot contain a
+    // newline, so the join is invertible.
     //
     // The `Ok` payload is the `Array<String>` triple, which is three words where a
     // sum's payload is two, so it is BOXED — the same `Word::Boxed` encoding at the
@@ -18797,13 +19162,11 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
     // Emitted once per mode: `listDirKinds` (RFC-0119) is the same split over
     // the same `\n`-joined blob — the host appends the `/` to directory names
     // before joining, so the guest's splitter never learns kinds exist.
-    for (slot, mode) in [
-        (rt.list_dir, crate::GEN_MODE_LIST),
-        (rt.list_dir_kinds, crate::GEN_MODE_LIST_KINDS),
+    let strcmp = rt.strcmp;
+    for (list_dir, mode, kinds) in [
+        (rt.list_dir, crate::GEN_MODE_LIST, 0),
+        (rt.list_dir_kinds, crate::GEN_MODE_LIST_KINDS, 1),
     ] {
-        let (Some(list_dir), Some(g)) = (slot, gen) else {
-            continue;
-        };
         let (listpre, listpost) = msg(m, "listerr");
         // A `String` element is a `ptr`, so the names buffer is a `char**` — the
         // stride comes off the layout engine rather than off a 4 written here.
@@ -18813,21 +19176,42 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
             &[ValType::I32, ValType::I32],
             &[],
             &[ValType::I32; 12],
-            0,
+            8,
             |b| {
                 // params 0..1, the frame base 2, then ours.
                 let (buf, len, n, i, names, start, k, emsg, boxed) = (3, 4, 5, 6, 7, 8, 9, 10, 11);
                 let (endp, seg, own) = (12, 13, 14);
                 b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
                     .ins(&Instruction::Block(BlockType::Empty)); // 0: err
-                gen_slurp(
-                    b,
-                    &g,
-                    (malloc, str_new, err3),
-                    [listpre, listpost, listpre, listpost],
-                    (buf, len, emsg, 0),
-                    mode,
-                );
+                match &gen {
+                    Some(g) => gen_slurp(
+                        b,
+                        g,
+                        (malloc, str_new, err3),
+                        [listpre, listpost, listpre, listpost],
+                        (buf, len, emsg, 0),
+                        mode,
+                    ),
+                    None => {
+                        b.ins(&Instruction::LocalGet(0))
+                            .ins(&Instruction::I32Const(kinds));
+                        b.slot(0);
+                        b.ins(&Instruction::Call(rt.readdir_blob))
+                            .ins(&Instruction::LocalTee(buf))
+                            .ins(&Instruction::I32Eqz)
+                            .ins(&Instruction::If(BlockType::Empty))
+                            .ins(&Instruction::I32Const(listpre as i32))
+                            .ins(&Instruction::LocalGet(0))
+                            .ins(&Instruction::I32Const(listpost as i32))
+                            .ins(&Instruction::Call(err3))
+                            .ins(&Instruction::LocalSet(emsg))
+                            .ins(&Instruction::Br(1))
+                            .ins(&Instruction::End);
+                        b.slot(0);
+                        b.ins(&Instruction::I32Load(word()))
+                            .ins(&Instruction::LocalSet(len));
+                    }
+                }
                 // One pass to count separators, because the pointer array has to be
                 // allocated before the second pass can fill it.
                 b.ins(&Instruction::Block(BlockType::Empty))
@@ -18951,12 +19335,85 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
                     .ins(&Instruction::I32Add)
                     .ins(&Instruction::LocalSet(endp));
                 elem(b);
-                b.ins(&Instruction::End)
-                    // Every name is now a copy of its own; the blob was only
-                    // ever something to split, so this is where its ownership
-                    // ends. The error exit above needs nothing: `gen_slurp`
-                    // branches before the malloc, so there `buf` is still 0.
-                    .ins(&Instruction::LocalGet(buf))
+                b.ins(&Instruction::End);
+                if gen.is_none() {
+                    // The interpreter sorts its listing, and the generator host
+                    // sorts before it joins; `readdir_blob` hands over the
+                    // host's order. An insertion sort by `strCmp`, which is the
+                    // byte order a `String` sorts in (RFC-0022).
+                    //
+                    // ponytail: quadratic, over a directory listing.
+                    b.ins(&Instruction::I32Const(1))
+                        .ins(&Instruction::LocalSet(i))
+                        .ins(&Instruction::Block(BlockType::Empty))
+                        .ins(&Instruction::Loop(BlockType::Empty))
+                        .ins(&Instruction::LocalGet(i))
+                        .ins(&Instruction::LocalGet(n))
+                        .ins(&Instruction::I32GeU)
+                        .ins(&Instruction::BrIf(1))
+                        .ins(&Instruction::LocalGet(names))
+                        .ins(&Instruction::LocalGet(i))
+                        .ins(&Instruction::I32Const(stride))
+                        .ins(&Instruction::I32Mul)
+                        .ins(&Instruction::I32Add)
+                        .ins(&Instruction::I32Load(word()))
+                        .ins(&Instruction::LocalSet(own))
+                        .ins(&Instruction::LocalGet(i))
+                        .ins(&Instruction::LocalSet(k))
+                        .ins(&Instruction::Block(BlockType::Empty))
+                        .ins(&Instruction::Loop(BlockType::Empty))
+                        .ins(&Instruction::LocalGet(k))
+                        .ins(&Instruction::I32Eqz)
+                        .ins(&Instruction::BrIf(1))
+                        // `seg` is the slot before `k`, read once for the
+                        // compare and once for the shift.
+                        .ins(&Instruction::LocalGet(names))
+                        .ins(&Instruction::LocalGet(k))
+                        .ins(&Instruction::I32Const(1))
+                        .ins(&Instruction::I32Sub)
+                        .ins(&Instruction::I32Const(stride))
+                        .ins(&Instruction::I32Mul)
+                        .ins(&Instruction::I32Add)
+                        .ins(&Instruction::LocalTee(seg))
+                        .ins(&Instruction::I32Load(word()))
+                        .ins(&Instruction::LocalGet(own))
+                        .ins(&Instruction::Call(strcmp))
+                        .ins(&Instruction::I32Const(0))
+                        .ins(&Instruction::I32LeS)
+                        .ins(&Instruction::BrIf(1))
+                        .ins(&Instruction::LocalGet(seg))
+                        .ins(&Instruction::I32Const(stride))
+                        .ins(&Instruction::I32Add)
+                        .ins(&Instruction::LocalGet(seg))
+                        .ins(&Instruction::I32Load(word()))
+                        .ins(&Instruction::I32Store(word()))
+                        .ins(&Instruction::LocalGet(k))
+                        .ins(&Instruction::I32Const(1))
+                        .ins(&Instruction::I32Sub)
+                        .ins(&Instruction::LocalSet(k))
+                        .ins(&Instruction::Br(0))
+                        .ins(&Instruction::End)
+                        .ins(&Instruction::End)
+                        .ins(&Instruction::LocalGet(names))
+                        .ins(&Instruction::LocalGet(k))
+                        .ins(&Instruction::I32Const(stride))
+                        .ins(&Instruction::I32Mul)
+                        .ins(&Instruction::I32Add)
+                        .ins(&Instruction::LocalGet(own))
+                        .ins(&Instruction::I32Store(word()))
+                        .ins(&Instruction::LocalGet(i))
+                        .ins(&Instruction::I32Const(1))
+                        .ins(&Instruction::I32Add)
+                        .ins(&Instruction::LocalSet(i))
+                        .ins(&Instruction::Br(0))
+                        .ins(&Instruction::End)
+                        .ins(&Instruction::End);
+                }
+                // Every name is now a copy of its own; the blob was only
+                // ever something to split, so this is where its ownership
+                // ends. The error exit above needs nothing: `gen_slurp`
+                // branches before the malloc, so there `buf` is still 0.
+                b.ins(&Instruction::LocalGet(buf))
                     .ins(&Instruction::Call(free))
                     .ins(&Instruction::I64Const(triple.size as i64))
                     .ins(&Instruction::Call(malloc))
@@ -19311,10 +19768,8 @@ mod tests {
     #[test]
     fn every_runtime_helper_gets_its_own_index() {
         let base = 7; // any offset; the imports are not always the same count
-                      // Both shapes: the generator path hands out one more (`list_dir`), and the
-                      // invariant is that adding it neither duplicates a name nor leaves a hole.
-        for gen_host in [false, true] {
-            let (rt, table) = Rt::slots(base, gen_host);
+        {
+            let (rt, table) = Rt::slots(base);
             assert_eq!(
                 table.len() as u32,
                 rt.count,

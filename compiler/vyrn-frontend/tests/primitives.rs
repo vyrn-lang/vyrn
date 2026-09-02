@@ -602,8 +602,9 @@ fn the_census_is_the_code() {
 /// [`the_census_is_the_code`] pins the INTERPRETER against the census.
 /// `direct.rs` is the only wasm backend since RFC-0077 M5, and it had no such
 /// pin at all — so the census had to find its gaps by reading, and found five.
-/// One (`alen`) went with the verb forms and one (`fsyncFile`) was lowered; the
-/// other three are below with the reason each is allowed to be missing. A fourth
+/// One (`alen`) went with the verb forms, one (`fsyncFile`) was lowered, and
+/// the three test-only builtins were lowered when `vyrn test --engine wasm`
+/// stopped rewriting them (RFC-0125 §3 M5). The set below is empty; a name
 /// appearing here is a program that runs on three engines and refuses on the
 /// fourth.
 ///
@@ -618,15 +619,10 @@ fn the_direct_backend_carries_the_census_too() {
     // `no lowering for the call` message, so a program that reaches one is
     // stopped rather than miscompiled.
     const ABSENT: &[(&str, &str)] = &[
-        (
-            "assert",
-            "RFC-0015: `vyrn test` runs test bodies on the interpreter",
-        ),
-        ("assertEq", "as `assert`"),
-        (
-            "blackBox",
-            "RFC-0055: `vyrn bench` times through the interpreter",
-        ),
+        // `assert`, `assertEq` and `blackBox` stood here while `vyrn test` and
+        // `vyrn bench` ran their bodies on the interpreter alone; the direct
+        // backend lowers all three now (RFC-0125 §3 M5), beside `panic`.
+        //
         // `fsyncFile` stood here, the one row not explained by a test path: it
         // had ZERO callers in `std/` and `examples/`, so no parity program ever
         // asked the wasm column for it and the absence stayed invisible. It is

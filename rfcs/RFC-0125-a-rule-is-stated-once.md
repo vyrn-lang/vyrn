@@ -1201,6 +1201,95 @@ because no emitter changed. All green: 1,176 frontend tests, the fixture
 gate (24 s), the nine suites, parity 41 passed in 209 s, the residue
 ratchet, and the manifest.
 
+**The second slice landed (2026-09-02): the five gaps above, closed or
+priced.** Four commits on `track-h`, each green on the fixture gate before
+the next.
+
+- `listDir` and `listDirKinds` are lowered by the direct backend over WASI
+  `fd_readdir`, the fifteenth preview1 import. The runtime function
+  `readdir_blob` opens the directory through `open_at` with
+  `oflags::directory` and `right::fd_readdir`, walks `fd_readdir`'s buffer
+  (a cut last entry is re-read from its predecessor's cookie), drops `.` and
+  `..`, and joins the names with `\n` — the encoding the generator host
+  already answers `GEN_MODE_LIST` in, so `list_dir` splits one shape
+  whichever host filled it, and sorts by `strCmp` on the WASI path, since the
+  interpreter sorts. The `Err` is RFC-0014's `listerr` from the one table.
+  The embedded host (`wasmrun.rs`) answers `fd_readdir` and opens a
+  directory on `path_open`; the `wasmtime` CLI already did; `web/wasi-min.js`
+  gains the stub so a page still links. The generator engine is unchanged: a
+  `gen fn` lists through `vyrn_gen.read`, as before. `examples/listdir.vyrn`
+  pins the three answers (a listing, a `listDirKinds` listing with its `/`,
+  the `Err`) and 228 entries of `examples/` itself came out byte-identical
+  from the interpreter, the embedded host and the `wasmtime` CLI. The
+  text-IR backend still has no lowering and says so in its own sentence
+  (`LIST_DIR_NO_LOWERING`, reworded); the example is on the parity
+  harness's `NATIVE_UNSUPPORTED` list and the residue baseline's `skip` row.
+- `assert`, `assertEq` and `blackBox` are lowered in `direct.rs` beside
+  `panic`, and the CLI's pre-compile rewrite (`desugar_asserts` and the
+  `blackBox` walk, 156 lines) is deleted. `assertEq` evaluates each operand
+  once into a local, compares by the operand's type, and on a mismatch
+  writes `error: assertion failed at line L: `, the two renderings `@str`
+  uses, and ` != ` in pieces, the way `panic` writes; an operand that
+  allocated is released by `Fn_::call` after the arm returns, as every call
+  argument is. The double-evaluation gap above is closed with the rewrite.
+  `std/num` is injected for a program that mentions `assertEq`, so a float
+  mismatch renders. Over every example with `test` blocks (25 files) and
+  every one with `bench` blocks (17), `vyrn test --engine wasm` and `vyrn
+  bench --check --engine wasm` print the interpreter's lines byte for byte,
+  with one exception that is not this slice's: `placeorder.vyrn`'s "a field
+  write does not disturb an alias taken before it" fails under wasm with
+  `99 != 1`, and the same body as a `main` prints `99` natively too, where
+  the interpreter prints `1` — a placement defect of the compiled routes,
+  on record here and being fixed on its own branch.
+- `polyrecursion.vyrn` has one refusal. The direct backend's drain now
+  defers a frame refusal until the worklist is empty, so the instantiation
+  refusal — `check_inst_depth`'s sentence, the one `vyrn check` and the
+  text-IR backend give — wins when it comes; a plain frame overflow is still
+  refused after the drain, in the same words as before. And `vyrn run` calls
+  `check_instantiations` before it runs, under either engine, so the
+  interpreter no longer prints `0` for a program `check` refuses: one
+  program, one sentence, from `check`, `run` and `build`. The cost is one
+  `vyrn_lower::lower` per run — under 3 s on the site export, which is the
+  whole of a warm `vyrn check` of it. The fixture is recorded from the
+  interpreter like every other refusal, and `INTERP_ONLY` is gone from
+  `fixtures.rs`: 203 compared, 1 skipped (host-only).
+- **Site export under `--engine wasm`: refused at the frame limit, and the
+  gap is priced.** With the `listDir` gap closed the export compiles until
+  `chapters` in `site/app/guide.vyrn` — one literal of every chapter's
+  record, with its sections' records nested in it — needs 11,360 bytes of
+  frame against the 8,192 of `FRAME_LIMIT`. Raised to 12 KiB for one build
+  (not committed), the next refusal is the generated `uiPageBody__from0` at
+  25,984 bytes; raised further the shadow stack (`FRAME_LIMIT` × the 1,000
+  call depth) no longer fits under the statics limit, so the constant is not
+  the knob. The frame is §1.4's finding again: every nested aggregate
+  temporary of a literal lands in the frame under the per-node copy
+  lowering, and M1's place-based lowering is what shrinks it. Measured on
+  the machine of §1.4, release binary, generator cache warm, medians of
+  three (the compile is inside the wasm column):
+
+  | | `run site/export.vyrn out` | of which before the first route |
+  |---|---|---|
+  | interpreter | 136.9 s (136.4, 143.8, 136.9) | — |
+  | `--engine wasm` | refused after 5.2 s (5.20, 5.18, 5.16) | the load and the compile |
+
+  The interpreter wrote 84 routes and 14 assets, 247 files; the wasm column
+  wrote nothing. So §2.5's first row still waits on M1 for this
+  program, and nothing else: no further import, builtin or host behaviour
+  stood between the export and the compiled route in this slice.
+- `test --engine wasm` still runs one instance per body. Not done in this
+  slice: the interpreter's per-run state and shared input are the semantics
+  to retire, not to reproduce, and the time went to the export.
+
+Gates run before the report, in order: `cargo fmt --all`; `cargo build
+--release -p vyrn-cli`; `cargo test --workspace`; the fixture gate; the
+kernel, lowered, fieldstore, places, simd, wasmabi, wasmio, traps, bytesink
+and audience suites; parity in release with `--ignored`; the residue
+ratchet; and the cross-engine generator test, which was red at the base
+commit for five programs (a placement defect on another branch) and is red
+for the same five here. The wasm manifest is not regenerated in this slice:
+the lowering renumbers every module's runtime table, and the integrator
+regenerates it after the merge.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

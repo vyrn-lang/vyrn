@@ -245,6 +245,16 @@ pub const WASM_ONLY: &[(&str, &str)] = &[(
     "calls `extern` fns; only the browser provides the `vyrn` namespace",
 )];
 
+/// Examples the interpreter and the wasm target run and the text-IR backend
+/// refuses (`vyrn_codegen::LIST_DIR_NO_LOWERING`). Excluded from the parity
+/// loop's native column; the fixture gate (`fixtures.rs`) compares their wasm
+/// output with the interpreter's recording, and `residue-baseline.tsv` carries
+/// their `skip` row.
+pub const NATIVE_UNSUPPORTED: &[(&str, &str)] = &[(
+    "listdir.vyrn",
+    "`listDir` has no native lowering; the wasm target lists over `fd_readdir` (RFC-0125 §3 M5)",
+)];
+
 pub fn examples_dir() -> PathBuf {
     // vyrn-cli/ -> compiler/ -> repo root -> examples/
     Path::new(env!("CARGO_MANIFEST_DIR"))

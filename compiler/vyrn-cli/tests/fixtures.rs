@@ -21,23 +21,14 @@
 //! `wasmhash.rs` names it, so a diagnostic that quotes the path is the same in
 //! every checkout. A refusal (`EXPECTED_CHECK_FAILURE`) is compared like any
 //! other program: its output is the diagnostic, and both engines share the
-//! load that prints it. The host-only program (`WASM_ONLY`) is skipped, since
-//! no terminal supplies its `extern` namespace, and so is the one program the
-//! interpreter runs and the compiled route refuses ([`INTERP_ONLY`]).
+//! load that prints it — `polyrecursion.vyrn` among them, since `vyrn run`
+//! refuses what `vyrn check` refuses under either engine. The host-only
+//! program (`WASM_ONLY`) is skipped, since no terminal supplies its `extern`
+//! namespace.
 
 mod common;
 use common::*;
 use std::path::PathBuf;
-
-/// Examples the interpreter runs and the direct backend refuses to compile,
-/// with the reason. A refusal on this route is `vyrn build`'s answer too, so
-/// the program has no recorded output to compare against: it is `check`'s to
-/// pin (`expected_check_failures_do_fail` in parity.rs), not this gate's.
-const INTERP_ONLY: &[(&str, &str)] = &[(
-    "polyrecursion.vyrn",
-    "polymorphic recursion has no monomorphization fixed point (audit A5.2); the \
-     interpreter prints `0`, the direct backend refuses `f`'s frame",
-)];
 
 fn expected_dir() -> PathBuf {
     examples_dir().join("expected")
@@ -71,11 +62,6 @@ fn every_example_prints_what_was_recorded() {
         let stem = path.file_stem().unwrap().to_string_lossy().to_string();
         if let Some((_, why)) = WASM_ONLY.iter().find(|(n, _)| *n == name) {
             eprintln!("SKIP  {name}  (host-only: {why})");
-            skipped += 1;
-            continue;
-        }
-        if let Some((_, why)) = INTERP_ONLY.iter().find(|(n, _)| *n == name) {
-            eprintln!("SKIP  {name}  (interpreter-only: {why})");
             skipped += 1;
             continue;
         }
@@ -125,7 +111,7 @@ fn every_example_prints_what_was_recorded() {
         eprintln!("ok    {name}");
     }
     eprintln!(
-        "\nfixtures: {compared} {}, {skipped} skipped (host-only or interpreter-only), {} failed",
+        "\nfixtures: {compared} {}, {skipped} skipped (host-only), {} failed",
         if write { "recorded" } else { "compared" },
         failures.len()
     );

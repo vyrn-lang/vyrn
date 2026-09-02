@@ -1,5 +1,5 @@
 /// A generic function that calls itself with a BIGGER type is refused, and
-/// `vyrn check` is the one that refuses it.
+/// `vyrn check`, `vyrn run` and `vyrn build` refuse it with one sentence.
 ///
 /// Monomorphization gives one function one body per distinct instantiation.
 /// `f<T>` calling `f<P<T>>` asks for `f<P<Int64>>`, then `f<P<P<Int64>>>`, and
