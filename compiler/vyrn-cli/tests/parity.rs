@@ -58,23 +58,28 @@ fn examples_interp_native_parity() {
     assert!(!names.is_empty(), "no examples found in {}", dir.display());
 
     let mut failures: Vec<String> = Vec::new();
-    let mut skipped = 0usize;
+    // Three reasons an example is not compared, counted apart, because the summary
+    // line used to call all of them "known divergent" while that list was empty.
+    // A refusal is a program `vyrn check` rejects on purpose, asserted by
+    // `expected_check_failures_do_fail`; host-only is `extern` into a namespace
+    // only a browser supplies, asserted by `wasm_only_examples_trap_identically`.
+    let (mut divergent, mut refused, mut host_only) = (0usize, 0usize, 0usize);
 
     for path in &names {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         if let Some((_, why)) = KNOWN_DIVERGENT.iter().find(|(n, _)| *n == name) {
             eprintln!("SKIP  {name}  ({why})");
-            skipped += 1;
+            divergent += 1;
             continue;
         }
         if let Some((_, why, _)) = EXPECTED_CHECK_FAILURE.iter().find(|(n, ..)| *n == name) {
             eprintln!("SKIP  {name}  (expected check failure: {why})");
-            skipped += 1;
+            refused += 1;
             continue;
         }
         if let Some((_, why)) = WASM_ONLY.iter().find(|(n, _)| *n == name) {
             eprintln!("SKIP  {name}  (wasm-only: {why})");
-            skipped += 1;
+            host_only += 1;
             continue;
         }
 
@@ -178,10 +183,14 @@ fn examples_interp_native_parity() {
         eprintln!("ok    {name}");
     }
 
+    let skipped = divergent + refused + host_only;
     eprintln!(
-        "\nparity: {} checked, {} skipped (known divergent), {} failed",
+        "\nparity: {} checked, {} skipped ({} refused by `vyrn check`, {} host-only, {} known divergent), {} failed",
         names.len() - skipped,
         skipped,
+        refused,
+        host_only,
+        divergent,
         failures.len()
     );
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
