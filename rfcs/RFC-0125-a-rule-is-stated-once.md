@@ -1930,6 +1930,131 @@ bodies in the core (2), the function-value join (3), then the three table
 cells the passes disagree with (4, 6, 7), then the rule change on record
 (8). Findings 5, 9, 10, 11 and 13 change nothing.
 
+#### The second slice (2026-09-03)
+
+The second slice closes findings 1, 2, 3 and 6, records a decision for 4,
+5 and 13, and records why no floor check moves out of the pass yet. The
+tally at its last commit:
+
+    effects over the corpus: 180 programs (31 not loadable here, 2 refused as
+    recorded), 18775 functions judged, 6267 pure, 8 unlowered, 63 calls
+    through a function value judged over their sources, 70 unattributed
+      open sets: 43
+      effect 12447  alloc
+      effect    11  read-input
+      effect   288  write-output
+      effect   189  fs-read
+      effect    19  fs-write
+      effect   106  fs-list
+      effect     8  args
+      effect    29  clock
+      effect    20  random
+      effect    31  extern
+      effect    22  serve
+      effect     4  spawn
+      effect  3285  trap
+      effect   698  gen-only
+      spawn:      12 sites judged, 0 outside `alloc, trap`
+      floor:      18535 agree, 24 callee-carried, 216 gen-body, 0 floor-blind,
+                  0 core-blind
+      audience:   18334 no fence, 27 agree, 414 declared-only, 0 unfenced,
+                  0 server-extern
+
+The corpus grew between the slices: M3 to M5 merged the runtime in Vyrn and
+the frames, so the function count is not the first slice's. **The ratchet
+is 0.**
+
+- **1, closed.** `Rhs::Call` carries `spawn`; the core prints a spawned call
+  as `spawn f(..)`. The lattice has the `spawn` row and the spawning body
+  carries the effect. The spawn-isolation rule of RFC-0004 §Q4 is the one
+  inclusion check `effects.rs` makes: the spawned callee's set within
+  `Effects::SPAWN_ALLOWS`, which is `alloc, trap`. The harness judges every
+  spawn site (12 in the corpus) and puts one outside the rule in the
+  ratchet; none is. The checker's rule is wider than the effect: it also
+  refuses a `modify` parameter, `drop`, module state, and the pure builtins
+  `close`, `stringFromBytes`, `lineAt` and `colAt`. None of those is an
+  effect. They stay in the checker, and the judgment does not restate them.
+- **2, closed.** M3's close-out made a lambda body a frame of its own
+  (`Body::lambdas`). The harness hands every frame to `judge`, and a body
+  joins the frames of the lambdas it holds: the value it builds can run
+  them, which is presence, as the floor counts it. Scratch `lambda.vyrn`'s
+  `main` (`let readIt = p -> readFile(p)`) is judged `alloc, write-output,
+  fs-read`, floor *agree*.
+- **3, closed.** A call whose callee is a name of the body with a function
+  type is judged over RFC-0037's stored sources for that type
+  (`checker::stored_fn_effects`, matched by `checker::fn_sigs_match`, which
+  is public now). A named source is its instances; a lambda source is its
+  frame, keyed by the function it was written in and its line — the two
+  facts `StoredLambda` records. 63 calls in the corpus are judged this way and 70
+  are not. The 70 are two kinds, and the harness prints both under `open
+  sets` (43 types) and `VYRN_EFFECTS_UNKNOWN=1`. A lambda written in a
+  module-state initializer or a `bench` body has no frame, because neither
+  is an instance the lowering builds: `examples/bin/server.vyrn`:33,
+  `examples/shelf/server.vyrn`:31 and 35 (the route tables),
+  `examples/genericpayload.vyrn`:58–60, `examples/langbench.vyrn`:216. And a
+  local whose type matches no collected source at all: the `cb` of every
+  `std/rpc` deliverer (`fn(RpcReply<T>)` in `bin`, `fullstack`, `shelf`,
+  `rpc.vyrn`, `rpcsplit.vyrn`), the `run` thunk of a page's `Lazy<T>` and
+  `ParamQuery<P, T>` (`std/ui`'s `runLazy`, `runParamQuery`), the
+  `Cursor`-stepping closures of `std/stream` (`streamops.vyrn`,
+  `streamunfold.vyrn`, `streamlazy.vyrn`, `membench.vyrn`, `lambdas.vyrn`,
+  `knucleotide.vyrn`), and the resolvers of `std/graphql` (`graphql.vyrn`,
+  `shelf/server.vyrn`). For these the checker's collection and the core's
+  name types do not meet: the frame's parameter is typed `fn(T) -> U` with a
+  bare parameter the sources were collected without, or the source flowed
+  through a record field or a generated module. This is **finding 14**, a
+  hole in the join, and the deletion slice inherits it before finding 7.
+  Calls to a projection by name (`field`, `tag`, `tryAt`, `tryField`,
+  `wrapped`) are among the 70 too; they are not function values, and the
+  harness's resolver is what does not name them.
+- **6, closed.** `listDir` and `listDirKinds` are in `floor::CALLS`, row
+  `fs`; RFC-0103's tables carry the row with the date. The prediction
+  program is `examples/listing`: a browser artifact whose entry lists a
+  directory. `vyrn check` refuses it with the floor's wording (`` `listDir`
+  needs `fs`; target `browser` has no filesystem ``), `tests/common`'s
+  `EXPECTED_PROJECT_CHECK_FAILURE` records the refusal, `tests/floor.rs`
+  asserts it, and the effects harness counts the entry as refused rather
+  than failing to load. `listdir.vyrn`'s `main` is *agree* now.
+- **No floor check moved.** The verdicts agree on the whole corpus for the
+  `stdin` row (11 functions with `read-input`) and the `args` row (8), so
+  either could be the prediction-as-program by verdict alone. The
+  placement stops it. The floor decides inside the loader (`loader.rs`,
+  after the link and before the checker runs), for every command that
+  loads with an `artifacts` map, and `vyrn why --capability` reads the same
+  graph. The judgment needs a checked program: the core is built from the
+  checker's types and the ownership analysis, and 8 instances still have
+  no core (finding 12). Routing a row through `effects.rs` today would
+  move its refusal from the load to the commands that build a core, after
+  the type errors instead of before them, and would leave the report
+  reading a graph the check no longer reads — a wording and an ordering
+  change, which the brief for this slice does not allow. A row moves when
+  the load can build the core, which is M2's gap list closed. Every floor
+  check still lives in `floor.rs`.
+- **4, decided.** `write-output` is one effect and the row's `gen` cell is
+  one cell: `no`. RFC-0021's sandbox is deterministic and cache-keyed; a
+  `print` in a `gen fn` writes to the compiler's stdout, is no cache input,
+  and is silent on a cache hit, so the same build prints or does not print
+  by the state of the cache. No change in this track: `print` in `COMPTIME_FORBIDDEN` is one
+  line, but the fence's hint names what it refuses and would have to say
+  `print`, and a test that pins the refusal does not exist yet. The
+  deletion slice makes the cell, with the hint and the pin.
+- **5, decided.** The row stays split, and the reason is the route, not
+  the effect. `readFile` in a `gen fn` goes through the loader's resolver
+  and is a cache input; `readFileBytes` does not, so a generation that
+  read bytes would be cached on a key that does not name them. The cell
+  becomes one (`yes` for both) when `readFileBytes` takes the resolver
+  route, and not before. No change.
+- **13, decided.** The verdict stands (`clock` is `no` at generation time);
+  the wording is the fence's, and it names `hostNowMillis` an extern
+  because `extern_fns` does not know RFC-0103 M2's host-boundary rule.
+  When the fence becomes the inclusion check, the reason is the row:
+  "reads the clock". Until then the wording stays, because changing it is
+  a new branch in `check_comptime_purity` and not one line. No change.
+
+Findings 7 and 8 are unchanged: the `extern` declaration-or-call question
+and the presence-or-reachability rule change wait for the deletion slice,
+which now inherits them first.
+
 ### What each milestone is worth on its own
 
 M1 fixes the wasm column. M2 makes leaks a compile error. M3 halves the

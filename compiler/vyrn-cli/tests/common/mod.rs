@@ -250,6 +250,24 @@ pub const WASM_ONLY: &[(&str, &str)] = &[(
 /// loop's native column; the fixture gate (`fixtures.rs`) compares their wasm
 /// output with the interpreter's recording, and `residue-baseline.tsv` carries
 /// their `skip` row.
+/// Project entries under `examples/*/` that `vyrn check` must REFUSE, with the
+/// text the refusal must contain. `EXPECTED_CHECK_FAILURE` is the precedent and
+/// lists single files; a project's entry point is refused by its artifact's
+/// floor (RFC-0103), which a single file never has. `tests/floor.rs` asserts
+/// each; the corpus harnesses that walk project entries skip them.
+pub const EXPECTED_PROJECT_CHECK_FAILURE: &[(&str, &str, &str)] = &[
+    (
+        "leak/client/boot.vyrn",
+        "RFC-0103 M2's gate: the browser artifact reaches a file reader three          hops away, and the chain is the diagnostic",
+        "`readFile` needs `fs`; target `browser` has no filesystem",
+    ),
+    (
+        "listing/client/boot.vyrn",
+        "RFC-0125 M6 finding 6: a browser artifact that lists a directory degrades          to the canonical `Err` on a page, so the floor's `fs` row carries `listDir`",
+        "`listDir` needs `fs`; target `browser` has no filesystem",
+    ),
+];
+
 pub const NATIVE_UNSUPPORTED: &[(&str, &str)] = &[(
     "listdir.vyrn",
     "`listDir` has no native lowering; the wasm target lists over `fd_readdir` (RFC-0125 §3 M5)",

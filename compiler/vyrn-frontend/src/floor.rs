@@ -20,10 +20,12 @@
 //! [`Capability::Stdin`], [`Capability::Args`], [`Capability::Extern`]. The
 //! universal reaches of M0's table (stdout/stderr, the clock, entropy, threads)
 //! are not tracked at all: every target answers yes, so a row for them would say
-//! nothing. `listDir` and `serveStream` are not tracked either, and for the
-//! opposite reason — M0's finding 5 — no compiled target has them, so they keep
-//! the refusals they already have (a missing lowering, a runtime trap) rather
-//! than becoming a per-target row that is `no` three times.
+//! nothing. `serveStream` is not tracked either, and for the opposite reason —
+//! M0's finding 5 — no compiled target has it, so it keeps the runtime trap it
+//! already has rather than becoming a per-target row that is `no` three times.
+//! `listDir` was in the same case until RFC-0125 M5 lowered it over
+//! `fd_readdir`: a WASI host lists, a page answers `BADF`, so it is an `fs`
+//! carrier like `readFile` (RFC-0125 §3 M6 finding 6).
 
 use crate::artifacts::{Artifact, ArtifactMap, Target};
 use crate::ast::{LogSink, Program};
@@ -33,8 +35,8 @@ use crate::diagnostics::Diagnostic;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Capability {
     /// The filesystem: `readFile`, `readFileBytes`, `writeFile`,
-    /// `writeFileBytes`, `renameFile`, `fsyncFile`, and the
-    /// `logging { sink: file(..) }` declaration.
+    /// `writeFileBytes`, `renameFile`, `fsyncFile`, `listDir`, `listDirKinds`,
+    /// and the `logging { sink: file(..) }` declaration.
     Fs,
     /// Standard input: `readLine`.
     Stdin,
@@ -129,7 +131,9 @@ pub struct Carried {
 /// because it behaves differently (the direct backend has no lowering for it, so
 /// a wasm build is refused outright), but that is a missing lowering — a filed
 /// regression — and not a second capability. The floor names the capability;
-/// the backend keeps its own refusal.
+/// the backend keeps its own refusal. `listDir` and `listDirKinds` are the same
+/// case on the native target (`NATIVE_UNSUPPORTED`), and on a page they degrade
+/// to the canonical `Err` the floor exists to refuse.
 pub const CALLS: &[(&str, Capability)] = &[
     ("readFile", Capability::Fs),
     ("readFileBytes", Capability::Fs),
@@ -137,6 +141,8 @@ pub const CALLS: &[(&str, Capability)] = &[
     ("writeFileBytes", Capability::Fs),
     ("renameFile", Capability::Fs),
     ("fsyncFile", Capability::Fs),
+    ("listDir", Capability::Fs),
+    ("listDirKinds", Capability::Fs),
     ("readLine", Capability::Stdin),
     ("args", Capability::Args),
 ];
@@ -438,6 +444,8 @@ mod tests {
             ("readFileBytes(\"a\")", Capability::Fs),
             ("renameFile(\"a\", \"b\")", Capability::Fs),
             ("fsyncFile(\"a\")", Capability::Fs),
+            ("listDir(\"a\")", Capability::Fs),
+            ("listDirKinds(\"a\")", Capability::Fs),
             ("readLine()", Capability::Stdin),
             ("args()", Capability::Args),
         ] {

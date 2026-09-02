@@ -27,6 +27,8 @@
 //! The lattice is stated once, as the table in RFC-0125 §3 M6. The first
 //! test reads it out of the RFC and holds `effects::ATOMS` equal to it.
 
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -80,15 +82,27 @@ fn slash(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
 
-fn load(path: &Path) -> Result<Program, String> {
+/// A root, loaded as the CLI loads it: under its project's `artifacts` map
+/// when it has one, so the floor (RFC-0103) decides on a declared entry
+/// here as it does at `vyrn check`.
+fn load(path: &Path, project: Option<&Path>) -> Result<Program, String> {
     let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let opts = vyrn_frontend::loader::LoadOptions {
         std_root: Some(slash(&repo_root().join("std"))),
+        artifacts: project.and_then(manifest).and_then(|m| m.artifacts),
         ..Default::default()
     };
+    // The message and its note: a floor refusal names the carrier in the note.
     vyrn_frontend::load(&src, &slash(path), &opts, &Fs).map_err(|d| {
         d.first()
-            .map(|d| d.render())
+            .map(|d| match &d.note {
+                Some(n) => format!(
+                    "{}
+  note: {n}",
+                    d.render()
+                ),
+                None => d.render(),
+            })
             .unwrap_or_else(|| "load failed".into())
     })
 }
@@ -309,17 +323,33 @@ fn run_corpus() {
     let mut spawn_outside: Vec<String> = Vec::new();
     let mut gaps: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut unloadable = 0usize;
+    let mut refused = 0usize;
     let mut programs = 0usize;
     for (path, project) in &roots {
-        let program = match load(path) {
+        let program = match load(path, project.as_deref()) {
             Ok(p) => p,
             Err(e) => {
                 // A project entry must load here: the audience comparison
-                // has nothing else to stand on. An example that needs the
-                // root manifest's remote dependencies is counted, as in
-                // `kernel.rs`.
-                if project.is_some() {
-                    panic!("{} did not load: {e}", slash(path));
+                // has nothing else to stand on — unless the registry says
+                // its artifact's floor refuses it, and the refusal is the
+                // one recorded. An example that needs the root manifest's
+                // remote dependencies is counted, as in `kernel.rs`.
+                if let Some(dir) = project {
+                    let rel = format!(
+                        "{}/{}",
+                        dir.file_name().unwrap().to_string_lossy(),
+                        path.strip_prefix(dir).map(slash).unwrap_or_default()
+                    );
+                    let recorded = common::EXPECTED_PROJECT_CHECK_FAILURE
+                        .iter()
+                        .find(|(entry, _, _)| *entry == rel);
+                    match recorded {
+                        Some((_, _, needle)) if e.contains(needle) => {
+                            refused += 1;
+                            continue;
+                        }
+                        _ => panic!("{} did not load: {e}", slash(path)),
+                    }
                 }
                 unloadable += 1;
                 continue;
@@ -643,8 +673,8 @@ fn run_corpus() {
     }
     let unlowered: usize = gaps.values().sum();
     eprintln!(
-        "effects over the corpus: {programs} programs ({unloadable} not loadable here), \
-         {} functions judged, {pure} pure, {unlowered} unlowered, \
+        "effects over the corpus: {programs} programs ({unloadable} not loadable here, \
+         {refused} refused as recorded), {} functions judged, {pure} pure, {unlowered} unlowered, \
          {through_calls} calls through a function value judged over their sources, \
          {} unattributed",
         rows.len(),
@@ -709,10 +739,10 @@ fn run_corpus() {
         }
     }
     // The ratchet: the disagreements, by function, and the spawn sites
-    // outside the rule. It may fall, never rise. 1 when the slice landed:
-    // `listdir.vyrn`'s `main`, whose `listDir` the floor has no row for
-    // (RFC-0125 §3 M6 finding 6).
-    const RATCHET: usize = 1;
+    // outside the rule. It may fall, never rise. 1 when the first slice
+    // landed (`listdir.vyrn`'s `main`, whose `listDir` the floor had no row
+    // for — RFC-0125 §3 M6 finding 6); 0 since the second slice.
+    const RATCHET: usize = 0;
     assert!(
         spawn_outside.is_empty(),
         "{} spawn sites whose callee's effects are outside the rule the checker accepted; the first: {}",
@@ -727,6 +757,11 @@ fn run_corpus() {
         disagreements[0].file,
         disagreements[0].line,
         disagreements[0].name
+    );
+    assert_eq!(
+        refused,
+        common::EXPECTED_PROJECT_CHECK_FAILURE.len(),
+        "every registered project refusal is in the corpus"
     );
     assert!(!rows.is_empty(), "the judgment judged nothing");
     let _ = &rows[0].module;
