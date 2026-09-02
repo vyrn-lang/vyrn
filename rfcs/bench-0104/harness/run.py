@@ -81,7 +81,10 @@ EXAMPLES = ROOT / "examples"
 BUILD = HARNESS / "build"                      # gitignored
 RESULTS = BENCHDIR / "results"
 
-CONTESTANTS = ["c", "rust", "js", "vyrn-native", "vyrn-wasm"]
+# `vyrn-wasm2c` is RFC-0125 §2.5's release route (`vyrn build --route wasm2c`):
+# the same wasm the `vyrn-wasm` leg runs, through wasm2c and clang. It needs
+# wabt and simde under tools/, so it is not in the default set.
+CONTESTANTS = ["c", "rust", "js", "vyrn-native", "vyrn-wasm", "vyrn-wasm2c"]
 
 # The flags, stated rather than implied.
 #
@@ -342,6 +345,7 @@ def environment() -> dict:
             "js": "node (no build step)",
             "vyrn-native": "vyrn build (clang -O2 -ffp-contract=off -Wno-override-module)",
             "vyrn-wasm": "vyrn build --target wasm (direct backend, no optimizer) + wasmtime run",
+            "vyrn-wasm2c": "vyrn build --route wasm2c (the same wasm, wasm2c to C, clang -O2 -ffp-contract=off with wasm-rt)",
         },
     }
 
@@ -448,12 +452,16 @@ def build_all(progs: list[Program], want: list[str]):
             # one is what `make secs` is of.
             native = (p.name, "vyrn-native") if tag == "timing" else None
             wasm = (p.name, "vyrn-wasm") if tag == "timing" else None
+            wasm2c = (p.name, "vyrn-wasm2c") if tag == "timing" else None
             if "vyrn-native" in want:
                 cmd = [vyrn, "build", src, "-o", exe(f"vyrn-{p.name}-{tag}")]
                 timed_sh(native, cmd) if native else sh(cmd)
             if "vyrn-wasm" in want:
                 cmd = [vyrn, "build", src, "--target", "wasm", "-o", BUILD / f"vyrn-{p.name}-{tag}.wasm"]
                 timed_sh(wasm, cmd) if wasm else sh(cmd)
+            if "vyrn-wasm2c" in want:
+                cmd = [vyrn, "build", src, "--route", "wasm2c", "-o", exe(f"vyrn-w2c-{p.name}-{tag}")]
+                timed_sh(wasm2c, cmd) if wasm2c else sh(cmd)
 
 
 def command(contestant: str, prog: Program, n: int, tag: str) -> list:
@@ -473,6 +481,8 @@ def command(contestant: str, prog: Program, n: int, tag: str) -> list:
         return [exe(f"vyrn-{prog.name}-{tag}")]
     if contestant == "vyrn-wasm":
         return [wasmtime_exe(), "run", BUILD / f"vyrn-{prog.name}-{tag}.wasm"]
+    if contestant == "vyrn-wasm2c":
+        return [exe(f"vyrn-w2c-{prog.name}-{tag}")]
     die(f"unknown contestant {contestant}")
 
 
@@ -730,7 +740,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--runs", type=int, default=10, help="timed runs per contestant (default 10)")
     ap.add_argument("--only", default="", help="comma-separated program names")
-    ap.add_argument("--contestants", default=",".join(CONTESTANTS))
+    ap.add_argument("--contestants", default=",".join(c for c in CONTESTANTS if c != "vyrn-wasm2c"))
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--skip-verify", action="store_true", help="calibration only; never for a committed record")
     ap.add_argument("--floor", action="store_true", help="also measure the empty-program floor")

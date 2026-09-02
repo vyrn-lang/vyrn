@@ -1112,6 +1112,41 @@ head interleaved on a shared machine. The
 audit and poison are the C shim's and go with it at step 3; the wasm copy never
 had them. Details under the plan's §6 table.*
 
+*Step 3, first slice, landed 2026-09-02 (`track-j`): the release route of §2.5
+is a build flag, `vyrn build --route wasm2c`, beside the text-IR route and not
+in its place. The same wasm `--target wasm` writes goes through wasm2c (wabt
+1.0.41) to C and through clang at the native route's own flags, with a
+574-line C WASI host (`vyrn-codegen/src/wasi_host.c`) that does what the
+embedded engine's host does, import for import. wasm2c and simde are
+discovered and recorded, never pinned, the way clang is (`$VYRN_WASM2C`,
+`$VYRN_SIMDE`, else `tools/`; `vyrn deps` prints both). `tests/route.rs` holds
+the route to the engine: 171 corpus programs byte-identical on stdout, stderr
+and exit code against the `wasmtime` CLI, 33 skipped for the parity loop's
+reasons. Nothing is deleted: the shim and the text-IR route stay until the
+numbers below decide the route. Seven programs at RFC-0104's timing sizes,
+medians of five, one machine, the three routes interleaved by the harness
+(`run.py --contestants vyrn-native,vyrn-wasm,vyrn-wasm2c`):*
+
+| program | native (text-IR, LLVM) | wasmtime 46 | wasm2c + clang | wasm2c ÷ native |
+|---|---|---|---|---|
+| nbody, 25 M steps | 0.95 s | 2.23 s | 1.54 s | 1.6x |
+| spectral-norm, n = 5500 | 1.06 s | 4.13 s | 2.31 s | 2.2x |
+| fannkuch, n = 11 | 2.09 s | 3.98 s | 3.93 s | 1.9x |
+| binary-trees, depth 18 | 2.14 s | 1.05 s | 1.07 s | 0.5x |
+| fasta, n = 5 M | 0.80 s | 0.91 s | 0.76 s | 0.9x |
+| reverse-complement, 40 M bases | 0.38 s | 1.05 s | 0.97 s | 2.6x |
+| k-nucleotide, 4 M bases | 0.13 s | 0.29 s | 0.20 s | 1.5x |
+
+*Build time of nbody: native 0.63 s, wasm 0.03 s, wasm2c 1.47 s (wasm2c
+itself is under 0.1 s; the rest is clang over a 150 KB C file). The three
+numeric kernels sit where M1 measured them, 1.6x, 2.2x and 1.9x against 1.5x,
+1.9x and 1.8x, on a run whose wasmtime column was slower than M1's too.
+binary-trees under the route is at its wasmtime time, which is M4's gate for
+the native route once the route is this one, and fasta is under native.
+reverse-complement is the widest gap and the one not yet explained: the route
+runs the wasm's runtime, so the answer is in step 4's string family, not in
+the route. The full record is under the plan's §6 table.*
+
 ### M5 — `vyrn run` is compiled
 
 `run`, `test` and `bench --check` execute the wasm in the embedded wasmtime.

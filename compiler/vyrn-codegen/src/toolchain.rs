@@ -1325,6 +1325,13 @@ fn discovered_wasmtime_from(start: &Path) -> Option<PathBuf> {
     } else {
         "wasmtime"
     };
+    discovered_tool_from(start, Path::new(exe))
+}
+
+/// The `tools/` walk every discovered tool takes: the first `tools/*/<rel>` that
+/// exists, walking up from `start`, the entries of each `tools/` sorted so the
+/// pick is deterministic when several versions are unpacked side by side.
+fn discovered_tool_from(start: &Path, rel: &Path) -> Option<PathBuf> {
     for dir in start.ancestors() {
         let tools = dir.join("tools");
         if !tools.is_dir() {
@@ -1337,7 +1344,7 @@ fn discovered_wasmtime_from(start: &Path) -> Option<PathBuf> {
         };
         let mut hits: Vec<PathBuf> = entries
             .flatten()
-            .map(|e| e.path().join(exe))
+            .map(|e| e.path().join(rel))
             .filter(|p| p.exists())
             .collect();
         hits.sort();
@@ -1347,6 +1354,95 @@ fn discovered_wasmtime_from(start: &Path) -> Option<PathBuf> {
     }
     None
 }
+
+/// The wasm2c route's tools (RFC-0125 §2.5, measured in §3 M1; PLAN-0125-runtime
+/// §6 step 3): `wasm2c` from a wabt release, with the wasm-rt headers and
+/// runtime sources that release lays out around it.
+///
+/// Discovered, never pinned, the way clang is: `$VYRN_WASM2C` names the
+/// executable, else the `tools/` walk finds `tools/wabt-*/bin/wasm2c`. The
+/// version is what `wasm2c --version` prints, recorded by `vyrn deps` beside
+/// clang's. CI has no wabt, so a consumer that finds nothing skips, as the
+/// native route skips without clang.
+pub struct Wasm2c {
+    pub exe: PathBuf,
+    pub version: String,
+    /// `include/`, where `wasm-rt.h` is.
+    pub include: PathBuf,
+    /// `share/wabt/wasm2c/`: `wasm-rt-impl.h`, `wasm-rt-impl.c` and
+    /// `wasm-rt-mem-impl.c`, compiled into every binary the route links.
+    pub runtime: PathBuf,
+    pub why: &'static str,
+}
+
+/// The wabt release layout around a `wasm2c` executable: `bin/wasm2c`,
+/// `include/wasm-rt.h`, `share/wabt/wasm2c/wasm-rt-impl.c`. An executable with
+/// no runtime beside it is `Err`, not "absent": the route cannot link without
+/// the runtime, and a silent fall-through would report the tool missing when
+/// it is there.
+pub fn wasm2c_from(start: &Path) -> Result<Option<Wasm2c>, String> {
+    let exe = if cfg!(windows) {
+        "wasm2c.exe"
+    } else {
+        "wasm2c"
+    };
+    let (exe, why) = match env_path("VYRN_WASM2C") {
+        Some(p) => (p, "override: environment"),
+        None => match discovered_tool_from(start, &Path::new("bin").join(exe)) {
+            Some(p) => (p, "discovered: tools/"),
+            None => return Ok(None),
+        },
+    };
+    let root = exe
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let include = root.join("include");
+    let runtime = root.join("share").join("wabt").join("wasm2c");
+    if !include.join("wasm-rt.h").exists() || !runtime.join("wasm-rt-impl.c").exists() {
+        return Err(format!(
+            "the wasm2c at {} has no wabt release layout around it (include/wasm-rt.h and              share/wabt/wasm2c/wasm-rt-impl.c beside bin/); the route links that runtime",
+            exe.display()
+        ));
+    }
+    let version = Command::new(&exe)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| first_line(&o.stdout))
+        .unwrap_or_else(|| UNKNOWN_VERSION.to_string());
+    Ok(Some(Wasm2c {
+        exe,
+        version,
+        include,
+        runtime,
+        why,
+    }))
+}
+
+/// simde, the header library wasm2c's output includes for SIMD (RFC-0075's
+/// lanes are `v128` in the C): the directory that holds `simde/`, so that
+/// `-I<dir>` resolves `<simde/wasm/simd128.h>`. `$VYRN_SIMDE` names it, else
+/// the `tools/` walk finds `tools/simde/`. The version is not probed: a header
+/// library reports none, and the release is recorded in RFC-0125 §3 M1.
+pub fn simde_from(start: &Path) -> Option<(PathBuf, &'static str)> {
+    let marker = Path::new("simde").join("wasm").join("simd128.h");
+    if let Some(p) = env_path("VYRN_SIMDE").filter(|p| p.join(&marker).exists()) {
+        return Some((p, "override: environment"));
+    }
+    let hit = discovered_tool_from(start, &marker)?;
+    // Back from `simde/wasm/simd128.h` to the directory that holds `simde/`.
+    let dir = hit.ancestors().nth(3)?.to_path_buf();
+    Some((dir, "discovered: tools/"))
+}
+
+/// The WASI host the wasm2c route links (RFC-0125 §2.4's two-hundred-line
+/// host): the fifteen imports `direct.rs` declares, each doing what the CLI's
+/// embedded engine does in `wasmrun.rs`. `VYRN_W2C_HEADER` is defined by the
+/// driver to the header wasm2c wrote.
+pub const WASI_HOST_C: &str = include_str!("wasi_host.c");
 
 /// Turn a missing tool from a SKIP into a failure when `VYRN_REQUIRE_TOOLS` is
 /// set, and return it unchanged otherwise.

@@ -8,7 +8,7 @@
 //!   vyrn emit-lowered [file.vyrn]       Print the lowered form of the root module (RFC-0101).
 //!   vyrn emit-gen [file.vyrn] [--maps]  Print every synthesized generator module (RFC-0021),
 //!                                       or its RFC-0073 symbol map as JSON.
-//!   vyrn build   [file.vyrn] [-o out] [--target wasm]
+//!   vyrn build   [file.vyrn] [-o out] [--target wasm] [--route wasm2c]
 //!                                        Compile to a native executable (or wasm) via clang.
 //!   vyrn test    [file.vyrn] [--name <substring>]
 //!                                        Run the root file's `test` blocks under the interpreter.
@@ -79,7 +79,7 @@ enum Engine {
     Wasm,
 }
 
-const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn run --profile [file.vyrn] [args...]   (where the interpreted run spent its time, to stderr; the flag counts only BEFORE the file, so a program can have one of its own)\n       vyrn run|test|bench --check --engine interp|wasm [file.vyrn]   (RFC-0125 M5: `wasm` compiles the program with the direct backend and runs it in the embedded wasmtime; `interp` is the default. Counts only BEFORE the file, like --profile)\n       vyrn check --profile [file.vyrn]   (the same, for generation alone: `check` runs every `gen fn` and stops. Needs a cold generator cache to mean anything)\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
+const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn build [file.vyrn] [-o out] [--route wasm2c]   (RFC-0125 §2.5: the same wasm `--target wasm` writes, through wasm2c and clang to a native executable; needs wabt and simde under tools/, or $VYRN_WASM2C and $VYRN_SIMDE)\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn run --profile [file.vyrn] [args...]   (where the interpreted run spent its time, to stderr; the flag counts only BEFORE the file, so a program can have one of its own)\n       vyrn run|test|bench --check --engine interp|wasm [file.vyrn]   (RFC-0125 M5: `wasm` compiles the program with the direct backend and runs it in the embedded wasmtime; `interp` is the default. Counts only BEFORE the file, like --profile)\n       vyrn check --profile [file.vyrn]   (the same, for generation alone: `check` runs every `gen fn` and stops. Needs a cold generator cache to mean anything)\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
        vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact-name>   (every import chain that pulls that capability into the artifact's closure)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
        vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [--locked] [alias] | vyrn vendor [--check] | vyrn deps [artifact]   (deps: every declared artifact's module graph, then the toolchain)\n       vyrn --version   (also -V)";
 
@@ -2031,6 +2031,23 @@ fn print_toolchain(start: &Path) {
         vyrn_codegen::toolchain::wasi_builtins_from(start, &sysroot_path),
         pin("wasi-builtins").as_deref(),
         "$WASI_BUILTINS, beside the sysroot",
+    ));
+    // The wasm2c route's two tools (RFC-0125 §2.5): discovered like clang, so
+    // wasm2c's row is a probe too, and simde's is a path with no version to ask.
+    rows.push(match vyrn_codegen::toolchain::wasm2c_from(start) {
+        Ok(Some(t)) => ("wasm2c".into(), show_path(&t.exe), t.version, t.why.into()),
+        other => tool_row(
+            "wasm2c",
+            other.map(|o| o.map(|t| (t.exe, t.why))),
+            None,
+            "$VYRN_WASM2C, tools/",
+        ),
+    });
+    rows.push(tool_row(
+        "simde",
+        Ok(vyrn_codegen::toolchain::simde_from(start)),
+        None,
+        "$VYRN_SIMDE, tools/",
     ));
 
     // The name and path columns are padded; the version column is not. A clang
@@ -5956,9 +5973,10 @@ fn bodies_wasm(
 }
 
 fn build(path: &str, rest: &[String]) -> ExitCode {
-    // parse optional `-o <out>` / `--target wasm`
+    // parse optional `-o <out>` / `--target wasm` / `--route wasm2c`
     let mut out: Option<String> = None;
     let mut wasm = false;
+    let mut wasm2c = false;
     let mut i = 0;
     while i < rest.len() {
         if rest[i] == "-o" && i + 1 < rest.len() {
@@ -5973,10 +5991,30 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
                 }
             }
             i += 2;
+        } else if rest[i] == "--route" && i + 1 < rest.len() {
+            // RFC-0125 §2.5's release route, as a flag beside the text-IR route
+            // and not in its place: PLAN-0125-runtime §6 step 3 is a decision
+            // the numbers in RFC-0125 §3 M4 are for, and this is what produces
+            // them. `wasm2c` is the only route name; the default stays the
+            // text-IR route.
+            match rest[i + 1].as_str() {
+                "wasm2c" => wasm2c = true,
+                other => {
+                    eprintln!("build: unknown route `{other}` (expected `wasm2c`)");
+                    return ExitCode::from(2);
+                }
+            }
+            i += 2;
         } else {
             eprintln!("build: unexpected argument `{}`", rest[i]);
             return ExitCode::from(2);
         }
+    }
+    if wasm && wasm2c {
+        eprintln!(
+            "build: `--route wasm2c` produces a native executable; it cannot take `--target wasm`"
+        );
+        return ExitCode::from(2);
     }
 
     // Resolved before anything expensive. A misspelled `nativeTarget` is a
@@ -6055,6 +6093,15 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         };
     }
 
+    if wasm2c {
+        return build_wasm2c(
+            path,
+            &program,
+            &out_path,
+            native_target.unwrap_or(DEFAULT_NATIVE_TARGET),
+        );
+    }
+
     let ir = match vyrn_codegen::emit(&program) {
         Ok(ir) => ir,
         Err(e) => {
@@ -6099,6 +6146,159 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
     add_native_clang_flags(&mut cmd, native_target.unwrap_or(DEFAULT_NATIVE_TARGET));
     let status = cmd.status();
     match status {
+        Ok(s) if s.success() => {
+            println!("wrote {out_path}");
+            ExitCode::SUCCESS
+        }
+        Ok(s) => {
+            eprintln!("error: clang exited with {s}");
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("error: failed to run clang ({}): {e}", clang.display());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `vyrn build --route wasm2c` (RFC-0125 §2.5; PLAN-0125-runtime §6 step 3,
+/// first slice): the program's wasm — the bytes `--target wasm` writes — through
+/// wasm2c to C, compiled with the WASI host of `wasi_host.c` and wabt's wasm-rt
+/// by clang at the native route's own flags, into a native executable.
+///
+/// The intermediate files stay beside the output the way the text-IR route's
+/// `.ll` and `.shim.c` do, so a failure is inspectable: `<out>.wasm`,
+/// `<out>.w2c.c`, `<out>.w2c.h`, `<out>.host.c`.
+fn build_wasm2c(
+    path: &str,
+    program: &vyrn_frontend::ast::Program,
+    out_path: &str,
+    native_target: NativeTarget,
+) -> ExitCode {
+    let start = Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+    let w2c = match vyrn_codegen::toolchain::wasm2c_from(&start) {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            eprintln!(
+                "error: could not find `wasm2c`. Unpack a wabt release under tools/ \
+                 (tools/wabt-<version>/bin/wasm2c) or set VYRN_WASM2C to the executable."
+            );
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some((simde, _)) = vyrn_codegen::toolchain::simde_from(&start) else {
+        eprintln!(
+            "error: could not find simde. Unpack a simde release under tools/ \
+             (tools/simde/simde/wasm/simd128.h) or set VYRN_SIMDE to the directory that \
+             holds `simde/`."
+        );
+        return ExitCode::FAILURE;
+    };
+    let clang = match find_clang() {
+        Some(c) => c,
+        None => {
+            eprintln!(
+                "error: could not find `clang`. Install LLVM and put clang on PATH, \
+                 or set the CLANG environment variable to its full path."
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let bytes = match vyrn_codegen::direct::compile(program) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let out = PathBuf::from(out_path);
+    let wasm_path = out.with_extension("wasm");
+    let c_path = out.with_extension("w2c.c");
+    let host_path = out.with_extension("host.c");
+    let write = |p: &Path, data: &[u8]| -> bool {
+        if let Err(e) = std::fs::write(p, data) {
+            eprintln!("error: cannot write {}: {e}", p.display());
+            return false;
+        }
+        true
+    };
+    if !write(&wasm_path, &bytes) {
+        return ExitCode::FAILURE;
+    }
+    // The module name fixes the C names the host calls (`w2c_prog`,
+    // `wasm2c_prog_instantiate`, `w2c_prog_0x5Fstart`); wasm2c would otherwise
+    // take it from the output file's name.
+    let st = Command::new(&w2c.exe)
+        .arg("-n")
+        .arg("prog")
+        .arg(&wasm_path)
+        .arg("-o")
+        .arg(&c_path)
+        .status();
+    match st {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            eprintln!("error: wasm2c exited with {s}");
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            eprintln!("error: failed to run wasm2c ({}): {e}", w2c.exe.display());
+            return ExitCode::FAILURE;
+        }
+    }
+    if !write(&host_path, vyrn_codegen::toolchain::WASI_HOST_C.as_bytes()) {
+        return ExitCode::FAILURE;
+    }
+
+    // The header is included by its bare name: the host sits beside it, and a
+    // full path would put backslashes into a C string literal.
+    let h_name = out
+        .with_extension("w2c.h")
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    // `show_path`: a tool found under a canonicalized start carries Windows's
+    // verbatim `\\?\` prefix, which clang's `#include <simde/..>` search does
+    // not take.
+    let mut cmd = Command::new(&clang);
+    cmd.arg(&c_path)
+        .arg(&host_path)
+        .arg(show_path(&w2c.runtime.join("wasm-rt-impl.c")))
+        .arg(show_path(&w2c.runtime.join("wasm-rt-mem-impl.c")))
+        .arg("-o")
+        .arg(&out)
+        .arg(format!("-I{}", show_path(&w2c.include)))
+        .arg(format!("-I{}", show_path(&w2c.runtime)))
+        .arg(format!("-I{}", show_path(&simde)))
+        .arg(format!("-DVYRN_W2C_HEADER=\"{h_name}\""))
+        // wasm-rt counts call depth where it has no guard page (Windows), at
+        // 500 frames by default. Vyrn's own counter traps at
+        // `CALL_DEPTH_LIMIT` (1,000) user frames, and the runtime's frames
+        // (RFC-0125 M4 step 1) are not counted by it, so the host's limit sits
+        // above the program's with room for those; `error: call depth exceeds
+        // 1000` stays the program's wording, as under the engine.
+        .arg(format!(
+            "-DWASM_RT_MAX_CALL_STACK_DEPTH={}",
+            4 * vyrn_frontend::interp::CALL_DEPTH_LIMIT
+        ));
+    // The same `-O2 -ffp-contract=off -march=..` the text-IR route ships, so
+    // the two routes' numbers differ by the route and nothing else.
+    add_native_clang_flags(&mut cmd, native_target);
+    if cfg!(windows) {
+        // `random_get` is `BCryptGenRandom`, as in `wasmrun.rs`.
+        cmd.arg("-lbcrypt");
+    }
+    match cmd.status() {
         Ok(s) if s.success() => {
             println!("wrote {out_path}");
             ExitCode::SUCCESS
