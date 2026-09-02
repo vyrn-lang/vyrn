@@ -55,6 +55,12 @@
 /// native route. A builtin's twin carries a `V` (`readFileV` for `readFile`),
 /// as `std/text`'s `charCountV` does, because the builtin's name is reserved.
 ///
+/// **Step 9, the traps and the printer:** `trapV`, `trapIdx`, `printI64` and
+/// `boolStr`, over `std/mem`'s `trap` primitive and the `writeAll` step 7 put
+/// here. They are the last functions the wasm emitter hand-emitted; what
+/// stays there is instruction sequences, not functions (PLAN-0125-runtime §6,
+/// step 9's results).
+///
 /// **Call depth.** The emitter does not count these frames against the
 /// language's call-depth budget: the hand-emitted copies had no prologue, and
 /// a program that traps at the limit must trap where it did.
@@ -65,7 +71,7 @@
 /// it the same way.
 
 import {
-    load8, load32, load64, store8, store32, store64, copy, fill, memorySize, grow, heapBase,
+    load8, load32, load64, store8, store32, store64, copy, fill, memorySize, grow, heapBase, trap,
     fdWrite, fdRead, fdClose, pathOpen, pathRename, fdSync, fdPrestatGet, argsSizesGet, argsGet,
     environSizesGet, environGet, clockTimeGet, randomGet, fdReaddir, genRead, genFetch,
 } from "std/mem"
@@ -322,7 +328,7 @@ export fn regexRun(s: Int32, table: Int32, start: Int32, accept: Int32) -> Bool 
 // The heap's first 480 bytes are the allocator's own: one head per class,
 // 116 words, then the bump offset at 464. The I/O family's cells follow (step
 // 7, the table above its section), and the first block starts sixteen-aligned
-// at 8736. All of it starts at zero, which is what an empty list, an empty heap
+// at 8768. All of it starts at zero, which is what an empty list, an empty heap
 // and an empty buffer are, so nothing initializes it: the emitter's `HEAP`
 // global and its reserved tables are gone with the hand-emitted runtime. A
 // freed block's list link lives in its payload; the eight-byte floor is what
@@ -372,7 +378,7 @@ export fn malloc(n: Int64) -> Int32 {
         store32(h, load32(head))
         return head
     }
-    let p = base + 8736 + Int32(load32(base + 464))
+    let p = base + 8768 + Int32(load32(base + 464))
     // In 64 bits so the sum cannot wrap: a top past 4 GiB is a request no
     // wasm32 memory can serve, reported in `grow`'s words.
     let end = Int64(UInt32(p)) + Int64(size) + 8
@@ -385,7 +391,7 @@ export fn malloc(n: Int64) -> Int32 {
             panic("out of memory")
         }
     }
-    store32(base + 464, UInt32(end - Int64(base) - 8736))
+    store32(base + 464, UInt32(end - Int64(base) - 8768))
     store32(p, UInt32(cls))
     return p + 8
 }
@@ -946,7 +952,8 @@ export fn arrClear(dst: Int32, src: Int32) {
 //   8692   one byte: the newline `printStr` writes
 //   8696   32 bytes of scratch for the host imports' out-parameters
 //   8728   the fixed clock's monotonic counter, an `Int64`
-//   8736   the allocator's first block (`malloc` above)
+//   8736   32 bytes of digits, written backwards (step 9's `digitsAt`)
+//   8768   the allocator's first block (`malloc` above)
 //
 // One host call is in flight at a time, so the scratch is never shared. The
 // stdin buffer is 4,096 bytes because `readLine` is the only reader of fd 0
@@ -1694,4 +1701,96 @@ export fn listDirGen(path: Int32, mode: Int32, listPre: Int32, listPost: Int32) 
         return Err(Int64(UInt32(err3(listPre, path, listPost))))
     }
     return splitNames(buf, Int32(load32(heapBase() + 8684)), false)
+}
+
+// ---------------------------------------------------------------------------
+// Step 9, the traps and the printer (PLAN-0125-runtime §6; RFC-0125 §2.4)
+// ---------------------------------------------------------------------------
+//
+// The last four functions the wasm emitter wrote by hand. Each keeps the bytes
+// of the copy it replaces: parity compares stderr, so every `error:` line in
+// the corpus is a test of these two traps.
+//
+// A trap writes through `writeAll`, never straight to descriptor 2, so the
+// stdout buffer behind it is flushed FIRST and a program's last output stands
+// in the order it was printed. `std/mem`'s `trap` primitive
+// (PLAN-0125-runtime §2.3) is that write and `proc_exit(1)`; it does not
+// return, so it is the last statement of both traps.
+
+/// The decimal digits of `v` written BACKWARDS from `buf + end`, and the
+/// address of the first one.
+///
+/// One loop for both printers, and no allocation on either path: the frame
+/// buffer the hand-emitted copies each carried is the 32-byte cell at
+/// `heapBase() + 8736`, and a trap must not need the heap to say why it
+/// trapped. `intStr` is the other digit loop in this module and stays where it
+/// is: it answers a `String` the caller owns, which is what `@str` promises.
+///
+/// The magnitude is taken in `UInt64`, where `0 - u` of `Int64.min` is exactly
+/// 2^63, so the smallest integer prints its digits rather than nothing. An
+/// unsigned type prints its magnitude, which is why the caller says whether to
+/// look for a sign.
+fn digitsAt(buf: Int32, end: Int32, v: Int64, signed: Bool) -> Int32 {
+    let mut u: UInt64 = UInt64(v)
+    let neg = signed && v < 0
+    if neg {
+        u = 0 - u
+    }
+    let mut p = end
+    while true {
+        store8(buf + p, UInt8(u % 10) + 48)
+        u = u / 10
+        p = p - 1
+        if u == 0 {
+            break
+        }
+    }
+    if neg {
+        store8(buf + p, '-')
+        p = p - 1
+    }
+    return buf + p + 1
+}
+
+/// `print(n: Int64)`: the decimal digits and a newline, to descriptor 1.
+///
+/// The newline sits at the end of the cell, so one `writeAll` carries the
+/// digits and it together — the copy's own shape, and the reason the pointer
+/// handed over is computed rather than fixed.
+export fn printI64(v: Int64, signed: Bool) {
+    let buf = heapBase() + 8736
+    store8(buf + 31, '\n')
+    let at = digitsAt(buf, 30, v, signed)
+    writeAll(1, at, buf + 32 - at)
+}
+
+/// `bool_str`: the interned literal itself, not a copy of it. `print` wants
+/// exactly that and frees nothing; `@str` copies at its own call site, because
+/// a rendered value owns its storage and a data-segment pointer cannot. The
+/// emitter passes both literals, as it passes every other wording here.
+export fn boolStr(v: Bool, t: Int32, f: Int32) -> Int32 {
+    if v {
+        return t
+    }
+    return f
+}
+
+/// `trap(msg)`: the message on descriptor 2 and exit 1, which is what the
+/// interpreter and the native build both do. Not a wasm `unreachable`: that
+/// would print the engine's wording, and parity compares stderr.
+export fn trapV(msg: Int32) {
+    trap(msg, strLen(msg))
+}
+
+/// `trap_idx(pre, i, post)`: `error: array index 7 out of bounds`, which the
+/// interpreter and the native build both print with the index interpolated.
+/// Three writes rather than one format: this is the only runtime message with
+/// a number in it, and the two halves around the number are `trap.rs`'s,
+/// interned by the emitter and passed in.
+export fn trapIdx(pre: Int32, i: Int64, post: Int32) {
+    writeAll(2, pre, strLen(pre))
+    let buf = heapBase() + 8736
+    let at = digitsAt(buf, 31, i, true)
+    writeAll(2, at, buf + 32 - at)
+    trap(post, strLen(post))
 }
