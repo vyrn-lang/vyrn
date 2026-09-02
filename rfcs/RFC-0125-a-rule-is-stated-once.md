@@ -768,6 +768,20 @@ parity in release with `--ignored`; the residue ratchet; the cross-engine
 generator test, red for the same five programs as at the base; and `vyrn doc
 --std --verify`. The wasm manifest is not regenerated in this slice.
 
+**The take out of a `read` parameter (2026-09-03): the probes.** The
+defect above and `placeorder.vyrn`'s alias write (M5's second slice) are
+one rule seen from two sides. Both probes are under `rfcs/probes-0125/`,
+and what each engine does is pinned here:
+
+| probe | interpreter | native | `--engine wasm` |
+|---|---|---|---|
+| `take-out-of-a-read-parameter.vyrn` (`let mut mt = h.meta` on a `read` parameter, then `mt.push(..)`; the caller reads `titled.meta` after) | `2`, `1`, `a` | exit `0xC0000374`, nothing printed | trap in `free`, nothing printed |
+| `alias-then-write-through-the-root.vyrn` (`let before = t.xs`, then `t.xs[0] = 99`, then `before[0]`) | `99`, `1` | `99`, `99` | `99`, `99` |
+
+The interpreter copies on write (`Rc::make_mut`), so it prints the answer a
+copy would; the compiled routes share the buffer, so the first probe
+releases one buffer twice and the second reads the write through it.
+
 ### M2 — the named core and the linear judgment, beside the pipeline
 
 The lowering emits the core of §2.1. The kernel makes the linear judgment. In
