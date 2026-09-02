@@ -311,7 +311,9 @@ needs (load, store, allocate pages) are the only unsafe surface in the
 language, fenced in that module, and reviewed there. Both the C shim's logic
 and the runtime the wasm backend hand-emits are replaced by it. The allocator
 is the segregated free list the wasm runtime already has, because §1.4
-measured it winning.
+measured it winning. The design for this — the inventory of all three
+runtimes with counts, the primitive set, the fence, the allocator, the
+migration order and the cost — is `PLAN-0125-runtime.md`.
 
 The C side of a native binary becomes the WASI host: read, write, clock, exit,
 arguments. About two hundred lines, supplied by the route in §2.5.

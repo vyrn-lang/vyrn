@@ -1,0 +1,637 @@
+# RFC-0125 — the runtime in Vyrn: design for M4
+
+- **Status:** Design (2026-09-02). Nothing here has landed. This document is
+  the design RFC-0125 §2.4 states in one paragraph, written out so M4 can be
+  built one family at a time and each family can be gated. It decides the
+  primitive set, the fence, the allocator and the migration order; §8 lists
+  what it could not decide.
+- **Depends on:** RFC-0125 (the RFC this serves: §1.4 measured the allocator,
+  §2.2 names the effects, §2.5 names the routes), RFC-0077 (the direct wasm
+  backend whose runtime this replaces), RFC-0089 M1a (the String header),
+  RFC-0028 and RFC-0117 (the three Map layouts), RFC-0114 §25 (the free audit
+  and the residue ratchet this deletes), RFC-0072 and RFC-0103 (the fence and
+  the floor §3 chooses between), RFC-0076 (the embedded wasmtime §5 reuses).
+- **Evidence:** every count below was taken at the tree this document was
+  written in, with the scripts described in §1.0. The C shim is the string
+  `RUNTIME_SHIM_TEMPLATE` in `compiler/vyrn-codegen/src/toolchain.rs`; the
+  wasm runtime is `fn runtime` in `compiler/vyrn-codegen/src/direct.rs`; the
+  native backend's own runtime is the six IR string constants at the top of
+  `compiler/vyrn-codegen/src/lib.rs`.
+
+---
+
+## The question
+
+RFC-0125 §2.4 says: allocator, Map, String, Array operations, validation, the
+trap table and their wording live in one Vyrn module, compiled by the emitter
+into every program, over a fenced set of raw-memory primitives. Today that
+runtime is written three times. This document answers, with the code counted:
+what the three copies contain and where they disagree (§1); which primitives
+the one module needs and why each cannot be a library (§2); how the fence
+keeps every other module off them (§3); what the allocator is (§4); what the
+interpreter does with the module before M5 deletes it (§5); in what order the
+families move and what gates each (§6); and what it costs (§7).
+
+---
+
+## 1. The inventory
+
+### 1.0 How the counts were taken
+
+The C shim is one Rust string, lines 26 to 1,098 of `toolchain.rs`, 1,073
+lines. A brace-matching pass over it finds 85 top-level function definitions
+holding 638 lines between them; the rest is comments, `typedef`s, statics and
+`#if` arms. Twelve of the 85 are `#if` twins (the audit lock, the task
+functions, the generator host entry), so the shim defines 73 distinct
+functions.
+
+The wasm runtime is `fn runtime` in `direct.rs`, lines 15,355 to 19,559:
+4,205 lines. It emits 55 functions, each announced by one `rt.next_is(m, ..)`
+line; a function's count below is the span from its announcement to the next
+one, so it includes the function's own comment block (703 comment lines over
+the 55). The 135 lines before the first announcement intern the trap wording
+and reserve the runtime's cells. The `Rt` table and its `slots` constructor,
+lines 14,941 to 15,354, are another 414 lines of index bookkeeping and doc.
+
+The native backend's runtime is in two places: the shim above, called through
+113 distinct `@__vyrn_*` symbols at 231 call lines in `lib.rs`, and 420 lines
+of hand-written LLVM IR in six constants at the top of `lib.rs`
+(`REGION_RUNTIME` 131, `STREAM_RUNTIME` 29, `ENCODING_RUNTIME` 45,
+`STRING_RUNTIME` 95, `REGEX_RUNTIME` 28, `IO_RUNTIME` 92), plus the internal
+helpers every program gets formatted in (`__vyrn_trap_msg`, `__vyrn_trap_idx`,
+`__vyrn_panic`, `__vyrn_call_enter`, `__vyrn_call_exit`,
+`__vyrn_globals_init`, `__vyrn_globals_teardown`).
+
+The emitter side is counted too, because it is what changes shape: `direct.rs`
+references the `rt` table 156 times outside `fn runtime`, and the trap wording
+table `vyrn-frontend/src/trap.rs` (296 lines, 22 public items) is read 16
+times in `direct.rs`, 21 in `lib.rs` and 47 in `interp.rs`.
+
+### 1.1 By family
+
+Line counts are function spans as defined above. "—" means the family has no
+function there; where the work is done inline by the emitter instead, the
+cell says so.
+
+**Allocation**
+
+| function | C shim | wasm runtime | native IR |
+|---|---|---|---|
+| `malloc` | `__vyrn_malloc` 13 + `__vyrn_alloc_check` 7 | `malloc` 174 | — |
+| `free` | `__vyrn_free` 17 | `free` 49 | — |
+| `realloc` | `__vyrn_realloc` 18 | none: `str_append`, `push`, `region_keep` allocate, copy and free | — |
+| free audit and leak check | 12 functions, 110 lines (`vyrn_audit_*`, `__vyrn_leak_check_on`, `__vyrn_audit_exit`, `__vyrn_teardown_begin`) | none | — |
+| total | 165 | 223 | 0 |
+
+**Strings**
+
+| function | C shim | wasm runtime | native IR |
+|---|---|---|---|
+| header new / grow / setlen | `vstr_new` 7, `vstr_grow` 5, `vstr_setlen` 4 (private to the shim) | `str_new` 35 | `STRING_RUNTIME` 95 (`str_new`, `str_free`, `str_len`, `str_setlen`, `str_bytes`, `str_bytes_range`) |
+| length, compare, prefix | `__vyrn_strlen` 1; `strcmp` is libc | `strlen` 25, `strcmp` 48, `starts` 57 | — |
+| concatenation and append | inline in the emitter, over `__vyrn_realloc` | `concat` 66, `str_append` 112 | — |
+| integer to text | `__vyrn_snprintf` 8 (`vsnprintf`) | `int_str` 86, `bool_str` 12, `print_i64` 9 | — |
+| text to integer | `strtoll` (libc) | `parse_i64` 110, `str_i64` 93 | — |
+| UTF-8 validation | — | `utf8valid` 91, `str_from_bytes` 116 | `ENCODING_RUNTIME` 45 |
+| regex DFA runner | — | `regex_run` 100 | `REGEX_RUNTIME` 28 |
+| line and column | `__vyrn_line_at` 8, `__vyrn_col_at` 8 | `line_at` 40, `col_at` 57 | — |
+| total | 41 | 1,057 | 168 |
+
+Float formatting is absent from all three columns on purpose: `std/num`'s
+`f64Str` builds it out of bytes in Vyrn (RFC-0081 M2). `charCount` left the
+shim for `std/text` (RFC-0078; "47 exports to 46" in the shim's own comment),
+the codecs left `lib.rs` for `std/codecs` (about 520 lines of IR, per the
+comment above `ENCODING_RUNTIME`), and `strncmp` left for `std/strpred`. Those
+four moves are this document's precedent: each was a runtime function that
+became Vyrn over a smaller primitive, and parity held.
+
+**Arrays**
+
+| function | C shim | wasm runtime | native IR |
+|---|---|---|---|
+| element access, push, reserve, append, copyFrom, clear | — (inline in the emitter) | — (inline in the emitter) | — (inline) |
+| bounds trap | — | `trap_idx` 45 | `__vyrn_trap_idx` (formatted per program) |
+
+Arrays have no runtime function in any engine. Every operation is emitted at
+its call site, three times, which is the per-builtin product RFC-0125 §1.1
+counts. They are in this inventory because the module of §2.4 gives them
+functions for the first time.
+
+**Maps** (three key layouts: String, Int64, canonical pack — RFC-0028,
+RFC-0117 M1, RFC-0117 M2)
+
+| function | C shim | wasm runtime | native IR |
+|---|---|---|---|
+| hash | `map_hash` 5, `map_hash_i64` 6, `map_hash_pack` 9 | `map_hash` 42 (String); the i64 and pack hashes are inside their `slot` | — |
+| bucket probe | `map_slot` 6, `_i64` 6, `_pack` 6 | `map_slot` 57, `_i64` 78, `_pack` 121 | — |
+| find | `__vyrn_map_find` 9, `_bytes` 17, `_i64` 1, `_pack` 1 | `map_find` 65, `_bytes` 165, `_i64` 58, `_pack` 59 | — |
+| record an append | `__vyrn_map_index_add` 3, `_i64` 1, `_pack` 1 | `map_put` 36, `_i64` 34, `_pack` 40 | — |
+| reindex after grow or remove | `map_reindex` 6, `_i64` 6, `_pack` 6 | `map_reindex` 52, `_i64` 51, `_pack` 62 | — |
+| reserve, remove_at, keys_copy | 3 × 3 functions, 33 lines | inline at their single call sites (the `Rt` doc says why) | — |
+| total | 25 functions, 133 lines | 14 functions, 920 lines | 0 |
+
+**I/O**
+
+| function | C shim | wasm runtime | native IR |
+|---|---|---|---|
+| bytes out | `__vyrn_write_stdout` 3, `__vyrn_stdout`/`__vyrn_stderr` 2 | `write_all` 136, `print_str` 15 | — |
+| standard input | `__vyrn_in_byte` 13, `__vyrn_read_line` 18 | `getbyte` 68, `read_line` 158 | — |
+| files | `__vyrn_read_file` 22, `_bytes` 18, `__vyrn_write_file` 9, `_bytes` 8, `__vyrn_rename_file` 9, `__vyrn_fsync_file` 15 | `open_at` 62, `read_all` 122, `read_file` 71, `_bytes` 55, `write_file` 31, `_bytes` 68, `rename_file` 99, `fsync_file` 81 | — |
+| the error message with the path in it | `__vyrn_snprintf` (shared with int formatting) | `err3` 121 | `IO_RUNTIME` 92 (`read_err`, `write_err`, `rename_err`, `args`) |
+| arguments and environment | `__vyrn_args_count` 3, `__vyrn_args_get` 1 | `args` 125, `env_get` 88 | — |
+| directory listing (generator path only) | — | `list_dir` and `list_dir_kinds` 168 | — |
+| total | 121 | 1,468 | 92 |
+
+**Time and randomness**
+
+| function | C shim | wasm runtime |
+|---|---|---|
+| `now`, `monotonic`, `randomSeed` | 7, 19, 14 = 40 | 23, 40, 35 = 98 |
+
+**Traps**
+
+| item | C shim | wasm runtime | native IR |
+|---|---|---|---|
+| the exit with a message | `__vyrn_alloc_check`'s `fputs($OOM); exit(1)`; `extern_trap_stubs` per `extern fn` | `trap` 13, `trap_idx` 45 | `__vyrn_trap_msg`, `__vyrn_trap_idx`, `__vyrn_panic`, formatted per program |
+| the wording | one hole, `$OOM`, filled from `trap.rs` | 11 messages interned in the 135-line preamble from `trap.rs` | strings formatted from `trap.rs` |
+| call-depth accounting | — | inline in every prologue (RFC-0125 M1 priced it at 0.25 s on nbody) | `__vyrn_call_enter`/`_exit` |
+
+The wording is already one table, `trap.rs`. What is three is the site: the
+function that prints and exits, and the prologue that counts.
+
+**Regions**
+
+| function | C shim | wasm runtime | native IR |
+|---|---|---|---|
+| enter, alloc, keep, exit, pop, pop_except | — | `region_keep` 103, `region_free` and `region_pop` 142 (one loop emits both) | `REGION_RUNTIME` 131: `region_enter`, `region_alloc`, `region_pop`, `region_exit`, `region_pop_except` |
+
+Both are the same design: a per-depth side list of block pointers over
+`malloc`, 16 entries then doubling, 64 frames deep (`REGION_MAX` in
+`interp.rs`, `$NEST` in the IR), freed one pointer at a time at the closing
+brace. RFC-0125 §1.3 calls this "the syntax of an arena and none of the
+effect", and §4 below is where the effect arrives.
+
+**Tasks**
+
+| function | C shim | wasm runtime |
+|---|---|---|
+| `spawn`, `join`, `task_release`, `join_all` | wasi: 4 functions, 13 lines (eager); native: 12 functions, about 140 lines (Win32 events or pthreads, a doubly linked registry, the exit walk) | none: the emitter runs the thunk at the spawn point |
+
+**Generator host**
+
+| function | C shim | wasm runtime |
+|---|---|---|
+| `__vyrn_gen_init` 12, `__vyrn_gen_fini` 1, `__vyrn_gen_libc_keep` 1, `main` 11 | 25 | `list_dir`, `list_dir_kinds`, and the `vyrn_gen` import table (`direct.rs` lines 141 to 180) |
+
+**Streams**
+
+| function | C shim | wasm runtime | native IR |
+|---|---|---|---|
+| box, unbox, close | — | inline, one `__vyrn_stream_close_<T>` per element type | `STREAM_RUNTIME` 29 |
+
+### 1.2 Totals
+
+| copy | functions | lines |
+|---|---|---|
+| C shim (`toolchain.rs`) | 73 distinct | 1,073 in the string, 638 in bodies |
+| wasm runtime (`direct.rs` `fn runtime`) | 55 | 4,205, of which 703 comment |
+| native IR prelude (`lib.rs`) | 6 constants, 7 formatted helpers | 420 in the constants |
+| the `Rt` table and `slots` (`direct.rs`) | — | 414 |
+
+RFC-0125 §1.6 estimated "about 1,600 lines of C runtime that the wasm backend
+re-emits by hand". The count is 1,073 lines of C, 420 of IR, and 4,619 of
+Rust that emits wasm: the wasm copy is four times the C copy because it is
+written as instruction lists with the doc inline.
+
+### 1.3 Where the copies disagree
+
+Each row was found by reading the two implementations side by side. "Agree
+by construction" means one copy's comment names the other and the shape is
+the same; it is still two copies.
+
+| item | C shim / native | wasm runtime | kind |
+|---|---|---|---|
+| allocator | platform `malloc` behind a wrapper with an audit branch | segregated free list, 113 size classes, four per power of two | design. RFC-0125 §1.4: binary-trees 1.87 s native, 0.88 s wasm, same source |
+| request too large | refused above `SIZE_MAX` (never on LP64) | refused above 2 GiB, and a heap top past 4 GiB | limit differs; both print `OUT_OF_MEMORY` |
+| `realloc` | in place through libc | none; every grow is allocate, copy, free | behaviour differs on the copy count; observable only in time |
+| free of a foreign pointer | under the audit: `free audit: double or foreign free`, exit 134; without it, undefined | silently refused when below `HEAP_BASE` or the class is out of range; the block leaks | a class of defect one engine reports and the other hides |
+| leak check | `VYRN_LEAK_CHECK` walks the audit table after teardown, exit 135 | none | the residue ratchet measures the native binary only |
+| poison on free | `0xDD` fill under the audit | none | a use-after-free reads stale bytes on one engine and `0xDD` on the other |
+| integer to text | `vsnprintf("%lld")` through `__vyrn_snprintf` | `int_str`, 86 lines by hand | agree by test, not by construction |
+| text to integer | `strtoll` | `parse_i64` and `str_i64`; `str_i64` skips no whitespace and does not clamp, and says so | `strtoll` accepts leading whitespace; only harness inputs reach it |
+| `strcmp` | libc | 48 lines by hand | agree by construction |
+| standard output | stdio's buffer, `fwrite`, binary mode set once in `main` | a 4,096-byte write-behind buffer in `write_all`, flushed before any write to another descriptor | agree on order; different flush points |
+| standard input | 4,096-byte buffer over `read` | 4,096-byte buffer over `fd_read` | agree by construction (the shim's comment names the wasm one) |
+| `read_line` growth | 64 then doubling | 64 then doubling | agree by construction |
+| `read_file` growth | 1,024 then doubling | 1,024 then doubling | agree by construction |
+| monotonic clock on Windows | wall clock (`timespec_get`), "an adequate elapsed source" | `clock_time_get(MONOTONIC)` on every host | a clock that can go backwards on one engine; the fixed-clock harness path (`1e9 + n × 1e6`) is identical |
+| random seed | `rand_s` / `getentropy` | `random_get` | same contract, different source; the fixed-seed path identical |
+| cross-device rename | status 2 on `EXDEV` / `ERROR_NOT_SAME_DEVICE` | `path_rename` through the preopen table; the status is `err3`'s | not compared beyond the corpus |
+| I/O error text | `__vyrn_snprintf` with a format string from `io_message_parts` | `err3` over three interned pieces from `io_message_parts` | one wording, two builders |
+| Map `reserve`, `remove_at`, `keys_copy` | shim functions | inline at the call site | same code, different place |
+| Map hashes | FNV-1a to the NUL, SplitMix64 finalizer, FNV-1a over the pack | the same three | agree by construction; `std/hash`'s `fnv1a` is a fourth copy of the first, in Vyrn |
+| `map_find_bytes` | 17 lines | 165 lines | the same probe |
+| UTF-8 validation | 45 lines of IR, 8-byte ASCII skip | 91 lines, 8-byte ASCII skip | the same DFA (`@__vyrn_utf8d`) both walk |
+| regex runner | 28 lines of IR | 100 lines | the same DFA tables, emitted per pattern by the compiler |
+| regions | thread-local frames (`thread_local global`) | global cells | tasks: a region inside a spawned task is per thread natively and shared in wasm, where tasks are eager so it cannot be observed |
+| a `return` out of a region | `region_pop`: the frame's other blocks leak | `region_pop`: the same, "which is what the textual backend also chooses" | agree, on a leak |
+| tasks | real threads natively, eager under wasi | eager | schedule differs; output is byte-identical because tasks are isolated |
+| call-depth counter | two functions | inline in every prologue | agree on the limit and the words |
+| `listDir` | absent; the native build is refused | present on the generator path | RFC-0103's census records the refusal |
+
+Twenty-six rows. Four are design differences that change what a program pays
+(the allocator, `realloc`, the audit, the flush points); the rest are one
+algorithm written twice and kept equal by the parity corpus. That is the
+maintenance RFC-0125 §"The question" describes, measured on this one file
+pair.
+
+---
+
+## 2. The primitives
+
+The runtime module needs what a library cannot write. A library function is
+Vyrn source over Vyrn values; a primitive is a wasm instruction the emitter
+maps a `prim` row to (RFC-0125 §2.3). Everything below is one instruction or
+one host import. Everything not below is Vyrn.
+
+### 2.1 Raw memory
+
+| primitive | signature | wasm instruction | why it cannot be library |
+|---|---|---|---|
+| `load8`, `load16`, `load32`, `load64` | `(addr: Int32) -> UInt8 / UInt16 / UInt32 / UInt64` | `i32.load8_u`, `i32.load16_u`, `i32.load`, `i64.load` | a Vyrn value has a type; a byte at an address has none until the runtime gives it one |
+| `loadF32`, `loadF64` | `(addr: Int32) -> Float32 / Float64` | `f32.load`, `f64.load` | the same, for the two float widths |
+| `store8` … `store64`, `storeF32`, `storeF64` | `(addr: Int32, v: T)` | `i32.store8` … `f64.store` | the same |
+| `copy` | `(dst: Int32, src: Int32, n: Int32)` | `memory.copy` | a loop of `load8`/`store8` is correct and one hundred times slower; every String and Array move is one of these |
+| `fill` | `(dst: Int32, byte: UInt8, n: Int32)` | `memory.fill` | the same; the Map's `reindex` and the canonical pack's zeroing use it |
+| `pages` | `() -> Int32` | `memory.size` | the allocator's top-of-heap test (`malloc` lines 15,760 to 15,790) |
+| `grow` | `(delta: Int32) -> Int32` | `memory.grow` | the one way the heap gets bigger; returns −1 on refusal, which the allocator turns into `OUT_OF_MEMORY` |
+| `heapBase` | `() -> Int32` | the `HEAP_BASE` global | where the data segment ends and the heap begins; `free` refuses anything below it |
+
+Addresses are `Int32` because the route is wasm32 (RFC-0125 §2.8 records
+the 4 GB limit). A `Ptr<T>` type is not proposed: the runtime module is the
+only reader of addresses, and inside it an address is an integer with a
+comment. Typing addresses would be a second type system for one file.
+
+### 2.2 Host imports
+
+The runtime module imports exactly the `wasi_snapshot_preview1` table the
+wasm backend already declares (`direct.rs` lines 77 to 140): `fd_write`,
+`fd_read`, `fd_close`, `proc_exit`, `path_open`, `path_rename`, `fd_sync`,
+`fd_prestat_get`, `args_sizes_get`, `args_get`, `environ_sizes_get`,
+`environ_get`, `clock_time_get`, `random_get`. Fourteen. Each is an I/O
+effect under RFC-0125 §2.2's effect judgment, which is what a host import is
+by that section's definition. The generator path adds `vyrn_gen.read` and its
+directory listing; the `vyrn` namespace for `extern fn` is unchanged (RFC-0012).
+
+Each import cannot be library because it is the boundary: there is no Vyrn
+below `fd_write`.
+
+### 2.3 The trap primitive
+
+`trap(msg: Int32, len: Int32) -> Never` is `fd_write` to descriptor 2 then
+`proc_exit(1)`. It is written once, in the module, over the two imports; the
+emitter's `trap` row (RFC-0125 §2.1) is a call to it with a table index. It
+is listed here because RFC-0125 M1 measured the call site: every bounds check
+parks its message and branches to one trap block per function, and that stays.
+
+### 2.4 What is not a primitive
+
+`strlen`, `strcmp`, `int_str`, `parse_i64`, `utf8valid`, `regex_run`,
+`line_at`, `col_at`, every Map function, `str_append`, `concat`, the
+allocator, the regions, the stdin and stdout buffers, `err3`. Each is a loop
+over `load8` and `store8` or over another runtime function. Each is in the
+wasm runtime today as an instruction list, and each becomes Vyrn source.
+
+The four SIMD lanes (RFC-0075) are not runtime; they are `prim` rows the
+emitter already has.
+
+---
+
+## 3. The fence
+
+### 3.1 The choice
+
+The language has three mechanisms that restrict what a module may see or do:
+
+| mechanism | RFC | what it decides | who declares it |
+|---|---|---|---|
+| audience | RFC-0072 | which modules may import a module, by path segment | `vyrn.json`, `audience` map; a fence |
+| capability floor | RFC-0103 | which capabilities an artifact's closure may need, by target | the target, fixed by physics; a floor |
+| module contract | RFC-0071 | which exports a module may have and their shapes | a `contract` declaration, checked by `std/contract` |
+
+The primitives of §2.1 must be visible to one module and invisible to every
+other, and that visibility must not be something a manifest can widen. The
+floor is the right kind of guarantee — "nobody can relabel it" — but it
+answers the wrong question: it checks an artifact's closure against a target,
+and the runtime module is in every closure, so the floor would either refuse
+every artifact or exempt the runtime by name. A contract constrains a module's
+exports, not its importers, so it says nothing about who may call `load8`.
+
+Audience is the mechanism with the right shape: RFC-0125 §2.2 already says "an
+audience is the set of declarations it may see" and makes it an inclusion
+check in the kernel. The fence is therefore an audience — with one change
+that turns it from a fence into a floor for this one case: **the audience of
+the primitives is declared by the compiler, not by `vyrn.json`.**
+
+### 3.2 How it works
+
+1. The primitives are declarations in a compiler-supplied module, `std/mem`,
+   with the signatures of §2.1 and no bodies. RFC-0094 made a builtin a
+   declaration; these are declarations whose lowering is one `prim` row each.
+2. `std/mem` has a fixed audience: the set `{ std/runtime }`. The audience is
+   a constant in the checker beside the standard-library table, not a key the
+   manifest reads. `vyrn why std/mem` prints "audience: `std/runtime`, declared
+   by the compiler".
+3. The checker's existing audience edge check (RFC-0072 §Enforcement) refuses
+   any other import of `std/mem` with the existing diagnostic shape:
+   `` error: `app/main.vyrn` cannot import `std/mem`, whose audience is the runtime ``.
+4. `std/runtime` is shipped with the compiler the way `std/json` is
+   (`include_str!` in `interp.rs`, lines 8,944 to 8,964), and its hash is
+   recorded in the compiler's own build, so a user cannot substitute a module
+   at that path. That is what makes step 2 a floor: the one importer is a file
+   the compiler carries.
+5. The kernel's effect judgment (RFC-0125 §2.2) is unchanged. A `prim` load or
+   store has no effect; `grow` has the allocates effect; a host import has the
+   I/O effect. The fence is about visibility, the judgment about behaviour, and
+   they do not overlap.
+
+### 3.3 What this costs and forbids
+
+A user cannot write an allocator, a custom Map layout or an unchecked byte
+loop. That is the intent: RFC-0125 §2.4 says the primitives are "the only
+unsafe surface in the language, fenced in that module, and reviewed there". A
+user who needs `memory.copy` speed gets it through `std/runtime`'s exported
+functions (`copyFrom`, `append`, the byte views RFC-0109 decided), which are
+the safe surface over the same instruction.
+
+Extending the fence later — a second audience member, a `trusted` keyword — is
+one constant in the checker and a sentence in RFC-0072. It is not proposed.
+
+---
+
+## 4. The allocator and the regions
+
+### 4.1 What exists
+
+The wasm runtime's `malloc` (`direct.rs` line 15,626, 174 lines) is a
+segregated free list. A request `n` rounds to eight and floors at eight; the
+class is `shift × 4 + sub` where `shift = 29 − clz(n − 1)` and `sub` is the
+two bits under the leading one, so there are four classes per power of two,
+113 in use (`MIN_CLASS` 3 to `MAX_CLASS` 115), the smallest 8 bytes and the
+largest 2 GiB. Every block carries an 8-byte header holding its class. A
+class's free blocks are a singly linked list whose link lives in the freed
+payload (the 8-byte floor is what makes room for it). `malloc` pops the head
+if there is one, else bumps `HEAP` by header plus class size and grows memory
+one page at a time until the top fits. `free` (line 15,800, 49 lines) checks
+the pointer is at or above `HEAP_BASE` and the header's class is in range,
+then pushes. There is no coalescing, no `realloc`, and no size in the header —
+the class implies it.
+
+RFC-0125 §1.4 measured it: binary-trees at depth 18, 0.88 s under wasmtime
+against 1.87 s natively through the platform allocator and the audit branch.
+That is the number this design keeps.
+
+### 4.2 The design
+
+The module's allocator is that free list, written in Vyrn over `load32`,
+`store32`, `pages`, `grow` and `heapBase`. Its shape in source:
+
+```
+// std/runtime — the allocator. Classes are four per power of two.
+let heads: FixedArray<Int32, 116>   // module state, one head per class
+
+fn classOf(n: Int32) -> Int32 { .. }      // the shift/sub arithmetic of §4.1
+fn sizeOf(cls: Int32) -> Int32 { .. }      // (sub + 5) << shift
+fn malloc(n: Int64) -> Int32 { .. }        // pop or bump; grow; trap OUT_OF_MEMORY
+fn free(p: Int32) { .. }                   // refuse below heapBase(); push
+```
+
+Three decisions beyond a transcription:
+
+1. **The audit and the poison go.** RFC-0125 §2.2 says the linear judgment
+   makes a double free and a leak compile errors, so the C shim's 110 lines of
+   audit table, lock and `0xDD` fill (§1.1, Allocation) have no run-time job
+   left. `free` keeps its two silent refusals (below `heapBase`, class out of
+   range) because a data-segment literal is still handed to `free` by `drop`
+   on a static String (the `free` comment, line 15,802), and those are one
+   compare each. The residue ratchet stays as a CI gate until M5 (§6).
+2. **`realloc` is not added.** The three growers (`str_append`, `push`,
+   `region_keep`) allocate, copy and free today, and the copy is a
+   `memory.copy` at the width of the old block. A class-aware `realloc` that
+   returns the same block when the new size fits the class is eight lines and
+   is the one optimisation this design permits, because it removes the copy
+   from every doubling that stays in class — which is half of them at four
+   classes per power of two. It is written when a probe shows the copy, not
+   before.
+3. **The header keeps the class, not the size.** `free` needs the class and
+   nothing needs the size; a String carries its own `{ len, cap }` header
+   (RFC-0089 M1a) and an Array its own triple.
+
+The native route gets this allocator too, through wasm2c or Cranelift
+(RFC-0125 §2.5), so the platform allocator leaves the picture with the shim.
+M4's gate in RFC-0125 — "binary-trees under the native route at or below its
+wasmtime time from §1.4" — is the check that it did.
+
+### 4.3 Regions as a bump arena
+
+Today `region { .. }` is a side list of pointers freed one at a time (§1.1,
+Regions). With the free list in the runtime and drops placed by the kernel,
+a region becomes what its syntax says:
+
+- `regionEnter()` records the current bump top `HEAP` and the depth. The
+  frame is three words: the saved top, the saved free-list heads' generation
+  (see below), and a keep pointer.
+- Inside the region, `malloc` bumps only: it does not pop a free list, so
+  every block allocated in the region is contiguous above the saved top.
+  Blocks the region allocates are never pushed to a class list by `free`
+  either — a `free` inside a region of a block above the saved top is a
+  no-op, which is what the emitters' `region_depth == 0` gates already do
+  for a `String` drop (`lib.rs` `emit_drop`, line 5,005).
+- `regionExit()` resets `HEAP` to the saved top. One store. The 64-frame
+  depth limit and its trap wording are unchanged (`REGION_MAX`).
+- `regionPopExcept(keep)` — the value a `return` carries out — copies the kept
+  block to a fresh `malloc` outside the region before the reset, exactly the
+  copy `__vyrn_region_pop_except` avoids today by leaking the frame's other
+  blocks. The copy is the price of not leaking, and it is one `memory.copy`
+  of the value's own size.
+
+Two things this changes for the linear judgment, and both are already in it:
+a value allocated in a region is consumed by the region's close (RFC-0125 open
+question 2 says so), and a value that leaves the region is a move the kernel
+already sees as a `return`. A `free` of a block below the saved top from
+inside the region — a value from outside the region, dropped inside it — goes
+to the class list as usual; the address compare decides, not a flag.
+
+Whether `region { }` keeps its syntax or becomes `std/runtime`'s `Arena` type
+is left open (§8), because the regions census's verdict on inferred regions
+stands either way and the runtime is the same in both spellings.
+
+---
+
+## 5. The interpreter, before M5
+
+### 5.1 What the interpreter can use
+
+The interpreter already runs Vyrn as wasm: RFC-0076's `vyrn-genwasm` compiles
+a generator with the direct backend, instantiates it in the embedded wasmtime
+(`compiler/vyrn-genwasm/src/lib.rs`, `fn run`, line 149), copies inputs in and
+results out through linear memory, and caches the module by source hash. That
+is the mechanism, and it serves the runtime module for the families whose
+interface is bytes in and bytes out:
+
+| family | interpreter today | with the module |
+|---|---|---|
+| UTF-8 validation | `String::from_utf8` at three sites (`interp.rs` 6,435, 6,466, 6,748) | `runtime.utf8valid` over a copied buffer |
+| text to integer | `parse_int` (line 1,472) and `str::parse::<i64>` | `runtime.parseI64` |
+| integer to text | Rust `format!` | `runtime.intStr` |
+| regex | `crate::regex` (line 8,057), a Rust DFA compiler and runner | `runtime.regexRun` over the compiler's tables |
+| trap wording | `trap.rs`, 47 references | unchanged; the table is already one |
+| I/O error text | `trap.rs` and `io_message_parts` | `runtime.err3` |
+
+Each is a call with a copy in and a copy out, the shape the generator engine
+already pays per run. For these families the interpreter stops being a third
+implementation and becomes the module's first consumer, which is worth having
+for one reason: parity for those functions becomes byte-identity by
+construction, one engine short of what M5 delivers for everything.
+
+### 5.2 What it cannot use, and why
+
+The allocator, the String and Array storage, the Maps and the regions manage
+addresses in a linear memory. The interpreter has no linear memory: a `Val` is
+a Rust enum whose `String` is a `Vec<u8>` and whose `Map` is an `Rc`
+(RFC-0125 §1.1's third picture). To use the module's `malloc` the interpreter
+would have to keep its values in the module's memory, which is to say it would
+have to stop being a tree-walker over `Val` and become the wasm engine. That
+is M5, by another name and with two value models alive at once during the
+change.
+
+So the interpreter uses the module for the six byte-in, byte-out families and
+for nothing else, and M5 inherits the rest with this reason written: the
+interpreter's value model is the thing being deleted, and no adapter makes it
+share an allocator with a linear memory without becoming the replacement.
+
+One consequence for the probes: until M5, a leak probe under `rfcs/probes-0125/`
+is measured natively and under wasmtime, never under `vyrn run`, because the
+interpreter frees by `Rc` and cannot leak what the plan forgets.
+
+---
+
+## 6. Migration order
+
+One family at a time. Each step deletes its C, its IR and its wasm copy only
+when its gate is green on the Vyrn copy, per RFC-0101 §3.0's second rule.
+Every step runs the same three gates unless it says otherwise:
+
+- **parity:** `cargo test -p vyrn-cli --release --test parity -- --ignored`
+  (41 programs, three engines byte-identical);
+- **residue:** `cargo test -p vyrn-cli --test residue -- --ignored` (the leak
+  ratchet, still measured natively until step 3 moves the native route);
+- **probes:** the four programs under `rfcs/probes-0125/` flat at 200,000 and
+  400,000 turns, natively and under wasmtime.
+
+| step | family | what moves | extra gate |
+|---|---|---|---|
+| 0 | the fence | `std/mem` declared, its audience fixed, `std/runtime` an empty module shipped with the compiler; the emitter lowers `std/mem` calls to `prim` rows | `vyrn-cli/tests/audience.rs` gains the refusal of a user import of `std/mem`; every existing gate unchanged |
+| 1 | strings, pure | `strlen`, `strcmp`, `starts`, `int_str`, `parse_i64`, `str_i64`, `utf8valid`, `line_at`, `col_at`, `regex_run` into `std/runtime`; the wasm backend calls them; the interpreter calls them through §5.1 | fasta and reverse-complement re-timed (RFC-0125 §1.5b: 0.80 s and 0.46 s native, 0.93 s and 1.06 s wasm) within noise |
+| 2 | the allocator | `malloc`, `free` into `std/runtime`; the wasm backend's 223 lines deleted | binary-trees under wasmtime at 0.88 s or better; the audit still on natively |
+| 3 | the native route | the native binary is the wasm through wasm2c and clang (RFC-0125 §2.5, measured there at 1.5x, 1.9x, 1.8x); the C shim's allocator, strings and maps deleted; the shim becomes the 200-line WASI host RFC-0125 §2.4 names | the residue ratchet re-based on the new route, with the audit deleted and the leak witnesses of RFC-0114 refused by the kernel instead (RFC-0125 M2's gate); binary-trees native at or below 0.88 s (M4's gate) |
+| 4 | strings, allocating | `str_new`, `concat`, `str_append`, `str_from_bytes`; the three `STRING_RUNTIME` accessors | `census-strings.md`'s builders re-run; `std/json`'s six append sites unchanged in output |
+| 5 | maps | the three key layouts, one Vyrn `Map` body over a `keyBytes` per layout, `find`/`put`/`reindex`/`reserve`/`removeAt`/`keysCopy` | k-nucleotide (RFC-0104's Map row) within noise; `finitekeys`, `heapkey`, `floatkey` examples byte-identical |
+| 6 | arrays | `push`, `reserve`, `append`, `copyFrom`, `clear`, `at` become runtime functions for the first time (§1.1, Arrays); the emitter's inline copies deleted from both backends | nbody, spectral-norm, fannkuch re-timed against RFC-0125 M1's table (1.98 s, 2.83 s, 3.58 s Cranelift; 1.30 s, 1.90 s, 3.64 s release) |
+| 7 | I/O | `write_all`, `getbyte`, `read_line`, `open_at`, `read_all`, `read_file`, `write_file`, `rename_file`, `fsync_file`, `args`, `env_get`, `err3`, time and randomness | `examples/files.vyrn`, `storage.vyrn`, `clock.vyrn` byte-identical under the fixed clock and seed; RFC-0103's capability census re-run (`census-0103`) |
+| 8 | regions | §4.3 | `census-regions.md` §5a's three shapes re-measured: the region-per-iteration shape at the flat line the region-around-the-loop shape holds |
+| 9 | traps and tasks | `trap`, `trap_idx`, the depth counter in the prologue; tasks stay eager in the module and native threads stay in the host until the threads proposal (RFC-0125 §2.8) | every `error:` line in the parity corpus byte-identical; `concurrency.vyrn` byte-identical |
+
+Steps 1 and 2 can land before step 3 and are useful on their own: they
+remove the two largest hand-emitted families from `direct.rs` and put the
+allocator where §4 wants it. Step 3 is the route decision RFC-0125 §2.5 left
+open, taken as its measurements say — release through wasm2c and clang — and
+nothing after it is possible without it, because until then the C shim is
+still the native runtime and every family would be moved into Vyrn while its
+C twin stays.
+
+Each step's prediction, per RFC-0101 §3.0's first rule, is the number in its
+extra-gate column, and the report goes into RFC-0125 §3 M4 either way.
+
+---
+
+## 7. What it costs
+
+### 7.1 Deleted
+
+| file | what | lines |
+|---|---|---|
+| `toolchain.rs` | the C shim string: allocator, audit, strings, maps, I/O, time, tasks, generator host | 1,073 → about 200 (the WASI host: `fd_write`, `fd_read`, `path_open`, `clock_time_get`, `random_get`, `proc_exit`, `main`, and the native thread pool for `spawn`) — **about 870 deleted** |
+| `toolchain.rs` | `extern_trap_stubs` and the shim cache | kept; they are the toolchain, not the runtime |
+| `direct.rs` | `fn runtime`, 55 functions | 4,205 → about 150 (the `Wasi` import table, the trap wording interning, the reserved cells) — **about 4,050 deleted** |
+| `direct.rs` | the `Rt` table and `slots` | 414 → about 40 (the module's export table, read from the compiled runtime) — **about 370 deleted** |
+| `direct.rs` | inline array, map-reserve, map-remove, map-keys, stream-close and region emission at call sites (step 5, 6, 8) | not counted here; RFC-0125 M3 owns the emitter walk, and these become calls when the core does |
+| `lib.rs` | the six IR constants | 420 → 0 — **420 deleted** |
+| `lib.rs` | the 231 `@__vyrn_*` call lines and the seven formatted helpers | deleted with the LLVM emitter if §2.5's one-emitter route holds; kept as calls into the same module if the two-emitter fallback is taken |
+| `interp.rs` | `parse_int`, the three `from_utf8` sites, `crate::regex`'s runner | about 200, replaced by six calls through §5.1 |
+| `trap.rs` | — | unchanged: it is already the one table |
+
+About 5,900 lines deleted on the one-emitter route, about 5,700 on the
+fallback.
+
+### 7.2 Written
+
+The Vyrn module is the C bodies, which are the shortest of the three copies,
+plus the array family that has no function anywhere today:
+
+| family | C body lines today | Vyrn estimate | why the estimate |
+|---|---|---|---|
+| allocator | 48 (without the audit) | 80 | the class arithmetic is the same; `grow` and the trap are explicit |
+| strings | 41 in C, 168 in IR | 250 | `int_str`, `parse_i64`, `utf8valid` and `regex_run` have no C body to transcribe; the wasm bodies less their instruction overhead |
+| arrays | 0 | 120 | six functions at twenty lines |
+| maps | 133 | 200 | the three layouts share one body with a `keyBytes` per layout, so one chain rather than three |
+| I/O | 121 in C, 92 in IR | 300 | `open_at` through the preopen table and `err3` are the wasm shapes; there is no libc to lean on |
+| time, randomness | 40 | 40 | the fixed-clock arithmetic and two imports |
+| traps, depth | 20 | 40 | one function and one counter |
+| regions | 131 in IR | 60 | §4.3 is shorter than a side list |
+| tasks | 13 (eager) | 20 | the native pool stays in the host |
+| **total** | **638 + 420** | **about 1,100** | |
+
+About 1,100 lines of Vyrn against about 5,900 of Rust, C and IR. The ratio
+is not the point; the count of copies is. After M4 a runtime rule is one
+function in one file, and the parity corpus stops being what keeps three
+transcriptions equal.
+
+### 7.3 What it costs at run time
+
+Nothing measured yet, and one thing predicted. The module is compiled by the
+same emitter as the program and runs in the same engine, so a runtime function
+is a wasm call today and a wasm call after; Cranelift's inliner declined
+`cell` at fifty instructions (RFC-0125 M1, spectral-norm), so it will decline
+`malloc` too, and the release route's clang will inline what it inlines
+today. The prediction is that steps 1, 2 and 4 hold every RFC-0125 §1.4, §1.5b
+and M1 number within noise, and each step's extra gate is that prediction
+written as a test.
+
+---
+
+## 8. Open questions
+
+1. **`region`'s spelling.** §4.3 makes the arena real under either `region
+   { .. }` or a `std/runtime` `Arena` type. Keeping the syntax keeps the seven
+   corpus uses and the census; a type makes the arena a value the linear
+   judgment tracks like any other and removes `region_depth` from the
+   emitters. Not decided here; the runtime is the same in both.
+2. **Class-aware `realloc`.** §4.2 permits it and defers it to a probe. The
+   probe is `census-strings.md`'s append builder at the sizes where doublings
+   stay in class.
+3. **The route.** Step 3 assumes RFC-0125 §2.5's release route, wasm2c and
+   clang, because M1 measured it inside the gate. If the two-emitter fallback
+   is taken instead, the LLVM emitter keeps calling the same Vyrn module
+   through the text-IR path, and `lib.rs`'s 231 call lines become calls into
+   compiled Vyrn rather than into C. §7.1 counts both.
+4. **Threads.** Tasks are eager in the module. The native pool of `spawn`
+   stays in the 200-line host until the wasm threads proposal is available on
+   the chosen route, and `Task<T>`'s linearity (RFC-0095) is unchanged. Whether
+   a host-side pool is still "runtime in Vyrn" is a definition, and this
+   document says no: it is the host.
+5. **`std/hash`'s `fnv1a`.** It is a fourth copy of the String Map's hash, in
+   Vyrn. After step 5 the Map should call it rather than carry a fifth, which
+   makes `std/hash` an import of `std/runtime`; whether the standard library
+   may be imported by the runtime module, or the function moves the other way,
+   is a layering question this document leaves to step 5.
