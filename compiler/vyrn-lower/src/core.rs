@@ -47,6 +47,15 @@ pub struct NameInfo {
     /// a non-consuming match, a `for` variable over a container it does not
     /// consume) is never owned, whatever its type.
     pub owned: bool,
+    /// Whether the type owns heap.
+    pub heap: bool,
+    /// Whether the name is a borrow (RFC-0089 rule 2): its type owns heap,
+    /// the body does not own it, and it is not static data — a `read` or
+    /// `modify` parameter, a binding read out of a place somebody owns, a
+    /// second name for one, a payload binder, a `for` variable over a
+    /// container the loop does not own. The kernel keeps what a borrow
+    /// bound to a place reads, and refuses a take of it.
+    pub borrow: bool,
     pub line: usize,
     /// The node the plan keys this binding by — a `Stmt::Let`, a parameter —
     /// when the name is one the plan can be told about. `None` for a
@@ -543,10 +552,13 @@ impl<'a> Builder<'a> {
     }
 
     fn name(&mut self, source: &str, ty: Type, owned: bool, line: usize) -> Name {
+        let heap = self.proto.owns_heap(&ty);
         self.body.names.push(NameInfo {
             source: source.to_string(),
             ty,
             owned,
+            heap,
+            borrow: heap && !owned,
             line,
             binding: None,
             receiver: None,
@@ -636,6 +648,15 @@ impl<'a> Builder<'a> {
             .iter()
             .flat_map(|i| i.places.iter())
             .find(|p| p.name == name)
+    }
+
+    /// Whether a value is a borrow: a name whose type owns heap and which
+    /// the body does not own (RFC-0089 rule 2).
+    fn borrows(&self, v: &Val) -> bool {
+        match v {
+            Val::Name(n) => self.body.names[*n as usize].borrow,
+            Val::Lit => false,
+        }
     }
 
     fn temp(&mut self, ty: Type, line: usize) -> Name {
@@ -789,7 +810,21 @@ impl<'a> Builder<'a> {
                     && self
                         .fate_owned(name, *line, &ty)
                         .unwrap_or_else(|| self.owns(&ty) && !literal);
+                // Not owned is not the same as borrowed: static data (`let
+                // s = ""`, a literal of literals), a value the plan leaks and
+                // the source of a whole-value alias (`Leak::Aliased`: the
+                // other name reclaims) are nobody's borrow. A lending call, a
+                // borrowed value and a read of a place are (the plan's note
+                // says which).
+                let borrow = !owned
+                    && (self.lends(value)
+                        || matches!(&rhs, Rhs::Val(v) if self.borrows(v))
+                        || matches!(
+                            self.fate_of(name, *line),
+                            Some(Fate::Leaked(Leak::Borrowed(_)))
+                        ));
                 let n = self.name(name, ty, owned, *line);
+                self.body.names[n as usize].borrow = borrow && self.body.names[n as usize].heap;
                 self.bind(n, rhs, out);
                 // The unnamed receiver of the field the binding took or read
                 // (RFC-0114 R1′): released after the read where the plan says
@@ -1529,9 +1564,14 @@ impl<'a> Builder<'a> {
                 // A function's name as a value (`sortWith(es, byCount)`), or
                 // a type's as an argument (`fromJson(Bag, src)`): static, and
                 // the checker types neither as an expression.
+                // A nullary constructor (`None`, a fieldless variant) parses
+                // as a bare name too, and is a literal: it owns nothing, and
+                // it is not module state anything reads out of.
                 None if self.program.functions.iter().any(|f| &f.name == name)
                     || self.program.contracts.iter().any(|c| &c.name == name)
-                    || vyrn_frontend::types::decl_map(self.program).contains_key(name) =>
+                    || vyrn_frontend::types::decl_map(self.program).contains_key(name)
+                    || name == "None"
+                    || self.is_variant(name) =>
                 {
                     Ok(Val::Lit)
                 }
@@ -1575,7 +1615,10 @@ impl<'a> Builder<'a> {
                     return Ok(Val::Name(t));
                 }
                 let rhs = self.rhs(e, out)?;
-                let t = if self.lends(e) {
+                // An `if` or `match` expression whose arm yields a borrow
+                // yields a borrow (`movecheck::names_a_place`).
+                let borrows = matches!(&rhs, Rhs::Val(v) if self.borrows(v));
+                let t = if self.lends(e) || borrows {
                     self.name("@borrow", ty, false, e.line())
                 } else {
                     self.temp(ty, e.line())
@@ -1847,6 +1890,7 @@ impl<'a> Builder<'a> {
                 let c = self.read_val(cond, out)?;
                 let mut t = Vec::new();
                 let tv = self.val(then_branch, &mut t)?;
+                let then_borrows = self.borrows(&tv);
                 t.push(St::Store {
                     place: Place::Name(res),
                     value: tv,
@@ -1858,6 +1902,7 @@ impl<'a> Builder<'a> {
                 match else_branch {
                     Some(eb) => {
                         let ev = self.val(eb, &mut f)?;
+                        let else_borrows = self.borrows(&ev);
                         f.push(St::Store {
                             place: Place::Name(res),
                             value: ev,
@@ -1865,6 +1910,13 @@ impl<'a> Builder<'a> {
                             line: *line,
                         });
                         self.edge_drops(site, 1, &mut f)?;
+                        // `if c { parts[0] } else { "Bool" }`: an arm that
+                        // yields a borrow makes the result one
+                        // (`movecheck::names_a_place`, one arm is enough).
+                        if then_borrows || else_borrows {
+                            self.body.names[res as usize].owned = false;
+                            self.body.names[res as usize].borrow = true;
+                        }
                     }
                     None => return gap("an `if` expression without `else`", *line),
                 }
@@ -1895,6 +1947,12 @@ impl<'a> Builder<'a> {
                     match &arm.body {
                         ArmBody::Expr(ae) => {
                             let v = self.val(ae, &mut body)?;
+                            // An arm that yields a borrow makes the result
+                            // one (`movecheck::names_a_place`).
+                            if self.borrows(&v) {
+                                self.body.names[res as usize].owned = false;
+                                self.body.names[res as usize].borrow = true;
+                            }
                             body.push(St::Store {
                                 place: Place::Name(res),
                                 value: v,
@@ -2213,9 +2271,16 @@ impl<'a> Builder<'a> {
         }
         for (k, (a, cap)) in args.iter().zip(caps.iter()).enumerate() {
             let v = if *cap == Capability::Consume {
+                // Module state as the receiver (`books.push(b)`): a read of
+                // it is a borrow nothing may take, so the write-back form
+                // takes the place and the store after the call fills it, as
+                // for a field or an element.
+                let global = matches!(a, Expr::Var { name, .. }
+                    if self.lookup(name).is_none()
+                        && self.program.globals.iter().any(|g| &g.name == name));
                 if k == 0
                     && rebuilds
-                    && !matches!(a, Expr::Var { .. } | Expr::Consume { .. })
+                    && (global || !matches!(a, Expr::Var { .. } | Expr::Consume { .. }))
                     && is_place_read(a)
                 {
                     // The write-back form on a field or an element: the
