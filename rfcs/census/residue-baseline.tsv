@@ -206,3 +206,4 @@ vlog	clean
 vondemo	clean
 vyxdemo	clean
 wirekey	clean
+listdir	skip

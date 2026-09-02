@@ -82,6 +82,11 @@ fn examples_interp_native_parity() {
             host_only += 1;
             continue;
         }
+        if let Some((_, why)) = NATIVE_UNSUPPORTED.iter().find(|(n, _)| *n == name) {
+            eprintln!("SKIP  {name}  (no native lowering: {why})");
+            host_only += 1;
+            continue;
+        }
 
         // RFC-0014 conventions: `examples/<name>.stdin` pipes into all three
         // backends; every run's cwd is `examples/` so relative file paths in
@@ -185,7 +190,7 @@ fn examples_interp_native_parity() {
 
     let skipped = divergent + refused + host_only;
     eprintln!(
-        "\nparity: {} checked, {} skipped ({} refused by `vyrn check`, {} host-only, {} known divergent), {} failed",
+        "\nparity: {} checked, {} skipped ({} refused by `vyrn check`, {} host-only or native-unsupported, {} known divergent), {} failed",
         names.len() - skipped,
         skipped,
         refused,

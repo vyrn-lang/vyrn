@@ -2,14 +2,14 @@
 //! this process by the embedded wasmtime.
 //!
 //! The module is what `vyrn build --target wasm` writes, byte for byte. This
-//! file is the WASI host it runs under: the fourteen `wasi_snapshot_preview1`
+//! file is the WASI host it runs under: the fifteen `wasi_snapshot_preview1`
 //! imports `vyrn_codegen::direct` declares, and nothing else. Any other import
 //! traps, so a module that reaches past this list says so instead of running
 //! wrong.
 //!
 //! Hand-written, not `wasmtime-wasi`, for the reason RFC-0076 gave when it wrote
 //! the generator engine's shim and `web/wasi-min.js` before that: the surface is
-//! fourteen calls, and the crate would bring an async runtime for a program that
+//! fifteen calls, and the crate would bring an async runtime for a program that
 //! reads a line and writes a file. The parity harness's wasm column is the
 //! `wasmtime` CLI; the fixtures gate (`tests/fixtures.rs`) is what says this host
 //! and that one agree.
@@ -58,6 +58,7 @@ const NOTCAPABLE: i32 = 76;
 
 // `path_open` bits, from the witx.
 const OFLAGS_CREAT: i32 = 1;
+const OFLAGS_DIRECTORY: i32 = 2;
 const OFLAGS_EXCL: i32 = 4;
 const OFLAGS_TRUNC: i32 = 8;
 const RIGHT_FD_READ: i64 = 1 << 1;
@@ -66,6 +67,15 @@ const FDFLAGS_APPEND: i32 = 1;
 
 /// The preopened directory: the working directory, as fd 3, named `.`.
 const PREOPEN_FD: i32 = 3;
+
+// `filetype` values, from the witx.
+const FILETYPE_UNKNOWN: u8 = 0;
+const FILETYPE_DIRECTORY: u8 = 3;
+const FILETYPE_REGULAR_FILE: u8 = 4;
+const FILETYPE_SYMBOLIC_LINK: u8 = 7;
+/// A `dirent` header: `d_next: u64, d_ino: u64, d_namlen: u32, d_type: u8`
+/// and three bytes of padding, then the name.
+const DIRENT_HDR: usize = 24;
 
 /// `proc_exit`'s argument, carried out of the guest as an error so the call
 /// stack unwinds the way a trap's does.
@@ -86,6 +96,10 @@ struct Host {
     stdin_prefix: Vec<u8>,
     stderr: Option<Vec<u8>>,
     files: HashMap<i32, std::fs::File>,
+    /// A directory opened for `fd_readdir` (RFC-0125 §3 M5): its entries as
+    /// `(name, filetype)`, read once at the open, with `.` and `..` first the
+    /// way the `wasmtime` CLI reports them. The cookie is an index into it.
+    dirs: HashMap<i32, Vec<(Vec<u8>, u8)>>,
     next_fd: i32,
     root: PathBuf,
     started: std::time::Instant,
@@ -138,6 +152,7 @@ pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
         stdin_prefix: run.stdin_prefix,
         stderr: run.capture_stderr.then(Vec::new),
         files: HashMap::new(),
+        dirs: HashMap::new(),
         next_fd: PREOPEN_FD + 1,
         root,
         started: std::time::Instant::now(),
@@ -393,8 +408,50 @@ fn link_wasi(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
             if fd <= PREOPEN_FD {
                 return SUCCESS;
             }
-            match caller.data_mut().files.remove(&fd) {
-                Some(_) => SUCCESS,
+            let host = caller.data_mut();
+            match (host.files.remove(&fd), host.dirs.remove(&fd)) {
+                (None, None) => BADF,
+                _ => SUCCESS,
+            }
+        },
+    )?;
+
+    linker.func_wrap(
+        wasi,
+        "fd_readdir",
+        |mut caller: Caller<'_, Host>,
+         fd: i32,
+         buf: i32,
+         buf_len: i32,
+         cookie: i64,
+         bufused: i32|
+         -> i32 {
+            let (data, host) = guest(&mut caller);
+            let Some(listed) = host.dirs.get(&fd) else {
+                return BADF;
+            };
+            // Entries from the cookie on, laid end to end; the last is cut
+            // where the buffer ends, which is how the guest learns to ask
+            // again from that entry's predecessor.
+            let mut bytes = Vec::new();
+            for (i, (name, kind)) in listed.iter().enumerate().skip(cookie.max(0) as usize) {
+                bytes.extend_from_slice(&(i as u64 + 1).to_le_bytes());
+                bytes.extend_from_slice(&0u64.to_le_bytes());
+                bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
+                bytes.push(*kind);
+                bytes.extend_from_slice(&[0, 0, 0]);
+                bytes.extend_from_slice(name);
+                if bytes.len() >= buf_len as usize {
+                    break;
+                }
+            }
+            bytes.truncate(buf_len as usize);
+            let Some(slot) = data.get_mut(buf as usize..buf as usize + bytes.len()) else {
+                return BADF;
+            };
+            slot.copy_from_slice(&bytes);
+            match wr32(data, bufused, bytes.len() as u32) {
+                Some(()) => SUCCESS,
                 None => BADF,
             }
         },
@@ -445,6 +502,35 @@ fn link_wasi(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
             let Some(full) = under_root(&host.root, name) else {
                 return NOTCAPABLE;
             };
+            if oflags & OFLAGS_DIRECTORY != 0 {
+                let entries = match std::fs::read_dir(&full) {
+                    Ok(it) => it,
+                    Err(e) => return errno(&e),
+                };
+                let mut listed = vec![
+                    (b".".to_vec(), FILETYPE_DIRECTORY),
+                    (b"..".to_vec(), FILETYPE_DIRECTORY),
+                ];
+                for e in entries.flatten() {
+                    let kind = match e.file_type() {
+                        Ok(t) if t.is_dir() => FILETYPE_DIRECTORY,
+                        Ok(t) if t.is_file() => FILETYPE_REGULAR_FILE,
+                        Ok(t) if t.is_symlink() => FILETYPE_SYMBOLIC_LINK,
+                        _ => FILETYPE_UNKNOWN,
+                    };
+                    listed.push((
+                        e.file_name().to_string_lossy().into_owned().into_bytes(),
+                        kind,
+                    ));
+                }
+                let fd = host.next_fd;
+                host.next_fd += 1;
+                host.dirs.insert(fd, listed);
+                return match wr32(data, out, fd as u32) {
+                    Some(()) => SUCCESS,
+                    None => BADF,
+                };
+            }
             let mut opts = std::fs::OpenOptions::new();
             opts.read(rights & RIGHT_FD_READ != 0)
                 .write(rights & RIGHT_FD_WRITE != 0)

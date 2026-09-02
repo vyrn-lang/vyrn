@@ -1119,24 +1119,25 @@ pub const GEN_ENTRY_MODULE_INTERFACE: &str = "__vyrnGenModuleInterface";
 pub const GEN_ENTRY_LEX: &str = "__vyrnGenLex";
 /// Suffixed with the contract's name: the argument is a declaration, not a value.
 pub const GEN_ENTRY_CONTRACT_OF: &str = "__vyrnGenContractOf_";
-/// What a compiling backend says about `listDir` (RFC-0021).
+/// The text-IR backend's refusal of `listDir`.
 ///
-/// It is BOTH backends' sentence, held once, for the reason `IO_MESSAGES` is
-/// held once: two copies are two chances to drift, and the wording is a user's
-/// diagnostic rather than an emitter's note to itself. The checker cannot gate
-/// the call the way it gates `moduleInterface`/`contractOf`/`lex` — `listDir`
-/// has a runtime under `vyrn run` (`list_dir_is_not_generation_only`), and only
-/// the two compiling backends lack a lowering — so the refusal belongs to them,
-/// and it says the same thing on both.
+/// The checker cannot gate the call the way it gates
+/// `moduleInterface`/`contractOf`/`lex` — `listDir` has a runtime under `vyrn
+/// run` (`list_dir_is_not_generation_only`) — so the one backend without a
+/// lowering refuses it itself, in a user's sentence rather than an emitter's
+/// note about its own gaps (RFC-0096 M3's addendum). The direct wasm backend
+/// lowers it over `fd_readdir` (RFC-0125 §3 M5).
 pub const LIST_DIR_NO_LOWERING: &str =
-    "`listDir` runs in the interpreter / at generation time (RFC-0021); it has no native or wasm \
-     lowering in v1 — use it in a `gen fn` or under `vyrn run`";
+    "`listDir` runs in the interpreter, at generation time and on the wasm target (RFC-0021, \
+     RFC-0125); it has no native lowering in v1 — use it in a `gen fn`, under `vyrn run` or with \
+     `--target wasm`";
 
 /// `listDirKinds`' copy of the sentence (RFC-0119) — same reasoning, its own
 /// name, so the diagnostic names the call the user wrote.
-pub const LIST_DIR_KINDS_NO_LOWERING: &str = "`listDirKinds` runs in the interpreter / at \
-     generation time (RFC-0119); it has no native or wasm lowering in v1 — use it in a `gen fn` \
-     or under `vyrn run`";
+pub const LIST_DIR_KINDS_NO_LOWERING: &str =
+    "`listDirKinds` runs in the interpreter, at generation time and on the wasm target \
+     (RFC-0119, RFC-0125); it has no native lowering in v1 — use it in a `gen fn`, under `vyrn \
+     run` or with `--target wasm`";
 
 /// The atom-stream primitives the synthesized decoders are written against.
 pub const GEN_REFLECT: &str = "__vyrnGenReflect";
