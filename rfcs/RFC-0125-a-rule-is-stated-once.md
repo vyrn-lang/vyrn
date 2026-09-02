@@ -22,7 +22,10 @@
   fixture gate of §2.6 exists — 201 of 203 examples byte-identical to the
   recorded output, 2 skipped by name. The interpreter stays the default and
   is not deleted; the site export does not compile yet (`listDir` has no
-  lowering), and the numbers are in §3 M5. Nothing after that has landed.
+  lowering), and the numbers are in §3 M5. On 2026-09-03 the site export
+  ran under `--engine wasm` byte-identical to the interpreter's, once RFC-0089
+  rule 2's alias half was stated in the core, the kernel and the checker
+  (§3 M5, "the take out of a `read` parameter").
 - **Depends on:** RFC-0101 (the lowered form — this RFC is what its own ledger
   says it could not become), RFC-0077 (the direct wasm backend — the emitter
   this RFC keeps), RFC-0087..0091 (ownership is defined, not inferred — the
@@ -768,8 +771,8 @@ parity in release with `--ignored`; the residue ratchet; the cross-engine
 generator test, red for the same five programs as at the base; and `vyrn doc
 --std --verify`. The wasm manifest is not regenerated in this slice.
 
-**The take out of a `read` parameter (2026-09-03): the rule, stated
-once.** The defect above and `placeorder.vyrn`'s
+**The take out of a `read` parameter (2026-09-03): the rule, stated once,
+and the export byte-identical.** The defect above and `placeorder.vyrn`'s
 alias write (M5's second slice) are one rule seen from two sides. Both
 probes are under `rfcs/probes-0125/`, and what each engine did before the
 fix is pinned here:
@@ -871,6 +874,19 @@ checker's `check_handover`); a lending call's result (`a[i]` through a
 projection) has no place the kernel can name; and the checker's two blind
 spots above (a place read through an `if` expression at a store, and a
 `lex()` token's type) stay the kernel's finds until the checker types them.
+
+**The gate.** From the repository root, `site/data/history.json` and
+`demo.json` generated, `out/` and its five subdirectories present, release
+binary, generator cache warm, on the machine of §1.4:
+
+| | `run site/export.vyrn` | files written |
+|---|---|---|
+| interpreter | 160.1 s | 241 |
+| `--engine wasm` (compile and load inside) | 7.5 s | 241 |
+
+`diff -r` between the two trees: empty, and the two runs' standard output is the same 82 routes and 14 assets line for line. That is §2.6's fixture gate for
+the largest program in the repository, and the first time the compiled
+route wrote it.
 
 ### M2 — the named core and the linear judgment, beside the pipeline
 
