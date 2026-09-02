@@ -11508,15 +11508,32 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// `xs.push(v)` — the value, and a NEW triple describing the array with it
-    /// in. The parser turns the statement into `xs = @push(xs, v)`, so the
-    /// write-back is an ordinary assignment and this never touches the binding.
-    /// `xs.reserve(n)` (RFC-0115): one allocation for `n` more elements. The
-    /// growth is malloc + copy + free, exactly the shape [`Fn_::push`] grows
-    /// by, so the two backends cost the same heap.
-    /// `xs.clear()` (RFC-0115 addendum): the header copied into a fresh slot
-    /// with its length zeroed. The buffer pointer and the capacity travel
-    /// unchanged, which is what keeps the next fill from allocating.
+    /// The receiver of an array operation `std/runtime` rebuilds
+    /// (PLAN-0125-runtime §6 step 6): the element type, the header layout, the
+    /// element stride, the receiver's address parked in a local, and a fresh
+    /// slot the runtime writes the result triple into. `xs.push(v)` is
+    /// `xs = @push(xs, v)`, so the result is a NEW triple and the write-back is
+    /// an ordinary assignment; `reserve`, `clear`, `append` and `copyFrom`
+    /// (RFC-0115) rebuild the same way.
+    fn arr_recv(
+        &mut self,
+        b: &mut Frame,
+        aty: &Type,
+        verb: &str,
+        line: usize,
+    ) -> Result<(Type, Layout, i32, u32, u32), String> {
+        let Type::Array(elem) = self.cx.resolve(aty) else {
+            return unsupported(&format!("`{verb}` on `{aty}`"), line);
+        };
+        let l = self.layout_of(aty, line)?;
+        let stride = self.stride(&elem, line)? as i32;
+        let src = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(src));
+        let off = b.alloc(l.size, l.align);
+        Ok((*elem, l, stride, src, off))
+    }
+
+    /// `xs.clear()` (RFC-0115 addendum): `std/runtime`'s `arrClear`.
     fn clear_arr(
         &mut self,
         m: &mut Module,
@@ -11525,27 +11542,17 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<Type, String> {
         let aty = self.expr(m, b, &args[0])?;
-        if !matches!(self.cx.resolve(&aty), Type::Array(_)) {
-            return unsupported(&format!("`clear` on `{aty}`"), line);
-        }
-        let l = self.layout_of(&aty, line)?;
-        let src = b.local(ValType::I32);
-        b.ins(&Instruction::LocalSet(src));
-        let off = b.alloc(l.size, l.align);
+        let (_, _, _, src, off) = self.arr_recv(b, &aty, "clear", line)?;
         b.slot(off);
         b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I32Const(l.size as i32));
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
-        b.slot(off + l.fields[1]);
-        b.ins(&Instruction::I64Const(0));
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::Call(self.cx.rt.arr_clear));
         b.slot(off);
         Ok(aty)
     }
 
+    /// `xs.reserve(n)` (RFC-0115): `std/runtime`'s `arrReserve`. The count is
+    /// evaluated into a local first, so no operand of the call is on the stack
+    /// while a user expression runs.
     fn reserve_arr(
         &mut self,
         m: &mut Module,
@@ -11553,83 +11560,23 @@ impl<'p> Fn_<'_, 'p> {
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
-        let _ = m;
         let aty = self.expr(m, b, &args[0])?;
-        let Type::Array(elem) = self.cx.resolve(&aty) else {
-            return unsupported(&format!("`reserve` on `{aty}`"), line);
-        };
-        let elem = *elem;
-        let l = self.layout_of(&aty, line)?;
-        let stride = self.stride(&elem, line)? as i32;
-        let (src, data, len, cap) = (
-            b.local(ValType::I32),
-            b.local(ValType::I32),
-            b.local(ValType::I64),
-            b.local(ValType::I64),
-        );
-        b.ins(&Instruction::LocalSet(src));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalSet(data));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I64Load(at(l.fields[1])));
-        b.ins(&Instruction::LocalSet(len));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::LocalSet(cap));
-        let need = b.local(ValType::I64);
+        let (elem, _, stride, src, off) = self.arr_recv(b, &aty, "reserve", line)?;
+        let n = b.local(ValType::I64);
         self.expr_as(m, b, &args[1], &Type::Int)?;
-        b.ins(&Instruction::LocalGet(len));
-        b.ins(&Instruction::I64Add);
-        b.ins(&Instruction::LocalSet(need));
-        // need > cap: grow to exactly `need`.
-        b.ins(&Instruction::LocalGet(need));
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64GtS);
-        b.ins(&Instruction::If(BlockType::Empty));
-        self.depth += 1;
-        let grown = b.local(ValType::I32);
-        b.ins(&Instruction::LocalGet(need));
-        b.ins(&Instruction::I64Const(stride as i64));
-        b.ins(&Instruction::I64Mul);
-        b.ins(&Instruction::Call(self.cx.rt.malloc));
-        b.ins(&Instruction::LocalTee(grown));
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::LocalGet(len));
-        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalSet(n));
+        b.slot(off);
+        b.ins(&Instruction::LocalGet(src));
         b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::I32Mul);
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::Call(self.cx.rt.free));
-        b.ins(&Instruction::LocalGet(grown));
-        b.ins(&Instruction::LocalSet(data));
-        b.ins(&Instruction::LocalGet(need));
-        b.ins(&Instruction::LocalSet(cap));
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-        let off = b.alloc(l.size, l.align);
-        b.slot(off + l.fields[0]);
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::I32Store(word()));
-        b.slot(off + l.fields[1]);
-        b.ins(&Instruction::LocalGet(len));
-        b.ins(&Instruction::I64Store(word8()));
-        b.slot(off + l.fields[2]);
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::LocalGet(n));
+        b.ins(&Instruction::Call(self.cx.rt.arr_reserve));
         b.slot(off);
         Ok(Type::Array(Box::new(elem)))
     }
 
-    /// `xs.append(ys)` (RFC-0115): grow once to `max(need, cap * 2)`, then one
-    /// `memory.copy` of the source's elements — the checker held the element
-    /// type to heapless ones, so bytes ARE the elements. A self-append reads
-    /// the source out of the grown buffer (the old one is freed), chosen by a
-    /// `select` on the old data pointer.
+    /// `xs.append(ys)` and `dst.copyFrom(src)` (RFC-0115): `std/runtime`'s
+    /// `arrAppend` and `arrCopyFrom`. The checker held the element type to
+    /// heapless ones, so the runtime moves bytes and is handed no type.
     fn append_arr(
         &mut self,
         m: &mut Module,
@@ -11637,131 +11584,9 @@ impl<'p> Fn_<'_, 'p> {
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
-        let aty = self.expr(m, b, &args[0])?;
-        let Type::Array(elem) = self.cx.resolve(&aty) else {
-            return unsupported(&format!("`append` on `{aty}`"), line);
-        };
-        let elem = *elem;
-        let l = self.layout_of(&aty, line)?;
-        let stride = self.stride(&elem, line)? as i32;
-        let (src, data, len, cap) = (
-            b.local(ValType::I32),
-            b.local(ValType::I32),
-            b.local(ValType::I64),
-            b.local(ValType::I64),
-        );
-        b.ins(&Instruction::LocalSet(src));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalSet(data));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I64Load(at(l.fields[1])));
-        b.ins(&Instruction::LocalSet(len));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::LocalSet(cap));
-        let (xsrc, xdata, xlen) = (
-            b.local(ValType::I32),
-            b.local(ValType::I32),
-            b.local(ValType::I64),
-        );
-        self.expr_as(m, b, &args[1], &aty)?;
-        b.ins(&Instruction::LocalSet(xsrc));
-        b.ins(&Instruction::LocalGet(xsrc));
-        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalSet(xdata));
-        b.ins(&Instruction::LocalGet(xsrc));
-        b.ins(&Instruction::I64Load(at(l.fields[1])));
-        b.ins(&Instruction::LocalSet(xlen));
-        let need = b.local(ValType::I64);
-        b.ins(&Instruction::LocalGet(len));
-        b.ins(&Instruction::LocalGet(xlen));
-        b.ins(&Instruction::I64Add);
-        b.ins(&Instruction::LocalSet(need));
-        // need > cap: grow to max(need, cap * 2), copy, free the old buffer —
-        // AFTER retargeting a self-append's source at the copy just made.
-        b.ins(&Instruction::LocalGet(need));
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64GtS);
-        b.ins(&Instruction::If(BlockType::Empty));
-        self.depth += 1;
-        let nc = b.local(ValType::I64);
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64Const(2));
-        b.ins(&Instruction::I64Mul);
-        b.ins(&Instruction::LocalTee(nc));
-        b.ins(&Instruction::LocalGet(need));
-        b.ins(&Instruction::I64LtS);
-        b.ins(&Instruction::If(BlockType::Empty));
-        self.depth += 1;
-        b.ins(&Instruction::LocalGet(need));
-        b.ins(&Instruction::LocalSet(nc));
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-        let grown = b.local(ValType::I32);
-        b.ins(&Instruction::LocalGet(nc));
-        b.ins(&Instruction::I64Const(stride as i64));
-        b.ins(&Instruction::I64Mul);
-        b.ins(&Instruction::Call(self.cx.rt.malloc));
-        b.ins(&Instruction::LocalTee(grown));
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::LocalGet(len));
-        b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::I32Mul);
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
-        // A self-append's source moved with the copy.
-        b.ins(&Instruction::LocalGet(grown));
-        b.ins(&Instruction::LocalGet(xdata));
-        b.ins(&Instruction::LocalGet(xdata));
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::I32Eq);
-        b.ins(&Instruction::Select);
-        b.ins(&Instruction::LocalSet(xdata));
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::Call(self.cx.rt.free));
-        b.ins(&Instruction::LocalGet(grown));
-        b.ins(&Instruction::LocalSet(data));
-        b.ins(&Instruction::LocalGet(nc));
-        b.ins(&Instruction::LocalSet(cap));
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-        // dst = data + len * stride; memory.copy xlen * stride bytes.
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::LocalGet(len));
-        b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::I32Mul);
-        b.ins(&Instruction::I32Add);
-        b.ins(&Instruction::LocalGet(xdata));
-        b.ins(&Instruction::LocalGet(xlen));
-        b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::I32Mul);
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
-        let off = b.alloc(l.size, l.align);
-        b.slot(off + l.fields[0]);
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::I32Store(word()));
-        b.slot(off + l.fields[1]);
-        b.ins(&Instruction::LocalGet(need));
-        b.ins(&Instruction::I64Store(word8()));
-        b.slot(off + l.fields[2]);
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64Store(word8()));
-        b.slot(off);
-        Ok(Type::Array(Box::new(elem)))
+        self.arr_bulk(m, b, args, "append", line)
     }
 
-    /// `dst.copyFrom(src)` (RFC-0115): the receiver's buffer, the source's
-    /// elements, one `memory.copy`. Grows only when the source is longer; a
-    /// self-copy moves zero bytes.
     fn copy_from_arr(
         &mut self,
         m: &mut Module,
@@ -11769,90 +11594,46 @@ impl<'p> Fn_<'_, 'p> {
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
+        self.arr_bulk(m, b, args, "copyFrom", line)
+    }
+
+    fn arr_bulk(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        args: &[Expr],
+        verb: &str,
+        line: usize,
+    ) -> Result<Type, String> {
         let aty = self.expr(m, b, &args[0])?;
-        let Type::Array(elem) = self.cx.resolve(&aty) else {
-            return unsupported(&format!("`copyFrom` on `{aty}`"), line);
-        };
-        let elem = *elem;
-        let l = self.layout_of(&aty, line)?;
-        let stride = self.stride(&elem, line)? as i32;
-        let (src, data, cap) = (
-            b.local(ValType::I32),
-            b.local(ValType::I32),
-            b.local(ValType::I64),
-        );
-        b.ins(&Instruction::LocalSet(src));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalSet(data));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::LocalSet(cap));
-        let (xsrc, xdata, xlen) = (
-            b.local(ValType::I32),
-            b.local(ValType::I32),
-            b.local(ValType::I64),
-        );
+        let (elem, _, stride, src, off) = self.arr_recv(b, &aty, verb, line)?;
+        let xs = b.local(ValType::I32);
         self.expr_as(m, b, &args[1], &aty)?;
-        b.ins(&Instruction::LocalSet(xsrc));
-        b.ins(&Instruction::LocalGet(xsrc));
-        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalSet(xdata));
-        b.ins(&Instruction::LocalGet(xsrc));
-        b.ins(&Instruction::I64Load(at(l.fields[1])));
-        b.ins(&Instruction::LocalSet(xlen));
-        // xlen > cap: grow to exactly xlen. The old contents are dead, so this
-        // is malloc + free with NO copy of them.
-        b.ins(&Instruction::LocalGet(xlen));
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64GtS);
-        b.ins(&Instruction::If(BlockType::Empty));
-        self.depth += 1;
-        let grown = b.local(ValType::I32);
-        b.ins(&Instruction::LocalGet(xlen));
-        b.ins(&Instruction::I64Const(stride as i64));
-        b.ins(&Instruction::I64Mul);
-        b.ins(&Instruction::Call(self.cx.rt.malloc));
-        b.ins(&Instruction::LocalSet(grown));
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::Call(self.cx.rt.free));
-        b.ins(&Instruction::LocalGet(grown));
-        b.ins(&Instruction::LocalSet(data));
-        b.ins(&Instruction::LocalGet(xlen));
-        b.ins(&Instruction::LocalSet(cap));
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-        // memory.copy, unless the pointers were one — then zero bytes.
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::LocalGet(xdata));
-        b.ins(&Instruction::I64Const(0));
-        b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::LocalGet(xlen));
-        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalSet(xs));
+        b.slot(off);
+        b.ins(&Instruction::LocalGet(src));
         b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::I32Mul);
-        b.ins(&Instruction::LocalGet(xdata));
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::I32Eq);
-        b.ins(&Instruction::Select);
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
-        let off = b.alloc(l.size, l.align);
-        b.slot(off + l.fields[0]);
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::I32Store(word()));
-        b.slot(off + l.fields[1]);
-        b.ins(&Instruction::LocalGet(xlen));
-        b.ins(&Instruction::I64Store(word8()));
-        b.slot(off + l.fields[2]);
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::LocalGet(xs));
+        b.ins(&Instruction::Call(if verb == "append" {
+            self.cx.rt.arr_append
+        } else {
+            self.cx.rt.arr_copy_from
+        }));
         b.slot(off);
         Ok(Type::Array(Box::new(elem)))
     }
 
+    /// `xs.push(v)`: `std/runtime`'s `arrPush` grows and writes the new triple
+    /// with `len + 1`; the element is stored here, because the runtime knows
+    /// the stride and not the type.
+    ///
+    /// The old buffer comes back from the call and is released only after the
+    /// element is stored, and that is not tidiness. The value expression is
+    /// evaluated BELOW, and it may read the array being pushed onto —
+    /// `w.push(rot1(w[t - 3] ^ w[t - 8] …))` in `std/hash` does, through the
+    /// caller's header, which still names the OLD buffer. Freeing at the
+    /// growth made that a read of a block already on a free list, and SHA-1
+    /// came out wrong from the seventeenth word.
     fn push(
         &mut self,
         m: &mut Module,
@@ -11865,98 +11646,31 @@ impl<'p> Fn_<'_, 'p> {
             let ty = self.cx.resolve(&aty);
             return self.sa_push(m, b, &ty, &inner, n, &args[1], line);
         }
-        let Type::Array(elem) = self.cx.resolve(&aty) else {
-            return unsupported(&format!("`push` onto `{aty}`"), line);
-        };
-        let elem = *elem;
-        let l = self.layout_of(&aty, line)?;
-        let stride = self.stride(&elem, line)? as i32;
-        let (src, data, len, cap) = (
-            b.local(ValType::I32),
-            b.local(ValType::I32),
-            b.local(ValType::I64),
-            b.local(ValType::I64),
-        );
-        b.ins(&Instruction::LocalSet(src));
+        let (elem, l, stride, src, off) = self.arr_recv(b, &aty, "push", line)?;
+        let stale = b.local(ValType::I32);
+        b.slot(off);
         b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I32Const(stride));
+        b.ins(&Instruction::Call(self.cx.rt.arr_push));
+        b.ins(&Instruction::LocalSet(stale));
+        // The element goes at the old length, which the new triple holds plus one.
+        let (data, last) = (b.local(ValType::I32), b.local(ValType::I64));
+        b.slot(off);
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         b.ins(&Instruction::LocalSet(data));
-        b.ins(&Instruction::LocalGet(src));
+        b.slot(off);
         b.ins(&Instruction::I64Load(at(l.fields[1])));
-        b.ins(&Instruction::LocalSet(len));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::LocalSet(cap));
-
-        // Full: 0 → 4, else double. Allocate, copy, and hand the old buffer back —
-        // which is what `realloc` does for the textual backend, so growth costs the
-        // two the same heap (M6).
-        //
-        // The release waits until the element is stored, and that is not tidiness.
-        // The value expression is evaluated BELOW, and it may read the array being
-        // pushed onto — `w.push(rot1(w[t - 3] ^ w[t - 8] …))` in `std/hash` does,
-        // through a header this `push` has not written back yet, so it reads the
-        // OLD buffer. Freeing at the growth made that a read of a block already on
-        // a free list, and SHA-1 came out wrong from the seventeenth word.
-        //
-        // `stale` is cleared first because a `push` in a loop is ONE emitted site:
-        // an iteration that grew would otherwise leave the local set and the next
-        // iteration, growing nothing, would free that block a second time.
-        let stale = b.local(ValType::I32);
-        b.ins(&Instruction::I32Const(0));
-        b.ins(&Instruction::LocalSet(stale));
-        b.ins(&Instruction::LocalGet(len));
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64Eq);
-        b.ins(&Instruction::If(BlockType::Empty));
-        self.depth += 1;
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64Eqz);
-        b.ins(&Instruction::If(BlockType::Result(ValType::I64)));
-        self.depth += 1;
-        b.ins(&Instruction::I64Const(4));
-        b.ins(&Instruction::Else);
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64Const(2));
-        b.ins(&Instruction::I64Mul);
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-        b.ins(&Instruction::LocalSet(cap));
-        let grown = b.local(ValType::I32);
-        // `cap * stride` in 64 bits, which is the width `cap` already is. Wrapping
-        // first is what made this the worst of the truncations: doubling a 2 GiB
-        // buffer asks for 4 GiB, wrapped to 0, and the copy below is `len *
-        // stride` — the OLD size, which does NOT wrap and does fit — so 2 GiB
-        // went into a zero-byte allocation without tripping a bounds check.
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64Const(stride as i64));
-        b.ins(&Instruction::I64Mul);
-        b.ins(&Instruction::Call(self.cx.rt.malloc));
-        b.ins(&Instruction::LocalTee(grown));
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::LocalGet(len));
-        b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::I32Mul);
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::LocalSet(stale));
-        b.ins(&Instruction::LocalGet(grown));
-        b.ins(&Instruction::LocalSet(data));
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Sub);
+        b.ins(&Instruction::LocalSet(last));
         let w = Walk {
             data,
-            len,
+            len: last,
             stride: stride as u32,
             elem: elem.clone(),
             byte: false,
         };
-        self.elem_addr(b, &w, len);
+        self.elem_addr(b, &w, last);
         let r = self.cx.repr(&elem, line)?;
         self.expr_as(m, b, &args[1], &elem)?;
         match &r {
@@ -11975,18 +11689,6 @@ impl<'p> Fn_<'_, 'p> {
         // Now nothing can read the old buffer through the caller's header.
         b.ins(&Instruction::LocalGet(stale));
         b.ins(&Instruction::Call(self.cx.rt.free));
-        let off = b.alloc(l.size, l.align);
-        b.slot(off + l.fields[0]);
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::I32Store(word()));
-        b.slot(off + l.fields[1]);
-        b.ins(&Instruction::LocalGet(len));
-        b.ins(&Instruction::I64Const(1));
-        b.ins(&Instruction::I64Add);
-        b.ins(&Instruction::I64Store(word8()));
-        b.slot(off + l.fields[2]);
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64Store(word8()));
         b.slot(off);
         Ok(Type::Array(Box::new(elem)))
     }
@@ -15682,6 +15384,18 @@ const VYRN_RUNTIME: &[(&str, &[ValType], &[ValType])] = &[
     ("mapReserve", &[ValType::I32; 4], &[]),
     ("mapRemoveAt", &[ValType::I32; 5], &[]),
     ("mapKeysCopy", &[ValType::I32; 3], &[ValType::I32]),
+    // Step 6: the arrays. `dst` and `src` are header addresses and `stride` the
+    // element size; `arrPush` answers the buffer a growth left behind, which
+    // the emitter frees after the element is stored.
+    ("arrPush", &[ValType::I32; 3], &[ValType::I32]),
+    (
+        "arrReserve",
+        &[ValType::I32, ValType::I32, ValType::I32, ValType::I64],
+        &[],
+    ),
+    ("arrAppend", &[ValType::I32; 4], &[]),
+    ("arrCopyFrom", &[ValType::I32; 4], &[]),
+    ("arrClear", &[ValType::I32; 2], &[]),
     // Step 7: the I/O family. A `dest` leads where the result is an
     // aggregate (an `Option`, a `Result`, the `args` triple); the interned
     // message halves, the DFA table and the fixed-clock keys trail, as
@@ -15881,6 +15595,16 @@ struct Rt {
     map_reserve: u32,
     map_remove_at: u32,
     map_keys_copy: u32,
+    /// The array family (RFC-0011, RFC-0115), Vyrn since PLAN-0125-runtime §6
+    /// step 6 and functions for the first time in any engine: each reads the
+    /// receiver's triple and writes the rebuilt one into a fresh slot, told
+    /// the element stride as a constant. `a[i]` is not among them; the plan's
+    /// results block for step 6 has the measurement that keeps it inline.
+    arr_push: u32,
+    arr_reserve: u32,
+    arr_append: u32,
+    arr_copy_from: u32,
+    arr_clear: u32,
     /// RFC-0046's `=~` (M2m): walk a complete DFA over a NUL-terminated string.
     /// One helper for every pattern in the module, because the pattern is entirely
     /// in the table it is handed — which is the same split the textual backend's
@@ -16032,6 +15756,11 @@ impl Rt {
             map_reserve: 0,
             map_remove_at: 0,
             map_keys_copy: 0,
+            arr_push: 0,
+            arr_reserve: 0,
+            arr_append: 0,
+            arr_copy_from: 0,
+            arr_clear: 0,
             regex_run: 0,
             parse_i64: 0,
             line_at: 0,
@@ -16191,6 +15920,11 @@ fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {
     rt.map_reserve = v.get("mapReserve");
     rt.map_remove_at = v.get("mapRemoveAt");
     rt.map_keys_copy = v.get("mapKeysCopy");
+    rt.arr_push = v.get("arrPush");
+    rt.arr_reserve = v.get("arrReserve");
+    rt.arr_append = v.get("arrAppend");
+    rt.arr_copy_from = v.get("arrCopyFrom");
+    rt.arr_clear = v.get("arrClear");
     rt.wasi = *wasi;
     rt.write_all = v.get("writeAll");
     rt.print_str = v.get("printStr");

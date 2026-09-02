@@ -837,6 +837,59 @@ before; `finitekeys` is a String-keyed map and is byte-identical across the
 three engines under parity and the fixtures. The interpreter keeps its own
 `Map` (§5.1), as at every step before this one.
 
+**Results, step 6 (2026-09-02, branch `track-p`).** The array family has
+runtime functions for the first time in any engine (§1.1, Arrays): `arrPush`,
+`arrReserve`, `arrAppend`, `arrCopyFrom` and `arrClear` are Vyrn in
+`std/runtime.vyrn` (136 lines with their comment, over `load32`, `load64`,
+`store32`, `store64`, `copy`, `malloc` and `free`), and the wasm emitter's
+five inline copies are deleted: 388 lines out of `direct.rs`, 122 in (five
+rows of the `VyrnRt` table, `arr_recv`, which parks the receiver and allocates
+the result slot for all five, and the call sites). The element type never
+reaches the module. The emitter passes the element STRIDE as a constant, the
+way the maps are passed a layout, and each function reads the triple at `src`
+and writes the rebuilt triple at `dst`, a fresh frame slot, because `xs.push(v)`
+is `xs = @push(xs, v)` and the write-back is the assignment. Alignment is not
+passed: `malloc` is eight-aligned and no element aligns coarser. The growth
+policy is the one it replaces (double from four; `append` to the larger of
+the doubling and the need; `reserve` and `copyFrom` to exactly the need), the
+products are `Int64` and `malloc` judges them, so the one trap the family has
+is still `out of memory` at the same request. `arrPush` does all but the
+element store, which the emitter keeps because it knows the type, and answers
+the buffer a growth left behind: the emitter frees it AFTER the store, for the
+reason the inline copy gave (`std/hash` reads the array inside its own
+`push`). The `SmallArray` push (RFC-0056) stays inline: its header is a
+different shape with two live states, and it is not this family. `at` stays
+inline, measured: a throwaway build (not kept) put the bounds check and the
+address arithmetic of an `Array` read behind one call to a module function,
+`arrAt(data, len, i, stride)`, and nbody at 25 M steps went from 1.95 s to
+7.28 s under wasmtime 46, fannkuch at n = 11 from 3.43 s to 5.91 s — step 5's
+finding again, on the hottest path there is: wasmtime 46 inlines nothing
+across the call, and every value live across it is spilled. So `a[i]` is the
+check-and-branch of RFC-0125 M1 at its site, with the one trap site per
+function that M1 measured, and it is not a candidate for the module until the
+engine inlines. Gates: fmt, workspace, kernel (the ratchet held), lowered
+(1,242 synthesized, under the 1,400 ceiling), the nine `vyrn-cli`
+suites, parity 41 of 41, residue, the cross-engine generator gate, `doc
+--verify`, site export 33 of 34 (the version test fails on local fixture
+data); the wasm2c route gate skipped for a missing wabt. The extra gate, the
+five programs at RFC-0104's timing sizes under wasmtime 46, the same base
+`.wasm` per row, base and head interleaved, medians of five, outputs byte-equal
+between the two, on a machine shared with other worktrees' builds:
+
+| program | base (inline) | head (`std/runtime`) | recorded (RFC-0125 M1, Cranelift) |
+|---|---|---|---|
+| nbody, 25 M steps | 1.974 s | 1.960 s | 1.98 s |
+| spectral-norm, n = 5500 | 2.845 s | 2.849 s | 2.83 s |
+| fannkuch, n = 11 | 3.413 s | 3.403 s | 3.58 s |
+| binary-trees, depth 18 | 0.845 s | 0.833 s | 0.88 s (§1.4) |
+| k-nucleotide, fasta n = 400 k | 0.298 s | 0.289 s | 0.297 s (step 5) |
+
+The three kernels do not push, so they are the no-change check, and they sit
+on M1's numbers. binary-trees and k-nucleotide are the push-heavy rows, and
+each is inside its run's spread of the base: a push that fits its capacity
+now pays one call it did not pay before, and the row does not see it, which
+is §7.3's prediction for a function that is not on a per-element path.
+
 **Results, step 7 (2026-09-03, branch `track-r`).** The I/O family is Vyrn in
 `std/runtime.vyrn`: `writeAll` with the stdout buffer behind it, `printStr`,
 `getByte` with the stdin buffer, `readLineV`, `openAt`, `readAll`, `err3`,
