@@ -13,8 +13,11 @@
   refusal classes are verified defects in the current release placement
   (§3 M2, `rfcs/probes-0125/`). The first was closed in `movecheck` the same
   day; M3's first slice, the placer, closed the second from the core's side:
-  5,344 accepted, 1 refused, every probe flat, every gate green. Nothing
-  after M3's first slice has landed.
+  5,344 accepted, 1 refused, every probe flat, every gate green. M2's
+  second slice lowered every construct: 6,581 accepted, 0 unlowered, 9
+  refused in five classes, each a leak the plan cannot express and each
+  measured by a probe (§3 M2, "the second slice"). Nothing after that has
+  landed.
 - **Depends on:** RFC-0101 (the lowered form — this RFC is what its own ledger
   says it could not become), RFC-0077 (the direct wasm backend — the emitter
   this RFC keeps), RFC-0087..0091 (ownership is defined, not inferred — the
@@ -693,6 +696,151 @@ builtin whose result is its receiver's type hands the buffer back, so the
 receiver is taken by the call. The kernel reproduces every one of these to
 judge the plan, which is the measure of how much M3's one liveness pass
 deletes.
+
+**The second slice lowered every construct (2026-09-02).** The 1,229
+unlowered instances were thirteen constructs, and each is now a rule the
+core states. What each became, and why:
+
+- **A read of module state that owns heap** (719): a borrow of
+  `Place::Global`. Nothing may take module state (RFC-0013): `movecheck`
+  refuses returning it or passing it to a `consume` parameter, and `own`
+  notes `let x = g` as a borrow. A store into a field or an element of a
+  global is a store into that place, with the plan's row saying what it
+  displaces.
+- **A `consume` hole** (177) and **a `consume` of a place that is not a
+  name** (31): `Rhs::Take(place)`. The value moves out into an owned name and
+  the base keeps a hole at that path. The kernel tracks holes per name: a
+  read or take that overlaps a hole is refused, a store at the hole fills
+  it, a drop of the name releases the rest (the plan's walk minus its hole
+  set), and two edges of a join must agree on the holes as on the names.
+  An element hole is `[]`, any index. A binding whose hole the walk cannot
+  skip (`Leak::Hole`) is not modelled: the plan leaks it on purpose, and
+  none is in the corpus.
+- **A move out of a field or an element** (155): three things. The receiver
+  of a rebuilding builtin on a field (`s.dense.push(i)`, which the parser
+  writes back as `s.dense = @push(s.dense, i)`) is a take whose store fills
+  the hole. A `for` over a field borrows the container. Every other place
+  read in a take position — `best = m.name`, an `if` arm that yields
+  `parts[0]` — is an alias, because `movecheck::names_a_place` says so at
+  the `let` and at the store and refuses every take that would own it.
+- **A map lookup as a place** (7): `Place::Key`. A store into it takes the
+  key — the map keeps the key it is handed, or releases the surplus one
+  (`examples/mapkeyowned.vyrn`) — and a read borrows it. The seventeen
+  refusals that appeared the moment map lookups lowered were all this rule.
+- **A lambda** (28): reads of its captures. A capture is by read and a
+  stored closure snapshots what it captured (RFC-0037), so the enclosing
+  frame keeps its value. In an argument position the literal is
+  monomorphized away and owns nothing. The lambda's own body is a separate
+  frame and is not judged yet.
+- **A `region`** (7): an ordinary block. The arena owns what is allocated
+  inside; the plan notes each such binding `Leak::Region`, and a `drop` of
+  one is what both compiling backends emit for it: nothing.
+- **A call this slice cannot attribute** (35): reserved names with no
+  prelude row (`fromJson`, `value`, `lex`, `render`, a log level) take the
+  prelude's capability where it has one and `read` elsewhere; a projection
+  an `impl` declares takes its own parameters' capabilities and yields a
+  borrow; a name that is a function, a type or a contract used as a value is
+  static.
+- **An expression the checker did not type** (33): the same names as
+  values, and a call to a projection the checker expands at the site
+  (`people.tryAt(h)`), typed as the impl declares it under the receiver's
+  type arguments. **An element of a non-container** (26) is a user
+  container's `nth` or `at` projection, typed the same way. **An `Err`
+  pattern on a non-result** (1) is `?` on a declared `Fallible` type: the
+  failing path returns the whole value, the succeeding one hands it to the
+  impl's `success`.
+- **A `for` over a stream** closes the stream at the loop's end and at every
+  `return` or `?` inside it — the direct backend's cursor stack, stated once.
+  **A `let mut s = ""`** is `Static` in the kernel until a store gives it a
+  value: a store over static data releases nothing, a drop of it frees
+  nothing, and a loop whose body replaces it is judged again from the state
+  the first turn leaves. The same holds for a literal built from literals
+  (`[]`, `Body { nodes: [] }`).
+- **The one misread.** `smallarray.vyrn`'s `let out = xs.toArray()` was
+  refused because the plan's note says "the type unknown owns no heap" — it
+  could not type the call — and the lowering read the note as "not owned".
+  A note that could not type its binding now says nothing, and the checker's
+  type decides.
+
+| kernel over the corpus | first slice | with the placer | every construct |
+|---|---|---|---|
+| accepted | 5,292 | 5,344 | 6,581 |
+| refused | 53 | 1 | 9 |
+| unlowered | 1,229 | 1,229 | 0 |
+
+**The nine refusals are five classes, all leaks the plan cannot express,
+each measured by a probe under `rfcs/probes-0125/`** (peak working set at
+200,000 and 400,000 turns, native build; a flat program measures 4.2 MB at
+both):
+
+5. **A payload binder with a hole.** `std/graphql`'s `reply`: `match consume
+   r { Some(res) => consume res.body, .. }`. The arm table frees a binder
+   whole or not at all, so the rest of `res` — its headers map — is never
+   released. `payload-binder-with-a-hole.vyrn`: 53 MB and 102 MB. The
+   placer must not place an arm row for a holed binder, because the
+   emitters' arm free walks the whole binder (`direct.rs`, round forty), and
+   the row would free what `consume res.body` handed to the caller. The
+   kernel's placement mode leaves such a binder held, and the judgment
+   refuses it.
+6. **A field taken out of a temporary.** `gqlTestProject`'s `let sels =
+   gqlParseQuery(query).sels`: the binding takes the field (`movecheck`:
+   "the binding takes ownership of the extracted buffer") and nothing
+   releases the rest of the temporary. `field-out-of-a-temporary.vyrn`:
+   35 MB and 66 MB.
+7. **A `consume` of a sub-place on one edge of a join.** `vlog`'s
+   `recordsFrom` (`if d.ok { .. consume d.line .. } else { .. }`) and
+   `std/rpc`'s `rpcApplyConfig`: the plan's hole set is per binding, not
+   per path, so the release walk skips `line` on the path that never took
+   it. `consume-on-one-edge.vyrn`: 12 MB and 20 MB. The placer saw the same
+   shape in four `std/vyx` bodies (`vyxEmitAttrs`, `vyxEmitComp`,
+   `vyxMergeImports`, `vyxProcessElemInner`) while loading a generator
+   module; those programs do not load in the corpus test and are not
+   counted.
+8. **A `for` variable one of whose fields the body takes.** `std/tw`'s
+   `twSafelist`: `for p in pairs { out.push(consume p.value) }`. The plan's
+   handover row (`FreeArr`) frees the buffer alone because every take came
+   through the variable, and `p.token` leaks per element — the direction
+   the analysis says it is allowed to be wrong in. `for-variable-with-a-hole.vyrn`:
+   66 MB and 127 MB.
+9. **A binding returned whole on one path and drained on the other.**
+   `gqlListValue`'s `let v = gqlValue(..); if v.err != "" { return v };
+   items.push(consume v.value)`, and the same shape in `gqlObjectValue` and
+   `gqlSelSet`. The plan's fate is "moved into the return", so it places no
+   release anywhere, and on the other path `v.err` is held at the block's
+   end. In these three the untaken field is an empty String and costs no
+   bytes; `moved-on-one-path-holed-on-the-other.vyrn` gives it a value:
+   20 MB and 35 MB.
+
+**What the placer may not place, found by the gates.** The first cut placed
+an exit row for every held name, holed or not, and `graphql` died natively
+of a use after free while `jsonplace` double-freed: parity and the residue
+ratchet both caught it. The emitters' release walk skips only the holes the
+plan's own table lists for a binding, and a binding the plan never meant to
+release (class 9's "moved" fate) has no entry there, so a placed row walked
+`inner.sels` after `subs` had taken it. The placer now places no row of any
+kind — exit, edge or arm — for a name that has a hole where the row would
+run; placement goes on past it as if it were released, so the body's other
+rows still land, and the judgment refuses the name. The second find was the
+same fallback in the other direction: a note that could not type its
+binding now defers to the checker's type (the `smallarray` fix), and a
+projection's result is typed but borrowed, so `let items = doc.field("items")`
+must stay a borrow whatever the note says; a lending call binds a borrow
+before the note is consulted.
+
+Each closes by fixing the plan: a hole set per path (7), a hole set on a
+binder, on a temporary and on a moved binding (5, 6, 9), and an element
+release minus the holes (8) — or, per M3, by the core placing what the plan
+cannot say, once the emitters' walk can be told the kernel's holes. The
+corpus test's ratchet is 9, for these and no others.
+
+**Strict mode.** With `VYRN_KERNEL_STRICT=1`, a hard refusal by the kernel
+— a double free, a use after release, a join whose edges disagree; not a
+missing release, which the placer repairs — fails `vyrn check` and `vyrn
+build` with the kernel's message printed as a diagnostic. The placer
+collects the refusals it meets (`core::augment`), and the CLI runs the
+analysis once more on the program it was given and drains them, so a
+generator's refusal is not charged to the program that ran it. Off by
+default while the five classes above stand in the corpus.
 
 ### M3 — the emitter reads the core
 

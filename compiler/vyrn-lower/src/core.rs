@@ -1,4 +1,4 @@
-//! The named core — RFC-0125 §2.1, first slice (M2).
+//! The named core — RFC-0125 §2.1 (M2).
 //!
 //! Every intermediate value has a name, every access is a place, and every
 //! release the ownership plan decided is an explicit [`St::Drop`]. A backend
@@ -17,9 +17,11 @@
 //! the kernel re-checks the plan's decisions per program, so a decision the
 //! plan missed is refused at compile time instead of found by the ratchet.
 //!
-//! A construct this slice does not lower yet returns a [`Gap`] naming it, and
-//! the instance is reported as unlowered rather than accepted or refused. The
-//! corpus test counts gaps by construct; the list is the work left.
+//! A construct this pass does not lower returns a [`Gap`] naming it, and the
+//! instance is reported as unlowered rather than accepted or refused. The
+//! corpus test counts gaps by construct. The second slice lowered every
+//! construct the corpus has (RFC-0125 §3 M2); what a gap still names is a
+//! binding the plan leaks on purpose, a hole its release walk cannot skip.
 
 use std::collections::HashMap;
 
@@ -52,7 +54,7 @@ pub struct NameInfo {
     pub binding: Option<usize>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Val {
     Name(Name),
     /// A literal: nothing to own. A string literal is static data
@@ -66,6 +68,11 @@ pub enum Place {
     Global(String),
     Field(Box<Place>, String),
     Elem(Box<Place>, Val),
+    /// A map's entry at a key. A store into it takes the key: the map keeps
+    /// the key it is handed, or releases the surplus one when an equal key is
+    /// already there (RFC-0028, `examples/mapkeyowned.vyrn`). A read of it
+    /// borrows the key.
+    Key(Box<Place>, Val),
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +82,11 @@ pub enum Rhs {
     /// A read of a place that yields a value the kernel does not own — a scalar
     /// field, an element of a heapless type, a borrowed payload.
     Read(Place),
+    /// A move out of a sub-place (`consume x.f`, RFC-0093; the receiver a
+    /// rebuilding builtin hands back). The value leaves into the bound name,
+    /// and the base keeps a hole where it was: a later release of the base
+    /// walks the rest, and a later read of the hole is refused.
+    Take(Place),
     Call {
         callee: String,
         args: Vec<(Val, Capability)>,
@@ -204,6 +216,7 @@ impl Body {
             Place::Global(g) => format!("global {g}"),
             Place::Field(b, f) => format!("{}.{f}", self.place(b)),
             Place::Elem(b, i) => format!("{}[{}]", self.place(b), self.val(i)),
+            Place::Key(b, k) => format!("{}[key {}]", self.place(b), self.val(k)),
         }
     }
 
@@ -211,6 +224,7 @@ impl Body {
         match r {
             Rhs::Val(v) => self.val(v),
             Rhs::Read(p) => format!("read {}", self.place(p)),
+            Rhs::Take(p) => format!("take {}", self.place(p)),
             Rhs::Call { callee, args } => format!(
                 "{callee}({})",
                 args.iter()
@@ -327,6 +341,34 @@ fn is_place_read(e: &Expr) -> bool {
     }
 }
 
+/// The kind of an expression, for a gap's detail.
+fn expr_kind(e: &Expr) -> &'static str {
+    match e {
+        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => "literal",
+        Expr::Var { .. } => "var",
+        Expr::Unary { .. } => "unary",
+        Expr::Binary { .. } => "binary",
+        Expr::Field { .. } => "field",
+        Expr::Call { name, .. } => {
+            if name.starts_with('@') {
+                "builtin call"
+            } else {
+                "call"
+            }
+        }
+        Expr::TryConstruct { .. } => "try construct",
+        Expr::ArrayLit { .. } => "array literal",
+        Expr::StructLit { .. } => "record literal",
+        Expr::MapLit { .. } => "map literal",
+        Expr::Spawn { .. } => "spawn",
+        Expr::IfExpr { .. } => "if expression",
+        Expr::Match { .. } => "match",
+        Expr::Try { .. } => "try",
+        Expr::Lambda { .. } => "lambda",
+        Expr::Consume { .. } => "consume",
+    }
+}
+
 fn gap<T>(what: &'static str, line: usize) -> Result<T, Gap> {
     Err(Gap {
         what,
@@ -358,15 +400,6 @@ pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<
     for r in &inst.releases {
         placed.entry((r.exit, r.site)).or_default().push(r);
     }
-    // A binding with a hole (RFC-0093) releases part of itself; the kernel of
-    // this slice tracks whole names only.
-    if own
-        .holes
-        .get(&inst.func.name)
-        .is_some_and(|h| h.values().any(|v| !v.is_empty()))
-    {
-        return gap("a binding with a `consume` hole", inst.func.line);
-    }
     let mut b = Builder {
         program,
         own,
@@ -386,6 +419,7 @@ pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<
         pending_receiver: None,
         after: Vec::new(),
         after_of_rhs: Vec::new(),
+        stream_loops: Vec::new(),
     };
     let f: &Function = inst.func;
     // A declared release (`impl Owned for T { fn release(consume self) }`) IS
@@ -427,6 +461,10 @@ struct Builder<'a> {
     after: Vec<Name>,
     /// What `rhs` left for the binding that follows it.
     after_of_rhs: Vec<Name>,
+    /// The streams the enclosing `for` loops walk, innermost last. A `return`
+    /// or a `?` inside such a loop closes every one of them on its way out
+    /// (the direct backend's cursor stack), and the loop's end closes its own.
+    stream_loops: Vec<Name>,
 }
 
 impl<'a> Builder<'a> {
@@ -457,21 +495,55 @@ impl<'a> Builder<'a> {
     /// release; a binding with no release rule for its type is, and the
     /// kernel will say so.
     fn fate_owned(&self, name: &str, line: usize, ty: &Type) -> Option<bool> {
-        let Some(notes) = self.own.notes.get(&self.func_name) else {
+        let Some(fate) = self.fate_of(name, line) else {
             return if self.owns(ty) { None } else { Some(false) };
         };
-        let Some(n) = notes.iter().find(|n| n.name == name && n.line == line) else {
-            return if self.owns(ty) { None } else { Some(false) };
-        };
-        Some(match &n.fate {
+        Some(match fate {
             // The plan releases, moves or discharges it: it is this frame's.
             Fate::Reclaimed(..)
             | Fate::Moved { .. }
             | Fate::Dropped { .. }
             | Fate::Discharged(_) => true,
+            // The plan could not type the initializer (`xs.toArray()` on a
+            // SmallArray answers `unknown`), so its note says nothing about
+            // ownership; the checker's type decides, as it does for a
+            // binding with no note at all.
+            Fate::Leaked(Leak::NoRelease { ty: noted, .. }) if noted == "unknown" => {
+                return if self.owns(ty) { None } else { Some(false) };
+            }
             Fate::Leaked(Leak::NoRelease { owns_heap, .. }) => *owns_heap,
             Fate::Static | Fate::Leaked(_) => false,
         })
+    }
+
+    /// The plan's note for a `let` binding, when it wrote one.
+    fn fate_of(&self, name: &str, line: usize) -> Option<&Fate> {
+        self.own
+            .notes
+            .get(&self.func_name)?
+            .iter()
+            .find(|n| n.name == name && n.line == line)
+            .map(|n| &n.fate)
+    }
+
+    /// Whether a call's result points into one of its arguments, so the name
+    /// bound to it is a borrow: a lending prelude row (`at`, `bytes`), the
+    /// `value` box, or a projection an `impl` declares (RFC-0120).
+    fn lends(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Call { name, .. } => {
+                prelude::lends(name) || name == "value" || self.projection(name).is_some()
+            }
+            _ => false,
+        }
+    }
+
+    fn projection(&self, name: &str) -> Option<&'a Function> {
+        self.program
+            .impls
+            .iter()
+            .flat_map(|i| i.places.iter())
+            .find(|p| p.name == name)
     }
 
     fn temp(&mut self, ty: Type, line: usize) -> Name {
@@ -503,7 +575,28 @@ impl<'a> Builder<'a> {
     fn ty_of(&self, e: &Expr) -> Result<Type, Gap> {
         match self.types.get(&(e as *const Expr as usize)) {
             Some(t) => Ok(t.clone()),
-            None => gap("an expression the checker did not type", e.line()),
+            // A call to a projection the checker expanded at the site
+            // (`people.tryAt(h)`, RFC-0122): its declared result, under the
+            // receiver's type arguments.
+            None if matches!(e, Expr::Call { name, args, .. }
+                if !args.is_empty() && self.projection(name).is_some()) =>
+            {
+                let Expr::Call { name, args, .. } = e else {
+                    unreachable!()
+                };
+                let p = self.projection(name).unwrap();
+                let rty = self.ty_of(&args[0])?;
+                Ok(self.under_impl(&p.ret, &rty))
+            }
+            None => gap_d(
+                "an expression the checker did not type",
+                &match e {
+                    Expr::Var { name, .. } => format!("var {name}"),
+                    Expr::Call { name, .. } => format!("call {name}"),
+                    _ => expr_kind(e).to_string(),
+                },
+                e.line(),
+            ),
         }
     }
 
@@ -547,6 +640,18 @@ impl<'a> Builder<'a> {
                 name, value, line, ..
             } => {
                 let ty = self.ty_of(value)?;
+                // A `consume` took a place the release walk cannot be told
+                // to skip (a declared `release`, an enum path, a filled
+                // hole), so the plan leaks the whole binding on purpose.
+                // Not modelled: the kernel would have to know what the walk
+                // can skip, which is the plan's question and RFC-0093's.
+                if let Some(Fate::Leaked(Leak::Hole { .. })) = self.fate_of(name, *line) {
+                    return gap_d(
+                        "a binding whose hole the release walk cannot skip",
+                        name,
+                        *line,
+                    );
+                }
                 if !matches!(value, Expr::Var { .. }) && is_place_read(value) {
                     let place = self.place(value, out)?;
                     let n = self.name(name, ty, false, *line);
@@ -561,9 +666,14 @@ impl<'a> Builder<'a> {
                     value,
                     Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_)
                 );
-                let owned = self
-                    .fate_owned(name, *line, &ty)
-                    .unwrap_or_else(|| self.owns(&ty) && !literal);
+                // A call whose result points into an argument — a lending
+                // prelude row, a projection — binds a borrow whatever the
+                // note says: the plan cannot type a projection it expands
+                // at the site, and its note then says "unknown".
+                let owned = !self.lends(value)
+                    && self
+                        .fate_owned(name, *line, &ty)
+                        .unwrap_or_else(|| self.owns(&ty) && !literal);
                 let n = self.name(name, ty, owned, *line);
                 self.bind(n, rhs, out);
                 self.scope.push((name.clone(), n));
@@ -613,13 +723,11 @@ impl<'a> Builder<'a> {
                 line,
             } => {
                 let v = self.val(value, out)?;
-                let Some(n) = self.lookup(name) else {
-                    return gap("a field store into module state", *line);
-                };
-                let fty = self.field_ty(&self.body.names[n as usize].ty.clone(), field, *line)?;
+                let (base, bty) = self.named_place(name, *line)?;
+                let fty = self.field_ty(&bty, field, *line)?;
                 let old = self.old_for(&fty, sid);
                 out.push(St::Store {
-                    place: Place::Field(Box::new(Place::Name(n)), field.clone()),
+                    place: Place::Field(Box::new(base), field.clone()),
                     value: v,
                     old,
                 });
@@ -630,15 +738,24 @@ impl<'a> Builder<'a> {
                 value,
                 line,
             } => {
-                let i = self.read_val(index, out)?;
-                let v = self.val(value, out)?;
-                let Some(n) = self.lookup(name) else {
-                    return gap("an element store into module state", *line);
+                let (base, bty) = self.named_place(name, *line)?;
+                let place = if self.is_map(&bty) {
+                    let k = self.val(index, out)?;
+                    Place::Key(Box::new(base), k)
+                } else {
+                    let i = self.read_val(index, out)?;
+                    Place::Elem(Box::new(base), i)
                 };
-                let ety = self.elem_ty(&self.body.names[n as usize].ty.clone(), *line)?;
+                let v = self.val(value, out)?;
+                // A user container's `place at` yields the element's place
+                // (RFC-0091 M2), and the element's type is the value's.
+                let ety = match self.elem_ty(&bty, *line) {
+                    Ok(t) => t,
+                    Err(_) => self.ty_of(value)?,
+                };
                 let old = self.old_for(&ety, sid);
                 out.push(St::Store {
-                    place: Place::Elem(Box::new(Place::Name(n)), i),
+                    place,
                     value: v,
                     old,
                 });
@@ -648,6 +765,7 @@ impl<'a> Builder<'a> {
                     Some(e) => Some(self.val(e, out)?),
                     None => None,
                 };
+                self.close_streams(out);
                 self.drops_at(Exit::Return, sid, out)?;
                 out.push(St::Return {
                     value: v,
@@ -743,7 +861,13 @@ impl<'a> Builder<'a> {
                 consuming,
             } => {
                 let ity = self.ty_of(iter)?;
-                let ety = self.elem_ty(&ity, *line)?;
+                let ety = match self.elem_ty(&ity, *line) {
+                    Ok(t) => t,
+                    // A user container: the element is what its `nth`
+                    // projection yields (RFC-0091 M2), under this
+                    // instantiation's type arguments.
+                    Err(g) => self.projected_elem(&ity).ok_or(g)?,
+                };
                 // The container: a name the loop reads, or one it takes.
                 let it = match iter {
                     Expr::Var { name, .. } if self.lookup(name).is_some() => {
@@ -757,6 +881,14 @@ impl<'a> Builder<'a> {
                             n
                         }
                     }
+                    _ if !*consuming && is_place_read(iter) => {
+                        // `for p in e.path`: the loop walks a container
+                        // somebody else owns.
+                        let place = self.place(iter, out)?;
+                        let t = self.name("@borrow", ity.clone(), false, *line);
+                        out.push(St::Let(t, Rhs::Read(place)));
+                        t
+                    }
                     _ => {
                         let v = self.val(iter, out)?;
                         let Val::Name(t) = v else {
@@ -768,6 +900,12 @@ impl<'a> Builder<'a> {
                         t
                     }
                 };
+                let decls = vyrn_frontend::types::decl_map(self.program);
+                let streaming =
+                    matches!(vyrn_frontend::types::resolve(&ity, &decls), Type::Stream(_));
+                if streaming {
+                    self.stream_loops.push(it);
+                }
                 let mut l = Vec::new();
                 // Whose is each element? The plan's row for the loop says:
                 // a `FreeArr` row frees the buffer only, because the body
@@ -792,7 +930,16 @@ impl<'a> Builder<'a> {
                 self.block(body, &mut l)?;
                 self.scope.truncate(mark);
                 out.push(St::Loop(l));
-                if *consuming && !self.placed.contains_key(&(Exit::Scrutinee, sid)) {
+                if streaming {
+                    self.stream_loops.pop();
+                    // The loop pulled the stream to its end, or a `break`
+                    // left early: either way the loop closes it here.
+                    if self.body.names[it as usize].owned
+                        && !self.placed.contains_key(&(Exit::Scrutinee, sid))
+                    {
+                        out.push(St::Drop(it));
+                    }
+                } else if *consuming && !self.placed.contains_key(&(Exit::Scrutinee, sid)) {
                     // The loop took the container and the plan placed no row
                     // for it, so the loop gives it back here.
                     out.push(St::Drop(it));
@@ -803,6 +950,18 @@ impl<'a> Builder<'a> {
                 let Some(n) = self.lookup(name) else {
                     return gap("a `drop` of module state", *line);
                 };
+                // A String bound inside a `region` is the arena's: both
+                // compiling backends emit its release as nothing under
+                // `region_depth`, and the plan notes it `Leak::Region`.
+                let info = &self.body.names[n as usize];
+                if !info.owned
+                    && matches!(
+                        self.fate_of(&info.source, info.line),
+                        Some(Fate::Leaked(Leak::Region))
+                    )
+                {
+                    return Ok(());
+                }
                 out.push(St::Drop(n));
             }
             Stmt::Expr(e) => {
@@ -821,7 +980,11 @@ impl<'a> Builder<'a> {
                     }
                 }
             }
-            Stmt::Region { line, .. } => return gap("a `region`", *line),
+            // The arena owns what is allocated inside it: the plan notes such
+            // a binding `Leak::Region` and it is not this frame's, so the
+            // body is an ordinary block here and the closing brace is the
+            // runtime's.
+            Stmt::Region { body, .. } => self.block(body, out)?,
         }
         Ok(())
     }
@@ -843,6 +1006,16 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The streams every enclosing `for` walks, closed on the way out of the
+    /// function, innermost first.
+    fn close_streams(&self, out: &mut Vec<St>) {
+        for it in self.stream_loops.iter().rev() {
+            if self.body.names[*it as usize].owned {
+                out.push(St::Drop(*it));
+            }
+        }
+    }
+
     /// RFC-0114 Rule N: the drops one edge of a join owes.
     fn edge_drops(&self, join: usize, edge: u32, out: &mut Vec<St>) -> Result<(), Gap> {
         let Some(ers) = self.own.plan.edge_releases_at(join) else {
@@ -858,6 +1031,76 @@ impl<'a> Builder<'a> {
             }
         }
         Ok(())
+    }
+
+    /// A name as a place: a binding of this body, or module state with its
+    /// declared type.
+    fn named_place(&self, name: &str, line: usize) -> Result<(Place, Type), Gap> {
+        if let Some(n) = self.lookup(name) {
+            return Ok((Place::Name(n), self.body.names[n as usize].ty.clone()));
+        }
+        match self.program.globals.iter().find(|g| &g.name == name) {
+            Some(g) => match g.ty.clone().or_else(|| self.init_ty(&g.init)) {
+                Some(t) => Ok((Place::Global(name.to_string()), t)),
+                None => gap_d("a global without a declared type", name, line),
+            },
+            None => gap("a place that is not a binding", line),
+        }
+    }
+
+    /// The type of a global's initializer, from its shape: the checker's rows
+    /// are per instance and a global is instantiated nowhere.
+    fn init_ty(&self, init: &Expr) -> Option<Type> {
+        match init {
+            Expr::StructLit { name, .. } => Some(Type::Named(name.clone())),
+            Expr::Str(_) => Some(Type::Str),
+            Expr::Bool(_) => Some(Type::Bool),
+            Expr::Call { name, .. } => self
+                .program
+                .functions
+                .iter()
+                .find(|f| &f.name == name)
+                .map(|f| f.ret.clone()),
+            _ => None,
+        }
+    }
+
+    fn projected_elem(&self, ity: &Type) -> Option<Type> {
+        let key = vyrn_frontend::types::type_key(ity)?;
+        let imp = self.program.impls.iter().find(|i| {
+            vyrn_frontend::types::type_key(&i.ty).as_deref() == Some(key.as_str())
+                && i.places.iter().any(|p| p.name == "nth")
+        })?;
+        let nth = imp.places.iter().find(|p| p.name == "nth")?;
+        Some(self.under_impl(&nth.ret, ity))
+    }
+
+    /// `ty` as an impl's member declares it, under the type arguments of the
+    /// receiver `recv`: `impl<T> .. for Slots<T>` against `Slots<Person>`
+    /// makes T Person.
+    fn under_impl(&self, ty: &Type, recv: &Type) -> Type {
+        let key = vyrn_frontend::types::type_key(recv);
+        let imp = self
+            .program
+            .impls
+            .iter()
+            .find(|i| vyrn_frontend::types::type_key(&i.ty) == key);
+        let mut subst = HashMap::new();
+        if let (Some(imp), Type::App(_, args)) = (imp, recv) {
+            if let Type::App(_, params) = &imp.ty {
+                for (p, a) in params.iter().zip(args) {
+                    if let Type::Param(n) = p {
+                        subst.insert(n.clone(), a.clone());
+                    }
+                }
+            }
+        }
+        vyrn_frontend::types::substitute(ty, &subst)
+    }
+
+    fn is_map(&self, ty: &Type) -> bool {
+        let decls = vyrn_frontend::types::decl_map(self.program);
+        matches!(vyrn_frontend::types::resolve(ty, &decls), Type::Map(..))
     }
 
     fn field_ty(&self, ty: &Type, field: &str, line: usize) -> Result<Type, Gap> {
@@ -887,7 +1130,8 @@ impl<'a> Builder<'a> {
                 bits: 8,
                 signed: false,
             }),
-            _ => gap("an element of a non-container", line),
+            Type::Map(_, v) => Ok(*v),
+            t => gap_d("an element of a non-container", &t.to_string(), line),
         }
     }
 
@@ -930,7 +1174,13 @@ impl<'a> Builder<'a> {
                     self.by_binding.insert(construct, t);
                     Ok((Val::Name(t), self.taken_by(t, construct)))
                 }
-                _ => gap("a `consume` of a place that is not a name", *line),
+                _ => {
+                    let Val::Name(t) = self.take_place(place, out)? else {
+                        return gap("a `consume` of a literal", *line);
+                    };
+                    self.by_binding.insert(construct, t);
+                    Ok((Val::Name(t), self.taken_by(t, construct)))
+                }
             },
             _ => {
                 let v = self.val(e, out)?;
@@ -1036,12 +1286,8 @@ impl<'a> Builder<'a> {
                 out.push(St::Let(t, Rhs::Read(place)));
                 Ok(Val::Name(t))
             }
-            Expr::Var { name, line } if owns && self.lookup(name).is_none() => {
-                let t = self.name("@borrow", ty.unwrap(), false, *line);
-                out.push(St::Let(t, Rhs::Read(Place::Global(name.clone()))));
-                Ok(Val::Name(t))
-            }
             Expr::Var { .. } | Expr::Consume { .. } => self.val(e, out),
+            Expr::Lambda { .. } => self.lambda(e, out),
             _ if owns => {
                 let v = self.val(e, out)?;
                 if let Val::Name(t) = v {
@@ -1075,12 +1321,28 @@ impl<'a> Builder<'a> {
             }
             Expr::Var { name, line } => match self.lookup(name) {
                 Some(n) => Ok(Val::Name(n)),
+                // A function's name as a value (`sortWith(es, byCount)`), or
+                // a type's as an argument (`fromJson(Bag, src)`): static, and
+                // the checker types neither as an expression.
+                None if self.program.functions.iter().any(|f| &f.name == name)
+                    || self.program.contracts.iter().any(|c| &c.name == name)
+                    || vyrn_frontend::types::decl_map(self.program).contains_key(name) =>
+                {
+                    Ok(Val::Lit)
+                }
                 None => {
+                    // Module state lives for the whole module and nothing
+                    // may take it (RFC-0013): `movecheck` refuses passing it
+                    // to a `consume` parameter or returning it, and `own`
+                    // notes `let x = g` as a borrow. So a read of it in any
+                    // position is a borrow, and the name it yields is one
+                    // the kernel does not own.
                     let ty = self.ty_of(e)?;
-                    if self.owns(&ty) {
-                        return gap("a read of module state that owns heap", *line);
-                    }
-                    let t = self.temp(ty, *line);
+                    let t = if self.owns(&ty) {
+                        self.name("@borrow", ty, false, *line)
+                    } else {
+                        self.temp(ty, *line)
+                    };
                     out.push(St::Let(t, Rhs::Read(Place::Global(name.clone()))));
                     Ok(Val::Name(t))
                 }
@@ -1090,15 +1352,29 @@ impl<'a> Builder<'a> {
                     Some(n) => Ok(Val::Name(n)),
                     None => gap("a `consume` of module state", *line),
                 },
-                _ => gap("a `consume` of a place that is not a name", *line),
+                _ => self.take_place(place, out),
             },
+            Expr::Lambda { .. } => self.lambda(e, out),
             _ => {
                 let ty = self.ty_of(e)?;
                 if is_place_read(e) && self.owns(&ty) {
-                    return gap("a move out of a field or an element", e.line());
+                    // `best = m.name`, `if c { parts[0] } else { "" }`: the
+                    // name this reaches is a borrow (`movecheck::names_a_place`
+                    // says so at the `let` and at the store), and every take
+                    // that would own it — a `return`, a literal part, a
+                    // `consume` argument — is refused there without a `.copy()`.
+                    let place = self.place(e, out)?;
+                    let t = self.name("@borrow", ty, false, e.line());
+                    out.push(St::Let(t, Rhs::Read(place)));
+                    self.release_receiver(e, out);
+                    return Ok(Val::Name(t));
                 }
                 let rhs = self.rhs(e, out)?;
-                let t = self.temp(ty, e.line());
+                let t = if self.lends(e) {
+                    self.name("@borrow", ty, false, e.line())
+                } else {
+                    self.temp(ty, e.line())
+                };
                 self.bind(t, rhs, out);
                 if let Expr::Field { .. } = e {
                     self.release_receiver(e, out);
@@ -1106,6 +1382,52 @@ impl<'a> Builder<'a> {
                 Ok(Val::Name(t))
             }
         }
+    }
+
+    /// A lambda literal (RFC-0023). Its captures are reads of the enclosing
+    /// names — a capture is by read, and a stored closure snapshots what it
+    /// captured (RFC-0037), so the enclosing frame still owns its value. In an
+    /// argument position the literal is monomorphized away and owns nothing;
+    /// as a `let`'s initializer the plan's note says whether the closure
+    /// value is this frame's. The lambda's own body is a separate frame and
+    /// is not judged here.
+    fn lambda(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
+        let caps = self.captures(e);
+        let ty = self.ty_of(e).unwrap_or(Type::Unit);
+        let t = self.name("@lambda", ty, false, e.line());
+        out.push(St::Let(t, Rhs::Prim(caps)));
+        Ok(Val::Name(t))
+    }
+
+    /// The names of this body a lambda mentions. Over-approximate: a name the
+    /// lambda shadows is counted, and a block-bodied lambda counts every name
+    /// in scope (`mentions_place` answers true for one); either costs a read
+    /// of a held name and nothing else.
+    fn captures(&self, e: &Expr) -> Vec<Val> {
+        let Expr::Lambda { params, .. } = e else {
+            return Vec::new();
+        };
+        let mut caps = Vec::new();
+        for (name, n) in &self.scope {
+            if params.contains(name) || caps.contains(&Val::Name(*n)) {
+                continue;
+            }
+            if vyrn_frontend::movecheck::mentions_place(e, name) {
+                caps.push(Val::Name(*n));
+            }
+        }
+        caps
+    }
+
+    /// A move out of a sub-place: `consume x.f`, or the receiver a rebuilding
+    /// builtin hands back (`s.dense.push(i)` is `s.dense = @push(s.dense, i)`).
+    /// The value leaves into an owned name and the base keeps a hole.
+    fn take_place(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
+        let ty = self.ty_of(e)?;
+        let place = self.place(e, out)?;
+        let t = self.temp(ty, e.line());
+        out.push(St::Let(t, Rhs::Take(place)));
+        Ok(Val::Name(t))
     }
 
     /// An expression as the right-hand side of a `let`. The temporaries the
@@ -1133,11 +1455,16 @@ impl<'a> Builder<'a> {
                 let b = self.read_val(rhs, out)?;
                 Ok(Rhs::Prim(vec![a, b]))
             }
-            Expr::Field { expr, field, line } => {
+            Expr::Field { expr, field, .. } => {
                 let fty = self.ty_of(e)?;
                 let place = self.place(expr, out)?;
                 if self.owns(&fty) {
-                    return gap("a read of a field that owns heap", *line);
+                    // `let sels = parse(q).sels`: the receiver is a temporary
+                    // nobody names, so the binding takes the field out of it
+                    // (`movecheck`: "the binding takes ownership of the
+                    // extracted buffer"). The rest of the temporary is what
+                    // the kernel then sees held.
+                    return Ok(Rhs::Take(Place::Field(Box::new(place), field.clone())));
                 }
                 Ok(Rhs::Read(Place::Field(Box::new(place), field.clone())))
             }
@@ -1271,6 +1598,10 @@ impl<'a> Builder<'a> {
                 let tid = e as *const Expr as usize;
                 let res = self.temp(ty, *line);
                 let (sv, consuming) = self.scrutinee(expr, tid, out)?;
+                let decls = vyrn_frontend::types::decl_map(self.program);
+                if let Type::Enum(_) = vyrn_frontend::types::resolve(&ity, &decls) {
+                    return self.fallible_try(ity, sv, res, tid, out);
+                }
                 // Failure: the exit's drops, then the propagated value leaves.
                 let mut fail = Vec::new();
                 let mark = self.scope.len();
@@ -1281,6 +1612,7 @@ impl<'a> Builder<'a> {
                     *line,
                     &mut fail,
                 )?;
+                self.close_streams(&mut fail);
                 self.drops_at(Exit::Try, tid, &mut fail)?;
                 fail.push(St::Return {
                     value: fb.first().map(|n| Val::Name(*n)),
@@ -1323,8 +1655,69 @@ impl<'a> Builder<'a> {
                 });
                 Ok(Rhs::Val(Val::Name(res)))
             }
-            Expr::Lambda { line, .. } => gap("a lambda", *line),
+            Expr::Lambda { .. } => Ok(Rhs::Prim(self.captures(e))),
         }
+    }
+
+    /// `?` on a declared `Fallible` type (RFC-0080 M3): the failing path
+    /// returns the whole value, whichever failing variant it is; the succeeding
+    /// path hands it to the impl's `success`, which owns it. The switch reads
+    /// the value and each arm takes it, so neither arm leaves it held.
+    fn fallible_try(
+        &mut self,
+        ity: Type,
+        sv: Val,
+        res: Name,
+        tid: usize,
+        out: &mut Vec<St>,
+    ) -> Result<Rhs, Gap> {
+        let line = self.body.names[res as usize].line;
+        let Some(key) = vyrn_frontend::types::type_key(&ity) else {
+            return gap("a `?` on a type with no impl key", line);
+        };
+        let success =
+            vyrn_frontend::types::impl_method_name(vyrn_frontend::types::FALLIBLE, &key, "success");
+        let mut fail = Vec::new();
+        self.close_streams(&mut fail);
+        self.drops_at(Exit::Try, tid, &mut fail)?;
+        fail.push(St::Return {
+            value: Some(sv.clone()),
+            site: tid,
+            is_try: true,
+        });
+        let mut ok = Vec::new();
+        let t = self.temp(self.body.names[res as usize].ty.clone(), line);
+        ok.push(St::Let(
+            t,
+            Rhs::Call {
+                callee: success,
+                args: vec![(sv.clone(), Capability::Consume)],
+            },
+        ));
+        ok.push(St::Store {
+            place: Place::Name(res),
+            value: Val::Name(t),
+            old: Old::Nothing,
+        });
+        out.push(St::Switch {
+            on: sv,
+            arms: vec![
+                Arm {
+                    binds: Vec::new(),
+                    body: fail,
+                    site: tid,
+                    index: 0,
+                },
+                Arm {
+                    binds: Vec::new(),
+                    body: ok,
+                    site: tid,
+                    index: 1,
+                },
+            ],
+            consuming: false,
+        });
+        Ok(Rhs::Val(Val::Name(res)))
     }
 
     /// A place, for a read or a store. A field chain over a name, an element
@@ -1345,15 +1738,15 @@ impl<'a> Builder<'a> {
                 let base = self.place(expr, out)?;
                 Ok(Place::Field(Box::new(base), field.clone()))
             }
-            Expr::Call { name, args, line } if name == "@at" && args.len() == 2 => {
-                let decls = vyrn_frontend::types::decl_map(self.program);
+            Expr::Call { name, args, .. } if name == "@at" && args.len() == 2 => {
                 let bty = self.ty_of(&args[0])?;
-                if matches!(vyrn_frontend::types::resolve(&bty, &decls), Type::Map(..)) {
-                    return gap("a map lookup as a place", *line);
-                }
                 let base = self.place(&args[0], out)?;
                 let i = self.read_val(&args[1], out)?;
-                Ok(Place::Elem(Box::new(base), i))
+                if self.is_map(&bty) {
+                    Ok(Place::Key(Box::new(base), i))
+                } else {
+                    Ok(Place::Elem(Box::new(base), i))
+                }
             }
             _ => {
                 let v = self.val(e, out)?;
@@ -1404,24 +1797,43 @@ impl<'a> Builder<'a> {
             .iter()
             .flat_map(|i| i.methods.iter())
             .find(|m| m.name == name);
+        // A seeded row whose result is its receiver's own type hands the
+        // buffer back through the result, so the receiver is taken by the
+        // call (`movecheck::sinks`).
+        let rebuilds = prelude::signature(name).is_some_and(|sig| {
+            sig.params.first().is_some_and(|p| p.ty == sig.ret)
+                && matches!(
+                    sig.ret,
+                    Type::Array(_) | Type::SmallArray(..) | Type::Map(..)
+                )
+        });
         let caps: Vec<Capability> =
             if let Some(f) = self.program.functions.iter().find(|f| f.name == name) {
                 f.params.iter().map(|p| p.capability).collect()
-            } else if let Some(sig) = prelude::signature(name) {
+            } else if prelude::signature(name).is_some() {
                 let mut caps: Vec<Capability> = (0..args.len())
                     .map(|i| prelude::capability(name, i).unwrap_or(Capability::Read))
                     .collect();
-                let rebuilds = sig.params.first().is_some_and(|p| p.ty == sig.ret)
-                    && matches!(
-                        sig.ret,
-                        Type::Array(_) | Type::SmallArray(..) | Type::Map(..)
-                    );
                 if rebuilds && !caps.is_empty() {
                     caps[0] = Capability::Consume;
                 }
                 caps
             } else if let Some(m) = method {
                 m.params.iter().map(|p| p.capability).collect()
+            } else if let Some(p) = self.projection(name) {
+                p.params.iter().map(|p| p.capability).collect()
+            } else if matches!(name, "Some" | "Ok" | "Err") || self.is_variant(name) {
+                vec![Capability::Consume; args.len()]
+            } else if vyrn_frontend::checker::RESERVED.contains(&name)
+                || vyrn_frontend::ast::is_log_level(name)
+                || matches!(name, "render" | "lex")
+            {
+                // A reserved name with no prelude row (`fromJson`, `value`,
+                // `lex`, `render`, a log level): its capabilities are the
+                // prelude's answer where it has one, and `read` elsewhere.
+                (0..args.len())
+                    .map(|i| prelude::capability(name, i).unwrap_or(Capability::Read))
+                    .collect()
             } else if scalar {
                 vec![Capability::Read; args.len()]
             } else if decls.contains_key(name) {
@@ -1432,8 +1844,6 @@ impl<'a> Builder<'a> {
                 // A call through a function value: the value's parameters are
                 // `read` (RFC-0023) — a lambda captures by read and takes by read.
                 vec![Capability::Read; args.len()]
-            } else if matches!(name, "Some" | "Ok" | "Err") || self.is_variant(name) {
-                vec![Capability::Consume; args.len()]
             } else if matches!(name, "print") {
                 vec![Capability::Read; args.len()]
             } else {
@@ -1444,9 +1854,20 @@ impl<'a> Builder<'a> {
         }
         let mut vs = Vec::new();
         let mut temps_to_drop = Vec::new();
-        for (a, cap) in args.iter().zip(caps.iter()) {
+        for (k, (a, cap)) in args.iter().zip(caps.iter()).enumerate() {
             let v = if *cap == Capability::Consume {
-                self.val(a, out)?
+                if k == 0
+                    && rebuilds
+                    && !matches!(a, Expr::Var { .. } | Expr::Consume { .. })
+                    && is_place_read(a)
+                {
+                    // The write-back form on a field or an element: the
+                    // receiver leaves and the store after the call fills the
+                    // hole with what the call handed back.
+                    self.take_place(a, out)?
+                } else {
+                    self.val(a, out)?
+                }
             } else {
                 self.read_val(a, out)?
             };
@@ -1478,6 +1899,23 @@ impl<'a> Builder<'a> {
     }
 }
 
+thread_local! {
+    static STRICT_REFUSALS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Whether `VYRN_KERNEL_STRICT=1` is set: a hard refusal by the kernel fails
+/// `vyrn check` and `vyrn build`.
+pub fn strict() -> bool {
+    std::env::var("VYRN_KERNEL_STRICT").is_ok_and(|v| v == "1")
+}
+
+/// The hard refusals the placer met since the last call, on this thread: a
+/// double free, a use after release, a join whose edges disagree — what no
+/// placement repairs. Drained by the CLI in strict mode after an analysis.
+pub fn take_strict_refusals() -> Vec<String> {
+    STRICT_REFUSALS.with(|v| std::mem::take(&mut *v.borrow_mut()))
+}
+
 /// RFC-0125 M3, first slice: the releases the plan did not place, placed.
 ///
 /// For every function instance the core can be built for, the kernel walks
@@ -1501,20 +1939,51 @@ impl<'a> Builder<'a> {
 /// after release), is left exactly as the plan had it.
 pub fn augment(program: &Program, own: &mut Ownership) {
     let lowered = crate::lower_with(program, own);
+    // `VYRN_KERNEL_TRACE=1` prints every release the placer found owed, and
+    // whether it could place it.
+    let trace = std::env::var("VYRN_KERNEL_TRACE").is_ok();
     let mut added: Vec<(String, Release, DropKind)> = Vec::new();
     for inst in &lowered.instances {
-        let Ok(body) = build(program, inst, own) else {
-            continue;
+        let body = match build(program, inst, own) {
+            Ok(b) => b,
+            Err(g) => {
+                if trace {
+                    eprintln!(
+                        "placer: {} not lowered: {} {}",
+                        inst.spelling(),
+                        g.what,
+                        g.detail
+                    );
+                }
+                continue;
+            }
         };
-        let Ok(missing) = crate::kernel::placement(&body) else {
-            continue;
+        let missing = match crate::kernel::placement(&body) {
+            Ok(m) => m,
+            Err(r) => {
+                if trace {
+                    eprintln!("placer: refused: {}", r.message);
+                }
+                // A refusal no placement repairs: a double free, a use after
+                // release, a join whose edges disagree. Kept for the CLI's
+                // strict mode.
+                STRICT_REFUSALS.with(|v| v.borrow_mut().push(r.message.clone()));
+                continue;
+            }
         };
         for m in missing {
+            let info = &body.names[m.name as usize];
+            let kind = own.proto.release_kind(&info.ty);
+            if trace {
+                eprintln!(
+                    "placer: {} `{}` (line {}) {:?} at {:?} site {} kind {:?}",
+                    body.name, info.source, info.line, m.kind, m.exit, m.site, kind
+                );
+            }
             if m.site == 0 {
                 continue;
             }
-            let info = &body.names[m.name as usize];
-            let Some(kind) = own.proto.release_kind(&info.ty) else {
+            let Some(kind) = kind else {
                 continue;
             };
             match m.kind {

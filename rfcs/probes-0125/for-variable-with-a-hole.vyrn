@@ -1,0 +1,39 @@
+// RFC-0125 M2 probe: a `for` variable one of whose fields the body takes.
+// The plan hands the elements over to the body (its row frees the buffer
+// alone); the kernel says the field the body did not take is never released.
+let turns = 200000
+
+type Pair = { token: String, value: String }
+
+fn pairs(n: Int64) -> Array<Pair> {
+    let mut out: Array<Pair> = []
+    let mut i = 0
+    while i < n {
+        out.push(Pair {
+            token: "token-" + i.toString() + "-with-enough-length-to-live-on-the-heap",
+            value: "value-" + i.toString() + "-with-enough-length-to-live-on-the-heap",
+        })
+        i = i + 1
+    }
+    return out
+}
+
+fn values(n: Int64) -> Array<String> {
+    let mut out: Array<String> = []
+    for p in pairs(n) {
+        out.push(consume p.value)
+    }
+    return out
+}
+
+fn main() -> Int64 {
+    let mut i = 0
+    let mut total = 0
+    while i < turns {
+        let vs = values(4)
+        total = total + vs.length
+        i = i + 1
+    }
+    print(total)
+    return 0
+}

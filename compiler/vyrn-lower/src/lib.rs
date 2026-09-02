@@ -39,6 +39,7 @@ mod render;
 pub fn install() {
     vyrn_frontend::own::install_placer(core::augment);
 }
+pub use core::{strict as kernel_strict, take_strict_refusals};
 pub use render::render;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};

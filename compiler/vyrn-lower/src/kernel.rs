@@ -25,6 +25,21 @@
 //! before the back edge, because the body's end is its scope's end. A `break`
 //! leaves the loop with the state it had; every `break` must agree.
 //!
+//! **Holes.** A `take` of a sub-place (`consume x.f`) moves the part out and
+//! leaves the name held with a hole at that path. A later read or take that
+//! overlaps the hole is refused; a store at the hole fills it; a drop of the
+//! name releases the rest, which is what the plan's release walk does with
+//! its hole set. Two edges of a join must agree on the holes as on the names.
+//! An element hole is tracked as `[]`, any index: coarser than the source,
+//! and the plan cannot skip inside an element either.
+//!
+//! **Static.** An owned name bound to a literal (`let mut s = ""`) holds
+//! static data: a store over it releases nothing, a drop of it frees nothing
+//! (the runtime reads a capacity of 0 as "never free"), and a scope's end
+//! owes it nothing. The state is `Static` until a store gives the name a
+//! value, and a loop whose body does so is judged again from that state, so
+//! the second turn's store is judged against what the first turn left.
+//!
 //! Names the body does not own — borrowed parameters, pattern binders of a
 //! non-consuming switch, heapless values — are invisible here.
 
@@ -67,6 +82,8 @@ enum Own {
     Held,
     /// Consumed, or not yet bound: nothing to release.
     Gone,
+    /// Bound to a literal: nothing to release until a store replaces it.
+    Static,
 }
 
 /// The state at one point: every owned name's [`Own`], plus whether the path
@@ -74,8 +91,39 @@ enum Own {
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct State {
     own: Vec<Own>,
+    /// The sub-places taken out of held names, as `(name, path)`, sorted.
+    holes: Vec<(Name, String)>,
     /// The path returned, broke, continued or trapped: it reaches no join.
     ended: bool,
+}
+
+/// Whether two paths under one name overlap: equal, or one under the other.
+/// The empty path is the whole name.
+fn overlaps(a: &str, b: &str) -> bool {
+    a.is_empty()
+        || b.is_empty()
+        || a == b
+        || a.strip_prefix(b).is_some_and(|r| r.starts_with('.'))
+        || b.strip_prefix(a).is_some_and(|r| r.starts_with('.'))
+}
+
+/// The root name of a place and the path under it; `None` for module state.
+fn root_of(p: &Place) -> Option<(Name, String)> {
+    match p {
+        Place::Name(n) => Some((*n, String::new())),
+        Place::Global(_) => None,
+        Place::Field(b, f) => {
+            let (n, mut path) = root_of(b)?;
+            path.push('.');
+            path.push_str(f);
+            Some((n, path))
+        }
+        Place::Elem(b, _) | Place::Key(b, _) => {
+            let (n, mut path) = root_of(b)?;
+            path.push_str(".[]");
+            Some((n, path))
+        }
+    }
 }
 
 /// One refusal, worded for the author of the program — and, for M2, for the
@@ -121,6 +169,7 @@ fn run(body: &Body, mode: Mode) -> Result<Vec<Missing>, Refusal> {
     };
     let mut st = State {
         own: vec![Own::Gone; body.names.len()],
+        holes: Vec::new(),
         ended: false,
     };
     for p in &body.params {
@@ -149,6 +198,12 @@ impl<'b> Kernel<'b> {
         self.body.names[n as usize].owned
     }
 
+    /// The name is consumed: nothing to release, and no holes to remember.
+    fn gone(st: &mut State, n: Name) {
+        st.own[n as usize] = Own::Gone;
+        st.holes.retain(|(h, _)| *h != n);
+    }
+
     fn info(&self, n: Name) -> String {
         let i = &self.body.names[n as usize];
         format!("`{}` (line {})", i.source, i.line)
@@ -170,20 +225,41 @@ impl<'b> Kernel<'b> {
         site: usize,
     ) -> Result<(), Refusal> {
         for n in names {
+            if self.owned(*n) && st.own[*n as usize] == Own::Static {
+                Self::gone(st, *n);
+            }
             if self.owned(*n) && st.own[*n as usize] == Own::Held {
+                // A placed row releases the whole value, minus the holes the
+                // plan's own table lists for the binding — and a binding the
+                // plan never meant to release has no entry there. So a name
+                // with a hole here gets no row: the row would free what left
+                // through the hole. Placement goes on past it as if it were
+                // released, so the body's other rows are still placed, and
+                // the judgment refuses the name.
                 if self.mode == Mode::Place {
-                    self.missing.push(Missing {
-                        exit,
-                        site,
-                        name: *n,
-                        kind: MissingKind::Exit,
-                    });
-                    st.own[*n as usize] = Own::Gone;
+                    let holed = st.holes.iter().any(|(h, _)| h == n);
+                    if !holed {
+                        self.missing.push(Missing {
+                            exit,
+                            site,
+                            name: *n,
+                            kind: MissingKind::Exit,
+                        });
+                    }
+                    Self::gone(st, *n);
                     continue;
                 }
                 return self.refuse(format!(
-                    "{} is still held where its scope ends — no release is placed for it",
-                    self.info(*n)
+                    "{} is still held at {} — no release is placed for it",
+                    self.info(*n),
+                    match exit {
+                        Exit::Block => "the end of its scope".to_string(),
+                        Exit::Return => "a `return`".to_string(),
+                        Exit::Try => "a `?`".to_string(),
+                        Exit::Break => "a `break`".to_string(),
+                        Exit::Continue => "a `continue`".to_string(),
+                        Exit::Scrutinee => "a scrutinee".to_string(),
+                    }
                 ));
             }
         }
@@ -193,7 +269,7 @@ impl<'b> Kernel<'b> {
     /// A read of a name: it must be held.
     fn read(&self, st: &State, v: &Val) -> Result<(), Refusal> {
         if let Val::Name(n) = v {
-            if self.owned(*n) && st.own[*n as usize] != Own::Held {
+            if self.owned(*n) && st.own[*n as usize] == Own::Gone {
                 return self.refuse(format!("{} is read after it was released", self.info(*n)));
             }
         }
@@ -204,34 +280,100 @@ impl<'b> Kernel<'b> {
     fn take(&self, st: &mut State, v: &Val) -> Result<(), Refusal> {
         if let Val::Name(n) = v {
             if self.owned(*n) {
-                if st.own[*n as usize] != Own::Held {
+                if st.own[*n as usize] == Own::Gone {
                     return self.refuse(format!(
                         "{} is taken after it was already released or taken",
                         self.info(*n)
                     ));
                 }
-                st.own[*n as usize] = Own::Gone;
+                if let Some((_, path)) = st.holes.iter().find(|(h, _)| h == n) {
+                    return self.refuse(format!(
+                        "{} is taken whole although a `consume` took `{path}` out of it",
+                        self.info(*n)
+                    ));
+                }
+                Self::gone(st, *n);
             }
         }
         Ok(())
     }
 
+    /// The indices a place reads, and the root: held, and not under a hole.
     fn place(&self, st: &State, p: &Place) -> Result<(), Refusal> {
+        self.indices(st, p)?;
+        let Some((n, path)) = root_of(p) else {
+            return Ok(());
+        };
+        self.read(st, &Val::Name(n))?;
+        if self.owned(n) {
+            if let Some((_, h)) = st
+                .holes
+                .iter()
+                .find(|(h, hp)| *h == n && overlaps(hp, &path))
+            {
+                return self.refuse(format!(
+                    "{}{path} is read after a `consume` took `{h}` out of it",
+                    self.info(n)
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn indices(&self, st: &State, p: &Place) -> Result<(), Refusal> {
         match p {
-            Place::Name(n) => self.read(st, &Val::Name(*n)),
-            Place::Global(_) => Ok(()),
-            Place::Field(b, _) => self.place(st, b),
-            Place::Elem(b, i) => {
-                self.place(st, b)?;
+            Place::Name(_) | Place::Global(_) => Ok(()),
+            Place::Field(b, _) => self.indices(st, b),
+            Place::Elem(b, i) | Place::Key(b, i) => {
+                self.indices(st, b)?;
                 self.read(st, i)
             }
         }
+    }
+
+    /// A take out of a sub-place: the root keeps a hole there.
+    fn take_place(&self, st: &mut State, p: &Place) -> Result<(), Refusal> {
+        self.place(st, p)?;
+        if let Some((n, path)) = root_of(p) {
+            if self.owned(n) && !path.is_empty() {
+                st.holes.push((n, path));
+                st.holes.sort();
+            }
+        }
+        Ok(())
+    }
+
+    /// A store into a sub-place fills the hole there, and anything under it.
+    /// A store under a hole writes into what left.
+    fn store_place(&self, st: &mut State, p: &Place) -> Result<(), Refusal> {
+        self.indices(st, p)?;
+        let Some((n, path)) = root_of(p) else {
+            return Ok(());
+        };
+        self.read(st, &Val::Name(n))?;
+        if !self.owned(n) {
+            return Ok(());
+        }
+        if let Some((_, h)) = st.holes.iter().find(|(h, hp)| {
+            *h == n
+                && path
+                    .strip_prefix(hp.as_str())
+                    .is_some_and(|r| r.starts_with('.'))
+        }) {
+            return self.refuse(format!(
+                "{}{path} is written after a `consume` took `{h}` out of it",
+                self.info(n)
+            ));
+        }
+        st.holes.retain(|(h, hp)| !(*h == n && overlaps(hp, &path)));
+        Ok(())
     }
 
     fn rhs(&self, st: &mut State, r: &Rhs) -> Result<(), Refusal> {
         match r {
             Rhs::Val(v) => self.take(st, v),
             Rhs::Read(p) => self.place(st, p),
+            Rhs::Take(p) => self.take_place(st, p),
             Rhs::Call { args, .. } => {
                 // Reads first, takes after: the call sees every argument
                 // before it owns any, so a receiver handed back through the
@@ -288,9 +430,20 @@ impl<'b> Kernel<'b> {
     fn stmt(&mut self, s: &St, st: &mut State, bound_here: &mut Vec<Name>) -> Result<(), Refusal> {
         match s {
             St::Let(n, rhs) => {
+                // A literal, or a literal built from literals (`[]`,
+                // `Body { nodes: [] }`), owns no heap yet.
+                let is_static = match rhs {
+                    Rhs::Val(Val::Lit) => true,
+                    Rhs::Make(vs) => vs.iter().all(|v| match v {
+                        Val::Lit => true,
+                        Val::Name(m) => !self.owned(*m) || st.own[*m as usize] == Own::Static,
+                    }),
+                    _ => false,
+                };
                 self.rhs(st, rhs)?;
                 if self.owned(*n) {
-                    st.own[*n as usize] = Own::Held;
+                    st.own[*n as usize] = if is_static { Own::Static } else { Own::Held };
+                    st.holes.retain(|(h, _)| h != n);
                     bound_here.push(*n);
                     if let Some(l) = self.loops.last_mut() {
                         l.bound_inside.push(*n);
@@ -316,11 +469,19 @@ impl<'b> Kernel<'b> {
                                 self.info(*n)
                             ));
                         }
-                        st.own[*n as usize] = Own::Held;
+                        st.own[*n as usize] = if matches!(value, Val::Lit) {
+                            Own::Static
+                        } else {
+                            Own::Held
+                        };
                     }
                     Place::Name(_) => {}
                     other => {
-                        self.place(st, other)?;
+                        self.store_place(st, other)?;
+                        // The map keeps the key it is handed.
+                        if let Place::Key(_, k) = other {
+                            self.take(st, k)?;
+                        }
                         if *old == Old::Unreleased {
                             return self.refuse(format!(
                                 "a store into a place that owns heap releases nothing (line {})",
@@ -337,13 +498,13 @@ impl<'b> Kernel<'b> {
                         self.info(*n)
                     ));
                 }
-                if st.own[*n as usize] != Own::Held {
+                if st.own[*n as usize] == Own::Gone {
                     return self.refuse(format!(
                         "{} is released twice, or released after it was taken",
                         self.info(*n)
                     ));
                 }
-                st.own[*n as usize] = Own::Gone;
+                Self::gone(st, *n);
             }
             St::If {
                 cond,
@@ -408,7 +569,20 @@ impl<'b> Kernel<'b> {
                 });
                 let mut a = st.clone();
                 self.stmts(body, &mut a)?;
-                let ctx = self.loops.pop().unwrap();
+                let mut ctx = self.loops.pop().unwrap();
+                // A literal the body replaced: the second turn starts with
+                // the value the first left, so the body is judged once more
+                // from that state.
+                if !a.ended && self.widen(&mut ctx.entry, &a) {
+                    self.loops.push(LoopCtx {
+                        entry: ctx.entry.clone(),
+                        breaks: Vec::new(),
+                        bound_inside: Vec::new(),
+                    });
+                    a = ctx.entry.clone();
+                    self.stmts(body, &mut a)?;
+                    ctx = self.loops.pop().unwrap();
+                }
                 // The back edge: the fall-through end of the body, and every
                 // `continue`, must find the entry state again.
                 if !a.ended {
@@ -417,6 +591,7 @@ impl<'b> Kernel<'b> {
                 *st = if ctx.breaks.is_empty() {
                     State {
                         own: st.own.clone(),
+                        holes: st.holes.clone(),
                         ended: true,
                     }
                 } else {
@@ -472,15 +647,22 @@ impl<'b> Kernel<'b> {
         arm: u32,
     ) -> Result<(), Refusal> {
         for n in binds {
+            if self.owned(*n) && st.own[*n as usize] == Own::Static {
+                Self::gone(st, *n);
+            }
             if self.owned(*n) && st.own[*n as usize] == Own::Held {
-                if self.mode == Mode::Place && site != 0 {
+                // The plan's arm table frees a binder whole, and a binder
+                // with a hole must not be: what left through the hole is
+                // somebody else's now. Such a binder is refused, not placed.
+                let holed = st.holes.iter().any(|(h, _)| h == n);
+                if self.mode == Mode::Place && site != 0 && !holed {
                     self.missing.push(Missing {
                         exit: Exit::Block,
                         site,
                         name: *n,
                         kind: MissingKind::ArmBinder { arm },
                     });
-                    st.own[*n as usize] = Own::Gone;
+                    Self::gone(st, *n);
                     continue;
                 }
                 return self.refuse(format!(
@@ -505,23 +687,30 @@ impl<'b> Kernel<'b> {
                 continue;
             }
             let live: Vec<usize> = (0..edges.len()).filter(|i| !edges[*i].ended).collect();
+            // An edge row too releases the whole value: a name holed on any
+            // live edge gets none, and is left to the judgment.
+            let holed = live
+                .iter()
+                .any(|i| edges[*i].holes.iter().any(|(h, _)| *h == n));
             let gone = live.iter().any(|i| edges[*i].own[n as usize] == Own::Gone);
             let held: Vec<usize> = live
                 .iter()
                 .copied()
-                .filter(|i| edges[*i].own[n as usize] == Own::Held)
+                .filter(|i| edges[*i].own[n as usize] != Own::Gone)
                 .collect();
             if !gone || held.is_empty() {
                 continue;
             }
             for i in held {
-                self.missing.push(Missing {
-                    exit: Exit::Block,
-                    site,
-                    name: n,
-                    kind: MissingKind::Edge { edge: i as u32 },
-                });
-                edges[i].own[n as usize] = Own::Gone;
+                if !holed {
+                    self.missing.push(Missing {
+                        exit: Exit::Block,
+                        site,
+                        name: n,
+                        kind: MissingKind::Edge { edge: i as u32 },
+                    });
+                }
+                Self::gone(&mut edges[i], n);
             }
         }
     }
@@ -531,6 +720,19 @@ impl<'b> Kernel<'b> {
             Val::Name(n) => self.body.names[*n as usize].line,
             Val::Lit => 0,
         }
+    }
+
+    /// Where `at` holds a value a name was `Static` at `entry`, the entry
+    /// becomes `Held`; answers whether anything changed.
+    fn widen(&self, entry: &mut State, at: &State) -> bool {
+        let mut changed = false;
+        for n in 0..self.body.names.len() {
+            if entry.own[n] == Own::Static && at.own[n] == Own::Held {
+                entry.own[n] = Own::Held;
+                changed = true;
+            }
+        }
+        changed
     }
 
     fn back_edge(&mut self, at: &mut State, ctx: &LoopCtx) -> Result<(), Refusal> {
@@ -555,8 +757,22 @@ impl<'b> Kernel<'b> {
                     }
                 ));
             }
+            if self.holes_of(at, n) != self.holes_of(entry, n) {
+                return self.refuse(format!(
+                    "{} has a `consume` hole at a loop's back edge it did not have at entry",
+                    self.info(n)
+                ));
+            }
         }
         Ok(())
+    }
+
+    fn holes_of<'s>(&self, st: &'s State, n: Name) -> Vec<&'s str> {
+        st.holes
+            .iter()
+            .filter(|(h, _)| *h == n)
+            .map(|(_, p)| p.as_str())
+            .collect()
     }
 
     /// The state after a join: every edge that reaches it agrees on every name.
@@ -565,22 +781,34 @@ impl<'b> Kernel<'b> {
         let Some(first) = live.first() else {
             return Ok(State {
                 own: edges[0].own.clone(),
+                holes: edges[0].holes.clone(),
                 ended: true,
             });
         };
+        let mut joined = (*first).clone();
         for other in &live[1..] {
             for n in 0..self.body.names.len() as Name {
                 if !self.owned(n) {
                     continue;
                 }
-                if first.own[n as usize] != other.own[n as usize] {
+                let (a, b) = (first.own[n as usize], other.own[n as usize]);
+                if (a == Own::Gone) != (b == Own::Gone) {
                     return self.refuse(format!(
                         "{} is released on one edge of a join and still held on another",
                         self.info(n)
                     ));
                 }
+                if a != b {
+                    joined.own[n as usize] = Own::Held;
+                }
+                if a != Own::Gone && self.holes_of(first, n) != self.holes_of(other, n) {
+                    return self.refuse(format!(
+                        "{} has a `consume` hole on one edge of a join and not on another",
+                        self.info(n)
+                    ));
+                }
             }
         }
-        Ok((*first).clone())
+        Ok(joined)
     }
 }

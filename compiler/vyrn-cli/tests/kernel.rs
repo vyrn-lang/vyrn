@@ -52,6 +52,46 @@
 //! the plan it produced. The count fell from 42 to 1, and the three probes
 //! under `rfcs/probes-0125/` are flat. `VYRN_NO_PLACER=1` runs this test
 //! against the analysis alone, which is how the earlier numbers were taken.
+//!
+//! **M2's second slice lowered every construct** (RFC-0125 §3 M2, "the
+//! second slice"): module state as a borrow, `consume` holes as sub-place
+//! takes the kernel tracks, the write-back receiver, map keys the store takes,
+//! lambdas as reads of their captures, regions, projections, `?` on a
+//! `Fallible` type. Unlowered fell from 1,229 to 0, and the kernel then
+//! refused nine instances in five classes, every one a leak the plan cannot
+//! express and each measured by a probe under `rfcs/probes-0125/`:
+//!
+//!   5. a payload binder with a hole (`reply`'s `Some(res) => consume
+//!      res.body`): the arm table frees a binder whole or not at all —
+//!      `payload-binder-with-a-hole.vyrn`, 53 MB at 200,000 turns, 102 MB at
+//!      400,000;
+//!   6. a field taken out of a temporary nobody names (`gqlParseQuery(q).sels`):
+//!      the rest of the temporary is never released —
+//!      `field-out-of-a-temporary.vyrn`, 35 MB and 66 MB;
+//!   7. a `consume` of a sub-place on one edge of a join (`recordsFrom`,
+//!      `rpcApplyConfig`): the release walk skips the hole on the path that
+//!      did not take it — `consume-on-one-edge.vyrn`, 12 MB and 20 MB;
+//!   8. a `for` variable one of whose fields the body takes (`twSafelist`):
+//!      the handover row frees the buffer alone and the other field leaks —
+//!      `for-variable-with-a-hole.vyrn`, 66 MB and 127 MB;
+//!   9. a binding returned whole on one path and drained by a `consume` of
+//!      one field on the other (`gqlListValue`, `gqlObjectValue`, `gqlSelSet`):
+//!      the plan's fate is "moved into the return" and it places no release,
+//!      so the untaken field is held at the block's end —
+//!      `moved-on-one-path-holed-on-the-other.vyrn`, 20 MB and 35 MB. In the
+//!      three corpus instances the untaken field is an empty error String,
+//!      which costs no bytes; the probe gives it a value.
+//!
+//! The placer places nothing for a name with a hole: the emitters' release
+//! walk skips only the holes the plan's own table lists, and a binding the
+//! plan never meant to release has no entry there, so a row would free what
+//! left through the hole. The first cut placed such rows and `graphql` died
+//! natively of a use after free; parity and the residue ratchet caught it.
+//!
+//! The ratchet is raised from 1 to 9 for these, and for these only: each is a
+//! defect in the plan, not in the lowering, and closes by fixing the plan.
+//! `VYRN_KERNEL_GAPS=<substring>` lists where each remaining gap is;
+//! `VYRN_KERNEL_TRACE=1` prints what the placer found owed in every body.
 
 use std::path::PathBuf;
 
@@ -120,6 +160,10 @@ fn run_corpus() {
     let mut gaps: std::collections::BTreeMap<&'static str, usize> = Default::default();
     let mut details: std::collections::BTreeMap<(&'static str, String), usize> = Default::default();
     let dump = std::env::var("VYRN_KERNEL_DUMP").ok();
+    // `VYRN_KERNEL_GAPS=<substring of a gap's name>` prints where each such
+    // gap is, one `file:fn:line` per instance, so a construct can be read
+    // in the source before it is modelled.
+    let show_gaps = std::env::var("VYRN_KERNEL_GAPS").ok();
     let mut unloadable = 0usize;
     let mut programs = 0usize;
     for path in corpus() {
@@ -140,6 +184,16 @@ fn run_corpus() {
         for inst in &lowered.instances {
             match vyrn_lower::core::build(&program, inst, &own) {
                 Err(g) => {
+                    if show_gaps.as_deref().is_some_and(|w| g.what.contains(w)) {
+                        eprintln!(
+                            "  gap: {file} {}:{}:{} {} {}",
+                            inst.module(),
+                            inst.spelling(),
+                            g.line,
+                            g.what,
+                            g.detail
+                        );
+                    }
                     *gaps.entry(g.what).or_default() += 1;
                     if !g.detail.is_empty() {
                         *details.entry((g.what, g.detail)).or_default() += 1;
@@ -195,8 +249,10 @@ fn run_corpus() {
         eprintln!("  refused: {r}");
     }
     // The ratchet: 53 at the end of the first slice; 42 once class 1 closed;
-    // 1 once the placer (M3's first slice) filled the plan's three tables.
-    const RATCHET: usize = 1;
+    // 1 once the placer (M3's first slice) filled the plan's three tables; 9
+    // once every construct lowered and the five hole-family classes above
+    // came into view (the one lowering misread, `smallarray`, is fixed).
+    const RATCHET: usize = 9;
     assert!(
         refused.len() <= RATCHET,
         "{} instances refused by the kernel, more than the {RATCHET} recorded; the first new          one is worth reading before the number is raised: {}",

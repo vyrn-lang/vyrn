@@ -502,6 +502,9 @@ fn real_main() -> ExitCode {
         "check" => profile_now(match load_program(path, &source) {
             Ok(program) => {
                 let _memo = shared_desugars();
+                if let Err(code) = kernel_strict(&program) {
+                    return code;
+                }
                 match vyrn_codegen::check_instantiations(&program) {
                     Ok(()) => {
                         println!("ok");
@@ -3052,6 +3055,27 @@ fn insert_copy(text: &str, line: usize, path: &str) -> Result<String, String> {
             "`{path}` appears {n} times on the line — which one is not said"
         )),
     }
+}
+
+/// RFC-0125 M2, strict mode: with `VYRN_KERNEL_STRICT=1`, a hard refusal by
+/// the kernel — a double free, a use after release, a join whose edges
+/// disagree; not a missing release, which the placer repairs — fails the
+/// command with the kernel's message as a diagnostic. The analysis runs once
+/// more here so the refusals are this program's and not a generator's.
+fn kernel_strict(program: &vyrn_frontend::ast::Program) -> Result<(), ExitCode> {
+    if !vyrn_lower::kernel_strict() {
+        return Ok(());
+    }
+    let _ = vyrn_lower::take_strict_refusals();
+    let _ = vyrn_frontend::own::analyze(program);
+    let refusals = vyrn_lower::take_strict_refusals();
+    if refusals.is_empty() {
+        return Ok(());
+    }
+    for r in &refusals {
+        eprintln!("error: the kernel refuses {r}");
+    }
+    Err(ExitCode::FAILURE)
 }
 
 fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program, ExitCode> {
@@ -5689,6 +5713,9 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         Err(code) => return code,
     };
     let _memo = shared_desugars();
+    if let Err(code) = kernel_strict(&program) {
+        return code;
+    }
     // default output name: <stem> (+ .exe on Windows, .wasm for wasm)
     let stem = Path::new(path)
         .file_stem()
