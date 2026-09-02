@@ -107,7 +107,16 @@
 //!      lowering used to read the dead row as a `drop`; it reads it as
 //!      nothing now, which is what the emitters do.
 //!
-//! The ratchet is 3, for these and no other. `VYRN_KERNEL_GAPS=<substring>`
+//! **M3's third slice closed class 10** (RFC-0125 §3 M3, "the third
+//! slice"): the placer writes an argument-temporary drop keyed by the node
+//! that PRODUCED the receiver, which both backends tee and free after the
+//! call or operator enclosing the read — after the read's consumer. A
+//! lending call (`a[i]`, a projection) whose result owns heap no longer
+//! drains its arguments' temporaries, so the tee reaches the consumer
+//! above. The count fell from 3 to 0 and the probe is flat: 4.4 MB at
+//! 200,000 and at 400,000 turns natively.
+//!
+//! The ratchet is 0. `VYRN_KERNEL_GAPS=<substring>`
 //! lists where each remaining gap is; `VYRN_KERNEL_TRACE=1` prints what the
 //! placer found owed in every body, and `VYRN_KERNEL_TRACE=<fn>` prints that
 //! body's core.
@@ -272,8 +281,9 @@ fn run_corpus() {
     // once every construct lowered and the five hole-family classes above
     // came into view (the one lowering misread, `smallarray`, is fixed); 3
     // once the placer could place a holed name and a `for` had its exit
-    // (M3's second slice).
-    const RATCHET: usize = 3;
+    // (M3's second slice); 0 once the receiver of a borrowed heap read was
+    // an argument temporary of the read's consumer (M3's third slice).
+    const RATCHET: usize = 0;
     assert!(
         refused.len() <= RATCHET,
         "{} instances refused by the kernel, more than the {RATCHET} recorded; the first new          one is worth reading before the number is raised: {}",

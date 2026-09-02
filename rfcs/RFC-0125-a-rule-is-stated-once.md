@@ -1064,6 +1064,42 @@ with an argument-temporary drop of the receiver after the read's consumer,
 which is the shape `arg_drops` has for the argument itself and not for what
 the argument was read out of.
 
+**The third slice closed it (2026-09-02).** The row is the argument-temporary
+drop the analysis already has, keyed one node down: not the read
+(`gqlSplitDecl(src).rhs`), whose value is the borrowed field, but the node
+that PRODUCED the receiver — `gqlSplitDecl(src)`, `weekdayLetters()`, the
+`match` a `??` spells. Both compiled backends already tee the value of any
+node in `arg_drops` where they evaluate it and free it after the call or
+operator that encloses it (`direct.rs` `expr` and `call`, `lib.rs` `gen_expr`
+and `gen_call`), which is after the read's consumer; the core drops the
+receiver at the same point, by queueing it with the String temporaries the
+consumer's binding releases. The placer writes the row where the kernel finds
+such a receiver held and a call or an operator encloses the read
+(`NameInfo::producer`); a read nothing drains encloses — `for p in
+f().items`, `let x = f().a.b` — gets no row and stays refused, and none is in
+the corpus. One emitter rule came with it: a lending call (`a[i]`, a
+projection) whose result owns heap must not drain its arguments' temporaries,
+because its result points into one of them; the call or operator above
+drains them. Without the rule `print(weekdayLetters()[1])` would free the
+array after `[1]` and print out of it.
+
+| kernel over the corpus | holed names placed | the receiver placed |
+|---|---|---|
+| accepted | 8,595 | 8,598 |
+| refused | 3 | 0 |
+
+(The corpus is 166 programs at this branch's base, so the accepted count is
+not the 6,587 of the second slice's record; the refused count is.) The
+probe, peak working set at 200,000 and 400,000 turns, measured as the table
+above; the "placer off" columns are this build with `VYRN_NO_PLACER=1`, and
+a flat probe reads 18.2 / 14.9 MB under the pinned wasmtime on this host:
+
+| probe | native, placer off | native after | wasm, placer off | wasm after |
+|---|---|---|---|---|
+| field-read-off-a-temporary | 36.7 / 68.8 MB | 4.4 / 4.4 MB | 43.7 / 72.6 MB | 14.9 / 14.8 MB |
+
+The corpus test's ratchet is 0.
+
 **Lambda bodies are not judged, and the reason is in the emitters.** Both
 compiled backends lift a lambda under a shell that owns no rows: `direct.rs`
 `f_shell` names it `@lambda`, so `Cx::droppable` and the placed steps answer

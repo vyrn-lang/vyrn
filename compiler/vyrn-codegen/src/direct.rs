@@ -7080,10 +7080,34 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<Type, String> {
         let mark = self.arg_frees.len();
         let r = self.call_inner(m, b, name, args, line);
+        // RFC-0125 M3, third slice: a lending call's result points into an
+        // argument (`a[i]`, a projection). A temporary its arguments teed —
+        // the receiver `weekdayLetters()[1]` reads its element out of — must
+        // outlive the call when the result owns heap, so the call or operator
+        // that consumes the result drains it instead.
+        if let Ok(t) = &r {
+            if self.lends(name) && self.rel_for(t, line)?.is_some() {
+                return r;
+            }
+        }
         for (l, ty) in self.arg_frees.split_off(mark) {
             self.free_arg_temp(m, b, l, &ty, line)?;
         }
         r
+    }
+
+    /// Whether a call by this name lends: `a[i]` and the seeded element row
+    /// it dispatches to, a lending prelude row, the `value` box, a projection.
+    fn lends(&self, name: &str) -> bool {
+        name == vyrn_frontend::project::AT
+            || name == vyrn_frontend::project::ELEM
+            || vyrn_frontend::prelude::lends(name)
+            || name == "value"
+            || self
+                .cx
+                .impls
+                .iter()
+                .any(|i| i.places.iter().any(|p| p.name == name))
     }
 
     fn call_inner(

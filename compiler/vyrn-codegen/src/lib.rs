@@ -10199,10 +10199,35 @@ impl<'a> Gen<'a> {
     fn gen_call(&mut self, name: &str, args: &[Expr]) -> Result<(String, Type), String> {
         let mark = self.arg_frees.len();
         let r = self.gen_call_inner(name, args);
+        // RFC-0125 M3, third slice: a lending call's result points into an
+        // argument (`a[i]`, a projection). A temporary its arguments recorded
+        // — the receiver `weekdayLetters()[1]` reads its element out of — must
+        // outlive the call when the result owns heap, so the call or operator
+        // that consumes the result drains it instead.
+        if let Ok((_, t)) = &r {
+            if self.lends(name) && self.owned.release_kind(t).is_some() {
+                return r;
+            }
+        }
         for (v, ty) in self.arg_frees.split_off(mark) {
             self.free_arg_temp(&v, &ty);
         }
         r
+    }
+
+    /// Whether a call by this name lends: `a[i]` and the seeded element row
+    /// it dispatches to, a lending prelude row, the `value` box, a projection
+    /// (a function of the same name wins, as it does at the dispatch).
+    fn lends(&self, name: &str) -> bool {
+        name == vyrn_frontend::project::AT
+            || name == vyrn_frontend::project::ELEM
+            || vyrn_frontend::prelude::lends(name)
+            || name == "value"
+            || (self.funcs.get(name).is_none()
+                && self
+                    .impls
+                    .iter()
+                    .any(|i| i.places.iter().any(|p| p.name == name)))
     }
 
     /// Release one argument temporary, by its TYPE (RFC-0114 M1).
