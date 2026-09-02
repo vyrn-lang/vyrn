@@ -1325,7 +1325,7 @@ impl<'a> Builder<'a> {
                 let rebuilds = sig.params.first().is_some_and(|p| p.ty == sig.ret)
                     && matches!(
                         sig.ret,
-                        Type::Array(_) | Type::SmallArray(..) | Type::Map(..) | Type::Str
+                        Type::Array(_) | Type::SmallArray(..) | Type::Map(..)
                     );
                 if rebuilds && !caps.is_empty() {
                     caps[0] = Capability::Consume;

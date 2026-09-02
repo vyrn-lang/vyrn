@@ -15,22 +15,27 @@
 //! The prediction, written before the first run: the kernel refuses nothing
 //! in the corpus, because the ratchet holds every example at zero leaks and
 //! the plan is what the engines emit. **It was wrong, and the way it was wrong
-//! is the finding.** The first slice ends at 5,292 instances accepted and 53
-//! refused, and the refusals are four classes (RFC-0125 §3 M2):
+//! is the finding.** The first slice ended at 5,292 instances accepted and 53
+//! refused, in four classes (RFC-0125 §3 M2). One is closed:
 //!
-//!   1. `push` in expression position whose result escapes while the plan
-//!      still releases the receiver (`jsondec$readDoc`, 9 instances) — a
-//!      double free natively, reproduced by
-//!      `rfcs/probes-0125/push-in-expression-position.vyrn`;
-//!   2. a String bound by `let`, returned on one path and never released on
-//!      the fall-through (`gqlArgOf`, `rpcPathFor`, `mapSlug` and ten more)
-//!      — a leak of the String per untaken turn, measured by
-//!      `rfcs/probes-0125/returned-on-one-path.vyrn`;
-//!   3. a payload binder an arm never reads (`parseErr`'s `Ok(v)`, 12
-//!      instances) — the same class as 2, predicted and not yet probed;
-//!   4. a `match` arm the program cannot reach (`None` for a key just
-//!      listed), where the kernel judges every path and the plan judged the
-//!      reachable ones (4 generated encoders);
+//!   1. CLOSED — `push` in expression position whose result escapes while the
+//!      plan still releases the receiver: a double free natively, reproduced
+//!      by `rfcs/probes-0125/push-in-expression-position.vyrn`. A rebuilding
+//!      row takes its receiver now (`movecheck::sinks`), the write-back
+//!      statement excepted; the probe runs clean and the refusals are gone.
+//!   2. a value bound by `let`, returned or taken on one path and never
+//!      released on another — the fall-through after a conditional `return`
+//!      (`gqlArgOf`, `rpcPathFor`, `mapSlug` and more), measured by
+//!      `rfcs/probes-0125/returned-on-one-path.vyrn`; and an early `return`
+//!      inside a loop before the take after it (`std/von`'s readers,
+//!      `jsonTopToVon`), measured by
+//!      `rfcs/probes-0125/early-return-before-the-take.vyrn`, which leaks
+//!      with the compiler as it was before this branch too. The plan's own
+//!      fold names the second half (round forty-two: "the in-loop exits keep
+//!      their leak until the fold can order across a back edge").
+//!   3. a payload binder an arm never reads (`parseErr`'s `Ok(v)`) — the same
+//!      class as 2, predicted and not yet probed.
+//!   4. the unreachable-arm class went with class 1's fix.
 //!
 //! plus one instance (`smallarray.vyrn`'s `main`) this lowering misreads.
 //! The gate is a ratchet on that count: it may fall, never rise. Each class
@@ -174,8 +179,8 @@ fn run_corpus() {
     for r in refused.iter().take(40) {
         eprintln!("  refused: {r}");
     }
-    // The ratchet: 53 at the end of the first slice, all four classes above.
-    const RATCHET: usize = 53;
+    // The ratchet: 53 at the end of the first slice; 42 once class 1 closed.
+    const RATCHET: usize = 42;
     assert!(
         refused.len() <= RATCHET,
         "{} instances refused by the kernel, more than the {RATCHET} recorded; the first new          one is worth reading before the number is raised: {}",

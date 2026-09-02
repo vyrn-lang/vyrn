@@ -907,6 +907,7 @@ fn run(program: &Program, want: Want) -> Run {
         nodes: RefCell::new(Scopes::new(HashMap::new())),
         lets: (want == Want::Lets).then(|| RefCell::new(HashMap::new())),
         cur_fn: RefCell::new(String::new()),
+        writeback: RefCell::new(None),
         lending: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
         forwards: (want == Want::Lets).then(|| RefCell::new(HashMap::new())),
         retains: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
@@ -1259,6 +1260,11 @@ struct MoveCheck<'a> {
     lets: Option<RefCell<HashMap<usize, LetOwnership>>>,
     /// The function being checked, so a recorded fact can name it.
     cur_fn: RefCell<String>,
+    /// RFC-0125 M2: the binding a write-back statement `xs = xs.push(v)` is
+    /// assigning, while its value is walked. A rebuilding row takes its
+    /// receiver (`sinks`), and the statement form takes and revives it in one
+    /// line — so the take is not recorded there, and the receiver is read.
+    writeback: RefCell<Option<String>>,
     /// Functions whose result the caller must NOT release — see
     /// [`MoveCheck::check_return`]. `None` on the check path.
     lending: Option<RefCell<HashSet<String>>>,
@@ -2034,6 +2040,32 @@ impl MoveCheck<'_> {
     /// A whole-expression sweep and not a place read: `return Some(s)` puts `s`
     /// in the caller's hands just as `return s` does, and an aggregate does not
     /// release its payload until Phase 5. Erring toward "it left" costs a leak.
+    /// Walk the value of a store into `target` (a name or a field path). When
+    /// the value is a rebuilding row applied to that same place —
+    /// `xs = xs.push(v)`, `s.keys = s.keys.push(k)` — the receiver comes back
+    /// through the result and the store revives the place, so the take the
+    /// row would record is not recorded (RFC-0125 M2, `sinks`).
+    fn walk_writeback(
+        &self,
+        target: &str,
+        value: &Expr,
+        consumed: &mut Consumed,
+        scope: &mut Vec<HashSet<String>>,
+    ) -> Result<(), Diagnostic> {
+        let writeback = matches!(
+            value,
+            Expr::Call { name: callee, args, .. }
+                if self.sinks(callee, 0)
+                    && args.first().and_then(store_path).as_deref() == Some(target)
+        );
+        if writeback {
+            *self.writeback.borrow_mut() = Some(target.to_string());
+        }
+        let walked = self.expr(value, consumed, scope);
+        *self.writeback.borrow_mut() = None;
+        walked
+    }
+
     fn gave_up(&self, e: &Expr, gone: &Gone) {
         for n in reads(e) {
             self.took(&n, gone.clone());
@@ -4607,7 +4639,11 @@ impl MoveCheck<'_> {
                 Ok(false)
             }
             Stmt::Assign { name, value, line } => {
-                self.expr(value, consumed, scope)?;
+                // The write-back form of a rebuilding row: `xs = xs.push(v)`.
+                // The receiver comes back through the result and the store
+                // revives the binding, so its take is not recorded.
+                let walked = self.walk_writeback(name, value, consumed, scope);
+                walked?;
                 // RFC-0114 M2: the write event, BEFORE the store's own effects
                 // (`took(Borrowed)`, revive) so the fold sees the state the
                 // store finds. A global is recorded in its own set — module
@@ -4711,7 +4747,7 @@ impl MoveCheck<'_> {
                 line,
             } => {
                 self.site("field", *line, value, None);
-                self.expr(value, consumed, scope)?;
+                self.walk_writeback(&format!("{name}.{field}"), value, consumed, scope)?;
                 let _ = self.store(
                     value,
                     &|| format!("the field `{name}.{field}`"),
@@ -6336,10 +6372,14 @@ impl MoveCheck<'_> {
                                 );
                             }
                         }
-                    } else if self.sinks(name, i) {
+                    } else if self.sinks(name, i)
+                        && !(i == 0
+                            && store_path(arg).as_deref() == self.writeback.borrow().as_deref())
+                    {
                         // A builtin whose parameter declares `consume`. Rule 1
                         // governs it exactly as it governs `xs = [.., v]`, which
-                        // is what it means.
+                        // is what it means. The receiver of a write-back
+                        // statement is the exception `writeback` names.
                         let _ = self.store(
                             arg,
                             &|| format!("`{}(..)`", crate::parser::method_surface(name)),
@@ -7311,11 +7351,40 @@ mod linear {
 /// the worse words — rule 1's menu offers `.copy()`, which a stream has no
 /// answer for. The obligation on the TYPE wins, and the census's claim that
 /// these three carry a rule "nowhere at all" is corrected rather than acted on.
+/// The place an expression names, spelled as the store arms spell it:
+/// `xs`, `s.keys`, `a.b.c`. `None` for anything that is not a place.
+fn store_path(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Var { name, .. } => Some(name.clone()),
+        Expr::Field { expr, field, .. } => Some(format!("{}.{field}", store_path(expr)?)),
+        _ => None,
+    }
+}
+
 fn sinks(decl: &Declared, name: &str, i: usize) -> bool {
-    let Some(p) = crate::prelude::signature(name).and_then(|f| f.params.get(i)) else {
+    let Some(f) = crate::prelude::signature(name) else {
         return false;
     };
-    p.capability == Capability::Consume && decl.linear_kind(&p.ty).is_none()
+    let Some(p) = f.params.get(i) else {
+        return false;
+    };
+    if decl.linear_kind(&p.ty).is_some() {
+        return false;
+    }
+    if p.capability == Capability::Consume {
+        return true;
+    }
+    // RFC-0125 M2, the first defect the kernel found: a row that hands its
+    // receiver's buffer back as its result — `push`, `reserve`, `append`,
+    // `copyFrom`, a map's `tally` — TAKES the receiver. The statement form
+    // `xs = xs.push(v)` takes and revives in one line, which the untake fold
+    // already reads as reclaimed; the expression form `return xs.push(v)`
+    // used to leave `xs` reclaimed at the return while the result carried
+    // its buffer out, and the caller received freed memory
+    // (`rfcs/probes-0125/push-in-expression-position.vyrn`).
+    i == 0
+        && p.ty == f.ret
+        && matches!(f.ret, Type::Array(_) | Type::SmallArray(..) | Type::Map(..))
 }
 
 /// Every name `e` reads, root names only, in no particular order.
@@ -7645,10 +7714,13 @@ mod tests {
                 "`{name}` argument {i} declares `consume`"
             );
         }
+        // RFC-0125 M2: the receiver is handed back through the result, so
+        // it is taken — and revived by the statement form's write-back.
         assert!(
-            !sinks(&decl, "@push", 0),
-            "the receiver is rebuilt, not taken"
+            sinks(&decl, "@push", 0),
+            "a rebuilding row takes its receiver"
         );
+        assert!(!sinks(&decl, "@at", 0), "a lookup takes nothing");
         // The four linear ones declare `consume` too, and the must-use walk
         // owns them — see [`sinks`]. `@join` is the fourth (RFC-0095 M1): a
         // `Task<T>` is linear exactly as a `Stream<T>` is, so the obligation on

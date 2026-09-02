@@ -607,6 +607,37 @@ One more instance, `smallarray.vyrn`'s `main`, the lowering misreads and
 the plan does not. The corpus test's gate is a ratchet on the count, 53,
 which may fall and not rise; each class closes by fixing the plan.
 
+**Class 1 closed the same day.** `movecheck::sinks` now answers that a
+seeded row whose result is its receiver's own type — `push`, `reserve`,
+`append`, `copyFrom`, a map's `tally` — takes the receiver, because the
+buffer comes back through the result. The write-back statement,
+`xs = xs.push(v)` and `s.keys = s.keys.push(k)`, is the one exception: it
+takes and revives in one line, so its take is not recorded and the untake
+fold sees what it always saw. `return xs.push(v)` now moves `xs`, the plan
+places no release for it, and the probe prints its five lines natively with
+the free audit on. One example changed: `examples/map.vyrn`'s `put` returned
+`a.push(..)` on a `read` parameter, which handed the caller's buffer back
+while the caller still held it; its parameter is `consume` now, which is what
+returning the buffer meant. Parity 41 passed, the residue ratchet held, the
+frontend's 1,176 unit tests passed, and the kernel's count fell to 42:
+5,303 accepted, 42 refused, 1,229 unlowered. The unreachable-arm class went
+with it, because the encoders' `fs.push(..)` is a take now and Rule N
+places the other arm's release.
+
+**Class 2 has a second half, and the plan's own fold names it.** Beside the
+conditional `return` with a fall-through, the kernel refused every reader
+in `std/von` whose accumulator is taken by the final `return Ok(..)` after
+a loop that returns `Err` from inside. `rfcs/probes-0125/early-return-before-the-take.vyrn`
+runs that shape 200,000 and 400,000 times: peak working set 98 MB and 212 MB,
+about 570 bytes per turn, which is the array — and the compiler as it stood
+before this branch measures 92 MB and 212 MB on the same probe. Pre-existing,
+not a regression of the take rule. The fold that places early-exit releases
+(`own.rs`, round forty-two) says why in its own words: "the in-loop exits
+keep their leak until the fold can order across a back edge". Ordering
+across a back edge is what the named core has and the event log does not,
+so this class is M3's to close, and the kernel now lists every instance of
+it rather than the one round forty-two remembered.
+
 **What the slice learned about the plan, recorded because M3 replaces it.**
 The plan is not one table but nine, and a body is right only when all nine
 are read together: the placed release rows, the argument-temporary drops,
