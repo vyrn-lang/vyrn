@@ -5977,7 +5977,7 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 // RFC-0115: `reserve`/`append` hand back the receiver's own
                 // type — capacity is not part of it.
-                "@reserve" | "@append" | "@copyFrom" | "@tally" | "@tallyBytes"
+                "@reserve" | "@clear" | "@append" | "@copyFrom" | "@tally" | "@tallyBytes"
                     if !args.is_empty() =>
                 {
                     self.peek(&args[0], line)?
@@ -8072,6 +8072,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             "@push" if args.len() == 2 => return self.push(m, b, args, line),
             "@reserve" if args.len() == 2 => return self.reserve_arr(m, b, args, line),
+            "@clear" if args.len() == 1 => return self.clear_arr(m, b, args, line),
             "@append" if args.len() == 2 => return self.append_arr(m, b, args, line),
             "@copyFrom" if args.len() == 2 => return self.copy_from_arr(m, b, args, line),
             "@tally" if args.len() == 3 => return self.map_tally(m, b, args, line),
@@ -10760,6 +10761,38 @@ impl<'p> Fn_<'_, 'p> {
     /// `xs.reserve(n)` (RFC-0115): one allocation for `n` more elements. The
     /// growth is malloc + copy + free, exactly the shape [`Fn_::push`] grows
     /// by, so the two backends cost the same heap.
+    /// `xs.clear()` (RFC-0115 addendum): the header copied into a fresh slot
+    /// with its length zeroed. The buffer pointer and the capacity travel
+    /// unchanged, which is what keeps the next fill from allocating.
+    fn clear_arr(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let aty = self.expr(m, b, &args[0])?;
+        if !matches!(self.cx.resolve(&aty), Type::Array(_)) {
+            return unsupported(&format!("`clear` on `{aty}`"), line);
+        }
+        let l = self.layout_of(&aty, line)?;
+        let src = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(src));
+        let off = b.alloc(l.size, l.align);
+        b.slot(off);
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I32Const(l.size as i32));
+        b.ins(&Instruction::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        });
+        b.slot(off + l.fields[1]);
+        b.ins(&Instruction::I64Const(0));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off);
+        Ok(aty)
+    }
+
     fn reserve_arr(
         &mut self,
         m: &mut Module,

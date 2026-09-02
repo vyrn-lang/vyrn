@@ -7573,6 +7573,36 @@ impl<'a> Checker<'a> {
         // none to grow. `append` is a byte copy of the source's elements in
         // the compiled backends, so an element type that owns heap is refused
         // — copying such an element by bytes would give two arrays one buffer.
+        // `xs.clear()` (RFC-0115 addendum): length to zero, buffer kept. The
+        // elements are FORGOTTEN, not released, so an element type that owns
+        // heap is refused the way `append` refuses it.
+        if name == "@clear" {
+            if args.len() != 1 {
+                return Err(cerr!(
+                    line,
+                    "`clear` takes no arguments, got {}",
+                    args.len() - 1
+                ));
+            }
+            let at = self.expr(&args[0], scope, None, fn_ret)?;
+            let elem = match self.base(&at) {
+                Type::Array(inner) => (*inner).clone(),
+                Type::Err => return Ok(Type::Err),
+                other => {
+                    return Err(cerr!(
+                        line,
+                        "`clear` needs a growable Array as its receiver, found {other}"
+                    ))
+                }
+            };
+            if crate::own::owns_heap(&elem, &self.types) {
+                return Err(cerr!(
+                    line,
+                    "`clear` forgets its elements without releasing them, and `{elem}` owns heap — pop each element in a loop instead"
+                ));
+            }
+            return Ok(at);
+        }
         if name == "@reserve" {
             if args.len() != 2 {
                 return Err(cerr!(

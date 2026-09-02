@@ -294,6 +294,10 @@ fn rows() -> Vec<Function> {
             arr(t()),
             &[],
         ),
+        // `xs.clear()` (RFC-0115 addendum, RFC-0125 §1): the length goes to
+        // zero and the buffer stays, so the next fill reuses it. Heapless
+        // elements only — forgetting an element that owns heap would leak it.
+        row("@clear", &["T"], &[("self", Read, arr(t()))], arr(t()), &[]),
         row(
             "@append",
             &["T"],

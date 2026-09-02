@@ -11738,6 +11738,19 @@ impl<'a> Gen<'a> {
         // `xs.reserve(n)` (RFC-0115): make room for `n` more elements, in one
         // realloc, and hand the (possibly moved) buffer back. A `need` already
         // inside `cap` passes the triple through untouched.
+        // `xs.clear()` (RFC-0115 addendum): the same triple with its length
+        // zeroed — the buffer and its capacity are kept for the next fill.
+        if name == "@clear" {
+            let (av, aty) = self.gen_expr(&args[0])?;
+            if !matches!(self.resolve(&aty), Type::Array(_)) {
+                return Err("clear on a non-Array value".into());
+            }
+            let r = self.fresh_tmp();
+            self.emit(format!(
+                "{r} = insertvalue {{ ptr, i64, i64 }} {av}, i64 0, 1"
+            ));
+            return Ok((r, aty));
+        }
         if name == "@reserve" {
             let (av, aty) = self.gen_expr(&args[0])?;
             let elem = match self.resolve(&aty) {

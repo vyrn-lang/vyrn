@@ -44,6 +44,11 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "copies its source's elements by bytes",
     ),
     (
+        "clearowned.vyrn",
+        "RFC-0115 addendum: `clear` forgets its elements, so an element type          that owns heap is refused — forgetting one leaks it",
+        "forgets its elements without releasing them",
+    ),
+    (
         "floatkey.vyrn",
         "RFC-0117: float keys are refused by name — NaN != NaN breaks the          reflexivity a key needs",
         "does neither well",

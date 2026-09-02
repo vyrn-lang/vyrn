@@ -131,6 +131,7 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // ---- Memory: the allocator and the containers standing on it ------------
     ("@push", Memory, "Array: append, reallocating"),
     ("@reserve", Memory, "Array (RFC-0115): capacity for n more, one realloc"),
+    ("@clear", Memory, "Array (RFC-0115 addendum): forget the elements, keep the buffer"),
     ("@append", Memory, "Array (RFC-0115): bulk copy of a heapless source, one growth"),
     ("@copyFrom", Memory, "Array (RFC-0115): overwrite in place, reusing the buffer"),
     ("@tally", Memory, "Map (RFC-0116): insert-or-add in one probe"),
@@ -587,7 +588,13 @@ fn the_census_is_the_code() {
     // entry's kind from `listDir` — the listing's error is one string for
     // every failure, and the project refuses to parse OS wording — so a
     // walker paid a second full listing per subdirectory to find out.
-    assert_eq!(found.len(), 97, "the primitive core changed size");
+    // 97 -> 98 for RFC-0115's addendum `@clear`: a length that goes to zero
+    // while the buffer stays is not spellable — `xs = []` is a fresh empty
+    // triple, and `pop` in a loop frees nothing but also keeps nothing that a
+    // later `push` could reuse without asking the allocator again. It is the
+    // "per-line assembly tax" RFC-0125 §1.4 read off reverse-complement:
+    // eight allocator calls per sixty-byte line, five million over the input.
+    assert_eq!(found.len(), 98, "the primitive core changed size");
 }
 
 /// The fourth engine, and nothing asked it anything until now (RFC-0094 M1).

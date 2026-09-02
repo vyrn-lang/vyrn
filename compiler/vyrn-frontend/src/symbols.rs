@@ -3777,6 +3777,7 @@ static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod { name: "push", detail: "array.push(value) -> Array<T> — append to a growable array; a statement writes the result back through the receiver" },
     BuiltinMethod { name: "reserve", detail: "array.reserve(n) -> Array<T> — make room for n more elements ahead of time, so a known-size build is one allocation (RFC-0115)" },
     BuiltinMethod { name: "append", detail: "array.append(other) -> Array<T> — copy every element of `other` on, in order; element type must not own heap (RFC-0115)" },
+    BuiltinMethod { name: "clear", detail: "array.clear() -> Array<T> — length to zero, buffer kept for the next fill; element type must not own heap (RFC-0115 addendum)" },
     BuiltinMethod { name: "copyFrom", detail: "array.copyFrom(src) -> Array<T> — overwrite the elements with `src`'s, reusing the buffer; element type must not own heap (RFC-0115)" },
     BuiltinMethod { name: "tally", detail: "map.tally(key, n) -> Map<String, Int64> — insert-or-add on a count map, one probe (RFC-0116)" },
     BuiltinMethod { name: "tallyBytes", detail: "map.tallyBytes(bytes, n) -> Map<String, Int64> — tally keyed by raw bytes; the String is built and validated only on a miss (RFC-0116)" },
@@ -3858,6 +3859,7 @@ fn builtin_methods_of_shape(ty: &Type) -> Vec<BuiltinMethod> {
             by_name("pop"),
             by_name("swapRemove"),
             by_name("reserve"),
+            by_name("clear"),
             by_name("append"),
             by_name("copyFrom"),
         ]

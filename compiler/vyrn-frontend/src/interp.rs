@@ -6870,6 +6870,16 @@ impl<'a> Interp<'a> {
                         Val::Array(_) => Ok(vals[0].clone()),
                         other => Err(format!("reserve of non-Array {other:?}").into()),
                     },
+                    // `xs.clear()` (RFC-0115 addendum): an empty array; that the
+                    // buffer is kept is the compiled backends' fact.
+                    "@clear" => match &vals[0] {
+                        Val::Array(a) => {
+                            let mut next = a.clone();
+                            std::rc::Rc::make_mut(&mut next).clear();
+                            Ok(Val::Array(next))
+                        }
+                        other => Err(format!("clear of non-Array {other:?}").into()),
+                    },
                     // `m.tally(k, n)` (RFC-0116): insert-or-add. Two probes in
                     // THIS engine — semantics only; the one-probe fact is the
                     // compiled backends'.

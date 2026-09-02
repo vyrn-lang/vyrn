@@ -123,6 +123,7 @@ pub const METHOD_BUILTINS: &[(&str, &str)] = &[
     // order. Both rebuild like `push`, so a statement writes back through the
     // receiver place.
     ("reserve", "@reserve"),
+    ("clear", "@clear"),
     ("append", "@append"),
     // `dst.copyFrom(src)` (RFC-0115): overwrite `dst`'s elements with `src`'s,
     // reusing the buffer — the refill loop fannkuch hand-wrote, as one copy.
@@ -4165,6 +4166,7 @@ impl Parser {
                 if let Expr::Call { name, args, .. } = &e {
                     if name == "@push"
                         || name == "@reserve"
+                        || name == "@clear"
                         || name == "@append"
                         || name == "@copyFrom"
                         || name == "@tally"

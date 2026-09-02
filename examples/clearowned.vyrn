@@ -1,0 +1,8 @@
+// RFC-0115 addendum's refusal: `clear` forgets its elements without releasing
+// them, and an element that owns heap — a String here — would leak. The fix
+// the checker names is a `pop` loop, which releases each one.
+fn main() -> Int64 {
+    let mut a: Array<String> = ["x"]
+    a.clear()
+    return a.length
+}
