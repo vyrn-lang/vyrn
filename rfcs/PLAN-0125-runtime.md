@@ -276,16 +276,36 @@ comment. Typing addresses would be a second type system for one file.
 ### 2.2 Host imports
 
 The runtime module imports exactly the `wasi_snapshot_preview1` table the
-wasm backend already declares (`direct.rs` lines 77 to 140): `fd_write`,
+wasm backend already declares (`direct.rs`, `wasi_imports`): `fd_write`,
 `fd_read`, `fd_close`, `proc_exit`, `path_open`, `path_rename`, `fd_sync`,
 `fd_prestat_get`, `args_sizes_get`, `args_get`, `environ_sizes_get`,
-`environ_get`, `clock_time_get`, `random_get`. Fourteen. Each is an I/O
-effect under RFC-0125 §2.2's effect judgment, which is what a host import is
-by that section's definition. The generator path adds `vyrn_gen.read` and its
-directory listing; the `vyrn` namespace for `extern fn` is unchanged (RFC-0012).
+`environ_get`, `clock_time_get`, `random_get`, `fd_readdir`. Fifteen. Each is
+an I/O effect under RFC-0125 §2.2's effect judgment, which is what a host
+import is by that section's definition. The generator path adds `vyrn_gen.read`
+and `vyrn_gen.fetch`, the mediated read a generator makes in place of
+`path_open` (RFC-0076 M7); the `vyrn` namespace for `extern fn` is unchanged
+(RFC-0012).
 
 Each import cannot be library because it is the boundary: there is no Vyrn
 below `fd_write`.
+
+*How the module reaches one (step 7).* Each import is a declaration in
+`std/mem`, beside the raw-memory primitives of §2.1, under its camel-case name
+(`fdWrite`, `pathOpen`, `genRead`) with the witx signature — an `Int32` for
+every `i32`, an `Int64` for every `i64`, a pointer an `Int32` address — and a
+body the emitter never reads. `Fn_::mem_prim` lowers a call to it as one
+`call` of the import, the way it lowers `load8` to one instruction; the
+import section is unchanged, declared once before the first body, and
+`Module::sweep` still drops every import no export reaches, so a program pays
+only for what its runtime functions call. The two `vyrn_gen` rows exist only
+under a generation: an ordinary build lowers a call to either as
+`unreachable`, and the runtime functions that make one (`readFileGen`,
+`readFileBytesGen`, `listDirGen`) are reached by nothing there, so the sweep
+removes them with the branch. The effect lattice's atoms (RFC-0125 §3 M6) stay
+the builtin names a program spells, `readFile` and `print` and the rest,
+because those are what the judgment sees in a user body and the runtime
+function behind a builtin is reached through no other name; `mem$` callees
+are pure to the judgment, as the memory primitives already were.
 
 ### 2.3 The trap primitive
 
@@ -816,6 +836,79 @@ and third are RFC-0117's compile-time refusals and print the same line as
 before; `finitekeys` is a String-keyed map and is byte-identical across the
 three engines under parity and the fixtures. The interpreter keeps its own
 `Map` (§5.1), as at every step before this one.
+
+**Results, step 7 (2026-09-03, branch `track-r`).** The I/O family is Vyrn in
+`std/runtime.vyrn`: `writeAll` with the stdout buffer behind it, `printStr`,
+`getByte` with the stdin buffer, `readLineV`, `openAt`, `readAll`, `err3`,
+`readFileV`, `readFileBytesV`, `writeFileBytesV`, `writeFileV`, `renameFileV`,
+`fsyncFileV`, `argsV`, `envGet`, `readdirBlob`, `listDirV`, the three
+generator-host twins (`readFileGen`, `readFileBytesGen`, `listDirGen`) and the
+clock and seed readers `nowMillis`, `monoNanos` and `randomSeedV` — 782 lines
+with their comment, over the host imports and the allocator — and the wasm
+emitter's twenty-one hand-emitted bodies are deleted with `gen_slurp`, the
+two `sum2` writers and the witx constants: 2,250 lines out of `direct.rs`, 288
+in (nineteen rows of the `VyrnRt` table, the host rows of `Fn_::mem_prim`,
+the interned wording and keys on `Rt`, the call sites). A builtin's twin
+carries a `V` because the builtin's name is reserved (`readFileV` for
+`readFile`, as `std/text`'s `charCountV`); `randomSeedV` also because
+`std/random` exports `randomSeed` and `tests/std_names.rs` holds std's export
+names distinct. How the module reaches a host import is §2.2's paragraph:
+fifteen declarations in `std/mem` with the witx signatures, each lowered to
+one `call`, plus the two `vyrn_gen` rows an ordinary build lowers as
+`unreachable`; the import section and the sweep are unchanged, and the
+emitter decides at the builtin's call site which twin a generation calls, as
+it decided before between `path_open` and the mediated read. The buffers,
+the fixed clock's counter and the host imports' out-parameters live in the
+heap's own first bytes after the allocator's 480 (the table above the module's
+I/O section; the first block moved from 480 to 8,736), for the reason the
+allocator's heads do — zeroed by the engine, no initializer — and for one
+more: module state would be initialized in declaration order, and an
+initializer that ran after a top-level `let` printed would reset the buffer
+under it. Each function keeps the copy's bytes: the same 4,096-byte buffers,
+64-then-doubling lines, 1,024-then-doubling files, the NUL scan before the
+UTF-8 check, `errno::xdev` 75 as the one errno read by value, the same errno
+tests; the wording stays `trap.rs`'s, the six message pairs interned by the
+emitter and passed as arguments, so the module never spells one. Two leaks the
+copies had are closed on the way, because the freeing pointer is in hand:
+`err3`'s middle concatenation and a `readFile` buffer refused for a NUL or
+for UTF-8. `readLineV` returns the `Option`, the readers and writers return
+a `Result<Int64, Int64>` whose payloads are addresses — the `build_sum2` shape
+every call site already reads, as `strFromBytes` established — and `argsV`
+writes the `Array<String>` triple through the destination, as the copy did.
+The effect lattice's atoms are unchanged: `tests/effects.rs` already counts a
+`mem$` callee as pure and the atoms are the builtin names a program spells,
+which is the paragraph §2.2 gained; the ratchet held at 1 (`listdir.vyrn`).
+Gates: fmt, workspace (one rename after `std_names` refused `randomSeed`),
+kernel (16,621 instances accepted, 0 refused, the ratchet at 0), effects
+(ratchet 1, the RFC table equal to `ATOMS`), lowered (1,255 synthesized, under
+the 1,400 ceiling), the nine `vyrn-cli` suites, parity 41 of 41, residue, the
+cross-engine generator gate under a fresh cache, `doc --verify` (41 files
+unchanged), site export 33 of 34 (the version test fails on local fixture
+data); the wasm2c route gate skipped for a missing wabt. The extra gate:
+`files.vyrn`, `storage.vyrn` and `clock.vyrn` under the harness's fixed clock
+and seed are byte-identical between the base `.wasm` and the head `.wasm` on
+stdout and stderr, and equal to the recorded fixtures (`tests/fixtures.rs` runs
+every example under the embedded engine, `input.vyrn` over its `.stdin`
+fixture among them, and parity runs the three engines). RFC-0103's census
+(`rfcs/census-0103/`, fourteen programs) re-run on the interpreter and wasi
+legs with the head compiler: no row changes — every cell that was
+byte-identical still is, the clock and entropy cells differ only in the live
+values they read, and `cap-listdir` counted the run's own build products; the
+browser leg needs a served page and was not re-run, and nothing in it changed
+(`web/wasi-min.js` and the import table are untouched). Timing under wasmtime
+46, base and head interleaved, medians of five, on a machine shared with other
+worktrees' builds (which is why both columns sit above step 4's row):
+
+| program | base (hand-emitted) | head (`std/runtime`) |
+|---|---|---|
+| fasta, n = 5 M | 1.043 s | 1.012 s |
+| reverse-complement, fasta n = 4 M | 1.171 s | 1.164 s |
+
+Both output-bound programs move inside the run's noise, which is §7.3's
+prediction: `writeAll` and `getByte` are one call each per line and per byte
+as the copies were, and the buffer behind each is the same 4,096 bytes at a
+different address. `fasta.wasm` grows 81 bytes and `revcomp.wasm` 301, the
+readers each program links but does not reach having been swept before too.
 
 ---
 
