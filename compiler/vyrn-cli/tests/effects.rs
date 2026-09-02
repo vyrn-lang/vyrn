@@ -606,7 +606,7 @@ fn collect_callees(stmts: &[vyrn_lower::core::St], out: &mut BTreeSet<String>) {
     use vyrn_lower::core::{Rhs, St};
     for s in stmts {
         match s {
-            St::Let(_, Rhs::Call { callee, .. }) | St::Do(Rhs::Call { callee, .. }) => {
+            St::Let(_, Rhs::Call { callee, .. }) | St::Do(Rhs::Call { callee, .. }, _) => {
                 out.insert(callee.clone());
             }
             St::If { then, els, .. } => {
