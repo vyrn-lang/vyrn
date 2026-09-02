@@ -566,6 +566,14 @@ fn branch(module: String, value: String) -> String {
     return "    if m == " + quoted(module) + " { return " + value + " }\n"
 }
 
+/// The modules behind the compiler's fence (RFC-0125 §2.4): no program can
+/// import them, so the reference does not list them. The compiler's own
+/// predicate is `is_fenced` in `loader.rs`; `vyrn doc --std` uses it, and a
+/// generator cannot, so the two names are spelled here too.
+fn fenced(name: String) -> Bool {
+    return name == "mem" || name == "runtime"
+}
+
 /// Read `stdDir`, and emit the whole reference as one module.
 export gen fn apiDocs(stdDir: String) -> String {
     let entries = match listDir(stdDir) {
@@ -574,7 +582,7 @@ export gen fn apiDocs(stdDir: String) -> String {
     }
     let mut mods: Array<Mod> = []
     for entry in entries {
-        if endsWith(entry, ".vyrn") {
+        if endsWith(entry, ".vyrn") && !fenced(substring(entry, 0, entry.byteLength - 5)) {
             let src = match readFile(stdDir + "/" + entry) {
                 Ok(text) => text,
                 Err(why) => "",

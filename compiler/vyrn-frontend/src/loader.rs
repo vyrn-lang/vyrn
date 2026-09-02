@@ -727,6 +727,14 @@ pub const RUNTIME_SPEC: &str = "std/runtime";
 /// is the check.
 pub const MEM_SPEC: &str = "std/mem";
 
+/// The two modules behind the fence. A reader outside the compiler cannot
+/// import either, so a list written for readers — `vyrn doc --std`, the site's
+/// reference shelf — leaves them out. One predicate, so the fence and the
+/// listing cannot disagree (RFC-0125 §2.4).
+pub fn is_fenced(spec: &str) -> bool {
+    spec == MEM_SPEC || spec == RUNTIME_SPEC
+}
+
 /// The reserved prefix of every `std/mem` declaration. The emitter matches on
 /// it to lower a call to one instruction rather than to a `call`.
 pub const MEM_PREFIX: &str = "mem$";

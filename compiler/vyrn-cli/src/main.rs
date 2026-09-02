@@ -2544,6 +2544,10 @@ fn scan_doc_dir(dir: &str, prefix: &str) -> Result<Vec<DocModule>, ExitCode> {
     let mut out = Vec::new();
     for p in paths {
         let rel = rel_name(&p, &base);
+        // A fenced module has no reader outside the compiler (RFC-0125 §2.4).
+        if vyrn_frontend::loader::is_fenced(&format!("{prefix}{rel}")) {
+            continue;
+        }
         let source = match std::fs::read_to_string(&p) {
             Ok(s) => s,
             Err(e) => {
