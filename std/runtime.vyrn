@@ -32,6 +32,13 @@
 /// `vstr_*` and the native IR's `STRING_RUNTIME` stay until step 3 moves the
 /// native route.
 ///
+/// **Step 5, the maps:** `mapFind`, `mapPut`, `mapReindex`, `mapReserve`,
+/// `mapRemoveAt` and `mapKeysCopy`, one body over the three key layouts of
+/// RFC-0028 and RFC-0117, over `malloc`, `free`, `copy`, `fill` and the loads.
+/// The wasm emitter's fourteen hand-emitted map functions and its inline
+/// copies of reserve, remove and keys are deleted; the C shim's stay until
+/// step 3 moves the native route.
+///
 /// **Call depth.** The emitter does not count these frames against the
 /// language's call-depth budget: the hand-emitted copies had no prologue, and
 /// a program that traps at the limit must trap where it did.
@@ -41,7 +48,7 @@
 /// runtime trap is one of `trap.rs`'s fixed wordings and every engine prints
 /// it the same way.
 
-import { load8, load32, load64, store8, store32, copy, memorySize, grow, heapBase } from "std/mem"
+import { load8, load32, load64, store8, store32, store64, copy, fill, memorySize, grow, heapBase } from "std/mem"
 
 /// `strlen`: the bytes before the NUL at `p`.
 export fn strLen(p: Int32) -> Int32 {
@@ -483,4 +490,268 @@ export fn strFromBytes(data: Int32, len: Int32, table: Int32, bnul: Int32, butf8
         return Err(Int64(UInt32(butf8)))
     }
     return Ok(Int64(UInt32(buf)))
+}
+
+// ---------------------------------------------------------------------------
+// Step 5, the maps (PLAN-0125-runtime §6; RFC-0028, RFC-0116, RFC-0117)
+// ---------------------------------------------------------------------------
+//
+// A `Map` header is `{ keys, vals, len, cap, idx }`: two buffer addresses at
+// 0 and 4, two `Int64` counts at 8 and 16, the index at 24. `keys` and `vals`
+// are columns in insertion order, which is the order RFC-0028 locks; `idx` is
+// `cap * 2` buckets of `Int64`, each an entry's position PLUS ONE so that zero
+// is the empty bucket, and `len <= cap` keeps it at most half full, so a probe
+// always reaches an empty bucket and the walk needs no bound of its own. The
+// index never reorders the columns; a grow or a remove rebuilds it.
+//
+// One body serves every key layout. `kind` names the layout and `klen` is the
+// byte count the layout needs; the key travels as an `Int64`, the value itself
+// for an `Int64` key and an address for the rest, so one signature carries all
+// of them and the emitter spills nothing:
+//
+//   0  String       a 4-byte pointer column; FNV-1a to the NUL; `strCmp`
+//   1  Int64        an 8-byte value column; SplitMix64's finalizer; the bits
+//   2  pack         `klen` canonical bytes inline (RFC-0117 M2); FNV-1a over
+//                   them; a byte compare, which IS field-wise equality because
+//                   the emitter zeroed the padding before packing
+//   3  byte window  `tallyBytes`'s probe (RFC-0116) against a String column:
+//                   FNV-1a over the `klen` bytes at the key, which is the hash
+//                   of the equal String since a stored key has no interior NUL;
+//                   equal when the stored key's `klen` bytes match and its byte
+//                   `klen` is the NUL. Never stored, so never put or copied.
+//
+// The three hashes are the C shim's (`map_hash`, `map_hash_i64`,
+// `map_hash_pack`) and are not observable: the columns decide every order the
+// program can see. `std/hash`'s `fnv1a` is the same arithmetic over an
+// `Array<UInt8>` value; this module reads bytes at an address and has no
+// array to hand it, so the two stay two (PLAN-0125-runtime §8 question 5).
+//
+// The layout choice is one compare per hash and one per key compare, on a
+// value the emitter passes as a constant. Three entry points per function,
+// one per layout, would carry the probe loop three times in every map program
+// to save a predicted branch; k-nucleotide is flat across the move (§6, the
+// results block), so the branch stays.
+
+/// The bucket hash of a byte key: FNV-1a over the `n` bytes at `p`, or to
+/// the NUL when `n` is negative (a String key, hashed in the one pass
+/// `strCmp` decides equality by).
+fn mapHash(p: Int32, n: Int32) -> UInt64 {
+    let mut h: UInt64 = 14695981039346656037 // 0xCBF29CE484222325
+    let mut i: Int32 = 0
+    while true {
+        let c = load8(p + i)
+        if i == n || (n < 0 && c == 0) {
+            break
+        }
+        h = (h ^ UInt64(c)) * 1099511628211
+        i = i + 1
+    }
+    return h
+}
+
+/// The bytes one entry of the key column takes.
+fn mapKeyStride(kind: Int32, klen: Int32) -> Int32 {
+    if kind == 1 {
+        return 8
+    }
+    if kind == 2 {
+        return klen
+    }
+    return 4
+}
+
+/// Whether the `n` bytes at `a` equal the `n` bytes at `b`.
+fn mapBytesEq(a: Int32, b: Int32, n: Int32) -> Bool {
+    let mut i: Int32 = 0
+    while i < n {
+        if load8(a + i) != load8(b + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+/// Whether entry `i`'s key equals `key` under a byte layout (0, 2 or 3).
+fn mapKeyEq(kind: Int32, klen: Int32, keys: Int32, i: Int32, key: Int64) -> Bool {
+    if kind == 2 {
+        return mapBytesEq(keys + i * klen, Int32(key), klen)
+    }
+    let stored = Int32(load32(keys + i * 4))
+    if kind == 0 {
+        return strCmp(stored, Int32(key)) == 0
+    }
+    return mapBytesEq(stored, Int32(key), klen) && load8(stored + klen) == 0
+}
+
+/// `map_slot`: the bucket `key` belongs in — the one that holds it, or the
+/// first empty one after where it hashes. One probe serves both readers: a
+/// lookup asks whether the bucket is occupied, an insert writes into it.
+/// `nb` is a power of two, so the wrap is a mask.
+///
+/// Two lanes, and the two callers choose between them by `kind` themselves
+/// rather than through a third function: a call is about four nanoseconds
+/// under wasmtime and k-nucleotide makes fourteen million probes, so one
+/// level more than the hand-emitted copy's two (find, then slot) was the
+/// whole of a 20 percent regression, and the lane in one larger body was
+/// the same 20 percent (PLAN-0125-runtime §7.3 predicted flat; §6 step 5's
+/// results block has the numbers). The `Int64` lane hashes with SplitMix64's
+/// finalizer and compares the bits in place; the byte lane hashes with FNV-1a
+/// and compares through `mapKeyEq`, as the copy it replaces called `strCmp`.
+fn mapSlotI64(keys: Int32, idx: Int32, nb: Int32, key: Int64) -> Int32 {
+    let mask = nb - 1
+    let m1: UInt64 = 13787848793156543929 // 0xBF58476D1CE4E5B9
+    let m2: UInt64 = 10723151780598845931 // 0x94D049BB133111EB
+    let mut h: UInt64 = UInt64(key)
+    h = (h ^ (h >> 30)) * m1
+    h = (h ^ (h >> 27)) * m2
+    let mut s = Int32(h ^ (h >> 31)) & mask
+    while true {
+        let ent = Int32(load64(idx + s * 8))
+        if ent == 0 || Int64(load64(keys + (ent - 1) * 8)) == key {
+            return s
+        }
+        s = (s + 1) & mask
+    }
+    return s
+}
+
+fn mapSlotBytes(kind: Int32, klen: Int32, keys: Int32, idx: Int32, nb: Int32, key: Int64) -> Int32 {
+    let mask = nb - 1
+    let mut n = klen
+    if kind == 0 {
+        n = -1
+    }
+    let mut s = Int32(mapHash(Int32(key), n)) & mask
+    while true {
+        let ent = Int32(load64(idx + s * 8))
+        if ent == 0 {
+            return s
+        }
+        if mapKeyEq(kind, klen, keys, ent - 1, key) {
+            return s
+        }
+        s = (s + 1) & mask
+    }
+    return s
+}
+
+/// `map_find`: the entry's position, or -1. An empty map has no index yet and
+/// a map with a `cap` has one: `mapReserve` keeps that pair, so a null `idx`
+/// under a non-zero `cap` is a defect here, not a case.
+export fn mapFind(kind: Int32, klen: Int32, keys: Int32, len: Int32, key: Int64, idx: Int32, cap: Int32) -> Int32 {
+    if len <= 0 || cap <= 0 {
+        return -1
+    }
+    let mut s: Int32 = 0
+    if kind == 1 {
+        s = mapSlotI64(keys, idx, cap * 2, key)
+    } else {
+        s = mapSlotBytes(kind, klen, keys, idx, cap * 2, key)
+    }
+    // The bucket holds position plus one, so an empty one answers -1.
+    return Int32(load64(idx + s * 8)) - 1
+}
+
+/// `map_put`: record the entry at position `i`, whose key is already in the
+/// column. The probe is `mapSlot`'s; this is the write.
+export fn mapPut(kind: Int32, klen: Int32, keys: Int32, idx: Int32, nb: Int32, i: Int32) {
+    // Entry `i`'s key as it travels: the value for an `Int64` key, the
+    // pointer for a String, the address of the pack.
+    let mut key: Int64 = 0
+    if kind == 1 {
+        key = Int64(load64(keys + i * 8))
+    } else if kind == 2 {
+        key = Int64(UInt32(keys + i * klen))
+    } else {
+        key = Int64(load32(keys + i * 4))
+    }
+    let mut s: Int32 = 0
+    if kind == 1 {
+        s = mapSlotI64(keys, idx, nb, key)
+    } else {
+        s = mapSlotBytes(kind, klen, keys, idx, nb, key)
+    }
+    store64(idx + s * 8, UInt64(Int64(i) + 1))
+}
+
+/// `map_reindex`: rebuild the whole index from the columns. Called where
+/// positions move — a grow (the bucket count changed) and a remove (the
+/// survivors shifted down) — both already O(len) for their own reasons.
+export fn mapReindex(kind: Int32, klen: Int32, keys: Int32, len: Int32, idx: Int32, nb: Int32) {
+    if nb <= 0 {
+        return
+    }
+    fill(idx, 0, nb * 8)
+    let mut i: Int32 = 0
+    while i < len {
+        mapPut(kind, klen, keys, idx, nb, i)
+        i = i + 1
+    }
+}
+
+/// `map_reserve`: room for one more entry in the map at `hdr`, whose values
+/// are `esz` bytes each: 0 to 4, else double, growing BOTH columns. Allocate,
+/// copy, free the old — the shape `push` grows in. The index last, because
+/// its bucket count follows the capacity just stored, and rebuilt rather than
+/// copied: the buckets are keyed by `hash & (nb - 1)` and `nb` just doubled.
+/// The emitter asks `len + 1 > cap` before calling, so an insert that fits
+/// pays no call; the check here is the function's own contract.
+export fn mapReserve(kind: Int32, klen: Int32, hdr: Int32, esz: Int32) {
+    let len = Int32(load64(hdr + 8))
+    let cap = Int32(load64(hdr + 16))
+    if len + 1 <= cap {
+        return
+    }
+    let mut nc: Int32 = 4
+    if cap != 0 {
+        nc = cap * 2
+    }
+    let ks = mapKeyStride(kind, klen)
+    // `nc * stride` in 64 bits: an entry costs at least twelve bytes, so the
+    // count fits 32 bits and the product may not; `malloc` judges it.
+    let nk = malloc(Int64(nc) * Int64(ks))
+    let ok = Int32(load32(hdr))
+    copy(nk, ok, len * ks)
+    free(ok)
+    store32(hdr, UInt32(nk))
+    let nv = malloc(Int64(nc) * Int64(esz))
+    let ov = Int32(load32(hdr + 4))
+    copy(nv, ov, len * esz)
+    free(ov)
+    store32(hdr + 4, UInt32(nv))
+    store64(hdr + 16, UInt64(Int64(nc)))
+    let ni = malloc(Int64(nc) * 16)
+    free(Int32(load32(hdr + 24)))
+    store32(hdr + 24, UInt32(ni))
+    mapReindex(kind, klen, nk, len, ni, nc * 2)
+}
+
+/// `map_remove_at`: close the hole at position `i` by shifting the survivors
+/// down one slot in both columns, so first-insertion order survives a
+/// removal, then rebuild the index, since every survivor after the hole moved.
+/// The entry's key and value are the emitter's to release before this runs:
+/// this function shifts bytes and is handed no types.
+export fn mapRemoveAt(kind: Int32, klen: Int32, hdr: Int32, esz: Int32, i: Int32) {
+    let len = Int32(load64(hdr + 8))
+    let rest = len - i - 1
+    let ks = mapKeyStride(kind, klen)
+    let kb = Int32(load32(hdr)) + i * ks
+    copy(kb, kb + ks, rest * ks)
+    let vb = Int32(load32(hdr + 4)) + i * esz
+    copy(vb, vb + esz, rest * esz)
+    store64(hdr + 8, UInt64(Int64(len - 1)))
+    mapReindex(kind, klen, Int32(load32(hdr)), len - 1, Int32(load32(hdr + 24)), Int32(load64(hdr + 16)) * 2)
+}
+
+/// `map_keys_copy`: the key column copied into a buffer of its own, so the map
+/// may be mutated afterwards without disturbing the snapshot. An empty map
+/// still gets a buffer, so an `Array`'s pointer is never null. String keys are
+/// then dup'd per element by the emitter (RFC-0092 M2), which knows the type.
+export fn mapKeysCopy(kind: Int32, klen: Int32, hdr: Int32) -> Int32 {
+    let len = Int32(load64(hdr + 8))
+    let ks = mapKeyStride(kind, klen)
+    let buf = malloc(Int64(UInt32((len + 1) * ks)))
+    copy(buf, Int32(load32(hdr)), len * ks)
+    return buf
 }
