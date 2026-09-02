@@ -42,7 +42,7 @@ pub use wasm_encoder::{BlockType, Instruction, MemArg, ValType};
 use wasm_encoder::{
     CodeSection, ConstExpr, CustomSection, DataSection, EntityType, ExportKind, ExportSection,
     Function, FunctionSection, GlobalSection, GlobalType, ImportSection, MemorySection, MemoryType,
-    TypeSection,
+    NameMap, NameSection, TypeSection,
 };
 
 /// How much shadow stack a generated module has: enough for
@@ -239,6 +239,11 @@ pub struct Module {
     /// section is data for the host, not for the engine: nothing here changes
     /// what the module does.
     custom: Vec<(String, Vec<u8>)>,
+    /// Function names for a `name` section, by index as handed out. Empty
+    /// unless the lowering asked for one (`VYRN_WASM_NAMES`): a trap's
+    /// backtrace then names the function, which is worth the bytes only while
+    /// someone is reading one.
+    names: Vec<(u32, String)>,
 }
 
 impl Default for Module {
@@ -260,6 +265,7 @@ impl Module {
             pool: Vec::new(),
             pool_at: HashMap::new(),
             custom: Vec::new(),
+            names: Vec::new(),
         }
     }
 
@@ -503,6 +509,13 @@ impl Module {
         keep
     }
 
+    /// Record the name of the function at `index`, for the `name` section
+    /// [`Module::finish`] writes when any name was recorded. `prune` renumbers
+    /// the names with the calls.
+    pub fn name(&mut self, index: u32, name: &str) {
+        self.names.push((index, name.to_string()));
+    }
+
     /// Drop what no export reaches and renumber every `call` that survives.
     ///
     /// Imports go first in the index space, so the new numbering is: surviving
@@ -544,13 +557,18 @@ impl Module {
         for (_, i) in &mut self.exports {
             *i = map[*i as usize];
         }
+        self.names.retain_mut(|(i, _)| {
+            *i = map[*i as usize];
+            *i != u32::MAX
+        });
     }
 
     /// The finished bytes, or the one refusal a program can earn here.
     ///
     /// Sections go out in the order the format fixes: type, import, function,
-    /// memory, global, export, code, data. Nothing else in this file may emit a
-    /// section, so this list is the whole ordering constraint.
+    /// memory, global, export, code, data, then the `name` custom section when
+    /// one was asked for. Nothing else in this file may emit a section, so this
+    /// list is the whole ordering constraint.
     ///
     /// `Result` for [`STATICS_LIMIT`] alone. The other checks below are asserts
     /// because a reservation nobody filled is a bug in this file, which no source
@@ -738,6 +756,16 @@ impl Module {
         if !data.is_empty() {
             m.section(&data);
         }
+        if !self.names.is_empty() {
+            let mut fns = NameMap::new();
+            self.names.sort_by_key(|(i, _)| *i);
+            for (i, n) in &self.names {
+                fns.append(*i, n);
+            }
+            let mut names = NameSection::new();
+            names.functions(&fns);
+            m.section(&names);
+        }
         for (name, payload) in &self.custom {
             m.section(&CustomSection {
                 name: name.as_str().into(),
@@ -757,7 +785,7 @@ fn encode(f: Frame, n_params: usize) -> Function {
     let mut decl = vec![ValType::I32]; // the frame base
     decl.extend(f.locals.iter().copied());
     let mut out = Function::new_with_locals_types(decl);
-    let frame = round_up(f.frame, FRAME_ALIGN);
+    let frame = f.bytes();
     // Claim the frame. Subtracting past 0 wraps to near `0xFFFFFFFF`, where
     // every access is out of bounds — the trap `--stack-first` buys, and the
     // reason the stack is at the BOTTOM of memory rather than above the data
@@ -818,6 +846,9 @@ pub struct Frame {
     locals: Vec<ValType>,
     next_local: u32,
     frame: u32,
+    /// The most `frame` has ever been: what the prologue claims. `frame`
+    /// itself comes back down at a statement's end ([`Frame::reset`]).
+    high: u32,
     /// Local holding the frame's base address, valid for the whole body.
     base: u32,
 }
@@ -833,6 +864,7 @@ impl Frame {
             locals: locals.to_vec(),
             next_local: base + 1 + locals.len() as u32,
             frame,
+            high: frame,
             base,
         }
     }
@@ -856,19 +888,40 @@ impl Frame {
     }
 
     /// Take `size` bytes of frame at `align`, giving the offset from the frame
-    /// base. Offsets are handed out for the whole function, never reused — a
-    /// slot inside a loop is one slot, written afresh each turn.
+    /// base. A slot inside a loop is one slot, written afresh each turn.
     /// Saturating, so a frame past 4 GB is a REFUSAL and not a panic: the caller
     /// compares [`Self::bytes`] against `FRAME_LIMIT` once the body is walked,
     /// and it cannot do that if the running total aborted the process first. A
     /// frame that saturates reports the clamp rather than its true size, which
     /// is a number nobody reads for anything but the comparison it loses by five
     /// orders of magnitude. Nothing under the limit moves at all.
+    ///
+    /// RFC-0125 M1: a slot is a statement's unless the statement bound a name.
+    /// The body walker takes [`Frame::mark`] before each statement and
+    /// [`Frame::reset`]s to it after one that left the scope as it found it, so
+    /// the temporaries of one statement — an argument's copy, a call's result,
+    /// a literal on its way to the heap — are the next statement's to reuse.
+    /// Before this, every temporary of a body was added up: a generated page
+    /// body of nine hundred statements needed 23 KB of frame for values no two
+    /// of which were ever live together.
     pub fn alloc(&mut self, size: u32, align: u32) -> u32 {
         debug_assert!(align.is_power_of_two());
         let at = round_up(self.frame, align.max(1));
         self.frame = at.saturating_add(size);
+        self.high = self.high.max(self.frame);
         at
+    }
+
+    /// Where the next [`Frame::alloc`] lands, to hand [`Frame::reset`] later.
+    pub fn mark(&self) -> u32 {
+        self.frame
+    }
+
+    /// Give back every slot taken since `mark`. Only the caller can know that
+    /// nothing still names one of them; the rule is on [`Frame::alloc`].
+    pub fn reset(&mut self, mark: u32) {
+        debug_assert!(mark <= self.frame);
+        self.frame = mark;
     }
 
     /// Push the address of the frame slot at `off`.
@@ -892,7 +945,7 @@ impl Frame {
     /// [`vyrn_frontend::interp::FRAME_LIMIT`] is checking the number the prologue
     /// subtracts.
     pub fn bytes(&self) -> u32 {
-        round_up(self.frame, FRAME_ALIGN)
+        round_up(self.high, FRAME_ALIGN)
     }
 }
 

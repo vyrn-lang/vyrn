@@ -574,7 +574,12 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
             cx.subst = HashMap::new();
             cx.mono.borrow_mut().done += 1;
             match body {
-                Ok(body) => m.fill(p.sig.index, body),
+                Ok(body) => {
+                    m.fill(p.sig.index, body);
+                    if std::env::var_os("VYRN_WASM_NAMES").is_some() {
+                        m.name(p.sig.index, &p.f.name);
+                    }
+                }
                 Err(e) if e.contains(crate::FRAME_LIMIT_NEEDLE) => {
                     deferred.get_or_insert(e);
                 }
@@ -1579,6 +1584,63 @@ impl Place {
     }
 }
 
+/// Storage an aggregate is built INTO (RFC-0125 §2.1, M1's second slice): a
+/// frame slot, or an address a wasm local holds plus an offset.
+///
+/// A record or array literal, and a call that returns an aggregate, write
+/// straight into one of these when the consumer already owns the storage. A
+/// nested literal then costs no frame of its own, which is what §1.4's
+/// per-node copy charged: every intermediate aggregate of a literal landed in
+/// the frame, and the frame was the sum of them.
+///
+/// The rule, stated once: **a value is built in place only into storage
+/// nothing can name while it is being built** — a fresh `let`'s slot, a field
+/// or element of a literal under construction, a call's result. A store into
+/// named storage (an assignment, a field or element store whose value reads
+/// the binding, module state) keeps the copy, because a field written early
+/// would be visible to a later field's initializer otherwise, and the
+/// interpreter builds the whole value first.
+#[derive(Clone, Copy)]
+enum Dest {
+    Slot(u32),
+    Addr(u32, u32),
+}
+
+impl Dest {
+    /// Push the address `off` bytes into this destination.
+    fn addr(self, b: &mut Frame, off: u32) {
+        match self {
+            Dest::Slot(base) => {
+                b.slot(base + off);
+            }
+            Dest::Addr(l, base) => {
+                b.ins(&Instruction::LocalGet(l));
+                if base + off != 0 {
+                    b.ins(&Instruction::I32Const((base + off) as i32));
+                    b.ins(&Instruction::I32Add);
+                }
+            }
+        }
+    }
+
+    /// The destination `off` bytes into this one.
+    fn at(self, off: u32) -> Dest {
+        match self {
+            Dest::Slot(base) => Dest::Slot(base + off),
+            Dest::Addr(l, base) => Dest::Addr(l, base + off),
+        }
+    }
+
+    /// A binding's place as a destination. Module state is named storage and
+    /// is never one (the rule above); a scalar local has no address.
+    fn of(p: Place) -> Option<Dest> {
+        match p {
+            Place::Slot(off) => Some(Dest::Slot(off)),
+            Place::Local(_) | Place::Static(_) => None,
+        }
+    }
+}
+
 /// An empty `Function` to fill in for a lifted lambda (RFC-0023).
 ///
 /// A synthesized declaration rather than a bespoke lowering path: the captures
@@ -1728,6 +1790,16 @@ struct Fn_<'a, 'p> {
     /// local IS the binding: two `let out`s in one body are two accumulators, and
     /// a global (a `Place::Static`) never gets an entry at all.
     str_append: HashMap<u32, u32>,
+    /// RFC-0125 M1: the storage the NEXT expression may build itself into, and
+    /// the type that storage holds. Set by a consumer that owns fresh storage
+    /// ([`Fn_::agg_into`]), taken at the top of [`Fn_::expr_inner`] so only the
+    /// immediate expression sees it; a literal or a call that uses it says so
+    /// through `dest_used`, and the consumer skips its copy.
+    dest_hint: Option<(Dest, Type)>,
+    dest_used: bool,
+    /// The hint an `Expr::Call` carried into [`Fn_::call_inner`], which takes it
+    /// before any argument is lowered so a nested call cannot claim it.
+    call_dest: Option<(Dest, Type)>,
 }
 
 /// A lowering context with nothing in scope and nothing to return to: what the
@@ -1759,6 +1831,9 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         append_ok: std::collections::HashSet::new(),
         is_release: false,
         str_append: HashMap::new(),
+        dest_hint: None,
+        dest_used: false,
+        call_dest: None,
     }
 }
 
@@ -1780,7 +1855,7 @@ fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<
     for g in &program.globals {
         let (place, ty) = cx.globals[&g.name].clone();
         let r = cx.repr(&ty, g.line)?;
-        f.store_into(m, &mut b, place, &r, &g.init, &ty)?;
+        f.store_into(m, &mut b, place, &r, &g.init, &ty, false)?;
         // The accumulator's ownership word starts true for every initializer but a
         // literal, which is data-segment storage nothing allocated. Getting this
         // wrong one way abandons the initializer's buffer at the first append; the
@@ -1815,6 +1890,9 @@ fn lower_fn(
 ) -> Result<(), String> {
     let frame = lower_body(m, f, Body::Block(&f.body), sig, cx, binds)?;
     m.fill(sig.index, frame);
+    if std::env::var_os("VYRN_WASM_NAMES").is_some() {
+        m.name(sig.index, &f.name);
+    }
     Ok(())
 }
 
@@ -1881,6 +1959,9 @@ fn lower_body(
         append_ok: stmts.map(crate::append_candidates).unwrap_or_default(),
         is_release: cx.owned.is_release_fn(&f.name),
         str_append: HashMap::new(),
+        dest_hint: None,
+        dest_used: false,
+        call_dest: None,
     };
 
     // By-value parameter semantics: an aggregate arrives as the caller's
@@ -2310,7 +2391,7 @@ fn lower_dispatcher(
         if let Some(d) = dest {
             b.ins(&Instruction::LocalGet(d));
         }
-        let got = f.emit_call(m, &mut b, &v.target.sig, &all)?;
+        let got = f.emit_call(m, &mut b, &v.target.sig, &all, None)?;
         match (&dsig.ret, cx.repr(&got, 0)?) {
             // The target's declared result may differ from the signature's — a
             // named source's validated scalar, a wider record — so it crosses the
@@ -2418,15 +2499,13 @@ impl<'p> Fn_<'_, 'p> {
             }
             Repr::Agg(l) => {
                 // Destination-first, at the function's own boundary: the
-                // caller's slot address is already in `dest`.
-                b.ins(&Instruction::LocalGet(self.dest.unwrap()));
+                // caller's slot address is already in `dest`. The caller
+                // handed over storage nothing names (its own fresh slot, or
+                // storage IT was handed under the same rule), so a literal
+                // is built in it directly (RFC-0125 M1).
                 let want = self.ret_ty.clone();
-                self.expr_as(m, b, e, &want)?;
-                b.ins(&Instruction::I32Const(l.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                let dest = Dest::Addr(self.dest.unwrap(), 0);
+                self.agg_into(m, b, dest, l.size, e, &want, true)?;
             }
             Repr::Unit => {
                 return unsupported("a return whose value does not match the signature", line);
@@ -2470,11 +2549,21 @@ impl<'p> Fn_<'_, 'p> {
         let mark = self.scope.len();
         let mut k = 0;
         while k < blk.stmts.len() {
+            // RFC-0125 M1: a statement's temporaries are its own. A statement
+            // that bound nothing at this level gives its slots back (the rule
+            // on `Frame::alloc`); one that did — a `let`, a refutable `let` —
+            // keeps everything it took, binding and temporaries alike, because
+            // the cheap test is the scope's length and not which slot is which.
+            let (frame, scope) = (b.mark(), self.scope.len());
             if let Some(n) = self.elem_field_store(m, b, &blk.stmts[k..])? {
                 k += n;
+                b.reset(frame);
                 continue;
             }
             self.stmt(m, b, &blk.stmts[k])?;
+            if self.scope.len() == scope {
+                b.reset(frame);
+            }
             k += 1;
         }
         // The fall-through exit. An early `return`/`break`/`continue` releases the
@@ -3593,8 +3682,27 @@ impl<'p> Fn_<'_, 'p> {
                     Some(t) => {
                         let r = self.cx.repr(t, *line)?;
                         let place = self.place_for(b, &r, *line)?;
-                        self.store_into(m, b, place, &r, value, t)?;
+                        self.store_into(m, b, place, &r, value, t, true)?;
                         (place, t.clone())
+                    }
+                    // Unannotated, and the initializer is a literal or a call
+                    // whose type the typer knows before it runs: the slot is
+                    // taken first and the value is built in it (RFC-0125 M1).
+                    None if matches!(
+                        value,
+                        Expr::StructLit { .. } | Expr::ArrayLit { .. } | Expr::Call { .. }
+                    ) && self
+                        .peek(value, *line)
+                        .ok()
+                        .is_some_and(|t| matches!(self.cx.repr(&t, *line), Ok(Repr::Agg(_)))) =>
+                    {
+                        let t = self.peek(value, *line)?;
+                        let Repr::Agg(l) = self.cx.repr(&t, *line)? else {
+                            unreachable!("the guard above checked the shape")
+                        };
+                        let off = b.alloc(l.size, l.align);
+                        self.agg_into(m, b, Dest::Slot(off), l.size, value, &t, true)?;
+                        (Place::Slot(off), t)
                     }
                     None => {
                         // Unannotated: the type is whatever the initializer
@@ -3841,7 +3949,7 @@ impl<'p> Fn_<'_, 'p> {
                 } else {
                     Vec::new()
                 };
-                self.store_into(m, b, place, &r, value, &ty.clone())?;
+                self.store_into(m, b, place, &r, value, &ty.clone(), false)?;
                 self.free_snap(b, snap.as_slice());
                 // The place now holds a pointer this path did not allocate, so the
                 // next append copies rather than grows. Claiming ownership here
@@ -3879,22 +3987,34 @@ impl<'p> Fn_<'_, 'p> {
                 } else {
                     Vec::new()
                 };
-                place
-                    .addr(b, foff)
-                    .ok_or_else(|| gap("a field assignment to a non-record", *line))?;
                 match &fr {
                     Repr::Scalar(_) => {
+                        place
+                            .addr(b, foff)
+                            .ok_or_else(|| gap("a field assignment to a non-record", *line))?;
                         self.expr_as(m, b, value, &fty)?;
                         b.ins(&store_of(&self.cx.ll(&fty)));
                     }
-                    Repr::Agg(l) => {
-                        self.expr_as(m, b, value, &fty)?;
-                        b.ins(&Instruction::I32Const(l.size as i32));
-                        b.ins(&Instruction::MemoryCopy {
-                            src_mem: 0,
-                            dst_mem: 0,
-                        });
-                    }
+                    // RFC-0125 M1: built in the field when the value cannot
+                    // see the binding while it is made; module state is
+                    // never built in place (see `Dest`).
+                    Repr::Agg(l) => match Dest::of(place) {
+                        Some(d) => {
+                            let fresh = !observes(value, name);
+                            self.agg_into(m, b, d.at(foff), l.size, value, &fty, fresh)?;
+                        }
+                        None => {
+                            place
+                                .addr(b, foff)
+                                .ok_or_else(|| gap("a field assignment to a non-record", *line))?;
+                            self.expr_as(m, b, value, &fty)?;
+                            b.ins(&Instruction::I32Const(l.size as i32));
+                            b.ins(&Instruction::MemoryCopy {
+                                src_mem: 0,
+                                dst_mem: 0,
+                            });
+                        }
+                    },
                     Repr::Unit => return unsupported("a Unit field", *line),
                 }
                 self.free_snap(b, snap.as_slice());
@@ -4336,13 +4456,15 @@ impl<'p> Fn_<'_, 'p> {
                         self.expr_as(m, b, value, &elem)?;
                         b.ins(&store_of(&self.cx.ll(&elem)));
                     }
+                    // RFC-0125 M1: built in the element when the value cannot
+                    // see the binding while it is made. The element address
+                    // moves off the stack into a local so the fields can be
+                    // addressed from it.
                     Repr::Agg(el) => {
-                        self.expr_as(m, b, value, &elem)?;
-                        b.ins(&Instruction::I32Const(el.size as i32));
-                        b.ins(&Instruction::MemoryCopy {
-                            src_mem: 0,
-                            dst_mem: 0,
-                        });
+                        let a = b.local(ValType::I32);
+                        b.ins(&Instruction::LocalSet(a));
+                        let fresh = !observes(value, name);
+                        self.agg_into(m, b, Dest::Addr(a, 0), el.size, value, &elem, fresh)?;
                     }
                     Repr::Unit => return unsupported("an array of Unit", *line),
                 }
@@ -4538,7 +4660,10 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// Evaluate `value` into an existing place of known type.
+    /// Evaluate `value` into an existing place of known type. `fresh` says the
+    /// place is storage nothing can name yet (a `let`'s slot), so an aggregate
+    /// may be built in it directly — see [`Dest`].
+    #[allow(clippy::too_many_arguments)]
     fn store_into(
         &mut self,
         m: &mut Module,
@@ -4547,6 +4672,7 @@ impl<'p> Fn_<'_, 'p> {
         r: &Repr,
         value: &Expr,
         ty: &Type,
+        fresh: bool,
     ) -> Result<(), String> {
         match (place, r) {
             (Place::Local(l), _) => {
@@ -4557,21 +4683,65 @@ impl<'p> Fn_<'_, 'p> {
             // before the value is built, so an aggregate has somewhere to be
             // copied to. A `Static` destination is the same shape with a constant
             // address, which is why module state needed no new store path.
-            (Place::Slot(_) | Place::Static(_), Repr::Agg(l)) => {
-                place.addr(b, 0);
-                self.expr_as(m, b, value, ty)?;
-                b.ins(&Instruction::I32Const(l.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-            }
+            (Place::Slot(_) | Place::Static(_), Repr::Agg(l)) => match Dest::of(place) {
+                Some(d) => self.agg_into(m, b, d, l.size, value, ty, fresh)?,
+                None => {
+                    place.addr(b, 0);
+                    self.expr_as(m, b, value, ty)?;
+                    b.ins(&Instruction::I32Const(l.size as i32));
+                    b.ins(&Instruction::MemoryCopy {
+                        src_mem: 0,
+                        dst_mem: 0,
+                    });
+                }
+            },
             (Place::Static(_), Repr::Scalar(_)) => {
                 place.addr(b, 0);
                 self.expr_as(m, b, value, ty)?;
                 b.ins(&store_of(&self.cx.ll(ty)));
             }
             _ => return unsupported("a store of a Unit value", Expr::line(value)),
+        }
+        Ok(())
+    }
+
+    /// Evaluate the aggregate `value`, of type `ty` and `size` bytes, and leave
+    /// it at `dest` (RFC-0125 M1). With `in_place`, a literal or a call whose
+    /// type is `ty` writes there directly and the copy is skipped; anything
+    /// else — a variable, a field read, a coercion — is built where it is built
+    /// and copied. Without it, only the copy: the caller could not show the
+    /// destination is unnamed while the value is made (see [`Dest`]).
+    ///
+    /// The destination's address goes down before the value either way, the
+    /// order every other store in this file uses; when the value landed in
+    /// place, the two addresses on the stack are dropped instead of copied.
+    #[allow(clippy::too_many_arguments)]
+    fn agg_into(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        dest: Dest,
+        size: u32,
+        value: &Expr,
+        ty: &Type,
+        in_place: bool,
+    ) -> Result<(), String> {
+        dest.addr(b, 0);
+        self.dest_hint = in_place.then(|| (dest, ty.clone()));
+        self.dest_used = false;
+        let r = self.expr_as(m, b, value, ty);
+        self.dest_hint = None;
+        let used = std::mem::take(&mut self.dest_used);
+        r?;
+        if used {
+            b.ins(&Instruction::Drop);
+            b.ins(&Instruction::Drop);
+        } else {
+            b.ins(&Instruction::I32Const(size as i32));
+            b.ins(&Instruction::MemoryCopy {
+                src_mem: 0,
+                dst_mem: 0,
+            });
         }
         Ok(())
     }
@@ -5070,6 +5240,9 @@ impl<'p> Fn_<'_, 'p> {
     /// The walk itself. Every arm leaves exactly one value (or none, for
     /// `Unit`) on the stack, which is what lets the wrapper above tee it.
     fn expr_inner(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
+        // RFC-0125 M1: the consumer's storage, for THIS node only. Taken here so
+        // that a literal or a call nested anywhere below cannot claim it.
+        let hint = self.dest_hint.take();
         Ok(match e {
             // RFC-0093: a take is the load the read already emits. The `.copy()`
             // that used to follow it is what the take removes, so the emitted
@@ -5121,7 +5294,7 @@ impl<'p> Fn_<'_, 'p> {
                 if self.lookup(name, *line).is_err()
                     && (name == "None" || self.cx.variants.contains_key(name)) =>
             {
-                match self.sum_ctor(m, b, name, &[], *line)? {
+                match self.sum_ctor(m, b, name, &[], *line, hint)? {
                     Some(t) => t,
                     None => return unsupported(&format!("the name `{name}`"), *line),
                 }
@@ -5262,7 +5435,12 @@ impl<'p> Fn_<'_, 'p> {
                 let Repr::Agg(l) = self.cx.repr(&ty, *line)? else {
                     return unsupported(&format!("the record literal `{name}`"), *line);
                 };
-                let off = b.alloc(l.size, l.align);
+                // RFC-0125 M1: the consumer's storage when it holds this very
+                // type, a slot of our own otherwise.
+                let (dest, used) = match hint {
+                    Some((d, t)) if self.cx.ll(&t) == self.cx.ll(&ty) => (d, true),
+                    _ => (Dest::Slot(b.alloc(l.size, l.align)), false),
+                };
                 for (i, f) in decl.iter().enumerate() {
                     let init = fields
                         .iter()
@@ -5271,23 +5449,19 @@ impl<'p> Fn_<'_, 'p> {
                         .ok_or_else(|| gap(&format!("the missing field `{}`", f.name), *line))?;
                     match self.cx.repr(&f.ty, *line)? {
                         Repr::Scalar(_) => {
-                            b.slot(off + l.fields[i]);
+                            dest.addr(b, l.fields[i]);
                             self.expr_as(m, b, init, &f.ty)?;
                             b.ins(&store_of(&self.cx.ll(&f.ty)));
                         }
                         Repr::Agg(fl) => {
-                            b.slot(off + l.fields[i]);
-                            self.expr_as(m, b, init, &f.ty)?;
-                            b.ins(&Instruction::I32Const(fl.size as i32));
-                            b.ins(&Instruction::MemoryCopy {
-                                src_mem: 0,
-                                dst_mem: 0,
-                            });
+                            let at = dest.at(l.fields[i]);
+                            self.agg_into(m, b, at, fl.size, init, &f.ty, true)?;
                         }
                         Repr::Unit => return unsupported("a Unit field", *line),
                     }
                 }
-                b.slot(off);
+                dest.addr(b, 0);
+                self.dest_used = used;
                 // A predicated record's cross-field `where` runs on the finished
                 // literal. There is no coercion to hang it on — the literal
                 // already IS the named type, so `from == to` and
@@ -5394,7 +5568,7 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 t
             }
-            Expr::ArrayLit { elems, line } => self.array_lit(m, b, elems, *line)?,
+            Expr::ArrayLit { elems, line } => self.array_lit(m, b, hint, elems, *line)?,
             Expr::MapLit { entries, line } => self.map_lit(m, b, entries, *line)?,
             Expr::Match {
                 scrutinee,
@@ -5409,7 +5583,10 @@ impl<'p> Fn_<'_, 'p> {
                 self.try_construct(m, b, name, args, *line)?
             }
             Expr::Binary { op, lhs, rhs, line } => self.binary(m, b, *op, lhs, rhs, *line)?,
-            Expr::Call { name, args, line } => self.call(m, b, name, args, *line)?,
+            Expr::Call { name, args, line } => {
+                self.call_dest = hint;
+                self.call(m, b, name, args, *line)?
+            }
             Expr::Spawn { name, args, line } => self.spawn(m, b, name, args, *line)?,
             // No catch-all. The arms above cover `Expr` exhaustively, and the
             // `other => unsupported(..)` that used to sit here was dead — it
@@ -7099,6 +7276,9 @@ impl<'p> Fn_<'_, 'p> {
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
+        // RFC-0125 M1: the consumer's storage for THIS call's result, taken
+        // before any argument is lowered.
+        let hint = self.call_dest.take();
         // PLAN-0125-runtime §2.1: a `std/mem` primitive is one instruction,
         // never a call. Before every other resolution, because the loader's
         // prefix is the whole of the identity and no table below has a row.
@@ -7577,7 +7757,7 @@ impl<'p> Fn_<'_, 'p> {
             // `IntVal(3)` would get.
             "value" if args.len() == 1 => {
                 let name = self.value_variant(&args[0], line)?;
-                return match self.sum_ctor(m, b, name, args, line)? {
+                return match self.sum_ctor(m, b, name, args, line, hint)? {
                     Some(t) => Ok(t),
                     None => unsupported("the built-in `Value` enum", line),
                 };
@@ -8356,7 +8536,7 @@ impl<'p> Fn_<'_, 'p> {
                 return self.fnval_call(m, b, &recv, &norm, args, line);
             }
         }
-        if let Some(t) = self.sum_ctor(m, b, name, args, line)? {
+        if let Some(t) = self.sum_ctor(m, b, name, args, line, hint.clone())? {
             return Ok(t);
         }
         // `Age(n)` — the explicit spelling of what a boundary now does by itself
@@ -8445,7 +8625,7 @@ impl<'p> Fn_<'_, 'p> {
                 }
             }
             let sig = self.cx.instantiate(m, &f, type_args, subst)?;
-            return self.emit_call(m, b, &sig, args);
+            return self.emit_call(m, b, &sig, args, hint);
         }
         // RFC-0043's host boundary. These three are not `vyrn` host imports like
         // an ordinary RFC-0012 `extern`: the C shim defines them on every target,
@@ -8555,7 +8735,7 @@ impl<'p> Fn_<'_, 'p> {
         if sig.params.len() != args.len() {
             return unsupported(&format!("the call `{name}` at this arity"), line);
         }
-        self.emit_call(m, b, &sig, args)
+        self.emit_call(m, b, &sig, args, hint)
     }
 
     /// One `std/mem` primitive (PLAN-0125-runtime §2.1 and §2.3) as its
@@ -8824,18 +9004,23 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         sig: &Sig,
         args: &[Expr],
+        hint: Option<(Dest, Type)>,
     ) -> Result<Type, String> {
         // An aggregate result is written through a hidden leading pointer into a
         // slot of ours, so the destination goes on the stack before the
-        // arguments and is pushed again afterwards as the value.
+        // arguments and is pushed again afterwards as the value. RFC-0125 M1:
+        // the consumer's own storage when it holds this very type, so the
+        // callee's `return` lands there and no slot is taken here.
         let dest = match sig.ret.agg() {
-            Some(l) => {
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                Some(off)
-            }
+            Some(l) => Some(match hint {
+                Some((d, t)) if self.cx.ll(&t) == self.cx.ll(&sig.ret_ty) => (d, true),
+                _ => (Dest::Slot(b.alloc(l.size, l.align)), false),
+            }),
             None => None,
         };
+        if let Some((d, _)) = dest {
+            d.addr(b, 0);
+        }
         // A `modify` argument is the caller's binding by ADDRESS. Reloads are the
         // one case that needs a fixup after the call: a scalar in a wasm local has
         // no address at all, so it is spilled to a slot for the callee to write
@@ -8880,8 +9065,9 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&load_of(ll, 0, *signed));
             b.ins(&Instruction::LocalSet(*l));
         }
-        if let Some(off) = dest {
-            b.slot(off);
+        if let Some((d, used)) = dest {
+            d.addr(b, 0);
+            self.dest_used = used;
         }
         // The DECLARED return type, not its structural form. Resolving here threw
         // away exactly the information a caller needs to solve a further generic:
@@ -9074,7 +9260,7 @@ impl<'p> Fn_<'_, 'p> {
             subst,
             binds,
         )?;
-        let r = self.emit_call(m, b, &sig, &call_args);
+        let r = self.emit_call(m, b, &sig, &call_args, None);
         // The clones die with this frame; their aliases must die first, or a
         // later node at a recycled address would resolve to somebody's row.
         self.cx.plan.alias_unwind(mark);
@@ -9125,7 +9311,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             self.cx.plan.alias_clones_scoped(&pairs);
         }
-        let r = self.emit_call(m, b, &bnd.target.sig, &all);
+        let r = self.emit_call(m, b, &bnd.target.sig, &all, None);
         self.cx.plan.alias_unwind(mark);
         r
     }
@@ -9859,7 +10045,7 @@ impl<'p> Fn_<'_, 'p> {
         let dsig = self.dispatcher(m, sig_ty, line)?;
         let mut all = vec![recv.clone()];
         all.extend(args.iter().cloned());
-        self.emit_call(m, b, &dsig, &all)
+        self.emit_call(m, b, &dsig, &all, None)
     }
 
     /// `.length` / `.byteLength`, neither of which is a field: the receiver's
@@ -10916,6 +11102,7 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
+        hint: Option<(Dest, Type)>,
         elems: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
@@ -10926,6 +11113,36 @@ impl<'p> Fn_<'_, 'p> {
             }
             _ => None,
         };
+        // RFC-0125 M1: in an `Array<T>` position the elements are built straight
+        // into the heap buffer and the triple is written where the consumer
+        // wants it — its own storage when it handed one over, a slot the size
+        // of the triple otherwise — so the fixed form, a frame extent the size
+        // of the whole literal copied once more by `heapify`, never exists. In
+        // a fixed position of the literal's own length the elements land in
+        // the consumer's storage.
+        if let Some((dest, hty)) = hint {
+            match self.cx.resolve(&hty) {
+                Type::Array(inner) if !matches!(*inner, Type::Param(_)) => {
+                    return self.array_lit_heap(m, b, dest, &inner, elems, line, true);
+                }
+                Type::ArrayN(inner, n)
+                    if n == elems.len() && n > 0 && !matches!(*inner, Type::Param(_)) =>
+                {
+                    self.fixed_elems(m, b, dest, &inner, elems, line)?;
+                    dest.addr(b, 0);
+                    self.dest_used = true;
+                    return Ok(Type::ArrayN(inner, n));
+                }
+                _ => {}
+            }
+        }
+        if let Some(Type::Array(inner)) = &want {
+            if !matches!(**inner, Type::Param(_)) {
+                let l = self.layout_of(&Type::Array(inner.clone()), line)?;
+                let dest = Dest::Slot(b.alloc(l.size, l.align));
+                return self.array_lit_heap(m, b, dest, inner, elems, line, false);
+            }
+        }
         // An empty `[]` in a `SmallArray<T, N>` position is the inline empty state,
         // not the empty triple: `len` 0, `cap` N, `data` null (RFC-0056). Built here
         // rather than through the `ArrayN` conversion because there is no fixed
@@ -10966,29 +11183,83 @@ impl<'p> Fn_<'_, 'p> {
             Some(t) => t,
             None => self.peek(&elems[0], line)?,
         };
-        let stride = self.stride(&elem, line)?;
         let el = self.layout_of(&elem, line)?;
         let off = b.alloc(self.extent(&elem, elems.len(), line)?, el.align);
-        let r = self.cx.repr(&elem, line)?;
+        self.fixed_elems(m, b, Dest::Slot(off), &elem, elems, line)?;
+        b.slot(off);
+        Ok(Type::ArrayN(Box::new(elem), elems.len()))
+    }
+
+    /// The elements of a literal, one after another from `dest` (RFC-0125 M1).
+    /// An aggregate element is built in its own place, so a nested literal
+    /// costs no frame.
+    fn fixed_elems(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        dest: Dest,
+        elem: &Type,
+        elems: &[Expr],
+        line: usize,
+    ) -> Result<(), String> {
+        let stride = self.stride(elem, line)?;
+        let r = self.cx.repr(elem, line)?;
         for (i, e) in elems.iter().enumerate() {
-            b.slot(off + stride * i as u32);
-            self.expr_as(m, b, e, &elem)?;
+            let at = stride * i as u32;
             match &r {
                 Repr::Scalar(_) => {
-                    b.ins(&store_of(&self.cx.ll(&elem)));
+                    dest.addr(b, at);
+                    self.expr_as(m, b, e, elem)?;
+                    b.ins(&store_of(&self.cx.ll(elem)));
                 }
-                Repr::Agg(_) => {
-                    b.ins(&Instruction::I32Const(stride as i32));
-                    b.ins(&Instruction::MemoryCopy {
-                        src_mem: 0,
-                        dst_mem: 0,
-                    });
-                }
+                Repr::Agg(_) => self.agg_into(m, b, dest.at(at), stride, e, elem, true)?,
                 Repr::Unit => return unsupported("an array of Unit", line),
             }
         }
-        b.slot(off);
-        Ok(Type::ArrayN(Box::new(elem), elems.len()))
+        Ok(())
+    }
+
+    /// `[a, b, c]` in an `Array<T>` position, built on the heap at once
+    /// (RFC-0125 M1): the buffer is taken first, the elements are built in it,
+    /// and the `{ptr, len, cap}` triple is written at `dest`. `len` and `cap`
+    /// are both N, the schedule [`Fn_::heapify`] gives a literal. The empty
+    /// literal is the empty triple, `data` null, as it always was.
+    #[allow(clippy::too_many_arguments)]
+    fn array_lit_heap(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        dest: Dest,
+        inner: &Type,
+        elems: &[Expr],
+        line: usize,
+        used: bool,
+    ) -> Result<Type, String> {
+        let ty = Type::Array(Box::new(inner.clone()));
+        let l = self.layout_of(&ty, line)?;
+        let n = elems.len();
+        let buf = b.local(ValType::I32);
+        if n == 0 {
+            b.ins(&Instruction::I32Const(0));
+            b.ins(&Instruction::LocalSet(buf));
+        } else {
+            let bytes = self.extent(inner, n, line)? as i32;
+            b.ins(&Instruction::I64Const(bytes.max(1) as i64));
+            b.ins(&Instruction::Call(self.cx.rt.malloc));
+            b.ins(&Instruction::LocalSet(buf));
+            self.fixed_elems(m, b, Dest::Addr(buf, 0), inner, elems, line)?;
+        }
+        dest.addr(b, l.fields[0]);
+        b.ins(&Instruction::LocalGet(buf));
+        b.ins(&Instruction::I32Store(word()));
+        for f in [l.fields[1], l.fields[2]] {
+            dest.addr(b, f);
+            b.ins(&Instruction::I64Const(n as i64));
+            b.ins(&Instruction::I64Store(word8()));
+        }
+        dest.addr(b, 0);
+        self.dest_used = used;
+        Ok(ty)
     }
 
     /// `[N x T]` → the growable `{ptr, len, cap}` triple: a heap buffer with a
@@ -12433,6 +12704,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Build an `Option`/`Result` value: the tag, then the two payload words.
+    #[allow(clippy::too_many_arguments)]
     fn build_sum2(
         &mut self,
         m: &mut Module,
@@ -12441,26 +12713,31 @@ impl<'p> Fn_<'_, 'p> {
         tag: i32,
         payload: Option<(&Expr, Type)>,
         line: usize,
+        hint: Option<(Dest, Type)>,
     ) -> Result<Type, String> {
         let Repr::Agg(l) = self.cx.repr(ty, line)? else {
             return unsupported("a sum that is not an aggregate", line);
         };
-        let off = b.alloc(l.size, l.align);
-        b.slot(off);
+        // RFC-0125 M1: the consumer's storage when it holds this very type.
+        let (dest, used) = match hint {
+            Some((d, t)) if self.cx.ll(&t) == self.cx.ll(ty) => (d, true),
+            _ => (Dest::Slot(b.alloc(l.size, l.align)), false),
+        };
+        dest.addr(b, 0);
         b.ins(&Instruction::I32Const(tag));
         b.ins(&Instruction::I32Store8(byte()));
-        let (w0, w1) = (off + l.fields[1], off + l.fields[2]);
+        let (w0, w1) = (l.fields[1], l.fields[2]);
         match payload {
             None => {
                 for a in [w0, w1] {
-                    b.slot(a);
+                    dest.addr(b, a);
                     b.ins(&Instruction::I64Const(0));
                     b.ins(&Instruction::I64Store(word8()));
                 }
             }
             Some((e, t)) if self.word2(&t)? == Word::Inline2 => {
                 // Two words already side by side: one copy, no encoding.
-                b.slot(w0);
+                dest.addr(b, w0);
                 self.expr_as(m, b, e, &t)?;
                 b.ins(&Instruction::I32Const(16));
                 b.ins(&Instruction::MemoryCopy {
@@ -12469,7 +12746,7 @@ impl<'p> Fn_<'_, 'p> {
                 });
             }
             Some((e, t)) => {
-                b.slot(w0);
+                dest.addr(b, w0);
                 self.expr_as(m, b, e, &t)?;
                 match self.word2(&t)? {
                     Word::Direct => {}
@@ -12480,16 +12757,18 @@ impl<'p> Fn_<'_, 'p> {
                     _ => self.box_value(b, &t, line)?,
                 }
                 b.ins(&Instruction::I64Store(word8()));
-                b.slot(w1);
+                dest.addr(b, w1);
                 b.ins(&Instruction::I64Const(0));
                 b.ins(&Instruction::I64Store(word8()));
             }
         }
-        b.slot(off);
+        dest.addr(b, 0);
+        self.dest_used = used;
         Ok(ty.clone())
     }
 
     /// Build a user-enum value: the tag, then one word per payload.
+    #[allow(clippy::too_many_arguments)]
     fn build_enum(
         &mut self,
         m: &mut Module,
@@ -12499,6 +12778,7 @@ impl<'p> Fn_<'_, 'p> {
         args: &[Expr],
         payload: &[Type],
         line: usize,
+        hint: Option<(Dest, Type)>,
     ) -> Result<Type, String> {
         if args.len() != payload.len() {
             return unsupported("an enum variant at this arity", line);
@@ -12506,19 +12786,24 @@ impl<'p> Fn_<'_, 'p> {
         let Repr::Agg(l) = self.cx.repr(ty, line)? else {
             return unsupported("an enum that is not an aggregate", line);
         };
-        let off = b.alloc(l.size, l.align);
-        b.slot(off);
+        // RFC-0125 M1: the consumer's storage when it holds this very type.
+        let (dest, used) = match hint {
+            Some((d, t)) if self.cx.ll(&t) == self.cx.ll(ty) => (d, true),
+            _ => (Dest::Slot(b.alloc(l.size, l.align)), false),
+        };
+        dest.addr(b, 0);
         b.ins(&Instruction::I64Const(tag as i64));
         b.ins(&Instruction::I64Store(word8()));
         for (i, (a, t)) in args.iter().zip(payload).enumerate() {
-            b.slot(off + l.fields[1 + i]);
+            dest.addr(b, l.fields[1 + i]);
             self.expr_as(m, b, a, t)?;
             if self.word1(t) == Word::Boxed {
                 self.box_value(b, t, line)?;
             }
             b.ins(&Instruction::I64Store(word8()));
         }
-        b.slot(off);
+        dest.addr(b, 0);
+        self.dest_used = used;
         Ok(ty.clone())
     }
 
@@ -12588,12 +12873,13 @@ impl<'p> Fn_<'_, 'p> {
         name: &str,
         args: &[Expr],
         line: usize,
+        hint: Option<(Dest, Type)>,
     ) -> Result<Option<Type>, String> {
         let want = self.expected_sum();
         match name {
             "None" => {
                 let ty = want.ok_or_else(|| gap("a `None` with no expected Option type", line))?;
-                return self.build_sum2(m, b, &ty, 0, None, line).map(Some);
+                return self.build_sum2(m, b, &ty, 0, None, line, hint).map(Some);
             }
             "Some" | "Ok" | "Err" => {
                 if args.len() != 1 {
@@ -12606,7 +12892,7 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 let tag = i32::from(name != "Err");
                 return self
-                    .build_sum2(m, b, &ty, tag, Some((&args[0], payload)), line)
+                    .build_sum2(m, b, &ty, tag, Some((&args[0], payload)), line, hint)
                     .map(Some);
             }
             _ => {}
@@ -12649,7 +12935,7 @@ impl<'p> Fn_<'_, 'p> {
                 (ty, tag, payload)
             }
         };
-        self.build_enum(m, b, &ty, tag, args, &payload, line)
+        self.build_enum(m, b, &ty, tag, args, &payload, line, hint)
             .map(Some)
     }
 
@@ -15136,6 +15422,27 @@ fn each_stmt(s: &Stmt, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt)) {
         }
         Stmt::Region { body, .. } => each_block(body, fe, fs),
     }
+}
+
+/// Could evaluating `e` read the binding `name`, or run code that might
+/// (RFC-0125 M1's rule on [`Dest`])? A mention of the binding, or any call —
+/// a callee can reach module state, and a `modify` argument is the binding
+/// itself. A lambda literal counts as a call: it captures now.
+fn observes(e: &Expr, name: &str) -> bool {
+    let mut hit = vyrn_frontend::movecheck::mentions_place(e, name);
+    each_expr(
+        e,
+        &mut |x| {
+            if matches!(
+                x,
+                Expr::Call { .. } | Expr::Spawn { .. } | Expr::Lambda { .. } | Expr::Try { .. }
+            ) {
+                hit = true;
+            }
+        },
+        &mut |_| {},
+    );
+    hit
 }
 
 fn is_var(e: &Expr, name: &str) -> bool {
