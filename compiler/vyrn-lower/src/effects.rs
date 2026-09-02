@@ -306,7 +306,7 @@ impl Walk<'_> {
                     self.own = self.own.with(Effect::Alloc);
                 }
             }
-            St::Do(rhs) => {
+            St::Do(rhs, _) => {
                 self.rhs(rhs);
             }
             St::Trap => self.own = self.own.with(Effect::Trap),
