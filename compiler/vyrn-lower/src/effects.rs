@@ -9,19 +9,24 @@
 //! the direction the RFC asks for: the code derives from the table.
 //!
 //! The judgment knows nothing about the surface language. It sees a call by
-//! its callee's name, an owned name born of a primitive or a literal (an
-//! allocation), and a trap. It does not see a `spawn` (the core lowers one
-//! as a call to the spawned function — RFC-0125 §3 M6 finding 1), and it
-//! does not see inside a lambda body (the core lowers a lambda as a read of
-//! its captures, and judges the body nowhere — finding 2).
+//! its callee's name, the spawn marker on a call (`Rhs::Call::spawn`), an
+//! owned name born of a primitive or a literal (an allocation), and a trap.
+//! A call through a function value names a local, and the caller answers
+//! for its type with the closed set of functions a value of that type may
+//! hold — RFC-0037's stored sources (finding 3 of the first slice). A lambda
+//! body is a frame of its own (RFC-0125 M3) and the caller hands every frame
+//! in; a body joins the frames of the lambdas it holds, because the value it
+//! builds can run them (finding 2).
 //!
-//! **This slice refuses nothing.** It computes the set and `tests/effects.rs`
-//! compares it, per function, with what the audience pass (RFC-0072) and the
-//! floor (RFC-0103) say today. The inclusion checks — a body's effects within
-//! its target's, within its context's — are the deletion slice's, and they
-//! wait on that comparison's findings.
+//! One inclusion check lives here: the spawn-isolation rule of RFC-0004 §Q4,
+//! stated as RFC-0125 §2.2 states it — a spawned callee's set within
+//! [`Effects::SPAWN_ALLOWS`]. The other two, a body within its target's set
+//! and within its context's, still wait on the floor and the fence;
+//! `tests/effects.rs` compares the set with both passes, per function.
 
 use std::collections::HashMap;
+
+use vyrn_frontend::ast::Type;
 
 use crate::core::{Body, Rhs, St};
 
@@ -52,6 +57,8 @@ pub enum Effect {
     Extern,
     /// A stream is handed to the serving host (RFC-0074 M3a).
     Serve,
+    /// A task is started (RFC-0004 §Q4): a call the core marks `spawn`.
+    Spawn,
     /// The path may end in a trap.
     Trap,
     /// The compiler's own state is read; exists at generation time only
@@ -60,7 +67,7 @@ pub enum Effect {
 }
 
 impl Effect {
-    pub const ALL: [Effect; 13] = [
+    pub const ALL: [Effect; 14] = [
         Effect::Alloc,
         Effect::ReadInput,
         Effect::WriteOutput,
@@ -72,6 +79,7 @@ impl Effect {
         Effect::Random,
         Effect::Extern,
         Effect::Serve,
+        Effect::Spawn,
         Effect::Trap,
         Effect::GenOnly,
     ];
@@ -90,6 +98,7 @@ impl Effect {
             Effect::Random => "random",
             Effect::Extern => "extern",
             Effect::Serve => "serve",
+            Effect::Spawn => "spawn",
             Effect::Trap => "trap",
             Effect::GenOnly => "gen-only",
         }
@@ -107,6 +116,12 @@ pub struct Effects(u16);
 
 impl Effects {
     pub const PURE: Effects = Effects(0);
+
+    /// What a spawned callee may do (RFC-0004 §Q4: isolated means no I/O and
+    /// no shared state; RFC-0125 §3 M6 finding 1): allocate and trap. A
+    /// task's result is heap it owns, and a trap in a task is the task's.
+    pub const SPAWN_ALLOWS: Effects =
+        Effects((1 << Effect::Alloc as u16) | (1 << Effect::Trap as u16));
 
     pub fn of(e: Effect) -> Effects {
         Effects(1 << e as u16)
@@ -203,19 +218,40 @@ pub fn atom(name: &str) -> Option<Effect> {
 
 /// What a callee's name resolves to, as the caller of [`judge`] sees the
 /// program. The judgment itself resolves nothing: it does not know which
-/// names are functions, which are `extern`, which are builtins.
+/// names are functions, which are `extern`, which are builtins, and which
+/// function values a type may hold.
 #[derive(Debug, Clone)]
 pub enum Callee {
     /// A builtin or host import with a known effect.
     Atom(Effects),
     /// User bodies, by index into the slice handed to [`judge`] — several
-    /// when a name has several instances or several impls.
+    /// when a name has several instances or several impls, or when a
+    /// function type has several sources (RFC-0037).
     Bodies(Vec<usize>),
     /// A builtin with no effect.
     Pure,
-    /// A name the caller cannot attribute (a call through a function value).
-    /// Judged as pure and reported, so the tally counts it.
+    /// A name the caller cannot attribute, or a function type with no known
+    /// source. Judged as pure and reported, so the tally counts it.
     Unknown,
+}
+
+/// One `spawn` the judgment saw.
+#[derive(Debug, Clone)]
+pub struct Spawned {
+    /// The body the spawn is in, by index.
+    pub body: usize,
+    pub callee: String,
+    pub line: usize,
+    /// The spawned callee's set, after the fixpoint.
+    pub effects: Effects,
+}
+
+impl Spawned {
+    /// What the spawn-isolation rule refuses: the callee's effects outside
+    /// [`Effects::SPAWN_ALLOWS`]. Pure when the spawn is allowed.
+    pub fn outside(&self) -> Effects {
+        self.effects.minus(Effects::SPAWN_ALLOWS)
+    }
 }
 
 /// The judgment's answer for a set of bodies.
@@ -225,32 +261,68 @@ pub struct Judged {
     pub effects: Vec<Effects>,
     /// `(body index, callee name)` for every call nobody could attribute.
     pub unknown: Vec<(usize, String)>,
+    /// `(body index, callee name)` for every call through a function value
+    /// that `through` answered with bodies.
+    pub through: Vec<(usize, String)>,
+    /// Every spawn site, with its callee's set.
+    pub spawns: Vec<Spawned>,
 }
 
-/// The effect set of every body in `bodies`, each the join of its own atoms
-/// and its callees', to a fixpoint. `resolve` says what a callee name is.
-pub fn judge(bodies: &[&Body], resolve: &mut dyn FnMut(&str) -> Callee) -> Judged {
+/// The effect set of every body in `bodies`, each the join of its own atoms,
+/// its callees' and its lambda frames', to a fixpoint. `resolve` says what
+/// a callee name is; `through` says what a function TYPE may hold, for a
+/// call whose callee is a name of the body (a parameter or a binding of
+/// function type). `bodies` holds every frame the caller wants judged: a
+/// body's lambdas are joined only when they are in the slice.
+pub fn judge(
+    bodies: &[&Body],
+    resolve: &mut dyn FnMut(&str) -> Callee,
+    through: &mut dyn FnMut(&Type) -> Callee,
+) -> Judged {
+    let index: HashMap<*const Body, usize> = bodies
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (*b as *const Body, i))
+        .collect();
     let mut own: Vec<Effects> = Vec::with_capacity(bodies.len());
     let mut edges: Vec<Vec<usize>> = Vec::with_capacity(bodies.len());
     let mut unknown = Vec::new();
-    // One resolution per distinct name, not one per call site.
+    let mut via = Vec::new();
+    let mut spawns: Vec<(usize, String, usize, Vec<usize>)> = Vec::new();
+    // One resolution per distinct name and per distinct type, not one per
+    // call site.
     let mut memo: HashMap<String, Callee> = HashMap::new();
+    let mut memo_ty: HashMap<String, Callee> = HashMap::new();
     for (i, b) in bodies.iter().enumerate() {
         let mut w = Walk {
             body: b,
             own: Effects::PURE,
             edges: Vec::new(),
             unknown: Vec::new(),
+            via: Vec::new(),
+            spawns: Vec::new(),
             resolve,
+            through,
             memo: &mut memo,
+            memo_ty: &mut memo_ty,
         };
         w.stmts(&b.stmts);
         own.push(w.own);
         let mut e = w.edges;
+        // A lambda's frame runs when the value is invoked, and the body that
+        // built the value is where the invocation is possible: presence, as
+        // the floor counts it.
+        e.extend(
+            b.lambdas
+                .iter()
+                .filter_map(|l| index.get(&(l as *const Body))),
+        );
         e.sort_unstable();
         e.dedup();
         edges.push(e);
         unknown.extend(w.unknown.into_iter().map(|n| (i, n)));
+        via.extend(w.via.into_iter().map(|n| (i, n)));
+        spawns.extend(w.spawns.into_iter().map(|(c, l, idx)| (i, c, l, idx)));
     }
     // The fixpoint. Monotone over a finite lattice, so it ends; the corpus
     // needs a handful of rounds.
@@ -271,7 +343,24 @@ pub fn judge(bodies: &[&Body], resolve: &mut dyn FnMut(&str) -> Callee) -> Judge
             break;
         }
     }
-    Judged { effects, unknown }
+    let spawns = spawns
+        .into_iter()
+        .map(|(body, callee, line, idx)| Spawned {
+            body,
+            callee,
+            line,
+            effects: idx
+                .iter()
+                .map(|j| effects[*j])
+                .fold(Effects::PURE, Effects::join),
+        })
+        .collect();
+    Judged {
+        effects,
+        unknown,
+        through: via,
+        spawns,
+    }
 }
 
 struct Walk<'a> {
@@ -279,8 +368,14 @@ struct Walk<'a> {
     own: Effects,
     edges: Vec<usize>,
     unknown: Vec<String>,
+    /// The callees `through` answered with bodies.
+    via: Vec<String>,
+    /// `(callee, line, callee bodies)` per spawn.
+    spawns: Vec<(String, usize, Vec<usize>)>,
     resolve: &'a mut dyn FnMut(&str) -> Callee,
+    through: &'a mut dyn FnMut(&Type) -> Callee,
     memo: &'a mut HashMap<String, Callee>,
+    memo_ty: &'a mut HashMap<String, Callee>,
 }
 
 impl Walk<'_> {
@@ -293,7 +388,7 @@ impl Walk<'_> {
     fn stmt(&mut self, s: &St) {
         match s {
             St::Let(n, rhs) => {
-                let atom_call = self.rhs(rhs);
+                let atom_call = self.rhs(rhs, self.body.names[*n as usize].line);
                 // An owned name born of a primitive, a literal or a builtin
                 // is an allocation. Born of a user call, the callee's own
                 // set says whether it allocated or handed a parameter back.
@@ -306,8 +401,8 @@ impl Walk<'_> {
                     self.own = self.own.with(Effect::Alloc);
                 }
             }
-            St::Do(rhs, _) => {
-                self.rhs(rhs);
+            St::Do(rhs, line) => {
+                self.rhs(rhs, *line);
             }
             St::Trap => self.own = self.own.with(Effect::Trap),
             St::If { then, els, .. } => {
@@ -329,35 +424,74 @@ impl Walk<'_> {
         }
     }
 
-    /// Whether the right-hand side was a call that is not a user body — the
-    /// caller's own allocation when the result is owned.
-    fn rhs(&mut self, r: &Rhs) -> bool {
-        let Rhs::Call { callee, .. } = r else {
-            return false;
-        };
+    /// What `callee` is: by name first, and for a name of this body, by its
+    /// type — a callable local holds a function value, whatever alias the
+    /// type is spelled through.
+    fn callee(&mut self, callee: &str) -> Callee {
         let c = match self.memo.get(callee) {
             Some(c) => c.clone(),
             None => {
                 let c = (self.resolve)(callee);
-                self.memo.insert(callee.clone(), c.clone());
+                self.memo.insert(callee.to_string(), c.clone());
                 c
             }
         };
-        match c {
+        if !matches!(c, Callee::Unknown) {
+            return c;
+        }
+        let Some(ty) = self
+            .body
+            .names
+            .iter()
+            .find(|n| n.source == callee)
+            .map(|n| &n.ty)
+        else {
+            return Callee::Unknown;
+        };
+        let key = ty.to_string();
+        let c = match self.memo_ty.get(&key) {
+            Some(c) => c.clone(),
+            None => {
+                let c = (self.through)(ty);
+                self.memo_ty.insert(key, c.clone());
+                c
+            }
+        };
+        if matches!(c, Callee::Bodies(_)) {
+            self.via.push(callee.to_string());
+        }
+        c
+    }
+
+    /// Whether the right-hand side was a call that is not a user body — the
+    /// caller's own allocation when the result is owned.
+    fn rhs(&mut self, r: &Rhs, line: usize) -> bool {
+        let Rhs::Call { callee, spawn, .. } = r else {
+            return false;
+        };
+        if *spawn {
+            self.own = self.own.with(Effect::Spawn);
+        }
+        let c = self.callee(callee);
+        let (atom, idx) = match c {
             Callee::Atom(e) => {
                 self.own = self.own.join(e);
-                true
+                (true, Vec::new())
             }
             Callee::Bodies(idx) => {
-                self.edges.extend(idx);
-                false
+                self.edges.extend(idx.iter().copied());
+                (false, idx)
             }
-            Callee::Pure => true,
+            Callee::Pure => (true, Vec::new()),
             Callee::Unknown => {
                 self.unknown.push(callee.clone());
-                true
+                (true, Vec::new())
             }
+        };
+        if *spawn {
+            self.spawns.push((callee.clone(), line, idx));
         }
+        atom
     }
 }
 
@@ -387,5 +521,6 @@ mod tests {
             s.minus(Effects::of(Effect::Alloc)),
             Effects::of(Effect::Trap)
         );
+        assert_eq!(Effects::SPAWN_ALLOWS.to_string(), "alloc, trap");
     }
 }

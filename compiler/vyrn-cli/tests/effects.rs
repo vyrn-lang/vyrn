@@ -27,10 +27,12 @@
 //! The lattice is stated once, as the table in RFC-0125 §3 M6. The first
 //! test reads it out of the RFC and holds `effects::ATOMS` equal to it.
 
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use vyrn_frontend::ast::Program;
+use vyrn_frontend::ast::{Program, Type};
 use vyrn_frontend::audience::{self, Audience};
 use vyrn_frontend::floor::{self, Capability};
 use vyrn_lower::effects::{self, Callee, Effect, Effects};
@@ -80,15 +82,27 @@ fn slash(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
 
-fn load(path: &Path) -> Result<Program, String> {
+/// A root, loaded as the CLI loads it: under its project's `artifacts` map
+/// when it has one, so the floor (RFC-0103) decides on a declared entry
+/// here as it does at `vyrn check`.
+fn load(path: &Path, project: Option<&Path>) -> Result<Program, String> {
     let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let opts = vyrn_frontend::loader::LoadOptions {
         std_root: Some(slash(&repo_root().join("std"))),
+        artifacts: project.and_then(manifest).and_then(|m| m.artifacts),
         ..Default::default()
     };
+    // The message and its note: a floor refusal names the carrier in the note.
     vyrn_frontend::load(&src, &slash(path), &opts, &Fs).map_err(|d| {
         d.first()
-            .map(|d| d.render())
+            .map(|d| match &d.note {
+                Some(n) => format!(
+                    "{}
+  note: {n}",
+                    d.render()
+                ),
+                None => d.render(),
+            })
             .unwrap_or_else(|| "load failed".into())
     })
 }
@@ -300,19 +314,42 @@ fn run_corpus() {
 
     let mut rows: Vec<Row> = Vec::new();
     let mut unknown: BTreeMap<String, usize> = BTreeMap::new();
+    // Calls through a function value the sources answered for, and the
+    // function types with a source the corpus has no body for (open sets).
+    let mut through_calls = 0usize;
+    let mut open: Vec<String> = Vec::new();
+    // Every spawn site, and the ones whose callee's set is outside the rule.
+    let mut spawn_sites = 0usize;
+    let mut spawn_outside: Vec<String> = Vec::new();
     let mut gaps: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut unloadable = 0usize;
+    let mut refused = 0usize;
     let mut programs = 0usize;
     for (path, project) in &roots {
-        let program = match load(path) {
+        let program = match load(path, project.as_deref()) {
             Ok(p) => p,
             Err(e) => {
                 // A project entry must load here: the audience comparison
-                // has nothing else to stand on. An example that needs the
-                // root manifest's remote dependencies is counted, as in
-                // `kernel.rs`.
-                if project.is_some() {
-                    panic!("{} did not load: {e}", slash(path));
+                // has nothing else to stand on — unless the registry says
+                // its artifact's floor refuses it, and the refusal is the
+                // one recorded. An example that needs the root manifest's
+                // remote dependencies is counted, as in `kernel.rs`.
+                if let Some(dir) = project {
+                    let rel = format!(
+                        "{}/{}",
+                        dir.file_name().unwrap().to_string_lossy(),
+                        path.strip_prefix(dir).map(slash).unwrap_or_default()
+                    );
+                    let recorded = common::EXPECTED_PROJECT_CHECK_FAILURE
+                        .iter()
+                        .find(|(entry, _, _)| *entry == rel);
+                    match recorded {
+                        Some((_, _, needle)) if e.contains(needle) => {
+                            refused += 1;
+                            continue;
+                        }
+                        _ => panic!("{} did not load: {e}", slash(path)),
+                    }
                 }
                 unloadable += 1;
                 continue;
@@ -345,11 +382,39 @@ fn run_corpus() {
                 Err(g) => *gaps.entry(g.what).or_default() += 1,
             }
         }
+        // Every frame, outermost first: the judgment's slice. `top[i]` is
+        // the slot of instance `i`'s own body; a lambda frame is keyed by
+        // the function it was written in and its line, which is how the
+        // checker names a lambda source (RFC-0037).
+        let mut refs: Vec<&vyrn_lower::core::Body> = Vec::new();
+        let mut top: Vec<usize> = Vec::new();
+        let mut lambda_frames: BTreeMap<(&str, usize), Vec<usize>> = BTreeMap::new();
+        for (i, b) in bodies.iter().enumerate() {
+            for f in b.frames() {
+                if std::ptr::eq(f, b) {
+                    top.push(refs.len());
+                } else if let Some(line) = f
+                    .name
+                    .rsplit("@lambda:")
+                    .next()
+                    .and_then(|l| l.parse::<usize>().ok())
+                {
+                    lambda_frames
+                        .entry((insts[i].func.name.as_str(), line))
+                        .or_default()
+                        .push(refs.len());
+                }
+                refs.push(f);
+            }
+        }
         // A callee's name: every instance of the function by that name, and
         // every impl method with that surface name.
         let mut by_name: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
         for (i, inst) in insts.iter().enumerate() {
-            by_name.entry(inst.func.name.as_str()).or_default().push(i);
+            by_name
+                .entry(inst.func.name.as_str())
+                .or_default()
+                .push(top[i]);
         }
         let mut impl_methods: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
         for im in &program.impls {
@@ -382,7 +447,6 @@ fn run_corpus() {
             .filter(|f| f.is_extern)
             .map(|f| f.name.as_str())
             .collect();
-        let refs: Vec<&vyrn_lower::core::Body> = bodies.iter().collect();
         let mut resolve = |name: &str| -> Callee {
             if let Some(e) = effects::atom(name) {
                 return Callee::Atom(Effects::of(e));
@@ -410,10 +474,71 @@ fn run_corpus() {
             }
             Callee::Unknown
         };
-        let judged = effects::judge(&refs, &mut resolve);
+        // RFC-0037: the closed set of functions a value of a function type
+        // may hold, as the checker's defunctionalization collected it. A
+        // named source is its instances; a lambda source is its frame.
+        let stored = vyrn_frontend::checker::stored_fn_effects(&program);
+        let mut through = |ty: &Type| -> Callee {
+            // The sources are collected with aliases resolved; a local is
+            // typed as the program spelled it.
+            let ty = &vyrn_frontend::types::resolve(ty, &decls);
+            if !matches!(ty, Type::Fn(..)) {
+                return Callee::Unknown;
+            }
+            let mut idx: Vec<usize> = Vec::new();
+            let mut missing: Vec<String> = Vec::new();
+            for src in &stored.sources {
+                if !vyrn_frontend::checker::fn_sigs_match(&src.sig, ty) {
+                    continue;
+                }
+                if let Some(n) = &src.named {
+                    match by_name.get(n.as_str()) {
+                        Some(i) => idx.extend(i.iter().copied()),
+                        None => missing.push(n.clone()),
+                    }
+                }
+                if let Some(l) = &src.lambda {
+                    match lambda_frames.get(&(l.defined_in.as_str(), l.line)) {
+                        Some(i) => idx.extend(i.iter().copied()),
+                        None => {
+                            missing.push(format!("a lambda in {} at line {}", l.defined_in, l.line))
+                        }
+                    }
+                }
+            }
+            if !missing.is_empty() {
+                open.push(format!(
+                    "{file}: a `{ty}` value may hold {}",
+                    missing.join(", ")
+                ));
+            } else if idx.is_empty() {
+                open.push(format!("{file}: a `{ty}` value has no source"));
+            }
+            idx.sort_unstable();
+            idx.dedup();
+            if idx.is_empty() {
+                Callee::Unknown
+            } else {
+                Callee::Bodies(idx)
+            }
+        };
+        let judged = effects::judge(&refs, &mut resolve, &mut through);
+        through_calls += judged.through.len();
+        spawn_sites += judged.spawns.len();
+        for sp in &judged.spawns {
+            if !sp.outside().is_pure() {
+                spawn_outside.push(format!(
+                    "{file}:{} spawn {}(..) in {} — {}",
+                    sp.line,
+                    sp.callee,
+                    refs[sp.body].name,
+                    sp.outside()
+                ));
+            }
+        }
         for (i, name) in &judged.unknown {
             *unknown
-                .entry(format!("{name} (in {})", bodies[*i].name))
+                .entry(format!("{name} (in {})", refs[*i].name))
                 .or_default() += 1;
         }
 
@@ -430,7 +555,7 @@ fn run_corpus() {
         }
 
         for (i, inst) in insts.iter().enumerate() {
-            let e = judged.effects[i];
+            let e = judged.effects[top[i]];
             let want = caps_of(e);
             let have = floor_carries(inst.func);
             let floor = if inst.func.is_gen && !want.is_empty() {
@@ -489,9 +614,22 @@ fn run_corpus() {
                         have
                     );
                     let mut callees: BTreeSet<String> = BTreeSet::new();
-                    collect_callees(&bodies[i].stmts, &mut callees);
+                    for f in bodies[i].frames() {
+                        collect_callees(&f.stmts, &mut callees);
+                    }
                     for c in callees {
-                        let ce = match resolve(&c) {
+                        let mut r = resolve(&c);
+                        if matches!(r, Callee::Unknown) {
+                            if let Some(n) = bodies[i]
+                                .frames()
+                                .iter()
+                                .flat_map(|f| f.names.iter())
+                                .find(|n| n.source == c)
+                            {
+                                r = through(&n.ty);
+                            }
+                        }
+                        let ce = match r {
                             Callee::Atom(a) => a.to_string(),
                             Callee::Bodies(idx) => idx
                                 .iter()
@@ -535,16 +673,31 @@ fn run_corpus() {
     }
     let unlowered: usize = gaps.values().sum();
     eprintln!(
-        "effects over the corpus: {programs} programs ({unloadable} not loadable here), \
-         {} functions judged, {pure} pure, {unlowered} unlowered, {} calls through a function value",
+        "effects over the corpus: {programs} programs ({unloadable} not loadable here, \
+         {refused} refused as recorded), {} functions judged, {pure} pure, {unlowered} unlowered, \
+         {through_calls} calls through a function value judged over their sources, \
+         {} unattributed",
         rows.len(),
         unknown.values().sum::<usize>()
     );
+    open.sort();
+    open.dedup();
+    eprintln!("  open sets: {}", open.len());
+    for o in &open {
+        eprintln!("    {o}");
+    }
     for (what, n) in &gaps {
         eprintln!("  unlowered: {n:5}  {what}");
     }
     for (e, n) in &per_effect {
         eprintln!("  effect {n:5}  {}", e.name());
+    }
+    eprintln!(
+        "  spawn:      {spawn_sites} sites judged, {} outside `alloc, trap`",
+        spawn_outside.len()
+    );
+    for s in &spawn_outside {
+        eprintln!("  spawn outside the rule: {s}");
     }
     eprintln!("  floor:");
     for (k, n) in &floor_kinds {
@@ -585,10 +738,17 @@ fn run_corpus() {
             eprintln!("  module {m}: {e}");
         }
     }
-    // The ratchet: the disagreements, by function. It may fall, never rise.
-    // 1 when the slice landed: `listdir.vyrn`'s `main`, whose `listDir` the
-    // floor has no row for (RFC-0125 §3 M6 finding 6).
-    const RATCHET: usize = 1;
+    // The ratchet: the disagreements, by function, and the spawn sites
+    // outside the rule. It may fall, never rise. 1 when the first slice
+    // landed (`listdir.vyrn`'s `main`, whose `listDir` the floor had no row
+    // for — RFC-0125 §3 M6 finding 6); 0 since the second slice.
+    const RATCHET: usize = 0;
+    assert!(
+        spawn_outside.is_empty(),
+        "{} spawn sites whose callee's effects are outside the rule the checker accepted; the first: {}",
+        spawn_outside.len(),
+        spawn_outside[0]
+    );
     assert!(
         disagreements.len() <= RATCHET,
         "{} functions where a pass and the effect judgment disagree, more than the {RATCHET} recorded; \
@@ -597,6 +757,11 @@ fn run_corpus() {
         disagreements[0].file,
         disagreements[0].line,
         disagreements[0].name
+    );
+    assert_eq!(
+        refused,
+        common::EXPECTED_PROJECT_CHECK_FAILURE.len(),
+        "every registered project refusal is in the corpus"
     );
     assert!(!rows.is_empty(), "the judgment judged nothing");
     let _ = &rows[0].module;
