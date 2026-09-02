@@ -530,6 +530,14 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // value — so this reads both lists afresh every turn rather than iterating a
     // snapshot. That is what "the worklists feed each other" is here: appending to
     // the list being read.
+    //
+    // A frame past the limit waits for the drain to end. In a polymorphic
+    // recursion the frames double every instance, so the frame limit trips turns
+    // before the instantiation limit does — and the instantiation refusal is the
+    // one `vyrn check` and the textual backend give for that program (audit
+    // A5.2, RFC-0125 §3 M5). One program, one sentence: the drain goes on, and the
+    // frame refusal is returned only when no instantiation refusal came.
+    let mut deferred: Option<String> = None;
     loop {
         let p = {
             let mono = cx.mono.borrow();
@@ -563,10 +571,15 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
             });
             let body = lower_body(&mut m, &p.f, p.body, &p.sig, &cx, p.binds.clone());
             crate::observe::set_ctx(was);
-            let body = body?;
             cx.subst = HashMap::new();
-            m.fill(p.sig.index, body);
             cx.mono.borrow_mut().done += 1;
+            match body {
+                Ok(body) => m.fill(p.sig.index, body),
+                Err(e) if e.contains(crate::FRAME_LIMIT_NEEDLE) => {
+                    deferred.get_or_insert(e);
+                }
+                Err(e) => return Err(e),
+            }
             continue;
         }
         // A dispatcher's body is the one thing that cannot be written when its
@@ -581,6 +594,9 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         let body = lower_dispatcher(&mut m, &cx, &sig_ty, &dsig)?;
         m.fill(dsig.index, body);
         cx.dispatch.borrow_mut().done += 1;
+    }
+    if let Some(e) = deferred {
+        return Err(e);
     }
 
     // RFC-0114 §26's finish, the textual driver's twin: every plan row in a

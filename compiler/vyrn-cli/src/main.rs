@@ -568,6 +568,14 @@ fn real_main() -> ExitCode {
                 Err(code) => return code,
             };
             let _memo = shared_desugars();
+            // What `check` refuses, `run` refuses, under either engine: a
+            // polymorphic recursion has no finite set of instances, and the
+            // interpreter running it anyway (audit A5.2) was one program with
+            // two answers (RFC-0125 §3 M5). The sentence is `check`'s.
+            if let Err(e) = vyrn_codegen::check_instantiations(&program) {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
             if engine == Engine::Wasm {
                 return run_wasm(path, &program, &prog_args);
             }

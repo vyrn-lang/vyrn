@@ -73,9 +73,6 @@ const FILETYPE_UNKNOWN: u8 = 0;
 const FILETYPE_DIRECTORY: u8 = 3;
 const FILETYPE_REGULAR_FILE: u8 = 4;
 const FILETYPE_SYMBOLIC_LINK: u8 = 7;
-/// A `dirent` header: `d_next: u64, d_ino: u64, d_namlen: u32, d_type: u8`
-/// and three bytes of padding, then the name.
-const DIRENT_HDR: usize = 24;
 
 /// `proc_exit`'s argument, carried out of the guest as an error so the call
 /// stack unwinds the way a trap's does.
@@ -430,9 +427,11 @@ fn link_wasi(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
             let Some(listed) = host.dirs.get(&fd) else {
                 return BADF;
             };
-            // Entries from the cookie on, laid end to end; the last is cut
-            // where the buffer ends, which is how the guest learns to ask
-            // again from that entry's predecessor.
+            // Entries from the cookie on, laid end to end — each a `dirent`
+            // header (`d_next: u64, d_ino: u64, d_namlen: u32, d_type: u8`, three
+            // bytes of padding) and the name. The last is cut where the buffer
+            // ends, which is how the guest learns to ask again from that
+            // entry's predecessor.
             let mut bytes = Vec::new();
             for (i, (name, kind)) in listed.iter().enumerate().skip(cookie.max(0) as usize) {
                 bytes.extend_from_slice(&(i as u64 + 1).to_le_bytes());
