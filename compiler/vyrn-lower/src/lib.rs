@@ -31,6 +31,14 @@
 pub mod core;
 pub mod kernel;
 mod render;
+
+/// Install the placer (RFC-0125 M3) into `own::analyze`, so every consumer
+/// of the ownership plan — the interpreter, both backends, `vyrn why` — sees
+/// the release rows the kernel found missing. Idempotent; the CLI calls it
+/// at start-up the way it installs the generator engine.
+pub fn install() {
+    vyrn_frontend::own::install_placer(core::augment);
+}
 pub use render::render;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -326,11 +334,20 @@ impl<'a> Lowered<'a> {
 /// JSON codecs are ordinary Vyrn functions and are lowered like any other, which
 /// is only true if they are in the program when the checker runs over it here.
 pub fn lower(program: &Program) -> Lowered<'_> {
-    let recorded = checker::record(program);
     // The same analysis all three engines already share, asked once here so the
     // placement below is the only new thing in the form (RFC-0101 §1.4).
     let ownership = vyrn_frontend::own::analyze(program);
-    let mut lowered = build(program, &recorded, &ownership);
+    lower_with(program, &ownership)
+}
+
+/// The lowered form against an ownership analysis already made — what the
+/// placer (RFC-0125 M3) needs, since it runs INSIDE `own::analyze`.
+pub fn lower_with<'a>(
+    program: &'a Program,
+    ownership: &vyrn_frontend::own::Ownership,
+) -> Lowered<'a> {
+    let recorded = checker::record(program);
+    let mut lowered = build(program, &recorded, ownership);
     lowered.instances.sort_by(|a, b| {
         (a.module(), &a.func.name, a.spelling()).cmp(&(b.module(), &b.func.name, b.spelling()))
     });

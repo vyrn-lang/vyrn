@@ -45,6 +45,10 @@ pub struct NameInfo {
     /// consume) is never owned, whatever its type.
     pub owned: bool,
     pub line: usize,
+    /// The node the plan keys this binding by — a `Stmt::Let`, a parameter —
+    /// when the name is one the plan can be told about. `None` for a
+    /// temporary this pass minted.
+    pub binding: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -105,9 +109,25 @@ pub enum St {
     Drop(Name),
     If(Val, Vec<St>, Vec<St>),
     Loop(Vec<St>),
-    Break,
-    Continue,
-    Return(Option<Val>),
+    /// A source block: its own scope, and the site the plan keys its
+    /// fall-through release rows by.
+    Block {
+        site: usize,
+        body: Vec<St>,
+    },
+    /// `site` is the statement's node, or 0 for a break this pass made up.
+    Break {
+        site: usize,
+    },
+    Continue {
+        site: usize,
+    },
+    Return {
+        value: Option<Val>,
+        /// The `return` statement, or the `?` expression when `is_try`.
+        site: usize,
+        is_try: bool,
+    },
     Switch {
         on: Val,
         arms: Vec<Arm>,
@@ -227,11 +247,17 @@ impl Body {
                     out.push_str(&format!("{pad}loop\n"));
                     self.render_stmts(b, depth + 1, out);
                 }
-                St::Break => out.push_str(&format!("{pad}break\n")),
-                St::Continue => out.push_str(&format!("{pad}continue\n")),
-                St::Return(v) => out.push_str(&format!(
-                    "{pad}return {}\n",
-                    v.as_ref().map(|v| self.val(v)).unwrap_or_default()
+                St::Block { body, .. } => {
+                    out.push_str(&format!("{pad}{{\n"));
+                    self.render_stmts(body, depth + 1, out);
+                    out.push_str(&format!("{pad}}}\n"));
+                }
+                St::Break { .. } => out.push_str(&format!("{pad}break\n")),
+                St::Continue { .. } => out.push_str(&format!("{pad}continue\n")),
+                St::Return { value, is_try, .. } => out.push_str(&format!(
+                    "{pad}return {}{}\n",
+                    value.as_ref().map(|v| self.val(v)).unwrap_or_default(),
+                    if *is_try { "  (?)" } else { "" }
                 )),
                 St::Switch {
                     on,
@@ -356,7 +382,7 @@ pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<
         let owned = p.capability == Capability::Consume && b.owns(&p.ty) && !is_release;
         let n = b.name(&p.name, p.ty.clone(), owned, f.line);
         b.scope.push((p.name.clone(), n));
-        b.by_binding.insert(p as *const _ as usize, n);
+        b.keyed(n, p as *const _ as usize);
         b.body.params.push(n);
     }
     let mut out = Vec::new();
@@ -400,8 +426,15 @@ impl<'a> Builder<'a> {
             ty,
             owned,
             line,
+            binding: None,
         });
         (self.body.names.len() - 1) as Name
+    }
+
+    /// Record the plan's key for a name, and the name for the key.
+    fn keyed(&mut self, n: Name, binding: usize) {
+        self.body.names[n as usize].binding = Some(binding);
+        self.by_binding.insert(binding, n);
     }
 
     /// What the plan decided a named binding's fate is: whether THIS frame
@@ -482,11 +515,14 @@ impl<'a> Builder<'a> {
 
     fn block(&mut self, blk: &'a Block, out: &mut Vec<St>) -> Result<(), Gap> {
         let mark = self.scope.len();
+        let site = blk as *const Block as usize;
+        let mut body = Vec::new();
         for s in &blk.stmts {
-            self.stmt(s, out)?;
+            self.stmt(s, &mut body)?;
         }
-        self.drops_at(Exit::Block, blk as *const Block as usize, out)?;
+        self.drops_at(Exit::Block, site, &mut body)?;
         self.scope.truncate(mark);
+        out.push(St::Block { site, body });
         Ok(())
     }
 
@@ -503,7 +539,7 @@ impl<'a> Builder<'a> {
                     out.push(St::Let(n, Rhs::Read(place)));
                     self.release_receiver(value, out);
                     self.scope.push((name.clone(), n));
-                    self.by_binding.insert(sid, n);
+                    self.keyed(n, sid);
                     return Ok(());
                 }
                 let rhs = self.rhs(value, out)?;
@@ -517,7 +553,7 @@ impl<'a> Builder<'a> {
                 let n = self.name(name, ty, owned, *line);
                 self.bind(n, rhs, out);
                 self.scope.push((name.clone(), n));
-                self.by_binding.insert(sid, n);
+                self.keyed(n, sid);
             }
             Stmt::Assign { name, value, line } => {
                 let v = self.val(value, out)?;
@@ -599,15 +635,19 @@ impl<'a> Builder<'a> {
                     None => None,
                 };
                 self.drops_at(Exit::Return, sid, out)?;
-                out.push(St::Return(v));
+                out.push(St::Return {
+                    value: v,
+                    site: sid,
+                    is_try: false,
+                });
             }
             Stmt::Break { .. } => {
                 self.drops_at(Exit::Break, sid, out)?;
-                out.push(St::Break);
+                out.push(St::Break { site: sid });
             }
             Stmt::Continue { .. } => {
                 self.drops_at(Exit::Continue, sid, out)?;
-                out.push(St::Continue);
+                out.push(St::Continue { site: sid });
             }
             Stmt::If {
                 cond,
@@ -660,7 +700,7 @@ impl<'a> Builder<'a> {
             Stmt::While { cond, body, .. } => {
                 let mut l = Vec::new();
                 let c = self.read_val(cond, &mut l)?;
-                l.push(St::If(c, Vec::new(), vec![St::Break]));
+                l.push(St::If(c, Vec::new(), vec![St::Break { site: 0 }]));
                 self.block(body, &mut l)?;
                 out.push(St::Loop(l));
             }
@@ -1201,7 +1241,11 @@ impl<'a> Builder<'a> {
                     &mut fail,
                 )?;
                 self.drops_at(Exit::Try, tid, &mut fail)?;
-                fail.push(St::Return(fb.first().map(|n| Val::Name(*n))));
+                fail.push(St::Return {
+                    value: fb.first().map(|n| Val::Name(*n)),
+                    site: tid,
+                    is_try: true,
+                });
                 self.scope.truncate(mark);
                 let mut ok = Vec::new();
                 let mark = self.scope.len();
@@ -1386,5 +1430,81 @@ impl<'a> Builder<'a> {
         decls
             .values()
             .any(|d| matches!(&d.base, Type::Enum(vs) if vs.iter().any(|v| v.name == name)))
+    }
+}
+
+/// RFC-0125 M3, first slice: the releases the plan did not place, placed.
+///
+/// For every function instance the core can be built for, the kernel walks
+/// the body in placement mode: wherever an owned name is still held at an
+/// exit — the fall-through end of its block, a `return`, a `?`, a `break`, a
+/// `continue` — and the plan placed no release there, a release row is added
+/// at that exit, keyed exactly as the plan keys its own (the exit's node and
+/// the binding's node), and the binding is entered in the plan's droppable
+/// table so every engine registers a slot for it. The engines then consume
+/// the row through the one path RFC-0101 M4 gave them; nothing here reaches
+/// an emitter.
+///
+/// What this closes is the class the plan's own fold names — "the in-loop
+/// exits keep their leak until the fold can order across a back edge" — and
+/// its fall-through twin: the named core orders across the back edge, and a
+/// name the kernel finds held is held on every turn the exit runs.
+///
+/// Installed into `own::analyze` by [`crate::install`], so every consumer of
+/// the plan sees the same rows. A body the core cannot build, or the kernel
+/// refuses for a reason other than a missing release (a double free, a use
+/// after release), is left exactly as the plan had it.
+pub fn augment(program: &Program, own: &mut Ownership) {
+    let lowered = crate::lower_with(program, own);
+    let mut added: Vec<(String, Release, DropKind)> = Vec::new();
+    for inst in &lowered.instances {
+        let Ok(body) = build(program, inst, own) else {
+            continue;
+        };
+        let Ok(missing) = crate::kernel::placement(&body) else {
+            continue;
+        };
+        for m in missing {
+            if m.site == 0 {
+                continue;
+            }
+            let info = &body.names[m.name as usize];
+            let Some(binding) = info.binding else {
+                continue;
+            };
+            let Some(kind) = own.proto.release_kind(&info.ty) else {
+                continue;
+            };
+            let dup = own.releases.get(&inst.func.name).is_some_and(|rows| {
+                rows.iter()
+                    .any(|r| r.exit == m.exit && r.site == m.site && r.binding == binding)
+            }) || added.iter().any(|(f, r, _)| {
+                *f == inst.func.name && r.exit == m.exit && r.site == m.site && r.binding == binding
+            });
+            if dup {
+                continue;
+            }
+            added.push((
+                inst.func.name.clone(),
+                Release {
+                    site: m.site,
+                    binding,
+                    name: info.source.clone(),
+                    kind: kind.clone(),
+                    exit: m.exit,
+                    line: info.line as u32,
+                    full: false,
+                },
+                kind,
+            ));
+        }
+    }
+    for (f, row, kind) in added {
+        own.droppable
+            .entry(f.clone())
+            .or_default()
+            .entry(row.binding)
+            .or_insert(kind);
+        own.releases.entry(f).or_default().push(row);
     }
 }

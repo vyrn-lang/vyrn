@@ -301,6 +301,13 @@ fn real_main() -> ExitCode {
     if std::env::var("VYRN_NO_WASM_GEN").is_err() {
         vyrn_genwasm::install();
     }
+    // RFC-0125 M3: the placer over the named core, into every plan this
+    // process makes. `VYRN_NO_PLACER=1` compiles with the plan as the
+    // ownership analysis alone leaves it — the configuration the probes
+    // under `rfcs/probes-0125/` were measured against.
+    if std::env::var("VYRN_NO_PLACER").is_err() {
+        vyrn_lower::install();
+    }
     let mut args: Vec<String> = std::env::args().collect();
     let is_offline = offline(&args);
     if is_offline {

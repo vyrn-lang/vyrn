@@ -30,6 +30,24 @@
 
 use crate::core::{Arm, Body, Name, Old, Place, Rhs, St, Val};
 use vyrn_frontend::ast::Capability;
+use vyrn_frontend::own::Exit;
+
+/// A release the plan owes and did not place: `name` is still held where the
+/// exit at `site` runs.
+#[derive(Debug, Clone)]
+pub struct Missing {
+    pub exit: Exit,
+    pub site: usize,
+    pub name: Name,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Refuse a held name at an exit.
+    Judge,
+    /// Record it as a missing release, treat it as released, and go on.
+    Place,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Own {
@@ -57,6 +75,8 @@ pub struct Refusal {
 
 struct Kernel<'b> {
     body: &'b Body,
+    mode: Mode,
+    missing: Vec<Missing>,
     /// The loop being walked: the state at its entry, the states at its
     /// `break`s, and the names bound inside it (which its back edge must find
     /// consumed).
@@ -70,8 +90,21 @@ struct LoopCtx {
 }
 
 pub fn check(body: &Body) -> Result<(), Refusal> {
+    run(body, Mode::Judge).map(|_| ())
+}
+
+/// The releases the plan owes this body and did not place. `Err` when the
+/// body is refused for another reason — a double free, a use after release —
+/// which no placement repairs.
+pub fn placement(body: &Body) -> Result<Vec<Missing>, Refusal> {
+    run(body, Mode::Place)
+}
+
+fn run(body: &Body, mode: Mode) -> Result<Vec<Missing>, Refusal> {
     let mut k = Kernel {
         body,
+        mode,
+        missing: Vec::new(),
         loops: Vec::new(),
     };
     let mut st = State {
@@ -85,9 +118,14 @@ pub fn check(body: &Body) -> Result<(), Refusal> {
     }
     k.stmts(&body.stmts, &mut st)?;
     if !st.ended {
-        k.end_of_scope(&st, &all_names(body))?;
+        // The parameters: the plan releases them at the body's own block.
+        let site = match body.stmts.first() {
+            Some(St::Block { site, .. }) => *site,
+            _ => 0,
+        };
+        k.scope_end(&mut st, &all_names(body), Exit::Block, site)?;
     }
-    Ok(())
+    Ok(k.missing)
 }
 
 fn all_names(body: &Body) -> Vec<Name> {
@@ -110,10 +148,26 @@ impl<'b> Kernel<'b> {
         })
     }
 
-    /// Every name in `names` that is still held is a leak at this scope's end.
-    fn end_of_scope(&self, st: &State, names: &[Name]) -> Result<(), Refusal> {
+    /// Every name in `names` that is still held is a leak at this scope's
+    /// end — refused when judging, recorded and released when placing.
+    fn scope_end(
+        &mut self,
+        st: &mut State,
+        names: &[Name],
+        exit: Exit,
+        site: usize,
+    ) -> Result<(), Refusal> {
         for n in names {
             if self.owned(*n) && st.own[*n as usize] == Own::Held {
+                if self.mode == Mode::Place {
+                    self.missing.push(Missing {
+                        exit,
+                        site,
+                        name: *n,
+                    });
+                    st.own[*n as usize] = Own::Gone;
+                    continue;
+                }
                 return self.refuse(format!(
                     "{} is still held where its scope ends — no release is placed for it",
                     self.info(*n)
@@ -196,7 +250,13 @@ impl<'b> Kernel<'b> {
         }
     }
 
+    /// A statement list that is not a source block: what it binds ends with
+    /// it, at no site the plan knows.
     fn stmts(&mut self, stmts: &[St], st: &mut State) -> Result<(), Refusal> {
+        self.stmts_at(stmts, st, 0)
+    }
+
+    fn stmts_at(&mut self, stmts: &[St], st: &mut State, site: usize) -> Result<(), Refusal> {
         let mut bound_here: Vec<Name> = Vec::new();
         for s in stmts {
             if st.ended {
@@ -207,7 +267,7 @@ impl<'b> Kernel<'b> {
             self.stmt(s, st, &mut bound_here)?;
         }
         if !st.ended {
-            self.end_of_scope(st, &bound_here)?;
+            self.scope_end(st, &bound_here, Exit::Block, site)?;
         }
         Ok(())
     }
@@ -303,11 +363,14 @@ impl<'b> Kernel<'b> {
                     // this checks for the binders.
                     self.stmts(body, &mut a)?;
                     if !a.ended {
-                        self.end_of_scope(&a, binds)?;
+                        self.scope_end(&mut a, binds, Exit::Block, 0)?;
                     }
                     outs.push(a);
                 }
                 *st = self.join(&outs)?;
+            }
+            St::Block { site, body } => {
+                self.stmts_at(body, st, *site)?;
             }
             St::Loop(body) => {
                 self.loops.push(LoopCtx {
@@ -321,7 +384,7 @@ impl<'b> Kernel<'b> {
                 // The back edge: the fall-through end of the body, and every
                 // `continue`, must find the entry state again.
                 if !a.ended {
-                    self.back_edge(&a, &ctx)?;
+                    self.back_edge(&mut a, &ctx)?;
                 }
                 *st = if ctx.breaks.is_empty() {
                     State {
@@ -332,32 +395,37 @@ impl<'b> Kernel<'b> {
                     self.join(&ctx.breaks)?
                 };
             }
-            St::Break => {
+            St::Break { site } => {
                 let Some(l) = self.loops.last_mut() else {
                     return self.refuse("a `break` outside a loop".into());
                 };
                 // Names bound inside the loop go out of scope here.
                 let inside = l.bound_inside.clone();
-                self.end_of_scope(st, &inside)?;
+                self.scope_end(st, &inside, Exit::Break, *site)?;
                 let l = self.loops.last_mut().unwrap();
                 l.breaks.push(st.clone());
                 st.ended = true;
             }
-            St::Continue => {
+            St::Continue { site } => {
                 let Some(ctx) = self.loops.last() else {
                     return self.refuse("a `continue` outside a loop".into());
                 };
                 let entry = ctx.entry.clone();
                 let inside = ctx.bound_inside.clone();
-                self.end_of_scope(st, &inside)?;
+                self.scope_end(st, &inside, Exit::Continue, *site)?;
                 self.same_outside(st, &entry, &inside)?;
                 st.ended = true;
             }
-            St::Return(v) => {
-                if let Some(v) = v {
+            St::Return {
+                value,
+                site,
+                is_try,
+            } => {
+                if let Some(v) = value {
                     self.take(st, v)?;
                 }
-                self.end_of_scope(st, &all_names(self.body))?;
+                let exit = if *is_try { Exit::Try } else { Exit::Return };
+                self.scope_end(st, &all_names(self.body), exit, *site)?;
                 st.ended = true;
             }
             St::Do(rhs) => self.rhs(st, rhs)?,
@@ -373,8 +441,8 @@ impl<'b> Kernel<'b> {
         }
     }
 
-    fn back_edge(&self, at: &State, ctx: &LoopCtx) -> Result<(), Refusal> {
-        self.end_of_scope(at, &ctx.bound_inside)?;
+    fn back_edge(&mut self, at: &mut State, ctx: &LoopCtx) -> Result<(), Refusal> {
+        self.scope_end(at, &ctx.bound_inside, Exit::Block, 0)?;
         self.same_outside(at, &ctx.entry, &ctx.bound_inside)
     }
 

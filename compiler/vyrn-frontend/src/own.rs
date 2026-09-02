@@ -2205,7 +2205,7 @@ pub fn analyze(program: &Program) -> Ownership {
         alias: Default::default(),
         alias_log: Default::default(),
     };
-    Ownership {
+    let mut ownership = Ownership {
         plan,
         owned_fns,
         droppable,
@@ -2215,7 +2215,34 @@ pub fn analyze(program: &Program) -> Ownership {
         proto,
         arg_temps: facts.arg_temps,
         releases,
+    };
+    // RFC-0125 M3: the placer, when one is installed, adds the release rows
+    // this analysis owes and did not place. It runs the lowering, which runs
+    // this analysis, so it is not re-entered.
+    if let Some(place) = PLACER.get() {
+        if !PLACING.with(|p| p.get()) {
+            PLACING.with(|p| p.set(true));
+            place(program, &mut ownership);
+            PLACING.with(|p| p.set(false));
+        }
     }
+    ownership
+}
+
+/// A pass that adds release rows to a finished analysis — RFC-0125 M3's
+/// placer over the named core, which lives in `vyrn-lower` and cannot be
+/// named from here.
+pub type Placer = fn(&Program, &mut Ownership);
+
+static PLACER: std::sync::OnceLock<Placer> = std::sync::OnceLock::new();
+
+thread_local! {
+    static PLACING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Install the placer. The first installation wins; a second is ignored.
+pub fn install_placer(f: Placer) {
+    let _ = PLACER.set(f);
 }
 
 /// RFC-0114 untake: the bindings whose value was taken and then provably
