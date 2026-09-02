@@ -11,8 +11,11 @@
 //! The judgment knows nothing about the surface language. It sees a call by
 //! its callee's name, the spawn marker on a call (`Rhs::Call::spawn`), an
 //! owned name born of a primitive or a literal (an allocation), and a trap.
-//! It does not see inside a lambda body (the core lowers a lambda as a read
-//! of its captures, and judges the body nowhere — RFC-0125 §3 M6 finding 2).
+//! A call through a function value names a local, and the caller answers
+//! for its type with the closed set of functions a value of that type may
+//! hold — RFC-0037's stored sources (finding 3 of the first slice). It does
+//! not see inside a lambda body (the core lowers a lambda as a read of its
+//! captures, and judges the body nowhere — finding 2).
 //!
 //! One inclusion check lives here: the spawn-isolation rule of RFC-0004 §Q4,
 //! stated as RFC-0125 §2.2 states it — a spawned callee's set within
@@ -21,6 +24,8 @@
 //! `tests/effects.rs` compares the set with both passes, per function.
 
 use std::collections::HashMap;
+
+use vyrn_frontend::ast::Type;
 
 use crate::core::{Body, Rhs, St};
 
@@ -212,18 +217,20 @@ pub fn atom(name: &str) -> Option<Effect> {
 
 /// What a callee's name resolves to, as the caller of [`judge`] sees the
 /// program. The judgment itself resolves nothing: it does not know which
-/// names are functions, which are `extern`, which are builtins.
+/// names are functions, which are `extern`, which are builtins, and which
+/// function values a type may hold.
 #[derive(Debug, Clone)]
 pub enum Callee {
     /// A builtin or host import with a known effect.
     Atom(Effects),
     /// User bodies, by index into the slice handed to [`judge`] — several
-    /// when a name has several instances or several impls.
+    /// when a name has several instances or several impls, or when a
+    /// function type has several sources (RFC-0037).
     Bodies(Vec<usize>),
     /// A builtin with no effect.
     Pure,
-    /// A name the caller cannot attribute (a call through a function value).
-    /// Judged as pure and reported, so the tally counts it.
+    /// A name the caller cannot attribute, or a function type with no known
+    /// source. Judged as pure and reported, so the tally counts it.
     Unknown,
 }
 
@@ -253,28 +260,43 @@ pub struct Judged {
     pub effects: Vec<Effects>,
     /// `(body index, callee name)` for every call nobody could attribute.
     pub unknown: Vec<(usize, String)>,
+    /// `(body index, callee name)` for every call through a function value
+    /// that `through` answered with bodies.
+    pub through: Vec<(usize, String)>,
     /// Every spawn site, with its callee's set.
     pub spawns: Vec<Spawned>,
 }
 
 /// The effect set of every body in `bodies`, each the join of its own atoms
-/// and its callees', to a fixpoint. `resolve` says what a callee name is.
-pub fn judge(bodies: &[&Body], resolve: &mut dyn FnMut(&str) -> Callee) -> Judged {
+/// and its callees', to a fixpoint. `resolve` says what a callee name is;
+/// `through` says what a function TYPE may hold, for a call whose callee is
+/// a name of the body (a parameter or a binding of function type).
+pub fn judge(
+    bodies: &[&Body],
+    resolve: &mut dyn FnMut(&str) -> Callee,
+    through: &mut dyn FnMut(&Type) -> Callee,
+) -> Judged {
     let mut own: Vec<Effects> = Vec::with_capacity(bodies.len());
     let mut edges: Vec<Vec<usize>> = Vec::with_capacity(bodies.len());
     let mut unknown = Vec::new();
+    let mut via = Vec::new();
     let mut spawns: Vec<(usize, String, usize, Vec<usize>)> = Vec::new();
-    // One resolution per distinct name, not one per call site.
+    // One resolution per distinct name and per distinct type, not one per
+    // call site.
     let mut memo: HashMap<String, Callee> = HashMap::new();
+    let mut memo_ty: HashMap<String, Callee> = HashMap::new();
     for (i, b) in bodies.iter().enumerate() {
         let mut w = Walk {
             body: b,
             own: Effects::PURE,
             edges: Vec::new(),
             unknown: Vec::new(),
+            via: Vec::new(),
             spawns: Vec::new(),
             resolve,
+            through,
             memo: &mut memo,
+            memo_ty: &mut memo_ty,
         };
         w.stmts(&b.stmts);
         own.push(w.own);
@@ -283,6 +305,7 @@ pub fn judge(bodies: &[&Body], resolve: &mut dyn FnMut(&str) -> Callee) -> Judge
         e.dedup();
         edges.push(e);
         unknown.extend(w.unknown.into_iter().map(|n| (i, n)));
+        via.extend(w.via.into_iter().map(|n| (i, n)));
         spawns.extend(w.spawns.into_iter().map(|(c, l, idx)| (i, c, l, idx)));
     }
     // The fixpoint. Monotone over a finite lattice, so it ends; the corpus
@@ -319,6 +342,7 @@ pub fn judge(bodies: &[&Body], resolve: &mut dyn FnMut(&str) -> Callee) -> Judge
     Judged {
         effects,
         unknown,
+        through: via,
         spawns,
     }
 }
@@ -328,10 +352,14 @@ struct Walk<'a> {
     own: Effects,
     edges: Vec<usize>,
     unknown: Vec<String>,
+    /// The callees `through` answered with bodies.
+    via: Vec<String>,
     /// `(callee, line, callee bodies)` per spawn.
     spawns: Vec<(String, usize, Vec<usize>)>,
     resolve: &'a mut dyn FnMut(&str) -> Callee,
+    through: &'a mut dyn FnMut(&Type) -> Callee,
     memo: &'a mut HashMap<String, Callee>,
+    memo_ty: &'a mut HashMap<String, Callee>,
 }
 
 impl Walk<'_> {
@@ -380,16 +408,42 @@ impl Walk<'_> {
         }
     }
 
-    /// What `callee` is, by name.
+    /// What `callee` is: by name first, and for a name of this body with a
+    /// function type, by that type.
     fn callee(&mut self, callee: &str) -> Callee {
-        match self.memo.get(callee) {
+        let c = match self.memo.get(callee) {
             Some(c) => c.clone(),
             None => {
                 let c = (self.resolve)(callee);
                 self.memo.insert(callee.to_string(), c.clone());
                 c
             }
+        };
+        if !matches!(c, Callee::Unknown) {
+            return c;
         }
+        let Some(ty) = self
+            .body
+            .names
+            .iter()
+            .find(|n| n.source == callee && matches!(n.ty, Type::Fn(..)))
+            .map(|n| &n.ty)
+        else {
+            return Callee::Unknown;
+        };
+        let key = ty.to_string();
+        let c = match self.memo_ty.get(&key) {
+            Some(c) => c.clone(),
+            None => {
+                let c = (self.through)(ty);
+                self.memo_ty.insert(key, c.clone());
+                c
+            }
+        };
+        if matches!(c, Callee::Bodies(_)) {
+            self.via.push(callee.to_string());
+        }
+        c
     }
 
     /// Whether the right-hand side was a call that is not a user body — the

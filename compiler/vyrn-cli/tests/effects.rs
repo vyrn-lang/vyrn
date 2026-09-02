@@ -30,7 +30,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use vyrn_frontend::ast::Program;
+use vyrn_frontend::ast::{Program, Type};
 use vyrn_frontend::audience::{self, Audience};
 use vyrn_frontend::floor::{self, Capability};
 use vyrn_lower::effects::{self, Callee, Effect, Effects};
@@ -300,6 +300,10 @@ fn run_corpus() {
 
     let mut rows: Vec<Row> = Vec::new();
     let mut unknown: BTreeMap<String, usize> = BTreeMap::new();
+    // Calls through a function value the sources answered for, and the
+    // function types with a source the corpus has no body for (open sets).
+    let mut through_calls = 0usize;
+    let mut open: Vec<String> = Vec::new();
     // Every spawn site, and the ones whose callee's set is outside the rule.
     let mut spawn_sites = 0usize;
     let mut spawn_outside: Vec<String> = Vec::new();
@@ -413,7 +417,44 @@ fn run_corpus() {
             }
             Callee::Unknown
         };
-        let judged = effects::judge(&refs, &mut resolve);
+        // RFC-0037: the closed set of functions a value of a function type
+        // may hold, as the checker's defunctionalization collected it. A
+        // named source is its instances; a lambda source is judged nowhere
+        // yet (finding 2), so a type with one is open.
+        let stored = vyrn_frontend::checker::stored_fn_effects(&program);
+        let mut through = |ty: &Type| -> Callee {
+            let mut idx: Vec<usize> = Vec::new();
+            let mut missing: Vec<String> = Vec::new();
+            for src in &stored.sources {
+                if !vyrn_frontend::checker::fn_sigs_match(&src.sig, ty) {
+                    continue;
+                }
+                if let Some(n) = &src.named {
+                    match by_name.get(n.as_str()) {
+                        Some(i) => idx.extend(i.iter().copied()),
+                        None => missing.push(n.clone()),
+                    }
+                }
+                if let Some(l) = &src.lambda {
+                    missing.push(format!("a lambda in {} at line {}", l.defined_in, l.line));
+                }
+            }
+            if !missing.is_empty() {
+                open.push(format!(
+                    "{file}: a `{ty}` value may hold {}",
+                    missing.join(", ")
+                ));
+            }
+            idx.sort_unstable();
+            idx.dedup();
+            if idx.is_empty() {
+                Callee::Unknown
+            } else {
+                Callee::Bodies(idx)
+            }
+        };
+        let judged = effects::judge(&refs, &mut resolve, &mut through);
+        through_calls += judged.through.len();
         spawn_sites += judged.spawns.len();
         for sp in &judged.spawns {
             if !sp.outside().is_pure() {
@@ -506,7 +547,17 @@ fn run_corpus() {
                     let mut callees: BTreeSet<String> = BTreeSet::new();
                     collect_callees(&bodies[i].stmts, &mut callees);
                     for c in callees {
-                        let ce = match resolve(&c) {
+                        let mut r = resolve(&c);
+                        if matches!(r, Callee::Unknown) {
+                            if let Some(n) = bodies[i]
+                                .names
+                                .iter()
+                                .find(|n| n.source == c && matches!(n.ty, Type::Fn(..)))
+                            {
+                                r = through(&n.ty);
+                            }
+                        }
+                        let ce = match r {
                             Callee::Atom(a) => a.to_string(),
                             Callee::Bodies(idx) => idx
                                 .iter()
@@ -551,10 +602,18 @@ fn run_corpus() {
     let unlowered: usize = gaps.values().sum();
     eprintln!(
         "effects over the corpus: {programs} programs ({unloadable} not loadable here), \
-         {} functions judged, {pure} pure, {unlowered} unlowered, {} calls through a function value",
+         {} functions judged, {pure} pure, {unlowered} unlowered, \
+         {through_calls} calls through a function value judged over their sources, \
+         {} unattributed",
         rows.len(),
         unknown.values().sum::<usize>()
     );
+    open.sort();
+    open.dedup();
+    eprintln!("  open sets: {}", open.len());
+    for o in &open {
+        eprintln!("    {o}");
+    }
     for (what, n) in &gaps {
         eprintln!("  unlowered: {n:5}  {what}");
     }
