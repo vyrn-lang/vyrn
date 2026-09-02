@@ -29,6 +29,7 @@
 //! below both backends instead of twice inside them.
 
 pub mod core;
+pub mod effects;
 pub mod kernel;
 mod render;
 
