@@ -16,8 +16,13 @@
   5,344 accepted, 1 refused, every probe flat, every gate green. M2's
   second slice lowered every construct: 6,581 accepted, 0 unlowered, 9
   refused in five classes, each a leak the plan cannot express and each
-  measured by a probe (§3 M2, "the second slice"). Nothing after that has
-  landed.
+  measured by a probe (§3 M2, "the second slice"). M5's first slice landed
+  the same day: `run`, `test` and `bench --check` take `--engine wasm` and
+  run the direct backend's module in a wasmtime the CLI embeds, and the
+  fixture gate of §2.6 exists — 201 of 203 examples byte-identical to the
+  recorded output, 2 skipped by name. The interpreter stays the default and
+  is not deleted; the site export does not compile yet (`listDir` has no
+  lowering), and the numbers are in §3 M5. Nothing after that has landed.
 - **Depends on:** RFC-0101 (the lowered form — this RFC is what its own ledger
   says it could not become), RFC-0077 (the direct wasm backend — the emitter
   this RFC keeps), RFC-0087..0091 (ownership is defined, not inferred — the
@@ -952,6 +957,129 @@ hash of §2.6 plus the fixture comparison.
 **Gate:** every fixture's output identical to the recorded expected output;
 every fixture's wasm byte-identical across the matrix; site export time
 recorded against its interpreter baseline.
+
+**The first slice landed (2026-09-02): the compiled route exists beside the
+interpreter, and the fixture gate exists.** `vyrn run`, `vyrn test` and
+`vyrn bench --check` take `--engine interp|wasm`, before the file the way
+`--profile` is. `wasm` compiles the program with the direct backend and runs
+the module in a wasmtime the CLI now embeds; the default stays `interp`, the
+interpreter is not deleted, and CI's required jobs are unchanged. The
+`wasmtime` crate enters `vyrn-cli`'s default build (the same version and
+features `vyrn-genwasm` uses), which is a Rust crate and leaves the
+workspace's property — no LLVM, no clang, no sysroot — where it was. What
+the embedding costs, on record: `vyrn.exe` (release) 9,973,248 to
+20,988,928 bytes; a cold `cargo build --release -p vyrn-cli` 31.9 s to
+122.6 s on the machine of §1.4, all of it the wasmtime and Cranelift tree.
+
+The WASI host is hand-written in `compiler/vyrn-cli/src/wasmrun.rs`: the
+fourteen `wasi_snapshot_preview1` imports `direct.rs` declares and no other
+(an unknown import traps, as the generator engine's does). It gives the guest
+what the parity harness's `wasmtime run --dir . --env ..` line gives it:
+argv, this process's environment, the three standard streams passed through,
+and the working directory as the one preopened directory, with the CLI's
+capability rule (no absolute path, no `..` past the root). `random_get` is
+answered from the operating system's source, `/dev/urandom` or
+`BCryptGenRandom`, as the CLI answers it. A trap the program did not spell —
+a wasm `unreachable`, an out-of-bounds access — prints `error: <wasmtime's
+trap text>` and exits 1, where the CLI prints `Error: failed to run main
+module` around the same text; no fixture reaches one, since every trap a
+Vyrn program can take is written by the program itself.
+
+`test` and `bench --check` under `wasm` lift each body into a function and
+synthesize a `main` that reads ONE line from standard input and calls the
+body that line names; the host serves that line before the process's own
+input, and runs one instance per body. A body's trap ends its instance with
+`error: <message>` on fd 2 and exit 1, and the host turns the message into
+the `FAILED: <message>` line the interpreter prints. Two test-only builtins
+have no lowering in the direct backend, so the CLI rewrites them before it
+compiles: `assert(c)` and `assertEq(a, b)` become `if` around `panic` with
+the interpreter's wording (a call operand is bound to a fresh local first;
+any other operand is written twice), and `blackBox(v)` becomes `v`, which is
+what the interpreter runs and `--check` measures nothing. The lines that come
+out are byte-identical to the interpreter's on the `testing.rs` corpus and on
+all seventeen bench programs in `examples/`.
+
+**The fixture gate.** `compiler/vyrn-cli/tests/fixtures.rs` runs every
+top-level example with `vyrn run --engine wasm` under the corpus's
+conventions (cwd `examples/`, the `.stdin` and `.args` fixtures, the fixed
+clock and seed) and compares stdout, stderr and the exit code byte for byte
+against `examples/expected/<name>.stdout|.stderr|.exit`, recorded once from
+the interpreter with `VYRN_FIXTURES=write`. A refusal is compared like any
+program — its output is the diagnostic, and both engines share the load that
+prints it. 203 examples: 201 compared and identical on the first run, 2
+skipped with a reason — `externdemo.vyrn` (host-only, no terminal supplies
+its `extern` namespace) and `polyrecursion.vyrn`, the one program the
+interpreter runs (it prints `0`) and the compiled route refuses. The
+interpreter's 203 runs take 155 s in a debug build; the wasm engine's 201
+take 32 s, compile included. A `fixtures` CI job runs the gate on the four
+platforms of the matrix; it is not required by branch protection in this
+slice. With `wasmhash` it is the shape §2.6 describes.
+
+**What a user pays, both engines, medians of three, wall clock with the
+compile in the wasm column.** `vyrn run` at the game's small inputs is
+process start-up under either engine; the bench bodies are where the
+interpreter's time goes.
+
+| program | `run`, interp | `run --engine wasm` | of which compile | `bench --check`, interp | `bench --check --engine wasm` |
+|---|---|---|---|---|---|
+| nbody | 0.16 s | 0.03 s | 0.03 s | 7.99 s | 0.04 s |
+| spectral-norm | 0.41 s | 0.03 s | 0.02 s | 10.53 s | 0.05 s |
+| fannkuch | 0.11 s | 0.03 s | 0.02 s | 9.62 s | 0.05 s |
+| binary-trees | 0.58 s | 0.03 s | 0.02 s | 1.17 s | 0.03 s |
+| fasta | 0.05 s | 0.03 s | 0.02 s | 0.56 s | 0.03 s |
+| reverse-complement | 0.03 s | 0.03 s | 0.02 s | 1.00 s | 0.06 s |
+| k-nucleotide | 0.07 s | 0.04 s | 0.03 s | 0.73 s | 0.05 s |
+
+The `bench --check` column is CI's "Bench --check" step, 45 to 59 s across
+the fleet under the release interpreter (ci.yml's table); under the compiled
+route the seven above sum to 0.31 s.
+
+**Site export: not measured under the compiled route, and here is why.**
+`vyrn run site/export.vyrn` under the interpreter, three runs on the machine
+of §1.4 with the generator cache warm: 130 s, 151 s, 136 s (82 routes and 14
+assets; `main`'s binary of 2026-08-29 gives 136 s on the same input, and
+`VYRN_NO_PLACER=1` 138 s, so neither this slice nor M3 moved it). The 13.8 s
+this milestone's gate cites from RFC-0124 does not reproduce here and is
+left as a discrepancy to resolve, not a regression to claim. Under
+`--engine wasm` the export is refused before it runs:
+
+    error: `listDir` runs in the interpreter / at generation time (RFC-0021);
+    it has no native or wasm lowering in v1 — use it in a `gen fn` or under
+    `vyrn run`
+
+That is the gap between this slice and §2.5's first row: the export walks
+directories, and the direct backend has no `fd_readdir`. It is one lowering
+and one host import, and it is the next thing M5 needs.
+
+**The other gaps, each on record so nobody discovers it later:**
+
+- `polyrecursion.vyrn`: `vyrn check` refuses it with `past the instantiation
+  limit`; `vyrn build --target wasm` and `run --engine wasm` refuse it with
+  `f needs 12288 bytes of stack for one call, past the frame limit` — the
+  frame check trips before the instantiation check on this route. Two
+  refusals for one program; `check` was meant to predict `build` (audit
+  A5.2) and here predicts a different sentence.
+- `test --engine wasm` initializes module state once per BODY, where the
+  interpreter initializes it once per run and lets bodies see each other's
+  writes. Input a body read ahead of its lines is not seen by the next body.
+  A body that calls `main()` calls the harness's empty `main`. These are the
+  semantics a fresh instance per test has; the interpreter's are the ones to
+  retire when it goes.
+- `assertEq`'s non-call operands are evaluated twice (once for the compare,
+  once for the message); the interpreter evaluates every operand once. A
+  side-effecting non-call operand does not exist in the language's surface,
+  so nothing observes it, and the rewrite records it anyway.
+- Standard input under `--engine wasm` is read by the host in one `read`
+  per `fd_read`, as a syscall would; the CLI's host does the same.
+
+Gates run before the commit: `cargo fmt --check`; `cargo test -p
+vyrn-frontend`; the fixtures gate; the kernel, lowered, fieldstore, places,
+simd, wasmabi, wasmio, traps and bytesink suites; parity in release with
+`--ignored` (41 programs, three engines byte-identical); the residue ratchet;
+and `VYRN_WASM_MANIFEST=check` on the wasm manifest, which passed unchanged
+because no emitter changed. All green: 1,176 frontend tests, the fixture
+gate (24 s), the nine suites, parity 41 passed in 209 s, the residue
+ratchet, and the manifest.
 
 ### M6 — the other two judgments
 
