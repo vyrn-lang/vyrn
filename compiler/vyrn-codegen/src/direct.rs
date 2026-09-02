@@ -2057,6 +2057,11 @@ fn lower_body(
         call_depth_bump(&mut b, cx, -1);
     }
 
+    // RFC-0125 M1: `VYRN_FRAME_TRACE=1` prints every body's frame, refused or
+    // not, so the biggest frames of a program can be read off stderr.
+    if std::env::var_os("VYRN_FRAME_TRACE").is_some() {
+        eprintln!("frame	{}	{}", b.bytes(), f.name);
+    }
     frame_fits(&b, &f.name, f.line)?;
     Ok(b)
 }
