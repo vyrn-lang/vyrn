@@ -134,6 +134,10 @@ pub enum St {
         place: Place,
         value: Val,
         old: Old,
+        /// The source line, for a refusal's wording (RFC-0125 M3, third
+        /// slice): the kernel names the line a value was moved on and the
+        /// line it is used again on, as the checker does.
+        line: usize,
     },
     Drop(Name),
     /// A release row the plan placed at an exit, keyed as the plan keys it,
@@ -174,6 +178,7 @@ pub enum St {
         /// The `return` statement, or the `?` expression when `is_try`.
         site: usize,
         is_try: bool,
+        line: usize,
     },
     Switch {
         on: Val,
@@ -181,8 +186,10 @@ pub enum St {
         /// The construct took the value: its payloads moved into the arms'
         /// binders, so nothing releases the scrutinee itself afterwards.
         consuming: bool,
+        line: usize,
     },
-    Do(Rhs),
+    /// An expression for its effect, on its line.
+    Do(Rhs, usize),
     /// A refusal or a `panic`: the path ends here and owes nothing.
     Trap,
 }
@@ -201,6 +208,8 @@ pub struct Arm {
 #[derive(Debug, Clone)]
 pub struct Body {
     pub name: String,
+    /// The module file the function came from; `None` for the root.
+    pub file: Option<String>,
     pub names: Vec<NameInfo>,
     pub params: Vec<Name>,
     pub stmts: Vec<St>,
@@ -301,7 +310,9 @@ impl Body {
                 St::Let(n, r) => {
                     out.push_str(&format!("{pad}let {} = {}\n", self.spell(*n), self.rhs(r)))
                 }
-                St::Store { place, value, old } => out.push_str(&format!(
+                St::Store {
+                    place, value, old, ..
+                } => out.push_str(&format!(
                     "{pad}{} = {}  ({:?})\n",
                     self.place(place),
                     self.val(value),
@@ -341,6 +352,7 @@ impl Body {
                     on,
                     arms,
                     consuming,
+                    ..
                 } => {
                     out.push_str(&format!(
                         "{pad}switch {}{}\n",
@@ -359,7 +371,7 @@ impl Body {
                         self.render_stmts(&a.body, depth + 2, out);
                     }
                 }
-                St::Do(r) => out.push_str(&format!("{pad}do {}\n", self.rhs(r))),
+                St::Do(r, _) => out.push_str(&format!("{pad}do {}\n", self.rhs(r))),
                 St::Trap => out.push_str(&format!("{pad}trap\n")),
             }
         }
@@ -458,6 +470,7 @@ pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<
         placed,
         body: Body {
             name: inst.spelling(),
+            file: inst.func.module.clone(),
             names: Vec::new(),
             params: Vec::new(),
             stmts: Vec::new(),
@@ -798,6 +811,7 @@ impl<'a> Builder<'a> {
                         place: Place::Global(name.clone()),
                         value: v,
                         old,
+                        line: *line,
                     });
                     return Ok(());
                 };
@@ -823,6 +837,7 @@ impl<'a> Builder<'a> {
                     place: Place::Name(n),
                     value: v,
                     old,
+                    line: *line,
                 });
             }
             Stmt::SetField {
@@ -839,6 +854,7 @@ impl<'a> Builder<'a> {
                     place: Place::Field(Box::new(base), field.clone()),
                     value: v,
                     old,
+                    line: *line,
                 });
             }
             Stmt::IndexSet {
@@ -867,9 +883,10 @@ impl<'a> Builder<'a> {
                     place,
                     value: v,
                     old,
+                    line: *line,
                 });
             }
-            Stmt::Return { value, .. } => {
+            Stmt::Return { value, line } => {
                 let v = match value {
                     Some(e) => Some(self.val(e, out)?),
                     None => None,
@@ -880,6 +897,7 @@ impl<'a> Builder<'a> {
                     value: v,
                     site: sid,
                     is_try: false,
+                    line: *line,
                 });
             }
             Stmt::Break { .. } => {
@@ -947,6 +965,7 @@ impl<'a> Builder<'a> {
                         },
                     ],
                     consuming,
+                    line: *line,
                 });
                 self.drops_at(Exit::Scrutinee, sid, out)?;
             }
@@ -1106,7 +1125,7 @@ impl<'a> Builder<'a> {
                         out.push(St::Drop(t));
                     }
                 } else {
-                    out.push(St::Do(rhs));
+                    out.push(St::Do(rhs, e.line()));
                     for t in std::mem::take(&mut self.after_of_rhs) {
                         out.push(St::Drop(t));
                     }
@@ -1629,10 +1648,12 @@ impl<'a> Builder<'a> {
         if ptys.len() != params.len() {
             return gap("a lambda with the wrong arity for its type", *line);
         }
+        let file = self.body.file.clone();
         let outer = std::mem::replace(
             &mut self.body,
             Body {
                 name: String::new(),
+                file,
                 names: Vec::new(),
                 params: Vec::new(),
                 stmts: Vec::new(),
@@ -1672,6 +1693,7 @@ impl<'a> Builder<'a> {
                     value: Some(v),
                     site: 0,
                     is_try: false,
+                    line: *line,
                 })
             }),
         };
@@ -1773,7 +1795,7 @@ impl<'a> Builder<'a> {
             }
             Expr::Call { name, args, line } if name == "panic" || name == "@panicAt" => {
                 let r = self.call(name, args, *line, out)?;
-                out.push(St::Do(r));
+                out.push(St::Do(r, *line));
                 out.push(St::Trap);
                 Ok(Rhs::Val(Val::Lit))
             }
@@ -1829,6 +1851,7 @@ impl<'a> Builder<'a> {
                     place: Place::Name(res),
                     value: tv,
                     old: Old::Nothing,
+                    line: *line,
                 });
                 self.edge_drops(site, 0, &mut t)?;
                 let mut f = Vec::new();
@@ -1839,6 +1862,7 @@ impl<'a> Builder<'a> {
                             place: Place::Name(res),
                             value: ev,
                             old: Old::Nothing,
+                            line: *line,
                         });
                         self.edge_drops(site, 1, &mut f)?;
                     }
@@ -1875,6 +1899,7 @@ impl<'a> Builder<'a> {
                                 place: Place::Name(res),
                                 value: v,
                                 old: Old::Nothing,
+                                line: *line,
                             });
                         }
                         ArmBody::Block(blk) => self.block(blk, &mut body)?,
@@ -1902,6 +1927,7 @@ impl<'a> Builder<'a> {
                     on: sv,
                     arms: core_arms,
                     consuming,
+                    line: *line,
                 });
                 self.drops_at(Exit::Scrutinee, mid, out)?;
                 Ok(Rhs::Val(Val::Name(res)))
@@ -1932,6 +1958,7 @@ impl<'a> Builder<'a> {
                     value: fb.first().map(|n| Val::Name(*n)),
                     site: tid,
                     is_try: true,
+                    line: *line,
                 });
                 self.scope.truncate(mark);
                 let mut ok = Vec::new();
@@ -1947,6 +1974,7 @@ impl<'a> Builder<'a> {
                     place: Place::Name(res),
                     value: ob.first().map(|n| Val::Name(*n)).unwrap_or(Val::Lit),
                     old: Old::Nothing,
+                    line: *line,
                 });
                 self.scope.truncate(mark);
                 out.push(St::Switch {
@@ -1966,6 +1994,7 @@ impl<'a> Builder<'a> {
                         },
                     ],
                     consuming,
+                    line: *line,
                 });
                 Ok(Rhs::Val(Val::Name(res)))
             }
@@ -2002,6 +2031,7 @@ impl<'a> Builder<'a> {
             value: Some(sv.clone()),
             site: tid,
             is_try: true,
+            line,
         });
         let mut ok = Vec::new();
         let t = self.temp(self.body.names[res as usize].ty.clone(), line);
@@ -2016,6 +2046,7 @@ impl<'a> Builder<'a> {
             place: Place::Name(res),
             value: Val::Name(t),
             old: Old::Nothing,
+            line,
         });
         out.push(St::Switch {
             on: sv,
@@ -2034,6 +2065,7 @@ impl<'a> Builder<'a> {
                 },
             ],
             consuming: false,
+            line,
         });
         Ok(Rhs::Val(Val::Name(res)))
     }
@@ -2357,7 +2389,8 @@ fn mentions_in_expr<'e>(e: &'e Expr, vars: &mut Vec<&'e Expr>, calls: &mut Vec<&
 }
 
 thread_local! {
-    static STRICT_REFUSALS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    static STRICT_REFUSALS: std::cell::RefCell<Vec<crate::kernel::Refusal>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Whether `VYRN_KERNEL_STRICT=1` is set: a hard refusal by the kernel fails
@@ -2369,7 +2402,7 @@ pub fn strict() -> bool {
 /// The hard refusals the placer met since the last call, on this thread: a
 /// double free, a use after release, a join whose edges disagree — what no
 /// placement repairs. Drained by the CLI in strict mode after an analysis.
-pub fn take_strict_refusals() -> Vec<String> {
+pub fn take_strict_refusals() -> Vec<crate::kernel::Refusal> {
     STRICT_REFUSALS.with(|v| std::mem::take(&mut *v.borrow_mut()))
 }
 
@@ -2427,12 +2460,12 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 Ok(m) => m,
                 Err(r) => {
                     if trace {
-                        eprintln!("placer: refused: {}", r.message);
+                        eprintln!("placer: refused: {}: {}", r.body, r.message);
                     }
                     // A refusal no placement repairs: a double free, a use after
                     // release, a join whose edges disagree. Kept for the CLI's
                     // strict mode.
-                    STRICT_REFUSALS.with(|v| v.borrow_mut().push(r.message.clone()));
+                    STRICT_REFUSALS.with(|v| v.borrow_mut().push(r));
                     continue;
                 }
             };

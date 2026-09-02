@@ -122,6 +122,11 @@
 //! this test judges every frame; the tally counts each as an instance.
 //! `lambda-holds-on-one-path.vyrn` went from 15.2 / 25.9 MB to 4.8 / 4.8 MB.
 //!
+//! **Wordings, the same slice.** A refusal carries its line and file and is
+//! worded as `movecheck.rs` words a move; `VYRN_KERNEL_STRICT=1` prints it
+//! as `file:line:0: message`, and `VYRN_NO_MOVECHECK=1` shows it on a
+//! program the checker refuses first (RFC-0125 §3 M3, "wordings").
+//!
 //! The ratchet is 0. `VYRN_KERNEL_GAPS=<substring>`
 //! lists where each remaining gap is; `VYRN_KERNEL_TRACE=1` prints what the
 //! placer found owed in every body, and `VYRN_KERNEL_TRACE=<fn>` prints that
@@ -263,7 +268,12 @@ fn run_corpus() {
                                         .collect();
                                     eprintln!("  plan releases: {}", rel.join("; "));
                                 }
-                                refused.push(format!("{file}: {}", r.message));
+                                refused.push(format!(
+                                    "{file}: {}: line {}: {}",
+                                    r.body,
+                                    r.line,
+                                    r.message.replace('\n', " / ")
+                                ));
                             }
                         }
                     }

@@ -1142,6 +1142,77 @@ the call could not be attributed. Every frame in the corpus is accepted
 with the placer on, so the rows the placer adds inside lambdas are the
 whole difference between the two probe columns above.
 
+**Wordings (2026-09-02, the third slice).** A hard refusal by the kernel
+under `VYRN_KERNEL_STRICT=1` prints as the checker's move diagnostics print:
+`file:line:0: message`, the message in `movecheck.rs`'s voice. The kernel
+now keeps, per consumed name, the line and the taker in the checker's words
+("the binding `t`", "`take(..)`", "`consume`", "a `return`"), and the core's
+taking statements carry their source line, which is what the wording needs
+and the judgment did not. The comparison was made on five small programs
+under `VYRN_NO_MOVECHECK=1` — a knob added for exactly this, since the
+checker refuses each before the kernel is reached:
+
+| program | the checker (`vyrn check`) | the kernel (`VYRN_NO_MOVECHECK=1 VYRN_KERNEL_STRICT=1`) |
+|---|---|---|
+| `let t = s` then `print(s)` | w1.vyrn:3:0: `s` was moved here into the binding `t` / line 4: ... and `s` is used again here / fix: `s.copy()` if both sides need a value | the same two lines, no fix |
+| `take(s)` twice, `take(v: consume String)` | w2.vyrn:8:0: `s` is used here but was already consumed by `take(..)` on line 7 / (a `consume` parameter takes ownership; the value can't be used afterward) | the same two lines |
+| `take(s)` inside a `while` | w3.vyrn:10:0: `s` is consumed by `take(..)` inside a loop, so it would be used again on the next iteration | the same line |
+| `take(consume p.name)` then `print(p.name)` | w4.vyrn:9:0: `p.name` was moved here into `consume` / line 10: ... and `p.name` is used again here / fix: `p.name.copy()` if both sides need a value | the same two lines, no fix |
+| `take(consume p.name)` then `keep(p)` | w5.vyrn:13:0: `p.name` was taken out of `p` here / line 14: ... and `p` is used as a whole here, with the hole still in it / two fix lines | the same two lines, no fix |
+
+Where the two differ the kernel's is the same sentence with the `fix:` menu
+missing: the menu names `.copy()` and write-back as ways out, which are the
+checker's knowledge of the surface and not the kernel's. The join refusal
+has no checker equivalent (the checker accepts a conditional move and the
+plan's Rule N releases the other edge; the kernel says so only when the
+placer is off), so its sentence is the kernel's own.
+
+**What the analysis answers that the kernel does not, recorded for the
+deletion track.** Neither `movecheck.rs` nor `own.rs` is deleted here. The
+answers below have no kernel equivalent today; each is a rule the kernel or
+the core must state before its source can go.
+
+From `movecheck.rs`:
+
+- Rule 2, borrows: a `read` or `modify` parameter, a place read
+  (`names_a_place`), a loop variable or a projection's result may not be
+  returned, stored, or handed to a `consume` parameter without `.copy()`.
+  The core binds such a name as not owned, and the kernel does not refuse a
+  take of a name it does not own.
+- Module state may not be taken (RFC-0013): the core reads a global as a
+  borrow and says nothing about a `consume` of it.
+- A `region`'s escape rule (RFC-0004 §4): a value the arena allocated may
+  not leave the region. The core lowers a `region` as an ordinary block.
+- A capture's rules: a moved name may not be captured, and a closure that
+  captures a borrowed parameter may not escape (`a2_capture_escape`). The
+  frame reads its captures as borrowed inputs and judges nothing about
+  their lifetime.
+- `consume` with nothing to take, and the `for .. in consume` forms.
+- The `fix:` menus and `vyrn fix`.
+- An exported function returning a borrow.
+- The argument verdicts over the call graph (`ArgVerdict`, `note_handover`):
+  whether a callee keeps what it is handed, which is what `arg_drops` is
+  built from. The kernel judges the row; it does not derive it.
+- `sinks`: a rebuilding builtin takes its receiver, and the write-back
+  statement excepted. The core restates the first half (`call`, `rebuilds`)
+  and reads the plan for the second.
+
+From `own.rs`:
+
+- Every per-node table the core reads and does not derive: `arg_drops`,
+  `store_owned` and `store_fresh` with `mentions_place`, `discarded_results`,
+  `consuming_matches`, `malloc_scrutinees` and `receiver_malloc` (the region
+  stand-downs), `receiver_frees` for a scalar read, the `for` handover
+  (`DropKind::FreeArr`), the binding notes (`Fate`, and `vyrn why --memory`).
+- The release kind of a type (`DropKind`) and a declared `release`'s
+  ordering: the emitters read kinds from the plan; the kernel asks only
+  whether a type owns heap.
+- `Leak::Hole` (a hole the walk cannot skip) and `Leak::Region`: not
+  modelled; a binding under the first is a gap.
+- An edge row's hole set, and an element hole (`.[]`): no row.
+- A lambda expression body's exit: a name still held at it has no site an
+  engine runs, so it is refused, not placed.
+
 
 
 **Lambda bodies are not judged, and the reason is in the emitters.** Both
