@@ -30,7 +30,7 @@ use crate::ast::{LogSink, Program};
 use crate::diagnostics::Diagnostic;
 
 /// A way out of the program that some target lacks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Capability {
     /// The filesystem: `readFile`, `readFileBytes`, `writeFile`,
     /// `writeFileBytes`, `renameFile`, `fsyncFile`, and the
@@ -130,7 +130,7 @@ pub struct Carried {
 /// a wasm build is refused outright), but that is a missing lowering — a filed
 /// regression — and not a second capability. The floor names the capability;
 /// the backend keeps its own refusal.
-const CALLS: &[(&str, Capability)] = &[
+pub const CALLS: &[(&str, Capability)] = &[
     ("readFile", Capability::Fs),
     ("readFileBytes", Capability::Fs),
     ("writeFile", Capability::Fs),

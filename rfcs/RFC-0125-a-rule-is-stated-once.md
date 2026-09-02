@@ -1540,6 +1540,222 @@ one program that must still refuse.
 **Gate:** the audience, floor and contract test suites green with their passes
 deleted.
 
+**The first slice landed (2026-09-02): the effect judgment, beside the two
+passes, over the corpus.** Nothing is deleted. `vyrn-lower/src/effects.rs`
+computes a per-function effect set over the named core; `tests/effects.rs`
+runs it over every example and every entry point of the four example
+projects, and stands the audience pass (RFC-0072) and the floor (RFC-0103)
+beside it, function by function. Every disagreement is a numbered finding
+below. The deletion slice reads this list before it deletes anything.
+
+#### The lattice
+
+One table. `effects::ATOMS` is its second column and nothing else;
+`tests/effects.rs` reads the table out of this file and refuses to run when
+the two differ. A row names an effect, the builtins and host imports that
+are its atoms, the WASI import the direct backend (RFC-0077) reaches it
+through, and which target provides it — `yes` is RFC-0103 §2's cell, `gen`
+is RFC-0021's generation-time sandbox. A function's set is the join of its
+own atoms and its callees' sets, to a fixpoint. An owned name born of a
+primitive, a literal or a builtin is an allocation; a user callee's set says
+whether it allocated. `pure` is the bottom.
+
+| effect | atoms | WASI import | native | wasi | browser | gen |
+|---|---|---|---|---|---|---|
+| `alloc` | `runtime$malloc`, `mem$grow`; and an owned name born of a primitive, a literal or a builtin | `memory.grow` | yes | yes | yes | yes |
+| `read-input` | `readLine` | `fd_read` on 0 | yes | yes | EOF | no |
+| `write-output` | `print`, `writeStdout`, `trace`, `debug`, `info`, `warn`, `error` | `fd_write` on 1, 2 | yes | yes | yes | `print` yes, the rest no (finding 4) |
+| `fs-read` | `readFile`, `readFileBytes` | `path_open`, `fd_read`, `fd_close`, `fd_prestat_get` | yes | yes | `NOENT` | `readFile` yes, `readFileBytes` no (finding 5) |
+| `fs-write` | `writeFile`, `writeFileBytes`, `renameFile`, `fsyncFile` | `path_open`, `fd_write`, `path_rename`, `fd_sync` | yes | yes | `NOENT` | no |
+| `fs-list` | `listDir`, `listDirKinds` | `fd_readdir` | no (`NATIVE_UNSUPPORTED`) | yes | `BADF` | yes, mediated |
+| `args` | `args` | `args_sizes_get`, `args_get` | yes | yes | empty | no |
+| `clock` | `hostNowMillis`, `hostMonotonicNanos` | `clock_time_get`; `environ_get` for `VYRN_FIXED_TIME` | yes | yes | yes | no (an extern) |
+| `random` | `hostRandomSeed` | `random_get`; `environ_get` for `VYRN_FIXED_SEED` | yes | yes | yes | no (an extern) |
+| `extern` | every other extern declaration, resolved by name | the `vyrn` namespace | trap | no instantiation | yes | no |
+| `serve` | `serveStream` | — | trap | trap | trap | no |
+| `trap` | `panic`, `@panicAt`, `assert`, `assertEq`, `runtime$trap`, `mem$trap`; and the core's trap statement | `proc_exit` | yes | yes | yes | yes |
+| `gen-only` | `moduleInterface`, `contractOf`, `lex`, `render`, `raw`, `rawAt`, `@codeText`, `@codeSplice` | — | no | no | no | yes |
+
+Every one of the fifteen preview1 imports `direct.rs` declares is in the
+third column; `environ_sizes_get` and `environ_get` serve the clock and the
+seed and nothing else. The runtime module's own primitives (`std/mem`,
+`std/runtime`) are pure but for the four rows that name them. `spawn` is not
+a row: the core lowers `spawn f(..)` as a call to `f`, so the judgment
+cannot see it (finding 1).
+
+#### The comparison
+
+For every function the harness records three things. The judgment's set.
+The floor's answer at function grain — which of `fs`, `stdin`, `args` the
+body spells, by `floor::CALLS`, a `gen fn` body skipped, as `floor::carried`
+does per module. The audience's answer — `audience::audience_of` for the
+module the function was declared in, under the project's `vyrn.json`. Each
+function lands in one floor kind and one audience kind:
+
+- floor: *agree*; *callee-carried* (the judgment has more, and a callee's
+  body spells it, so the floor's union over the closure agrees); *gen-body*
+  (a `gen fn` reads at generation time; the floor skips it by design, and
+  the verdict agrees because the context differs); *floor-blind* (the
+  judgment has an effect no body in the program spells — a disagreement);
+  *core-blind* (the body spells a call the core does not lower — a
+  disagreement).
+- audience: *no fence* (no `audience` key, or a module outside the project:
+  std, a remote); *agree*; *declared-only* (server-only or client-only with
+  no target-restricted effect — the fence protects a declaration, RFC-0103
+  §4; not an effect, stays); *unfenced* (universal or client-only with an
+  effect a browser lacks — a disagreement); *server-extern* (server-only
+  with an extern a native target lacks — a disagreement).
+
+The ratchet is the sum of the disagreement kinds.
+`VYRN_EFFECTS_DUMP=<file>:<fn>` prints one function's set and where each
+callee's came from.
+
+#### The tally
+
+`cargo test -p vyrn-cli --test effects`, 2026-09-02, at the commit that
+landed this slice:
+
+    effects over the corpus: 181 programs (31 not loadable here), 16650 functions
+    judged, 4479 pure, 8 unlowered, 117 calls through a function value
+      effect 12110  alloc
+      effect    11  read-input
+      effect   280  write-output
+      effect   192  fs-read
+      effect    12  fs-write
+      effect   106  fs-list
+      effect     8  args
+      effect    22  clock
+      effect    13  random
+      effect    31  extern
+      effect    22  serve
+      effect  3282  trap
+      effect   698  gen-only
+      floor:      16414 agree, 19 callee-carried, 216 gen-body, 1 floor-blind,
+                  0 core-blind
+      audience:   16209 no fence, 23 agree, 418 declared-only, 0 unfenced,
+                  0 server-extern
+
+The 181 programs are the 204 examples less the 31 that need the root
+manifest's remote dependencies (the count `kernel.rs` reports), plus the
+eight entry points of `examples/bin`, `examples/fullstack`, `examples/leak`
+and `examples/shelf`. The 8 unlowered are instances of the project entries
+whose core the M2 lowering cannot attribute a call in; they are judged
+nowhere. **The ratchet is 1**: `listdir.vyrn`'s `main`, finding 6.
+
+#### The findings
+
+Each finding names the kind the harness puts it in, the program that shows
+it, and what it is: a pass that is wrong, an atom the lattice lacks, a hole
+in the judgment, or a rule that is not an effect and stays. The programs
+named `scratch/..` were written for this slice and run against the binary
+of this commit; the ones under `examples/` are in the corpus.
+
+1. **The core erases `spawn`** (lattice: a missing atom). §2.2 names four
+   effects and the fourth is *may spawn*; the core lowers `spawn f(..)` as a
+   call to `f` (`core.rs`, `Expr::Spawn`), so the judgment sees `f`'s set
+   and no spawn. The checker's spawn-isolation rule — `spawn work()` is
+   refused with "`work` (or something it calls) does I/O", scratch
+   `spawned.vyrn`:6 — is exactly an inclusion check, the spawned callee's
+   set within `{alloc, trap}`, and it cannot be stated on the core until a
+   call carries a spawn marker. `examples/concurrency.vyrn` is the corpus
+   case. The deletion slice adds the marker first.
+2. **The core does not lower a lambda body** (judgment: a hole). A lambda is
+   a read of its captures (`core.rs`, `lambda`) and its body is no
+   instance, so a call inside one is judged nowhere. Scratch `lambda.vyrn`:2
+   binds `p -> readFile(p)`; the dump gives `main — alloc, write-output` and
+   the floor kind *core-blind*, because the body spells `readFile`. The
+   corpus has no such function (core-blind is 0), which is why the ratchet
+   does not carry it; the deletion slice cannot land while it is possible.
+3. **A call through a function value is judged pure** (judgment: a hole).
+   117 call sites name a parameter or a binding (`f` in `map<Int64, Int64>`,
+   `resolve` in `std/graphql`'s `gqlAnswer`, `cb` in `std/rpc`'s deliverers)
+   and resolve to no body. RFC-0037's defunctionalization already knows
+   every source a `fn`-typed slot can hold (`checker::StoredSource`); the
+   judgment should join over them. `VYRN_EFFECTS_UNKNOWN=1` lists the sites.
+4. **The generation fence splits `write-output`** (pass: inconsistent with
+   the lattice). `COMPTIME_FORBIDDEN` refuses `writeStdout` and the five log
+   levels in a `gen fn` and says nothing of `print`: scratch
+   `genprint.vyrn` — a `gen fn` that prints — is `ok`, and the same body
+   with `writeStdout` is refused. One effect, two verdicts. The table's
+   `gen` column records the split; the deletion slice picks one cell.
+5. **The generation fence splits `fs-read`** (not an effect; stays until
+   the route is one). `readFile` in a `gen fn` is permitted because it
+   routes through the loader's resolver and is a cache input (RFC-0021);
+   `readFileBytes` is refused because it does not. Scratch `genread.vyrn`
+   is `ok`, `genbytes.vyrn` is refused. The difference is which reads the
+   generation cache is keyed by, not what the program does. It stays a
+   rule of the resolver until `readFileBytes` takes the same route, and
+   then the row is one cell.
+6. **The floor has no row for `fs-list`** (pass: wrong — a program that
+   should be refused is not). `examples/listdir.vyrn`:18 calls `listDir`
+   at run time and is the corpus's one *floor-blind* function. `floor.rs`
+   leaves `listDir` out because "no compiled target has them"; M5 lowered
+   it over `fd_readdir`, `wasi` runs it, and a page answers `BADF`, so a
+   browser artifact calling it now degrades to the canonical `Err` the
+   floor exists to refuse. Scratch `p3/client/boot.vyrn` under
+   `{ "app": { "target": "browser" } }` passes `vyrn check`. The row
+   belongs in `fs`.
+7. **An `extern` declaration is a capability the direct backend does not
+   need** (pass: refuses a program that runs). The floor carries `extern`
+   on the declaration (M0 finding 3: an unanswered import stops
+   instantiation). Scratch `p5/unused.vyrn` declares `jsAdd` and never
+   calls it: under a native artifact `vyrn check` refuses it ("imports a
+   host function"), and `vyrn run --engine wasm` on the same file prints
+   and exits 0, because the direct backend sweeps an import nothing
+   reaches (RFC-0077 M2p). The judgment gives `main` no `extern`. The
+   deletion slice decides whether the rule is a declaration or a call; the
+   lattice can state only the call.
+8. **Presence per module against reachability per function** (rule
+   difference). The floor carries what a module SPELLS, whichever function
+   spells it; the judgment carries what a function REACHES. On branches
+   the two agree — the judgment joins both arms of every `if`. On dead
+   functions they do not: scratch `p6/client/boot.vyrn` under a browser
+   artifact has a `dump()` nothing calls that writes a file, the floor
+   refuses it, and `main` is judged `alloc, write-output`. The 19
+   *callee-carried* functions are the same difference at function grain
+   with the closure agreeing. The deletion slice's inclusion check for an
+   artifact is over the entry's set, which is reachability, and this RFC
+   says so here so the change of rule is on record.
+9. **A `gen fn` body is judged; the floor skips it** (context differs,
+   verdict agrees). 216 generation-time bodies carry `fs-read`, `fs-list`
+   or `gen-only` — `std/ui`, `std/vyx`, `std/i18n`, every generator that
+   reads its inputs. The floor is right to skip them for the artifact; the
+   judgment is right to see them for the generation context. The table's
+   `gen` column is the target row the deletion slice's check reads for
+   them. Not a disagreement.
+10. **A fence protects a declaration** (not an effect; stays). 418
+    server-only and client-only functions in `bin`, `fullstack` and `shelf`
+    have no target-restricted effect at all — a route handler, a page, a
+    store's shape. RFC-0103 §4 says what the fence is for: a secret in a
+    constant uses no capability. The audience pass stays as the declared
+    boundary it is; the judgment replaces nothing of it. The `logging {
+    sink: file(..) }` carrier is the same kind: the floor's `fs` by
+    declaration, the judgment's `write-output` on every log call.
+11. **A universal module with a file read, imported by a client** (not a
+    disagreement; recorded so nobody looks for it). Scratch `p4` declares
+    an `audience` and no `artifacts`; `shared/format.vyrn` calls
+    `readFile`, `client/boot.vyrn` imports it. The fence allows the import
+    (universal is importable from anywhere) and the floor refuses it, from
+    the browser artifact the manifest's `client` key implies. The corpus
+    has no *unfenced* function. The floor and the fence divide the work as
+    RFC-0103 designed, and the judgment sides with the floor.
+12. **Eight instances have no core** (judgment: judged nowhere). The project
+    entries reach eight instances whose lowering stops at "a call this
+    slice cannot attribute" (§3 M2's gap list); `examples/*.vyrn` has none.
+    They are counted as unlowered and are outside the ratchet.
+13. **The generation fence names the clock an extern** (verdict agrees;
+    wording does not). Scratch `genclock.vyrn` calls `std/time`'s `now` in
+    a `gen fn` and is refused as "calls the extern `hostNowMillis`". The
+    table's `gen` column says no for `clock`, so the verdict stands; but
+    RFC-0103 M2 established that the three host-boundary externs are not
+    imports, and the fence's `extern_fns` set does not know it. When the
+    fence becomes the inclusion check, the reason is the row: `clock`.
+
+What the deletion slice inherits, in order: the spawn marker (1), lambda
+bodies in the core (2), the function-value join (3), then the three table
+cells the passes disagree with (4, 6, 7), then the rule change on record
+(8). Findings 5, 9, 10, 11 and 13 change nothing.
+
 ### What each milestone is worth on its own
 
 M1 fixes the wasm column. M2 makes leaks a compile error. M3 halves the
