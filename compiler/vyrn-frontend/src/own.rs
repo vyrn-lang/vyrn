@@ -273,6 +273,13 @@ pub struct Release {
     /// WHOLE value, hole fields included. False everywhere else, and the
     /// emission skips the holes as it always has.
     pub full: bool,
+    /// RFC-0125 M3: the holes THIS row walks around, when the placer decided
+    /// them for this exit rather than the analysis for the binding. `None`
+    /// means the binding's own set (the `holes` table). The placer sets it
+    /// where a name is held with a hole at an exit the analysis placed
+    /// nothing at: the hole set at that exit is the kernel's state there,
+    /// which may differ from the binding's set on another path.
+    pub holes: Option<Vec<String>>,
 }
 
 /// How a droppable binding is reclaimed at block exit.
@@ -1330,8 +1337,17 @@ pub struct ReleasePlan {
     /// unmoved payload binders, each released at the arm's end. See
     /// [`crate::movecheck::ArmPayloadEv`]. The analysis writes one binder per
     /// row; RFC-0125 M3's placer writes every unmoved binder of an arm, so an
-    /// emitter frees the binders the row names and no other.
-    pub arm_frees: HashMap<(usize, u32), Vec<(String, DropKind)>>,
+    /// emitter frees the binders the row names and no other. The third
+    /// element is the binder's holes at the arm's end (RFC-0125 M3): the
+    /// analysis writes none, the placer writes what the kernel saw taken out
+    /// of the binder, and the walk skips exactly those.
+    pub arm_frees: HashMap<(usize, u32), Vec<(String, DropKind, Vec<String>)>>,
+    /// RFC-0125 M3: for a receiver in [`ReleasePlan::receiver_frees`] one of
+    /// whose heap fields the read TOOK (`let sels = parse(q).sels`), the
+    /// holes the free walks around — the taken field. The analysis kept such
+    /// a receiver out of the set because a whole walk would free what the
+    /// binding took; the placer puts it in with its hole.
+    pub receiver_holes: HashMap<usize, Vec<String>>,
     /// §26's finish check: which function each row above lives in, so
     /// [`ReleasePlan::unconsumed`] can skip rows whose owner an emission
     /// never reached — dead code alarms nobody, a missed site in emitted
@@ -1470,6 +1486,15 @@ impl ReleasePlan {
         hit
     }
 
+    /// RFC-0125 M3: the holes a receiver's free walks around, when the read
+    /// took a field out of it. Empty for every receiver the analysis placed.
+    pub fn receiver_holes_at(&self, at: usize) -> Vec<String> {
+        self.receiver_holes
+            .get(&self.resolve(at))
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// Round fifty-seven: is this receiver's block a CALLEE allocation —
     /// malloc-side even inside a `region`?
     pub fn receiver_malloc_at(&self, at: usize) -> bool {
@@ -1478,7 +1503,11 @@ impl ReleasePlan {
 
     /// Round forty: the releases owed to this arm's unmoved payload binders,
     /// by binder name.
-    pub fn arm_payload_free(&self, at: usize, arm: u32) -> Option<&Vec<(String, DropKind)>> {
+    pub fn arm_payload_free(
+        &self,
+        at: usize,
+        arm: u32,
+    ) -> Option<&Vec<(String, DropKind, Vec<String>)>> {
         let at = self.resolve(at);
         let r = self.arm_frees.get(&(at, arm));
         if r.is_some() {
@@ -1855,6 +1884,7 @@ pub fn analyze(program: &Program) -> Ownership {
                         exit: if ex.is_try { Exit::Try } else { Exit::Return },
                         line: 0,
                         full: false,
+                        holes: None,
                     },
                 ));
                 early
@@ -2160,12 +2190,13 @@ pub fn analyze(program: &Program) -> Ownership {
     }
     // Round forty: unmoved payload binders of temp-scrutinee matches —
     // pre-screened in movecheck (silence, single binder, no alias).
-    let mut arm_frees: HashMap<(usize, u32), Vec<(String, DropKind)>> = HashMap::new();
+    let mut arm_frees: HashMap<(usize, u32), Vec<(String, DropKind, Vec<String>)>> =
+        HashMap::new();
     for a in &facts.arm_payloads {
         arm_frees
             .entry((a.match_id, a.arm_ix))
             .or_default()
-            .push((a.binder.clone(), a.kind.clone()));
+            .push((a.binder.clone(), a.kind.clone(), Vec::new()));
     }
     if std::env::var("VYRN_ARM_DUMP").is_ok() {
         for a in &facts.arm_payloads {
@@ -2205,6 +2236,7 @@ pub fn analyze(program: &Program) -> Ownership {
         edge_releases,
         receiver_frees,
         receiver_malloc,
+        receiver_holes: HashMap::new(),
         owners,
         taken: Default::default(),
         alias: Default::default(),
@@ -2533,12 +2565,22 @@ fn fold_store_owned(facts: &crate::movecheck::Facts) -> std::collections::HashSe
 /// value WITH — an alloca name, a wasm place, a scope entry. What it never does
 /// again is decide the order, or derive a boundary index to find where its own
 /// frames stop.
-pub fn placed(steps: &[Release]) -> HashMap<(Exit, usize), Vec<(usize, bool)>> {
-    let mut out: HashMap<(Exit, usize), Vec<(usize, bool)>> = HashMap::new();
+///
+/// The second element is the hole set the step walks around, when the row
+/// carries its own: round fifty-two's `full` is the empty set, and the
+/// placer's rows (RFC-0125 M3) carry the kernel's set at that exit. `None`
+/// leaves the binding's own set in force.
+pub fn placed(steps: &[Release]) -> HashMap<(Exit, usize), Vec<(usize, Option<Vec<String>>)>> {
+    let mut out: HashMap<(Exit, usize), Vec<(usize, Option<Vec<String>>)>> = HashMap::new();
     for r in steps {
+        let holes = if r.full {
+            Some(Vec::new())
+        } else {
+            r.holes.clone()
+        };
         out.entry((r.exit, r.site))
             .or_default()
-            .push((r.binding, r.full));
+            .push((r.binding, holes));
     }
     out
 }
@@ -2641,6 +2683,7 @@ impl Place<'_> {
                 exit,
                 line: l.line,
                 full: false,
+                holes: None,
             })
             .collect();
         self.out.extend(steps);

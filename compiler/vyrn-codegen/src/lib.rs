@@ -2575,7 +2575,7 @@ struct Gen<'a> {
     ownership: &'a vyrn_frontend::own::Ownership,
     /// RFC-0101 M4: the release steps placed at every exit of the function being
     /// emitted, keyed by the node the exit is AT. Read, never derived.
-    placed: HashMap<(vyrn_frontend::own::Exit, usize), Vec<(usize, bool)>>,
+    placed: HashMap<(vyrn_frontend::own::Exit, usize), Vec<(usize, Option<Vec<String>>)>>,
     /// RFC-0093 M2: per `let` node, the places a `consume` took out of it. The
     /// release walk skips them, because the take already gave them away.
     holes_map: &'a HashMap<usize, Vec<String>>,
@@ -4885,24 +4885,24 @@ impl<'a> Gen<'a> {
             ExitKind::Return | ExitKind::Try => self.cursors.clone(),
             _ => Vec::new(),
         };
-        let mut run: Vec<(String, Option<DropKind>, bool, bool)> = Vec::new();
-        for (b, full) in steps {
+        let mut run: Vec<(String, Option<DropKind>, bool, Option<Vec<String>>)> = Vec::new();
+        for (b, holes) in steps {
             let Some(d) = self.drop_slots.get(&b) else {
                 continue;
             };
             let (slot, kind, seq, ms) = (d.slot.clone(), d.kind.clone(), d.seq, d.malloc_side);
             while cursors.last().is_some_and(|(_, at)| *at > seq) {
-                run.push((cursors.pop().unwrap().0, None, false, false));
+                run.push((cursors.pop().unwrap().0, None, false, None));
             }
-            run.push((slot, Some(kind), ms, full));
+            run.push((slot, Some(kind), ms, holes));
         }
         for (slot, _) in cursors.into_iter().rev() {
-            run.push((slot, None, false, false));
+            run.push((slot, None, false, None));
         }
-        for (slot, kind, malloc_side, full) in run {
+        for (slot, kind, malloc_side, holes) in run {
             if std::env::var_os("VYRN_STEP_TRACE").is_some() {
                 self.emit(format!(
-                    "; release-step exit={exit:?} at={at:x} slot={slot} full={full}"
+                    "; release-step exit={exit:?} at={at:x} slot={slot} holes={holes:?}"
                 ));
             }
             // Round twenty-seven: a malloc-side scrutinee inside a `region` —
@@ -4914,20 +4914,27 @@ impl<'a> Gen<'a> {
             } else {
                 self.region_depth
             };
-            // Round fifty-two: a pre-take exit walks the WHOLE value — the
-            // hole fields included, since nothing has taken them on this
-            // path. The skip-list is parked around the one emit.
-            let saved_holes = if full {
-                self.hole_slots.remove(&slot)
-            } else {
-                None
-            };
+            // A row that carries its own hole set walks around exactly
+            // those: round fifty-two's pre-take exit walks the WHOLE value
+            // (the empty set), and the placer's row walks the rest of what
+            // the kernel saw taken at this exit (RFC-0125 M3). The binding's
+            // own skip-list is parked around the one emit.
+            let saved_holes = holes.map(|h| {
+                let prev = self.hole_slots.remove(&slot);
+                if !h.is_empty() {
+                    self.hole_slots.insert(slot.clone(), h);
+                }
+                prev
+            });
             match kind {
                 Some(k) => self.emit_drop(&slot, &k),
                 None => self.emit_drop(&slot, &DropKind::CloseStream),
             }
-            if let Some(h) = saved_holes {
-                self.hole_slots.insert(slot.clone(), h);
+            if let Some(prev) = saved_holes {
+                self.hole_slots.remove(&slot);
+                if let Some(h) = prev {
+                    self.hole_slots.insert(slot.clone(), h);
+                }
             }
             self.region_depth = saved;
         }
@@ -6123,6 +6130,17 @@ impl<'a> Gen<'a> {
                 self.scope.push(Vec::new());
                 let vslot = self.declare(var, &elem);
                 self.emit(format!("store {ell} {ev}, ptr {vslot}"));
+                // RFC-0125 M3: a variable the body drains a field of keeps
+                // the rest of its element, and the placer's rows for it —
+                // keyed by the variable's spelling, since it has no `let` —
+                // release that rest at every exit of the body.
+                let vkey = var as *const String as usize;
+                if let Some(kind) = self.droppable.get(&vkey).cloned() {
+                    if let Some(h) = self.holes_map.get(&vkey) {
+                        self.hole_slots.insert(vslot.clone(), h.clone());
+                    }
+                    self.register_drop(vkey, vslot.clone(), kind);
+                }
                 self.loop_ctx.push(LoopCtx {
                     break_label: end_l.clone(),
                     continue_label: latch_l.clone(),
@@ -6506,6 +6524,7 @@ impl<'a> Gen<'a> {
                 // heap field stays out: `names_a_place` made the binding its
                 // owner. A `lazy` field stays out too: forcing it reads the
                 // record after this point.
+                let rh = self.plan.receiver_holes_at(expr as *const Expr as usize);
                 if self.plan.receiver_free(expr as *const Expr as usize)
                     && (self.region_depth == 0
                         || self.plan.receiver_malloc_at(expr as *const Expr as usize))
@@ -6513,6 +6532,21 @@ impl<'a> Gen<'a> {
                     && vyrn_frontend::types::deferred(&fty).is_none()
                 {
                     self.free_arg_temp(&v, &ety);
+                } else if !rh.is_empty()
+                    && self.plan.receiver_free(expr as *const Expr as usize)
+                    && (self.region_depth == 0
+                        || self.plan.receiver_malloc_at(expr as *const Expr as usize))
+                    && !self.terminated
+                {
+                    // RFC-0125 M3: the read TOOK a heap field (`let sels =
+                    // parse(q).sels`), and the placer's row frees the rest of
+                    // the receiver around that hole. The value is already in
+                    // `t`, so the walk reads nothing the free reaches.
+                    if let Some(kind) = self.owned.release_kind(&ety) {
+                        let slot = self.fresh_alloca(&ll);
+                        self.emit(format!("store {ll} {v}, ptr {slot}"));
+                        self.emit_drop_holed(&slot, &kind, rh);
+                    }
                 }
                 // RFC-0085 M4a: reading a `lazy T` field FORCES it — the loaded
                 // `{ i64, i64 }` is a stored nullary closure and this is the
@@ -7227,11 +7261,11 @@ impl<'a> Gen<'a> {
             // `gen_arm_body`.
             if let Some(rows) = self.plan.arm_payload_free(key, arm_ix as u32).cloned() {
                 for (bind, slot) in &bind_slots {
-                    let Some((_, kind)) = rows.iter().find(|(n, _)| n == bind) else {
+                    let Some((_, kind, holes)) = rows.iter().find(|(n, _, _)| n == bind) else {
                         continue;
                     };
                     if !self.terminated && self.region_depth == 0 {
-                        self.emit_drop(slot, kind);
+                        self.emit_drop_holed(slot, kind, holes.clone());
                     }
                 }
             }
@@ -7649,7 +7683,7 @@ impl<'a> Gen<'a> {
         arm: &MatchArm,
         payload_ty: &Type,
         free_boxes: bool,
-        payload_free: Option<Vec<(String, DropKind)>>,
+        payload_free: Option<Vec<(String, DropKind, Vec<String>)>>,
     ) -> Result<(String, Type), String> {
         self.scope.push(Vec::new());
         let mut bind_slot: Option<(String, String)> = None;
@@ -7694,10 +7728,10 @@ impl<'a> Gen<'a> {
         // release stood down, and this payload is the arm's to give back
         // once its body is done with it.
         if let (Some(rows), Some((bind, slot))) = (&payload_free, &bind_slot) {
-            if let Some((_, kind)) = rows.iter().find(|(n, _)| n == bind) {
+            if let Some((_, kind, holes)) = rows.iter().find(|(n, _, _)| n == bind) {
                 if !self.terminated && self.region_depth == 0 {
-                    let (slot, kind) = (slot.clone(), kind.clone());
-                    self.emit_drop(&slot, &kind);
+                    let (slot, kind, holes) = (slot.clone(), kind.clone(), holes.clone());
+                    self.emit_drop_holed(&slot, &kind, holes);
                 }
             }
         }
@@ -10208,17 +10242,50 @@ impl<'a> Gen<'a> {
             if *t != edge {
                 continue;
             }
-            let Some((slot, ty)) = self.lookup(name) else {
+            // `d.line` (RFC-0125 M3): the sub-place the other edge took,
+            // released here through its own address inside the binding.
+            let mut parts = name.split('.');
+            let root = parts.next().unwrap_or_default();
+            let Some((mut slot, mut ty)) = self.lookup(root) else {
                 continue;
             };
+            let mut sub = false;
+            for f in parts {
+                let Some(fields) = self.record_fields(&ty) else {
+                    break;
+                };
+                let Some(idx) = fields.iter().position(|x| x.name == f) else {
+                    break;
+                };
+                let rll = self.llt(&ty);
+                let fp = self.fresh_tmp();
+                self.emit(format!("{fp} = getelementptr {rll}, ptr {slot}, i32 0, i32 {idx}"));
+                slot = fp;
+                ty = fields[idx].ty.clone();
+                sub = true;
+            }
             let Some(kind) = self.owned.release_kind(&ty) else {
                 continue;
             };
-            if matches!(kind, DropKind::Release(..)) {
+            if matches!(kind, DropKind::Release(..)) && !sub {
                 continue;
             }
             self.emit_drop(&slot, &kind);
         }
+    }
+
+    /// `emit_drop` with a hole set of the row's own (RFC-0125 M3): the arm
+    /// table's binder row, whose arm handed part of the binder out.
+    fn emit_drop_holed(&mut self, slot: &str, kind: &DropKind, holes: Vec<String>) {
+        if holes.is_empty() {
+            return self.emit_drop(slot, kind);
+        }
+        let prev = self.hole_slots.insert(slot.to_string(), holes);
+        self.emit_drop(slot, kind);
+        match prev {
+            Some(h) => self.hole_slots.insert(slot.to_string(), h),
+            None => self.hole_slots.remove(slot),
+        };
     }
 
     fn gen_call_inner(&mut self, name: &str, args: &[Expr]) -> Result<(String, Type), String> {

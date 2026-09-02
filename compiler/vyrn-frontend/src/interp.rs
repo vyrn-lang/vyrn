@@ -3005,7 +3005,7 @@ struct Interp<'a> {
     /// Round forty's arm table, `(match, arm) -> [(binder, kind)]`: the
     /// payload binders an arm never moved, released at the arm's end. Only a
     /// declared release is observable in this engine; the buffers are `Rc`s.
-    arm_frees: HashMap<(usize, u32), Vec<(String, crate::own::DropKind)>>,
+    arm_frees: HashMap<(usize, u32), Vec<(String, crate::own::DropKind, Vec<String>)>>,
     /// The boxed streams (RFC-0075 M2c, re-hosted by RFC-0090 M3): what
     /// `boxStream` moved out of the program and `unboxStream` moves back in, keyed by
     /// the address it handed back. The compiled backends `malloc` one header and
@@ -7589,7 +7589,9 @@ impl<'a> Interp<'a> {
         if self.region_depth.get() != 0 {
             return Ok(());
         }
-        for (name, kind) in rows {
+        // The row's holes are not read: a buffer here is an `Rc`, and what
+        // a take handed out keeps its own count.
+        for (name, kind, _) in rows {
             let Some(v) = scope.last().and_then(|f| f.get(name)).map(|s| s.v.clone()) else {
                 continue;
             };

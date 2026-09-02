@@ -52,6 +52,15 @@ pub struct NameInfo {
     /// when the name is one the plan can be told about. `None` for a
     /// temporary this pass minted.
     pub binding: Option<usize>,
+    /// For the unnamed receiver of a field read (`parse(q).sels`): the
+    /// `Expr::Field` node, which is the key of the plan's receiver-free row
+    /// (RFC-0114 R1′). The placer frees such a receiver right after the read,
+    /// minus the field the read took.
+    pub receiver: Option<usize>,
+    /// The holes the plan's release walk skips for this binding (RFC-0093
+    /// M2's table), spelled as the kernel spells them (`.f.g`). A `Drop` of
+    /// the name walks around exactly these; a placed row may carry its own.
+    pub holes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +129,17 @@ pub enum St {
         old: Old,
     },
     Drop(Name),
+    /// A release row the plan placed at an exit, keyed as the plan keys it,
+    /// walking the name around `holes`. The kernel checks the set against
+    /// the holes its state has there: a row that skips a place still held
+    /// is a leak the placer repairs by rewriting the row's set; a row that
+    /// walks a place a take left is a double free.
+    Row {
+        name: Name,
+        holes: Vec<String>,
+        exit: Exit,
+        site: usize,
+    },
     If {
         cond: Val,
         then: Vec<St>,
@@ -263,6 +283,11 @@ impl Body {
                     old
                 )),
                 St::Drop(n) => out.push_str(&format!("{pad}drop {}\n", self.spell(*n))),
+                St::Row { name, holes, .. } => out.push_str(&format!(
+                    "{pad}drop {} minus {:?}\n",
+                    self.spell(*name),
+                    holes
+                )),
                 St::If {
                     cond, then, els, ..
                 } => {
@@ -479,6 +504,8 @@ impl<'a> Builder<'a> {
             owned,
             line,
             binding: None,
+            receiver: None,
+            holes: Vec::new(),
         });
         (self.body.names.len() - 1) as Name
     }
@@ -486,7 +513,18 @@ impl<'a> Builder<'a> {
     /// Record the plan's key for a name, and the name for the key.
     fn keyed(&mut self, n: Name, binding: usize) {
         self.body.names[n as usize].binding = Some(binding);
+        self.body.names[n as usize].holes = self.plan_holes(binding);
         self.by_binding.insert(binding, n);
+    }
+
+    /// The plan's hole set for a binding, spelled for the kernel.
+    fn plan_holes(&self, binding: usize) -> Vec<String> {
+        self.own
+            .holes
+            .get(&self.func_name)
+            .and_then(|m| m.get(&binding))
+            .map(|hs| hs.iter().map(|h| format!(".{h}")).collect())
+            .unwrap_or_default()
     }
 
     /// What the plan decided a named binding's fate is: whether THIS frame
@@ -607,7 +645,23 @@ impl<'a> Builder<'a> {
         };
         for r in rows {
             match self.by_binding.get(&r.binding) {
-                Some(n) => out.push(St::Drop(*n)),
+                Some(n) => {
+                    // The row's own set (a placer row, or round fifty-two's
+                    // whole walk), else the binding's.
+                    let holes = if r.full {
+                        Vec::new()
+                    } else if let Some(h) = &r.holes {
+                        h.iter().map(|h| format!(".{h}")).collect()
+                    } else {
+                        self.body.names[*n as usize].holes.clone()
+                    };
+                    out.push(St::Row {
+                        name: *n,
+                        holes,
+                        exit,
+                        site,
+                    });
+                }
                 None => {
                     return gap_d(
                         "a placed release of a binding this slice did not name",
@@ -621,9 +675,16 @@ impl<'a> Builder<'a> {
     }
 
     fn block(&mut self, blk: &'a Block, out: &mut Vec<St>) -> Result<(), Gap> {
+        self.block_with(blk, Vec::new(), out)
+    }
+
+    /// A source block, opened with `head` already in it: a `for` binds its
+    /// variable inside the body's block, so the variable's scope ends at
+    /// the block's site and a row for it can be keyed there.
+    fn block_with(&mut self, blk: &'a Block, head: Vec<St>, out: &mut Vec<St>) -> Result<(), Gap> {
         let mark = self.scope.len();
         let site = blk as *const Block as usize;
-        let mut body = Vec::new();
+        let mut body = head;
         for s in &blk.stmts {
             self.stmt(s, &mut body)?;
         }
@@ -676,6 +737,13 @@ impl<'a> Builder<'a> {
                         .unwrap_or_else(|| self.owns(&ty) && !literal);
                 let n = self.name(name, ty, owned, *line);
                 self.bind(n, rhs, out);
+                // The unnamed receiver of the field the binding took or read
+                // (RFC-0114 R1′): released after the read where the plan says
+                // this frame owns it, held — and seen by the kernel — where
+                // it does not.
+                if let Expr::Field { .. } = value {
+                    self.release_receiver(value, out);
+                }
                 self.scope.push((name.clone(), n));
                 self.keyed(n, sid);
             }
@@ -921,13 +989,16 @@ impl<'a> Builder<'a> {
                     .is_some_and(|k| matches!(k, DropKind::FreeArr));
                 let owned = handed_over && self.owns(&ety);
                 let x = self.name(var, ety, owned, *line);
-                l.push(St::Let(
+                // The variable has no `let` node; the plan keys it by its
+                // spelling in the statement, which is one address per loop.
+                self.keyed(x, var as *const String as usize);
+                let head = vec![St::Let(
                     x,
                     Rhs::Read(Place::Elem(Box::new(Place::Name(it)), Val::Lit)),
-                ));
+                )];
                 let mark = self.scope.len();
                 self.scope.push((var.clone(), x));
-                self.block(body, &mut l)?;
+                self.block_with(body, head, &mut l)?;
                 self.scope.truncate(mark);
                 out.push(St::Loop(l));
                 if streaming {
@@ -1017,7 +1088,7 @@ impl<'a> Builder<'a> {
     }
 
     /// RFC-0114 Rule N: the drops one edge of a join owes.
-    fn edge_drops(&self, join: usize, edge: u32, out: &mut Vec<St>) -> Result<(), Gap> {
+    fn edge_drops(&mut self, join: usize, edge: u32, out: &mut Vec<St>) -> Result<(), Gap> {
         let Some(ers) = self.own.plan.edge_releases_at(join) else {
             return Ok(());
         };
@@ -1025,9 +1096,28 @@ impl<'a> Builder<'a> {
             if *e != edge {
                 continue;
             }
-            match self.lookup(name) {
-                Some(n) => out.push(St::Drop(n)),
-                None => return gap("an edge release of a name out of scope", 0),
+            // `d.line`: a sub-place the other edge took, released on this
+            // one (RFC-0125 M3). It leaves as a take into a temporary that is
+            // dropped at once, so the kernel sees the hole it leaves.
+            let mut parts = name.split('.');
+            let root = parts.next().unwrap_or_default();
+            let Some(n) = self.lookup(root) else {
+                return gap("an edge release of a name out of scope", 0);
+            };
+            let mut place = Place::Name(n);
+            let mut ty = self.body.names[n as usize].ty.clone();
+            let mut sub = false;
+            for f in parts {
+                ty = self.field_ty(&ty, f, 0)?;
+                place = Place::Field(Box::new(place), f.to_string());
+                sub = true;
+            }
+            if sub {
+                let t = self.temp(ty, self.body.names[n as usize].line);
+                out.push(St::Let(t, Rhs::Take(place)));
+                out.push(St::Drop(t));
+            } else {
+                out.push(St::Drop(n));
             }
         }
         Ok(())
@@ -1306,9 +1396,21 @@ impl<'a> Builder<'a> {
     /// place the free, the receiver stays held and the kernel says so.
     fn release_receiver(&mut self, e: &Expr, out: &mut Vec<St>) {
         if let Some(r) = self.pending_receiver.take() {
-            if self.own.plan.receiver_free(e as *const Expr as usize) {
-                out.push(St::Drop(r));
+            let node = e as *const Expr as usize;
+            if !self.own.plan.receiver_free(node) {
+                return;
             }
+            // Both emitters run the row after a SCALAR field read only, and
+            // after a heap field's take when the row carries the hole
+            // (RFC-0125 M3): a row without one stands for nothing there,
+            // and the receiver stays held for the kernel to see.
+            let holes = self.own.plan.receiver_holes_at(node);
+            let took = self.ty_of(e).is_ok_and(|t| self.owns(&t));
+            if took && holes.is_empty() {
+                return;
+            }
+            self.body.names[r as usize].holes = holes.iter().map(|h| format!(".{h}")).collect();
+            out.push(St::Drop(r));
         }
     }
 
@@ -1458,6 +1560,9 @@ impl<'a> Builder<'a> {
             Expr::Field { expr, field, .. } => {
                 let fty = self.ty_of(e)?;
                 let place = self.place(expr, out)?;
+                if let Some(r) = self.pending_receiver {
+                    self.body.names[r as usize].receiver = Some(e as *const Expr as usize);
+                }
                 if self.owns(&fty) {
                     // `let sels = parse(q).sels`: the receiver is a temporary
                     // nobody names, so the binding takes the field out of it
@@ -1573,7 +1678,9 @@ impl<'a> Builder<'a> {
                     if let Some(rows) = self.own.plan.arm_payload_free(mid, i as u32) {
                         for b in &binds {
                             let src = &self.body.names[*b as usize].source;
-                            if rows.iter().any(|(n, _)| n == src) {
+                            if let Some((_, _, holes)) = rows.iter().find(|(n, _, _)| n == src) {
+                                self.body.names[*b as usize].holes =
+                                    holes.iter().map(|h| format!(".{h}")).collect();
                                 body.push(St::Drop(*b));
                             }
                         }
@@ -1961,6 +2068,10 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 continue;
             }
         };
+        // `VYRN_KERNEL_TRACE=<fn>` prints that body's core.
+        if std::env::var("VYRN_KERNEL_TRACE").is_ok_and(|v| v != "1" && body.name.contains(&v)) {
+            eprintln!("{}", body.render());
+        }
         let missing = match crate::kernel::placement(&body) {
             Ok(m) => m,
             Err(r) => {
@@ -1979,8 +2090,8 @@ pub fn augment(program: &Program, own: &mut Ownership) {
             let kind = own.proto.release_kind(&info.ty);
             if trace {
                 eprintln!(
-                    "placer: {} `{}` (line {}) {:?} at {:?} site {} kind {:?}",
-                    body.name, info.source, info.line, m.kind, m.exit, m.site, kind
+                    "placer: {} `{}` (line {}) {:?} at {:?} site {} kind {:?} holes {:?}",
+                    body.name, info.source, info.line, m.kind, m.exit, m.site, kind, m.holes
                 );
             }
             if m.site == 0 {
@@ -1989,6 +2100,23 @@ pub fn augment(program: &Program, own: &mut Ownership) {
             let Some(kind) = kind else {
                 continue;
             };
+            // The kernel spells a hole `.f.g`; the plan's tables spell it
+            // `f.g`, relative to the binding (RFC-0093 M2). An element hole
+            // (`.[]`) is one the walk cannot skip: no row, and the judgment
+            // refuses the name.
+            if m.holes.iter().any(|h| h.contains("[]")) {
+                continue;
+            }
+            let holes: Vec<String> = m
+                .holes
+                .iter()
+                .map(|h| h.trim_start_matches('.').to_string())
+                .collect();
+            // A declared release takes the whole value (RFC-0086): it cannot
+            // be told a hole.
+            if !holes.is_empty() && matches!(kind, DropKind::Release(..)) {
+                continue;
+            }
             match m.kind {
                 // Rule N's table: one edge of a join still holds what another
                 // took. Consumed by name, so a loop variable qualifies.
@@ -2000,25 +2128,58 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                     }
                     continue;
                 }
+                // The same table, one level down: the sub-place one edge took,
+                // released on the edge that did not. Spelled `d.line`, which
+                // every reader of the table resolves as a place.
+                MissingKind::EdgePlace { edge, path } => {
+                    let name = format!("{}{}", info.source, path);
+                    let rows = own.plan.edge_releases.entry(m.site).or_default();
+                    if !rows.iter().any(|(n, e)| *n == name && *e == edge) {
+                        rows.push((name, edge));
+                        own.plan.owners.insert(m.site, inst.func.name.clone());
+                    }
+                    continue;
+                }
                 // Round forty's table: the arm's unmoved payload binders, one
-                // entry per binder so an emitter frees exactly those.
+                // entry per binder so an emitter frees exactly those, each
+                // with the holes its arm left in it.
                 MissingKind::ArmBinder { arm } => {
                     let rows = own.plan.arm_frees.entry((m.site, arm)).or_default();
-                    if !rows.iter().any(|(n, _)| *n == info.source) {
-                        rows.push((info.source.clone(), kind.clone()));
+                    if !rows.iter().any(|(n, _, _)| *n == info.source) {
+                        rows.push((info.source.clone(), kind.clone(), holes));
                     }
                     own.plan.owners.insert(m.site, inst.func.name.clone());
                     continue;
                 }
                 MissingKind::Exit => {}
             }
+            // The unnamed receiver of a field read: R1′'s table, with the
+            // field the read took as its hole. Freed right after the read,
+            // whichever exit found it held.
+            if let Some(node) = info.receiver {
+                own.plan.receiver_frees.insert(node);
+                if !holes.is_empty() {
+                    own.plan.receiver_holes.insert(node, holes);
+                }
+                own.plan.owners.insert(node, inst.func.name.clone());
+                continue;
+            }
             let Some(binding) = info.binding else {
                 continue;
             };
-            let dup = own.releases.get(&inst.func.name).is_some_and(|rows| {
-                rows.iter()
-                    .any(|r| r.exit == m.exit && r.site == m.site && r.binding == binding)
-            }) || added.iter().any(|(f, r, _)| {
+            // A row the plan already placed here whose hole set is not the
+            // kernel's at this exit (the analysis's set is per binding, the
+            // kernel's is per path): the row keeps its key and takes the
+            // kernel's set.
+            if let Some(r) = own.releases.get_mut(&inst.func.name).and_then(|rows| {
+                rows.iter_mut()
+                    .find(|r| r.exit == m.exit && r.site == m.site && r.binding == binding)
+            }) {
+                r.full = false;
+                r.holes = Some(holes);
+                continue;
+            }
+            let dup = added.iter().any(|(f, r, _)| {
                 *f == inst.func.name && r.exit == m.exit && r.site == m.site && r.binding == binding
             });
             if dup {
@@ -2034,6 +2195,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                     exit: m.exit,
                     line: info.line as u32,
                     full: false,
+                    holes: if holes.is_empty() { None } else { Some(holes) },
                 },
                 kind,
             ));
