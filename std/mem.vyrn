@@ -1,11 +1,13 @@
-/// std/mem — the raw-memory primitives the runtime module stands on
-/// (RFC-0125 §2.4, PLAN-0125-runtime §2.1 and §2.3).
+/// std/mem — the primitives the runtime module stands on: raw memory
+/// (RFC-0125 §2.4, PLAN-0125-runtime §2.1), the host imports (§2.2) and the
+/// trap (§2.3).
 ///
 /// Every function here is a declaration. The emitter never reads a body: it
 /// maps each call to one wasm instruction (`load8` is `i32.load8_u`, `copy` is
-/// `memory.copy`, `grow` is `memory.grow`). The bodies below exist so the
-/// module parses and checks like any other; an engine that reaches one — the
-/// interpreter, which has no linear memory — stops with the message.
+/// `memory.copy`, `grow` is `memory.grow`) or to one `call` of a host import
+/// (`fdWrite` is `wasi_snapshot_preview1.fd_write`). The bodies below exist so
+/// the module parses and checks like any other; an engine that reaches one —
+/// the interpreter, which has no linear memory — stops with the message.
 ///
 /// The audience of this module is `std/runtime` and nothing else. The loader
 /// declares that audience itself (PLAN-0125-runtime §3.2), so no `vyrn.json`
@@ -117,5 +119,132 @@ export fn heapBase() -> Int32 {
 /// The trap primitive (PLAN-0125-runtime §2.3): `len` bytes at `msg` to
 /// descriptor 2, then `proc_exit(1)`. It does not return.
 export fn trap(msg: Int32, len: Int32) {
+    noBody()
+}
+
+// ---------------------------------------------------------------------------
+// The host imports (PLAN-0125-runtime §2.2)
+// ---------------------------------------------------------------------------
+//
+// Each is one `wasi_snapshot_preview1` import, with the signature the witx
+// gives it: an `Int32` for every `i32` and an `Int64` for every `i64`, a
+// pointer being an `Int32` address in the module's own memory. The emitter
+// declares the fifteen once, before any body, and `Module::sweep` drops the
+// ones no export reaches, so a program pays only for the imports it calls.
+// Each is an effect under RFC-0125 §2.2's judgment, which is what a host
+// import is by that section's definition; the atoms of the lattice stay the
+// builtin names a program spells (`readFile`, `print`, ..), because those are
+// what the judgment sees in a user body, and the runtime functions behind
+// them are reached through no other name.
+//
+// The two `vyrn_gen` imports at the end are the generator host's (RFC-0076
+// M7): a generator reads through the loader's resolver, not through
+// `path_open`. An ordinary build has no generator host, so the emitter lowers
+// a call to either as `unreachable`; the runtime functions that call them
+// (`readFileGen`, `listDirGen`) are reached only under a generation, and the
+// sweep removes them from every other module.
+
+/// `fd_write(fd, iovs, iovsLen, nwritten) -> errno`.
+export fn fdWrite(fd: Int32, iovs: Int32, iovsLen: Int32, nwritten: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `fd_read(fd, iovs, iovsLen, nread) -> errno`.
+export fn fdRead(fd: Int32, iovs: Int32, iovsLen: Int32, nread: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `fd_close(fd) -> errno`.
+export fn fdClose(fd: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `proc_exit(code)`. It does not return; `trap` above is the one caller.
+export fn procExit(code: Int32) {
+    noBody()
+}
+
+/// `path_open(dirFd, dirFlags, path, pathLen, oflags, rightsBase,
+/// rightsInheriting, fdFlags, out) -> errno`, the descriptor written at `out`.
+export fn pathOpen(dirFd: Int32, dirFlags: Int32, path: Int32, pathLen: Int32, oflags: Int32, rightsBase: Int64, rightsInheriting: Int64, fdFlags: Int32, out: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `path_rename(fd, from, fromLen, toFd, to, toLen) -> errno`.
+export fn pathRename(fd: Int32, from: Int32, fromLen: Int32, toFd: Int32, to: Int32, toLen: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `fd_sync(fd) -> errno`.
+export fn fdSync(fd: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `fd_prestat_get(fd, out) -> errno`: `BADF` past the last preopen.
+export fn fdPrestatGet(fd: Int32, out: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `args_sizes_get(count, size) -> errno`.
+export fn argsSizesGet(count: Int32, size: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `args_get(argv, buf) -> errno`.
+export fn argsGet(argv: Int32, buf: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `environ_sizes_get(count, size) -> errno`.
+export fn environSizesGet(count: Int32, size: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `environ_get(environ, buf) -> errno`.
+export fn environGet(environ: Int32, buf: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `clock_time_get(id, precision, out) -> errno`: 0 is the realtime clock, 1
+/// the monotonic one; nanoseconds as an `i64` at `out`.
+export fn clockTimeGet(id: Int32, precision: Int64, out: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `random_get(buf, len) -> errno`.
+export fn randomGet(buf: Int32, len: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `fd_readdir(fd, buf, len, cookie, used) -> errno`.
+export fn fdReaddir(fd: Int32, buf: Int32, len: Int32, cookie: Int64, used: Int32) -> Int32 {
+    noBody()
+    return 0
+}
+
+/// `vyrn_gen.read(path, mode) -> (status << 32) | len`: the resource at
+/// `path` resolved, mediated, recorded and stashed by the generator host.
+/// The status is 0 ok, 1 io, 3 an embedded NUL.
+export fn genRead(path: Int32, mode: Int32) -> Int64 {
+    noBody()
+    return 0
+}
+
+/// `vyrn_gen.fetch(buf)`: the stash of the last `genRead` copied into `buf`,
+/// which the module allocated itself; the host never allocates in it.
+export fn genFetch(buf: Int32) {
     noBody()
 }
