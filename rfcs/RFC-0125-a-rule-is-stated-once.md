@@ -1477,6 +1477,22 @@ keeps the hand-emitted copy's two levels. `std/hash`'s `fnv1a` stays a
 separate function of the same arithmetic (the plan's §8 question 5, closed).
 Details under the plan's §6 table.*
 
+*Step 6 landed 2026-09-02 (`track-p`): the arrays — `push`, `reserve`,
+`append`, `copyFrom` and `clear` — are runtime functions for the first time in
+any engine, Vyrn in `std/runtime` (`arrPush`, `arrReserve`, `arrAppend`,
+`arrCopyFrom`, `arrClear`) over the step-2 allocator and `std/mem`'s `copy`,
+told the element stride by the emitter the way the maps are told a layout;
+the wasm emitter's five inline copies are deleted, 388 lines out of
+`direct.rs`, 136 in the module. `at` stays inline, and the number that keeps
+it there is on the record: with the check and the address behind one module
+call, nbody went from 1.95 s to 7.28 s under wasmtime 46, which is the per-call
+cost step 5 found, on the per-element path. Parity 41 of 41, residue green.
+The five programs under wasmtime, base and head interleaved, medians of five:
+nbody 1.974 s against 1.960 s, spectral-norm 2.845 s against 2.849 s,
+fannkuch 3.413 s against 3.403 s (M1's 1.98 s, 2.83 s, 3.58 s), binary-trees
+0.845 s against 0.833 s, k-nucleotide 0.298 s against 0.289 s. Details under
+the plan's §6 table.*
+
 ### M5 — `vyrn run` is compiled
 
 `run`, `test` and `bench --check` execute the wasm in the embedded wasmtime.
