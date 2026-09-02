@@ -397,6 +397,17 @@ eleven, and would be unmergeable by anyone. Until CI runs a job on every PR,
 the owner merging a docs-only PR by hand is the escape, and it is the only
 one.
 
+**One check runs on every PR now.** `.github/workflows/docs.yml` has no
+path filter and one job, `rfc-index`, reported as "the RFC index agrees with
+the directory". It runs `cargo test -p vyrn-cli --test rfc_index`, the gate
+that says `rfcs/README.md` is derived from `rfcs/` — the one check a docs-only
+PR most needs, and the one `paths-ignore` had been skipping on exactly those
+PRs. It is a twelfth check, not a replacement: the eleven still do not
+report on a docs-only PR, so the owner's hand merge stays the escape for
+those until the required list on `main` is changed to say what a docs-only
+PR must pass. That list is a repository setting, and this RFC records the
+choice rather than making it.
+
 ### M1 — places, and the probe re-run
 
 The current lowering and the direct emitter learn places: a field read is a
