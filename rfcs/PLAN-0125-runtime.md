@@ -847,7 +847,7 @@ clock and seed readers `nowMillis`, `monoNanos` and `randomSeedV` — 782 lines
 with their comment, over the host imports and the allocator — and the wasm
 emitter's twenty-one hand-emitted bodies are deleted with `gen_slurp`, the
 two `sum2` writers and the witx constants: 2,250 lines out of `direct.rs`, 288
-in (nineteen rows of the `VyrnRt` table, the host rows of `Fn_::mem_prim`,
+in (eighteen rows of the `VyrnRt` table, the host rows of `Fn_::mem_prim`,
 the interned wording and keys on `Rt`, the call sites). A builtin's twin
 carries a `V` because the builtin's name is reserved (`readFileV` for
 `readFile`, as `std/text`'s `charCountV`); `randomSeedV` also because
