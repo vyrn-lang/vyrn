@@ -11,7 +11,10 @@
   first slice landed the same day: the named core, the linear judgment, and
   a corpus test — 5,292 instances accepted, 53 refused, and two of the
   refusal classes are verified defects in the current release placement
-  (§3 M2, `rfcs/probes-0125/`). Nothing after M2 has landed.
+  (§3 M2, `rfcs/probes-0125/`). The first was closed in `movecheck` the same
+  day; M3's first slice, the placer, closed the second from the core's side:
+  5,344 accepted, 1 refused, every probe flat, every gate green. Nothing
+  after M3's first slice has landed.
 - **Depends on:** RFC-0101 (the lowered form — this RFC is what its own ledger
   says it could not become), RFC-0077 (the direct wasm backend — the emitter
   this RFC keeps), RFC-0087..0091 (ownership is defined, not inferred — the
@@ -661,6 +664,43 @@ native emitter, or its deletion, per M1's decision.
 **Gate:** parity green with placement code deleted from every emitter that
 reads the core. `movecheck.rs` and `own.rs` are deleted when the last consumer
 of their answers is gone.
+
+**The first slice landed (2026-09-02), the other way round: the core places
+what the plan owed, into the plan.** Rather than teach an emitter to read
+the core, the kernel walks every body in placement mode inside
+`own::analyze` and fills the plan's own tables with what it found missing —
+a release row at the exit where a name is still held, keyed by the exit's
+node and the binding's node exactly as the plan keys its rows, and the
+binding entered in the droppable table so every engine registers a slot; an
+edge row where one edge of a join holds what another took (Rule N's table);
+an arm row where a payload binder was never moved (round forty's table). The
+three engines then consume the rows through the one path RFC-0101 M4 gave
+them, and no emitter changed. The placer is installed by the CLI at start-up
+the way the generator engine is (`vyrn_lower::install`); `VYRN_NO_PLACER=1`
+compiles against the analysis alone.
+
+| kernel over the corpus | analysis alone | with the placer |
+|---|---|---|
+| accepted | 5,303 | 5,344 |
+| refused | 42 | 1 |
+
+The one refusal left is the lowering's own misread of a SmallArray literal.
+The three probes under `rfcs/probes-0125/` are flat: 4.2 MB peak at 200,000
+and at 400,000 turns for both leak shapes, against 20 to 28 MB and 98 to
+212 MB before, and the push probe prints its five lines with the audit on.
+Parity 41 passed, the residue ratchet held, the lowered-form gate, the
+frontend's unit tests and the wasm tests passed.
+
+What this says about M3's shape: the plan's nine tables are a *protocol*
+between the analysis and the emitters, and the core can speak it. So the
+emitters need not read the core until the plan is deleted; until then the
+core corrects the plan, and each correction is an exit row, an edge row or an
+arm row the emitters already know how to run. The event-log fold that could
+not order across a back edge is not repaired; it is overruled, per body, by
+a walk that can. One caveat the emitters carry: the arm table frees a
+single binder only, so a multi-binder arm's row is placed and not run, which
+is a leak the ratchet does not yet see and the next slice removes by
+freeing every binder the row names.
 
 ### M4 — the runtime in Vyrn
 

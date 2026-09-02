@@ -42,6 +42,16 @@
 //! is closed by fixing the plan, at which point the count drops and the
 //! ratchet is lowered with it. The tally of gaps is printed so the work left
 //! is a list and not a feeling.
+//!
+//! **M3's first slice closed classes 2 and 3 from the other side.** With the
+//! placer installed (`vyrn_lower::install`), the kernel runs over every body
+//! in placement mode inside `own::analyze` and fills the plan's three tables
+//! with what it owed: an exit-release row where a name is still held at an
+//! exit, an edge row where one edge of a join holds what another took, an
+//! arm row where a payload binder was never moved. The judging run then sees
+//! the plan it produced. The count fell from 42 to 1, and the three probes
+//! under `rfcs/probes-0125/` are flat. `VYRN_NO_PLACER=1` runs this test
+//! against the analysis alone, which is how the earlier numbers were taken.
 
 use std::path::PathBuf;
 
@@ -184,8 +194,9 @@ fn run_corpus() {
     for r in refused.iter().take(40) {
         eprintln!("  refused: {r}");
     }
-    // The ratchet: 53 at the end of the first slice; 42 once class 1 closed.
-    const RATCHET: usize = 42;
+    // The ratchet: 53 at the end of the first slice; 42 once class 1 closed;
+    // 1 once the placer (M3's first slice) filled the plan's three tables.
+    const RATCHET: usize = 1;
     assert!(
         refused.len() <= RATCHET,
         "{} instances refused by the kernel, more than the {RATCHET} recorded; the first new          one is worth reading before the number is raised: {}",

@@ -33,12 +33,24 @@ use vyrn_frontend::ast::Capability;
 use vyrn_frontend::own::Exit;
 
 /// A release the plan owes and did not place: `name` is still held where the
-/// exit at `site` runs.
+/// exit at `site` runs, or on one edge of the join at `site`, or at the end
+/// of arm `arm` of the switch at `site`.
 #[derive(Debug, Clone)]
 pub struct Missing {
     pub exit: Exit,
     pub site: usize,
     pub name: Name,
+    pub kind: MissingKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingKind {
+    /// At an exit: the plan's placed-release rows.
+    Exit,
+    /// On one edge of a join, RFC-0114 Rule N: the plan's edge table.
+    Edge { edge: u32 },
+    /// An arm's payload binder the arm never moved: the plan's arm table.
+    ArmBinder { arm: u32 },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -164,6 +176,7 @@ impl<'b> Kernel<'b> {
                         exit,
                         site,
                         name: *n,
+                        kind: MissingKind::Exit,
                     });
                     st.own[*n as usize] = Own::Gone;
                     continue;
@@ -332,13 +345,20 @@ impl<'b> Kernel<'b> {
                 }
                 st.own[*n as usize] = Own::Gone;
             }
-            St::If(c, t, e) => {
-                self.read(st, c)?;
+            St::If {
+                cond,
+                then,
+                els,
+                site,
+            } => {
+                self.read(st, cond)?;
                 let mut a = st.clone();
-                self.stmts(t, &mut a)?;
+                self.stmts(then, &mut a)?;
                 let mut b = st.clone();
-                self.stmts(e, &mut b)?;
-                *st = self.join(&[a, b])?;
+                self.stmts(els, &mut b)?;
+                let mut edges = vec![a, b];
+                self.equalize(&mut edges, *site);
+                *st = self.join(&edges)?;
             }
             St::Switch {
                 on,
@@ -351,7 +371,13 @@ impl<'b> Kernel<'b> {
                     self.read(st, on)?;
                 }
                 let mut outs = Vec::new();
-                for Arm { binds, body } in arms {
+                for Arm {
+                    binds,
+                    body,
+                    site,
+                    index,
+                } in arms
+                {
                     let mut a = st.clone();
                     for b in binds {
                         if self.owned(*b) {
@@ -363,10 +389,12 @@ impl<'b> Kernel<'b> {
                     // this checks for the binders.
                     self.stmts(body, &mut a)?;
                     if !a.ended {
-                        self.scope_end(&mut a, binds, Exit::Block, 0)?;
+                        self.binders_end(&mut a, binds, *site, *index)?;
                     }
                     outs.push(a);
                 }
+                let site = arms.first().map(|a| a.site).unwrap_or(0);
+                self.equalize(&mut outs, site);
                 *st = self.join(&outs)?;
             }
             St::Block { site, body } => {
@@ -432,6 +460,70 @@ impl<'b> Kernel<'b> {
             St::Trap => st.ended = true,
         }
         Ok(())
+    }
+
+    /// The binders of an arm at the arm's end: refused when judging, recorded
+    /// against the plan's arm table when placing.
+    fn binders_end(
+        &mut self,
+        st: &mut State,
+        binds: &[Name],
+        site: usize,
+        arm: u32,
+    ) -> Result<(), Refusal> {
+        for n in binds {
+            if self.owned(*n) && st.own[*n as usize] == Own::Held {
+                if self.mode == Mode::Place && site != 0 {
+                    self.missing.push(Missing {
+                        exit: Exit::Block,
+                        site,
+                        name: *n,
+                        kind: MissingKind::ArmBinder { arm },
+                    });
+                    st.own[*n as usize] = Own::Gone;
+                    continue;
+                }
+                return self.refuse(format!(
+                    "{} is still held where its arm ends — no release is placed for it",
+                    self.info(*n)
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// RFC-0114 Rule N in placement mode: where one live edge of a join has
+    /// taken a name another still holds, the holding edges release it, and
+    /// the release is recorded against the plan's edge table. In judging
+    /// mode nothing changes and `join` refuses the disagreement.
+    fn equalize(&mut self, edges: &mut [State], site: usize) {
+        if self.mode != Mode::Place || site == 0 {
+            return;
+        }
+        for n in 0..self.body.names.len() as Name {
+            if !self.owned(n) {
+                continue;
+            }
+            let live: Vec<usize> = (0..edges.len()).filter(|i| !edges[*i].ended).collect();
+            let gone = live.iter().any(|i| edges[*i].own[n as usize] == Own::Gone);
+            let held: Vec<usize> = live
+                .iter()
+                .copied()
+                .filter(|i| edges[*i].own[n as usize] == Own::Held)
+                .collect();
+            if !gone || held.is_empty() {
+                continue;
+            }
+            for i in held {
+                self.missing.push(Missing {
+                    exit: Exit::Block,
+                    site,
+                    name: n,
+                    kind: MissingKind::Edge { edge: i as u32 },
+                });
+                edges[i].own[n as usize] = Own::Gone;
+            }
+        }
     }
 
     fn line_of(&self, v: &Val) -> usize {

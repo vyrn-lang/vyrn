@@ -29,6 +29,7 @@ use vyrn_frontend::ast::{
 use vyrn_frontend::own::{DropKind, Exit, Fate, Leak, Owned, Ownership, Release};
 use vyrn_frontend::prelude;
 
+use crate::kernel::MissingKind;
 use crate::{Instance, Node};
 
 /// A name in a body: an index into [`Body::names`].
@@ -107,7 +108,14 @@ pub enum St {
         old: Old,
     },
     Drop(Name),
-    If(Val, Vec<St>, Vec<St>),
+    If {
+        cond: Val,
+        then: Vec<St>,
+        els: Vec<St>,
+        /// The `if` statement, the plan's key for its edge releases; 0 for
+        /// an `if` this pass made up.
+        site: usize,
+    },
     Loop(Vec<St>),
     /// A source block: its own scope, and the site the plan keys its
     /// fall-through release rows by.
@@ -145,6 +153,10 @@ pub struct Arm {
     /// The payload binders. Owned when the match consumed its scrutinee.
     pub binds: Vec<Name>,
     pub body: Vec<St>,
+    /// The `match` (or `if let`, or `?`) this arm belongs to, and which arm
+    /// it is — the plan's key for an arm payload free and an edge release.
+    pub site: usize,
+    pub index: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -237,11 +249,13 @@ impl Body {
                     old
                 )),
                 St::Drop(n) => out.push_str(&format!("{pad}drop {}\n", self.spell(*n))),
-                St::If(c, t, e) => {
-                    out.push_str(&format!("{pad}if {}\n", self.val(c)));
-                    self.render_stmts(t, depth + 1, out);
+                St::If {
+                    cond, then, els, ..
+                } => {
+                    out.push_str(&format!("{pad}if {}\n", self.val(cond)));
+                    self.render_stmts(then, depth + 1, out);
                     out.push_str(&format!("{pad}else\n"));
-                    self.render_stmts(e, depth + 1, out);
+                    self.render_stmts(els, depth + 1, out);
                 }
                 St::Loop(b) => {
                     out.push_str(&format!("{pad}loop\n"));
@@ -664,7 +678,12 @@ impl<'a> Builder<'a> {
                     self.block(blk, &mut e)?;
                 }
                 self.edge_drops(sid, 1, &mut e)?;
-                out.push(St::If(c, t, e));
+                out.push(St::If {
+                    cond: c,
+                    then: t,
+                    els: e,
+                    site: sid,
+                });
             }
             Stmt::IfLet {
                 pattern,
@@ -687,10 +706,17 @@ impl<'a> Builder<'a> {
                 out.push(St::Switch {
                     on: sv,
                     arms: vec![
-                        Arm { binds, body: t },
+                        Arm {
+                            binds,
+                            body: t,
+                            site: sid,
+                            index: 0,
+                        },
                         Arm {
                             binds: Vec::new(),
                             body: e,
+                            site: sid,
+                            index: 1,
                         },
                     ],
                     consuming,
@@ -700,7 +726,12 @@ impl<'a> Builder<'a> {
             Stmt::While { cond, body, .. } => {
                 let mut l = Vec::new();
                 let c = self.read_val(cond, &mut l)?;
-                l.push(St::If(c, Vec::new(), vec![St::Break { site: 0 }]));
+                l.push(St::If {
+                    cond: c,
+                    then: Vec::new(),
+                    els: vec![St::Break { site: 0 }],
+                    site: 0,
+                });
                 self.block(body, &mut l)?;
                 out.push(St::Loop(l));
             }
@@ -1177,7 +1208,12 @@ impl<'a> Builder<'a> {
                     }
                     None => return gap("an `if` expression without `else`", *line),
                 }
-                out.push(St::If(c, t, f));
+                out.push(St::If {
+                    cond: c,
+                    then: t,
+                    els: f,
+                    site: 0,
+                });
                 Ok(Rhs::Val(Val::Name(res)))
             }
             Expr::Match {
@@ -1214,7 +1250,12 @@ impl<'a> Builder<'a> {
                     }
                     self.edge_drops(mid, i as u32, &mut body)?;
                     self.scope.truncate(mark);
-                    core_arms.push(Arm { binds, body });
+                    core_arms.push(Arm {
+                        binds,
+                        body,
+                        site: mid,
+                        index: i as u32,
+                    });
                 }
                 out.push(St::Switch {
                     on: sv,
@@ -1268,10 +1309,14 @@ impl<'a> Builder<'a> {
                         Arm {
                             binds: fb,
                             body: fail,
+                            site: tid,
+                            index: 0,
                         },
                         Arm {
                             binds: ob,
                             body: ok,
+                            site: tid,
+                            index: 1,
                         },
                     ],
                     consuming,
@@ -1469,10 +1514,32 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 continue;
             }
             let info = &body.names[m.name as usize];
-            let Some(binding) = info.binding else {
+            let Some(kind) = own.proto.release_kind(&info.ty) else {
                 continue;
             };
-            let Some(kind) = own.proto.release_kind(&info.ty) else {
+            match m.kind {
+                // Rule N's table: one edge of a join still holds what another
+                // took. Consumed by name, so a loop variable qualifies.
+                MissingKind::Edge { edge } => {
+                    let rows = own.plan.edge_releases.entry(m.site).or_default();
+                    if !rows.iter().any(|(n, e)| *n == info.source && *e == edge) {
+                        rows.push((info.source.clone(), edge));
+                        own.plan.owners.insert(m.site, inst.func.name.clone());
+                    }
+                    continue;
+                }
+                // Round forty's table: the arm's unmoved payload binder.
+                MissingKind::ArmBinder { arm } => {
+                    own.plan
+                        .arm_frees
+                        .entry((m.site, arm))
+                        .or_insert_with(|| kind.clone());
+                    own.plan.owners.insert(m.site, inst.func.name.clone());
+                    continue;
+                }
+                MissingKind::Exit => {}
+            }
+            let Some(binding) = info.binding else {
                 continue;
             };
             let dup = own.releases.get(&inst.func.name).is_some_and(|rows| {
