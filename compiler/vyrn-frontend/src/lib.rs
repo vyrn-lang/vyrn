@@ -17,6 +17,7 @@ pub mod checker;
 pub mod codec;
 pub mod consteval;
 pub mod contracts;
+pub mod ctor;
 pub mod declared;
 pub mod diagnostics;
 pub mod effects;
@@ -101,7 +102,15 @@ pub fn check(source: &str) -> Result<ast::Program, String> {
             // since diagnostics() reported nothing, lex+parse+check+movecheck all
             // succeeded, so this is infallible in practice.
             let tokens = lexer::lex(source).expect("diagnostics reported no lex error");
-            let program = parser::parse(tokens).expect("diagnostics reported no parse error");
+            let mut program = parser::parse(tokens).expect("diagnostics reported no parse error");
+            // RFC-0125 §3 M6, the third judgment's fourth slice: a `where`
+            // type's predicate is a generated function now, so the
+            // single-source path has to carry it too — the interpreter calls
+            // it, exactly as it does on the linked path. Only this synthesis:
+            // the JSON walks need the checker's own record and `floor` holds a
+            // decision, and neither belongs to a re-parse.
+            let types = types::decl_map(&program);
+            program.functions.extend(ctor::constructors(&types));
             Ok(program)
         }
         Some(d) => Err(d.render()),
@@ -184,6 +193,18 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
             }
             Err(e) => diags.push(diagnostics::Diagnostic::error(0, 0, "check", e)),
         }
+        // RFC-0125 §3 M6, the third judgment's fourth slice: one constructor
+        // per `where` type, so the census's `where-scalar` and `where-record`
+        // rows are stated in Vyrn once instead of once per engine. Here for the
+        // JSON walks' reason — the checker has just typed the program and no
+        // engine has built its function table.
+        let have: std::collections::HashSet<&str> =
+            program.functions.iter().map(|f| f.name.as_str()).collect();
+        let fresh: Vec<_> = ctor::constructors(&types)
+            .into_iter()
+            .filter(|f| !have.contains(f.name.as_str()))
+            .collect();
+        program.functions.extend(fresh);
     }
     // RFC-0125 M3, third slice: `VYRN_NO_MOVECHECK=1` lets the move check
     // stand aside so the kernel's own refusal (`VYRN_KERNEL_STRICT=1`) can be

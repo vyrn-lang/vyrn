@@ -393,7 +393,6 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     let ownership = vyrn_frontend::own::analyze(program);
     let mut cx = Cx {
         types,
-        decls: &program.type_decls,
         lambdas: vyrn_frontend::ast::lambdas(program),
         impls: program.impls.clone(),
         sigs: HashMap::new(),
@@ -1116,13 +1115,6 @@ struct Cx<'a> {
     /// cannot answer: a `where` predicate's node ADDRESS (RFC-0101 M6's third
     /// phase).
     ///
-    /// `types` is `decl_map`'s copy, made once per engine, and every validation
-    /// site copied the predicate out of it again. What the copying costs is not
-    /// the copy: no recorded type can reach a node the program does not hold, so
-    /// 1,043 of the corpus's off-program backend answers were inside one
-    /// (RFC-0101 §1.5). Read from here, the predicate is the same tree the
-    /// checker typed and the other two engines walk.
-    decls: &'a [TypeDecl],
     /// Every lambda literal the PROGRAM holds, by node address (RFC-0101 M6's
     /// third phase).
     ///
@@ -1417,34 +1409,6 @@ impl<'a> Cx<'a> {
 
     fn resolve(&self, ty: &Type) -> Type {
         ftypes::resolve(&self.sub(ty), &self.types)
-    }
-
-    /// `decl`'s `where` predicate as the PROGRAM holds it — see [`Cx::decls`].
-    ///
-    /// `Ok(None)` is a type with no refinement. Every `decl` that reaches this
-    /// backend was cloned out of [`Cx::types`], which is `decl_map`'s copy of
-    /// this list, so a decl that HAS a predicate and is not in the list is a
-    /// decl the program does not hold — a refusal rather than a silently skipped
-    /// validation.
-    fn predicate(&self, decl: &TypeDecl, line: usize) -> Result<Option<&'a Expr>, String> {
-        if decl.predicate.is_none() {
-            return Ok(None);
-        }
-        match self
-            .decls
-            .iter()
-            .find(|d| d.name == decl.name && d.base == decl.base)
-            .and_then(|d| d.predicate.as_ref())
-        {
-            Some(p) => Ok(Some(p)),
-            None => unsupported(
-                &format!(
-                    "a `where` clause on `{}`, which is not one of the program's own                      type declarations",
-                    decl.name
-                ),
-                line,
-            ),
-        }
     }
 
     /// The PROGRAM's own body for a lambda literal at this address, or `None`
@@ -5113,7 +5077,7 @@ impl<'p> Fn_<'_, 'p> {
             // step nearer a builtin than the name it backs.
             self.coerce(m, b, expr, from, &decl.base, line)?;
             if !expr.is_some_and(|e| self.proven(e, to)) {
-                self.emit_validation(m, b, &decl, line)?;
+                self.emit_validation(b, &decl, line)?;
             }
             return Ok(());
         }
@@ -5329,39 +5293,44 @@ impl<'p> Fn_<'_, 'p> {
         vyrn_frontend::finite::string_flow_proven(e, to, &self.cx.types, &resolve)
     }
 
-    /// Emit the runtime check that the value on the stack satisfies `decl`'s
-    /// `where` predicate, trapping with the canonical message if it does not.
+    /// Emit the check that the value on the stack satisfies `decl`'s `where`
+    /// predicate: a CALL to the program's own constructor for the type, which
+    /// traps with the canonical message when it does not hold.
     ///
-    /// The value is LEFT on the stack: a validation is a check on a flow, not a
-    /// step in it. But the predicate's own code would bury it — the operand stack
-    /// is not addressable — so it is parked in the place the predicate binds it
-    /// to, which for a scalar base is the same place and therefore costs no copy.
+    /// RFC-0125 §3 M6, the third judgment's fourth slice. This backend used to
+    /// lower the predicate itself — bind what [`crate::predicate_binds`] names,
+    /// walk the clause, spell the trap — and so did the LLVM emitter and the
+    /// interpreter. The predicate is generated Vyrn now
+    /// ([`vyrn_frontend::ctor`]), so the census's `where-scalar` and
+    /// `where-record` rows are one body every engine calls.
     ///
-    /// What binds is [`crate::predicate_binds`]'s call, shared with the LLVM
-    /// emitter. The lowering of the predicate itself cannot be shared, since one
-    /// prints text and this writes bytes; what is shared is the structure walked.
+    /// The value is LEFT on the stack, because a validation is a check on a
+    /// flow and not a step in it. Parked in a local first, since the call
+    /// consumes what it is given: three instructions where the old site was a
+    /// binding walk.
     fn emit_validation(
         &mut self,
-        m: &mut Module,
         b: &mut Frame,
         decl: &TypeDecl,
         line: usize,
     ) -> Result<(), String> {
-        let Some(held) = self.predicate_holds(m, b, decl, line)? else {
+        if decl.predicate.is_none() {
             return Ok(());
+        }
+        let held = self.park_for_predicate(b, decl, line)?;
+        let name = vyrn_frontend::ctor::ctor_name(&decl.name);
+        let Some(sig) = self.cx.sigs.get(&name) else {
+            return unsupported(
+                &format!(
+                    "a `where` clause on `{}` with no constructor in the link",
+                    decl.name
+                ),
+                line,
+            );
         };
-        // The message on stderr and exit 1 — `Rt::trap`, the same path the
-        // division and bounds checks take, because parity compares stderr and a
-        // wasm `unreachable` would print wasmtime's wording instead of ours.
-        let msg = self.cx.rt.intern(m, &crate::validation_message(decl));
-        let trap = self.cx.rt.trap;
-        b.ins(&Instruction::I32Eqz);
-        b.ins(&Instruction::If(BlockType::Empty));
-        self.depth += 1;
-        b.ins(&Instruction::I32Const(msg as i32));
-        b.ins(&Instruction::Call(trap));
-        self.depth -= 1;
-        b.ins(&Instruction::End);
+        let index = sig.index;
+        b.ins(&Instruction::LocalGet(held));
+        b.ins(&Instruction::Call(index));
         b.ins(&Instruction::LocalGet(held));
         Ok(())
     }
@@ -5370,97 +5339,64 @@ impl<'p> Fn_<'_, 'p> {
     /// answer (a Bool) there instead, giving the local the value was parked in —
     /// or `None`, stack untouched, for a type with no refinement.
     ///
-    /// Split out of [`Fn_::emit_validation`] because a fallible construction wants
-    /// the same answer without the trap (RFC-0077 M2k): two spellings of "run the
-    /// predicate" could disagree about what the predicate binds, and a `Age?(n)`
-    /// that read a different `value` than `Age(n)` does would be a `None` on one
-    /// backend only.
+    /// Split from [`Fn_::emit_validation`] because a fallible construction wants
+    /// the same answer without the trap (RFC-0077 M2k). It is the same generated
+    /// function the constructor calls, so `Age?(n)` and `Age(n)` cannot read a
+    /// different `value`.
+    ///
+    /// Scalar bases only, which is what the one caller allows: a record base
+    /// binds by field and has no single word to become an `Option`'s payload.
     fn predicate_holds(
         &mut self,
-        m: &mut Module,
         b: &mut Frame,
         decl: &TypeDecl,
         line: usize,
     ) -> Result<Option<u32>, String> {
-        let Some(pred) = self.cx.predicate(decl, line)? else {
+        if decl.predicate.is_none() {
             return Ok(None);
-        };
-        let binds = crate::predicate_binds(decl);
-        let mark = self.scope.len();
-        // Whatever the value was parked in, so the flow can carry on with it.
-        let held = match (self.cx.repr(&decl.base, line)?, &decl.base) {
-            // A record base binds every field by name, so the value is parked by
-            // ADDRESS and each field copied out of it. A copy rather than a view
-            // because a predicate cannot write to what it was given, so the two
-            // can never be observed to differ.
-            (Repr::Agg(l), Type::Record(_)) => {
-                let addr = b.local(ValType::I32);
-                b.ins(&Instruction::LocalSet(addr));
-                for (name, ty, field) in &binds {
-                    let i = field.expect("a record base binds by field index");
-                    let fr = self.cx.repr(ty, line)?;
-                    let place = self.place_for(b, &fr, line)?;
-                    match (place, &fr) {
-                        (Place::Local(loc), _) => {
-                            b.ins(&Instruction::LocalGet(addr));
-                            b.ins(&load_of(&self.cx.ll(ty), l.fields[i], self.cx.signed(ty)));
-                            b.ins(&Instruction::LocalSet(loc));
-                        }
-                        (Place::Slot(off), Repr::Agg(fl)) => {
-                            b.slot(off);
-                            b.ins(&Instruction::LocalGet(addr));
-                            b.ins(&Instruction::I32Const(l.fields[i] as i32));
-                            b.ins(&Instruction::I32Add);
-                            b.ins(&Instruction::I32Const(fl.size as i32));
-                            b.ins(&Instruction::MemoryCopy {
-                                src_mem: 0,
-                                dst_mem: 0,
-                            });
-                        }
-                        _ => return unsupported("a Unit field in a `where` clause", line),
-                    }
-                    self.scope.push((name.clone(), place, ty.clone()));
-                }
-                addr
-            }
-            // Every other base binds `value`, and the parked local IS it.
-            (Repr::Scalar(v), _) => {
-                let loc = b.local(v);
-                b.ins(&Instruction::LocalSet(loc));
-                let (name, ty, _) = binds
-                    .into_iter()
-                    .next()
-                    .expect("a scalar base binds `value`");
-                self.scope.push((name, Place::Local(loc), ty));
-                loc
-            }
-            // An aggregate base that is not a record has one `value` binding, and
-            // M2d refused it because `Place` could not name where to put it. M2f's
-            // `Static` does not change that — a global's address is fixed and this
-            // one is on the operand stack — but the record arm above shows the
-            // shape that would: copy the whole value into a frame slot and bind
-            // `value` to it, needing no new variant at all. Still refused, because
-            // no example has one and an untested lowering is worse than a named
-            // gap: this is the milestone where it stopped being a Place problem.
-            _ => {
-                return unsupported(
-                    &format!(
-                        "a `where` clause over the non-record aggregate `{}`",
-                        decl.base
-                    ),
-                    line,
-                );
-            }
-        };
-        let was = crate::observe::set_ctx("pred");
-        let cond = self.expr(m, b, pred);
-        crate::observe::set_ctx(was);
-        let cond = cond?;
-        self.scope.truncate(mark);
-        if self.cx.resolve(&cond) != Type::Bool {
-            return unsupported("a `where` clause that is not a Bool", line);
         }
+        let held = self.park_for_predicate(b, decl, line)?;
+        let name = vyrn_frontend::ctor::pred_name(&decl.name);
+        let Some(sig) = self.cx.sigs.get(&name) else {
+            return unsupported(
+                &format!(
+                    "a `where` clause on `{}` with no predicate in the link",
+                    decl.name
+                ),
+                line,
+            );
+        };
+        let index = sig.index;
+        b.ins(&Instruction::LocalGet(held));
+        b.ins(&Instruction::Call(index));
         Ok(Some(held))
+    }
+
+    /// Park the value on the stack in a local, so a generated call can be given
+    /// it and the flow can carry on with it afterwards.
+    ///
+    /// An aggregate base is on the stack as its ADDRESS, which is what a `read`
+    /// parameter of that type is passed as ([`Fn_::emit_call`]), so one local
+    /// holds either shape.
+    fn park_for_predicate(
+        &mut self,
+        b: &mut Frame,
+        decl: &TypeDecl,
+        line: usize,
+    ) -> Result<u32, String> {
+        let v = match self.cx.repr(&decl.base, line)? {
+            Repr::Scalar(v) => v,
+            Repr::Agg(_) => ValType::I32,
+            Repr::Unit => {
+                return unsupported(
+                    &format!("a `where` clause over the Unit base `{}`", decl.base),
+                    line,
+                )
+            }
+        };
+        let held = b.local(v);
+        b.ins(&Instruction::LocalSet(held));
+        Ok(held)
     }
 
     /// Evaluate `e`, leaving its value (a scalar) or its address (an aggregate)
@@ -5746,7 +5682,7 @@ impl<'p> Fn_<'_, 'p> {
                         .iter()
                         .any(|(_, e)| vyrn_frontend::consteval::eval(e, &HashMap::new()).is_none());
                     if dynamic {
-                        self.emit_validation(m, b, &d, *line)?;
+                        self.emit_validation(b, &d, *line)?;
                     }
                 }
                 ty
@@ -8911,7 +8847,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             self.expr_as(m, b, &args[0], &d.base)?;
             if vyrn_frontend::consteval::eval(&args[0], &HashMap::new()).is_none() {
-                self.emit_validation(m, b, &d, line)?;
+                self.emit_validation(b, &d, line)?;
             }
             return Ok(Type::Named(name.to_string()));
         }
@@ -13484,7 +13420,7 @@ impl<'p> Fn_<'_, 'p> {
         // `predicate_holds` parks the value where the `where` clause binds it, so
         // both halves of the answer are in locals before either store.
         let (held, base_v) = match self.cx.repr(&base, line)? {
-            Repr::Scalar(v) => (self.predicate_holds(m, b, &decl, line)?, v),
+            Repr::Scalar(v) => (self.predicate_holds(b, &decl, line)?, v),
             // Only the record arm of `emit_validation` binds an aggregate base, and
             // it binds by field — there is no single local to become the payload
             // word. No corpus has one, and a guess here would be a silent `None`.
@@ -16434,7 +16370,6 @@ mod tests {
             plan: Default::default(),
             facts: None,
             types: HashMap::new(),
-            decls: &[],
             lambdas: HashMap::new(),
             impls: Vec::new(),
             sigs: HashMap::new(),
@@ -16575,16 +16510,21 @@ mod tests {
                 "{what}: no `where` check was emitted"
             );
         }
-        // And the negative, so the assertion above is about a check being emitted
-        // and not about the word "Age" reaching the module some other way: the
-        // same declaration, with nothing flowing into it.
-        let unreached = "type Age = Int64 where value >= 18 \
-                         fn main() -> Int64 { return 20 }";
-        let p = linked(unreached).unwrap();
-        let bytes = compile(&p).unwrap();
+        // And the negative. Since RFC-0125 §3 M6's fourth slice the message is
+        // the CONSTRUCTOR's own `panic` string, so a module that declares the
+        // type carries it whether or not anything crosses into it — the word is
+        // no longer evidence of a check, and the check is the CALL. The same
+        // program with a constant the checker proved emits no call, so the
+        // reached module is the larger of the two.
+        let proved = "type Age = Int64 where value >= 18                       fn f(n: Int64) -> Int64 { let a = Age(20) return a }
+                      fn main() -> Int64 { return f(20) }";
+        let small = compile(&linked(proved).unwrap()).unwrap();
+        let big = compile(&linked(bare).unwrap()).unwrap();
         assert!(
-            !bytes.windows(msg.len()).any(|w| w == msg.as_bytes()),
-            "an unreached refinement emitted a check"
+            big.len() > small.len(),
+            "a proven constant emitted a check: {} against {}",
+            big.len(),
+            small.len()
         );
     }
 

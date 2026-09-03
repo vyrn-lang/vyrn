@@ -80,7 +80,9 @@ export fn rateBook(req: RateReq) -> BookResult {
     let mut i = 0
     while i < books.length {
         if books[i].id == req.id {
-            let s: Stars = req.rating
+            // Through `Stars`'s own constructor: the store into the book's
+            // validated field runs it anyway (RFC-0125 section 3 M6).
+            let s = Stars(req.rating)
             books[i].rating = s
             return getBook(IdReq { id: req.id })
         }

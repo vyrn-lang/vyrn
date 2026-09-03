@@ -1703,18 +1703,6 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("@.lvl.info = private unnamed_addr constant [5 x i8] c\"INFO\\00\"\n");
     out.push_str("@.lvl.warn = private unnamed_addr constant [5 x i8] c\"WARN\\00\"\n");
     out.push_str("@.lvl.error = private unnamed_addr constant [6 x i8] c\"ERROR\\00\"\n");
-    // Validation trap messages, one per predicated type — byte-identical to
-    // the interpreter's errors as the CLI renders them (`error: {msg}` on
-    // stderr, exit 1). A record base gets the cross-field wording.
-    for t in &program.type_decls {
-        if t.predicate.is_none() {
-            continue;
-        }
-        out.push_str(&trap_global(
-            &format!("@.trap.verr.{}", t.name),
-            &validation_message(t),
-        ));
-    }
     // Division trap messages — byte-identical to the interpreter's errors as
     // rendered by the CLI (`error: {msg}` on stderr, exit 1).
     out.push_str(&trap_global(
@@ -1992,7 +1980,6 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &plan,
-            &program.type_decls,
         );
         gi.log_level = program.log_level;
         gi.log_sink = program.log_sink.clone();
@@ -2086,7 +2073,6 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &plan,
-            &program.type_decls,
         );
         gt.log_level = program.log_level;
         gt.log_sink = program.log_sink.clone();
@@ -2190,7 +2176,6 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &plan,
-            &program.type_decls,
         );
         gen.log_level = program.log_level;
         gen.log_sink = program.log_sink.clone();
@@ -2244,7 +2229,6 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 &regex_globals,
                 &program.impls,
                 &plan,
-                &program.type_decls,
             );
             gen.log_level = program.log_level;
             gen.log_sink = program.log_sink.clone();
@@ -2308,7 +2292,6 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 &regex_globals,
                 &program.impls,
                 &plan,
-                &program.type_decls,
             );
             gen.log_level = program.log_level;
             gen.log_sink = program.log_sink.clone();
@@ -2369,7 +2352,6 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &plan,
-            &program.type_decls,
         );
         dgen.protocol_methods = protocol_methods.clone();
         dgen.globals = globals_map.clone();
@@ -2400,7 +2382,6 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &plan,
-            &program.type_decls,
         );
         cgen.fnval_variants = fnval_registry.clone();
         cgen.emit_fnval_copy(&mut out)?;
@@ -2426,7 +2407,6 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &plan,
-            &program.type_decls,
         );
         cgen.protocol_methods = protocol_methods.clone();
         cgen.globals = globals_map.clone();
@@ -2557,13 +2537,6 @@ struct Gen<'a> {
     /// cannot answer: a `where` predicate's node ADDRESS (RFC-0101 M6's third
     /// phase).
     ///
-    /// `types` is `decl_map`'s copy, made once per engine, and this emitter then
-    /// copied the predicate out of it again at every validation site. What the
-    /// copying costs is not the copy: no recorded type can reach a node the
-    /// program does not hold, so 1,043 of the corpus's off-program backend
-    /// answers were inside one (RFC-0101 §1.5). Read from here, the predicate is
-    /// the same tree the checker typed and the other two engines walk.
-    decls: &'a [TypeDecl],
     /// Enum variant name -> (tag index, enum name), for construction.
     variants: &'a HashMap<String, (i64, String)>,
     /// String literal content -> module global name.
@@ -2781,7 +2754,6 @@ impl<'a> Gen<'a> {
         regex_globals: &'a HashMap<String, (String, String, u32)>,
         impls: &'a [vyrn_frontend::ast::ImplBlock],
         plan: &'a vyrn_frontend::own::ReleasePlan,
-        decls: &'a [TypeDecl],
     ) -> Self {
         Gen {
             plan,
@@ -2799,7 +2771,6 @@ impl<'a> Gen<'a> {
             param_caps,
             modify_copyout: Vec::new(),
             types,
-            decls,
             variants,
             str_globals,
             subst,
@@ -6783,20 +6754,10 @@ impl<'a> Gen<'a> {
             ));
         }
         let (v, _) = self.gen_expr(arg)?;
-        let base_ll = self.llt(&decl.base);
-        let pred_i1 = match self.predicate(&decl)? {
-            None => "true".to_string(),
-            Some(pred) => {
-                self.scope.push(Vec::new());
-                let slot = self.declare("value", &decl.base);
-                self.emit(format!("store {base_ll} {v}, ptr {slot}"));
-                let was = crate::observe::set_ctx("pred");
-                let cond = self.gen_expr(pred);
-                crate::observe::set_ctx(was);
-                let (cond, _) = cond?;
-                self.scope.pop();
-                cond
-            }
+        let pred_i1 = if decl.predicate.is_none() {
+            "true".to_string()
+        } else {
+            self.emit_predicate_cond(&decl, &v)?
         };
         // The payload is one word: the Int itself, or the String's pointer.
         let word = if base == Type::Str {
@@ -6920,23 +6881,15 @@ impl<'a> Gen<'a> {
         // construction, an all-constant literal is validated by the checker and
         // needs no runtime check.
         if let Some(decl) = self.types.get(name).cloned() {
-            if let Some(pred) = self.predicate(&decl)? {
-                let all_const = fields
-                    .iter()
-                    .all(|(_, e)| vyrn_frontend::consteval::eval(e, &HashMap::new()).is_some());
-                if !all_const {
-                    self.scope.push(Vec::new());
-                    for (fname, v, fty) in &coerced {
-                        let slot = self.declare(fname, fty);
-                        let fll = self.llt(fty);
-                        self.emit(format!("store {fll} {v}, ptr {slot}"));
-                    }
-                    let (cond, _) = self.gen_expr(pred)?;
-                    self.scope.pop();
-                    let nok = self.fresh_tmp();
-                    self.emit(format!("{nok} = xor i1 {cond}, true"));
-                    self.trap_if(&nok, &format!("@.trap.verr.{name}"), "rfail");
-                }
+            let all_const = fields
+                .iter()
+                .all(|(_, e)| vyrn_frontend::consteval::eval(e, &HashMap::new()).is_some());
+            if !all_const {
+                // The record literal is a SECOND producer of a validated record
+                // type (RFC-0003), and it runs the same constructor the typed
+                // boundary does — RFC-0125 §3 M6, the third judgment's fourth
+                // slice.
+                self.emit_validation(&decl, &cur)?;
             }
         }
         Ok((cur, result_ty))
@@ -14027,73 +13980,56 @@ impl<'a> Gen<'a> {
         Ok((v, named))
     }
 
-    /// Emit the inline runtime check that a value satisfies `decl`'s `where`
-    /// predicate, trapping with the canonical per-type message otherwise. A
-    /// scalar base binds `value`; a record base binds every field (the
-    /// cross-field predicate references them by name). Shared by explicit
-    /// construction (`Age(n)`) and every automatic-validation coercion.
+    /// Emit the check that a value satisfies `decl`'s `where` predicate: a CALL
+    /// to the program's own constructor for the type, which traps with the
+    /// canonical per-type message when it does not hold.
+    ///
+    /// RFC-0125 §3 M6, the third judgment's fourth slice. This emitter used to
+    /// lower the predicate itself, and so did the direct wasm backend, and so
+    /// did the interpreter — the census's `where-scalar` and `where-record`
+    /// rows with three carriers. The predicate is generated Vyrn now
+    /// ([`vyrn_frontend::ctor`]) and all three engines call one body, which is
+    /// the mechanism `char-boundary` and `json-decode` already took.
+    ///
+    /// The call is WRITTEN, not built as an `Expr` and lowered: RFC-0101 M6
+    /// counted backend answers about AST no instantiation of the program holds,
+    /// and `tests/lowered.rs` holds the ceiling. A synthesized node per
+    /// validation site would put one back.
     fn emit_validation(&mut self, decl: &TypeDecl, v: &str) -> Result<(), String> {
         if decl.predicate.is_none() {
             return Ok(());
         }
-        let cond = self.emit_predicate_cond(decl, v)?;
-        let nok = self.fresh_tmp();
-        self.emit(format!("{nok} = xor i1 {cond}, true"));
-        self.trap_if(&nok, &format!("@.trap.verr.{}", decl.name), "vfail");
+        let sym = fn_sym(&vyrn_frontend::ctor::ctor_name(&decl.name));
+        let ll = self.llt(&decl.base);
+        self.emit(format!("call void @{sym}({ll} {v})"));
         Ok(())
     }
 
-    /// The program's OWN `where` predicate node for `decl` — see [`Gen::decls`].
+    /// The predicate's answer as an `i1`, without the trap — a CALL to the
+    /// program's own predicate function for the type.
     ///
-    /// `Ok(None)` is a type with no refinement. Every `decl` that reaches this
-    /// emitter was cloned out of [`Gen::types`], which is `decl_map`'s copy of
-    /// this list, so a decl that HAS a predicate and is not in the list is a
-    /// decl the program does not hold — a refusal rather than a silently
-    /// skipped validation.
-    fn predicate(&self, decl: &TypeDecl) -> Result<Option<&'a Expr>, String> {
-        if decl.predicate.is_none() {
-            return Ok(None);
-        }
-        self.decls
-            .iter()
-            .find(|d| d.name == decl.name && d.base == decl.base)
-            .and_then(|d| d.predicate.as_ref())
-            .map(Some)
-            .ok_or_else(|| {
-                format!(
-                    "a `where` clause on `{}`, which is not one of the program's own                      type declarations",
-                    decl.name
-                )
-            })
-    }
-
-    /// Lower a refined type's `where` predicate to an `i1` (true = holds),
-    /// binding the value under check as [`predicate_binds`] says to. This is the
-    /// ONE place a predicate is lowered to LLVM — the trap path
-    /// (`emit_validation`) and the JSON decode `validate` path (RFC-0018) both
-    /// derive from it, so the two never drift.
+    /// The fallible construction `Age?(n)` (RFC-0077 M2k) wants the same answer
+    /// the trap path asks for, and gets it from the same function rather than
+    /// from a second lowering of the clause. What the arguments are is
+    /// [`vyrn_frontend::types::predicate_binds`]'s: a record base hands over
+    /// every field, every other base hands over `value`.
     fn emit_predicate_cond(&mut self, decl: &TypeDecl, v: &str) -> Result<String, String> {
-        let pred = self.predicate(decl)?.expect("predicate present");
-        let rec_ll = self.llt(&decl.base);
-        self.scope.push(Vec::new());
-        for (name, ty, field) in predicate_binds(decl) {
-            let val = match field {
+        let base_ll = self.llt(&decl.base);
+        let mut args: Vec<String> = Vec::new();
+        for (_, ty, field) in vyrn_frontend::types::predicate_binds(decl) {
+            let ll = self.llt(&ty);
+            match field {
                 Some(i) => {
                     let ext = self.fresh_tmp();
-                    self.emit(format!("{ext} = extractvalue {rec_ll} {v}, {i}"));
-                    ext
+                    self.emit(format!("{ext} = extractvalue {base_ll} {v}, {i}"));
+                    args.push(format!("{ll} {ext}"));
                 }
-                None => v.to_string(),
-            };
-            let slot = self.declare(&name, &ty);
-            let ll = self.llt(&ty);
-            self.emit(format!("store {ll} {val}, ptr {slot}"));
+                None => args.push(format!("{ll} {v}")),
+            }
         }
-        let was = crate::observe::set_ctx("pred");
-        let cond = self.gen_expr(pred);
-        crate::observe::set_ctx(was);
-        let (cond, _) = cond?;
-        self.scope.pop();
+        let sym = fn_sym(&vyrn_frontend::ctor::pred_name(&decl.name));
+        let cond = self.fresh_tmp();
+        self.emit(format!("{cond} = call i1 @{sym}({})", args.join(", ")));
         Ok(cond)
     }
 }
@@ -15468,23 +15404,6 @@ pub fn coerce_plan(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) ->
     }
 }
 
-/// The message a `where` violation prints. A record base gets the cross-field
-/// wording, because what violated it is not one value.
-///
-/// Byte-identical across interp, native and wasm — parity compares stderr — so
-/// it is built here rather than spelled at each of the places that trap.
-pub(crate) fn validation_message(decl: &TypeDecl) -> String {
-    vyrn_frontend::trap::line(&vyrn_frontend::trap::validation_of(decl))
-}
-
-/// What a `where` predicate has in scope, re-exported from the frontend.
-///
-/// It moved there in RFC-0078 M3: the JSON decode path now synthesizes a
-/// `Bool`-returning Vyrn function whose PARAMETERS are this structure, and the
-/// frontend is the only crate both it and the two lowerings can see. This file had
-/// three copies of the walk before RFC-0077 M2d wanted a fourth; it has none now.
-pub(crate) use vyrn_frontend::types::predicate_binds;
-
 /// The LLVM shape of a Vyrn type: the ONE match that turns a type into a memory
 /// layout, so `Gen::llt` and RFC-0077's direct wasm backend cannot come to
 /// different conclusions about the same value. `layout::of_ll` parses what this
@@ -15698,7 +15617,6 @@ mod tests {
             &rg,
             &[],
             &pl,
-            &[],
         );
         let rec = |fs: &[Type]| {
             Type::Record(
@@ -16822,7 +16740,7 @@ mod tests {
                    fn g(a: Age) -> Int64 { return a } \
                    fn main() -> Int64 { let mut x = 30 x = x - 1 return g(x) }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("@.trap.verr.Age"), "coercion validates: {ir}");
+        assert!(ir.contains("@vyrn_where$cAge("), "coercion validates: {ir}");
     }
 
     #[test]
@@ -17967,11 +17885,14 @@ mod tests {
                    fn mk(n: Int64) -> Age { return Age(n); } \
                    fn main() -> Int64 { return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(
-            exit_calls(&ir) > exit_baseline(),
+        // The check is a CALL to the type's constructor since RFC-0125 §3 M6's
+        // fourth slice, and the trap is inside that one body — so counting trap
+        // sites no longer counts checks.
+        assert_eq!(
+            ir.matches("call void @vyrn_where$cAge(").count(),
+            1,
             "expected a runtime check: {ir}"
         );
-        assert!(ir.contains("@.trap.verr.Age"), "{ir}");
     }
 
     #[test]
@@ -18142,7 +18063,7 @@ mod tests {
             ir.contains("call i64 @__vyrn_str_len"),
             "refinement reads the header: {ir}"
         );
-        assert!(ir.contains("@.trap.verr.Name"), "refinement traps: {ir}");
+        assert!(ir.contains("@vyrn_where$cName("), "refinement traps: {ir}");
     }
 
     #[test]
@@ -18151,7 +18072,7 @@ mod tests {
                    fn mk(x: Int64, y: Int64) -> R { return R { a: x, b: y }; } \
                    fn main() -> Int64 { return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("@.trap.verr.R"), "cross-field traps: {ir}");
+        assert!(ir.contains("@vyrn_where$cR("), "cross-field traps: {ir}");
     }
 
     #[test]
@@ -18753,7 +18674,7 @@ mod tests {
                    let mut n = 30; a[0] = n; return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(
-            ir.contains("@.trap.verr.Age"),
+            ir.contains("@vyrn_where$cAge("),
             "element store validates: {ir}"
         );
     }
@@ -18837,7 +18758,7 @@ mod tests {
                    fn main() -> Int64 { return setAge(30) }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(
-            ir.contains("@.trap.verr.Age"),
+            ir.contains("@vyrn_where$cAge("),
             "per-type validation trap: {ir}"
         );
         assert!(
@@ -18859,10 +18780,10 @@ mod tests {
                    fn t(key: TransKey) -> Int64 { return 0 } \
                    fn main() -> Int64 { let s: Section = \"home\" return t(\"nav.\\{s}.label\") }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        // The per-type message global is always defined; a *check* is an `fputs`
-        // of it in a trap block. A proven flow emits none.
+        // The constructor is always DEFINED (it is a function of the program);
+        // a *check* is a call to it. A proven flow emits none.
         assert!(
-            !ir.contains("@.trap.verr.TransKey, ptr"),
+            !ir.contains("call void @vyrn_where$cTransKey("),
             "proven interpolation must emit NO TransKey validation: {ir}"
         );
     }
@@ -18878,7 +18799,7 @@ mod tests {
                    fn main() -> Int64 { return build(\"home\") }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(
-            ir.contains("@__vyrn_trap_msg(ptr @.trap.verr.TransKey)"),
+            ir.contains("call void @vyrn_where$cTransKey("),
             "a non-finite hole must keep the runtime validation: {ir}"
         );
     }
@@ -18893,7 +18814,7 @@ mod tests {
                    fn main() -> Int64 { let n: Narrow = \"a\" return want(n) }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(
-            !ir.contains("@.trap.verr.Wide, ptr"),
+            !ir.contains("call void @vyrn_where$cWide("),
             "contained finite var needs no check: {ir}"
         );
     }

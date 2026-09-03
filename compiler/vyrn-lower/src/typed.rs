@@ -62,6 +62,10 @@ pub enum Step<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum How {
     /// The type's own constructor: `Age(n)`, which is where the predicate runs.
+    /// A RECORD LITERAL of a validated record type is the same answer — it is
+    /// that type's second producer by design (RFC-0003's cross-field `where` has
+    /// no other spelling), and since RFC-0125 §3 M6's fourth slice all three
+    /// engines run the generated constructor at it.
     Constructor,
     /// A name already of the type — nothing crossed, so nothing is owed.
     ByName,
@@ -276,7 +280,9 @@ impl<'a> Walk<'a, '_> {
             {
                 How::ByName
             }
-            Rhs::Make(_) => How::Finding("record-literal"),
+            // A record literal of a validated record type: the type's other
+            // producer, and the one the `where-record` row exists for.
+            Rhs::Make(_) => How::Constructor,
             Rhs::Call { .. } => How::Finding("other-call"),
             Rhs::Prim(..) => How::Finding("primitive"),
             Rhs::Read(_) | Rhs::Take(_) => How::Finding("read-of-place"),

@@ -296,20 +296,23 @@ fn run_corpus() {
     }
     // The ratchet: a store into a validated place whose producer is neither the
     // type's constructor, nor a name already of the type, nor a literal, nor a
-    // constant into a sized integer. It may fall, never rise. Six when the
-    // second slice landed and six still — one primitive, two reads of a place,
-    // three record literals — and RFC-0125 §3 M6 records each with its program
-    // and line. None of the six is a value that reaches its slot unchecked:
-    // `rfcs/probes-0125/raw-value-into-a-validated-slot.vyrn` runs all three
-    // shapes on all three engines and each refuses in the census's words. They
-    // are the sites the boundary check exists for, which is what §2.3's
-    // constructor removes.
-    const RATCHET: usize = 6;
-    assert!(
-        findings.len() <= RATCHET,
-        "{} stores into a validated place with a raw producer, more than the {RATCHET} \
-         recorded; the first is worth reading before the number is raised: {}",
+    // constant into a sized integer. It may fall, never rise, and it is ZERO
+    // since RFC-0125 §3 M6's fourth slice — so a finding is a REFUSAL here and
+    // not a row in a record. Six before it: three record literals, which are a
+    // validated record type's own second producer and read as constructors now,
+    // and three sites the corpus rewrote to call the constructor the boundary
+    // was going to run anyway.
+    //
+    // What zero does NOT mean is that the language refuses the shape. A raw
+    // value entering a validated slot is RFC-0003's automatic validation and
+    // stays legal; every engine runs the constructor at it
+    // (`rfcs/probes-0125/raw-value-into-a-validated-slot.vyrn` refuses on all
+    // three, in the census's words). Zero is a fact about this corpus.
+    const RATCHET: usize = 0;
+    assert_eq!(
         findings.len(),
+        RATCHET,
+        "a store into a validated place with a raw producer; the ratchet is          {RATCHET} and this one is worth reading before it is raised: {}",
         findings[0]
     );
     assert!(judged > 0, "the judgment judged nothing");
