@@ -742,8 +742,8 @@ gen fn rpcReadJson(path: String) -> Json {
 fn rpcApplyConfig(cfg: RpcConfig, doc: Json) -> RpcConfig {
     let p = rpcStrOf(rpcMember(doc, "prefix"))
     let t = rpcStrOf(rpcMember(doc, "path"))
-    let mut keys = cfg.pinKeys
-    let mut paths = cfg.pinPaths
+    let mut keys = cfg.pinKeys.copy()
+    let mut paths = cfg.pinPaths.copy()
     for f in rpcFieldsOf(rpcMember(doc, "pin")) {
         let v = rpcStrOf(f.value)
         if v != "" {
@@ -752,8 +752,8 @@ fn rpcApplyConfig(cfg: RpcConfig, doc: Json) -> RpcConfig {
         }
     }
     return RpcConfig {
-        prefix: if p == "" { cfg.prefix } else { p },
-        path: if t == "" { cfg.path } else { t },
+        prefix: if p == "" { cfg.prefix.copy() } else { p },
+        path: if t == "" { cfg.path.copy() } else { t },
         pinKeys: keys.copy(),
         pinPaths: paths.copy(),
     }

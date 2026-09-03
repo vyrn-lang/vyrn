@@ -127,6 +127,14 @@
 //! as `file:line:0: message`, and `VYRN_NO_MOVECHECK=1` shows it on a
 //! program the checker refuses first (RFC-0125 §3 M3, "wordings").
 //!
+//! **Borrows bound to a place are judged (2026-09-03).** A `let` that reads
+//! a heap field or element out of a place somebody owns is an alias of it;
+//! a take of the alias is refused, and a write to the place ends it
+//! (RFC-0125 §3 M5, "the take out of a `read` parameter";
+//! `take-out-of-a-read-parameter.vyrn`, `alias-then-write-through-the-root.vyrn`).
+//! Eleven corpus sites took the `.copy()` the rule names; the tally stayed
+//! at 0.
+//!
 //! The ratchet is 0. `VYRN_KERNEL_GAPS=<substring>`
 //! lists where each remaining gap is; `VYRN_KERNEL_TRACE=1` prints what the
 //! placer found owed in every body, and `VYRN_KERNEL_TRACE=<fn>` prints that

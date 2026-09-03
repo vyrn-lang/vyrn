@@ -40,8 +40,24 @@
 //! value, and a loop whose body does so is judged again from that state, so
 //! the second turn's store is judged against what the first turn left.
 //!
-//! Names the body does not own — borrowed parameters, pattern binders of a
-//! non-consuming switch, heapless values — are invisible here.
+//! **Borrows.** A name the body does not own whose type owns heap is a
+//! borrow (RFC-0089 rule 2): a parameter, or a binding read out of a place
+//! somebody owns (`let mt = h.meta`, `let x = xs[i]`, `let q = p`). A
+//! binding read out of a place is an alias of that place, and the kernel
+//! keeps what it reads. An alias may be read and passed on; a take of it —
+//! a `consume` argument, a literal part, a store, a `return` — is refused,
+//! because the place still owns the buffer and the engines would release it
+//! twice (`rfcs/probes-0125/take-out-of-a-read-parameter.vyrn`). And a write
+//! to the place it reads — a store, a take, a drop — ends the alias: a later
+//! read of it is refused, because the compiled routes see the write through
+//! one buffer and the interpreter does not
+//! (`rfcs/probes-0125/alias-then-write-through-the-root.vyrn`). RFC-0090:
+//! all mutation is exclusive. Not modelled: what a `modify` argument does to
+//! the aliases of what it is handed (`examples/tree.vyrn`'s `freeNode` reads
+//! a handle out of the node it then removes, and a handle is safe to hold).
+//!
+//! Every other name the body does not own — a heapless value, a pattern
+//! binder of a non-consuming switch — is invisible here.
 
 use crate::core::{Arm, Body, Name, Old, Place, Rhs, St, Val};
 use vyrn_frontend::ast::Capability;
@@ -111,6 +127,12 @@ struct State {
     /// Where each hole was taken: `(name, path, line)`. Append-only, and not
     /// part of the judgment either.
     taken_at: Vec<(Name, String, usize)>,
+    /// For an alias: the line and the place written, once the place it
+    /// reads has been written. A later read is refused.
+    dead: Vec<Option<(usize, String)>>,
+    /// What each alias reads out of. Bound by the `let` that reads the
+    /// place, or the store that rebinds a borrow's binding; on a path.
+    alias: Vec<Option<Alias>>,
 }
 
 /// Whether two paths under one name overlap: equal, or one under the other.
@@ -128,6 +150,24 @@ fn overlaps(a: &str, b: &str) -> bool {
 /// `line`, which is wrong when all of `.line` has left.
 fn covers(r: &str, h: &str) -> bool {
     r == h || h.strip_prefix(r).is_some_and(|x| x.starts_with('.'))
+}
+
+/// What an alias reads out of: a name of this body, or module state.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Root {
+    N(Name),
+    G(String),
+}
+
+/// An alias: the place a borrow reads, resolved through every alias on its
+/// root, and the name it was read through (`t.xs[]` reads `t.xs` through
+/// `t`; `t.xs[][]` reads it through `t.xs[]`). A write through an alias is
+/// not a write the alias, or any alias on its chain, has to end for.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Alias {
+    root: Root,
+    path: String,
+    via: Option<Name>,
 }
 
 /// The root name of a place and the path under it; `None` for module state.
@@ -209,6 +249,8 @@ fn run(body: &Body, mode: Mode) -> Result<Vec<Missing>, Refusal> {
         ended: false,
         taker: vec![None; body.names.len()],
         taken_at: Vec::new(),
+        dead: vec![None; body.names.len()],
+        alias: vec![None; body.names.len()],
     };
     for p in &body.params {
         if body.names[*p as usize].owned {
@@ -251,6 +293,160 @@ impl<'b> Kernel<'b> {
     fn info(&self, n: Name) -> String {
         let i = &self.body.names[n as usize];
         format!("`{}` (line {})", i.source, i.line)
+    }
+
+    /// Whether `n` is a borrow (RFC-0089 rule 2): the core says.
+    fn borrowed(&self, n: Name) -> bool {
+        self.body.names[n as usize].borrow
+    }
+
+    /// What a place reads out of, through every alias on its root: the
+    /// alias a binding of it would be. `let mt = h.meta` then `mt[0]` reads
+    /// `h.meta.[]`.
+    fn src_of(&self, st: &State, p: &Place) -> Alias {
+        match p {
+            Place::Name(n) => match &st.alias[*n as usize] {
+                Some(a) => Alias {
+                    via: Some(*n),
+                    ..a.clone()
+                },
+                None => Alias {
+                    root: Root::N(*n),
+                    path: String::new(),
+                    via: Some(*n),
+                },
+            },
+            Place::Global(g) => Alias {
+                root: Root::G(g.clone()),
+                path: String::new(),
+                via: None,
+            },
+            Place::Field(b, f) => {
+                let mut a = self.src_of(st, b);
+                a.path.push('.');
+                a.path.push_str(f);
+                a
+            }
+            Place::Elem(b, _) | Place::Key(b, _) => {
+                let mut a = self.src_of(st, b);
+                a.path.push_str(".[]");
+                a
+            }
+        }
+    }
+
+    /// The source of an alias, spelled for a refusal: `h.meta`, `xs[..]`.
+    fn src_text(&self, st: &State, n: Name) -> String {
+        match &st.alias[n as usize] {
+            Some(a) => self.alias_text(a),
+            None => self.src(n).to_string(),
+        }
+    }
+
+    fn alias_text(&self, a: &Alias) -> String {
+        let root = match &a.root {
+            Root::N(m) => self.src(*m).to_string(),
+            Root::G(g) => g.clone(),
+        };
+        format!("{root}{}", a.path.replace(".[]", "[..]"))
+    }
+
+    /// A place, spelled for a refusal: `t.xs`, `xs[..]`.
+    fn place_text(&self, p: &Place) -> String {
+        match p {
+            Place::Name(n) => self.src(*n).to_string(),
+            Place::Global(g) => g.clone(),
+            Place::Field(b, f) => format!("{}.{f}", self.place_text(b)),
+            Place::Elem(b, _) | Place::Key(b, _) => format!("{}[..]", self.place_text(b)),
+        }
+    }
+
+    /// `p` is written: every alias reading a place that overlaps it ends
+    /// here. `what` is the place, in the checker's words.
+    fn wrote(&self, st: &mut State, p: &Place, what: &str) {
+        // A store into a binding writes the binding's own slot, not the
+        // place it reads.
+        let a = match p {
+            Place::Name(n) => Alias {
+                root: Root::N(*n),
+                path: String::new(),
+                via: None,
+            },
+            _ => self.src_of(st, p),
+        };
+        // Spelled through the aliases, as the reader wrote it: `t.xs[..]`,
+        // not the desugar's `t.xs[][..]`.
+        let what = if matches!(p, Place::Name(_)) {
+            what.to_string()
+        } else {
+            self.alias_text(&a)
+        };
+        // A write through an alias is that alias's own, and its chain's.
+        let mut chain = Vec::new();
+        let mut via = root_of(p).map(|(n, _)| n);
+        while let Some(n) = via {
+            chain.push(n);
+            via = st.alias[n as usize].as_ref().and_then(|x| x.via);
+        }
+        for n in 0..self.body.names.len() {
+            if chain.contains(&(n as Name)) {
+                continue;
+            }
+            let Some(x) = &st.alias[n] else {
+                continue;
+            };
+            if x.root == a.root && overlaps(&x.path, &a.path) && st.dead[n].is_none() {
+                st.dead[n] = Some((self.here, what.clone()));
+            }
+        }
+    }
+
+    /// A read of an alias whose place was written since: refused, at the
+    /// write, in the checker's two-line form.
+    fn alias_read(&self, st: &State, n: Name, what: &str) -> Result<(), Refusal> {
+        let Some((l, place)) = &st.dead[n as usize] else {
+            return Ok(());
+        };
+        let (s, here) = (self.src(n), self.here);
+        self.refuse_at(
+            *l,
+            format!(
+                "`{place}` is written here while `{s}` still reads out of it\nline {here}: ... \
+                 and `{s}` is {what} again here"
+            ),
+        )
+    }
+
+    /// A take of an alias: refused, because the place it reads still owns
+    /// the buffer (RFC-0089 rule 2). Worded as `movecheck.rs` words each
+    /// exit: the `consume` parameter, the `return`, the literal, the store.
+    fn alias_take(&self, st: &State, n: Name) -> Refusal {
+        let (s, src, by) = (self.src(n), self.src_text(st, n), &self.by);
+        let what = format!("it is read out of `{src}`, a place that owns it");
+        // A named binding a call takes: at the binding, as the checker words
+        // it, so the `.copy()` on the menu lands where the read is.
+        if by.ends_with("(..)`") && !s.starts_with('@') {
+            let (here, at) = (self.here, self.body.names[n as usize].line);
+            return self
+                .refuse_at::<()>(
+                    at,
+                    format!(
+                        "`{s}` is read out of `{src}` here — a place that owns it\nline {here}: \
+                         ... and {by} takes `{s}`, so `{s}` must be a value of its own"
+                    ),
+                )
+                .unwrap_err();
+        }
+        let msg = if by.ends_with("(..)`") {
+            format!("`{s}` may not be passed to a `consume` parameter via {by} — {what}")
+        } else if by == "a `return`" {
+            format!("`{s}` may not be returned — {what}")
+        } else if by == "a literal" {
+            format!("`{s}` may not be stored into the literal — {what}")
+        } else {
+            format!("`{s}` may not be stored into {by} — {what}")
+        };
+        self.refuse_at::<()>(self.here, msg).unwrap_err()
     }
 
     /// A refusal at the statement being judged.
@@ -405,19 +601,25 @@ impl<'b> Kernel<'b> {
         Ok(())
     }
 
-    /// A read of a name: it must be held.
+    /// A read of a name: it must be held, and an alias's place unwritten.
     fn read(&self, st: &State, v: &Val) -> Result<(), Refusal> {
         if let Val::Name(n) = v {
             if self.owned(*n) && st.own[*n as usize] == Own::Gone {
                 return Err(self.used_after(st, *n, "used"));
             }
+            self.alias_read(st, *n, "used")?;
         }
         Ok(())
     }
 
-    /// A take of a name: it must be held, and it is gone afterwards.
+    /// A take of a name: it must be held, and it is gone afterwards. An
+    /// alias is never taken.
     fn take(&self, st: &mut State, v: &Val) -> Result<(), Refusal> {
         if let Val::Name(n) = v {
+            if st.alias[*n as usize].is_some() {
+                self.alias_read(st, *n, "used")?;
+                return Err(self.alias_take(st, *n));
+            }
             if self.owned(*n) {
                 if st.own[*n as usize] == Own::Gone {
                     return Err(self.used_after(st, *n, "used"));
@@ -477,9 +679,11 @@ impl<'b> Kernel<'b> {
         }
     }
 
-    /// A take out of a sub-place: the root keeps a hole there.
+    /// A take out of a sub-place: the root keeps a hole there, and every
+    /// alias of the place ends.
     fn take_place(&self, st: &mut State, p: &Place) -> Result<(), Refusal> {
         self.place(st, p)?;
+        self.wrote(st, p, &self.place_text(p));
         if let Some((n, path)) = root_of(p) {
             if self.owned(n) && !path.is_empty() {
                 st.taken_at.push((n, path.clone(), self.here));
@@ -491,9 +695,11 @@ impl<'b> Kernel<'b> {
     }
 
     /// A store into a sub-place fills the hole there, and anything under it.
-    /// A store under a hole writes into what left.
+    /// A store under a hole writes into what left. Every alias of the place
+    /// ends.
     fn store_place(&self, st: &mut State, p: &Place) -> Result<(), Refusal> {
         self.indices(st, p)?;
+        self.wrote(st, p, &self.place_text(p));
         let Some((n, path)) = root_of(p) else {
             return Ok(());
         };
@@ -644,6 +850,22 @@ impl<'b> Kernel<'b> {
                     }),
                     _ => false,
                 };
+                // An alias: a borrow read out of a place, or a second name
+                // for a borrow. What it reads is kept, and a second name for
+                // a borrow is not a take of it.
+                st.dead[*n as usize] = None;
+                st.alias[*n as usize] = None;
+                match rhs {
+                    Rhs::Read(p) if self.borrowed(*n) => {
+                        st.alias[*n as usize] = Some(self.src_of(st, p));
+                    }
+                    Rhs::Val(Val::Name(m)) if self.borrowed(*n) && self.borrowed(*m) => {
+                        self.read(st, &Val::Name(*m))?;
+                        st.alias[*n as usize] = Some(self.src_of(st, &Place::Name(*m)));
+                        return Ok(());
+                    }
+                    _ => {}
+                }
                 self.rhs(st, rhs)?;
                 if self.owned(*n) {
                     st.own[*n as usize] = if is_static { Own::Static } else { Own::Held };
@@ -657,7 +879,43 @@ impl<'b> Kernel<'b> {
             St::Store {
                 place, value, old, ..
             } => {
+                // A borrow's binding rebound to another borrow (`t = d.title`
+                // after `let t = s.name`): the alias travels, as at a `let`.
+                if let (Place::Name(n), Val::Name(m)) = (place, value) {
+                    if self.borrowed(*n) && st.alias[*m as usize].is_some() {
+                        self.read(st, value)?;
+                        self.wrote(st, place, self.src(*n));
+                        st.alias[*n as usize] = st.alias[*m as usize].clone();
+                        st.dead[*n as usize] = None;
+                        return Ok(());
+                    }
+                }
+                // The write-back of RFC-0082's place desugar (`t.xs[k] = v`
+                // reads `t.xs` into a temporary, stores, and writes it back):
+                // the alias goes back into the very place it reads, so
+                // nothing changes owner. The alias ends with it.
+                if let Val::Name(m) = value {
+                    let into = self.src_of(st, place);
+                    let back = st.alias[*m as usize]
+                        .as_ref()
+                        .is_some_and(|a| a.root == into.root && a.path == into.path);
+                    if back {
+                        self.read(st, value)?;
+                        self.wrote(st, place, &self.place_text(place));
+                        st.dead[*m as usize] = Some((self.here, self.place_text(place)));
+                        return Ok(());
+                    }
+                }
                 self.take(st, value)?;
+                if let Place::Name(n) = place {
+                    self.wrote(st, place, self.src(*n));
+                    // A borrow's binding given a fresh value (`out = out +
+                    // s`) is no alias afterwards.
+                    if self.borrowed(*n) {
+                        st.alias[*n as usize] = None;
+                        st.dead[*n as usize] = None;
+                    }
+                }
                 match place {
                     Place::Name(n) if self.owned(*n) => {
                         if st.own[*n as usize] == Own::Held
@@ -700,6 +958,7 @@ impl<'b> Kernel<'b> {
             St::Drop(n) => {
                 let holes = self.body.names[*n as usize].holes.clone();
                 self.drop(st, *n, &holes, None)?;
+                self.wrote(st, &Place::Name(*n), self.src(*n));
             }
             St::Row {
                 name,
@@ -708,6 +967,7 @@ impl<'b> Kernel<'b> {
                 site,
             } => {
                 self.drop(st, *name, holes, Some((*exit, *site)))?;
+                self.wrote(st, &Place::Name(*name), self.src(*name));
             }
             St::If {
                 cond,
@@ -799,6 +1059,8 @@ impl<'b> Kernel<'b> {
                         ended: true,
                         taker: st.taker.clone(),
                         taken_at: st.taken_at.clone(),
+                        dead: st.dead.clone(),
+                        alias: st.alias.clone(),
                     }
                 } else {
                     self.join(&ctx.breaks)?
@@ -980,6 +1242,11 @@ impl<'b> Kernel<'b> {
                 entry.own[n] = Own::Held;
                 changed = true;
             }
+            // An alias ended in the body is ended when the next turn starts.
+            if entry.dead[n].is_none() && at.dead[n].is_some() {
+                entry.dead[n] = at.dead[n].clone();
+                changed = true;
+            }
         }
         changed
     }
@@ -1045,11 +1312,21 @@ impl<'b> Kernel<'b> {
                 ended: true,
                 taker: edges[0].taker.clone(),
                 taken_at: edges[0].taken_at.clone(),
+                dead: edges[0].dead.clone(),
+                alias: edges[0].alias.clone(),
             });
         };
         let mut joined = (*first).clone();
         for other in &live[1..] {
             for n in 0..self.body.names.len() as Name {
+                // An alias ended on one edge is ended after the join, and
+                // an alias one edge bound is bound after it.
+                if joined.dead[n as usize].is_none() {
+                    joined.dead[n as usize] = other.dead[n as usize].clone();
+                }
+                if joined.alias[n as usize].is_none() {
+                    joined.alias[n as usize] = other.alias[n as usize].clone();
+                }
                 if !self.owned(n) {
                     continue;
                 }

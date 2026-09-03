@@ -902,6 +902,7 @@ fn run(program: &Program, want: Want) -> Run {
                 .collect(),
         )),
         ret: RefCell::new(Type::Unit),
+        reads: RefCell::new(Scopes::new(HashMap::new())),
         lambda_base: RefCell::new(Vec::new()),
         lambda_escapes: RefCell::new(Vec::new()),
         arm_binders: RefCell::new(Vec::new()),
@@ -1222,6 +1223,11 @@ struct MoveCheck<'a> {
     /// see [`MoveCheck::enter`]. A borrow is second-class: observable, passable,
     /// but never stored, captured or returned.
     borrows: RefCell<Scopes<Option<Borrow>>>,
+    /// What each borrow READS — the place's path and the binding's line — in
+    /// lockstep with `borrows`. A write to that place ends the borrow
+    /// ([`MoveCheck::wrote_place`]), and the fix for a borrow a rebuilding
+    /// call takes is a `.copy()` where the borrow is bound.
+    reads: RefCell<Scopes<Option<(String, usize)>>>,
     /// The return type of the function being checked, for rule 3.
     ret: RefCell<Type>,
     /// The frame depth at each enclosing lambda's parameter frame. A name that
@@ -1481,6 +1487,9 @@ struct Consumption {
     /// binding, moved whole, and reading `o.i[]` afterwards is not a hole. The
     /// take is the one thing that can make one.
     hole: bool,
+    /// The place a write ended this borrow at ([`MoveCheck::wrote_place`]):
+    /// the use is refused as a read of what the write replaced.
+    write: Option<String>,
 }
 
 /// Consumed places: PATH -> what took it (RFC-0093), bucketed by ROOT.
@@ -1602,6 +1611,19 @@ fn overlaps(a: &str, b: &str) -> bool {
     a == b || under(a, b) || under(b, a)
 }
 
+/// Whether a write to `b` reaches the storage `a` reads, or the other way:
+/// equal, or one under the other at a `.` or a `[`. Unlike [`under`] this
+/// reads `[` as a step, because an element read (`xs[i]`, `xs[..]`) is a
+/// borrow of the container's storage and a write to the container reaches it.
+fn touches(a: &str, b: &str) -> bool {
+    let step = |long: &str, short: &str| {
+        long.len() > short.len()
+            && long.starts_with(short)
+            && matches!(long.as_bytes()[short.len()], b'.' | b'[')
+    };
+    a == b || step(a, b) || step(b, a)
+}
+
 /// Whether `long` names storage inside `short`: `er.node` is under `er`.
 ///
 /// FIELDS ONLY, and a name carrying a `[` relates to nothing but itself. Two
@@ -1642,6 +1664,7 @@ impl Consumption {
             by,
             fixes: Vec::new(),
             hole: false,
+            write: None,
         }
     }
 }
@@ -1741,12 +1764,14 @@ impl MoveCheck<'_> {
     fn enter(&self) {
         self.vars.borrow_mut().enter();
         self.borrows.borrow_mut().enter();
+        self.reads.borrow_mut().enter();
         self.nodes.borrow_mut().enter();
     }
 
     fn exit(&self) {
         self.vars.borrow_mut().exit();
         self.borrows.borrow_mut().exit();
+        self.reads.borrow_mut().exit();
         self.nodes.borrow_mut().exit();
     }
 
@@ -1756,7 +1781,53 @@ impl MoveCheck<'_> {
     fn bind(&self, name: &str, ty: Option<Type>, borrow: Option<Borrow>) {
         self.vars.borrow_mut().bind(name, ty);
         self.borrows.borrow_mut().bind(name, borrow);
+        self.reads.borrow_mut().bind(name, None);
         self.nodes.borrow_mut().bind(name, 0);
+    }
+
+    /// The place a borrow of `value` reads, when the value spells one: `h.meta`,
+    /// `xs[i]`, or a whole borrowed name.
+    fn read_of(value: &Expr) -> Option<String> {
+        place_path(value)
+            .or_else(|| element_path(value))
+            .map(|(_, path)| path)
+    }
+
+    /// RFC-0090: all mutation is exclusive. A write to `path` — a store, a
+    /// take, a rebuilding call's write-back, a drop — ends every borrow that
+    /// reads a place overlapping it (`let before = t.xs` then `t.xs[0] = 99`:
+    /// the compiled routes write through one buffer, the interpreter copies).
+    /// A later use of the borrow is refused at the write, as a move is. The
+    /// name the write goes through is not ended by its own write.
+    fn wrote_place(&self, path: &str, line: usize, consumed: &mut Consumed) {
+        let through = root_of(path);
+        // RFC-0082's place desugar writes an element through a temporary named
+        // after the place (`t.xs[]`); the reader wrote `t.xs[..]`.
+        let shown = match path.strip_suffix("[]") {
+            Some(p) => format!("{p}[..]"),
+            None => path.to_string(),
+        };
+        let reads = self.reads.borrow();
+        for frame in reads.frames() {
+            for (name, read) in frame {
+                let Some((src, at)) = read else { continue };
+                if name == through || reads.get(name) != Some(read) || !touches(src, path) {
+                    continue;
+                }
+                consumed.or_insert(
+                    name.clone(),
+                    Consumption {
+                        line,
+                        by: format!("a write to `{shown}`"),
+                        fixes: vec![format!(
+                            "`{src}.copy()` on line {at}, so `{name}` is a value of its own"
+                        )],
+                        hole: false,
+                        write: Some(shown.clone()),
+                    },
+                );
+            }
+        }
     }
 
     /// Record what became of the binding `name` names, if this run is recording
@@ -2614,6 +2685,7 @@ impl MoveCheck<'_> {
                 by: into(),
                 fixes: vec![format!("`{path}.copy()` if both sides need a value")],
                 hole: false,
+                write: None,
             },
         );
         Ok(true)
@@ -2781,6 +2853,19 @@ impl MoveCheck<'_> {
                     ),
                     format!("write `{key}` back before this line"),
                 ],
+            ));
+        }
+        // A borrow whose place was written since (RFC-0090: all mutation is
+        // exclusive): the read would see the write through one buffer in the
+        // compiled routes and a copy in the interpreter.
+        if let Some(place) = &c.write {
+            return Err(menu(
+                c.line,
+                format!(
+                    "`{place}` is written here while `{key}` still reads out of it\nline {line}: \
+                     ... and `{key}` is used again here"
+                ),
+                c.fixes.clone(),
             ));
         }
         // A `consume` capability keeps the wording it has always had: the
@@ -4626,7 +4711,12 @@ impl MoveCheck<'_> {
                 if self.param_escapers.is_some() && self.carries_param_storage(value) {
                     self.carrying_locals.borrow_mut().insert(name.clone());
                 }
+                let is_borrow = borrow.is_some();
                 self.bind(name, bty, borrow);
+                if is_borrow {
+                    let read = Self::read_of(value).map(|p| (p, *line));
+                    self.reads.borrow_mut().bind(name, read);
+                }
                 self.nodes.borrow_mut().bind(name, let_id(s));
                 // RFC-0114 M2: the initializer is the binding's first write.
                 // `id` 0 because a `let` is never itself a release site — it is
@@ -4704,8 +4794,13 @@ impl MoveCheck<'_> {
                     if let Some(why) = self.names_a_place(value) {
                         self.took(name, Gone::Borrowed(why));
                     }
+                    let read = b
+                        .as_ref()
+                        .and_then(|_| Self::read_of(value).map(|p| (p, *line)));
                     self.borrows.borrow_mut().rebind(name, b);
+                    self.reads.borrow_mut().rebind(name, read);
                 }
+                self.wrote_place(name, *line, consumed);
                 // Exit-residue round eighteen: record the store whose value
                 // mentions the place only through read arguments of declared
                 // functions — `dec = halveBy(dec, m)` — so `facts()` can
@@ -4763,6 +4858,7 @@ impl MoveCheck<'_> {
                 // sentence `Stmt::Assign` has carried since Phase 4b, one dot
                 // down — and the reason no drop flag is needed to say it.
                 revive(consumed, &format!("{name}.{field}"));
+                self.wrote_place(&format!("{name}.{field}"), *line, consumed);
                 self.wrote_into(name); // RFC-0093 M2: a filled hole is not skippable
                                        // Round thirty-two: a mention that provably cannot hand the
                                        // old value back — a String `+` is a fresh concat — records
@@ -4816,6 +4912,7 @@ impl MoveCheck<'_> {
                 self.site("element", *line, value, None);
                 self.expr(value, consumed, scope)?;
                 let _ = self.store(value, &|| format!("`{name}`"), *line, true, consumed)?;
+                self.wrote_place(name, *line, consumed);
                 // A map takes its KEY. Both backends write the key pointer into
                 // `keys[len]` and copy nothing, so `hs[k] = v` moves `k` — and
                 // no rule said so until RFC-0092 M5 needed it to. `httpHeaders`
@@ -5176,7 +5273,12 @@ impl MoveCheck<'_> {
                 };
                 let mut body_c = consumed.clone();
                 self.enter();
+                let is_borrow = borrow.is_some();
                 self.bind(var, elem, borrow);
+                if is_borrow {
+                    let read = place_path(iter).map(|(_, p)| (format!("{p}[..]"), *line));
+                    self.reads.borrow_mut().bind(var, read);
+                }
                 // The loop variable is bound to the snapshot's row, so every way
                 // an ELEMENT can leave the loop is written on it: a store
                 // (`fs.push(Field { key: k, .. })`, which is what `httpInput`
@@ -5245,6 +5347,7 @@ impl MoveCheck<'_> {
                                 by: "the `for .. in consume` loop".into(),
                                 fixes,
                                 hole: root != path,
+                                write: None,
                             },
                         );
                     }
@@ -5307,6 +5410,7 @@ impl MoveCheck<'_> {
             // `drop name;` consumes the binding: using it afterward is a
             // use-after-drop, caught by the same machinery as `consume`.
             Stmt::Drop { name, line } => {
+                self.wrote_place(name, *line, consumed);
                 if let Some(c) = consumed.get(name) {
                     let (cline, consumer) = (c.line, &c.by);
                     return Err(menu(
@@ -5737,6 +5841,7 @@ impl MoveCheck<'_> {
                 self.expr(place, consumed, scope)?;
                 self.check_take(place, *line, scope, TakeForm::Prefix)?;
                 let (root, path) = place_path(place).expect("check_take proved this is a place");
+                self.wrote_place(&path, *line, consumed);
                 // A whole binding writes the same `Gone::Moved` the consuming
                 // loop writes, so `own.rs` suppresses its drop through the two
                 // lines it already has.
@@ -5775,6 +5880,7 @@ impl MoveCheck<'_> {
                         by: "`consume`".into(),
                         fixes: vec![format!("`{path}.copy()` if both sides need a value")],
                         hole: root != path,
+                        write: None,
                     },
                 );
                 Ok(())
@@ -6373,18 +6479,66 @@ impl MoveCheck<'_> {
                                             "`{root}.copy()` if both sides need a value"
                                         )],
                                         hole: false,
+                                        write: None,
                                     },
                                 );
                             }
                         }
                     } else if self.sinks(name, i)
-                        && !(i == 0
-                            && store_path(arg).as_deref() == self.writeback.borrow().as_deref())
+                        && i == 0
+                        && store_path(arg).as_deref() == self.writeback.borrow().as_deref()
                     {
+                        // The receiver of a write-back statement (`xs = xs.push(v)`,
+                        // `s.dense.push(i)`): the call takes the buffer and hands
+                        // it back through the result, into the same place. That
+                        // is this frame's own business when the frame owns the
+                        // place, and the caller's when the place IS a `modify`
+                        // parameter, lent for exactly this. A borrowed LOCAL is
+                        // neither: `let mut mt = h.meta` then `mt.push(x)`
+                        // rebuilds a buffer `h.meta` still owns, and the caller
+                        // and the callee both release it (RFC-0125 §3 M5,
+                        // `rfcs/probes-0125/take-out-of-a-read-parameter.vyrn`).
+                        // Rule 2: a borrow may not be consumed.
+                        let path = store_path(arg).unwrap_or_default();
+                        let root = root_of(&path).to_string();
+                        let borrowed = match self.borrow_of(&root) {
+                            None => None,
+                            Some(Borrow::Modify(p)) if p == root => None,
+                            Some(b) => Some(b),
+                        };
+                        if let Some(b) = borrowed {
+                            if self.type_of(arg).is_some_and(|t| self.decl.owns_heap(&t)) {
+                                let surface = crate::parser::method_surface(name);
+                                let read = self.reads.borrow().get(&root).cloned().flatten();
+                                return Err(match read {
+                                    Some((src, at)) => menu(
+                                        at,
+                                        format!(
+                                            "`{root}` is read out of `{src}` here — a place that \
+                                             owns it\nline {line}: ... and `{surface}(..)` takes \
+                                             `{path}`, so `{root}` must be a value of its own"
+                                        ),
+                                        vec![format!(
+                                            "`{src}.copy()` if `{root}` should own what \
+                                             `{surface}(..)` rebuilds"
+                                        )],
+                                    ),
+                                    None => menu(
+                                        *line,
+                                        format!(
+                                            "`{path}` may not be passed to a `consume` parameter \
+                                             via `{surface}(..)` — it is {}",
+                                            b.what(&path)
+                                        ),
+                                        self.fixes_here(&b, &root, &path),
+                                    ),
+                                });
+                            }
+                        }
+                    } else if self.sinks(name, i) {
                         // A builtin whose parameter declares `consume`. Rule 1
                         // governs it exactly as it governs `xs = [.., v]`, which
-                        // is what it means. The receiver of a write-back
-                        // statement is the exception `writeback` names.
+                        // is what it means.
                         let _ = self.store(
                             arg,
                             &|| format!("`{}(..)`", crate::parser::method_surface(name)),

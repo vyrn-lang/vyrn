@@ -2679,13 +2679,13 @@ gen fn vyxMergeImports(comps: Array<VyxComp>) -> VyxMerge {
                     selCol.push(oC)
                     selCount.push(1)
                 } else {
-                    let mut cur = selNames[si]
+                    let mut cur = selNames[si].copy()
                     for nm in imp.names {
                         if includes(cur, nm) == false {
                             cur.push(nm.copy())
                         }
                     }
-                    selNames[si] = cur.copy()
+                    selNames[si] = cur
                     selCount[si] = selCount[si] + 1
                 }
             }

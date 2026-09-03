@@ -10718,8 +10718,9 @@ pub struct StoredFnEffects {
 /// Whether two collected fn signatures could describe the same stored value.
 /// Structural equality, loosened so a generic `Type::Param` matches anything
 /// (a stored fn type inside a generic function is collected pre-substitution;
-/// matching loosely keeps the effect union conservative).
-fn fn_sigs_match(a: &Type, b: &Type) -> bool {
+/// matching loosely keeps the effect union conservative). Public because the
+/// effect judgment (RFC-0125 §2.2) joins over the same sources.
+pub fn fn_sigs_match(a: &Type, b: &Type) -> bool {
     if matches!(a, Type::Param(_)) || matches!(b, Type::Param(_)) {
         return true;
     }

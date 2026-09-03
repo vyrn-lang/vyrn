@@ -22,7 +22,10 @@
   fixture gate of §2.6 exists — 201 of 203 examples byte-identical to the
   recorded output, 2 skipped by name. The interpreter stays the default and
   is not deleted; the site export does not compile yet (`listDir` has no
-  lowering), and the numbers are in §3 M5. Nothing after that has landed.
+  lowering), and the numbers are in §3 M5. On 2026-09-03 the site export
+  ran under `--engine wasm` byte-identical to the interpreter's, once RFC-0089
+  rule 2's alias half was stated in the core, the kernel and the checker
+  (§3 M5, "the take out of a `read` parameter").
 - **Depends on:** RFC-0101 (the lowered form — this RFC is what its own ledger
   says it could not become), RFC-0077 (the direct wasm backend — the emitter
   this RFC keeps), RFC-0087..0091 (ownership is defined, not inferred — the
@@ -770,6 +773,123 @@ parity in release with `--ignored`; the residue ratchet; the cross-engine
 generator test, red for the same five programs as at the base; and `vyrn doc
 --std --verify`. The wasm manifest is not regenerated in this slice.
 
+**The take out of a `read` parameter (2026-09-03): the rule, stated once,
+and the export byte-identical.** The defect above and `placeorder.vyrn`'s
+alias write (M5's second slice) are one rule seen from two sides. Both
+probes are under `rfcs/probes-0125/`, and what each engine did before the
+fix is pinned here:
+
+| probe | interpreter | native | `--engine wasm` |
+|---|---|---|---|
+| `take-out-of-a-read-parameter.vyrn` (`let mut mt = h.meta` on a `read` parameter, then `mt.push(..)`; the caller reads `titled.meta` after) | `2`, `1`, `a` | exit `0xC0000374`, nothing printed | trap in `free`, nothing printed |
+| `alias-then-write-through-the-root.vyrn` (`let before = t.xs`, then `t.xs[0] = 99`, then `before[0]`) | `99`, `1` | `99`, `99` | `99`, `99` |
+
+The interpreter copies on write (`Rc::make_mut`), so it prints the answer a
+copy would; the compiled routes share the buffer, so the first probe
+releases one buffer twice and the second reads the write through it.
+
+The rule is RFC-0089's rule 2 and RFC-0090's one line: a `read` or
+`modify` value may be observed and passed on, it may not be retained,
+stored, returned or consumed, and all mutation is exclusive. So `let mut mt
+= h.meta` is neither a copy nor a move: it is a borrow of `h.meta`, and the
+program is refused where the borrow is taken or where its place is written,
+with `.copy()` named at the binding. Not a copy, because RFC-0088 put the
+cost of a copy at the call site where a reader can see it (`copy` is "the
+escape hatch"), and a hidden allocation on every `let x = p.f` would undo
+that. Not a refusal of the `let` itself, because a read-only projection is
+the corpus's commonest idiom and costs nothing.
+
+Where it lives:
+
+- **The core** (`core.rs`): a name carries `borrow` — its type owns heap,
+  the body does not own it, and it is not static data or the source of a
+  whole-value alias. A `read` parameter, a `let` of a place read
+  (`is_place_read`), a second name for a borrow, a lending call's result, a
+  payload binder and a `for` variable over a container the loop does not own
+  are borrows. An `if` or `match` expression with an arm that yields a
+  borrow yields one (`names_a_place`'s reading, one arm is enough); it used
+  to be lowered as an owned temporary the arms stored a borrow into. A
+  nullary constructor (`None`, a fieldless variant) is a literal, not a read
+  of module state. Module state as the receiver of a rebuilding call
+  (`books.push(b)`) is a take of the place and a store back, as a field is.
+- **The kernel** (`kernel.rs`, "Borrows"): a borrow bound by a read of a
+  place is an alias of that place, resolved through the aliases on its root
+  and remembering the name it was read through. A take of an alias — a
+  `consume` argument, a literal part, a store into an owned binding, a
+  `return` — is refused. A take of a sub-place, a store into a place, a
+  store into a binding, a drop and a placed row end every alias of the
+  storage they write, except the alias the write goes through and its
+  chain (RFC-0082's desugar reads `t.xs` into `t.xs[]` and writes through
+  it); a later read of an ended alias is refused at the write. The write-back
+  of that desugar, an alias stored into the very place it reads, changes no
+  owner and is not a take. A `let` rebinds: the alias and its end are
+  cleared. Joins keep an alias either edge bound and an end either edge
+  made; a loop whose body ends an alias is walked once more from that
+  state. The wordings are the checker's, below.
+- **The checker** (`movecheck.rs`): the write-back statement's exemption from
+  `sinks` (a rebuilding builtin takes its receiver) held for any receiver.
+  It now holds for a place this frame owns and for the `modify` parameter
+  itself; a borrowed local — a projection, a second name for a `read` or
+  `modify` parameter, a loop variable — is refused at its binding:
+  ``` `mt` is read out of `h.meta` here — a place that owns it / line 19: ...
+  and `push(..)` takes `mt`, so `mt` must be a value of its own / fix:
+  `h.meta.copy()` if `mt` should own what `push(..)` rebuilds ```, and
+  `vyrn fix` applies the copy on the binding's line. Each borrow records
+  what it reads (`reads`, in lockstep with `borrows`), and a write to a
+  place — an assignment, a field or element store, a prefix take, a drop —
+  records a consumption for every borrow reading storage that touches it;
+  the later use is refused as a move is: ``` `t.xs[..]` is written here while
+  `before` still reads out of it / line 15: ... and `before` is used again
+  here / fix: `t.xs.copy()` on line 12, so `before` is a value of its
+  own ```. The kernel prints the same two lines without the menu.
+- **The engines**: nothing. A program the rule refuses never reaches them,
+  and a program it accepts they already release once.
+
+The corpus had eleven sites, every one edited to the spelling the rule
+wants and none with a changed output: `std/ui.vyrn`'s four `with*` head
+builders (the site's own copy of the probe: `h.meta.copy()` and `meta: mt`),
+`std/rpc.vyrn`'s `rpcApplyConfig` (`cfg.pinKeys.copy()`, and its returned
+literal read `cfg.prefix` through an `if` expression the checker's `store`
+does not look into), `std/vyx.vyrn`'s selector merge, `std/i18n.vyrn`'s two
+insertion sorts (`let tmp = names[j - 1]` then `names[j - 1] = ..`: the
+store released the element `tmp` still read, and `tmp.copy()` copied out of
+freed memory), `examples/show.vyrn`'s `tag` (`let mut out = parts[0]` then
+`return out`, a borrow returned on the empty path; the copy is annotated
+`String`, because the analysis cannot type a copied element and left it
+unreleased), `examples/assoctype.vyrn`'s generic `valueOr` (a `read`
+parameter returned, invisible to the checker because `Output` has no type
+until it is instantiated; its copied result is now a `leak 1` row in the
+residue baseline, because the analysis reads the generic body, says the
+return type `T` owns no heap, and the caller releases nothing), and the three
+generator-only token loops in `std/cli.vyrn`, `std/http.vyrn` and
+`std/von.vyrn` (`tk.text` into a literal, invisible to the checker because a
+`lex()` token has no type outside generation). `placeorder.vyrn`'s alias
+test is now "a field write does not disturb a copy taken before it", with
+the copy written. The kernel corpus test's ratchet is still 0: 11,306
+instances accepted, 0 refused, 0 unlowered.
+
+Not modelled, recorded: what a `modify` argument does to the aliases of what
+it is handed (`examples/tree.vyrn`'s `freeNode` reads a child handle out of
+the node it then removes, and a handle is safe to hold, so the kernel does
+not end an alias at a call); a `read` parameter taken as a whole (the
+checker's `check_handover`); a lending call's result (`a[i]` through a
+projection) has no place the kernel can name; and the checker's two blind
+spots above (a place read through an `if` expression at a store, and a
+`lex()` token's type) stay the kernel's finds until the checker types them.
+
+**The gate.** From the repository root, `site/data/history.json` and
+`demo.json` generated, `out/` and its five subdirectories present, release
+binary, generator cache warm, on the machine of §1.4:
+
+| | `run site/export.vyrn` | files written |
+|---|---|---|
+| interpreter | 160.1 s | 241 |
+| `--engine wasm` (compile and load inside) | 7.5 s | 241 |
+
+`diff -r` between the two trees: empty, and the two runs' standard output is the same 82 routes and 14 assets line for line. That is §2.6's fixture gate for
+the largest program in the repository, and the first time the compiled
+route wrote it.
+
 ### M2 — the named core and the linear judgment, beside the pipeline
 
 The lowering emits the core of §2.1. The kernel makes the linear judgment. In
@@ -1327,7 +1447,12 @@ From `movecheck.rs`:
   (`names_a_place`), a loop variable or a projection's result may not be
   returned, stored, or handed to a `consume` parameter without `.copy()`.
   The core binds such a name as not owned, and the kernel does not refuse a
-  take of a name it does not own.
+  take of a name it does not own. *Closed for the place-read half on
+  2026-09-03 (§3 M5, "the take out of a `read` parameter"): the core marks
+  a borrow, the kernel keeps what a borrow bound to a place reads, refuses a
+  take of it and ends it at a write to the place. A parameter taken as a
+  whole, a lending call's result and a `modify` argument's effect on the
+  aliases of what it is handed are still the checker's alone.*
 - Module state may not be taken (RFC-0013): the core reads a global as a
   borrow and says nothing about a `consume` of it.
 - A `region`'s escape rule (RFC-0004 §4): a value the arena allocated may
@@ -1708,7 +1833,8 @@ the next.
   write does not disturb an alias taken before it" fails under wasm with
   `99 != 1`, and the same body as a `main` prints `99` natively too, where
   the interpreter prints `1` — a placement defect of the compiled routes,
-  on record here and being fixed on its own branch.
+  on record here and closed by the rule in "the take out of a `read`
+  parameter" below: the alias is refused, and the test takes a copy.
 - `polyrecursion.vyrn` has one refusal. The direct backend's drain now
   defers a frame refusal until the worklist is empty, so the instantiation
   refusal — `check_inst_depth`'s sentence, the one `vyrn check` and the
@@ -1801,15 +1927,20 @@ whether it allocated. `pure` is the bottom.
 | `random` | `hostRandomSeed` | `random_get`; `environ_get` for `VYRN_FIXED_SEED` | yes | yes | yes | no (an extern) |
 | `extern` | every other extern declaration, resolved by name | the `vyrn` namespace | trap | no instantiation | yes | no |
 | `serve` | `serveStream` | — | trap | trap | trap | no |
+| `spawn` | no name: the marker the core keeps on a spawned call (§2.1; the spawn flag of a core call, second slice) | — | yes | yes, eager | yes, eager | no |
 | `trap` | `panic`, `@panicAt`, `assert`, `assertEq`, `runtime$trap`, `mem$trap`; and the core's trap statement | `proc_exit` | yes | yes | yes | yes |
 | `gen-only` | `moduleInterface`, `contractOf`, `lex`, `render`, `raw`, `rawAt`, `@codeText`, `@codeSplice` | — | no | no | no | yes |
 
 Every one of the fifteen preview1 imports `direct.rs` declares is in the
 third column; `environ_sizes_get` and `environ_get` serve the clock and the
 seed and nothing else. The runtime module's own primitives (`std/mem`,
-`std/runtime`) are pure but for the four rows that name them. `spawn` is not
-a row: the core lowers `spawn f(..)` as a call to `f`, so the judgment
-cannot see it (finding 1).
+`std/runtime`) are pure but for the four rows that name them. `spawn` has
+no atom: the core keeps a marker on the call (`Rhs::Call::spawn`, second
+slice), and the spawning body carries the effect. The spawn-isolation rule
+of RFC-0004 §Q4 is the one inclusion check the judgment makes today: the
+spawned callee's set within `effects::Effects::SPAWN_ALLOWS`, which is
+`alloc, trap`. The harness counts every spawn site and puts one outside the
+rule in the ratchet.
 
 #### The comparison
 
@@ -1983,6 +2114,131 @@ What the deletion slice inherits, in order: the spawn marker (1), lambda
 bodies in the core (2), the function-value join (3), then the three table
 cells the passes disagree with (4, 6, 7), then the rule change on record
 (8). Findings 5, 9, 10, 11 and 13 change nothing.
+
+#### The second slice (2026-09-03)
+
+The second slice closes findings 1, 2, 3 and 6, records a decision for 4,
+5 and 13, and records why no floor check moves out of the pass yet. The
+tally at its last commit:
+
+    effects over the corpus: 180 programs (31 not loadable here, 2 refused as
+    recorded), 18775 functions judged, 6267 pure, 8 unlowered, 63 calls
+    through a function value judged over their sources, 70 unattributed
+      open sets: 43
+      effect 12447  alloc
+      effect    11  read-input
+      effect   288  write-output
+      effect   189  fs-read
+      effect    19  fs-write
+      effect   106  fs-list
+      effect     8  args
+      effect    29  clock
+      effect    20  random
+      effect    31  extern
+      effect    22  serve
+      effect     4  spawn
+      effect  3285  trap
+      effect   698  gen-only
+      spawn:      12 sites judged, 0 outside `alloc, trap`
+      floor:      18535 agree, 24 callee-carried, 216 gen-body, 0 floor-blind,
+                  0 core-blind
+      audience:   18334 no fence, 27 agree, 414 declared-only, 0 unfenced,
+                  0 server-extern
+
+The corpus grew between the slices: M3 to M5 merged the runtime in Vyrn and
+the frames, so the function count is not the first slice's. **The ratchet
+is 0.**
+
+- **1, closed.** `Rhs::Call` carries `spawn`; the core prints a spawned call
+  as `spawn f(..)`. The lattice has the `spawn` row and the spawning body
+  carries the effect. The spawn-isolation rule of RFC-0004 §Q4 is the one
+  inclusion check `effects.rs` makes: the spawned callee's set within
+  `Effects::SPAWN_ALLOWS`, which is `alloc, trap`. The harness judges every
+  spawn site (12 in the corpus) and puts one outside the rule in the
+  ratchet; none is. The checker's rule is wider than the effect: it also
+  refuses a `modify` parameter, `drop`, module state, and the pure builtins
+  `close`, `stringFromBytes`, `lineAt` and `colAt`. None of those is an
+  effect. They stay in the checker, and the judgment does not restate them.
+- **2, closed.** M3's close-out made a lambda body a frame of its own
+  (`Body::lambdas`). The harness hands every frame to `judge`, and a body
+  joins the frames of the lambdas it holds: the value it builds can run
+  them, which is presence, as the floor counts it. Scratch `lambda.vyrn`'s
+  `main` (`let readIt = p -> readFile(p)`) is judged `alloc, write-output,
+  fs-read`, floor *agree*.
+- **3, closed.** A call whose callee is a name of the body with a function
+  type is judged over RFC-0037's stored sources for that type
+  (`checker::stored_fn_effects`, matched by `checker::fn_sigs_match`, which
+  is public now). A named source is its instances; a lambda source is its
+  frame, keyed by the function it was written in and its line — the two
+  facts `StoredLambda` records. 63 calls in the corpus are judged this way and 70
+  are not. The 70 are two kinds, and the harness prints both under `open
+  sets` (43 types) and `VYRN_EFFECTS_UNKNOWN=1`. A lambda written in a
+  module-state initializer or a `bench` body has no frame, because neither
+  is an instance the lowering builds: `examples/bin/server.vyrn`:33,
+  `examples/shelf/server.vyrn`:31 and 35 (the route tables),
+  `examples/genericpayload.vyrn`:58–60, `examples/langbench.vyrn`:216. And a
+  local whose type matches no collected source at all: the `cb` of every
+  `std/rpc` deliverer (`fn(RpcReply<T>)` in `bin`, `fullstack`, `shelf`,
+  `rpc.vyrn`, `rpcsplit.vyrn`), the `run` thunk of a page's `Lazy<T>` and
+  `ParamQuery<P, T>` (`std/ui`'s `runLazy`, `runParamQuery`), the
+  `Cursor`-stepping closures of `std/stream` (`streamops.vyrn`,
+  `streamunfold.vyrn`, `streamlazy.vyrn`, `membench.vyrn`, `lambdas.vyrn`,
+  `knucleotide.vyrn`), and the resolvers of `std/graphql` (`graphql.vyrn`,
+  `shelf/server.vyrn`). For these the checker's collection and the core's
+  name types do not meet: the frame's parameter is typed `fn(T) -> U` with a
+  bare parameter the sources were collected without, or the source flowed
+  through a record field or a generated module. This is **finding 14**, a
+  hole in the join, and the deletion slice inherits it before finding 7.
+  Calls to a projection by name (`field`, `tag`, `tryAt`, `tryField`,
+  `wrapped`) are among the 70 too; they are not function values, and the
+  harness's resolver is what does not name them.
+- **6, closed.** `listDir` and `listDirKinds` are in `floor::CALLS`, row
+  `fs`; RFC-0103's tables carry the row with the date. The prediction
+  program is `examples/listing`: a browser artifact whose entry lists a
+  directory. `vyrn check` refuses it with the floor's wording (`` `listDir`
+  needs `fs`; target `browser` has no filesystem ``), `tests/common`'s
+  `EXPECTED_PROJECT_CHECK_FAILURE` records the refusal, `tests/floor.rs`
+  asserts it, and the effects harness counts the entry as refused rather
+  than failing to load. `listdir.vyrn`'s `main` is *agree* now.
+- **No floor check moved.** The verdicts agree on the whole corpus for the
+  `stdin` row (11 functions with `read-input`) and the `args` row (8), so
+  either could be the prediction-as-program by verdict alone. The
+  placement stops it. The floor decides inside the loader (`loader.rs`,
+  after the link and before the checker runs), for every command that
+  loads with an `artifacts` map, and `vyrn why --capability` reads the same
+  graph. The judgment needs a checked program: the core is built from the
+  checker's types and the ownership analysis, and 8 instances still have
+  no core (finding 12). Routing a row through `effects.rs` today would
+  move its refusal from the load to the commands that build a core, after
+  the type errors instead of before them, and would leave the report
+  reading a graph the check no longer reads — a wording and an ordering
+  change, which the brief for this slice does not allow. A row moves when
+  the load can build the core, which is M2's gap list closed. Every floor
+  check still lives in `floor.rs`.
+- **4, decided.** `write-output` is one effect and the row's `gen` cell is
+  one cell: `no`. RFC-0021's sandbox is deterministic and cache-keyed; a
+  `print` in a `gen fn` writes to the compiler's stdout, is no cache input,
+  and is silent on a cache hit, so the same build prints or does not print
+  by the state of the cache. No change in this track: `print` in `COMPTIME_FORBIDDEN` is one
+  line, but the fence's hint names what it refuses and would have to say
+  `print`, and a test that pins the refusal does not exist yet. The
+  deletion slice makes the cell, with the hint and the pin.
+- **5, decided.** The row stays split, and the reason is the route, not
+  the effect. `readFile` in a `gen fn` goes through the loader's resolver
+  and is a cache input; `readFileBytes` does not, so a generation that
+  read bytes would be cached on a key that does not name them. The cell
+  becomes one (`yes` for both) when `readFileBytes` takes the resolver
+  route, and not before. No change.
+- **13, decided.** The verdict stands (`clock` is `no` at generation time);
+  the wording is the fence's, and it names `hostNowMillis` an extern
+  because `extern_fns` does not know RFC-0103 M2's host-boundary rule.
+  When the fence becomes the inclusion check, the reason is the row:
+  "reads the clock". Until then the wording stays, because changing it is
+  a new branch in `check_comptime_purity` and not one line. No change.
+
+Findings 7 and 8 are unchanged: the `extern` declaration-or-call question
+and the presence-or-reachability rule change wait for the deletion slice,
+which now inherits them first.
 
 ### What each milestone is worth on its own
 

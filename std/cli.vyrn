@@ -277,7 +277,7 @@ gen fn cliFieldsOf(src: String) -> Array<CliField> {
                         j = j + 1
                     }
                 }
-                out.push(CliField { name: tk.text, ty: ty })
+                out.push(CliField { name: tk.text.copy(), ty: ty })
             }
         }
         i = i + 1

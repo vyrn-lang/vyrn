@@ -99,7 +99,7 @@ result, and every cell in it was produced by an execution recorded under
 |---|---|---|---|---|
 | `fs` | `readFile`, `readFileBytes`, `writeFile`, `renameFile`, `std/storage`'s `writeAtomic` | yes | yes | **no** — the canonical `Err` payloads (`` cannot read `p` ``, `` cannot write `p` ``), exit 0 |
 | `fs` durability | `fsyncFile` | yes | yes | **no** — the canonical `Err` (`` cannot write `p` ``), exit 0, exactly as the `fs` row above |
-| `fs` listing | `listDir` | **no — the build is refused** (interpreter / generation only) | **no** — same refusal | **no** — same refusal |
+| `fs` listing | `listDir`, `listDirKinds` | **no — the build is refused** (`NATIVE_UNSUPPORTED`) | yes — `fd_readdir` since RFC-0125 M5 | **no** — the canonical `Err` (`BADF`), exit 0 [2026-09-02: the row was "no" three times at M0; the direct backend lowered it, and the floor gained the row in RFC-0125 M6's second slice] |
 | `fs` through a declaration | `logging { sink: file("…") }` | yes | yes | **no, and silently**: the line is dropped, nothing is printed, exit 0 |
 | `stdin` | `readLine` | yes | yes | **no** — EOF, so `None` |
 | `args` | `args` | yes | yes | **no** — empty `Array<String>` |
@@ -419,7 +419,7 @@ Four capabilities, and nothing else is tracked:
 
 | capability | carried by |
 |---|---|
-| `fs` | `readFile`, `readFileBytes`, `writeFile`, `renameFile`, `fsyncFile`, and the `logging { sink: file("…") }` DECLARATION |
+| `fs` | `readFile`, `readFileBytes`, `writeFile`, `renameFile`, `fsyncFile`, `listDir`, `listDirKinds` (since RFC-0125 M6, second slice), and the `logging { sink: file("…") }` DECLARATION |
 | `stdin` | `readLine` |
 | `args` | `args` |
 | `extern` | an `extern fn` IMPORT declaration (not the call, not `export extern fn`) |
@@ -433,6 +433,16 @@ floor and keep the refusals they already have — a missing lowering for `listDi
 a runtime trap for `serveStream`. A capability set indexed by three targets
 cannot say "every artifact lacks this", and inventing a fourth answer to say it
 buys one diagnostic that two mechanisms already give.
+
+*[2026-09-02, RFC-0125 M6's second slice: the premise moved for `listDir`.
+RFC-0125 M5 lowered `listDir` and `listDirKinds` over `fd_readdir`, so a WASI
+host lists and a page answers `BADF` — the canonical `Err`, exit 0, which is
+the silent degradation the floor exists to refuse. Both are in the `fs` row
+now (`floor::CALLS`); native keeps its `NATIVE_UNSUPPORTED` refusal, as
+`fsyncFile` does. `examples/listing` is the prediction program: a browser
+artifact whose entry lists a directory, refused by `vyrn check` with the
+floor's wording and recorded in `EXPECTED_PROJECT_CHECK_FAILURE`.
+`serveStream` stays outside, unchanged.]*
 
 The target sets are Rust constants in `vyrn_frontend::floor::capabilities`.
 Nothing in `vyrn.json` reads them, writes them, or can argue with them — that is

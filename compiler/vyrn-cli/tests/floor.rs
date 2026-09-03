@@ -14,6 +14,8 @@
 //! it is a list of single files; a project does not fit it, so the assertion is
 //! here instead.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -87,6 +89,28 @@ fn the_leak_example_is_refused_with_the_full_chain() {
 
     let (ok, err) = check(&leak.join("server/main.vyrn"));
     assert!(ok, "the native artifact reaches the same module:\n{err}");
+}
+
+/// Every project entry the registry says must be refused, is — with the text
+/// it names. `examples/listing` is RFC-0125 M6's prediction program for
+/// finding 6: a browser artifact that lists a directory.
+#[test]
+fn every_registered_project_entry_is_refused() {
+    for (entry, why, needle) in common::EXPECTED_PROJECT_CHECK_FAILURE {
+        let (ok, err) = check(&repo_dir("examples").join(entry));
+        assert!(!ok, "{entry} should be refused ({why}):\n{err}");
+        assert!(
+            err.contains(needle),
+            "{entry}: expected `{needle}` in:\n{err}"
+        );
+    }
+    let (_, err) = check(&repo_dir("examples/listing/client/boot.vyrn"));
+    assert!(
+        err.contains(
+            "artifact `app` (browser) cannot include `client/boot.vyrn`: it reaches the filesystem"
+        ),
+        "{err}"
+    );
 }
 
 /// The floor fires for a declared ENTRY POINT and for nothing else. A module in
