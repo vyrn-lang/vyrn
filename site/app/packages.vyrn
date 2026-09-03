@@ -128,7 +128,14 @@ export fn manifestText(slug: String) -> String {
 
 /// Whether `slug` names a package this site publishes a page for.
 export fn packageKnown(slug: String) -> Bool {
-    return manifestText(slug).byteLength > 0
+    // Known means in the registry: a project that offers no module is a
+    // directory with a manifest, not a page (`packages()`).
+    for p in packages() {
+        if p.slug == slug {
+            return true
+        }
+    }
+    return false
 }
 
 /// Every package in the registry, in listing order.
@@ -585,7 +592,13 @@ test "the registry lists projects, and no standard library module is one" {
         // compiler and no specifier fetches it.
         assert(!apiKnown(p.slug))
     }
-    assertEq(all.length, projectSlugs().length)
+    // A project is a package when it offers a module (`packages()`): the
+    // prediction program under `examples/listing` is an entry point alone,
+    // so it is a project and not a package.
+    for slug in projectSlugs() {
+        assertEq(packageKnown(slug), offerOf(slug).spec.byteLength > 0)
+    }
+    assert(!packageKnown("listing"))
     assert(packageKnown("shelf"))
     assert(!packageKnown("json"))
     assert(!packageKnown("nope"))
@@ -631,7 +644,8 @@ test "every install line is a specifier the compiler's grammar accepts" {
     // `compiler/vyrn-cli/src/remote.rs` parses: an `@`, then a ref, then a `/`
     // and a path. The node gate re-parses the emitted attribute; this is the
     // same claim made where the string is built.
-    for slug in projectSlugs() {
+    for p in packages() {
+        let slug = p.slug
         let o = offerOf(slug)
         assert(startsWith(o.spec, "github:vyrn-lang/vyrn@main/examples/" + slug + "/"))
         assert(endsWith(o.spec, ".vyrn"))
