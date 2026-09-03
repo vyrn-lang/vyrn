@@ -1514,6 +1514,28 @@ reverse-complement under wasmtime, base and head interleaved, medians of five:
 1.043 s against 1.012 s and 1.171 s against 1.164 s. Details under the plan's
 §6 table.*
 
+*Step 9 landed 2026-09-03 (`track-t`): the traps and the two renderers —
+`trap`, `trap_idx`, `print_i64` and `bool_str` — are Vyrn in `std/runtime`
+(`trapV`, `trapIdx`, `printI64`, `boolStr`, 93 lines) over the plan's §2.3
+`trap` primitive and the `writeAll` step 7 put there, and the wasm emitter's
+four bodies are deleted, 171 lines out of `direct.rs`. Neither renderer
+allocates: one `digitsAt` writes an integer backwards into a 32-byte cell, so a
+trap needs no heap to say why it trapped. The call-depth counter STAYS in the
+prologue, which is this milestone's open question closed on a number: as a
+`std/runtime` `enter`/`leave` pair, nbody at 25 M steps went from 2.155 s to
+2.306 s and fannkuch at n = 11 from 3.599 s to 4.014 s under wasmtime 46,
+medians of five — two calls per user call cost more than the counter M1 priced
+at 0.25 s. Parity 41 of 41, residue green; every `error:` line in the corpus
+byte-identical to the record, and `concurrency.vyrn` byte-identical, tasks
+still eager in the module and the native pool still in the host (§2.8). What is
+left hand-emitted in `direct.rs` is instruction sequences at their one site
+each — the prologue's counter, M1's trap site, the `a[i]` check, the
+`SmallArray` push, `_start`, the three trap-writing builtins, the type-aware
+tests around a runtime call, a `String` header load and `std/mem`'s own
+lowering — plus the three region functions, which are the plan's step 8. The
+emitter's runtime section was 4,205 lines before step 0 and is 387. Details
+under the plan's §6 table.*
+
 ### M5 — `vyrn run` is compiled
 
 `run`, `test` and `bench --check` execute the wasm in the embedded wasmtime.

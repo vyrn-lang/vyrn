@@ -963,6 +963,92 @@ as the copies were, and the buffer behind each is the same 4,096 bytes at a
 different address. `fasta.wasm` grows 81 bytes and `revcomp.wasm` 301, the
 readers each program links but does not reach having been swept before too.
 
+**Results, step 9 (2026-09-03, branch `track-t`).** The last four functions the
+wasm emitter wrote by hand are Vyrn in `std/runtime.vyrn`: `trapV`, `trapIdx`,
+`printI64` and `boolStr`, with `digitsAt` under the two printers (93 lines with
+their comment, over `strLen`, `writeAll`, `store8`, `heapBase` and §2.3's
+`trap`), and the four hand-emitted bodies are deleted: 171 lines out of
+`direct.rs`, 54 in (four rows of the `VyrnRt` table, the two interned literals
+`boolStr` is handed, and the three call sites that hand them over). A trap
+writes through `writeAll`, never straight to descriptor 2, so the stdout buffer
+step 7 put behind it flushes FIRST and a program's last output stands in the
+order it was printed; §2.3's `trap(msg, len)` is that write and `proc_exit(1)`,
+and it is the last statement of both traps. `digitsAt` writes an integer's
+digits backwards into a 32-byte cell at `heapBase() + 8736`, which moves the
+allocator's first block from 8736 to 8768: neither printer allocates, and a
+trap must not need the heap to say why it trapped. `intStr` is the other digit
+loop in the module and stays as it is, because it answers a `String` the caller
+owns, which is what `@str` promises. `boolStr` takes the two interned literals
+as arguments, as `strFromBytes` takes its two wordings, so the module spells no
+message of its own.
+
+The call-depth counter STAYS in the emitter's prologue, and the RFC-0125 §3 M4
+open question closes on a number rather than on the argument. A throwaway build
+(not kept) put the counter behind a `std/runtime` pair, `depthEnter(at, limit,
+msg)` and `depthLeave(at)`, with the emitter's own counter cell passed in as an
+address; base and head interleaved, medians of five, under wasmtime 46:
+
+| program | prologue (instructions) | `enter`/`leave` (calls) |
+|---|---|---|
+| nbody, 25 M steps | 2.155 s | 2.306 s |
+| fannkuch, n = 11 | 3.599 s | 4.014 s |
+
+Seven and twelve percent, for two calls per user call, which is step 5's four
+nanoseconds on the path every program takes; RFC-0125 M1 priced the whole
+counter at 0.25 s on nbody, so a pair of calls costs more than the counter
+does. So it stays a load, a compare and a store at the one site that has the
+frame in hand, and the number is on `call_depth_enter`.
+
+**What is hand-emitted in `direct.rs` after this step, and why.** The emitter's
+runtime section — `fn runtime` and the helpers it calls, §1.0's span — was
+4,205 lines at `d43c1729`, before step 0, and is 387 lines now. Those 387 hold
+no function this plan has moved: the `wasi_snapshot_preview1` import table, the
+interned trap wording, the UTF-8 DFA table and the reserved cells (the
+call-depth counter, the region stack) are data and declarations; `region_keep`,
+`region_free` and `region_pop` are the one family still emitted as functions
+here, and they are step 8's, not step 9's. Everything else the emitter still
+writes is an instruction sequence at its one site, and each is a sequence
+because what it needs is at the site:
+
+- **the prologue's counter**, the number above;
+- **the trap site** (RFC-0125 §3 M1): a failed check parks its message and its
+  index in two locals and branches to the one `trapV` call per function. The
+  call is the module's already; the branch cannot be, because it is how a body
+  reaches the call without emitting a wasm `return`;
+- **the `a[i]` check**: step 6 priced it, 1.95 s to 7.28 s on nbody with the
+  check and the address behind one module call;
+- **the `SmallArray` push** (RFC-0056): its header has two live states and is
+  not the array family's triple;
+- **`_start`**: the entry WASI calls, the `file(..)` log sink opened once
+  (RFC-0008), the top-level initializers, the flush and `main & 255`. There is
+  one per program, and what it holds is the program's, not the runtime's;
+- **`panic`, `assert` and `assertEq`**: each writes its line in pieces the
+  compiler knows at that site, through `writeAll`, and ends at `trapV`. One
+  function for the three would need varargs, which is M3's;
+- **what the map and array call sites keep in front of a runtime call**: the
+  `len + 1 > cap` test, the release of a removed key, the element store after
+  `arrPush`, the receiver `arr_recv` parks. Each knows the element type, and
+  the module does not;
+- **a `String` header read** (`str_len`, `cap_at`): one `i32.load`;
+- **`Fn_::mem_prim`**: one instruction, or one host `call`, per `std/mem` row.
+  It is the fence itself (§3), not a runtime.
+
+Gates: fmt, workspace (`corpus_fmt` caught the module's trailing line and it
+was formatted), kernel (RATCHET 0), effects, lowered (1,283 synthesized, under
+the 1,400 ceiling), the nine `vyrn-cli` suites, parity 41 of 41, residue, the
+cross-engine generator gate under a fresh cache, `doc --verify`, site export 33
+of 34 (the version test fails on local fixture data). The extra gate, every
+`error:` line in the corpus: the twelve `examples/expected/*.stderr` files that
+carry one are byte-identical to the record under the wasm route, the ten
+distinct lines among them included (`array index -1 out of bounds`, `array
+index 7 out of bounds`, `call depth exceeds 1000`, `division by zero`, `shift
+amount out of range`, `validation failed for `Age``, and the four a std module
+spells with its file and line); `polyrecursion`'s line is a compile-time
+refusal and is identical too. `concurrency.vyrn` is byte-identical on stdout,
+stderr and exit code: tasks stay eager in the module and the native pool stays
+in the host until the threads proposal (RFC-0125 §2.8), so this step moved
+nothing of theirs.
+
 ---
 
 ## 7. What it costs
