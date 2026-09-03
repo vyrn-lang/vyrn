@@ -2652,10 +2652,12 @@ now half spent: 8 is on record and paid by two rows; 7 is what keeps
 #### The fifth slice (2026-09-03): the third judgment's census
 
 The four slices above are the effect judgment. This one starts the third:
-typed by construction. Nothing is deleted here either. `tests/boundaries.rs`
-counts every value-boundary check the three engines carry, runs a program per
-rule under all three, and asserts that the three answers are the same bytes.
-The deletion slices read this table before they delete anything.
+typed by construction. `tests/boundaries.rs` counts every value-boundary check
+the three engines carry, runs a program per rule under all three, and asserts
+that the three answers are the same bytes. Then one rule moves: the user's own
+`where` predicate, which the two compiled backends decided in a crate the
+interpreter cannot read and the interpreter therefore decided three more times.
+The deletion slices read this table before they delete anything else.
 
 **What a copy is.** The WORDING has been one table since RFC-0101 M5
 (`vyrn_frontend::trap`, and `tests/traps.rs` is what keeps it one). What is
@@ -2799,6 +2801,99 @@ Five lines, and the census's rows sorted into them.
   `coerce`-time check every engine makes at every boundary — which is where
   the 97.6 per cent of coercions that answer "nothing to do" come from
   (`interp.rs`, `coerce`).
+
+#### The row that moved: `where-scalar` and `where-record`
+
+The prediction was: take the row with the most copies whose rule is a pure
+function of the value, give it one statement every engine calls, delete the
+copies, and keep the wording byte-identical. The census changed which row that
+is, and the reason is the next section. The row taken is the user's own
+predicate, and it moved as far as it can move before §2.3's constructor exists.
+
+**The decision left `vyrn-codegen`.** `validation_required(from, to, types)` —
+which declaration's `where` a value crossing from one type into another must
+satisfy — was the one copy for the two compiled backends and it was in the
+wrong crate. The interpreter lives in `vyrn-frontend`, which `vyrn-codegen`
+depends on, so it could not read that decision and asked the same question for
+itself. It is `vyrn_frontend::validate::required` now, beside `trap` and for
+the reason RFC-0101 §6.4 put `trap` there; `vyrn-codegen` keeps the old name as
+a re-export, so both backends ask the same words they always did.
+
+`validate::of` takes the declaration the caller already looked up rather than
+the map, because the engines hold their declarations differently — the emitters
+key by `String` and own the values, the interpreter keys by `&str` and borrows
+them. Taking one engine's map would have made the rule one engine's map shape,
+which is how a rule ends up with two spellings again.
+
+**The interpreter went from three statements to one.** It refused a value for
+its type's `where` at `Age(n)` (`construct`), at a record literal
+(`Expr::StructLit`) and at every typed boundary (`coerce_walk`). Each ran a
+predicate; each spelled its own wording. Only the third built the wording from
+the declaration, so the constructor path would have handed a record base the
+scalar sentence and the literal path always spelled the record one. `enforce`
+is the one statement now, and `validates` learned the second binding form:
+`validate::is_cross_field` decides whether the predicate sees the fields or
+`value`, and `trap::validation_of` decides the sentence by the same fact, so
+the two cannot disagree.
+
+**What the copy count does and does not show.** The census's column counts
+CARRIERS — engines that state the rule themselves — and for these two rows it
+is 3 before and 3 after, because the interpreter still runs the predicate in
+Rust over a `Val`. What fell is the number of statements inside the carriers:
+five sites checked and two decided, and now three check and one decides. The
+census table is unchanged at 19 rows and 53 copies, and this paragraph is here
+so that a later reader does not take an unchanged table for an unchanged tree.
+
+The programs that must still refuse are the census's own:
+`tests/boundaries/where-scalar.vyrn` prints ``validation failed for `Age` `` and
+`tests/boundaries/where-record.vyrn` prints
+``validation failed: `Range` violates its `where` clause``, both on stderr at
+exit 1, and both byte-identical under the interpreter, the compiled wasm and
+the native binary. Parity, the fixtures and the manifest hold: no example's
+output changed, so no recorded byte changed either.
+
+#### What did not move, and why
+
+No row's carrier count fell, and the census is what makes the reason exact
+rather than a suspicion.
+
+- **There is one mechanism by which all three engines run one body**, and it is
+  `loader::RtModule` — a builtin that IS an exported function of a std module,
+  so the interpreter interprets it and both emitters compile it. RFC-0078 M4c
+  used it for the six codecs, and `char-boundary` and `json-decode` are the
+  census's two one-copy rows because they took it. `RtModule`'s own doc states
+  the price: "Adding a builtin to the runtime is now an ENTRY here plus a
+  deletion in each engine."
+- **A row can take that mechanism only if its rule is expressible over ordinary
+  Vyrn values.** `string-nul` and `string-utf8` are pure functions of an
+  `Array<UInt8>` and would qualify — except that the function they belong to,
+  `stringFromBytes`, must BUILD the String it validates, and that needs the
+  raw-memory primitives `std/mem` fences. Splitting the check from the build
+  means an unchecked builder primitive, which is exactly §2.3's constructor and
+  exactly not a slice that lands beside a census.
+- **Seven rows are one or two instructions per site.** `array-index`,
+  `string-index`, the four arithmetic rows and `int-narrowing` are lowered
+  inline by both emitters. Routing them through a call would trade the thing
+  §1.4 measured — a place-based core an optimizer can work with — for a rule
+  stated once, and RFC-0101 §3.0's second rule says a copy goes when its
+  replacement's gate is green, not before.
+- **`region-depth` cannot be a call** (finding 6) and `io-status` should not be
+  a type (finding 7).
+- **The interpreter's copy is not this milestone's to delete** (finding 3).
+  PLAN-0125-runtime §5.2 records why it cannot call the Vyrn statement, §5.1
+  lists the six byte-in, byte-out families that could go through the embedded
+  engine, and M5 removes the rest by removing the interpreter. For the five
+  `String` and I/O rows the native copy is M4 step 3's, not M6's. So seventeen
+  rows read three today, and the path to one runs through M4 and M5 before it
+  runs through a rewritten rule.
+
+What the next slice inherits, in order: the unchecked builder primitive that
+lets `string-nul` and `string-utf8` become a constructor over ordinary Vyrn
+values; then the same shape for `int-narrowing`, whose rule is the smallest
+pure function of its value in the census and whose constructor is the one §2.3
+names — `UInt8` from an `Int64`, answering `Option` or trapping at one site
+named by the type; then the kernel's third judgment over the core, which is
+what makes a boundary check unnecessary rather than shared.
 
 ### What each milestone is worth on its own
 
