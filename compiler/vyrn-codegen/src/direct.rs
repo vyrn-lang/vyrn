@@ -14929,15 +14929,12 @@ impl Num {
 
     /// The integer type `ty` *is*, or `None` for anything that is not one. Takes
     /// a RESOLVED type, so a validated name has already become its base.
+    ///
+    /// `vyrn_frontend::validate::width` is the answer, not a second copy of it:
+    /// "which types are integers, and how wide" is the fact the `int-narrowing`
+    /// row rests on, and the interpreter reads the same one (RFC-0125 §3 M6).
     fn of(ty: &Type) -> Option<Num> {
-        match ty {
-            Type::Int => Some(Num::PLAIN),
-            Type::IntN { bits, signed } => Some(Num {
-                bits: *bits,
-                signed: *signed,
-            }),
-            _ => None,
-        }
+        vyrn_frontend::validate::width(ty).map(|(bits, signed)| Num { bits, signed })
     }
 
     /// Whether the carrier is an `i64`. Everything 32 bits and under rides an

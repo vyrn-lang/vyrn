@@ -1278,22 +1278,6 @@ fn scalar_to_string(v: &Val) -> String {
     }
 }
 
-/// Wrap `v` into a `bits`-wide two's-complement integer, matching the native
-/// backend's `iN` arithmetic. Signed values are sign-extended back into `i64`;
-/// unsigned are zero-extended. `bits >= 64` is the identity.
-fn wrap_intn(v: i64, bits: u8, signed: bool) -> i64 {
-    if bits >= 64 {
-        return v;
-    }
-    let mask = (1i64 << bits) - 1;
-    let m = v & mask;
-    if signed && (m & (1i64 << (bits - 1))) != 0 {
-        m | !mask // set the high bits (sign extension)
-    } else {
-        m
-    }
-}
-
 /// IEEE-754-2019 `minimum` — NaN in either operand propagates, and `-0.0` orders
 /// strictly below `+0.0` (RFC-0083 M2).
 ///
@@ -1403,7 +1387,7 @@ fn vec_oob(i: i64, span: i64) -> String {
 }
 
 /// Convert a numeric value to `target` (Int / sized IntN / Float / Float32),
-/// matching the native casts (sext/trunc via `wrap_intn`, si/uitofp, fpto si/ui,
+/// matching the native casts (sext/trunc via `validate::wrap`, si/uitofp, fpto si/ui,
 /// fp trunc/ext). Float→int truncates toward zero; out-of-range float→int is
 /// unspecified (as in C/LLVM).
 fn convert_val(v: Val, target: &Type) -> Val {
@@ -1415,19 +1399,18 @@ fn convert_val(v: Val, target: &Type) -> Val {
             other => other,
         },
         Type::IntN { bits, signed } => {
+            // The float rows go through `validate::from_float`, which is the
+            // `float-to-int` row's one statement (RFC-0125 §3 M6): truncate
+            // toward zero, then re-read at the target's width.
             let n = match v {
-                Val::Int(n) => n,
-                Val::IntN { v, .. } => v,
-                // Truncate toward zero; an unsigned target reads the float as
-                // `u64` (native `fptoui`), signed as `i64` (`fptosi`).
-                Val::Float(f) if !*signed => f as u64 as i64,
-                Val::Float(f) => f as i64,
-                Val::Float32(f) if !*signed => f as u64 as i64,
-                Val::Float32(f) => f as i64,
+                Val::Int(n) => crate::validate::wrap(n, *bits, *signed),
+                Val::IntN { v, .. } => crate::validate::wrap(v, *bits, *signed),
+                Val::Float(f) => crate::validate::from_float(f, *bits, *signed),
+                Val::Float32(f) => crate::validate::from_float(f64::from(f), *bits, *signed),
                 other => return other,
             };
             Val::IntN {
-                v: wrap_intn(n, *bits, *signed),
+                v: n,
                 bits: *bits,
                 signed: *signed,
             }
@@ -5417,7 +5400,7 @@ impl<'a> Interp<'a> {
                     // keeps it MIN, exactly as native `sub i64 0, %n` does.
                     (UnOp::Neg, Val::Int(n)) => Ok(Val::Int(n.wrapping_neg())),
                     (UnOp::Neg, Val::IntN { v, bits, signed }) => Ok(Val::IntN {
-                        v: wrap_intn(v.wrapping_neg(), bits, signed),
+                        v: crate::validate::wrap(v.wrapping_neg(), bits, signed),
                         bits,
                         signed,
                     }),
@@ -5449,7 +5432,7 @@ impl<'a> Interp<'a> {
                     // width (re-wrapped so an unsigned complement stays in range).
                     (UnOp::BitNot, Val::Int(n)) => Ok(Val::Int(!n)),
                     (UnOp::BitNot, Val::IntN { v, bits, signed }) => Ok(Val::IntN {
-                        v: wrap_intn(!v, bits, signed),
+                        v: crate::validate::wrap(!v, bits, signed),
                         bits,
                         signed,
                     }),
@@ -7936,17 +7919,17 @@ impl<'a> Interp<'a> {
             // native backend's iN registers truncate it — comparing or dividing
             // by the raw i64 would give a different answer.
             let x = match l {
-                Val::IntN { v, .. } => wrap_intn(v, bits, signed),
-                Val::Int(n) => wrap_intn(n, bits, signed),
+                Val::IntN { v, .. } => crate::validate::wrap(v, bits, signed),
+                Val::Int(n) => crate::validate::wrap(n, bits, signed),
                 _ => return Err("type error in sized-int binop".into()),
             };
             let y = match r {
-                Val::IntN { v, .. } => wrap_intn(v, bits, signed),
-                Val::Int(n) => wrap_intn(n, bits, signed),
+                Val::IntN { v, .. } => crate::validate::wrap(v, bits, signed),
+                Val::Int(n) => crate::validate::wrap(n, bits, signed),
                 _ => return Err("type error in sized-int binop".into()),
             };
             let mk = |v: i64| Val::IntN {
-                v: wrap_intn(v, bits, signed),
+                v: crate::validate::wrap(v, bits, signed),
                 bits,
                 signed,
             };
@@ -8196,12 +8179,12 @@ impl<'a> Interp<'a> {
         }
         match (ty, v) {
             (Type::IntN { bits, signed }, Val::Int(n)) => Ok(Val::IntN {
-                v: wrap_intn(n, *bits, *signed),
+                v: crate::validate::wrap(n, *bits, *signed),
                 bits: *bits,
                 signed: *signed,
             }),
             (Type::IntN { bits, signed }, Val::IntN { v, .. }) => Ok(Val::IntN {
-                v: wrap_intn(v, *bits, *signed),
+                v: crate::validate::wrap(v, *bits, *signed),
                 bits: *bits,
                 signed: *signed,
             }),
@@ -8406,7 +8389,18 @@ impl<'a> Interp<'a> {
                     bits: b,
                     signed: s,
                 },
-            ) => bits == b && signed == s && wrap_intn(*v, *bits, *signed) == *v,
+            ) => {
+                // "Already at this width and signedness" is `validate::narrows`
+                // read the other way round — the same question the emitters ask
+                // of a crossing (RFC-0125 §3 M6).
+                !crate::validate::narrows(
+                    &Type::IntN {
+                        bits: *b,
+                        signed: *s,
+                    },
+                    ty,
+                ) && crate::validate::wrap(*v, *bits, *signed) == *v
+            }
             (
                 Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _),
                 Val::Array(items),

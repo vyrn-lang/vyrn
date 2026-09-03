@@ -3158,6 +3158,32 @@ an index — hand their RECEIVER's value back, which the caller reads off the
 argument type. Before that rule the corpus showed 120 findings and every one
 of them was a copy of a `Title` reported for not being a `Title`.
 
+**The constructor rows' first move.** The judgment finds no store into a
+sized integer whose producer is a wider value and not the conversion — every
+one it can name goes through `UInt8(..)` or a literal the checker proved. So
+the two narrowing rows move as far as they can move before §2.3's constructor
+exists, which is the same distance `where-scalar` moved in the fifth slice:
+the DECISION leaves the engine that held it.
+
+`validate::narrows` says which crossings re-read the bits, `validate::wrap`
+says what an integer reads as at a width, `validate::from_float` says what a
+float reads as, and `validate::width` says which types are integers at all.
+The interpreter's `wrap_intn` was the third of those, private to `interp.rs`
+at ten sites; the wasm emitter's `Num::of` was the fourth, written again in
+`direct.rs`. Both ask now. `convert_val`'s four float arms — signed and
+unsigned, `Float64` and `Float32` — become one call, and
+`coercion_is_noop`'s own "already at this width and signedness" becomes
+`narrows` read the other way round.
+
+The census's copy column does not move, and the fifth slice already said why
+it would not: the interpreter re-reads bits in Rust over a `Val`, the wasm
+emitter emits `i32.wrap_i64` and a mask, the native backend emits `trunc`.
+Three carriers, three representations, and no call can join them — finding 3
+and the paragraph on the seven inline rows. What falls is the number of
+STATEMENTS inside the carriers: seven decisions about width and truncation
+across two engines, and four of them are now one function each in
+`vyrn_frontend::validate`, which is the crate all three can read.
+
 ### What each milestone is worth on its own
 
 M1 fixes the wasm column. M2 makes leaks a compile error. M3 halves the
