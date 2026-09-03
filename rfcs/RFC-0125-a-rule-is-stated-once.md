@@ -2218,6 +2218,120 @@ Findings 7 and 8 are unchanged: the `extern` declaration-or-call question
 and the presence-or-reachability rule change wait for the deletion slice,
 which now inherits them first.
 
+#### The third slice (2026-09-03)
+
+The third slice closes finding 12, closes half of finding 14 and lists the
+rest, and finds why no floor row moves — a different reason from the second
+slice's, and one the second slice could not have found. The tally at its
+last commit:
+
+    effects over the corpus: 180 programs (31 not loadable here, 2 refused as
+    recorded), 25443 functions judged, 7345 pure, 0 unlowered, 64 calls
+    through a function value judged over their sources, 69 unattributed
+      open sets: 40
+      effect 18037  alloc
+      effect    11  read-input
+      effect   292  write-output
+      effect   189  fs-read
+      effect    19  fs-write
+      effect   106  fs-list
+      effect     8  args
+      effect    29  clock
+      effect    20  random
+      effect    31  extern
+      effect    22  serve
+      effect     4  spawn
+      effect  3285  trap
+      effect   826  gen-only
+      spawn:      12 sites judged, 0 outside `alloc, trap`
+      floor:      25203 agree, 24 callee-carried, 216 gen-body, 0 floor-blind,
+                  0 core-blind
+      audience:   25002 no fence, 27 agree, 414 declared-only, 0 unfenced,
+                  0 server-extern
+
+The corpus grew again between the slices: the I/O family moved into Vyrn, so
+the function count is not the second slice's. **The ratchet is 0**, and the
+kernel's tally is 17,513 instances accepted, 0 refused, 0 unlowered.
+
+- **12, closed.** The eight instances were one function: `std/vyx`'s
+  `vyxRegion`, whose `rawAt` call `core::call` could not attribute.
+  `ast::SURFACE_BUILTINS` is one list of four names and the arm spelled two
+  of them (`render`, `lex`), so `raw` and `rawAt` fell to the gap. The arm
+  asks `ast::is_surface_builtin` now. Unlowered is 0 in both harnesses, and
+  the effects harness judges eight more functions.
+  `VYRN_EFFECTS_GAPS=<substring>` shows where a remaining gap is, as
+  `VYRN_KERNEL_GAPS` does.
+- **14, half closed and the rest listed.** Two defects, and one body that
+  stays out.
+  - A parameter's type in the core was the DECLARATION's, not the
+    instance's, so `map<Int64, Int64>`'s `f` read `fn(T) -> U` and matched
+    no signature RFC-0037 collected. `core::build` substitutes the
+    instance's arguments into a parameter's type now; every other type in
+    the core comes from the instance's rows and was substituted already.
+    Every open set the harness prints names a concrete signature after it.
+  - The module-state initializer (RFC-0013) has a core:
+    `core::build_module_state` states each `let` at module scope as the
+    store into the global it names, run once at `_start`, and both
+    harnesses judge it and the lambda frames it holds. The three route
+    tables — `examples/bin`'s and `examples/shelf`'s `middleware`,
+    `examples/genericpayload`'s `ops` — are judged now. The kernel accepts
+    62 more instances at 0 refused: a store into a global consumes the
+    value it is handed, so an initializer is linear by construction.
+  - A `test` (RFC-0015) or `bench` (RFC-0055) body is a body too and does
+    NOT get a core here. The checker checks a CLONE of it
+    (`check_tests`, `check_benches`), so nothing typed the nodes `own` and
+    the lowering walk, and a core built over the real nodes is one gap per
+    expression: 3,663 of them, measured on a branch. The plan is keyed by
+    the real nodes and the checker's types by the clone's, and the two meet
+    only when the checker checks the real body — a frontend change this
+    slice does not make. `examples/langbench.vyrn`'s `bench@7` is the one
+    open set left of this kind.
+  - Open sets fall from 43 to 40 and unattributed calls from 70 to 69. The
+    harness prints every one of the 69 with its program, its line and its
+    reason, and they are two kinds. Thirteen are a projection dispatched by
+    name (`field`, `tag`, `tryAt`, `tryField`, `wrapped` in
+    `namedplace.vyrn`, `tryplace.vyrn`, `protoplace.vyrn`, `jchain.vyrn`,
+    `jsonplace.vyrn`): a projection is no function value, it is expanded at
+    its site (RFC-0123), and the harness's resolver has no body to name.
+    Fifty-six name a function type no collected source matches — the `cb`
+    of every `std/rpc` deliverer, the `run` thunk of `std/ui`'s `Lazy<T>`
+    and `ParamQuery<P, T>`, the `Cursor` steppers of `std/stream`, the
+    resolvers of `std/graphql`, and the lambda an argument position
+    monomorphized away (`lambdas.vyrn`, `streamops.vyrn`,
+    `streamunfold.vyrn`, `streamlazy.vyrn`, `membench.vyrn`,
+    `knucleotide.vyrn`). The second kind is RFC-0037's collection and the
+    core's names not meeting, and it stays finding 14.
+- **No floor row moved, and the reason is not the second slice's.** The
+  second slice named the ordering and M2's gap list. The gap list is closed
+  now, and the cost objection does not stand either: `vyrn check` on
+  `site/export.vyrn` is 3.32–3.43 s warm, the same command with
+  `own::analyze` and the placer run is 3.23–3.40 s (inside the noise), and
+  `vyrn emit-lowered` on the same file — the load, the analysis and the
+  whole lowering — is 3.51–3.56 s, which is 4 to 6 per cent. What stops the
+  row is placement, and this slice can name it exactly:
+  - **The crate boundary.** `effects.rs` is in `vyrn-lower` and reads the
+    named core, which is built from `Instance`. `floor::objection` is in
+    `vyrn-frontend`, which `vyrn-lower` depends on. The judgment cannot be
+    called from where the refusal is made.
+  - **The order.** The floor runs inside the load (`loader.rs`, after the
+    link and before `check_and_synthesize`), so its refusal comes BEFORE
+    every type error: a browser entry that calls `readLine` and also binds
+    `let bad: Int64 = "x"` reports the floor and not the type error today.
+    A judgment over the core runs after the checker, so the row's refusal
+    would swap places with the type errors while the other three rows kept
+    their place — one rule with two orders.
+  - **The LSP.** `vyrn-lsp` depends on `vyrn-frontend` alone, and it shows
+    the floor's refusal because the loader makes it. A row that moves to
+    `vyrn-lower` leaves the editor, unless `vyrn-lsp` takes the dependency
+    too. `vyrn why --capability` reads the same graph and would stop
+    answering for the row.
+
+  The row moves when the floor's decision moves out of the load as a whole,
+  to one call after the check that the CLI and the LSP both make. That is a
+  change of where a rule is stated, which is this RFC's subject, and it is
+  the deletion slice's first act rather than a row's. Every floor check
+  still lives in `floor.rs`.
+
 ### What each milestone is worth on its own
 
 M1 fixes the wasm column. M2 makes leaks a compile error. M3 halves the
