@@ -3452,6 +3452,105 @@ STATEMENTS inside the carriers: seven decisions about width and truncation
 across two engines, and four of them are now one function each in
 `vyrn_frontend::validate`, which is the crate all three can read.
 
+#### The third judgment's third slice (2026-09-03)
+
+The second slice ended on a number it could not reduce: 94,691 stores unjudged,
+every one into a sized integer whose producer had no type in the core. This
+slice gives every producer a type and judges them all.
+
+**The producer type.** A right-hand side of the core now names the type it
+makes. `Rhs::Prim` carries the operator's own result and `Rhs::Call` what the
+callee answers at that site. Both are the CHECKER's answer at that node, read
+off the pair the form already carries — `Row::has` where the node's own shape
+settles its type, and `Row::ty` where the two are one answer (RFC-0101 §2.1
+item 2 [A16]). The lowering guesses nothing and the checker records nothing
+new: the half that says what a value HAS was already derived, and this slice is
+the first reader that needed it at a `prim`.
+
+One class of node has no row of its own — a projection the checker expanded at
+the site (RFC-0122) — and it answers from its declared result under the
+receiver's type arguments, which is the answer `core::ty_of` already reads
+there. Five calls in the corpus. `tests/coretables.rs` pins the rest at zero:
+over the whole corpus, 145,678 calls, 183,079 primitives, 5,968 literals,
+25,485 names, 17,998 reads and 442 takes, and **not one right-hand side without
+a producer type**. There is no exception list because there is no exception.
+
+**What the judgment does with it.** A store into a sized integer is judged by
+the lookup that already answered every other store. The producer at the
+destination's width and signedness crossed nothing, which is
+`validate::narrows` read the other way round — the same exemption `required`
+states at the `where` rows, and the reason `Int` and `Int64` are one width
+written two ways rather than a finding. The type's own conversion is its
+constructor. A literal is the checker's. A primitive over LITERALS ONLY, into a
+sized integer, is a fourth answer and it is named apart from the third: the
+checker ranges a constant against a destination of the same sign — `-200` into
+an `Int8` is refused, at compile time — and where the signs differ the
+`int-narrowing` row answers rather than refuses, so `-1` into a `UInt8` is 255,
+which is the row's answer and the same fact as `UInt8(300)` being 44. It is not
+a finding, and calling it `by-literal` would have claimed a proof that half of
+it does not have.
+
+The tally over the same 180 programs, on 2026-09-03:
+
+| answer | before | after |
+|---|---|---|
+| by-constructor | 46,473 | 46,473 |
+| by-literal | 9,103 | 9,103 |
+| by-name | 349 | 156,963 |
+| by-constant | — | 1,080 |
+| findings | 6 | 6 |
+| **judged** | **55,931** | **213,625** |
+| unjudged | 94,691 | **0** |
+
+**RATCHET 6, and they are the same six** — one primitive, two reads of a place,
+three record literals, each recorded above with its program and line, and each
+a legitimate boundary site that all three engines refuse
+(`rfcs/probes-0125/raw-value-into-a-validated-slot.vyrn`). No new finding, so
+no new probe.
+
+`by-name` rises by 156,614 because the second slice did not COUNT a store it
+could not ask about. Two kinds joined. The 94,691 it counted as unjudged: 1,080
+of those are the constants above and the other 93,611 are `by-name`. And 63,003
+more it dropped silently — a store whose source type resolved and whose width
+matched was no crossing, so the rule answered "no row" and the store left no
+row in the tally either. A store that owes nothing is still a store the
+judgment looked at, and it is counted now. The 366 stores into a named `where`
+type are unmoved; the rest are the sized-integer rows: 137,076 `Int32`, 33,129
+`UInt32`, 25,097 `UInt64`, 17,938 `UInt8`, and nineteen at the other three
+widths.
+
+**Unjudged is 0, and the last twenty-five were the harness's.** They were a
+byte read out of a `String` — `for b in s`, `s[i]` — where the corpus harness
+resolved a place's element type for an array and not for a String. The
+`string-index` row says what a String indexes as, so the harness says it too.
+Nothing in the judgment changed for them.
+
+**What the judgment now proves, and what it still does not license.** Every
+narrowing store in the corpus — every store into a sized integer whose producer
+is of another width — goes through that type's own conversion, or is a literal
+or a constant the program wrote out. Not one is a raw wider value. The second
+slice predicted that over the stores it could see; this slice has seen them
+all.
+
+That proof licenses no deletion, and the reason is the shape of the two rows
+rather than the state of the tree. `int-narrowing` and `float-to-int` REFUSE
+NOTHING — finding 4 of the census. What each engine writes out for them is the
+wrap itself, which is the conversion's meaning and not a check in front of it:
+the interpreter re-reads bits in Rust over a `Val`, the wasm emitter emits
+`i32.wrap_i64` and a mask, the native backend emits `trunc`. Deleting any of
+the three deletes the answer. The DECISIONS around them left their engines in
+the second slice and are `vyrn_frontend::validate`'s — `narrows`, `wrap`,
+`from_float`, `width` — and a judgment that finds no unchecked narrowing gives
+no third thing to remove. The census is therefore unchanged at **19 rows and 53
+copies**, and `tests/boundaries.rs` derives that sentence from its own table so
+that an unchanged count stays a measurement.
+
+The `where` rows are the ones a deletion waits on, and the judgment says
+plainly that it cannot yet clear them: six stores reach a validated slot
+without the constructor, and a record literal of a validated record type is a
+second producer by design. §2.3's constructor is what closes that, and it is
+the next slice's, not this one's.
+
 ### What each milestone is worth on its own
 
 M1 fixes the wasm column. M2 makes leaks a compile error. M3 halves the
