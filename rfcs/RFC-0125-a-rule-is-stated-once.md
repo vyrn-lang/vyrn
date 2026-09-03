@@ -1661,6 +1661,82 @@ Each took the `.copy()` the rule names, and no output changed. The kernel
 tally: 18,343 instances accepted, 0 refused, 0 unlowered, so the ratchet is
 still 0.
 
+**The census (2026-09-03): every read of the plan in the direct wasm
+emitter, and whether the core says the same thing.** The slice after this
+one deletes `own.rs`'s per-node tables, and it may delete only what
+something else states. So every `self.cx.plan.*` in
+`compiler/vyrn-codegen/src/direct.rs` is one row below, with the function
+that reads it, what the read decides, and whether the core carries the same
+fact at the same key. `compiler/vyrn-cli/tests/coretables.rs` pins the last
+column: it runs the analysis over the corpus with the placer installed and
+diffs the core's own answer (`vyrn_lower::core::facts`, folded out of every
+body and every lambda frame AFTER the placer has added its rows) against
+the plan's at the same site.
+
+| # | reader | table | what it decides | the core |
+|---|---|---|---|---|
+| 01 | `Fn_::stmt`, the `String` append spine | `store_owned` | whether the buffer the append copied out of is this path's to free | a key, not stated |
+| 02 | `Fn_::stmt`, a store to a name | `store_owned` | whether the store releases the value it displaces | a key, not stated |
+| 03 | `Fn_::stmt`, a store to a name | `store_fresh` | whether a mention of the place in the value can hand the old buffer back | a key, not stated |
+| 04 | `Fn_::stmt`, `SetField` | `store_owned` | the same, through a field | a key, not stated |
+| 05 | `Fn_::stmt`, `IndexSet` | `store_owned` | the same, through an element | a key, not stated |
+| 06 | `Fn_::stmt`, `IndexSet` on a map, and a projection's store | `store_owned` | acknowledged only, so §26's finish check counts the row | a key, not stated |
+| 07 | `Fn_::elem_field_store` | `store_owned` | the same, for the `a[i].f = v` idiom's three statements | a key, not stated |
+| 08 | `Fn_::stmt`, `Stmt::Expr` | `discarded_results` | free an owned result nothing binds, rather than dropping it | a key, not stated |
+| 09 | `Fn_::expr` | `arg_drops` | tee this node's value and free it after the call or operator above | a key, not stated |
+| 10 | `Fn_::stmt`, `Stmt::If`; `Fn_::join`; `Fn_::match_expr` | `edge_releases` | the release one edge of a join owes because another edge took the name | a position, not a key |
+| 11 | `Fn_::expr_inner`, `Expr::Field` | `receiver_frees`, `receiver_malloc` | free the unnamed receiver right after the read | **carried** |
+| 12 | `Fn_::expr_inner`, `Expr::Field` | `receiver_holes` | the field the read took, which the free walks around | **carried** |
+| 13 | `Fn_::match_expr` | `arm_frees` | the payload binders this arm releases, and the holes each has | **carried** |
+| 14 | `Fn_::frees_boxes` | `consuming_matches` | whether the arms free the boxes their binders came out of | a different rule |
+| 15 | `Fn_` construction | `releases` (through `own::placed`) | the order and the exits this body releases at | `St::Row`, keyed the same |
+| 16 | `Fn_` construction | `droppable`, `early`, `holes` | which bindings get a release slot, with what kind and what holes | a name's `owned` and `holes` |
+| 17 | `compile_inner` | `unconsumed` | §26's finish check: a planned row no query hit | the audit's, not a placement read |
+| 18 | `Fn_::expr_inner`, `Fn_::join`, `Fn_::match_expr` | `alias_clones`, `alias_scope`, `alias_unwind` | the node a projection's expansion stands for | not a placement table |
+
+Three readings of the table.
+
+- **Three tables are carried and flipped in this slice.** Rows 11, 12 and 13.
+  The core states each as a `St::Drop`: of a name whose `NameInfo::receiver`
+  is the `Expr::Field` node, and of a payload binder at the end of
+  `Arm::body`, with `NameInfo::holes` as the row's hole set. The test diffs
+  591 arm sites and 21 receiver sites and finds no difference, which is what
+  lets the emitter read `core::facts` for all three; `VYRN_PLAN_ROWS=1` puts
+  it back on the plan for a bisect.
+- **Seven have no key in the core, and that is the whole obstacle.** Rows 01
+  to 09 are the store, discard and argument-temporary decisions. The core
+  states every one of them — `St::Store` carries `Old::Released`, a
+  discarded result is a temporary with a `St::Drop`, an argument temporary
+  is a name in the drop queue — but `St::Store` and `St::Drop` carry a line
+  and no node, so nothing can be looked up by the address the emitter walks.
+  Row 10 is the same shape one level worse: an edge release is a `St::Drop`
+  at a POSITION in a branch, and a position is not a key at all. Each is a
+  "make the core carry it" step: a `site` on `St::Store`, on the discarded
+  temporary's `Let`, and on the edge drops, before the flip.
+- **One table states a different rule, and the difference is the emitter's.**
+  `St::Switch::consuming` is not `consuming_matches`. It is the whole
+  disjunction `frees_boxes` computes — a `consume`, a scrutinee that names
+  no place, or the table — narrowed to an owned scrutinee with no placed
+  release after the construct. The core says "consuming" at 1,089 sites in
+  the corpus where the table names far fewer, and one site
+  (`scan.vyrn`'s `match q { Some(s) => s, None => "<none>" }`) goes the other
+  way, because the plan placed the scrutinee's release after the construct
+  and the core then treats the binders as borrows. So the row is not a flip:
+  it is `frees_boxes`'s own rule, and the core would have to state that rule
+  before the table can go.
+
+**What the native emitter and the interpreter still need.** Neither moved in
+this slice. `compiler/vyrn-codegen/src/lib.rs` reads the same tables through
+`gen_stmt`, `gen_expr`, `gen_call`, `gen_arm_body` and `gen_match_enum`, and
+the interpreter reads `arm_frees` and the placed rows. So `own.rs` can go
+only after: the seven keyless tables above are keyed in the core and flipped
+in both compiled backends; `frees_boxes`'s rule is stated in the core; the
+interpreter reads `core::facts` for the arm table; and the answers the
+close-out above lists as having no kernel equivalent at all — `DropKind` and
+a declared release's ordering, `Leak::Hole` and `Leak::Region`, the binding
+notes behind `vyrn why --memory`, the `FreeArr` handover — are stated
+somewhere else.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The

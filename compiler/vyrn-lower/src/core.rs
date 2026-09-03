@@ -2653,6 +2653,122 @@ fn mentions_in_expr<'e>(e: &'e Expr, vars: &mut Vec<&'e Expr>, calls: &mut Vec<&
 thread_local! {
     static STRICT_REFUSALS: std::cell::RefCell<Vec<crate::kernel::Refusal>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    static FACTS: std::cell::RefCell<Facts> = std::cell::RefCell::new(Facts::default());
+}
+
+/// RFC-0125 §3 M3, the deletion-preparation slice: what an emitter reads off
+/// the core in place of a per-node table in `own.rs`, keyed exactly as the
+/// plan keys the table it replaces.
+///
+/// The core states each of these as a statement — a `St::Drop` of a
+/// receiver's name, a `St::Drop` of an arm's payload binder — with the
+/// binding's hole set on the name. A statement is not a lookup, and the
+/// emitters walk the AST, so the walk over the core is folded into this
+/// side table once per compile and every emitter reads it by node.
+///
+/// `compiler/vyrn-cli/tests/coretables.rs` proves the two sources agree at
+/// every site in the corpus. `VYRN_PLAN_ROWS=1` makes an emitter read the
+/// plan again, which is the bisect for a difference this table would hide.
+#[derive(Default, Clone, Debug)]
+pub struct Facts {
+    /// RFC-0114 R1′: the `Expr::Field` node of an unnamed receiver the core
+    /// releases after the read, and the holes the release walks around.
+    pub receivers: std::collections::HashMap<usize, Vec<String>>,
+    /// Round forty's table: `(match, arm) -> [(binder, holes)]`, the payload
+    /// binders the arm's own body releases at its end.
+    pub arms: std::collections::HashMap<(usize, u32), Vec<(String, Vec<String>)>>,
+}
+
+/// The core's answers for the program last analysed on this thread. Empty
+/// when the placer is not installed (`VYRN_NO_PLACER=1`), in which case an
+/// emitter reads the plan as it always did.
+pub fn facts() -> Facts {
+    FACTS.with(|f| f.borrow().clone())
+}
+
+/// The kernel spells a hole `.f.g`; every table spells it `f.g`, relative to
+/// the binding (RFC-0093 M2).
+fn plan_holes(holes: &[String]) -> Vec<String> {
+    holes
+        .iter()
+        .map(|h| h.trim_start_matches('.').to_string())
+        .collect()
+}
+
+/// Fold one frame's statements into the side table. Called after the placer
+/// has added every row, so the core here is the core the emitters will run.
+fn fold_facts(body: &Body, stmts: &[St], out: &mut Facts) {
+    for s in stmts {
+        match s {
+            St::If { then, els, .. } => {
+                fold_facts(body, then, out);
+                fold_facts(body, els, out);
+            }
+            St::Loop(b) | St::Block { body: b, .. } => fold_facts(body, b, out),
+            St::Switch { arms, .. } => {
+                for a in arms {
+                    // The arm table's drops are the trailing run of binder
+                    // drops `stmt` pushes at the end of the arm's own
+                    // statements, in the order the binders were bound.
+                    let mut trailing: Vec<Name> = Vec::new();
+                    for st in a.body.iter().rev() {
+                        match st {
+                            St::Drop(n) if a.binds.contains(n) => trailing.push(*n),
+                            _ => break,
+                        }
+                    }
+                    let rows: Vec<(String, Vec<String>)> = a
+                        .binds
+                        .iter()
+                        .filter(|b| trailing.contains(b))
+                        .map(|b| {
+                            let info = &body.names[*b as usize];
+                            (info.source.clone(), plan_holes(&info.holes))
+                        })
+                        .collect();
+                    if !rows.is_empty() {
+                        out.arms.entry((a.site, a.index)).or_default().extend(rows);
+                    }
+                    fold_facts(body, &a.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Every frame's answers, added to the table.
+fn fold_frame(body: &Body, out: &mut Facts) {
+    fold_facts(body, &body.stmts, out);
+    let mut released = std::collections::HashSet::new();
+    collect_drops(&body.stmts, &mut released);
+    for (i, info) in body.names.iter().enumerate() {
+        let Some(node) = info.receiver else { continue };
+        if released.contains(&(i as Name)) {
+            out.receivers.insert(node, plan_holes(&info.holes));
+        }
+    }
+}
+
+fn collect_drops(stmts: &[St], out: &mut std::collections::HashSet<Name>) {
+    for s in stmts {
+        match s {
+            St::Drop(n) => {
+                out.insert(*n);
+            }
+            St::If { then, els, .. } => {
+                collect_drops(then, out);
+                collect_drops(els, out);
+            }
+            St::Loop(b) | St::Block { body: b, .. } => collect_drops(b, out),
+            St::Switch { arms, .. } => {
+                for a in arms {
+                    collect_drops(&a.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Whether `VYRN_KERNEL_STRICT=1` is set: a hard refusal by the kernel fails
@@ -2876,4 +2992,22 @@ pub fn augment(program: &Program, own: &mut Ownership) {
             .or_insert(kind);
         own.releases.entry(f).or_default().push(row);
     }
+    // A SECOND build, after every row the placer added: the emitters read
+    // the core's answers, and the core built above read the plan as it was
+    // before this pass filled it (RFC-0125 §3 M3, the deletion-preparation
+    // slice). The lowering is reused, so this costs the naming pass alone.
+    let mut facts = Facts::default();
+    if let Ok(top) = build_module_state(program, own, &lowered.globals) {
+        for body in top.frames() {
+            fold_frame(body, &mut facts);
+        }
+    }
+    for inst in &lowered.instances {
+        if let Ok(top) = build(program, inst, own) {
+            for body in top.frames() {
+                fold_frame(body, &mut facts);
+            }
+        }
+    }
+    FACTS.with(|f| *f.borrow_mut() = facts);
 }
