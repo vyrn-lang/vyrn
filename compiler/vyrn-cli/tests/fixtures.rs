@@ -34,6 +34,81 @@ fn expected_dir() -> PathBuf {
     examples_dir().join("expected")
 }
 
+/// One row of RFC-0125 §3 M5's census: a capability the interpreter provides,
+/// and what the compiled route does with it. `verdict` is the first word of the
+/// row's third cell — `yes`, `no`, `partial` or `worse`.
+struct Census {
+    capability: &'static str,
+    verdict: &'static str,
+}
+
+/// Every row of the census, in the order the RFC's table lists them.
+///
+/// The verdicts were proved by running both engines over the same input, not by
+/// reading the code — the slice's report says which run proved which row.
+const CENSUS: &[Census] = &[
+    Census {
+        capability: "run-default",
+        verdict: "yes",
+    },
+    Census {
+        capability: "test-bodies",
+        verdict: "yes",
+    },
+    Census {
+        capability: "test-state",
+        verdict: "no",
+    },
+    Census {
+        capability: "bench-check",
+        verdict: "yes",
+    },
+    Census {
+        capability: "serve",
+        verdict: "no",
+    },
+    Census {
+        capability: "mounted-routes",
+        verdict: "no",
+    },
+    Census {
+        capability: "from-json",
+        verdict: "no",
+    },
+    Census {
+        capability: "run-profile",
+        verdict: "no",
+    },
+    Census {
+        capability: "gen-fn",
+        verdict: "partial",
+    },
+    Census {
+        capability: "fixture-oracle",
+        verdict: "no",
+    },
+    Census {
+        capability: "parity-column",
+        verdict: "yes",
+    },
+    Census {
+        capability: "boundary-carrier",
+        verdict: "yes",
+    },
+    Census {
+        capability: "library-run",
+        verdict: "no",
+    },
+    Census {
+        capability: "extern-unavailable",
+        verdict: "worse",
+    },
+    Census {
+        capability: "site-export",
+        verdict: "yes",
+    },
+];
+
 #[test]
 fn every_example_prints_what_was_recorded() {
     let dir = examples_dir();
@@ -116,4 +191,97 @@ fn every_example_prints_what_was_recorded() {
         failures.len()
     );
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
+}
+
+/// One census, not two: the table in RFC-0125 §3 M5 and [`CENSUS`] name the
+/// same capabilities with the same verdicts.
+///
+/// `tests/boundaries.rs` holds its own census this way, and for the same
+/// reason: a table in prose beside a table in code is two tables, and the one
+/// nobody runs is the one that goes stale.
+#[test]
+fn the_rfc_census_lists_exactly_these_capabilities() {
+    let rfc = repo_root()
+        .join("rfcs")
+        .join("RFC-0125-a-rule-is-stated-once.md");
+    let text = std::fs::read_to_string(&rfc).unwrap_or_else(|e| panic!("{}: {e}", rfc.display()));
+    let header = "| capability | who needs it | the compiled route today | what moving it costs |";
+    let start = text
+        .find(header)
+        .unwrap_or_else(|| panic!("{}: no census table (looked for {header:?})", rfc.display()));
+    let mut got: Vec<String> = Vec::new();
+    for line in text[start..].lines().skip(2) {
+        if !line.starts_with("| `") {
+            break;
+        }
+        let cells: Vec<&str> = line
+            .trim_matches('|')
+            .split('|')
+            .map(|c| c.trim())
+            .collect();
+        assert_eq!(cells.len(), 4, "row has {} cells: {line}", cells.len());
+        // The verdict is the third cell's first word, so the rest of the cell
+        // can say why without the pin caring.
+        let verdict = cells[2]
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_end_matches([',', '.']);
+        got.push(format!("{} {verdict}", cells[0].trim_matches('`')));
+    }
+    let want: Vec<String> = CENSUS
+        .iter()
+        .map(|r| format!("{} {}", r.capability, r.verdict))
+        .collect();
+    assert_eq!(
+        got,
+        want,
+        "the census table in {} and `CENSUS` differ. One table, not two.",
+        rfc.display()
+    );
+}
+
+/// The census's one live semantic claim, run rather than asserted: the `no` on
+/// the `test-state` row.
+///
+/// The interpreter initializes a module's state once per RUN; `--engine wasm`
+/// runs one fresh instance per body. The probe under `rfcs/probes-0125/` is
+/// twelve lines and disagrees on purpose, so this pins the disagreement rather
+/// than an engine. When the interpreter goes, the wasm answer is the one that
+/// stays (RFC-0125 §3 M5, the second slice).
+#[test]
+fn module_state_is_shared_across_test_bodies_only_under_the_interpreter() {
+    let probe = repo_root()
+        .join("rfcs")
+        .join("probes-0125")
+        .join("module-state-across-test-bodies.vyrn");
+    let one = |engine: Option<&str>| {
+        let mut cmd = vyrn();
+        cmd.arg("test");
+        if let Some(e) = engine {
+            cmd.arg("--engine").arg(e);
+        }
+        let out = cmd.arg(&probe).output().expect("run vyrn test");
+        (out.status.code(), norm(&out.stdout))
+    };
+    let (interp_code, interp_out) = one(None);
+    assert_eq!(interp_code, Some(0), "the interpreter's run:\n{interp_out}");
+    assert!(
+        interp_out.contains("2 passed, 0 failed"),
+        "the interpreter's run:\n{interp_out}"
+    );
+    let (wasm_code, wasm_out) = one(Some("wasm"));
+    assert_eq!(wasm_code, Some(1), "the compiled run:\n{wasm_out}");
+    assert!(
+        wasm_out.contains("1 != 2") && wasm_out.contains("1 passed, 1 failed"),
+        "the compiled run:\n{wasm_out}"
+    );
+}
+
+/// The repository root, for the RFC and the probe the two tests above read.
+fn repo_root() -> PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("repo root")
 }

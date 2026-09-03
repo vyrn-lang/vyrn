@@ -6429,6 +6429,12 @@ impl<'p> Fn_<'_, 'p> {
                     }
                 }
                 "parse" if args.len() == 1 => Type::Option(Box::new(Type::Int)),
+                // `blackBox(v)` (RFC-0055) is `v`, which is exactly how `call`
+                // lowers it, so a branch that yields one has its argument's type.
+                // Found by RFC-0125 §3 M5's census: without this row
+                // `examples/langbench.vyrn` is the one bench program the compiled
+                // route refuses and the interpreter runs.
+                "blackBox" if args.len() == 1 => self.peek(&args[0], line)?,
                 // M2l's rule: a builtin `call` types as it emits owes this a row,
                 // and these two are `call`'s newest. Both are 1-based positions, so
                 // `Int` — the checker's own answer, and the only one it could be.

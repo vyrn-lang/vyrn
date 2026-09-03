@@ -1,0 +1,23 @@
+// RFC-0125 M5 probe: the one semantic difference the census found between the
+// two engines. The interpreter initializes a module's state once per RUN and
+// lets the bodies see each other's writes; `--engine wasm` runs one fresh
+// instance per body.
+//
+//     vyrn test rfcs/probes-0125/module-state-across-test-bodies.vyrn
+//         2 passed, 0 failed
+//     vyrn test --engine wasm rfcs/probes-0125/module-state-across-test-bodies.vyrn
+//         FAILED: assertion failed at line 22: 1 != 2
+//
+// The wasm answer is the one to keep (RFC-0125 §3 M5, the second slice): a test
+// that reads what an earlier test wrote is a test with an order.
+let mut counter = 0
+
+test "the first body writes the module's state" {
+    counter = counter + 1
+    assertEq(counter, 1)
+}
+
+test "the second body sees what the first wrote" {
+    counter = counter + 1
+    assertEq(counter, 2)
+}
