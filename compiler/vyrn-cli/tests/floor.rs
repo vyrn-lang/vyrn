@@ -409,3 +409,45 @@ fn the_shim_implemented_externs_are_not_a_capability() {
     let (ok, err) = check(&dir.join("main.vyrn"));
     assert!(ok, "a clock is not a host import:\n{err}");
 }
+
+/// RFC-0125 M6, fourth slice: the `stdin` row is decided by the effect
+/// judgment, and the refusal is the pass's own words. `VYRN_NO_JUDGE=1`
+/// puts both rows back in the pass, and the two texts must be one text —
+/// which is what "the rule moved, the refusal did not" means.
+#[test]
+fn a_moved_row_refuses_in_the_words_the_pass_used() {
+    for (name, body) in [(
+        "stdin",
+        "fn main() -> Int64 {
+                 print(match readLine() { Some(s) => s, None => \"\", })
+    return 0
+}
+",
+    )] {
+        let dir = scratch(name);
+        write(&dir, "client/boot.vyrn", body);
+        write(
+            &dir,
+            "vyrn.json",
+            "{ \"name\": \"p\", \"artifacts\": {               \"app\": { \"entry\": \"client/boot.vyrn\", \"target\": \"browser\" } } }
+",
+        );
+        let entry = dir.join("client/boot.vyrn");
+        let (ok, judged) = check(&entry);
+        assert!(
+            !ok,
+            "{name}: the browser artifact must be refused:
+{judged}"
+        );
+        let out = vyrn()
+            .env("VYRN_NO_JUDGE", "1")
+            .arg("check")
+            .arg(&entry)
+            .output()
+            .expect("run check");
+        let pass = String::from_utf8_lossy(&out.stderr).to_string()
+            + &String::from_utf8_lossy(&out.stdout);
+        assert!(!out.status.success(), "{name}: {pass}");
+        assert_eq!(judged, pass, "{name}: the judgment changed the refusal");
+    }
+}

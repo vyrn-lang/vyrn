@@ -143,21 +143,20 @@ pub const CALLS: &[(&str, Capability)] = &[
     ("fsyncFile", Capability::Fs),
     ("listDir", Capability::Fs),
     ("listDirKinds", Capability::Fs),
-    ("readLine", Capability::Stdin),
     ("args", Capability::Args),
 ];
 
 /// The rows a judgment answers — RFC-0125 §3 M6, fourth slice.
 ///
-/// Empty here: this commit lands the hook, and a row moves out of [`CALLS`]
-/// into this list one line at a time. The module scan below reads both lists,
-/// so a moved row is still FOUND by the scan — the carrier and its line are
-/// the diagnostic's own words and the sentence is written once. What moves is
-/// the VERDICT. When a judgment is installed ([`install_judge`]) the effect
-/// judgment of RFC-0125 §2.2 says which module reaches the capability, and
-/// [`decide`] drops the rows it does not confirm. When none is installed — the
-/// LSP, `VYRN_NO_JUDGE=1` — the pass answers for them exactly as it did.
-pub const JUDGED: &[(&str, Capability)] = &[];
+/// A row here is out of [`CALLS`]: the pass no longer decides it. The module
+/// scan below reads both lists, so a moved row is still FOUND by the scan —
+/// the carrier and its line are the diagnostic's own words and the sentence is
+/// written once. What moved is the VERDICT. When a judgment is installed
+/// ([`install_judge`]) the effect judgment of RFC-0125 §2.2 says which module
+/// reaches the capability, and [`decide`] drops the rows it does not confirm.
+/// When none is installed — the LSP, `VYRN_NO_JUDGE=1` — the pass answers for
+/// them exactly as it did.
+pub const JUDGED: &[(&str, Capability)] = &[("readLine", Capability::Stdin)];
 
 /// Every capability `program` carries, in a stable order.
 ///
