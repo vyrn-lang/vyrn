@@ -3623,7 +3623,8 @@ four that took the same mechanism.
 The price is stated rather than hidden. A declaration that carries a `where`
 now costs two functions in every module that declares it, reached or not, and
 the constructor's sentence is in the data segment whether or not anything
-crosses into the type. `direct.rs`'s
+crosses into the type. `VYRN_WASM_MANIFEST=check` therefore fails on 36 of
+the 172 examples — every one that declares a `where` type. `direct.rs`'s
 `a_validated_type_is_checked_wherever_it_is_reached` had asserted on the
 message's ABSENCE for an unreached declaration; the message is the
 constructor's own string now, so the test compares a reached module against one
