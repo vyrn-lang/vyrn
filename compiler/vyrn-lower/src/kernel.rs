@@ -829,6 +829,17 @@ impl<'b> Kernel<'b> {
                         self.take_arg(st, v, *write_back && i == 0)?;
                     }
                 }
+                // A `modify` argument does NOT end the aliases of what it is
+                // handed, and the census measured why (RFC-0125 §3 M3).
+                // Ending them refuses `freeNode` in `tree.vyrn`,
+                // `linkedlist.vyrn` and `freelist.vyrn`: each reads
+                // `t[h].left` — an `Option<Handle<T>>`, which owns heap
+                // because a wide payload travels boxed — and then calls
+                // `remove(t, h)`, which shuffles index arrays and never
+                // touches the payload the read points into. The rule needs
+                // to know WHICH place a callee writes, and that is the
+                // per-argument retention over the call graph the deletion
+                // track still owes.
                 Ok(())
             }
             Rhs::Prim(vs) => {
