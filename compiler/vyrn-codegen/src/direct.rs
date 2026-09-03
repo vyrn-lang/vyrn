@@ -5426,7 +5426,7 @@ impl<'p> Fn_<'_, 'p> {
     /// is at the allocation on both backends now: see [`Fn_::str_owned`].
     fn expr(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
         let t = self.expr_inner(m, b, e)?;
-        if self.cx.plan.arg_drop(e as *const Expr as usize) && self.region_depth == 0 {
+        if self.cx.arg_drop_row(e as *const Expr as usize) && self.region_depth == 0 {
             let l = b.local(ValType::I32);
             b.ins(&Instruction::LocalTee(l));
             self.arg_frees.push((l, t.clone()));
