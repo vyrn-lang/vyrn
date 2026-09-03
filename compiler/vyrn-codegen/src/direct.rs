@@ -1259,6 +1259,35 @@ impl<'a> Cx<'a> {
         f.receivers.get(&self.plan.key_of(node)).cloned()
     }
 
+    /// Round forty's table read off the core (RFC-0125 §3 M3, the
+    /// deletion-preparation slice): the payload binders the arm at
+    /// `(key, arm)` releases at its end, each with the holes the arm left in
+    /// it. The core states them as the trailing run of `St::Drop` in
+    /// `Arm::body`, with `NameInfo::holes` on each binder;
+    /// `compiler/vyrn-cli/tests/coretables.rs` proves it equal to the plan's
+    /// rows at every site in the corpus. The plan is acknowledged for §26's
+    /// finish check, as [`Cx::receiver_row`] acknowledges R1′'s.
+    fn arm_row(&self, key: usize, arm: u32) -> Option<Vec<(String, Vec<String>)>> {
+        let Some(f) = &self.facts else {
+            return self.plan.arm_payload_free(key, arm).map(|rows| {
+                rows.iter()
+                    .map(|(n, _, h)| (n.clone(), h.clone()))
+                    .collect()
+            });
+        };
+        // A site this pass of the core does not state (an `if let`, a `?`)
+        // keeps reading the plan; `match` is the reader this slice flips.
+        let Some(rows) = f.arms.get(&(self.plan.key_of(key), arm)) else {
+            return self.plan.arm_payload_free(key, arm).map(|rows| {
+                rows.iter()
+                    .map(|(n, _, h)| (n.clone(), h.clone()))
+                    .collect()
+            });
+        };
+        self.plan.acknowledge(key);
+        (!rows.is_empty()).then(|| rows.clone())
+    }
+
     /// Substitute the monomorphization this lowering is inside.
     ///
     /// The chokepoint, and the point of having one: [`Cx::resolve`], [`Cx::ll`],
@@ -13085,10 +13114,10 @@ impl<'p> Fn_<'_, 'p> {
             }
             // Round forty: the unmoved payload binders the row names — the
             // textual backend's `gen_arm_body` twin.
-            let owed = self.cx.plan.arm_payload_free(key, arm_ix as u32).cloned();
+            let owed = self.cx.arm_row(key, arm_ix as u32);
             if let Some(rows) = owed.filter(|_| self.region_depth == 0) {
                 for (n, place, ty) in &bound {
-                    let Some((_, _, holes)) = rows.iter().find(|(r, _, _)| r == n) else {
+                    let Some((_, holes)) = rows.iter().find(|(r, _)| r == n) else {
                         continue;
                     };
                     let (place, ty) = (place.clone(), ty.clone());

@@ -1104,6 +1104,7 @@ impl<'b> Kernel<'b> {
                     body,
                     site,
                     index,
+                    ..
                 } in arms
                 {
                     let mut a = st.clone();

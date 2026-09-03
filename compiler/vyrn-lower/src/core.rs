@@ -266,6 +266,18 @@ pub enum St {
 pub struct Arm {
     /// The payload binders. Owned when the match consumed its scrutinee.
     pub binds: Vec<Name>,
+    /// The binders this arm releases at its end, in the order it releases
+    /// them — round forty's table, stated by the core (RFC-0125 §3 M3, the
+    /// deletion-preparation slice). Each is a `St::Drop` at the end of
+    /// `body`, and the holes are the binder's own (`NameInfo::holes`). Named
+    /// rather than left to the reader's eye, because the edge drops of a
+    /// join follow them and a position is not a key.
+    ///
+    /// `None` where this pass does not state the answer: the `if let` and `?`
+    /// desugars build arms of their own and consult no table, so a reader
+    /// falls back to the plan for those sites. Closing that is the next
+    /// step, and the emitters this slice flips do not read the table there.
+    pub frees: Option<Vec<Name>>,
     pub body: Vec<St>,
     /// The `match` (or `if let`, or `?`) this arm belongs to, and which arm
     /// it is — the plan's key for an arm payload free and an edge release.
@@ -1143,12 +1155,14 @@ impl<'a> Builder<'a> {
                     on: sv,
                     arms: vec![
                         Arm {
+                            frees: None,
                             binds,
                             body: t,
                             site: sid,
                             index: 0,
                         },
                         Arm {
+                            frees: None,
                             binds: Vec::new(),
                             body: e,
                             site: sid,
@@ -1618,12 +1632,17 @@ impl<'a> Builder<'a> {
         };
         let mut binds = Vec::new();
         for (name, ty) in payloads {
-            if name == "_" {
-                continue;
-            }
             let owned = consuming && self.owns(&ty);
             let n = self.name(&name, ty, owned, line);
-            self.scope.push((name, n));
+            // `_` names nothing a body can read, so it never enters the
+            // scope — but the payload is real, and a consumed scrutinee's arm
+            // still owes its release. The plan's arm table names `_`
+            // (`revcomp.vyrn`'s `Err(_) => ""`), and the core said nothing
+            // about it until this slice (RFC-0125 §3 M3, the
+            // deletion-preparation slice).
+            if name != "_" {
+                self.scope.push((name, n));
+            }
             binds.push(n);
         }
         let _ = out;
@@ -2145,6 +2164,7 @@ impl<'a> Builder<'a> {
                         }
                         ArmBody::Block(blk) => self.block(blk, &mut body)?,
                     }
+                    let mut frees: Vec<Name> = Vec::new();
                     if let Some(rows) = self.own.plan.arm_payload_free(mid, i as u32) {
                         for b in &binds {
                             let src = &self.body.names[*b as usize].source;
@@ -2152,6 +2172,7 @@ impl<'a> Builder<'a> {
                                 self.body.names[*b as usize].holes =
                                     holes.iter().map(|h| format!(".{h}")).collect();
                                 body.push(St::Drop(*b));
+                                frees.push(*b);
                             }
                         }
                     }
@@ -2159,6 +2180,7 @@ impl<'a> Builder<'a> {
                     self.scope.truncate(mark);
                     core_arms.push(Arm {
                         binds,
+                        frees: Some(frees),
                         body,
                         site: mid,
                         index: i as u32,
@@ -2222,12 +2244,14 @@ impl<'a> Builder<'a> {
                     on: sv,
                     arms: vec![
                         Arm {
+                            frees: None,
                             binds: fb,
                             body: fail,
                             site: tid,
                             index: 0,
                         },
                         Arm {
+                            frees: None,
                             binds: ob,
                             body: ok,
                             site: tid,
@@ -2295,12 +2319,14 @@ impl<'a> Builder<'a> {
             on: sv,
             arms: vec![
                 Arm {
+                    frees: None,
                     binds: Vec::new(),
                     body: fail,
                     site: tid,
                     index: 0,
                 },
                 Arm {
+                    frees: None,
                     binds: Vec::new(),
                     body: ok,
                     site: tid,
@@ -2707,26 +2733,17 @@ fn fold_facts(body: &Body, stmts: &[St], out: &mut Facts) {
             St::Loop(b) | St::Block { body: b, .. } => fold_facts(body, b, out),
             St::Switch { arms, .. } => {
                 for a in arms {
-                    // The arm table's drops are the trailing run of binder
-                    // drops `stmt` pushes at the end of the arm's own
-                    // statements, in the order the binders were bound.
-                    let mut trailing: Vec<Name> = Vec::new();
-                    for st in a.body.iter().rev() {
-                        match st {
-                            St::Drop(n) if a.binds.contains(n) => trailing.push(*n),
-                            _ => break,
-                        }
-                    }
-                    let rows: Vec<(String, Vec<String>)> = a
-                        .binds
-                        .iter()
-                        .filter(|b| trailing.contains(b))
-                        .map(|b| {
-                            let info = &body.names[*b as usize];
-                            (info.source.clone(), plan_holes(&info.holes))
-                        })
-                        .collect();
-                    if !rows.is_empty() {
+                    if let Some(frees) = &a.frees {
+                        let rows: Vec<(String, Vec<String>)> = frees
+                            .iter()
+                            .map(|b| {
+                                let info = &body.names[*b as usize];
+                                (info.source.clone(), plan_holes(&info.holes))
+                            })
+                            .collect();
+                        // An entry even when it is empty: "this arm states
+                        // its releases and owes none" is not the same answer
+                        // as "this pass did not state them".
                         out.arms.entry((a.site, a.index)).or_default().extend(rows);
                     }
                     fold_facts(body, &a.body, out);

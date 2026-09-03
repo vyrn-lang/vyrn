@@ -154,6 +154,23 @@ fn run() {
             }
         }
 
+        // The other direction, over the sites the core STATES an answer for
+        // (a `match`; an `if let` or a `?` arm states none and the emitter
+        // keeps reading the plan there): a row the plan placed and the core
+        // leaves out is a site the flipped emitter would stop freeing at.
+        for ((site, arm), rows) in own.plan.arm_frees.iter() {
+            let Some(core_says) = facts.arms.get(&(*site, *arm)) else {
+                continue;
+            };
+            for (n, _, h) in rows {
+                if !core_says.iter().any(|(cn, ch)| cn == n && ch == h) {
+                    diffs.push(format!(
+                        "{file}: site {site} arm {arm}: arm_frees:                          the plan frees `{n}` {h:?} and the core does not"
+                    ));
+                }
+            }
+        }
+
         for (node, core_holes) in &facts.receivers {
             *counted.entry("receiver_frees").or_default() += 1;
             let plan_free = own.plan.receiver_free(*node);
@@ -184,7 +201,7 @@ fn run() {
     for (what, n) in &counted {
         eprintln!("  {n:6} sites  {what}");
     }
-    for d in diffs.iter().take(40) {
+    for d in diffs.iter().take(400) {
         eprintln!("  DIFF {d}");
     }
     assert!(
