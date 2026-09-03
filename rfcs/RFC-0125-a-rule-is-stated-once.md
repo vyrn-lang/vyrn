@@ -3068,12 +3068,13 @@ would target, so it calls `trapAt` itself. Finding 6's `region-depth` is not
 an exception here — its counter stays in the prologue's neighbourhood, but its
 check is inside the body and takes the site like the rest.
 
-`direct.rs` falls from 16,547 lines to 16,532 and `std/runtime.vyrn` rises
-from 1,942 to 1,952: the deletion is fifteen lines of emitter and the addition
-is ten lines of Vyrn, which is the trade §2.3 asks for and not a line count
-worth celebrating. The module BYTES rise, and the reason is worth recording
-rather than hiding: a site that parks two locals and branches is three
-instructions where a site that pushed a pointer and called was two.
+`direct.rs` falls from 16,547 lines to 16,532 at this commit (16,529 after the
+third one below) and `std/runtime.vyrn` rises from 1,942 to 1,952: the
+deletion is fifteen lines of emitter and the addition is ten lines of Vyrn,
+which is the trade §2.3 asks for and not a line count worth celebrating. The
+module BYTES rise, and the reason is worth recording rather than hiding: a
+site that parks two locals and branches is three instructions where a site
+that pushed a pointer and called was two.
 `nbody.wasm` goes from 10,847 to 10,913 bytes, `fannkuch.wasm` from 7,637 to
 7,789, `jsoncodec.wasm` from 49,610 to 49,997 — 0.6, 2.0 and 0.8 per cent.
 The call sites are what the engine paid for, and they are gone.
