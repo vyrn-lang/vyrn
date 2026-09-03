@@ -1639,6 +1639,30 @@ reverse-complement under wasmtime, base and head interleaved, medians of five:
 1.043 s against 1.012 s and 1.171 s against 1.164 s. Details under the plan's
 §6 table.*
 
+*Step 8 landed 2026-09-03 (`track-s`): `region { .. }` is a bump arena.
+`regionEnter` and `regionExit` are Vyrn in `std/runtime`, `strNew` allocates
+from the region's chunks while the emitter routes a `String` there, and the
+wasm emitter's `region_keep`, `region_free` and `region_pop` with their three
+64-word side tables are deleted, 261 lines out of `direct.rs`. A chunk is one
+ordinary block holding the older chunk, its end and the region's allocations;
+the closing brace frees the chunks, not the blocks, and keeps the oldest, so a
+region in a loop asks the allocator nothing after its first turn. The ownership
+test needed no new mechanism: a block the free list hands out carries its class
+in the header, a block the arena hands out carries 0, and `free`'s class-range
+refusal already declines it. The routing stays LEXICAL — the emitter marks
+which allocation is the arena's — because the checker states that an `Array`
+buffer is never the arena's, so the plan's shared-bump reading would reclaim a
+global array grown inside a region under a live binding; that finding is on the
+record in the plan's §6. Parity 41 of 41, residue green, the kernel ratchet at
+0 refused. `census-regions.md` §5a's three shapes at forty million turns under
+wasmtime 46, base and head interleaved, medians of five: one region per
+iteration 0.908 s to 0.513 s with peak working set flat at 13 MB either way,
+which puts it at the no-region line (0.463 s) for the first time; one region
+around the loop 0.968 s to 0.692 s and 1,681 MB to 1,579 MB; no region
+unchanged. The plan's §8 question 1 is answered there too: keep the syntax,
+because a library `Arena` cannot route the allocations a program never names.
+Details under the plan's §6 table.*
+
 *Step 9 landed 2026-09-03 (`track-t`): the traps and the two renderers —
 `trap`, `trap_idx`, `print_i64` and `bool_str` — are Vyrn in `std/runtime`
 (`trapV`, `trapIdx`, `printI64`, `boolStr`, 93 lines) over the plan's §2.3
@@ -2492,7 +2516,10 @@ be the last one landed and the language is better than before it.
    linear judgment already understands: values allocated in it are consumed by
    its close. Whether `region { .. }` keeps its syntax or becomes a library
    type over the runtime's arena is M4's question, and the regions census's
-   verdict on *inferred* regions stands either way.
+   verdict on *inferred* regions stands either way. *Answered by M4 step 8:
+   the arena is real and the recommendation is to keep the syntax. A library
+   type cannot route the allocations a program never names — `a + b`, `@str`,
+   `.copy()` — without an allocator parameter on every one of them.*
 3. **Reference counting.** The linear judgment is the same for unique
    ownership and for precise counting. This RFC keeps unique ownership, because
    the language chose explicit copies. Counting stays available as a runtime

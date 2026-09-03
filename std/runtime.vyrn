@@ -55,6 +55,12 @@
 /// native route. A builtin's twin carries a `V` (`readFileV` for `readFile`),
 /// as `std/text`'s `charCountV` does, because the builtin's name is reserved.
 ///
+/// **Step 8, the regions:** `regionEnter` and `regionExit`, the bump arena of
+/// PLAN-0125-runtime §4.3, which `strNew` allocates from while the emitter
+/// says so. The wasm emitter's `region_keep`/`region_free`/`region_pop` and
+/// their 64 frames of side vector are deleted; the native IR's
+/// `REGION_RUNTIME` stays until step 3 moves the native route.
+///
 /// **Step 9, the traps and the printer:** `trapV`, `trapIdx`, `printI64` and
 /// `boolStr`, over `std/mem`'s `trap` primitive and the `writeAll` step 7 put
 /// here. They are the last functions the wasm emitter hand-emitted; what
@@ -326,13 +332,15 @@ export fn regexRun(s: Int32, table: Int32, start: Int32, accept: Int32) -> Bool 
 // the size). The second header word is never written and reads as zero.
 //
 // The heap's first 480 bytes are the allocator's own: one head per class,
-// 116 words, then the bump offset at 464. The I/O family's cells follow (step
-// 7, the table above its section), and the first block starts sixteen-aligned
-// at 8768. All of it starts at zero, which is what an empty list, an empty heap
-// and an empty buffer are, so nothing initializes it: the emitter's `HEAP`
-// global and its reserved tables are gone with the hand-emitted runtime. A
-// freed block's list link lives in its payload; the eight-byte floor is what
-// makes room for it.
+// 116 words, then the bump offset at 464, then the arena's three words at
+// 468, 472 and 476 (step 8 below). The I/O family's cells follow at 480
+// (step 7, the table above its section), then step 9's digit cell at 8736,
+// and the first block starts sixteen-aligned at 8768. All of it starts at
+// zero, which is what an empty list, an empty heap, an empty buffer and a
+// closed arena are, so nothing initializes it: the emitter's `HEAP` global
+// and its reserved tables are gone with the hand-emitted runtime. A freed
+// block's list link lives in its payload; the eight-byte floor is what makes
+// room for it.
 //
 // `malloc` pops the class's head if there is one, else bumps and grows memory
 // by exactly the pages the new top needs. `free` refuses, silently, a pointer
@@ -340,6 +348,13 @@ export fn regexRun(s: Int32, table: Int32, start: Int32, accept: Int32) -> Bool 
 // data-segment address, and null is the `SmallArray` that never spilled) and
 // a header outside the class range (memory this allocator did not write).
 // Both leak rather than corrupt, which is what the copy it replaces did.
+//
+// THE OWNERSHIP TEST, stated once: the header's class word says which
+// allocator owns a block. A block this list handed out carries a class of 3 to
+// 115; a block the arena of step 8 handed out carries 0. So `free` of an arena
+// block takes the class-out-of-range refusal already written below and does
+// nothing, and the region's closing brace is the only thing that reclaims it
+// (PLAN-0125-runtime §4.3).
 //
 // The request is an `Int64` because every interesting caller computes
 // `count * stride` out of a Vyrn length, which IS an `Int64`, and `push`
@@ -412,6 +427,128 @@ export fn free(p: Int32) {
 }
 
 // ---------------------------------------------------------------------------
+// Step 8, the region arena (PLAN-0125-runtime §4.3; RFC-0004 §4)
+// ---------------------------------------------------------------------------
+//
+// `region { .. }` was a side vector of block pointers freed one at a time. It
+// is a bump arena now: an allocation inside a region is a pointer add, and the
+// closing brace gives every one of them back at once.
+//
+// The arena's three words sit in the allocator's own head bytes, after the
+// bump offset at 464 and before the I/O family's cells at 480:
+//
+//   468  the chunk being bumped, 0 when the arena has none
+//   472  the next free byte in that chunk
+//   476  the routing flag: nonzero while the emitter has routed a `String`
+//        in here. `strNew` reads it; `malloc` does not, so a program with no
+//        region pays nothing at all
+//
+// A chunk is one ordinary `malloc` block: `next` (the older chunk) at 0, the
+// end address at 4, and the region's blocks from 8. Blocks are bumped inside
+// it; a chunk that cannot fit the request is followed by a new one, at least
+// 4 KiB or as large as the request needs.
+//
+// ROUTING IS LEXICAL, and this flag is how the emitter says so. The emitter
+// raises it around exactly the allocating calls it already marked as the
+// arena's (`Fn_::arena_route` in `direct.rs`, whose site table is the rule),
+// and lowers it again; `strNew`, the funnel every `String` block comes
+// through, is what reads it. Everything else allocated while a region is open
+// — an `Array` buffer, a `Map`, a callee's own `String` — is the free list's,
+// is freed by the ownership walk, and outlives the region if its binding does.
+// Reading the routing off an open region instead would put those blocks in the
+// arena, and `examples/regionescape.vyrn`'s callee route and a global
+// `Array` grown inside a region would both dangle at the brace: the checker
+// permits them because `contains_heap` says an `Array` buffer is never the
+// arena's (`checker.rs`).
+//
+// `regionEnter` answers the bump top; `regionExit` puts it back and frees the
+// chunks the region added. Two rules keep the pointers honest:
+//
+//   1. A block the arena hands out carries a class word of 0, so `free` of one
+//      is the silent refusal above. That is the whole of the ownership test.
+//   2. A `return` out of a region carries a block out with it, so the emitter
+//      does NOT call `regionExit` on that edge — the bump stays where it is and
+//      the region's blocks live on, which is what the side vector's own pop
+//      path chose (`__vyrn_region_pop`) for the same reason.
+//
+// The oldest chunk is never freed while it is a standard 4 KiB one. A
+// `region` inside a loop then asks the allocator nothing after its first turn,
+// which is the flat line the extra gate of PLAN-0125-runtime §6 step 8
+// measures. The cost is one retained 4 KiB chunk; an oversized chunk goes back
+// with the rest.
+
+/// The bump inside the open region's chunks. `strNew` routes here while the
+/// flag at 476 is up; the chunk it needs when it is full is an ordinary
+/// `malloc` block, which the flag does not touch.
+fn arenaAlloc(n: Int64, base: Int32) -> Int32 {
+    if UInt64(n) > 2147483648 {
+        panic("out of memory")
+    }
+    let size = Int32((n + 7) & -8) + 8
+    let mut c = Int32(load32(base + 468))
+    let mut cur = Int32(load32(base + 472))
+    // In 64 bits, because a chunk near the top of a wasm32 memory would wrap
+    // the sum — the reason `malloc`'s own bump is judged in 64 bits.
+    let full = c == 0 || Int64(UInt32(cur)) + Int64(size) > Int64(load32(c + 4))
+    if full {
+        let mut body = size
+        if body < 4096 {
+            body = 4096
+        }
+        let nc = malloc(Int64(body) + 8)
+        store32(nc, UInt32(c))
+        store32(nc + 4, UInt32(nc + 8 + body))
+        store32(base + 468, UInt32(nc))
+        c = nc
+        cur = nc + 8
+    }
+    // Class 0: the ownership test above, written at the one place that mints
+    // an arena block.
+    store32(cur, 0)
+    store32(base + 472, UInt32(cur + size))
+    return cur + 8
+}
+
+/// `region_enter`'s arena half: the bump top, which `regionExit` puts back.
+/// The nesting depth and its `region nesting exceeds 64` trap stay with the
+/// emitter, because a program that traps at the limit must trap where it did.
+export fn regionEnter() -> Int32 {
+    return Int32(load32(heapBase() + 472))
+}
+
+/// `region_exit`: give back everything bumped since `mark`. The chunks the
+/// region added are freed, down to the one `mark` points into or to the
+/// oldest, whichever comes first.
+export fn regionExit(mark: Int32) {
+    let base = heapBase()
+    let mut c = Int32(load32(base + 468))
+    while c != 0 {
+        let holds = UInt32(mark) >= UInt32(c + 8) && UInt32(mark) <= UInt32(load32(c + 4))
+        if holds {
+            break
+        }
+        let next = Int32(load32(c))
+        // The oldest chunk stays, so a `region` in a loop asks the allocator
+        // nothing after its first turn — but only at the standard size, or a
+        // program whose first arena request was 100 MB would hold 100 MB for
+        // the rest of its life.
+        if next == 0 && Int32(load32(c + 4)) - c - 8 == 4096 {
+            break
+        }
+        free(c)
+        c = next
+    }
+    store32(base + 468, UInt32(c))
+    // `mark` is below the chunk that is left when the region opened on an
+    // empty arena: the whole of the retained chunk is free again.
+    let mut cur = mark
+    if c != 0 && UInt32(cur) < UInt32(c + 8) {
+        cur = c + 8
+    }
+    store32(base + 472, UInt32(cur))
+}
+
+// ---------------------------------------------------------------------------
 // Step 4, the allocating strings (PLAN-0125-runtime §6)
 // ---------------------------------------------------------------------------
 //
@@ -426,7 +563,16 @@ export fn free(p: Int32) {
 /// the address of the bytes. `malloc` judges the size, so the one 64-bit
 /// length in the module (a host-named file size) is judged here too.
 export fn strNew(len: Int32, cap: Int32) -> Int32 {
-    let base = malloc(Int64(cap) + 9)
+    // Step 8: every `String` block an engine allocates comes through here, so
+    // this is the one place the region arena has to be routed to, and `malloc`
+    // pays nothing for it. See the arena's comment above.
+    let heap = heapBase()
+    let mut base: Int32 = 0
+    if load32(heap + 476) != 0 {
+        base = arenaAlloc(Int64(cap) + 9, heap)
+    } else {
+        base = malloc(Int64(cap) + 9)
+    }
     store32(base, UInt32(len))
     store32(base + 4, UInt32(cap))
     let p = base + 8

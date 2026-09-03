@@ -963,6 +963,101 @@ as the copies were, and the buffer behind each is the same 4,096 bytes at a
 different address. `fasta.wasm` grows 81 bytes and `revcomp.wasm` 301, the
 readers each program links but does not reach having been swept before too.
 
+**Results, step 8 (2026-09-03, branch `track-s`).** `region { .. }` is a bump
+arena. `regionEnter` and `regionExit` are Vyrn in `std/runtime.vyrn` (122 lines
+with their comment, over `load32`, `store32`, `heapBase`, `malloc` and `free`),
+`strNew` allocates from the arena while the emitter says to, and the wasm
+emitter's `region_keep`, `region_free` and `region_pop` with their three
+64-word side tables are deleted: 261 lines out of `direct.rs`, 96 in (two rows
+of the `VyrnRt` table, one mark local per open region, and the flag store).
+
+The arena is a chain of chunks. A chunk is one ordinary `malloc` block of at
+least 4 KiB holding the older chunk at 0, its own end at 4, and the region's
+blocks bumped from 8. `regionEnter` answers the bump top; `regionExit` puts it
+back and frees the chunks the region added, down to the one the mark points
+into. The OLDEST chunk is not freed while it is a standard 4 KiB one, so a
+`region` in a loop asks the allocator nothing after its first turn, which is
+what makes the gate's row flat; an oversized chunk goes back with the rest, so
+a program whose first arena request was 100 MB does not hold 100 MB for the
+rest of its life. The arena's three words — the chunk, the bump, the routing
+flag — are at 468, 472 and 476, inside the 480 bytes §4.2 already gave the
+allocator, so step 7's cells still start at 480 and nothing above them moves:
+the first block stays where the step that last placed it put it.
+
+Three differences from §4.3, and the first is the one that matters.
+
+1. **The arena is its own space, not the allocator's own bump, because the
+   routing is LEXICAL.** §4.3 says `malloc` bumps only while a region is open
+   and that an address compare against the saved top decides who owns a block.
+   That is not sound against the partition this backend already draws. The
+   emitter routes at the ALLOCATION SITE — `Fn_::str_owned`, now
+   `Fn_::arena_route` — and everything it does not mark is the free list's and
+   the ownership walk's, including an `Array` buffer: `checker.rs`'s
+   `contains_heap` says in as many words that an `Array` buffer is never the
+   arena's, so the escape guard lets a global `Array<Int64>` be grown inside a
+   region, and a twenty-line program that does it compiles and runs today.
+   Under one shared bump that buffer would sit above the saved top and the
+   closing brace would hand it back under a live binding. So the arena has its
+   own chunks, and the emitter raises one word — `heapBase() + 476`, the only
+   address the module and the emitter both name — around exactly the calls it
+   marked before.
+2. **The ownership test is the header's class word, and it was already
+   written.** A block the free list hands out carries a class of 3 to 115; a
+   block the arena hands out carries 0. `free`'s existing class-out-of-range
+   refusal is therefore what makes a `free` of an arena block a no-op, inside
+   the region and outside it. No second test, no header bit, no address range.
+3. **`regionPopExcept` is not built.** A `return` out of a region calls neither
+   function: the bump stays where it is and the region's blocks live on, which
+   is the leak the side vector's own pop path chose for the same reason.
+   §4.3's copy-the-kept-block cannot be written in general — the value a
+   `return` carries out is not always one block; a record of two `String`s is
+   two — and the leak it would replace is the same set of blocks either engine
+   leaks today. Because the bump is not rewound, a function that returns out of
+   a region in a loop pays the bytes it carried out and not a chunk a turn.
+
+Where the flag is READ is a measured decision, not a taste. It was in `malloc`
+first, which is one load and one branch on every allocation a program makes;
+the no-region shape of the gate below went 0.466 s to 0.544 s on that, 13
+percent, which is 1.5 ns times forty million. `strNew` is the funnel every
+`String` block comes through and is the only allocation a region routes, so the
+test moved there, and `malloc` is byte for byte what step 2 wrote.
+
+The 64-frame nesting counter and its `region nesting exceeds 64` trap stay
+inline in the emitter: a program that traps at the limit must trap where it
+did. The interpreter and the text-IR native route are untouched, so the residue
+ratchet still measures the allocator this step did not change.
+
+Gates: fmt, workspace, kernel (the ratchet held: 12,637 instances accepted, 0
+refused), effects, lowered (1,207 synthesized, under the 1,400 ceiling), the
+nine `vyrn-cli` suites, parity 41 of 41, residue, the cross-engine generator
+gate, `doc --verify` (41 files unchanged), site export 33 of 34 (the version
+test fails on local fixture data, as at steps 4, 5 and 6). The extra gate,
+`census-regions.md` §5a's three shapes at the census's own forty million turns,
+under wasmtime 46, the same base `.wasm` on every row, base and head
+interleaved, medians of five on a quiet machine, peak working set sampled from
+`PeakWorkingSet64`:
+
+| shape | base peak | head peak | base wall | head wall |
+|---|---:|---:|---:|---:|
+| no region — the walk frees each temporary | 12,968 KiB | 13,032 KiB | 0.466 s | 0.463 s |
+| one region per iteration | 13,028 KiB | 13,044 KiB | 0.908 s | 0.513 s |
+| one region around the loop | 1,681,460 KiB | 1,579,488 KiB | 0.968 s | 0.692 s |
+
+A second round agreed: 0.454 s and 0.467 s, 0.918 s and 0.486 s, 0.959 s and
+0.735 s. The census's own rows were native and are not comparable; these are
+the same three shapes under the engine this step changes. The per-iteration
+shape is where the gate looks. It is flat in memory, as it always was, and it
+sits at the no-region line in time for the first time: 0.513 s against
+0.463 s, 11 percent, where the base was 0.908 s, 95 percent. What is left of
+the 26 percent the census measured is the two calls a turn, 1.2 ns each. The
+region around the loop is not flat and cannot be, because nothing is freed
+until the brace, but it holds 6 percent fewer bytes and runs 29 percent faster:
+a chunk of blocks costs one header and one `free` per chunk rather than one of
+each per block, and there is no side vector to double. The no-region shape does
+not open an arena and does not move.
+
+§8 question 1 (`region`'s spelling) is answered under §8.
+
 **Results, step 9 (2026-09-03, branch `track-t`).** The last four functions the
 wasm emitter wrote by hand are Vyrn in `std/runtime.vyrn`: `trapV`, `trapIdx`,
 `printI64` and `boolStr`, with `digitsAt` under the two printers (93 lines with
@@ -1115,6 +1210,19 @@ written as a test.
    corpus uses and the census; a type makes the arena a value the linear
    judgment tracks like any other and removes `region_depth` from the
    emitters. Not decided here; the runtime is the same in both.
+   *Recommendation from step 8 (§6, results), and it is a recommendation, not a
+   change: keep `region { .. }`.* The step measured what the two spellings have
+   to route. A region's allocations are the ones a program never names — `a +
+   b`, `@str`, `.copy()`, an interpolation's spine — and a value of type
+   `Arena` is reachable only by a call that takes it, so a library type routes
+   none of them unless every implicit allocation grows an allocator parameter.
+   That is a larger language change than the arena, and the results block says
+   why the cheap alternative is closed: the routing may not be read off an open
+   region instead, because the checker states that an `Array` buffer is never
+   the arena's. `region_depth` does not leave the emitters either way, because
+   it is what the escape guard and the release suppression read, and an `Arena`
+   value would need the same question answered under another name. Reopen it if
+   the language ever gains that parameter.
 2. **Class-aware `realloc`.** §4.2 permits it and defers it to a probe. The
    probe is `census-strings.md`'s append builder at the sizes where doublings
    stay in class.
