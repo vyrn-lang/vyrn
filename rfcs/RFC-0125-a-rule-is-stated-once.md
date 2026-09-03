@@ -2402,6 +2402,77 @@ regenerated twice in release, once with the base's `direct.rs` and once with
 this slice's, and the two files are identical. The committed file is left
 alone.
 
+#### The fourth slice (2026-09-04): the two defects the census recorded
+
+The third slice found two things and repaired neither. This slice repairs
+both. Nothing is deleted, and no emitted byte changes.
+
+**The reached `extern`.** A program that calls an `extern fn` no host answers
+must fail the same way on every engine. It did not. Read off
+`examples/externdemo.vyrn`, before:
+
+| engine | standard error | exit |
+|---|---|---|
+| interpreter | ``error: extern `jsNow` is not available on this target`` | 1 |
+| native | ``error: extern `jsNow` is not available on this target`` | 1 |
+| `--engine wasm` | `error: error while executing at wasm backtrace:` | 1 |
+
+After, all three print ``error: extern `jsNow` is not available on this
+target`` and exit 1.
+
+**Where the rule lives, and why there.** In the HOST, not in the emitter and
+not in a fourth copy of the wording. `vyrn-cli`'s embedded engine
+(`src/wasmrun.rs`) now defines every import in the `vyrn` namespace as a
+function that writes `vyrn_frontend::interp::extern_unavailable`'s sentence to
+fd 2 and exits 1, and it does that before `define_unknown_imports_as_traps`
+sees the module. Two other places were possible and both are wrong:
+
+- **The emitter.** A trap stub in the module would delete the import, and the
+  import is the whole point of RFC-0012 — a browser page fills it, and
+  `std/rpc`'s `vyrnRpcCall` is that import in three client artifacts. An
+  emitter that refuses on the author's behalf refuses in the browser too.
+- **A new wording.** There is one table since RFC-0101 M5 and one sentence for
+  this refusal since RFC-0012. The host reads it; it does not respell it. This
+  is the same shape native has: `toolchain::extern_trap_stubs` writes a C stub
+  per declaration from the same function.
+
+The sixth M6 slice decided that the `extern` row is a CALL, and the emitter
+agrees: `Module::sweep` drops an import nothing reaches, so a `vyrn` import in
+a loaded module is an `extern` the program REACHES. Naming it is therefore
+never a refusal of a program that would have run.
+
+**What the registries say now.** `tests/fixtures.rs` no longer skips
+`WASM_ONLY`, and `examples/expected/externdemo.{stdout,stderr,exit}` are
+recorded: the corpus is 204 of 204 compared, not 203 with one skipped. The
+list itself stays, because it is true of the harnesses that drive an OUTSIDE
+tool — parity's wasm column is the `wasmtime` CLI and `route.rs`'s is wasm2c,
+and neither knows the namespace. Its doc comment says which harness it binds
+and which it does not. The census row above reads `yes`, and `fixtures.rs`'s
+`CENSUS` reads `yes` with it.
+
+**The export's out-directory.** `site/export.vyrn` read `args()[1]`, and
+`args()` excludes the program's name (RFC-0014), so `vyrn run
+site/export.vyrn dist` fell to the default and wrote `out/` while printing
+`exported .. to out`. The read is one function now, `outDirFrom`, with the
+convention in its doc comment and a `test` block on it — the export into
+`dist` writes 241 files there and creates no `out/`, measured. The workflow's
+argument is unchanged and now takes effect: it passes `out`, which is also the
+default, which is why CI never saw the bug. The export produces the same 241
+files it did.
+
+**Gates.** In the order §1.4 requires, one at a time: `cargo fmt --all
+--check`; the release build; the `fixtures`, `boundaries` and `traps` suites;
+`kernel`, `coretables`, `typed` and `effects`; `audience`, `floor`,
+`contracts`, `fieldstore`, `places`, `simd`, `wasmabi`, `wasmio` and
+`bytesink`; `vyrn-frontend`; the workspace less the peak-RSS tests; those
+serially; parity in release with `--ignored`, 41 of 41; the residue ratchet;
+the cross-engine generator test with a fresh cache; `vyrn doc --std --verify`;
+and `vyrn test` over the site's files, 35 blocks in `export.vyrn` where there
+were 34. `VYRN_WASM_MANIFEST=check` is red for the 172 examples it was red for
+before this slice: the manifest is stale on this branch and the integrator
+regenerates it after the merge. This slice adds no trap stub to any module and
+changes no emitted byte, so it is not what makes that gate red.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
