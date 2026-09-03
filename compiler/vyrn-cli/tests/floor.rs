@@ -410,20 +410,31 @@ fn the_shim_implemented_externs_are_not_a_capability() {
     assert!(ok, "a clock is not a host import:\n{err}");
 }
 
-/// RFC-0125 M6, fourth slice: the `stdin` row is decided by the effect
-/// judgment, and the refusal is the pass's own words. `VYRN_NO_JUDGE=1`
+/// RFC-0125 M6, fourth slice: the `stdin` and `args` rows are decided by the
+/// effect judgment, and the refusal is the pass's own words. `VYRN_NO_JUDGE=1`
 /// puts both rows back in the pass, and the two texts must be one text —
 /// which is what "the rule moved, the refusal did not" means.
 #[test]
 fn a_moved_row_refuses_in_the_words_the_pass_used() {
-    for (name, body) in [(
-        "stdin",
-        "fn main() -> Int64 {
+    for (name, body) in [
+        (
+            "stdin",
+            "fn main() -> Int64 {
                  print(match readLine() { Some(s) => s, None => \"\", })
     return 0
 }
 ",
-    )] {
+        ),
+        (
+            "args",
+            "fn main() -> Int64 {
+    let a = args()
+    print(a[0])
+    return 0
+}
+",
+        ),
+    ] {
         let dir = scratch(name);
         write(&dir, "client/boot.vyrn", body);
         write(

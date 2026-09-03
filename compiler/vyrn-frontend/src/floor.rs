@@ -143,7 +143,6 @@ pub const CALLS: &[(&str, Capability)] = &[
     ("fsyncFile", Capability::Fs),
     ("listDir", Capability::Fs),
     ("listDirKinds", Capability::Fs),
-    ("args", Capability::Args),
 ];
 
 /// The rows a judgment answers — RFC-0125 §3 M6, fourth slice.
@@ -156,7 +155,8 @@ pub const CALLS: &[(&str, Capability)] = &[
 /// reaches the capability, and [`decide`] drops the rows it does not confirm.
 /// When none is installed — the LSP, `VYRN_NO_JUDGE=1` — the pass answers for
 /// them exactly as it did.
-pub const JUDGED: &[(&str, Capability)] = &[("readLine", Capability::Stdin)];
+pub const JUDGED: &[(&str, Capability)] =
+    &[("readLine", Capability::Stdin), ("args", Capability::Args)];
 
 /// Every capability `program` carries, in a stable order.
 ///
