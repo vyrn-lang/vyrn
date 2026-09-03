@@ -124,15 +124,18 @@ pub const ROWS: &[Row] = &[
         carriers: &[Carrier::Interp, Carrier::Native, Carrier::Wasm],
     },
     // ---- the user's own predicate --------------------------------------
+    // One carrier each since RFC-0125 §3 M6's fourth slice: the predicate and
+    // its refusal are a generated Vyrn function per declaration
+    // (`vyrn_frontend::ctor`), and all three engines call it.
     Row {
         rule: "where-scalar",
         rfc: "RFC-0003",
-        carriers: &[Carrier::Interp, Carrier::Native, Carrier::Wasm],
+        carriers: &[Carrier::Vyrn],
     },
     Row {
         rule: "where-record",
         rfc: "RFC-0003",
-        carriers: &[Carrier::Interp, Carrier::Native, Carrier::Wasm],
+        carriers: &[Carrier::Vyrn],
     },
     // ---- what a String may hold ----------------------------------------
     Row {
