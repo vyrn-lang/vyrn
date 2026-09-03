@@ -1297,7 +1297,9 @@ impl<'a> Cx<'a> {
         let Some(f) = &self.facts else {
             return self.plan.discarded_result(node);
         };
-        f.discarded.contains(&self.plan.key_of(node))
+        // As `Cx::arg_drop_row`: a node this pass of the core states nothing
+        // for keeps the plan's answer.
+        f.discarded.contains(&self.plan.key_of(node)) || self.plan.discarded_result(node)
     }
 
     /// RFC-0114 M1 read off the core (RFC-0125 §3 M3, the
@@ -1310,11 +1312,15 @@ impl<'a> Cx<'a> {
         let Some(f) = &self.facts else {
             return self.plan.arg_drop(node);
         };
-        let hit = f.arg_drops.contains(&self.plan.key_of(node));
-        if hit {
+        if f.arg_drops.contains(&self.plan.key_of(node)) {
             self.plan.acknowledge(node);
+            return true;
         }
-        hit
+        // A node the core states nothing for keeps the plan's answer, the way
+        // every other reader here does: a body the core cannot lower states
+        // no row at all, and `valuecount.vyrn` in the parity suite is one —
+        // a field read off a string literal is a place this pass refuses.
+        self.plan.arg_drop(node)
     }
 
     /// RFC-0114 Rule N read off the core (RFC-0125 §3 M3, the
