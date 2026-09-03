@@ -54,7 +54,16 @@
 //! (`rfcs/probes-0125/alias-then-write-through-the-root.vyrn`). RFC-0090:
 //! all mutation is exclusive. Not modelled: what a `modify` argument does to
 //! the aliases of what it is handed (`examples/tree.vyrn`'s `freeNode` reads
-//! a handle out of the node it then removes, and a handle is safe to hold).
+//! a handle out of the node it then removes, and a handle is safe to hold);
+//! `rhs` says what the census measured when the rule was tried.
+//!
+//! A borrow with no place to be an alias of carries its kind instead
+//! ([`crate::core::BorrowKind`], RFC-0125 §3 M3, the census): a `read` or
+//! `modify` parameter, a second name for one, and a lambda frame's capture.
+//! A take of one is refused in the checker's words — the caller owns a
+//! parameter (RFC-0089 rule 2), and the frame that made a capture owns it
+//! (RFC-0037). Module state is neither: a read of a global is an alias of
+//! it, and RFC-0013's own sentence says why nothing may take it.
 //!
 //! Every other name the body does not own — a heapless value, a pattern
 //! binder of a non-consuming switch — is invisible here.

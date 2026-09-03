@@ -1526,10 +1526,12 @@ checker goes. *Nothing* means the kernel accepts the program. *Not the move
 check's* means the refusal survives `VYRN_NO_MOVECHECK=1` because another
 pass gives it.
 
-The table below is the state before this slice closed anything. It is
+The table below is the state AFTER this slice closed what it could. It is
 printed from the test's own rows (`cargo test -p vyrn-cli --test refusals --
 --ignored --nocapture the_census_as_a_table`), so the prose and the
-assertion cannot drift apart by a transcription.
+assertion cannot drift apart by a transcription. Before the slice the column
+read: 6 the same, 10 its own words, 16 nothing, 2 not the move check's. It
+now reads 11, 15, 6 and 2.
 
 | # | rule | RFC | the checker's sentence | the kernel |
 |---|---|---|---|---|
@@ -1542,16 +1544,16 @@ assertion cannot drift apart by a transcription.
 | 07 | rule 1: a move into a binding, and a use of the source after it | RFC-0089 | `s` was moved here into the binding `t` / line 5: ... and `s` is used again here | the same |
 | 08 | `consume` reaches a field, never an element | RFC-0093 | `xs[0]` may not be taken — an element is not a place a take reaches | nothing |
 | 09 | `consume` with nothing to take | RFC-0093 | `consume` here has nothing to take — the value is already owned, so there is no place to leave a hole in | nothing |
-| 10 | module state may not be taken: a prefix `consume` | RFC-0013 | module state `names` may not be consumed by a take — nothing may take ownership of module state (it lives for the whole module and is never dropped) | nothing |
-| 11 | rule 2: a prefix `consume` of a `read` parameter | RFC-0089 | `ys` may not be consumed — it is a `read` parameter | nothing |
-| 12 | module state may not be taken: a `consume` parameter | RFC-0013 | module state `names` may not be passed to a `consume` parameter via `take(..)` — nothing may take ownership of module state (it lives for the whole module and is never dropped) | its own words |
-| 13 | rule 2: a whole `read` parameter to a `consume` parameter | RFC-0089 | `ys` may not be passed to a `consume` parameter via `take(..)` — it is a `read` parameter | nothing |
+| 10 | module state may not be taken: a prefix `consume` | RFC-0013 | module state `names` may not be consumed by a take — nothing may take ownership of module state (it lives for the whole module and is never dropped) | its own words |
+| 11 | rule 2: a prefix `consume` of a `read` parameter | RFC-0089 | `ys` may not be consumed — it is a `read` parameter | its own words |
+| 12 | module state may not be taken: a `consume` parameter | RFC-0013 | module state `names` may not be passed to a `consume` parameter via `take(..)` — nothing may take ownership of module state (it lives for the whole module and is never dropped) | the same |
+| 13 | rule 2: a whole `read` parameter to a `consume` parameter | RFC-0089 | `ys` may not be passed to a `consume` parameter via `take(..)` — it is a `read` parameter | the same |
 | 14 | rule 2: a projection to a `consume` parameter | RFC-0092 | `d.title` may not be passed to a `consume` parameter via `take(..)` — it is read out of a place that owns it | its own words |
-| 15 | module state may not be taken: a `return` | RFC-0013 | `names` may not be returned — it is module state, which nothing may take, and a return is owned | its own words |
+| 15 | module state may not be taken: a `return` | RFC-0013 | `names` may not be returned — it is module state, which nothing may take, and a return is owned | the same |
 | 16 | rule 2 at the return: a field of a `read` parameter | RFC-0089 | `d.title` may not be returned — it is a `read` parameter, and a return is owned | its own words |
-| 17 | an exported function owns its result | RFC-0012 | `s` may not be returned from an exported function — it is a `read` parameter, and the JS caller releases what it is handed | nothing |
-| 18 | rule 2 at the return: a whole `read` parameter | RFC-0089 | `ys` may not be returned — it is a `read` parameter, and a return is owned | nothing |
-| 19 | rule 2 through a wrapper: a `read` parameter put into the result | RFC-0089 | `s` may not be put into `Some(..)` — it is a `read` parameter | nothing |
+| 17 | an exported function owns its result | RFC-0012 | `s` may not be returned from an exported function — it is a `read` parameter, and the JS caller releases what it is handed | its own words |
+| 18 | rule 2 at the return: a whole `read` parameter | RFC-0089 | `ys` may not be returned — it is a `read` parameter, and a return is owned | the same |
+| 19 | rule 2 through a wrapper: a `read` parameter put into the result | RFC-0089 | `s` may not be put into `Some(..)` — it is a `read` parameter | its own words |
 | 20 | rule 1 at the drop: what a `consume` parameter took is gone | RFC-0089 | `a` is dropped here but was already consumed by `take(..)` on line 6 | its own words |
 | 21 | rule 4 at the drop: the place that owns a value releases it | RFC-0089 | `owned` may not be dropped — it is read out of a place that owns it | its own words |
 | 22 | `drop` releases the whole binding, and a take left a hole | RFC-0093 | `p` may not be dropped — `p.name` was taken out of it on line 17, and `drop` releases the whole binding | nothing |
@@ -1559,14 +1561,14 @@ assertion cannot drift apart by a transcription.
 | 24 | a closure that outlives the call may not capture a borrow | RFC-0037 | `s` may not be captured by a closure that outlives this call — it is a `read` parameter | nothing |
 | 25 | rule 1 across a back edge | RFC-0089 | `x` is consumed by `take(..)` inside a loop, so it would be used again on the next iteration | the same |
 | 26 | a rebuilding builtin takes its receiver | RFC-0125 | `mt` is read out of `h.meta` here — a place that owns it / line 7: ... and `push(..)` takes `mt`, so `mt` must be a value of its own | the same |
-| 27 | rule 2: a `read` parameter to a builtin that declares `consume` | RFC-0089 | `xs` may not be stored into `fromArray(..)` — it is a `read` parameter | nothing |
-| 28 | a closure's result is its caller's, and a capture is not its to give | RFC-0037 | `s` may not be returned from a closure — it is a captured binding, and the closure's result is its caller's | nothing |
+| 27 | rule 2: a `read` parameter to a builtin that declares `consume` | RFC-0089 | `xs` may not be stored into `fromArray(..)` — it is a `read` parameter | its own words |
+| 28 | a closure's result is its caller's, and a capture is not its to give | RFC-0037 | `s` may not be returned from a closure — it is a captured binding, and the closure's result is its caller's | the same |
 | 29 | module state may not be taken: `for .. in consume` | RFC-0013 | module state `names` may not be consumed by a `for` loop — nothing may take ownership of module state (it lives for the whole module and is never dropped) | its own words |
 | 30 | a must-use obligation is discharged on every path | RFC-0075 | `s` is a `Stream` and is never disposed | nothing |
 | 31 | a must-use obligation is discharged exactly once | RFC-0075 | `s` is a `Stream` and is disposed more than once | its own words |
 | 32 | a value the region allocated may not be stored where it outlives the region | RFC-0004 §4 | cannot store a heap value into `kept`, which outlives the enclosing `region` (it would dangle when the region frees). Move `kept` inside the region, or compute a non-heap result to carry out. | not the move check's |
 | 33 | a `consume` parameter may not take a value the region frees | RFC-0004 §4 | cannot hand a heap value to argument 1 of `take`, which is `consume`, inside a `region`. The region frees the value at its closing brace, so the callee cannot own it. Move the call out of the region, or pass a value that holds no heap. | not the move check's |
-| 34 | rule 2: a `read` parameter into a builtin's `consume` argument | RFC-0089 | `s` may not be stored into `push(..)` — it is a `read` parameter | nothing |
+| 34 | rule 2: a `read` parameter into a builtin's `consume` argument | RFC-0089 | `s` may not be stored into `push(..)` — it is a `read` parameter | its own words |
 
 Three things the census found before a line of kernel code changed.
 
@@ -1584,6 +1586,80 @@ Three things the census found before a line of kernel code changed.
   are module state, and the kernel refuses each as a place read: "read out
   of `names`, a place that owns it". True, and not RFC-0013's sentence,
   which names the reason the rule exists.
+
+**What the slice closed, rule family by rule family.**
+
+- **A `read` parameter taken whole** (rows 11, 13, 17, 18, 19, 27, 34, and
+  28 with it). A parameter is a borrow with no place to be an alias of, so
+  the alias table never saw one. The core carries its kind instead
+  (`core::BorrowKind`), which is the capability and the parameter's own
+  spelling, and the kernel refuses a take of it — a `consume` argument, a
+  `return`, a store, a literal part — in the checker's words. `let t = s`
+  carries the kind on, so a second name says so. Two exceptions the rule
+  needs: a `consume` parameter is not a borrow, and neither is a parameter
+  whose type carries a must-use obligation, because RFC-0075 M1 states that
+  "a stream PARAMETER carries the obligation into the callee" whatever the
+  capability says — without that, eleven corpus instances of
+  `boxStream(s)` were refused.
+- **Module state** (rows 10, 12, 15, 29). `consume <global>` was a gap, so
+  the whole body went unjudged; it lowers as a read of the global now, like
+  every other read of one. The kernel words a take of a whole global with
+  RFC-0013's own sentence, which names the reason: the global lives for the
+  whole module and nothing drops it, so there is no owner to take from.
+- **A capture** (row 28). A lambda frame's captures carry
+  `BorrowKind::Capture`, and a `return` of one gets RFC-0037's sentence.
+- **The `drop` of a borrow** (rows 21 and 29). A release is a take, so a
+  `drop` of an alias is refused as one; the sentence is the checker's and
+  the line is the binding's, because a `Drop` in the core carries none.
+
+**What the slice did not close, and why.**
+
+- **Region escape** (rows 32, 33). Nothing is owed. The rule is
+  `checker.rs`'s (`region_store_guard`, `region_consume_guard`), it survives
+  `VYRN_NO_MOVECHECK=1`, and the close-out's attribution of it to
+  `movecheck.rs` was wrong.
+- **A closure that outlives the call** (row 24). Whether a closure escapes
+  is a lifetime question, and §2.2 has no lifetimes on purpose — borrowing
+  is second-class so that the kernel stays small. It stays the checker's
+  until something states the rule without them.
+- **`consume` with nothing to take, and `consume` of an element** (rows 9,
+  8). Both are about the KEYWORD, not about ownership: `consume make()` and
+  `make()` denote the same value, and the kernel has no keywords. The rule
+  belongs where the desugar is written, which is the core.
+- **A `modify` argument's effect on aliases.** Tried and measured. Ending
+  every alias that overlaps a `modify` argument refuses three corpus
+  programs, all the same shape: `freeNode` in `tree.vyrn`,
+  `linkedlist.vyrn` and `freelist.vyrn` reads `t[h].left` — an
+  `Option<Handle<T>>`, which `owns_heap` calls heap because a wide payload
+  travels boxed (round twenty-nine) — and then calls `remove(t, h)`, which
+  shuffles two index arrays and never touches the payload the read points
+  into. So the refusal is a false positive, and the rule needs to know WHICH
+  place a callee writes. That is the per-argument retention over the call
+  graph (`ArgVerdict`, `note_handover`) the deletion track already owes, and
+  it is where this rule belongs.
+- **Rows 30 and 31**, the must-use obligation, and **row 22**, a `drop`
+  after a hole. Not attempted this slice.
+- The `fix:` menus, the `sinks` write-back exception, and `own.rs`'s
+  per-node tables are the next slice's, as the close-out above says. The
+  write-back exception is now marked rather than modelled: a rebuilding
+  builtin's receiver passed by name carries `Rhs::Call::write_back`, and the
+  kernel exempts that one take, so a `modify` parameter may still be one.
+
+**Three corpus programs were refused by the kernel and accepted by the
+checker, and all three were defects.** Each is the checker's recorded blind
+spot — a generic body has no type for `T` until the instance, and the
+checker does not re-run per instance — so each is a rule 2 violation nobody
+had seen.
+
+| program | what it wrote | what it did |
+|---|---|---|
+| `examples/generics.vyrn` | `fn id<T>(x: T) -> T { return x }` | `id("polymorphic")` returned the caller's buffer; the reduced form exits `0xC0000374`, STATUS_HEAP_CORRUPTION |
+| `examples/regex.vyrn` | `return Username(name)` on a `read` parameter | a validated constructor hands its argument on as the result, so the caller and the result released one buffer; same exit code |
+| `examples/polyrecursion.vyrn` | `return P { a: x, b: x }` | two fields out of one `read` parameter — two owners for one value |
+
+Each took the `.copy()` the rule names, and no output changed. The kernel
+tally: 18,343 instances accepted, 0 refused, 0 unlowered, so the ratchet is
+still 0.
 
 ### M4 — the runtime in Vyrn
 
