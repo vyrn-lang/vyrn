@@ -155,6 +155,38 @@ fn blackbox_inside_bench_and_test_is_accepted() {
     assert_eq!(norm(&out.stdout), "ok\n");
 }
 
+#[test]
+fn a_branch_that_yields_blackbox_runs_under_both_engines() {
+    // RFC-0125 §3 M5's census, the one defect it found: the direct backend
+    // lowers `blackBox(v)` as `v` but held no type row for the name, so an `if`
+    // arm that yielded one was refused where the interpreter ran it.
+    // `examples/langbench.vyrn` hit it; the reduction is
+    // `rfcs/probes-0125/branch-yielding-blackbox.vyrn`.
+    let dir = scratch("bb-branch");
+    let file = dir.join("b.vyrn");
+    std::fs::write(
+        &file,
+        "bench \"a branch that yields blackBox\" {\n\
+         \x20   let n = if true { blackBox(3) } else { 0 }\n\
+         \x20   blackBox(n)\n\
+         }\n",
+    )
+    .unwrap();
+    let one = |engine: Option<&str>| {
+        let mut cmd = vyrn();
+        cmd.arg("bench");
+        if let Some(e) = engine {
+            cmd.arg("--engine").arg(e);
+        }
+        let out = cmd.arg(&file).arg("--check").output().unwrap();
+        (out.status.code(), norm(&out.stdout), norm(&out.stderr))
+    };
+    let interp = one(None);
+    let wasm = one(Some("wasm"));
+    assert_eq!(interp.0, Some(0), "interp stderr:\n{}", interp.2);
+    assert_eq!(wasm, interp, "the engines disagree");
+}
+
 // ---- strip guarantee --------------------------------------------------------
 
 #[test]
