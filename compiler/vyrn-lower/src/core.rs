@@ -146,10 +146,11 @@ impl BorrowKind {
 ///
 /// The statements that carry one: [`St::Store`] (its `Stmt::Assign`,
 /// `Stmt::SetField` or `Stmt::IndexSet` node), a [`St::Drop`] of a discarded
-/// result (its `Stmt::Expr` node), a [`St::Drop`] of an argument temporary
-/// (the argument expression's node), a [`St::Drop`] one edge of a join owes
+/// result (its `Stmt::Expr` node), a [`St::Drop`] one edge of a join owes
 /// ([`Site::Edge`]), [`St::Row`], [`St::If`], [`St::Block`], [`St::Break`],
-/// [`St::Continue`], [`St::Return`] and [`Arm`]. Every other statement
+/// [`St::Continue`], [`St::Return`] and [`Arm`]. An argument temporary's key
+/// rides on the NAME instead ([`NameInfo::arg_drop`]), because the drop that
+/// runs it belongs to the binding after the call. Every other statement
 /// states [`Site::None`]: this pass has no key for it, and a reader falls
 /// back to the plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -263,11 +264,11 @@ pub enum St {
         releases: bool,
     },
     /// A release. `site` is the node the plan keys the row by where the plan
-    /// has one: the `Stmt::Expr` of a discarded result, the argument
-    /// expression of an argument temporary, the join and edge of a Rule N
-    /// release. [`Site::None`] elsewhere — a `drop` statement, a scope's own
-    /// release, a payload binder, which [`Arm::frees`] and
-    /// [`NameInfo::receiver`] name instead.
+    /// has one: the `Stmt::Expr` of a discarded result, or the join and edge
+    /// of a Rule N release. [`Site::None`] elsewhere — a `drop` statement, a
+    /// scope's own release, an argument temporary, a payload binder, which
+    /// [`NameInfo::arg_drop`], [`NameInfo::receiver`] and [`Arm::frees`] name
+    /// instead.
     Drop(Name, Site),
     /// A release row the plan placed at an exit, keyed as the plan keys it,
     /// walking the name around `holes`. The kernel checks the set against
@@ -2849,8 +2850,8 @@ pub struct Facts {
     /// binders the arm's own body releases at its end.
     pub arms: std::collections::HashMap<(usize, u32), Vec<(String, Vec<String>)>>,
     /// RFC-0114 M2 and exit-residue round eighteen: the store statements
-    /// whose old value the store releases — a `St::Store` with
-    /// [`Old::Released`] at a [`Site::Node`]. The plan's `store_owned` and
+    /// whose old value the store releases — a `St::Store`'s `releases` at a
+    /// [`Site::Node`]. The plan's `store_owned` and
     /// `store_fresh` are two halves of one answer, and this is the answer:
     /// the core folds the mention guard and the `fresh_str` exception in
     /// where both compiled backends spell them. A site absent from the map
@@ -2862,8 +2863,8 @@ pub struct Facts {
     /// statement's [`Site::Node`].
     pub discarded: std::collections::HashSet<usize>,
     /// RFC-0114 M1: the call-argument nodes whose temporary the caller
-    /// releases after the call — [`NameInfo::arg_drop`] on a name the core
-    /// drops.
+    /// releases after the call — [`NameInfo::arg_drop`], which the core sets
+    /// wherever it lowers such an argument.
     pub arg_drops: std::collections::HashSet<usize>,
     /// RFC-0114 Rule N: per join node, the `(name, edge)` releases one edge
     /// owes because another edge took the name — a `St::Drop` at a

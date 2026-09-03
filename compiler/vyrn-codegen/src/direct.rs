@@ -1263,8 +1263,8 @@ impl<'a> Cx<'a> {
     /// (RFC-0125 §3 M3, the emitter-reads-the-core slice): does the store at
     /// `node` release the value it displaces?
     ///
-    /// The core states the plan's two tables as ONE answer, `Old::Released`,
-    /// because both compiled backends read them as one — the row, the
+    /// The core states the plan's two tables as ONE answer (`St::Store`'s
+    /// `releases`), because both compiled backends read them as one — the row, the
     /// `mentions_place` guard, and round eighteen's `fresh_str` exception,
     /// all of which the core now spells (`core::Builder::stmt`). What stays
     /// the emitter's is the region gate, which is a property of where the
@@ -1337,7 +1337,13 @@ impl<'a> Cx<'a> {
                 self.plan.acknowledge(node);
                 rows.clone()
             }
-            None => Vec::new(),
+            // A join this pass of the core states nothing for — a body it
+            // could not lower — keeps the plan's rows.
+            None => self
+                .plan
+                .edge_releases_at(node)
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 

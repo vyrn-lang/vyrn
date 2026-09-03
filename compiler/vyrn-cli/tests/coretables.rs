@@ -21,26 +21,29 @@
 //!   - `receiver_frees` and `receiver_holes`, from a `St::Drop` of a name
 //!     whose `NameInfo::receiver` names the `Expr::Field` node.
 //!
-//! One is not pinned, and the reason is the finding. `St::Switch::consuming`
-//! is not the plan's `consuming_matches`: it is the whole disjunction the
-//! emitter computes in `frees_boxes` — a `consume`, a scrutinee that names
-//! no place, or the table — narrowed to an owned scrutinee with no placed
-//! release after the construct. The two answer different questions, so only
-//! the count of sites the core calls consuming is recorded here.
-//!
 //! Four more are pinned since the emitter-reads-the-core slice, and each
 //! needed the core taught to carry a key first ([`vyrn_lower::core::Site`]):
 //!
 //!   - `store_owned` and `store_fresh`, from a `St::Store` at the store
-//!     statement's node — the core states the two as one answer, `Old`,
-//!     because both compiled backends read them as one;
+//!     statement's node — the core states the two as one answer, because
+//!     both compiled backends read them as one;
 //!   - `discarded_results`, from a `St::Drop` at the `Stmt::Expr`'s node;
-//!   - `arg_drops`, from `NameInfo::arg_drop` on a name the core drops;
+//!   - `arg_drops`, from `NameInfo::arg_drop` on the name the argument
+//!     bound;
 //!   - `edge_releases`, from a `St::Drop` at a `Site::Edge`.
 //!
 //! The diff is structural in both directions: a plan row the core states
 //! nothing for is a site a flipped emitter would stop releasing at, and a
 //! core answer the plan does not have is one it would release twice.
+//!
+//! One is COUNTED and not pinned, and the count is the finding.
+//! `St::Switch`'s `consuming` is not the plan's `consuming_matches`: it is
+//! the whole disjunction the emitter computes in `frees_boxes` — a
+//! `consume`, a scrutinee that names no place, or the table — narrowed to an
+//! owned scrutinee with no placed release after the construct. The two
+//! answer different questions, and six sites in the corpus answer them the
+//! other way round, so the emitter keeps reading the plan there (RFC-0125 §3
+//! M3, row 14).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

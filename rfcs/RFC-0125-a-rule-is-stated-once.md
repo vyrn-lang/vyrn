@@ -1773,6 +1773,135 @@ swept the arm's own `drop l`, too few when Rule N's edge drop followed the
 row and ended the trailing run. A table is carried when a reader can ask
 for it by key, not when a careful reader can see it.
 
+**The emitter-reads-the-core slice (2026-09-03): the seven keyless tables are
+keyed, and five more rows are flipped.** The census above named one obstacle
+for rows 01 to 10 — the core states the decision and nothing can ask for it,
+because `St::Store` and a temporary's `St::Drop` carry a line and no node.
+`core::Site` is that key, and the core's doc states what one is: **a site is
+the address of the AST node the ownership plan keys its row by, and nothing
+else.** Not a source position, not an ordinal. The statements that carry one:
+`St::Store` (its `Stmt::Assign`, `Stmt::SetField` or `Stmt::IndexSet` node), a
+`St::Drop` of a discarded result (its `Stmt::Expr`), a `St::Drop` one edge of
+a join owes (`Site::Edge`, the join and the edge), `St::Row`, `St::If`,
+`St::Block`, `Break`, `Continue`, `Return` and `Arm`. An argument temporary's
+key rides on the name rather than the drop (`NameInfo::arg_drop`), because the
+drop that runs it belongs to the binding after the call. Everything else
+states `Site::None`, and a reader falls back to the plan there.
+
+The census, with the column this slice moved. Rows 15 to 18 are unchanged.
+
+| # | table | the core, before | the core, now |
+|---|---|---|---|
+| 01 | `store_owned`, the append spine | a key, not stated | **carried** |
+| 02 | `store_owned`, a store to a name | a key, not stated | **carried** |
+| 03 | `store_fresh` | a key, not stated | **carried**, inside 02's one answer |
+| 04 | `store_owned`, `SetField` | a key, not stated | **carried** |
+| 05 | `store_owned`, `IndexSet` | a key, not stated | **carried**, except a user container's |
+| 06 | `store_owned`, a map entry and a projection's store | a key, not stated | acknowledged only, as before |
+| 07 | `store_owned`, the `a[i].f = v` idiom | a key, not stated | acknowledged only, as before |
+| 08 | `discarded_results` | a key, not stated | **carried** |
+| 09 | `arg_drops` | a key, not stated | **carried** |
+| 10 | `edge_releases` | a position, not a key | **carried**, by join and edge |
+| 11 | `receiver_frees` | carried | carried |
+| 11b | `receiver_malloc` | the region stand-down, not modelled | unchanged |
+| 12 | `receiver_holes` | carried | carried |
+| 13 | `arm_frees` | carried for a `match` | unchanged |
+| 14 | `consuming_matches` | a different rule | measured, and not flipped |
+
+`compiler/vyrn-cli/tests/coretables.rs` reconstructs each new row from the
+core and diffs it against the plan over the corpus, in both directions, with
+the plan's rows restricted to functions the lowering instantiated — a row in a
+function nothing built is nobody's to state, exactly as §26's finish check
+skips a row in a function nothing emitted. What the diff found, and where each
+was fixed:
+
+- **`arg_drops`: the core keyed a quarter of the rows.** 2,184 of the plan's
+  reached rows had no key. Three causes, all the core's. 1,646 were
+  temporaries `read_val` had already queued for release, and the key was
+  written only where the queue was empty — the drop was the same drop either
+  way. 531 were an OPERATOR's operand: `a + b` is `@concat(a, b)` to the plan
+  and a `Prim` to this pass, so `call` never saw them. Seven were a `lazy`
+  field read, which binds a borrow here, so no drop carried a key at all. The
+  key is taken once now, in `read_val`, for every read in an argument
+  position, and it stands whether or not this pass releases the temporary
+  itself: what the row answers is "does an argument-temporary drop stand at
+  this node", and that is what an emitter asks. 2,188 rows, none missing.
+- **`store_owned`: `Old` was not the answer, and the difference was 123
+  modules.** Two findings. First, both compiled backends spell an exception
+  the core did not — a String concatenation builds a fresh buffer whatever it
+  reads, so a mention of the place cannot be a hand-back (`s = s + x`), which
+  they call `fresh_str`. It is stated in the core now, so the rule is in one
+  place. Second, and this is the finding: `old` and the emitter's question are
+  not the same question. `old` is what the KERNEL sees at the place, and a
+  place holding nothing that owns heap displaces nothing whatever the plan
+  decided about the statement; the emitter asks what the plan decided. Reading
+  `Old::Released` as the emitter's answer changed 123 of the corpus's 172
+  modules. `St::Store` carries both, named apart, and the fold reads the
+  second.
+- **`store_owned`, the residue left to the plan: twelve rows.** RFC-0091 M2
+  rewrites a user container's `c[i] = v` into a block of its own before the
+  checker walks it, so the plan's row stands on a statement this pass never
+  sees while the source statement it does see has an answer of its own. The
+  core states no site for such a store, so the emitter falls back; the count
+  is pinned in the test, and a thirteenth is a site nobody has looked at.
+- **`edge_releases`: a sub-place row has a name, and a temporary does not.**
+  Rule N's row may be `d.line`, one level down, which the core lowers as a
+  take into a temporary dropped at once. A temporary spelled `@t7` gives a
+  reader nothing back, so the temporary is spelled for the place it took.
+- **`discarded_results`: zero rows in the corpus.** Round twenty-eight's table
+  is empty across every function the lowering reaches, so the flip is a no-op
+  that stands for the day a row appears. Recorded because a green diff over an
+  empty table proves nothing about the table.
+
+| the corpus, this slice | sites |
+|---|---|
+| `store_owned`: core states / plan rows / left to the plan | 50,569 / 39,338 / 12 |
+| `arg_drops`: core / plan | 2,188 / 2,188 |
+| `edge_releases`: core / plan | 52 / 52 |
+| `arm_frees`, `receiver_frees` (the previous slice) | 4,350 / 21 |
+| `discarded_results`: core / plan | 0 / 0 |
+| kernel: accepted / refused / unlowered | 18,841 / 0 / 0 |
+
+**Row 14 was measured and left alone, and the measurement is the reason.**
+`frees_boxes`'s rule stated in the core would be: the construct took its
+scrutinee, so the boxes its binders came out of are its own to give back. The
+core states exactly that (`St::Switch`'s `consuming`) at 1,808 switch sites.
+Against the plan's `consuming_matches` it says yes at 1,089 sites the table
+does not name — those are temporary scrutinees, which the emitter's own
+disjunction already covers — and no at six the table does name. The six are
+the finding. Each is `let s = match o { Some(v) => v, .. }` on an owned local,
+and round twenty-seven's table is what MAKES that local's row `Aliased`: the
+core then reads the name as a borrow and the rule answers "not taken". The
+rule rests on an ownership the decision itself changes. Flipping stopped
+freeing six payload boxes over `jsonplace.vyrn`, `matchown.vyrn` and
+`refutablelet.vyrn`, each one a leak, so the emitter keeps the table and the
+core owes a binding's ownership stated apart from the decision it feeds.
+
+**What the direct emitter no longer reads.** `store_owned` and `store_fresh`
+at every store but a user container's element store and the two acknowledged
+idioms; `discarded_results`; `arg_drops`; `edge_releases`; and the three the
+previous slice took (`receiver_frees`, `receiver_holes`, `arm_frees` at a
+`match`). What it still reads: `consuming_matches`, `receiver_malloc`,
+`arm_frees` at an `if let` or a `?`, `store_owned` at the twelve rewritten
+statements, and `releases`, `droppable`, `early` and `holes` to build a frame.
+It still ACKNOWLEDGES every row it took off the core, so §26's finish check
+keeps counting the plan's decisions; the acknowledgement goes when the tables
+go. `VYRN_PLAN_ROWS=1` puts every one of them back on the plan for a bisect.
+The wasm manifest is byte-identical after each of the five commits.
+
+**What `own.rs` still owes, after this slice.** The list in the close-out
+above stands, less the five tables flipped here. `own.rs` can go only after:
+`frees_boxes`'s rule is stated on an ownership the table does not decide (the
+six sites above); the native emitter reads `core::facts` for the same ten
+rows, which `compiler/vyrn-codegen/src/lib.rs` reads through `gen_stmt`,
+`gen_expr`, `gen_call`, `gen_arm_body` and `gen_match_enum`; the interpreter
+reads it for the arm table; RFC-0091 M2's rewritten store statements are
+keyed, or the rewrite runs where the core can see it; and the answers that
+have no kernel equivalent at all — `DropKind` and a declared release's
+ordering, `Leak::Hole` and `Leak::Region`, the binding notes behind `vyrn why
+--memory`, the `FreeArr` handover, `receiver_malloc`'s region stand-down — are
+stated somewhere else.
+
 **What the native emitter and the interpreter still need.** Neither moved in
 this slice. `compiler/vyrn-codegen/src/lib.rs` reads the same tables through
 `gen_stmt`, `gen_expr`, `gen_call`, `gen_arm_body` and `gen_match_enum`, and
