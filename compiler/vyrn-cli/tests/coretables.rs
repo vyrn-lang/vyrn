@@ -45,7 +45,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use vyrn_frontend::ast::Program;
-use vyrn_lower::core::St;
 
 struct Fs;
 
@@ -85,32 +84,6 @@ fn corpus() -> Vec<PathBuf> {
     names.sort();
     assert!(!names.is_empty(), "no examples found");
     names
-}
-
-/// Every `match` site the core took its scrutinee at.
-fn consuming(stmts: &[St], out: &mut Vec<usize>) {
-    for s in stmts {
-        match s {
-            St::If { then, els, .. } => {
-                consuming(then, out);
-                consuming(els, out);
-            }
-            St::Loop(b) | St::Block { body: b, .. } => consuming(b, out),
-            St::Switch {
-                arms, consuming: c, ..
-            } => {
-                if *c {
-                    if let Some(a) = arms.first() {
-                        out.push(a.site);
-                    }
-                }
-                for a in arms {
-                    consuming(&a.body, out);
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 #[test]
@@ -312,18 +285,21 @@ fn run() {
             }
         }
 
-        for inst in &lowered.instances {
-            let Ok(top) = vyrn_lower::core::build(&program, inst, &own) else {
-                continue;
-            };
-            let mut sites = Vec::new();
-            for body in top.frames() {
-                consuming(&body.stmts, &mut sites);
+        // No pin: `St::Switch`'s `consuming` is a different rule from the
+        // plan's `consuming_matches`, so the two directions are COUNTED and
+        // the emitter keeps reading the plan (RFC-0125 §3 M3, row 14). The
+        // second count is the one that decided it: a site the plan calls
+        // consuming and the core does not is a payload box the flipped
+        // emitter would stop freeing.
+        for (site, took) in &facts.consuming {
+            *counted.entry("switch sites").or_default() += 1;
+            if *took {
+                *counted.entry("consuming: core only").or_default() +=
+                    usize::from(!own.plan.consuming_matches.contains(site));
+            } else {
+                *counted.entry("consuming: plan only").or_default() +=
+                    usize::from(own.plan.consuming_matches.contains(site));
             }
-            *counted.entry("consuming_matches").or_default() += sites.len();
-            // No pin: `St::Switch::consuming` is a different rule from the
-            // plan's table (see the head of this file), so the count alone
-            // is recorded.
         }
     }
     eprintln!("core-vs-plan over the corpus: {programs} programs");

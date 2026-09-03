@@ -2869,6 +2869,12 @@ pub struct Facts {
     /// owes because another edge took the name — a `St::Drop` at a
     /// [`Site::Edge`].
     pub edges: std::collections::HashMap<usize, Vec<(String, u32)>>,
+    /// Round twenty-seven's question, answered by the rule rather than by
+    /// the plan's table: per `match`, `if let` or `?` node, whether the
+    /// construct TOOK its scrutinee, so the boxes its binders came out of
+    /// are its own to give back ([`St::Switch`]'s `consuming`). A site
+    /// absent from the map is one this pass states no answer for.
+    pub consuming: std::collections::HashMap<usize, bool>,
 }
 
 /// The core's answers for the program last analysed on this thread. `None`
@@ -2919,7 +2925,14 @@ fn fold_facts(body: &Body, stmts: &[St], out: &mut Facts) {
                 }
                 Site::None => {}
             },
-            St::Switch { arms, .. } => {
+            St::Switch {
+                arms,
+                consuming: took,
+                ..
+            } => {
+                if let Some(a) = arms.first() {
+                    out.consuming.insert(a.site, *took);
+                }
                 for a in arms {
                     if let Some(frees) = &a.frees {
                         let rows: Vec<(String, Vec<String>)> = frees

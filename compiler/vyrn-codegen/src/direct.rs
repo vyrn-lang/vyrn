@@ -13711,6 +13711,15 @@ impl<'p> Fn_<'_, 'p> {
     /// was here; `element_path` keeps every `@at` scrutinee out of the free.
     fn frees_boxes(&self, scrutinee: &Expr, key: usize) -> bool {
         use vyrn_frontend::movecheck::{element_path, place_path};
+        // RFC-0125 §3 M3, the emitter-reads-the-core slice: NOT read off the
+        // core, and the measurement is in the RFC. The core states the rule
+        // — the construct took its scrutinee — but its answer rests on the
+        // scrutinee binding's own ownership, and round twenty-seven's table
+        // is what MAKES that binding `Aliased`. So a `let s = match o { .. }`
+        // reads as a borrow in the core and the boxes would stop being
+        // freed: six sites over three corpus programs, each one a leak.
+        // The rule needs a binding's ownership stated apart from the
+        // decision it feeds, and that is not this slice's.
         let consumed = matches!(scrutinee, Expr::Consume { .. })
             || (place_path(scrutinee).is_none() && element_path(scrutinee).is_none())
             || self.cx.plan.match_consumes(key);
