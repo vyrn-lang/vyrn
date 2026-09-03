@@ -21,6 +21,11 @@
 //!   - `receiver_frees` and `receiver_holes`, from a `St::Drop` of a name
 //!     whose `NameInfo::receiver` names the `Expr::Field` node.
 //!
+//! A third is pinned here since M6's third judgment took its third slice: every
+//! `Rhs` in the core names the type its node produces, and none is an
+//! exception. That is what lets the typed judgment ask what produced a value
+//! rather than counting the store as unjudged.
+//!
 //! One is not pinned, and the reason is the finding. `St::Switch::consuming`
 //! is not the plan's `consuming_matches`: it is the whole disjunction the
 //! emitter computes in `frees_boxes` — a `consume`, a scrutinee that names
@@ -38,7 +43,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use vyrn_frontend::ast::Program;
-use vyrn_lower::core::St;
+use vyrn_lower::core::{Rhs, St};
 
 struct Fs;
 
@@ -78,6 +83,42 @@ fn corpus() -> Vec<PathBuf> {
     names.sort();
     assert!(!names.is_empty(), "no examples found");
     names
+}
+
+/// Every producer type the core carries, and every one it does not.
+///
+/// RFC-0125 §3 M6, the third judgment's third slice: `Rhs::Prim` and
+/// `Rhs::Call` carry the type their node produces, from the checker's row.
+/// `out` counts one row per right-hand side — the variant's name, and whether
+/// it named a type — so the pin below is a diff over the corpus rather than a
+/// claim about one program.
+fn producers(stmts: &[St], out: &mut BTreeMap<(&'static str, bool), usize>) {
+    for s in stmts {
+        match s {
+            St::Let(_, rhs) => {
+                let row = match rhs {
+                    Rhs::Prim(_, t) => ("prim", t.is_some()),
+                    Rhs::Call { ret, .. } => ("call", ret.is_some()),
+                    Rhs::Val(_) => ("val", true),
+                    Rhs::Read(_) => ("read", true),
+                    Rhs::Take(_) => ("take", true),
+                    Rhs::Make(_) => ("make", true),
+                };
+                *out.entry(row).or_default() += 1;
+            }
+            St::If { then, els, .. } => {
+                producers(then, out);
+                producers(els, out);
+            }
+            St::Loop(b) | St::Block { body: b, .. } => producers(b, out),
+            St::Switch { arms, .. } => {
+                for a in arms {
+                    producers(&a.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Every `match` site the core took its scrutinee at.
@@ -122,6 +163,7 @@ fn run() {
     vyrn_lower::install();
     let mut diffs: Vec<String> = Vec::new();
     let mut counted: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut produced: BTreeMap<(&'static str, bool), usize> = BTreeMap::new();
     let mut programs = 0usize;
     for path in corpus() {
         let Ok(program) = load(&path) else { continue };
@@ -192,6 +234,9 @@ fn run() {
                 consuming(&body.stmts, &mut sites);
             }
             *counted.entry("consuming_matches").or_default() += sites.len();
+            for body in top.frames() {
+                producers(&body.stmts, &mut produced);
+            }
             // No pin: `St::Switch::consuming` is a different rule from the
             // plan's table (see the head of this file), so the count alone
             // is recorded.
@@ -201,6 +246,13 @@ fn run() {
     for (what, n) in &counted {
         eprintln!("  {n:6} sites  {what}");
     }
+    eprintln!("producer types over the corpus:");
+    for ((what, typed), n) in &produced {
+        eprintln!(
+            "  {n:6} {what}  {}",
+            if *typed { "typed" } else { "UNTYPED" }
+        );
+    }
     for d in diffs.iter().take(400) {
         eprintln!("  DIFF {d}");
     }
@@ -209,4 +261,18 @@ fn run() {
         "{} sites where the core and the plan disagree",
         diffs.len()
     );
+    // The producer-type pin (RFC-0125 §3 M6, the third judgment's third
+    // slice): every `Rhs` in the corpus names the type its node produces.
+    // There is no exception list, because there is no exception: a node the
+    // checker typed answers from its row, and the one class with no row of
+    // its own — a projection the checker expanded at the site (RFC-0122) —
+    // answers from its declared result under the receiver's type arguments.
+    // A right-hand side that stopped naming a type would make the typed
+    // judgment count a store as unjudged instead of judging it.
+    let untyped: usize = produced
+        .iter()
+        .filter(|((_, typed), _)| !typed)
+        .map(|(_, n)| *n)
+        .sum();
+    assert_eq!(untyped, 0, "right-hand sides with no producer type");
 }

@@ -245,7 +245,7 @@ impl<'a> Walk<'a, '_> {
             _ if from.as_ref().is_some_and(|f| *f == to) => How::ByName,
             Rhs::Make(_) => How::Finding("record-literal"),
             Rhs::Call { .. } => How::Finding("other-call"),
-            Rhs::Prim(_) => How::Finding("primitive"),
+            Rhs::Prim(..) => How::Finding("primitive"),
             Rhs::Read(_) | Rhs::Take(_) => How::Finding("read-of-place"),
             Rhs::Val(Val::Name(_)) => How::Finding("other-name"),
         };
@@ -255,7 +255,7 @@ impl<'a> Walk<'a, '_> {
             ty: name,
             producer: match rhs {
                 Rhs::Call { callee, .. } => callee.clone(),
-                Rhs::Prim(_) => "@prim".into(),
+                Rhs::Prim(..) => "@prim".into(),
                 Rhs::Make(_) => "@make".into(),
                 Rhs::Read(p) | Rhs::Take(p) => self.spell(p),
                 Rhs::Val(Val::Name(n)) => self.body.names[*n as usize].source.clone(),
