@@ -28,12 +28,19 @@
 //! release after the construct. The two answer different questions, so only
 //! the count of sites the core calls consuming is recorded here.
 //!
-//! The rest of the emitter's reads — `store_owned`, `store_fresh`,
-//! `discarded_results`, `arg_drops`, `edge_releases` — have no site key in
-//! the core today: `St::Store` and a temporary's `St::Drop` carry a line and
-//! no node, and an edge drop is a `St::Drop` at a position rather than at a
-//! key. Each needs the core taught to carry the key before its flip, which
-//! is what the census table in the RFC records.
+//! Four more are pinned since the emitter-reads-the-core slice, and each
+//! needed the core taught to carry a key first ([`vyrn_lower::core::Site`]):
+//!
+//!   - `store_owned` and `store_fresh`, from a `St::Store` at the store
+//!     statement's node — the core states the two as one answer, `Old`,
+//!     because both compiled backends read them as one;
+//!   - `discarded_results`, from a `St::Drop` at the `Stmt::Expr`'s node;
+//!   - `arg_drops`, from `NameInfo::arg_drop` on a name the core drops;
+//!   - `edge_releases`, from a `St::Drop` at a `Site::Edge`.
+//!
+//! The diff is structural in both directions: a plan row the core states
+//! nothing for is a site a flipped emitter would stop releasing at, and a
+//! core answer the plan does not have is one it would release twice.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -131,6 +138,22 @@ fn run() {
         let own = vyrn_frontend::own::analyze(&program);
         let facts = vyrn_lower::core::facts().expect("the placer fills the core's facts");
         let file = path.file_name().unwrap().to_string_lossy().to_string();
+        // The plan holds a row for every function the checker walked; the core
+        // holds one for every function the lowering instantiated. A row in a
+        // function nothing instantiated is nobody's to state, exactly as
+        // `ReleasePlan::unconsumed` skips one in a function nothing emitted.
+        let built: std::collections::HashSet<String> = lowered
+            .instances
+            .iter()
+            .map(|i| i.func.name.clone())
+            .collect();
+        let owner = |at: &usize| own.plan.owners.get(at).cloned().unwrap_or_default();
+        let reached = |at: &usize| {
+            own.plan
+                .owners
+                .get(at)
+                .is_some_and(|f| built.contains(f) || f.is_empty())
+        };
 
         for ((site, arm), core_says) in &facts.arms {
             *counted.entry("arm_frees").or_default() += 1;
@@ -171,6 +194,112 @@ fn run() {
             }
         }
 
+        // The plan's own totals, so the census can be read off this test.
+        for (what, n) in [
+            (
+                "store_owned (plan)",
+                own.plan.store_owned.iter().filter(|a| reached(a)).count(),
+            ),
+            (
+                "discarded_results (plan)",
+                own.plan
+                    .discarded_results
+                    .iter()
+                    .filter(|a| reached(a))
+                    .count(),
+            ),
+            (
+                "arg_drops (plan)",
+                own.plan.arg_drops.iter().filter(|a| reached(a)).count(),
+            ),
+            (
+                "edge_releases (plan)",
+                own.plan.edge_releases.keys().filter(|a| reached(a)).count(),
+            ),
+        ] {
+            *counted.entry(what).or_default() += n;
+        }
+
+        for (at, core_says) in &facts.stores {
+            *counted.entry("store_owned").or_default() += 1;
+            // The core's answer is the whole conjunction both compiled
+            // backends compute, so only its `true` implies the plan's row.
+            if *core_says && !own.plan.store_owned.contains(at) {
+                diffs.push(format!(
+                    "{file}: site {at}: store_owned: the core releases the old                      value and the plan does not"
+                ));
+            }
+        }
+        // A plan store row the core states no answer for. Every one in the
+        // corpus stands on a statement RFC-0091 M2's `place at` rewrite
+        // BUILT: a user container's `c[h] = v` is checked on the rewritten
+        // block, and this pass walks the source statement. A reader falls
+        // back to the plan at such a site, so the count is pinned here
+        // rather than diffed — a thirteenth would be a site nobody looked
+        // at.
+        *counted.entry("store rows left to the plan").or_default() += own
+            .plan
+            .store_owned
+            .iter()
+            .filter(|a| reached(a) && !facts.stores.contains_key(*a))
+            .count();
+
+        for at in &facts.discarded {
+            *counted.entry("discarded_results").or_default() += 1;
+            if !own.plan.discarded_results.contains(at) {
+                diffs.push(format!(
+                    "{file}: site {at}: discarded_results: core yes, plan no"
+                ));
+            }
+        }
+        for at in own.plan.discarded_results.iter().filter(|a| reached(a)) {
+            if !facts.discarded.contains(at) {
+                diffs.push(format!(
+                    "{file}: site {at}: discarded_results: plan yes, core no"
+                ));
+            }
+        }
+
+        for at in &facts.arg_drops {
+            *counted.entry("arg_drops").or_default() += 1;
+            if !own.plan.arg_drops.contains(at) {
+                diffs.push(format!("{file}: site {at}: arg_drops: core yes, plan no"));
+            }
+        }
+        for at in own.plan.arg_drops.iter().filter(|a| reached(a)) {
+            if !facts.arg_drops.contains(at) {
+                diffs.push(format!(
+                    "{file}: site {at}: arg_drops: plan yes, core no (fn {})",
+                    owner(at)
+                ));
+            }
+        }
+
+        for (join, core_rows) in &facts.edges {
+            *counted.entry("edge_releases").or_default() += 1;
+            let mut core_rows = core_rows.clone();
+            core_rows.sort();
+            let mut plan_rows = own
+                .plan
+                .edge_releases
+                .get(join)
+                .cloned()
+                .unwrap_or_default();
+            plan_rows.sort();
+            if core_rows != plan_rows {
+                diffs.push(format!(
+                    "{file}: join {join}: edge_releases: core {core_rows:?},                      plan {plan_rows:?}"
+                ));
+            }
+        }
+        for (join, plan_rows) in own.plan.edge_releases.iter().filter(|(a, _)| reached(a)) {
+            if !facts.edges.contains_key(join) && !plan_rows.is_empty() {
+                diffs.push(format!(
+                    "{file}: join {join}: edge_releases: the plan owes                      {plan_rows:?} and the core states none"
+                ));
+            }
+        }
+
         for (node, core_holes) in &facts.receivers {
             *counted.entry("receiver_frees").or_default() += 1;
             let plan_free = own.plan.receiver_free(*node);
@@ -201,12 +330,30 @@ fn run() {
     for (what, n) in &counted {
         eprintln!("  {n:6} sites  {what}");
     }
-    for d in diffs.iter().take(400) {
-        eprintln!("  DIFF {d}");
+    // Grouped: the class first, then a handful of each, so a run that finds
+    // thousands of one shape is still readable.
+    let mut classes: BTreeMap<String, Vec<&String>> = BTreeMap::new();
+    for d in &diffs {
+        let class = d.split(": ").skip(2).take(2).collect::<Vec<_>>().join(": ");
+        classes.entry(class).or_default().push(d);
+    }
+    for (class, ds) in &classes {
+        eprintln!("  {:6} DIFF {class}", ds.len());
+        for d in ds.iter().take(4) {
+            eprintln!("           {d}");
+        }
     }
     assert!(
         diffs.is_empty(),
         "{} sites where the core and the plan disagree",
         diffs.len()
+    );
+    assert_eq!(
+        counted
+            .get("store rows left to the plan")
+            .copied()
+            .unwrap_or(0),
+        12,
+        "the `place at` rewrite's own store statements, and nothing else"
     );
 }

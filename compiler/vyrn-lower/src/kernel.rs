@@ -935,7 +935,7 @@ impl<'b> Kernel<'b> {
                 self.here = *line;
                 self.by = "a `match`".to_string();
             }
-            St::Drop(n) | St::Row { name: n, .. } => {
+            St::Drop(n, _) | St::Row { name: n, .. } => {
                 self.here = self.body.names[*n as usize].line;
                 self.by = String::new();
             }
@@ -1058,7 +1058,7 @@ impl<'b> Kernel<'b> {
                     }
                 }
             }
-            St::Drop(n) => {
+            St::Drop(n, _) => {
                 let holes = self.body.names[*n as usize].holes.clone();
                 self.drop(st, *n, &holes, None)?;
                 self.wrote(st, &Place::Name(*n), self.src(*n));
