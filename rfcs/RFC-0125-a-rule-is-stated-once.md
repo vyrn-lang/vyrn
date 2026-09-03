@@ -3034,6 +3034,57 @@ names — `UInt8` from an `Int64`, answering `Option` or trapping at one site
 named by the type; then the kernel's third judgment over the core, which is
 what makes a boundary check unnecessary rather than shared.
 
+#### The third judgment's second slice (2026-09-03)
+
+The census sorted every value boundary into five lines. This slice takes two
+of them: the trap table becomes a table on the wasm route, and the judgment
+itself runs beside the linear and the effect judgment.
+
+**The trap table.** §2.3 says the emitter "maps `trap` to a call with a table
+index". It did not. Eight rows of the census — `array-index`, `string-index`,
+`int-div-zero`, `int-rem-zero`, `int-div-overflow`, `shift-range`,
+`call-depth`, `region-depth` — each had their WORDING interned as a private
+field of the wasm backend's runtime record (`msg_div0`, `msg_aoob`,
+`msg_oob_end`, six more), and each site pushed the pointer it needed. Two rows
+carry a number in the middle of the sentence, so they went through a second
+runtime function with a three-piece protocol (`trapIdx(pre, i, post)`) that
+existed only because those two rows are shaped differently from the other six.
+
+Now `trap::Rule` is the table: eight rows in one order, each stating its two
+halves — what stands before the value and what stands after it, or nothing for
+a row with no value. The emitter lays those addresses out as one data segment
+and every site pushes A NUMBER. `std/runtime`'s `trapAt(rule, v, table)` reads
+the row and writes it. `trapIdx` is deleted, the nine interned wordings are
+deleted, and the emitter spells no sentence: the two shapes the old code told
+apart at eight sites are told apart once, by a zero in the row's second half.
+
+Seven of the eight rows reach it through the function's ONE trap site (M1):
+the check parks the row's number and the value in the site's two locals and
+branches out, so a division check now costs a compare and a branch where it
+used to cost a compare and a call — the same shape M1 measured for the bounds
+check (3.56 s against 1.71 s on nbody's inner loop). The eighth is
+`call-depth`, whose check is the prologue: it stands before the block a branch
+would target, so it calls `trapAt` itself. Finding 6's `region-depth` is not
+an exception here — its counter stays in the prologue's neighbourhood, but its
+check is inside the body and takes the site like the rest.
+
+`direct.rs` falls from 16,547 lines to 16,532 and `std/runtime.vyrn` rises
+from 1,942 to 1,952: the deletion is fifteen lines of emitter and the addition
+is ten lines of Vyrn, which is the trade §2.3 asks for and not a line count
+worth celebrating. The module BYTES rise, and the reason is worth recording
+rather than hiding: a site that parks two locals and branches is three
+instructions where a site that pushed a pointer and called was two.
+`nbody.wasm` goes from 10,847 to 10,913 bytes, `fannkuch.wasm` from 7,637 to
+7,789, `jsoncodec.wasm` from 49,610 to 49,997 — 0.6, 2.0 and 0.8 per cent.
+The call sites are what the engine paid for, and they are gone.
+
+Every wording is byte-identical, which is what the census's own programs
+prove: all eight rows answer the same bytes under `vyrn run`, `vyrn run
+--engine wasm` and a native binary, and the boundaries suite, the fixtures and
+parity are the gate. `rfcs/census/wasm-sha256.tsv` is NOT regenerated in this
+slice: the trap sites changed, so the recorded module hashes changed, and a
+hash regenerated in the same commit that changed the bytes records nothing.
+
 ### What each milestone is worth on its own
 
 M1 fixes the wasm column. M2 makes leaks a compile error. M3 halves the
