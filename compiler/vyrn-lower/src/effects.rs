@@ -241,7 +241,7 @@ impl Walk<'_> {
                 }
             }
             St::Store { .. }
-            | St::Drop(_)
+            | St::Drop(..)
             | St::Row { .. }
             | St::Break { .. }
             | St::Continue { .. }

@@ -81,6 +81,12 @@ pub struct NameInfo {
     /// slice). Set only where the consumer is a call or an operator, the
     /// two sites each compiled backend drains such temporaries at.
     pub producer: Option<usize>,
+    /// RFC-0114 M1: for a call-argument temporary the CALLER releases after
+    /// the call, the argument expression's node — the key of the plan's
+    /// `arg_drops` row (RFC-0125 §3 M3, the emitter-reads-the-core slice).
+    /// The release itself is the `St::Drop` the binding after the call
+    /// queues; this is the key a reader looks it up by.
+    pub arg_drop: Option<usize>,
     /// The holes the plan's release walk skips for this binding (RFC-0093
     /// M2's table), spelled as the kernel spells them (`.f.g`). A `Drop` of
     /// the name walks around exactly these; a placed row may carry its own.
@@ -126,6 +132,37 @@ impl BorrowKind {
             BorrowKind::Capture => "a captured binding".to_string(),
         }
     }
+}
+
+/// Where a statement stands, for a reader that looks a plan row up by node
+/// (RFC-0125 §3 M3, the emitter-reads-the-core slice).
+///
+/// **A site is the address of the AST node the ownership plan keys its row
+/// by, and nothing else.** It is not a source position and not an ordinal: a
+/// reader asks the core for the row at a node it already holds, and gets an
+/// answer or none. The census's lesson stated once — a fact stated at a
+/// position is not stated, because a careful reader can see it and a lookup
+/// cannot ask for it.
+///
+/// The statements that carry one: [`St::Store`] (its `Stmt::Assign`,
+/// `Stmt::SetField` or `Stmt::IndexSet` node), a [`St::Drop`] of a discarded
+/// result (its `Stmt::Expr` node), a [`St::Drop`] one edge of a join owes
+/// ([`Site::Edge`]), [`St::Row`], [`St::If`], [`St::Block`], [`St::Break`],
+/// [`St::Continue`], [`St::Return`] and [`Arm`]. An argument temporary's key
+/// rides on the NAME instead ([`NameInfo::arg_drop`]), because the drop that
+/// runs it belongs to the binding after the call. Every other statement
+/// states [`Site::None`]: this pass has no key for it, and a reader falls
+/// back to the plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Site {
+    /// This pass states no key for the statement.
+    #[default]
+    None,
+    /// The node the plan keys the row by.
+    Node(usize),
+    /// RFC-0114 Rule N: the join whose edge owes this release, and which edge
+    /// — 0/1 for an `if`'s then/else, the arm's source index for a `match`.
+    Edge(usize, u32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,8 +264,33 @@ pub enum St {
         /// slice): the kernel names the line a value was moved on and the
         /// line it is used again on, as the checker does.
         line: usize,
+        /// The statement the plan keys its store decision by (RFC-0125 §3 M3,
+        /// the emitter-reads-the-core slice). [`Site::None`] for a store this
+        /// pass made up — a global's initializer, a desugar's temporary — and
+        /// for a user container's `c[i] = v`, whose store statements RFC-0091
+        /// M2's `place at` rewrite BUILDS: the plan's row stands on one of
+        /// those and this pass walks the source, so a reader must fall back
+        /// to the plan there.
+        site: Site,
+        /// Whether the store releases the value it displaces — the plan's
+        /// decision, with the mention guard and round eighteen's exceptions
+        /// folded in for a name store, which is how both compiled backends
+        /// read it.
+        ///
+        /// A different question from `old`, and both are needed. `old` is
+        /// what the KERNEL sees at the place: a place holding nothing that
+        /// owns heap displaces nothing, whatever the plan decided about the
+        /// statement, and a sub-place's ownership is not a judgment this
+        /// pass makes. `releases` is what an EMITTER emits.
+        releases: bool,
     },
-    Drop(Name),
+    /// A release. `site` is the node the plan keys the row by where the plan
+    /// has one: the `Stmt::Expr` of a discarded result, or the join and edge
+    /// of a Rule N release. [`Site::None`] elsewhere — a `drop` statement, a
+    /// scope's own release, an argument temporary, a payload binder, which
+    /// [`NameInfo::arg_drop`], [`NameInfo::receiver`] and [`Arm::frees`] name
+    /// instead.
+    Drop(Name, Site),
     /// A release row the plan placed at an exit, keyed as the plan keys it,
     /// walking the name around `holes`. The kernel checks the set against
     /// the holes its state has there: a row that skips a place still held
@@ -425,7 +487,7 @@ impl Body {
                     self.val(value),
                     old
                 )),
-                St::Drop(n) => out.push_str(&format!("{pad}drop {}\n", self.spell(*n))),
+                St::Drop(n, _) => out.push_str(&format!("{pad}drop {}\n", self.spell(*n))),
                 St::Row { name, holes, .. } => out.push_str(&format!(
                     "{pad}drop {} minus {:?}\n",
                     self.spell(*name),
@@ -699,6 +761,8 @@ pub fn build_module_state<'a>(
             value: v,
             old: Old::Nothing,
             line: g.line,
+            site: Site::None,
+            releases: false,
         });
     }
     b.body.stmts = out;
@@ -760,6 +824,7 @@ impl<'a> Builder<'a> {
             binding: None,
             receiver: None,
             producer: None,
+            arg_drop: None,
             holes: Vec::new(),
         });
         (self.body.names.len() - 1) as Name
@@ -870,7 +935,7 @@ impl<'a> Builder<'a> {
     fn bind(&mut self, n: Name, rhs: Rhs, out: &mut Vec<St>) {
         out.push(St::Let(n, rhs));
         for t in std::mem::take(&mut self.after_of_rhs) {
-            out.push(St::Drop(t));
+            out.push(St::Drop(t, Site::None));
         }
     }
 
@@ -1060,30 +1125,58 @@ impl<'a> Builder<'a> {
             }
             Stmt::Assign { name, value, line } => {
                 let v = self.val(value, out)?;
-                let Some(n) = self.lookup(name) else {
-                    let _ = line;
-                    let ty = self.ty_of(value)?;
-                    let old = self.old_for(&ty, sid);
+                let n = self.lookup(name);
+                let ty = match n {
+                    Some(n) => self.body.names[n as usize].ty.clone(),
+                    None => self.ty_of(value)?,
+                };
+                // The emitters' rule for a store to a NAME, stated once: the
+                // plan says whether the store releases the old value; a value
+                // that MENTIONS the place may be handing the old buffer back
+                // (`xs = xs.push(v)`) so the release stands down — unless the
+                // plan proved every mention a read argument to a function
+                // that cannot hand it back (`store_fresh_at`, exit-residue
+                // round eighteen), or the value is a String concatenation,
+                // which builds a fresh buffer whatever it reads (`s = s + x`).
+                // Both compiled backends spell the last exception
+                // `fresh_str`; it stands here so the one answer they read is
+                // this one (RFC-0125 §3 M3, the emitter-reads-the-core
+                // slice). Module state takes the same rule: it is a name to
+                // both of them.
+                let mentions = vyrn_frontend::movecheck::mentions_place(value, name);
+                let fresh_str = matches!(
+                    vyrn_frontend::types::resolve(
+                        &ty,
+                        &vyrn_frontend::types::decl_map(self.program),
+                    ),
+                    Type::Str
+                ) && matches!(
+                    value,
+                    Expr::Binary {
+                        op: vyrn_frontend::ast::BinOp::Add,
+                        ..
+                    }
+                );
+                let releases = self.own.plan.store_owned_at(sid)
+                    && (fresh_str || !mentions || self.own.plan.store_fresh_at(sid));
+                let Some(n) = n else {
                     out.push(St::Store {
                         place: Place::Global(name.clone()),
                         value: v,
-                        old,
+                        old: if releases {
+                            Old::Released
+                        } else {
+                            Old::Nothing
+                        },
                         line: *line,
+                        site: Site::Node(sid),
+                        releases,
                     });
                     return Ok(());
                 };
-                // The emitters' rule, stated once: the plan says whether the
-                // store releases the old value; a value that MENTIONS the
-                // place may be handing the old buffer back (`xs = xs.push(v)`)
-                // so the release stands down — unless the plan proved every
-                // mention a read argument to a function that cannot hand it
-                // back (`store_fresh_at`, exit-residue round eighteen).
-                let mentions = vyrn_frontend::movecheck::mentions_place(value, name);
                 let old = if !self.body.names[n as usize].owned {
                     Old::Nothing
-                } else if self.own.plan.store_owned_at(sid)
-                    && (!mentions || self.own.plan.store_fresh_at(sid))
-                {
+                } else if releases {
                     Old::Released
                 } else if mentions {
                     Old::Transferred
@@ -1095,6 +1188,8 @@ impl<'a> Builder<'a> {
                     value: v,
                     old,
                     line: *line,
+                    site: Site::Node(sid),
+                    releases,
                 });
             }
             Stmt::SetField {
@@ -1112,6 +1207,11 @@ impl<'a> Builder<'a> {
                     value: v,
                     old,
                     line: *line,
+                    site: Site::Node(sid),
+                    // A field store takes the plan's row as it stands: the
+                    // value-alias guard is folded into the row itself
+                    // (`fold_store_owned`), so there is nothing to add here.
+                    releases: self.own.plan.store_owned_at(sid),
                 });
             }
             Stmt::IndexSet {
@@ -1130,10 +1230,15 @@ impl<'a> Builder<'a> {
                 };
                 let v = self.val(value, out)?;
                 // A user container's `place at` yields the element's place
-                // (RFC-0091 M2), and the element's type is the value's.
-                let ety = match self.elem_ty(&bty, *line) {
-                    Ok(t) => t,
-                    Err(_) => self.ty_of(value)?,
+                // (RFC-0091 M2), and the element's type is the value's. Such
+                // a store is REWRITTEN into a block of its own before the
+                // checker walks it, so the plan's row stands on a statement
+                // this pass never sees: no site, and a reader falls back to
+                // the plan (RFC-0125 §3 M3, the emitter-reads-the-core
+                // slice).
+                let (ety, site) = match self.elem_ty(&bty, *line) {
+                    Ok(t) => (t, Site::Node(sid)),
+                    Err(_) => (self.ty_of(value)?, Site::None),
                 };
                 let old = self.old_for(&ety, sid);
                 out.push(St::Store {
@@ -1141,6 +1246,8 @@ impl<'a> Builder<'a> {
                     value: v,
                     old,
                     line: *line,
+                    site,
+                    releases: self.own.plan.store_owned_at(sid),
                 });
             }
             Stmt::Return { value, line } => {
@@ -1347,12 +1454,12 @@ impl<'a> Builder<'a> {
                     if self.body.names[it as usize].owned
                         && !self.placed.contains_key(&(Exit::Scrutinee, sid))
                     {
-                        out.push(St::Drop(it));
+                        out.push(St::Drop(it, Site::None));
                     }
                 } else if *consuming && !self.placed.contains_key(&(Exit::Scrutinee, sid)) {
                     // The loop took the container and the plan placed no row
                     // for it, so the loop gives it back here.
-                    out.push(St::Drop(it));
+                    out.push(St::Drop(it, Site::None));
                 }
                 self.drops_at(Exit::Scrutinee, sid, out)?;
             }
@@ -1372,7 +1479,7 @@ impl<'a> Builder<'a> {
                 {
                     return Ok(());
                 }
-                out.push(St::Drop(n));
+                out.push(St::Drop(n, Site::None));
             }
             Stmt::Expr(e) => {
                 let ty = self.ty_of(e).unwrap_or(Type::Unit);
@@ -1381,12 +1488,12 @@ impl<'a> Builder<'a> {
                     let t = self.temp(ty, e.line());
                     self.bind(t, rhs, out);
                     if self.own.plan.discarded_result(sid) {
-                        out.push(St::Drop(t));
+                        out.push(St::Drop(t, Site::Node(sid)));
                     }
                 } else {
                     out.push(St::Do(rhs, e.line()));
                     for t in std::mem::take(&mut self.after_of_rhs) {
-                        out.push(St::Drop(t));
+                        out.push(St::Drop(t, Site::None));
                     }
                 }
             }
@@ -1421,7 +1528,7 @@ impl<'a> Builder<'a> {
     fn close_streams(&self, out: &mut Vec<St>) {
         for it in self.stream_loops.iter().rev() {
             if self.body.names[*it as usize].owned {
-                out.push(St::Drop(*it));
+                out.push(St::Drop(*it, Site::None));
             }
         }
     }
@@ -1451,12 +1558,16 @@ impl<'a> Builder<'a> {
                 place = Place::Field(Box::new(place), f.to_string());
                 sub = true;
             }
+            let at = Site::Edge(join, edge);
             if sub {
                 let t = self.temp(ty, self.body.names[n as usize].line);
+                // The temporary is spelled as the sub-place it took, so a
+                // reader of the fold gets back the row's own name.
+                self.body.names[t as usize].source = name.clone();
                 out.push(St::Let(t, Rhs::Take(place)));
-                out.push(St::Drop(t));
+                out.push(St::Drop(t, at));
             } else {
-                out.push(St::Drop(n));
+                out.push(St::Drop(n, at));
             }
         }
         Ok(())
@@ -1710,6 +1821,24 @@ impl<'a> Builder<'a> {
     /// reads it (RFC-0096 M3), so the drop is queued for right after the
     /// binding that consumes it.
     fn read_val(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
+        let v = self.read_val_inner(e, out)?;
+        // RFC-0114 M1's key, stated once for every read in an argument
+        // position (RFC-0125 §3 M3, the emitter-reads-the-core slice). An
+        // operator is a call to the plan (`a + b` is `@concat(a, b)`) and a
+        // `lazy` field read is one too, so the key is taken here rather than
+        // in `call`, which sees neither. Membership, not the query: the
+        // query records a row as consumed, and §26's finish check is the
+        // emitters' to discharge.
+        if let Val::Name(t) = v {
+            let node = e as *const Expr as usize;
+            if self.own.plan.arg_drops.contains(&node) {
+                self.body.names[t as usize].arg_drop = Some(node);
+            }
+        }
+        Ok(v)
+    }
+
+    fn read_val_inner(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
         let ty = self.ty_of(e).ok();
         let owns = ty.as_ref().is_some_and(|t| self.owns(t));
         match e {
@@ -1765,6 +1894,7 @@ impl<'a> Builder<'a> {
         if borrowed && took {
             if self.own.plan.arg_drop(producer) {
                 if !self.after.contains(&r) {
+                    self.body.names[r as usize].arg_drop = Some(producer);
                     self.after.push(r);
                 }
             } else if self.drain > 0 {
@@ -1784,7 +1914,7 @@ impl<'a> Builder<'a> {
             return;
         }
         self.body.names[r as usize].holes = holes.iter().map(|h| format!(".{h}")).collect();
-        out.push(St::Drop(r));
+        out.push(St::Drop(r, Site::None));
     }
 
     /// An expression in a TAKE position: a `let`, a `return`, a store, a part
@@ -2155,6 +2285,8 @@ impl<'a> Builder<'a> {
                     value: tv,
                     old: Old::Nothing,
                     line: *line,
+                    site: Site::None,
+                    releases: false,
                 });
                 self.edge_drops(site, 0, &mut t)?;
                 let mut f = Vec::new();
@@ -2167,6 +2299,8 @@ impl<'a> Builder<'a> {
                             value: ev,
                             old: Old::Nothing,
                             line: *line,
+                            site: Site::None,
+                            releases: false,
                         });
                         self.edge_drops(site, 1, &mut f)?;
                         // `if c { parts[0] } else { "Bool" }`: an arm that
@@ -2217,6 +2351,8 @@ impl<'a> Builder<'a> {
                                 value: v,
                                 old: Old::Nothing,
                                 line: *line,
+                                site: Site::None,
+                                releases: false,
                             });
                         }
                         ArmBody::Block(blk) => self.block(blk, &mut body)?,
@@ -2228,7 +2364,7 @@ impl<'a> Builder<'a> {
                             if let Some((_, _, holes)) = rows.iter().find(|(n, _, _)| n == src) {
                                 self.body.names[*b as usize].holes =
                                     holes.iter().map(|h| format!(".{h}")).collect();
-                                body.push(St::Drop(*b));
+                                body.push(St::Drop(*b, Site::None));
                                 frees.push(*b);
                             }
                         }
@@ -2295,6 +2431,8 @@ impl<'a> Builder<'a> {
                     value: ob.first().map(|n| Val::Name(*n)).unwrap_or(Val::Lit),
                     old: Old::Nothing,
                     line: *line,
+                    site: Site::None,
+                    releases: false,
                 });
                 self.scope.truncate(mark);
                 out.push(St::Switch {
@@ -2374,6 +2512,8 @@ impl<'a> Builder<'a> {
             value: Val::Name(t),
             old: Old::Nothing,
             line,
+            site: Site::None,
+            releases: false,
         });
         out.push(St::Switch {
             on: sv,
@@ -2581,9 +2721,15 @@ impl<'a> Builder<'a> {
                     && *cap != Capability::Consume
                     && self.body.names[t as usize].owned
                     && self.own.plan.arg_drop(a as *const Expr as usize)
-                    && !self.after.contains(&t)
                 {
-                    temps_to_drop.push(t);
+                    // The key stands whether or not `read_val` already queued
+                    // the temporary: the drop is the same drop, and a reader
+                    // of the fold looks the row up by this node (RFC-0125 §3
+                    // M3, the emitter-reads-the-core slice).
+                    self.body.names[t as usize].arg_drop = Some(a as *const Expr as usize);
+                    if !self.after.contains(&t) {
+                        temps_to_drop.push(t);
+                    }
                 }
             }
             vs.push((v, *cap));
@@ -2765,6 +2911,33 @@ pub struct Facts {
     /// Round forty's table: `(match, arm) -> [(binder, holes)]`, the payload
     /// binders the arm's own body releases at its end.
     pub arms: std::collections::HashMap<(usize, u32), Vec<(String, Vec<String>)>>,
+    /// RFC-0114 M2 and exit-residue round eighteen: the store statements
+    /// whose old value the store releases — a `St::Store`'s `releases` at a
+    /// [`Site::Node`]. The plan's `store_owned` and
+    /// `store_fresh` are two halves of one answer, and this is the answer:
+    /// the core folds the mention guard and the `fresh_str` exception in
+    /// where both compiled backends spell them. A site absent from the map
+    /// is one this pass states no answer for, and a reader falls back to the
+    /// plan there.
+    pub stores: std::collections::HashMap<usize, bool>,
+    /// Round twenty-eight: the statement-position calls whose owned result
+    /// nothing binds and the core releases — a `St::Drop` at the
+    /// statement's [`Site::Node`].
+    pub discarded: std::collections::HashSet<usize>,
+    /// RFC-0114 M1: the call-argument nodes whose temporary the caller
+    /// releases after the call — [`NameInfo::arg_drop`], which the core sets
+    /// wherever it lowers such an argument.
+    pub arg_drops: std::collections::HashSet<usize>,
+    /// RFC-0114 Rule N: per join node, the `(name, edge)` releases one edge
+    /// owes because another edge took the name — a `St::Drop` at a
+    /// [`Site::Edge`].
+    pub edges: std::collections::HashMap<usize, Vec<(String, u32)>>,
+    /// Round twenty-seven's question, answered by the rule rather than by
+    /// the plan's table: per `match`, `if let` or `?` node, whether the
+    /// construct TOOK its scrutinee, so the boxes its binders came out of
+    /// are its own to give back ([`St::Switch`]'s `consuming`). A site
+    /// absent from the map is one this pass states no answer for.
+    pub consuming: std::collections::HashMap<usize, bool>,
 }
 
 /// The core's answers for the program last analysed on this thread. `None`
@@ -2793,7 +2966,36 @@ fn fold_facts(body: &Body, stmts: &[St], out: &mut Facts) {
                 fold_facts(body, els, out);
             }
             St::Loop(b) | St::Block { body: b, .. } => fold_facts(body, b, out),
-            St::Switch { arms, .. } => {
+            St::Store {
+                releases,
+                site: Site::Node(at),
+                ..
+            } => {
+                out.stores.insert(*at, *releases);
+            }
+            St::Drop(n, at) => match at {
+                Site::Node(at) => {
+                    out.discarded.insert(*at);
+                }
+                Site::Edge(join, edge) => {
+                    let name = body.names[*n as usize].source.clone();
+                    let rows = out.edges.entry(*join).or_default();
+                    // One row per name and edge: a generic instantiated twice
+                    // folds the same join twice when the two share a node.
+                    if !rows.contains(&(name.clone(), *edge)) {
+                        rows.push((name, *edge));
+                    }
+                }
+                Site::None => {}
+            },
+            St::Switch {
+                arms,
+                consuming: took,
+                ..
+            } => {
+                if let Some(a) = arms.first() {
+                    out.consuming.insert(a.site, *took);
+                }
                 for a in arms {
                     if let Some(frees) = &a.frees {
                         let rows: Vec<(String, Vec<String>)> = frees
@@ -2822,9 +3024,21 @@ fn fold_frame(body: &Body, out: &mut Facts) {
     let mut released = std::collections::HashSet::new();
     collect_drops(&body.stmts, &mut released);
     for (i, info) in body.names.iter().enumerate() {
-        let Some(node) = info.receiver else { continue };
-        if released.contains(&(i as Name)) {
+        if !released.contains(&(i as Name)) {
+            continue;
+        }
+        if let Some(node) = info.receiver {
             out.receivers.insert(node, plan_holes(&info.holes));
+        }
+    }
+    for info in body.names.iter() {
+        // The key stands whether or not this pass releases the temporary
+        // itself: a `lazy` field read binds a borrow here, and the row still
+        // says the caller frees the value after the call. What the row
+        // answers is "does an argument-temporary drop stand at this node",
+        // and that is what an emitter asks.
+        if let Some(node) = info.arg_drop {
+            out.arg_drops.insert(node);
         }
     }
 }
@@ -2832,7 +3046,7 @@ fn fold_frame(body: &Body, out: &mut Facts) {
 fn collect_drops(stmts: &[St], out: &mut std::collections::HashSet<Name>) {
     for s in stmts {
         match s {
-            St::Drop(n) => {
+            St::Drop(n, _) => {
                 out.insert(*n);
             }
             St::If { then, els, .. } => {

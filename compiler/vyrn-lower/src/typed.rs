@@ -222,7 +222,7 @@ impl<'a> Walk<'a, '_> {
                 }
             }
             St::Do(..)
-            | St::Drop(_)
+            | St::Drop(..)
             | St::Row { .. }
             | St::Break { .. }
             | St::Continue { .. }

@@ -21,24 +21,34 @@
 //!   - `receiver_frees` and `receiver_holes`, from a `St::Drop` of a name
 //!     whose `NameInfo::receiver` names the `Expr::Field` node.
 //!
-//! A third is pinned here since M6's third judgment took its third slice: every
+//! A third is pinned since M6's third judgment took its third slice: every
 //! `Rhs` in the core names the type its node produces, and none is an
 //! exception. That is what lets the typed judgment ask what produced a value
 //! rather than counting the store as unjudged.
 //!
-//! One is not pinned, and the reason is the finding. `St::Switch::consuming`
-//! is not the plan's `consuming_matches`: it is the whole disjunction the
-//! emitter computes in `frees_boxes` — a `consume`, a scrutinee that names
-//! no place, or the table — narrowed to an owned scrutinee with no placed
-//! release after the construct. The two answer different questions, so only
-//! the count of sites the core calls consuming is recorded here.
+//! Four more are pinned since the emitter-reads-the-core slice, and each
+//! needed the core taught to carry a key first ([`vyrn_lower::core::Site`]):
 //!
-//! The rest of the emitter's reads — `store_owned`, `store_fresh`,
-//! `discarded_results`, `arg_drops`, `edge_releases` — have no site key in
-//! the core today: `St::Store` and a temporary's `St::Drop` carry a line and
-//! no node, and an edge drop is a `St::Drop` at a position rather than at a
-//! key. Each needs the core taught to carry the key before its flip, which
-//! is what the census table in the RFC records.
+//!   - `store_owned` and `store_fresh`, from a `St::Store` at the store
+//!     statement's node — the core states the two as one answer, because
+//!     both compiled backends read them as one;
+//!   - `discarded_results`, from a `St::Drop` at the `Stmt::Expr`'s node;
+//!   - `arg_drops`, from `NameInfo::arg_drop` on the name the argument
+//!     bound;
+//!   - `edge_releases`, from a `St::Drop` at a `Site::Edge`.
+//!
+//! The diff is structural in both directions: a plan row the core states
+//! nothing for is a site a flipped emitter would stop releasing at, and a
+//! core answer the plan does not have is one it would release twice.
+//!
+//! One is COUNTED and not pinned, and the count is the finding.
+//! `St::Switch`'s `consuming` is not the plan's `consuming_matches`: it is
+//! the whole disjunction the emitter computes in `frees_boxes` — a
+//! `consume`, a scrutinee that names no place, or the table — narrowed to an
+//! owned scrutinee with no placed release after the construct. The two
+//! answer different questions, and six sites in the corpus answer them the
+//! other way round, so the emitter keeps reading the plan there (RFC-0125 §3
+//! M3, row 14).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -121,32 +131,6 @@ fn producers(stmts: &[St], out: &mut BTreeMap<(&'static str, bool), usize>) {
     }
 }
 
-/// Every `match` site the core took its scrutinee at.
-fn consuming(stmts: &[St], out: &mut Vec<usize>) {
-    for s in stmts {
-        match s {
-            St::If { then, els, .. } => {
-                consuming(then, out);
-                consuming(els, out);
-            }
-            St::Loop(b) | St::Block { body: b, .. } => consuming(b, out),
-            St::Switch {
-                arms, consuming: c, ..
-            } => {
-                if *c {
-                    if let Some(a) = arms.first() {
-                        out.push(a.site);
-                    }
-                }
-                for a in arms {
-                    consuming(&a.body, out);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 #[test]
 fn the_core_and_the_plan_agree_on_every_table() {
     // The frontend recurses deeply on a realistic program; the CLI runs it on
@@ -173,6 +157,22 @@ fn run() {
         let own = vyrn_frontend::own::analyze(&program);
         let facts = vyrn_lower::core::facts().expect("the placer fills the core's facts");
         let file = path.file_name().unwrap().to_string_lossy().to_string();
+        // The plan holds a row for every function the checker walked; the core
+        // holds one for every function the lowering instantiated. A row in a
+        // function nothing instantiated is nobody's to state, exactly as
+        // `ReleasePlan::unconsumed` skips one in a function nothing emitted.
+        let built: std::collections::HashSet<String> = lowered
+            .instances
+            .iter()
+            .map(|i| i.func.name.clone())
+            .collect();
+        let owner = |at: &usize| own.plan.owners.get(at).cloned().unwrap_or_default();
+        let reached = |at: &usize| {
+            own.plan
+                .owners
+                .get(at)
+                .is_some_and(|f| built.contains(f) || f.is_empty())
+        };
 
         for ((site, arm), core_says) in &facts.arms {
             *counted.entry("arm_frees").or_default() += 1;
@@ -213,6 +213,112 @@ fn run() {
             }
         }
 
+        // The plan's own totals, so the census can be read off this test.
+        for (what, n) in [
+            (
+                "store_owned (plan)",
+                own.plan.store_owned.iter().filter(|a| reached(a)).count(),
+            ),
+            (
+                "discarded_results (plan)",
+                own.plan
+                    .discarded_results
+                    .iter()
+                    .filter(|a| reached(a))
+                    .count(),
+            ),
+            (
+                "arg_drops (plan)",
+                own.plan.arg_drops.iter().filter(|a| reached(a)).count(),
+            ),
+            (
+                "edge_releases (plan)",
+                own.plan.edge_releases.keys().filter(|a| reached(a)).count(),
+            ),
+        ] {
+            *counted.entry(what).or_default() += n;
+        }
+
+        for (at, core_says) in &facts.stores {
+            *counted.entry("store_owned").or_default() += 1;
+            // The core's answer is the whole conjunction both compiled
+            // backends compute, so only its `true` implies the plan's row.
+            if *core_says && !own.plan.store_owned.contains(at) {
+                diffs.push(format!(
+                    "{file}: site {at}: store_owned: the core releases the old                      value and the plan does not"
+                ));
+            }
+        }
+        // A plan store row the core states no answer for. Every one in the
+        // corpus stands on a statement RFC-0091 M2's `place at` rewrite
+        // BUILT: a user container's `c[h] = v` is checked on the rewritten
+        // block, and this pass walks the source statement. A reader falls
+        // back to the plan at such a site, so the count is pinned here
+        // rather than diffed — a thirteenth would be a site nobody looked
+        // at.
+        *counted.entry("store rows left to the plan").or_default() += own
+            .plan
+            .store_owned
+            .iter()
+            .filter(|a| reached(a) && !facts.stores.contains_key(*a))
+            .count();
+
+        for at in &facts.discarded {
+            *counted.entry("discarded_results").or_default() += 1;
+            if !own.plan.discarded_results.contains(at) {
+                diffs.push(format!(
+                    "{file}: site {at}: discarded_results: core yes, plan no"
+                ));
+            }
+        }
+        for at in own.plan.discarded_results.iter().filter(|a| reached(a)) {
+            if !facts.discarded.contains(at) {
+                diffs.push(format!(
+                    "{file}: site {at}: discarded_results: plan yes, core no"
+                ));
+            }
+        }
+
+        for at in &facts.arg_drops {
+            *counted.entry("arg_drops").or_default() += 1;
+            if !own.plan.arg_drops.contains(at) {
+                diffs.push(format!("{file}: site {at}: arg_drops: core yes, plan no"));
+            }
+        }
+        for at in own.plan.arg_drops.iter().filter(|a| reached(a)) {
+            if !facts.arg_drops.contains(at) {
+                diffs.push(format!(
+                    "{file}: site {at}: arg_drops: plan yes, core no (fn {})",
+                    owner(at)
+                ));
+            }
+        }
+
+        for (join, core_rows) in &facts.edges {
+            *counted.entry("edge_releases").or_default() += 1;
+            let mut core_rows = core_rows.clone();
+            core_rows.sort();
+            let mut plan_rows = own
+                .plan
+                .edge_releases
+                .get(join)
+                .cloned()
+                .unwrap_or_default();
+            plan_rows.sort();
+            if core_rows != plan_rows {
+                diffs.push(format!(
+                    "{file}: join {join}: edge_releases: core {core_rows:?},                      plan {plan_rows:?}"
+                ));
+            }
+        }
+        for (join, plan_rows) in own.plan.edge_releases.iter().filter(|(a, _)| reached(a)) {
+            if !facts.edges.contains_key(join) && !plan_rows.is_empty() {
+                diffs.push(format!(
+                    "{file}: join {join}: edge_releases: the plan owes                      {plan_rows:?} and the core states none"
+                ));
+            }
+        }
+
         for (node, core_holes) in &facts.receivers {
             *counted.entry("receiver_frees").or_default() += 1;
             let plan_free = own.plan.receiver_free(*node);
@@ -225,21 +331,34 @@ fn run() {
             }
         }
 
+        // No pin: `St::Switch`'s `consuming` is a different rule from the
+        // plan's `consuming_matches`, so the two directions are COUNTED and
+        // the emitter keeps reading the plan (RFC-0125 §3 M3, row 14). The
+        // second count is the one that decided it: a site the plan calls
+        // consuming and the core does not is a payload box the flipped
+        // emitter would stop freeing.
+        for (site, took) in &facts.consuming {
+            *counted.entry("switch sites").or_default() += 1;
+            if *took {
+                *counted.entry("consuming: core only").or_default() +=
+                    usize::from(!own.plan.consuming_matches.contains(site));
+            } else {
+                *counted.entry("consuming: plan only").or_default() +=
+                    usize::from(own.plan.consuming_matches.contains(site));
+            }
+        }
+
+        // RFC-0125 §3 M6, the third judgment's third slice: every right-hand
+        // side of every instance, counted by whether it names its producer
+        // type. The build is the placer's own, re-run here because the fold
+        // keeps no `Rhs`.
         for inst in &lowered.instances {
             let Ok(top) = vyrn_lower::core::build(&program, inst, &own) else {
                 continue;
             };
-            let mut sites = Vec::new();
-            for body in top.frames() {
-                consuming(&body.stmts, &mut sites);
-            }
-            *counted.entry("consuming_matches").or_default() += sites.len();
             for body in top.frames() {
                 producers(&body.stmts, &mut produced);
             }
-            // No pin: `St::Switch::consuming` is a different rule from the
-            // plan's table (see the head of this file), so the count alone
-            // is recorded.
         }
     }
     eprintln!("core-vs-plan over the corpus: {programs} programs");
@@ -253,13 +372,31 @@ fn run() {
             if *typed { "typed" } else { "UNTYPED" }
         );
     }
-    for d in diffs.iter().take(400) {
-        eprintln!("  DIFF {d}");
+    // Grouped: the class first, then a handful of each, so a run that finds
+    // thousands of one shape is still readable.
+    let mut classes: BTreeMap<String, Vec<&String>> = BTreeMap::new();
+    for d in &diffs {
+        let class = d.split(": ").skip(2).take(2).collect::<Vec<_>>().join(": ");
+        classes.entry(class).or_default().push(d);
+    }
+    for (class, ds) in &classes {
+        eprintln!("  {:6} DIFF {class}", ds.len());
+        for d in ds.iter().take(4) {
+            eprintln!("           {d}");
+        }
     }
     assert!(
         diffs.is_empty(),
         "{} sites where the core and the plan disagree",
         diffs.len()
+    );
+    assert_eq!(
+        counted
+            .get("store rows left to the plan")
+            .copied()
+            .unwrap_or(0),
+        12,
+        "the `place at` rewrite's own store statements, and nothing else"
     );
     // The producer-type pin (RFC-0125 §3 M6, the third judgment's third
     // slice): every `Rhs` in the corpus names the type its node produces.

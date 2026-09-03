@@ -1259,6 +1259,106 @@ impl<'a> Cx<'a> {
         f.receivers.get(&self.plan.key_of(node)).cloned()
     }
 
+    /// RFC-0114 M2 and exit-residue round eighteen read off the core
+    /// (RFC-0125 §3 M3, the emitter-reads-the-core slice): does the store at
+    /// `node` release the value it displaces?
+    ///
+    /// The core states the plan's two tables as ONE answer (`St::Store`'s
+    /// `releases`), because both compiled backends read them as one — the row, the
+    /// `mentions_place` guard, and round eighteen's `fresh_str` exception,
+    /// all of which the core now spells (`core::Builder::stmt`). What stays
+    /// the emitter's is the region gate, which is a property of where the
+    /// code stands and not of the store.
+    ///
+    /// A site the core states nothing for falls back to the plan: RFC-0091
+    /// M2's `place at` rewrite BUILDS the store statements a user
+    /// container's `c[h] = v` becomes, the checker walks those, and this
+    /// pass walks the source statement. `compiler/vyrn-cli/tests/coretables.rs`
+    /// pins that residue at twelve rows over the corpus.
+    fn store_row(&self, node: usize) -> bool {
+        self.store_fact(node)
+            .unwrap_or_else(|| self.plan.store_owned_at(node))
+    }
+
+    /// The core's answer alone, or `None` where it states none — a body this
+    /// pass could not lower, or a statement RFC-0091 M2's rewrite built. A
+    /// store to a NAME asks for it this way, because the answer it falls
+    /// back to is the plan's row AND the guards around it, not the row
+    /// alone.
+    fn store_fact(&self, node: usize) -> Option<bool> {
+        let f = self.facts.as_ref()?;
+        let released = f.stores.get(&self.plan.key_of(node)).copied();
+        if released.is_some() {
+            self.plan.acknowledge(node);
+        }
+        released
+    }
+
+    /// Round twenty-eight read off the core (RFC-0125 §3 M3, the
+    /// emitter-reads-the-core slice): does this statement discard an owned
+    /// result the emission frees rather than drops? The core states it as a
+    /// `St::Drop` of the temporary the statement's value bound, keyed by the
+    /// `Stmt::Expr` node.
+    fn discarded_row(&self, node: usize) -> bool {
+        let Some(f) = &self.facts else {
+            return self.plan.discarded_result(node);
+        };
+        // As `Cx::arg_drop_row`: a node this pass of the core states nothing
+        // for keeps the plan's answer.
+        f.discarded.contains(&self.plan.key_of(node)) || self.plan.discarded_result(node)
+    }
+
+    /// RFC-0114 M1 read off the core (RFC-0125 §3 M3, the
+    /// emitter-reads-the-core slice): does the caller free this argument's
+    /// value after the call or operator above it? The core carries the key
+    /// on the name the argument bound ([`vyrn_lower::core::NameInfo`]'s
+    /// `arg_drop`), which is where an operator's operand gets one too — `a +
+    /// b` is `@concat(a, b)` to the plan.
+    fn arg_drop_row(&self, node: usize) -> bool {
+        let Some(f) = &self.facts else {
+            return self.plan.arg_drop(node);
+        };
+        if f.arg_drops.contains(&self.plan.key_of(node)) {
+            self.plan.acknowledge(node);
+            return true;
+        }
+        // A node the core states nothing for keeps the plan's answer, the way
+        // every other reader here does: a body the core cannot lower states
+        // no row at all, and `valuecount.vyrn` in the parity suite is one —
+        // a field read off a string literal is a place this pass refuses.
+        self.plan.arg_drop(node)
+    }
+
+    /// RFC-0114 Rule N read off the core (RFC-0125 §3 M3, the
+    /// emitter-reads-the-core slice): the releases one edge of the join at
+    /// `node` owes because another edge took the name. The core states each
+    /// as a `St::Drop` at a `Site::Edge`, which is the join and the edge —
+    /// a position in a branch is not a key, and this is why the drop carries
+    /// one. A sub-place row (`d.line`) keeps its spelling, because the
+    /// temporary the core takes it into is spelled for the place it took.
+    fn edge_rows(&self, node: usize) -> Vec<(String, u32)> {
+        let Some(f) = &self.facts else {
+            return self
+                .plan
+                .edge_releases_at(node)
+                .cloned()
+                .unwrap_or_default();
+        };
+        match f.edges.get(&self.plan.key_of(node)) {
+            Some(rows) => {
+                self.plan.acknowledge(node);
+                rows.clone()
+            }
+            // A join this pass of the core states nothing for — a body it
+            // could not lower — keeps the plan's rows.
+            None => self
+                .plan
+                .edge_releases_at(node)
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+
     /// Round forty's table read off the core (RFC-0125 §3 M3, the
     /// deletion-preparation slice): the payload binders the arm at
     /// `(key, arm)` releases at its end, each with the holes the arm left in
@@ -4005,7 +4105,7 @@ impl<'p> Fn_<'_, 'p> {
                             // resets the flag on every reassign, so `s = a + b`
                             // then `s = s + c` abandoned the `a + b` buffer
                             // (exit-residue round sixteen).
-                            let owned_here = self.cx.plan.store_owned_at(s as *const Stmt as usize);
+                            let owned_here = self.cx.store_row(s as *const Stmt as usize);
                             // Save the flag and the incoming pointer before the
                             // appends; free after them, only if the take ran
                             // (entry flag was 0) and the buffer is heap — an
@@ -4080,22 +4180,25 @@ impl<'p> Fn_<'_, 'p> {
                 // 9.9 GB over 50,000 calls of a 200-iteration loop.
                 let fresh_str = matches!(self.cx.resolve(&ty), Type::Str)
                     && matches!(value, Expr::Binary { op: BinOp::Add, .. });
-                // RFC-0114 M2: ownedness is the analysis's per-statement answer,
-                // shared with the textual backend — see `fold_store_owned` and
-                // the comment there. `place_owns` stays for the OTHER stores
-                // (fields, elements), which this slice does not touch.
-                // Queried FIRST so a region-gated site still counts as
-                // considered (§26's finish check).
-                let owned_here = self.cx.plan.store_owned_at(s as *const Stmt as usize)
-                    && self.region_depth == 0;
-                // Round eighteen: the textual backend's twin — a mention
-                // that is only a read argument to a declared non-lender
-                // cannot hand the old value back (`store_fresh_at`).
-                let snap = if owned_here
-                    && (fresh_str
-                        || !vyrn_frontend::movecheck::mentions_place(value, name)
-                        || self.cx.plan.store_fresh_at(s as *const Stmt as usize))
-                {
+                // RFC-0125 §3 M3: the rule above, the row, and round
+                // eighteen's `store_fresh` are ONE answer, and the core
+                // states it at the store's own node (`Cx::store_fact`). What
+                // is left here is the region gate: arena memory is not this
+                // path's to free, whatever the store displaces. Where the
+                // core states nothing — a body it could not lower — the
+                // three read as they always did. The answer is taken FIRST
+                // so a region-gated site still counts as considered (§26's
+                // finish check).
+                let owned_here = self
+                    .cx
+                    .store_fact(s as *const Stmt as usize)
+                    .unwrap_or_else(|| {
+                        self.cx.plan.store_owned_at(s as *const Stmt as usize)
+                            && (fresh_str
+                                || !vyrn_frontend::movecheck::mentions_place(value, name)
+                                || self.cx.plan.store_fresh_at(s as *const Stmt as usize))
+                    });
+                let snap = if owned_here && self.region_depth == 0 {
                     match (place, &r) {
                         // A scalar local IS the pointer; it has no address.
                         (Place::Local(l), Repr::Scalar(_)) => {
@@ -4146,8 +4249,7 @@ impl<'p> Fn_<'_, 'p> {
                 // per-binding registry guess (`place_owns`), queried before
                 // the region gate so an arena-owned site still counts as
                 // considered. The value-alias guard folded with it.
-                let snap = if self.cx.plan.store_owned_at(s as *const Stmt as usize)
-                    && self.region_depth == 0
+                let snap = if self.cx.store_row(s as *const Stmt as usize) && self.region_depth == 0
                 {
                     let a = self.addr_local(b, place, foff);
                     self.snap_at(b, a, &fty, *line)?
@@ -4225,12 +4327,7 @@ impl<'p> Fn_<'_, 'p> {
                 // An `if` with no else-arm grows one when the implicit edge is
                 // the one that owes a release. After a diverged arm the
                 // releases are dead code, which wasm validates.
-                let ers = self
-                    .cx
-                    .plan
-                    .edge_releases_at(s as *const Stmt as usize)
-                    .cloned()
-                    .unwrap_or_default();
+                let ers = self.cx.edge_rows(s as *const Stmt as usize);
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
                 self.block(m, b, then_block)?;
@@ -4609,8 +4706,7 @@ impl<'p> Fn_<'_, 'p> {
                 // Rule 4 through an element. The element address is already on the
                 // stack, so it is teed rather than recomputed; the snapshot is
                 // stack-neutral and the store finds its address where it left it.
-                let snap = if self.cx.plan.store_owned_at(s as *const Stmt as usize)
-                    && self.region_depth == 0
+                let snap = if self.cx.store_row(s as *const Stmt as usize) && self.region_depth == 0
                 {
                     let ea = b.local(ValType::I32);
                     b.ins(&Instruction::LocalTee(ea));
@@ -4724,7 +4820,7 @@ impl<'p> Fn_<'_, 'p> {
                 let line = Expr::line(e);
                 match self.cx.repr(&ty, line)? {
                     Repr::Unit => {}
-                    _ if self.cx.plan.discarded_result(s as *const Stmt as usize) => {
+                    _ if self.cx.discarded_row(s as *const Stmt as usize) => {
                         let l = b.local(ValType::I32);
                         b.ins(&Instruction::LocalSet(l));
                         self.free_arg_temp(m, b, l, &ty, line)?;
@@ -5389,7 +5485,7 @@ impl<'p> Fn_<'_, 'p> {
     /// is at the allocation on both backends now: see [`Fn_::str_owned`].
     fn expr(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
         let t = self.expr_inner(m, b, e)?;
-        if self.cx.plan.arg_drop(e as *const Expr as usize) && self.region_depth == 0 {
+        if self.cx.arg_drop_row(e as *const Expr as usize) && self.region_depth == 0 {
             let l = b.local(ValType::I32);
             b.ins(&Instruction::LocalTee(l));
             self.arg_frees.push((l, t.clone()));
@@ -5969,12 +6065,7 @@ impl<'p> Fn_<'_, 'p> {
         // RFC-0114 Rule N at an `if`-expression join. The releases are
         // stack-neutral, so in the scalar case they sit under the branch value
         // exactly as `match_expr`'s do.
-        let ers = self
-            .cx
-            .plan
-            .edge_releases_at(key)
-            .cloned()
-            .unwrap_or_default();
+        let ers = self.cx.edge_rows(key);
         self.cond(m, b, cond, line)?;
         match &r {
             Repr::Agg(l) => {
@@ -13091,12 +13182,7 @@ impl<'p> Fn_<'_, 'p> {
         self.depth += 1;
 
         // RFC-0114 Rule N at a match join, keyed by this expression's address.
-        let ers = self
-            .cx
-            .plan
-            .edge_releases_at(key)
-            .cloned()
-            .unwrap_or_default();
+        let ers = self.cx.edge_rows(key);
         let free_box = self.frees_boxes(scrutinee, key);
         for (arm_ix, arm) in arms.iter().enumerate() {
             self.tag_test(b, addr, &sum, &arm.pattern, line)?;
@@ -13677,6 +13763,15 @@ impl<'p> Fn_<'_, 'p> {
     /// was here; `element_path` keeps every `@at` scrutinee out of the free.
     fn frees_boxes(&self, scrutinee: &Expr, key: usize) -> bool {
         use vyrn_frontend::movecheck::{element_path, place_path};
+        // RFC-0125 §3 M3, the emitter-reads-the-core slice: NOT read off the
+        // core, and the measurement is in the RFC. The core states the rule
+        // — the construct took its scrutinee — but its answer rests on the
+        // scrutinee binding's own ownership, and round twenty-seven's table
+        // is what MAKES that binding `Aliased`. So a `let s = match o { .. }`
+        // reads as a borrow in the core and the boxes would stop being
+        // freed: six sites over three corpus programs, each one a leak.
+        // The rule needs a binding's ownership stated apart from the
+        // decision it feeds, and that is not this slice's.
         let consumed = matches!(scrutinee, Expr::Consume { .. })
             || (place_path(scrutinee).is_none() && element_path(scrutinee).is_none())
             || self.cx.plan.match_consumes(key);
