@@ -7493,39 +7493,35 @@ impl<'a> Interp<'a> {
         }
     }
 
-    /// Whether `v` satisfies `decl`'s refinement predicate (always true if none).
+    /// Whether `v` satisfies `decl`'s refinement predicate (always true if
+    /// none) — by CALLING the program's own predicate function.
     ///
-    /// The predicate is evaluated by the *runtime* evaluator with `value` bound
-    /// — not by consteval — so every value kind the interpreter has (Float,
-    /// sized ints, strings, indexing, `=~`) validates with exactly its runtime
-    /// semantics, and a predicate that traps (division by zero) traps the same
-    /// way an ordinary expression does.
+    /// RFC-0125 §3 M6, the third judgment's fourth slice: the predicate is
+    /// generated Vyrn ([`crate::ctor`]), so this interpreter runs the same body
+    /// the two emitters compile instead of building a scope and evaluating the
+    /// clause itself. What `value` means, and whether the fields are bound
+    /// instead, is the generated function's signature — one answer, not one per
+    /// engine.
     fn validates(&self, decl: &TypeDecl, v: &Val) -> Result<bool, Ctrl> {
-        let pred = match &decl.predicate {
-            None => return Ok(true),
-            Some(p) => p,
-        };
-        // A record base binds every field name; every other base binds `value`
-        // (RFC-0003). `validate::is_cross_field` is the one place that fact is
-        // asked, because `trap::validation_of` picks its wording by the same
-        // fact and the two must not disagree.
-        let mut scope = if crate::validate::is_cross_field(decl) {
-            match v {
-                Val::Record(map, _) => vec![map
-                    .iter()
-                    .map(|(k, fv)| (k.clone(), Slot::untyped(fv.clone())))
-                    .collect::<Frame>()],
-                // Not a record value: a cross-field predicate has nothing to
-                // read, so nothing is checked.
-                _ => return Ok(true),
-            }
+        if decl.predicate.is_none() {
+            return Ok(true);
+        }
+        // A record base binds every field, so the call spreads them in
+        // `predicate_binds` order; every other base binds `value` and passes it
+        // through. Not a record value under a cross-field predicate is nothing
+        // to read, as it was before this became a call.
+        let args: Vec<Val> = if crate::validate::is_cross_field(decl) {
+            let Val::Record(map, _) = v else {
+                return Ok(true);
+            };
+            crate::types::predicate_binds(decl)
+                .into_iter()
+                .map(|(n, _, _)| map.get(&n).cloned().unwrap_or(Val::Unit))
+                .collect()
         } else {
-            vec![Frame::from_iter([(
-                "value".to_string(),
-                Slot::untyped(v.clone()),
-            )])]
+            vec![v.clone()]
         };
-        match self.expr(pred, &mut scope)? {
+        match self.call(&crate::ctor::pred_name(&decl.name), &args)? {
             Val::Bool(b) => Ok(b),
             other => Err(format!(
                 "refinement for `{}` did not evaluate to Bool (got {other:?})",
@@ -7536,20 +7532,18 @@ impl<'a> Interp<'a> {
     }
 
     /// The one place this interpreter refuses a value for its type's `where` —
-    /// RFC-0125 section 3 M6, the census rows `where-scalar` and `where-record`.
+    /// RFC-0125 §3 M6, the census rows `where-scalar` and `where-record`.
     ///
-    /// It was three places: `Age(n)`, a record literal, and every typed
-    /// boundary. Each ran a predicate and each spelled its own wording, and only
-    /// the third built that wording from the declaration — so the constructor
-    /// path would have given a record base the scalar sentence. One statement
-    /// asks [`Interp::validates`] and hands the answer to
-    /// [`crate::trap::validation_of`], which picks the sentence by the same fact
-    /// `validates` picks the binding by.
+    /// It was three places, then one, and now it is none: the refusal itself is
+    /// the generated constructor's ([`crate::ctor`]), which every engine calls,
+    /// so the sentence on stderr is written by one `panic` in one Vyrn body
+    /// rather than by three engines that agreed to spell it alike.
     fn enforce(&self, decl: &TypeDecl, v: &Val) -> Result<(), Ctrl> {
-        if self.validates(decl, v)? {
+        if decl.predicate.is_none() {
             return Ok(());
         }
-        Err(crate::trap::validation_of(decl).into())
+        self.call(&crate::ctor::ctor_name(&decl.name), &[v.clone()])?;
+        Ok(())
     }
 
     /// Evaluate a `match` over an Option or Result, binding the payload.
