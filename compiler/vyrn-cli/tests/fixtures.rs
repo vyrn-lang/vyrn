@@ -22,9 +22,10 @@
 //! every checkout. A refusal (`EXPECTED_CHECK_FAILURE`) is compared like any
 //! other program: its output is the diagnostic, and both engines share the
 //! load that prints it — `polyrecursion.vyrn` among them, since `vyrn run`
-//! refuses what `vyrn check` refuses under either engine. The host-only
-//! program (`WASM_ONLY`) is skipped, since no terminal supplies its `extern`
-//! namespace.
+//! refuses what `vyrn check` refuses under either engine. Nothing is skipped:
+//! the host-only program (`WASM_ONLY`) is compared like the rest, because the
+//! embedded host answers an RFC-0012 `extern` with the same refusal the
+//! interpreter recorded (RFC-0125 §3 M5, the `extern-unavailable` row).
 
 mod common;
 use common::*;
@@ -101,7 +102,7 @@ const CENSUS: &[Census] = &[
     },
     Census {
         capability: "extern-unavailable",
-        verdict: "worse",
+        verdict: "yes",
     },
     Census {
         capability: "site-export",
@@ -131,15 +132,10 @@ fn every_example_prints_what_was_recorded() {
     assert!(!names.is_empty(), "no examples found in {}", dir.display());
 
     let mut failures: Vec<String> = Vec::new();
-    let (mut compared, mut skipped) = (0usize, 0usize);
+    let mut compared = 0usize;
     for path in &names {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let stem = path.file_stem().unwrap().to_string_lossy().to_string();
-        if let Some((_, why)) = WASM_ONLY.iter().find(|(n, _)| *n == name) {
-            eprintln!("SKIP  {name}  (host-only: {why})");
-            skipped += 1;
-            continue;
-        }
         let mut cmd = vyrn();
         cmd.arg("run");
         if !write {
@@ -186,7 +182,7 @@ fn every_example_prints_what_was_recorded() {
         eprintln!("ok    {name}");
     }
     eprintln!(
-        "\nfixtures: {compared} {}, {skipped} skipped (host-only), {} failed",
+        "\nfixtures: {compared} {}, {} failed",
         if write { "recorded" } else { "compared" },
         failures.len()
     );

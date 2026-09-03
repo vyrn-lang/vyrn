@@ -3,9 +3,10 @@
 //!
 //! The module is what `vyrn build --target wasm` writes, byte for byte. This
 //! file is the WASI host it runs under: the fifteen `wasi_snapshot_preview1`
-//! imports `vyrn_codegen::direct` declares, and nothing else. Any other import
-//! traps, so a module that reaches past this list says so instead of running
-//! wrong.
+//! imports `vyrn_codegen::direct` declares, and nothing else. An RFC-0012
+//! `extern` import is answered with the one refusal a terminal owes it (see
+//! [`run`]); any other import traps, so a module that reaches past this list
+//! says so instead of running wrong.
 //!
 //! Hand-written, not `wasmtime-wasi`, for the reason RFC-0076 gave when it wrote
 //! the generator engine's shim and `web/wasi-min.js` before that: the surface is
@@ -122,10 +123,35 @@ pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
     let module = Module::new(engine, bytes).map_err(|e| format!("wasm: {e:?}"))?;
     let mut linker: Linker<Host> = Linker::new(engine);
     link_wasi(&mut linker).map_err(|e| e.to_string())?;
-    // A directly-emitted module imports only what it calls after `sweep`; an
-    // `extern fn` (RFC-0012) is in the `vyrn` namespace no terminal supplies,
-    // so it traps here the way native's stub does — the corpus keeps such a
-    // program host-only (`WASM_ONLY` in tests/common).
+    // A directly-emitted module imports only what it calls after `sweep`, so a
+    // `vyrn` import here is an `extern fn` (RFC-0012) the program REACHES. Only
+    // a browser page supplies that namespace. A terminal answers each name with
+    // the one refusal — `interp::extern_unavailable`'s sentence on fd 2, then
+    // exit 1 — because that is what the interpreter prints and what native's C
+    // stub prints (`vyrn_codegen::toolchain::extern_trap_stubs`), and a reached
+    // `extern` must fail the same way on every engine. RFC-0125 §3 M5, the
+    // `extern-unavailable` row. The import stays in the module: the page still
+    // fills it, and only the host that cannot answer names the function.
+    for imp in module.imports() {
+        if imp.module() != "vyrn" {
+            continue;
+        }
+        let Some(ty) = imp.ty().func().cloned() else {
+            continue;
+        };
+        let msg = format!(
+            "error: {}\n",
+            vyrn_frontend::interp::extern_unavailable(imp.name())
+        );
+        linker
+            .func_new("vyrn", imp.name(), ty, move |mut caller, _, _| {
+                write_err(caller.data_mut(), msg.as_bytes());
+                Err(Exit(1).into())
+            })
+            .map_err(|e| e.to_string())?;
+    }
+    // Anything else the module asks for is neither WASI nor an `extern`, so the
+    // trap is this host's own and says the module reached past its list.
     linker
         .define_unknown_imports_as_traps(&module)
         .map_err(|e| e.to_string())?;

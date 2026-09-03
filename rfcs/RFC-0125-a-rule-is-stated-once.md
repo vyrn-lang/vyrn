@@ -2194,7 +2194,7 @@ deleted here, and `--engine interp` is still the default.
 
 | capability | who needs it | the compiled route today | what moving it costs |
 |---|---|---|---|
-| `run-default` | every user; 34 of `vyrn-cli`'s test suites, at 150 `vyrn run` call sites; the fixture recorder | yes — 204 examples run under both engines, 203 byte-identical, the same 58 exit non-zero | flipping one default. the corpus costs 89.1 s under the interpreter and 39.4 s under the compiled route, compile included |
+| `run-default` | every user; 34 of `vyrn-cli`'s test suites, at 150 `vyrn run` call sites; the fixture recorder | yes — 204 examples run under both engines, all byte-identical since the fourth slice below (203 of 204 when this row was written), the same 58 exit non-zero | flipping one default. the corpus costs 89.1 s under the interpreter and 39.4 s under the compiled route, compile included |
 | `test-bodies` | 25 corpus files; `tests/testing.rs` | yes — all 25 byte-identical, `placeorder.vyrn` among them | 4.6 s against 5.3 s over the 25. The compiled route is SLOWER here: the bodies are small and the compile is the whole cost |
 | `test-state` | nothing in the corpus | no — one fresh instance per body, where the interpreter runs the module's state once and lets the bodies see each other's writes | `rfcs/probes-0125/module-state-across-test-bodies.vyrn`: 2 passed under the interpreter, `1 != 2` under wasm. The cost is the semantics, and M5 retires them rather than reproducing them |
 | `bench-check` | CI's "Bench --check" step; 17 corpus files | yes — all 17 byte-identical, after this slice's fix below | 52.3 s against 2.4 s over the 17, a factor of 22 |
@@ -2207,7 +2207,7 @@ deleted here, and `--engine interp` is still the default.
 | `parity-column` | CI's parity job, 41 programs three engines | yes, by replacement — `fixtures` plus `wasmhash` state the invariant §2.6 names | parity is 971 s on one platform; `fixtures` is 123 to 213 s and `wasmhash` 97 to 146 s, each on four |
 | `boundary-carrier` | `tests/boundaries.rs`, 18 of its 19 rules | yes — every row keeps a native, wasm or Vyrn carrier | 18 rows lose a carrier and the census's copy total falls by 18 |
 | `library-run` | `vyrn_frontend::run`, `interp::run`; `jsondec.rs` and `loader.rs` self-tests | no — the compiled route lives in `vyrn-cli`, not in the frontend | those tests move to the CLI's harness, or the frontend takes a dependency on a backend |
-| `extern-unavailable` | `examples/externdemo.vyrn`, the corpus's one host-only program | worse — the interpreter prints ``error: extern `jsNow` is not available on this target`` and the compiled route traps with `error: error while executing at wasm backtrace:` | the direct backend has to refuse an unavailable `extern` in `interp::extern_unavailable`'s words. This is the one output difference in 204 programs |
+| `extern-unavailable` | `examples/externdemo.vyrn`, the corpus's one host-only program | yes, since the fourth slice below — both engines print ``error: extern `jsNow` is not available on this target`` on standard error and exit 1. The third slice read `worse` here: the compiled route trapped with `error: error while executing at wasm backtrace:`, the one output difference in 204 programs | the embedded host answers the `vyrn` namespace with `interp::extern_unavailable`'s sentence, as native's C stub already did. No emitted byte changes |
 | `site-export` | CI's Site job | yes, and this is new — the frame-limit refusal M5's second slice recorded is gone, and the compiled route writes the same 241 files | 187.30 s against 13.89 s, medians of three interleaved runs, and the 241 files are byte-identical |
 
 #### How the third column was proved
@@ -2220,7 +2220,8 @@ Every `yes` above is a run, not a reading.
   203 are byte-identical on stdout, stderr and the exit code. The refusal sets
   are the same set, not the same size: 58 programs exit non-zero under each,
   and no program is refused by one engine and run by the other. The single
-  difference is `externdemo.vyrn`, the `extern-unavailable` row.
+  difference is `externdemo.vyrn`, the `extern-unavailable` row — closed by the
+  fourth slice, which makes the count 204 of 204.
 - **The bodies.** `vyrn test` over the 25 examples with `test` blocks and
   `vyrn bench --check` over the 17 with `bench` blocks, under both engines.
   All byte-identical. `placeorder.vyrn`, the placement defect M5's second
@@ -2362,7 +2363,8 @@ it, and `tests/benching.rs` pins both engines on the reduction. It changes no
 emitted bytes: `blackBox` exists only inside a `bench` or `test` body, and
 `wasmhash` builds each example's `main`.
 
-Two things were found and NOT fixed here, both recorded rather than repaired:
+Two things were found and NOT fixed here, both recorded rather than repaired.
+The fourth slice below fixed both:
 
 - `examples/externdemo.vyrn` under `--engine wasm` traps with wasmtime's
   backtrace where the interpreter names the unavailable `extern`. The
