@@ -1278,22 +1278,6 @@ fn scalar_to_string(v: &Val) -> String {
     }
 }
 
-/// Wrap `v` into a `bits`-wide two's-complement integer, matching the native
-/// backend's `iN` arithmetic. Signed values are sign-extended back into `i64`;
-/// unsigned are zero-extended. `bits >= 64` is the identity.
-fn wrap_intn(v: i64, bits: u8, signed: bool) -> i64 {
-    if bits >= 64 {
-        return v;
-    }
-    let mask = (1i64 << bits) - 1;
-    let m = v & mask;
-    if signed && (m & (1i64 << (bits - 1))) != 0 {
-        m | !mask // set the high bits (sign extension)
-    } else {
-        m
-    }
-}
-
 /// IEEE-754-2019 `minimum` — NaN in either operand propagates, and `-0.0` orders
 /// strictly below `+0.0` (RFC-0083 M2).
 ///
@@ -1403,7 +1387,7 @@ fn vec_oob(i: i64, span: i64) -> String {
 }
 
 /// Convert a numeric value to `target` (Int / sized IntN / Float / Float32),
-/// matching the native casts (sext/trunc via `wrap_intn`, si/uitofp, fpto si/ui,
+/// matching the native casts (sext/trunc via `validate::wrap`, si/uitofp, fpto si/ui,
 /// fp trunc/ext). Float→int truncates toward zero; out-of-range float→int is
 /// unspecified (as in C/LLVM).
 fn convert_val(v: Val, target: &Type) -> Val {
@@ -1415,19 +1399,18 @@ fn convert_val(v: Val, target: &Type) -> Val {
             other => other,
         },
         Type::IntN { bits, signed } => {
+            // The float rows go through `validate::from_float`, which is the
+            // `float-to-int` row's one statement (RFC-0125 §3 M6): truncate
+            // toward zero, then re-read at the target's width.
             let n = match v {
-                Val::Int(n) => n,
-                Val::IntN { v, .. } => v,
-                // Truncate toward zero; an unsigned target reads the float as
-                // `u64` (native `fptoui`), signed as `i64` (`fptosi`).
-                Val::Float(f) if !*signed => f as u64 as i64,
-                Val::Float(f) => f as i64,
-                Val::Float32(f) if !*signed => f as u64 as i64,
-                Val::Float32(f) => f as i64,
+                Val::Int(n) => crate::validate::wrap(n, *bits, *signed),
+                Val::IntN { v, .. } => crate::validate::wrap(v, *bits, *signed),
+                Val::Float(f) => crate::validate::from_float(f, *bits, *signed),
+                Val::Float32(f) => crate::validate::from_float(f64::from(f), *bits, *signed),
                 other => return other,
             };
             Val::IntN {
-                v: wrap_intn(n, *bits, *signed),
+                v: n,
                 bits: *bits,
                 signed: *signed,
             }
@@ -3624,9 +3607,7 @@ impl<'a> Interp<'a> {
     /// `v` and fail if it does not hold. The runtime representation of a
     /// validated value is just its base value (zero overhead).
     fn construct(&self, decl: &TypeDecl, v: Val) -> Result<Val, Ctrl> {
-        if !self.validates(decl, &v)? {
-            return Err(crate::trap::validation(&decl.name, false).into());
-        }
+        self.enforce(decl, &v)?;
         Ok(v)
     }
 
@@ -5419,7 +5400,7 @@ impl<'a> Interp<'a> {
                     // keeps it MIN, exactly as native `sub i64 0, %n` does.
                     (UnOp::Neg, Val::Int(n)) => Ok(Val::Int(n.wrapping_neg())),
                     (UnOp::Neg, Val::IntN { v, bits, signed }) => Ok(Val::IntN {
-                        v: wrap_intn(v.wrapping_neg(), bits, signed),
+                        v: crate::validate::wrap(v.wrapping_neg(), bits, signed),
                         bits,
                         signed,
                     }),
@@ -5451,7 +5432,7 @@ impl<'a> Interp<'a> {
                     // width (re-wrapped so an unsigned complement stays in range).
                     (UnOp::BitNot, Val::Int(n)) => Ok(Val::Int(!n)),
                     (UnOp::BitNot, Val::IntN { v, bits, signed }) => Ok(Val::IntN {
-                        v: wrap_intn(!v, bits, signed),
+                        v: crate::validate::wrap(!v, bits, signed),
                         bits,
                         signed,
                     }),
@@ -7347,30 +7328,19 @@ impl<'a> Interp<'a> {
                         }
                     }
                 }
-                // Enforce a cross-field `where` invariant, if the record declares
-                // one (e.g. `{ start, end } where start < end`). The predicate
-                // runs under the runtime evaluator with every field bound, so
-                // Float/sized-int fields compare with exact runtime semantics.
-                if let Some(decl) = self.types.get(name.as_str()) {
-                    if let Some(pred) = &decl.predicate {
-                        let mut env = vec![map
-                            .iter()
-                            .map(|(k, v)| (k.clone(), Slot::untyped(v.clone())))
-                            .collect::<Frame>()];
-                        match self.expr(pred, &mut env)? {
-                            Val::Bool(true) => {}
-                            Val::Bool(false) => {
-                                return Err(crate::trap::validation(name, true).into())
-                            }
-                            other => {
-                                return Err(format!(
-                                    "cross-field predicate for `{name}` did not evaluate \
-                                     to Bool (got {other:?})"
-                                )
-                                .into())
-                            }
-                        }
-                    }
+                // Enforce a cross-field `where` invariant, if the record
+                // declares one (e.g. `{ start, end } where start < end`) —
+                // through [`Interp::enforce`], the one place this interpreter
+                // runs a predicate (RFC-0125 section 3 M6). A literal is a
+                // boundary like any other, and it used to be a boundary that
+                // spelled the rule for itself.
+                if let Some(decl) = crate::validate::of(self.types.get(name.as_str()).copied()) {
+                    let probe = Val::Record(std::rc::Rc::new(map), None);
+                    self.enforce(decl, &probe)?;
+                    let Val::Record(back, _) = probe else {
+                        unreachable!("built one line above")
+                    };
+                    map = std::rc::Rc::try_unwrap(back).unwrap_or_else(|rc| (*rc).clone());
                 }
                 // A literal names its own type, and the checker types it as
                 // exactly that name — so `User { .. }` is born stamped `User`
@@ -7535,10 +7505,26 @@ impl<'a> Interp<'a> {
             None => return Ok(true),
             Some(p) => p,
         };
-        let mut scope = vec![Frame::from_iter([(
-            "value".to_string(),
-            Slot::untyped(v.clone()),
-        )])];
+        // A record base binds every field name; every other base binds `value`
+        // (RFC-0003). `validate::is_cross_field` is the one place that fact is
+        // asked, because `trap::validation_of` picks its wording by the same
+        // fact and the two must not disagree.
+        let mut scope = if crate::validate::is_cross_field(decl) {
+            match v {
+                Val::Record(map, _) => vec![map
+                    .iter()
+                    .map(|(k, fv)| (k.clone(), Slot::untyped(fv.clone())))
+                    .collect::<Frame>()],
+                // Not a record value: a cross-field predicate has nothing to
+                // read, so nothing is checked.
+                _ => return Ok(true),
+            }
+        } else {
+            vec![Frame::from_iter([(
+                "value".to_string(),
+                Slot::untyped(v.clone()),
+            )])]
+        };
         match self.expr(pred, &mut scope)? {
             Val::Bool(b) => Ok(b),
             other => Err(format!(
@@ -7547,6 +7533,23 @@ impl<'a> Interp<'a> {
             )
             .into()),
         }
+    }
+
+    /// The one place this interpreter refuses a value for its type's `where` —
+    /// RFC-0125 section 3 M6, the census rows `where-scalar` and `where-record`.
+    ///
+    /// It was three places: `Age(n)`, a record literal, and every typed
+    /// boundary. Each ran a predicate and each spelled its own wording, and only
+    /// the third built that wording from the declaration — so the constructor
+    /// path would have given a record base the scalar sentence. One statement
+    /// asks [`Interp::validates`] and hands the answer to
+    /// [`crate::trap::validation_of`], which picks the sentence by the same fact
+    /// `validates` picks the binding by.
+    fn enforce(&self, decl: &TypeDecl, v: &Val) -> Result<(), Ctrl> {
+        if self.validates(decl, v)? {
+            return Ok(());
+        }
+        Err(crate::trap::validation_of(decl).into())
     }
 
     /// Evaluate a `match` over an Option or Result, binding the payload.
@@ -7916,17 +7919,17 @@ impl<'a> Interp<'a> {
             // native backend's iN registers truncate it — comparing or dividing
             // by the raw i64 would give a different answer.
             let x = match l {
-                Val::IntN { v, .. } => wrap_intn(v, bits, signed),
-                Val::Int(n) => wrap_intn(n, bits, signed),
+                Val::IntN { v, .. } => crate::validate::wrap(v, bits, signed),
+                Val::Int(n) => crate::validate::wrap(n, bits, signed),
                 _ => return Err("type error in sized-int binop".into()),
             };
             let y = match r {
-                Val::IntN { v, .. } => wrap_intn(v, bits, signed),
-                Val::Int(n) => wrap_intn(n, bits, signed),
+                Val::IntN { v, .. } => crate::validate::wrap(v, bits, signed),
+                Val::Int(n) => crate::validate::wrap(n, bits, signed),
                 _ => return Err("type error in sized-int binop".into()),
             };
             let mk = |v: i64| Val::IntN {
-                v: wrap_intn(v, bits, signed),
+                v: crate::validate::wrap(v, bits, signed),
                 bits,
                 signed,
             };
@@ -8176,12 +8179,12 @@ impl<'a> Interp<'a> {
         }
         match (ty, v) {
             (Type::IntN { bits, signed }, Val::Int(n)) => Ok(Val::IntN {
-                v: wrap_intn(n, *bits, *signed),
+                v: crate::validate::wrap(n, *bits, *signed),
                 bits: *bits,
                 signed: *signed,
             }),
             (Type::IntN { bits, signed }, Val::IntN { v, .. }) => Ok(Val::IntN {
-                v: wrap_intn(v, *bits, *signed),
+                v: crate::validate::wrap(v, *bits, *signed),
                 bits: *bits,
                 signed: *signed,
             }),
@@ -8195,37 +8198,7 @@ impl<'a> Interp<'a> {
                 // Coerce toward the base first (a record base coerces fields;
                 // a scalar base wraps), then run the predicate on the result.
                 let v = self.coerce(v, &decl.base)?;
-                if let Some(pred) = &decl.predicate {
-                    // A record base has a cross-field predicate (field names in
-                    // scope); a scalar base binds `value`.
-                    let holds = if matches!(decl.base, Type::Record(_)) {
-                        match &v {
-                            Val::Record(map, _) => {
-                                let mut env = vec![map
-                                    .iter()
-                                    .map(|(k, v)| (k.clone(), Slot::untyped(v.clone())))
-                                    .collect::<Frame>()];
-                                match self.expr(pred, &mut env)? {
-                                    Val::Bool(b) => b,
-                                    other => {
-                                        return Err(format!(
-                                            "cross-field predicate for `{n}` did not \
-                                             evaluate to Bool (got {other:?})"
-                                        )
-                                        .into())
-                                    }
-                                }
-                            }
-                            _ => true, // not a record value — nothing to check
-                        }
-                    } else {
-                        self.validates(decl, &v)?
-                    };
-                    if !holds {
-                        let msg = crate::trap::validation_of(decl);
-                        return Err(msg.into());
-                    }
-                }
+                self.enforce(decl, &v)?;
                 // The typed boundary is where a record learns its name
                 // (RFC-0084 M1). `n` is the STATIC type of the slot the value is
                 // entering, which is the same thing `type_key` hands the two
@@ -8416,7 +8389,18 @@ impl<'a> Interp<'a> {
                     bits: b,
                     signed: s,
                 },
-            ) => bits == b && signed == s && wrap_intn(*v, *bits, *signed) == *v,
+            ) => {
+                // "Already at this width and signedness" is `validate::narrows`
+                // read the other way round — the same question the emitters ask
+                // of a crossing (RFC-0125 §3 M6).
+                !crate::validate::narrows(
+                    &Type::IntN {
+                        bits: *b,
+                        signed: *s,
+                    },
+                    ty,
+                ) && crate::validate::wrap(*v, *bits, *signed) == *v
+            }
             (
                 Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _),
                 Val::Array(items),

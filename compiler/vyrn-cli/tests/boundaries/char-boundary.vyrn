@@ -1,0 +1,14 @@
+/// Row `char-boundary` — RFC-0046. A byte offset inside a multi-byte
+/// character. The rule is stated ONCE, in `std/strings`, and every engine
+/// runs that one body — the shape the other rows are moving towards.
+
+import { substring } from "std/strings"
+
+fn raw(n: Int64) -> Int64 {
+    return n
+}
+
+fn main() -> Int64 {
+    print(substring("café", raw(4), 5))
+    return 0
+}

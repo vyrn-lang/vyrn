@@ -2362,13 +2362,13 @@ whether it allocated. `pure` is the bottom.
 |---|---|---|---|---|---|---|
 | `alloc` | `runtime$malloc`, `mem$grow`; and an owned name born of a primitive, a literal or a builtin | `memory.grow` | yes | yes | yes | yes |
 | `read-input` | `readLine` | `fd_read` on 0 | yes | yes | EOF | no |
-| `write-output` | `print`, `writeStdout`, `trace`, `debug`, `info`, `warn`, `error` | `fd_write` on 1, 2 | yes | yes | yes | `print` yes, the rest no (finding 4) |
+| `write-output` | `print`, `writeStdout`, `trace`, `debug`, `info`, `warn`, `error` | `fd_write` on 1, 2 | yes | yes | yes | no (finding 4) |
 | `fs-read` | `readFile`, `readFileBytes` | `path_open`, `fd_read`, `fd_close`, `fd_prestat_get` | yes | yes | `NOENT` | `readFile` yes, `readFileBytes` no (finding 5) |
 | `fs-write` | `writeFile`, `writeFileBytes`, `renameFile`, `fsyncFile` | `path_open`, `fd_write`, `path_rename`, `fd_sync` | yes | yes | `NOENT` | no |
 | `fs-list` | `listDir`, `listDirKinds` | `fd_readdir` | no (`NATIVE_UNSUPPORTED`) | yes | `BADF` | yes, mediated |
 | `args` | `args` | `args_sizes_get`, `args_get` | yes | yes | empty | no |
-| `clock` | `hostNowMillis`, `hostMonotonicNanos` | `clock_time_get`; `environ_get` for `VYRN_FIXED_TIME` | yes | yes | yes | no (an extern) |
-| `random` | `hostRandomSeed` | `random_get`; `environ_get` for `VYRN_FIXED_SEED` | yes | yes | yes | no (an extern) |
+| `clock` | `hostNowMillis`, `hostMonotonicNanos` | `clock_time_get`; `environ_get` for `VYRN_FIXED_TIME` | yes | yes | yes | no (finding 13) |
+| `random` | `hostRandomSeed` | `random_get`; `environ_get` for `VYRN_FIXED_SEED` | yes | yes | yes | no (finding 13) |
 | `extern` | every other extern declaration, resolved by name | the `vyrn` namespace | trap | no instantiation | yes | no |
 | `serve` | `serveStream` | — | trap | trap | trap | no |
 | `spawn` | no name: the marker the core keeps on a spawned call (§2.1; the spawn flag of a core call, second slice) | — | yes | yes, eager | yes, eager | no |
@@ -2916,6 +2916,784 @@ lowering and one ownership analysis, which `emit-lowered` measures at 4 to
 Findings 5, 9, 10, 11 and 13 still change nothing. Findings 7 and 8 are
 now half spent: 8 is on record and paid by two rows; 7 is what keeps
 `extern` where it is.
+
+#### The fifth slice (2026-09-03)
+
+The fifth slice makes the lattice's `gen` column a check, closes findings 4
+and 13 with it, and moves the `fs` row into the judgment. `floor::CALLS`
+holds nothing now.
+
+**Where the column had to go.** The table's DATA — the effects, the sets,
+`ATOMS` and the new `Effect::gen` — is `vyrn-frontend/src/effects.rs`. The
+JUDGMENT that joins a body's atoms with its callees' sets stays in
+`vyrn-lower/src/effects.rs` and re-exports every name, so it still spells the
+lattice `effects::`. The fourth slice's hook could not carry this rule.
+RFC-0021's fence (`checker::check_comptime_purity`) runs at step 7 of the
+check, over the AST, and it must answer for EVERY `gen fn`: a generic one no
+lowering instantiates, and a body no core is built for. A judgment over the
+core cannot be handed to it, because the core is built from the checker's
+types and the check is what is running. A hook with no answer would drop the
+fence out of the LSP, which installs no judge; a hook with a fallback would
+keep the second list this slice deletes. So the column is data both readers
+can see rather than a function pointer one of them installs, and the fence
+keeps its place in the order of diagnostics.
+
+`COMPTIME_FORBIDDEN` is deleted. It was thirteen names — the column written a
+second time — and the two had drifted in exactly the two places the findings
+named, plus one the findings had not.
+
+- **4, closed.** `write-output` is one effect and its `gen` cell is one cell:
+  `no`. `print` in a `gen fn` is refused with the other six atoms of its row.
+  The hint names it, `checker::gen_fn_using_print_is_rejected` pins the
+  refusal, and the table's cell is `no (finding 4)`.
+- **13, closed.** The fence no longer calls the clock an extern. `extern_fns`
+  skips what `trap::host_boundary_extern` knows — RFC-0103 M2's rule that the
+  three host-boundary names are not host imports, because the runtime shim
+  implements them on every target — and the row answers instead: "reads the
+  clock", "reads entropy". The pin
+  `rfc0043_host_clock_extern_is_rejected_in_a_generator` holds the new sentence
+  and holds the old one out.
+- **5, unchanged, and now written where a reader will find it.**
+  `effects::GEN_ATOM_OVERRIDES` is one row: `readFileBytes`, `no`, against its
+  `fs-read` row's `yes`. The reason is the route and not the effect, exactly as
+  the second slice decided. The one-line version is this line, and it changes
+  no verdict.
+- **One cell the list did not have.** `serveStream` is an atom of the `serve`
+  row, whose `gen` cell is `no`, and it was on no list. It is refused in a
+  `gen fn` now. Nothing in the corpus spells it in one.
+
+**The knob.** `VYRN_NO_JUDGE=1` is still one knob. It puts every judged row
+back in the pass, and it puts the fence's two changed cells back: `print` is
+allowed again and the three host-boundary names are externs again. A refusal
+that is new can be told from one that is not, without a second env var.
+
+**What moved out of the floor.** `readFile`, `readFileBytes`, `writeFile`,
+`writeFileBytes`, `renameFile`, `fsyncFile`, `listDir`, `listDirKinds` — the
+whole `fs` row of calls. `floor::CALLS` is empty and kept: the module scan
+reads it and `JUDGED` as one list, so a row that has to come back comes back
+by moving one line.
+
+What held the row back was the generation context, which is what the `gen`
+column becoming a check gives. 216 corpus bodies are `gen fn`s carrying
+`fs-read` or `fs-list`; the floor skips them because a generator runs against
+the compiler's filesystem and is never compiled into the artifact; a judgment
+that did not know the context would have refused every one of them.
+`effects::reaches` skips a `gen fn` instance now, which is the same line
+`floor::carried` draws. The fence decides what a generator may do, the floor
+decides what a target may do, and this is the line between them.
+
+`floor::is_judged` asks about the CARRIER and not the capability, because `fs`
+has both kinds: eight calls a judgment decides and one declaration it does
+not. `floor::objected` hands the loader the carrier, so a declaration's
+refusal is still made inside the load, before every type error, where it
+always was.
+
+**The tally.** `cargo test -p vyrn-cli --test effects`, at this slice's last
+commit:
+
+    effects over the corpus: 180 programs (31 not loadable here, 2 refused as
+    recorded), 26883 functions judged, 8244 pure, 0 unlowered, 64 calls
+    through a function value judged over their sources, 69 unattributed
+      open sets: 40
+      effect 18218  alloc
+      effect    11  read-input
+      effect   292  write-output
+      effect   189  fs-read
+      effect    19  fs-write
+      effect   106  fs-list
+      effect     8  args
+      effect    29  clock
+      effect    20  random
+      effect    31  extern
+      effect    22  serve
+      effect     4  spawn
+      effect  7785  trap
+      effect   826  gen-only
+      spawn:      12 sites judged, 0 outside `alloc, trap`
+      floor:      26643 agree, 24 callee-carried, 216 gen-body, 0 floor-blind,
+                  0 core-blind
+      audience:   26442 no fence, 27 agree, 414 declared-only, 0 unfenced,
+                  0 server-extern
+      judged:     26643 agree, 24 callee-carried, 216 gen-body, 0 differ
+
+The corpus grew again between the slices — the count is not the fourth
+slice's — and **both ratchets are 0**. The `judged:` line is the whole-floor
+comparison now, because every call row the scan finds is a judged row: 24
+*callee-carried* and 216 *gen-body*, the two kinds that are not
+disagreements, and nothing else.
+
+**The rows the floor still holds, and why.**
+
+- `extern` — carried by an `extern fn` DECLARATION and not by a call (finding
+  7). Unchanged, and the reason is unchanged: the lattice can state only the
+  call, and the judgment gives `main` no `extern` for an import nothing
+  reaches, while the floor refuses it because an unanswered import stops
+  instantiation. The row moves when that question is decided, and deciding it
+  changes what the floor refuses.
+- The `logging { sink: file(..) }` DECLARATION, which carries `fs` (finding
+  10). The sink is a block, not a call; no effect set holds it, and RFC-0103
+  §4's reason stands: a declaration is not a capability a body reaches. It
+  is the one `fs` reach that degrades SILENTLY in a page, so the pass keeps
+  it and keeps deciding it inside the load.
+  `floor::the_log_sink_is_a_declaration_the_judgment_does_not_clear` pins that,
+  byte-identical under the knob.
+
+What the floor decides on its own is two declarations now, and no call at all.
+
+**The cost.** `vyrn check site/export.vyrn`, warm, on a machine running other
+worktrees' gates at the same time, so the spread is the machine's. Four
+interleaved pairs, base binary then this slice's: 6.36 / 3.32, 3.64 / 2.82,
+3.31 / 2.85, 3.49 / 2.78 s. Five more of this slice's alone: 3.74, 2.85, 2.92,
+3.45, 3.19 s, and five under `VYRN_NO_JUDGE=1`: 4.84, 5.08, 3.09, 3.00, 3.09 s.
+No cost, and there should be none: this artifact is native, its target has
+`fs`, so the load raises no objection and the judgment never runs. A BROWSER
+entry that does spell `readFile` pays one lowering and one ownership analysis,
+which `emit-lowered` measured at 4 to 6 per cent of a check in the third
+slice.
+
+**What the deletion slice still inherits.** Finding 7, which is the `extern`
+row. Finding 14, the calls through a function value the join cannot attribute:
+40 open sets and 69 calls. And the audience pass, which this milestone has not
+touched. 414 *declared-only* functions say why (finding 10): a fence
+protects a declaration, and no effect set holds one.
+#### The fifth slice (2026-09-03): the third judgment's census
+
+The four slices above are the effect judgment. This one starts the third:
+typed by construction. `tests/boundaries.rs` counts every value-boundary check
+the three engines carry, runs a program per rule under all three, and asserts
+that the three answers are the same bytes. Then one rule moves: the user's own
+`where` predicate, which the two compiled backends decided in a crate the
+interpreter cannot read and the interpreter therefore decided three more times.
+The deletion slices read this table before they delete anything else.
+
+**What a copy is.** The WORDING has been one table since RFC-0101 M5
+(`vyrn_frontend::trap`, and `tests/traps.rs` is what keeps it one). What is
+still written out per engine is the CONDITION — the half that decides whether
+the wording is reached at all. A *carrier* is one engine's own statement of
+that condition: `interp` is `vyrn-frontend/src/interp.rs`, `native` is
+`vyrn-codegen/src/lib.rs`'s IR together with the C shim in `toolchain.rs`,
+`wasm` is `vyrn-codegen/src/direct.rs`, and `vyrn` is a Vyrn module — either
+`std/runtime.vyrn` or a library that states the rule in ordinary Vyrn. An
+engine that CALLS another carrier's statement is not a carrier: the wasm
+emitter does not carry `string-utf8`, because it calls `std/runtime`'s
+`strFromBytes`; the interpreter does, because it calls Rust's `from_utf8`.
+
+The carriers were read, not grepped. A grep for a wording finds the comments
+that explain it and the tests that pin it, and the censuses of 2026-08-24
+recorded what that costs.
+
+#### The census
+
+| rule | what it refuses | RFC | copies | carriers |
+|---|---|---|---|---|
+| `array-index` | an index outside `0..len` of an array | RFC-0011 | 3 | `interp` `native` `wasm` |
+| `string-index` | an index outside `0..byteLength` of a String | RFC-0022 | 3 | `interp` `native` `wasm` |
+| `int-div-zero` | an integer divided by zero | RFC-0002 | 3 | `interp` `native` `wasm` |
+| `int-rem-zero` | an integer remainder by zero | RFC-0002 | 3 | `interp` `native` `wasm` |
+| `int-div-overflow` | `Int64.MIN / -1`, whose quotient is not an `Int64` | RFC-0002 | 3 | `interp` `native` `wasm` |
+| `shift-range` | a shift count outside `0..bits` | RFC-0045 | 3 | `interp` `native` `wasm` |
+| `int-narrowing` | nothing — it answers, with the low bits and the sign re-read | RFC-0002 | 3 | `interp` `native` `wasm` |
+| `float-to-int` | nothing — it answers, truncated toward zero | RFC-0002 | 3 | `interp` `native` `wasm` |
+| `where-scalar` | a scalar failing its named type's `where` predicate | RFC-0003 | 3 | `interp` `native` `wasm` |
+| `where-record` | a record failing its cross-field `where` predicate | RFC-0003 | 3 | `interp` `native` `wasm` |
+| `string-nul` | bytes holding a NUL, made into a String | RFC-0014 | 3 | `interp` `native` `vyrn` |
+| `string-utf8` | bytes that are not UTF-8, made into a String | RFC-0014 | 3 | `interp` `native` `vyrn` |
+| `file-nul` | a file holding a NUL, read as a String | RFC-0014 | 3 | `interp` `native` `vyrn` |
+| `file-utf8` | a file that is not UTF-8, read as a String | RFC-0014 | 3 | `interp` `native` `vyrn` |
+| `io-status` | nothing — it turns a host status into canonical Vyrn wording | RFC-0014 | 3 | `interp` `native` `vyrn` |
+| `call-depth` | recursion past `CALL_DEPTH_LIMIT` frames | RFC-0004 | 3 | `interp` `native` `wasm` |
+| `region-depth` | arena nesting past `REGION_MAX` frames | RFC-0004 | 3 | `interp` `native` `wasm` |
+| `json-decode` | nothing — it accumulates `Issue`s, shape and `where` alike | RFC-0018 | 1 | `vyrn` |
+| `char-boundary` | a byte offset inside a multi-byte character | RFC-0046 | 1 | `vyrn` |
+
+**19 rows and 53 copies.** Seventeen rows are stated three times. Two are
+stated once, and they are the two that already went where §2.3 sends the rest:
+`json-decode` is `std/jsondec` plus the decoders `jsondec.rs` synthesizes per
+target type (RFC-0078 M3), and `char-boundary` is nine lines of `std/strings`.
+Both are ordinary Vyrn, so all three engines run the one body and the wording
+carries the module and the line it was stated on —
+`substring: byte offset 4 is inside a multi-byte UTF-8 character
+(std/strings.vyrn:94)`. That is what a row looks like after it moves.
+
+Every row's program is `compiler/vyrn-cli/tests/boundaries/<rule>.vyrn`, and
+every one of them hides its value behind a parameter so no engine folds the
+check away. The harness compares stdout, stderr and the exit code, and the
+last column of the census is therefore a measurement: on 2026-09-03 all 19
+rows answer the same bytes under `vyrn run`, `vyrn run --engine wasm` and a
+native binary. The native column needs clang and is skipped by name without
+it, as every tool-dependent tier here is.
+
+#### What the census found
+
+1. **The trap table did half the job, and the half it did is the visible
+   half.** No row's WORDING differs, because no engine spells one: RFC-0101
+   M5's gate makes that impossible. Every row's CONDITION is still written per
+   engine, and a condition that drifts is a program that runs on two targets
+   and dies on the third — which is what parity exists to catch and what §2.3
+   exists to make impossible.
+2. **Three of the five rows about what a `String` may hold are already one
+   statement on the wasm route.** `string-nul`, `string-utf8`, `file-nul`,
+   `file-utf8` and `io-status` all name `std/runtime.vyrn` as a carrier,
+   because PLAN-0125-runtime §6 steps 1, 4 and 7 moved them there and the wasm
+   emitter calls them. Their remaining two copies are the interpreter's Rust
+   and the native route's C shim, and step 3 — the native binary through
+   wasm2c — deletes the second of those without this milestone touching it.
+   That is the largest single deletion available and it is M4's, not M6's.
+3. **The interpreter is the carrier no step removes.** Every row's `interp`
+   copy is Rust over `Val`, and PLAN-0125-runtime §5.2 records why it cannot
+   call the Vyrn statement: the module manages addresses in a linear memory
+   and the interpreter has no linear memory. §5.1 lists the six byte-in,
+   byte-out families that COULD go through the embedded engine, and M5 deletes
+   the rest by deleting the interpreter. So for seventeen rows the honest
+   count today is three, and the path to one is M4 step 3 plus M5 — not a
+   rewrite of the rule.
+4. **Two rows answer rather than refusing, and they are the rows §2.3 is
+   about.** `int-narrowing` and `float-to-int` are the only value boundaries
+   in the language where a value that does not fit is not refused: `UInt8(300)`
+   is 44, in all three engines, by three separately written statements of the
+   same wrap. They have three copies and no trap, so nothing about them is
+   pinned except this census's program. A validated type would refuse them at
+   its constructor, and the language would have to decide what a program that
+   narrows means. That is §2.3's question and the next slice's.
+5. **`where-scalar` and `where-record` already share half of one statement.**
+   The two compiled backends both ask `vyrn_codegen::validation_required` WHERE
+   to check, and both call `emit_validation` to do it; the interpreter asks its
+   own question in `coerce_walk`, over a value with no `from` type, so it
+   re-runs a predicate on a same-type crossing that the emitters exempt. The
+   verdicts agree — re-running a predicate that cannot fail changes nothing —
+   but the rule is stated twice, and it is stated in `vyrn-codegen`, which the
+   interpreter cannot import. `trap.rs` is in `vyrn-frontend` for exactly that
+   reason (RFC-0101 §6.4).
+6. **`region-depth` is a rule the runtime module deliberately did not take.**
+   `std/runtime.vyrn`'s comment says it: "The nesting depth and its
+   `region nesting exceeds 64` trap stay with the emitter, because a program
+   that traps at the limit must trap where it did." The counter is in the
+   prologue, and a prologue is the one place a call cannot be. The row is not
+   a candidate for a constructor.
+7. **`io-status` is not a value check and should not become a type.** It maps
+   a host status onto canonical Vyrn wording. Its three copies are three
+   translations of a host's answer, not three statements of a predicate. It
+   goes with the I/O family under M4 step 3 and is in the census so that a
+   later reader does not look for it under §2.3.
+
+#### The design: which check becomes what
+
+Five lines, and the census's rows sorted into them.
+
+- **A constructor of a validated type.** `where-scalar`, `where-record`,
+  `string-nul`, `string-utf8`, `int-narrowing`, `float-to-int`. Each is a
+  predicate on one value with no other input. §2.3's shape: the type has one
+  producer, the producer runs the predicate, and every slot of the type holds
+  a value that passed it. `UInt8` from an `Int64` is that producer for the two
+  coercion rows, and it either answers `Option`/`Result` or traps at one site
+  named by the type.
+- **The trap table and its primitive.** `array-index`, `string-index`,
+  `int-div-zero`, `int-rem-zero`, `int-div-overflow`, `shift-range`,
+  `call-depth`, `region-depth`. Each is a check the EMITTER inserts because
+  the core told it to, not one a producer runs: the value is fine, the
+  operation is not. §2.3's emitter maps `trap` to a call with a table index,
+  so the wording is the table's row and the condition is the core's.
+- **An I/O error, and it stays one.** `file-nul`, `file-utf8`, `io-status`.
+  A host answered; the answer is a value. These follow M4 step 7's family and
+  M4 step 3 deletes their C copy.
+- **Already one.** `json-decode`, `char-boundary`. Nothing to do, and they are
+  the shape the first two lines are aiming at.
+- **What the kernel's third judgment checks, and where.** A name of a
+  validated type is produced only by that type's constructor, and no raw value
+  reaches a slot of it. It is a use-def walk over the named core, beside the
+  linear and effect judgments, in `vyrn-lower`: for every store into a place
+  whose type is validated, the value's producer is that type's `validate`, or
+  a name already of that type, or a literal the checker proved. It refuses
+  anything else. That is one judgment over one form, and it replaces the
+  `coerce`-time check every engine makes at every boundary — which is where
+  the 97.6 per cent of coercions that answer "nothing to do" come from
+  (`interp.rs`, `coerce`).
+
+#### The row that moved: `where-scalar` and `where-record`
+
+The prediction was: take the row with the most copies whose rule is a pure
+function of the value, give it one statement every engine calls, delete the
+copies, and keep the wording byte-identical. The census changed which row that
+is, and the reason is the next section. The row taken is the user's own
+predicate, and it moved as far as it can move before §2.3's constructor exists.
+
+**The decision left `vyrn-codegen`.** `validation_required(from, to, types)` —
+which declaration's `where` a value crossing from one type into another must
+satisfy — was the one copy for the two compiled backends and it was in the
+wrong crate. The interpreter lives in `vyrn-frontend`, which `vyrn-codegen`
+depends on, so it could not read that decision and asked the same question for
+itself. It is `vyrn_frontend::validate::required` now, beside `trap` and for
+the reason RFC-0101 §6.4 put `trap` there; `vyrn-codegen` keeps the old name as
+a re-export, so both backends ask the same words they always did.
+
+`validate::of` takes the declaration the caller already looked up rather than
+the map, because the engines hold their declarations differently — the emitters
+key by `String` and own the values, the interpreter keys by `&str` and borrows
+them. Taking one engine's map would have made the rule one engine's map shape,
+which is how a rule ends up with two spellings again.
+
+**The interpreter went from three statements to one.** It refused a value for
+its type's `where` at `Age(n)` (`construct`), at a record literal
+(`Expr::StructLit`) and at every typed boundary (`coerce_walk`). Each ran a
+predicate; each spelled its own wording. Only the third built the wording from
+the declaration, so the constructor path would have handed a record base the
+scalar sentence and the literal path always spelled the record one. `enforce`
+is the one statement now, and `validates` learned the second binding form:
+`validate::is_cross_field` decides whether the predicate sees the fields or
+`value`, and `trap::validation_of` decides the sentence by the same fact, so
+the two cannot disagree.
+
+**What the copy count does and does not show.** The census's column counts
+CARRIERS — engines that state the rule themselves — and for these two rows it
+is 3 before and 3 after, because the interpreter still runs the predicate in
+Rust over a `Val`. What fell is the number of statements inside the carriers:
+five sites checked and two decided, and now three check and one decides. The
+census table is unchanged at 19 rows and 53 copies, and this paragraph is here
+so that a later reader does not take an unchanged table for an unchanged tree.
+
+The programs that must still refuse are the census's own:
+`tests/boundaries/where-scalar.vyrn` prints ``validation failed for `Age` `` and
+`tests/boundaries/where-record.vyrn` prints
+``validation failed: `Range` violates its `where` clause``, both on stderr at
+exit 1, and both byte-identical under the interpreter, the compiled wasm and
+the native binary. Parity, the fixtures and the manifest hold: no example's
+output changed, so no recorded byte changed either.
+
+#### What did not move, and why
+
+No row's carrier count fell, and the census is what makes the reason exact
+rather than a suspicion.
+
+- **There is one mechanism by which all three engines run one body**, and it is
+  `loader::RtModule` — a builtin that IS an exported function of a std module,
+  so the interpreter interprets it and both emitters compile it. RFC-0078 M4c
+  used it for the six codecs, and `char-boundary` and `json-decode` are the
+  census's two one-copy rows because they took it. `RtModule`'s own doc states
+  the price: "Adding a builtin to the runtime is now an ENTRY here plus a
+  deletion in each engine."
+- **A row can take that mechanism only if its rule is expressible over ordinary
+  Vyrn values.** `string-nul` and `string-utf8` are pure functions of an
+  `Array<UInt8>` and would qualify — except that the function they belong to,
+  `stringFromBytes`, must BUILD the String it validates, and that needs the
+  raw-memory primitives `std/mem` fences. Splitting the check from the build
+  means an unchecked builder primitive, which is exactly §2.3's constructor and
+  exactly not a slice that lands beside a census.
+- **Seven rows are one or two instructions per site.** `array-index`,
+  `string-index`, the four arithmetic rows and `int-narrowing` are lowered
+  inline by both emitters. Routing them through a call would trade the thing
+  §1.4 measured — a place-based core an optimizer can work with — for a rule
+  stated once, and RFC-0101 §3.0's second rule says a copy goes when its
+  replacement's gate is green, not before.
+- **`region-depth` cannot be a call** (finding 6) and `io-status` should not be
+  a type (finding 7).
+- **The interpreter's copy is not this milestone's to delete** (finding 3).
+  PLAN-0125-runtime §5.2 records why it cannot call the Vyrn statement, §5.1
+  lists the six byte-in, byte-out families that could go through the embedded
+  engine, and M5 removes the rest by removing the interpreter. For the five
+  `String` and I/O rows the native copy is M4 step 3's, not M6's. So seventeen
+  rows read three today, and the path to one runs through M4 and M5 before it
+  runs through a rewritten rule.
+
+What the next slice inherits, in order: the unchecked builder primitive that
+lets `string-nul` and `string-utf8` become a constructor over ordinary Vyrn
+values; then the same shape for `int-narrowing`, whose rule is the smallest
+pure function of its value in the census and whose constructor is the one §2.3
+names — `UInt8` from an `Int64`, answering `Option` or trapping at one site
+named by the type; then the kernel's third judgment over the core, which is
+what makes a boundary check unnecessary rather than shared.
+
+#### The sixth slice (2026-09-03)
+
+The sixth slice decides finding 7, deletes the floor's call machinery, and
+records the audience decision. What the floor decides on its own is one
+declaration now, and it keeps no list of capability-carrying names at all.
+
+**7, decided: the `extern` row is a CALL.** RFC-0103 M2's finding 3 made the
+declaration the carrier and gave one reason — an unanswered import stops
+instantiation, so a program that never calls the import still cannot start.
+The reason stopped being true. The direct backend (RFC-0077) emits an
+`(import "vyrn" ..)` for a host function the call graph reaches and for no
+other, so a declaration nothing calls produces no import at all. Read off the
+emitted module, three programs:
+
+| program | `vyrn` import emitted | what the artifact does |
+|---|---|---|
+| declares `jsAdd`, calls nothing | none | `wasi`: instantiates, prints, exits 0. `native`: links, prints, exits 0 |
+| declares `jsAdd`, calls it from `main` | `(import "vyrn" "jsAdd" ..)` | `wasi`: a host without the namespace cannot instantiate. `native`: the call traps, `` extern `jsAdd` is not available on this target `` |
+| declares `jsAdd`, calls it from a function `main` never reaches | none | as the first row |
+
+Both prediction programs are in `vyrn-cli`
+`floor::an_unreached_host_import_is_no_capability`. The first row is what the
+old rule refused and the artifact runs; the second is what both rules refuse,
+in one wording, byte-identical under `VYRN_NO_JUDGE=1`. The third row is the
+backend sweeping HARDER than the floor: it drops a call `_start` cannot reach
+where the judgment keeps every non-generic instance, so the floor stays the
+wider of the two and never accepts a program whose artifact holds the import.
+RFC-0103 carries the decision as a dated addendum and its vocabulary table
+carries the row; the refusal, its wording, its chain and the target sets are
+unchanged.
+
+Nothing in the corpus changes verdict. The three client artifacts whose
+`std/rpc` and `std/connect` stubs declare `vyrnRpcCall` are `browser`, and a
+page HAS `extern`; a stub calls its own import in the same module, so the one
+refusal the tree relies on — the same client retargeted to `native` — is the
+refusal it was. `examples/externdemo.vyrn` is no artifact's entry and the floor
+never touched it.
+
+**What was deleted.** `floor::CALLS` and `floor::JUDGED`, 41 lines with their
+reasons, and the `extern fn` declaration scan, 21 more. The floor's vocabulary
+is the LATTICE's rows now, read through one match (`floor::Capability::of`):
+`fs` is three effect rows, `stdin` is one, `args` is one, `extern` is one, and
+every other effect is `None` for one of RFC-0103 M2's two opposite reasons —
+every target has it, or no compiled target does. `floor::call_carrier` is the
+one reading of a call site, and the scan, the judgment
+(`vyrn_lower::effects::reaches`) and the effects harness all make it instead
+of each holding a copy. A `Carried` records whether the scan found a CALL or a
+DECLARATION, so `floor::is_judged` asks the scan rather than matching names.
+
+The count is a wash and the rule is not: 62 lines of two constant tables and a
+second scan out, 58 lines of derivation in, `floor.rs` 829 lines to 851. What
+was two lists to keep equal is one table read twice.
+
+**What the floor still is.** A scan and a declaration check, and neither is a
+verdict on a call.
+
+- The SCAN finds every carrier and writes every refusal — the carrier it
+  quotes, the line it found it on, the import chain, and the `connect(..)`
+  remedy. The breadth-first walk in `floor::locate` is the IMPORT graph and
+  stays: the shortest chain to the offending module is the diagnostic.
+- The DECLARATION check is `logging { sink: file(..) }` (finding 10). A
+  declaration is no call, no effect set holds one, and RFC-0103 §4's reason
+  stands. It is also the one `fs` reach that degrades SILENTLY in a page, so
+  the pass keeps deciding it inside the load, before every type error.
+  `floor::the_log_sink_is_a_declaration_the_judgment_does_not_clear` pins it,
+  byte-identical under the knob.
+
+The VERDICT on every call is the judgment's. The floor holds it back for the
+check (`floor::defer`, `floor::decide`) and drops the rows no instance
+reaches.
+
+**The knob, and what it means now.** `VYRN_NO_JUDGE=1` stays, and it restores
+two things rather than a second list. The floor goes back to PRESENCE: the
+scan's carriers are refused whether or not an instance reaches them, inside
+the load and before every type error, which is the rule and the order of
+RFC-0103 M2. The generation fence goes back to its own two cells (fifth
+slice): `print` is allowed in a `gen fn` again and the three host-boundary
+names are externs again. One knob, because the two are one milestone.
+
+**The audience pass: it stays, and this is the record.** RFC-0103 §4 says what
+a fence is for, and the tally says the judgment agrees: 414 *declared-only*
+functions — a route handler, a page, a store's shape — are server-only or
+client-only with no target-restricted effect at all, and **0 unfenced, 0
+server-extern**. A fence protects a DECLARATION. A secret in a constant uses
+no capability, so no effect set can hold the rule and no judgment can replace
+it. No audience code path is dead by the tally either: `audience.rs` is path
+classification, the widening rule, the remedy and the display, and every one
+of them is the declared boundary rather than a reach. Nothing was deleted, and
+the reason it was not is the finding.
+
+**The tally.** `cargo test -p vyrn-cli --test effects`, at this slice's last
+commit:
+
+    effects over the corpus: 180 programs (31 not loadable here, 2 refused as
+    recorded), 26883 functions judged, 8244 pure, 0 unlowered, 64 calls
+    through a function value judged over their sources, 69 unattributed
+      open sets: 40
+      effect 18218  alloc
+      effect    11  read-input
+      effect   292  write-output
+      effect   189  fs-read
+      effect    19  fs-write
+      effect   106  fs-list
+      effect     8  args
+      effect    29  clock
+      effect    20  random
+      effect    31  extern
+      effect    22  serve
+      effect     4  spawn
+      effect  7785  trap
+      effect   826  gen-only
+      spawn:      12 sites judged, 0 outside `alloc, trap`
+      floor:      26625 agree, 42 callee-carried, 216 gen-body, 0 floor-blind,
+                  0 core-blind
+      audience:   26442 no fence, 27 agree, 414 declared-only, 0 unfenced,
+                  0 server-extern
+      judged:     26625 agree, 42 callee-carried, 216 gen-body, 0 differ
+
+The function count is the fifth slice's: the judgment did not change, only who
+reads it. *callee-carried* rises from 24 to 42 because `extern` is compared
+now — eighteen functions whose extern comes from a callee, which is the floor
+agreeing over the closure. **Both ratchets are 0.** The `floor:` and `judged:`
+lines are one line twice: every call the scan finds is judged.
+
+**The M6 gate.** "The audience, floor and contract test suites green with
+their passes deleted." Where each stands:
+
+- **floor** — `cargo test -p vyrn-cli --test floor`, 12 passed. The pass's
+  call machinery is deleted and its verdicts are the judgment's; the scan and
+  one declaration check remain, and the RFC says above why a scan is not a
+  second statement of the rule and why a declaration cannot be an effect.
+- **audience** — `cargo test -p vyrn-cli --test audience`, 21 passed. The pass
+  is NOT deleted, by the decision recorded above; the fence is a declared
+  boundary and the judgment replaces nothing of it.
+- **contracts** — `cargo test -p vyrn-cli --test contracts`, 12 passed.
+  Untouched by this milestone.
+
+What still stands between here and the gate is M6's other two sentences, which
+no slice has started: validation by construction in place of the boundary
+checks, and the trap primitive and its table in place of the sites. Finding 14
+is still open — 69 calls through a function value the join cannot attribute,
+40 open sets — and it bounds neither: the ratchet counts it as unattributed
+rather than as a disagreement.
+#### The third judgment's second slice (2026-09-03)
+
+The census sorted every value boundary into five lines. This slice takes two
+of them: the trap table becomes a table on the wasm route, and the judgment
+itself runs beside the linear and the effect judgment.
+
+**The trap table.** §2.3 says the emitter "maps `trap` to a call with a table
+index". It did not. Eight rows of the census — `array-index`, `string-index`,
+`int-div-zero`, `int-rem-zero`, `int-div-overflow`, `shift-range`,
+`call-depth`, `region-depth` — each had their WORDING interned as a private
+field of the wasm backend's runtime record (`msg_div0`, `msg_aoob`,
+`msg_oob_end`, six more), and each site pushed the pointer it needed. Two rows
+carry a number in the middle of the sentence, so they went through a second
+runtime function with a three-piece protocol (`trapIdx(pre, i, post)`) that
+existed only because those two rows are shaped differently from the other six.
+
+Now `trap::Rule` is the table: eight rows in one order, each stating its two
+halves — what stands before the value and what stands after it, or nothing for
+a row with no value. The emitter lays those addresses out as one data segment
+and every site pushes A NUMBER. `std/runtime`'s `trapAt(rule, v, table)` reads
+the row and writes it. `trapIdx` is deleted, the nine interned wordings are
+deleted, and the emitter spells no sentence: the two shapes the old code told
+apart at eight sites are told apart once, by a zero in the row's second half.
+
+Seven of the eight rows reach it through the function's ONE trap site (M1):
+the check parks the row's number and the value in the site's two locals and
+branches out, so a division check now costs a compare and a branch where it
+used to cost a compare and a call — the same shape M1 measured for the bounds
+check (3.56 s against 1.71 s on nbody's inner loop). The eighth is
+`call-depth`, whose check is the prologue: it stands before the block a branch
+would target, so it calls `trapAt` itself. Finding 6's `region-depth` is not
+an exception here — its counter stays in the prologue's neighbourhood, but its
+check is inside the body and takes the site like the rest.
+
+`direct.rs` falls from 16,547 lines to 16,532 at this commit (16,529 after the
+third one below) and `std/runtime.vyrn` rises from 1,942 to 1,952: the
+deletion is fifteen lines of emitter and the addition is ten lines of Vyrn,
+which is the trade §2.3 asks for and not a line count worth celebrating. The
+module BYTES rise, and the reason is worth recording rather than hiding: a
+site that parks two locals and branches is three instructions where a site
+that pushed a pointer and called was two.
+`nbody.wasm` goes from 10,847 to 10,913 bytes, `fannkuch.wasm` from 7,637 to
+7,789, `jsoncodec.wasm` from 49,610 to 49,997 — 0.6, 2.0 and 0.8 per cent.
+The call sites are what the engine paid for, and they are gone.
+
+Every wording is byte-identical, which is what the census's own programs
+prove: all eight rows answer the same bytes under `vyrn run`, `vyrn run
+--engine wasm` and a native binary, and the boundaries suite, the fixtures and
+parity are the gate. `rfcs/census/wasm-sha256.tsv` is NOT regenerated in this
+slice: the trap sites changed, so the recorded module hashes changed, and a
+hash regenerated in the same commit that changed the bytes records nothing.
+
+**The judgment.** `vyrn-lower/src/typed.rs`, beside `kernel.rs` and
+`effects.rs`, over the same form. It is a use-def walk and nothing else: every
+name of a body is bound once, so the producer of a name is a lookup. For every
+store into a place whose type is validated — a `let`, an assignment, a field
+or an element — it asks what produced the value, and the three answers that
+are the rule are the type's own constructor, a name already of the type, and a
+literal the checker proved.
+
+WHICH crossings are validated is not the judgment's to decide. It asks
+`vyrn_frontend::validate`, which is where the fifth slice put the rule: the
+`where` rows through `validate::of`, and the two narrowing rows through
+`validate::narrows`, which is new here and states in one place what the three
+engines each write instructions for — a crossing that changes the width or the
+signedness re-reads the low bits and the sign, and the same pair does not.
+`tests/typed.rs` is the corpus tally, `VYRN_TYPED_DUMP=<file>:<fn>` prints one
+body's judged stores, and the ratchet is on the findings.
+
+The tally over 180 programs, on 2026-09-03:
+
+| answer | stores |
+|---|---|
+| by-constructor | 46,473 |
+| by-literal | 9,103 |
+| by-name | 349 |
+| findings | 6 |
+| **judged** | **55,931** |
+| unjudged | 94,691 |
+
+**RATCHET 6.** The six findings, each with its program and line:
+
+1. `examples/bin/server/store.vyrn:107`, `createPaste` — a PRIMITIVE into
+   `Created`: `let bumped: Created = store.counter + 1`. The sum is an
+   `Int64` and the slot is validated.
+2. and 3. `examples/shelf/server/store.vyrn:84`, `rateBook` — a READ OF A
+   PLACE into `Stars`: `let s: Stars = req.rating`, where the request's field
+   is a plain `Int64`. Two, because two entry points of the project reach the
+   module.
+4. `examples/autovalidate.vyrn:46` — a RECORD LITERAL into `Range`.
+5. and 6. `examples/inlinewhere.vyrn:15` and `:19` — a record literal into
+   `User`.
+
+**None of the six is a defect**, and the probe is what says so rather than an
+argument: `rfcs/probes-0125/raw-value-into-a-validated-slot.vyrn` runs all
+three shapes with a value that breaks the predicate, and all three refuse
+under `vyrn run`, `vyrn run --engine wasm` and a native binary, in the
+census's own words — `validation failed for `Small`` and
+``validation failed: `Pair` violates its `where` clause``. They are the sites
+the boundary check exists FOR. That is the judgment's real answer: the check
+is not missing anywhere, it is present everywhere, and §2.3's constructor is
+what makes it unnecessary rather than what makes it correct.
+
+Two of the six shapes are one shape. A record literal of a validated record
+type is a SECOND producer for that type, beside the constructor, and it is the
+`where-record` row's whole reason for existing. The other two — a primitive
+and a read of a place — are the value boundary the interpreter's `coerce`
+takes 97.6 per cent of the time for nothing.
+
+**What the judgment cannot see, and it is the same fact twice.** 94,691 stores
+are unjudged, every one of them into a sized integer whose producer has no
+type in the core: `Rhs::Prim` erases the operator, so `a + b` and `UInt8(n)`
+read alike, and a builtin's result type is nobody's declaration. A narrowing
+IS a store whose producer is of another width, so a judgment that guessed
+would call every integer store one. That number is not a gap in the walk; it
+is the size of what §2.3's constructor closes, stated as a count. When
+`UInt8` is a producer with a name, 94,691 stores become answerable by the
+lookup that already answers the other 55,931.
+
+The judgment holds no table of builtins. The caller answers what a callee
+returns, and the three the corpus stores through — `copy`, `swapRemove` and
+an index — hand their RECEIVER's value back, which the caller reads off the
+argument type. Before that rule the corpus showed 120 findings and every one
+of them was a copy of a `Title` reported for not being a `Title`.
+
+**The constructor rows' first move.** The judgment finds no store into a
+sized integer whose producer is a wider value and not the conversion — every
+one it can name goes through `UInt8(..)` or a literal the checker proved. So
+the two narrowing rows move as far as they can move before §2.3's constructor
+exists, which is the same distance `where-scalar` moved in the fifth slice:
+the DECISION leaves the engine that held it.
+
+`validate::narrows` says which crossings re-read the bits, `validate::wrap`
+says what an integer reads as at a width, `validate::from_float` says what a
+float reads as, and `validate::width` says which types are integers at all.
+The interpreter's `wrap_intn` was the third of those, private to `interp.rs`
+at ten sites; the wasm emitter's `Num::of` was the fourth, written again in
+`direct.rs`. Both ask now. `convert_val`'s four float arms — signed and
+unsigned, `Float64` and `Float32` — become one call, and
+`coercion_is_noop`'s own "already at this width and signedness" becomes
+`narrows` read the other way round.
+
+The census's copy column does not move, and the fifth slice already said why
+it would not: the interpreter re-reads bits in Rust over a `Val`, the wasm
+emitter emits `i32.wrap_i64` and a mask, the native backend emits `trunc`.
+Three carriers, three representations, and no call can join them — finding 3
+and the paragraph on the seven inline rows. What falls is the number of
+STATEMENTS inside the carriers: seven decisions about width and truncation
+across two engines, and four of them are now one function each in
+`vyrn_frontend::validate`, which is the crate all three can read.
+
+#### The third judgment's third slice (2026-09-03)
+
+The second slice ended on a number it could not reduce: 94,691 stores unjudged,
+every one into a sized integer whose producer had no type in the core. This
+slice gives every producer a type and judges them all.
+
+**The producer type.** A right-hand side of the core now names the type it
+makes. `Rhs::Prim` carries the operator's own result and `Rhs::Call` what the
+callee answers at that site. Both are the CHECKER's answer at that node, read
+off the pair the form already carries — `Row::has` where the node's own shape
+settles its type, and `Row::ty` where the two are one answer (RFC-0101 §2.1
+item 2 [A16]). The lowering guesses nothing and the checker records nothing
+new: the half that says what a value HAS was already derived, and this slice is
+the first reader that needed it at a `prim`.
+
+One class of node has no row of its own — a projection the checker expanded at
+the site (RFC-0122) — and it answers from its declared result under the
+receiver's type arguments, which is the answer `core::ty_of` already reads
+there. Five calls in the corpus. `tests/coretables.rs` pins the rest at zero:
+over the whole corpus, 145,678 calls, 183,079 primitives, 5,968 literals,
+25,485 names, 17,998 reads and 442 takes, and **not one right-hand side without
+a producer type**. There is no exception list because there is no exception.
+
+**What the judgment does with it.** A store into a sized integer is judged by
+the lookup that already answered every other store. The producer at the
+destination's width and signedness crossed nothing, which is
+`validate::narrows` read the other way round — the same exemption `required`
+states at the `where` rows, and the reason `Int` and `Int64` are one width
+written two ways rather than a finding. The type's own conversion is its
+constructor. A literal is the checker's. A primitive over LITERALS ONLY, into a
+sized integer, is a fourth answer and it is named apart from the third: the
+checker ranges a constant against a destination of the same sign — `-200` into
+an `Int8` is refused, at compile time — and where the signs differ the
+`int-narrowing` row answers rather than refuses, so `-1` into a `UInt8` is 255,
+which is the row's answer and the same fact as `UInt8(300)` being 44. It is not
+a finding, and calling it `by-literal` would have claimed a proof that half of
+it does not have.
+
+The tally over the same 180 programs, on 2026-09-03:
+
+| answer | before | after |
+|---|---|---|
+| by-constructor | 46,473 | 46,473 |
+| by-literal | 9,103 | 9,103 |
+| by-name | 349 | 156,963 |
+| by-constant | — | 1,080 |
+| findings | 6 | 6 |
+| **judged** | **55,931** | **213,625** |
+| unjudged | 94,691 | **0** |
+
+**RATCHET 6, and they are the same six** — one primitive, two reads of a place,
+three record literals, each recorded above with its program and line, and each
+a legitimate boundary site that all three engines refuse
+(`rfcs/probes-0125/raw-value-into-a-validated-slot.vyrn`). No new finding, so
+no new probe.
+
+`by-name` rises by 156,614 because the second slice did not COUNT a store it
+could not ask about. Two kinds joined. The 94,691 it counted as unjudged: 1,080
+of those are the constants above and the other 93,611 are `by-name`. And 63,003
+more it dropped silently — a store whose source type resolved and whose width
+matched was no crossing, so the rule answered "no row" and the store left no
+row in the tally either. A store that owes nothing is still a store the
+judgment looked at, and it is counted now. The 366 stores into a named `where`
+type are unmoved; the rest are the sized-integer rows: 137,076 `Int32`, 33,129
+`UInt32`, 25,097 `UInt64`, 17,938 `UInt8`, and nineteen at the other three
+widths.
+
+**Unjudged is 0, and the last twenty-five were the harness's.** They were a
+byte read out of a `String` — `for b in s`, `s[i]` — where the corpus harness
+resolved a place's element type for an array and not for a String. The
+`string-index` row says what a String indexes as, so the harness says it too.
+Nothing in the judgment changed for them.
+
+**What the judgment now proves, and what it still does not license.** Every
+narrowing store in the corpus — every store into a sized integer whose producer
+is of another width — goes through that type's own conversion, or is a literal
+or a constant the program wrote out. Not one is a raw wider value. The second
+slice predicted that over the stores it could see; this slice has seen them
+all.
+
+That proof licenses no deletion, and the reason is the shape of the two rows
+rather than the state of the tree. `int-narrowing` and `float-to-int` REFUSE
+NOTHING — finding 4 of the census. What each engine writes out for them is the
+wrap itself, which is the conversion's meaning and not a check in front of it:
+the interpreter re-reads bits in Rust over a `Val`, the wasm emitter emits
+`i32.wrap_i64` and a mask, the native backend emits `trunc`. Deleting any of
+the three deletes the answer. The DECISIONS around them left their engines in
+the second slice and are `vyrn_frontend::validate`'s — `narrows`, `wrap`,
+`from_float`, `width` — and a judgment that finds no unchecked narrowing gives
+no third thing to remove. The census is therefore unchanged at **19 rows and 53
+copies**, and `tests/boundaries.rs` derives that sentence from its own table so
+that an unchanged count stays a measurement.
+
+The `where` rows are the ones a deletion waits on, and the judgment says
+plainly that it cannot yet clear them: six stores reach a validated slot
+without the constructor, and a record literal of a validated record type is a
+second producer by design. §2.3's constructor is what closes that, and it is
+the next slice's, not this one's.
 
 ### What each milestone is worth on its own
 

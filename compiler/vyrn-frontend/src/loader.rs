@@ -1657,7 +1657,7 @@ fn load_modules(
         match crate::floor::objected(&graph, &root_key, map) {
             // A nested generator load (RFC-0021) is not the artifact; only the
             // outermost load may hold a decision for the check that follows it.
-            Some(cap) if crate::floor::is_judged(cap) && LOAD_DEPTH.with(|d| d.get()) == 1 => {
+            Some(c) if crate::floor::is_judged(&c) && LOAD_DEPTH.with(|d| d.get()) == 1 => {
                 crate::floor::defer(graph, root_key.clone(), map.clone(), origins.clone());
             }
             _ => {

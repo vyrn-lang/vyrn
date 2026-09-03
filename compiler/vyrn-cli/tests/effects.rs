@@ -7,8 +7,8 @@
 //! own atoms and its callees', to a fixpoint. Beside it stand the two passes'
 //! answers for the same function, computed by the passes' own functions:
 //!
-//!   - the floor's: which of `fs`, `stdin`, `args` the function's BODY carries,
-//!     by the floor's rule (presence of a `floor::CALLS` name; a `gen fn` body
+//!   - the floor's: which capability the function's BODY carries, by the
+//!     floor's rule (presence of a `floor::call_carrier` call; a `gen fn` body
 //!     is skipped) — per function here, where the floor unions per module;
 //!   - the audience's: the verdict of `audience::audience_of` for the module
 //!     the function was declared in, under the project's manifest.
@@ -205,25 +205,21 @@ struct Row {
     who: String,
 }
 
-/// The floor's capability a set of effects needs.
+/// The floor's capability a set of effects needs — `floor::Capability::of`
+/// over the set, because the mapping is stated once (RFC-0125 §3 M6, sixth
+/// slice) and a copy here would be the second statement.
 fn caps_of(e: Effects) -> BTreeSet<Capability> {
-    let mut out = BTreeSet::new();
-    if e.has(Effect::FsRead) || e.has(Effect::FsWrite) || e.has(Effect::FsList) {
-        out.insert(Capability::Fs);
-    }
-    if e.has(Effect::ReadInput) {
-        out.insert(Capability::Stdin);
-    }
-    if e.has(Effect::Args) {
-        out.insert(Capability::Args);
-    }
-    out
+    e.iter().filter_map(Capability::of).collect()
 }
 
-/// The floor's own rule at function grain: which `CALLS` names the body
-/// spells, whatever branch they are on. A `gen fn` carries nothing, as in
-/// `floor::carried`.
-fn floor_carries(f: &vyrn_frontend::ast::Function) -> BTreeSet<Capability> {
+/// The floor's own rule at function grain: which carriers the body spells,
+/// whatever branch they are on. A `gen fn` carries nothing, as in
+/// `floor::carried`. `externs` is the program's host imports, because a call
+/// to one is the `extern` carrier (RFC-0125 §3 M6, sixth slice, finding 7).
+fn floor_carries(
+    externs: &std::collections::HashSet<String>,
+    f: &vyrn_frontend::ast::Function,
+) -> BTreeSet<Capability> {
     let mut out = BTreeSet::new();
     if f.is_gen {
         return out;
@@ -231,24 +227,20 @@ fn floor_carries(f: &vyrn_frontend::ast::Function) -> BTreeSet<Capability> {
     let mut body = f.body.clone();
     vyrn_frontend::project::walk_block(&mut body, &mut |e| {
         if let vyrn_frontend::ast::Expr::Call { name, .. } = e {
-            // `CALLS` and `JUDGED` are one scan (RFC-0125 §3 M6, fourth
-            // slice): the rows a judgment decides are still the rows the
-            // pass finds, so this comparison is over the whole floor.
-            if let Some((_, cap)) = floor::CALLS
-                .iter()
-                .chain(floor::JUDGED)
-                .find(|(n, _)| n == name)
-            {
-                out.insert(*cap);
+            if let Some(cap) = floor::call_carrier(name, externs) {
+                out.insert(cap);
             }
         }
     });
     out
 }
 
-/// Whether the effect set needs something a browser page lacks.
+/// Whether the effect set needs something a browser page lacks. A page HAS
+/// `extern` — it is the namespace — so the target's own row answers here
+/// rather than a second reading of the vocabulary.
 fn browser_lacks(e: Effects) -> bool {
-    !caps_of(e).is_empty()
+    let has = floor::capabilities(vyrn_frontend::artifacts::Target::Browser);
+    caps_of(e).iter().any(|c| !has.contains(c))
 }
 
 #[test]
@@ -262,6 +254,8 @@ fn the_lattice_is_the_rfc_table() {
         .find("| effect | atoms")
         .expect("the lattice table is in RFC-0125 §3 M6");
     let mut from_rfc: BTreeSet<(String, Effect)> = BTreeSet::new();
+    let mut gen_from_rfc: std::collections::BTreeMap<String, bool> =
+        std::collections::BTreeMap::new();
     let mut rows = 0;
     for line in rfc[start..].lines().skip(2) {
         if !line.starts_with('|') {
@@ -276,10 +270,40 @@ fn the_lattice_is_the_rfc_table() {
             let after = &rest[open + 1..];
             let close = after.find('`').expect("closed backtick");
             let name = &after[..close];
-            if name != "—" && !name.is_empty() {
+            if name != "\u{2014}" && !name.is_empty() {
                 from_rfc.insert((name.to_string(), effect));
             }
             rest = &after[close + 1..];
+        }
+        // The LAST column is the `gen` cell: RFC-0021's generation-time
+        // sandbox, which RFC-0125 M6's fifth slice made a check. A cell is
+        // `yes` or `no` for the whole row, or names the atoms it splits — one
+        // row does, and finding 5 says why.
+        let cell = cells[6];
+        if cell.contains('`') {
+            // A split cell names each atom and its own verdict. One row is
+            // split, and finding 5 says why.
+            let mut rest = cell;
+            while let Some(open) = rest.find('`') {
+                let after = &rest[open + 1..];
+                let close = after.find('`').expect("closed backtick");
+                let verdict = after[close + 1..].trim_start();
+                gen_from_rfc.insert(after[..close].to_string(), verdict.starts_with("yes"));
+                rest = &after[close + 1..];
+            }
+        } else {
+            let allowed = if cell.starts_with("yes") {
+                true
+            } else if cell.starts_with("no") {
+                false
+            } else {
+                panic!("`{cell}` is not a gen cell");
+            };
+            for (n, e) in effects::ATOMS {
+                if *e == effect {
+                    gen_from_rfc.insert(n.to_string(), allowed);
+                }
+            }
         }
     }
     assert_eq!(rows, Effect::ALL.len(), "one row per effect");
@@ -292,6 +316,19 @@ fn the_lattice_is_the_rfc_table() {
     assert!(
         only_rfc.is_empty() && only_code.is_empty(),
         "the RFC table and effects::ATOMS differ; in the RFC only: {only_rfc:?}; in the code only: {only_code:?}"
+    );
+    // And the last column against the code that reads it. RFC-0021's fence
+    // asks this and nothing else now (RFC-0125 M6, fifth slice), so a cell
+    // edited here is a refusal changed there.
+    let wrong: Vec<String> = gen_from_rfc
+        .iter()
+        .filter(|(n, allowed)| effects::gen_allows(n) != **allowed)
+        .map(|(n, allowed)| format!("`{n}`: the RFC says {allowed}"))
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "the RFC table's `gen` column and the code differ: {}",
+        wrong.join("; ")
     );
 }
 
@@ -333,7 +370,8 @@ fn run_corpus() {
     // RFC-0125 §3 M6, fourth slice: the rows that MOVED into the judgment,
     // counted on their own. A moved row must answer as the pass answered,
     // function by function, or the refusal changed when the derivation did.
-    let judged_caps: BTreeSet<Capability> = floor::JUDGED.iter().map(|(_, c)| *c).collect();
+    // Every call row is a moved row since the sixth slice, so this is the
+    // whole-floor comparison stated as the moved rows' own ratchet.
     let mut judged_agree = 0usize;
     let mut judged_gen = 0usize;
     let mut judged_carried = 0usize;
@@ -629,20 +667,21 @@ fn run_corpus() {
 
         // The floor's union over the whole program: what its closure check
         // would see for any artifact rooted here.
+        let externs = floor::extern_imports(&program);
         let mut program_carries: BTreeSet<Capability> = BTreeSet::new();
         for f in &program.functions {
-            program_carries.extend(floor_carries(f));
+            program_carries.extend(floor_carries(&externs, f));
         }
         for im in &program.impls {
             for m in im.methods.iter().chain(im.places.iter()) {
-                program_carries.extend(floor_carries(m));
+                program_carries.extend(floor_carries(&externs, m));
             }
         }
 
         for (i, inst) in insts.iter().enumerate() {
             let e = judged.effects[top[i]];
             let want = caps_of(e);
-            let have = floor_carries(inst.func);
+            let have = floor_carries(&externs, inst.func);
             let floor = if inst.func.is_gen && !want.is_empty() {
                 FloorKind::GenBody
             } else if have == want {
@@ -661,8 +700,7 @@ fn run_corpus() {
             // are the same two non-disagreements the whole-floor comparison
             // names; anything else is the judgment and the pass giving one
             // program two answers.
-            let hj: BTreeSet<Capability> = have.intersection(&judged_caps).copied().collect();
-            let wj: BTreeSet<Capability> = want.intersection(&judged_caps).copied().collect();
+            let (hj, wj) = (&have, &want);
             if hj == wj {
                 judged_agree += 1;
             } else if inst.func.is_gen && hj.is_empty() {

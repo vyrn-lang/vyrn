@@ -55,7 +55,7 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 
-use crate::ast::{Type, TypeDecl};
+use crate::ast::TypeDecl;
 
 /// What every engine puts in front of a trap before it reaches a terminal.
 ///
@@ -137,6 +137,88 @@ pub fn region_depth() -> String {
     format!("region nesting exceeds {}", crate::interp::REGION_MAX)
 }
 
+// ---- the trap table ------------------------------------------------------
+
+/// The eight rows RFC-0125 §2.3 gives the EMITTER: a check the emitter inserts
+/// because the core told it to, not one a producer runs. The census of §3 M6
+/// sorts every value boundary into five lines and this is the second of them.
+///
+/// A row is an index. The wasm route lays the two halves of each row out as
+/// one data table and every trap site becomes `trapAt(rule, value)` — the
+/// shape §2.3 names, "a call with a table index". Before it, each site pushed
+/// its own interned wording, so the emitter knew eight sentences; now it knows
+/// eight numbers and the table knows the sentences.
+///
+/// The order is the census's, and it is the table's layout, so `index` and the
+/// data segment cannot disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rule {
+    ArrayIndex,
+    StringIndex,
+    DivZero,
+    RemZero,
+    DivOverflow,
+    ShiftRange,
+    CallDepth,
+    RegionDepth,
+}
+
+impl Rule {
+    /// Every row, in table order.
+    pub const ALL: [Rule; 8] = [
+        Rule::ArrayIndex,
+        Rule::StringIndex,
+        Rule::DivZero,
+        Rule::RemZero,
+        Rule::DivOverflow,
+        Rule::ShiftRange,
+        Rule::CallDepth,
+        Rule::RegionDepth,
+    ];
+
+    /// The row's index — what a trap site pushes.
+    pub fn index(self) -> u32 {
+        Self::ALL.iter().position(|r| *r == self).unwrap() as u32
+    }
+
+    /// The census's name for the row (RFC-0125 §3 M6), for a diagnostic and
+    /// for the record. Not a wording: no program prints it.
+    pub fn census(self) -> &'static str {
+        match self {
+            Rule::ArrayIndex => "array-index",
+            Rule::StringIndex => "string-index",
+            Rule::DivZero => "int-div-zero",
+            Rule::RemZero => "int-rem-zero",
+            Rule::DivOverflow => "int-div-overflow",
+            Rule::ShiftRange => "shift-range",
+            Rule::CallDepth => "call-depth",
+            Rule::RegionDepth => "region-depth",
+        }
+    }
+
+    /// The row as a compiled runtime writes it: what stands before the value,
+    /// and what stands after it for the two rows that HAVE a value. A row with
+    /// no second half prints no number, which is how the runtime tells the two
+    /// shapes apart with one comparison.
+    ///
+    /// The framing is [`line`]'s, because a compiled runtime writes the whole
+    /// line itself (the note above): the prefix opens the first half and the
+    /// newline closes the last one.
+    pub fn parts(self) -> (String, Option<String>) {
+        let split = |p: (&str, &str)| (format!("{PREFIX}{}", p.0), Some(format!("{}\n", p.1)));
+        match self {
+            Rule::ArrayIndex => split(ARRAY_INDEX),
+            Rule::StringIndex => split(STRING_INDEX),
+            Rule::DivZero => (line(DIV_ZERO), None),
+            Rule::RemZero => (line(REM_ZERO), None),
+            Rule::DivOverflow => (line(DIV_OVERFLOW), None),
+            Rule::ShiftRange => (line(SHIFT_RANGE), None),
+            Rule::CallDepth => (line(&call_depth()), None),
+            Rule::RegionDepth => (line(&region_depth()), None),
+        }
+    }
+}
+
 // ---- validation ----------------------------------------------------------
 
 /// What a `where` violation says. A record base gets the cross-field wording,
@@ -155,7 +237,7 @@ pub fn validation(name: &str, record_base: bool) -> String {
 
 /// [`validation`] for a declaration, which is what every caller actually holds.
 pub fn validation_of(decl: &TypeDecl) -> String {
-    validation(&decl.name, matches!(decl.base, Type::Record(_)))
+    validation(&decl.name, crate::validate::is_cross_field(decl))
 }
 
 /// [`validation`] for a named type, resolved through this program's
@@ -163,9 +245,7 @@ pub fn validation_of(decl: &TypeDecl) -> String {
 pub fn validation_named(name: &str, types: &HashMap<String, TypeDecl>) -> String {
     validation(
         name,
-        types
-            .get(name)
-            .is_some_and(|d| matches!(d.base, Type::Record(_))),
+        types.get(name).is_some_and(crate::validate::is_cross_field),
     )
 }
 
@@ -278,6 +358,23 @@ mod tests {
             }
             assert_eq!(io_at(n, "P"), m.replace("%s", "P"));
         }
+    }
+
+    /// The table the wasm route indexes: eight rows, each a wording this file
+    /// already held, and only the two index rows carry a value.
+    #[test]
+    fn every_trap_table_row_is_one_of_the_two_shapes() {
+        for (i, r) in Rule::ALL.iter().enumerate() {
+            assert_eq!(r.index() as usize, i, "the order is the layout");
+            let (pre, post) = r.parts();
+            assert!(pre.starts_with(PREFIX), "{}", r.census());
+            match post {
+                Some(p) => assert!(p.ends_with('\n'), "{}", r.census()),
+                None => assert!(pre.ends_with('\n'), "{}", r.census()),
+            }
+        }
+        assert_eq!(Rule::ArrayIndex.parts().1.unwrap(), " out of bounds\n");
+        assert_eq!(Rule::DivZero.parts().0, line(DIV_ZERO));
     }
 
     /// The framing an engine adds, and the message it must not touch.

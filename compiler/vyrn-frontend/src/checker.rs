@@ -7056,7 +7056,7 @@ impl<'a> Checker<'a> {
         // `vyrn build --target wasm` printed `direct backend: no lowering for
         // the call`, which is an emitter's own words in a user's diagnostic.
         // `listDir` is NOT gated with it — that one has a runtime under `vyrn
-        // run` (see [`COMPTIME_FORBIDDEN`]), and only the compiling backends
+        // run` (see the lattice's `gen` column), and only the compiling backends
         // lack a lowering for it.
         if name == "moduleInterface" {
             if !*self.in_gen.borrow() {
@@ -10524,32 +10524,34 @@ fn contains_spawn(b: &Block) -> bool {
     b.stmts.iter().any(stmt)
 }
 
-/// Builtins a `gen fn` (RFC-0021) may not use at generation time: they observe
-/// or mutate the outside world in a way the deterministic, cache-keyed sandbox
-/// cannot mediate. `readFile`/`listDir`/`moduleInterface` are deliberately
-/// ABSENT — they route through the loader's resolver at generation time and are
-/// recorded as cache inputs. Logging sinks (`trace`..`error`) are here too.
-const COMPTIME_FORBIDDEN: &[&str] = &[
-    "writeFile",
-    "writeFileBytes",
-    "writeStdout",
-    "renameFile",
-    "fsyncFile",
-    "readLine",
-    "args",
-    "readFileBytes",
-    "trace",
-    "debug",
-    "info",
-    "warn",
-    "error",
-];
+/// The `gen` column of the lattice table, as RFC-0021's fence asks it — the
+/// reason the sandbox may not run `name`, or `None`.
+///
+/// The list this replaced (`COMPTIME_FORBIDDEN`, deleted) was the column
+/// written a second time, and the two had drifted: `print` was allowed where
+/// `writeStdout` was refused, which is one effect with two verdicts (RFC-0125
+/// §3 M6 finding 4), and the clock was reported as an extern although
+/// RFC-0103 M2 says it is not one (finding 13). The column is stated once now,
+/// in [`crate::effects`], derived from the table in RFC-0125 §3 M6.
+///
+/// `VYRN_NO_JUDGE=1` is the fourth slice's bisect knob and stands this
+/// milestone's judgments aside — here, the two cells this slice changed — so a
+/// refusal that is new can be told from one that is not.
+fn gen_refused(name: &str) -> Option<String> {
+    if crate::floor::no_judge() && crate::trap::host_boundary_extern(name).is_none() {
+        // The list's own answer: `print` was not on it.
+        return (name != "print")
+            .then(|| crate::effects::gen_refusal(name))
+            .flatten();
+    }
+    crate::effects::gen_refusal(name)
+}
 
 /// Comptime-purity analysis (RFC-0021), the spawn-isolation sibling. Every
 /// `gen fn` — and everything it transitively calls — must be pure enough to run
 /// deterministically in the compiler's interpreter at generation time: no
-/// `extern`, `spawn`, module state, or the [`COMPTIME_FORBIDDEN`] effect
-/// builtins. Because a `gen fn` may be *used* as an import target anywhere it is
+/// `extern`, `spawn`, module state, or an atom the lattice's `gen` column
+/// refuses ([`gen_refused`]). Because a `gen fn` may be *used* as an import target anywhere it is
 /// visible, the restriction is enforced on EVERY `gen fn` unconditionally (v1:
 /// simpler and sound than a whole-program "reached as a generation target"
 /// analysis; a `gen fn` called only at runtime pays the same discipline, which
@@ -10565,10 +10567,20 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
         .iter()
         .map(|f| (f.name.as_str(), f))
         .collect();
+    // RFC-0103 M2's host-boundary rule: `hostNowMillis` and its two neighbours
+    // are not host imports — the runtime shim implements them on every target —
+    // so the fence must not call them "the extern" (RFC-0125 §3 M6 finding 13).
+    // They are atoms of the `clock` and `random` rows and the table refuses them
+    // there, in the row's own words. Under the bisect knob they are externs
+    // again, which is what the list did.
     let extern_fns: std::collections::HashSet<&str> = program
         .functions
         .iter()
-        .filter(|f| f.is_extern)
+        .filter(|f| {
+            f.is_extern
+                && (crate::floor::no_judge()
+                    || crate::trap::host_boundary_extern(&f.name).is_none())
+        })
         .map(|f| f.name.as_str())
         .collect();
     let global_names: std::collections::HashSet<String> =
@@ -10605,8 +10617,8 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
             return Some("reads or writes module state".to_string());
         }
         for c in expand(fn_calls(&f.body)) {
-            if COMPTIME_FORBIDDEN.contains(&c.as_str()) {
-                return Some(format!("calls `{c}`"));
+            if let Some(why) = gen_refused(&c) {
+                return Some(why);
             }
             if extern_fns.contains(c.as_str()) {
                 return Some(format!("calls the extern `{c}`"));
@@ -10615,8 +10627,8 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
         None
     };
     const HINT: &str = "generators run at compile time — they may not use `extern`, `spawn`, \
-                        module state, `writeFile`, `readLine`, `args`, `readFileBytes`, or logging \
-                        sinks";
+                        module state, `print`, `writeFile`, `readLine`, `args`, `readFileBytes`, \
+                        the clock, entropy, or logging sinks";
     // Whether a function violates purity on its own, and the call edges out of
     // it, computed ONCE per function and shared by every generator's search.
     // Both are functions of the body alone — nothing about them depends on which
@@ -11480,24 +11492,20 @@ mod tests {
     /// Every log level is reserved, and every log level is an effect.
     ///
     /// `trace`/`debug`/`info`/`warn`/`error` are spelled out inside three long
-    /// lists here — `RESERVED`, `SPAWN_FORBIDDEN`, `COMPTIME_FORBIDDEN` — mixed
-    /// among dozens of unrelated builtin names. They cannot read
-    /// [`ast::LOG_LEVELS`] directly, because splicing a const array into an
-    /// array literal costs more than it saves and would make three readable
-    /// lists unreadable.
+    /// lists here — `RESERVED` and `SPAWN_FORBIDDEN` — mixed among dozens of
+    /// unrelated builtin names. They cannot read [`ast::LOG_LEVELS`] directly,
+    /// because splicing a const array into an array literal costs more than it
+    /// saves and would make two readable lists unreadable.
     ///
     /// So this compares them instead. A sixth level added to `ast::LOG_LEVELS`
     /// and to the dispatch, but not to these lists, is a level that logs while
     /// counting as neither an effect nor a reserved word: `spawn` would let it
     /// cross a task boundary, and a `gen fn` would be allowed to call it at
-    /// compile time.
+    /// compile time. The third list was the generation fence's, and it is the
+    /// lattice's `write-output` row now (RFC-0125 §3 M6, fifth slice).
     #[test]
     fn every_log_level_is_reserved_and_forbidden_where_effects_are() {
-        for list in [
-            ("RESERVED", RESERVED),
-            ("SPAWN_FORBIDDEN", SPAWN_FORBIDDEN),
-            ("COMPTIME_FORBIDDEN", COMPTIME_FORBIDDEN),
-        ] {
+        for list in [("RESERVED", RESERVED), ("SPAWN_FORBIDDEN", SPAWN_FORBIDDEN)] {
             let (what, names) = list;
             let missing: Vec<&str> = crate::ast::LOG_LEVELS
                 .iter()
@@ -11508,6 +11516,14 @@ mod tests {
                 missing.is_empty(),
                 "{what} does not hold every log level — missing: {}",
                 missing.join(", ")
+            );
+        }
+        // The generation fence reads the lattice's `gen` column now (RFC-0125
+        // §3 M6, fifth slice), so the third list is the `write-output` row.
+        for lvl in crate::ast::LOG_LEVELS {
+            assert!(
+                crate::effects::gen_refusal(lvl).is_some(),
+                "`{lvl}` is a log level a `gen fn` may call"
             );
         }
     }
@@ -12517,6 +12533,23 @@ mod tests {
         assert!(e.contains("`writeFile`"), "{e}");
     }
 
+    /// RFC-0125 M6 finding 4: `write-output` is one effect and its `gen` cell
+    /// is one cell. The fence used to refuse `writeStdout` and allow `print`,
+    /// which is one effect with two verdicts. A generator is re-run only when
+    /// its cache key changes, so a `print` in a `gen fn` is silent on a cache
+    /// hit, and the same build prints or does not print by the state of the
+    /// cache.
+    #[test]
+    fn gen_fn_using_print_is_rejected() {
+        let src = "gen fn g() -> String { print(\"hi\") return \"\" } \
+                   fn main() -> Int64 { return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(
+            e.contains("not comptime-pure") && e.contains("`print`"),
+            "{e}"
+        );
+    }
+
     #[test]
     fn gen_fn_using_spawn_is_rejected() {
         let e = check_src(
@@ -12955,8 +12988,11 @@ mod tests {
 
     #[test]
     fn rfc0043_host_clock_extern_is_rejected_in_a_generator() {
-        // A gen fn reaching the clock extern (what `now()` wraps) is not
-        // comptime-pure — pinned via the existing extern rule.
+        // A gen fn reaching the clock is not comptime-pure, and the reason is
+        // the lattice's `clock` row. It used to be "calls the extern
+        // `hostNowMillis`", which RFC-0103 M2 says is wrong: the three
+        // host-boundary names are not host imports at all, because the runtime
+        // shim implements them on every target (RFC-0125 §3 M6 finding 13).
         let e = check_src(
             "extern fn hostNowMillis() -> Int64 \
              fn now() -> Int64 { return hostNowMillis() } \
@@ -12965,9 +13001,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            e.contains("not comptime-pure") && e.contains("extern"),
+            e.contains("not comptime-pure") && e.contains("which reads the clock"),
             "{e}"
         );
+        assert!(!e.contains("the extern `hostNowMillis`"), "{e}");
     }
 
     #[test]
@@ -13491,13 +13528,17 @@ mod tests {
     /// `get` rot out of `movecheck`'s view list. One list was updated when a
     /// builtin was deleted, a second was not, and a `Slots<String>` leaked
     /// silently for two milestones. `SPAWN_FORBIDDEN` has been pinned since
-    /// `afree` left; `COMPTIME_FORBIDDEN` reads the same way and was pinned by
-    /// nothing.
+    /// `afree` left; the generation fence's list read the same way and was
+    /// pinned by nothing. The list is gone and the fence reads the lattice's
+    /// `gen` column, so this asks the column instead.
     #[test]
     fn comptime_forbidden_names_are_reserved() {
-        for n in COMPTIME_FORBIDDEN {
+        for (n, _) in crate::effects::ATOMS {
+            if crate::effects::gen_allows(n) {
+                continue;
+            }
             assert!(
-                RESERVED.contains(n),
+                RESERVED.contains(n) || crate::trap::host_boundary_extern(n).is_some(),
                 "`{n}` is forbidden inside a `gen fn` but is not a name the \
                  compiler owns — it now forbids any user function spelled that way"
             );
@@ -15190,7 +15231,7 @@ mod tests {
 
     /// `listDir` is NOT gated with them, and the asymmetry is deliberate: it
     /// lists the real filesystem under `vyrn run` (which is why
-    /// [`COMPTIME_FORBIDDEN`] omits it and the interpreter serves it), so the
+    /// the lattice's `gen` column allows it and the interpreter serves it), so the
     /// front end has nothing to refuse. Only the two compiling backends lack a
     /// lowering, and each says so itself.
     #[test]

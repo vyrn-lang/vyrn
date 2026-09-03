@@ -19,6 +19,7 @@ pub mod consteval;
 pub mod contracts;
 pub mod declared;
 pub mod diagnostics;
+pub mod effects;
 pub mod finite;
 pub mod floor;
 pub mod fmt;
@@ -49,6 +50,7 @@ pub mod symbols;
 pub mod toolpin;
 pub mod trap;
 pub mod types;
+pub mod validate;
 pub mod vyx;
 
 // Re-export the symbol-query API at the crate root so the LSP can spell it as

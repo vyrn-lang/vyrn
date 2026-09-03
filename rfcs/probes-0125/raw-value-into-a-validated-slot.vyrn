@@ -1,0 +1,50 @@
+// RFC-0125 M6 probe, the third judgment's second slice: the three producers
+// the typed judgment finds at a validated slot, each with a value that breaks
+// the predicate. The judgment reports them because none of them is the type's
+// constructor; this probe answers the other question — whether the value is
+// CHECKED anyway. It is, at every one of the three, in all three engines, and
+// the wording is the census's.
+//
+// The three shapes, and where the corpus has each:
+//   - a primitive:      `let bumped: Created = store.counter + 1`
+//                       (examples/bin/server/store.vyrn:107)
+//   - a read of a place: `let s: Stars = req.rating`
+//                       (examples/shelf/server/store.vyrn:84)
+//   - a record literal:  `Range { start: .., end: .. }`
+//                       (examples/autovalidate.vyrn:46, inlinewhere.vyrn:15)
+//
+// Run it with an argument of 1, 2 or 3 to take one shape. Each prints
+// `validation failed for `Small`` (or the cross-field wording for `Pair`) on
+// stderr and exits 1. Nothing here is a defect: every raw producer meets the
+// boundary check the engines still carry, which is exactly the work §2.3's
+// constructor removes rather than adds.
+
+type Small = Int64 where value < 10
+type Pair = { lo: Int64, hi: Int64 } where lo < hi
+type Row = { rating: Int64 }
+
+fn raw(n: Int64) -> Int64 {
+    return n
+}
+
+fn main() -> Int64 {
+    let which = args()
+    let pick = if which.length > 0 { which[0] } else { "1" }
+    if pick == "1" {
+        // A primitive: the sum is an `Int64` and the slot is validated.
+        let bumped: Small = raw(9) + 5
+        print(bumped)
+    }
+    if pick == "2" {
+        // A read of a place: the field is an `Int64` and the slot is validated.
+        let row = Row { rating: raw(42) }
+        let s: Small = row.rating
+        print(s)
+    }
+    if pick == "3" {
+        // A record literal: the cross-field predicate, at the literal.
+        let p = Pair { lo: raw(9), hi: 2 }
+        print(p.hi - p.lo)
+    }
+    return 0
+}

@@ -31,191 +31,13 @@ use vyrn_frontend::floor;
 
 use crate::core::{Body, Rhs, St};
 
-/// One effect. The order is the table's order in RFC-0125 §3 M6.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Effect {
-    /// Heap is allocated: an owned name born of a primitive or a literal, or
-    /// the allocator itself.
-    Alloc,
-    /// Standard input is read.
-    ReadInput,
-    /// Standard output or error is written.
-    WriteOutput,
-    /// A file is read.
-    FsRead,
-    /// A file is written, renamed or synced.
-    FsWrite,
-    /// A directory is listed.
-    FsList,
-    /// The command line is read.
-    Args,
-    /// The clock is read.
-    Clock,
-    /// Entropy is read.
-    Random,
-    /// A host function imported by name (RFC-0012) is called. Not an atom by
-    /// name: the harness resolves an `extern fn` declaration to it.
-    Extern,
-    /// A stream is handed to the serving host (RFC-0074 M3a).
-    Serve,
-    /// A task is started (RFC-0004 §Q4): a call the core marks `spawn`.
-    Spawn,
-    /// The path may end in a trap.
-    Trap,
-    /// The compiler's own state is read; exists at generation time only
-    /// (RFC-0021, RFC-0054).
-    GenOnly,
-}
-
-impl Effect {
-    pub const ALL: [Effect; 14] = [
-        Effect::Alloc,
-        Effect::ReadInput,
-        Effect::WriteOutput,
-        Effect::FsRead,
-        Effect::FsWrite,
-        Effect::FsList,
-        Effect::Args,
-        Effect::Clock,
-        Effect::Random,
-        Effect::Extern,
-        Effect::Serve,
-        Effect::Spawn,
-        Effect::Trap,
-        Effect::GenOnly,
-    ];
-
-    /// The name the RFC's table and every printout use.
-    pub fn name(self) -> &'static str {
-        match self {
-            Effect::Alloc => "alloc",
-            Effect::ReadInput => "read-input",
-            Effect::WriteOutput => "write-output",
-            Effect::FsRead => "fs-read",
-            Effect::FsWrite => "fs-write",
-            Effect::FsList => "fs-list",
-            Effect::Args => "args",
-            Effect::Clock => "clock",
-            Effect::Random => "random",
-            Effect::Extern => "extern",
-            Effect::Serve => "serve",
-            Effect::Spawn => "spawn",
-            Effect::Trap => "trap",
-            Effect::GenOnly => "gen-only",
-        }
-    }
-
-    /// The inverse of [`Effect::name`].
-    pub fn parse(s: &str) -> Option<Effect> {
-        Effect::ALL.into_iter().find(|e| e.name() == s)
-    }
-}
-
-/// A set of effects. `PURE` is the bottom of the lattice; join is union.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct Effects(u16);
-
-impl Effects {
-    pub const PURE: Effects = Effects(0);
-
-    /// What a spawned callee may do (RFC-0004 §Q4: isolated means no I/O and
-    /// no shared state; RFC-0125 §3 M6 finding 1): allocate and trap. A
-    /// task's result is heap it owns, and a trap in a task is the task's.
-    pub const SPAWN_ALLOWS: Effects =
-        Effects((1 << Effect::Alloc as u16) | (1 << Effect::Trap as u16));
-
-    pub fn of(e: Effect) -> Effects {
-        Effects(1 << e as u16)
-    }
-
-    pub fn with(self, e: Effect) -> Effects {
-        Effects(self.0 | Effects::of(e).0)
-    }
-
-    pub fn join(self, o: Effects) -> Effects {
-        Effects(self.0 | o.0)
-    }
-
-    /// The effects in `self` that are not in `o`.
-    pub fn minus(self, o: Effects) -> Effects {
-        Effects(self.0 & !o.0)
-    }
-
-    pub fn has(self, e: Effect) -> bool {
-        self.0 & Effects::of(e).0 != 0
-    }
-
-    pub fn is_pure(self) -> bool {
-        self.0 == 0
-    }
-
-    pub fn iter(self) -> impl Iterator<Item = Effect> {
-        Effect::ALL.into_iter().filter(move |e| self.has(*e))
-    }
-}
-
-impl std::fmt::Display for Effects {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.is_pure() {
-            return f.write_str("pure");
-        }
-        let names: Vec<&str> = self.iter().map(Effect::name).collect();
-        f.write_str(&names.join(", "))
-    }
-}
-
-/// The atoms: `(callee name, effect)`. The second column of the lattice
-/// table in RFC-0125 §3 M6, and nothing else — `tests/effects.rs` holds the
-/// two equal. A callee not here and not a user function is pure.
-///
-/// `extern` has no row: an `extern fn` is a user declaration and is resolved
-/// by whoever builds the call graph ([`Callee::Atom`]). The three
-/// host-boundary externs of RFC-0043 ARE here, because the runtime declares
-/// them on every target and they are a clock and a seed, not an import.
-pub const ATOMS: &[(&str, Effect)] = &[
-    ("runtime$malloc", Effect::Alloc),
-    ("mem$grow", Effect::Alloc),
-    ("readLine", Effect::ReadInput),
-    ("print", Effect::WriteOutput),
-    ("writeStdout", Effect::WriteOutput),
-    ("trace", Effect::WriteOutput),
-    ("debug", Effect::WriteOutput),
-    ("info", Effect::WriteOutput),
-    ("warn", Effect::WriteOutput),
-    ("error", Effect::WriteOutput),
-    ("readFile", Effect::FsRead),
-    ("readFileBytes", Effect::FsRead),
-    ("writeFile", Effect::FsWrite),
-    ("writeFileBytes", Effect::FsWrite),
-    ("renameFile", Effect::FsWrite),
-    ("fsyncFile", Effect::FsWrite),
-    ("listDir", Effect::FsList),
-    ("listDirKinds", Effect::FsList),
-    ("args", Effect::Args),
-    ("hostNowMillis", Effect::Clock),
-    ("hostMonotonicNanos", Effect::Clock),
-    ("hostRandomSeed", Effect::Random),
-    ("serveStream", Effect::Serve),
-    ("panic", Effect::Trap),
-    ("@panicAt", Effect::Trap),
-    ("assert", Effect::Trap),
-    ("assertEq", Effect::Trap),
-    ("runtime$trap", Effect::Trap),
-    ("mem$trap", Effect::Trap),
-    ("moduleInterface", Effect::GenOnly),
-    ("contractOf", Effect::GenOnly),
-    ("lex", Effect::GenOnly),
-    ("render", Effect::GenOnly),
-    ("raw", Effect::GenOnly),
-    ("rawAt", Effect::GenOnly),
-    ("@codeText", Effect::GenOnly),
-    ("@codeSplice", Effect::GenOnly),
-];
-
-/// The atom `name` is, if it is one.
-pub fn atom(name: &str) -> Option<Effect> {
-    ATOMS.iter().find(|(n, _)| *n == name).map(|(_, e)| *e)
-}
+/// The lattice's table — the effects, the sets and [`ATOMS`] — lives in
+/// `vyrn_frontend::effects`, because RFC-0021's generation fence reads the
+/// same table mid-check and cannot see this crate (RFC-0125 §3 M6, fifth
+/// slice). Re-exported so the judgment still spells it `effects::`.
+pub use vyrn_frontend::effects::{
+    atom, gen_allows, gen_refusal, Effect, Effects, ATOMS, GEN_ATOM_OVERRIDES,
+};
 
 /// What a callee's name resolves to, as the caller of [`judge`] sees the
 /// program. The judgment itself resolves nothing: it does not know which
@@ -396,7 +218,7 @@ impl Walk<'_> {
                 // is an allocation. Born of a user call, the callee's own
                 // set says whether it allocated or handed a parameter back.
                 let born = match rhs {
-                    Rhs::Prim(_) | Rhs::Make(_) => true,
+                    Rhs::Prim(..) | Rhs::Make(_) => true,
                     Rhs::Call { .. } => atom_call,
                     Rhs::Val(_) | Rhs::Read(_) | Rhs::Take(_) => false,
                 };
@@ -498,36 +320,6 @@ impl Walk<'_> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_atom_names_one_effect_once() {
-        for (i, (n, _)) in ATOMS.iter().enumerate() {
-            assert!(
-                ATOMS[..i].iter().all(|(m, _)| m != n),
-                "`{n}` is in ATOMS twice"
-            );
-        }
-        for e in Effect::ALL {
-            assert_eq!(Effect::parse(e.name()), Some(e));
-        }
-    }
-
-    #[test]
-    fn the_set_prints_in_table_order() {
-        let s = Effects::of(Effect::Trap).with(Effect::Alloc);
-        assert_eq!(s.to_string(), "alloc, trap");
-        assert_eq!(Effects::PURE.to_string(), "pure");
-        assert_eq!(
-            s.minus(Effects::of(Effect::Alloc)),
-            Effects::of(Effect::Trap)
-        );
-        assert_eq!(Effects::SPAWN_ALLOWS.to_string(), "alloc, trap");
-    }
-}
-
 /// Which of the floor's judged capabilities each module of `program` REACHES —
 /// RFC-0125 §3 M6, fourth slice.
 ///
@@ -541,8 +333,8 @@ mod tests {
 ///
 /// A `let` at module scope (RFC-0013) and a `where` predicate are declarations
 /// the instance list does not cover, so they are read here from the AST by the
-/// same [`vyrn_frontend::floor::JUDGED`] names. Nothing else in the program can
-/// carry one of these rows.
+/// same [`vyrn_frontend::floor::call_carrier`] the floor's scan uses. Nothing
+/// else in the program can carry a capability through a call.
 pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Capability)> {
     let mut out: Vec<(String, floor::Capability)> = Vec::new();
     let mut add = |module: Option<&String>, cap: floor::Capability| {
@@ -552,15 +344,16 @@ pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Cap
         }
     };
 
-    // The two declarations no instance holds. A judged name is a builtin call,
-    // so a walk for the name is the whole reading.
+    // The two declarations no instance holds. A carrier is a call, so a walk
+    // for the call is the whole reading.
+    let externs = floor::extern_imports(program);
     let spells = |e: &vyrn_frontend::ast::Expr| -> Vec<floor::Capability> {
         let mut e = e.clone();
         let mut found: Vec<floor::Capability> = Vec::new();
         vyrn_frontend::project::walk_bare(&mut e, &mut |x| {
             if let vyrn_frontend::ast::Expr::Call { name, .. } = x {
-                if let Some((_, cap)) = floor::JUDGED.iter().find(|(n, _)| n == name) {
-                    found.push(*cap);
+                if let Some(cap) = floor::call_carrier(name, &externs) {
+                    found.push(cap);
                 }
             }
         });
@@ -579,11 +372,12 @@ pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Cap
         add(module.as_ref(), cap);
     }
 
-    // The effect a judged row is: one lookup, so the row and the atom cannot
-    // drift apart.
-    let rows: Vec<(Effect, floor::Capability)> = floor::JUDGED
-        .iter()
-        .filter_map(|(n, cap)| atom(n).map(|e| (e, *cap)))
+    // The lattice's rows read as capabilities, which is the floor's whole
+    // vocabulary (RFC-0125 §3 M6, sixth slice). One table, so the row and the
+    // capability cannot drift apart.
+    let rows: Vec<(Effect, floor::Capability)> = Effect::ALL
+        .into_iter()
+        .filter_map(|e| floor::Capability::of(e).map(|cap| (e, cap)))
         .collect();
 
     let lowered = crate::lower(program);
@@ -695,6 +489,17 @@ pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Cap
     };
     let judged = judge(&refs, &mut resolve, &mut through);
     for (i, inst) in insts.iter().enumerate() {
+        // The generation context, which is the table's `gen` column becoming a
+        // check (RFC-0125 §3 M6, fifth slice). A `gen fn` body runs at
+        // GENERATION time against the compiler's filesystem and is never
+        // compiled into the artifact, so what it reaches is no capability of
+        // the artifact — the same rule `floor::carried` states by skipping a
+        // `gen fn`, and the reason 216 corpus bodies are `gen-body` and not a
+        // disagreement (finding 9). The fence decides what a generator may do;
+        // the floor decides what a target may do; this is the line between.
+        if inst.func.is_gen {
+            continue;
+        }
         let e = judged.effects[top[i]];
         for (effect, cap) in &rows {
             if e.has(*effect) {

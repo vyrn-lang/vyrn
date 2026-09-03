@@ -43,7 +43,7 @@
 //!
 //! ## What is deliberately NOT here
 //!
-//! - **Effects.** `SPAWN_FORBIDDEN` and `COMPTIME_FORBIDDEN` are 29 rows and no
+//! - **Effects.** `SPAWN_FORBIDDEN` and the lattice's `gen` column are 29 rows and no
 //!   signature in this language carries an effect. That is a language feature,
 //!   not a milestone.
 //! - **Arity and parameter types.** The checker's per-builtin arms already
@@ -555,7 +555,7 @@ fn rows() -> Vec<Function> {
         // belong to is empty by construction, and the row is about facts.
         //
         // `listDir` also has a runtime: `vyrn run` lists the real filesystem
-        // (`COMPTIME_FORBIDDEN` deliberately omits it, and so does the
+        // (the lattice's `gen` column allows it, and so does the
         // interpreter's generation-only refusal). Only the two compiling
         // backends have no lowering for it.
         row(

@@ -1,0 +1,10 @@
+/// Row `int-div-zero` — RFC-0002. An integer divided by a runtime zero.
+
+fn zero(n: Int64) -> Int64 {
+    return n - n
+}
+
+fn main() -> Int64 {
+    print(10 / zero(3))
+    return 0
+}

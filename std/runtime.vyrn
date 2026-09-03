@@ -61,7 +61,7 @@
 /// their 64 frames of side vector are deleted; the native IR's
 /// `REGION_RUNTIME` stays until step 3 moves the native route.
 ///
-/// **Step 9, the traps and the printer:** `trapV`, `trapIdx`, `printI64` and
+/// **Step 9, the traps and the printer:** `trapV`, `trapAt`, `printI64` and
 /// `boolStr`, over `std/mem`'s `trap` primitive and the `writeAll` step 7 put
 /// here. They are the last functions the wasm emitter hand-emitted; what
 /// stays there is instruction sequences, not functions (PLAN-0125-runtime §6,
@@ -1928,15 +1928,25 @@ export fn trapV(msg: Int32) {
     trap(msg, strLen(msg))
 }
 
-/// `trap_idx(pre, i, post)`: `error: array index 7 out of bounds`, which the
-/// interpreter and the native build both print with the index interpolated.
-/// Three writes rather than one format: this is the only runtime message with
-/// a number in it, and the two halves around the number are `trap.rs`'s,
-/// interned by the emitter and passed in.
-export fn trapIdx(pre: Int32, i: Int64, post: Int32) {
+/// `trapAt(rule, v, table)`: the trap table's row `rule`, with `v` in the
+/// middle of the rows that have a middle — RFC-0125 §2.3.
+///
+/// `table` is eight rows of two addresses, laid out by the emitter from
+/// `vyrn_frontend::trap::Rule`: the wording before the value, and the wording
+/// after it, or zero for a row with no value in it. So a site says WHICH rule
+/// broke and this says what that reads like, which is what "`trap` maps to a
+/// call with a table index" means. It replaces `trapIdx` and the eight
+/// separately interned wordings the emitter used to push one of.
+export fn trapAt(rule: Int32, v: Int64, table: Int32) {
+    let row = table + (rule << 3)
+    let pre = Int32(load32(row))
+    let post = Int32(load32(row + 4))
+    if post == 0 {
+        trap(pre, strLen(pre))
+    }
     writeAll(2, pre, strLen(pre))
     let buf = heapBase() + 8736
-    let at = digitsAt(buf, 31, i, true)
+    let at = digitsAt(buf, 31, v, true)
     writeAll(2, at, buf + 32 - at)
     trap(post, strLen(post))
 }
