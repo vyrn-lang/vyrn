@@ -2649,6 +2649,146 @@ Findings 5, 9, 10, 11 and 13 still change nothing. Findings 7 and 8 are
 now half spent: 8 is on record and paid by two rows; 7 is what keeps
 `extern` where it is.
 
+#### The fifth slice (2026-09-03)
+
+The fifth slice makes the lattice's `gen` column a check, closes findings 4
+and 13 with it, and moves the `fs` row into the judgment. `floor::CALLS`
+holds nothing now.
+
+**Where the column had to go.** The table's DATA — the effects, the sets,
+`ATOMS` and the new `Effect::gen` — is `vyrn-frontend/src/effects.rs`. The
+JUDGMENT that joins a body's atoms with its callees' sets stays in
+`vyrn-lower/src/effects.rs` and re-exports every name, so it still spells the
+lattice `effects::`. The fourth slice's hook could not carry this rule.
+RFC-0021's fence (`checker::check_comptime_purity`) runs at step 7 of the
+check, over the AST, and it must answer for EVERY `gen fn`: a generic one no
+lowering instantiates, and a body no core is built for. A judgment over the
+core cannot be handed to it, because the core is built from the checker's
+types and the check is what is running. A hook with no answer would drop the
+fence out of the LSP, which installs no judge; a hook with a fallback would
+keep the second list this slice deletes. So the column is data both readers
+can see rather than a function pointer one of them installs, and the fence
+keeps its place in the order of diagnostics.
+
+`COMPTIME_FORBIDDEN` is deleted. It was thirteen names — the column written a
+second time — and the two had drifted in exactly the two places the findings
+named, plus one the findings had not.
+
+- **4, closed.** `write-output` is one effect and its `gen` cell is one cell:
+  `no`. `print` in a `gen fn` is refused with the other six atoms of its row.
+  The hint names it, `checker::gen_fn_using_print_is_rejected` pins the
+  refusal, and the table's cell is `no (finding 4)`.
+- **13, closed.** The fence no longer calls the clock an extern. `extern_fns`
+  skips what `trap::host_boundary_extern` knows — RFC-0103 M2's rule that the
+  three host-boundary names are not host imports, because the runtime shim
+  implements them on every target — and the row answers instead: "reads the
+  clock", "reads entropy". The pin
+  `rfc0043_host_clock_extern_is_rejected_in_a_generator` holds the new sentence
+  and holds the old one out.
+- **5, unchanged, and now written where a reader will find it.**
+  `effects::GEN_ATOM_OVERRIDES` is one row: `readFileBytes`, `no`, against its
+  `fs-read` row's `yes`. The reason is the route and not the effect, exactly as
+  the second slice decided. The one-line version is this line, and it changes
+  no verdict.
+- **One cell the list did not have.** `serveStream` is an atom of the `serve`
+  row, whose `gen` cell is `no`, and it was on no list. It is refused in a
+  `gen fn` now. Nothing in the corpus spells it in one.
+
+**The knob.** `VYRN_NO_JUDGE=1` is still one knob. It puts every judged row
+back in the pass, and it puts the fence's two changed cells back: `print` is
+allowed again and the three host-boundary names are externs again. A refusal
+that is new can be told from one that is not, without a second env var.
+
+**What moved out of the floor.** `readFile`, `readFileBytes`, `writeFile`,
+`writeFileBytes`, `renameFile`, `fsyncFile`, `listDir`, `listDirKinds` — the
+whole `fs` row of calls. `floor::CALLS` is empty and kept: the module scan
+reads it and `JUDGED` as one list, so a row that has to come back comes back
+by moving one line.
+
+What held the row back was the generation context, which is what the `gen`
+column becoming a check gives. 216 corpus bodies are `gen fn`s carrying
+`fs-read` or `fs-list`; the floor skips them because a generator runs against
+the compiler's filesystem and is never compiled into the artifact; a judgment
+that did not know the context would have refused every one of them.
+`effects::reaches` skips a `gen fn` instance now, which is the same line
+`floor::carried` draws. The fence decides what a generator may do, the floor
+decides what a target may do, and this is the line between them.
+
+`floor::is_judged` asks about the CARRIER and not the capability, because `fs`
+has both kinds: eight calls a judgment decides and one declaration it does
+not. `floor::objected` hands the loader the carrier, so a declaration's
+refusal is still made inside the load, before every type error, where it
+always was.
+
+**The tally.** `cargo test -p vyrn-cli --test effects`, at this slice's last
+commit:
+
+    effects over the corpus: 180 programs (31 not loadable here, 2 refused as
+    recorded), 26883 functions judged, 8244 pure, 0 unlowered, 64 calls
+    through a function value judged over their sources, 69 unattributed
+      open sets: 40
+      effect 18218  alloc
+      effect    11  read-input
+      effect   292  write-output
+      effect   189  fs-read
+      effect    19  fs-write
+      effect   106  fs-list
+      effect     8  args
+      effect    29  clock
+      effect    20  random
+      effect    31  extern
+      effect    22  serve
+      effect     4  spawn
+      effect  7785  trap
+      effect   826  gen-only
+      spawn:      12 sites judged, 0 outside `alloc, trap`
+      floor:      26643 agree, 24 callee-carried, 216 gen-body, 0 floor-blind,
+                  0 core-blind
+      audience:   26442 no fence, 27 agree, 414 declared-only, 0 unfenced,
+                  0 server-extern
+      judged:     26643 agree, 24 callee-carried, 216 gen-body, 0 differ
+
+The corpus grew again between the slices — the count is not the fourth
+slice's — and **both ratchets are 0**. The `judged:` line is the whole-floor
+comparison now, because every call row the scan finds is a judged row: 24
+*callee-carried* and 216 *gen-body*, the two kinds that are not
+disagreements, and nothing else.
+
+**The rows the floor still holds, and why.**
+
+- `extern` — carried by an `extern fn` DECLARATION and not by a call (finding
+  7). Unchanged, and the reason is unchanged: the lattice can state only the
+  call, and the judgment gives `main` no `extern` for an import nothing
+  reaches, while the floor refuses it because an unanswered import stops
+  instantiation. The row moves when that question is decided, and deciding it
+  changes what the floor refuses.
+- The `logging { sink: file(..) }` DECLARATION, which carries `fs` (finding
+  10). The sink is a block, not a call; no effect set holds it, and RFC-0103
+  §4's reason stands: a declaration is not a capability a body reaches. It
+  is the one `fs` reach that degrades SILENTLY in a page, so the pass keeps
+  it and keeps deciding it inside the load.
+  `floor::the_log_sink_is_a_declaration_the_judgment_does_not_clear` pins that,
+  byte-identical under the knob.
+
+What the floor decides on its own is two declarations now, and no call at all.
+
+**The cost.** `vyrn check site/export.vyrn`, warm, on a machine running other
+worktrees' gates at the same time, so the spread is the machine's. Four
+interleaved pairs, base binary then this slice's: 6.36 / 3.32, 3.64 / 2.82,
+3.31 / 2.85, 3.49 / 2.78 s. Five more of this slice's alone: 3.74, 2.85, 2.92,
+3.45, 3.19 s, and five under `VYRN_NO_JUDGE=1`: 4.84, 5.08, 3.09, 3.00, 3.09 s.
+No cost, and there should be none: this artifact is native, its target has
+`fs`, so the load raises no objection and the judgment never runs. A BROWSER
+entry that does spell `readFile` pays one lowering and one ownership analysis,
+which `emit-lowered` measured at 4 to 6 per cent of a check in the third
+slice.
+
+**What the deletion slice still inherits.** Finding 7, which is the `extern`
+row. Finding 14, the calls through a function value the join cannot attribute:
+40 open sets and 69 calls. And the audience pass, which this milestone has not
+touched. 414 *declared-only* functions say why (finding 10): a fence
+protects a declaration, and no effect set holds one.
+
 ### What each milestone is worth on its own
 
 M1 fixes the wasm column. M2 makes leaks a compile error. M3 halves the
