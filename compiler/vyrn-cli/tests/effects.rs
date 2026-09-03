@@ -20,6 +20,8 @@
 //! verdict agrees) are tallied and printed but not ratcheted. RFC-0125 §3 M6
 //! lists each kind as a numbered finding with the program and line.
 //!
+//! `VYRN_EFFECTS_GAPS=<substring>` says where an instance with no core is,
+//! as `VYRN_KERNEL_GAPS` does.
 //! `VYRN_EFFECTS_DUMP=<file>:<fn>` prints one function's effect set and the
 //! callees it took them from; `<file>` is a corpus file name (or a substring
 //! of one) or a path to any `.vyrn` file.
@@ -400,6 +402,20 @@ fn run_corpus() {
                 }
             }
         }
+        // The module-state initializer (RFC-0013), which is a body and no
+        // function of the program (RFC-0125 §3 M6, finding 14). No build
+        // emits it as an instance and no pass verdict stands beside it; it
+        // is judged here so the lambdas it holds have a frame, which is what
+        // a stored source names. A `test` or `bench` body is a body too and
+        // is NOT here: the checker checks a CLONE of it, so no type is
+        // recorded for the nodes `own` and the lowering walk.
+        let mut outside: Vec<vyrn_lower::core::Body> = Vec::new();
+        if !program.globals.is_empty() {
+            match vyrn_lower::core::build_module_state(&program, &own, &lowered.globals) {
+                Ok(b) => outside.push(b),
+                Err(g) => *gaps.entry(g.what).or_default() += 1,
+            }
+        }
         // Every frame, outermost first: the judgment's slice. `top[i]` is
         // the slot of instance `i`'s own body; a lambda frame is keyed by
         // the function it was written in and its line, which is how the
@@ -419,6 +435,25 @@ fn run_corpus() {
                 {
                     lambda_frames
                         .entry((insts[i].func.name.as_str(), line))
+                        .or_default()
+                        .push(refs.len());
+                }
+                refs.push(f);
+            }
+        }
+        // The initializer's frames. Its own body is no instance, so it lands
+        // in no `top` slot; the lambdas it holds are keyed by the body the
+        // checker records them under, which is the empty name.
+        for b in &outside {
+            for f in b.frames() {
+                if let Some(line) = f
+                    .name
+                    .rsplit("@lambda:")
+                    .next()
+                    .and_then(|l| l.parse::<usize>().ok())
+                {
+                    lambda_frames
+                        .entry((b.name.as_str(), line))
                         .or_default()
                         .push(refs.len());
                 }
@@ -554,9 +589,26 @@ fn run_corpus() {
                 ));
             }
         }
-        for (i, name) in &judged.unknown {
+        // A call nobody could attribute, with the program and line it is on
+        // and the reason (RFC-0125 §3 M6, finding 14). Two reasons only: the
+        // callee is a name of the body whose function type no collected
+        // source matches, or it is no name of the body at all — a projection
+        // dispatched by name (RFC-0123), which is no function value.
+        for (i, name, line) in &judged.unknown {
+            let ty = refs[*i]
+                .names
+                .iter()
+                .find(|n| &n.source == name)
+                .map(|n| n.ty.to_string());
+            let why = match ty {
+                Some(t) => format!("no collected source of `{t}`"),
+                None => "not a name of the body: a projection dispatched by name".to_string(),
+            };
             *unknown
-                .entry(format!("{name} (in {})", refs[*i].name))
+                .entry(format!(
+                    "{file}:{line} {name} (in {}) — {why}",
+                    refs[*i].name
+                ))
                 .or_default() += 1;
         }
 
@@ -741,10 +793,10 @@ fn run_corpus() {
             r.file, r.line, r.name, r.effects, r.floor, r.audience, r.who
         );
     }
-    if std::env::var("VYRN_EFFECTS_UNKNOWN").is_ok() {
-        for (name, n) in &unknown {
-            eprintln!("  call through a function value {n:5}  {name}");
-        }
+    // Every call the judgment could not attribute, with its program, its
+    // line and the reason — the list RFC-0125 §3 M6's finding 14 is.
+    for (name, n) in &unknown {
+        eprintln!("  unattributed {n:5}  {name}");
     }
     if std::env::var("VYRN_EFFECTS_MODULES").is_ok() {
         let mut by_module: BTreeMap<&str, Effects> = BTreeMap::new();

@@ -505,19 +505,90 @@ pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<
         stream_loops: Vec::new(),
     };
     let f: &Function = inst.func;
+    // The instance's substitution, so a parameter's type here is the type the
+    // instance has rather than the declaration's (RFC-0125 §3 M6, finding 14):
+    // `map<Int64, Int64>`'s `f` is `fn(Int64) -> Int64`, which is the shape
+    // RFC-0037 collected its stored sources under. Every other type in the
+    // core comes from the instance's rows and is substituted already.
+    let subst: HashMap<String, Type> = inst.subst.clone().into_iter().collect();
     // A declared release (`impl Owned for T { fn release(consume self) }`) IS
     // the release of `self`: its body frees the parts, and nothing releases
     // `self` again — so `self` is not a name the kernel owns there.
     let is_release = f.name.starts_with("Owned__") && f.name.ends_with("__release");
     for p in &f.params {
-        let owned = p.capability == Capability::Consume && b.owns(&p.ty) && !is_release;
-        let n = b.name(&p.name, p.ty.clone(), owned, f.line);
+        let pty = vyrn_frontend::types::substitute(&p.ty, &subst);
+        let owned = p.capability == Capability::Consume && b.owns(&pty) && !is_release;
+        let n = b.name(&p.name, pty, owned, f.line);
         b.scope.push((p.name.clone(), n));
         b.keyed(n, p as *const _ as usize);
         b.body.params.push(n);
     }
     let mut out = Vec::new();
     b.block(&f.body, &mut out)?;
+    b.body.stmts = out;
+    Ok(b.body)
+}
+
+/// The module-state initializer (RFC-0013) as a body of its own.
+///
+/// It is a body and no function of the program: every `let` at module scope
+/// is a store into the global it names, run once at `_start`, and the place
+/// held nothing before it. Its name is the empty one, which is the name the
+/// checker records a lambda written in it under (RFC-0037's
+/// `StoredLambda::defined_in`), so a call through a value of that lambda's
+/// type is judged over its frame rather than nowhere (RFC-0125 §3 M6,
+/// finding 14).
+///
+/// A `test` (RFC-0015) or `bench` (RFC-0055) body is a body too and is not
+/// here: the checker checks a CLONE of it, so nothing typed the nodes `own`
+/// and the lowering walk, and its core would be one gap per expression.
+pub fn build_module_state<'a>(
+    program: &'a Program,
+    own: &'a Ownership,
+    rows: &[crate::Row<'a>],
+) -> Result<Body, Gap> {
+    let mut types: HashMap<usize, Type> = HashMap::new();
+    for r in rows {
+        if let Node::Expr(_) = r.node {
+            if let Some(t) = r.ty.as_ref().or(r.has.as_ref()) {
+                types.insert(r.node.id(), t.clone());
+            }
+        }
+    }
+    let mut b = Builder {
+        program,
+        own,
+        proto: &own.proto,
+        types,
+        placed: HashMap::new(),
+        body: Body {
+            name: String::new(),
+            file: None,
+            names: Vec::new(),
+            params: Vec::new(),
+            stmts: Vec::new(),
+            lambdas: Vec::new(),
+        },
+        scope: Vec::new(),
+        by_binding: HashMap::new(),
+        temps: 0,
+        func_name: String::new(),
+        pending_receiver: None,
+        drain: 0,
+        after: Vec::new(),
+        after_of_rhs: Vec::new(),
+        stream_loops: Vec::new(),
+    };
+    let mut out = Vec::new();
+    for g in &program.globals {
+        let v = b.val(&g.init, &mut out)?;
+        out.push(St::Store {
+            place: Place::Global(g.name.clone()),
+            value: v,
+            old: Old::Nothing,
+            line: g.line,
+        });
+    }
     b.body.stmts = out;
     Ok(b.body)
 }
