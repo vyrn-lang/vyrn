@@ -45,6 +45,16 @@
 /// header loads, told the element stride by the emitter. The wasm emitter's
 /// five inline copies are deleted; `a[i]` stays at its site.
 ///
+/// **Step 7, the I/O family:** `writeAll`, `printStr`, `getByte`, `readLineV`,
+/// `openAt`, `readAll`, `readFileV`, `readFileBytesV`, `writeFileV`,
+/// `writeFileBytesV`, `renameFileV`, `fsyncFileV`, `argsV`, `envGet`, `err3`,
+/// `readdirBlob`, `listDirV`, the generator-host twins of the three readers,
+/// and the clock and seed readers `nowMillis`, `monoNanos` and `randomSeedV`,
+/// over the host imports `std/mem` declares. The wasm emitter's twenty-one
+/// hand-emitted bodies are deleted; the C shim's stay until step 3 moves the
+/// native route. A builtin's twin carries a `V` (`readFileV` for `readFile`),
+/// as `std/text`'s `charCountV` does, because the builtin's name is reserved.
+///
 /// **Step 8, the regions:** `regionEnter` and `regionExit`, the bump arena of
 /// PLAN-0125-runtime §4.3, which `strNew` allocates from while the emitter
 /// says so. The wasm emitter's `region_keep`/`region_free`/`region_pop` and
@@ -60,7 +70,11 @@
 /// runtime trap is one of `trap.rs`'s fixed wordings and every engine prints
 /// it the same way.
 
-import { load8, load32, load64, store8, store32, store64, copy, fill, memorySize, grow, heapBase } from "std/mem"
+import {
+    load8, load32, load64, store8, store32, store64, copy, fill, memorySize, grow, heapBase,
+    fdWrite, fdRead, fdClose, pathOpen, pathRename, fdSync, fdPrestatGet, argsSizesGet, argsGet,
+    environSizesGet, environGet, clockTimeGet, randomGet, fdReaddir, genRead, genFetch,
+} from "std/mem"
 
 /// `strlen`: the bytes before the NUL at `p`.
 export fn strLen(p: Int32) -> Int32 {
@@ -313,12 +327,13 @@ export fn regexRun(s: Int32, table: Int32, start: Int32, accept: Int32) -> Bool 
 //
 // The heap's first 480 bytes are the allocator's own: one head per class,
 // 116 words, then the bump offset at 464, then the arena's three words at
-// 468, 472 and 476 (step 8 below), so the first block still starts
-// sixteen-aligned at 480. All of it starts at zero, which is what an empty
-// list, an empty heap and a closed arena are, so nothing initializes it: the
-// emitter's `HEAP` global and its reserved head table are gone with the
-// hand-emitted allocator. A freed block's list link lives in its payload; the
-// eight-byte floor is what makes room for it.
+// 468, 472 and 476 (step 8 below). The I/O family's cells follow at 480
+// (step 7, the table above its section), and the first block starts
+// sixteen-aligned at 8736. All of it starts at zero, which is what an empty
+// list, an empty heap, an empty buffer and a closed arena are, so nothing
+// initializes it: the emitter's `HEAP` global and its reserved tables are
+// gone with the hand-emitted runtime. A freed block's list link lives in its
+// payload; the eight-byte floor is what makes room for it.
 //
 // `malloc` pops the class's head if there is one, else bumps and grows memory
 // by exactly the pages the new top needs. `free` refuses, silently, a pointer
@@ -371,7 +386,7 @@ export fn malloc(n: Int64) -> Int32 {
         store32(h, load32(head))
         return head
     }
-    let p = base + 480 + Int32(load32(base + 464))
+    let p = base + 8736 + Int32(load32(base + 464))
     // In 64 bits so the sum cannot wrap: a top past 4 GiB is a request no
     // wasm32 memory can serve, reported in `grow`'s words.
     let end = Int64(UInt32(p)) + Int64(size) + 8
@@ -384,7 +399,7 @@ export fn malloc(n: Int64) -> Int32 {
             panic("out of memory")
         }
     }
-    store32(base + 464, UInt32(end - Int64(base) - 480))
+    store32(base + 464, UInt32(end - Int64(base) - 8736))
     store32(p, UInt32(cls))
     return p + 8
 }
@@ -413,7 +428,7 @@ export fn free(p: Int32) {
 // closing brace gives every one of them back at once.
 //
 // The arena's three words sit in the allocator's own head bytes, after the
-// bump offset at 464 and before the first block at 480:
+// bump offset at 464 and before the I/O family's cells at 480:
 //
 //   468  the chunk being bumped, 0 when the arena has none
 //   472  the next free byte in that chunk
@@ -1042,4 +1057,786 @@ export fn arrCopyFrom(dst: Int32, src: Int32, stride: Int32, xs: Int32) {
 export fn arrClear(dst: Int32, src: Int32) {
     copy(dst, src, 24)
     store64(dst + 8, 0)
+}
+
+// ---------------------------------------------------------------------------
+// Step 7, the I/O family (PLAN-0125-runtime §6; RFC-0014, RFC-0043, RFC-0044)
+// ---------------------------------------------------------------------------
+//
+// Every function here is the wasm body it replaces, over the host imports
+// `std/mem` declares (PLAN-0125-runtime §2.2): the same buffer sizes, the same
+// growth, the same errno tests, the same canonical `@.io.*` wording. The
+// wording is never spelled here: the emitter interns each message's two halves
+// from `trap.rs`'s one table (`io_message_parts`) and passes them as
+// arguments, as it passes `strFromBytes` its two, so a reader of the message
+// finds one source. A `String` argument is its bytes' address, as everywhere in
+// this module; a `dest` is the caller's destination slot for an aggregate the
+// emitter reads back.
+//
+// **The cells.** The family needs memory that outlives a call — the two
+// standard-stream buffers, the fixed clock's counter — and scratch a host
+// import writes through (an iovec, an `nwritten`, a prestat). A wasm local has
+// no address and this module has no module state (an initializer that ran
+// after a top-level `let` printed would reset the buffer under it), so the
+// cells live where the allocator's heads do: in the heap's own first bytes,
+// zeroed by the engine, after the allocator's 480. Offsets from `heapBase()`:
+//
+//   480    stdout buffer, 4,096 bytes    `writeAll` gathers fd 1 here
+//   4576   stdout position
+//   4580   stdin buffer, 4,096 bytes     `getByte` scatters fd 0 from here
+//   8676   stdin length                  what the last `fd_read` returned
+//   8680   stdin position                the next byte
+//   8684   the length a slurp hands back (`readAll`, `slurpGen`, `readdirBlob`)
+//   8688   the status a `genRead` answered
+//   8692   one byte: the newline `printStr` writes
+//   8696   32 bytes of scratch for the host imports' out-parameters
+//   8728   the fixed clock's monotonic counter, an `Int64`
+//   8736   the allocator's first block (`malloc` above)
+//
+// One host call is in flight at a time, so the scratch is never shared. The
+// stdin buffer is 4,096 bytes because `readLine` is the only reader of fd 0
+// (`readFileBytes` takes a path), and one syscall per byte is what reverse
+// complement paid 40.7 million times before it; the stdout buffer is the same
+// size for fasta's five million printed lines.
+//
+// **Rights and flags** are the `wasi_snapshot_preview1` witx's, spelled at
+// their one use each: `right::fd_read` 2, `right::fd_sync` 16,
+// `right::fd_write` 64, `right::fd_readdir` 16384; `oflags::creat | trunc` 9,
+// `oflags::directory` 2; `lookupflags::symlink_follow` 1 (what `fopen` does);
+// `filetype::directory` 3; `errno::xdev` 75, the last of preview1's
+// alphabetical list and NOT POSIX's 18. A `dirent` is a 24-byte header
+// (`d_next: u64, d_ino: u64, d_namlen: u32, d_type: u8`, three bytes of
+// padding), then the name.
+
+/// The retry loop under `writeAll`: `n` bytes at `p` to `fd`, however many
+/// `fd_write`s it takes. Zero when every byte went; the errno of a failed
+/// write, or 1 for a write that moved nothing while bytes were still owed,
+/// either of which would spin forever.
+fn drain(fd: Int32, p: Int32, n: Int32) -> Int32 {
+    let iov = heapBase() + 8696
+    let mut q = p
+    let mut left = n
+    while left != 0 {
+        store32(iov, UInt32(q))
+        store32(iov + 4, UInt32(left))
+        let e = fdWrite(fd, iov, 1, iov + 8)
+        if e != 0 {
+            return e
+        }
+        let w = Int32(load32(iov + 8))
+        if w == 0 {
+            return 1
+        }
+        q = q + w
+        left = left - w
+    }
+    return 0
+}
+
+/// `write_all`: the ONE place bytes leave a program. Zero when every byte
+/// arrived, non-zero when `drain` gave up; a caller that only prints drops it,
+/// `writeFileV` reads it. Standard output is gathered: a write to fd 1 that
+/// fits the buffer is copied in and nothing leaves. Anything else — another
+/// descriptor, a write too long to buffer, a buffer with no room — flushes
+/// what is waiting FIRST, so order holds against standard error and against
+/// a file. Both trap paths write to fd 2 before they exit, which flushes on
+/// the way out; the ordinary exit flushes in `_start` with a zero-length
+/// write to fd 2.
+export fn writeAll(fd: Int32, p: Int32, n: Int32) -> Int32 {
+    let base = heapBase()
+    let buffered = fd == 1 && UInt32(n) < 4096
+    let mut st: Int32 = 0
+    let pos = Int32(load32(base + 4576))
+    if pos != 0 && (!buffered || UInt32(pos + n) > 4096) {
+        store32(base + 4576, 0)
+        st = drain(1, base + 480, pos)
+    }
+    if buffered {
+        let at = Int32(load32(base + 4576))
+        copy(base + 480 + at, p, n)
+        store32(base + 4576, UInt32(at + n))
+    } else {
+        let s2 = drain(fd, p, n)
+        if s2 != 0 {
+            st = s2
+        }
+    }
+    return st
+}
+
+/// `print_str`: the bytes, then the newline.
+export fn printStr(s: Int32) {
+    let base = heapBase()
+    writeAll(1, s, Int32(load32(s - 8)))
+    store8(base + 8692, '\n')
+    writeAll(1, base + 8692, 1)
+}
+
+/// `env_get`: the value of the environment entry `key` names (`key` carries
+/// its own `=`, so the lookup is one prefix test), or 0. WASI hands the whole
+/// environment over in one go, so this is `environ_get` plus a scan. The blob
+/// is never freed: the answer points into it, and the two callers run once
+/// per process.
+export fn envGet(key: Int32) -> Int32 {
+    let sc = heapBase() + 8696
+    store32(sc, 0)
+    store32(sc + 4, 0)
+    if environSizesGet(sc, sc + 4) != 0 {
+        return 0
+    }
+    let cnt = Int32(load32(sc))
+    let ptrs = malloc(Int64((cnt << 2) + 8))
+    let blob = malloc(Int64(Int32(load32(sc + 4)) + 1))
+    environGet(ptrs, blob)
+    let mut i: Int32 = 0
+    while UInt32(i) < UInt32(cnt) {
+        let e = Int32(load32(ptrs + (i << 2)))
+        if starts(e, key) {
+            free(ptrs)
+            return e + strLen(key)
+        }
+        i = i + 1
+    }
+    free(ptrs)
+    return 0
+}
+
+/// RFC-0043's injected value: the entry `key` names when it is set AND not
+/// empty, else 0. The C shim's own guard, `if (e && e[0])`: an empty value
+/// falls through to the real host.
+fn injected(key: Int32) -> Int32 {
+    let e = envGet(key)
+    if e != 0 && load8(e) != 0 {
+        return e
+    }
+    return 0
+}
+
+/// `now_millis`: epoch milliseconds, or `VYRN_FIXED_TIME` when the harness
+/// set it. `clock_time_get` answers nanoseconds and the division is the shim's
+/// `tv_sec * 1000 + tv_nsec / 1e6`, the same floor. A failing clock reads 0,
+/// which is what `timespec_get` returning 0 gives.
+export fn nowMillis(fixedTime: Int32) -> Int64 {
+    let e = injected(fixedTime)
+    if e != 0 {
+        return strI64(e)
+    }
+    let out = heapBase() + 8696
+    if clockTimeGet(0, 1000000, out) != 0 {
+        return 0
+    }
+    return Int64(load64(out) / 1000000)
+}
+
+/// `mono_nanos`: monotonic nanoseconds. Under a fixed clock the interpreter's
+/// own base and step, `1e9 + n * 1e6` for the n-th call, so successive calls
+/// are byte-identical across engines; otherwise `clock_time_get(MONOTONIC)`.
+export fn monoNanos(fixedTime: Int32) -> Int64 {
+    let base = heapBase()
+    if injected(fixedTime) != 0 {
+        let n = Int64(load64(base + 8728))
+        store64(base + 8728, UInt64(n + 1))
+        return n * 1000000 + 1000000000
+    }
+    let out = base + 8696
+    clockTimeGet(1, 1000, out)
+    return Int64(load64(out))
+}
+
+/// `random_seed`: eight CSPRNG bytes as an `Int64`, or `VYRN_FIXED_SEED`.
+/// Zeroed first: the shim leaves `v = 0` when `getentropy` fails, so the zero
+/// IS the error path and there is no errno to read.
+export fn randomSeedV(fixedSeed: Int32) -> Int64 {
+    let e = injected(fixedSeed)
+    if e != 0 {
+        return strI64(e)
+    }
+    let out = heapBase() + 8696
+    store64(out, 0)
+    randomGet(out, 8)
+    return Int64(load64(out))
+}
+
+/// `args`: `argv[1..]` as the `Array<String>` triple `{ ptr, len, cap }`
+/// written through `dest`. WASI writes the pointers as one contiguous array,
+/// which is the buffer an `Array<String>` wants, and one blob they point into;
+/// each element is copied into a String with a header of its own (RFC-0089
+/// M1a), ascending from `argv[1]` into slot 0 so the program name is never
+/// copied and every read of slot `i` precedes the write of slot `i - 1`. The
+/// blob was the host's staging buffer and is freed; the copies outlive the
+/// program, which is what `args()` always did (RFC-0011's element rule). Two
+/// words of slack on the pointer block, so an argv of one name still asks for
+/// a block rather than for nothing.
+export fn argsV(dest: Int32) {
+    let sc = heapBase() + 8696
+    store32(sc, 0)
+    store32(sc + 4, 0)
+    argsSizesGet(sc, sc + 4)
+    let cnt = Int32(load32(sc))
+    let ptrs = malloc(Int64((cnt << 2) + 8))
+    let blob = malloc(Int64(Int32(load32(sc + 4)) + 1))
+    argsGet(ptrs, blob)
+    let mut i: Int32 = 1
+    while UInt32(i) < UInt32(cnt) {
+        let e = Int32(load32(ptrs + (i << 2)))
+        let n = strLen(e)
+        let c = strNew(n, n)
+        copy(c, e, n)
+        store32(ptrs + ((i - 1) << 2), UInt32(c))
+        i = i + 1
+    }
+    free(blob)
+    let mut n: Int32 = 0
+    if UInt32(cnt) > 1 {
+        n = cnt - 1
+    }
+    store32(dest, UInt32(ptrs))
+    store64(dest + 8, UInt64(Int64(n)))
+    store64(dest + 16, UInt64(Int64(n)))
+}
+
+/// `getbyte`: one byte of standard input, or -1 at EOF and on any error,
+/// which is what `getchar` returning `EOF` covers too. Buffered the way
+/// `getchar` is: `fd_read` refills 4,096 bytes when the buffer is spent, and
+/// every other call is two loads and a store. `pos >= len` covers the initial
+/// zero-zero state, so the first call is a fill.
+export fn getByte() -> Int32 {
+    let base = heapBase()
+    let mut pos = Int32(load32(base + 8680))
+    if UInt32(pos) >= UInt32(load32(base + 8676)) {
+        let iov = base + 8696
+        store32(iov, UInt32(base + 4580))
+        store32(iov + 4, 4096)
+        store32(iov + 8, 0)
+        // An error and a zero-length read are the same answer to the caller,
+        // and neither may leave the buffer looking full.
+        if fdRead(0, iov, 1, iov + 8) != 0 {
+            return -1
+        }
+        let got = Int32(load32(iov + 8))
+        if got == 0 {
+            return -1
+        }
+        store32(base + 8676, UInt32(got))
+        pos = 0
+    }
+    store32(base + 8680, UInt32(pos + 1))
+    return Int32(load8(base + 4580 + pos))
+}
+
+/// `read_line`: RFC-0014's `readLine()`. `None` at EOF, for a line carrying
+/// a NUL byte (a NUL-terminated `String` could not hold it) and for one that
+/// is not UTF-8 by the DFA at `table` — where the interpreter's
+/// `String::from_utf8` fails, decided here rather than by the caller. The
+/// buffer starts at 64 bytes and doubles at `len + 2`, so the terminator
+/// never needs a reallocation of its own; a trailing `\\r` goes with the `\\n`,
+/// so a Windows pipe and a POSIX one read identically. The payload is the
+/// String's address, which is the `Option<String>` shape the caller reads.
+export fn readLineV(table: Int32) -> Option<Int64> {
+    let mut c = getByte()
+    if c < 0 {
+        return None
+    }
+    let mut cap: Int32 = 64
+    let mut buf = strNew(0, cap)
+    let mut len: Int32 = 0
+    let mut nul = false
+    while c >= 0 && c != '\n' {
+        if c == 0 {
+            nul = true
+        }
+        if UInt32(len + 2) >= UInt32(cap) {
+            cap = cap << 1
+            let nb = strNew(0, cap)
+            copy(nb, buf, len)
+            free(buf - 8)
+            buf = nb
+        }
+        store8(buf + len, UInt8(c))
+        len = len + 1
+        c = getByte()
+    }
+    if len != 0 && load8(buf + len - 1) == '\r' {
+        len = len - 1
+    }
+    store8(buf + len, 0)
+    store32(buf - 8, UInt32(len))
+    if nul || !utf8Valid(buf, len, table) {
+        free(buf - 8)
+        return None
+    }
+    return Some(Int64(UInt32(buf)))
+}
+
+/// `open_at`: a descriptor for `path`, or -1. WASI has no `open` relative to a
+/// working directory: every path resolves under a preopened directory, and
+/// the host decides which exist. So the preopens are walked from fd 3 (the
+/// first WASI hands out) until `fd_prestat_get` says there are no more, and
+/// the first that resolves the path wins — `--dir .` gives exactly one, and
+/// no preopens at all (a browser) give -1 for every path, RFC-0014's
+/// canonical `Err`.
+///
+/// ponytail: no prefix matching against the preopens' own names, so an
+/// absolute guest path only opens under a preopen mounted at `/`; nothing in
+/// the corpus has one.
+export fn openAt(path: Int32, oflags: Int32, rights: Int64) -> Int32 {
+    let plen = strLen(path)
+    let sc = heapBase() + 8696
+    let mut fd: Int32 = 3
+    while fdPrestatGet(fd, sc) == 0 {
+        if pathOpen(fd, 1, path, plen, oflags, rights, 0, 0, sc + 8) == 0 {
+            return Int32(load32(sc + 8))
+        }
+        fd = fd + 1
+    }
+    return -1
+}
+
+/// `read_all`: the whole descriptor into one NUL-terminated buffer, its length
+/// in the cell at 8684; 0 on a read error, the buffer freed. A read loop
+/// rather than a stat-and-slurp, for the reason the C shim gives: it is the
+/// same code for a regular file and for a pipe. 1,024 bytes then doubling.
+/// `hdr` is how many bytes to leave in FRONT of the returned pointer: 8 for a
+/// `String` answer, whose header goes there, and 0 for an `Array<UInt8>`,
+/// whose buffer is freed at its own base (RFC-0089 M1a). One reader, two
+/// shapes.
+fn readAll(fd: Int32, hdr: Int32) -> Int32 {
+    let base = heapBase()
+    let iov = base + 8696
+    let mut cap: Int32 = 1024
+    let mut buf = malloc(Int64(UInt32(cap + hdr))) + hdr
+    let mut len: Int32 = 0
+    while true {
+        if UInt32(len + 1) >= UInt32(cap) {
+            cap = cap << 1
+            let nb = malloc(Int64(UInt32(cap + hdr))) + hdr
+            copy(nb, buf, len)
+            free(buf - hdr)
+            buf = nb
+        }
+        store32(iov, UInt32(buf + len))
+        store32(iov + 4, UInt32(cap - len - 1))
+        store32(iov + 8, 0)
+        if fdRead(fd, iov, 1, iov + 8) != 0 {
+            free(buf - hdr)
+            return 0
+        }
+        let got = Int32(load32(iov + 8))
+        if got == 0 {
+            break
+        }
+        len = len + got
+    }
+    store8(buf + len, 0)
+    store32(base + 8684, UInt32(len))
+    return buf
+}
+
+/// `err3`: one canonical I/O message with the path in the middle, from the
+/// two interned halves `io_message_parts` gave the emitter. A fresh String
+/// the `Err` owns; the middle step is freed here.
+fn err3(pre: Int32, mid: Int32, post: Int32) -> Int32 {
+    let t = strConcat(pre, mid)
+    let r = strConcat(t, post)
+    free(t - 8)
+    return r
+}
+
+/// The open-and-slurp both file readers start with, under WASI: the buffer
+/// with `hdr` bytes in front, its length in the cell at 8684, or 0 when the
+/// open or the read failed — one message for both, the caller's.
+fn slurpFile(path: Int32, hdr: Int32) -> Int32 {
+    let fd = openAt(path, 0, 2)
+    if fd < 0 {
+        return 0
+    }
+    let buf = readAll(fd, hdr)
+    fdClose(fd)
+    return buf
+}
+
+/// The same slurp under a generation (RFC-0076): the whole resource in one
+/// mediated import, into a buffer this module allocates, because the host
+/// must not allocate in guest memory. `genRead` answers `(status << 32) |
+/// len` and stashes the bytes; `genFetch` copies them in. The status goes to
+/// the cell at 8688 (0 ok, 1 io, 3 an embedded NUL, which the host checks
+/// for a String read) and the length to 8684. A String answer gets its header
+/// and terminator from `strNew`; a byte read and a directory listing get a
+/// NUL only, because the listing is scanned for the zero.
+fn slurpGen(path: Int32, mode: Int32, asString: Bool) -> Int32 {
+    let base = heapBase()
+    let packed = UInt64(genRead(path, mode))
+    let st = Int32(packed >> 32)
+    store32(base + 8688, UInt32(st))
+    if st != 0 {
+        return 0
+    }
+    let len = Int32(packed)
+    store32(base + 8684, UInt32(len))
+    if asString {
+        let s = strNew(len, len)
+        genFetch(s)
+        return s
+    }
+    // The NUL is added in 64 bits, so a host answering 4 GiB minus one gets
+    // an out of memory rather than a one-byte buffer.
+    let buf = malloc(Int64(UInt32(len)) + 1)
+    genFetch(buf)
+    store8(buf + len, 0)
+    return buf
+}
+
+/// The read message a generation's failure picks: the NUL wording for status
+/// 3, the caller's for the rest. Both halves change together, so a rejected
+/// path never reads `cannot read \\`x\\` contains a NUL byte`.
+fn genErr(path: Int32, ioPre: Int32, ioPost: Int32, nulPre: Int32, nulPost: Int32) -> Int64 {
+    if Int32(load32(heapBase() + 8688)) == 3 {
+        return Int64(UInt32(err3(nulPre, path, nulPost)))
+    }
+    return Int64(UInt32(err3(ioPre, path, ioPost)))
+}
+
+/// The half of `readFile` after the slurp: the NUL scan BEFORE the UTF-8
+/// check and with its own wording, because a `String` is NUL-terminated — a
+/// file with one in it is not representable rather than badly encoded. The
+/// buffer has no owner on either failure and is freed. The `Ok` payload is
+/// the String's address, the `Result<String, String>` shape the caller reads.
+fn readFileFrom(path: Int32, buf: Int32, len: Int32, table: Int32, nulPre: Int32, nulPost: Int32, utf8Pre: Int32, utf8Post: Int32) -> Result<Int64, Int64> {
+    let mut i: Int32 = 0
+    while UInt32(i) < UInt32(len) {
+        if load8(buf + i) == 0 {
+            free(buf - 8)
+            return Err(Int64(UInt32(err3(nulPre, path, nulPost))))
+        }
+        i = i + 1
+    }
+    if !utf8Valid(buf, len, table) {
+        free(buf - 8)
+        return Err(Int64(UInt32(err3(utf8Pre, path, utf8Post))))
+    }
+    return Ok(Int64(UInt32(buf)))
+}
+
+/// `read_file`: RFC-0014's `readFile` as a `Result<String, String>`. The
+/// `String` answer needs its header filled: `readAll` left the room and only
+/// this side knows the length; `cap == len`, since the buffer is never grown
+/// again (RFC-0089 M1a).
+export fn readFileV(path: Int32, table: Int32, readPre: Int32, readPost: Int32, nulPre: Int32, nulPost: Int32, utf8Pre: Int32, utf8Post: Int32) -> Result<Int64, Int64> {
+    let buf = slurpFile(path, 8)
+    if buf == 0 {
+        return Err(Int64(UInt32(err3(readPre, path, readPost))))
+    }
+    let len = Int32(load32(heapBase() + 8684))
+    store32(buf - 8, UInt32(len))
+    store32(buf - 4, UInt32(len))
+    return readFileFrom(path, buf, len, table, nulPre, nulPost, utf8Pre, utf8Post)
+}
+
+/// `readFileV` under a generation: the slurp is the host's, the rest the same.
+/// `mode` is the host's read mode for a String.
+export fn readFileGen(path: Int32, mode: Int32, table: Int32, readPre: Int32, readPost: Int32, nulPre: Int32, nulPost: Int32, utf8Pre: Int32, utf8Post: Int32) -> Result<Int64, Int64> {
+    let buf = slurpGen(path, mode, true)
+    if buf == 0 {
+        return Err(genErr(path, readPre, readPost, nulPre, nulPost))
+    }
+    let len = Int32(load32(heapBase() + 8684))
+    return readFileFrom(path, buf, len, table, nulPre, nulPost, utf8Pre, utf8Post)
+}
+
+/// An `Array<UInt8>` of `len` bytes at `buf`, as the `Ok` of a
+/// `Result<Array<UInt8>, String>`: the triple is three words where a sum's
+/// payload is one, so it is BOXED, and the box IS the triple.
+fn bytesBox(buf: Int32, len: Int32) -> Result<Int64, Int64> {
+    let boxed = malloc(24)
+    store32(boxed, UInt32(buf))
+    store64(boxed + 8, UInt64(UInt32(len)))
+    store64(boxed + 16, UInt64(UInt32(len)))
+    return Ok(Int64(UInt32(boxed)))
+}
+
+/// `read_file_bytes`: the same open-and-slurp with no NUL or UTF-8 rule at
+/// all, which is the whole point of a byte read.
+export fn readFileBytesV(path: Int32, readPre: Int32, readPost: Int32) -> Result<Int64, Int64> {
+    let buf = slurpFile(path, 0)
+    if buf == 0 {
+        return Err(Int64(UInt32(err3(readPre, path, readPost))))
+    }
+    return bytesBox(buf, Int32(load32(heapBase() + 8684)))
+}
+
+/// `readFileBytesV` under a generation. The host never answers status 3 for
+/// a byte read; the NUL halves are passed so the message pick is the one
+/// function either way.
+export fn readFileBytesGen(path: Int32, mode: Int32, readPre: Int32, readPost: Int32, nulPre: Int32, nulPost: Int32) -> Result<Int64, Int64> {
+    let buf = slurpGen(path, mode, false)
+    if buf == 0 {
+        return Err(genErr(path, readPre, readPost, nulPre, nulPost))
+    }
+    return bytesBox(buf, Int32(load32(heapBase() + 8684)))
+}
+
+/// `write_file_bytes`: RFC-0111, THE ONLY FILE WRITER. Create-or-truncate and
+/// write every byte, as a `Result<Bool, String>` whose `Ok` is `true` — a
+/// `Bool` payload is the word zero-extended, so the `Ok` carries 1. Three ways
+/// to fail, one message: the open, the write and the close. The descriptor is
+/// closed on every path, as `fclose` is reached on every path natively, and
+/// the close's errno joins the write's: a buffered write that only fails at
+/// the close failed.
+export fn writeFileBytesV(path: Int32, p: Int32, n: Int32, writePre: Int32, writePost: Int32) -> Result<Int64, Int64> {
+    let fd = openAt(path, 9, 64)
+    if fd < 0 {
+        return Err(Int64(UInt32(err3(writePre, path, writePost))))
+    }
+    let wst = writeAll(fd, p, n)
+    if (fdClose(fd) | wst) != 0 {
+        return Err(Int64(UInt32(err3(writePre, path, writePost))))
+    }
+    return Ok(1)
+}
+
+/// `write_file`: the String face of the writer above. A Vyrn String never
+/// holds a NUL (the readers above are why), so `strLen` is its whole length;
+/// that one call is the entire difference between the two builtins.
+export fn writeFileV(path: Int32, s: Int32, writePre: Int32, writePost: Int32) -> Result<Int64, Int64> {
+    return writeFileBytesV(path, s, strLen(s), writePre, writePost)
+}
+
+/// `rename_file`: RFC-0044's atomic overwrite, as a `Result<Bool, String>`.
+/// `path_rename` needs a directory descriptor for each side, so this is
+/// `openAt`'s preopen walk without the open, both paths through the same
+/// descriptor — which is why the cross-device arm is nearly unreachable here:
+/// a preopen is one mount. Two failure classes, because RFC-0044 has two:
+/// `errno::xdev` is `@.io.xdeverr` and everything else `@.io.writeerr`, both
+/// about the TARGET path. A failure is remembered rather than returned: a
+/// later preopen may still resolve the pair, and only if none does is WHY the
+/// last one failed the answer. No preopen at all is an io failure, which is
+/// also what a browser gets.
+export fn renameFileV(from: Int32, to: Int32, writePre: Int32, writePost: Int32, xdevPre: Int32, xdevPost: Int32) -> Result<Int64, Int64> {
+    let flen = strLen(from)
+    let tlen = strLen(to)
+    let sc = heapBase() + 8696
+    let mut fd: Int32 = 3
+    let mut xdev = false
+    while fdPrestatGet(fd, sc) == 0 {
+        let e = pathRename(fd, from, flen, fd, to, tlen)
+        if e == 0 {
+            return Ok(1)
+        }
+        if e == 75 {
+            xdev = true
+        }
+        fd = fd + 1
+    }
+    if xdev {
+        return Err(Int64(UInt32(err3(xdevPre, to, xdevPost))))
+    }
+    return Err(Int64(UInt32(err3(writePre, to, writePost))))
+}
+
+/// `fsync_file`: RFC-0044's durability step, as a `Result<Bool, String>`.
+/// Open, sync, close — the shim's three steps. The open asks for WRITE and
+/// SYNC (a descriptor opened without the sync right may refuse with
+/// `ENOTCAPABLE`) and passes no oflags, so a missing file is NOT created and
+/// an existing one is NOT truncated: the `"rb+"` the shim opens with. Both
+/// failures are `@.io.writeerr` about the path: fsync is a step of writing
+/// and has no wording of its own.
+export fn fsyncFileV(path: Int32, writePre: Int32, writePost: Int32) -> Result<Int64, Int64> {
+    let fd = openAt(path, 0, 80)
+    if fd < 0 {
+        return Err(Int64(UInt32(err3(writePre, path, writePost))))
+    }
+    let st = fdSync(fd)
+    if (fdClose(fd) | st) != 0 {
+        return Err(Int64(UInt32(err3(writePre, path, writePost))))
+    }
+    return Ok(1)
+}
+
+/// `readdir_blob`: the directory's entry names joined with `\\n`,
+/// NUL-terminated, in a fresh block with its length in the cell at 8684; or 0
+/// when the directory cannot be opened or read (RFC-0125 §3 M5). This is
+/// `listDir`'s listing on an ordinary build, in the encoding the generator
+/// host already answers in, so `splitNames` splits one shape whichever host
+/// filled it. `.` and `..` are dropped, since `read_dir` never reports them;
+/// with `kinds` a directory's name gets its `/` (RFC-0119). The order is the
+/// host's, and `listDirV` sorts.
+///
+/// `fd_readdir` fills a buffer with as many entries as fit; the last may be
+/// cut, and a cut entry is re-read by asking again from its predecessor's
+/// `d_next` cookie. A fill shorter than the buffer is the end.
+///
+/// ponytail: a 4 KiB read buffer, so a name longer than that re-reads
+/// forever; no filesystem allows one, NAME_MAX being 255.
+fn readdirBlob(path: Int32, kinds: Bool) -> Int32 {
+    let base = heapBase()
+    let fd = openAt(path, 2, 16384)
+    if fd < 0 {
+        return 0
+    }
+    let mut cap: Int32 = 1024
+    let mut buf = malloc(Int64(cap))
+    let rb = malloc(4096)
+    let mut len: Int32 = 0
+    let mut cookie: Int64 = 0
+    let usedAt = base + 8696
+    while true {
+        if fdReaddir(fd, rb, 4096, cookie, usedAt) != 0 {
+            free(buf)
+            buf = 0
+            break
+        }
+        let used = Int32(load32(usedAt))
+        let mut off: Int32 = 0
+        while UInt32(off + 24) <= UInt32(used) {
+            let ent = rb + off
+            let namlen = Int32(load32(ent + 16))
+            if UInt32(namlen + off + 24) > UInt32(used) {
+                break
+            }
+            cookie = Int64(load64(ent))
+            let dtype = load8(ent + 20)
+            let name = ent + 24
+            // `.` and `..`: a name of one or two bytes that are all `.`.
+            let dot = UInt32(namlen) <= 2 && load8(name) == '.' && load8(name + namlen - 1) == '.'
+            if !dot {
+                // Room for the name, a `/`, the `\n` and the NUL.
+                let need = namlen + 3 + len
+                if UInt32(need) > UInt32(cap) {
+                    cap = cap << 1
+                    if UInt32(cap) <= UInt32(need) {
+                        cap = need
+                    }
+                    let nb = malloc(Int64(UInt32(cap)))
+                    copy(nb, buf, len)
+                    free(buf)
+                    buf = nb
+                }
+                copy(buf + len, name, namlen)
+                len = len + namlen
+                if kinds && dtype == 3 {
+                    store8(buf + len, '/')
+                    len = len + 1
+                }
+                store8(buf + len, '\n')
+                len = len + 1
+            }
+            off = off + 24 + namlen
+        }
+        if UInt32(used) < 4096 {
+            break
+        }
+    }
+    fdClose(fd)
+    free(rb)
+    if buf == 0 {
+        return 0
+    }
+    // The last `\n` is a separator with nothing after it.
+    if len != 0 {
+        len = len - 1
+    }
+    store8(buf + len, 0)
+    store32(base + 8684, UInt32(len))
+    return buf
+}
+
+/// The `n` bytes at `p` as a String of their own.
+fn strCopy(p: Int32, n: Int32) -> Int32 {
+    let s = strNew(n, n)
+    copy(s, p, n)
+    return s
+}
+
+/// A `\\n`-joined listing of `len` bytes at `buf` split into an
+/// `Array<String>` and boxed as the `Ok` of a `Result<Array<String>, String>`.
+/// The split is safe for the reason the join is: an entry name cannot contain
+/// a newline. A non-empty listing has one more name than separators; an EMPTY
+/// one is zero names rather than one empty name, the difference between `[]`
+/// and `[""]`. A zero-length array still gets a buffer, so the triple's
+/// pointer is never null. Each name is COPIED out of the blob, because a
+/// String's header has to sit in front of it and inside one shared buffer
+/// there is no room (RFC-0089 M1a); the blob is freed once every name has a
+/// copy. With `sort`, an insertion sort by `strCmp`, the byte order a String
+/// sorts in (RFC-0022): the interpreter sorts its listing, the generator host
+/// sorts before it joins, and `readdirBlob` hands over the host's order.
+///
+/// ponytail: quadratic, over a directory listing.
+fn splitNames(buf: Int32, len: Int32, sort: Bool) -> Result<Int64, Int64> {
+    let mut n: Int32 = 0
+    let mut i: Int32 = 0
+    while UInt32(i) < UInt32(len) {
+        if load8(buf + i) == '\n' {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    if len != 0 {
+        n = n + 1
+    }
+    let mut room = n
+    if room == 0 {
+        room = 1
+    }
+    let names = malloc(Int64(room) * 4)
+    let mut start = buf
+    let mut k: Int32 = 0
+    i = 0
+    while UInt32(i) < UInt32(len) {
+        if load8(buf + i) == '\n' {
+            store32(names + (k << 2), UInt32(strCopy(start, buf + i - start)))
+            k = k + 1
+            start = buf + i + 1
+        }
+        i = i + 1
+    }
+    if len != 0 {
+        store32(names + (k << 2), UInt32(strCopy(start, buf + len - start)))
+    }
+    if sort {
+        i = 1
+        while UInt32(i) < UInt32(n) {
+            let own = Int32(load32(names + (i << 2)))
+            k = i
+            while k != 0 {
+                let prev = Int32(load32(names + ((k - 1) << 2)))
+                if strCmp(prev, own) <= 0 {
+                    break
+                }
+                store32(names + (k << 2), UInt32(prev))
+                k = k - 1
+            }
+            store32(names + (k << 2), UInt32(own))
+            i = i + 1
+        }
+    }
+    free(buf)
+    let boxed = malloc(24)
+    store32(boxed, UInt32(names))
+    store64(boxed + 8, UInt64(UInt32(n)))
+    store64(boxed + 16, UInt64(UInt32(n)))
+    return Ok(Int64(UInt32(boxed)))
+}
+
+/// `list_dir`: `listDir` and `listDirKinds` as a `Result<Array<String>,
+/// String>`, over `fd_readdir` on an ordinary build, sorted.
+export fn listDirV(path: Int32, kinds: Bool, listPre: Int32, listPost: Int32) -> Result<Int64, Int64> {
+    let buf = readdirBlob(path, kinds)
+    if buf == 0 {
+        return Err(Int64(UInt32(err3(listPre, path, listPost))))
+    }
+    return splitNames(buf, Int32(load32(heapBase() + 8684)), true)
+}
+
+/// `listDirV` under a generation: the listing comes from the loader's
+/// resolver through `genRead`, sorted and recorded there — the interpreter's
+/// own encoding, so a directory whose contents change invalidates the same
+/// cache entry under either engine. `mode` says whether names carry kinds;
+/// the host appends the `/` before joining, so the splitter never learns
+/// kinds exist.
+export fn listDirGen(path: Int32, mode: Int32, listPre: Int32, listPost: Int32) -> Result<Int64, Int64> {
+    let buf = slurpGen(path, mode, false)
+    if buf == 0 {
+        return Err(Int64(UInt32(err3(listPre, path, listPost))))
+    }
+    return splitNames(buf, Int32(load32(heapBase() + 8684)), false)
 }

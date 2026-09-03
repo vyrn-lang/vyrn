@@ -1,0 +1,15 @@
+/// The browser artifact's entry point — `artifacts.app`, target `browser`.
+///
+/// A page has no directory to list: `listDir` answers `BADF` there, the
+/// canonical `Err`, and the program prints its error and exits 0. That is
+/// the silent degradation RFC-0103's floor exists to refuse, and it did not,
+/// because the floor had no row for a listing until RFC-0125 M6's second
+/// slice (finding 6). `vyrn check` refuses this file now, with the floor's
+/// wording; `tests/floor.rs` holds the refusal.
+fn main() -> Int64 {
+    match listDir("themes") {
+        Ok(names) => print("\{names.length} themes"),
+        Err(e) => print(e)
+    }
+    return 0
+}
