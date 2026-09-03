@@ -487,6 +487,17 @@ pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Cap
     };
     let judged = judge(&refs, &mut resolve, &mut through);
     for (i, inst) in insts.iter().enumerate() {
+        // The generation context, which is the table's `gen` column becoming a
+        // check (RFC-0125 §3 M6, fifth slice). A `gen fn` body runs at
+        // GENERATION time against the compiler's filesystem and is never
+        // compiled into the artifact, so what it reaches is no capability of
+        // the artifact — the same rule `floor::carried` states by skipping a
+        // `gen fn`, and the reason 216 corpus bodies are `gen-body` and not a
+        // disagreement (finding 9). The fence decides what a generator may do;
+        // the floor decides what a target may do; this is the line between.
+        if inst.func.is_gen {
+            continue;
+        }
         let e = judged.effects[top[i]];
         for (effect, cap) in &rows {
             if e.has(*effect) {

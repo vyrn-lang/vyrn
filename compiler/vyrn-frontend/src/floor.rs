@@ -10,11 +10,15 @@
 //! requirement(closure(entry)) ⊆ capabilities(target)
 //! ```
 //!
-//! **Presence, not reachability.** A module REQUIRES `fs` because a call to
-//! `readFile` is written in it, not because that call runs. The check must not
+//! **Presence, then reachability.** A module REQUIRES a capability because a
+//! carrier is written in it, not because that carrier runs. The check must not
 //! depend on control flow, and M0's census found the shipped runtime already
 //! behaves this way: under wasmtime an `extern` import fails at INSTANTIATION,
-//! so a program that never reaches the call still cannot start.
+//! so a program that never reaches the call still cannot start. The scan is
+//! still what FINDS every carrier and writes every refusal. What changed is
+//! the verdict on the rows in [`JUDGED`]: the effect judgment of RFC-0125 §2.2
+//! can CLEAR one, never add one, so a carrier no instance of the module
+//! reaches is no longer refused (RFC-0125 §3 M6, finding 8).
 //!
 //! **The vocabulary is four capabilities** — [`Capability::Fs`],
 //! [`Capability::Stdin`], [`Capability::Args`], [`Capability::Extern`]. The
@@ -35,8 +39,18 @@ use crate::diagnostics::Diagnostic;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Capability {
     /// The filesystem: `readFile`, `readFileBytes`, `writeFile`,
-    /// `writeFileBytes`, `renameFile`, `fsyncFile`, `listDir`, `listDirKinds`,
-    /// and the `logging { sink: file(..) }` declaration.
+    /// `writeFileBytes`, `renameFile`, `fsyncFile`, `listDir`, `listDirKinds`
+    /// — all eight judged — and the `logging { sink: file(..) }` declaration,
+    /// which is no call and stays the pass's.
+    ///
+    /// `fsyncFile` is in this row rather than one of its own. M0 split it out
+    /// because it behaves differently (the direct backend has no lowering for
+    /// it, so a wasm build is refused outright), but that is a missing
+    /// lowering — a filed regression — and not a second capability. The floor
+    /// names the capability; the backend keeps its own refusal. `listDir` and
+    /// `listDirKinds` are the same case on the native target
+    /// (`NATIVE_UNSUPPORTED`), and on a page they degrade to the canonical
+    /// `Err` the floor exists to refuse.
     Fs,
     /// Standard input: `readLine`.
     Stdin,
@@ -125,27 +139,18 @@ pub struct Carried {
     pub line: usize,
 }
 
-/// `(builtin, capability)` — the calls that reach out of the program.
+/// `(builtin, capability)` — the calls the PASS decides, and there are none
+/// left (RFC-0125 §3 M6, fifth slice).
 ///
-/// `fsyncFile` is in the `fs` row rather than a row of its own. M0 split it out
-/// because it behaves differently (the direct backend has no lowering for it, so
-/// a wasm build is refused outright), but that is a missing lowering — a filed
-/// regression — and not a second capability. The floor names the capability;
-/// the backend keeps its own refusal. `listDir` and `listDirKinds` are the same
-/// case on the native target (`NATIVE_UNSUPPORTED`), and on a page they degrade
-/// to the canonical `Err` the floor exists to refuse.
-pub const CALLS: &[(&str, Capability)] = &[
-    ("readFile", Capability::Fs),
-    ("readFileBytes", Capability::Fs),
-    ("writeFile", Capability::Fs),
-    ("writeFileBytes", Capability::Fs),
-    ("renameFile", Capability::Fs),
-    ("fsyncFile", Capability::Fs),
-    ("listDir", Capability::Fs),
-    ("listDirKinds", Capability::Fs),
-];
+/// The list is kept rather than deleted because it is half of one rule: the
+/// module scan reads it and [`JUDGED`] as one list, so a row that has to come
+/// back — a judgment the CLI cannot install, a builtin no core lowers — comes
+/// back by moving one line. What the floor still decides on its own is two
+/// DECLARATIONS: an `extern fn` and `logging { sink: file(..) }`. Neither is a
+/// call, and no effect set holds either.
+pub const CALLS: &[(&str, Capability)] = &[];
 
-/// The rows a judgment answers — RFC-0125 §3 M6, fourth slice.
+/// The rows a judgment answers — RFC-0125 §3 M6, fourth and fifth slices.
 ///
 /// A row here is out of [`CALLS`]: the pass no longer decides it. The module
 /// scan below reads both lists, so a moved row is still FOUND by the scan —
@@ -155,8 +160,25 @@ pub const CALLS: &[(&str, Capability)] = &[
 /// reaches the capability, and [`decide`] drops the rows it does not confirm.
 /// When none is installed — the LSP, `VYRN_NO_JUDGE=1` — the pass answers for
 /// them exactly as it did.
-pub const JUDGED: &[(&str, Capability)] =
-    &[("readLine", Capability::Stdin), ("args", Capability::Args)];
+///
+/// `stdin` and `args` moved in the fourth slice; the eight `fs` calls in the
+/// fifth, once the judgment could tell a generation-time body from a run-time
+/// one. That was the whole hold-up: 216 corpus bodies are `gen fn`s that read
+/// files and list directories, the floor skips them because a generator is
+/// never compiled into the artifact, and a judgment that did not know the
+/// context would have refused every one of them.
+pub const JUDGED: &[(&str, Capability)] = &[
+    ("readLine", Capability::Stdin),
+    ("args", Capability::Args),
+    ("readFile", Capability::Fs),
+    ("readFileBytes", Capability::Fs),
+    ("writeFile", Capability::Fs),
+    ("writeFileBytes", Capability::Fs),
+    ("renameFile", Capability::Fs),
+    ("fsyncFile", Capability::Fs),
+    ("listDir", Capability::Fs),
+    ("listDirKinds", Capability::Fs),
+];
 
 /// Every capability `program` carries, in a stable order.
 ///
@@ -268,14 +290,14 @@ pub fn objection(modules: &Graph, root: &str, map: &ArtifactMap) -> Option<Diagn
     Some(refusal(artifact, key, c, &parent, map))
 }
 
-/// The capability the floor would object to, without writing the diagnostic.
+/// What the floor would object to, without writing the diagnostic.
 ///
 /// The loader asks before it refuses (RFC-0125 §3 M6, fourth slice): a row a
 /// judgment answers cannot be decided inside the load, because the judgment
 /// needs a checked program, so that objection is deferred to [`decide`] and
 /// every other one is made where it always was.
-pub fn objected(modules: &Graph, root: &str, map: &ArtifactMap) -> Option<Capability> {
-    locate(modules, root, map).map(|(_, _, c, _)| c.cap)
+pub fn objected(modules: &Graph, root: &str, map: &ArtifactMap) -> Option<Carried> {
+    locate(modules, root, map).map(|(_, _, c, _)| c.clone())
 }
 
 /// The artifact, the module, the carrier and each module's first parent — what
@@ -367,9 +389,15 @@ fn judge() -> Option<Judge> {
     JUDGE.get().copied()
 }
 
-/// Whether a judgment is installed and answers `cap`.
-pub fn is_judged(cap: Capability) -> bool {
-    judge().is_some() && JUDGED.iter().any(|(_, c)| *c == cap)
+/// Whether a judgment is installed and answers for this carrier.
+///
+/// The carrier and not the capability, because one capability has both kinds:
+/// `fs` is carried by eight CALLS a judgment decides and by the `logging {
+/// sink: file(..) }` DECLARATION, which is no effect and stays the pass's
+/// (RFC-0125 §3 M6, finding 10). Judging by capability would defer the
+/// declaration's refusal to after the check for no gain.
+pub fn is_judged(c: &Carried) -> bool {
+    judge().is_some() && JUDGED.iter().any(|(n, _)| *n == c.carrier)
 }
 
 /// A floor decision the load could not make, held until the program is checked.
@@ -423,7 +451,7 @@ pub fn decide(program: &Program) -> Option<Diagnostic> {
     let reached = judge(program);
     for (key, _, carried) in &mut p.graph {
         carried.retain(|c| {
-            !JUDGED.iter().any(|(_, jc)| *jc == c.cap)
+            !JUDGED.iter().any(|(n, _)| *n == c.carrier)
                 || reached
                     .iter()
                     .any(|(m, rc)| *rc == c.cap && (m == key || (m.is_empty() && *key == p.root)))
