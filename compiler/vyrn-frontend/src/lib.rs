@@ -198,6 +198,11 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
     // a type error. A no-op for every load that decided for itself.
     if diags.is_empty() {
         diags.extend(floor::decide(program));
+    } else {
+        // A program with errors gets its errors. Dropping the held decision
+        // here is what keeps it from answering for the next program a process
+        // checks without loading.
+        floor::forget();
     }
     diags
 }
