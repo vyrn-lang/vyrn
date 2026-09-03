@@ -2418,7 +2418,7 @@ to disable the placer to read a floor diagnostic is a worse bisect. The CLI
 installs both; each knob stands its own judgment aside.
 
 **The cost.** `vyrn check site/export.vyrn`, warm, four runs each:
-3.16–3.30 s with the judgment armed, 3.22–3.46 s under `VYRN_NO_JUDGE=1`.
+2.78–3.15 s with the judgment armed, 2.87–3.20 s under `VYRN_NO_JUDGE=1`.
 Inside the noise, and it should be: the judgment runs only when the load's
 objection is on a judged row, which for this artifact and for almost every
 artifact is never. A browser entry that does spell `readLine` pays one

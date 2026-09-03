@@ -416,39 +416,25 @@ fn the_shim_implemented_externs_are_not_a_capability() {
 /// which is what "the rule moved, the refusal did not" means.
 #[test]
 fn a_moved_row_refuses_in_the_words_the_pass_used() {
-    for (name, body) in [
-        (
-            "stdin",
-            "fn main() -> Int64 {
-                 print(match readLine() { Some(s) => s, None => \"\", })
-    return 0
-}
-",
-        ),
-        (
-            "args",
-            "fn main() -> Int64 {
-    let a = args()
-    print(a[0])
-    return 0
-}
-",
-        ),
-    ] {
+    const STDIN: &str = "fn main() -> Int64 {\n    \
+         let line = match readLine() { Some(s) => s, None => \"\", }\n    \
+         print(line)\n    return 0\n}\n";
+    const ARGS: &str =
+        "fn main() -> Int64 {\n    let a = args()\n    print(a[0])\n    return 0\n}\n";
+    for (name, body) in [("stdin", STDIN), ("args", ARGS)] {
         let dir = scratch(name);
         write(&dir, "client/boot.vyrn", body);
         write(
             &dir,
             "vyrn.json",
-            "{ \"name\": \"p\", \"artifacts\": {               \"app\": { \"entry\": \"client/boot.vyrn\", \"target\": \"browser\" } } }
-",
+            "{ \"name\": \"p\", \"artifacts\": { \
+              \"app\": { \"entry\": \"client/boot.vyrn\", \"target\": \"browser\" } } }\n",
         );
         let entry = dir.join("client/boot.vyrn");
         let (ok, judged) = check(&entry);
         assert!(
             !ok,
-            "{name}: the browser artifact must be refused:
-{judged}"
+            "{name}: the browser artifact must be refused:\n{judged}"
         );
         let out = vyrn()
             .env("VYRN_NO_JUDGE", "1")
