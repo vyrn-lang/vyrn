@@ -1,0 +1,12 @@
+// RFC-0037: a closure that outlives this call may not capture a borrow — the
+// captured buffer belongs to the caller.
+fn hold(s: String) -> fn() -> Int64 {
+    let g: fn() -> Int64 = () -> s.byteLength
+    return g
+}
+
+fn main() -> Int64 {
+    let f = hold("hello")
+    print(f())
+    return 0
+}

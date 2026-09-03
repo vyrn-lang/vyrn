@@ -56,6 +56,14 @@ pub struct NameInfo {
     /// container the loop does not own. The kernel keeps what a borrow
     /// bound to a place reads, and refuses a take of it.
     pub borrow: bool,
+    /// What kind of borrow this name is, in the checker's words
+    /// (`movecheck::Borrow::what`): the capability, and the parameter it
+    /// comes from. A `read` or `modify` parameter and a second name for one
+    /// carry a kind; a borrow bound by a read of a place carries none,
+    /// because the kernel's alias table words that one from the place it
+    /// reads. RFC-0125 §3 M3, the census: this is what the kernel needs to
+    /// refuse a take of a parameter, which has no place to be an alias of.
+    pub borrow_kind: Option<BorrowKind>,
     pub line: usize,
     /// The node the plan keys this binding by — a `Stmt::Let`, a parameter —
     /// when the name is one the plan can be told about. `None` for a
@@ -77,6 +85,47 @@ pub struct NameInfo {
     /// M2's table), spelled as the kernel spells them (`.f.g`). A `Drop` of
     /// the name walks around exactly these; a placed row may carry its own.
     pub holes: Vec<String>,
+}
+
+/// The borrow a parameter's capability makes, or `None` for one that owns
+/// what it is handed (`consume`).
+fn param_borrow(cap: Capability, name: &str) -> Option<BorrowKind> {
+    let cap = match cap {
+        Capability::Read | Capability::Share => "read",
+        Capability::Modify => "modify",
+        Capability::Consume => return None,
+    };
+    Some(BorrowKind::Param {
+        cap,
+        of: name.to_string(),
+    })
+}
+
+/// A borrow the surface named, rather than one the kernel reads out of a
+/// place (RFC-0089 rule 2, `movecheck::Borrow`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BorrowKind {
+    /// A `read` or `modify` parameter, or a second name for one: the
+    /// capability, and the parameter's own spelling.
+    Param { cap: &'static str, of: String },
+    /// A name of the enclosing frame that a lambda frame reads (RFC-0037).
+    /// The closure observes it; the frame that made it still owns it.
+    Capture,
+}
+
+impl BorrowKind {
+    /// What this borrow is, in words, for a refusal. `at` is the name the
+    /// sentence is about: a second name for a parameter says so, which is
+    /// how `movecheck::Borrow::what` words it.
+    pub fn what(&self, at: &str) -> String {
+        match self {
+            BorrowKind::Param { cap, of } if at == of => format!("a `{cap}` parameter"),
+            BorrowKind::Param { cap, of } => {
+                format!("a second name for the `{cap}` parameter `{of}`")
+            }
+            BorrowKind::Capture => "a captured binding".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +168,12 @@ pub enum Rhs {
         /// reads the marker (RFC-0125 §2.2, the fourth effect); the linear
         /// judgment and the emitters see an ordinary call.
         spawn: bool,
+        /// Argument 0 is the receiver of a rebuilding builtin passed by name
+        /// (`out.push(v)`): the call hands the buffer back through its result
+        /// and the store after it puts it back, so the take changes no owner.
+        /// That is `movecheck::sinks`'s write-back exception, which stays the
+        /// checker's this slice (RFC-0125 §3 M3, the census).
+        write_back: bool,
     },
     /// Arithmetic, comparison, interpolation, conversion: reads its operands.
     Prim(Vec<Val>),
@@ -296,6 +351,7 @@ impl Body {
                 callee,
                 args,
                 spawn,
+                ..
             } => format!(
                 "{}{callee}({})",
                 if *spawn { "spawn " } else { "" },
@@ -519,6 +575,17 @@ pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<
         let pty = vyrn_frontend::types::substitute(&p.ty, &subst);
         let owned = p.capability == Capability::Consume && b.owns(&pty) && !is_release;
         let n = b.name(&p.name, pty, owned, f.line);
+        // RFC-0089 rule 2: a `read` or `modify` parameter may be observed and
+        // passed on, never taken. The kernel refuses the take and needs the
+        // capability to word it (RFC-0125 §3 M3, the census, rows 11 to 34).
+        //
+        // A must-use type is the exception RFC-0075 M1 states: "a stream
+        // PARAMETER carries the obligation into the callee", whatever the
+        // capability says, so the callee is the one that disposes of it and
+        // `boxStream(s)` is not a take of the caller's value.
+        if !b.proto.must_use(&b.body.names[n as usize].ty.clone()) {
+            b.body.names[n as usize].borrow_kind = param_borrow(p.capability, &p.name);
+        }
         b.scope.push((p.name.clone(), n));
         b.keyed(n, p as *const _ as usize);
         b.body.params.push(n);
@@ -639,6 +706,7 @@ impl<'a> Builder<'a> {
             owned,
             heap,
             borrow: heap && !owned,
+            borrow_kind: None,
             line,
             binding: None,
             receiver: None,
@@ -905,6 +973,14 @@ impl<'a> Builder<'a> {
                         ));
                 let n = self.name(name, ty, owned, *line);
                 self.body.names[n as usize].borrow = borrow && self.body.names[n as usize].heap;
+                // `let t = s` on a `read` parameter: `t` is a second name for
+                // it, and the checker says so in the refusal it gives at `t`.
+                if let Rhs::Val(Val::Name(m)) = &rhs {
+                    if self.body.names[n as usize].borrow {
+                        self.body.names[n as usize].borrow_kind =
+                            self.body.names[*m as usize].borrow_kind.clone();
+                    }
+                }
                 self.bind(n, rhs, out);
                 // The unnamed receiver of the field the binding took or read
                 // (RFC-0114 R1′): released after the read where the plan says
@@ -1452,7 +1528,13 @@ impl<'a> Builder<'a> {
             Expr::Consume { place, line } => match &**place {
                 Expr::Var { name, .. } => {
                     let Some(n) = self.lookup(name) else {
-                        return gap("a `consume` of module state", *line);
+                        // `for x in consume <module state>`: the same read,
+                        // and the same refusal (RFC-0125 §3 M3, row 29).
+                        let v = self.global_read(place, name, *line, out)?;
+                        if let Val::Name(t) = v {
+                            self.by_binding.insert(construct, t);
+                        }
+                        return Ok((v, false));
                     };
                     let t = self.temp(self.body.names[n as usize].ty.clone(), *line);
                     out.push(St::Let(t, Rhs::Val(Val::Name(n))));
@@ -1655,27 +1737,22 @@ impl<'a> Builder<'a> {
                 {
                     Ok(Val::Lit)
                 }
-                None => {
-                    // Module state lives for the whole module and nothing
-                    // may take it (RFC-0013): `movecheck` refuses passing it
-                    // to a `consume` parameter or returning it, and `own`
-                    // notes `let x = g` as a borrow. So a read of it in any
-                    // position is a borrow, and the name it yields is one
-                    // the kernel does not own.
-                    let ty = self.ty_of(e)?;
-                    let t = if self.owns(&ty) {
-                        self.name("@borrow", ty, false, *line)
-                    } else {
-                        self.temp(ty, *line)
-                    };
-                    out.push(St::Let(t, Rhs::Read(Place::Global(name.clone()))));
-                    Ok(Val::Name(t))
-                }
+                // Module state lives for the whole module and nothing
+                // may take it (RFC-0013): `movecheck` refuses passing it
+                // to a `consume` parameter or returning it, and `own`
+                // notes `let x = g` as a borrow. So a read of it in any
+                // position is a borrow, and the name it yields is one
+                // the kernel does not own.
+                None => self.global_read(e, name, *line, out),
             },
             Expr::Consume { place, line } => match &**place {
                 Expr::Var { name, .. } => match self.lookup(name) {
                     Some(n) => Ok(Val::Name(n)),
-                    None => gap("a `consume` of module state", *line),
+                    // `consume <module state>`: a read of the global, which
+                    // is a borrow the kernel then refuses the take of
+                    // (RFC-0013, and RFC-0125 §3 M3, the census, row 10). It
+                    // used to be a gap, so the whole body went unjudged.
+                    None => self.global_read(place, name, *line, out),
                 },
                 _ => self.take_place(place, out),
             },
@@ -1800,6 +1877,10 @@ impl<'a> Builder<'a> {
             let info = &outer.names[*n as usize];
             let (source, ty) = (info.source.clone(), info.ty.clone());
             let m = self.name(&source, ty, false, *line);
+            // RFC-0037: the closure's result is its caller's, and a capture
+            // is the enclosing frame's. The kernel refuses a take of one
+            // (RFC-0125 §3 M3, the census, row 28).
+            self.body.names[m as usize].borrow_kind = Some(BorrowKind::Capture);
             self.scope.push((source, m));
             self.body.params.push(m);
         }
@@ -1857,6 +1938,26 @@ impl<'a> Builder<'a> {
             }
         }
         caps
+    }
+
+    /// A read of module state as a value: a borrow of the global, because
+    /// RFC-0013 gives it no owner a frame can take from. `e` is the
+    /// expression whose type this is.
+    fn global_read(
+        &mut self,
+        e: &'a Expr,
+        name: &str,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<Val, Gap> {
+        let ty = self.ty_of(e)?;
+        let t = if self.owns(&ty) {
+            self.name("@borrow", ty, false, line)
+        } else {
+            self.temp(ty, line)
+        };
+        out.push(St::Let(t, Rhs::Read(Place::Global(name.to_string()))));
+        Ok(Val::Name(t))
     }
 
     /// A move out of a sub-place: `consume x.f`, or the receiver a rebuilding
@@ -1954,6 +2055,7 @@ impl<'a> Builder<'a> {
                     callee: name.clone(),
                     args: vs,
                     spawn: true,
+                    write_back: false,
                 })
             }
             Expr::IfExpr {
@@ -2180,6 +2282,7 @@ impl<'a> Builder<'a> {
                 callee: success,
                 args: vec![(sv.clone(), Capability::Consume)],
                 spawn: false,
+                write_back: false,
             },
         ));
         ok.push(St::Store {
@@ -2348,6 +2451,12 @@ impl<'a> Builder<'a> {
         }
         let mut vs = Vec::new();
         let mut temps_to_drop = Vec::new();
+        // The write-back exception: a rebuilding builtin's receiver passed by
+        // name is handed back through the result and stored back after the
+        // call, so the take it looks like changes no owner.
+        let write_back = rebuilds
+            && caps.first() == Some(&Capability::Consume)
+            && matches!(args.first(), Some(Expr::Var { .. }));
         // A call drains its arguments' temporaries after it runs, unless its
         // result points into one of them: a lending call leaves them to the
         // call or operator above (both backends' `call` drain).
@@ -2400,6 +2509,7 @@ impl<'a> Builder<'a> {
             callee: name.to_string(),
             args: vs,
             spawn: false,
+            write_back,
         })
     }
 

@@ -1,0 +1,11 @@
+// RFC-0004 §4: a value the region arena allocated may not be stored into a
+// binding that outlives the region — it would dangle when the region frees.
+fn main() -> Int64 {
+    let mut kept = "".copy()
+    region {
+        let s = "a" + "b"
+        kept = s
+    }
+    print(kept.byteLength)
+    return 0
+}

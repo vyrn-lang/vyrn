@@ -1,0 +1,9 @@
+// An `export extern fn` owns its result: the JS caller releases what it is
+// handed, so a borrow may not leave one.
+export extern fn passOn(s: String) -> String {
+    return s
+}
+
+fn main() -> Int64 {
+    return 0
+}

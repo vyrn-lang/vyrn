@@ -54,12 +54,21 @@
 //! (`rfcs/probes-0125/alias-then-write-through-the-root.vyrn`). RFC-0090:
 //! all mutation is exclusive. Not modelled: what a `modify` argument does to
 //! the aliases of what it is handed (`examples/tree.vyrn`'s `freeNode` reads
-//! a handle out of the node it then removes, and a handle is safe to hold).
+//! a handle out of the node it then removes, and a handle is safe to hold);
+//! `rhs` says what the census measured when the rule was tried.
+//!
+//! A borrow with no place to be an alias of carries its kind instead
+//! ([`crate::core::BorrowKind`], RFC-0125 §3 M3, the census): a `read` or
+//! `modify` parameter, a second name for one, and a lambda frame's capture.
+//! A take of one is refused in the checker's words — the caller owns a
+//! parameter (RFC-0089 rule 2), and the frame that made a capture owns it
+//! (RFC-0037). Module state is neither: a read of a global is an alias of
+//! it, and RFC-0013's own sentence says why nothing may take it.
 //!
 //! Every other name the body does not own — a heapless value, a pattern
 //! binder of a non-consuming switch — is invisible here.
 
-use crate::core::{Arm, Body, Name, Old, Place, Rhs, St, Val};
+use crate::core::{Arm, Body, BorrowKind, Name, Old, Place, Rhs, St, Val};
 use vyrn_frontend::ast::Capability;
 use vyrn_frontend::own::Exit;
 
@@ -422,6 +431,34 @@ impl<'b> Kernel<'b> {
     /// exit: the `consume` parameter, the `return`, the literal, the store.
     fn alias_take(&self, st: &State, n: Name) -> Refusal {
         let (s, src, by) = (self.src(n), self.src_text(st, n), &self.by);
+        // Module state read whole: RFC-0013's own sentence, which names the
+        // reason — the global lives for the whole module and nothing ever
+        // drops it, so there is no owner to take from.
+        if let Some(Alias {
+            root: Root::G(g),
+            path,
+            ..
+        }) = &st.alias[n as usize]
+        {
+            if path.is_empty() {
+                let never = "nothing may take ownership of module state \
+                             (it lives for the whole module and is never dropped)";
+                let msg = if by == "a `return`" {
+                    format!(
+                        "`{g}` may not be returned — it is module state, \
+                         which nothing may take, and a return is owned"
+                    )
+                } else if by.ends_with("(..)`") {
+                    format!(
+                        "module state `{g}` may not be passed to a `consume` \
+                         parameter via {by} — {never}"
+                    )
+                } else {
+                    format!("module state `{g}` may not be consumed by {by} — {never}")
+                };
+                return self.refuse_at::<()>(self.here, msg).unwrap_err();
+            }
+        }
         let what = format!("it is read out of `{src}`, a place that owns it");
         // A named binding a call takes: at the binding, as the checker words
         // it, so the `.copy()` on the menu lands where the read is.
@@ -441,6 +478,8 @@ impl<'b> Kernel<'b> {
             format!("`{s}` may not be passed to a `consume` parameter via {by} — {what}")
         } else if by == "a `return`" {
             format!("`{s}` may not be returned — {what}")
+        } else if by == "a `drop`" {
+            format!("`{s}` may not be dropped — {what}")
         } else if by == "a literal" {
             format!("`{s}` may not be stored into the literal — {what}")
         } else {
@@ -557,6 +596,16 @@ impl<'b> Kernel<'b> {
         at: Option<(Exit, usize)>,
     ) -> Result<(), Refusal> {
         if !self.owned(n) {
+            // A release IS a take, so a borrow released here is RFC-0089
+            // rule 4 refused: the place that owns the value releases it, and
+            // this frame is not that place. Worded as the checker words a
+            // `drop` (RFC-0125 §3 M3, the census, rows 21 and 29).
+            if st.alias[n as usize].is_some() {
+                let by = std::mem::replace(&mut self.by, "a `drop`".to_string());
+                let r = self.alias_take(st, n);
+                self.by = by;
+                return Err(r);
+            }
             return self.refuse(format!(
                 "{} is released although the body does not own it",
                 self.info(n)
@@ -612,10 +661,51 @@ impl<'b> Kernel<'b> {
         Ok(())
     }
 
+    /// A take of a `read` or `modify` parameter, of a second name for one,
+    /// or of a lambda frame's capture: refused, because somebody else owns
+    /// it (RFC-0089 rule 2, RFC-0037). Neither has a place to be an alias
+    /// of, which is why the alias table does not see them (RFC-0125 §3 M3,
+    /// the census).
+    fn param_take(&self, n: Name, b: &BorrowKind) -> Refusal {
+        let (s, by) = (self.src(n), &self.by);
+        let what = b.what(s);
+        let msg = if by == "a `return`" && matches!(b, BorrowKind::Capture) {
+            format!(
+                "`{s}` may not be returned from a closure — it is a captured \
+                 binding, and the closure's result is its caller's"
+            )
+        } else if by == "a `return`" {
+            format!("`{s}` may not be returned — it is {what}, and a return is owned")
+        } else if by.ends_with("(..)`") {
+            format!("`{s}` may not be passed to a `consume` parameter via {by} — it is {what}")
+        } else if by == "a literal" {
+            format!("`{s}` may not be stored into the literal — it is {what}")
+        } else {
+            format!("`{s}` may not be stored into {by} — it is {what}")
+        };
+        self.refuse_at::<()>(self.here, msg).unwrap_err()
+    }
+
     /// A take of a name: it must be held, and it is gone afterwards. An
     /// alias is never taken.
     fn take(&self, st: &mut State, v: &Val) -> Result<(), Refusal> {
+        self.take_arg(st, v, false)
+    }
+
+    /// A take, told whether it is the receiver of a rebuilding builtin
+    /// (`out.push(v)`): that one take changes no owner, because the store
+    /// after the call puts the value back where it came from, so a `modify`
+    /// parameter may be its subject. The exception is `movecheck::sinks`'s
+    /// and stays the checker's this slice.
+    fn take_arg(&self, st: &mut State, v: &Val, write_back: bool) -> Result<(), Refusal> {
         if let Val::Name(n) = v {
+            if !write_back {
+                if let Some(b) = &self.body.names[*n as usize].borrow_kind {
+                    if self.borrowed(*n) {
+                        return Err(self.param_take(*n, b));
+                    }
+                }
+            }
             if st.alias[*n as usize].is_some() {
                 self.alias_read(st, *n, "used")?;
                 return Err(self.alias_take(st, *n));
@@ -732,7 +822,9 @@ impl<'b> Kernel<'b> {
             Rhs::Val(v) => self.take(st, v),
             Rhs::Read(p) => self.place(st, p),
             Rhs::Take(p) => self.take_place(st, p),
-            Rhs::Call { args, .. } => {
+            Rhs::Call {
+                args, write_back, ..
+            } => {
                 // Reads first, takes after: the call sees every argument
                 // before it owns any, so a receiver handed back through the
                 // result (`dup.append(dup)`) is read and taken by one call.
@@ -741,11 +833,22 @@ impl<'b> Kernel<'b> {
                         self.read(st, v)?;
                     }
                 }
-                for (v, cap) in args {
+                for (i, (v, cap)) in args.iter().enumerate() {
                     if matches!(cap, Capability::Consume) {
-                        self.take(st, v)?;
+                        self.take_arg(st, v, *write_back && i == 0)?;
                     }
                 }
+                // A `modify` argument does NOT end the aliases of what it is
+                // handed, and the census measured why (RFC-0125 §3 M3).
+                // Ending them refuses `freeNode` in `tree.vyrn`,
+                // `linkedlist.vyrn` and `freelist.vyrn`: each reads
+                // `t[h].left` — an `Option<Handle<T>>`, which owns heap
+                // because a wide payload travels boxed — and then calls
+                // `remove(t, h)`, which shuffles index arrays and never
+                // touches the payload the read points into. The rule needs
+                // to know WHICH place a callee writes, and that is the
+                // per-argument retention over the call graph the deletion
+                // track still owes.
                 Ok(())
             }
             Rhs::Prim(vs) => {

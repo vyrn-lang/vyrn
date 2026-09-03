@@ -1,0 +1,11 @@
+// RFC-0089 rule 2 at the return: a `read` parameter taken whole.
+fn passOn(ys: Array<Int64>) -> Array<Int64> {
+    return ys
+}
+
+fn main() -> Int64 {
+    let a: Array<Int64> = [1, 2]
+    let b = passOn(a)
+    print(b.length)
+    return 0
+}
