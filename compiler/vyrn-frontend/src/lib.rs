@@ -191,6 +191,19 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
     if diags.is_empty() && !std::env::var("VYRN_NO_MOVECHECK").is_ok_and(|v| v == "1") {
         diags.extend(movecheck::check_accum(program));
     }
+    // RFC-0125 M6, fourth slice: the floor row a judgment answers. The load
+    // held the decision because the judgment reads the named core, which is
+    // built from the types the check has only just supplied. Last, so the
+    // refusal is the one this program earns and not a second answer on top of
+    // a type error. A no-op for every load that decided for itself.
+    if diags.is_empty() {
+        diags.extend(floor::decide(program));
+    } else {
+        // A program with errors gets its errors. Dropping the held decision
+        // here is what keeps it from answering for the next program a process
+        // checks without loading.
+        floor::forget();
+    }
     diags
 }
 

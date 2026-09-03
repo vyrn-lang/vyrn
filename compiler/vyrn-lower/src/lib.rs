@@ -39,6 +39,9 @@ mod render;
 /// at start-up the way it installs the generator engine.
 pub fn install() {
     vyrn_frontend::own::install_placer(core::augment);
+    // RFC-0125 M6, fourth slice: the effect judgment into the floor's decision,
+    // so a capability row is answered by the judgment and not by a second scan.
+    vyrn_frontend::floor::install_judge(effects::reaches);
 }
 pub use core::{strict as kernel_strict, take_strict_refusals};
 pub use render::render;

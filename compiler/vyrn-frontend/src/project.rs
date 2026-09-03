@@ -1382,7 +1382,7 @@ pub(crate) fn walk_program(program: &mut Program, f: &mut impl FnMut(&mut Expr))
 
 /// [`walk_program`] over a bare expression — a global's initializer or a
 /// refinement predicate, neither of which is a block.
-pub(crate) fn walk_bare(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
+pub fn walk_bare(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
     let mut b = Block {
         stmts: vec![Stmt::Expr(std::mem::replace(e, Expr::Int(0)))],
     };

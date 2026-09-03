@@ -231,7 +231,14 @@ fn floor_carries(f: &vyrn_frontend::ast::Function) -> BTreeSet<Capability> {
     let mut body = f.body.clone();
     vyrn_frontend::project::walk_block(&mut body, &mut |e| {
         if let vyrn_frontend::ast::Expr::Call { name, .. } = e {
-            if let Some((_, cap)) = floor::CALLS.iter().find(|(n, _)| n == name) {
+            // `CALLS` and `JUDGED` are one scan (RFC-0125 §3 M6, fourth
+            // slice): the rows a judgment decides are still the rows the
+            // pass finds, so this comparison is over the whole floor.
+            if let Some((_, cap)) = floor::CALLS
+                .iter()
+                .chain(floor::JUDGED)
+                .find(|(n, _)| n == name)
+            {
                 out.insert(*cap);
             }
         }
@@ -323,6 +330,14 @@ fn run_corpus() {
     // Every spawn site, and the ones whose callee's set is outside the rule.
     let mut spawn_sites = 0usize;
     let mut spawn_outside: Vec<String> = Vec::new();
+    // RFC-0125 §3 M6, fourth slice: the rows that MOVED into the judgment,
+    // counted on their own. A moved row must answer as the pass answered,
+    // function by function, or the refusal changed when the derivation did.
+    let judged_caps: BTreeSet<Capability> = floor::JUDGED.iter().map(|(_, c)| *c).collect();
+    let mut judged_agree = 0usize;
+    let mut judged_gen = 0usize;
+    let mut judged_carried = 0usize;
+    let mut judged_differ: Vec<String> = Vec::new();
     let mut gaps: BTreeMap<&'static str, usize> = BTreeMap::new();
     let show_gaps = std::env::var("VYRN_EFFECTS_GAPS").ok();
     let mut unloadable = 0usize;
@@ -642,6 +657,26 @@ fn run_corpus() {
                 FloorKind::CoreBlind
             };
 
+            // The moved rows, compared alone. `gen-body` and `callee-carried`
+            // are the same two non-disagreements the whole-floor comparison
+            // names; anything else is the judgment and the pass giving one
+            // program two answers.
+            let hj: BTreeSet<Capability> = have.intersection(&judged_caps).copied().collect();
+            let wj: BTreeSet<Capability> = want.intersection(&judged_caps).copied().collect();
+            if hj == wj {
+                judged_agree += 1;
+            } else if inst.func.is_gen && hj.is_empty() {
+                judged_gen += 1;
+            } else if hj.is_subset(&wj) && wj.difference(&hj).all(|c| program_carries.contains(c)) {
+                judged_carried += 1;
+            } else {
+                judged_differ.push(format!(
+                    "{file}:{} {} — the pass says {hj:?}, the judgment says {wj:?}",
+                    inst.func.line,
+                    inst.spelling()
+                ));
+            }
+
             let module_key = if inst.module().is_empty() {
                 root_key.clone()
             } else {
@@ -777,6 +812,13 @@ fn run_corpus() {
     for (k, n) in &audience_kinds {
         eprintln!("    {n:5}  {k:?}");
     }
+    eprintln!(
+        "  judged:     {judged_agree} agree, {judged_carried} callee-carried, {judged_gen} gen-body, {} differ",
+        judged_differ.len()
+    );
+    for d in judged_differ.iter().take(20) {
+        eprintln!("    {d}");
+    }
     let disagreements: Vec<&Row> = rows
         .iter()
         .filter(|r| {
@@ -827,6 +869,12 @@ fn run_corpus() {
         disagreements[0].file,
         disagreements[0].line,
         disagreements[0].name
+    );
+    assert!(
+        judged_differ.is_empty(),
+        "{} functions where the moved floor rows and the judgment disagree; the first: {}",
+        judged_differ.len(),
+        judged_differ[0]
     );
     assert_eq!(
         refused,

@@ -2354,6 +2354,125 @@ kernel's tally is 17,513 instances accepted, 0 refused, 0 unlowered.
   the deletion slice's first act rather than a row's. Every floor check
   still lives in `floor.rs`.
 
+#### The fourth slice (2026-09-03)
+
+The fourth slice installs the effect judgment into the floor's decision,
+moves the first two rows into it, and takes the decision for those two rows
+out of the load. `floor::CALLS` holds the `fs` row alone now.
+
+**The hook.** `floor::install_judge(Judge)` is the placer's shape
+(`own::install_placer`): a function pointer in `vyrn-frontend`, set once,
+first installation wins. `vyrn_lower::install()` registers
+`effects::reaches` beside `core::augment`, so the CLI arms both at
+start-up and the LSP arms neither. The judgment is handed a checked
+program and answers one question: which module reaches which of
+[`floor::JUDGED`]'s capabilities. It builds the named core for every
+instance, joins each body's set to a fixpoint, and reports
+`(module key, capability)`.
+
+**Where the loader calls it.** The load cannot answer a judged row: the
+core is built from the checker's types and nothing in the load is checked.
+So the loader asks first and refuses second. At the point it called
+`floor::objection` it now calls `floor::objected`, which is the same walk
+without the diagnostic. An objection on a row no judgment answers is
+refused there, in the words and the order it always was. An objection on a
+judged row is HELD — `floor::defer` keeps the graph, the root key, the
+artifact map and the origin maps — and `floor::decide` makes it at the end
+of `check_and_synthesize`, which is the one call every CLI command makes
+with a checked program. `decide` drops the judged rows the judgment does
+not confirm and re-runs `objection` over what is left, so the refusal is
+still the scan's own words: the carrier it found and the line it found it
+on. Nothing else moved: a load whose first objection is on `fs` or
+`extern` never reaches `decide`.
+
+The floor's whole call did NOT move after the check, and it did not have
+to. Moving it would have changed the order of every row against every type
+error; deferring only the row a judgment answers changes the order of that
+row alone, which is the smallest change that lets a row move at all.
+
+**What the LSP does.** Nothing, and that is the point. `vyrn-lsp` depends
+on `vyrn-frontend` alone and installs no placer, so it installs no judge
+either — the brief's "make them the same". With no judgment installed
+`floor::objected` reports no judged row, the loader refuses inside the load
+as before, and the editor's diagnostics are the same diagnostics. The same
+is true of `vyrn why --capability`: `floor::carried` reads `CALLS` and
+`JUDGED` as one scan, so the report still names every carrier of a moved
+row, with its module and its line.
+
+**What moved.** `readLine` (`stdin`) and `args` (`args`). Both are out of
+`floor::CALLS` and in `floor::JUDGED`. The verdicts agree over the whole
+corpus; the harness says so per function, and refuses if they ever do not:
+
+    judged:     25436 agree, 7 callee-carried, 0 gen-body, 0 differ
+
+The seven are the whole-floor comparison's *callee-carried* kind at the
+grain of these two rows: the judgment has the effect and a callee's body
+spells it, so the floor's union over the closure agrees. `0 differ` is the
+new ratchet, beside the old one. The rest of the tally is the third
+slice's, unchanged: 25443 functions judged, 0 unlowered, 40 open sets, 69
+unattributed, floor 25203 agree / 24 callee-carried / 216 gen-body / 0
+blind either way, and the ratchet 0.
+
+Two declarations hold no instance and are read from the AST by the same
+`JUDGED` names: a `let` at module scope (RFC-0013) and a `where` predicate.
+Nothing else in a program can carry one of these rows.
+
+**The rule these two rows now follow.** Presence gave way to reachability
+(finding 8), and less than it sounds: `lower` instantiates every
+non-generic function, so a dead ordinary function is still judged and still
+refused. What the judgment no longer sees is a GENERIC function nobody
+instantiates, and a body the core cannot build (0 in the corpus). What it
+sees and the scan does not is nothing, because a moved row is still found
+by the scan first — the judgment can only clear a row, never add one.
+
+**The order.** A judged row's refusal now comes AFTER a type error, where
+it came before. A browser entry that calls `readLine` and also binds `let
+bad: Int64 = "x"` reports the type error today and the floor once the
+types are right. That is the price of the row needing a checked program,
+it is paid by two rows and not by the floor, and `VYRN_NO_JUDGE=1` puts
+both rows back in the pass and the order back with them. `tests/floor.rs`
+holds the two refusals byte-identical under both settings.
+
+**One knob, not two.** `VYRN_NO_JUDGE=1` is separate from
+`VYRN_NO_PLACER=1` although one call installs both. They bisect different
+things — a wrong release row and a wrong refusal — and a bisect that has
+to disable the placer to read a floor diagnostic is a worse bisect. The CLI
+installs both; each knob stands its own judgment aside.
+
+**The cost.** `vyrn check site/export.vyrn`, warm, four runs each:
+2.78–3.15 s with the judgment armed, 2.87–3.20 s under `VYRN_NO_JUDGE=1`.
+Inside the noise, and it should be: the judgment runs only when the load's
+objection is on a judged row, which for this artifact and for almost every
+artifact is never. A browser entry that does spell `readLine` pays one
+lowering and one ownership analysis, which `emit-lowered` measures at 4 to
+6 per cent of a check.
+
+**The rows still in the floor, and why each has not moved.**
+
+- `fs` — `readFile`, `readFileBytes`, `writeFile`, `writeFileBytes`,
+  `renameFile`, `fsyncFile`, `listDir`, `listDirKinds`, and the `logging {
+  sink: file(..) }` declaration. Two reasons, and the second is the hard
+  one. The declaration carries `fs` and no effect set holds it (finding
+  10): the sink is a `logging` block, not a call, and the judgment would
+  have to read it as a declaration the way it reads a module-scope `let`.
+  That part is small. The other part is not: 216 functions in the corpus
+  are `gen fn` bodies carrying `fs-read` or `fs-list`, which the floor
+  skips by design and the judgment sees (finding 9). Moving the row means
+  the judgment must know the generation context from the artifact context,
+  which is the table's `gen` column becoming a check — the deletion
+  slice's work, and finding 4's cell with it. Both judged rows had 0
+  gen-body functions, which is why they could move first.
+- `extern` — carried by an `extern fn` DECLARATION and not by a call
+  (finding 7). The lattice can state only the call, and it disagrees: the
+  judgment gives `main` no `extern` for an import nothing reaches, while
+  the floor refuses it because an unanswered import stops instantiation.
+  The row moves when that question is decided, and deciding it changes
+  what the floor refuses. Unchanged here.
+
+Findings 5, 9, 10, 11 and 13 still change nothing. Findings 7 and 8 are
+now half spent: 8 is on record and paid by two rows; 7 is what keeps
+`extern` where it is.
+
 ### What each milestone is worth on its own
 
 M1 fixes the wasm column. M2 makes leaks a compile error. M3 halves the
