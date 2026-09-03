@@ -13990,49 +13990,47 @@ impl<'a> Gen<'a> {
     /// rows with three carriers. The predicate is generated Vyrn now
     /// ([`vyrn_frontend::ctor`]) and all three engines call one body, which is
     /// the mechanism `char-boundary` and `json-decode` already took.
+    ///
+    /// The call is WRITTEN, not built as an `Expr` and lowered: RFC-0101 M6
+    /// counted backend answers about AST no instantiation of the program holds,
+    /// and `tests/lowered.rs` holds the ceiling. A synthesized node per
+    /// validation site would put one back.
     fn emit_validation(&mut self, decl: &TypeDecl, v: &str) -> Result<(), String> {
         if decl.predicate.is_none() {
             return Ok(());
         }
-        let arg = self.park_for_predicate(decl, v)?;
-        let e = Expr::Call {
-            name: vyrn_frontend::ctor::ctor_name(&decl.name),
-            args: vec![arg],
-            line: 0,
-        };
-        self.gen_expr(&e)?;
+        let sym = fn_sym(&vyrn_frontend::ctor::ctor_name(&decl.name));
+        let ll = self.llt(&decl.base);
+        self.emit(format!("call void @{sym}({ll} {v})"));
         Ok(())
     }
 
     /// The predicate's answer as an `i1`, without the trap — a CALL to the
     /// program's own predicate function for the type.
     ///
-    /// The fallible construction `Age?(n)` (RFC-0077 M2k) and the JSON decode
-    /// path want the same answer the trap path asks for, and they get it from
-    /// the same function rather than from a second lowering of the clause.
+    /// The fallible construction `Age?(n)` (RFC-0077 M2k) wants the same answer
+    /// the trap path asks for, and gets it from the same function rather than
+    /// from a second lowering of the clause. What the arguments are is
+    /// [`vyrn_frontend::types::predicate_binds`]'s: a record base hands over
+    /// every field, every other base hands over `value`.
     fn emit_predicate_cond(&mut self, decl: &TypeDecl, v: &str) -> Result<String, String> {
-        let arg = self.park_for_predicate(decl, v)?;
-        let e = Expr::Call {
-            name: vyrn_frontend::ctor::pred_name(&decl.name),
-            args: vyrn_frontend::ctor::pred_args(decl, arg),
-            line: 0,
-        };
-        let (cond, _) = self.gen_expr(&e)?;
+        let base_ll = self.llt(&decl.base);
+        let mut args: Vec<String> = Vec::new();
+        for (_, ty, field) in vyrn_frontend::types::predicate_binds(decl) {
+            let ll = self.llt(&ty);
+            match field {
+                Some(i) => {
+                    let ext = self.fresh_tmp();
+                    self.emit(format!("{ext} = extractvalue {base_ll} {v}, {i}"));
+                    args.push(format!("{ll} {ext}"));
+                }
+                None => args.push(format!("{ll} {v}")),
+            }
+        }
+        let sym = fn_sym(&vyrn_frontend::ctor::pred_name(&decl.name));
+        let cond = self.fresh_tmp();
+        self.emit(format!("{cond} = call i1 @{sym}({})", args.join(", ")));
         Ok(cond)
-    }
-
-    /// Park `v` in a slot of `decl`'s base and answer the expression that names
-    /// it, so a generated call can be lowered by the ordinary path.
-    ///
-    /// The `toJson` precedent: this emitter has no way to hand an operand to an
-    /// AST node, and a slot with a `$` in its name cannot shadow anything a
-    /// program can spell.
-    fn park_for_predicate(&mut self, decl: &TypeDecl, v: &str) -> Result<Expr, String> {
-        let name = format!("{}arg", vyrn_frontend::ctor::PREFIX);
-        let ll = self.llt(&decl.base);
-        let slot = self.declare(&name, &decl.base);
-        self.emit(format!("store {ll} {v}, ptr {slot}"));
-        Ok(Expr::Var { name, line: 0 })
     }
 }
 
