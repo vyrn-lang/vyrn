@@ -2184,6 +2184,196 @@ for the same five here. The wasm manifest is not regenerated in this slice:
 the lowering renumbers every module's runtime table, and the integrator
 regenerates it after the merge.
 
+#### The third slice (2026-09-03): the census of what only the interpreter does
+
+M5 deletes the interpreter. This slice counts what goes with it. One row per
+capability the interpreter alone provides today; the third column was proved by
+running the compiled route over the same input, never by reading it; the fourth
+column is a measurement or a named piece of work, never an estimate. Nothing is
+deleted here, and `--engine interp` is still the default.
+
+| capability | who needs it | the compiled route today | what moving it costs |
+|---|---|---|---|
+| `run-default` | every user; 34 of `vyrn-cli`'s test suites, at 150 `vyrn run` call sites; the fixture recorder | yes — 204 examples run under both engines, 203 byte-identical, the same 58 exit non-zero | flipping one default. the corpus costs 89.1 s under the interpreter and 39.4 s under the compiled route, compile included |
+| `test-bodies` | 25 corpus files; `tests/testing.rs` | yes — all 25 byte-identical, `placeorder.vyrn` among them | 4.6 s against 5.3 s over the 25. The compiled route is SLOWER here: the bodies are small and the compile is the whole cost |
+| `test-state` | nothing in the corpus | no — one fresh instance per body, where the interpreter runs the module's state once and lets the bodies see each other's writes | `rfcs/probes-0125/module-state-across-test-bodies.vyrn`: 2 passed under the interpreter, `1 != 2` under wasm. The cost is the semantics, and M5 retires them rather than reproducing them |
+| `bench-check` | CI's "Bench --check" step; 17 corpus files | yes — all 17 byte-identical, after this slice's fix below | 52.3 s against 2.4 s over the 17, a factor of 22 |
+| `serve` | `vyrn serve`, `vyrn dev`; `tests/serve.rs`, `rpc.rs`, `universal_pages.rs` | no — `serve_cmd` takes no engine, and `vyrn serve --engine wasm` silently serves from the interpreter | `interp::serve` holds ONE live instance across every request: `main` runs once and the module's state persists. A resident wasm instance the host calls into per request is not designed anywhere in this RFC or its plan |
+| `mounted-routes` | `vyrn routes`, for the hand-written channel | no | `interp::mounted_routes` evaluates the arguments of `mount(..)` before any program runs. The derived rows survive without it, and the command already prints a note when the channel fails |
+| `from-json` | `vyrn fmt --from-json` (RFC-0097 M1) | no — `fmt` has no engine flag | one constant 40-line Vyrn converter, run in process. Compile it instead, or move it to Rust |
+| `run-profile` | `vyrn run --profile`, `vyrn check --profile` | no, and there is nothing to profile: under the compiled route the time is wasmtime's | `vyrn_frontend::prof` counts interpreter steps. `check --profile` measures generation and survives while generation is interpreted |
+| `gen-fn` | every `gen fn` (RFC-0021), on every command that loads a module: `run`, `check`, `test`, `bench`, `build`, `doc`, `why`, `routes`, `fmt`, `emit-*`, and the LSP | partial — RFC-0076's `vyrn-genwasm` runs a generator as compiled wasm, but the feature `wasm-gen` is OFF in `vyrn-cli`'s default build and ON in `vyrn-lsp`'s, it needs clang and a wasi sysroot, and it declines to the interpreter for a module reaching `writeFile`, `writeAtomic`, `renameFile` or `fsyncFile` | the largest row. `generate_interpreted` is both the reference and the fallback; deleting it makes clang a hard requirement of `vyrn check` |
+| `fixture-oracle` | `examples/expected/*.stdout`, `.stderr`, `.exit` | no — the interpreter IS the oracle the compiled route is compared against | after the deletion `VYRN_FIXTURES=write` records from the route under test, and the fixture gate is a self-comparison. The oracle becomes a reviewed diff plus `wasmhash`'s cross-platform bytes |
+| `parity-column` | CI's parity job, 41 programs three engines | yes, by replacement — `fixtures` plus `wasmhash` state the invariant §2.6 names | parity is 971 s on one platform; `fixtures` is 123 to 213 s and `wasmhash` 97 to 146 s, each on four |
+| `boundary-carrier` | `tests/boundaries.rs`, 18 of its 19 rules | yes — every row keeps a native, wasm or Vyrn carrier | 18 rows lose a carrier and the census's copy total falls by 18 |
+| `library-run` | `vyrn_frontend::run`, `interp::run`; `jsondec.rs` and `loader.rs` self-tests | no — the compiled route lives in `vyrn-cli`, not in the frontend | those tests move to the CLI's harness, or the frontend takes a dependency on a backend |
+| `extern-unavailable` | `examples/externdemo.vyrn`, the corpus's one host-only program | worse — the interpreter prints ``error: extern `jsNow` is not available on this target`` and the compiled route traps with `error: error while executing at wasm backtrace:` | the direct backend has to refuse an unavailable `extern` in `interp::extern_unavailable`'s words. This is the one output difference in 204 programs |
+| `site-export` | CI's Site job | yes, and this is new — the frame-limit refusal M5's second slice recorded is gone, and the compiled route writes the same 241 files | 187.30 s against 13.89 s, medians of three interleaved runs, and the 241 files are byte-identical |
+
+#### How the third column was proved
+
+Every `yes` above is a run, not a reading.
+
+- **The corpus, both engines.** All 204 `examples/*.vyrn` under `vyrn run` and
+  `vyrn run --engine wasm`, with the harness's own conventions — cwd
+  `examples/`, the `.stdin` and `.args` fixtures, the fixed clock and seed.
+  203 are byte-identical on stdout, stderr and the exit code. The refusal sets
+  are the same set, not the same size: 58 programs exit non-zero under each,
+  and no program is refused by one engine and run by the other. The single
+  difference is `externdemo.vyrn`, the `extern-unavailable` row.
+- **The bodies.** `vyrn test` over the 25 examples with `test` blocks and
+  `vyrn bench --check` over the 17 with `bench` blocks, under both engines.
+  All byte-identical. `placeorder.vyrn`, the placement defect M5's second
+  slice recorded, passes under both here: the rule that closed it landed with
+  M1.
+- **The one disagreement that is by design** is `test-state`, and the probe
+  reproduces it in twelve lines.
+
+#### The measurements
+
+Every pair is interleaved — interpreter, compiled route, interpreter,
+compiled route — because other worktrees run their gates on this machine and
+an interleaved pair moves together under someone else's load. Release binary,
+generator cache warm.
+
+| what | interpreter | `--engine wasm` | ratio |
+|---|---|---|---|
+| the corpus, 204 programs, `run` | 89.1 s | 39.4 s | 2.3x |
+| `test` over 25 files | 4.6 s | 5.3 s | 0.9x |
+| `bench --check` over 17 files | 52.3 s | 2.4 s | 22x |
+| the site export, 241 files | 187.30 s | 13.89 s | 13.5x |
+
+The corpus row is the weakest of the four, and says so: at the game's small
+inputs `vyrn run` is process start-up under either engine, so 204 programs
+measure the two start-ups and not the two engines. The interpreter's time is
+in the bodies and in the export.
+
+The site export is the row that changed. M5's second slice measured 136.9 s
+under the interpreter and a refusal after 5.2 s under the compiled route, at
+`chapters` in `site/app/guide.vyrn`, 11,360 bytes of frame against a limit of
+8,192. On this branch the export compiles and runs, and the two engines write
+the same 241 files, byte for byte. §2.5's first row is no longer a claim.
+
+CI's two jobs, read off the last green run of each branch with `gh run view`:
+
+| job | what it runs | platforms | wall |
+|---|---|---|---|
+| `parity` | 41 programs, interp == native == wasm | 1 | 971 s (`rfc-0125-core`), 544 s (`main`) |
+| `fixtures` | 203 examples, compiled route against the recorded output | 4 | 123, 152, 168, 213 s |
+| `wasmhash` | every example's wasm, one SHA-256 per example | 4 | 97, 103, 112, 146 s |
+
+So the pair that replaces parity costs less on its worst leg than parity does
+on its only one, and it runs on four platforms rather than one.
+
+#### The binary, and why the gate is a count
+
+The census should price the interpreter in the release binary and in the build.
+**A clean feature gate is not possible, and that is itself a census
+finding.** `mod interp` cannot be `#[cfg]`-ed out: six CLI
+commands call into it (`run`, `test`, `bench --check`, `serve`, `dev`,
+`fmt --from-json`), `vyrn routes` calls `mounted_routes`, the loader's
+generator path calls `generate`, `vyrn-frontend`'s own public `run` calls it,
+and both backends plus the checker read five constants that live in the file
+(`CALL_DEPTH_LIMIT`, `FRAME_LIMIT`, `REGION_MAX`, `ARRAY_LIT_LIMIT`,
+`INTERP_STACK_BYTES`) along with `extern_unavailable`. Gating it is the
+deletion, not a measurement of it. So the price is a count:
+
+- `interp.rs` is 11,631 lines — 8,401 of code and 2,805 of comment — of
+  `vyrn-frontend`'s 87,237 and the workspace's 149,870 lines of `src`. 13.3
+  percent of the crate, 7.8 percent of the compiler.
+- It pulls in **no crates**. `vyrn-frontend` has an empty `[dependencies]`
+  table, so the interpreter costs the binary nothing but its own machine code.
+  The 21,110,272-byte `vyrn.exe` measured here is the embedding of wasmtime
+  and Cranelift that M5's first slice already priced (9,973,248 to 20,988,928
+  bytes), and deleting the interpreter does not touch it.
+- What it does buy back is the `Val` model of §1.1's third picture, the copies
+  the boundary census counts at `Carrier::Interp` (18 rows), and the 44
+  builtin names the interpreter matches against its own value model.
+
+#### The deletion plan
+
+The order is fixed by what has no replacement, not by what is easiest.
+
+1. **The suites move first.** `fixtures.rs` already compares the compiled
+   route against a recorded file. The other 33 suites call `vyrn run` and read
+   its output; they move by adding `--engine wasm` to the command they build,
+   which is a one-line change per call site and 150 call sites. Nothing else
+   can be deleted while they are the interpreter's largest consumer.
+2. **The parity job is replaced by the pair it already runs beside.**
+   `fixtures` plus `wasmhash` state §2.6's invariant, on four platforms, for
+   less wall time than parity's one. `tests/parity.rs` and its
+   `KNOWN_DIVERGENT` / `NATIVE_UNSUPPORTED` lists go with it; `tests/route.rs`
+   keeps the native route honest against the same wasm.
+3. **`VYRN_FIXTURES=write` records from the compiled route.** This is the
+   change that costs the most and shows the least: the fixture gate stops
+   being a comparison of two engines and becomes a record of one. The
+   replacement oracle is the reviewed diff — a recording run's output is read
+   before it is committed — plus `wasmhash`, which catches the compiler that
+   depends on its host, which is the failure a single-engine oracle cannot
+   see.
+4. **`serve`, `dev`, `routes` and `fmt --from-json` are ported or dropped.**
+   These are the four with no route at all. `routes` and `from-json` are
+   small. `serve` is not: see below.
+5. **The generator path is last**, because it is the only consumer that gets
+   SLOWER and less available when it moves: `wasm-gen` needs clang and a wasi
+   sysroot, and `vyrn check` on a machine without a toolchain is a thing that
+   works today.
+6. **Then `interp.rs`, `Val`, and the 18 `Carrier::Interp` rows.**
+
+#### What breaks, with no replacement yet
+
+- **`vyrn serve` and `vyrn dev`.** One live instance, `main` run once, module
+  state persisting across requests, and a Rust accept loop calling back into
+  it per request. The compiled route runs a module to completion and exits.
+  Nothing in this RFC or `PLAN-0125-runtime.md` designs a resident instance
+  the host calls into, and three test suites spawn it.
+- **The generator path without clang.** `vyrn check` runs every `gen fn`
+  today with no toolchain at all. After the deletion it cannot.
+- **The oracle.** Deleting the reference semantics leaves the fixture files
+  as the only statement of what a program prints, and they were recorded from
+  the thing being deleted.
+- **`vyrn run --profile`.** The flag reports the interpreter's own steps.
+
+#### The one gate that would prove the deletion safe
+
+Record every `examples/expected/*` file a second time, from the compiled
+route, and require the two recordings to be byte-identical — the interpreter's
+committed files against the compiled route's fresh ones, over all 203
+comparable examples, on all four platforms of the matrix. That is the
+`fixtures` job with `VYRN_FIXTURES=write` run into a scratch tree and diffed
+against the committed one. It passes today, which is the point: it is the same
+statement the fixture gate makes, made once more at the moment the oracle
+changes hands, so the recording that replaces the interpreter is provably the
+recording the interpreter would have made.
+
+#### The defect the census found, and its fix
+
+One program the interpreter ran and the compiled route refused:
+`examples/langbench.vyrn`, under `vyrn bench --check --engine wasm`, with
+
+    error: direct backend: no lowering for a branch yielding `blackBox` at line 212
+
+The direct backend lowers `blackBox(v)` as `v` (RFC-0055), but its type peek
+held no row for the name, so an `if` arm that yielded one had no type and the
+whole program was refused. The reduction is four lines and is recorded as
+`rfcs/probes-0125/branch-yielding-blackbox.vyrn`. The fix is one arm in
+`Fn_::peek` that peeks the argument, which is what the emitting path does with
+it, and `tests/benching.rs` pins both engines on the reduction. It changes no
+emitted bytes: `blackBox` exists only inside a `bench` or `test` body, and
+`wasmhash` builds each example's `main`.
+
+Two things were found and NOT fixed here, both recorded rather than repaired:
+
+- `examples/externdemo.vyrn` under `--engine wasm` traps with wasmtime's
+  backtrace where the interpreter names the unavailable `extern`. The
+  `extern-unavailable` row above.
+- `site/export.vyrn` reads its output directory from `args()[1]`, but
+  `args()` excludes the program name (RFC-0014), so `vyrn run
+  site/export.vyrn out` passes one argument, `argv.length > 1` is false, and
+  the export writes to its default `out` whatever it is given. The site
+  workflow creates `out/` and so never noticed. It is the site's bug, not the
+  compiler's, and it is written down here because the census tripped over it.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
