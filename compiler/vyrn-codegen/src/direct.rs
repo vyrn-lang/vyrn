@@ -1317,6 +1317,30 @@ impl<'a> Cx<'a> {
         hit
     }
 
+    /// RFC-0114 Rule N read off the core (RFC-0125 §3 M3, the
+    /// emitter-reads-the-core slice): the releases one edge of the join at
+    /// `node` owes because another edge took the name. The core states each
+    /// as a `St::Drop` at a `Site::Edge`, which is the join and the edge —
+    /// a position in a branch is not a key, and this is why the drop carries
+    /// one. A sub-place row (`d.line`) keeps its spelling, because the
+    /// temporary the core takes it into is spelled for the place it took.
+    fn edge_rows(&self, node: usize) -> Vec<(String, u32)> {
+        let Some(f) = &self.facts else {
+            return self
+                .plan
+                .edge_releases_at(node)
+                .cloned()
+                .unwrap_or_default();
+        };
+        match f.edges.get(&self.plan.key_of(node)) {
+            Some(rows) => {
+                self.plan.acknowledge(node);
+                rows.clone()
+            }
+            None => Vec::new(),
+        }
+    }
+
     /// Round forty's table read off the core (RFC-0125 §3 M3, the
     /// deletion-preparation slice): the payload binders the arm at
     /// `(key, arm)` releases at its end, each with the holes the arm left in
@@ -4263,12 +4287,7 @@ impl<'p> Fn_<'_, 'p> {
                 // An `if` with no else-arm grows one when the implicit edge is
                 // the one that owes a release. After a diverged arm the
                 // releases are dead code, which wasm validates.
-                let ers = self
-                    .cx
-                    .plan
-                    .edge_releases_at(s as *const Stmt as usize)
-                    .cloned()
-                    .unwrap_or_default();
+                let ers = self.cx.edge_rows(s as *const Stmt as usize);
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
                 self.block(m, b, then_block)?;
@@ -6006,12 +6025,7 @@ impl<'p> Fn_<'_, 'p> {
         // RFC-0114 Rule N at an `if`-expression join. The releases are
         // stack-neutral, so in the scalar case they sit under the branch value
         // exactly as `match_expr`'s do.
-        let ers = self
-            .cx
-            .plan
-            .edge_releases_at(key)
-            .cloned()
-            .unwrap_or_default();
+        let ers = self.cx.edge_rows(key);
         self.cond(m, b, cond, line)?;
         match &r {
             Repr::Agg(l) => {
@@ -13116,12 +13130,7 @@ impl<'p> Fn_<'_, 'p> {
         self.depth += 1;
 
         // RFC-0114 Rule N at a match join, keyed by this expression's address.
-        let ers = self
-            .cx
-            .plan
-            .edge_releases_at(key)
-            .cloned()
-            .unwrap_or_default();
+        let ers = self.cx.edge_rows(key);
         let free_box = self.frees_boxes(scrutinee, key);
         for (arm_ix, arm) in arms.iter().enumerate() {
             self.tag_test(b, addr, &sum, &arm.pattern, line)?;

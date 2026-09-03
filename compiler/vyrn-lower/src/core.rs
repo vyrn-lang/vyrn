@@ -2910,7 +2910,12 @@ fn fold_facts(body: &Body, stmts: &[St], out: &mut Facts) {
                 }
                 Site::Edge(join, edge) => {
                     let name = body.names[*n as usize].source.clone();
-                    out.edges.entry(*join).or_default().push((name, *edge));
+                    let rows = out.edges.entry(*join).or_default();
+                    // One row per name and edge: a generic instantiated twice
+                    // folds the same join twice when the two share a node.
+                    if !rows.contains(&(name.clone(), *edge)) {
+                        rows.push((name, *edge));
+                    }
                 }
                 Site::None => {}
             },
