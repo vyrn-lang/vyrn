@@ -1685,9 +1685,10 @@ the plan's at the same site.
 | 08 | `Fn_::stmt`, `Stmt::Expr` | `discarded_results` | free an owned result nothing binds, rather than dropping it | a key, not stated |
 | 09 | `Fn_::expr` | `arg_drops` | tee this node's value and free it after the call or operator above | a key, not stated |
 | 10 | `Fn_::stmt`, `Stmt::If`; `Fn_::join`; `Fn_::match_expr` | `edge_releases` | the release one edge of a join owes because another edge took the name | a position, not a key |
-| 11 | `Fn_::expr_inner`, `Expr::Field` | `receiver_frees`, `receiver_malloc` | free the unnamed receiver right after the read | **carried** |
+| 11 | `Fn_::expr_inner`, `Expr::Field` | `receiver_frees` | free the unnamed receiver right after the read | **carried** |
+| 11b | `Fn_::expr_inner`, `Expr::Field` | `receiver_malloc` | whether that free stands inside a `region` — a callee allocation is malloc-side | the region stand-down, not modelled |
 | 12 | `Fn_::expr_inner`, `Expr::Field` | `receiver_holes` | the field the read took, which the free walks around | **carried** |
-| 13 | `Fn_::match_expr` | `arm_frees` | the payload binders this arm releases, and the holes each has | **carried** |
+| 13 | `Fn_::match_expr` | `arm_frees` | the payload binders this arm releases, and the holes each has | **carried** for a `match` |
 | 14 | `Fn_::frees_boxes` | `consuming_matches` | whether the arms free the boxes their binders came out of | a different rule |
 | 15 | `Fn_` construction | `releases` (through `own::placed`) | the order and the exits this body releases at | `St::Row`, keyed the same |
 | 16 | `Fn_` construction | `droppable`, `early`, `holes` | which bindings get a release slot, with what kind and what holes | a name's `owned` and `holes` |
@@ -1698,11 +1699,33 @@ Three readings of the table.
 
 - **Three tables are carried and flipped in this slice.** Rows 11, 12 and 13.
   The core states each as a `St::Drop`: of a name whose `NameInfo::receiver`
-  is the `Expr::Field` node, and of a payload binder at the end of
-  `Arm::body`, with `NameInfo::holes` as the row's hole set. The test diffs
-  591 arm sites and 21 receiver sites and finds no difference, which is what
-  lets the emitter read `core::facts` for all three; `VYRN_PLAN_ROWS=1` puts
-  it back on the plan for a bisect.
+  is the `Expr::Field` node, and of a payload binder named by `Arm::frees`,
+  with `NameInfo::holes` as the row's hole set. The test diffs 4,350 arm
+  sites and 21 receiver sites, in both directions, and finds no difference —
+  which is what lets the emitter read `core::facts` for all three;
+  `VYRN_PLAN_ROWS=1` puts it back on the plan for a bisect, and
+  `VYRN_NO_PLACER=1` does too, because the placer is what folds the core's
+  answers. The emitted bytes did not change: `VYRN_WASM_MANIFEST=check` is
+  green after each commit.
+
+  Two things the flip needed, and both were the core's gap rather than the
+  emitter's. **The arm's releases had to be NAMED.** A reader cannot find
+  them by position: `stmt` pushes them at the end of the arm's own
+  statements and then the edge drops of a join follow, so the trailing run
+  of `St::Drop` is sometimes the arm's rows and sometimes Rule N's. `Arm`
+  carries `frees: Option<Vec<Name>>` now — the binders this arm releases,
+  or `None` where this pass states no answer. The `if let` and `?` desugars
+  build arms of their own and consult no table, so they state `None` and
+  the emitter reads the plan at those sites; 117 plan rows in the corpus
+  are there, and no emitter this slice flips reads the table for them.
+  **And a `_` payload binder had to exist.** `bind_pattern` skipped it — it
+  names nothing a body can read — so a consumed scrutinee's `Err(_) => ""`
+  had a real payload the core never mentioned, while the plan's arm table
+  named `_` and both compiled backends freed it. The binder is bound and
+  left out of the scope now. Three corpus programs have the shape
+  (`fasta.vyrn`, `knucleotide.vyrn`, `revcomp.vyrn`), and each was a leak
+  the kernel could not see; the tally did not move, because the plan's row
+  was already placed at every one.
 - **Seven have no key in the core, and that is the whole obstacle.** Rows 01
   to 09 are the store, discard and argument-temporary decisions. The core
   states every one of them — `St::Store` carries `Old::Released`, a
@@ -1724,6 +1747,23 @@ Three readings of the table.
   and the core then treats the binders as borrows. So the row is not a flip:
   it is `frees_boxes`'s own rule, and the core would have to state that rule
   before the table can go.
+
+**What the direct emitter no longer reads.** `receiver_frees`,
+`receiver_holes`, and `arm_frees` at every `match` — three of the nine
+tables. It still reads `store_owned`, `store_fresh`, `discarded_results`,
+`arg_drops`, `edge_releases`, `consuming_matches`, `receiver_malloc`, and
+`arm_frees` at an `if let` or a `?`; it still reads `releases`, `droppable`,
+`early` and `holes` to build a frame, and it still ACKNOWLEDGES every row it
+took off the core, so §26's finish check keeps counting the plan's decisions.
+The acknowledgement (`ReleasePlan::acknowledge`) goes when the tables go.
+
+**The lesson the flip taught, and it is the one this RFC keeps finding.** A
+fact stated at a POSITION is not stated. The arm table looked carried — the
+core pushes a `St::Drop` per released binder — and the reconstruction was
+wrong in both directions until `Arm` NAMED the binders: too many when it
+swept the arm's own `drop l`, too few when Rule N's edge drop followed the
+row and ended the trailing run. A table is carried when a reader can ask
+for it by key, not when a careful reader can see it.
 
 **What the native emitter and the interpreter still need.** Neither moved in
 this slice. `compiler/vyrn-codegen/src/lib.rs` reads the same tables through
