@@ -21,13 +21,12 @@
 //!   - `receiver_frees` and `receiver_holes`, from a `St::Drop` of a name
 //!     whose `NameInfo::receiver` names the `Expr::Field` node.
 //!
-//! One is pinned one way only. `St::Switch::consuming` is not the plan's
-//! `consuming_matches`: it is the whole disjunction the emitter computes in
-//! `frees_boxes` — a `consume`, a scrutinee that names no place, or the
-//! table — narrowed to an owned scrutinee with no placed release after the
-//! construct. So the core says "consuming" at many more sites than the table
-//! does, and what a pin can assert is the implication: every site the table
-//! names, the core names too.
+//! One is not pinned, and the reason is the finding. `St::Switch::consuming`
+//! is not the plan's `consuming_matches`: it is the whole disjunction the
+//! emitter computes in `frees_boxes` — a `consume`, a scrutinee that names
+//! no place, or the table — narrowed to an owned scrutinee with no placed
+//! release after the construct. The two answer different questions, so only
+//! the count of sites the core calls consuming is recorded here.
 //!
 //! The rest of the emitter's reads — `store_owned`, `store_fresh`,
 //! `discarded_results`, `arg_drops`, `edge_releases` — have no site key in
@@ -130,7 +129,7 @@ fn run() {
         let _memo = vyrn_frontend::project::Memo::open();
         let lowered = vyrn_lower::lower(&program);
         let own = vyrn_frontend::own::analyze(&program);
-        let facts = vyrn_lower::core::facts();
+        let facts = vyrn_lower::core::facts().expect("the placer fills the core's facts");
         let file = path.file_name().unwrap().to_string_lossy().to_string();
 
         for ((site, arm), core_says) in &facts.arms {
@@ -167,8 +166,6 @@ fn run() {
             }
         }
 
-        // The one-way pin: every site the plan's table names, the core's
-        // `consuming` flag names too.
         for inst in &lowered.instances {
             let Ok(top) = vyrn_lower::core::build(&program, inst, &own) else {
                 continue;

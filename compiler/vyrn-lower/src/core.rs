@@ -2653,7 +2653,7 @@ fn mentions_in_expr<'e>(e: &'e Expr, vars: &mut Vec<&'e Expr>, calls: &mut Vec<&
 thread_local! {
     static STRICT_REFUSALS: std::cell::RefCell<Vec<crate::kernel::Refusal>> =
         const { std::cell::RefCell::new(Vec::new()) };
-    static FACTS: std::cell::RefCell<Facts> = std::cell::RefCell::new(Facts::default());
+    static FACTS: std::cell::RefCell<Option<Facts>> = const { std::cell::RefCell::new(None) };
 }
 
 /// RFC-0125 §3 M3, the deletion-preparation slice: what an emitter reads off
@@ -2679,10 +2679,10 @@ pub struct Facts {
     pub arms: std::collections::HashMap<(usize, u32), Vec<(String, Vec<String>)>>,
 }
 
-/// The core's answers for the program last analysed on this thread. Empty
+/// The core's answers for the program last analysed on this thread. `None`
 /// when the placer is not installed (`VYRN_NO_PLACER=1`), in which case an
 /// emitter reads the plan as it always did.
-pub fn facts() -> Facts {
+pub fn facts() -> Option<Facts> {
     FACTS.with(|f| f.borrow().clone())
 }
 
@@ -3009,5 +3009,5 @@ pub fn augment(program: &Program, own: &mut Ownership) {
             }
         }
     }
-    FACTS.with(|f| *f.borrow_mut() = facts);
+    FACTS.with(|f| *f.borrow_mut() = Some(facts));
 }

@@ -1416,6 +1416,23 @@ impl ReleasePlan {
         at
     }
 
+    /// The node a plan row is keyed by, for a reader that holds its own
+    /// answer and needs only the key (RFC-0125 §3 M3, the
+    /// deletion-preparation slice).
+    pub fn key_of(&self, at: usize) -> usize {
+        self.resolve(at)
+    }
+
+    /// Record that the emission considered the rows at `at`, without asking
+    /// what they say. An emitter that takes its answer from the core still
+    /// owes §26's finish check an acknowledgement, or every row it no longer
+    /// reads is counted as a decision the emission walked past. The
+    /// acknowledgement goes when the tables go.
+    pub fn acknowledge(&self, at: usize) {
+        let at = self.resolve(at);
+        self.taken.borrow_mut().insert(at);
+    }
+
     /// RFC-0114 M1: does the caller release this argument after the call?
     /// A hit is recorded as consumed — see [`ReleasePlan::unconsumed`].
     pub fn arg_drop(&self, at: usize) -> bool {
