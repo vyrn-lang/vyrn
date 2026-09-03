@@ -3553,6 +3553,146 @@ without the constructor, and a record literal of a validated record type is a
 second producer by design. §2.3's constructor is what closes that, and it is
 the next slice's, not this one's.
 
+#### The third judgment's fourth slice (2026-09-03)
+
+The third slice ended on the two rows a deletion waits on. This slice builds
+their constructor, points all three engines at it, and deletes what they each
+wrote out.
+
+**Where the constructor lives: it is a function of the program.** For every
+declaration that carries a `where`, `vyrn_frontend::ctor` generates two
+ordinary Vyrn functions and `check_and_synthesize` appends them to the linked
+program beside the JSON walks:
+
+```text
+fn where$p<Name>(binds..) -> Bool   the `where` clause itself
+fn where$c<Name>(value: Base)       calls it, or panics in the census's words
+```
+
+The three options were a generated function in the program, an entry in
+`std/runtime` taking a predicate index, and an entry in `validate` each engine
+calls. The last two cannot be built: a `where` clause is the USER'S expression,
+so no fixed body in `std/runtime` and no function in `validate` can hold it —
+only the program can. That leaves the mechanism the census named as the one
+that works, `loader::RtModule`'s: a function the interpreter interprets and
+both emitters compile. `jsonenc` and `jsondec` already inject per-type walks
+this way (RFC-0078 M2b, M3), and `jsondec` already synthesized a
+`Bool`-returning function whose body is a `where` clause — this slice makes
+that shape the only statement of the rule rather than a second one.
+
+The pair rather than one function, because a fallible construction (`Age?(n)`,
+RFC-0077 M2k) wants the same answer without the trap. Two spellings of "run the
+predicate" could disagree about what `value` means; one function called by both
+cannot.
+
+**The constructor answers nothing, and that is not a compromise.** It takes the
+raw value and returns Unit. A validated value's runtime representation IS its
+base — `Interp::construct`'s own words, "zero overhead" — so the caller
+already holds what the constructor would answer. Returning it would cost twice:
+the `return value` inside the constructor crosses into the validated type,
+which is the boundary that runs the predicate, so the function would call
+itself for ever; and a record base would have to be moved out and back for a
+check that cannot write to it.
+
+**What each engine lost.** The interpreter's `validates` built a scope and
+evaluated the clause; it calls `where$p` now, and `enforce` calls `where$c`, so
+the sentence on stderr is written by one `panic` in one Vyrn body. The textual
+emitter's `emit_validation` and `emit_predicate_cond` lowered the predicate to
+LLVM at three sites — a coercion, a construction and a record literal — and
+each is one call now; its per-type `@.trap.verr.*` globals and
+`validation_message` are deleted, so that backend spells no validation wording
+at all. The direct wasm backend's `emit_validation` bound every field by
+`predicate_binds`, walked the clause and interned the sentence; it parks the
+value in a local and calls, which is three instructions where the binding walk
+was a page. `Cx::predicate` and `Gen::decls` — the program's own predicate
+node, read at every validation site — are deleted with them.
+
+`direct.rs` falls from 16,592 lines to 16,532, `lib.rs` from 19,099 to 19,022
+and `interp.rs` from 11,631 to 11,625, against 204 lines of `ctor.rs`. That is
+the trade §2.3 asks for: 143 lines of three engines for one generator of two
+small functions.
+
+**The census.** `where-scalar` and `where-record` each fall from three carriers
+to one, `vyrn`, and the table says **19 rows and 49 copies**.
+`tests/boundaries.rs` derives that sentence from its own table, so the count is
+still a measurement and not a claim; the two rows' programs answer the same
+bytes under `vyrn run`, `vyrn run --engine wasm` and a native binary, as they
+did before. Four of the nineteen rows are stated once now, and they are the
+four that took the same mechanism.
+
+The price is stated rather than hidden. A declaration that carries a `where`
+now costs two functions in every module that declares it, reached or not, and
+the constructor's sentence is in the data segment whether or not anything
+crosses into the type. `direct.rs`'s
+`a_validated_type_is_checked_wherever_it_is_reached` had asserted on the
+message's ABSENCE for an unreached declaration; the message is the
+constructor's own string now, so the test compares a reached module against one
+whose value the checker proved instead. Emitted bytes changed, so
+`rfcs/census/wasm-sha256.tsv` is NOT regenerated here, for the second slice's
+reason: a hash written in the commit that moved it records nothing.
+
+**The judgment.** The tally over the same 180 programs, on 2026-09-03:
+
+| answer | before | after |
+|---|---|---|
+| by-constructor | 46,473 | 46,482 |
+| by-literal | 9,103 | 9,103 |
+| by-name | 156,963 | 156,966 |
+| by-constant | 1,080 | 1,080 |
+| findings | 6 | 0 |
+| **judged** | **213,625** | **213,631** |
+| unjudged | 0 | 0 |
+
+**RATCHET 0**, and `tests/typed.rs` asserts equality now rather than a bound: a
+store into a validated place whose producer is raw is a refusal there, not a
+row in a record. The six went two ways.
+
+Three were record literals — `autovalidate.vyrn:46` into `Range`,
+`inlinewhere.vyrn:15` and `:19` into `User` — and they were never findings in
+the first place. A record literal of a validated record type is that type's
+SECOND producer by design: RFC-0003's cross-field `where` has no other
+spelling, and since this slice all three engines run the generated constructor
+at it. The judgment names `Rhs::Make` into a validated place a constructor for
+that reason.
+
+Three were the program's, and the program says so now.
+`bin/server/store.vyrn:107` was `let bumped: Created = store.counter + 1` and
+is `let bumped = Created(store.counter + 1)`; `shelf/server/store.vyrn:84` was
+`let s: Stars = req.rating` and is `let s = Stars(req.rating)`, reached by two
+entry points and therefore counted twice. Neither rewrite changes what runs —
+the boundary was going to call the constructor either way — and both make the
+producer the one the judgment can name.
+
+**Zero is a fact about this corpus, not a new rule of the language.** A raw
+value entering a validated slot is RFC-0003's automatic validation and stays
+legal; refusing it would delete a documented feature, which is a different
+RFC's decision. What the judgment now proves is narrower and worth having: over
+180 programs, every value that reaches a `where` type reaches it through that
+type's own constructor, and there is exactly one constructor.
+
+**What the remaining constructor rows wait on.** The design sorted six rows
+into this line and two of them are done. Of the other four:
+
+- `string-nul` and `string-utf8` wait on what the fifth slice already named:
+  their function, `stringFromBytes`, must BUILD the String it validates, and
+  that needs the raw-memory primitives `std/mem` fences. This slice does not
+  supply it. The `where` rows could take a constructor precisely because they
+  build nothing — the value already exists and the constructor only judges it.
+  An unchecked builder primitive is still the missing piece.
+- `int-narrowing` and `float-to-int` REFUSE NOTHING (finding 4 of the census).
+  What each engine writes out for them is the wrap itself, which is the
+  conversion's meaning and not a check in front of it, so a constructor has
+  nothing to take: deleting the wrap deletes the answer. Their DECISIONS left
+  their engines in the second slice and are `vyrn_frontend::validate`'s. They
+  move when the language decides what a program that narrows means, which is
+  §2.3's open question and not a slice's.
+
+The interpreter's copy is gone for these two rows and no other, and the reason
+is worth stating: the `where` rows are the only ones whose rule is written in
+Vyrn by the USER. Every other row's rule is the compiler's, so moving it means
+writing it in Vyrn, and PLAN-0125-runtime §5.2 is why the interpreter cannot
+then call it. Finding 3 stands for the remaining fifteen rows.
+
 ### What each milestone is worth on its own
 
 M1 fixes the wasm column. M2 makes leaks a compile error. M3 halves the
