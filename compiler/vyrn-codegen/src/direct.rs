@@ -2232,9 +2232,17 @@ fn frame_fits(b: &Frame, name: &str, line: usize) -> Result<(), String> {
     ))
 }
 
-/// Take one call frame, or trap. Inline for the reason `region_enter` is: it is
-/// a dozen instructions, and a helper would be another index in a table whose
-/// numbering is load-bearing.
+/// Take one call frame, or trap.
+///
+/// This is an instruction sequence, not a runtime function, and
+/// PLAN-0125-runtime §6 step 9 priced the alternative before leaving it here:
+/// with `enter` and `leave` a `std/runtime` pair called from every counted
+/// prologue and epilogue, nbody at 25 M steps went from 2.155 s to 2.306 s
+/// under wasmtime 46 and fannkuch at n = 11 from 3.599 s to 4.014 s, medians
+/// of five, base and head interleaved — 7 and 12 percent for two calls per
+/// user call, which is step 5's four nanoseconds on the path every program
+/// takes. The counter is a load, a compare and a store at the one site that
+/// has the frame in hand, so it stays here (RFC-0125 §3 M4).
 fn call_depth_enter(b: &mut Frame, cx: &Cx<'_>) {
     let (at, msg, trap) = (cx.rt.call_depth, cx.rt.msg_calldepth, cx.rt.trap);
     b.ins(&Instruction::I32Const(at as i32))
@@ -7600,7 +7608,9 @@ impl<'p> Fn_<'_, 'p> {
                         Type::Str => {}
                         Type::Float | Type::Float32 => self.f64_str(b, &t, line)?,
                         Type::Bool => {
-                            b.ins(&Instruction::Call(self.cx.rt.bool_str));
+                            b.ins(&Instruction::I32Const(self.cx.rt.str_true as i32))
+                                .ins(&Instruction::I32Const(self.cx.rt.str_false as i32))
+                                .ins(&Instruction::Call(self.cx.rt.bool_str));
                         }
                         it => {
                             let n = Num::of(it).expect("compared as a number above");
@@ -7703,7 +7713,9 @@ impl<'p> Fn_<'_, 'p> {
                         b.ins(&Instruction::Call(self.cx.rt.print_str));
                     }
                     Type::Bool => {
-                        b.ins(&Instruction::Call(self.cx.rt.bool_str));
+                        b.ins(&Instruction::I32Const(self.cx.rt.str_true as i32))
+                            .ins(&Instruction::I32Const(self.cx.rt.str_false as i32))
+                            .ins(&Instruction::Call(self.cx.rt.bool_str));
                         b.ins(&Instruction::Call(self.cx.rt.print_str));
                     }
                     _ => return unsupported(&format!("`print` of `{t}`"), line),
@@ -7797,7 +7809,9 @@ impl<'p> Fn_<'_, 'p> {
                     // splits the same way — `@.str.true` is strdup'd by `str(..)`
                     // and printed straight by `print`.
                     Type::Bool => {
-                        b.ins(&Instruction::Call(self.cx.rt.bool_str));
+                        b.ins(&Instruction::I32Const(self.cx.rt.str_true as i32))
+                            .ins(&Instruction::I32Const(self.cx.rt.str_false as i32))
+                            .ins(&Instruction::Call(self.cx.rt.bool_str));
                         self.str_dup(b);
                     }
                     _ => return unsupported(&format!("`toString` of `{t}`"), line),
@@ -15465,6 +15479,13 @@ const VYRN_RUNTIME: &[(&str, &[ValType], &[ValType])] = &[
     ("fsyncFileV", &[ValType::I32; 4], &[]),
     ("listDirV", &[ValType::I32; 5], &[]),
     ("listDirGen", &[ValType::I32; 5], &[]),
+    // Step 9: the two traps and the two renderers. `boolStr` is handed the
+    // two interned literals, as `strFromBytes` is handed its two wordings;
+    // `trapIdx`'s halves are `trap.rs`'s, interned by `runtime` below.
+    ("trapV", &[ValType::I32], &[]),
+    ("trapIdx", &[ValType::I32, ValType::I64, ValType::I32], &[]),
+    ("printI64", &[ValType::I64, ValType::I32], &[]),
+    ("boolStr", &[ValType::I32; 3], &[ValType::I32]),
     // Step 8: the region arena. `regionEnter` answers the bump top and
     // `regionExit` puts it back; the nesting counter and its trap stay inline
     // (see [`Fn_::region_enter`]).
@@ -15570,11 +15591,18 @@ struct Rt {
     /// The address of the UTF-8 DFA table `utf8Valid` walks, interned by
     /// `runtime`; every caller passes it as the third argument.
     utf8d: u32,
+    /// `std/runtime`'s `trapV` (PLAN-0125-runtime §6 step 9): the canonical
+    /// line on descriptor 2 and exit 1, called from every refusal this
+    /// backend emits.
     trap: u32,
     print_str: u32,
     print_i64: u32,
     int_str: u32,
+    /// `std/runtime`'s `boolStr`; the two interned literals below go in as its
+    /// last two arguments, so the module holds no wording of its own.
     bool_str: u32,
+    str_true: u32,
+    str_false: u32,
     concat: u32,
     /// Grow a `String` accumulator in place (RFC-0081): `std/runtime`'s
     /// `strAppend`, called at every `s = s + …`; `std/json` alone has six.
@@ -15746,14 +15774,16 @@ impl Rt {
             bnul: 0,
             butf8: 0,
             strcmp: 0,
-            trap: slot("trap"),
+            trap: 0,
             print_str: 0,
-            print_i64: slot("print_i64"),
+            print_i64: 0,
             int_str: 0,
-            bool_str: slot("bool_str"),
+            bool_str: 0,
+            str_true: 0,
+            str_false: 0,
             concat: 0,
             str_append: 0,
-            trap_idx: slot("trap_idx"),
+            trap_idx: 0,
             utf8valid: 0,
             str_from_bytes: 0,
             starts: 0,
@@ -15960,6 +15990,10 @@ fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {
     rt.arr_append = v.get("arrAppend");
     rt.arr_copy_from = v.get("arrCopyFrom");
     rt.arr_clear = v.get("arrClear");
+    rt.trap = v.get("trapV");
+    rt.trap_idx = v.get("trapIdx");
+    rt.print_i64 = v.get("printI64");
+    rt.bool_str = v.get("boolStr");
     rt.wasi = *wasi;
     rt.write_all = v.get("writeAll");
     rt.print_str = v.get("printStr");
@@ -15996,8 +16030,8 @@ fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {
     rt.listerr = msg(m, &rt, "listerr");
     rt.region_enter = v.get("regionEnter");
     rt.region_exit = v.get("regionExit");
-    let t = rt.intern(m, "true");
-    let f = rt.intern(m, "false");
+    rt.str_true = rt.intern(m, "true");
+    rt.str_false = rt.intern(m, "false");
     rt.msg_div0 = rt.intern(m, &vyrn_frontend::trap::line(vyrn_frontend::trap::DIV_ZERO));
     rt.msg_rem0 = rt.intern(m, &vyrn_frontend::trap::line(vyrn_frontend::trap::REM_ZERO));
     rt.msg_divovf = rt.intern(
@@ -16046,81 +16080,14 @@ fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {
     );
     rt.call_depth = m.reserve(4, 4);
 
-    // `malloc` and `free` are `std/runtime`'s (PLAN-0125-runtime §6 step 2):
-    // the segregated free list this function used to spell out in wasm, with
-    // its class heads and bump offset in the heap's own first 480 bytes rather
-    // than in a reserved table and the `HEAP` global. `str_new`, `concat`,
-    // `str_append` and `str_from_bytes` are `std/runtime`'s too (step 4), and
-    // so is the whole I/O family (step 7): `write_all` with its stdout buffer,
-    // `getbyte` with its stdin buffer, the readers, the writers, `args`, the
-    // clock and the seed, over the host imports `std/mem` declares. The
-    // functions below call them through the indices `VyrnRt` reserved.
-
-    // trap(msg) — the message on stderr and exit 1, which is what the
-    // interpreter and the native build both do. Not a wasm `unreachable`: that
-    // would print wasmtime's wording, and parity compares stderr.
-    let strlen = rt.strlen;
-    let write_all = rt.write_all;
-    rt.next_is(m, rt.trap);
-    m.func(&[ValType::I32], &[], &[], 0, |b| {
-        b.ins(&Instruction::I32Const(2))
-            .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::Call(strlen))
-            .ins(&Instruction::Call(write_all))
-            .ins(&Instruction::Drop)
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::Call(proc_exit));
-    });
-
-    rt.next_is(m, rt.print_i64);
-    print_i64(m, write_all);
-
-    // bool_str(v) — the interned literal itself, not a copy of it. `print` wants
-    // exactly that and frees nothing; `@str` copies at its own call site, because
-    // a rendered value owns its storage and a data-segment pointer cannot.
-    rt.next_is(m, rt.bool_str);
-    m.func(&[ValType::I32], &[ValType::I32], &[], 0, |b| {
-        b.ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::If(BlockType::Result(ValType::I32)))
-            .ins(&Instruction::I32Const(t as i32))
-            .ins(&Instruction::Else)
-            .ins(&Instruction::I32Const(f as i32))
-            .ins(&Instruction::End);
-    });
-
-    // trap_idx(pre, i, post) — `error: array index 7 out of bounds`, which the
-    // interpreter and the native build both print with the index interpolated.
-    // Three writes rather than a `printf`: varargs are M3, and this is the only
-    // runtime message with a number in it.
-    let int_str = rt.int_str;
-    rt.next_is(m, rt.trap_idx);
-    m.func(
-        &[ValType::I32, ValType::I64, ValType::I32],
-        &[],
-        &[ValType::I32],
-        0,
-        |b| {
-            let s = 4; // params 0..2, the frame base 3, then ours
-            let put = |b: &mut Frame, p: u32| {
-                b.ins(&Instruction::I32Const(2))
-                    .ins(&Instruction::LocalGet(p))
-                    .ins(&Instruction::LocalGet(p))
-                    .ins(&Instruction::Call(strlen))
-                    .ins(&Instruction::Call(write_all))
-                    .ins(&Instruction::Drop);
-            };
-            put(b, 0);
-            b.ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::Call(int_str))
-                .ins(&Instruction::LocalSet(s));
-            put(b, s);
-            put(b, 2);
-            b.ins(&Instruction::I32Const(1))
-                .ins(&Instruction::Call(proc_exit));
-        },
-    );
+    // Every runtime FUNCTION this backend once wrote is now `std/runtime`'s
+    // (PLAN-0125-runtime §6): the allocator at step 2, the strings at steps 1
+    // and 4, the maps at 5, the arrays at 6, the I/O family at 7, and at step
+    // 9 the last four — `trapV`, `trapIdx`, `printI64` and `boolStr`. The call
+    // sites reach them through the indices `VyrnRt` reserved. What is left in
+    // this file is instruction sequences at their one site each, listed in
+    // step 9's results: the prologue's depth counter, the trap site of
+    // RFC-0125 M1, the `a[i]` check, the `SmallArray` push and `_start`.
 
     // (`charcount(s)` was here — ~30 lines of scan for the bytes that are not UTF-8
     // continuation bytes. RFC-0078's census found `charCount` the one builtin with
@@ -16179,90 +16146,6 @@ const OFLAGS_CREAT_TRUNC: i32 = 1 | 8;
 // the oracle a differential test compares it against. The measurement that
 // bought it: 330 ns hand-written here against 721 ns compiled, and no difference
 // a program could observe.)
-
-/// `print(n: Int64)`: the decimal digits and a newline, straight to fd 1.
-///
-/// Written as wasm rather than deferred to the shim because `print` is
-/// `printf("%lld\n")` today and varargs are M3 — and because it is the one place
-/// this backend touches the shadow stack without an aggregate being involved.
-/// Digits go in backwards from the end of the frame's buffer, which is why the
-/// pointer handed to `write_all` is computed rather than fixed.
-///
-/// Unsigned division throughout, so `Int64.min` — whose negation is itself —
-/// prints its digits rather than wrapping to nothing.
-fn print_i64(m: &mut Module, write_all: u32) -> u32 {
-    // A 32-byte buffer at the bottom of the frame; 20 digits and a sign is the
-    // widest an i64 gets.
-    const BUF_END: u32 = 32;
-    let (v, sgn, p, neg) = (0, 1, 3, 4); // params 0 and 1, base is 2, then our two
-    m.func(
-        &[ValType::I64, ValType::I32],
-        &[],
-        &[ValType::I32, ValType::I32],
-        BUF_END,
-        |b| {
-            // neg = signed && v < 0; v = |v| as unsigned. An unsigned type prints its
-            // magnitude — the interpreter's `*v as u64` — so the caller says which,
-            // rather than there being a second digit loop to keep in step with this
-            // one.
-            b.ins(&Instruction::LocalGet(v))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::I64LtS)
-                .ins(&Instruction::LocalGet(sgn))
-                .ins(&Instruction::I32And)
-                .ins(&Instruction::LocalTee(neg))
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::LocalGet(v))
-                .ins(&Instruction::I64Sub)
-                .ins(&Instruction::LocalSet(v))
-                .ins(&Instruction::End);
-            // p = base + BUF_END - 1; *p = the newline
-            b.slot(BUF_END - 1)
-                .ins(&Instruction::LocalTee(p))
-                .ins(&Instruction::I32Const(10)) // newline
-                .ins(&Instruction::I32Store8(byte()));
-            // do { *--p = '0' + v % 10; v /= 10 } while (v)
-            b.ins(&Instruction::Loop(BlockType::Empty))
-                .ins(&Instruction::LocalGet(p))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::LocalTee(p))
-                .ins(&Instruction::LocalGet(v))
-                .ins(&Instruction::I64Const(10))
-                .ins(&Instruction::I64RemU)
-                .ins(&Instruction::I32WrapI64)
-                .ins(&Instruction::I32Const(b'0' as i32))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Store8(byte()))
-                .ins(&Instruction::LocalGet(v))
-                .ins(&Instruction::I64Const(10))
-                .ins(&Instruction::I64DivU)
-                .ins(&Instruction::LocalTee(v))
-                .ins(&Instruction::I64Eqz)
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::BrIf(0))
-                .ins(&Instruction::End);
-            // if (neg) *--p = '-'
-            b.ins(&Instruction::LocalGet(neg))
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(p))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::LocalTee(p))
-                .ins(&Instruction::I32Const(b'-' as i32))
-                .ins(&Instruction::I32Store8(byte()))
-                .ins(&Instruction::End);
-            // write_all(1, p, (base + BUF_END) - p)
-            b.ins(&Instruction::I32Const(1));
-            b.ins(&Instruction::LocalGet(p));
-            b.slot(BUF_END)
-                .ins(&Instruction::LocalGet(p))
-                .ins(&Instruction::I32Sub);
-            b.ins(&Instruction::Call(write_all)).ins(&Instruction::Drop);
-        },
-    )
-}
 
 /// The result type of an RFC-0014/RFC-0044 I/O builtin, or `None` if the name is
 /// not one.

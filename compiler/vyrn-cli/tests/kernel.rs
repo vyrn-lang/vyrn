@@ -228,6 +228,36 @@ fn run_corpus() {
         let lowered = vyrn_lower::lower(&program);
         let own = vyrn_frontend::own::analyze(&program);
         let file = path.file_name().unwrap().to_string_lossy().to_string();
+        // The module-state initializer (RFC-0013) is a body and no instance:
+        // every `let` at module scope is a store into the global it names.
+        // The kernel judges it and the lambda frames it holds like any other
+        // (RFC-0125 §3 M6, third slice).
+        if !program.globals.is_empty() {
+            match vyrn_lower::core::build_module_state(&program, &own, &lowered.globals) {
+                Err(g) => {
+                    if show_gaps.as_deref().is_some_and(|w| g.what.contains(w)) {
+                        eprintln!(
+                            "  gap: {file} <module state>:{} {} {}",
+                            g.line, g.what, g.detail
+                        );
+                    }
+                    *gaps.entry(g.what).or_default() += 1;
+                }
+                Ok(top) => {
+                    for body in top.frames() {
+                        match vyrn_lower::kernel::check(body) {
+                            Ok(()) => accepted += 1,
+                            Err(r) => refused.push(format!(
+                                "{file}: <module state> {}: line {}: {}",
+                                r.body,
+                                r.line,
+                                r.message.replace('\n', " / ")
+                            )),
+                        }
+                    }
+                }
+            }
+        }
         for inst in &lowered.instances {
             match vyrn_lower::core::build(&program, inst, &own) {
                 Err(g) => {

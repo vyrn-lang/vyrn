@@ -259,8 +259,10 @@ impl Spawned {
 pub struct Judged {
     /// Per body, in the order given.
     pub effects: Vec<Effects>,
-    /// `(body index, callee name)` for every call nobody could attribute.
-    pub unknown: Vec<(usize, String)>,
+    /// `(body index, callee name, line)` for every call nobody could
+    /// attribute. The line is the call's, so a remaining one can be read in
+    /// the source (RFC-0125 §3 M6, finding 14).
+    pub unknown: Vec<(usize, String, usize)>,
     /// `(body index, callee name)` for every call through a function value
     /// that `through` answered with bodies.
     pub through: Vec<(usize, String)>,
@@ -320,7 +322,7 @@ pub fn judge(
         e.sort_unstable();
         e.dedup();
         edges.push(e);
-        unknown.extend(w.unknown.into_iter().map(|n| (i, n)));
+        unknown.extend(w.unknown.into_iter().map(|(n, l)| (i, n, l)));
         via.extend(w.via.into_iter().map(|n| (i, n)));
         spawns.extend(w.spawns.into_iter().map(|(c, l, idx)| (i, c, l, idx)));
     }
@@ -367,7 +369,7 @@ struct Walk<'a> {
     body: &'a Body,
     own: Effects,
     edges: Vec<usize>,
-    unknown: Vec<String>,
+    unknown: Vec<(String, usize)>,
     /// The callees `through` answered with bodies.
     via: Vec<String>,
     /// `(callee, line, callee bodies)` per spawn.
@@ -484,7 +486,7 @@ impl Walk<'_> {
             }
             Callee::Pure => (true, Vec::new()),
             Callee::Unknown => {
-                self.unknown.push(callee.clone());
+                self.unknown.push((callee.clone(), line));
                 (true, Vec::new())
             }
         };
