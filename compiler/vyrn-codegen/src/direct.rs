@@ -1276,16 +1276,22 @@ impl<'a> Cx<'a> {
     /// pass walks the source statement. `compiler/vyrn-cli/tests/coretables.rs`
     /// pins that residue at twelve rows over the corpus.
     fn store_row(&self, node: usize) -> bool {
-        let Some(f) = &self.facts else {
-            return self.plan.store_owned_at(node);
-        };
-        match f.stores.get(&self.plan.key_of(node)) {
-            Some(released) => {
-                self.plan.acknowledge(node);
-                *released
-            }
-            None => self.plan.store_owned_at(node),
+        self.store_fact(node)
+            .unwrap_or_else(|| self.plan.store_owned_at(node))
+    }
+
+    /// The core's answer alone, or `None` where it states none — a body this
+    /// pass could not lower, or a statement RFC-0091 M2's rewrite built. A
+    /// store to a NAME asks for it this way, because the answer it falls
+    /// back to is the plan's row AND the guards around it, not the row
+    /// alone.
+    fn store_fact(&self, node: usize) -> Option<bool> {
+        let f = self.facts.as_ref()?;
+        let released = f.stores.get(&self.plan.key_of(node)).copied();
+        if released.is_some() {
+            self.plan.acknowledge(node);
         }
+        released
     }
 
     /// Round twenty-eight read off the core (RFC-0125 §3 M3, the
@@ -4162,15 +4168,27 @@ impl<'p> Fn_<'_, 'p> {
                 // either input. The append spine above hides the common
                 // `s = s + x`; what reaches here is a PREPEND, and that leaked
                 // 9.9 GB over 50,000 calls of a 200-iteration loop.
+                let fresh_str = matches!(self.cx.resolve(&ty), Type::Str)
+                    && matches!(value, Expr::Binary { op: BinOp::Add, .. });
                 // RFC-0125 §3 M3: the rule above, the row, and round
                 // eighteen's `store_fresh` are ONE answer, and the core
-                // states it at the store's own node (`Cx::store_row`). What
+                // states it at the store's own node (`Cx::store_fact`). What
                 // is left here is the region gate: arena memory is not this
-                // path's to free, whatever the store displaces. The answer is
-                // taken FIRST so a region-gated site still counts as
-                // considered (§26's finish check).
-                let snap = if self.cx.store_row(s as *const Stmt as usize) && self.region_depth == 0
-                {
+                // path's to free, whatever the store displaces. Where the
+                // core states nothing — a body it could not lower — the
+                // three read as they always did. The answer is taken FIRST
+                // so a region-gated site still counts as considered (§26's
+                // finish check).
+                let owned_here = self
+                    .cx
+                    .store_fact(s as *const Stmt as usize)
+                    .unwrap_or_else(|| {
+                        self.cx.plan.store_owned_at(s as *const Stmt as usize)
+                            && (fresh_str
+                                || !vyrn_frontend::movecheck::mentions_place(value, name)
+                                || self.cx.plan.store_fresh_at(s as *const Stmt as usize))
+                    });
+                let snap = if owned_here && self.region_depth == 0 {
                     match (place, &r) {
                         // A scalar local IS the pointer; it has no address.
                         (Place::Local(l), Repr::Scalar(_)) => {

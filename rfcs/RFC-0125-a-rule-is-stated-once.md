@@ -1852,16 +1852,21 @@ was fixed:
   is empty across every function the lowering reaches, so the flip is a no-op
   that stands for the day a row appears. Recorded because a green diff over an
   empty table proves nothing about the table.
-- **Every reader falls back per node, and the parity suite is why.** The first
-  cut had `arg_drops` and `discarded_results` read the core alone: absent
-  meant no. `valuecount.vyrn`, a fixture of the parity suite and of no corpus
-  program, reads a field off a String literal (`"héllo".byteLength`), which
-  this pass refuses as "a place that is a literal" — so `main` is not lowered,
-  the core states nothing about any of it, and six argument drops went
-  unemitted. §26's finish check caught it, which is the loudness it exists
-  for. A node the core states nothing for keeps the plan's answer now, in
-  every reader here; the corpus proves the two equal wherever the core does
-  speak.
+- **Every reader falls back per node, and the fallback is the site's OWN old
+  answer.** Two gates outside the corpus made the same point twice. The first
+  cut had `arg_drops` and `discarded_results` read the core alone, absent
+  meaning no: `valuecount.vyrn`, a parity fixture and no corpus program, reads
+  a field off a String literal (`"héllo".byteLength`), which this pass refuses
+  as "a place that is a literal", so `main` is not lowered, the core states
+  nothing about any of it, and six argument drops went unemitted. §26's finish
+  check caught it, which is the loudness it exists for. Then the cross-engine
+  generator gate caught the sharper form: a store to a NAME fell back to the
+  plan's ROW, and the row alone is not what that site used to read — the
+  `mentions_place` guard and the `fresh_str` exception stood beside it.
+  Seventeen generated programs trapped, and `VYRN_PLAN_ROWS=1` did not restore
+  them, because the fault was in the fallback rather than in the flip. Stated
+  once: where the core answers, the answer stands; where it does not, the site
+  reads exactly what it read before the flip.
 
 | the corpus, this slice | sites |
 |---|---|
