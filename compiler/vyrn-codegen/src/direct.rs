@@ -2159,9 +2159,11 @@ fn lower_body(
     if counted {
         call_depth_enter(&mut b, cx);
     }
-    // RFC-0125 M1: the trap site. A bounds check that fails parks its message
-    // and its index in these two locals and branches OUT of this block; the
-    // one call to the trap helper stands after it. Measured on nbody's inner
+    // RFC-0125 M1: the trap site. A check that fails parks its trap-table ROW
+    // and the value the row names in these two locals and branches OUT of this
+    // block; the one call to `trapAt` stands after it. Seven of §2.3's eight
+    // rows reach it — the eighth is the prologue's own, which stands before
+    // the block and cannot branch into it. Measured on nbody's inner
     // loop under Cranelift: twenty-nine checks each carrying their own call
     // cost 3.56 s against 1.71 s with the compare kept and the call gone —
     // the call site, not the check, was what the engine paid for.
@@ -2204,11 +2206,11 @@ fn lower_body(
     }
     b.ins(&Instruction::End);
     cx_fn.depth -= 1;
-    if let Some((tpre, tidx)) = cx_fn.trap_site {
-        b.ins(&Instruction::LocalGet(tpre));
-        b.ins(&Instruction::LocalGet(tidx));
-        b.ins(&Instruction::I32Const(cx.rt.msg_oob_end as i32));
-        b.ins(&Instruction::Call(cx.rt.trap_idx));
+    if let Some((trule, tval)) = cx_fn.trap_site {
+        b.ins(&Instruction::LocalGet(trule));
+        b.ins(&Instruction::LocalGet(tval));
+        b.ins(&Instruction::I32Const(cx.rt.trap_table as i32));
+        b.ins(&Instruction::Call(cx.rt.trap_at));
     }
     // The helper exits the process; the validator is told so.
     b.ins(&Instruction::Unreachable);
@@ -2305,7 +2307,10 @@ fn frame_fits(b: &Frame, name: &str, line: usize) -> Result<(), String> {
 /// takes. The counter is a load, a compare and a store at the one site that
 /// has the frame in hand, so it stays here (RFC-0125 §3 M4).
 fn call_depth_enter(b: &mut Frame, cx: &Cx<'_>) {
-    let (at, msg, trap) = (cx.rt.call_depth, cx.rt.msg_calldepth, cx.rt.trap);
+    let at = cx.rt.call_depth;
+    // The one trap-table row that cannot go through the function's trap site:
+    // the prologue stands BEFORE the block a check branches out to, so it
+    // calls `trapAt` itself (RFC-0125 §2.3, and M1's structure).
     b.ins(&Instruction::I32Const(at as i32))
         .ins(&Instruction::I32Load(word()))
         .ins(&Instruction::I32Const(
@@ -2313,8 +2318,12 @@ fn call_depth_enter(b: &mut Frame, cx: &Cx<'_>) {
         ))
         .ins(&Instruction::I32GeU)
         .ins(&Instruction::If(BlockType::Empty))
-        .ins(&Instruction::I32Const(msg as i32))
-        .ins(&Instruction::Call(trap))
+        .ins(&Instruction::I32Const(
+            vyrn_frontend::trap::Rule::CallDepth.index() as i32,
+        ))
+        .ins(&Instruction::I64Const(0))
+        .ins(&Instruction::I32Const(cx.rt.trap_table as i32))
+        .ins(&Instruction::Call(cx.rt.trap_at))
         .ins(&Instruction::End);
     call_depth_bump(b, cx, 1);
 }
@@ -3656,15 +3665,16 @@ impl<'p> Fn_<'_, 'p> {
     /// rather than a scratch slot because every region open at an exit edge
     /// needs its own — see [`Fn_::exit_regions_above`].
     fn region_enter(&mut self, b: &mut Frame) {
-        let (sp, msg, trap) = (self.cx.rt.region_sp, self.cx.rt.msg_region, self.cx.rt.trap);
+        let sp = self.cx.rt.region_sp;
         b.ins(&Instruction::I32Const(sp as i32))
             .ins(&Instruction::I32Load(word()))
             .ins(&Instruction::I32Const(REGION_MAX as i32))
             .ins(&Instruction::I32GeU)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I32Const(msg as i32))
-            .ins(&Instruction::Call(trap))
-            .ins(&Instruction::End);
+            .ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        self.trap_row(b, vyrn_frontend::trap::Rule::RegionDepth, None);
+        self.depth -= 1;
+        b.ins(&Instruction::End);
         self.region_bump(b, 1);
         let mark = b.local(ValType::I32);
         b.ins(&Instruction::Call(self.cx.rt.region_enter))
@@ -7054,11 +7064,10 @@ impl<'p> Fn_<'_, 'p> {
         if matches!(op, BinOp::Div | BinOp::Rem | BinOp::Shl | BinOp::Shr) {
             let c = if n.wide() { ValType::I64 } else { ValType::I32 };
             let (d, num) = (self.scratch(b, c, 0), self.scratch(b, c, 1));
-            let trap = self.cx.rt.trap;
-            let msg = match op {
-                BinOp::Div => self.cx.rt.msg_div0,
-                BinOp::Rem => self.cx.rt.msg_rem0,
-                _ => self.cx.rt.msg_shift,
+            let rule = match op {
+                BinOp::Div => vyrn_frontend::trap::Rule::DivZero,
+                BinOp::Rem => vyrn_frontend::trap::Rule::RemZero,
+                _ => vyrn_frontend::trap::Rule::ShiftRange,
             };
             b.ins(&Instruction::LocalSet(d));
             b.ins(&Instruction::LocalSet(num));
@@ -7081,8 +7090,9 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I32Eqz);
             }
             b.ins(&Instruction::If(BlockType::Empty));
-            b.ins(&Instruction::I32Const(msg as i32));
-            b.ins(&Instruction::Call(trap));
+            self.depth += 1;
+            self.trap_row(b, rule, None);
+            self.depth -= 1;
             b.ins(&Instruction::End);
             if op == BinOp::Div && n.signed {
                 // The width's minimum over -1 has no representable answer.
@@ -7090,7 +7100,6 @@ impl<'p> Fn_<'_, 'p> {
                 // LLVM's rewritten `srem` and the interpreter both produce. An
                 // unsigned divide is exempt because it has no minimum.)
                 let min = i64::MIN >> (64 - n.bits);
-                let ovf = self.cx.rt.msg_divovf;
                 b.ins(&Instruction::LocalGet(d));
                 if n.wide() {
                     b.ins(&Instruction::I64Const(-1)).ins(&Instruction::I64Eq);
@@ -7104,8 +7113,9 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 b.ins(&Instruction::I32And);
                 b.ins(&Instruction::If(BlockType::Empty));
-                b.ins(&Instruction::I32Const(ovf as i32));
-                b.ins(&Instruction::Call(trap));
+                self.depth += 1;
+                self.trap_row(b, vyrn_frontend::trap::Rule::DivOverflow, None);
+                self.depth -= 1;
                 b.ins(&Instruction::End);
             }
             b.ins(&Instruction::LocalGet(num));
@@ -8060,11 +8070,6 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalSet(to));
                     // start < 0 || end < start || end > len — one unsigned
                     // compare would miss the ordering, so all three are written.
-                    let (pre, post, trap) = (
-                        self.cx.rt.msg_soob,
-                        self.cx.rt.msg_oob_end,
-                        self.cx.rt.trap_idx,
-                    );
                     b.ins(&Instruction::LocalGet(from));
                     b.ins(&Instruction::I32Const(0));
                     b.ins(&Instruction::I32LtS);
@@ -8078,9 +8083,9 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::I32Or);
                     b.ins(&Instruction::If(BlockType::Empty));
                     self.depth += 1;
-                    b.ins(&Instruction::I32Const(pre as i32));
                     // The offset the other two engines name: the low one when it
                     // is negative or out of order, otherwise the high one.
+                    let at = b.local(ValType::I64);
                     b.ins(&Instruction::LocalGet(from));
                     b.ins(&Instruction::I64ExtendI32S);
                     b.ins(&Instruction::LocalGet(to));
@@ -8093,9 +8098,8 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::I32LtS);
                     b.ins(&Instruction::I32Or);
                     b.ins(&Instruction::Select);
-                    b.ins(&Instruction::I32Const(post as i32));
-                    b.ins(&Instruction::Call(trap));
-                    b.ins(&Instruction::Unreachable);
+                    b.ins(&Instruction::LocalSet(at));
+                    self.trap_row(b, vyrn_frontend::trap::Rule::StringIndex, Some(at));
                     self.depth -= 1;
                     b.ins(&Instruction::End);
                     b.ins(&Instruction::LocalGet(to));
@@ -11301,45 +11305,61 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Add);
     }
 
+    /// Take a trap-table row — RFC-0125 §2.3, and the one way this backend
+    /// refuses at any of the eight rows the census of §3 M6 gives the emitter.
+    ///
+    /// The site pushes the row's NUMBER and the value the row names; the
+    /// wording is the table's, which `std/runtime`'s `trapAt` reads. Before
+    /// this, each site pushed its own interned sentence and the two index rows
+    /// pushed three pieces through a second helper.
+    ///
+    /// A function with a trap site (M1) parks the pair and branches OUT to it,
+    /// so a check costs a compare and a branch rather than a call — the 3.56 s
+    /// against 1.71 s the prologue's note records. The caller has already
+    /// counted its own `if` in `depth`, so the trap block is `depth - 1`, one
+    /// label inside the function block a `return` targets.
+    ///
+    /// `val` names the row's value as an `i64` local; a row without one passes
+    /// zero, which `trapAt` never reads.
+    fn trap_row(&mut self, b: &mut Frame, rule: vyrn_frontend::trap::Rule, val: Option<u32>) {
+        let push_val = |b: &mut Frame| {
+            match val {
+                Some(v) => b.ins(&Instruction::LocalGet(v)),
+                None => b.ins(&Instruction::I64Const(0)),
+            };
+        };
+        match self.trap_site {
+            Some((trule, tval)) => {
+                b.ins(&Instruction::I32Const(rule.index() as i32));
+                b.ins(&Instruction::LocalSet(trule));
+                push_val(b);
+                b.ins(&Instruction::LocalSet(tval));
+                b.ins(&Instruction::Br(self.depth - 1));
+            }
+            None => {
+                b.ins(&Instruction::I32Const(rule.index() as i32));
+                push_val(b);
+                b.ins(&Instruction::I32Const(self.cx.rt.trap_table as i32));
+                b.ins(&Instruction::Call(self.cx.rt.trap_at));
+            }
+        }
+    }
+
     /// Trap unless `idx` is in `0..len`.
     ///
-    /// The index is in the message, so it cannot be one interned string — hence
-    /// `trap_idx(prefix, i, suffix)` rather than the plain `trap` the arithmetic
-    /// checks use. Unsigned, so a negative index is caught by the same compare.
+    /// Unsigned, so a negative index is caught by the same compare.
     fn bounds_check(&mut self, b: &mut Frame, w: &Walk, idx: u32, string: bool) {
-        let (pre, post, trap) = (
-            if string {
-                self.cx.rt.msg_soob
-            } else {
-                self.cx.rt.msg_aoob
-            },
-            self.cx.rt.msg_oob_end,
-            self.cx.rt.trap_idx,
-        );
+        let rule = if string {
+            vyrn_frontend::trap::Rule::StringIndex
+        } else {
+            vyrn_frontend::trap::Rule::ArrayIndex
+        };
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::LocalGet(w.len));
         b.ins(&Instruction::I64GeU);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        match self.trap_site {
-            // The function's one trap site (RFC-0125 M1): park the message and
-            // the index, and branch out of the trap block. `depth` counts that
-            // block and this `if`; the function block every `return` targets
-            // is one label further out, so the trap block is `depth - 1`.
-            Some((tpre, tidx)) => {
-                b.ins(&Instruction::I32Const(pre as i32));
-                b.ins(&Instruction::LocalSet(tpre));
-                b.ins(&Instruction::LocalGet(idx));
-                b.ins(&Instruction::LocalSet(tidx));
-                b.ins(&Instruction::Br(self.depth - 1));
-            }
-            None => {
-                b.ins(&Instruction::I32Const(pre as i32));
-                b.ins(&Instruction::LocalGet(idx));
-                b.ins(&Instruction::I32Const(post as i32));
-                b.ins(&Instruction::Call(trap));
-            }
-        }
+        self.trap_row(b, rule, Some(idx));
         self.depth -= 1;
         b.ins(&Instruction::End);
     }
@@ -11356,11 +11376,6 @@ impl<'p> Fn_<'_, 'p> {
     /// span: `idx + span` wraps for a huge `idx` and would let the access through,
     /// while `len - span` cannot wrap because `len >= 0`.
     fn bounds_check_span(&mut self, b: &mut Frame, w: &Walk, idx: u32, span: i64) {
-        let (pre, post, trap) = (
-            self.cx.rt.msg_aoob,
-            self.cx.rt.msg_oob_end,
-            self.cx.rt.trap_idx,
-        );
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::I64Const(0));
         b.ins(&Instruction::I64LtS);
@@ -11372,11 +11387,12 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Or);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        b.ins(&Instruction::I32Const(pre as i32));
         // The first lane of `idx..idx+span-1` actually out of range: `idx` when it
         // is negative, `idx + span - 1` when the tail overruns. Reporting `idx`
         // alone would name an in-range element in the common case, and this is the
-        // cold path.
+        // cold path. A local rather than the stack, because the row's value is
+        // what the trap site parks.
+        let at = b.local(ValType::I64);
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::I64Const(span - 1));
@@ -11385,8 +11401,8 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64Const(0));
         b.ins(&Instruction::I64LtS);
         b.ins(&Instruction::Select);
-        b.ins(&Instruction::I32Const(post as i32));
-        b.ins(&Instruction::Call(trap));
+        b.ins(&Instruction::LocalSet(at));
+        self.trap_row(b, vyrn_frontend::trap::Rule::ArrayIndex, Some(at));
         self.depth -= 1;
         b.ins(&Instruction::End);
     }
@@ -14975,15 +14991,12 @@ impl Num {
 
     /// The integer type `ty` *is*, or `None` for anything that is not one. Takes
     /// a RESOLVED type, so a validated name has already become its base.
+    ///
+    /// `vyrn_frontend::validate::width` is the answer, not a second copy of it:
+    /// "which types are integers, and how wide" is the fact the `int-narrowing`
+    /// row rests on, and the interpreter reads the same one (RFC-0125 §3 M6).
     fn of(ty: &Type) -> Option<Num> {
-        match ty {
-            Type::Int => Some(Num::PLAIN),
-            Type::IntN { bits, signed } => Some(Num {
-                bits: *bits,
-                signed: *signed,
-            }),
-            _ => None,
-        }
+        vyrn_frontend::validate::width(ty).map(|(bits, signed)| Num { bits, signed })
     }
 
     /// Whether the carrier is an `i64`. Everything 32 bits and under rides an
@@ -15543,9 +15556,9 @@ const VYRN_RUNTIME: &[(&str, &[ValType], &[ValType])] = &[
     ("listDirGen", &[ValType::I32; 5], &[]),
     // Step 9: the two traps and the two renderers. `boolStr` is handed the
     // two interned literals, as `strFromBytes` is handed its two wordings;
-    // `trapIdx`'s halves are `trap.rs`'s, interned by `runtime` below.
+    // `trapAt`'s table is `trap::Rule`'s, laid out by `runtime` below.
     ("trapV", &[ValType::I32], &[]),
-    ("trapIdx", &[ValType::I32, ValType::I64, ValType::I32], &[]),
+    ("trapAt", &[ValType::I32, ValType::I64, ValType::I32], &[]),
     ("printI64", &[ValType::I64, ValType::I32], &[]),
     ("boolStr", &[ValType::I32; 3], &[ValType::I32]),
     // Step 8: the region arena. `regionEnter` answers the bump top and
@@ -15669,7 +15682,12 @@ struct Rt {
     /// Grow a `String` accumulator in place (RFC-0081): `std/runtime`'s
     /// `strAppend`, called at every `s = s + …`; `std/json` alone has six.
     str_append: u32,
-    trap_idx: u32,
+    /// `std/runtime`'s `trapAt` and the trap table it indexes (RFC-0125 §2.3):
+    /// eight rows of two interned addresses, laid out by `runtime` from
+    /// `trap::Rule`. Every check the EMITTER inserts pushes its row's number
+    /// and calls this; the module spells none of the eight wordings.
+    trap_at: u32,
+    trap_table: u32,
     utf8valid: u32,
     /// `std/runtime`'s `strFromBytes`; its two failure messages, interned by
     /// `runtime` from `io_message`, go in as its last two arguments so the
@@ -15770,21 +15788,12 @@ struct Rt {
     region_enter: u32,
     region_exit: u32,
     count: u32,
-    msg_div0: u32,
-    msg_rem0: u32,
-    msg_divovf: u32,
-    msg_shift: u32,
-    msg_aoob: u32,
-    msg_soob: u32,
-    msg_oob_end: u32,
-    msg_region: u32,
     /// RFC-0004 §4's region nesting counter: four reserved bytes, because the
     /// depth is dynamic (a `region` in a callee nests inside its caller's) and
     /// entering a 65th is a trap the interpreter also takes. Storage rather than a
     /// wasm global for M2f's reason — module state showed that one mechanism in
     /// memory beats two, and `reserve` is that mechanism.
     region_sp: u32,
-    msg_calldepth: u32,
     /// The call-depth counter (audit A5.3): four reserved bytes holding how many
     /// Vyrn calls are in flight, in the same storage and for the same reason
     /// `region_sp` is. Every named function's prologue bumps it and its one exit
@@ -15845,7 +15854,8 @@ impl Rt {
             str_false: 0,
             concat: 0,
             str_append: 0,
-            trap_idx: 0,
+            trap_at: 0,
+            trap_table: 0,
             utf8valid: 0,
             str_from_bytes: 0,
             starts: 0,
@@ -15893,16 +15903,7 @@ impl Rt {
             // Derived, not declared. The data segment addresses are filled in by
             // `runtime` as it interns them.
             count: 0,
-            msg_div0: 0,
-            msg_rem0: 0,
-            msg_divovf: 0,
-            msg_shift: 0,
-            msg_aoob: 0,
-            msg_soob: 0,
-            msg_oob_end: 0,
-            msg_region: 0,
             region_sp: 0,
-            msg_calldepth: 0,
             call_depth: 0,
         };
         rt.count = table.len() as u32;
@@ -16053,7 +16054,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {
     rt.arr_copy_from = v.get("arrCopyFrom");
     rt.arr_clear = v.get("arrClear");
     rt.trap = v.get("trapV");
-    rt.trap_idx = v.get("trapIdx");
+    rt.trap_at = v.get("trapAt");
     rt.print_i64 = v.get("printI64");
     rt.bool_str = v.get("boolStr");
     rt.wasi = *wasi;
@@ -16094,58 +16095,39 @@ fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {
     rt.region_exit = v.get("regionExit");
     rt.str_true = rt.intern(m, "true");
     rt.str_false = rt.intern(m, "false");
-    rt.msg_div0 = rt.intern(m, &vyrn_frontend::trap::line(vyrn_frontend::trap::DIV_ZERO));
-    rt.msg_rem0 = rt.intern(m, &vyrn_frontend::trap::line(vyrn_frontend::trap::REM_ZERO));
-    rt.msg_divovf = rt.intern(
-        m,
-        &vyrn_frontend::trap::line(vyrn_frontend::trap::DIV_OVERFLOW),
-    );
-    rt.msg_shift = rt.intern(
-        m,
-        &vyrn_frontend::trap::line(vyrn_frontend::trap::SHIFT_RANGE),
-    );
     // (The three spellings `{:.6}` gives a non-finite double were interned here
     // for `float_str`. `std/num`'s `f64Str` builds them out of bytes, in Vyrn —
     // RFC-0081 M2.)
-    // The bounds message has the offending index in the MIDDLE, so it is three
-    // pieces rather than one interned string — see `trap_idx` below.
-    rt.msg_aoob = rt.intern(
-        m,
-        &format!(
-            "{}{}",
-            vyrn_frontend::trap::PREFIX,
-            vyrn_frontend::trap::ARRAY_INDEX.0
-        ),
-    );
-    rt.msg_soob = rt.intern(
-        m,
-        &format!(
-            "{}{}",
-            vyrn_frontend::trap::PREFIX,
-            vyrn_frontend::trap::STRING_INDEX.0
-        ),
-    );
-    rt.msg_oob_end = rt.intern(m, &format!("{}\n", vyrn_frontend::trap::ARRAY_INDEX.1));
+    // The trap table — RFC-0125 §2.3, and the eight rows the census of §3 M6
+    // sorts into "a check the emitter inserts". Each row is the two halves
+    // `trap::Rule` states, interned, and the table is those addresses in row
+    // order: the wording before the value, and the wording after it, or zero
+    // where the row has no value. Every trap site pushes a row NUMBER now, so
+    // the eight `msg_*` fields this replaced are gone and the emitter knows no
+    // sentence. `trapAt` reads the row.
+    let mut table = Vec::with_capacity(8 * 8);
+    for r in vyrn_frontend::trap::Rule::ALL {
+        let (pre, post) = r.parts();
+        let pre = rt.intern(m, &pre);
+        let post = post.map_or(0, |p| rt.intern(m, &p));
+        table.extend_from_slice(&pre.to_le_bytes());
+        table.extend_from_slice(&post.to_le_bytes());
+    }
+    rt.trap_table = m.data(&table, 4);
     // RFC-0004 §4. The 64 is the LLVM prelude's fixed region stack, and the
     // interpreter traps at the same depth with the same words precisely so the
-    // three engines agree about it.
-    rt.msg_region = rt.intern(
-        m,
-        &vyrn_frontend::trap::line(&vyrn_frontend::trap::region_depth()),
-    );
+    // three engines agree about it; the depth counter itself stays inline (see
+    // [`Fn_::region_enter`]).
     rt.region_sp = m.reserve(4, 4);
-    // Audit A5.3. Interned from the constant, so the number in the message and
-    // the number the prologue compares against cannot drift apart.
-    rt.msg_calldepth = rt.intern(
-        m,
-        &vyrn_frontend::trap::line(&vyrn_frontend::trap::call_depth()),
-    );
+    // Audit A5.3. The row is built from the constant the prologue compares
+    // against, so the number in the message and the number enforced cannot
+    // drift apart.
     rt.call_depth = m.reserve(4, 4);
 
     // Every runtime FUNCTION this backend once wrote is now `std/runtime`'s
     // (PLAN-0125-runtime §6): the allocator at step 2, the strings at steps 1
     // and 4, the maps at 5, the arrays at 6, the I/O family at 7, and at step
-    // 9 the last four — `trapV`, `trapIdx`, `printI64` and `boolStr`. The call
+    // 9 the last four — `trapV`, `trapAt`, `printI64` and `boolStr`. The call
     // sites reach them through the indices `VyrnRt` reserved. What is left in
     // this file is instruction sequences at their one site each, listed in
     // step 9's results: the prologue's depth counter, the trap site of

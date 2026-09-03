@@ -32,6 +32,7 @@ pub mod core;
 pub mod effects;
 pub mod kernel;
 mod render;
+pub mod typed;
 
 /// Install the placer (RFC-0125 M3) into `own::analyze`, so every consumer
 /// of the ownership plan — the interpreter, both backends, `vyrn why` — sees

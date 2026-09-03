@@ -13,11 +13,19 @@
 //! what that cost: `validation_required` in `vyrn-codegen` for the two
 //! emitters, and the same question asked three more times in `interp.rs`.
 //!
-//! Three functions. [`of`] and [`required`] answer the same question at two
-//! grains — the interpreter has a value and a target type, the emitters have a
-//! pair of types — so the second is built on the first. [`is_cross_field`] is
-//! the fact both the BINDING and the WORDING of a predicate follow, asked here
-//! so the two cannot disagree.
+//! Two rules. The `where` rows first: [`of`] and [`required`] answer the same
+//! question at two grains — the interpreter has a value and a target type, the
+//! emitters have a pair of types — so the second is built on the first.
+//! [`is_cross_field`] is the fact both the BINDING and the WORDING of a
+//! predicate follow, asked here so the two cannot disagree.
+//!
+//! Then the two rows that ANSWER rather than refusing (§3 M6's design, the
+//! third judgment's second slice): [`narrows`] says which crossings re-read
+//! the bits, [`wrap`] and [`from_float`] say what the value reads as, and
+//! [`width`] says which types are integers. No engine can call another's
+//! instructions for those — the interpreter reads a `Val`, the emitters write
+//! a mask and a `trunc` — but all three must agree about WHICH crossing does
+//! it, and that agreement is one function here instead of one per engine.
 
 use std::collections::HashMap;
 
@@ -64,6 +72,71 @@ pub fn required<'t>(
         return None;
     }
     of(types.get(n))
+}
+
+/// The width and signedness of an integer type, or `None` for a type that is
+/// not one. `Int` is `Int64` (RFC-0002: the unsized names are gone).
+///
+/// Public because the wasm emitter asked the same question in its own words
+/// (`Num::of`), and "which types are integers, and how wide" is one fact.
+pub fn width(t: &Type) -> Option<(u8, bool)> {
+    match t {
+        Type::Int => Some((64, true)),
+        Type::IntN { bits, signed } => Some((*bits, *signed)),
+        _ => None,
+    }
+}
+
+/// Whether a value crossing from `from` into `to` is RE-READ: the census's
+/// `int-narrowing` and `float-to-int` rows (RFC-0125 §3 M6).
+///
+/// These two rows answer rather than refusing — `UInt8(300)` is 44 — so the
+/// crossing has no predicate and no trap. What it has is a rule about the
+/// bits, and the rule is here for the reason the rest of this file is: the
+/// three engines each write their own instructions for it, and they must agree
+/// about WHICH crossings do it. A crossing that changes the width or the
+/// signedness re-reads the low bits and the sign; the same pair does not, and
+/// that is [`required`]'s exemption at the other rows.
+pub fn narrows(from: &Type, to: &Type) -> bool {
+    let Some(t) = width(to) else { return false };
+    match from {
+        // Truncated toward zero, then re-read at the target's width.
+        Type::Float | Type::Float32 => true,
+        _ => width(from).is_some_and(|f| f != t),
+    }
+}
+
+/// What a value READS AS at `bits` and `signed`: the low bits, and the sign
+/// re-read at the new width — the `int-narrowing` row's answer.
+///
+/// The interpreter's `wrap_intn` before this, at ten sites in one file and
+/// nowhere another engine could read it. It is here beside [`narrows`], which
+/// says WHERE it applies, for the reason the rest of this file is here: the
+/// engines each write their own instructions for the rule and must not each
+/// decide what the rule is.
+pub fn wrap(v: i64, bits: u8, signed: bool) -> i64 {
+    if bits >= 64 {
+        return v;
+    }
+    let mask = (1i64 << bits) - 1;
+    let m = v & mask;
+    if signed && (m & (1i64 << (bits - 1))) != 0 {
+        m | !mask // set the high bits (sign extension)
+    } else {
+        m
+    }
+}
+
+/// What a float READS AS in a sized integer — the `float-to-int` row.
+///
+/// Truncated toward zero, then re-read by [`wrap`]. An unsigned target reads
+/// the float as a `u64` (the native `fptoui`), a signed one as an `i64`
+/// (`fptosi`); out of range is unspecified, as it is in C and LLVM, and the
+/// census's program stays in range for that reason. Four arms in `convert_val`
+/// before this, which is four chances to disagree about one truncation.
+pub fn from_float(f: f64, bits: u8, signed: bool) -> i64 {
+    let n = if signed { f as i64 } else { f as u64 as i64 };
+    wrap(n, bits, signed)
 }
 
 /// Whether `decl`'s predicate is the CROSS-FIELD form — RFC-0003.
