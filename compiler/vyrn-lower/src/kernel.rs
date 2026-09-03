@@ -59,7 +59,7 @@
 //! Every other name the body does not own — a heapless value, a pattern
 //! binder of a non-consuming switch — is invisible here.
 
-use crate::core::{Arm, Body, Name, Old, ParamBorrow, Place, Rhs, St, Val};
+use crate::core::{Arm, Body, BorrowKind, Name, Old, Place, Rhs, St, Val};
 use vyrn_frontend::ast::Capability;
 use vyrn_frontend::own::Exit;
 
@@ -652,14 +652,20 @@ impl<'b> Kernel<'b> {
         Ok(())
     }
 
-    /// A take of a `read` or `modify` parameter, or of a second name for
-    /// one: refused, because the caller owns it (RFC-0089 rule 2). A
-    /// parameter is a borrow with no place to be an alias of, which is why
-    /// the alias table does not see it (RFC-0125 §3 M3, the census).
-    fn param_take(&self, n: Name, b: &ParamBorrow) -> Refusal {
+    /// A take of a `read` or `modify` parameter, of a second name for one,
+    /// or of a lambda frame's capture: refused, because somebody else owns
+    /// it (RFC-0089 rule 2, RFC-0037). Neither has a place to be an alias
+    /// of, which is why the alias table does not see them (RFC-0125 §3 M3,
+    /// the census).
+    fn param_take(&self, n: Name, b: &BorrowKind) -> Refusal {
         let (s, by) = (self.src(n), &self.by);
         let what = b.what(s);
-        let msg = if by == "a `return`" {
+        let msg = if by == "a `return`" && matches!(b, BorrowKind::Capture) {
+            format!(
+                "`{s}` may not be returned from a closure — it is a captured \
+                 binding, and the closure's result is its caller's"
+            )
+        } else if by == "a `return`" {
             format!("`{s}` may not be returned — it is {what}, and a return is owned")
         } else if by.ends_with("(..)`") {
             format!("`{s}` may not be passed to a `consume` parameter via {by} — it is {what}")

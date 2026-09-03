@@ -63,7 +63,7 @@ pub struct NameInfo {
     /// because the kernel's alias table words that one from the place it
     /// reads. RFC-0125 §3 M3, the census: this is what the kernel needs to
     /// refuse a take of a parameter, which has no place to be an alias of.
-    pub borrow_kind: Option<ParamBorrow>,
+    pub borrow_kind: Option<BorrowKind>,
     pub line: usize,
     /// The node the plan keys this binding by — a `Stmt::Let`, a parameter —
     /// when the name is one the plan can be told about. `None` for a
@@ -89,36 +89,41 @@ pub struct NameInfo {
 
 /// The borrow a parameter's capability makes, or `None` for one that owns
 /// what it is handed (`consume`).
-fn param_borrow(cap: Capability, name: &str) -> Option<ParamBorrow> {
+fn param_borrow(cap: Capability, name: &str) -> Option<BorrowKind> {
     let cap = match cap {
         Capability::Read | Capability::Share => "read",
         Capability::Modify => "modify",
         Capability::Consume => return None,
     };
-    Some(ParamBorrow {
+    Some(BorrowKind::Param {
         cap,
         of: name.to_string(),
     })
 }
 
-/// The borrow a parameter's capability makes (RFC-0089 rule 2), in the
-/// checker's words: the capability, and the parameter's own spelling.
+/// A borrow the surface named, rather than one the kernel reads out of a
+/// place (RFC-0089 rule 2, `movecheck::Borrow`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParamBorrow {
-    pub cap: &'static str,
-    pub of: String,
+pub enum BorrowKind {
+    /// A `read` or `modify` parameter, or a second name for one: the
+    /// capability, and the parameter's own spelling.
+    Param { cap: &'static str, of: String },
+    /// A name of the enclosing frame that a lambda frame reads (RFC-0037).
+    /// The closure observes it; the frame that made it still owns it.
+    Capture,
 }
 
-impl ParamBorrow {
+impl BorrowKind {
     /// What this borrow is, in words, for a refusal. `at` is the name the
     /// sentence is about: a second name for a parameter says so, which is
     /// how `movecheck::Borrow::what` words it.
     pub fn what(&self, at: &str) -> String {
-        let (cap, of) = (self.cap, &self.of);
-        if at == of {
-            format!("a `{cap}` parameter")
-        } else {
-            format!("a second name for the `{cap}` parameter `{of}`")
+        match self {
+            BorrowKind::Param { cap, of } if at == of => format!("a `{cap}` parameter"),
+            BorrowKind::Param { cap, of } => {
+                format!("a second name for the `{cap}` parameter `{of}`")
+            }
+            BorrowKind::Capture => "a captured binding".to_string(),
         }
     }
 }
@@ -1872,6 +1877,10 @@ impl<'a> Builder<'a> {
             let info = &outer.names[*n as usize];
             let (source, ty) = (info.source.clone(), info.ty.clone());
             let m = self.name(&source, ty, false, *line);
+            // RFC-0037: the closure's result is its caller's, and a capture
+            // is the enclosing frame's. The kernel refuses a take of one
+            // (RFC-0125 §3 M3, the census, row 28).
+            self.body.names[m as usize].borrow_kind = Some(BorrowKind::Capture);
             self.scope.push((source, m));
             self.body.params.push(m);
         }

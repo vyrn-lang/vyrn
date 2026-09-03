@@ -296,7 +296,7 @@ fn census() -> Vec<Row> {
             "RFC-0037",
             "`s` may not be returned from a closure — it is a captured binding, and the \
              closure's result is its caller's",
-            Kernel::No,
+            Kernel::Same,
         ),
         row(
             "r29_for_in_consume_module_state.vyrn",
