@@ -3085,6 +3085,79 @@ parity are the gate. `rfcs/census/wasm-sha256.tsv` is NOT regenerated in this
 slice: the trap sites changed, so the recorded module hashes changed, and a
 hash regenerated in the same commit that changed the bytes records nothing.
 
+**The judgment.** `vyrn-lower/src/typed.rs`, beside `kernel.rs` and
+`effects.rs`, over the same form. It is a use-def walk and nothing else: every
+name of a body is bound once, so the producer of a name is a lookup. For every
+store into a place whose type is validated — a `let`, an assignment, a field
+or an element — it asks what produced the value, and the three answers that
+are the rule are the type's own constructor, a name already of the type, and a
+literal the checker proved.
+
+WHICH crossings are validated is not the judgment's to decide. It asks
+`vyrn_frontend::validate`, which is where the fifth slice put the rule: the
+`where` rows through `validate::of`, and the two narrowing rows through
+`validate::narrows`, which is new here and states in one place what the three
+engines each write instructions for — a crossing that changes the width or the
+signedness re-reads the low bits and the sign, and the same pair does not.
+`tests/typed.rs` is the corpus tally, `VYRN_TYPED_DUMP=<file>:<fn>` prints one
+body's judged stores, and the ratchet is on the findings.
+
+The tally over 180 programs, on 2026-09-03:
+
+| answer | stores |
+|---|---|
+| by-constructor | 46,473 |
+| by-literal | 9,103 |
+| by-name | 349 |
+| findings | 6 |
+| **judged** | **55,931** |
+| unjudged | 94,691 |
+
+**RATCHET 6.** The six findings, each with its program and line:
+
+1. `examples/bin/server/store.vyrn:107`, `createPaste` — a PRIMITIVE into
+   `Created`: `let bumped: Created = store.counter + 1`. The sum is an
+   `Int64` and the slot is validated.
+2. and 3. `examples/shelf/server/store.vyrn:84`, `rateBook` — a READ OF A
+   PLACE into `Stars`: `let s: Stars = req.rating`, where the request's field
+   is a plain `Int64`. Two, because two entry points of the project reach the
+   module.
+4. `examples/autovalidate.vyrn:46` — a RECORD LITERAL into `Range`.
+5. and 6. `examples/inlinewhere.vyrn:15` and `:19` — a record literal into
+   `User`.
+
+**None of the six is a defect**, and the probe is what says so rather than an
+argument: `rfcs/probes-0125/raw-value-into-a-validated-slot.vyrn` runs all
+three shapes with a value that breaks the predicate, and all three refuse
+under `vyrn run`, `vyrn run --engine wasm` and a native binary, in the
+census's own words — `validation failed for `Small`` and
+``validation failed: `Pair` violates its `where` clause``. They are the sites
+the boundary check exists FOR. That is the judgment's real answer: the check
+is not missing anywhere, it is present everywhere, and §2.3's constructor is
+what makes it unnecessary rather than what makes it correct.
+
+Two of the six shapes are one shape. A record literal of a validated record
+type is a SECOND producer for that type, beside the constructor, and it is the
+`where-record` row's whole reason for existing. The other two — a primitive
+and a read of a place — are the value boundary the interpreter's `coerce`
+takes 97.6 per cent of the time for nothing.
+
+**What the judgment cannot see, and it is the same fact twice.** 94,691 stores
+are unjudged, every one of them into a sized integer whose producer has no
+type in the core: `Rhs::Prim` erases the operator, so `a + b` and `UInt8(n)`
+read alike, and a builtin's result type is nobody's declaration. A narrowing
+IS a store whose producer is of another width, so a judgment that guessed
+would call every integer store one. That number is not a gap in the walk; it
+is the size of what §2.3's constructor closes, stated as a count. When
+`UInt8` is a producer with a name, 94,691 stores become answerable by the
+lookup that already answers the other 55,931.
+
+The judgment holds no table of builtins. The caller answers what a callee
+returns, and the three the corpus stores through — `copy`, `swapRemove` and
+an index — hand their RECEIVER's value back, which the caller reads off the
+argument type. Before that rule the corpus showed 120 findings and every one
+of them was a copy of a `Title` reported for not being a `Title`.
+
 ### What each milestone is worth on its own
 
 M1 fixes the wasm column. M2 makes leaks a compile error. M3 halves the

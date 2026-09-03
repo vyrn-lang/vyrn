@@ -66,6 +66,35 @@ pub fn required<'t>(
     of(types.get(n))
 }
 
+/// The width and signedness of an integer type, or `None` for a type that is
+/// not one. `Int` is `Int64` (RFC-0002: the unsized names are gone).
+fn width(t: &Type) -> Option<(u8, bool)> {
+    match t {
+        Type::Int => Some((64, true)),
+        Type::IntN { bits, signed } => Some((*bits, *signed)),
+        _ => None,
+    }
+}
+
+/// Whether a value crossing from `from` into `to` is RE-READ: the census's
+/// `int-narrowing` and `float-to-int` rows (RFC-0125 §3 M6).
+///
+/// These two rows answer rather than refusing — `UInt8(300)` is 44 — so the
+/// crossing has no predicate and no trap. What it has is a rule about the
+/// bits, and the rule is here for the reason the rest of this file is: the
+/// three engines each write their own instructions for it, and they must agree
+/// about WHICH crossings do it. A crossing that changes the width or the
+/// signedness re-reads the low bits and the sign; the same pair does not, and
+/// that is [`required`]'s exemption at the other rows.
+pub fn narrows(from: &Type, to: &Type) -> bool {
+    let Some(t) = width(to) else { return false };
+    match from {
+        // Truncated toward zero, then re-read at the target's width.
+        Type::Float | Type::Float32 => true,
+        _ => width(from).is_some_and(|f| f != t),
+    }
+}
+
 /// Whether `decl`'s predicate is the CROSS-FIELD form — RFC-0003.
 ///
 /// A record base binds every field name; every other base binds `value`. The
