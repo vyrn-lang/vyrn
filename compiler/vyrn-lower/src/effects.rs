@@ -27,6 +27,7 @@
 use std::collections::HashMap;
 
 use vyrn_frontend::ast::Type;
+use vyrn_frontend::floor;
 
 use crate::core::{Body, Rhs, St};
 
@@ -525,4 +526,181 @@ mod tests {
         );
         assert_eq!(Effects::SPAWN_ALLOWS.to_string(), "alloc, trap");
     }
+}
+
+/// Which of the floor's judged capabilities each module of `program` REACHES —
+/// RFC-0125 §3 M6, fourth slice.
+///
+/// This is the judgment installed as [`vyrn_frontend::floor::Judge`]. It is
+/// handed a checked program, builds the named core for every instance the
+/// program has, and joins each body's set to a fixpoint; a module reaches a
+/// capability when an instance declared in it does. The floor keeps the words
+/// — the carrier its scan found and the line it found it on — and drops the
+/// rows this does not confirm, so the rule for these rows becomes reachability
+/// where the rest of the floor stays presence (finding 8).
+///
+/// A `let` at module scope (RFC-0013) and a `where` predicate are declarations
+/// the instance list does not cover, so they are read here from the AST by the
+/// same [`vyrn_frontend::floor::JUDGED`] names. Nothing else in the program can
+/// carry one of these rows.
+pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Capability)> {
+    let mut out: Vec<(String, floor::Capability)> = Vec::new();
+    let mut add = |module: Option<&String>, cap: floor::Capability| {
+        let key = module.cloned().unwrap_or_default();
+        if !out.iter().any(|(m, c)| *m == key && *c == cap) {
+            out.push((key, cap));
+        }
+    };
+
+    // The two declarations no instance holds. A judged name is a builtin call,
+    // so a walk for the name is the whole reading.
+    let spells = |e: &vyrn_frontend::ast::Expr| -> Vec<floor::Capability> {
+        let mut e = e.clone();
+        let mut found: Vec<floor::Capability> = Vec::new();
+        vyrn_frontend::project::walk_bare(&mut e, &mut |x| {
+            if let vyrn_frontend::ast::Expr::Call { name, .. } = x {
+                if let Some((_, cap)) = floor::JUDGED.iter().find(|(n, _)| n == name) {
+                    found.push(*cap);
+                }
+            }
+        });
+        found
+    };
+    let mut declared: Vec<(Option<String>, floor::Capability)> = Vec::new();
+    for g in &program.globals {
+        declared.extend(spells(&g.init).into_iter().map(|c| (g.module.clone(), c)));
+    }
+    for t in &program.type_decls {
+        if let Some(p) = &t.predicate {
+            declared.extend(spells(p).into_iter().map(|c| (t.module.clone(), c)));
+        }
+    }
+    for (module, cap) in declared {
+        add(module.as_ref(), cap);
+    }
+
+    // The effect a judged row is: one lookup, so the row and the atom cannot
+    // drift apart.
+    let rows: Vec<(Effect, floor::Capability)> = floor::JUDGED
+        .iter()
+        .filter_map(|(n, cap)| atom(n).map(|e| (e, *cap)))
+        .collect();
+
+    let lowered = crate::lower(program);
+    let own = vyrn_frontend::own::analyze(program);
+    let mut bodies = Vec::new();
+    let mut insts = Vec::new();
+    for inst in &lowered.instances {
+        if let Ok(b) = crate::core::build(program, inst, &own) {
+            bodies.push(b);
+            insts.push(inst);
+        }
+    }
+    // Every frame, outermost first: `top[i]` is instance `i`'s own body, and a
+    // lambda frame is keyed by the function it was written in and its line,
+    // which is how RFC-0037 names a lambda source.
+    let mut refs: Vec<&crate::core::Body> = Vec::new();
+    let mut top: Vec<usize> = Vec::new();
+    let mut lambda_frames: HashMap<(&str, usize), Vec<usize>> = HashMap::new();
+    for (i, b) in bodies.iter().enumerate() {
+        for f in b.frames() {
+            if std::ptr::eq(f, b) {
+                top.push(refs.len());
+            } else if let Some(line) = f
+                .name
+                .rsplit("@lambda:")
+                .next()
+                .and_then(|l| l.parse::<usize>().ok())
+            {
+                lambda_frames
+                    .entry((insts[i].func.name.as_str(), line))
+                    .or_default()
+                    .push(refs.len());
+            }
+            refs.push(f);
+        }
+    }
+    let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, inst) in insts.iter().enumerate() {
+        by_name
+            .entry(inst.func.name.as_str())
+            .or_default()
+            .push(top[i]);
+    }
+    let mut impl_methods: HashMap<&str, Vec<usize>> = HashMap::new();
+    for im in &program.impls {
+        for m in im.methods.iter().chain(im.places.iter()) {
+            if let Some(key) = vyrn_frontend::types::type_key(&im.ty) {
+                let mangled = vyrn_frontend::types::impl_method_name(&im.protocol, &key, &m.name);
+                if let Some(idx) = by_name.get(mangled.as_str()) {
+                    impl_methods
+                        .entry(m.name.as_str())
+                        .or_default()
+                        .extend(idx.iter().copied());
+                }
+            }
+        }
+    }
+    let decls = vyrn_frontend::types::decl_map(program);
+    let externs: std::collections::BTreeSet<&str> = program
+        .functions
+        .iter()
+        .filter(|f| f.is_extern)
+        .map(|f| f.name.as_str())
+        .collect();
+    let mut resolve = |name: &str| -> Callee {
+        if let Some(e) = atom(name) {
+            return Callee::Atom(Effects::of(e));
+        }
+        if externs.contains(name) {
+            return Callee::Atom(Effects::of(Effect::Extern));
+        }
+        if let Some(idx) = by_name.get(name) {
+            return Callee::Bodies(idx.clone());
+        }
+        if let Some(idx) = impl_methods.get(name) {
+            return Callee::Bodies(idx.clone());
+        }
+        Callee::Pure
+    };
+    let stored = vyrn_frontend::checker::stored_fn_effects(program);
+    let mut through = |ty: &Type| -> Callee {
+        let ty = &vyrn_frontend::types::resolve(ty, &decls);
+        if !matches!(ty, Type::Fn(..)) {
+            return Callee::Unknown;
+        }
+        let mut idx: Vec<usize> = Vec::new();
+        for src in &stored.sources {
+            if !vyrn_frontend::checker::fn_sigs_match(&src.sig, ty) {
+                continue;
+            }
+            if let Some(n) = &src.named {
+                if let Some(i) = by_name.get(n.as_str()) {
+                    idx.extend(i.iter().copied());
+                }
+            }
+            if let Some(l) = &src.lambda {
+                if let Some(i) = lambda_frames.get(&(l.defined_in.as_str(), l.line)) {
+                    idx.extend(i.iter().copied());
+                }
+            }
+        }
+        idx.sort_unstable();
+        idx.dedup();
+        if idx.is_empty() {
+            Callee::Unknown
+        } else {
+            Callee::Bodies(idx)
+        }
+    };
+    let judged = judge(&refs, &mut resolve, &mut through);
+    for (i, inst) in insts.iter().enumerate() {
+        let e = judged.effects[top[i]];
+        for (effect, cap) in &rows {
+            if e.has(*effect) {
+                add(inst.func.module.as_ref(), *cap);
+            }
+        }
+    }
+    out
 }

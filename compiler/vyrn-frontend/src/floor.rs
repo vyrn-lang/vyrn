@@ -147,6 +147,18 @@ pub const CALLS: &[(&str, Capability)] = &[
     ("args", Capability::Args),
 ];
 
+/// The rows a judgment answers — RFC-0125 §3 M6, fourth slice.
+///
+/// Empty here: this commit lands the hook, and a row moves out of [`CALLS`]
+/// into this list one line at a time. The module scan below reads both lists,
+/// so a moved row is still FOUND by the scan — the carrier and its line are
+/// the diagnostic's own words and the sentence is written once. What moves is
+/// the VERDICT. When a judgment is installed ([`install_judge`]) the effect
+/// judgment of RFC-0125 §2.2 says which module reaches the capability, and
+/// [`decide`] drops the rows it does not confirm. When none is installed — the
+/// LSP, `VYRN_NO_JUDGE=1` — the pass answers for them exactly as it did.
+pub const JUDGED: &[(&str, Capability)] = &[];
+
 /// Every capability `program` carries, in a stable order.
 ///
 /// The `&mut` is the walker's, not this function's: [`crate::project::walk_block`]
@@ -164,7 +176,7 @@ pub fn carried(program: &mut Program) -> Vec<Carried> {
         let crate::ast::Expr::Call { name, line, .. } = e else {
             return;
         };
-        if let Some((_, cap)) = CALLS.iter().find(|(n, _)| n == name) {
+        if let Some((_, cap)) = CALLS.iter().chain(JUDGED).find(|(n, _)| n == name) {
             out.push(Carried {
                 cap: *cap,
                 carrier: name.clone(),
@@ -253,6 +265,33 @@ pub type Graph = Vec<(String, Vec<String>, Vec<Carried>)>;
 /// SHORTEST one that reaches the offending module: the author never saw hop
 /// three, and showing them the longest way round would not help.
 pub fn objection(modules: &Graph, root: &str, map: &ArtifactMap) -> Option<Diagnostic> {
+    let (artifact, key, c, parent) = locate(modules, root, map)?;
+    Some(refusal(artifact, key, c, &parent, map))
+}
+
+/// The capability the floor would object to, without writing the diagnostic.
+///
+/// The loader asks before it refuses (RFC-0125 §3 M6, fourth slice): a row a
+/// judgment answers cannot be decided inside the load, because the judgment
+/// needs a checked program, so that objection is deferred to [`decide`] and
+/// every other one is made where it always was.
+pub fn objected(modules: &Graph, root: &str, map: &ArtifactMap) -> Option<Capability> {
+    locate(modules, root, map).map(|(_, _, c, _)| c.cap)
+}
+
+/// The artifact, the module, the carrier and each module's first parent — what
+/// both [`objection`] and [`objected`] read, walked once.
+#[allow(clippy::type_complexity)]
+fn locate<'a>(
+    modules: &'a Graph,
+    root: &'a str,
+    map: &'a ArtifactMap,
+) -> Option<(
+    &'a Artifact,
+    &'a str,
+    &'a Carried,
+    std::collections::HashMap<&'a str, &'a str>,
+)> {
     let artifact = map.artifact_for(root)?;
     let has = capabilities(artifact.target);
 
@@ -290,9 +329,108 @@ pub fn objection(modules: &Graph, root: &str, map: &ArtifactMap) -> Option<Diagn
         let Some(c) = carried.iter().find(|c| !has.contains(&c.cap)) else {
             continue;
         };
-        return Some(refusal(artifact, key, c, &parent, map));
+        return Some((artifact, key, c, parent));
     }
     None
+}
+
+/// A judgment that says which of [`JUDGED`]'s capabilities each module of a
+/// CHECKED program reaches — RFC-0125 §3 M6, fourth slice.
+///
+/// The effect judgment (RFC-0125 §2.2) is in `vyrn-lower`, which depends on
+/// this crate and cannot be named from it, so the shape is the placer's
+/// ([`crate::own::Placer`]): a function pointer the CLI installs at start-up.
+/// The module key is the load's, `""` for the root.
+pub type Judge = fn(&Program) -> Vec<(String, Capability)>;
+
+static JUDGE: std::sync::OnceLock<Judge> = std::sync::OnceLock::new();
+
+/// Install the judgment. The first installation wins; a second is ignored.
+pub fn install_judge(f: Judge) {
+    let _ = JUDGE.set(f);
+}
+
+/// The installed judgment, unless `VYRN_NO_JUDGE=1` stood it aside — the knob
+/// that puts every row back in the pass for a bisect.
+fn judge() -> Option<Judge> {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let off = *OFF.get_or_init(|| std::env::var("VYRN_NO_JUDGE").is_ok_and(|v| v == "1"));
+    if off {
+        return None;
+    }
+    JUDGE.get().copied()
+}
+
+/// Whether a judgment is installed and answers `cap`.
+pub fn is_judged(cap: Capability) -> bool {
+    judge().is_some() && JUDGED.iter().any(|(_, c)| *c == cap)
+}
+
+/// A floor decision the load could not make, held until the program is checked.
+struct Pending {
+    graph: Graph,
+    root: String,
+    map: ArtifactMap,
+    origins: crate::origin::OriginMaps,
+}
+
+thread_local! {
+    static PENDING: std::cell::RefCell<Option<Pending>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+/// Hold this load's floor decision for [`decide`]. Called by the loader in
+/// place of the refusal, and only when the objection is on a judged row.
+pub fn defer(graph: Graph, root: String, map: ArtifactMap, origins: crate::origin::OriginMaps) {
+    PENDING.with(|p| {
+        *p.borrow_mut() = Some(Pending {
+            graph,
+            root,
+            map,
+            origins,
+        })
+    });
+}
+
+/// Forget a held decision. The loader calls it at the start of every outermost
+/// load, so a deferral nobody checked cannot answer for the next program.
+pub fn forget() {
+    PENDING.with(|p| *p.borrow_mut() = None);
+}
+
+/// The floor's objection to a program whose row a judgment answers, made after
+/// the check — RFC-0125 §3 M6, fourth slice.
+///
+/// `None` for every load that decided for itself, which is every load whose
+/// first objection is not a judged row.
+///
+/// The judgment can only CLEAR a row: a module keeps its carrier when the
+/// judgment confirms the module reaches the capability, and loses it when no
+/// instance of that module does. That is presence giving way to reachability
+/// (RFC-0125 §3 M6 finding 8) for these rows and for nothing else, and the
+/// words of the refusal are still the scan's — the carrier it found and the
+/// line it found it on.
+pub fn decide(program: &Program) -> Option<Diagnostic> {
+    let mut p = PENDING.with(|p| p.borrow_mut().take())?;
+    let judge = judge()?;
+    let reached = judge(program);
+    for (key, _, carried) in &mut p.graph {
+        carried.retain(|c| {
+            !JUDGED.iter().any(|(_, jc)| *jc == c.cap)
+                || reached
+                    .iter()
+                    .any(|(m, rc)| *rc == c.cap && (m == key || (m.is_empty() && *key == p.root)))
+        });
+    }
+    let mut d = objection(&p.graph, &p.root, &p.map)?;
+    if d.file.as_deref() == Some(p.root.as_str()) {
+        d.file = None;
+    }
+    if !p.origins.is_empty() {
+        p.origins.remap(&mut d);
+    }
+    Some(d)
 }
 
 /// The diagnostic RFC-0103 §3 specifies: what was refused, the chain that

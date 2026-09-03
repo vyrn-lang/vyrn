@@ -1111,6 +1111,12 @@ fn load_modules(
     (Vec<Diagnostic>, crate::origin::OriginMaps),
 > {
     let root_key = normalize(root_path);
+    // A deferred floor decision belongs to ONE load (RFC-0125 M6, fourth
+    // slice). Nobody is obliged to check the program a load returns, so the
+    // next outermost load drops whatever the last one held.
+    if LOAD_DEPTH.with(|d| d.get()) <= 1 {
+        crate::floor::forget();
+    }
     let mut modules: Vec<Module> = Vec::new();
     let mut states: HashMap<String, bool> = HashMap::new(); // false = loading
     let mut stack: Vec<String> = Vec::new();
@@ -1642,14 +1648,29 @@ fn load_modules(
     // NEEDS, and no single import edge knows that.
     if let Some(map) = &opts.artifacts {
         let graph = floor_graph(&mut modules);
-        if let Some(mut d) = crate::floor::objection(&graph, &root_key, map) {
-            if d.file.as_deref() == Some(root_key.as_str()) {
-                d.file = None;
+        // RFC-0125 M6, fourth slice: a row a judgment answers cannot be decided
+        // here. The judgment reads the named core, which is built from the
+        // checker's types, and nothing in this load is checked yet. So the
+        // decision is HELD and made after the check, in the one place the CLI
+        // reaches with a checked program; every other row is refused where it
+        // always was, in the order it always was.
+        match crate::floor::objected(&graph, &root_key, map) {
+            // A nested generator load (RFC-0021) is not the artifact; only the
+            // outermost load may hold a decision for the check that follows it.
+            Some(cap) if crate::floor::is_judged(cap) && LOAD_DEPTH.with(|d| d.get()) == 1 => {
+                crate::floor::defer(graph, root_key.clone(), map.clone(), origins.clone());
             }
-            if !origins.is_empty() {
-                origins.remap(&mut d);
+            _ => {
+                if let Some(mut d) = crate::floor::objection(&graph, &root_key, map) {
+                    if d.file.as_deref() == Some(root_key.as_str()) {
+                        d.file = None;
+                    }
+                    if !origins.is_empty() {
+                        origins.remap(&mut d);
+                    }
+                    return Err((vec![d], origins));
+                }
             }
-            return Err((vec![d], origins));
         }
     }
 
