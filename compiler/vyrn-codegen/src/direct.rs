@@ -1288,6 +1288,35 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// Round twenty-eight read off the core (RFC-0125 §3 M3, the
+    /// emitter-reads-the-core slice): does this statement discard an owned
+    /// result the emission frees rather than drops? The core states it as a
+    /// `St::Drop` of the temporary the statement's value bound, keyed by the
+    /// `Stmt::Expr` node.
+    fn discarded_row(&self, node: usize) -> bool {
+        let Some(f) = &self.facts else {
+            return self.plan.discarded_result(node);
+        };
+        f.discarded.contains(&self.plan.key_of(node))
+    }
+
+    /// RFC-0114 M1 read off the core (RFC-0125 §3 M3, the
+    /// emitter-reads-the-core slice): does the caller free this argument's
+    /// value after the call or operator above it? The core carries the key
+    /// on the name the argument bound ([`vyrn_lower::core::NameInfo`]'s
+    /// `arg_drop`), which is where an operator's operand gets one too — `a +
+    /// b` is `@concat(a, b)` to the plan.
+    fn arg_drop_row(&self, node: usize) -> bool {
+        let Some(f) = &self.facts else {
+            return self.plan.arg_drop(node);
+        };
+        let hit = f.arg_drops.contains(&self.plan.key_of(node));
+        if hit {
+            self.plan.acknowledge(node);
+        }
+        hit
+    }
+
     /// Round forty's table read off the core (RFC-0125 §3 M3, the
     /// deletion-preparation slice): the payload binders the arm at
     /// `(key, arm)` releases at its end, each with the holes the arm left in
@@ -4732,7 +4761,7 @@ impl<'p> Fn_<'_, 'p> {
                 let line = Expr::line(e);
                 match self.cx.repr(&ty, line)? {
                     Repr::Unit => {}
-                    _ if self.cx.plan.discarded_result(s as *const Stmt as usize) => {
+                    _ if self.cx.discarded_row(s as *const Stmt as usize) => {
                         let l = b.local(ValType::I32);
                         b.ins(&Instruction::LocalSet(l));
                         self.free_arg_temp(m, b, l, &ty, line)?;
