@@ -415,6 +415,11 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         // (`rfcs/census-call-arguments.md`), taken before `ownership` is moved
         // from.
         plan: ownership.plan.clone(),
+        // The core's own answers, folded once by the placer inside
+        // `own::analyze` above (RFC-0125 §3 M3).
+        facts: (std::env::var("VYRN_PLAN_ROWS").is_err())
+            .then(vyrn_lower::core::facts)
+            .flatten(),
         releases: ownership.releases,
         droppable: ownership.droppable,
         early: ownership.early,
@@ -1208,6 +1213,12 @@ struct Cx<'a> {
     /// The per-node release decisions (RFC-0114 §26) — the same artifact the
     /// textual backend reads, so the two cannot disagree about a site.
     plan: vyrn_frontend::own::ReleasePlan,
+    /// RFC-0125 §3 M3, the deletion-preparation slice: what the CORE says
+    /// about the tables this emitter has been moved off. `None` when the
+    /// placer is not installed (`VYRN_NO_PLACER=1`) or when
+    /// `VYRN_PLAN_ROWS=1` asks for the plan's answer instead — the bisect for
+    /// a difference the flip would otherwise hide.
+    facts: Option<vyrn_lower::core::Facts>,
     /// The `Owned` table (RFC-0086 M1) — the same one `own` decided with, so a
     /// user type's declared `release` reaches this backend without a second list.
     owned: vyrn_frontend::own::Owned,
@@ -1227,6 +1238,56 @@ struct Cx<'a> {
 }
 
 impl<'a> Cx<'a> {
+    /// RFC-0114 R1′ read off the core (RFC-0125 §3 M3, the
+    /// deletion-preparation slice): does this frame release the unnamed
+    /// receiver of the field read at `node`, and around which holes?
+    ///
+    /// The core states it as a `St::Drop` of the name whose
+    /// `NameInfo::receiver` is this node, with the name's own hole set;
+    /// `compiler/vyrn-cli/tests/coretables.rs` proves it equal to R1′'s
+    /// table at every site in the corpus. The plan is still ACKNOWLEDGED, so
+    /// §26's finish check keeps counting the rows it placed — the
+    /// acknowledgement goes when the table does.
+    fn receiver_row(&self, node: usize) -> Option<Vec<String>> {
+        let Some(f) = &self.facts else {
+            return self
+                .plan
+                .receiver_free(node)
+                .then(|| self.plan.receiver_holes_at(node));
+        };
+        self.plan.acknowledge(node);
+        f.receivers.get(&self.plan.key_of(node)).cloned()
+    }
+
+    /// Round forty's table read off the core (RFC-0125 §3 M3, the
+    /// deletion-preparation slice): the payload binders the arm at
+    /// `(key, arm)` releases at its end, each with the holes the arm left in
+    /// it. The core states them as the trailing run of `St::Drop` in
+    /// `Arm::body`, with `NameInfo::holes` on each binder;
+    /// `compiler/vyrn-cli/tests/coretables.rs` proves it equal to the plan's
+    /// rows at every site in the corpus. The plan is acknowledged for §26's
+    /// finish check, as [`Cx::receiver_row`] acknowledges R1′'s.
+    fn arm_row(&self, key: usize, arm: u32) -> Option<Vec<(String, Vec<String>)>> {
+        let Some(f) = &self.facts else {
+            return self.plan.arm_payload_free(key, arm).map(|rows| {
+                rows.iter()
+                    .map(|(n, _, h)| (n.clone(), h.clone()))
+                    .collect()
+            });
+        };
+        // A site this pass of the core does not state (an `if let`, a `?`)
+        // keeps reading the plan; `match` is the reader this slice flips.
+        let Some(rows) = f.arms.get(&(self.plan.key_of(key), arm)) else {
+            return self.plan.arm_payload_free(key, arm).map(|rows| {
+                rows.iter()
+                    .map(|(n, _, h)| (n.clone(), h.clone()))
+                    .collect()
+            });
+        };
+        self.plan.acknowledge(key);
+        (!rows.is_empty()).then(|| rows.clone())
+    }
+
     /// Substitute the monomorphization this lowering is inside.
     ///
     /// The chokepoint, and the point of having one: [`Cx::resolve`], [`Cx::ll`],
@@ -5433,7 +5494,8 @@ impl<'p> Fn_<'_, 'p> {
                 // RFC-0114 R1′: an unnamed String receiver this frame owns is
                 // freed right after the header read — the pointer is teed to a
                 // local before `length_of` consumes it.
-                let rfree = self.cx.plan.receiver_free(e as *const Expr as usize)
+                let row = self.cx.receiver_row(e as *const Expr as usize);
+                let rfree = row.is_some()
                     && (self.region_depth == 0
                         || self.cx.plan.receiver_malloc_at(e as *const Expr as usize));
                 let tee = if rfree {
@@ -5471,7 +5533,7 @@ impl<'p> Fn_<'_, 'p> {
                     // RFC-0125 M3: the read TOOK a heap field (`let sels =
                     // parse(q).sels`), and the placer's row frees the rest of
                     // the receiver around that hole.
-                    let rh = self.cx.plan.receiver_holes_at(e as *const Expr as usize);
+                    let rh = row.unwrap_or_default();
                     if !rh.is_empty() {
                         if let Some(Rel::Deep(t, _)) = self.rel_for(&base, *line)? {
                             self.emit_rel(m, b, Place::Local(l), &Rel::Deep(t, rh), *line)?;
@@ -13052,10 +13114,10 @@ impl<'p> Fn_<'_, 'p> {
             }
             // Round forty: the unmoved payload binders the row names — the
             // textual backend's `gen_arm_body` twin.
-            let owed = self.cx.plan.arm_payload_free(key, arm_ix as u32).cloned();
+            let owed = self.cx.arm_row(key, arm_ix as u32);
             if let Some(rows) = owed.filter(|_| self.region_depth == 0) {
                 for (n, place, ty) in &bound {
-                    let Some((_, _, holes)) = rows.iter().find(|(r, _, _)| r == n) else {
+                    let Some((_, holes)) = rows.iter().find(|(r, _)| r == n) else {
                         continue;
                     };
                     let (place, ty) = (place.clone(), ty.clone());
@@ -16287,6 +16349,7 @@ mod tests {
     fn cx() -> Cx<'static> {
         Cx {
             plan: Default::default(),
+            facts: None,
             types: HashMap::new(),
             decls: &[],
             lambdas: HashMap::new(),

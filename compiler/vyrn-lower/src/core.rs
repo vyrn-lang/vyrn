@@ -266,6 +266,18 @@ pub enum St {
 pub struct Arm {
     /// The payload binders. Owned when the match consumed its scrutinee.
     pub binds: Vec<Name>,
+    /// The binders this arm releases at its end, in the order it releases
+    /// them — round forty's table, stated by the core (RFC-0125 §3 M3, the
+    /// deletion-preparation slice). Each is a `St::Drop` at the end of
+    /// `body`, and the holes are the binder's own (`NameInfo::holes`). Named
+    /// rather than left to the reader's eye, because the edge drops of a
+    /// join follow them and a position is not a key.
+    ///
+    /// `None` where this pass does not state the answer: the `if let` and `?`
+    /// desugars build arms of their own and consult no table, so a reader
+    /// falls back to the plan for those sites. Closing that is the next
+    /// step, and the emitters this slice flips do not read the table there.
+    pub frees: Option<Vec<Name>>,
     pub body: Vec<St>,
     /// The `match` (or `if let`, or `?`) this arm belongs to, and which arm
     /// it is — the plan's key for an arm payload free and an edge release.
@@ -1143,12 +1155,14 @@ impl<'a> Builder<'a> {
                     on: sv,
                     arms: vec![
                         Arm {
+                            frees: None,
                             binds,
                             body: t,
                             site: sid,
                             index: 0,
                         },
                         Arm {
+                            frees: None,
                             binds: Vec::new(),
                             body: e,
                             site: sid,
@@ -1618,12 +1632,17 @@ impl<'a> Builder<'a> {
         };
         let mut binds = Vec::new();
         for (name, ty) in payloads {
-            if name == "_" {
-                continue;
-            }
             let owned = consuming && self.owns(&ty);
             let n = self.name(&name, ty, owned, line);
-            self.scope.push((name, n));
+            // `_` names nothing a body can read, so it never enters the
+            // scope — but the payload is real, and a consumed scrutinee's arm
+            // still owes its release. The plan's arm table names `_`
+            // (`revcomp.vyrn`'s `Err(_) => ""`), and the core said nothing
+            // about it until this slice (RFC-0125 §3 M3, the
+            // deletion-preparation slice).
+            if name != "_" {
+                self.scope.push((name, n));
+            }
             binds.push(n);
         }
         let _ = out;
@@ -2145,6 +2164,7 @@ impl<'a> Builder<'a> {
                         }
                         ArmBody::Block(blk) => self.block(blk, &mut body)?,
                     }
+                    let mut frees: Vec<Name> = Vec::new();
                     if let Some(rows) = self.own.plan.arm_payload_free(mid, i as u32) {
                         for b in &binds {
                             let src = &self.body.names[*b as usize].source;
@@ -2152,6 +2172,7 @@ impl<'a> Builder<'a> {
                                 self.body.names[*b as usize].holes =
                                     holes.iter().map(|h| format!(".{h}")).collect();
                                 body.push(St::Drop(*b));
+                                frees.push(*b);
                             }
                         }
                     }
@@ -2159,6 +2180,7 @@ impl<'a> Builder<'a> {
                     self.scope.truncate(mark);
                     core_arms.push(Arm {
                         binds,
+                        frees: Some(frees),
                         body,
                         site: mid,
                         index: i as u32,
@@ -2222,12 +2244,14 @@ impl<'a> Builder<'a> {
                     on: sv,
                     arms: vec![
                         Arm {
+                            frees: None,
                             binds: fb,
                             body: fail,
                             site: tid,
                             index: 0,
                         },
                         Arm {
+                            frees: None,
                             binds: ob,
                             body: ok,
                             site: tid,
@@ -2295,12 +2319,14 @@ impl<'a> Builder<'a> {
             on: sv,
             arms: vec![
                 Arm {
+                    frees: None,
                     binds: Vec::new(),
                     body: fail,
                     site: tid,
                     index: 0,
                 },
                 Arm {
+                    frees: None,
                     binds: Vec::new(),
                     body: ok,
                     site: tid,
@@ -2653,6 +2679,113 @@ fn mentions_in_expr<'e>(e: &'e Expr, vars: &mut Vec<&'e Expr>, calls: &mut Vec<&
 thread_local! {
     static STRICT_REFUSALS: std::cell::RefCell<Vec<crate::kernel::Refusal>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    static FACTS: std::cell::RefCell<Option<Facts>> = const { std::cell::RefCell::new(None) };
+}
+
+/// RFC-0125 §3 M3, the deletion-preparation slice: what an emitter reads off
+/// the core in place of a per-node table in `own.rs`, keyed exactly as the
+/// plan keys the table it replaces.
+///
+/// The core states each of these as a statement — a `St::Drop` of a
+/// receiver's name, a `St::Drop` of an arm's payload binder — with the
+/// binding's hole set on the name. A statement is not a lookup, and the
+/// emitters walk the AST, so the walk over the core is folded into this
+/// side table once per compile and every emitter reads it by node.
+///
+/// `compiler/vyrn-cli/tests/coretables.rs` proves the two sources agree at
+/// every site in the corpus. `VYRN_PLAN_ROWS=1` makes an emitter read the
+/// plan again, which is the bisect for a difference this table would hide.
+#[derive(Default, Clone, Debug)]
+pub struct Facts {
+    /// RFC-0114 R1′: the `Expr::Field` node of an unnamed receiver the core
+    /// releases after the read, and the holes the release walks around.
+    pub receivers: std::collections::HashMap<usize, Vec<String>>,
+    /// Round forty's table: `(match, arm) -> [(binder, holes)]`, the payload
+    /// binders the arm's own body releases at its end.
+    pub arms: std::collections::HashMap<(usize, u32), Vec<(String, Vec<String>)>>,
+}
+
+/// The core's answers for the program last analysed on this thread. `None`
+/// when the placer is not installed (`VYRN_NO_PLACER=1`), in which case an
+/// emitter reads the plan as it always did.
+pub fn facts() -> Option<Facts> {
+    FACTS.with(|f| f.borrow().clone())
+}
+
+/// The kernel spells a hole `.f.g`; every table spells it `f.g`, relative to
+/// the binding (RFC-0093 M2).
+fn plan_holes(holes: &[String]) -> Vec<String> {
+    holes
+        .iter()
+        .map(|h| h.trim_start_matches('.').to_string())
+        .collect()
+}
+
+/// Fold one frame's statements into the side table. Called after the placer
+/// has added every row, so the core here is the core the emitters will run.
+fn fold_facts(body: &Body, stmts: &[St], out: &mut Facts) {
+    for s in stmts {
+        match s {
+            St::If { then, els, .. } => {
+                fold_facts(body, then, out);
+                fold_facts(body, els, out);
+            }
+            St::Loop(b) | St::Block { body: b, .. } => fold_facts(body, b, out),
+            St::Switch { arms, .. } => {
+                for a in arms {
+                    if let Some(frees) = &a.frees {
+                        let rows: Vec<(String, Vec<String>)> = frees
+                            .iter()
+                            .map(|b| {
+                                let info = &body.names[*b as usize];
+                                (info.source.clone(), plan_holes(&info.holes))
+                            })
+                            .collect();
+                        // An entry even when it is empty: "this arm states
+                        // its releases and owes none" is not the same answer
+                        // as "this pass did not state them".
+                        out.arms.entry((a.site, a.index)).or_default().extend(rows);
+                    }
+                    fold_facts(body, &a.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Every frame's answers, added to the table.
+fn fold_frame(body: &Body, out: &mut Facts) {
+    fold_facts(body, &body.stmts, out);
+    let mut released = std::collections::HashSet::new();
+    collect_drops(&body.stmts, &mut released);
+    for (i, info) in body.names.iter().enumerate() {
+        let Some(node) = info.receiver else { continue };
+        if released.contains(&(i as Name)) {
+            out.receivers.insert(node, plan_holes(&info.holes));
+        }
+    }
+}
+
+fn collect_drops(stmts: &[St], out: &mut std::collections::HashSet<Name>) {
+    for s in stmts {
+        match s {
+            St::Drop(n) => {
+                out.insert(*n);
+            }
+            St::If { then, els, .. } => {
+                collect_drops(then, out);
+                collect_drops(els, out);
+            }
+            St::Loop(b) | St::Block { body: b, .. } => collect_drops(b, out),
+            St::Switch { arms, .. } => {
+                for a in arms {
+                    collect_drops(&a.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Whether `VYRN_KERNEL_STRICT=1` is set: a hard refusal by the kernel fails
@@ -2876,4 +3009,27 @@ pub fn augment(program: &Program, own: &mut Ownership) {
             .or_insert(kind);
         own.releases.entry(f).or_default().push(row);
     }
+    // A SECOND build, after every row the placer added: the emitters read
+    // the core's answers, and the core built above read the plan as it was
+    // before this pass filled it (RFC-0125 §3 M3, the deletion-preparation
+    // slice). The lowering is reused, so this costs the naming pass alone.
+    // `VYRN_PLAN_ROWS=1` puts every emitter back on the plan, and then the
+    // second build has no reader and is not run.
+    if std::env::var("VYRN_PLAN_ROWS").is_ok() {
+        return;
+    }
+    let mut facts = Facts::default();
+    if let Ok(top) = build_module_state(program, own, &lowered.globals) {
+        for body in top.frames() {
+            fold_frame(body, &mut facts);
+        }
+    }
+    for inst in &lowered.instances {
+        if let Ok(top) = build(program, inst, own) {
+            for body in top.frames() {
+                fold_frame(body, &mut facts);
+            }
+        }
+    }
+    FACTS.with(|f| *f.borrow_mut() = Some(facts));
 }
