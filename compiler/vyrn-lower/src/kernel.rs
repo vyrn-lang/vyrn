@@ -422,6 +422,34 @@ impl<'b> Kernel<'b> {
     /// exit: the `consume` parameter, the `return`, the literal, the store.
     fn alias_take(&self, st: &State, n: Name) -> Refusal {
         let (s, src, by) = (self.src(n), self.src_text(st, n), &self.by);
+        // Module state read whole: RFC-0013's own sentence, which names the
+        // reason — the global lives for the whole module and nothing ever
+        // drops it, so there is no owner to take from.
+        if let Some(Alias {
+            root: Root::G(g),
+            path,
+            ..
+        }) = &st.alias[n as usize]
+        {
+            if path.is_empty() {
+                let never = "nothing may take ownership of module state \
+                             (it lives for the whole module and is never dropped)";
+                let msg = if by == "a `return`" {
+                    format!(
+                        "`{g}` may not be returned — it is module state, \
+                         which nothing may take, and a return is owned"
+                    )
+                } else if by.ends_with("(..)`") {
+                    format!(
+                        "module state `{g}` may not be passed to a `consume` \
+                         parameter via {by} — {never}"
+                    )
+                } else {
+                    format!("module state `{g}` may not be consumed by {by} — {never}")
+                };
+                return self.refuse_at::<()>(self.here, msg).unwrap_err();
+            }
+        }
         let what = format!("it is read out of `{src}`, a place that owns it");
         // A named binding a call takes: at the binding, as the checker words
         // it, so the `.copy()` on the menu lands where the read is.
@@ -441,6 +469,8 @@ impl<'b> Kernel<'b> {
             format!("`{s}` may not be passed to a `consume` parameter via {by} — {what}")
         } else if by == "a `return`" {
             format!("`{s}` may not be returned — {what}")
+        } else if by == "a `drop`" {
+            format!("`{s}` may not be dropped — {what}")
         } else if by == "a literal" {
             format!("`{s}` may not be stored into the literal — {what}")
         } else {
@@ -557,6 +587,16 @@ impl<'b> Kernel<'b> {
         at: Option<(Exit, usize)>,
     ) -> Result<(), Refusal> {
         if !self.owned(n) {
+            // A release IS a take, so a borrow released here is RFC-0089
+            // rule 4 refused: the place that owns the value releases it, and
+            // this frame is not that place. Worded as the checker words a
+            // `drop` (RFC-0125 §3 M3, the census, rows 21 and 29).
+            if st.alias[n as usize].is_some() {
+                let by = std::mem::replace(&mut self.by, "a `drop`".to_string());
+                let r = self.alias_take(st, n);
+                self.by = by;
+                return Err(r);
+            }
             return self.refuse(format!(
                 "{} is released although the body does not own it",
                 self.info(n)

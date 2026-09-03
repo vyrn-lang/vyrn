@@ -152,7 +152,7 @@ fn census() -> Vec<Row> {
             "RFC-0013",
             "module state `names` may not be consumed by a take — nothing may take ownership of \
              module state (it lives for the whole module and is never dropped)",
-            Kernel::No,
+            Kernel::Other("module state `names` may not be passed to a `consume` parameter"),
         ),
         row(
             "r11_consume_a_read_parameter.vyrn",
@@ -168,7 +168,7 @@ fn census() -> Vec<Row> {
             "module state `names` may not be passed to a `consume` parameter via `take(..)` — \
              nothing may take ownership of module state (it lives for the whole module and is \
              never dropped)",
-            Kernel::Other("read out of `names`, a place that owns it"),
+            Kernel::Same,
         ),
         row(
             "r13_read_parameter_to_a_consume_parameter.vyrn",
@@ -192,7 +192,7 @@ fn census() -> Vec<Row> {
             "RFC-0013",
             "`names` may not be returned — it is module state, which nothing may take, and a \
              return is owned",
-            Kernel::Other("read out of `names`, a place that owns it"),
+            Kernel::Same,
         ),
         row(
             "r16_return_a_field_of_a_read_parameter.vyrn",
@@ -237,7 +237,11 @@ fn census() -> Vec<Row> {
             "rule 4 at the drop: the place that owns a value releases it",
             "RFC-0089",
             "`owned` may not be dropped — it is read out of a place that owns it",
-            Kernel::Other("is released although the body does not own it"),
+            // The sentence is the checker's; the line is the binding's, because
+            // a `Drop` in the core carries none.
+            Kernel::Other(
+                "`owned` may not be dropped — it is read out of `b.items`, a place that owns it",
+            ),
         ),
         row(
             "r22_drop_with_a_hole.vyrn",
@@ -300,7 +304,7 @@ fn census() -> Vec<Row> {
             "RFC-0013",
             "module state `names` may not be consumed by a `for` loop — nothing may take \
              ownership of module state (it lives for the whole module and is never dropped)",
-            Kernel::Other("is released although the body does not own it"),
+            Kernel::Other("module state `names` may not be consumed by a `drop`"),
         ),
         row(
             "r30_stream_never_disposed.vyrn",

@@ -1523,7 +1523,13 @@ impl<'a> Builder<'a> {
             Expr::Consume { place, line } => match &**place {
                 Expr::Var { name, .. } => {
                     let Some(n) = self.lookup(name) else {
-                        return gap("a `consume` of module state", *line);
+                        // `for x in consume <module state>`: the same read,
+                        // and the same refusal (RFC-0125 §3 M3, row 29).
+                        let v = self.global_read(place, name, *line, out)?;
+                        if let Val::Name(t) = v {
+                            self.by_binding.insert(construct, t);
+                        }
+                        return Ok((v, false));
                     };
                     let t = self.temp(self.body.names[n as usize].ty.clone(), *line);
                     out.push(St::Let(t, Rhs::Val(Val::Name(n))));
@@ -1726,27 +1732,22 @@ impl<'a> Builder<'a> {
                 {
                     Ok(Val::Lit)
                 }
-                None => {
-                    // Module state lives for the whole module and nothing
-                    // may take it (RFC-0013): `movecheck` refuses passing it
-                    // to a `consume` parameter or returning it, and `own`
-                    // notes `let x = g` as a borrow. So a read of it in any
-                    // position is a borrow, and the name it yields is one
-                    // the kernel does not own.
-                    let ty = self.ty_of(e)?;
-                    let t = if self.owns(&ty) {
-                        self.name("@borrow", ty, false, *line)
-                    } else {
-                        self.temp(ty, *line)
-                    };
-                    out.push(St::Let(t, Rhs::Read(Place::Global(name.clone()))));
-                    Ok(Val::Name(t))
-                }
+                // Module state lives for the whole module and nothing
+                // may take it (RFC-0013): `movecheck` refuses passing it
+                // to a `consume` parameter or returning it, and `own`
+                // notes `let x = g` as a borrow. So a read of it in any
+                // position is a borrow, and the name it yields is one
+                // the kernel does not own.
+                None => self.global_read(e, name, *line, out),
             },
             Expr::Consume { place, line } => match &**place {
                 Expr::Var { name, .. } => match self.lookup(name) {
                     Some(n) => Ok(Val::Name(n)),
-                    None => gap("a `consume` of module state", *line),
+                    // `consume <module state>`: a read of the global, which
+                    // is a borrow the kernel then refuses the take of
+                    // (RFC-0013, and RFC-0125 §3 M3, the census, row 10). It
+                    // used to be a gap, so the whole body went unjudged.
+                    None => self.global_read(place, name, *line, out),
                 },
                 _ => self.take_place(place, out),
             },
@@ -1928,6 +1929,26 @@ impl<'a> Builder<'a> {
             }
         }
         caps
+    }
+
+    /// A read of module state as a value: a borrow of the global, because
+    /// RFC-0013 gives it no owner a frame can take from. `e` is the
+    /// expression whose type this is.
+    fn global_read(
+        &mut self,
+        e: &'a Expr,
+        name: &str,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<Val, Gap> {
+        let ty = self.ty_of(e)?;
+        let t = if self.owns(&ty) {
+            self.name("@borrow", ty, false, line)
+        } else {
+            self.temp(ty, line)
+        };
+        out.push(St::Let(t, Rhs::Read(Place::Global(name.to_string()))));
+        Ok(Val::Name(t))
     }
 
     /// A move out of a sub-place: `consume x.f`, or the receiver a rebuilding
