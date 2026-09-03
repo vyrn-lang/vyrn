@@ -49,6 +49,7 @@ pub mod symbols;
 pub mod toolpin;
 pub mod trap;
 pub mod types;
+pub mod validate;
 pub mod vyx;
 
 // Re-export the symbol-query API at the crate root so the LSP can spell it as

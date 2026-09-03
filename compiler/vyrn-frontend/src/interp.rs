@@ -3624,9 +3624,7 @@ impl<'a> Interp<'a> {
     /// `v` and fail if it does not hold. The runtime representation of a
     /// validated value is just its base value (zero overhead).
     fn construct(&self, decl: &TypeDecl, v: Val) -> Result<Val, Ctrl> {
-        if !self.validates(decl, &v)? {
-            return Err(crate::trap::validation(&decl.name, false).into());
-        }
+        self.enforce(decl, &v)?;
         Ok(v)
     }
 
@@ -7347,30 +7345,19 @@ impl<'a> Interp<'a> {
                         }
                     }
                 }
-                // Enforce a cross-field `where` invariant, if the record declares
-                // one (e.g. `{ start, end } where start < end`). The predicate
-                // runs under the runtime evaluator with every field bound, so
-                // Float/sized-int fields compare with exact runtime semantics.
-                if let Some(decl) = self.types.get(name.as_str()) {
-                    if let Some(pred) = &decl.predicate {
-                        let mut env = vec![map
-                            .iter()
-                            .map(|(k, v)| (k.clone(), Slot::untyped(v.clone())))
-                            .collect::<Frame>()];
-                        match self.expr(pred, &mut env)? {
-                            Val::Bool(true) => {}
-                            Val::Bool(false) => {
-                                return Err(crate::trap::validation(name, true).into())
-                            }
-                            other => {
-                                return Err(format!(
-                                    "cross-field predicate for `{name}` did not evaluate \
-                                     to Bool (got {other:?})"
-                                )
-                                .into())
-                            }
-                        }
-                    }
+                // Enforce a cross-field `where` invariant, if the record
+                // declares one (e.g. `{ start, end } where start < end`) —
+                // through [`Interp::enforce`], the one place this interpreter
+                // runs a predicate (RFC-0125 section 3 M6). A literal is a
+                // boundary like any other, and it used to be a boundary that
+                // spelled the rule for itself.
+                if let Some(decl) = crate::validate::of(self.types.get(name.as_str()).copied()) {
+                    let probe = Val::Record(std::rc::Rc::new(map), None);
+                    self.enforce(decl, &probe)?;
+                    let Val::Record(back, _) = probe else {
+                        unreachable!("built one line above")
+                    };
+                    map = std::rc::Rc::try_unwrap(back).unwrap_or_else(|rc| (*rc).clone());
                 }
                 // A literal names its own type, and the checker types it as
                 // exactly that name — so `User { .. }` is born stamped `User`
@@ -7535,10 +7522,26 @@ impl<'a> Interp<'a> {
             None => return Ok(true),
             Some(p) => p,
         };
-        let mut scope = vec![Frame::from_iter([(
-            "value".to_string(),
-            Slot::untyped(v.clone()),
-        )])];
+        // A record base binds every field name; every other base binds `value`
+        // (RFC-0003). `validate::is_cross_field` is the one place that fact is
+        // asked, because `trap::validation_of` picks its wording by the same
+        // fact and the two must not disagree.
+        let mut scope = if crate::validate::is_cross_field(decl) {
+            match v {
+                Val::Record(map, _) => vec![map
+                    .iter()
+                    .map(|(k, fv)| (k.clone(), Slot::untyped(fv.clone())))
+                    .collect::<Frame>()],
+                // Not a record value: a cross-field predicate has nothing to
+                // read, so nothing is checked.
+                _ => return Ok(true),
+            }
+        } else {
+            vec![Frame::from_iter([(
+                "value".to_string(),
+                Slot::untyped(v.clone()),
+            )])]
+        };
         match self.expr(pred, &mut scope)? {
             Val::Bool(b) => Ok(b),
             other => Err(format!(
@@ -7547,6 +7550,23 @@ impl<'a> Interp<'a> {
             )
             .into()),
         }
+    }
+
+    /// The one place this interpreter refuses a value for its type's `where` —
+    /// RFC-0125 section 3 M6, the census rows `where-scalar` and `where-record`.
+    ///
+    /// It was three places: `Age(n)`, a record literal, and every typed
+    /// boundary. Each ran a predicate and each spelled its own wording, and only
+    /// the third built that wording from the declaration — so the constructor
+    /// path would have given a record base the scalar sentence. One statement
+    /// asks [`Interp::validates`] and hands the answer to
+    /// [`crate::trap::validation_of`], which picks the sentence by the same fact
+    /// `validates` picks the binding by.
+    fn enforce(&self, decl: &TypeDecl, v: &Val) -> Result<(), Ctrl> {
+        if self.validates(decl, v)? {
+            return Ok(());
+        }
+        Err(crate::trap::validation_of(decl).into())
     }
 
     /// Evaluate a `match` over an Option or Result, binding the payload.
@@ -8195,37 +8215,7 @@ impl<'a> Interp<'a> {
                 // Coerce toward the base first (a record base coerces fields;
                 // a scalar base wraps), then run the predicate on the result.
                 let v = self.coerce(v, &decl.base)?;
-                if let Some(pred) = &decl.predicate {
-                    // A record base has a cross-field predicate (field names in
-                    // scope); a scalar base binds `value`.
-                    let holds = if matches!(decl.base, Type::Record(_)) {
-                        match &v {
-                            Val::Record(map, _) => {
-                                let mut env = vec![map
-                                    .iter()
-                                    .map(|(k, v)| (k.clone(), Slot::untyped(v.clone())))
-                                    .collect::<Frame>()];
-                                match self.expr(pred, &mut env)? {
-                                    Val::Bool(b) => b,
-                                    other => {
-                                        return Err(format!(
-                                            "cross-field predicate for `{n}` did not \
-                                             evaluate to Bool (got {other:?})"
-                                        )
-                                        .into())
-                                    }
-                                }
-                            }
-                            _ => true, // not a record value — nothing to check
-                        }
-                    } else {
-                        self.validates(decl, &v)?
-                    };
-                    if !holds {
-                        let msg = crate::trap::validation_of(decl);
-                        return Err(msg.into());
-                    }
-                }
+                self.enforce(decl, &v)?;
                 // The typed boundary is where a record learns its name
                 // (RFC-0084 M1). `n` is the STATIC type of the slot the value is
                 // entering, which is the same thing `type_key` hands the two
