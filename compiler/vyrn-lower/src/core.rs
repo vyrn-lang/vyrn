@@ -244,8 +244,23 @@ pub enum St {
         line: usize,
         /// The statement the plan keys its store decision by (RFC-0125 §3 M3,
         /// the emitter-reads-the-core slice). [`Site::None`] for a store this
-        /// pass made up — a global's initializer, a desugar's temporary.
+        /// pass made up — a global's initializer, a desugar's temporary — and
+        /// for a user container's `c[i] = v`, whose store statements RFC-0091
+        /// M2's `place at` rewrite BUILDS: the plan's row stands on one of
+        /// those and this pass walks the source, so a reader must fall back
+        /// to the plan there.
         site: Site,
+        /// Whether the store releases the value it displaces — the plan's
+        /// decision, with the mention guard and round eighteen's exceptions
+        /// folded in for a name store, which is how both compiled backends
+        /// read it.
+        ///
+        /// A different question from `old`, and both are needed. `old` is
+        /// what the KERNEL sees at the place: a place holding nothing that
+        /// owns heap displaces nothing, whatever the plan decided about the
+        /// statement, and a sub-place's ownership is not a judgment this
+        /// pass makes. `releases` is what an EMITTER emits.
+        releases: bool,
     },
     /// A release. `site` is the node the plan keys the row by where the plan
     /// has one: the `Stmt::Expr` of a discarded result, the argument
@@ -713,6 +728,7 @@ pub fn build_module_state<'a>(
             old: Old::Nothing,
             line: g.line,
             site: Site::None,
+            releases: false,
         });
     }
     b.body.stmts = out;
@@ -1054,34 +1070,28 @@ impl<'a> Builder<'a> {
             }
             Stmt::Assign { name, value, line } => {
                 let v = self.val(value, out)?;
-                let Some(n) = self.lookup(name) else {
-                    let _ = line;
-                    let ty = self.ty_of(value)?;
-                    let old = self.old_for(&ty, sid);
-                    out.push(St::Store {
-                        place: Place::Global(name.clone()),
-                        value: v,
-                        old,
-                        line: *line,
-                        site: Site::Node(sid),
-                    });
-                    return Ok(());
+                let n = self.lookup(name);
+                let ty = match n {
+                    Some(n) => self.body.names[n as usize].ty.clone(),
+                    None => self.ty_of(value)?,
                 };
-                // The emitters' rule, stated once: the plan says whether the
-                // store releases the old value; a value that MENTIONS the
-                // place may be handing the old buffer back (`xs = xs.push(v)`)
-                // so the release stands down — unless the plan proved every
-                // mention a read argument to a function that cannot hand it
-                // back (`store_fresh_at`, exit-residue round eighteen).
+                // The emitters' rule for a store to a NAME, stated once: the
+                // plan says whether the store releases the old value; a value
+                // that MENTIONS the place may be handing the old buffer back
+                // (`xs = xs.push(v)`) so the release stands down — unless the
+                // plan proved every mention a read argument to a function
+                // that cannot hand it back (`store_fresh_at`, exit-residue
+                // round eighteen), or the value is a String concatenation,
+                // which builds a fresh buffer whatever it reads (`s = s + x`).
+                // Both compiled backends spell the last exception
+                // `fresh_str`; it stands here so the one answer they read is
+                // this one (RFC-0125 §3 M3, the emitter-reads-the-core
+                // slice). Module state takes the same rule: it is a name to
+                // both of them.
                 let mentions = vyrn_frontend::movecheck::mentions_place(value, name);
-                // A String concatenation builds a fresh buffer whatever it
-                // reads, so a mention of the place cannot be a hand-back
-                // (`s = s + x`). Both compiled backends spell this exception
-                // `fresh_str`; it is stated here so `Old::Released` is the
-                // whole answer they read (RFC-0125 §3 M3).
                 let fresh_str = matches!(
                     vyrn_frontend::types::resolve(
-                        &self.body.names[n as usize].ty,
+                        &ty,
                         &vyrn_frontend::types::decl_map(self.program),
                     ),
                     Type::Str
@@ -1092,11 +1102,26 @@ impl<'a> Builder<'a> {
                         ..
                     }
                 );
+                let releases = self.own.plan.store_owned_at(sid)
+                    && (fresh_str || !mentions || self.own.plan.store_fresh_at(sid));
+                let Some(n) = n else {
+                    out.push(St::Store {
+                        place: Place::Global(name.clone()),
+                        value: v,
+                        old: if releases {
+                            Old::Released
+                        } else {
+                            Old::Nothing
+                        },
+                        line: *line,
+                        site: Site::Node(sid),
+                        releases,
+                    });
+                    return Ok(());
+                };
                 let old = if !self.body.names[n as usize].owned {
                     Old::Nothing
-                } else if self.own.plan.store_owned_at(sid)
-                    && (fresh_str || !mentions || self.own.plan.store_fresh_at(sid))
-                {
+                } else if releases {
                     Old::Released
                 } else if mentions {
                     Old::Transferred
@@ -1109,6 +1134,7 @@ impl<'a> Builder<'a> {
                     old,
                     line: *line,
                     site: Site::Node(sid),
+                    releases,
                 });
             }
             Stmt::SetField {
@@ -1127,6 +1153,10 @@ impl<'a> Builder<'a> {
                     old,
                     line: *line,
                     site: Site::Node(sid),
+                    // A field store takes the plan's row as it stands: the
+                    // value-alias guard is folded into the row itself
+                    // (`fold_store_owned`), so there is nothing to add here.
+                    releases: self.own.plan.store_owned_at(sid),
                 });
             }
             Stmt::IndexSet {
@@ -1145,10 +1175,15 @@ impl<'a> Builder<'a> {
                 };
                 let v = self.val(value, out)?;
                 // A user container's `place at` yields the element's place
-                // (RFC-0091 M2), and the element's type is the value's.
-                let ety = match self.elem_ty(&bty, *line) {
-                    Ok(t) => t,
-                    Err(_) => self.ty_of(value)?,
+                // (RFC-0091 M2), and the element's type is the value's. Such
+                // a store is REWRITTEN into a block of its own before the
+                // checker walks it, so the plan's row stands on a statement
+                // this pass never sees: no site, and a reader falls back to
+                // the plan (RFC-0125 §3 M3, the emitter-reads-the-core
+                // slice).
+                let (ety, site) = match self.elem_ty(&bty, *line) {
+                    Ok(t) => (t, Site::Node(sid)),
+                    Err(_) => (self.ty_of(value)?, Site::None),
                 };
                 let old = self.old_for(&ety, sid);
                 out.push(St::Store {
@@ -1156,7 +1191,8 @@ impl<'a> Builder<'a> {
                     value: v,
                     old,
                     line: *line,
-                    site: Site::Node(sid),
+                    site,
+                    releases: self.own.plan.store_owned_at(sid),
                 });
             }
             Stmt::Return { value, line } => {
@@ -2192,6 +2228,7 @@ impl<'a> Builder<'a> {
                     old: Old::Nothing,
                     line: *line,
                     site: Site::None,
+                    releases: false,
                 });
                 self.edge_drops(site, 0, &mut t)?;
                 let mut f = Vec::new();
@@ -2205,6 +2242,7 @@ impl<'a> Builder<'a> {
                             old: Old::Nothing,
                             line: *line,
                             site: Site::None,
+                            releases: false,
                         });
                         self.edge_drops(site, 1, &mut f)?;
                         // `if c { parts[0] } else { "Bool" }`: an arm that
@@ -2256,6 +2294,7 @@ impl<'a> Builder<'a> {
                                 old: Old::Nothing,
                                 line: *line,
                                 site: Site::None,
+                                releases: false,
                             });
                         }
                         ArmBody::Block(blk) => self.block(blk, &mut body)?,
@@ -2335,6 +2374,7 @@ impl<'a> Builder<'a> {
                     old: Old::Nothing,
                     line: *line,
                     site: Site::None,
+                    releases: false,
                 });
                 self.scope.truncate(mark);
                 out.push(St::Switch {
@@ -2412,6 +2452,7 @@ impl<'a> Builder<'a> {
             old: Old::Nothing,
             line,
             site: Site::None,
+            releases: false,
         });
         out.push(St::Switch {
             on: sv,
@@ -2857,11 +2898,11 @@ fn fold_facts(body: &Body, stmts: &[St], out: &mut Facts) {
             }
             St::Loop(b) | St::Block { body: b, .. } => fold_facts(body, b, out),
             St::Store {
-                old,
+                releases,
                 site: Site::Node(at),
                 ..
             } => {
-                out.stores.insert(*at, *old == Old::Released);
+                out.stores.insert(*at, *releases);
             }
             St::Drop(n, at) => match at {
                 Site::Node(at) => {

@@ -1259,6 +1259,35 @@ impl<'a> Cx<'a> {
         f.receivers.get(&self.plan.key_of(node)).cloned()
     }
 
+    /// RFC-0114 M2 and exit-residue round eighteen read off the core
+    /// (RFC-0125 §3 M3, the emitter-reads-the-core slice): does the store at
+    /// `node` release the value it displaces?
+    ///
+    /// The core states the plan's two tables as ONE answer, `Old::Released`,
+    /// because both compiled backends read them as one — the row, the
+    /// `mentions_place` guard, and round eighteen's `fresh_str` exception,
+    /// all of which the core now spells (`core::Builder::stmt`). What stays
+    /// the emitter's is the region gate, which is a property of where the
+    /// code stands and not of the store.
+    ///
+    /// A site the core states nothing for falls back to the plan: RFC-0091
+    /// M2's `place at` rewrite BUILDS the store statements a user
+    /// container's `c[h] = v` becomes, the checker walks those, and this
+    /// pass walks the source statement. `compiler/vyrn-cli/tests/coretables.rs`
+    /// pins that residue at twelve rows over the corpus.
+    fn store_row(&self, node: usize) -> bool {
+        let Some(f) = &self.facts else {
+            return self.plan.store_owned_at(node);
+        };
+        match f.stores.get(&self.plan.key_of(node)) {
+            Some(released) => {
+                self.plan.acknowledge(node);
+                *released
+            }
+            None => self.plan.store_owned_at(node),
+        }
+    }
+
     /// Round forty's table read off the core (RFC-0125 §3 M3, the
     /// deletion-preparation slice): the payload binders the arm at
     /// `(key, arm)` releases at its end, each with the holes the arm left in
@@ -3995,7 +4024,7 @@ impl<'p> Fn_<'_, 'p> {
                             // resets the flag on every reassign, so `s = a + b`
                             // then `s = s + c` abandoned the `a + b` buffer
                             // (exit-residue round sixteen).
-                            let owned_here = self.cx.plan.store_owned_at(s as *const Stmt as usize);
+                            let owned_here = self.cx.store_row(s as *const Stmt as usize);
                             // Save the flag and the incoming pointer before the
                             // appends; free after them, only if the take ran
                             // (entry flag was 0) and the buffer is heap — an
@@ -4068,23 +4097,14 @@ impl<'p> Fn_<'_, 'p> {
                 // either input. The append spine above hides the common
                 // `s = s + x`; what reaches here is a PREPEND, and that leaked
                 // 9.9 GB over 50,000 calls of a 200-iteration loop.
-                let fresh_str = matches!(self.cx.resolve(&ty), Type::Str)
-                    && matches!(value, Expr::Binary { op: BinOp::Add, .. });
-                // RFC-0114 M2: ownedness is the analysis's per-statement answer,
-                // shared with the textual backend — see `fold_store_owned` and
-                // the comment there. `place_owns` stays for the OTHER stores
-                // (fields, elements), which this slice does not touch.
-                // Queried FIRST so a region-gated site still counts as
+                // RFC-0125 §3 M3: the rule above, the row, and round
+                // eighteen's `store_fresh` are ONE answer, and the core
+                // states it at the store's own node (`Cx::store_row`). What
+                // is left here is the region gate: arena memory is not this
+                // path's to free, whatever the store displaces. The answer is
+                // taken FIRST so a region-gated site still counts as
                 // considered (§26's finish check).
-                let owned_here = self.cx.plan.store_owned_at(s as *const Stmt as usize)
-                    && self.region_depth == 0;
-                // Round eighteen: the textual backend's twin — a mention
-                // that is only a read argument to a declared non-lender
-                // cannot hand the old value back (`store_fresh_at`).
-                let snap = if owned_here
-                    && (fresh_str
-                        || !vyrn_frontend::movecheck::mentions_place(value, name)
-                        || self.cx.plan.store_fresh_at(s as *const Stmt as usize))
+                let snap = if self.cx.store_row(s as *const Stmt as usize) && self.region_depth == 0
                 {
                     match (place, &r) {
                         // A scalar local IS the pointer; it has no address.
@@ -4136,8 +4156,7 @@ impl<'p> Fn_<'_, 'p> {
                 // per-binding registry guess (`place_owns`), queried before
                 // the region gate so an arena-owned site still counts as
                 // considered. The value-alias guard folded with it.
-                let snap = if self.cx.plan.store_owned_at(s as *const Stmt as usize)
-                    && self.region_depth == 0
+                let snap = if self.cx.store_row(s as *const Stmt as usize) && self.region_depth == 0
                 {
                     let a = self.addr_local(b, place, foff);
                     self.snap_at(b, a, &fty, *line)?
@@ -4599,8 +4618,7 @@ impl<'p> Fn_<'_, 'p> {
                 // Rule 4 through an element. The element address is already on the
                 // stack, so it is teed rather than recomputed; the snapshot is
                 // stack-neutral and the store finds its address where it left it.
-                let snap = if self.cx.plan.store_owned_at(s as *const Stmt as usize)
-                    && self.region_depth == 0
+                let snap = if self.cx.store_row(s as *const Stmt as usize) && self.region_depth == 0
                 {
                     let ea = b.local(ValType::I32);
                     b.ins(&Instruction::LocalTee(ea));
