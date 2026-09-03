@@ -1034,9 +1034,31 @@ fn missingDemo() -> Bool {
     return true
 }
 
+/// The output directory, off the command line.
+///
+/// `args()` is `argv[1..]` — it EXCLUDES the program's own name (RFC-0014), so
+/// the directory is the first element and not the second. This read used to ask
+/// for `argv[1]`, which is one past the only argument the caller passes, so
+/// `vyrn run site/export.vyrn dist` wrote to `out` and said nothing. The site
+/// workflow passes `out`, which is also the default, and so never noticed
+/// (RFC-0125 §3 M5, the fourth slice).
+fn outDirFrom(argv: Array<String>) -> String {
+    if argv.length > 0 {
+        return argv[0].copy()
+    }
+    return "out"
+}
+
+test "the export writes where it is told, and to `out` when it is told nothing" {
+    assertEq(outDirFrom([]), "out")
+    assertEq(outDirFrom(["dist"]), "dist")
+    // A second argument is not the directory. `args()` carries no program name,
+    // so reading past the first element is how the directory got ignored.
+    assertEq(outDirFrom(["dist", "extra"]), "dist")
+}
+
 fn main() -> Int64 {
-    let argv = args()
-    let outDir = if argv.length > 1 { argv[1].copy() } else { "out" }
+    let outDir = outDirFrom(args())
     if missingHistory() || missingDemo() {
         return 1
     }
