@@ -3013,6 +3013,11 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     // the core's answers, and the core built above read the plan as it was
     // before this pass filled it (RFC-0125 §3 M3, the deletion-preparation
     // slice). The lowering is reused, so this costs the naming pass alone.
+    // `VYRN_PLAN_ROWS=1` puts every emitter back on the plan, and then the
+    // second build has no reader and is not run.
+    if std::env::var("VYRN_PLAN_ROWS").is_ok() {
+        return;
+    }
     let mut facts = Facts::default();
     if let Ok(top) = build_module_state(program, own, &lowered.globals) {
         for body in top.frames() {

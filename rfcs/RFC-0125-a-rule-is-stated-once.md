@@ -1757,6 +1757,14 @@ tables. It still reads `store_owned`, `store_fresh`, `discarded_results`,
 took off the core, so §26's finish check keeps counting the plan's decisions.
 The acknowledgement (`ReleasePlan::acknowledge`) goes when the tables go.
 
+**What the fold costs.** The placer builds every body once to place, and
+the rows it adds are not in the body it built — so the facts come from a
+SECOND build, after the placer is done, reusing the same lowering. The site
+export measures the difference: 2 m 14 s with the fold, 2 m 10 s with
+`VYRN_PLAN_ROWS=1`, which skips it because nothing would read it. About 3
+per cent, and it goes when the plan goes and the placer's own build is the
+only one.
+
 **The lesson the flip taught, and it is the one this RFC keeps finding.** A
 fact stated at a POSITION is not stated. The arm table looked carried — the
 core pushes a `St::Drop` per released binder — and the reconstruction was
