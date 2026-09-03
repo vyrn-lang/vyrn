@@ -1,0 +1,21 @@
+// RFC-0093: `drop` releases the whole binding, and a take left a hole in it.
+type Person = { name: String, note: String }
+
+impl Owned for Person {
+    fn release(consume self) {
+        let a = consume self.name
+        let b = consume self.note
+        drop a
+        drop b
+    }
+}
+
+fn take(s: consume String) -> Int64 { return s.byteLength }
+
+fn main() -> Int64 {
+    let p = Person { name: "n", note: "x" }
+    let n = take(consume p.name)
+    drop p
+    print(n)
+    return 0
+}

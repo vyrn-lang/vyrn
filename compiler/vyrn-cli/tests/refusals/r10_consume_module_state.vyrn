@@ -1,0 +1,11 @@
+// RFC-0013: module state lives for the whole module and is never dropped, so
+// nothing may take ownership of it.
+let mut names: Array<String> = ["a"]
+
+fn take(xs: consume Array<String>) -> Int64 { return xs.length }
+
+fn main() -> Int64 {
+    let n = take(consume names)
+    print(n)
+    return 0
+}

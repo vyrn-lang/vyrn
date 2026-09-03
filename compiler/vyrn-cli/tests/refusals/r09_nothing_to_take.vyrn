@@ -1,0 +1,9 @@
+// RFC-0093: `consume` names a place. A call result is nobody's place.
+fn make() -> String { return "a".copy() }
+fn take(s: consume String) -> Int64 { return s.byteLength }
+
+fn main() -> Int64 {
+    let n = take(consume make())
+    print(n)
+    return 0
+}

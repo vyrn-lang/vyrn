@@ -1,0 +1,13 @@
+// RFC-0089 rule 2: a `read` parameter may be observed and passed on, never
+// taken. A prefix `consume` of it is the third exit.
+fn take(xs: consume Array<Int64>) -> Int64 { return xs.length }
+
+fn caller(ys: Array<Int64>) -> Int64 {
+    return take(consume ys)
+}
+
+fn main() -> Int64 {
+    let a: Array<Int64> = [1, 2]
+    print(caller(a) + a.length)
+    return 0
+}

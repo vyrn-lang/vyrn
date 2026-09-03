@@ -1,0 +1,15 @@
+// RFC-0089 rule 1 across a back edge: what the first turn consumed the second
+// would consume again.
+type Token = { id: Int64, tag: String }
+
+fn take(t: consume Token) -> Int64 { return t.id }
+
+fn main() -> Int64 {
+    let x = Token { id: 1, tag: "a" }
+    let mut i = 0
+    while i < 3 {
+        let n = take(x)
+        i = i + n
+    }
+    return 0
+}
