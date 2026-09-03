@@ -333,8 +333,8 @@ impl Walk<'_> {
 ///
 /// A `let` at module scope (RFC-0013) and a `where` predicate are declarations
 /// the instance list does not cover, so they are read here from the AST by the
-/// same [`vyrn_frontend::floor::JUDGED`] names. Nothing else in the program can
-/// carry one of these rows.
+/// same [`vyrn_frontend::floor::call_carrier`] the floor's scan uses. Nothing
+/// else in the program can carry a capability through a call.
 pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Capability)> {
     let mut out: Vec<(String, floor::Capability)> = Vec::new();
     let mut add = |module: Option<&String>, cap: floor::Capability| {
@@ -344,15 +344,16 @@ pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Cap
         }
     };
 
-    // The two declarations no instance holds. A judged name is a builtin call,
-    // so a walk for the name is the whole reading.
+    // The two declarations no instance holds. A carrier is a call, so a walk
+    // for the call is the whole reading.
+    let externs = floor::extern_imports(program);
     let spells = |e: &vyrn_frontend::ast::Expr| -> Vec<floor::Capability> {
         let mut e = e.clone();
         let mut found: Vec<floor::Capability> = Vec::new();
         vyrn_frontend::project::walk_bare(&mut e, &mut |x| {
             if let vyrn_frontend::ast::Expr::Call { name, .. } = x {
-                if let Some((_, cap)) = floor::JUDGED.iter().find(|(n, _)| n == name) {
-                    found.push(*cap);
+                if let Some(cap) = floor::call_carrier(name, &externs) {
+                    found.push(cap);
                 }
             }
         });
@@ -371,11 +372,12 @@ pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Cap
         add(module.as_ref(), cap);
     }
 
-    // The effect a judged row is: one lookup, so the row and the atom cannot
-    // drift apart.
-    let rows: Vec<(Effect, floor::Capability)> = floor::JUDGED
-        .iter()
-        .filter_map(|(n, cap)| atom(n).map(|e| (e, *cap)))
+    // The lattice's rows read as capabilities, which is the floor's whole
+    // vocabulary (RFC-0125 §3 M6, sixth slice). One table, so the row and the
+    // capability cannot drift apart.
+    let rows: Vec<(Effect, floor::Capability)> = Effect::ALL
+        .into_iter()
+        .filter_map(|e| floor::Capability::of(e).map(|cap| (e, cap)))
         .collect();
 
     let lowered = crate::lower(program);
