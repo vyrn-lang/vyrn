@@ -1,19 +1,22 @@
-//! RFC-0125 M6, the third judgment's second slice — typed by construction,
-//! over the corpus.
+//! RFC-0125 M6, the third judgment — typed by construction, over the corpus.
 //!
 //! For every example, and for every entry point of the example projects that
 //! carry a `vyrn.json`, every function instance is lowered into the named core
 //! and judged (`vyrn_lower::typed`): for every store into a place whose type is
-//! validated, what produced the value. Three answers are the rule — the type's
-//! own constructor, a name already of the type, a literal the checker proved —
-//! and every other answer is a finding, counted by kind and ratcheted.
+//! validated, what produced the value. Four answers are the rule — the type's
+//! own constructor, a name already of the type, a literal the checker proved,
+//! and a constant into a sized integer, which the `int-narrowing` row answers
+//! rather than refuses — and every other answer is a finding, counted by kind
+//! and ratcheted.
 //!
 //! WHICH crossings are validated is not decided here. The judgment asks
 //! `vyrn_frontend::validate`, which is where the census of §3 M6 put the rule
 //! so that all three engines ask one question, and this file hands it the two
 //! types the core carries. The narrowing rows (`int-narrowing`, `float-to-int`)
-//! are the second half: a store into a sized integer out of a WIDER numeric
-//! type is a crossing the same way, and `validate::narrows` decides it.
+//! are the second half: a store into a sized integer out of a numeric type of
+//! another width is a crossing the same way, and `validate::narrows` decides
+//! it. Since the third slice the core names the type of every producer, so
+//! that question has both its halves at every store.
 //!
 //! `VYRN_TYPED_DUMP=<file>:<fn>` prints one body's judged stores, as
 //! `VYRN_EFFECTS_DUMP` prints one function's effects. `<file>` is a corpus file
@@ -150,7 +153,13 @@ fn step_ty(
             _ => None,
         },
         Step::Elem => match resolve(base?) {
-            Type::Array(t) => Some(*t),
+            Type::Array(t) | Type::ArrayN(t, _) | Type::SmallArray(t, _) => Some(*t),
+            // A String indexes as bytes (RFC-0022's `string-index` row), and
+            // its element is the byte.
+            Type::Str => Some(Type::IntN {
+                bits: 8,
+                signed: false,
+            }),
             _ => None,
         },
         Step::Key => match resolve(base?) {
@@ -222,20 +231,11 @@ fn run_corpus() {
         }
         let refs: Vec<&vyrn_lower::core::Body> = bodies.iter().flat_map(|b| b.frames()).collect();
         let map = types.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        // What each function answers, for the producer of a store that is a
-        // call. A builtin is in no table and answers nothing, which is what
-        // `Judged::unjudged` counts.
-        let rets: BTreeMap<String, Type> = program
-            .functions
-            .iter()
-            .map(|f| (f.name.clone(), f.ret.clone()))
-            .collect();
-        let judgement = typed::judge(
-            &refs,
-            &mut |from, to| validated(from, to, &map),
-            &mut |base, s| step_ty(base, s, &types, &globals),
-            &mut |callee, args| answers(callee, args, &rets, &types),
-        );
+        // What a call answers is the core's now (`Rhs::Call::ret`), so this
+        // file no longer keeps a table of return types beside the checker's.
+        let judgement = typed::judge(&refs, &mut |to| validated(to, &map), &mut |base, s| {
+            step_ty(base, s, &types, &globals)
+        });
         unjudged += judgement.unjudged;
         judged += judgement.stores.len();
         for s in &judgement.stores {
@@ -281,8 +281,8 @@ fn run_corpus() {
 
     eprintln!(
         "typed by construction over the corpus: {programs} programs, {judged} stores into a \
-         validated place judged, {unjudged} unjudged (a primitive into a sized integer — the \
-         core carries no type for one)"
+         validated place judged, {unjudged} unjudged (a store whose producer is a read of a \
+         place these declarations resolve no type for)"
     );
     for (k, n) in &by_kind {
         eprintln!("  {n:5}  {k}");
@@ -295,14 +295,15 @@ fn run_corpus() {
         eprintln!("  finding: {f}");
     }
     // The ratchet: a store into a validated place whose producer is neither the
-    // type's constructor, nor a name already of the type, nor a literal. It may
-    // fall, never rise. Six when this slice landed — one primitive, two reads
-    // of a place, three record literals — and RFC-0125 §3 M6 records each with
-    // its program and line. None of the six is a value that reaches its slot
-    // unchecked: `rfcs/probes-0125/raw-value-into-a-validated-slot.vyrn` runs
-    // all three shapes on all three engines and each refuses in the census's
-    // words. They are the sites the boundary check exists for, which is what
-    // §2.3's constructor removes.
+    // type's constructor, nor a name already of the type, nor a literal, nor a
+    // constant into a sized integer. It may fall, never rise. Six when the
+    // second slice landed and six still — one primitive, two reads of a place,
+    // three record literals — and RFC-0125 §3 M6 records each with its program
+    // and line. None of the six is a value that reaches its slot unchecked:
+    // `rfcs/probes-0125/raw-value-into-a-validated-slot.vyrn` runs all three
+    // shapes on all three engines and each refuses in the census's words. They
+    // are the sites the boundary check exists for, which is what §2.3's
+    // constructor removes.
     const RATCHET: usize = 6;
     assert!(
         findings.len() <= RATCHET,
@@ -314,52 +315,10 @@ fn run_corpus() {
     assert!(judged > 0, "the judgment judged nothing");
 }
 
-/// What a call answers. A declared function answers what it declares. A
-/// builtin declares nothing here, and the three the corpus stores through hand
-/// their RECEIVER's value back — `xs.copy()` of a `Title` is a `Title`,
-/// `xs[i]` and `xs.swapRemove(i)` are the array's element — so their answer is
-/// read off the argument. Every other builtin answers nothing, and a store
-/// whose producer answers nothing is unjudged rather than guessed at.
-fn answers(
-    callee: &str,
-    args: &[Option<Type>],
-    rets: &BTreeMap<String, Type>,
-    types: &BTreeMap<String, TypeDecl>,
-) -> Option<Type> {
-    if let Some(t) = rets.get(callee) {
-        return Some(t.clone());
-    }
-    let arg0 = args.first().cloned().flatten();
-    match callee {
-        "@copy" => arg0,
-        "@at" | "@swapRemove" | "@pop" => match arg0.map(|t| resolve(t, types)) {
-            Some(Type::Array(e)) | Some(Type::ArrayN(e, _)) | Some(Type::SmallArray(e, _)) => {
-                Some(*e)
-            }
-            Some(Type::Map(_, v)) => Some(*v),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-/// A named type stepped down to the type it is declared over.
-fn resolve(t: Type, types: &BTreeMap<String, TypeDecl>) -> Type {
-    match &t {
-        Type::Named(n) => types.get(n).map(|d| d.base.clone()).unwrap_or(t),
-        _ => t,
-    }
-}
-
-/// The rule, asked where it is stated. A named type's `where` is
-/// `validate::required`'s question (the interpreter's form when the core
-/// carries no source type); a narrowing into a sized integer is
-/// `validate::narrows`.
-fn validated(
-    from: Option<&Type>,
-    to: &Type,
-    types: &std::collections::HashMap<String, TypeDecl>,
-) -> Option<String> {
+/// Which types carry a rule, asked where the rule is stated: a named type's
+/// `where` through `validate::of`, and a sized integer through the census's
+/// two narrowing rows. Whether a given store crossed it is the judgment's.
+fn validated(to: &Type, types: &std::collections::HashMap<String, TypeDecl>) -> Option<String> {
     match to {
         // Asked in the interpreter's form — `of`, the declaration's own
         // question — rather than `required`'s, so that a store of a name
@@ -368,14 +327,12 @@ fn validated(
         // of the census), and a judgment that skipped it would report only the
         // crossings it dislikes.
         Type::Named(n) => vyrn_frontend::validate::of(types.get(n)).map(|d| d.name.clone()),
-        // The narrowing rows. With a source type in hand the rule is
-        // `validate::narrows`; with none, the judgment has already decided the
-        // producer names the type (a conversion call) or is a literal, and the
-        // store is the row either way.
-        Type::IntN { .. } => match from {
-            Some(f) => vyrn_frontend::validate::narrows(f, to).then(|| to.to_string()),
-            None => Some(to.to_string()),
-        },
+        // The narrowing rows, for the same reason: a sized integer IS the
+        // row, whatever produced the value, so a store out of a producer
+        // already at that width is judged and lands as `by-name` rather than
+        // vanishing. `validate::narrows` tells the two apart, and the judgment
+        // reads it there.
+        Type::IntN { .. } => Some(to.to_string()),
         _ => None,
     }
 }
