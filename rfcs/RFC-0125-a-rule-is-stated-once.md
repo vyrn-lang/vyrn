@@ -2374,6 +2374,32 @@ Two things were found and NOT fixed here, both recorded rather than repaired:
   workflow creates `out/` and so never noticed. It is the site's bug, not the
   compiler's, and it is written down here because the census tripped over it.
 
+#### Gates
+
+In order, one at a time, on the machine of §1.4 with other worktrees running
+their own gates on it: `cargo fmt --all --check`, clean; `cargo build --release
+-p vyrn-cli`; `cargo test --workspace -- --skip _natively`, 1,965 tests over 87
+suites; `cargo test -p vyrn-cli --test memory -- --test-threads=1` serial, green
+on the first attempt; the `fixtures`, `boundaries`, `traps`, `audience`, `floor`
+and `contracts` suites (16, 2, 21, 3, 12 and 2); the `kernel`, `effects` and
+`typed` suites (2, 1 and 1); parity in release with `--ignored`, 41 of 41
+byte-identical in 238 s; the cross-engine generator test with a fresh
+`VYRN_GEN_CACHE_DIR`, every generator example the same source under both
+engines — the five programs M5's second slice reported red are green here;
+`vyrn doc --std --verify`, 41 files up to date; and `vyrn test` over
+`site/export.vyrn` and the site's own modules, 28 files and every block green.
+
+One gate is red, and it was red before this slice.
+`VYRN_WASM_MANIFEST=check` on `wasmhash` reports that all 172 examples differ
+from `rfcs/census/wasm-sha256.tsv`. The same command at the base commit
+(29aff225) reports the same 172, so the committed manifest is stale on this
+branch, as M5's second slice said it would be until the integrator regenerates
+it after the merge. This slice's change to the direct backend emits no
+different bytes, and that was checked rather than argued: the manifest was
+regenerated twice in release, once with the base's `direct.rs` and once with
+this slice's, and the two files are identical. The committed file is left
+alone.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
