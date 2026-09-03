@@ -1,0 +1,11 @@
+/// Row `string-utf8` — RFC-0014 M2. `stringFromBytes` is the single gate on
+/// what a `String` may hold: 0xFF starts no UTF-8 sequence.
+
+fn main() -> Int64 {
+    let b: Array<UInt8> = [104, 255, 105]
+    print(match stringFromBytes(b) {
+        Ok(s) => "ok: \{s}",
+        Err(e) => "err: \{e}",
+    })
+    return 0
+}

@@ -1,0 +1,18 @@
+/// Row `where-scalar` — RFC-0003. A value crossing into a predicated named
+/// type at a call boundary. The value hides behind a parameter, so nothing
+/// folds it and the boundary itself does the check.
+
+type Age = Int64 where value >= 18
+
+fn greet(a: Age) -> Int64 {
+    return a
+}
+
+fn raw(n: Int64) -> Int64 {
+    return n
+}
+
+fn main() -> Int64 {
+    print(greet(raw(5)))
+    return 0
+}

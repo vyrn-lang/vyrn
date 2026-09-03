@@ -15349,30 +15349,14 @@ fn mangle_ty(t: &Type) -> String {
 /// The declaration whose `where` predicate a value flowing from `from` into `to`
 /// must satisfy, if any (RFC-0003's automatic validation).
 ///
-/// The ONE copy of that decision, for the reason [`llt_of`] is the one copy of
-/// the shape rules: RFC-0077's direct wasm backend asks the same question, and a
-/// second spelling of it would fork the semantics silently — a flow one backend
-/// checks and the other does not is a wrong program on exactly one target.
-///
-/// The exactly-same named type is not a boundary crossing: it was checked when
-/// it was built, so re-running the predicate would be work that cannot fail.
-///
-/// One exemption is deliberately NOT here, because it needs the expression
-/// rather than the two types: [`vyrn_frontend::finite::string_flow_proven`],
-/// RFC-0020's containment proof. Both backends call that function themselves on
-/// the same AST — the consteval precedent — so it is single-sourced too, just
-/// one layer out.
-pub(crate) fn validation_required<'t>(
-    from: &Type,
-    to: &Type,
-    types: &'t HashMap<String, TypeDecl>,
-) -> Option<&'t TypeDecl> {
-    let Type::Named(n) = to else { return None };
-    if from == to {
-        return None;
-    }
-    types.get(n).filter(|d| d.predicate.is_some())
-}
+/// It was the one copy of that decision for the two compiled backends and it was
+/// in the wrong crate: the interpreter lives in `vyrn-frontend`, which this crate
+/// depends on, so it could not read this and asked the same question itself —
+/// the census of RFC-0125 §3 M6 counted three more askings in `interp.rs`. The
+/// statement is [`vyrn_frontend::validate::required`] now, beside `trap` and for
+/// the same reason (RFC-0101 §6.4), and this name is the two backends' spelling
+/// of it rather than a second copy.
+pub(crate) use vyrn_frontend::validate::required as validation_required;
 
 /// One rung of the boundary ladder — RFC-0101 §1.5's shadow.
 ///

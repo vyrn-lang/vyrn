@@ -55,7 +55,7 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 
-use crate::ast::{Type, TypeDecl};
+use crate::ast::TypeDecl;
 
 /// What every engine puts in front of a trap before it reaches a terminal.
 ///
@@ -155,7 +155,7 @@ pub fn validation(name: &str, record_base: bool) -> String {
 
 /// [`validation`] for a declaration, which is what every caller actually holds.
 pub fn validation_of(decl: &TypeDecl) -> String {
-    validation(&decl.name, matches!(decl.base, Type::Record(_)))
+    validation(&decl.name, crate::validate::is_cross_field(decl))
 }
 
 /// [`validation`] for a named type, resolved through this program's
@@ -163,9 +163,7 @@ pub fn validation_of(decl: &TypeDecl) -> String {
 pub fn validation_named(name: &str, types: &HashMap<String, TypeDecl>) -> String {
     validation(
         name,
-        types
-            .get(name)
-            .is_some_and(|d| matches!(d.base, Type::Record(_))),
+        types.get(name).is_some_and(crate::validate::is_cross_field),
     )
 }
 
