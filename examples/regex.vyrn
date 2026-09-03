@@ -21,7 +21,13 @@ type EveryOther = String where value.byteLength >= 2 && value =~ "[a-z]+" && val
 
 fn register(name: String) -> Username {
     // Checked at runtime because `name` is not a compile-time constant.
-    return Username(name)
+    //
+    // The copy is RFC-0089 rule 2: `name` is a `read` parameter, the caller
+    // still owns it, and a validated constructor hands its argument on as the
+    // result. Without it the caller and the result released one buffer, and
+    // the native binary exited with STATUS_HEAP_CORRUPTION (RFC-0125 §3 M3,
+    // the census).
+    return Username(name.copy())
 }
 
 fn main() -> Int64 {

@@ -159,7 +159,7 @@ fn census() -> Vec<Row> {
             "rule 2: a prefix `consume` of a `read` parameter",
             "RFC-0089",
             "`ys` may not be consumed — it is a `read` parameter",
-            Kernel::No,
+            Kernel::Other("via `take(..)` — it is a `read` parameter"),
         ),
         row(
             "r12_module_state_to_a_consume_parameter.vyrn",
@@ -176,7 +176,7 @@ fn census() -> Vec<Row> {
             "RFC-0089",
             "`ys` may not be passed to a `consume` parameter via `take(..)` — it is a `read` \
              parameter",
-            Kernel::No,
+            Kernel::Same,
         ),
         row(
             "r14_projection_to_a_consume_parameter.vyrn",
@@ -207,21 +207,23 @@ fn census() -> Vec<Row> {
             "RFC-0012",
             "`s` may not be returned from an exported function — it is a `read` parameter, and \
              the JS caller releases what it is handed",
-            Kernel::No,
+            Kernel::Other(
+                "`s` may not be returned — it is a `read` parameter, and a return is owned",
+            ),
         ),
         row(
             "r18_return_a_read_parameter.vyrn",
             "rule 2 at the return: a whole `read` parameter",
             "RFC-0089",
             "`ys` may not be returned — it is a `read` parameter, and a return is owned",
-            Kernel::No,
+            Kernel::Same,
         ),
         row(
             "r19_read_parameter_wrapped_in_the_result.vyrn",
             "rule 2 through a wrapper: a `read` parameter put into the result",
             "RFC-0089",
             "`s` may not be put into `Some(..)` — it is a `read` parameter",
-            Kernel::No,
+            Kernel::Other("via `Some(..)` — it is a `read` parameter"),
         ),
         row(
             "r20_drop_after_consume.vyrn",
@@ -282,7 +284,7 @@ fn census() -> Vec<Row> {
             "rule 2: a `read` parameter to a builtin that declares `consume`",
             "RFC-0089",
             "`xs` may not be stored into `fromArray(..)` — it is a `read` parameter",
-            Kernel::No,
+            Kernel::Other("via `fromArray(..)` — it is a `read` parameter"),
         ),
         row(
             "r28_return_a_capture_from_a_closure.vyrn",
@@ -337,7 +339,7 @@ fn census() -> Vec<Row> {
             "rule 2: a `read` parameter into a builtin's `consume` argument",
             "RFC-0089",
             "`s` may not be stored into `push(..)` — it is a `read` parameter",
-            Kernel::No,
+            Kernel::Other("via `push(..)` — it is a `read` parameter"),
         ),
     ]
 }

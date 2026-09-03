@@ -17,7 +17,9 @@
 type P<T> = { a: T, b: T }
 
 fn mk<T>(x: T) -> P<T> {
-    return P { a: x, b: x }
+    // Two fields out of one `read` parameter: two owners for one value
+    // (RFC-0089 rule 2), which the generic body hides from the checker.
+    return P { a: x.copy(), b: x.copy() }
 }
 
 fn f<T>(x: T, n: Int64) -> Int64 {
