@@ -140,7 +140,13 @@ export fn packages() -> Array<Package> {
     }
     let mut out: Array<Package> = []
     for slug in projectSlugs() {
-        out.push(packageOf(slug))
+        // A project is a package when it has a module to import. One that is
+        // only an entry point — a prediction program the floor refuses, an
+        // artifact with no library beside it — has no specifier to offer, and
+        // the registry publishes offers, not directories.
+        if offerOf(slug).spec.byteLength > 0 {
+            out.push(packageOf(slug))
+        }
     }
     registry = out.copy()
     return out
