@@ -349,12 +349,19 @@ pub fn install_judge(f: Judge) {
     let _ = JUDGE.set(f);
 }
 
-/// The installed judgment, unless `VYRN_NO_JUDGE=1` stood it aside — the knob
-/// that puts every row back in the pass for a bisect.
-fn judge() -> Option<Judge> {
+/// `VYRN_NO_JUDGE=1` — the bisect knob that stands RFC-0125 M6's judgments
+/// aside. It puts every judged row back in the pass here, and it puts the
+/// generation fence's two changed cells back in `checker::gen_refused`
+/// (RFC-0125 §3 M6, fifth slice). One knob, because the two are one milestone
+/// and a bisect that needs two is a worse bisect.
+pub fn no_judge() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let off = *OFF.get_or_init(|| std::env::var("VYRN_NO_JUDGE").is_ok_and(|v| v == "1"));
-    if off {
+    *OFF.get_or_init(|| std::env::var("VYRN_NO_JUDGE").is_ok_and(|v| v == "1"))
+}
+
+/// The installed judgment, unless [`no_judge`] stood it aside.
+fn judge() -> Option<Judge> {
+    if no_judge() {
         return None;
     }
     JUDGE.get().copied()

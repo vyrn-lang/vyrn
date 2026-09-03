@@ -189,7 +189,7 @@ pub fn is_surface_builtin(name: &str) -> bool {
 ///   READ AS DATA by `vyrn-frontend/tests/primitives.rs`, which scans both files
 ///   for literals to enumerate what each engine implements and compares that to
 ///   RFC-0078's census. A predicate is invisible to a text scan.
-/// - `checker.rs`'s `RESERVED`, `SPAWN_FORBIDDEN` and `COMPTIME_FORBIDDEN` hold
+/// - `checker.rs`'s `RESERVED` and `SPAWN_FORBIDDEN`, and the lattice's `gen` column, hold
 ///   the five among dozens of unrelated names, where splicing a const array in
 ///   costs more than it saves. `every_log_level_is_reserved_and_forbidden_where_effects_are`
 ///   compares them to this table instead.

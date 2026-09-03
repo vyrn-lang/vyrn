@@ -19,6 +19,7 @@ pub mod consteval;
 pub mod contracts;
 pub mod declared;
 pub mod diagnostics;
+pub mod effects;
 pub mod finite;
 pub mod floor;
 pub mod fmt;

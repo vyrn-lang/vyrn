@@ -262,6 +262,8 @@ fn the_lattice_is_the_rfc_table() {
         .find("| effect | atoms")
         .expect("the lattice table is in RFC-0125 §3 M6");
     let mut from_rfc: BTreeSet<(String, Effect)> = BTreeSet::new();
+    let mut gen_from_rfc: std::collections::BTreeMap<String, bool> =
+        std::collections::BTreeMap::new();
     let mut rows = 0;
     for line in rfc[start..].lines().skip(2) {
         if !line.starts_with('|') {
@@ -276,10 +278,40 @@ fn the_lattice_is_the_rfc_table() {
             let after = &rest[open + 1..];
             let close = after.find('`').expect("closed backtick");
             let name = &after[..close];
-            if name != "—" && !name.is_empty() {
+            if name != "\u{2014}" && !name.is_empty() {
                 from_rfc.insert((name.to_string(), effect));
             }
             rest = &after[close + 1..];
+        }
+        // The LAST column is the `gen` cell: RFC-0021's generation-time
+        // sandbox, which RFC-0125 M6's fifth slice made a check. A cell is
+        // `yes` or `no` for the whole row, or names the atoms it splits — one
+        // row does, and finding 5 says why.
+        let cell = cells[6];
+        if cell.contains('`') {
+            // A split cell names each atom and its own verdict. One row is
+            // split, and finding 5 says why.
+            let mut rest = cell;
+            while let Some(open) = rest.find('`') {
+                let after = &rest[open + 1..];
+                let close = after.find('`').expect("closed backtick");
+                let verdict = after[close + 1..].trim_start();
+                gen_from_rfc.insert(after[..close].to_string(), verdict.starts_with("yes"));
+                rest = &after[close + 1..];
+            }
+        } else {
+            let allowed = if cell.starts_with("yes") {
+                true
+            } else if cell.starts_with("no") {
+                false
+            } else {
+                panic!("`{cell}` is not a gen cell");
+            };
+            for (n, e) in effects::ATOMS {
+                if *e == effect {
+                    gen_from_rfc.insert(n.to_string(), allowed);
+                }
+            }
         }
     }
     assert_eq!(rows, Effect::ALL.len(), "one row per effect");
@@ -292,6 +324,19 @@ fn the_lattice_is_the_rfc_table() {
     assert!(
         only_rfc.is_empty() && only_code.is_empty(),
         "the RFC table and effects::ATOMS differ; in the RFC only: {only_rfc:?}; in the code only: {only_code:?}"
+    );
+    // And the last column against the code that reads it. RFC-0021's fence
+    // asks this and nothing else now (RFC-0125 M6, fifth slice), so a cell
+    // edited here is a refusal changed there.
+    let wrong: Vec<String> = gen_from_rfc
+        .iter()
+        .filter(|(n, allowed)| effects::gen_allows(n) != **allowed)
+        .map(|(n, allowed)| format!("`{n}`: the RFC says {allowed}"))
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "the RFC table's `gen` column and the code differ: {}",
+        wrong.join("; ")
     );
 }
 
