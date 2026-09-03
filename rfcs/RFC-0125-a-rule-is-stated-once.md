@@ -3158,6 +3158,150 @@ names — `UInt8` from an `Int64`, answering `Option` or trapping at one site
 named by the type; then the kernel's third judgment over the core, which is
 what makes a boundary check unnecessary rather than shared.
 
+#### The sixth slice (2026-09-03)
+
+The sixth slice decides finding 7, deletes the floor's call machinery, and
+records the audience decision. What the floor decides on its own is one
+declaration now, and it keeps no list of capability-carrying names at all.
+
+**7, decided: the `extern` row is a CALL.** RFC-0103 M2's finding 3 made the
+declaration the carrier and gave one reason — an unanswered import stops
+instantiation, so a program that never calls the import still cannot start.
+The reason stopped being true. The direct backend (RFC-0077) emits an
+`(import "vyrn" ..)` for a host function the call graph reaches and for no
+other, so a declaration nothing calls produces no import at all. Read off the
+emitted module, three programs:
+
+| program | `vyrn` import emitted | what the artifact does |
+|---|---|---|
+| declares `jsAdd`, calls nothing | none | `wasi`: instantiates, prints, exits 0. `native`: links, prints, exits 0 |
+| declares `jsAdd`, calls it from `main` | `(import "vyrn" "jsAdd" ..)` | `wasi`: a host without the namespace cannot instantiate. `native`: the call traps, `` extern `jsAdd` is not available on this target `` |
+| declares `jsAdd`, calls it from a function `main` never reaches | none | as the first row |
+
+Both prediction programs are in `vyrn-cli`
+`floor::an_unreached_host_import_is_no_capability`. The first row is what the
+old rule refused and the artifact runs; the second is what both rules refuse,
+in one wording, byte-identical under `VYRN_NO_JUDGE=1`. The third row is the
+backend sweeping HARDER than the floor: it drops a call `_start` cannot reach
+where the judgment keeps every non-generic instance, so the floor stays the
+wider of the two and never accepts a program whose artifact holds the import.
+RFC-0103 carries the decision as a dated addendum and its vocabulary table
+carries the row; the refusal, its wording, its chain and the target sets are
+unchanged.
+
+Nothing in the corpus changes verdict. The three client artifacts whose
+`std/rpc` and `std/connect` stubs declare `vyrnRpcCall` are `browser`, and a
+page HAS `extern`; a stub calls its own import in the same module, so the one
+refusal the tree relies on — the same client retargeted to `native` — is the
+refusal it was. `examples/externdemo.vyrn` is no artifact's entry and the floor
+never touched it.
+
+**What was deleted.** `floor::CALLS` and `floor::JUDGED`, 41 lines with their
+reasons, and the `extern fn` declaration scan, 21 more. The floor's vocabulary
+is the LATTICE's rows now, read through one match (`floor::Capability::of`):
+`fs` is three effect rows, `stdin` is one, `args` is one, `extern` is one, and
+every other effect is `None` for one of RFC-0103 M2's two opposite reasons —
+every target has it, or no compiled target does. `floor::call_carrier` is the
+one reading of a call site, and the scan, the judgment
+(`vyrn_lower::effects::reaches`) and the effects harness all make it instead
+of each holding a copy. A `Carried` records whether the scan found a CALL or a
+DECLARATION, so `floor::is_judged` asks the scan rather than matching names.
+
+The count is a wash and the rule is not: 62 lines of two constant tables and a
+second scan out, 58 lines of derivation in, `floor.rs` 829 lines to 851. What
+was two lists to keep equal is one table read twice.
+
+**What the floor still is.** A scan and a declaration check, and neither is a
+verdict on a call.
+
+- The SCAN finds every carrier and writes every refusal — the carrier it
+  quotes, the line it found it on, the import chain, and the `connect(..)`
+  remedy. The breadth-first walk in `floor::locate` is the IMPORT graph and
+  stays: the shortest chain to the offending module is the diagnostic.
+- The DECLARATION check is `logging { sink: file(..) }` (finding 10). A
+  declaration is no call, no effect set holds one, and RFC-0103 §4's reason
+  stands. It is also the one `fs` reach that degrades SILENTLY in a page, so
+  the pass keeps deciding it inside the load, before every type error.
+  `floor::the_log_sink_is_a_declaration_the_judgment_does_not_clear` pins it,
+  byte-identical under the knob.
+
+The VERDICT on every call is the judgment's. The floor holds it back for the
+check (`floor::defer`, `floor::decide`) and drops the rows no instance
+reaches.
+
+**The knob, and what it means now.** `VYRN_NO_JUDGE=1` stays, and it restores
+two things rather than a second list. The floor goes back to PRESENCE: the
+scan's carriers are refused whether or not an instance reaches them, inside
+the load and before every type error, which is the rule and the order of
+RFC-0103 M2. The generation fence goes back to its own two cells (fifth
+slice): `print` is allowed in a `gen fn` again and the three host-boundary
+names are externs again. One knob, because the two are one milestone.
+
+**The audience pass: it stays, and this is the record.** RFC-0103 §4 says what
+a fence is for, and the tally says the judgment agrees: 414 *declared-only*
+functions — a route handler, a page, a store's shape — are server-only or
+client-only with no target-restricted effect at all, and **0 unfenced, 0
+server-extern**. A fence protects a DECLARATION. A secret in a constant uses
+no capability, so no effect set can hold the rule and no judgment can replace
+it. No audience code path is dead by the tally either: `audience.rs` is path
+classification, the widening rule, the remedy and the display, and every one
+of them is the declared boundary rather than a reach. Nothing was deleted, and
+the reason it was not is the finding.
+
+**The tally.** `cargo test -p vyrn-cli --test effects`, at this slice's last
+commit:
+
+    effects over the corpus: 180 programs (31 not loadable here, 2 refused as
+    recorded), 26883 functions judged, 8244 pure, 0 unlowered, 64 calls
+    through a function value judged over their sources, 69 unattributed
+      open sets: 40
+      effect 18218  alloc
+      effect    11  read-input
+      effect   292  write-output
+      effect   189  fs-read
+      effect    19  fs-write
+      effect   106  fs-list
+      effect     8  args
+      effect    29  clock
+      effect    20  random
+      effect    31  extern
+      effect    22  serve
+      effect     4  spawn
+      effect  7785  trap
+      effect   826  gen-only
+      spawn:      12 sites judged, 0 outside `alloc, trap`
+      floor:      26625 agree, 42 callee-carried, 216 gen-body, 0 floor-blind,
+                  0 core-blind
+      audience:   26442 no fence, 27 agree, 414 declared-only, 0 unfenced,
+                  0 server-extern
+      judged:     26625 agree, 42 callee-carried, 216 gen-body, 0 differ
+
+The function count is the fifth slice's: the judgment did not change, only who
+reads it. *callee-carried* rises from 24 to 42 because `extern` is compared
+now — eighteen functions whose extern comes from a callee, which is the floor
+agreeing over the closure. **Both ratchets are 0.** The `floor:` and `judged:`
+lines are one line twice: every call the scan finds is judged.
+
+**The M6 gate.** "The audience, floor and contract test suites green with
+their passes deleted." Where each stands:
+
+- **floor** — `cargo test -p vyrn-cli --test floor`, 12 passed. The pass's
+  call machinery is deleted and its verdicts are the judgment's; the scan and
+  one declaration check remain, and the RFC says above why a scan is not a
+  second statement of the rule and why a declaration cannot be an effect.
+- **audience** — `cargo test -p vyrn-cli --test audience`, 21 passed. The pass
+  is NOT deleted, by the decision recorded above; the fence is a declared
+  boundary and the judgment replaces nothing of it.
+- **contracts** — `cargo test -p vyrn-cli --test contracts`, 12 passed.
+  Untouched by this milestone.
+
+What still stands between here and the gate is M6's other two sentences, which
+no slice has started: validation by construction in place of the boundary
+checks, and the trap primitive and its table in place of the sites. Finding 14
+is still open — 69 calls through a function value the join cannot attribute,
+40 open sets — and it bounds neither: the ratchet counts it as unattributed
+rather than as a disagreement.
+
 ### What each milestone is worth on its own
 
 M1 fixes the wasm column. M2 makes leaks a compile error. M3 halves the

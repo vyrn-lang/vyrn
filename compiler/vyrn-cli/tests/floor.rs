@@ -460,6 +460,64 @@ fn a_moved_row_refuses_in_the_words_the_pass_used() {
     }
 }
 
+/// RFC-0125 M6, sixth slice, finding 7 decided: the `extern` row is carried by
+/// the CALL and not by the declaration. The two prediction programs stand here
+/// beside each other.
+///
+/// `unused.vyrn` declares a host import and calls nothing. The direct backend
+/// (RFC-0077) emits no `(import "vyrn" ..)` for it, so the artifact asks the
+/// host for nothing and runs: `vyrn run --engine wasm unused.vyrn` prints and
+/// exits 0. The floor accepts it now; it used to refuse a program that runs.
+///
+/// `used.vyrn` calls it. The backend emits the import, a plain wasmtime cannot
+/// instantiate the module and a native build traps at the call, so the artifact
+/// does need a host. The floor refuses it in the words it always used, and
+/// `VYRN_NO_JUDGE=1` gives the same bytes: for this row presence and
+/// reachability are one answer whenever a call is written at all.
+///
+/// A dead ORDINARY function that calls the import is refused too, and by both
+/// rules: `lower` instantiates every non-generic function, so the judgment sees
+/// `dead` exactly as the scan does.
+#[test]
+fn an_unreached_host_import_is_no_capability() {
+    const UNUSED: &str = "extern fn jsAdd(a: Int64, b: Int64) -> Int64\n\n\
+         fn main() -> Int64 {\n    print(\"no host needed\")\n    return 0\n}\n";
+    const USED: &str = "extern fn jsAdd(a: Int64, b: Int64) -> Int64\n\n\
+         fn main() -> Int64 {\n    let x = jsAdd(1, 2)\n    print(x.toString())\n    return 0\n}\n";
+    const DEAD: &str = "extern fn jsAdd(a: Int64, b: Int64) -> Int64\n\n\
+         fn dead() -> Int64 {\n    return jsAdd(1, 2)\n}\n\n\
+         fn main() -> Int64 {\n    print(\"alive\")\n    return 0\n}\n";
+    const MANIFEST: &str = "{ \"name\": \"p\", \"artifacts\": { \
+         \"app\": { \"entry\": \"host.vyrn\", \"target\": \"native\" } } }\n";
+
+    let dir = scratch("externunused");
+    write(&dir, "vyrn.json", MANIFEST);
+    write(&dir, "host.vyrn", UNUSED);
+    let entry = dir.join("host.vyrn");
+    let (ok, err) = check(&entry);
+    assert!(ok, "an import nothing calls is no capability:\n{err}");
+
+    for (name, body) in [("used", USED), ("dead", DEAD)] {
+        write(&dir, "host.vyrn", body);
+        let (ok, judged) = check(&entry);
+        assert!(!ok, "{name}: a native artifact has no host:\n{judged}");
+        assert!(
+            judged.contains("`jsAdd` needs `extern`; target `native` has no host to import from"),
+            "{name}: {judged}"
+        );
+        let out = vyrn()
+            .env("VYRN_NO_JUDGE", "1")
+            .arg("check")
+            .arg(&entry)
+            .output()
+            .expect("run check");
+        let pass = String::from_utf8_lossy(&out.stderr).to_string()
+            + &String::from_utf8_lossy(&out.stdout);
+        assert!(!out.status.success(), "{name}: {pass}");
+        assert_eq!(judged, pass, "{name}: the judgment changed the refusal");
+    }
+}
+
 /// RFC-0125 M6, fifth slice: `fs` moved, and the `logging { sink: file(..) }`
 /// carrier did not move with it. The sink is a DECLARATION and no effect set
 /// holds it (finding 10), so the pass keeps deciding it — inside the load,
