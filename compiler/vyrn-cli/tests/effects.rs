@@ -322,6 +322,7 @@ fn run_corpus() {
     let mut spawn_sites = 0usize;
     let mut spawn_outside: Vec<String> = Vec::new();
     let mut gaps: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let show_gaps = std::env::var("VYRN_EFFECTS_GAPS").ok();
     let mut unloadable = 0usize;
     let mut refused = 0usize;
     let mut programs = 0usize;
@@ -379,7 +380,24 @@ fn run_corpus() {
                     bodies.push(b);
                     insts.push(inst);
                 }
-                Err(g) => *gaps.entry(g.what).or_default() += 1,
+                Err(g) => {
+                    // As `kernel.rs` does: `VYRN_EFFECTS_GAPS=<substring>`
+                    // says where each remaining gap is, so an instance with
+                    // no core can be read in the source (RFC-0125 §3 M6,
+                    // finding 12).
+                    if show_gaps.as_deref().is_some_and(|w| g.what.contains(w)) {
+                        eprintln!(
+                            "  gap: {} {}:{}:{} {} {}",
+                            slash(path),
+                            inst.module(),
+                            inst.spelling(),
+                            g.line,
+                            g.what,
+                            g.detail
+                        );
+                    }
+                    *gaps.entry(g.what).or_default() += 1;
+                }
             }
         }
         // Every frame, outermost first: the judgment's slice. `top[i]` is
