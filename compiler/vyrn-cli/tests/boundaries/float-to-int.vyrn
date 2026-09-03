@@ -1,0 +1,15 @@
+/// Row `float-to-int` — RFC-0002. A float entering an integer slot truncates
+/// toward zero. Out of range is unspecified, so this row stays in range and
+/// pins only what the three engines promise.
+
+fn raw(f: Float64) -> Float64 {
+    return f
+}
+
+fn main() -> Int64 {
+    let a: Int64 = Int64(raw(2.9))
+    let b: Int64 = Int64(raw(-2.9))
+    let c: Float32 = Float32(raw(0.1))
+    print("\{a} \{b} \{c}")
+    return 0
+}

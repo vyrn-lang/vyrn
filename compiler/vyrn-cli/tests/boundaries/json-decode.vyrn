@@ -1,0 +1,33 @@
+/// Row `json-decode` — RFC-0018. Decode ACCUMULATES: a range failure, a shape
+/// mismatch and a parse error are `Issue`s, never traps. The vocabulary is a
+/// compile-time constant per type and site, so the bytes are the same on every
+/// engine.
+
+type Age = Int64 where value > 0 && value < 200
+type User = { name: String, age: Age }
+
+fn report(is: Array<Issue>) -> String {
+    let mut out = ""
+    let mut n = 0
+    while n < is.length {
+        out = out + is[n].key + "@" + is[n].path + ": " + is[n].message + " | "
+        n = n + 1
+    }
+    return out
+}
+
+fn main() -> Int64 {
+    match fromJson(User, "{ \"name\": \"ada\", \"age\": 900 }") {
+        Valid(u) => print("ok"),
+        Invalid(is) => print(report(is)),
+    }
+    match fromJson(User, "{ \"name\": 7 }") {
+        Valid(u) => print("ok"),
+        Invalid(is) => print(report(is)),
+    }
+    match fromJson(User, "{ not json") {
+        Valid(u) => print("ok"),
+        Invalid(is) => print(report(is)),
+    }
+    return 0
+}

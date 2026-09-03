@@ -1,0 +1,10 @@
+/// Row `shift-range` — RFC-0045. A shift count outside `0..bits`.
+
+fn count(n: Int64) -> Int64 {
+    return n
+}
+
+fn main() -> Int64 {
+    print(1 << count(64))
+    return 0
+}
