@@ -149,6 +149,21 @@ pub enum Place {
     Key(Box<Place>, Val),
 }
 
+/// A right-hand side: what produced the value a `let` binds or a store puts
+/// away.
+///
+/// **The producer type.** Two variants below carry one, and it is the type the
+/// value HAS when the node's code has run, before any coercion the destination
+/// asks for — [`crate::Row::has`] falling back to [`crate::Row::ty`], which is
+/// the pair a backend reads (RFC-0101 §2.1 item 2 [A16]). It is the CHECKER's
+/// answer at that node and never this pass's guess. The other four variants
+/// need none: a `Val`, a `Read` and a `Take` name a place or a name whose type
+/// the core already carries, and a `Make` is a literal of its destination.
+///
+/// The typed judgment (`typed.rs`) is what reads it. Without it `a + b` and
+/// `UInt8(n)` read alike, so a store into a sized integer had no producer to
+/// ask and 94,691 of them were unjudged (RFC-0125 §3 M6, the third judgment's
+/// second slice).
 #[derive(Debug, Clone)]
 pub enum Rhs {
     /// The value of a name: a move when the name is owned, a copy otherwise.
@@ -174,9 +189,15 @@ pub enum Rhs {
         /// That is `movecheck::sinks`'s write-back exception, which stays the
         /// checker's this slice (RFC-0125 §3 M3, the census).
         write_back: bool,
+        /// The producer type: what the callee answers at this site, with the
+        /// call's own type arguments already substituted. `None` for a call
+        /// the checker did not type.
+        ret: Option<Type>,
     },
     /// Arithmetic, comparison, interpolation, conversion: reads its operands.
-    Prim(Vec<Val>),
+    /// The second field is the producer type — the operator's own result,
+    /// which is what `binop_type` decided and the destination did not.
+    Prim(Vec<Val>, Option<Type>),
     /// A record, array, map or variant literal: takes its parts.
     Make(Vec<Val>),
 }
@@ -372,7 +393,7 @@ impl Body {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            Rhs::Prim(vs) => format!(
+            Rhs::Prim(vs, _) => format!(
                 "prim({})",
                 vs.iter()
                     .map(|v| self.val(v))
@@ -536,10 +557,15 @@ fn gap_d<T>(what: &'static str, detail: &str, line: usize) -> Result<T, Gap> {
 /// Build the core of one instance.
 pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<Body, Gap> {
     let mut types: HashMap<usize, Type> = HashMap::new();
+    let mut produced: HashMap<usize, Type> = HashMap::new();
     for r in &inst.rows {
         if let Node::Expr(_) = r.node {
             if let Some(t) = r.ty.as_ref().or(r.has.as_ref()) {
                 types.insert(r.node.id(), t.clone());
+            }
+            // The other half of the pair: what the node's own code produces.
+            if let Some(t) = r.has.as_ref().or(r.ty.as_ref()) {
+                produced.insert(r.node.id(), t.clone());
             }
         }
     }
@@ -553,6 +579,7 @@ pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<
         own,
         proto: &own.proto,
         types,
+        produced,
         placed,
         body: Body {
             name: inst.spelling(),
@@ -627,10 +654,15 @@ pub fn build_module_state<'a>(
     rows: &[crate::Row<'a>],
 ) -> Result<Body, Gap> {
     let mut types: HashMap<usize, Type> = HashMap::new();
+    let mut produced: HashMap<usize, Type> = HashMap::new();
     for r in rows {
         if let Node::Expr(_) = r.node {
             if let Some(t) = r.ty.as_ref().or(r.has.as_ref()) {
                 types.insert(r.node.id(), t.clone());
+            }
+            // The other half of the pair: what the node's own code produces.
+            if let Some(t) = r.has.as_ref().or(r.ty.as_ref()) {
+                produced.insert(r.node.id(), t.clone());
             }
         }
     }
@@ -639,6 +671,7 @@ pub fn build_module_state<'a>(
         own,
         proto: &own.proto,
         types,
+        produced,
         placed: HashMap::new(),
         body: Body {
             name: String::new(),
@@ -677,6 +710,10 @@ struct Builder<'a> {
     own: &'a Ownership,
     proto: &'a Owned,
     types: HashMap<usize, Type>,
+    /// The producer type of every expression the checker typed: what the node
+    /// HAS, before the destination's coercion (see [`Rhs`]). `types` above is
+    /// the other half of the same pair — what the value must end up as.
+    produced: HashMap<usize, Type>,
     placed: HashMap<(Exit, usize), Vec<&'a Release>>,
     body: Body,
     scope: Vec<(String, Name)>,
@@ -843,6 +880,23 @@ impl<'a> Builder<'a> {
             .rev()
             .find(|(n, _)| n == name)
             .map(|(_, i)| *i)
+    }
+
+    /// The producer type of a node — what its own code answers, before the
+    /// destination's coercion (see [`Rhs`]). `None` where the checker typed no
+    /// row for the node, which is a gap for `ty_of` and merely an unanswered
+    /// question here: the judgment counts a store it cannot ask about rather
+    /// than guessing at it.
+    fn produced(&self, e: &Expr) -> Option<Type> {
+        self.produced
+            .get(&(e as *const Expr as usize))
+            .cloned()
+            // A projection the checker expanded at the site (RFC-0122) has no
+            // row of its own, and its declared result under the receiver's
+            // type arguments is what it produces — the same answer `ty_of`
+            // reads there. `ty_of` refuses everything else, so this fills the
+            // one class and guesses at none.
+            .or_else(|| self.ty_of(e).ok())
     }
 
     fn ty_of(&self, e: &Expr) -> Result<Type, Gap> {
@@ -1818,8 +1872,8 @@ impl<'a> Builder<'a> {
     fn lambda(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
         let caps = self.captures(e);
         let ty = self.ty_of(e).unwrap_or(Type::Unit);
-        let t = self.name("@lambda", ty, false, e.line());
-        out.push(St::Let(t, Rhs::Prim(caps.clone())));
+        let t = self.name("@lambda", ty.clone(), false, e.line());
+        out.push(St::Let(t, Rhs::Prim(caps.clone(), Some(ty))));
         self.lambda_frame(e, &caps)?;
         Ok(Val::Name(t))
     }
@@ -2010,7 +2064,9 @@ impl<'a> Builder<'a> {
                 Ok(Rhs::Val(Val::Lit))
             }
             Expr::Var { .. } | Expr::Consume { .. } => Ok(Rhs::Val(self.val(e, out)?)),
-            Expr::Unary { expr, .. } => Ok(Rhs::Prim(vec![self.read_val(expr, out)?])),
+            Expr::Unary { expr, .. } => {
+                Ok(Rhs::Prim(vec![self.read_val(expr, out)?], self.produced(e)))
+            }
             Expr::Binary { lhs, rhs, .. } => {
                 // An operator drains its operands' temporaries in both
                 // compiled backends (`binary`, `gen_binary`).
@@ -2018,7 +2074,7 @@ impl<'a> Builder<'a> {
                 let a = self.read_val(lhs, out)?;
                 let b = self.read_val(rhs, out)?;
                 self.drain -= 1;
-                Ok(Rhs::Prim(vec![a, b]))
+                Ok(Rhs::Prim(vec![a, b], self.produced(e)))
             }
             Expr::Field { expr, field, .. } => {
                 let fty = self.ty_of(e)?;
@@ -2037,12 +2093,12 @@ impl<'a> Builder<'a> {
                 Ok(Rhs::Read(Place::Field(Box::new(place), field.clone())))
             }
             Expr::Call { name, args, line } if name == "panic" || name == "@panicAt" => {
-                let r = self.call(name, args, *line, out)?;
+                let r = self.call(name, args, *line, self.produced(e), out)?;
                 out.push(St::Do(r, *line));
                 out.push(St::Trap);
                 Ok(Rhs::Val(Val::Lit))
             }
-            Expr::Call { name, args, line } => self.call(name, args, *line, out),
+            Expr::Call { name, args, line } => self.call(name, args, *line, self.produced(e), out),
             Expr::TryConstruct { args, .. } | Expr::ArrayLit { elems: args, .. } => {
                 let mut vs = Vec::new();
                 for a in args {
@@ -2075,6 +2131,7 @@ impl<'a> Builder<'a> {
                     args: vs,
                     spawn: true,
                     write_back: false,
+                    ret: self.produced(e),
                 })
             }
             Expr::IfExpr {
@@ -2266,7 +2323,7 @@ impl<'a> Builder<'a> {
             Expr::Lambda { .. } => {
                 let caps = self.captures(e);
                 self.lambda_frame(e, &caps)?;
-                Ok(Rhs::Prim(caps))
+                Ok(Rhs::Prim(caps, self.produced(e)))
             }
         }
     }
@@ -2307,6 +2364,9 @@ impl<'a> Builder<'a> {
                 args: vec![(sv.clone(), Capability::Consume)],
                 spawn: false,
                 write_back: false,
+                // `success` answers the unwrapped value, which is what the
+                // result name of the `?` holds.
+                ret: Some(self.body.names[res as usize].ty.clone()),
             },
         ));
         ok.push(St::Store {
@@ -2387,6 +2447,7 @@ impl<'a> Builder<'a> {
         name: &str,
         args: &'a [Expr],
         line: usize,
+        ret: Option<Type>,
         out: &mut Vec<St>,
     ) -> Result<Rhs, Gap> {
         // The capability of each argument position, by who the callee is.
@@ -2536,6 +2597,7 @@ impl<'a> Builder<'a> {
             args: vs,
             spawn: false,
             write_back,
+            ret,
         })
     }
 

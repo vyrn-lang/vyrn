@@ -851,7 +851,7 @@ impl<'b> Kernel<'b> {
                 // track still owes.
                 Ok(())
             }
-            Rhs::Prim(vs) => {
+            Rhs::Prim(vs, _) => {
                 for v in vs {
                     self.read(st, v)?;
                 }
@@ -901,7 +901,7 @@ impl<'b> Kernel<'b> {
             Rhs::Call { callee, .. } => format!("`{}(..)`", callee.trim_start_matches('@')),
             Rhs::Take(_) => "`consume`".to_string(),
             Rhs::Make(_) => "a literal".to_string(),
-            Rhs::Read(_) | Rhs::Prim(_) => String::new(),
+            Rhs::Read(_) | Rhs::Prim(..) => String::new(),
         }
     }
 

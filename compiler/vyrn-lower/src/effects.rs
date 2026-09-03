@@ -218,7 +218,7 @@ impl Walk<'_> {
                 // is an allocation. Born of a user call, the callee's own
                 // set says whether it allocated or handed a parameter back.
                 let born = match rhs {
-                    Rhs::Prim(_) | Rhs::Make(_) => true,
+                    Rhs::Prim(..) | Rhs::Make(_) => true,
                     Rhs::Call { .. } => atom_call,
                     Rhs::Val(_) | Rhs::Read(_) | Rhs::Take(_) => false,
                 };
