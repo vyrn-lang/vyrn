@@ -1034,10 +1034,12 @@ because what it needs is at the site:
   It is the fence itself (§3), not a runtime.
 
 Gates: fmt, workspace (`corpus_fmt` caught the module's trailing line and it
-was formatted), kernel (RATCHET 0), effects, lowered (1,283 synthesized, under
-the 1,400 ceiling), the nine `vyrn-cli` suites, parity 41 of 41, residue, the
-cross-engine generator gate under a fresh cache, `doc --verify`, site export 33
-of 34 (the version test fails on local fixture data). The extra gate, every
+was formatted), kernel (18,281 instances accepted, 0 refused, 0 unlowered, the
+ratchet at 0), effects, lowered (1,311 synthesized, under the 1,400 ceiling;
+18,226 instances over 204 examples), the nine `vyrn-cli` suites, parity 41 of
+41, residue, the cross-engine generator gate under a fresh cache, `doc
+--verify` (41 files unchanged), site export 33 of 34 (the version test fails on
+local fixture data). The extra gate, every
 `error:` line in the corpus: the twelve `examples/expected/*.stderr` files that
 carry one are byte-identical to the record under the wasm route, the ten
 distinct lines among them included (`array index -1 out of bounds`, `array
