@@ -2649,6 +2649,157 @@ Findings 5, 9, 10, 11 and 13 still change nothing. Findings 7 and 8 are
 now half spent: 8 is on record and paid by two rows; 7 is what keeps
 `extern` where it is.
 
+#### The fifth slice (2026-09-03): the third judgment's census
+
+The four slices above are the effect judgment. This one starts the third:
+typed by construction. Nothing is deleted here either. `tests/boundaries.rs`
+counts every value-boundary check the three engines carry, runs a program per
+rule under all three, and asserts that the three answers are the same bytes.
+The deletion slices read this table before they delete anything.
+
+**What a copy is.** The WORDING has been one table since RFC-0101 M5
+(`vyrn_frontend::trap`, and `tests/traps.rs` is what keeps it one). What is
+still written out per engine is the CONDITION — the half that decides whether
+the wording is reached at all. A *carrier* is one engine's own statement of
+that condition: `interp` is `vyrn-frontend/src/interp.rs`, `native` is
+`vyrn-codegen/src/lib.rs`'s IR together with the C shim in `toolchain.rs`,
+`wasm` is `vyrn-codegen/src/direct.rs`, and `vyrn` is a Vyrn module — either
+`std/runtime.vyrn` or a library that states the rule in ordinary Vyrn. An
+engine that CALLS another carrier's statement is not a carrier: the wasm
+emitter does not carry `string-utf8`, because it calls `std/runtime`'s
+`strFromBytes`; the interpreter does, because it calls Rust's `from_utf8`.
+
+The carriers were read, not grepped. A grep for a wording finds the comments
+that explain it and the tests that pin it, and the censuses of 2026-08-24
+recorded what that costs.
+
+#### The census
+
+| rule | what it refuses | RFC | copies | carriers |
+|---|---|---|---|---|
+| `array-index` | an index outside `0..len` of an array | RFC-0011 | 3 | `interp` `native` `wasm` |
+| `string-index` | an index outside `0..byteLength` of a String | RFC-0022 | 3 | `interp` `native` `wasm` |
+| `int-div-zero` | an integer divided by zero | RFC-0002 | 3 | `interp` `native` `wasm` |
+| `int-rem-zero` | an integer remainder by zero | RFC-0002 | 3 | `interp` `native` `wasm` |
+| `int-div-overflow` | `Int64.MIN / -1`, whose quotient is not an `Int64` | RFC-0002 | 3 | `interp` `native` `wasm` |
+| `shift-range` | a shift count outside `0..bits` | RFC-0045 | 3 | `interp` `native` `wasm` |
+| `int-narrowing` | nothing — it answers, with the low bits and the sign re-read | RFC-0002 | 3 | `interp` `native` `wasm` |
+| `float-to-int` | nothing — it answers, truncated toward zero | RFC-0002 | 3 | `interp` `native` `wasm` |
+| `where-scalar` | a scalar failing its named type's `where` predicate | RFC-0003 | 3 | `interp` `native` `wasm` |
+| `where-record` | a record failing its cross-field `where` predicate | RFC-0003 | 3 | `interp` `native` `wasm` |
+| `string-nul` | bytes holding a NUL, made into a String | RFC-0014 | 3 | `interp` `native` `vyrn` |
+| `string-utf8` | bytes that are not UTF-8, made into a String | RFC-0014 | 3 | `interp` `native` `vyrn` |
+| `file-nul` | a file holding a NUL, read as a String | RFC-0014 | 3 | `interp` `native` `vyrn` |
+| `file-utf8` | a file that is not UTF-8, read as a String | RFC-0014 | 3 | `interp` `native` `vyrn` |
+| `io-status` | nothing — it turns a host status into canonical Vyrn wording | RFC-0014 | 3 | `interp` `native` `vyrn` |
+| `call-depth` | recursion past `CALL_DEPTH_LIMIT` frames | RFC-0004 | 3 | `interp` `native` `wasm` |
+| `region-depth` | arena nesting past `REGION_MAX` frames | RFC-0004 | 3 | `interp` `native` `wasm` |
+| `json-decode` | nothing — it accumulates `Issue`s, shape and `where` alike | RFC-0018 | 1 | `vyrn` |
+| `char-boundary` | a byte offset inside a multi-byte character | RFC-0046 | 1 | `vyrn` |
+
+**19 rows and 53 copies.** Seventeen rows are stated three times. Two are
+stated once, and they are the two that already went where §2.3 sends the rest:
+`json-decode` is `std/jsondec` plus the decoders `jsondec.rs` synthesizes per
+target type (RFC-0078 M3), and `char-boundary` is nine lines of `std/strings`.
+Both are ordinary Vyrn, so all three engines run the one body and the wording
+carries the module and the line it was stated on —
+`substring: byte offset 4 is inside a multi-byte UTF-8 character
+(std/strings.vyrn:94)`. That is what a row looks like after it moves.
+
+Every row's program is `compiler/vyrn-cli/tests/boundaries/<rule>.vyrn`, and
+every one of them hides its value behind a parameter so no engine folds the
+check away. The harness compares stdout, stderr and the exit code, and the
+last column of the census is therefore a measurement: on 2026-09-03 all 19
+rows answer the same bytes under `vyrn run`, `vyrn run --engine wasm` and a
+native binary. The native column needs clang and is skipped by name without
+it, as every tool-dependent tier here is.
+
+#### What the census found
+
+1. **The trap table did half the job, and the half it did is the visible
+   half.** No row's WORDING differs, because no engine spells one: RFC-0101
+   M5's gate makes that impossible. Every row's CONDITION is still written per
+   engine, and a condition that drifts is a program that runs on two targets
+   and dies on the third — which is what parity exists to catch and what §2.3
+   exists to make impossible.
+2. **Three of the five rows about what a `String` may hold are already one
+   statement on the wasm route.** `string-nul`, `string-utf8`, `file-nul`,
+   `file-utf8` and `io-status` all name `std/runtime.vyrn` as a carrier,
+   because PLAN-0125-runtime §6 steps 1, 4 and 7 moved them there and the wasm
+   emitter calls them. Their remaining two copies are the interpreter's Rust
+   and the native route's C shim, and step 3 — the native binary through
+   wasm2c — deletes the second of those without this milestone touching it.
+   That is the largest single deletion available and it is M4's, not M6's.
+3. **The interpreter is the carrier no step removes.** Every row's `interp`
+   copy is Rust over `Val`, and PLAN-0125-runtime §5.2 records why it cannot
+   call the Vyrn statement: the module manages addresses in a linear memory
+   and the interpreter has no linear memory. §5.1 lists the six byte-in,
+   byte-out families that COULD go through the embedded engine, and M5 deletes
+   the rest by deleting the interpreter. So for seventeen rows the honest
+   count today is three, and the path to one is M4 step 3 plus M5 — not a
+   rewrite of the rule.
+4. **Two rows answer rather than refusing, and they are the rows §2.3 is
+   about.** `int-narrowing` and `float-to-int` are the only value boundaries
+   in the language where a value that does not fit is not refused: `UInt8(300)`
+   is 44, in all three engines, by three separately written statements of the
+   same wrap. They have three copies and no trap, so nothing about them is
+   pinned except this census's program. A validated type would refuse them at
+   its constructor, and the language would have to decide what a program that
+   narrows means. That is §2.3's question and the next slice's.
+5. **`where-scalar` and `where-record` already share half of one statement.**
+   The two compiled backends both ask `vyrn_codegen::validation_required` WHERE
+   to check, and both call `emit_validation` to do it; the interpreter asks its
+   own question in `coerce_walk`, over a value with no `from` type, so it
+   re-runs a predicate on a same-type crossing that the emitters exempt. The
+   verdicts agree — re-running a predicate that cannot fail changes nothing —
+   but the rule is stated twice, and it is stated in `vyrn-codegen`, which the
+   interpreter cannot import. `trap.rs` is in `vyrn-frontend` for exactly that
+   reason (RFC-0101 §6.4).
+6. **`region-depth` is a rule the runtime module deliberately did not take.**
+   `std/runtime.vyrn`'s comment says it: "The nesting depth and its
+   `region nesting exceeds 64` trap stay with the emitter, because a program
+   that traps at the limit must trap where it did." The counter is in the
+   prologue, and a prologue is the one place a call cannot be. The row is not
+   a candidate for a constructor.
+7. **`io-status` is not a value check and should not become a type.** It maps
+   a host status onto canonical Vyrn wording. Its three copies are three
+   translations of a host's answer, not three statements of a predicate. It
+   goes with the I/O family under M4 step 3 and is in the census so that a
+   later reader does not look for it under §2.3.
+
+#### The design: which check becomes what
+
+Five lines, and the census's rows sorted into them.
+
+- **A constructor of a validated type.** `where-scalar`, `where-record`,
+  `string-nul`, `string-utf8`, `int-narrowing`, `float-to-int`. Each is a
+  predicate on one value with no other input. §2.3's shape: the type has one
+  producer, the producer runs the predicate, and every slot of the type holds
+  a value that passed it. `UInt8` from an `Int64` is that producer for the two
+  coercion rows, and it either answers `Option`/`Result` or traps at one site
+  named by the type.
+- **The trap table and its primitive.** `array-index`, `string-index`,
+  `int-div-zero`, `int-rem-zero`, `int-div-overflow`, `shift-range`,
+  `call-depth`, `region-depth`. Each is a check the EMITTER inserts because
+  the core told it to, not one a producer runs: the value is fine, the
+  operation is not. §2.3's emitter maps `trap` to a call with a table index,
+  so the wording is the table's row and the condition is the core's.
+- **An I/O error, and it stays one.** `file-nul`, `file-utf8`, `io-status`.
+  A host answered; the answer is a value. These follow M4 step 7's family and
+  M4 step 3 deletes their C copy.
+- **Already one.** `json-decode`, `char-boundary`. Nothing to do, and they are
+  the shape the first two lines are aiming at.
+- **What the kernel's third judgment checks, and where.** A name of a
+  validated type is produced only by that type's constructor, and no raw value
+  reaches a slot of it. It is a use-def walk over the named core, beside the
+  linear and effect judgments, in `vyrn-lower`: for every store into a place
+  whose type is validated, the value's producer is that type's `validate`, or
+  a name already of that type, or a literal the checker proved. It refuses
+  anything else. That is one judgment over one form, and it replaces the
+  `coerce`-time check every engine makes at every boundary — which is where
+  the 97.6 per cent of coercions that answer "nothing to do" come from
+  (`interp.rs`, `coerce`).
+
 ### What each milestone is worth on its own
 
 M1 fixes the wasm column. M2 makes leaks a compile error. M3 halves the
