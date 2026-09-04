@@ -1547,7 +1547,7 @@ fn the_plan_places_the_rungs_the_two_ladders_were_read_at() {
 //
 // The metric is CODE lines — non-blank and not a comment — over the site's whole
 // span, doc comment included. That is §1.1's own column, and it is what makes
-// §1's 505 comparable: the six ladder rows measure 533 the day this census is
+// §1's 505 comparable: the six ladder rows measured 533 the day this census was
 // written, and the difference is the observation hook RFC-0101 §1.5's shadow
 // added after §1 was measured.
 // ---------------------------------------------------------------------------
@@ -1595,7 +1595,7 @@ fn coercion_census() -> Vec<CoercionSite> {
             "native",
             "the rung, and the IR for it",
             true,
-            104,
+            111,
         ),
         site(
             "vyrn-codegen/src/direct.rs",
@@ -1742,8 +1742,8 @@ fn the_coercion_census_is_what_the_rfc_records() {
         }
     }
     assert_eq!(
-        ladder, 533,
-        "the rung ladder is {ladder} code lines and RFC-0125 §3 M6 records 533"
+        ladder, 540,
+        "the rung ladder is {ladder} code lines and RFC-0125 §3 M6 records 540"
     );
     // The carriers that state the rung rule THEMSELVES, in the sense the
     // boundary census of §3 M6's fifth slice uses: an engine that ASKS another

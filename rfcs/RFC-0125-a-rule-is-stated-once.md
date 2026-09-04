@@ -5009,7 +5009,7 @@ prose and the tree cannot drift apart by one edit.
 | site | rung ladder | engine | what it decides | code |
 |---|---|---|---|---|
 | `vyrn-codegen/src/lib.rs` `coerce_plan` | yes | shared | which rung a pair takes | 49 |
-| `vyrn-codegen/src/lib.rs` `Gen::coerce` | yes | native | the rung, and the IR for it | 104 |
+| `vyrn-codegen/src/lib.rs` `Gen::coerce` | yes | native | the rung, and the IR for it | 111 |
 | `vyrn-codegen/src/direct.rs` `Fn_::coerce` | yes | wasm | the rung, and the wasm for it | 177 |
 | `vyrn-frontend/src/interp.rs` `Interp::coerce` | yes | interp | the scalar targets that need no walk | 19 |
 | `vyrn-frontend/src/interp.rs` `coerce_walk` | yes | interp | the rung, by target type and value shape | 112 |

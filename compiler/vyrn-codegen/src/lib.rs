@@ -3103,167 +3103,187 @@ impl<'a> Gen<'a> {
         vyrn_frontend::finite::string_flow_proven(expr, to, self.types, &resolve)
     }
 
+    /// Reconcile a value of type `from` into type `to`, by the rung
+    /// [`coerce_plan`] places for the pair.
+    ///
+    /// **The decision is not here** — RFC-0125 §2.3 ("an emitter reads the core
+    /// and decides nothing"), and §3 M6's coercion census. This emitter used to
+    /// restate the ladder: eleven guards in one order, the direct backend's
+    /// eleven in another, and a corpus gate to notice when the two orders
+    /// disagreed. The guards are gone. What is left is one arm per rung, and an
+    /// arm writes IR.
+    ///
+    /// **The types are substituted first**, for the reason the direct backend
+    /// substitutes first (RFC-0077 M2d): a `Param` is a spelling that says
+    /// nothing until the monomorphization fills it in, and a plan keyed on a
+    /// pair cannot read a spelling. That is also what retires the census's
+    /// `ParamSpelling` difference — the 56 crossings this emitter used to walk
+    /// past the end of its ladder are `String -> String` once `T` is filled in.
     fn coerce(&mut self, op: String, from: &Type, to: &Type) -> Result<(String, Type), String> {
-        // A `Never` (RFC-0079) is `poison` in a block the `panic` already left
-        // through `unreachable`. There is nothing to reconcile — and running a
-        // validation here would emit a live-looking check over a value that does
-        // not exist. `poison` is valid at `to` as it stands.
-        if matches!(from, Type::Never) {
-            crate::observe::note_rung(observe::Site::Native, from, to, Rung::Never);
-            return Ok((op, to.clone()));
-        }
-        // AUTOMATIC VALIDATION: a value flowing into a predicated named type
-        // coerces to its base, then runs the `where` predicate inline and traps
-        // with the canonical message — mirroring the interpreter's `coerce`.
-        // Whether that is required is [`validation_required`]'s call, not this
-        // site's, because the direct wasm backend has to reach the same verdict.
-        if let Some(decl) = validation_required(from, to, self.types).cloned() {
-            crate::observe::note_rung(observe::Site::Native, from, to, Rung::Validate);
-            let (v, _) = self.coerce(op, from, &decl.base)?;
-            self.emit_validation(&decl, &v)?;
-            return Ok((v, to.clone()));
-        }
-        // A function value flowing between fn-typed spellings (RFC-0037): the
-        // structural form and any named alias share the `{ i64, i64 }` enum
-        // representation, so this is a re-tag only. (Sources — lambda literals
-        // and bare function names — were constructed AS the slot's signature by
-        // the expected-type stack, so no reshaping can be needed here.)
-        if matches!(self.resolve(to), Type::Fn(..)) && matches!(self.resolve(from), Type::Fn(..)) {
-            crate::observe::note_rung(observe::Site::Native, from, to, Rung::FnRetag);
-            return Ok((op, to.clone()));
-        }
-        // NOTE: there is deliberately no Option/Result payload reshape here.
-        // Until RFC-0082 the boxed payload of `Ok([1,2,3])` was a fixed
-        // `[N x T]` while the target wanted the growable `Array<T>` triple, and
-        // this site repaired it afterwards by branching on the tag and
-        // re-materializing the arm (`rebox_sum`). That repair is gone because
-        // `Some`/`Ok`/`Err` now coerce the payload INTO the expected type before
-        // boxing it, as the user-enum constructor always has — so the words are
-        // right at the source and there is nothing to reinterpret. Nothing else
-        // can produce an `Option<Array<T, N>>` that reaches an `Array<T>`
-        // target: the checker refuses that flow for any expression other than an
-        // array literal directly under a constructor (`Option<Array<Int64, 3>>`
-        // is not assignable to `Option<Array<Int64>>`), which is exactly the case
-        // construction now covers.
-        // Fixed arrays coerce element-wise (unrolled), so `[x, y]` flowing into
-        // an `Array<Age, 2>` validates every element.
-        if let (Type::ArrayN(fi, fnn), Type::ArrayN(ti, tn)) =
-            (&self.resolve(from), &self.resolve(to))
-        {
-            if fi != ti && fnn == tn {
-                crate::observe::note_rung(observe::Site::Native, from, to, Rung::Elementwise);
-                let fell = self.llt(fi);
+        let (from, to) = (
+            &vyrn_frontend::types::substitute(from, self.subst),
+            &vyrn_frontend::types::substitute(to, self.subst),
+        );
+        let rung = coerce_plan(from, to, self.types);
+        crate::observe::note_rung(observe::Site::Native, from, to, rung);
+        match rung {
+            // A `Never` (RFC-0079) is `poison` in a block the `panic` already
+            // left through `unreachable`. There is nothing to reconcile — and a
+            // validation here would emit a live-looking check over a value that
+            // does not exist. `poison` is valid at `to` as it stands.
+            Rung::Never => Ok((op, to.clone())),
+            // AUTOMATIC VALIDATION: a value flowing into a predicated named type
+            // coerces to its base, then runs the `where` predicate inline and
+            // traps with the canonical message. The base crossing is a rung of
+            // its own, at its own pair.
+            Rung::Validate => {
+                let Some(decl) = validation_required(from, to, self.types).cloned() else {
+                    return Err(plan_disagrees(from, to, rung));
+                };
+                let (v, _) = self.coerce(op, from, &decl.base)?;
+                self.emit_validation(&decl, &v)?;
+                Ok((v, to.clone()))
+            }
+            // A function value flowing between fn-typed spellings (RFC-0037):
+            // the structural form and any named alias share the `{ i64, i64 }`
+            // enum representation, so this is a re-tag only. (Sources — lambda
+            // literals and bare function names — were constructed AS the slot's
+            // signature by the expected-type stack, so no reshaping can be
+            // needed here.)
+            Rung::FnRetag => Ok((op, to.clone())),
+            // Fixed arrays whose ELEMENT type changes coerce element-wise
+            // (unrolled), so `[x, y]` flowing into an `Array<Age, 2>` validates
+            // every element.
+            Rung::Elementwise => {
+                let (Type::ArrayN(fi, fnn), Type::ArrayN(ti, tn)) =
+                    (self.resolve(from), self.resolve(to))
+                else {
+                    return Err(plan_disagrees(from, to, rung));
+                };
+                let fell = self.llt(&fi);
                 let from_ll = format!("[{fnn} x {fell}]");
-                let tell = self.llt(ti);
+                let tell = self.llt(&ti);
                 let to_ll = format!("[{tn} x {tell}]");
                 let mut cur = "undef".to_string();
-                for i in 0..*tn {
+                for i in 0..tn {
                     let ext = self.fresh_tmp();
                     self.emit(format!("{ext} = extractvalue {from_ll} {op}, {i}"));
-                    let (cv, _) = self.coerce(ext, fi, ti)?;
+                    let (cv, _) = self.coerce(ext, &fi, &ti)?;
                     let ins = self.fresh_tmp();
                     self.emit(format!(
                         "{ins} = insertvalue {to_ll} {cur}, {tell} {cv}, {i}"
                     ));
                     cur = ins;
                 }
-                return Ok((cur, to.clone()));
+                Ok((cur, to.clone()))
             }
-        }
-        // A contextual array literal: a fixed `[N x T]` value flowing into a
-        // growable `Array<T>` slot (a `let`/arg/return annotation) is copied to
-        // the heap and wrapped in the `{ptr,len,cap}` triple — the same lowering
-        // `list([..])` used. Element types already match (the checker coerced
-        // each element into `T` when it built the literal), so no per-element
-        // step is needed here.
-        {
-            let rf = self.resolve(from);
-            let rt = self.resolve(to);
-            if let (Type::ArrayN(fi, _), Type::Array(ti)) = (&rf, &rt) {
-                // The reshape reinterprets the fixed `[N x T]` buffer as a
-                // growable `{ptr,len,cap}` triple; it is sound whenever the
-                // element representation matches. Fall back to comparing the LLVM
-                // layout so an element whose static type is spelled differently
-                // but lowers identically still reshapes — e.g. a lambda literal
-                // (`fn(..) -> ..`) flowing into an `Array<AliasFn>`, where the
-                // element type is the closure value and `ti` is the fn-type alias.
-                if fi == ti || self.llt(fi) == self.llt(ti) {
-                    crate::observe::note_rung(observe::Site::Native, from, to, Rung::Heapify);
-                    let inner = (**fi).clone();
-                    let (triple, _) = self.array_n_to_heap(&op, &inner, &rf)?;
-                    return Ok((triple, to.clone()));
+            // A contextual array literal: a fixed `[N x T]` value flowing into a
+            // growable `Array<T>` slot (a `let`/arg/return annotation) is copied
+            // to the heap and wrapped in the `{ptr,len,cap}` triple — the same
+            // lowering `list([..])` used. Element types already match (the
+            // checker coerced each element into `T` when it built the literal),
+            // so no per-element step is needed here.
+            Rung::Heapify => {
+                let rf = self.resolve(from);
+                let Type::ArrayN(fi, _) = &rf else {
+                    return Err(plan_disagrees(from, to, rung));
+                };
+                let inner = (**fi).clone();
+                let (triple, _) = self.array_n_to_heap(&op, &inner, &rf)?;
+                Ok((triple, to.clone()))
+            }
+            // The same literal in a `SmallArray<T, N>` slot (RFC-0056): lift the
+            // elements into the inline buffer (the checker proved `len <= N`).
+            Rung::Inline => {
+                let (Type::ArrayN(_, len), Type::SmallArray(ti, n)) =
+                    (self.resolve(from), self.resolve(to))
+                else {
+                    return Err(plan_disagrees(from, to, rung));
+                };
+                let inner = (*ti).clone();
+                let (sa, _) = self.array_n_to_smallarray(&op, &inner, len, n)?;
+                Ok((sa, to.clone()))
+            }
+            // An integer resize. Same-shape is a no-op — `Int8` and `UInt8` are
+            // one `i8` here, and the signedness a narrowing renormalises into is
+            // carried by the instructions that READ the value, not by the
+            // carrier. A narrowing truncates, matching the interpreter's
+            // `wrap_intn`.
+            Rung::Resize => {
+                let fll = self.llt(from);
+                let tll = self.llt(to);
+                if fll == tll {
+                    return Ok((op, to.clone()));
                 }
-            }
-            // A contextual array literal `[..]` (a fixed `[len x T]`) flowing
-            // into a `SmallArray<T, N>` slot (RFC-0056): lift the elements into
-            // the inline buffer (the checker proved `len <= N`).
-            if let (Type::ArrayN(_, len), Type::SmallArray(ti, n)) = (&rf, &rt) {
-                crate::observe::note_rung(observe::Site::Native, from, to, Rung::Inline);
-                let inner = (**ti).clone();
-                let (sa, _) = self.array_n_to_smallarray(&op, &inner, *len, *n)?;
-                return Ok((sa, to.clone()));
-            }
-        }
-        // A plain integer flowing into a sized-integer slot truncates to `iN`
-        // (matching the interpreter's `wrap_intn`). Same-width is a no-op.
-        if let Type::IntN { bits, .. } = self.resolve(to) {
-            crate::observe::note_rung(observe::Site::Native, from, to, Rung::Resize);
-            let fll = self.llt(from);
-            let tll = format!("i{bits}");
-            if fll != tll && matches!(self.resolve(from), Type::Int | Type::IntN { .. }) {
                 let t = self.fresh_tmp();
-                // Widening (fll narrower than tll) shouldn't arise post-checker;
-                // Int(i64)→iN and wider→narrower both truncate.
+                // Widening does not arise post-checker: a sized integer reaches a
+                // wider slot through a conversion call, not through a boundary.
+                // The corpus gate's 3,241 native resizes are every one of them a
+                // narrowing (RFC-0125 §3 M6, the coercion ladder).
                 self.emit(format!("{t} = trunc {fll} {op} to {tll}"));
-                return Ok((t, to.clone()));
+                Ok((t, to.clone()))
             }
-            return Ok((op, to.clone()));
-        }
-        // A default `double` literal flowing into a `Float32` slot rounds to single
-        // precision (`fptrunc`), matching the interpreter's `as f32`.
-        if self.resolve(to) == Type::Float32 && self.resolve(from) == Type::Float {
-            crate::observe::note_rung(observe::Site::Native, from, to, Rung::FloatCross);
-            let t = self.fresh_tmp();
-            self.emit(format!("{t} = fptrunc double {op} to float"));
-            return Ok((t, to.clone()));
-        }
-        if let (Some(ff), Some(tf)) = (self.record_fields(from), self.record_fields(to)) {
-            if ff == tf {
-                crate::observe::note_rung(observe::Site::Native, from, to, Rung::Identity);
-                return Ok((op, to.clone()));
+            // A default `double` literal flowing into a `Float32` slot rounds to
+            // single precision (`fptrunc`), matching the interpreter's `as f32`.
+            //
+            // The plan places every other float crossing here too — the int/float
+            // line in either direction — and this emitter has no instruction for
+            // one, because none arrives: a Vyrn program crosses that line by
+            // calling `Int64(..)` or `Float(..)`, which is a builtin and not a
+            // boundary. The corpus's 197 native float crossings are all
+            // `Float -> Float32` (RFC-0125 §3 M6, the coercion ladder).
+            Rung::FloatCross => {
+                if self.resolve(to) == Type::Float32 && self.resolve(from) == Type::Float {
+                    let t = self.fresh_tmp();
+                    self.emit(format!("{t} = fptrunc double {op} to float"));
+                    return Ok((t, to.clone()));
+                }
+                Ok((op, to.clone()))
             }
-            crate::observe::note_rung(observe::Site::Native, from, to, Rung::Rebuild);
-            let from_ll = self.llt(from);
-            let to_ll = self.llt(to);
-            let mut cur = "undef".to_string();
-            for (i, need) in tf.iter().enumerate() {
-                let (src_idx, src_field) = ff
-                    .iter()
-                    .enumerate()
-                    .find(|(_, h)| h.name == need.name)
-                    .map(|(idx, h)| (idx, h.clone()))
-                    .ok_or_else(|| format!("field `{}` missing during coercion", need.name))?;
-                let ext = self.fresh_tmp();
-                self.emit(format!("{ext} = extractvalue {from_ll} {op}, {src_idx}"));
-                // Recurse so nested records coerce too.
-                let (fv, _) = self.coerce(ext, &src_field.ty, &need.ty)?;
-                let field_ll = self.llt(&need.ty);
-                let ins = self.fresh_tmp();
-                self.emit(format!(
-                    "{ins} = insertvalue {to_ll} {cur}, {field_ll} {fv}, {i}"
-                ));
-                cur = ins;
+            // RFC-0002's record width subtyping: a wider record used as a
+            // narrower one, rebuilt field by field, because the two field orders
+            // need not agree.
+            Rung::Rebuild => {
+                let (Some(ff), Some(tf)) = (self.record_fields(from), self.record_fields(to))
+                else {
+                    return Err(plan_disagrees(from, to, rung));
+                };
+                let from_ll = self.llt(from);
+                let to_ll = self.llt(to);
+                let mut cur = "undef".to_string();
+                for (i, need) in tf.iter().enumerate() {
+                    let (src_idx, src_field) = ff
+                        .iter()
+                        .enumerate()
+                        .find(|(_, h)| h.name == need.name)
+                        .map(|(idx, h)| (idx, h.clone()))
+                        .ok_or_else(|| format!("field `{}` missing during coercion", need.name))?;
+                    let ext = self.fresh_tmp();
+                    self.emit(format!("{ext} = extractvalue {from_ll} {op}, {src_idx}"));
+                    // Recurse so nested records coerce too.
+                    let (fv, _) = self.coerce(ext, &src_field.ty, &need.ty)?;
+                    let field_ll = self.llt(&need.ty);
+                    let ins = self.fresh_tmp();
+                    self.emit(format!(
+                        "{ins} = insertvalue {to_ll} {cur}, {field_ll} {fv}, {i}"
+                    ));
+                    cur = ins;
+                }
+                Ok((cur, to.clone()))
             }
-            return Ok((cur, to.clone()));
+            // The bits are already right.
+            Rung::Identity => Ok((op, to.clone())),
+            // THE END OF THE LADDER, and it is now the same end the direct
+            // backend has (RFC-0101 §1.5 recorded that the two differed here).
+            // This emitter used to reinterpret an unhandled pair — the bits as
+            // they are, under a new name — which is a program that compiles on
+            // one target only. Every crossing that reached it was a type
+            // parameter's spelling, and the substitution above answers those
+            // before the plan is asked.
+            Rung::Refuse => Err(format!(
+                "no lowering for a conversion from `{from}` to `{to}`"
+            )),
         }
-        // THE END OF THE LADDER, and it is not the end of the other one: the
-        // direct backend refuses an unhandled pair (RFC-0101 §1.5). A pair that
-        // reaches here is one this emitter reinterprets — the bits as they are,
-        // under a new name — so the corpus gate holds every one of them to the
-        // plan's [`Rung::Identity`], and a pair the plan REFUSES landing here is
-        // a program that compiles on one target only.
-        crate::observe::note_rung(observe::Site::Native, from, to, Rung::Identity);
-        Ok((op, to.clone()))
     }
 
     fn fresh_tmp(&mut self) -> String {
@@ -15538,6 +15558,14 @@ pub enum Rung {
     Identity,
     /// No rung handles this pair.
     Refuse,
+}
+
+/// An arm of an engine's `coerce` could not destructure the pair the plan sent
+/// it. Unreachable unless [`coerce_plan`] and that arm have come apart, which is
+/// the one class of disagreement a single statement of a rule can still have —
+/// so it is one sentence, here, rather than one per arm (RFC-0125 §2.3).
+pub(crate) fn plan_disagrees(from: &Type, to: &Type, rung: Rung) -> String {
+    format!("the coercion plan placed {rung:?} for `{from}` into `{to}` and the emitter's arm for it cannot take that pair")
 }
 
 /// The rung a value crossing from `from` into `to` takes — the PLAN both
