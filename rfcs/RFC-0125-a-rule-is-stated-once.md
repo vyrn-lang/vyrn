@@ -3246,6 +3246,61 @@ lowering — plus the three region functions, which are the plan's step 8. The
 emitter's runtime section was 4,205 lines before step 0 and is 387. Details
 under the plan's §6 table.*
 
+**Where a build's time goes, measured 2026-09-04 (`track-at`).** Every program
+links `std/runtime` (1,951 lines) and `std/text` (395 lines) since step 0, and
+the suites that emit hundreds of modules pay for that hundreds of times: CI's
+`tests (workspace)` step went from 172 s to about 800 s. The claim under
+investigation was that the loader now reads, parses and CHECKS those two
+modules on every build. **It is false.** `vyrn --profile` measures a RUN, so
+`prof.rs` gained a build-phase timer under `VYRN_BUILD_PROFILE=1`, and the
+release binary says this about a three-line program that prints one string
+(`vyrn check`, milliseconds, one run of each, Windows):
+
+| phase | with the runtime modules | with them absent | their share |
+|---|---|---|---|
+| read | 0.16 | 0.03 | 0.13 |
+| lex + parse | 3.48 | 1.01 | 2.47 |
+| link: `resolve_aliases` | 15.20 | 1.83 | 13.37 |
+| link: index + visibility + merge | 0.63 | 0.19 | 0.44 |
+| check | 1.53 | 0.55 | 0.98 |
+| move check | 1.43 | 0.73 | 0.70 |
+| lower, of which the placer | 38.02 / 35.01 | 9.85 / 8.76 | 28.17 / 26.25 |
+
+The right-hand column is what the two modules cost, and it reads: **read, parse
+and check together are 3.6 ms of the 46 ms they add.** A parse-and-check cache
+shared across a process could not have recovered 8% of it. The two payers are
+the placer (RFC-0125 M3, 26 ms) and ONE function in the loader (13 ms), and
+neither is the front end.
+
+**The loader's 13 ms was quadratic and is gone.** `resolve_aliases` pass 3
+renames every declaration of an injected module to its reserved spelling
+(RFC-0078 M2b), and it called a one-rename walk of the whole module once per
+declaration: `std/runtime` asked for about 200 full walks of its own 1,951
+lines. The renames cannot chain — a reserved spelling holds a `$`, a minted one
+a `__fromN`, and no declared name holds either — and the caller iterates a
+`HashMap`, so an order-dependent answer was never sound. One walk per module
+with the whole rename map now does what many walks did: `resolve_aliases` is
+15.20 ms to 1.31 ms on the three-line program, the whole link 129 ms to 31 ms
+on `examples/pagesdemo.vyrn`, and `vyrn check` on those two 143 ms to 106 ms
+and 2.885 s to 2.619 s. `VYRN_WASM_MANIFEST=check` stays green, so no emitted
+byte moved.
+
+Four suites, `cargo test -p vyrn-cli --test lowered --test pages --test vyx
+--test symbolmap`, before and after: `lowered` 55.12 s to 28.87 s, `pages`
+38.50 s to 34.30 s, `symbolmap` 35.70 s to 30.68 s, `vyx` 26.57 s to 23.65 s,
+and the whole invocation 2 m 36 s to 2 m 04 s. `lowered` halves because it
+builds its corpus in-process; the other three spawn `vyrn` per case and carry
+the process start-up too.
+
+**What is left is the placer, and it is the larger half.** `own::analyze` with
+the placer installed costs 35.0 ms on the three-line program against 3.5 ms
+with `VYRN_NO_PLACER=1`, and 917 ms of `pagesdemo`'s 2.6 s. `core::augment`
+builds a core body and runs `kernel::placement` for EVERY instance of the
+linked program, so `std/runtime`'s functions are re-placed in every build, and
+the analysis runs more than once per build. `pagesdemo` under `VYRN_NO_PLACER=1`
+is 0.55 s against 2.62 s. That is the next slice, and it belongs to whoever owns
+`core.rs`.
+
 ### M5 — `vyrn run` is compiled
 
 `run`, `test` and `bench --check` execute the wasm in the embedded wasmtime.
