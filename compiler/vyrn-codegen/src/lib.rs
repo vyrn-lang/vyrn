@@ -2985,7 +2985,14 @@ impl<'a> Gen<'a> {
             return plan_rows();
         };
         self.plan.acknowledge(key);
-        (!rows.is_empty()).then(|| rows.clone())
+        // The core's row carries a kind since the interpreter's slice; this
+        // reader does not want it — the native emitter asks
+        // `Owned::release_kind` at the site (RFC-0125 §3 M3).
+        (!rows.is_empty()).then(|| {
+            rows.iter()
+                .map(|(n, h, _)| (n.clone(), h.clone()))
+                .collect::<Vec<_>>()
+        })
     }
 
     /// Resolve a type to its structural form: substitute generic parameters for
