@@ -33,8 +33,8 @@
 //!     survives `VYRN_NO_MOVECHECK=1` because another pass gives it. Nothing
 //!     is owed here, and the close-out's attribution is corrected.
 //!
-//! A row whose site has already LEFT `movecheck.rs` — row 12, RFC-0125 §3 M3,
-//! the containment slice — is refused by the kernel in both runs, and the two
+//! A row whose site has already LEFT `movecheck.rs` — rows 12, 08, 09, 04, 05
+//! and 28, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the two
 //! must still agree. The row is what stops the sentence moving after the
 //! deletion, so it stays in the census.
 
@@ -921,16 +921,6 @@ fn sections() -> Vec<Section> {
             "which form wrote the `consume`, and how a refusal names it",
         ),
         sec(
-            "    fn nothing_to_take(self) -> String {",
-            Kernel,
-            "`consume` with nothing to take (row 09)",
-        ),
-        sec(
-            "    fn drop_it(self) -> String {",
-            Menu,
-            "the `drop` a take's menu offers",
-        ),
-        sec(
             "fn root_of(path: &str) -> &str {",
             Shared,
             "the path algebra and the consumed table: overlap, reach, revival",
@@ -944,11 +934,6 @@ fn sections() -> Vec<Section> {
             "    fn enter(&self) {",
             Shared,
             "the three scope stacks, read as one environment",
-        ),
-        sec(
-            "    fn wrote_place(&self, path: &str, line: usize, consumed: &mut Consumed) {",
-            Kernel,
-            "a write to a place ends every alias that reads out of it (row 05)",
         ),
         sec(
             "    fn place_key(&self, e: &Expr) -> usize {",
@@ -1291,12 +1276,12 @@ fn the_structural_census_is_what_the_rfc_records() {
     .map(|k| (k.label(), by_kind.get(&(*k as usize)).copied().unwrap_or(0)))
     .collect();
     let want = vec![
-        ("a rule the kernel now gives", 1009),
+        ("a rule the kernel now gives", 926),
         ("a rule only the checker gives", 723),
         ("placement rows for the engines", 2360),
-        ("a fix menu", 81),
-        ("shared machinery", 3651),
-        ("tests", 2172),
+        ("a fix menu", 73),
+        ("shared machinery", 3611),
+        ("tests", 2166),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(
