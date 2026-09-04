@@ -22,10 +22,11 @@ its own predicate — there is no zeroed slot a Vyrn program can spell).
 
 RFC-0078 M3 predicted `Option<T>` for that. It cannot be: a bare `Option<U>`
 IS a decode target (`Array<Option<Int64>>` decodes today), and `Option<Option<U>>`
-is rejected by the checker — "nested Option/Result is not supported in v0.1".
-So every decoder returns `Array<T>` with **zero or one** element: empty means
-"no value, and the issue is already recorded". One convention for every T,
-including `T = Option<U>`.
+has no wire form — a double `null` has two readings, so `codec::wire`
+declines it. (The CHECKER stopped refusing the type at RFC-0126 §8; the
+wire refusal is its own and stands.) So every decoder returns `Array<T>`
+with **zero or one** element: empty means "no value, and the issue is
+already recorded". One convention for every T, including `T = Option<U>`.
 
 # Wording
 

@@ -24,11 +24,12 @@
 //!
 //! RFC-0078 M3 predicted `Option<T>` for that shape. It cannot be: a bare
 //! `Option<U>` IS a decode target (`Array<Option<Int64>>` decodes today) and
-//! `Option<Option<U>>` is rejected outright — "nested Option/Result is not
-//! supported in v0.1". So a decoder returns an array of **zero or one** element,
-//! which is one convention for every `T` including `T = Option<U>`, and which
-//! reads well at the use site: `for x in dec(..) { .. }` runs exactly when a value
-//! was produced.
+//! `Option<Option<U>>` has no wire form — a double `null` has two readings, so
+//! [`crate::codec::wire`] declines it. That refusal is the codec's own and
+//! stands; the checker stopped refusing the TYPE at RFC-0126 §8. So a decoder
+//! returns an array of **zero or one** element, which is one convention for
+//! every `T` including `T = Option<U>`, and which reads well at the use site:
+//! `for x in dec(..) { .. }` runs exactly when a value was produced.
 //!
 //! # Where a predicate comes from
 //!
