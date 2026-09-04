@@ -1420,7 +1420,13 @@ impl<'a> Cx<'a> {
             });
         };
         self.plan.acknowledge(key);
-        (!rows.is_empty()).then(|| rows.clone())
+        // The kind the core carries beside each binder is the interpreter's
+        // reader; this backend reads the release off the type itself.
+        (!rows.is_empty()).then(|| {
+            rows.iter()
+                .map(|(n, h, _)| (n.clone(), h.clone()))
+                .collect()
+        })
     }
 
     /// Substitute the monomorphization this lowering is inside.

@@ -7601,7 +7601,17 @@ impl<'a> Interp<'a> {
     /// them. The compiled backends free the buffers too; here they are `Rc`s,
     /// so only a declared release and what a `Deep` walk reaches can be seen.
     fn release_arm_binders(&self, key: usize, arm: usize, scope: &[Frame]) -> Result<(), Ctrl> {
-        let Some(rows) = self.arm_frees.get(&(key, arm as u32)) else {
+        // RFC-0125 §3 M3, the deletion slice: the core's answer where it
+        // states one, the plan's where it does not — an `if let` or a `?`,
+        // whose arms the core builds and consults no table for, and a run
+        // with no placer installed. This is the fallback rule the slice
+        // states once: where the core answers, the answer stands; where it
+        // does not, the site reads exactly what it read before the flip.
+        let core = crate::own::core_arm_rows(key, arm as u32);
+        let Some(rows) = core
+            .as_ref()
+            .or_else(|| self.arm_frees.get(&(key, arm as u32)))
+        else {
             return Ok(());
         };
         if self.region_depth.get() != 0 {

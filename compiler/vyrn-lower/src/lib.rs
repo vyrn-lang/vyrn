@@ -40,6 +40,10 @@ pub mod typed;
 /// at start-up the way it installs the generator engine.
 pub fn install() {
     vyrn_frontend::own::install_placer(core::augment);
+    // RFC-0125 §3 M3, the deletion slice: the interpreter reads round forty's
+    // answer off the core through this slot, because `vyrn-frontend` sits
+    // below this crate and cannot call into it.
+    vyrn_frontend::own::install_arm_rows(core::arm_rows);
     // RFC-0125 M6, fourth slice: the effect judgment into the floor's decision,
     // so a capability row is answered by the judgment and not by a second scan.
     vyrn_frontend::floor::install_judge(effects::reaches);

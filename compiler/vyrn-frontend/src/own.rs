@@ -2308,6 +2308,32 @@ pub fn install_placer(f: Placer) {
     let _ = PLACER.set(f);
 }
 
+/// RFC-0125 §3 M3, the deletion slice: round forty's answer read off the
+/// CORE, for the one engine that cannot name `vyrn-lower` — the interpreter.
+///
+/// The two compiled backends call `vyrn_lower::core::facts()` themselves;
+/// this crate sits below that one, so the core hands its answer down through
+/// a slot instead. The slot is not a placement table: it holds no rows, it
+/// answers from the core's own fold, and it goes when [`ReleasePlan`] does.
+/// `None` is "this pass states no answer here" — an `if let` or a `?`, whose
+/// arms the core builds and consults no table for — and a reader falls back
+/// to the plan there, as every other reader of the core does.
+pub type ArmRows = fn(usize, u32) -> Option<Vec<(String, DropKind, Vec<String>)>>;
+
+static ARM_ROWS: std::sync::OnceLock<ArmRows> = std::sync::OnceLock::new();
+
+/// Install the core's arm answer. The first installation wins.
+pub fn install_arm_rows(f: ArmRows) {
+    let _ = ARM_ROWS.set(f);
+}
+
+/// The core's payload releases for one arm, or `None` where nothing is
+/// installed (`VYRN_NO_PLACER=1`, a host that never linked the lowering) or
+/// the core states no answer.
+pub fn core_arm_rows(key: usize, arm: u32) -> Option<Vec<(String, DropKind, Vec<String>)>> {
+    ARM_ROWS.get().and_then(|f| f(key, arm))
+}
+
 /// RFC-0114 untake: the bindings whose value was taken and then provably
 /// re-established, so block exit releases the FINAL value. The rules, all
 /// refusing toward the leak:

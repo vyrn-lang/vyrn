@@ -184,13 +184,16 @@ fn run() {
             *counted.entry("arm_frees").or_default() += 1;
             // The plan's row may name a binder no arm of this shape drops;
             // only the binders the core released are compared, by name.
-            let want: Vec<(String, Vec<String>)> = own
+            // The KIND travels with each binder since the deletion slice:
+            // the interpreter reads round forty's answer off the core and
+            // has no type of its own to ask (RFC-0125 §3 M3).
+            let want: Vec<(String, Vec<String>, Option<vyrn_frontend::own::DropKind>)> = own
                 .plan
                 .arm_payload_free(*site, *arm)
                 .map(|rows| {
                     rows.iter()
-                        .filter(|(n, _, _)| core_says.iter().any(|(c, _)| c == n))
-                        .map(|(n, _, h)| (n.clone(), h.clone()))
+                        .filter(|(n, _, _)| core_says.iter().any(|(c, _, _)| c == n))
+                        .map(|(n, k, h)| (n.clone(), h.clone(), Some(k.clone())))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -211,7 +214,7 @@ fn run() {
                 continue;
             };
             for (n, _, h) in rows {
-                if !core_says.iter().any(|(cn, ch)| cn == n && ch == h) {
+                if !core_says.iter().any(|(cn, ch, _)| cn == n && ch == h) {
                     diffs.push(format!(
                         "{file}: site {site} arm {arm}: arm_frees:                          the plan frees `{n}` {h:?} and the core does not"
                     ));

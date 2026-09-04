@@ -3034,9 +3034,12 @@ pub struct Facts {
     /// RFC-0114 R1′: the `Expr::Field` node of an unnamed receiver the core
     /// releases after the read, and the holes the release walks around.
     pub receivers: std::collections::HashMap<usize, Vec<String>>,
-    /// Round forty's table: `(match, arm) -> [(binder, holes)]`, the payload
-    /// binders the arm's own body releases at its end.
-    pub arms: std::collections::HashMap<(usize, u32), Vec<(String, Vec<String>)>>,
+    /// Round forty's table: `(match, arm) -> [(binder, holes, kind)]`, the
+    /// payload binders the arm's own body releases at its end. The kind is
+    /// the binder type's release rule ([`vyrn_frontend::own::Owned`]), which
+    /// the interpreter needs and the two compiled backends read off the type
+    /// themselves.
+    pub arms: std::collections::HashMap<(usize, u32), Vec<(String, Vec<String>, Option<DropKind>)>>,
     /// RFC-0114 M2 and exit-residue round eighteen: the store statements
     /// whose old value the store releases — a `St::Store`'s `releases` at a
     /// [`Site::Node`]. The plan's `store_owned` and
@@ -3079,6 +3082,20 @@ pub fn facts() -> Option<Facts> {
     FACTS.with(|f| f.borrow().clone())
 }
 
+/// Round forty's answer for one arm, handed down to the interpreter through
+/// [`vyrn_frontend::own::install_arm_rows`] — the one engine that cannot name
+/// this crate. `None` where this pass states no answer (an `if let`, a `?`),
+/// and the reader falls back to the plan there.
+pub fn arm_rows(key: usize, arm: u32) -> Option<Vec<(String, DropKind, Vec<String>)>> {
+    let f = facts()?;
+    let rows = f.arms.get(&(key, arm))?;
+    Some(
+        rows.iter()
+            .filter_map(|(n, h, k)| k.clone().map(|k| (n.clone(), k, h.clone())))
+            .collect(),
+    )
+}
+
 /// The kernel spells a hole `.f.g`; every table spells it `f.g`, relative to
 /// the binding (RFC-0093 M2).
 fn plan_holes(holes: &[String]) -> Vec<String> {
@@ -3090,14 +3107,14 @@ fn plan_holes(holes: &[String]) -> Vec<String> {
 
 /// Fold one frame's statements into the side table. Called after the placer
 /// has added every row, so the core here is the core the emitters will run.
-fn fold_facts(body: &Body, stmts: &[St], out: &mut Facts) {
+fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
     for s in stmts {
         match s {
             St::If { then, els, .. } => {
-                fold_facts(body, then, out);
-                fold_facts(body, els, out);
+                fold_facts(body, proto, then, out);
+                fold_facts(body, proto, els, out);
             }
-            St::Loop(b) | St::Block { body: b, .. } => fold_facts(body, b, out),
+            St::Loop(b) | St::Block { body: b, .. } => fold_facts(body, proto, b, out),
             St::Store {
                 releases,
                 site: Site::Node(at),
@@ -3130,11 +3147,15 @@ fn fold_facts(body: &Body, stmts: &[St], out: &mut Facts) {
                 }
                 for a in arms {
                     if let Some(frees) = &a.frees {
-                        let rows: Vec<(String, Vec<String>)> = frees
+                        let rows: Vec<(String, Vec<String>, Option<DropKind>)> = frees
                             .iter()
                             .map(|b| {
                                 let info = &body.names[*b as usize];
-                                (info.source.clone(), plan_holes(&info.holes))
+                                (
+                                    info.source.clone(),
+                                    plan_holes(&info.holes),
+                                    proto.release_kind(&info.ty),
+                                )
                             })
                             .collect();
                         // An entry even when it is empty: "this arm states
@@ -3142,7 +3163,7 @@ fn fold_facts(body: &Body, stmts: &[St], out: &mut Facts) {
                         // as "this pass did not state them".
                         out.arms.entry((a.site, a.index)).or_default().extend(rows);
                     }
-                    fold_facts(body, &a.body, out);
+                    fold_facts(body, proto, &a.body, out);
                 }
             }
             _ => {}
@@ -3151,8 +3172,8 @@ fn fold_facts(body: &Body, stmts: &[St], out: &mut Facts) {
 }
 
 /// Every frame's answers, added to the table.
-fn fold_frame(body: &Body, out: &mut Facts) {
-    fold_facts(body, &body.stmts, out);
+fn fold_frame(body: &Body, proto: &Owned, out: &mut Facts) {
+    fold_facts(body, proto, &body.stmts, out);
     let mut released = std::collections::HashSet::new();
     collect_drops(&body.stmts, &mut released);
     for (i, info) in body.names.iter().enumerate() {
@@ -3432,13 +3453,13 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     let mut facts = Facts::default();
     if let Ok(top) = build_module_state(program, own, &lowered.globals) {
         for body in top.frames() {
-            fold_frame(body, &mut facts);
+            fold_frame(body, &own.proto, &mut facts);
         }
     }
     for inst in &lowered.instances {
         if let Ok(top) = build(program, inst, own) {
             for body in top.frames() {
-                fold_frame(body, &mut facts);
+                fold_frame(body, &own.proto, &mut facts);
             }
         }
     }
