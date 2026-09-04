@@ -4069,7 +4069,7 @@ deleted here, and `--engine interp` is still the default.
 | `test-bodies` | 25 corpus files; `tests/testing.rs` | yes — all 25 byte-identical, `placeorder.vyrn` among them | 4.6 s against 5.3 s over the 25. The compiled route is SLOWER here: the bodies are small and the compile is the whole cost |
 | `test-state` | nothing in the corpus | no — one fresh instance per body, where the interpreter runs the module's state once and lets the bodies see each other's writes | `rfcs/probes-0125/module-state-across-test-bodies.vyrn`: 2 passed under the interpreter, `1 != 2` under wasm. The cost is the semantics, and M5 retires them rather than reproducing them |
 | `bench-check` | CI's "Bench --check" step; 17 corpus files | yes — all 17 byte-identical, after this slice's fix below | 52.3 s against 2.4 s over the 17, a factor of 22 |
-| `serve` | `vyrn serve`, `vyrn dev`; `tests/serve.rs`, `rpc.rs`, `universal_pages.rs` | no — `serve_cmd` takes no engine, and `vyrn serve --engine wasm` silently serves from the interpreter | `interp::serve` holds ONE live instance across every request: `main` runs once and the module's state persists. The fifth slice below measured the resident half and it is cheap — a `Store` and an `Instance` outlive `_start`, module state keeps what `main` wrote, and an answer costs 11 ns against 839 µs for a fresh instance — and it names the three pieces that remain: no door for `handle`, no marshalling for `Request` and `Response`, and `serveStream` traps in both compiling backends |
+| `serve` | `vyrn serve`, `vyrn dev`; `tests/serve.rs`, `rpc.rs`, `universal_pages.rs` | yes, since the sixth slice below — `vyrn serve --engine wasm` compiles the served file with the direct backend and answers every request through doors in ONE resident instance, `main` having run once behind them. `vyrn dev` still takes no engine | the fifth slice measured the resident half — `proc_exit` unwinds the call and not the store, module state keeps what `main` wrote, and an answer costs 11 ns against 839 µs for a fresh instance — and named three pieces that remained: no door for `handle`, no marshalling for `Request` and `Response`, and `serveStream` trapping in both compiling backends. The sixth slice below closes all three in appended Vyrn rather than in an emitter, and moves no emitted byte for a program nobody serves. `tests/serve.rs` is 27 of 27 and `rpc.rs` 12 of 12 under `VYRN_SERVE_ENGINE=wasm`; `universal_pages.rs` waits on a miscompile of `examples/bin/server.vyrn` that has nothing to do with serving |
 | `mounted-routes` | `vyrn routes`, for the hand-written channel | yes, since the fifth slice below — a copy of the program with a synthesized `main` hands each `mount(..)`'s route lists to `std/http`'s `mountedRows` and prints them, compiled and run in the embedded engine | `examples/bin/server.vyrn` prints the same twelve-row table under both, byte for byte, at 2.61 s against 2.79 s. Both times are the page and RPC generators, not the reading |
 | `from-json` | `vyrn fmt --from-json` (RFC-0097 M1) | yes, since the fifth slice below — the converter compiles through the direct backend and runs in the embedded engine. `fmt` still has no engine flag, because the converter is the CLI's program and not the user's: there is one route and nothing to choose | 145 ms against 260 ms on `examples/shelf/vyrn.json`, medians of three. The compiled route is SLOWER, for the reason `test-bodies` is: 40 lines of program against a compile of every module they reach |
 | `run-profile` | `vyrn run --profile`, `vyrn check --profile` | yes, by replacement since the fifth slice below — the rows are phases rather than functions, and the count is wasmtime's fuel. A per-function table is not portable and the slice says why | `vyrn_frontend::prof` counts interpreter steps and keeps counting them for `--engine interp` and for `check --profile`, which measures generation. What the compiled route reports instead is five phases and one repeatable count: 85,759,742,333 operations for the site export, the same number twice |
@@ -4561,6 +4561,196 @@ GREEN — all 172 examples at their recorded hashes, which is the gate that sent
 `VYRN_GEN_CACHE_DIR`; `vyrn doc --std --verify`, 41 files up to date; and the
 site — the export writes its 82 routes and 14 assets, and `vyrn test` is green
 over `export.vyrn` and the 27 modules of `site/app`.
+
+#### The sixth slice (2026-09-05): `serve` on the compiled route
+
+The fifth slice named three pieces and measured the cheap half of the fourth.
+All three are here, and `vyrn serve --engine wasm` serves a file from one
+resident instance. The `serve` row was the last of the four with no route at
+all.
+
+**The instance.** `serve_cmd` compiles the served file with the direct backend,
+instantiates it once through `wasmrun::open`, and runs `_start`. `proc_exit`
+unwinds the call and not the store, so `main` has run, the module's
+initializers have run, and every later request is a call into a guest that
+still remembers what they wrote. Everything from `parse_request` outward is the
+code the interpreter's loop already used: the handler is a `FnMut(ServeCall) ->
+Result<ServeAnswer, String>` of the same shape, so `serve_one`, the response
+writer and the stream pump are untouched. `--workers` is refused here, because
+it is N interpreters (RFC-0025) and this is one instance.
+
+**None of the three pieces is a new rule in an emitter.** The CLI appends a
+block of ordinary Vyrn to the served root BEFORE it loads it (`SERVE_SHIM` in
+`vyrn-cli/src/main.rs`). Appended text is the root module's own, so the checker,
+the move checker and the release planner judge the doors exactly as they judge
+the program — the first version of the block was refused by the move checker for
+storing a pulled frame into module state without a `.copy()`, which is the point
+of writing them there rather than in `direct.rs`. Appending also leaves every
+line of the program where it was, so a diagnostic still points where the author
+looks.
+
+- **The door for `handle`** is an `export extern fn` wrapper, which is the one
+  kind of export the direct backend already writes (RFC-0012 M2). It is the
+  shape the `vyrn routes` port uses for `mountedRows`: a function the CLI
+  writes, compiled with the program.
+- **`Request` and `Response` do not cross. Their FIELDS cross**, one
+  `export extern fn` call each, under RFC-0012's String ABI — the host allocates
+  with `__vyrn_malloc` in front of the `{ len, cap }` header (RFC-0089 M1a) and
+  reads a returned String by the NUL scan, which is `web/wasi-min.js` in the
+  other language. So there is no encoding for the two sides to agree on, no text
+  to parse on the guest side, and no JSON reader linked into a served program to
+  read a header map. Thirteen crossings answer one request.
+- **`serveStream` still traps at the site in both emitters, and correctly**: a
+  compiled build has no accept loop, which is what RFC-0074 M3a's wording says.
+  A SERVED build has one, so `serve_rewrite` renames the call to
+  `vyrnServePark`, which boxes the producer into module state (RFC-0090 M3's
+  `boxStream`) where the doors pull it a frame at a time (`pullAt`) and release
+  it (`unboxStream`, `close`). The fifth slice read this as a hole in the
+  emitters; it is not. The trap is right for `vyrn run` and for `vyrn build`,
+  and the serving host is the only caller that has somewhere to put a producer.
+
+Both edits `serve_rewrite` makes are name substitutions on the CHECKED tree, and
+that is why they are safe after the check rather than before it:
+`vyrnServePark` declares the signature `serveStream` declares (`consume
+Stream<String>` to `Unit`), so every judgment that ran over the call answers the
+same question about the same shape, and `own::analyze` runs inside
+`direct::compile` on the rewritten program. The second substitution renames
+`vyrnServeMain` to `main` when the program declares none, because a served file
+need not have one (RFC-0016) and the direct backend has no `_start` without one.
+
+**No emitted byte moves for anything that is not being served.** `vyrn run` and
+`vyrn build` compile the file as written.
+
+#### What the reader would have cost
+
+The census asked what linking a reader into every served program costs. It was
+measured rather than argued, with `std/jsonread` named beside the doors:
+
+| module | bytes |
+|---|---|
+| a served file with no imports | 1,680 |
+| the same, with the doors | 14,963 |
+| the same, with `std/jsonread` also linked | 35,789 |
+| `examples/fullstack/server.vyrn` | 84,614 |
+| the same, with the doors | 93,417 |
+| the same, with `std/jsonread` also named | 93,682 |
+
+2.4x the module on a program that has no reader, and 265 bytes on one that
+already links `std/rpc`'s. The first row is the one that decides it: a served
+program is not required to speak JSON, and a boundary that passes fields does
+not make it.
+
+#### What an answer costs
+
+Two pairs, because they say different things.
+
+| | compiled route | interpreter |
+|---|---|---|
+| one answer, in process, a four-line `handle` | 6.965 µs | 3.354 µs |
+| one request over TCP, `examples/fullstack/server.vyrn`, `GET /`, 300 requests | 326.6 µs | 422.0 µs |
+
+The first pair is the doors themselves and nothing else: the handler is four
+lines, so the thirteen crossings — each allocating a String inside the guest and
+freeing it after — ARE the work. It is the `test-bodies` and `from-json` rows
+again, where the compiled route loses on a program small enough that the
+crossing is the program.
+
+The second is a real handler, and it wins by 95 µs. Both columns carry the same
+~300 µs of connect-and-close on this machine, so the handler itself is roughly
+25 µs compiled against 120 µs interpreted. The doors are not the expensive part
+of anything a server does.
+
+`vyrn-cli/src/main.rs`'s in-process check
+(`the_serve_doors_answer_on_one_resident_instance`) is where the first pair
+comes from. It also pins the three pieces without a socket, which is what makes
+a failure readable: a `Handle` that answers wrong names the door rather than a
+500 on a wire.
+
+#### The three suites
+
+`serve.rs`, `rpc.rs` and `universal_pages.rs` take `VYRN_SERVE_ENGINE=wasm` and
+spawn the server with `--engine wasm`. One set of assertions rather than two: a
+served program must answer the same on both engines, so a second copy of each
+test would be a second place for the answer to drift. A spawn that asks for
+`--workers` keeps the interpreter whatever the variable says.
+
+| suite | interpreter | compiled route |
+|---|---|---|
+| `serve`, 27 tests | 0.79 s | 0.77 s |
+| `rpc`, 12 tests | 2.87 s | 3.18 s |
+| `universal_pages`, 9 tests, `--ignored` | green | RED, and not for a reason in this slice |
+
+`serve`'s 27 include SSE with a mapped feed, the WebSocket handshake, both
+disconnect-release rows — the client vanishes and the producer's release runs
+before the next event would be produced — the empty-producer 204, the response
+header map, and the trap-and-keep-serving row. All of them are answers a
+compiled route had none of yesterday.
+
+**`universal_pages` is blocked by a defect that has nothing to do with serving.**
+`examples/bin/server.vyrn` traps in its own `main`, under `vyrn run --engine
+wasm` and under the `wasmtime` CLI alike, so the server never reaches its accept
+loop. The self-check reaches `/openapi.json` and faults: `memory fault at wasm
+address 0x68637324`, which is the four bytes `$sch` — the start of the literal
+`$schema` — read as a pointer. The interpreter runs the same route. It is a
+miscompile, it is reproducible in one command without a socket, and it is not
+this slice's to fix.
+
+#### The defect this slice found on the way
+
+`examples/bin/server.vyrn` did not start at all under the `wasmtime` CLI before
+this slice, and the reason was in the emitter.
+
+`std/runtime` occupies 8,768 bytes at `heapBase()` before its first allocated
+block: the free-list heads, the buffered standard output and input, the 32 bytes
+of scratch the host imports write their out-parameters into, and the digit
+buffer. The map is in `std/runtime.vyrn` above `drain`. The emitted memory did
+not cover it. `minimum` was `round_up(data_end, 65536)`, whose comment said "one
+page past the top of everything we occupy" — but `round_up` adds nothing when
+`data_end` already sits near a page boundary, and the header is ABOVE
+`data_end`. A module whose statics end within those 8,768 bytes of a page
+declared a memory that stops inside its own runtime header.
+
+`examples/bin/server.vyrn` is such a module: statics to 10,479,280, memory to
+10,485,760, scratch at 10,487,976. The `wasmtime` CLI refuses the first host
+call to use it — `In func wasi_snapshot_preview1::fd_prestat_get at write
+prestat: Pointer out of bounds` — and this repo's own host answers `BADF` and
+runs on with a filesystem that reports every path missing.
+
+The minimum now rounds up `data_end + HEAP_HEADER_BYTES`. For a module whose
+statics are not near a boundary the two round-ups agree, so nothing moves: the
+manifest gate named ONE example of 172, `twdemo.vyrn`, and `rfcs/census/wasm-
+sha256.tsv` moved that row and no other. Its runs were correct only because its
+first `malloc` grew memory before anything read the scratch. Two checks stand
+behind it — the constant is read back out of `std/runtime.vyrn`'s own map, so a
+drift in either direction is a red test rather than an out-of-bounds write; and
+a module whose data ends EXACTLY on a page is finished and its declared memory
+asserted to cover the header.
+
+#### What the census reads after this slice
+
+The `serve` row's third column reads `yes` — `vyrn serve --engine wasm` serves,
+and two of the three suites that spawn a server pass against it. The fourth
+column is the work above plus the one thing still outstanding: `vyrn dev` takes
+no engine either, and `universal_pages` waits on the `$schema` miscompile. Three of
+the fifteen rows still read `no`, and none of them is a missing capability:
+`test-state` is semantics M5 retires rather than reproduces, `fixture-oracle` is
+the interpreter BEING the oracle, and `library-run` is where the compiled route
+lives. `gen-fn` still reads `partial`, unchanged.
+
+**Gates.** In §1.4's order, one at a time, on a machine carrying other
+worktrees' gates: `cargo fmt --all --check`, clean; `cargo build --release -p
+vyrn-cli`; `cargo test -p vyrn-cli` with no filter, 545 passed and 74 ignored; the `kernel`, `coretables`, `typed` and `effects` suites with
+`--ignored` (1, 1, 1 and 2, at 90 s, 80 s, 183 s and 206 s); `fixtures` with
+`--ignored`, the whole corpus against its recorded output, 57 s; `vyrn-frontend`,
+1,256; the workspace less `vyrn-cli` with `--skip _natively`, 1,432; `memory`
+with `--test-threads=1`, 9; parity in release with `--ignored`, 41 of 41 in
+338 s; the residue ratchet, 219 s; `VYRN_WASM_MANIFEST=check` on `wasmhash`,
+green on all 172 after the one row above was rewritten; the cross-engine
+generator test with a fresh `VYRN_GEN_CACHE_DIR`; `testsweep` with `--ignored`,
+67 s; `vyrn doc --std -o ../docs/api --verify`, 41 files up to date; and the
+site — `vyrn run site/export.vyrn out` writes its 82 routes and 14 assets, and
+`vyrn test` is green over `export.vyrn` and `site/app`, 189 blocks. Then the new
+column: `VYRN_SERVE_ENGINE=wasm` over `serve` and `rpc`, green.
 
 ### M6 — the other two judgments
 
