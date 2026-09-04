@@ -1087,7 +1087,7 @@ fn run(program: &Program, want: Want) -> Run {
     // The verdict per call-argument temporary. It waits for both closures above:
     // whether a position keeps what it is given is only settled once every body
     // has been read, which is why the walk records the site and decides nothing.
-    let mut arg_temps = mc.arg_temps.map(RefCell::into_inner).unwrap_or_default();
+    let arg_temps = mc.arg_temps.map(RefCell::into_inner).unwrap_or_default();
     // Round forty-six: the capability meet over a fn-value call's closed
     // target set. Any runtime value of `Fn(ps) -> r` is either a program
     // function of exactly that signature or a lambda; lambdas carry no
