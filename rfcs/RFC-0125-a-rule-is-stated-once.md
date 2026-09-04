@@ -4448,6 +4448,29 @@ no engine and still serves from the interpreter, which is what the census row
 says, and the three suites that spawn it (`serve`, `rpc`, `universal_pages`)
 run against exactly what they ran against before.
 
+**What the census reads after this slice.** Three rows flip. `from-json` and
+`mounted-routes` read `yes`, each proved by running the command and comparing
+its output with the interpreter's — the manifest as VON, byte for byte, and the
+twelve-row table of `examples/bin/server.vyrn`, byte for byte. `run-profile`
+reads `yes, by replacement`, and the row says what the replacement is, because
+a `yes` that hid the missing per-function table would be worse than the `no`.
+`serve` still reads `no`. Ten of the fifteen rows are `yes` now; the four with
+no route at all are down to one, and its remaining work is written above.
+
+**Gates.** In §1.4's order, one at a time, on a machine carrying other
+worktrees' gates: `cargo fmt --all --check`, clean; the release build; `cargo
+test -p vyrn-cli` with no filter, 541 tests over 72 suites; the `kernel`,
+`coretables`, `typed` and `effects` suites with `--ignored` (1, 2, 1 and 1);
+`fixtures` with `--ignored`, the whole corpus compared against its recorded
+output; `vyrn-frontend`, 1,256; the workspace less `vyrn-cli` and the peak-RSS
+tests, 1,430; `memory` serially, 9; parity in release with `--ignored`, 41 of
+41 in 235 s; the residue ratchet; `VYRN_WASM_MANIFEST=check` on `wasmhash`,
+GREEN — all 172 examples at their recorded hashes, which is the gate that sent
+`mountedRows` back for a rewrite; the cross-engine generator test with a fresh
+`VYRN_GEN_CACHE_DIR`; `vyrn doc --std --verify`, 41 files up to date; and the
+site — the export writes its 82 routes and 14 assets, and `vyrn test` is green
+over `export.vyrn` and the 27 modules of `site/app`.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
