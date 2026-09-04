@@ -5614,12 +5614,13 @@ impl<'a> Gen<'a> {
                     if let Some(parts) = self_append_spine(name, value) {
                         // The spine handles this store's ownership itself
                         // (§22's own state machine, not yet subsumed by the
-                        // plan) — acknowledged so §26's finish check knows
-                        // the site was considered, not walked past.
-                        let _ = self.plan.store_owned_at(stmt as *const Stmt as usize);
+                        // plan). RFC-0125 §3 M3, the deletion slice: whether
+                        // the buffer the append copies out of is this path's
+                        // is the core's answer now, and the query
+                        // acknowledges the plan's row for §26's finish check.
+                        // This arm already stands under `region_depth == 0`.
                         self.expect.push(tty.clone());
-                        let owned_here = self.plan.store_owned_at(stmt as *const Stmt as usize)
-                            && self.region_depth == 0;
+                        let owned_here = self.store_row(stmt as *const Stmt as usize);
                         let mark = self.arg_frees.len();
                         let vals: Result<Vec<String>, String> = parts
                             .iter()
@@ -5683,20 +5684,23 @@ impl<'a> Gen<'a> {
                 // see. The value-side test (`fresh_str` / `mentions_place`)
                 // stays: it answers whether the NEW value can alias the old,
                 // which is representation knowledge.
-                // The plan is asked FIRST: the query records the site as
-                // considered (§26's finish check), and a `region`'s arena
-                // ownership then gates the release without hiding the site.
-                let owned_here = self.plan.store_owned_at(stmt as *const Stmt as usize)
-                    && self.region_depth == 0;
-                // Round eighteen: a mention that is only ever a read
-                // argument to a declared non-lender cannot hand the old value
-                // back — `dec = halveBy(dec, m)` — and the plan says which
-                // stores those are (`store_fresh_at`).
-                let snap = if owned_here
-                    && (fresh_str
-                        || !vyrn_frontend::movecheck::mentions_place(value, name)
-                        || self.plan.store_fresh_at(stmt as *const Stmt as usize))
-                {
+                // RFC-0125 §3 M3, the deletion slice: the row, the
+                // `mentions_place` guard and round eighteen's `store_fresh`
+                // exception are ONE answer, and the core states it at the
+                // store's own node. Where the core states nothing — a body it
+                // could not lower, or a statement RFC-0091 M2's rewrite built
+                // — the three read as they always did. The answer is taken
+                // FIRST so a region-gated site still counts as considered
+                // (§26's finish check).
+                let owned_here = self
+                    .store_fact(stmt as *const Stmt as usize)
+                    .unwrap_or_else(|| {
+                        self.plan.store_owned_at(stmt as *const Stmt as usize)
+                            && (fresh_str
+                                || !vyrn_frontend::movecheck::mentions_place(value, name)
+                                || self.plan.store_fresh_at(stmt as *const Stmt as usize))
+                    });
+                let snap = if owned_here && self.region_depth == 0 {
                     self.snap_old(&slot, &tty)
                 } else {
                     Vec::new()
@@ -5739,8 +5743,7 @@ impl<'a> Gen<'a> {
                 // per-binding registry guess (`slot_owns`), queried before the
                 // region gate so an arena-owned site still counts as
                 // considered. The value-alias guard folded with it.
-                let snap = if self.plan.store_owned_at(stmt as *const Stmt as usize)
-                    && self.region_depth == 0
+                let snap = if self.store_row(stmt as *const Stmt as usize) && self.region_depth == 0
                 {
                     let old = self.fresh_tmp();
                     self.emit(format!("{old} = extractvalue {rec_ll} {cur}, {idx}"));
@@ -5814,7 +5817,7 @@ impl<'a> Gen<'a> {
                         self.emit(format!("{ep} = getelementptr {ell}, ptr {data}, i64 {iv}"));
                         // Rule 4 through an element: the container owns what its
                         // element holds, so storing over it releases the old one.
-                        let snap = if self.plan.store_owned_at(stmt as *const Stmt as usize)
+                        let snap = if self.store_row(stmt as *const Stmt as usize)
                             && self.region_depth == 0
                         {
                             self.snap_old(&ep, &elem)
@@ -5853,7 +5856,7 @@ impl<'a> Gen<'a> {
                         // `sa[i] = other` abandoned the displaced element's
                         // buffer — reclaimed neither here nor at drop, which
                         // releases only the slots' current contents.
-                        let snap = if self.plan.store_owned_at(stmt as *const Stmt as usize)
+                        let snap = if self.store_row(stmt as *const Stmt as usize)
                             && self.region_depth == 0
                         {
                             self.snap_old(&ep, &elem)
