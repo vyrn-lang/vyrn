@@ -7185,7 +7185,7 @@ impl<'a> Gen<'a> {
             .iter()
             .position(|a| pattern_is_one(&a.pattern))
             .unwrap();
-        let one_pf = self.plan.arm_payload_free(key, one_ix as u32).cloned();
+        let one_pf = self.arm_row(key, one_ix as u32);
         let (one_val, one_t) =
             self.gen_arm_body(&sv, &arms[one_ix], &one_ty, free_boxes, one_pf)?;
         if !self.terminated {
@@ -7200,7 +7200,7 @@ impl<'a> Gen<'a> {
             .iter()
             .position(|a| !pattern_is_one(&a.pattern))
             .unwrap();
-        let zero_pf = self.plan.arm_payload_free(key, zero_ix as u32).cloned();
+        let zero_pf = self.arm_row(key, zero_ix as u32);
         let (zero_val, zero_t) =
             self.gen_arm_body(&sv, &arms[zero_ix], &zero_ty, free_boxes, zero_pf)?;
         if !self.terminated {
@@ -7345,7 +7345,7 @@ impl<'a> Gen<'a> {
         for (arm_ix, (arm, (idx, lbl))) in arms.iter().zip(&arm_labels).enumerate() {
             self.emit_label(lbl);
             self.scope.push(Vec::new());
-            let mut bind_slots: Vec<(String, String)> = Vec::new();
+            let mut bind_slots: Vec<(String, String, Type)> = Vec::new();
             if let (Pattern::Variant(_, binds), Some(idx)) = (&arm.pattern, idx) {
                 let payload_tys = &evs[*idx].payload;
                 for (i, bind) in binds.iter().enumerate() {
@@ -7356,7 +7356,7 @@ impl<'a> Gen<'a> {
                     let ll = self.llt(&pty);
                     let slot = self.declare(bind, &pty);
                     self.emit(format!("store {ll} {v}, ptr {slot}"));
-                    bind_slots.push((bind.clone(), slot.clone()));
+                    bind_slots.push((bind.clone(), slot.clone(), pty.clone()));
                     // A consumed scrutinee's boxes are this match's to give
                     // back once the value is out — see `gen_match`'s note.
                     if free_boxes && v != raw {
@@ -7396,13 +7396,18 @@ impl<'a> Gen<'a> {
             }
             // Round forty: the unmoved payload binders the row names — see
             // `gen_arm_body`.
-            if let Some(rows) = self.plan.arm_payload_free(key, arm_ix as u32).cloned() {
-                for (bind, slot) in &bind_slots {
-                    let Some((_, kind, holes)) = rows.iter().find(|(n, _, _)| n == bind) else {
+            if let Some(rows) = self.arm_row(key, arm_ix as u32) {
+                for (bind, slot, pty) in &bind_slots {
+                    let Some((_, holes)) = rows.iter().find(|(n, _)| n == bind) else {
+                        continue;
+                    };
+                    // The kind is the binder's TYPE's, as `gen_arm_body`
+                    // states: the core names the binder, not the shape.
+                    let Some(kind) = self.rel_kind(pty) else {
                         continue;
                     };
                     if !self.terminated && self.region_depth == 0 {
-                        self.emit_drop_holed(slot, kind, holes.clone());
+                        self.emit_drop_holed(slot, &kind, holes.clone());
                     }
                 }
             }
@@ -7820,7 +7825,7 @@ impl<'a> Gen<'a> {
         arm: &MatchArm,
         payload_ty: &Type,
         free_boxes: bool,
-        payload_free: Option<Vec<(String, DropKind, Vec<String>)>>,
+        payload_free: Option<Vec<(String, Vec<String>)>>,
     ) -> Result<(String, Type), String> {
         self.scope.push(Vec::new());
         let mut bind_slot: Option<(String, String)> = None;
@@ -7865,10 +7870,16 @@ impl<'a> Gen<'a> {
         // release stood down, and this payload is the arm's to give back
         // once its body is done with it.
         if let (Some(rows), Some((bind, slot))) = (&payload_free, &bind_slot) {
-            if let Some((_, kind, holes)) = rows.iter().find(|(n, _, _)| n == bind) {
-                if !self.terminated && self.region_depth == 0 {
-                    let (slot, kind, holes) = (slot.clone(), kind.clone(), holes.clone());
-                    self.emit_drop_holed(&slot, &kind, holes);
+            if let Some((_, holes)) = rows.iter().find(|(n, _)| n == bind) {
+                // RFC-0125 §3 M3, the deletion slice: the row names the
+                // binder and its holes; the release KIND is the payload
+                // TYPE's, which is where the placer took the plan's kinds
+                // from (`Owned::release_kind`).
+                if let Some(kind) = self.rel_kind(payload_ty) {
+                    if !self.terminated && self.region_depth == 0 {
+                        let (slot, holes) = (slot.clone(), holes.clone());
+                        self.emit_drop_holed(&slot, &kind, holes);
+                    }
                 }
             }
         }
