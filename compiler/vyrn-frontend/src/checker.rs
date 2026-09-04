@@ -1087,6 +1087,7 @@ fn check_accum_inner(
         gen_fns: &gen_fns,
         cur_fn: RefCell::new(String::new()),
         stored_sources: RefCell::new(Vec::new()),
+        arg_sources: RefCell::new(Vec::new()),
         stored_calls: RefCell::new(Vec::new()),
         spawn_sites: RefCell::new(Vec::new()),
         json_types: RefCell::new(Vec::new()),
@@ -1320,6 +1321,7 @@ fn check_accum_inner(
     //    flows through a stored value passed the inline check; catch it here.
     let effects = StoredFnEffects {
         sources: checker.stored_sources.borrow().clone(),
+        arg_sources: checker.arg_sources.borrow().clone(),
         calls: checker.stored_calls.borrow().clone(),
     };
     if !effects.calls.is_empty() {
@@ -1976,6 +1978,12 @@ struct Checker<'a> {
     /// RFC-0037 defunctionalization sources collected during checking: every
     /// lambda literal or named function that flows into a stored fn value.
     stored_sources: RefCell<Vec<StoredSource>>,
+    /// RFC-0023's ARGUMENT position: every lambda literal and every bare
+    /// function name handed straight to a `fn`-typed parameter. Not a
+    /// defunctionalization source — the position is monomorphized and the
+    /// value gets no tag — so it is a list of its own; see
+    /// [`StoredFnEffects::arg_sources`].
+    arg_sources: RefCell<Vec<StoredSource>>,
     /// RFC-0037: each call through a stored (non-parameter) fn-typed binding,
     /// as (enclosing function, signature).
     stored_calls: RefCell<Vec<(String, Type)>>,
@@ -9258,6 +9266,8 @@ impl<'a> Checker<'a> {
                     }
                 };
                 if ret == Type::Unit {
+                    let sig = crate::types::substitute(expected_fn, subst);
+                    self.record_arg_fn(&sig, None, Some(*lline));
                     return Ok(());
                 }
                 if ret_known {
@@ -9275,6 +9285,8 @@ impl<'a> Checker<'a> {
                     // Infer the generic return parameter (`U`) from the body type.
                     self.unify(&ret, &body_ty, subst, *lline)?;
                 }
+                let sig = crate::types::substitute(expected_fn, subst);
+                self.record_arg_fn(&sig, None, Some(*lline));
                 Ok(())
             }
             // A bare name: either a pass-through `fn`-typed parameter, or a named
@@ -9351,6 +9363,11 @@ impl<'a> Checker<'a> {
                     }
                 }
                 self.unify(&ret, &sig.1, subst, line)?;
+                self.record_arg_fn(
+                    &crate::types::substitute(expected_fn, subst),
+                    Some(vn),
+                    None,
+                );
                 Ok(())
             }
             // Any other expression of `fn` type (RFC-0037): a field read, an
@@ -9600,6 +9617,33 @@ impl<'a> Checker<'a> {
             lambda: None,
         });
         Ok(exp.clone())
+    }
+
+    /// Record the function a `fn`-typed ARGUMENT hands its callee — RFC-0125
+    /// §3 M6, seventh slice.
+    ///
+    /// The set is closed the way RFC-0037's is: [`Self::check_fn_arg`] accepts
+    /// a lambda literal, a bare function name, or an expression of `fn` type,
+    /// and only the first two are new functions — the third forwards a value
+    /// some other position already collected. `sig` is the parameter's type
+    /// under everything the call has solved, so a generic `fn(T) -> U` is
+    /// recorded as the concrete signature the instance calls through.
+    fn record_arg_fn(&self, sig: &Type, named: Option<&str>, lambda_line: Option<usize>) {
+        self.arg_sources.borrow_mut().push(StoredSource {
+            sig: self.base(sig),
+            named: named.map(str::to_string),
+            // The spawn fields are the spawn analysis's, and it reads
+            // `sources` alone; the judgment reads the two a frame is keyed by
+            // (see `StoredFnEffects::arg_sources`).
+            lambda: lambda_line.map(|line| StoredLambda {
+                defined_in: self.cur_fn.borrow().clone(),
+                line,
+                calls: HashSet::new(),
+                touches_global: None,
+                forbidden: false,
+                nested_sigs: Vec::new(),
+            }),
+        });
     }
 
     /// The RFC-0037 gate on using a named function as a value: generic,
@@ -10736,8 +10780,35 @@ pub struct StoredLambda {
 #[derive(Debug, Clone, Default)]
 pub struct StoredFnEffects {
     pub sources: Vec<StoredSource>,
+    /// The functions handed to a `fn`-typed PARAMETER at a call site — a
+    /// lambda literal or a bare function name, checked by
+    /// [`Checker::check_fn_arg`] and monomorphized there (RFC-0023).
+    ///
+    /// A list of its own, and not part of [`sources`](Self::sources), because
+    /// the two positions are different things: a stored value carries a
+    /// defunctionalization tag and one enum variant, and an argument carries
+    /// neither. The spawn and `--workers` analyses read `sources` alone, so
+    /// their verdicts do not move. What reads BOTH is the effect judgment
+    /// (RFC-0125 §2.2): a parameter's call reaches whatever a caller handed
+    /// it, whichever route the value took. Before this list, whether a source
+    /// was collected turned on how the parameter's type was SPELLED — a named
+    /// alias (`f: Bump`) went through the stored path and a bare `fn(..)` did
+    /// not — which is RFC-0125 §3 M6's finding 14.
+    ///
+    /// Only `sig`, `named` and a lambda's `defined_in`/`line` are filled: the
+    /// rest of [`StoredLambda`] is the spawn analysis's, and the spawn
+    /// analysis does not read this list.
+    pub arg_sources: Vec<StoredSource>,
     /// `(function, signature)` for each call through a stored fn value.
     pub calls: Vec<(String, Type)>,
+}
+
+impl StoredFnEffects {
+    /// Every function a value of some `fn` type may be, whichever position it
+    /// came from — what the effect judgment joins over.
+    pub fn every_source(&self) -> impl Iterator<Item = &StoredSource> {
+        self.sources.iter().chain(self.arg_sources.iter())
+    }
 }
 
 /// Whether two collected fn signatures could describe the same stored value.

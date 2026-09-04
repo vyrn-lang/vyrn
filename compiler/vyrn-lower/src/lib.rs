@@ -328,6 +328,24 @@ pub struct Lowered<'a> {
     /// judgment cannot see is a lambda with no frame, which is the half of
     /// RFC-0125 §3 M6's finding 14 the third slice could not close.
     pub bodies: Vec<OutsideBody<'a>>,
+    /// Every `impl` projection's body (RFC-0091 M2, RFC-0120), with its rows.
+    ///
+    /// A projection is never flattened into `Program::functions`, so no
+    /// instance covers it and no worklist reaches it — and the core still
+    /// lowers an access site as a CALL by the projection's own name. That is
+    /// why the effect judgment had twenty calls it could not attribute
+    /// (RFC-0125 §3 M6, finding 14). Outside every instantiation, like
+    /// [`Lowered::predicates`], and for the same reason: a projection is
+    /// inlined at its site, so following its calls would add instantiations
+    /// no backend's worklist has.
+    pub places: Vec<PlaceRows<'a>>,
+}
+
+/// One `impl` projection's body and its rows.
+#[derive(Debug, Clone)]
+pub struct PlaceRows<'a> {
+    pub func: &'a Function,
+    pub rows: Vec<Row<'a>>,
 }
 
 /// One body that is no function of the program: a `test` or a `bench`.
@@ -518,6 +536,18 @@ fn build<'a>(
             rows: w.rows,
         });
     }
+    // The fifth root, and the third with no worklist attached: an `impl`
+    // projection's body — see [`Lowered::places`].
+    let mut places: Vec<PlaceRows<'a>> = Vec::new();
+    for (_, f) in vyrn_frontend::project::all(program) {
+        let mut w = Walk::new(recorded, &program.impls);
+        let mut chain: Chain = vec![HashMap::new()];
+        block(&f.body, 0, &mut chain, &mut w);
+        places.push(PlaceRows {
+            func: f,
+            rows: w.rows,
+        });
+    }
     follow(
         "<module state>",
         std::mem::take(&mut gw.calls),
@@ -625,6 +655,7 @@ fn build<'a>(
         unresolved,
         lambda_bodies,
         bodies: outside,
+        places,
     }
 }
 
