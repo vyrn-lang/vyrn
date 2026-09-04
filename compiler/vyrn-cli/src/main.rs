@@ -296,7 +296,14 @@ fn main() -> ExitCode {
     // has the same headroom a run does.
     std::thread::Builder::new()
         .stack_size(vyrn_frontend::interp::INTERP_STACK_BYTES)
-        .spawn(real_main)
+        .spawn(|| {
+            let code = real_main();
+            // RFC-0125 §3 M4: the build-phase table, on the worker thread that
+            // did the build — the phases are thread-local for the reason the
+            // run profile's rows are. Stderr, so a piped stdout is unchanged.
+            eprint!("{}", vyrn_frontend::prof::phase_table());
+            code
+        })
         .expect("failed to spawn the vyrn worker thread")
         .join()
         .unwrap_or(ExitCode::FAILURE)
