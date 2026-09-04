@@ -393,6 +393,18 @@ pub struct Facts {
     /// with the callee name for the lender screen. The backends free the
     /// discarded value right after the call.
     pub discarded: Vec<(usize, String)>,
+    /// The two closures over the call graph, kept so a reader can ask whether
+    /// either says anything (RFC-0125 §3 M3, the checker's deletion path).
+    ///
+    /// `lending` names the functions whose result the caller must not release;
+    /// `retains` names the `(callee, index)` positions that KEEP a borrowed
+    /// parameter they are handed. Both are seeded by rule 2 and rule 3's own
+    /// recording paths, and both are EMPTY over the corpus and the site: the
+    /// kernel refuses a store, a return and a `consume` argument of a `read`
+    /// or `modify` parameter, so no function retains one and none lends its
+    /// result. They are the shadow of a rule that is enforced now.
+    pub lending: HashSet<String>,
+    pub retains: HashSet<(String, usize)>,
     /// Exit-residue round eighteen: `Stmt::Assign` nodes whose value mentions
     /// the assigned place ONLY as the bare name in plain argument positions of
     /// user-declared, non-lending, non-retaining functions — so the stored
@@ -625,6 +637,8 @@ pub fn facts(program: &Program) -> Facts {
             })
             .map(|(id, _)| id)
             .collect(),
+        lending: r.lending,
+        retains: r.retains,
     }
 }
 
@@ -7541,9 +7555,7 @@ fn sinks(decl: &Declared, name: &str, i: usize) -> bool {
     // used to leave `xs` reclaimed at the return while the result carried
     // its buffer out, and the caller received freed memory
     // (`rfcs/probes-0125/push-in-expression-position.vyrn`).
-    i == 0
-        && p.ty == f.ret
-        && matches!(f.ret, Type::Array(_) | Type::SmallArray(..) | Type::Map(..))
+    i == 0 && crate::prelude::rebuilds(name)
 }
 
 /// Every name `e` reads, root names only, in no particular order.

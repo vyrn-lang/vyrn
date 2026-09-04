@@ -674,6 +674,13 @@ impl<'b> Kernel<'b> {
                 "`{s}` may not be returned from a closure — it is a captured \
                  binding, and the closure's result is its caller's"
             )
+        } else if by == "a `return`" && self.body.export {
+            // RFC-0012 M2: the caller is JS and it releases what it is
+            // handed, so an export owns its result or it does not compile.
+            format!(
+                "`{s}` may not be returned from an exported function — it is {what}, \
+                 and the JS caller releases what it is handed"
+            )
         } else if by == "a `return`" {
             format!("`{s}` may not be returned — it is {what}, and a return is owned")
         } else if by.ends_with("(..)`") {
@@ -695,8 +702,9 @@ impl<'b> Kernel<'b> {
     /// A take, told whether it is the receiver of a rebuilding builtin
     /// (`out.push(v)`): that one take changes no owner, because the store
     /// after the call puts the value back where it came from, so a `modify`
-    /// parameter may be its subject. The exception is `movecheck::sinks`'s
-    /// and stays the checker's this slice.
+    /// parameter may be its subject. The core states the exception
+    /// ([`crate::core::Rhs::Call::write_back`]) and the rule under it is
+    /// `prelude::rebuilds`, which `movecheck::sinks` reads too.
     fn take_arg(&self, st: &mut State, v: &Val, write_back: bool) -> Result<(), Refusal> {
         if let Val::Name(n) = v {
             if !write_back {

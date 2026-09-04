@@ -2220,6 +2220,334 @@ release's ordering, `Leak::Hole` and `Leak::Region`, the binding notes behind
 `vyrn why --memory`, the `FreeArr` handover, and the argument verdicts over the
 call graph.
 
+**The checker's deletion path (2026-09-04): the structural census of
+`movecheck.rs`.** The census above is rule by rule. This one is line by line,
+and it answers the question the deletion needs answered: how many lines is the
+deletion worth, and what stands in its way. Every section of the file — an
+item and everything under it up to the next section — carries one kind:
+
+- **a rule the kernel now gives**: the rule-by-rule census says `the same`
+  for it, so the sentence a reader gets does not change the day the checker
+  goes;
+- **a rule only the checker gives**: the census says `nothing` or `its own
+  words`, so nothing may take it yet;
+- **placement rows for the engines**: what `own.rs` reads. It is not a rule,
+  and the kernel does not replace it — the own-side track above does;
+- **a fix menu**: surface knowledge the kernel has no source for;
+- **shared machinery**: the walk itself, the scope stacks, the path algebra,
+  the entry points, the instruments.
+
+`compiler/vyrn-cli/tests/refusals.rs` holds the classification and computes
+the spans, so the numbers below are asserted rather than transcribed: the
+sections must tile the file with no gap and no overlap, each anchor must name
+exactly one line, and the totals per kind must be these
+(`the_structural_census_covers_the_file`,
+`the_structural_census_is_what_the_rfc_records`). The table is printed from
+the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
+--nocapture the_structural_census_as_a_table`).
+
+| kind | lines | share |
+|---|---|---|
+| a rule the kernel now gives | 1,045 | 10 per cent |
+| a rule only the checker gives | 723 | 7 per cent |
+| placement rows for the engines | 2,349 | 23 per cent |
+| a fix menu | 81 | 1 per cent |
+| shared machinery | 3,656 | 37 per cent |
+| tests | 2,169 | 22 per cent |
+| **the file** | **10,023** | |
+
+| section | lines | kind | what it is |
+|---|---|---|---|
+| `pub struct OwningSite` | 129 | shared machinery | the module's own statement of the rules, and the two recorded measurements (RFC-0089 rule 1's sites, RFC-0092's projections) |
+| `pub enum Gone` | 134 | placement rows for the engines | why a binding does not hold its value at its block's end, and the row `own.rs` reads it from |
+| `pub enum ArgVerdict` | 24 | placement rows for the engines | what a callee does with the temporary at a call-argument position |
+| `pub struct ExitEv` | 218 | placement rows for the engines | the event records: exits, reads, consuming matches, arm payloads, stores, Rule N edges, place stores |
+| `pub fn facts(program: &Program) -> Facts` | 139 | placement rows for the engines | the two facts out of one walk, and the lender and retention post-passes over them |
+| `enum Want` | 35 | shared machinery | what a run is for, and one run's outputs |
+| `fn arg_verdict` | 94 | placement rows for the engines | the verdict for one argument temporary, read at a position instead of at a binding |
+| `fn let_id(s: &Stmt) -> usize` | 52 | placement rows for the engines | the key of a `let`, the lending builtins, and the projection names |
+| `pub fn check_accum(program: &Program) -> Vec<Diagnostic>` | 27 | shared machinery | the entry points a caller uses |
+| `fn run(program: &Program, want: Want) -> Run` | 348 | shared machinery | the one walk: the capability tables, every body, the drains and the stamps |
+| `pub fn check(program: &Program) -> Result<(), String>` | 10 | shared machinery | the historical string shim |
+| `struct MoveCheck<'a>` | 153 | shared machinery | the pass's state: the scope stacks, the sinks, the recorded rows |
+| `enum Borrow` | 48 | a rule the kernel now gives | what a borrow is, in words — `core::BorrowKind::what` is this sentence |
+| `fn fixes(&self, root: &str, path: &str) -> Vec<String>` | 24 | a fix menu | the named ways out of a borrow error |
+| `enum TakeForm` | 18 | a rule the kernel now gives | which form wrote the `consume`, and how a refusal names it |
+| `fn nothing_to_take(self) -> String` | 13 | a rule the kernel now gives | `consume` with nothing to take (row 09) |
+| `fn drop_it(self) -> String` | 8 | a fix menu | the `drop` a take's menu offers |
+| `fn root_of(path: &str) -> &str` | 211 | shared machinery | the path algebra and the consumed table: overlap, reach, revival |
+| `impl MoveCheck<'_>` | 89 | shared machinery | one body, with its parameters and its return type |
+| `fn enter(&self)` | 35 | shared machinery | the three scope stacks, read as one environment |
+| `fn wrote_place(&self, path: &str, line: usize, consumed: &mut Consumed)` | 37 | a rule the kernel now gives | a write to a place ends every alias that reads out of it (row 05) |
+| `fn place_key(&self, e: &Expr) -> usize` | 20 | placement rows for the engines | the key a row is written under |
+| `fn note_temporary(&self, s: &Stmt, value: &Expr) -> usize` | 479 | placement rows for the engines | the recording: temporaries, store events, branches, reads, exits, takes, holes, place stores, hand-overs at a `return` |
+| `fn is_bound_name(&self, e: &Expr) -> bool` | 18 | placement rows for the engines | whether a `let` names storage somebody else owns, for reclamation |
+| `fn names_a_place(&self, value: &Expr) -> Option<&'static str>` | 76 | a rule the kernel now gives | whether a value reads a place that owns it — the kernel's alias table |
+| `fn fixes_here(&self, b: &Borrow, root: &str, path: &str) -> Vec<String>` | 36 | a fix menu | the ways out that exist in THIS function |
+| `fn is_module_state(&self, name: &str) -> bool` | 72 | shared machinery | module state, the borrow table, and the type reading |
+| `fn sinks(&self, name: &str, i: usize) -> bool` | 47 | a rule the kernel now gives | a rebuilding builtin takes its receiver, and the write-back statement excepted (row 26) |
+| `fn store` | 113 | a rule the kernel now gives | rule 1's move and rule 2's refusal at a store (rows 01, 02, 03, 27, 34) |
+| `fn borrow_from(&self, value: &Expr) -> Option<Borrow>` | 68 | a rule the kernel now gives | the borrow status a `let` of a value gives its binding |
+| `fn payload_binding` | 60 | shared machinery | what a pattern's binders name, and whether an iterable is a place |
+| `fn check_use(&self, path: &str, line: usize, consumed: &Consumed) -> Result<(), Diagnostic>` | 79 | a rule the kernel now gives | rule 1 asked of a path: is the storage still all there (rows 04, 06, 07) |
+| `fn check_take` | 57 | a rule the kernel now gives | a take's refusals: an element, and nothing to take — `core::take_prefix` states both (rows 08, 09) |
+| `fn check_handover(&self, arg: &Expr, callee: &str, line: usize) -> Result<(), Diagnostic>` | 123 | a rule the kernel now gives | rule 2 at the third exit: a borrow may not be consumed (rows 11, 12, 13, 14) |
+| `fn refuse_projected_arg` | 34 | a rule the kernel now gives | the refusal a projected argument to a `consume` parameter gets |
+| `fn arm_binder(&self, name: &str) -> bool` | 24 | shared machinery | an arm's binders, and whether a callee keeps a `fn` value |
+| `fn check_return(&self, e: &Expr, line: usize) -> Result<(), Diagnostic>` | 132 | a rule the kernel now gives | rule 3: a return is owned (rows 15, 16, 18, 19, 28) |
+| `fn refuse_return(&self, b: &Borrow, root: &str, path: &str, line: usize) -> Diagnostic` | 47 | a rule the kernel now gives | the one exit every returned borrow leaves by, the exported function's own sentence with it (row 17) |
+| `fn note_handover(&self, arg: &Expr, callee: &str, i: usize, line: usize)` | 27 | placement rows for the engines | the retention and hand-over records the call graph is closed over |
+| `fn note_arg_temp(&self, arg: &Expr, callee: &str, ix: usize, line: usize)` | 527 | placement rows for the engines | the argument-temporary row: its producer, its type and its release kind |
+| `fn ctor_valued(&self, e: &Expr) -> bool` | 57 | placement rows for the engines | what an expression builds: a variant, a String, a concatenation |
+| `fn note_arm_aliases(&self, e: &Expr, line: usize, binders: &[String])` | 84 | placement rows for the engines | an arm that yields a place, and what naming one costs |
+| `fn value_cannot_alias(&self, e: &Expr, root: &str) -> bool` | 119 | placement rows for the engines | Rule N's edge guard, the mention guard, and what a call may forward |
+| `fn carries_param_storage(&self, e: &Expr) -> bool` | 171 | placement rows for the engines | the escape screen: storage flow rather than mention |
+| `fn lends(&self)` | 34 | placement rows for the engines | the lending record, and the lend a wrapper hides |
+| `fn returned_borrow(&self, e: &Expr) -> Option<(Borrow, String, String)>` | 54 | a rule the kernel now gives | the first borrow a returned expression yields |
+| `fn note_returned_projection(&self, e: &Expr, line: usize)` | 59 | shared machinery | RFC-0092's instrument |
+| `fn lends_through_a_wrapper(&self, e: &Expr) -> Option<(Borrow, String, String)>` | 77 | placement rows for the engines | the same question through a constructor, to record a lend and never to refuse one |
+| `fn site(&self, kind: &'static str, line: usize, e: &Expr, declared: Option<&Type>)` | 40 | shared machinery | RFC-0089 rule 1's instrument |
+| `fn block(&self, b: &Block, consumed: &mut Consumed, scope: &mut Vec<HashSet<String>>) -> bool` | 32 | shared machinery | a block, and whether it diverges |
+| `fn stmt` | 890 | shared machinery | the walk over statements: it calls the refusal helpers and writes the plan's rows in the same arm |
+| `fn capture_site(&self, name: &str, line: usize)` | 75 | placement rows for the engines | a lambda's captures, recorded for the enclosing block |
+| `fn check_exclusive(&self, callee: &str, args: &[Expr], line: usize) -> Result<(), Diagnostic>` | 35 | a rule only the checker gives | a `modify` borrow is exclusive (row 23) |
+| `fn check_capture(&self, name: &str, line: usize) -> Result<(), Diagnostic>` | 43 | a rule only the checker gives | a closure that outlives the call may not capture a borrow (row 24) |
+| `fn check_loop_reuse` | 39 | a rule the kernel now gives | rule 1 across a back edge (row 25) |
+| `fn expr` | 1,039 | shared machinery | the walk over expressions: the same traversal does both jobs |
+| `fn reject_consume_global` | 36 | a rule the kernel now gives | module state may not be taken (rows 10, 12, 15, 29) |
+| `pub fn mentions_place(e: &Expr, base: &str) -> bool` | 95 | shared machinery | whether a stored value mentions the place it is stored into |
+| `mod linear` | 645 | a rule only the checker gives | the must-use obligation: acquired once, disposed exactly once (rows 30, 31) |
+| `fn store_path(e: &Expr) -> Option<String>` | 27 | shared machinery | the place an expression names, as the store arms spell it |
+| `fn sinks(decl: &Declared, name: &str, i: usize) -> bool` | 24 | a rule the kernel now gives | whether a builtin's parameter takes its argument for good |
+| `fn reads(e: &Expr) -> Vec<String>` | 141 | shared machinery | the names an expression reads, and the calls in it |
+| `pub fn element_path(e: &Expr) -> Option<(String, String)>` | 84 | shared machinery | the place spellings every rule above compares |
+| `fn menu(line: usize, message: String, fixes: Vec<String>) -> Diagnostic` | 13 | a fix menu | one diagnostic with its menu of fixes |
+| `fn declared_in(block: &crate::ast::Block, out: &mut std::collections::HashSet<String>)` | 56 | shared machinery | the names a block declares, and a pattern's binders |
+| `mod tests` | 2,169 | tests | the pass's own unit tests |
+
+Four things the structural census says, and the third is the finding.
+
+- **The rules are a sixth of the file.** After this slice's three rule
+  commits, 1,045 lines state a rule the kernel gives and 723 state one only
+  the checker gives. Together they are 1,768 lines out of 10,023. Every
+  argument about which rule closes next is an argument about a sixth of
+  `movecheck.rs`, and about two lines in five of that sixth.
+- **The placement rows are more than twice the rules.** 2,349 lines write
+  what `own.rs` reads. They are not a second opinion about a rule, so no
+  kernel refusal takes them; the own-side track above does, table by table.
+  `note_arg_temp` alone is 527 lines and `note_temporary` and the recorders
+  under it are 479, which together are more than every rule the checker
+  states on its own.
+- **The obstacle is the walk, not the open rules.** `stmt` (890 lines) and
+  `expr` (1,039) are one traversal doing both jobs: an arm calls
+  `check_handover` and writes an `ArgTemp` row in the same breath. So a
+  closed rule frees its own helper and not the arm that calls it, and the
+  file cannot lose a fifth of itself until the recording has a walk of its
+  own or the plan has gone. That is 1,929 lines, and it is the largest single
+  entry in the census.
+- **The fix menus are 81 lines.** They are named in the close-out as a thing
+  the kernel does not have, and they are the smallest of everything the
+  deletion track owes.
+
+**The rules this slice closed.** Each is one commit, and each moves a row of
+the rule-by-rule census from `nothing` or `its own words` to `the same`: the
+kernel prints the checker's whole sentence at the same file and line, minus
+the menu. `tests/refusals.rs` runs both passes over every row, so a wording
+that drifts fails the build rather than the reading.
+
+- **`consume` with nothing to take, and `consume` of an element** (rows 09
+  and 08). The census left these open with the reason written down: both are
+  about the KEYWORD and not about ownership, because `consume make()` and
+  `make()` denote the same value and the kernel has no keywords. So the rule
+  belongs where the desugar is written, which is the core
+  (`core::take_prefix`). A `consume` whose operand names no place is refused
+  there, and an element is named as the element it is. The core states it as
+  a REFUSAL rather than a gap: `core::Gap` carries a `rule` now — a sentence
+  the program broke, not a construct the slice cannot lower — and the placer
+  reports one the way it reports the kernel's own. No corpus program reaches
+  either refusal, because the checker refuses every such program before the
+  core is built; the corpus tally counts a rule-gap as refused, so one that
+  got through would move the ratchet rather than hide in the gap column.
+
+
+- **An exported function owns its result** (row 17). The kernel refused the
+  program already, in the general sentence: "it is a `read` parameter, and a
+  return is owned". True, and it names the wrong reason — the reason is that
+  the caller is JS and `wasi-min.js` releases every String an export hands
+  back (RFC-0012 M2, RFC-0089 M3b), so `.copy()` is the only way out and
+  `consume` is not one. The core carries `Body::export` now, a lambda frame
+  carries the flag of the body that holds it, and the kernel words the
+  return refusal as `movecheck::refuse_return` words it. One field and one
+  branch.
+
+
+- **The `sinks` write-back exception** (row 26). The close-out recorded this
+  as "the core restates the first half and reads the plan for the second".
+  Neither half is the plan's now, and neither is restated. The rule under it
+  — which builtin hands its receiver's buffer back through its result — is
+  `prelude::rebuilds`, one function that `movecheck::sinks` and `core::call`
+  both read, so the predicate is written once instead of twice. The exception
+  itself is the core's (`Rhs::Call::write_back`), and the kernel exempts that
+  one take. The row was already `the same`; what moved is that a reader can
+  now find the rule in one place, which is what the deletion needs.
+
+- **Region escape** (rows 32, 33). Nothing is owed, and the census already
+  proved it: both programs are refused with `VYRN_NO_MOVECHECK=1`, because
+  `checker.rs`'s `region_store_guard` and `region_consume_guard` give them.
+  The rule is not the move check's, so it does not stand in the deletion's
+  way. The `Kernel::Elsewhere` rows assert this on every run.
+
+
+**The rule-by-rule census, after this slice.** Printed from the test's own
+rows (`cargo test -p vyrn-cli --test refusals -- --ignored --nocapture
+the_census_as_a_table`), so the prose and the assertion cannot drift apart by
+a transcription.
+
+| # | rule | RFC | the checker's sentence | the kernel |
+|---|---|---|---|---|
+| 01 | rule 2: an element read may not be stored | RFC-0092 | `b.xs[0]` may not be stored into `push(..)` — it is read out of a place that owns it | its own words |
+| 02 | rule 2: a field of a `read` parameter may not be stored | RFC-0089 | `h.meta[0]` may not be stored into `push(..)` — it is a `read` parameter | its own words |
+| 03 | rule 2: a projection is a borrow of its root, whatever the root is | RFC-0092 | `d.title` may not be stored into `push(..)` — it is read out of a place that owns it | its own words |
+| 04 | a name with a hole may not be used whole | RFC-0093 | `p.name` was taken out of `p` here / line 10: ... and `p` is used as a whole here, with the hole still in it | the same |
+| 05 | a write to a place ends every alias that reads out of it | RFC-0090 | `t.xs[..]` is written here while `before` still reads out of it / line 9: ... and `before` is used again here | the same |
+| 06 | rule 1: a `consume` parameter takes ownership | RFC-0089 | `x` is used here but was already consumed by `take(..)` on line 8 /   (a `consume` parameter takes ownership; the value can't be used afterward) | the same |
+| 07 | rule 1: a move into a binding, and a use of the source after it | RFC-0089 | `s` was moved here into the binding `t` / line 5: ... and `s` is used again here | the same |
+| 08 | `consume` reaches a field, never an element | RFC-0093 | `xs[0]` may not be taken — an element is not a place a take reaches | the same |
+| 09 | `consume` with nothing to take | RFC-0093 | `consume` here has nothing to take — the value is already owned, so there is no place to leave a hole in | the same |
+| 10 | module state may not be taken: a prefix `consume` | RFC-0013 | module state `names` may not be consumed by a take — nothing may take ownership of module state (it lives for the whole module and is never dropped) | its own words |
+| 11 | rule 2: a prefix `consume` of a `read` parameter | RFC-0089 | `ys` may not be consumed — it is a `read` parameter | its own words |
+| 12 | module state may not be taken: a `consume` parameter | RFC-0013 | module state `names` may not be passed to a `consume` parameter via `take(..)` — nothing may take ownership of module state (it lives for the whole module and is never dropped) | the same |
+| 13 | rule 2: a whole `read` parameter to a `consume` parameter | RFC-0089 | `ys` may not be passed to a `consume` parameter via `take(..)` — it is a `read` parameter | the same |
+| 14 | rule 2: a projection to a `consume` parameter | RFC-0092 | `d.title` may not be passed to a `consume` parameter via `take(..)` — it is read out of a place that owns it | its own words |
+| 15 | module state may not be taken: a `return` | RFC-0013 | `names` may not be returned — it is module state, which nothing may take, and a return is owned | the same |
+| 16 | rule 2 at the return: a field of a `read` parameter | RFC-0089 | `d.title` may not be returned — it is a `read` parameter, and a return is owned | its own words |
+| 17 | an exported function owns its result | RFC-0012 | `s` may not be returned from an exported function — it is a `read` parameter, and the JS caller releases what it is handed | the same |
+| 18 | rule 2 at the return: a whole `read` parameter | RFC-0089 | `ys` may not be returned — it is a `read` parameter, and a return is owned | the same |
+| 19 | rule 2 through a wrapper: a `read` parameter put into the result | RFC-0089 | `s` may not be put into `Some(..)` — it is a `read` parameter | its own words |
+| 20 | rule 1 at the drop: what a `consume` parameter took is gone | RFC-0089 | `a` is dropped here but was already consumed by `take(..)` on line 6 | its own words |
+| 21 | rule 4 at the drop: the place that owns a value releases it | RFC-0089 | `owned` may not be dropped — it is read out of a place that owns it | its own words |
+| 22 | `drop` releases the whole binding, and a take left a hole | RFC-0093 | `p` may not be dropped — `p.name` was taken out of it on line 17, and `drop` releases the whole binding | nothing |
+| 23 | a `modify` borrow is exclusive | RFC-0090 | `a` is passed to `bump` as `modify` and read again in the same call — a `modify` borrow is exclusive | nothing |
+| 24 | a closure that outlives the call may not capture a borrow | RFC-0037 | `s` may not be captured by a closure that outlives this call — it is a `read` parameter | nothing |
+| 25 | rule 1 across a back edge | RFC-0089 | `x` is consumed by `take(..)` inside a loop, so it would be used again on the next iteration | the same |
+| 26 | a rebuilding builtin takes its receiver | RFC-0125 | `mt` is read out of `h.meta` here — a place that owns it / line 7: ... and `push(..)` takes `mt`, so `mt` must be a value of its own | the same |
+| 27 | rule 2: a `read` parameter to a builtin that declares `consume` | RFC-0089 | `xs` may not be stored into `fromArray(..)` — it is a `read` parameter | its own words |
+| 28 | a closure's result is its caller's, and a capture is not its to give | RFC-0037 | `s` may not be returned from a closure — it is a captured binding, and the closure's result is its caller's | the same |
+| 29 | module state may not be taken: `for .. in consume` | RFC-0013 | module state `names` may not be consumed by a `for` loop — nothing may take ownership of module state (it lives for the whole module and is never dropped) | its own words |
+| 30 | a must-use obligation is discharged on every path | RFC-0075 | `s` is a `Stream` and is never disposed | nothing |
+| 31 | a must-use obligation is discharged exactly once | RFC-0075 | `s` is a `Stream` and is disposed more than once | its own words |
+| 32 | a value the region allocated may not be stored where it outlives the region | RFC-0004 §4 | cannot store a heap value into `kept`, which outlives the enclosing `region` (it would dangle when the region frees). Move `kept` inside the region, or compute a non-heap result to carry out. | not the move check's |
+| 33 | a `consume` parameter may not take a value the region frees | RFC-0004 §4 | cannot hand a heap value to argument 1 of `take`, which is `consume`, inside a `region`. The region frees the value at its closing brace, so the callee cannot own it. Move the call out of the region, or pass a value that holds no heap. | not the move check's |
+| 34 | rule 2: a `read` parameter into a builtin's `consume` argument | RFC-0089 | `s` may not be stored into `push(..)` — it is a `read` parameter | its own words |
+
+
+**The retention over the call graph: measured, and there is nothing in it.**
+The close-out owed the deletion track `ArgVerdict` and `note_handover` — "whether
+a callee keeps what it is handed", which `arg_drops` is built from — and named
+the kernel's fixpoint over the core as its natural home. The measurement says
+no fixpoint is needed, because the sets are empty. `movecheck` keeps two
+closures over the call graph: `lending`, the functions whose result the caller
+must not release, and `retains`, the `(callee, index)` positions that KEEP a
+borrowed parameter. `VYRN_LEND_DUMP=1 vyrn check <file>` prints both after the
+fixpoint. Over 276 programs — every file under `examples/`, `std/`, `bench/`,
+`site/` and `site/app/` — both are empty, and no run seeds either one.
+
+The reason is a rule, and it is one the kernel now gives. A function retains a
+borrowed parameter only by storing it, returning it or handing it to a
+`consume` parameter, and rule 2 refuses all three (rows 11, 13, 17, 18, 19, 27,
+34). A function lends its result only by returning a borrow, and rule 3 refuses
+that (rows 15, 16, 18). So the two closures are the shadow of a rule that is
+enforced: they were built when the rule was recorded rather than applied, and
+nothing has filled them since. `arg_verdict`'s `Lent` and `retains` clauses,
+`facts`'s lender post-pass and `fresh_stores`'s retention screen all read a set
+that is always empty.
+
+`movecheck::Facts` carries both sets now, and the kernel corpus tally asserts
+they are empty over every corpus program — pinned rather than described,
+because a program that fills one is the day the argument changes. What the
+deletion track owes here is therefore a DELETION and not a kernel rule: the
+next slice may take the two closures and the clauses that read them, on that
+assertion. Nothing was added to the kernel, so `vyrn check site/export.vyrn`
+did not move: 7.8 and 7.9 seconds warm before and after, against 32.9 seconds
+cold.
+
+**The `fix:` menus stay in the checker, and this is the decision.** They are 81
+lines: `Borrow::fixes`, `TakeForm::drop_it`, `MoveCheck::fixes_here` and the
+`menu` constructor. A menu is a function of two things — the rule that was
+broken, and the surface spelling of the place it was broken at — and the kernel
+has the second and not the first: it prints a sentence, not a rule name. Two
+options were weighed.
+
+- Give the kernel the menus. It would have to carry a rule identity beside
+  every refusal, and then carry `.copy()`, `consume`, `swapRemove` and the
+  write-back form, which are four surface spellings the kernel exists not to
+  know. It would also put RFC-0087 U2's wording inside a pass whose whole
+  claim is that it knows nothing about the surface.
+- Keep them where the surface is. A refusal names a rule; a menu is a table
+  from a rule to a suggestion; the table belongs beside the parser's own
+  vocabulary. When the checker's rules go, the menus become a small pass over
+  a kernel refusal, keyed by the rule the refusal names — one `match`, and no
+  walk.
+
+The second, and nothing is built for it this slice: `vyrn fix` reads the
+diagnostics the checker already prints, and the checker still runs. The
+`refusals` census asserts what this costs today — the kernel's sentence is the
+checker's minus the menu, on every row that says `the same` — so the day the
+checker goes, the menu is the only thing a reader loses and the pass that
+restores it is written against a refusal that names its rule.
+
+**What the census column says now.** Before this slice: 11 `the same`, 15 `its
+own words`, 6 `nothing`, 2 `not the move check's`. After: **14, 14, 4 and 2**.
+Rows 08, 09 and 17 moved to `the same`; the rest is unchanged, and the table
+above is printed from the test.
+
+**The rules still open, and why each is.**
+
+- **Rows 01, 02, 03, 14, 16, 21 and 34** — a projection, an element read, a
+  field of a `read` parameter. The kernel refuses every one, and in its own
+  words: "read out of `d.title`, a place that owns it". True, and it names the
+  PLACE where the checker names the CAPABILITY. Closing them is a wording
+  change and not a rule: the alias would have to carry the kind of the
+  parameter its root came from, so `h.meta[0]` can be called what the reader
+  wrote rather than what the kernel sees.
+- **Rows 10, 29** — module state, taken by a prefix `consume` or a `for` loop.
+  The kernel refuses both with RFC-0013's sentence at the `consume` parameter
+  form (rows 12, 15) and reaches a different form of the take here. Also a
+  wording gap.
+- **Rows 11, 19, 20, 27, 31** — the same shape once more: the kernel's sentence
+  names the taker (`via take(..)`) where the checker names the form.
+- **Row 22**, a `drop` after a hole, and **rows 30, 23, 24** — a must-use
+  obligation on every path, a `modify` borrow's exclusivity, and a closure that
+  outlives the call. These four are the rules the kernel gives NOTHING for.
+  Row 24 is a lifetime question and §2.2 has no lifetimes on purpose. Row 23's
+  own extension — what a `modify` argument does to the aliases of what it is
+  handed — was measured when the alias rule was tried and refuses three corpus
+  programs falsely, and the measurement above says the call-graph retention
+  that would fix it is empty, so the rule needs a per-argument WRITE set rather
+  than a retention set.
+- **Rows 32, 33** — region escape. Nothing is owed: `checker.rs` gives them.
+
+**How many lines of `movecheck.rs` have no caller after this slice: none, and
+that is the right answer.** The slice deleted no rule, because the refusals
+suite must stay byte-identical and the checker is still the pass that runs
+first. What the slice produced is the number the deletion slice acts on: **1,045
+lines now state a rule the kernel gives in the same sentence**, and the census
+test names every one of them by section. Against them stand three things, in
+this order of size:
+
+1. **the walk**, 1,929 lines of `stmt` and `expr`, which calls the refusal
+   helpers and writes the plan's rows in the same arm. Until the recording has
+   a walk of its own, deleting a rule frees its helper and not its call site;
+2. **723 lines of rules the kernel does not give in the same words**, of which
+   the wording gaps above are most and the four real gaps (rows 22, 23, 24, 30)
+   are `check_exclusive`, `check_capture` and `mod linear` — 723 lines, and
+   `mod linear` alone is 645 of them;
+3. **81 lines of menu**, which stay by the decision above and become a table.
+
+The next slice's first move is therefore not another rule. It is to split the
+walk: one traversal that refuses, one that records, so that a closed rule takes
+its call site with it.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
