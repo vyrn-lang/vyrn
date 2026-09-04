@@ -3312,8 +3312,8 @@ recorded what that costs.
 | `float-to-int` | nothing — it answers, truncated toward zero | RFC-0002 | 3 | `interp` `native` `wasm` |
 | `where-scalar` | a scalar failing its named type's `where` predicate | RFC-0003 | 1 | `vyrn` |
 | `where-record` | a record failing its cross-field `where` predicate | RFC-0003 | 1 | `vyrn` |
-| `string-nul` | bytes holding a NUL, made into a String | RFC-0014 | 3 | `interp` `native` `vyrn` |
-| `string-utf8` | bytes that are not UTF-8, made into a String | RFC-0014 | 3 | `interp` `native` `vyrn` |
+| `string-nul` | bytes holding a NUL, made into a String | RFC-0014 | 1 | `vyrn` |
+| `string-utf8` | bytes that are not UTF-8, made into a String | RFC-0014 | 1 | `vyrn` |
 | `file-nul` | a file holding a NUL, read as a String | RFC-0014 | 3 | `interp` `native` `vyrn` |
 | `file-utf8` | a file that is not UTF-8, read as a String | RFC-0014 | 3 | `interp` `native` `vyrn` |
 | `io-status` | nothing — it turns a host status into canonical Vyrn wording | RFC-0014 | 3 | `interp` `native` `vyrn` |
@@ -3322,14 +3322,15 @@ recorded what that costs.
 | `json-decode` | nothing — it accumulates `Issue`s, shape and `where` alike | RFC-0018 | 1 | `vyrn` |
 | `char-boundary` | a byte offset inside a multi-byte character | RFC-0046 | 1 | `vyrn` |
 
-**19 rows and 49 copies**, and it was 53 when this census was written. Fifteen
-rows are stated three times. Four are stated once, and they are the rows that
+**19 rows and 45 copies**, and it was 53 when this census was written. Thirteen
+rows are stated three times. Six are stated once, and they are the rows that
 went where §2.3 sends the rest: `json-decode` is `std/jsondec` plus the decoders
 `jsondec.rs` synthesizes per target type (RFC-0078 M3), `char-boundary` is nine
-lines of `std/strings`, and `where-scalar` and `where-record` are the generated
-constructor of the fourth slice below. All of them are ordinary Vyrn, so all
-three engines run the one body and the wording carries the module and the line
-it was stated on —
+lines of `std/strings`, `where-scalar` and `where-record` are the generated
+constructor of the fourth slice below, and `string-nul` and `string-utf8` are
+`std/text`'s `stringFault`, the fifth slice's. All of them are ordinary Vyrn, so
+all three engines run the one body and the wording carries the module and the
+line it was stated on —
 `substring: byte offset 4 is inside a multi-byte UTF-8 character
 (std/strings.vyrn:94)`. That is what a row looks like after it moves.
 

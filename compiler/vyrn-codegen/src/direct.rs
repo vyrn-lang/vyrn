@@ -3775,12 +3775,16 @@ impl<'p> Fn_<'_, 'p> {
         self.region_bump(b, -1);
     }
 
-    /// Call `std/runtime`'s `strFromBytes` with the destination, the bytes and
-    /// their count already on the stack: the DFA table and the two interned
+    /// Call `std/runtime`'s `strFromBytes` with the destination, the bytes, their
+    /// count and the check's answer already on the stack: the two interned
     /// messages are its constant tail (PLAN-0125-runtime §6 step 4).
+    ///
+    /// The DFA table used to be the third argument. RFC-0125 §3 M6 (the third
+    /// judgment's fifth slice) replaced it with the answer of `std/text`'s
+    /// `stringFault` — the one check every engine calls — so the runtime function
+    /// builds and decides nothing.
     fn str_from_bytes_tail(&self, b: &mut Frame) {
-        b.ins(&Instruction::I32Const(self.cx.rt.utf8d as i32))
-            .ins(&Instruction::I32Const(self.cx.rt.bnul as i32))
+        b.ins(&Instruction::I32Const(self.cx.rt.bnul as i32))
             .ins(&Instruction::I32Const(self.cx.rt.butf8 as i32))
             .ins(&Instruction::Call(self.cx.rt.str_from_bytes));
     }
@@ -8035,11 +8039,17 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::F64ReinterpretI64);
                 return Ok(Type::Float);
             }
-            // `stringFromBytes(b)` (RFC-0014): the bytes copied into a fresh
-            // NUL-terminated buffer and UTF-8-validated, as a
-            // `Result<String, String>`. The result is an aggregate, so the slot is
-            // allocated here and the runtime writes through it — the same hidden
-            // destination an aggregate-returning Vyrn call gets.
+            // `stringFromBytes(b)` (RFC-0014): the bytes checked by `std/text`'s
+            // `stringFault` and then copied into a fresh NUL-terminated buffer, as
+            // a `Result<String, String>`. The result is an aggregate, so the slot
+            // is allocated here and the runtime writes through it — the same
+            // hidden destination an aggregate-returning Vyrn call gets.
+            //
+            // RFC-0125 §3 M6 (the third judgment's fifth slice): the check is the
+            // call this arm makes first, and its answer travels into
+            // `strFromBytes` where the DFA table used to go. This backend was
+            // never a carrier of the two `String` rows — it called the runtime —
+            // and now the runtime is not one either.
             "stringFromBytes" if args.len() == 1 => {
                 let ty = Type::Result(Box::new(Type::Str), Box::new(Type::Str));
                 let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
@@ -8057,6 +8067,21 @@ impl<'p> Fn_<'_, 'p> {
                 let src = self.scratch(b, ValType::I32, 0);
                 let al = self.layout_of(&bytes, line)?;
                 b.ins(&Instruction::LocalSet(src));
+                let check = vyrn_frontend::loader::STRING_FAULT;
+                let Some(check_idx) = self.cx.sigs.get(check).map(|s| s.index) else {
+                    // `std/text` is injected into any program that mentions
+                    // `stringFromBytes`, so reaching this means a program built
+                    // without a std root.
+                    return unsupported(
+                        "`stringFromBytes` with no `std/text` in the link (its check is Vyrn)",
+                        line,
+                    );
+                };
+                let fault = self.scratch(b, ValType::I32, 1);
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::Call(check_idx));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::LocalSet(fault));
                 let off = b.alloc(l.size, l.align);
                 b.slot(off);
                 b.ins(&Instruction::LocalGet(src));
@@ -8064,6 +8089,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalGet(src));
                 b.ins(&Instruction::I64Load(at(al.fields[1])));
                 b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::LocalGet(fault));
                 self.str_from_bytes_tail(b);
                 b.slot(off);
                 return Ok(ty);
@@ -15496,7 +15522,9 @@ const VYRN_RUNTIME: &[(&str, &[ValType], &[ValType])] = &[
     ("free", &[ValType::I32], &[]),
     // Step 4: the allocating strings. `strFromBytes` returns a
     // `Result<Int64, Int64>`, an aggregate, so the hidden destination leads;
-    // the DFA table and the two interned messages are its last three arguments.
+    // the check's answer and the two interned messages are its last three
+    // arguments (RFC-0125 §3 M6, the third judgment's fifth slice — the DFA
+    // table used to be the first of those).
     ("strNew", &[ValType::I32, ValType::I32], &[ValType::I32]),
     ("strConcat", &[ValType::I32, ValType::I32], &[ValType::I32]),
     (
@@ -15728,7 +15756,8 @@ struct Rt {
     utf8valid: u32,
     /// `std/runtime`'s `strFromBytes`; its two failure messages, interned by
     /// `runtime` from `io_message`, go in as its last two arguments so the
-    /// wording stays `trap.rs`'s.
+    /// wording stays `trap.rs`'s. What DECIDES between them is `std/text`'s
+    /// `stringFault`, called at the site and passed in (RFC-0125 §3 M6).
     str_from_bytes: u32,
     bnul: u32,
     butf8: u32,
@@ -16316,6 +16345,10 @@ mod tests {
                     include_str!("../../../std/runtime.vyrn"),
                 ),
                 ("std/mem.vyrn", include_str!("../../../std/mem.vyrn")),
+                // RFC-0125 §3 M6 (the third judgment's fifth slice): the runtime's
+                // own `intStr` makes a `String` from bytes, and that check is
+                // `std/text`'s now, so every linked program needs the module.
+                ("std/text.vyrn", include_str!("../../../std/text.vyrn")),
             ]
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))

@@ -321,8 +321,13 @@ good:
 
 /// The strict UTF-8 validator: Björn Höhrmann's DFA over the `@__vyrn_utf8d`
 /// table, which is emitted separately in `emit` and shared with the direct wasm
-/// backend (RFC-0077 M2g). It matches Rust's `from_utf8` exactly, which is what
-/// makes `stringFromBytes` the single gate on what a `String` may hold.
+/// backend (RFC-0077 M2g). It matches Rust's `from_utf8` exactly.
+///
+/// **`stringFromBytes` no longer reaches it.** RFC-0125 §3 M6's fifth slice made
+/// that check one Vyrn function (`std/text`'s `stringFault`) every engine calls,
+/// so what is left here is the FILE side — `readFile` and `readLine` validate a
+/// buffer this backend slurped, which is never an `Array<UInt8>` — and
+/// `@tallyBytes`'s key rule (RFC-0116).
 ///
 /// An ASCII prefix is skipped eight bytes at a time first (RFC-0125 §1, the
 /// output-path trio): a word with no high bit set is eight bytes the DFA would
@@ -629,6 +634,13 @@ entry:
   %n = call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr %buf, i64 %bsz, ptr %fmt, ptr %to)
   %n64 = sext i32 %n to i64
   call void @__vyrn_str_setlen(ptr %buf, i64 %n64)
+  ret ptr %buf
+}
+
+define noalias ptr @__vyrn_bytes_copy(ptr %data, i64 %len) {
+entry:
+  %buf = call ptr @__vyrn_str_new(i64 %len, i64 %len)
+  call void @llvm.memcpy.p0.p0.i64(ptr %buf, ptr %data, i64 %len, i1 false)
   ret ptr %buf
 }
 
@@ -11480,10 +11492,22 @@ impl<'a> Gen<'a> {
             return Ok((r, Type::Result(Box::new(elem_ty), Box::new(Type::Str))));
         }
         if name == "stringFromBytes" {
-            // Copy the bytes into a fresh NUL-terminated buffer (null result =
-            // an embedded NUL byte), then UTF-8-validate with the shared DFA.
-            // The fixed error payloads are strcpy'd to the heap so an Err string
-            // is always owned storage, like every other I/O error payload.
+            // RFC-0125 §3 M6 (the third judgment's fifth slice): the CHECK is
+            // `std/text`'s `stringFault`, one Vyrn function all three engines
+            // call, and this arm keeps only the BUILD. It used to decide both
+            // halves here — `bytes_dup`'s null answer was the NUL rule and
+            // `@__vyrn_utf8valid` the encoding rule — which is what made this
+            // backend a carrier of the census's two `String` rows.
+            //
+            // The fixed error payloads are still strcpy'd to the heap so an Err
+            // string is always owned storage, like every other I/O error payload.
+            let f = vyrn_frontend::loader::STRING_FAULT;
+            if !self.funcs.contains_key(f) {
+                // The refusal a routed builtin makes when its module is absent.
+                return Err(format!(
+                    "`stringFromBytes` is checked in Vyrn (`{f}`) and its module is not in                      the link — a std root is needed to compile a call to it"
+                ));
+            }
             let (arr, _) = self.gen_expr(&args[0])?;
             let data = self.fresh_tmp();
             let len = self.fresh_tmp();
@@ -11491,29 +11515,27 @@ impl<'a> Gen<'a> {
                 "{data} = extractvalue {{ ptr, i64, i64 }} {arr}, 0"
             ));
             self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {arr}, 1"));
-            let buf = self.fresh_tmp();
+            let fault = self.fresh_tmp();
             self.emit(format!(
-                "{buf} = call ptr @__vyrn_bytes_dup(ptr {data}, i64 {len})"
+                "{fault} = call i64 @{}({{ ptr, i64, i64 }} {arr})",
+                fn_sym(f)
             ));
-            let isnull = self.fresh_tmp();
-            self.emit(format!("{isnull} = icmp eq ptr {buf}, null"));
+            let isnul = self.fresh_tmp();
+            self.emit(format!("{isnul} = icmp eq i64 {fault}, 1"));
             let nul_l = self.fresh_label("sfb.nul");
             let chk_l = self.fresh_label("sfb.chk");
             let badutf_l = self.fresh_label("sfb.badutf");
             let err_l = self.fresh_label("sfb.err");
             let ok_l = self.fresh_label("sfb.ok");
             let end_l = self.fresh_label("sfb.end");
-            self.emit_term(format!("br i1 {isnull}, label %{nul_l}, label %{chk_l}"));
+            self.emit_term(format!("br i1 {isnul}, label %{nul_l}, label %{chk_l}"));
             self.emit_label(&nul_l);
             self.emit_term(format!("br label %{err_l}"));
             self.emit_label(&chk_l);
-            let valid = self.fresh_tmp();
-            self.emit(format!(
-                "{valid} = call i1 @__vyrn_utf8valid(ptr {buf}, i64 {len})"
-            ));
-            self.emit_term(format!("br i1 {valid}, label %{ok_l}, label %{badutf_l}"));
+            let isutf = self.fresh_tmp();
+            self.emit(format!("{isutf} = icmp eq i64 {fault}, 2"));
+            self.emit_term(format!("br i1 {isutf}, label %{badutf_l}, label %{ok_l}"));
             self.emit_label(&badutf_l);
-            self.emit(format!("call void @__vyrn_str_free(ptr {buf})"));
             self.emit_term(format!("br label %{err_l}"));
             self.emit_label(&err_l);
             let src = self.fresh_tmp();
@@ -11545,6 +11567,14 @@ impl<'a> Gen<'a> {
             ));
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&ok_l);
+            // The BUILD, and nothing else: `stringFault` has already answered, so
+            // the bytes copy into a fresh NUL-terminated String with no scan of
+            // their own. `__vyrn_bytes_dup` used to do this and to DECIDE the NUL
+            // rule by answering null; it keeps that job for `@tallyBytes` alone.
+            let buf = self.fresh_tmp();
+            self.emit(format!(
+                "{buf} = call ptr @__vyrn_bytes_copy(ptr {data}, i64 {len})"
+            ));
             let ow = self.fresh_tmp();
             let o0 = self.fresh_tmp();
             let o1 = self.fresh_tmp();
@@ -15591,6 +15621,34 @@ mod tests {
     use super::*;
     use vyrn_frontend::check;
 
+    /// A program linked against the std modules a lowering needs, for the tests
+    /// that reach a builtin whose implementation is Vyrn. `check` is the
+    /// single-source path and has no std root, so it cannot serve them.
+    ///
+    /// `std/text` is here because RFC-0125 §3 M6 (the third judgment's fifth
+    /// slice) made `stringFromBytes`'s check one of its exports.
+    fn linked(src: &str) -> Result<vyrn_frontend::ast::Program, String> {
+        let files = vyrn_frontend::loader::MapResolver(
+            [
+                ("main.vyrn", src),
+                ("std/text.vyrn", include_str!("../../../std/text.vyrn")),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        );
+        let opts = vyrn_frontend::loader::LoadOptions {
+            std_root: Some("std".into()),
+            ..Default::default()
+        };
+        vyrn_frontend::load(src, "main.vyrn", &opts, &files).map_err(|ds| {
+            ds.iter().map(|d| d.render()).collect::<Vec<_>>().join(
+                "
+",
+            )
+        })
+    }
+
     // ---- the layout engine's link to lowering (RFC-0077 M0) -------------
 
     /// [`layout::SHAPES`] is what the clang comparison is run against, so it is
@@ -16721,13 +16779,19 @@ mod tests {
         assert!(ir.contains("load i8, ptr"), "{ir}");
     }
 
+    /// RFC-0125 §3 M6 (the third judgment's fifth slice): the check is a CALL to
+    /// `std/text`'s `stringFault` and this backend decides neither half. The two
+    /// wordings stay `trap.rs`'s and are still interned here, because the `Err`
+    /// payload is built on this side.
     #[test]
-    fn string_from_bytes_validates_and_pins_error_strings() {
+    fn string_from_bytes_calls_the_one_check_and_pins_error_strings() {
         let src = "fn main() -> Int64 { \
                        let r = stringFromBytes(bytes(\"hi\")) \
                        return match r { Ok(s) => s.byteLength, Err(e) => e.byteLength } }";
-        let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call ptr @__vyrn_bytes_dup(ptr"), "{ir}");
+        let ir = emit(&linked(src).unwrap()).unwrap();
+        let f = fn_sym(vyrn_frontend::loader::STRING_FAULT);
+        assert!(ir.contains(&format!("call i64 @{f}(")), "{ir}");
+        assert!(ir.contains("call ptr @__vyrn_bytes_copy(ptr"), "{ir}");
         assert!(ir.contains("c\"bytes contain a NUL byte\\00\""), "{ir}");
         assert!(ir.contains("c\"bytes are not valid UTF-8\\00\""), "{ir}");
     }

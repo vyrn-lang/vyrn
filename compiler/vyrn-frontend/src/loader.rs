@@ -710,10 +710,13 @@ pub struct RtModule {
     /// expression takes. `every_route_is_spelled_with_its_modules_prefix` is what
     /// keeps the redundancy honest.
     pub routes: &'static [(&'static str, &'static str)],
-    /// Linked into every program, mentioned or not. Only [`RUNTIME_SPEC`] is:
-    /// the wasm emitter calls its functions from lowerings no builtin name
-    /// announces (a `String` comparison is a call to `strCmp`), so no mention
-    /// scan could gate it (PLAN-0125-runtime §3.2 step 4).
+    /// Linked into every program, mentioned or not. Two modules are:
+    /// [`RUNTIME_SPEC`], because the wasm emitter calls its functions from
+    /// lowerings no builtin name announces (a `String` comparison is a call to
+    /// `strCmp`), so no mention scan could gate it (PLAN-0125-runtime §3.2
+    /// step 4); and `std/text`, because the runtime's own `intStr` mentions
+    /// `stringFromBytes` and enters the load inside this loop, after the scan
+    /// (RFC-0125 §3 M6, the third judgment's fifth slice).
     pub always: bool,
 }
 
@@ -779,12 +782,26 @@ pub const RT_MODULES: &[RtModule] = &[
     // alone — see the M4c note in RFC-0078 and the doc on `lineAtV`: the
     // interpreter memoizes a line-start table that a Vyrn library cannot, worth
     // 122 ms of a 291 ms `std/vyx` page compile.
+    //
+    // RFC-0125 §3 M6 (the third judgment's fifth slice) added `stringFromBytes`
+    // as a DESUGAR rather than a route: only the CHECK half moved here
+    // ([`STRING_FAULT`]), and each engine still builds the `String` itself,
+    // which needs the primitives `std/mem` fences.
+    //
+    // `always`, and the reason is [`RUNTIME_SPEC`]'s own `intStr`: it makes its
+    // digits into a `String` with `stringFromBytes`, because that builtin is the
+    // ONLY route from bytes to a `String` a Vyrn body has. So the check is in
+    // every program's closure whatever the mention scan says, and the scan could
+    // not see it anyway — it reads the modules loaded before this loop, and the
+    // runtime enters inside it. The price is the direct backend's to sweep: a
+    // program that formats no integer and makes no `String` from bytes reaches
+    // neither function and carries neither.
     RtModule {
         spec: "std/text",
         prefix: "text$",
-        desugared: &[],
+        desugared: &["stringFromBytes"],
         routes: &[("@charCount", "text$charCountV")],
-        always: false,
+        always: true,
     },
     // RFC-0081 M2: the six decimal places. Listed as DESUGARED rather than routed
     // for the same reason `toJson` is — `@str` is type-directed and only its float
@@ -839,6 +856,19 @@ pub const RT_MODULES: &[RtModule] = &[
 /// `select`, and only a float becomes a call. That is the same reason `toJson` is
 /// a desugar (see [`RtModule::desugared`]).
 pub const F64_STR: &str = "num$f64Str";
+
+/// The reserved spelling of `std/text`'s byte check — the ONE statement of what a
+/// `String` may hold (RFC-0125 §3 M6, the third judgment's fifth slice), reached
+/// from `stringFromBytes` in all three engines. It answers 0 for bytes that can be
+/// a `String`, 1 for an embedded NUL and 2 for bytes that are not UTF-8; the
+/// wording for 1 and 2 is [`crate::trap::io`]'s `bnul` and `butf8`, as it always
+/// was.
+///
+/// Not a `routes` row, for the reason [`F64_STR`] is not one: a route is a
+/// whole-builtin rename and this is one HALF of one. The BUILD stays per engine
+/// because it allocates, and allocation is what `std/mem`'s fence is around.
+/// `the_string_check_is_std_texts` is what keeps the prefix and the name honest.
+pub const STRING_FAULT: &str = "text$stringFault";
 
 /// The reserved spelling a routed builtin's call becomes, or `None` for a name no
 /// runtime module implements.
@@ -5209,6 +5239,27 @@ mod tests {
         // one case of a type-directed builtin.
         assert!(num.desugared.contains(&"@str") && num.desugared.contains(&"print"));
         assert!(routed_builtin(F64_STR).is_none());
+    }
+
+    /// RFC-0125 §3 M6 (the third judgment's fifth slice): [`STRING_FAULT`] is the
+    /// same shape and needs the same guard — three engines emit a call to it, and
+    /// a mismatch between the name and the module's prefix is a link error in
+    /// every program that makes a `String` from bytes.
+    #[test]
+    fn the_string_check_is_std_texts() {
+        let text = RT_MODULES
+            .iter()
+            .find(|rt| rt.spec == "std/text")
+            .expect("std/text is linked");
+        assert!(
+            STRING_FAULT.starts_with(text.prefix),
+            "`{STRING_FAULT}` vs `{}`",
+            text.prefix
+        );
+        // The mention that links the module, and it is a desugar rather than a
+        // route: only the check moved, the build stayed with each engine.
+        assert!(text.desugared.contains(&"stringFromBytes"));
+        assert!(routed_builtin("stringFromBytes").is_none());
     }
 
     pub(super) fn map(entries: &[(&str, &str)]) -> MapResolver {
