@@ -513,3 +513,573 @@ fn the_census_as_a_table() {
         println!("| {n} | {} | {} | {says} | {k} |", r.rule, r.rfc);
     }
 }
+
+// ---------------------------------------------------------------------------
+// The structural census of `movecheck.rs` (RFC-0125 §3 M3, the checker's
+// deletion path).
+//
+// The census above is rule by rule. This one is line by line: every section of
+// `compiler/vyrn-frontend/src/movecheck.rs`, what kind of code it is, and how
+// many lines it holds. The point is to say what the deletion is worth and what
+// stands in its way, in a number rather than in an impression.
+//
+// A section is one item — a `fn`, a `struct`, an `enum`, an `impl`, a `mod` —
+// together with every item after it up to the next section's anchor. The span
+// runs from the anchor's own doc comment to the line before the next anchor's,
+// so every line of the file belongs to exactly one section and the counts add
+// up to the file. The test computes the spans; the table below records only the
+// anchor and the kind, so an edit to the file moves the numbers and the
+// classification stays where a reader put it.
+// ---------------------------------------------------------------------------
+
+/// What a section of `movecheck.rs` is.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum Kind {
+    /// A refusal rule the kernel gives today, in the same sentence: the census
+    /// above says `Same` for it. The checker's copy is what the deletion takes.
+    Kernel,
+    /// A refusal rule only the checker gives. The census above says `nothing`
+    /// or `its own words`, so nothing may take this yet.
+    Checker,
+    /// Placement rows for the engines: what `own.rs` reads and the plan
+    /// carries. It is not a rule, and the kernel does not replace it — the
+    /// own-side deletion track does.
+    Rows,
+    /// A `fix:` menu. Surface knowledge the kernel has no source for.
+    Menu,
+    /// Shared machinery: the walk itself, the scope stacks, the path algebra,
+    /// the entry points, the recorded measurements.
+    Shared,
+    /// The file's own unit tests.
+    Tests,
+}
+
+impl Kind {
+    fn label(self) -> &'static str {
+        match self {
+            Kind::Kernel => "a rule the kernel now gives",
+            Kind::Checker => "a rule only the checker gives",
+            Kind::Rows => "placement rows for the engines",
+            Kind::Menu => "a fix menu",
+            Kind::Shared => "shared machinery",
+            Kind::Tests => "tests",
+        }
+    }
+}
+
+/// One section: the exact source line that starts it, its kind, and what it is.
+struct Section {
+    at: &'static str,
+    kind: Kind,
+    what: &'static str,
+}
+
+const fn sec(at: &'static str, kind: Kind, what: &'static str) -> Section {
+    Section { at, kind, what }
+}
+
+/// The sections, in file order. The first one starts at line 1.
+fn sections() -> Vec<Section> {
+    use Kind::*;
+    vec![
+        sec(
+            "pub struct OwningSite {",
+            Shared,
+            "the module's own statement of the rules, and the two recorded \
+             measurements (RFC-0089 rule 1's sites, RFC-0092's projections)",
+        ),
+        sec(
+            "pub enum Gone {",
+            Rows,
+            "why a binding does not hold its value at its block's end, and the \
+             row `own.rs` reads it from",
+        ),
+        sec(
+            "pub enum ArgVerdict {",
+            Rows,
+            "what a callee does with the temporary at a call-argument position",
+        ),
+        sec(
+            "pub struct ExitEv {",
+            Rows,
+            "the event records: exits, reads, consuming matches, arm payloads, \
+             stores, Rule N edges, place stores",
+        ),
+        sec(
+            "pub fn facts(program: &Program) -> Facts {",
+            Rows,
+            "the two facts out of one walk, and the lender and retention \
+             post-passes over them",
+        ),
+        sec(
+            "enum Want {",
+            Shared,
+            "what a run is for, and one run's outputs",
+        ),
+        sec(
+            "fn arg_verdict(",
+            Rows,
+            "the verdict for one argument temporary, read at a position instead \
+             of at a binding",
+        ),
+        sec(
+            "fn let_id(s: &Stmt) -> usize {",
+            Rows,
+            "the key of a `let`, the lending builtins, and the projection names",
+        ),
+        sec(
+            "pub fn check_accum(program: &Program) -> Vec<Diagnostic> {",
+            Shared,
+            "the entry points a caller uses",
+        ),
+        sec(
+            "fn run(program: &Program, want: Want) -> Run {",
+            Shared,
+            "the one walk: the capability tables, every body, the drains and the \
+             stamps",
+        ),
+        sec(
+            "pub fn check(program: &Program) -> Result<(), String> {",
+            Shared,
+            "the historical string shim",
+        ),
+        sec(
+            "struct MoveCheck<'a> {",
+            Shared,
+            "the pass's state: the scope stacks, the sinks, the recorded rows",
+        ),
+        sec(
+            "enum Borrow {",
+            Kernel,
+            "what a borrow is, in words — `core::BorrowKind::what` is this \
+             sentence",
+        ),
+        sec(
+            "    fn fixes(&self, root: &str, path: &str) -> Vec<String> {",
+            Menu,
+            "the named ways out of a borrow error",
+        ),
+        sec(
+            "enum TakeForm {",
+            Kernel,
+            "which form wrote the `consume`, and how a refusal names it",
+        ),
+        sec(
+            "    fn nothing_to_take(self) -> String {",
+            Checker,
+            "`consume` with nothing to take (row 09)",
+        ),
+        sec(
+            "    fn drop_it(self) -> String {",
+            Menu,
+            "the `drop` a take's menu offers",
+        ),
+        sec(
+            "fn root_of(path: &str) -> &str {",
+            Shared,
+            "the path algebra and the consumed table: overlap, reach, revival",
+        ),
+        sec(
+            "impl MoveCheck<'_> {",
+            Shared,
+            "one body, with its parameters and its return type",
+        ),
+        sec(
+            "    fn enter(&self) {",
+            Shared,
+            "the three scope stacks, read as one environment",
+        ),
+        sec(
+            "    fn wrote_place(&self, path: &str, line: usize, consumed: &mut Consumed) {",
+            Kernel,
+            "a write to a place ends every alias that reads out of it (row 05)",
+        ),
+        sec(
+            "    fn place_key(&self, e: &Expr) -> usize {",
+            Rows,
+            "the key a row is written under",
+        ),
+        sec(
+            "    fn note_temporary(&self, s: &Stmt, value: &Expr) -> usize {",
+            Rows,
+            "the recording: temporaries, store events, branches, reads, exits, \
+             takes, holes, place stores, hand-overs at a `return`",
+        ),
+        sec(
+            "    fn is_bound_name(&self, e: &Expr) -> bool {",
+            Rows,
+            "whether a `let` names storage somebody else owns, for reclamation",
+        ),
+        sec(
+            "    fn names_a_place(&self, value: &Expr) -> Option<&'static str> {",
+            Kernel,
+            "whether a value reads a place that owns it — the kernel's alias \
+             table",
+        ),
+        sec(
+            "    fn fixes_here(&self, b: &Borrow, root: &str, path: &str) -> Vec<String> {",
+            Menu,
+            "the ways out that exist in THIS function",
+        ),
+        sec(
+            "    fn is_module_state(&self, name: &str) -> bool {",
+            Shared,
+            "module state, the borrow table, and the type reading",
+        ),
+        sec(
+            "    fn sinks(&self, name: &str, i: usize) -> bool {",
+            Kernel,
+            "a rebuilding builtin takes its receiver, and the write-back \
+             statement excepted (row 26)",
+        ),
+        sec(
+            "    fn store(",
+            Kernel,
+            "rule 1's move and rule 2's refusal at a store (rows 01, 02, 03, 27, \
+             34)",
+        ),
+        sec(
+            "    fn borrow_from(&self, value: &Expr) -> Option<Borrow> {",
+            Kernel,
+            "the borrow status a `let` of a value gives its binding",
+        ),
+        sec(
+            "    fn payload_binding(",
+            Shared,
+            "what a pattern's binders name, and whether an iterable is a place",
+        ),
+        sec(
+            "    fn check_use(&self, path: &str, line: usize, consumed: &Consumed) \
+             -> Result<(), Diagnostic> {",
+            Kernel,
+            "rule 1 asked of a path: is the storage still all there (rows 04, 06, \
+             07)",
+        ),
+        sec(
+            "    fn check_take(",
+            Checker,
+            "a take's refusals: an element, and a place the frame does not own \
+             (row 08)",
+        ),
+        sec(
+            "    fn check_handover(&self, arg: &Expr, callee: &str, line: usize) \
+             -> Result<(), Diagnostic> {",
+            Kernel,
+            "rule 2 at the third exit: a borrow may not be consumed (rows 11, 12, \
+             13, 14)",
+        ),
+        sec(
+            "    fn refuse_projected_arg(",
+            Kernel,
+            "the refusal a projected argument to a `consume` parameter gets",
+        ),
+        sec(
+            "    fn arm_binder(&self, name: &str) -> bool {",
+            Shared,
+            "an arm's binders, and whether a callee keeps a `fn` value",
+        ),
+        sec(
+            "    fn check_return(&self, e: &Expr, line: usize) -> Result<(), Diagnostic> {",
+            Kernel,
+            "rule 3: a return is owned (rows 15, 16, 18, 19, 28)",
+        ),
+        sec(
+            "    fn refuse_return(&self, b: &Borrow, root: &str, path: &str, line: usize) \
+             -> Diagnostic {",
+            Checker,
+            "the one exit every returned borrow leaves by, the exported \
+             function's own sentence with it (row 17)",
+        ),
+        sec(
+            "    fn note_handover(&self, arg: &Expr, callee: &str, i: usize, line: usize) {",
+            Rows,
+            "the retention and hand-over records the call graph is closed over",
+        ),
+        sec(
+            "    fn note_arg_temp(&self, arg: &Expr, callee: &str, ix: usize, line: usize) {",
+            Rows,
+            "the argument-temporary row: its producer, its type and its release \
+             kind",
+        ),
+        sec(
+            "    fn ctor_valued(&self, e: &Expr) -> bool {",
+            Rows,
+            "what an expression builds: a variant, a String, a concatenation",
+        ),
+        sec(
+            "    fn note_arm_aliases(&self, e: &Expr, line: usize, binders: &[String]) {",
+            Rows,
+            "an arm that yields a place, and what naming one costs",
+        ),
+        sec(
+            "    fn value_cannot_alias(&self, e: &Expr, root: &str) -> bool {",
+            Rows,
+            "Rule N's edge guard, the mention guard, and what a call may forward",
+        ),
+        sec(
+            "    fn carries_param_storage(&self, e: &Expr) -> bool {",
+            Rows,
+            "the escape screen: storage flow rather than mention",
+        ),
+        sec(
+            "    fn lends(&self) {",
+            Rows,
+            "the lending record, and the lend a wrapper hides",
+        ),
+        sec(
+            "    fn returned_borrow(&self, e: &Expr) -> Option<(Borrow, String, String)> {",
+            Kernel,
+            "the first borrow a returned expression yields",
+        ),
+        sec(
+            "    fn note_returned_projection(&self, e: &Expr, line: usize) {",
+            Shared,
+            "RFC-0092's instrument",
+        ),
+        sec(
+            "    fn lends_through_a_wrapper(&self, e: &Expr) -> Option<(Borrow, String, String)> {",
+            Rows,
+            "the same question through a constructor, to record a lend and never \
+             to refuse one",
+        ),
+        sec(
+            "    fn site(&self, kind: &'static str, line: usize, e: &Expr, declared: Option<&Type>) {",
+            Shared,
+            "RFC-0089 rule 1's instrument",
+        ),
+        sec(
+            "    fn block(&self, b: &Block, consumed: &mut Consumed, scope: &mut Vec<HashSet<String>>) -> bool {",
+            Shared,
+            "a block, and whether it diverges",
+        ),
+        sec(
+            "    fn stmt(",
+            Shared,
+            "the walk over statements: it calls the refusal helpers and writes \
+             the plan's rows in the same arm",
+        ),
+        sec(
+            "    fn capture_site(&self, name: &str, line: usize) {",
+            Rows,
+            "a lambda's captures, recorded for the enclosing block",
+        ),
+        sec(
+            "    fn check_exclusive(&self, callee: &str, args: &[Expr], line: usize) \
+             -> Result<(), Diagnostic> {",
+            Checker,
+            "a `modify` borrow is exclusive (row 23)",
+        ),
+        sec(
+            "    fn check_capture(&self, name: &str, line: usize) -> Result<(), Diagnostic> {",
+            Checker,
+            "a closure that outlives the call may not capture a borrow (row 24)",
+        ),
+        sec(
+            "    fn check_loop_reuse(",
+            Kernel,
+            "rule 1 across a back edge (row 25)",
+        ),
+        sec(
+            "    fn expr(",
+            Shared,
+            "the walk over expressions: the same traversal does both jobs",
+        ),
+        sec(
+            "    fn reject_consume_global(",
+            Kernel,
+            "module state may not be taken (rows 10, 12, 15, 29)",
+        ),
+        sec(
+            "pub fn mentions_place(e: &Expr, base: &str) -> bool {",
+            Shared,
+            "whether a stored value mentions the place it is stored into",
+        ),
+        sec(
+            "mod linear {",
+            Checker,
+            "the must-use obligation: acquired once, disposed exactly once (rows \
+             30, 31)",
+        ),
+        sec(
+            "fn store_path(e: &Expr) -> Option<String> {",
+            Shared,
+            "the place an expression names, as the store arms spell it",
+        ),
+        sec(
+            "fn sinks(decl: &Declared, name: &str, i: usize) -> bool {",
+            Kernel,
+            "whether a builtin's parameter takes its argument for good",
+        ),
+        sec(
+            "fn reads(e: &Expr) -> Vec<String> {",
+            Shared,
+            "the names an expression reads, and the calls in it",
+        ),
+        sec(
+            "pub fn element_path(e: &Expr) -> Option<(String, String)> {",
+            Shared,
+            "the place spellings every rule above compares",
+        ),
+        sec(
+            "fn menu(line: usize, message: String, fixes: Vec<String>) -> Diagnostic {",
+            Menu,
+            "one diagnostic with its menu of fixes",
+        ),
+        sec(
+            "fn declared_in(block: &crate::ast::Block, out: &mut std::collections::HashSet<String>) {",
+            Shared,
+            "the names a block declares, and a pattern's binders",
+        ),
+        sec("mod tests {", Tests, "the pass's own unit tests"),
+    ]
+}
+
+/// `movecheck.rs`, as lines.
+fn movecheck() -> Vec<String> {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../vyrn-frontend/src/movecheck.rs");
+    std::fs::read_to_string(&p)
+        .expect("read movecheck.rs")
+        .replace("\r\n", "\n")
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Where a section's doc comment starts: the run of comment and attribute lines
+/// straight above the anchor.
+fn doc_start(lines: &[String], anchor: usize) -> usize {
+    let mut i = anchor;
+    while i > 0 {
+        let t = lines[i - 1].trim_start();
+        if t.starts_with("//") || t.starts_with("#[") {
+            i -= 1;
+        } else {
+            break;
+        }
+    }
+    i
+}
+
+/// The sections, with the span each holds: `(index, first line, last line)`,
+/// one-based and inclusive. Every line of the file is in exactly one span.
+fn spans(lines: &[String]) -> Vec<(usize, usize, usize)> {
+    let secs = sections();
+    let mut anchors = Vec::new();
+    for s in &secs {
+        let want: String = s.at.split_whitespace().collect::<Vec<_>>().join(" ");
+        let hits: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.split_whitespace().collect::<Vec<_>>().join(" ") == want)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "the anchor `{}` names {} lines of movecheck.rs; a section's anchor must name one",
+            s.at,
+            hits.len()
+        );
+        anchors.push(doc_start(lines, hits[0]));
+    }
+    let mut out = Vec::new();
+    for i in 0..secs.len() {
+        let first = if i == 0 { 0 } else { anchors[i] };
+        let last = if i + 1 == secs.len() {
+            lines.len()
+        } else {
+            anchors[i + 1]
+        };
+        assert!(
+            first < last,
+            "section `{}` of movecheck.rs is empty or out of order",
+            secs[i].at
+        );
+        out.push((i, first + 1, last));
+    }
+    out
+}
+
+/// The sections tile `movecheck.rs`: every line is in one, in file order.
+#[test]
+fn the_structural_census_covers_the_file() {
+    let lines = movecheck();
+    let spans = spans(&lines);
+    let mut next = 1;
+    for (_, a, b) in &spans {
+        assert_eq!(*a, next, "a gap or an overlap at line {a} of movecheck.rs");
+        next = b + 1;
+    }
+    assert_eq!(
+        next - 1,
+        lines.len(),
+        "the last section does not reach the end of movecheck.rs"
+    );
+}
+
+/// The line count per kind, as RFC-0125 §3 M3 records it. The prose quotes
+/// these numbers, so they are asserted rather than described: a change to
+/// `movecheck.rs` moves one, and the RFC's table moves with it.
+#[test]
+fn the_structural_census_is_what_the_rfc_records() {
+    let lines = movecheck();
+    let secs = sections();
+    let mut by_kind = std::collections::BTreeMap::new();
+    for (i, a, b) in spans(&lines) {
+        *by_kind.entry(secs[i].kind as usize).or_insert(0usize) += b - a + 1;
+    }
+    let got: Vec<(&'static str, usize)> = [
+        Kind::Kernel,
+        Kind::Checker,
+        Kind::Rows,
+        Kind::Menu,
+        Kind::Shared,
+        Kind::Tests,
+    ]
+    .iter()
+    .map(|k| (k.label(), by_kind.get(&(*k as usize)).copied().unwrap_or(0)))
+    .collect();
+    let want = vec![
+        ("a rule the kernel now gives", 930),
+        ("a rule only the checker gives", 840),
+        ("placement rows for the engines", 2335),
+        ("a fix menu", 81),
+        ("shared machinery", 3656),
+        ("tests", 2169),
+    ];
+    assert_eq!(got, want, "the structural census has moved");
+    assert_eq!(
+        got.iter().map(|(_, n)| n).sum::<usize>(),
+        lines.len(),
+        "the kinds do not add up to the file"
+    );
+}
+
+/// The table for RFC-0125 §3 M3, printed from the sections above:
+/// `cargo test -p vyrn-cli --test refusals -- --ignored --nocapture
+/// the_structural_census_as_a_table`.
+#[test]
+#[ignore]
+fn the_structural_census_as_a_table() {
+    let lines = movecheck();
+    let secs = sections();
+    println!("| section | lines | kind | what it is |");
+    println!("|---|---|---|---|");
+    for (i, a, b) in spans(&lines) {
+        let name = secs[i]
+            .at
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim_end_matches(" {")
+            .trim_end_matches('(')
+            .to_string();
+        println!(
+            "| `{}` | {} | {} | {} |",
+            name,
+            b - a + 1,
+            secs[i].kind.label(),
+            secs[i].what
+        );
+    }
+}
