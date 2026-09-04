@@ -302,6 +302,199 @@ fn open(bytes: &[u8], meter: bool, run: &Run) -> Result<(Store<Host>, wasmtime::
     Ok((store, inst))
 }
 
+/// One instance that outlives `_start` — what `vyrn serve --engine wasm` answers
+/// requests on (RFC-0125 §3 M6).
+///
+/// `proc_exit` unwinds the call and not the store, so `main` runs to its exit
+/// and the module's state keeps what it wrote. Every door below is an RFC-0012
+/// `export extern fn` the CLI appended to the served program, and the String ABI
+/// is that RFC's: an argument is one pointer to NUL-terminated UTF-8 the CALLER
+/// allocates with `__vyrn_malloc`, in front of the `{ len, cap }` header
+/// (RFC-0089 M1a), and a returned String is the caller's to `__vyrn_free`.
+/// `web/wasi-min.js` is the same marshalling in the other language.
+pub struct Resident {
+    store: Store<Host>,
+    inst: wasmtime::Instance,
+}
+
+/// The eight-byte `{ len, cap }` header in front of every Vyrn String.
+const STR_HDR: i32 = 8;
+
+/// Compile `bytes`, instantiate, and run `_start` — leaving the store open.
+///
+/// The exit code comes back with it: a served program whose `main` returns
+/// non-zero aborts the serve, exactly as it does under the interpreter.
+pub fn start(bytes: &[u8], run: &Run) -> Result<(Resident, i32), String> {
+    let (mut store, inst) = open(bytes, false, run)?;
+    let entry = inst
+        .get_typed_func::<(), ()>(&mut store, "_start")
+        .map_err(|e| format!("_start: {e}"))?;
+    let code = match entry.call(&mut store, ()) {
+        Ok(()) => 0,
+        Err(e) => match e.downcast_ref::<Exit>() {
+            Some(Exit(code)) => *code,
+            None => return Err(first_line(&format!("{e:?}")).to_string()),
+        },
+    };
+    Ok((Resident { store, inst }, code))
+}
+
+impl Resident {
+    /// Whatever the guest wrote to standard error since the last drain, taken.
+    /// A trap inside a door writes its `error: ..` line there before it exits,
+    /// and that line is the message the serving loop logs.
+    pub fn drain_err(&mut self) -> String {
+        match &mut self.store.data_mut().stderr {
+            Some(buf) => String::from_utf8_lossy(&std::mem::take(buf)).into_owned(),
+            None => String::new(),
+        }
+    }
+
+    /// A String argument, in the guest's memory: header, bytes, NUL. The address
+    /// answered is the STRING's, and the block's is eight less.
+    fn alloc(&mut self, s: &str) -> Result<i32, String> {
+        let malloc = self
+            .inst
+            .get_typed_func::<i64, i32>(&mut self.store, "__vyrn_malloc")
+            .map_err(|e| format!("__vyrn_malloc: {e}"))?;
+        let n = s.len() as i32;
+        let base = malloc
+            .call(&mut self.store, (STR_HDR + n + 1) as i64)
+            .map_err(|e| format!("__vyrn_malloc: {e}"))?;
+        let mem = self.store.data().mem.expect("memory is set before _start");
+        let data = mem.data_mut(&mut self.store);
+        let mut write = || -> Option<()> {
+            wr32(data, base, n as u32)?;
+            wr32(data, base + 4, n as u32)?;
+            let at = (base + STR_HDR) as usize;
+            data.get_mut(at..at + s.len())?
+                .copy_from_slice(s.as_bytes());
+            *data.get_mut(at + s.len())? = 0;
+            Some(())
+        };
+        write().ok_or_else(|| "the guest's memory is too small for the argument".to_string())?;
+        Ok(base + STR_HDR)
+    }
+
+    /// Give one back. The block starts at the String's header.
+    fn release(&mut self, ptr: i32) -> Result<(), String> {
+        let free = self
+            .inst
+            .get_typed_func::<i32, ()>(&mut self.store, "__vyrn_free")
+            .map_err(|e| format!("__vyrn_free: {e}"))?;
+        free.call(&mut self.store, ptr - STR_HDR)
+            .map_err(|e| format!("__vyrn_free: {e}"))
+    }
+
+    /// A returned String, by the NUL scan `wasi-min.js` does — then released,
+    /// because RFC-0089 rule 3 makes the result the caller's.
+    fn text(&mut self, ptr: i32) -> Result<String, String> {
+        let mem = self.store.data().mem.expect("memory is set before _start");
+        let data = mem.data(&self.store);
+        let at = ptr as usize;
+        let end = data
+            .get(at..)
+            .and_then(|rest| rest.iter().position(|b| *b == 0))
+            .ok_or_else(|| "a returned String has no terminator".to_string())?;
+        let out = String::from_utf8_lossy(&data[at..at + end]).into_owned();
+        self.release(ptr)?;
+        Ok(out)
+    }
+
+    /// A trap out of a door. `proc_exit` is the program's own refusal — it wrote
+    /// its wording to standard error first — and anything else is this host's.
+    fn trapped(&mut self, door: &str, e: wasmtime::Error) -> String {
+        let said = self.drain_err();
+        let line = said
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim_start_matches("error: ")
+            .to_string();
+        if line.is_empty() {
+            format!("{door}: {}", first_line(&format!("{e:?}")))
+        } else {
+            line
+        }
+    }
+
+    /// Hand the guest a door's String arguments and call it for its effect.
+    pub fn tell(&mut self, door: &str, args: &[&str]) -> Result<(), String> {
+        let mut ptrs = Vec::with_capacity(args.len());
+        for a in args {
+            ptrs.push(self.alloc(a)?);
+        }
+        let out = match ptrs.len() {
+            0 => self
+                .inst
+                .get_typed_func::<(), ()>(&mut self.store, door)
+                .map_err(|e| format!("{door}: {e}"))?
+                .call(&mut self.store, ()),
+            1 => self
+                .inst
+                .get_typed_func::<i32, ()>(&mut self.store, door)
+                .map_err(|e| format!("{door}: {e}"))?
+                .call(&mut self.store, ptrs[0]),
+            2 => self
+                .inst
+                .get_typed_func::<(i32, i32), ()>(&mut self.store, door)
+                .map_err(|e| format!("{door}: {e}"))?
+                .call(&mut self.store, (ptrs[0], ptrs[1])),
+            n => return Err(format!("{door}: {n} arguments is not a door shape")),
+        };
+        // The caller owns a String argument (RFC-0012), so it goes back whatever
+        // the call did — a trap the serving loop answers 500 for included.
+        for p in ptrs {
+            let _ = self.release(p);
+        }
+        out.map_err(|e| self.trapped(door, e))
+    }
+
+    /// A door that answers a `Bool`.
+    pub fn ask_bool(&mut self, door: &str) -> Result<bool, String> {
+        let f = self
+            .inst
+            .get_typed_func::<(), i32>(&mut self.store, door)
+            .map_err(|e| format!("{door}: {e}"))?;
+        match f.call(&mut self.store, ()) {
+            Ok(v) => Ok(v != 0),
+            Err(e) => Err(self.trapped(door, e)),
+        }
+    }
+
+    /// A door that answers an `Int64`.
+    pub fn ask_int(&mut self, door: &str) -> Result<i64, String> {
+        let f = self
+            .inst
+            .get_typed_func::<(), i64>(&mut self.store, door)
+            .map_err(|e| format!("{door}: {e}"))?;
+        match f.call(&mut self.store, ()) {
+            Ok(v) => Ok(v),
+            Err(e) => Err(self.trapped(door, e)),
+        }
+    }
+
+    /// A door that answers a `String`, at an index or at nothing.
+    pub fn ask_text(&mut self, door: &str, at: Option<i64>) -> Result<String, String> {
+        let got = match at {
+            None => self
+                .inst
+                .get_typed_func::<(), i32>(&mut self.store, door)
+                .map_err(|e| format!("{door}: {e}"))?
+                .call(&mut self.store, ()),
+            Some(i) => self
+                .inst
+                .get_typed_func::<i64, i32>(&mut self.store, door)
+                .map_err(|e| format!("{door}: {e}"))?
+                .call(&mut self.store, i),
+        };
+        match got {
+            Ok(p) => self.text(p),
+            Err(e) => Err(self.trapped(door, e)),
+        }
+    }
+}
+
 fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or(s)
 }

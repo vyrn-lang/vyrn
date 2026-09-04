@@ -104,10 +104,21 @@ fn wait_for_port(acc: &Arc<Mutex<String>>, timeout: Duration) -> u16 {
 
 /// Spawn `vyrn serve examples/fullstack/server.vyrn` and wait for the startup
 /// line — which names the port the OS gave it — before returning.
+/// `--engine wasm` when the environment asks for it (RFC-0125 §3 M6). The whole
+/// suite then runs against the compiled route — one set of assertions rather
+/// than two, because a served program must answer the same on both engines.
+fn engine_args() -> Vec<String> {
+    match std::env::var("VYRN_SERVE_ENGINE").as_deref() {
+        Ok("wasm") => vec!["--engine".to_string(), "wasm".to_string()],
+        _ => Vec::new(),
+    }
+}
+
 fn start_server() -> Serve {
     let server = repo_file("examples/fullstack/server.vyrn");
     let mut child = vyrn()
         .arg("serve")
+        .args(engine_args())
         .arg(&server)
         .arg("--port")
         .arg("0")
