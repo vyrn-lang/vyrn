@@ -21,6 +21,12 @@
 //!   - `receiver_frees` and `receiver_holes`, from a `St::Drop` of a name
 //!     whose `NameInfo::receiver` names the `Expr::Field` node.
 //!
+//! `receiver_malloc` (row 11b) is pinned one way and counted the other: the
+//! core states it from the producer it records beside that name, and a plan
+//! row the core loses would stop a free inside a `region`, while the core
+//! answering yes where the plan's spelling of the producer says no is
+//! counted, at one site.
+//!
 //! A third is pinned since M6's third judgment took its third slice: every
 //! `Rhs` in the core names the type its node produces, and none is an
 //! exception. That is what lets the typed judgment ask what produced a value
@@ -329,6 +335,24 @@ fn run() {
                      plan free {plan_free} holes {plan_holes:?}"
                 ));
             }
+            // Row 11b, the region stand-down: whether a CALLEE allocated the
+            // block. The emitter asks its own region depth beside it. The
+            // plan losing a row here would stop a free inside a `region`,
+            // so that direction is pinned; the core saying yes where the
+            // plan's SPELLING of the producer says no is counted, and the
+            // count is one — `gqlParseQuery(query).sels`, whose producer the
+            // analysis spells `@fieldof:gqlParseQuery` and screens out with
+            // the arena's own `@` names, though a callee allocated it.
+            let core_malloc = facts.receiver_malloc.contains(node);
+            let plan_malloc = own.plan.receiver_malloc_at(*node);
+            if plan_malloc && !core_malloc {
+                diffs.push(format!(
+                    "{file}: site {node} in {}: receiver_malloc: plan yes, core no",
+                    owner(node)
+                ));
+            }
+            *counted.entry("receiver_malloc: core only").or_default() +=
+                usize::from(core_malloc && !plan_malloc);
         }
 
         // `St::Switch`'s `consuming` is a WIDER rule than the plan's
@@ -395,6 +419,14 @@ fn run() {
         diffs.is_empty(),
         "{} sites where the core and the plan disagree",
         diffs.len()
+    );
+    assert_eq!(
+        counted
+            .get("receiver_malloc: core only")
+            .copied()
+            .unwrap_or(0),
+        1,
+        "`gqlParseQuery(query).sels`, and nothing else"
     );
     assert_eq!(
         counted

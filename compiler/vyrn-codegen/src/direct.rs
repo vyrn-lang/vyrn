@@ -1251,6 +1251,27 @@ impl<'a> Cx<'a> {
         f.receivers.get(&self.plan.key_of(node)).cloned()
     }
 
+    /// Round fifty-seven read off the core (RFC-0125 §3 M3, the deletion
+    /// slice): did a CALLEE allocate the receiver freed at `node`? A
+    /// callee's block is malloc-side whatever `region` is open here, so the
+    /// free stands inside one; the `@`-spelled producers route through the
+    /// arena lexically and stay region-gated. The region depth itself stays
+    /// this emitter's question, as it does at a store: the core lowers a
+    /// `region` as an ordinary block.
+    fn receiver_malloc(&self, node: usize) -> bool {
+        let Some(f) = &self.facts else {
+            return self.plan.receiver_malloc_at(node);
+        };
+        let key = self.plan.key_of(node);
+        // A receiver the core states no free for states no producer either,
+        // and the site keeps the plan's answer.
+        if f.receivers.contains_key(&key) {
+            f.receiver_malloc.contains(&key)
+        } else {
+            self.plan.receiver_malloc_at(node)
+        }
+    }
+
     /// RFC-0114 M2 and exit-residue round eighteen read off the core
     /// (RFC-0125 §3 M3, the emitter-reads-the-core slice): does the store at
     /// `node` release the value it displaces?
@@ -5565,7 +5586,7 @@ impl<'p> Fn_<'_, 'p> {
                 let row = self.cx.receiver_row(e as *const Expr as usize);
                 let rfree = row.is_some()
                     && (self.region_depth == 0
-                        || self.cx.plan.receiver_malloc_at(e as *const Expr as usize));
+                        || self.cx.receiver_malloc(e as *const Expr as usize));
                 let tee = if rfree {
                     let l = b.local(ValType::I32);
                     b.ins(&Instruction::LocalTee(l));

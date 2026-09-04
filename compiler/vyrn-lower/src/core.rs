@@ -91,6 +91,14 @@ pub struct NameInfo {
     /// M2's table), spelled as the kernel spells them (`.f.g`). A `Drop` of
     /// the name walks around exactly these; a placed row may carry its own.
     pub holes: Vec<String>,
+    /// RFC-0125 §3 M3, row 11b: for a receiver ([`NameInfo::receiver`]), was
+    /// the block a CALLEE allocated? A callee's block is malloc-side
+    /// whatever `region` is open at the call site, so the free stands there
+    /// too; the `@`-spelled producers (`@concat`, `@str`, `@copy`) route
+    /// through the arena lexically and stay region-gated. The region itself
+    /// is the emitter's, because this pass lowers a `region` as an ordinary
+    /// block.
+    pub receiver_malloc: bool,
 }
 
 /// The borrow a parameter's capability makes, or `None` for one that owns
@@ -858,7 +866,7 @@ struct Builder<'a> {
     /// An unnamed receiver `place` minted for a field or element read, with
     /// the node that produced it, so the read can release it afterwards when
     /// the plan says the frame owns it (R1').
-    pending_receiver: Option<(Name, usize)>,
+    pending_receiver: Option<(Name, usize, bool)>,
     /// How many calls that do not lend, and operators, enclose the expression
     /// being built. Each is a site the compiled backends drain argument
     /// temporaries at, so a receiver borrowed under one can be freed there.
@@ -894,6 +902,7 @@ impl<'a> Builder<'a> {
             producer: None,
             arg_drop: None,
             holes: Vec::new(),
+            receiver_malloc: false,
         });
         (self.body.names.len() - 1) as Name
     }
@@ -1987,7 +1996,7 @@ impl<'a> Builder<'a> {
     /// where such a drain encloses the read; elsewhere the receiver stays
     /// held and the judgment refuses it.
     fn release_receiver(&mut self, e: &Expr, out: &mut Vec<St>, borrowed: bool) {
-        let Some((r, producer)) = self.pending_receiver.take() else {
+        let Some((r, producer, malloc)) = self.pending_receiver.take() else {
             return;
         };
         let node = e as *const Expr as usize;
@@ -2015,6 +2024,7 @@ impl<'a> Builder<'a> {
             return;
         }
         self.body.names[r as usize].holes = holes.iter().map(|h| format!(".{h}")).collect();
+        self.body.names[r as usize].receiver_malloc = malloc;
         out.push(St::Drop(r, Site::None));
     }
 
@@ -2310,7 +2320,7 @@ impl<'a> Builder<'a> {
             Expr::Field { expr, field, .. } => {
                 let fty = self.ty_of(e)?;
                 let place = self.place(expr, out)?;
-                if let Some((r, _)) = self.pending_receiver {
+                if let Some((r, _, _)) = self.pending_receiver {
                     self.body.names[r as usize].receiver = Some(e as *const Expr as usize);
                 }
                 if self.owns(&fty) {
@@ -2673,7 +2683,13 @@ impl<'a> Builder<'a> {
                 match v {
                     Val::Name(t) => {
                         if self.body.names[t as usize].owned {
-                            self.pending_receiver = Some((t, e as *const Expr as usize));
+                            // Row 11b's rule, stated where the producer is
+                            // known: a callee's own allocation.
+                            let malloc = matches!(
+                                e,
+                                Expr::Call { name, .. } if !name.starts_with('@')
+                            );
+                            self.pending_receiver = Some((t, e as *const Expr as usize, malloc));
                         }
                         Ok(Place::Name(t))
                     }
@@ -3042,6 +3058,12 @@ pub struct Facts {
     /// owes because another edge took the name — a `St::Drop` at a
     /// [`Site::Edge`].
     pub edges: std::collections::HashMap<usize, Vec<(String, u32)>>,
+    /// RFC-0125 §3 M3, row 11b: of those receivers, the ones a CALLEE
+    /// allocated. Such a block is malloc-side whatever `region` is open at
+    /// the call site, so the free stands inside one; an emitter still asks
+    /// its own region depth, because this pass lowers a `region` as an
+    /// ordinary block.
+    pub receiver_malloc: std::collections::HashSet<usize>,
     /// Round twenty-seven's question, answered by the rule rather than by
     /// the plan's table: per `match`, `if let` or `?` node, whether the
     /// construct TOOK its scrutinee, so the boxes its binders came out of
@@ -3139,6 +3161,9 @@ fn fold_frame(body: &Body, out: &mut Facts) {
         }
         if let Some(node) = info.receiver {
             out.receivers.insert(node, plan_holes(&info.holes));
+            if info.receiver_malloc {
+                out.receiver_malloc.insert(node);
+            }
         }
     }
     for info in body.names.iter() {
