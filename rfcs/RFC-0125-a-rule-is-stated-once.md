@@ -1959,18 +1959,18 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 |---|---|---|
 | a rule the kernel now gives | 1,045 | 10 per cent |
 | a rule only the checker gives | 723 | 7 per cent |
-| placement rows for the engines | 2,335 | 23 per cent |
+| placement rows for the engines | 2,349 | 23 per cent |
 | a fix menu | 81 | 1 per cent |
 | shared machinery | 3,656 | 37 per cent |
 | tests | 2,169 | 22 per cent |
-| **the file** | **10,009** | |
+| **the file** | **10,023** | |
 
 | section | lines | kind | what it is |
 |---|---|---|---|
 | `pub struct OwningSite` | 129 | shared machinery | the module's own statement of the rules, and the two recorded measurements (RFC-0089 rule 1's sites, RFC-0092's projections) |
 | `pub enum Gone` | 134 | placement rows for the engines | why a binding does not hold its value at its block's end, and the row `own.rs` reads it from |
 | `pub enum ArgVerdict` | 24 | placement rows for the engines | what a callee does with the temporary at a call-argument position |
-| `pub struct ExitEv` | 204 | placement rows for the engines | the event records: exits, reads, consuming matches, arm payloads, stores, Rule N edges, place stores |
+| `pub struct ExitEv` | 218 | placement rows for the engines | the event records: exits, reads, consuming matches, arm payloads, stores, Rule N edges, place stores |
 | `pub fn facts(program: &Program) -> Facts` | 139 | placement rows for the engines | the two facts out of one walk, and the lender and retention post-passes over them |
 | `enum Want` | 35 | shared machinery | what a run is for, and one run's outputs |
 | `fn arg_verdict` | 94 | placement rows for the engines | the verdict for one argument temporary, read at a position instead of at a binding |
@@ -2038,10 +2038,10 @@ Four things the structural census says, and the third is the finding.
 
 - **The rules are a sixth of the file.** After this slice's three rule
   commits, 1,045 lines state a rule the kernel gives and 723 state one only
-  the checker gives. Together they are 1,768 lines out of 10,009. Every
+  the checker gives. Together they are 1,768 lines out of 10,023. Every
   argument about which rule closes next is an argument about a sixth of
   `movecheck.rs`, and about two lines in five of that sixth.
-- **The placement rows are more than twice the rules.** 2,335 lines write
+- **The placement rows are more than twice the rules.** 2,349 lines write
   what `own.rs` reads. They are not a second opinion about a rule, so no
   kernel refusal takes them; the own-side track above does, table by table.
   `note_arg_temp` alone is 527 lines and `note_temporary` and the recorders

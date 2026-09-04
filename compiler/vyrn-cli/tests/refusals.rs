@@ -1040,7 +1040,7 @@ fn the_structural_census_is_what_the_rfc_records() {
     let want = vec![
         ("a rule the kernel now gives", 1045),
         ("a rule only the checker gives", 723),
-        ("placement rows for the engines", 2335),
+        ("placement rows for the engines", 2349),
         ("a fix menu", 81),
         ("shared machinery", 3656),
         ("tests", 2169),
