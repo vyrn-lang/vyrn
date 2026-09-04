@@ -3216,6 +3216,83 @@ Wall clock at this baseline, best of three: `vyrn check three.vyrn` 136 ms,
 7,806 ms. The four suites, `cargo test -p vyrn-cli --test <name>`, one run
 each: `lowered` 56.9 s, `pages` 44.7 s, `symbolmap` 46.0 s, `vyx` 29.4 s.
 
+**The repetition is gone (2026-09-04).** Two changes, neither of them to what
+the judgment decides. The kernel corpus tally is the same instance count with
+the same ratchet, and every emitted byte is the one the manifest records.
+
+**One ownership analysis per build.** `own::analyze` runs the placer, so a
+second analysis is a second placement of every instance. The CLI now opens
+`own::Memo` beside `project::Memo`, after the load and for the one program the
+command is about, and the second ask is served from the first answer. The key
+is the program's ADDRESS, and the guard BORROWS the program, so the program
+outlives the entry and no other `Program` can take that address while it is
+held: a hit is the same program, so it is the same answer. Any other program
+analysed inside the guard — a generator's own, during a load — has a different
+address, misses, and is neither served nor stored. Nothing outside the CLI
+opens a guard, so a host that does not arm one analyses twice as before, and
+the corpus tests are unaffected.
+
+One thing had to move with it. `kernel_refuses` re-analysed on purpose, so
+that the refusals it prints are the command's program's and not a generator's,
+and under the memo a re-analysis would re-place nothing and print nothing. The
+clear moved to where the boundary actually is: `RefusalScope` empties the
+thread-local when the program is linked, which is the same point the memo is
+opened, and every refusal after it is this program's. The print dedups, so a
+host with no memo armed still prints each refusal once.
+
+**The `Facts` fold reuses the bodies the placement pass built.** `augment`
+built every instance twice: once to judge it, once at the end to fold the
+`Facts` the emitters read, because the first build had read the plan before
+the pass filled it. The pass now keeps each body and records which FUNCTIONS
+it wrote a row for. A row is keyed by a node and a node belongs to one
+function, so an instance whose function is not named there would rebuild to
+the same body; only the named ones are rebuilt. On a three-line program 1 of
+96 is; on `pagesdemo`, 65 of 1,345.
+
+The same table as above, after:
+
+| phase | three-line: count / total | `pagesdemo`: count / total |
+|---|---|---|
+| `placer` | 1 / 21.25 | 2 / 896.57 |
+| `placer: lower_with` | 1 / 3.55 | 2 / 70.42 |
+| `placer: core::build` | 96 / 14.98 | 1345 / 680.02 |
+| `placer: kernel::placement` | 96 / 1.69 | 1345 / 28.20 |
+| `placer: facts: rebuilt` | 1 / 0.30 | 65 / 102.79 |
+| `placer: facts rebuild` | 1 / 0.42 | 2 / 105.41 |
+
+`pagesdemo`'s two remaining placer runs are two PROGRAMS: its own, and the
+generator the load runs as a whole program of its own. Neither is a repeat.
+
+Wall clock, best of three, and the four suites, one run each:
+
+| | before | after |
+|---|---|---|
+| `vyrn check three.vyrn` | 136 ms | 71 ms |
+| `vyrn check examples/pagesdemo.vyrn` | 2,723 ms | 1,253 ms |
+| `vyrn check site/export.vyrn` | 7,806 ms | 5,201 ms |
+| `--test lowered` | 56.9 s | 36.9 s |
+| `--test pages` | 44.7 s | 23.6 s |
+| `--test symbolmap` | 46.0 s | 25.8 s |
+| `--test vyx` | 29.4 s | 17.3 s |
+
+**What was NOT taken, and what it would cost.** Two savings were weighed and
+left:
+
+- *A cache of a runtime function's placement across builds.* Every table the
+  placer fills is keyed by the node ADDRESSES of the program being built, and
+  every build re-parses `std/runtime` into fresh nodes, so a cached row cannot
+  be keyed to the build that would read it. Reusing one would need placement
+  keyed by source position instead of by address, which is a redesign of the
+  plan's protocol and not a cache.
+- *Skipping instances whose body cannot need placement.* The judgment is 3% of
+  the placer; the cost is building the core body, and the same body feeds the
+  `Facts` the emitters read. Skipping a build to skip a judgment would drop
+  facts, which is judging less, which this slice refuses.
+
+What is left is one build of each instance, and it is 76% of the placer. That
+is the cost of the core body itself, not of repeating it, and it belongs to
+whoever makes `core::build` cheaper.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
