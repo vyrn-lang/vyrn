@@ -1987,6 +1987,103 @@ Three readings of the table, and the first is the point of the slice.
   the reason recorded there: its rule rests on an ownership the decision itself
   changes.
 
+**The deletion slice (2026-09-04): the native emitter reads the core, and four
+of `own.rs`'s tables lose their last reader.** The census above, with the
+column this slice moved. Rows 13 to 17 are unchanged.
+
+| # | table | the core, before | the native emitter, now |
+|---|---|---|---|
+| 01 | `store_owned`, the append spine | carried | **flipped** (`Gen::store_row`) |
+| 02 | `store_owned`, a store to a name | carried | **flipped** (`Gen::store_fact`, the guards in the fallback) |
+| 03 | `store_fresh` | carried, inside 02's one answer | **flipped**, with 02 |
+| 04 | `store_owned`, `SetField` | carried | **flipped** |
+| 05 | `store_owned`, the `Array` and `SmallArray` element stores | carried | **flipped** |
+| 06 | `store_owned`, the `ArrayN` and `Map` arms and a projection's store | acknowledged only | acknowledged only, as before |
+| 07 | `discarded_results` | carried | **flipped** (`Gen::discarded_row`) |
+| 08 | `arg_drops` | carried | **flipped** (`Gen::arg_drop_row`) |
+| 09 | `receiver_frees` | carried | **flipped** (`Gen::receiver_row`) |
+| 09b | `receiver_malloc` | the region stand-down, not modelled | unchanged |
+| 10 | `receiver_holes` | carried | **flipped**, inside 09's one row |
+| 11 | `edge_releases` | carried, by join and edge | **flipped** (`Gen::edge_rows`) |
+| 12 | `arm_frees` | the binders and the holes carried | **flipped** (`Gen::arm_row`); the kind is `Gen::rel_kind`'s |
+| 13 | `consuming_matches` | a different rule | unchanged |
+| 14 | `malloc_scrutinees` | the region stand-down, not modelled | unchanged |
+
+Three things the slice needed, and all three were already there.
+
+- **The core needed nothing new.** The native emitter's decisions are the
+  direct emitter's, at the same keys: `core::Site` on `St::Store`, on a
+  discarded result's `St::Drop`, on an edge release's `Site::Edge`, and
+  `NameInfo::arg_drop`, `NameInfo::receiver`, `NameInfo::holes` and
+  `Arm::frees` for the rest. So this slice is a reader change alone, and its
+  six helpers on `Gen` are `Cx`'s six spelled for the textual backend.
+- **The release kind comes off the type, and the test says so.** `lib.rs`
+  emitted the arm row's stored `DropKind`; the core states none, because a
+  kind is a property of the type and not of the site. It asks
+  `Gen::rel_kind` — `Owned::release_kind` under this instantiation's
+  substitution, which is where the placer itself took the plan's kinds from.
+  `coretables.rs`'s `arm_kinds` walks the 594 arm binders the core frees over
+  the corpus and asserts the type's answer equals the plan's row at every one.
+- **The fallback rule held, unchanged.** Where the core answers, its answer
+  stands; where it does not, the site reads exactly what it read BEFORE the
+  flip. That is why a store to a NAME asks `store_fact` and falls back to the
+  row AND its two guards, while `SetField` and an element store ask
+  `store_row` and fall back to the row alone — those two never had the
+  guards. The region gate stays the emitter's at every one of them: whether
+  an arena's memory is this path's to free is a property of where the code
+  stands, not of the store.
+
+**What the native emitter no longer reads.** `receiver_frees`,
+`receiver_holes`, `arm_frees` at every `match`, `store_owned` and
+`store_fresh` at every store but the three acknowledged idioms and a user
+container's element store, `discarded_results`, `arg_drops` and
+`edge_releases`. What it still reads: `consuming_matches` (row 13),
+`receiver_malloc` and `malloc_scrutinees` (the two region stand-downs),
+`arm_frees` at an `if let` or a `?`, `store_owned` at the rewritten
+statements, the `fromJson` rewrite's alias scope, and `releases`,
+`droppable`, `early` and `holes` to build a frame. It still ACKNOWLEDGES
+every row it took off the core, so §26's finish check keeps counting the
+plan's decisions. `VYRN_PLAN_ROWS=1` puts every one of them back on the plan
+for a bisect. The wasm manifest is byte-identical after each of the six
+commits, which is the gate this slice needed most: a change to the textual
+backend that moves a wasm byte touched the wrong thing.
+
+**Which `own.rs` tables now have NO reader, and what deleting them takes
+away.** A reader is an emission site or the interpreter. The
+`VYRN_PLAN_ROWS=1` fallback inside a reader helper is the bisect knob, and it
+goes with the table; `coretables.rs` diffs the table against the core and goes
+with it too. Line counts are of `compiler/vyrn-frontend/src/own.rs` at this
+commit.
+
+| table | where its lines are | lines |
+|---|---|---|
+| `edge_releases` | the field (5), `edge_releases_at` (9), `fold_edge_releases` (63), its call (1), the owners loop (5), its `unconsumed` class (1) | **84** |
+| `arg_drops` | the field (4), `arg_drop` (10), the build in `analyze` (6), its `unconsumed` class (1), and `Ownership::arg_drops`, which nothing has called for some time (26) | **47** |
+| `receiver_frees` and `receiver_holes` | the two fields (10), `receiver_free` (9), `receiver_holes_at` (8), its `unconsumed` class (1) | **28** |
+| `discarded_results` | the field (4), `discarded_result` (5), the build in `analyze` (2) | **11** |
+
+170 lines, and one caveat: R1′'s 60-line fold in `analyze` cannot go with the
+28 above, because `receiver_malloc` is derived from `receiver_frees` and the
+region stand-down still has a reader in both backends. The fold and the
+11-line owners loop go the day that stand-down is stated somewhere else, which
+takes the four tables to 241 lines.
+
+**What still has a reader, and who it is.** `arm_frees` is read by the
+INTERPRETER (`interp.rs`, one lookup per arm), which this slice did not move,
+so the table stays although both compiled backends are off it.
+`store_owned` and `store_fresh` are read at the three acknowledged idioms and
+at the twelve store statements RFC-0091 M2's `place at` rewrite builds.
+`consuming_matches`, `malloc_scrutinees` and `receiver_malloc` are the three
+the census above measured and left. `releases`, `droppable`, `early` and
+`holes` build a frame in all three engines. So `own.rs` can go after: the
+interpreter reads `core::facts` for the arm table; `frees_boxes`'s rule is
+stated on an ownership the table does not decide; the `place at` rewrite runs
+where the core can see it; the two region stand-downs are stated; and the
+answers the close-out above lists as having no kernel equivalent at all —
+`DropKind` and a declared release's ordering, `Leak::Hole` and `Leak::Region`,
+the binding notes behind `vyrn why --memory`, the `FreeArr` handover — are
+stated somewhere else.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
