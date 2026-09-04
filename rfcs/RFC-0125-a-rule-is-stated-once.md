@@ -2548,6 +2548,108 @@ The next slice's first move is therefore not another rule. It is to split the
 walk: one traversal that refuses, one that records, so that a closed rule takes
 its call site with it.
 
+**The checker's deletion slice (2026-09-04): no line went, and each of the
+three reasons is a proof rather than a judgment.** The slice above took
+`own.rs`'s readers away. This one was to take the checker's fillers away with
+them, and the rules the kernel already states in the same sentence. It took
+neither. Each attempt reached a proof that the deletion is not safe today, and
+the three proofs are what the next slice needs, in this order.
+
+**One: every placement table still has a reader, and the reader is the CORE.**
+The own-side record above says which tables have "no reader", and it names its
+own scope in the same line: *a reader is an emission site or the interpreter*.
+The core is neither, and the core reads the plan. `core::Builder` does not
+derive the store, discard, argument-temporary, edge and receiver decisions.
+It ASKS the plan for each, and states what it is told:
+
+| what the core states | what it asks first |
+|---|---|
+| `St::Store`'s `releases` | `plan.store_owned_at`, `plan.store_fresh_at` (`Builder::stmt`) |
+| a discarded result's `St::Drop` | `plan.discarded_result` |
+| `NameInfo::arg_drop` | `plan.arg_drops`, `plan.arg_drop` (`Builder::read_val`, `release_receiver`) |
+| an edge release at `Site::Edge` | `plan.edge_releases_at` (`Builder::edge_drops`) |
+| a receiver's `St::Drop` and its holes | `plan.receiver_free`, `plan.receiver_holes_at` |
+| an arm's `frees` | `plan.arm_payload_free` |
+| `St::Switch`'s `consuming` | `plan.match_consumes` (`own_the_scrutinee`) |
+
+So the chain from the checker to an emitter is unbroken: `movecheck` writes the
+row, `own::analyze` folds it, the core reads the fold and re-states it,
+`core::facts` carries it, and the emitter reads the facts. Empty the filler and
+the core states nothing, and every emitter falls back to a table that is now
+empty too. `arg_drops` shows it exactly: `Builder::read_val` writes
+`NameInfo::arg_drop` only inside `if self.own.plan.arg_drops.contains(&node)`,
+so `Facts::arg_drops` is the plan's own set filtered, and
+`coretables.rs`'s two-way diff over 2,188 rows measures a filter, not a second
+opinion. The three flip slices moved the ENGINES off the plan. They did not
+move the plan off the checker. A filler here goes when the core states its fact
+without asking, which is M5's and M6's work and not a deletion.
+
+**Two: a rule the kernel gives in the same SENTENCE is not a rule the kernel
+ENFORCES.** The rule-by-rule census runs each program twice, and the kernel's
+run carries `VYRN_KERNEL_STRICT=1`. That knob is the whole difference:
+`core::strict()` reads it, and without it a hard refusal is collected into
+`take_strict_refusals` and the build succeeds. The checker also runs FIRST, and
+the kernel judges an instance the lowering built — a generic body with no
+instance is judged at no point. So deleting the checker's detection for a row
+the census marks `the same` does not move the refusal to the kernel. It accepts
+the program. Measured on row 07, which the census marks `the same`:
+
+| `vyrn check tests/refusals/r07_moved_into_a_binding.vyrn` | exit |
+|---|---|
+| the checker | 1, the sentence and its menu |
+| `VYRN_NO_MOVECHECK=1` | **0, `ok`** |
+| `VYRN_NO_MOVECHECK=1 VYRN_KERNEL_STRICT=1` | 1, the same sentence, no menu |
+
+The middle row is what a deletion ships. Fourteen rows say `the same` today
+and not one of them may go before the kernel refuses by default, which is a
+change to what `vyrn check` IS, not to where a rule is written.
+
+**Three: the two closures over the call graph are empty over the corpus, and
+not by a rule.** The record above licensed their deletion on the measurement:
+both sets are empty over 276 programs, "the shadow of a rule that is enforced
+now", because rule 3 refuses a returned borrow. Rule 3 does not refuse one.
+`check_return` exempts a `Borrow::Element` in its own words: a `for` variable
+keeps phase 4b's verdict, because it is outside the three sites RFC-0092
+priced. So `fn pick(xs: Array<String>) -> String { for x in xs { return x }
+.. }` is ACCEPTED, it seeds `lending`, and a caller that binds `pick(a)`
+through an aggregate must not release what it gets. `movecheck`'s own
+`a_lender_forwarded_through_an_aggregate_is_still_marked_lending` is that
+program, written when the hole was found the first time. The closures were
+deleted, the whole workspace compiled, and that one test failed: the caller's
+binding lost its `Gone::Lent` and the block would free an element the caller's
+caller still owns. Empty over the corpus is a measurement of the corpus. It is
+not a theorem, and a deletion needs the theorem. The closures go when rule 3
+covers an element, or when something else states what they state.
+
+**What the slice changed.** Two records, so the next reader does not spend the
+day again. `movecheck::Facts`'s doc for the two closures now carries the
+counterexample by name, and `kernel.rs`'s corpus assertion says what its count
+is worth: the corpus has no lender, and no more than that.
+
+**The structural census, re-measured.** The eleven lines are the corrected
+record on the closures, which sits in the `ExitEv` section.
+
+| kind | before | after |
+|---|---|---|
+| a rule the kernel now gives | 1,045 | 1,045 |
+| a rule only the checker gives | 723 | 723 |
+| placement rows for the engines | 2,349 | 2,360 |
+| a fix menu | 81 | 81 |
+| shared machinery | 3,656 | 3,656 |
+| tests | 2,169 | 2,169 |
+| **the file** | **10,023** | **10,034** |
+
+**What remains, and what each line waits on.** No line of `movecheck.rs` is
+dead: the release build reports no dead-code warning from the file, which is
+the same answer the previous slice recorded. The 2,360 placement lines wait on
+the core stating its facts without reading the plan (proof one). The 1,045
+lines of rules the kernel repeats wait on the kernel refusing by default
+(proof two).
+The 723 lines only the checker gives wait on the four open rules the close-out
+lists. The 81 lines of menu stay by the recorded decision. The walk — `stmt`
+and `expr`, 1,929 lines — still does both jobs in one arm, which is the
+obstacle the previous slice named and this one did not reach.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
