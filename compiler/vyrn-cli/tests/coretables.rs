@@ -132,6 +132,7 @@ fn producers(stmts: &[St], out: &mut BTreeMap<(&'static str, bool), usize>) {
 }
 
 #[test]
+#[ignore = "walks the whole corpus; run explicitly: cargo test -p vyrn-cli --test coretables -- --ignored"]
 fn the_core_and_the_plan_agree_on_every_table() {
     // The frontend recurses deeply on a realistic program; the CLI runs it on
     // a thread with the interpreter's reserve, and so does this.

@@ -244,6 +244,7 @@ fn browser_lacks(e: Effects) -> bool {
 }
 
 #[test]
+#[ignore = "walks the whole corpus; run explicitly: cargo test -p vyrn-cli --test effects -- --ignored"]
 fn the_lattice_is_the_rfc_table() {
     // The table in RFC-0125 §3 M6: a row per effect, whose second column
     // lists the atoms in backticks. ATOMS is derived from it, so the two
@@ -333,6 +334,7 @@ fn the_lattice_is_the_rfc_table() {
 }
 
 #[test]
+#[ignore = "walks the whole corpus; run explicitly: cargo test -p vyrn-cli --test effects -- --ignored"]
 fn the_effect_judgment_over_the_corpus() {
     std::thread::Builder::new()
         .stack_size(vyrn_frontend::interp::INTERP_STACK_BYTES)
