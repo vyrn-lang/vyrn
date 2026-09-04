@@ -2788,28 +2788,18 @@ impl MoveCheck<'_> {
         // kernel refuses it, in these same words and with this same menu
         // (RFC-0125 §3 M3, row 04). This arm held two rules, and this is the
         // filter that lets the licensed one leave while rule 1 stays.
+        // A consumption a `consume` capability made — a parameter, a `drop` —
+        // is not one either: the kernel refuses the use after it, in the same
+        // sentence at the same line (RFC-0125 §3 M3, row 06). The capability
+        // IS the fix there, so such a consumption carries no menu, and the
+        // empty menu is what tells the two rules apart.
         let Some((key, c)) = consumed
             .overlapping(path)
-            .filter(|(k, c)| !(c.hole && under(k, path)))
+            .filter(|(k, c)| !(c.hole && under(k, path)) && !c.fixes.is_empty())
             .min_by(|(ak, a), (bk, b)| (a.line, *ak).cmp(&(b.line, *bk)))
         else {
             return Ok(());
         };
-        // A `consume` capability keeps the wording it has always had: the
-        // capability IS the fix, so there is no menu to print.
-        if c.fixes.is_empty() {
-            let (cline, consumer) = (c.line, &c.by);
-            return Err(Diagnostic::error(
-                line,
-                0,
-                "movecheck",
-                format!(
-                    "`{path}` is used here but was already consumed by \
-                     {consumer} on line {cline}\n  (a `consume` parameter takes \
-                     ownership; the value can't be used afterward)"
-                ),
-            ));
-        }
         // RFC-0089 rule 1, worded exactly as Phase 4b left it. Both lines name
         // the storage that moved rather than the longer path that reads it: the
         // line number already says which read, and `vyrn fix` looks for the
@@ -7761,38 +7751,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_use_after_consume() {
-        let src = "type T = { id: Int64 }; \
-                   fn use_up(t: consume T) -> Int64 { return t.id; } \
-                   fn main() -> Int64 { let x = T { id: 1 }; let a = use_up(x); return use_up(x); }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("already consumed"), "{e}");
-    }
-
-    #[test]
-    fn rejects_use_after_consume_inside_a_test_body() {
-        // RFC-0015: a test body is move-checked exactly like a function body.
-        let src = "type T = { id: Int64 }; \
-                   fn use_up(t: consume T) -> Int64 { return t.id; } \
-                   test \"consumes twice\" { let x = T { id: 1 }; \
-                       let a = use_up(x); let b = use_up(x); assert(a == b) }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("already consumed"), "{e}");
-    }
-
-    #[test]
-    fn rejects_smallarray_use_after_drop() {
-        // RFC-0056: a moved-from `SmallArray` is dead (move copies the whole
-        // struct incl. inline slots, but movecheck semantics are unchanged) —
-        // using it after `drop` is rejected, exactly like any owned value.
-        let src = "fn main() -> Int64 { \
-                   let mut xs: SmallArray<Int64, 4> = []  xs.push(1)  \
-                   drop xs  return xs.length }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("consumed") || e.contains("drop"), "{e}");
-    }
-
-    #[test]
     fn allows_read_reuse() {
         let src = "type T = { id: Int64 }; \
                    fn peek(t: read T) -> Int64 { return t.id; } \
@@ -7878,20 +7836,6 @@ mod tests {
     }
 
     #[test]
-    fn lambda_block_shadowing_let_does_not_revive_a_moved_binding() {
-        // F2-051: a lambda block body shares the enclosing map no more — a
-        // shadowing `let` inside it must not erase the outer consumption.
-        let src = "type T = { id: Int64 }; \
-                   fn make() -> T { return T { id: 1 }; } \
-                   fn take(t: consume T) -> Int64 { return t.id; } \
-                   fn main() -> Int64 { let s = make(); let n = take(s); \
-                                      let g = x -> { let s = 0; x + s }; \
-                                      return g(n) + take(s); }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("already consumed"), "{e}");
-    }
-
-    #[test]
     fn rejects_if_expr_arm_handing_a_field_to_a_consume_param() {
         // F2-050: the value an `if` expression yields is a projection of a
         // place this frame owns, and it answers the same question its direct
@@ -7908,19 +7852,6 @@ mod tests {
         );
     }
     #[test]
-    fn spawn_applies_consume_capabilities() {
-        // `spawn take(x)` moves x across the task boundary; a second use is a
-        // double move.
-        let src = "type T = { id: Int64 }; \
-                   fn take(t: consume T) -> Int64 { return t.id; } \
-                   fn main() -> Int64 { let x = T { id: 1 }; \
-                                      let t = spawn take(x); \
-                                      let z = take(x); return t.join() + z; }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("already consumed by `spawn take(..)`"), "{e}");
-    }
-
-    #[test]
     fn local_shadowing_global_may_be_consumed() {
         // A local `g` shadows the global, so consuming it is fine.
         let src = "type T = { id: Int64 } \
@@ -7929,18 +7860,6 @@ mod tests {
                    fn use_it() -> Int64 { let g = T { id: 2 } return take(g); } \
                    fn main() -> Int64 { return 0; }";
         assert!(run(src).is_ok(), "{:?}", run(src));
-    }
-
-    #[test]
-    fn break_path_consume_rejected_after_loop() {
-        // Consumed on the way out of the loop, then used after it — rejected.
-        let src = "type T = { id: Int64 }; \
-                   fn take(t: consume T) -> Int64 { return t.id; } \
-                   fn main() -> Int64 { let x = T { id: 1 }; \
-                       for i in [0, 1] { let a = take(x); break } \
-                       return take(x); }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("already consumed"), "{e}");
     }
 
     #[test]
@@ -8689,18 +8608,6 @@ mod tests {
         );
     }
 
-    /// A shadowing `let` inside a region revives only the region's own map: the
-    /// outer binding's consumption record must survive the region, or the
-    /// use-after-move after it compiles.
-    #[test]
-    fn a_region_let_does_not_revive_the_outer_binding() {
-        let src = "fn sink(t: consume String) -> Int64 { drop t return 0 } \
-                   fn main() -> Int64 { let x = \"a\" + \"b\" let n = sink(x) \
-                   region { let x = 9 } return x.byteLength + n }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("already consumed"), "{e}");
-    }
-
     /// The linear walk reads unreachable code the way [`MoveCheck::block`] does:
     /// a mention after a diverging statement is not a second disposal.
     #[test]
@@ -8778,20 +8685,6 @@ mod tests {
             e.contains("as `modify` and read again in the same call"),
             "{e}"
         );
-    }
-
-    #[test]
-    fn a_consume_parameter_of_a_method_still_moves() {
-        // The same map, for the other capability. `insert(s, v)` moving `v` and
-        // `s.insert(v)` not moving it would be two languages.
-        let src = "type T = { n: Int64 } \
-                   protocol Taking { fn take(modify self, s: consume String) -> Unit } \
-                   impl Taking for T { fn take(modify self, s: consume String) -> Unit \
-                   { self.n = self.n + s.byteLength } } \
-                   fn main() -> Int64 { let mut t = T { n: 1 } let s = \"a\" \
-                   t.take(s) return s.byteLength }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("already consumed by `take(..)`"), "{e}");
     }
 
     #[test]

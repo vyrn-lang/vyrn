@@ -447,28 +447,33 @@ fn main() -> Int64 {
     assert_eq!(d.end_col, 13);
 }
 
-/// A movecheck use-after-consume diagnostic is pinned to the consumed
-/// **identifier** on the error's line (the movecheck message backtick-quotes the
-/// variable name). Guards that the pinner covers movecheck, not just checker.
+/// A movecheck rule-2 diagnostic is pinned to the borrowed **identifier** on
+/// the error's line (the movecheck message backtick-quotes the variable name).
+/// Guards that the pinner covers movecheck, not just checker.
+///
+/// It read a use-after-consume until that rule left this pass (RFC-0125 §3 M3,
+/// row 06). What the editor shows for a rule the KERNEL states is a separate
+/// question, and the record says the answer is nothing: `vyrn-lsp` is an
+/// adapter over `vyrn_frontend::analyze` and the kernel is in `vyrn-lower`.
 #[test]
-fn movecheck_use_after_consume_pinned_to_ident() {
+fn movecheck_rule_two_pinned_to_ident() {
     let src = "\
-fn main() -> Int64 {
-    let x = 5;
-    drop x;
-    return x;
+fn take(t: consume String) -> Int64 { return t.byteLength }
+fn borrow(s: read String) -> Int64 {
+    return take(s);
 }
+fn main() -> Int64 { return 0; }
 ";
     let a = analyze(src);
     let d = a
         .diagnostics
         .iter()
-        .find(|d| d.stage == "movecheck" && d.message.contains("already consumed"))
-        .expect("a movecheck use-after-consume diagnostic");
-    // Line 4: `    return x;` — the offending use `x` is at col 12.
-    assert_eq!(d.line, 4);
-    assert_eq!(d.col, 12, "pinned to the `x` use, not col 0 (whole line)");
-    assert_eq!(d.end_col, 13);
+        .find(|d| d.stage == "movecheck" && d.message.contains("`read` parameter"))
+        .expect("a movecheck rule-2 diagnostic");
+    // Line 3: `    return take(s);` — the offending use `s` is at col 17.
+    assert_eq!(d.line, 3);
+    assert_eq!(d.col, 17, "pinned to the `s` use, not col 0 (whole line)");
+    assert_eq!(d.end_col, 18);
 }
 
 /// An `unknown type` diagnostic (a type reference that doesn't resolve) is

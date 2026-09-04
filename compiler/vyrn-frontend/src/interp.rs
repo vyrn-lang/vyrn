@@ -9560,13 +9560,10 @@ mod tests {
         assert_eq!(run(src).unwrap(), 604);
     }
 
-    #[test]
-    fn drop_then_use_is_a_compile_error() {
-        // `drop` consumes: using the value afterward must be rejected.
-        let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; a.push(1); \
-                   drop a; return a.length; }";
-        assert!(run(src).is_err());
-    }
+    // `drop` consumes, and a use after it is refused — by the kernel now
+    // rather than by this crate's own check (RFC-0125 §3 M3, row 06). The
+    // assertion moved to `vyrn-cli`'s `refusals` suite, which runs the whole
+    // compiler; `crate::run` is the frontend alone and no longer states it.
 
     #[test]
     fn drop_of_non_heap_is_rejected() {
