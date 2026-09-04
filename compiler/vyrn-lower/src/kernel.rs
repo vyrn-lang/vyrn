@@ -229,6 +229,12 @@ struct Kernel<'b> {
 struct LoopCtx {
     entry: State,
     breaks: Vec<State>,
+    /// Every `continue`'s state, checked against the entry AFTER the widen —
+    /// a `continue` that follows the store which promotes a `Static` name is
+    /// as much a back edge as the body's end, and it must be judged against
+    /// the entry the second turn really has (RFC-0125 §3 M3, the default
+    /// slice).
+    continues: Vec<State>,
     bound_inside: Vec<Name>,
 }
 
@@ -1017,6 +1023,17 @@ impl<'b> Kernel<'b> {
                         return Ok(());
                     }
                 }
+                // Read before the take, which ends the temporary: a store
+                // gives its target the state the value has, so `b = Body {
+                // nodes: [] }` leaves `b` `Static` exactly as the same
+                // expression does at a `let`. The rule is the `let`'s, stated
+                // once (RFC-0125 §3 M3, the default slice); without it the
+                // second turn of a loop refused a store over a name that owns
+                // nothing.
+                let fresh_static = match value {
+                    Val::Lit => true,
+                    Val::Name(m) => self.owned(*m) && st.own[*m as usize] == Own::Static,
+                };
                 self.take(st, value)?;
                 if let Place::Name(n) = place {
                     self.wrote(st, place, self.src(*n));
@@ -1044,7 +1061,7 @@ impl<'b> Kernel<'b> {
                                 self.info(*n)
                             ));
                         }
-                        st.own[*n as usize] = if matches!(value, Val::Lit) {
+                        st.own[*n as usize] = if fresh_static {
                             Own::Static
                         } else {
                             Own::Held
@@ -1141,6 +1158,7 @@ impl<'b> Kernel<'b> {
                 self.loops.push(LoopCtx {
                     entry: st.clone(),
                     breaks: Vec::new(),
+                    continues: Vec::new(),
                     bound_inside: Vec::new(),
                 });
                 let mut a = st.clone();
@@ -1148,11 +1166,21 @@ impl<'b> Kernel<'b> {
                 let mut ctx = self.loops.pop().unwrap();
                 // A literal the body replaced: the second turn starts with
                 // the value the first left, so the body is judged once more
-                // from that state.
-                if !a.ended && self.widen(&mut ctx.entry, &a) {
+                // from that state. Every back edge widens it, the `continue`s
+                // as well as the body's end, or a `continue` after the store
+                // would be judged against an entry the loop never has again.
+                let mut wider = false;
+                if !a.ended {
+                    wider |= self.widen(&mut ctx.entry, &a);
+                }
+                for c in &ctx.continues.clone() {
+                    wider |= self.widen(&mut ctx.entry, c);
+                }
+                if wider {
                     self.loops.push(LoopCtx {
                         entry: ctx.entry.clone(),
                         breaks: Vec::new(),
+                        continues: Vec::new(),
                         bound_inside: Vec::new(),
                     });
                     a = ctx.entry.clone();
@@ -1161,6 +1189,9 @@ impl<'b> Kernel<'b> {
                 }
                 // The back edge: the fall-through end of the body, and every
                 // `continue`, must find the entry state again.
+                for c in &ctx.continues {
+                    self.same_outside(c, &ctx.entry, &ctx.bound_inside)?;
+                }
                 if !a.ended {
                     self.back_edge(&mut a, &ctx)?;
                 }
@@ -1193,10 +1224,12 @@ impl<'b> Kernel<'b> {
                 let Some(ctx) = self.loops.last() else {
                     return self.refuse("a `continue` outside a loop".into());
                 };
-                let entry = ctx.entry.clone();
                 let inside = ctx.bound_inside.clone();
                 self.scope_end(st, &inside, Exit::Continue, *site)?;
-                self.same_outside(st, &entry, &inside)?;
+                // Recorded, not judged here: the loop widens its entry from
+                // every back edge before any of them is compared to it.
+                let l = self.loops.last_mut().unwrap();
+                l.continues.push(st.clone());
                 st.ended = true;
             }
             St::Return {

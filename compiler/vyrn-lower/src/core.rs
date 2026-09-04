@@ -2426,18 +2426,18 @@ impl<'a> Builder<'a> {
                 }
                 Ok(Rhs::Make(vs))
             }
-            Expr::Spawn { name, args, .. } => {
-                let mut vs = Vec::new();
-                for a in args {
-                    vs.push((self.val(a, out)?, Capability::Consume));
+            // A `spawn` is a call that runs as a task, so its arguments are
+            // the callee's parameters: a `read` parameter is read, and only a
+            // `consume` one is taken. Attributing every argument to a
+            // `consume` refused `rfcs/bench-0104/p-spawn.vyrn`, which hands
+            // the same `read` array to both halves on purpose (RFC-0125 §3
+            // M3, the default slice).
+            Expr::Spawn { name, args, line } => {
+                let mut r = self.call(name, args, *line, self.produced(e), out)?;
+                if let Rhs::Call { spawn, .. } = &mut r {
+                    *spawn = true;
                 }
-                Ok(Rhs::Call {
-                    callee: name.clone(),
-                    args: vs,
-                    spawn: true,
-                    write_back: false,
-                    ret: self.produced(e),
-                })
+                Ok(r)
             }
             Expr::IfExpr {
                 cond,
