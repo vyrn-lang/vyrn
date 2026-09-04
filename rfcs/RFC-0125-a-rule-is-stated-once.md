@@ -2468,10 +2468,11 @@ files it did.
 serially; parity in release with `--ignored`, 41 of 41; the residue ratchet;
 the cross-engine generator test with a fresh cache; `vyrn doc --std --verify`;
 and `vyrn test` over the site's files, 35 blocks in `export.vyrn` where there
-were 34. `VYRN_WASM_MANIFEST=check` is red for the 172 examples it was red for
-before this slice: the manifest is stale on this branch and the integrator
-regenerates it after the merge. This slice adds no trap stub to any module and
-changes no emitted byte, so it is not what makes that gate red.
+were 34. `VYRN_WASM_MANIFEST=check` is GREEN, which is the third slice's red
+gate turned over: the manifest was regenerated on this branch after that slice,
+and this slice adds no trap stub to any module, so every example's wasm still
+hashes to the committed row. The manifest is not regenerated here and needs no
+regenerating.
 
 ### M6 — the other two judgments
 
