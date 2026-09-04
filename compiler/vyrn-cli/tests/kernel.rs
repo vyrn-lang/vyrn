@@ -235,6 +235,12 @@ fn run_corpus() {
         if !program.globals.is_empty() {
             match vyrn_lower::core::build_module_state(&program, &own, &lowered.globals) {
                 Err(g) => {
+                    // A rule the core states is a refusal, not a gap
+                    // (RFC-0125 §3 M3, the checker's deletion path).
+                    if let Some(m) = &g.rule {
+                        refused.push(format!("{file}: <module state>: line {}: {m}", g.line));
+                        continue;
+                    }
                     if show_gaps.as_deref().is_some_and(|w| g.what.contains(w)) {
                         eprintln!(
                             "  gap: {file} <module state>:{} {} {}",
@@ -261,6 +267,13 @@ fn run_corpus() {
         for inst in &lowered.instances {
             match vyrn_lower::core::build(&program, inst, &own) {
                 Err(g) => {
+                    // A rule the core states is a refusal, not a gap: a
+                    // corpus program that reaches one moves the ratchet
+                    // (RFC-0125 §3 M3, the checker's deletion path).
+                    if let Some(m) = &g.rule {
+                        refused.push(format!("{file}: {}: line {}: {m}", inst.spelling(), g.line));
+                        continue;
+                    }
                     if show_gaps.as_deref().is_some_and(|w| g.what.contains(w)) {
                         eprintln!(
                             "  gap: {file} {}:{}:{} {} {}",

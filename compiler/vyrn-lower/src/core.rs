@@ -556,6 +556,13 @@ pub struct Gap {
     /// construct alone says it.
     pub detail: String,
     pub line: usize,
+    /// RFC-0125 §3 M3, the checker's deletion path: this is not a construct
+    /// the slice cannot lower. It is a rule the PROGRAM breaks, in the
+    /// checker's own sentence, and the placer turns it into a refusal the
+    /// same way it turns the kernel's own. A rule about the KEYWORD belongs
+    /// here rather than in the kernel, because the kernel has no keywords —
+    /// `consume make()` and `make()` denote the same value.
+    pub rule: Option<String>,
 }
 
 /// A field read or an element read: a place, not a value the reader owns.
@@ -605,6 +612,7 @@ fn gap<T>(what: &'static str, line: usize) -> Result<T, Gap> {
         what,
         detail: String::new(),
         line,
+        rule: None,
     })
 }
 
@@ -613,6 +621,20 @@ fn gap_d<T>(what: &'static str, detail: &str, line: usize) -> Result<T, Gap> {
         what,
         detail: detail.to_string(),
         line,
+        rule: None,
+    })
+}
+
+/// A rule the program breaks, stated by the core (RFC-0125 §3 M3, the
+/// checker's deletion path). The lowering stops here, as it does at a gap,
+/// and the placer reports `message` at `line` the way it reports the
+/// kernel's own refusals.
+fn refuse<T>(message: String, line: usize) -> Result<T, Gap> {
+    Err(Gap {
+        what: "a rule the program breaks",
+        detail: String::new(),
+        line,
+        rule: Some(message),
     })
 }
 
@@ -1723,6 +1745,7 @@ impl<'a> Builder<'a> {
                     what: "a field the record does not have",
                     detail: field.to_string(),
                     line,
+                    rule: None,
                 }),
             _ => gap("a field of a non-record", line),
         }
@@ -1789,7 +1812,7 @@ impl<'a> Builder<'a> {
                     Ok((Val::Name(t), self.taken_by(t, construct)))
                 }
                 _ => {
-                    let Val::Name(t) = self.take_place(place, out)? else {
+                    let Val::Name(t) = self.take_prefix(place, *line, out)? else {
                         return gap("a `consume` of a literal", *line);
                     };
                     self.by_binding.insert(construct, t);
@@ -2025,7 +2048,7 @@ impl<'a> Builder<'a> {
                     // used to be a gap, so the whole body went unjudged.
                     None => self.global_read(place, name, *line, out),
                 },
-                _ => self.take_place(place, out),
+                _ => self.take_prefix(place, *line, out),
             },
             Expr::Lambda { .. } => self.lambda(e, out),
             _ => {
@@ -2229,6 +2252,32 @@ impl<'a> Builder<'a> {
         };
         out.push(St::Let(t, Rhs::Read(Place::Global(name.to_string()))));
         Ok(Val::Name(t))
+    }
+
+    /// The `consume p` prefix (RFC-0093). The rule is stated here, where the
+    /// desugar is written, because it is about the KEYWORD rather than about
+    /// ownership: `consume make()` and `make()` denote the same value, and
+    /// the kernel has no keywords (RFC-0125 §3 M3, the census, rows 08 and
+    /// 09). Two refusals, in the checker's own words. An element is not a
+    /// place a take reaches, because nothing walks around an element hole. A
+    /// value that names no place at all is already owned, so there is no
+    /// place to leave a hole in.
+    fn take_prefix(&mut self, e: &'a Expr, line: usize, out: &mut Vec<St>) -> Result<Val, Gap> {
+        if vyrn_frontend::movecheck::place_path(e).is_none() {
+            if let Some((_, path)) = vyrn_frontend::movecheck::element_path(e) {
+                return refuse(
+                    format!("`{path}` may not be taken — an element is not a place a take reaches"),
+                    line,
+                );
+            }
+            return refuse(
+                "`consume` here has nothing to take — the value is already owned, so \
+                 there is no place to leave a hole in"
+                    .to_string(),
+                line,
+            );
+        }
+        self.take_place(e, out)
     }
 
     /// A move out of a sub-place: `consume x.f`, or the receiver a rebuilding
@@ -3185,6 +3234,20 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         let top = match build(program, inst, own) {
             Ok(b) => b,
             Err(g) => {
+                // A rule the core states, rather than a construct it cannot
+                // lower: reported like the kernel's own refusals (RFC-0125
+                // §3 M3, the checker's deletion path).
+                if let Some(message) = g.rule {
+                    STRICT_REFUSALS.with(|v| {
+                        v.borrow_mut().push(crate::kernel::Refusal {
+                            message,
+                            line: g.line,
+                            file: inst.func.module.clone(),
+                            body: inst.func.name.clone(),
+                        })
+                    });
+                    continue;
+                }
                 if trace {
                     eprintln!(
                         "placer: {} not lowered: {} {}",

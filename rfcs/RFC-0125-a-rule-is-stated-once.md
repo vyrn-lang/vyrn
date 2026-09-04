@@ -2057,6 +2057,27 @@ Four things the structural census says, and the third is the finding.
   the kernel does not have, and they are the smallest of everything the
   deletion track owes.
 
+**The rules this slice closed.** Each is one commit, and each moves a row of
+the rule-by-rule census from `nothing` or `its own words` to `the same`: the
+kernel prints the checker's whole sentence at the same file and line, minus
+the menu. `tests/refusals.rs` runs both passes over every row, so a wording
+that drifts fails the build rather than the reading.
+
+- **`consume` with nothing to take, and `consume` of an element** (rows 09
+  and 08). The census left these open with the reason written down: both are
+  about the KEYWORD and not about ownership, because `consume make()` and
+  `make()` denote the same value and the kernel has no keywords. So the rule
+  belongs where the desugar is written, which is the core
+  (`core::take_prefix`). A `consume` whose operand names no place is refused
+  there, and an element is named as the element it is. The core states it as
+  a REFUSAL rather than a gap: `core::Gap` carries a `rule` now — a sentence
+  the program broke, not a construct the slice cannot lower — and the placer
+  reports one the way it reports the kernel's own. No corpus program reaches
+  either refusal, because the checker refuses every such program before the
+  core is built; the corpus tally counts a rule-gap as refused, so one that
+  got through would move the ratchet rather than hide in the gap column.
+
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The

@@ -136,7 +136,7 @@ fn census() -> Vec<Row> {
             "`consume` reaches a field, never an element",
             "RFC-0093",
             "`xs[0]` may not be taken — an element is not a place a take reaches",
-            Kernel::No,
+            Kernel::Same,
         ),
         row(
             "r09_nothing_to_take.vyrn",
@@ -144,7 +144,7 @@ fn census() -> Vec<Row> {
             "RFC-0093",
             "`consume` here has nothing to take — the value is already owned, so there is no \
              place to leave a hole in",
-            Kernel::No,
+            Kernel::Same,
         ),
         row(
             "r10_consume_module_state.vyrn",
@@ -666,7 +666,7 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "    fn nothing_to_take(self) -> String {",
-            Checker,
+            Kernel,
             "`consume` with nothing to take (row 09)",
         ),
         sec(
@@ -757,9 +757,9 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "    fn check_take(",
-            Checker,
-            "a take's refusals: an element, and a place the frame does not own \
-             (row 08)",
+            Kernel,
+            "a take's refusals: an element, and nothing to take — \
+             `core::take_prefix` states both (rows 08, 09)",
         ),
         sec(
             "    fn check_handover(&self, arg: &Expr, callee: &str, line: usize) \
@@ -1040,8 +1040,8 @@ fn the_structural_census_is_what_the_rfc_records() {
     .map(|k| (k.label(), by_kind.get(&(*k as usize)).copied().unwrap_or(0)))
     .collect();
     let want = vec![
-        ("a rule the kernel now gives", 930),
-        ("a rule only the checker gives", 840),
+        ("a rule the kernel now gives", 1000),
+        ("a rule only the checker gives", 770),
         ("placement rows for the engines", 2335),
         ("a fix menu", 81),
         ("shared machinery", 3656),
