@@ -1,0 +1,35 @@
+// RFC-0125 M3 probe, the default slice: a back edge that owes less than the
+// loop's entry.
+//
+// `rows` is bound to a literal, a turn gives it a value, and a later turn
+// hands that value away and puts the literal back. The entry is the join of
+// the loop's edges, so it says `Held`; the back edge that has just reset the
+// name says `Static`. That is within the entry, not a difference from it, and
+// the kernel used to refuse the body for it.
+//
+// `site/app/apidoc.vyrn`'s `docHtml` is the corpus program that met this: one
+// block accumulator, flushed and reset at every blank line and every fence.
+
+import { substring } from "std/strings"
+
+fn blocksOf(doc: String) -> Int64 {
+    let mut rows: Array<String> = []
+    let mut blocks = 0
+    let mut i = 0
+    while i < doc.byteLength {
+        if doc[i] == '\n' {
+            blocks = blocks + rows.length
+            rows = []
+            i = i + 1
+            continue
+        }
+        rows.push(substring(doc, i, i + 1))
+        i = i + 1
+    }
+    return blocks + rows.length
+}
+
+fn main() -> Int64 {
+    print(blocksOf("ab\ncde\nf").toString())
+    return 0
+}
