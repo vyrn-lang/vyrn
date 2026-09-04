@@ -1,7 +1,0 @@
-# Every test suite scratches under `std::env::temp_dir()` with a FIXED name, so
-# two worktrees gating at once clobber each other. Pointing the temp dir at
-# this worktree's own `target` keeps each checkout's runs apart.
-[env]
-TMP = { value = "target", relative = true, force = true }
-TEMP = { value = "target", relative = true, force = true }
-TMPDIR = { value = "target", relative = true, force = true }
