@@ -2403,22 +2403,51 @@ fn from_json_cmd(path: &str, type_name: &str, module: &str) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let args = vec![json, type_name.to_string(), module.to_string()];
-    match vyrn_frontend::interp::run_with_args(&program, &args) {
-        Ok(code) => ExitCode::from((code & 0xff) as u8),
-        Err(e) => {
-            // The trap carries the position of the `panic` in the converter
-            // above — a module the user never wrote and cannot open. The message
-            // is the whole answer, so the internal location is dropped and the
-            // INPUT file's name takes its place.
-            let msg = e
-                .split_once(" (from-json.vyrn:")
-                .map(|(m, _)| m)
-                .unwrap_or(e.as_str());
-            eprintln!("error: {path}: {msg}");
-            ExitCode::FAILURE
-        }
+    // The compiled route (RFC-0125 §3 M5, the `from-json` row): the converter is
+    // one constant program, so it compiles once per invocation through the direct
+    // backend and runs in the embedded wasmtime. Nothing about it is a user's
+    // choice, so there is no engine flag — this IS the engine. Standard output
+    // passes through; standard error is captured because the wording below
+    // rewrites it.
+    if let Err(code) = kernel_refuses(&program, &key) {
+        return code;
     }
+    let bytes = match vyrn_codegen::direct::compile(&program) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let run = wasmrun::Run {
+        argv: vec![key.clone(), json, type_name.to_string(), module.to_string()],
+        stdin_prefix: Vec::new(),
+        capture_stderr: true,
+    };
+    let out = match wasmrun::run(&bytes, run) {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if out.code == 0 {
+        return ExitCode::SUCCESS;
+    }
+    // The trap carries the position of the `panic` in the converter above — a
+    // module the user never wrote and cannot open. The message is the whole
+    // answer, so the internal location is dropped and the INPUT file's name
+    // takes its place.
+    let text = String::from_utf8_lossy(&out.stderr).into_owned();
+    let msg = text
+        .trim_end_matches(['\n', '\r'])
+        .trim_start_matches("error: ");
+    let msg = msg
+        .split_once(" (from-json.vyrn:")
+        .map(|(m, _)| m)
+        .unwrap_or(msg);
+    eprintln!("error: {path}: {msg}");
+    ExitCode::from((out.code & 0xff) as u8)
 }
 
 /// The project's `main` plus its local (non-remote) imports, as file paths — the

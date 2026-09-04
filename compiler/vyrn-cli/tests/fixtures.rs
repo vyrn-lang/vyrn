@@ -74,7 +74,7 @@ const CENSUS: &[Census] = &[
     },
     Census {
         capability: "from-json",
-        verdict: "no",
+        verdict: "yes",
     },
     Census {
         capability: "run-profile",

@@ -3980,7 +3980,7 @@ deleted here, and `--engine interp` is still the default.
 | `bench-check` | CI's "Bench --check" step; 17 corpus files | yes — all 17 byte-identical, after this slice's fix below | 52.3 s against 2.4 s over the 17, a factor of 22 |
 | `serve` | `vyrn serve`, `vyrn dev`; `tests/serve.rs`, `rpc.rs`, `universal_pages.rs` | no — `serve_cmd` takes no engine, and `vyrn serve --engine wasm` silently serves from the interpreter | `interp::serve` holds ONE live instance across every request: `main` runs once and the module's state persists. A resident wasm instance the host calls into per request is not designed anywhere in this RFC or its plan |
 | `mounted-routes` | `vyrn routes`, for the hand-written channel | no | `interp::mounted_routes` evaluates the arguments of `mount(..)` before any program runs. The derived rows survive without it, and the command already prints a note when the channel fails |
-| `from-json` | `vyrn fmt --from-json` (RFC-0097 M1) | no — `fmt` has no engine flag | one constant 40-line Vyrn converter, run in process. Compile it instead, or move it to Rust |
+| `from-json` | `vyrn fmt --from-json` (RFC-0097 M1) | yes, since the fifth slice below — the converter compiles through the direct backend and runs in the embedded engine. `fmt` still has no engine flag, because the converter is the CLI's program and not the user's: there is one route and nothing to choose | 145 ms against 260 ms on `examples/shelf/vyrn.json`, medians of three. The compiled route is SLOWER, for the reason `test-bodies` is: 40 lines of program against a compile of every module they reach |
 | `run-profile` | `vyrn run --profile`, `vyrn check --profile` | no, and there is nothing to profile: under the compiled route the time is wasmtime's | `vyrn_frontend::prof` counts interpreter steps. `check --profile` measures generation and survives while generation is interpreted |
 | `gen-fn` | every `gen fn` (RFC-0021), on every command that loads a module: `run`, `check`, `test`, `bench`, `build`, `doc`, `why`, `routes`, `fmt`, `emit-*`, and the LSP | partial — RFC-0076's `vyrn-genwasm` runs a generator as compiled wasm, but the feature `wasm-gen` is OFF in `vyrn-cli`'s default build and ON in `vyrn-lsp`'s, it needs clang and a wasi sysroot, and it declines to the interpreter for a module reaching `writeFile`, `writeAtomic`, `renameFile` or `fsyncFile` | the largest row. `generate_interpreted` is both the reference and the fallback; deleting it makes clang a hard requirement of `vyrn check` |
 | `fixture-oracle` | `examples/expected/*.stdout`, `.stderr`, `.exit` | no — the interpreter IS the oracle the compiled route is compared against | after the deletion `VYRN_FIXTURES=write` records from the route under test, and the fixture gate is a self-comparison. The oracle becomes a reviewed diff plus `wasmhash`'s cross-platform bytes |
@@ -4253,6 +4253,36 @@ gate turned over: the manifest was regenerated on this branch after that slice,
 and this slice adds no trap stub to any module, so every example's wasm still
 hashes to the committed row. The manifest is not regenerated here and needs no
 regenerating.
+
+#### The fifth slice (2026-09-04): the four commands with no route
+
+The census named four capabilities the compiled route could not do at all —
+`from-json`, `mounted-routes`, `run-profile` and `serve`. They are step 4 of
+the deletion plan, and the plan puts them fourth because nothing else about
+them is optional: they are the CLI's own commands, and a deletion that broke
+them would be a deletion of features. This slice takes them one at a time,
+cheapest first. Nothing is deleted here and the default engine is unchanged.
+
+**`fmt --from-json` runs its converter as wasm.** The converter is one
+constant program (`FROM_JSON_SRC`, 40 lines of Vyrn), so there was never a
+choice to expose: it compiles through the direct backend on each invocation
+and runs in `wasmrun`'s embedded wasmtime, with the JSON text, the type name
+and the module name as `args()` exactly as before. The CLI still carries bytes
+and nothing else — `std/jsonread` reads and `std/von` writes, and no second
+reader or writer appears in Rust.
+
+The one thing that had to move is the wording of a refusal. Under the
+interpreter the trap came back as a `Result`, and the location of the
+converter's own `panic` was cut out of it. Under wasm the guest writes
+``error: <message>`` on fd 2 itself, so the host captures standard error, cuts
+the same location out, and prints it against the INPUT file's name. The three
+`tests/von.rs` cases that pin this — the manifest, the null, the duplicate key
+— pass unchanged, including the one that asserts `from-json.vyrn` never
+reaches the user.
+
+It is slower, and the census row says so: 260 ms against 145 ms. That is the
+`test-bodies` shape — a 40-line program whose compile costs more than its run —
+and it is the price of one route instead of two.
 
 ### M6 — the other two judgments
 
