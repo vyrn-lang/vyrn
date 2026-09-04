@@ -396,6 +396,12 @@ narrative comments are moved to the records they retell.
   result-like types can become library over fixed arrays and canonical packs.
   Each is a checker case that becomes a desugar. A later RFC, done while the
   compiler is still in Rust and easy to change.
+  **That RFC is RFC-0126, and it is done (2026-09-04). It prices all 35
+  constructors and takes no collapse.** Two of the three candidates above are
+  refused with numbers RFC-0082 already had: Map over Array was withdrawn at
+  18x, and `SmallArray` cannot be written in Vyrn at all. The third,
+  `Option`/`Result` into `Enum`, is real and is the most expensive item in the
+  table. Read that paragraph as the hypothesis it was.
 - **wasm32's 4 GB limit, 128-bit SIMD lanes, and threads.** Known costs of the
   route in §2.5, stated so nobody discovers them later. Wider SIMD types lower
   to pairs. Threads need the wasm threads proposal in whichever native route

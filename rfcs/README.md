@@ -44,7 +44,7 @@ drifts: each header says which milestone landed and what did not, and the
 
 ## The index
 
-124 RFCs, numbered 0001 to 0125, with one gap. **There is no RFC-0066** — the
+125 RFCs, numbered 0001 to 0126, with one gap. **There is no RFC-0066** — the
 number was skipped and never used. The only mention of it in the repository is
 this sentence. Closing the gap would mean renumbering thirty files and breaking
 every cross-reference, so the gap stays.
@@ -181,6 +181,7 @@ claim is true — is written down in the test's own header.
 | [0123](RFC-0123-the-arc-closes-its-gaps.md) | the arc closes its gaps | Implemented; staged tolerance, protocol-declared projections, chained receivers, and the writable name weighed and closed "not yet" |
 | [0124](RFC-0124-work-that-happens-once.md) | work that happens once | Implemented; generation-side at-most-once evaluation for provably effect-free nullary functions (referential transparency with its hypothesis screened, not assumed) — site export 16.7 s → 13.8 s; runtime once-only recorded as module state's answered question |
 | [0125](RFC-0125-a-rule-is-stated-once.md) | a rule is stated once | Draft; a named, place-based core, a kernel of three judgments, one emitter and a runtime in Vyrn — M1 (places) is the measured gate, and the probe that motivates it is in §1.4 |
+| [0126](RFC-0126-a-type-constructor-is-a-case-in-every-pass.md) | a type constructor is a case in every pass | Census, closed; the 35 constructors of `ast::Type` priced across the seven files that decide (2,507 mentions), one verdict each, and five ranked collapses — none taken, and RFC-0125 §2.8's array and Map candidates were already refused with numbers by RFC-0082 |
 
 ## The other documents here
 

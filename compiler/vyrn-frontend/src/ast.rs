@@ -890,11 +890,16 @@ pub enum Type {
     /// stream would still answer `.length`), and a library type would have to be
     /// spelled with an `Array` base, so `let a: Array<T> = s` would launder the
     /// obligation away. Neither is a runtime concern — both are about what the
-    /// checker will accept — so the *lowering* is `Array<T>`'s exactly, in all
-    /// three engines: `{ ptr data, i64 len, i64 cap }`, `Val::Array`, the same
-    /// indexed walk for `for … in`. RFC-0083's `F32x4` is the opposite case (a
-    /// value with a new representation and no ownership); this is a resource
-    /// with a new *rule* and no new representation.
+    /// checker will accept.
+    ///
+    /// **M1's representation WAS `Array<T>`'s exactly** — `{ ptr data, i64 len,
+    /// i64 cap }`, `Val::Array`, the same indexed walk for `for … in` — and M2b
+    /// ended that in all three engines, because a pull-based producer has no
+    /// buffer to point at. `llt_of` answers `{ ptr, i64, i64, i64, i64, i64 }`,
+    /// a six-word header tagged over the two producers, and the interpreter
+    /// holds a `Val::Stream` of its own. RFC-0126 §6 records the correction: the
+    /// claim above outlived the code by an RFC, and a reader pricing the
+    /// collapse of this constructor from it would have priced a free one.
     ///
     /// M1's only producer is `fromArray`, so the sequence is eager. M2's
     /// `unfold`/`channel` are what make it pull-based; nothing in the obligation
