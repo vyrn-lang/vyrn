@@ -3978,7 +3978,7 @@ deleted here, and `--engine interp` is still the default.
 | `test-bodies` | 25 corpus files; `tests/testing.rs` | yes — all 25 byte-identical, `placeorder.vyrn` among them | 4.6 s against 5.3 s over the 25. The compiled route is SLOWER here: the bodies are small and the compile is the whole cost |
 | `test-state` | nothing in the corpus | no — one fresh instance per body, where the interpreter runs the module's state once and lets the bodies see each other's writes | `rfcs/probes-0125/module-state-across-test-bodies.vyrn`: 2 passed under the interpreter, `1 != 2` under wasm. The cost is the semantics, and M5 retires them rather than reproducing them |
 | `bench-check` | CI's "Bench --check" step; 17 corpus files | yes — all 17 byte-identical, after this slice's fix below | 52.3 s against 2.4 s over the 17, a factor of 22 |
-| `serve` | `vyrn serve`, `vyrn dev`; `tests/serve.rs`, `rpc.rs`, `universal_pages.rs` | no — `serve_cmd` takes no engine, and `vyrn serve --engine wasm` silently serves from the interpreter | `interp::serve` holds ONE live instance across every request: `main` runs once and the module's state persists. A resident wasm instance the host calls into per request is not designed anywhere in this RFC or its plan |
+| `serve` | `vyrn serve`, `vyrn dev`; `tests/serve.rs`, `rpc.rs`, `universal_pages.rs` | no — `serve_cmd` takes no engine, and `vyrn serve --engine wasm` silently serves from the interpreter | `interp::serve` holds ONE live instance across every request: `main` runs once and the module's state persists. The fifth slice below measured the resident half and it is cheap — a `Store` and an `Instance` outlive `_start`, module state keeps what `main` wrote, and an answer costs 11 ns against 839 µs for a fresh instance — and it names the three pieces that remain: no door for `handle`, no marshalling for `Request` and `Response`, and `serveStream` traps in both compiling backends |
 | `mounted-routes` | `vyrn routes`, for the hand-written channel | yes, since the fifth slice below — a copy of the program with a synthesized `main` hands each `mount(..)`'s route lists to `std/http`'s `mountedRows` and prints them, compiled and run in the embedded engine | `examples/bin/server.vyrn` prints the same twelve-row table under both, byte for byte, at 2.61 s against 2.79 s. Both times are the page and RPC generators, not the reading |
 | `from-json` | `vyrn fmt --from-json` (RFC-0097 M1) | yes, since the fifth slice below — the converter compiles through the direct backend and runs in the embedded engine. `fmt` still has no engine flag, because the converter is the CLI's program and not the user's: there is one route and nothing to choose | 145 ms against 260 ms on `examples/shelf/vyrn.json`, medians of three. The compiled route is SLOWER, for the reason `test-bodies` is: 40 lines of program against a compile of every module they reach |
 | `run-profile` | `vyrn run --profile`, `vyrn check --profile` | yes, by replacement since the fifth slice below — the rows are phases rather than functions, and the count is wasmtime's fuel. A per-function table is not portable and the slice says why | `vyrn_frontend::prof` counts interpreter steps and keeps counting them for `--engine interp` and for `check --profile`, which measures generation. What the compiled route reports instead is five phases and one repeatable count: 85,759,742,333 operations for the site export, the same number twice |
@@ -4094,7 +4094,10 @@ The order is fixed by what has no replacement, not by what is easiest.
    see.
 4. **`serve`, `dev`, `routes` and `fmt --from-json` are ported or dropped.**
    These are the four with no route at all. `routes` and `from-json` are
-   small. `serve` is not: see below.
+   small. `serve` is not: see below. **Three of the four landed in the fifth
+   slice** — `from-json`, `routes` and `--profile`, the last by replacement
+   rather than by port. `serve` and `dev` are the remainder, and the slice
+   prices what is left of them.
 5. **The generator path is last**, because it is the only consumer that gets
    SLOWER and less available when it moves: `wasm-gen` needs clang and a wasi
    sysroot, and `vyrn check` on a machine without a toolchain is a thing that
@@ -4106,14 +4109,19 @@ The order is fixed by what has no replacement, not by what is easiest.
 - **`vyrn serve` and `vyrn dev`.** One live instance, `main` run once, module
   state persisting across requests, and a Rust accept loop calling back into
   it per request. The compiled route runs a module to completion and exits.
-  Nothing in this RFC or `PLAN-0125-runtime.md` designs a resident instance
-  the host calls into, and three test suites spawn it.
+  The fifth slice designed and measured the resident instance — it works, and
+  it is cheap — but three pieces of the port are still missing, and one of them
+  (`serveStream`) is a hole in both compiling backends rather than a hole in
+  the host. Three test suites spawn it.
 - **The generator path without clang.** `vyrn check` runs every `gen fn`
   today with no toolchain at all. After the deletion it cannot.
 - **The oracle.** Deleting the reference semantics leaves the fixture files
   as the only statement of what a program prints, and they were recorded from
   the thing being deleted.
-- **`vyrn run --profile`.** The flag reports the interpreter's own steps.
+- **`vyrn run --profile`.** Closed by the fifth slice, by replacement: under
+  `--engine wasm` the rows are the phases of the compile and the run, and the
+  count is wasmtime's fuel. There is no per-function table and there will not
+  be one without instrumenting bytes nobody ships.
 
 #### The one gate that would prove the deletion safe
 
@@ -4364,6 +4372,63 @@ change — a caller that timed a span itself and already knows it is profiling.
 Under `--engine interp`, and for `check --profile`, nothing moves: the
 tree-walker's per-function rows are still what those print, and `check
 --profile` measures generation, which is interpreted.
+
+**`serve` and `dev` are NOT ported, and this is what stands in the way.** The
+census called the resident instance "designed nowhere". It is designed here,
+and the cheap half of it is measured; three pieces remain, and one of them is
+not the host's.
+
+**The resident instance works, and it is nearly free.** `wasmrun::open` is now
+split out of `run` — compile, link, instantiate, everything before `_start` —
+because an instance can outlive one `_start` and something has to open it
+either way. Two probes beside it (`src/wasmrun.rs`, `mod tests`) run a program
+with module state and one `export extern fn`, and they say:
+
+- **`proc_exit` unwinds the call, not the store.** `_start` runs `main` to its
+  exit, and the `Store` and `Instance` are still usable afterwards. Module
+  state keeps what `main` wrote: the probe's `main` sets a counter to 100 and
+  three later calls through the export return 101, 102 and 103. That is the
+  property `vyrn serve` needs and the property one fresh instance per request
+  cannot have — the same disagreement the `test-state` row records.
+- **An answer on a resident instance costs 11 ns.** Against 839 µs for the
+  fresh-instance route, in release, 1,000 calls against 20. The fresh column
+  recompiles the module, because `open` does; a serving host would compile
+  once and instantiate per request, and the profile above prices THAT at
+  159 µs. Either way the resident instance is the right shape, and it is not
+  the expensive part of anything.
+
+**What remains, exactly.**
+
+1. **`serveStream` traps in both compiling backends.** `vyrn_codegen`'s
+   `serve_stream_trap` is emitted by the textual emitter and by the direct one,
+   at the site, as a runtime trap — RFC-0074 M3a wrote it that way because
+   `std/http`'s `mount` reaches the arm whether or not a program mounts a live
+   route. So SSE and WebSocket answers — `ServeCall::Next` and `Close`, the
+   whole streaming half of the serve protocol — have no compiled route at all,
+   and `examples/bin/server.vyrn` mounts two of them. This is a hole in the
+   emitters, not in the host, and it is the largest of the three.
+2. **There is no door for `handle`.** The direct backend exports `_start` and
+   RFC-0012's `export extern fn` names, and `handle` is neither. A serving host
+   needs a synthesized `export extern fn` wrapper, in the shape the `routes`
+   port above already uses for `mountedRows`.
+3. **There is no marshalling for `Request` and `Response`.** The interpreter
+   reads `ServeRequest` and `ServeResponse` straight out of its `Val`s. Across
+   the wasm boundary a `String` argument is one pointer into the guest's memory
+   and the caller allocates with `__vyrn_malloc` (RFC-0089 M1a's `{ len, cap }`
+   header; `web/wasi-min.js` is the working reference), so the two records have
+   to cross as text — and both carry a `Map<String, String>` of headers, so the
+   text needs a reader on the guest side. `std/jsonread` can be that reader,
+   at the cost of linking it into every served program.
+
+`--workers N` is not on this list. It is N stores instead of N interpreters,
+and the gate in front of it — `checker::module_state_use`, which refuses a
+`handle` that touches module state — is a checker analysis and outlives the
+interpreter untouched.
+
+Nothing about `serve` or `dev` changed in this slice. `serve_cmd` still takes
+no engine and still serves from the interpreter, which is what the census row
+says, and the three suites that spawn it (`serve`, `rpc`, `universal_pages`)
+run against exactly what they ran against before.
 
 ### M6 — the other two judgments
 

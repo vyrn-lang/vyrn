@@ -137,6 +137,9 @@ struct Host {
     root: PathBuf,
     started: std::time::Instant,
     mem: Option<Memory>,
+    /// How long Cranelift took over the module. Measured in [`open`] and
+    /// reported by [`run`], which is on the other side of the split.
+    translate: std::time::Duration,
 }
 
 /// One engine for the process. Cranelift's default is speed, which is what the
@@ -168,7 +171,56 @@ fn engine(metered: bool) -> &'static Engine {
 /// terms (`error: ..` on fd 2, then `proc_exit(1)`) is an `Ok` with code 1,
 /// because that is the program's output and not this host's.
 pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
-    let engine = engine(run.meter);
+    let clock = std::time::Instant::now();
+    let (mut store, inst) = open(bytes, run.meter, &run)?;
+    // `open` compiles AND instantiates, so the compile comes back out of it and
+    // the rest of the span is the instantiation.
+    let translate = store.data().translate;
+    let instantiate = clock.elapsed().saturating_sub(translate);
+    let start = inst
+        .get_typed_func::<(), ()>(&mut store, "_start")
+        .map_err(|e| format!("_start: {e}"))?;
+    let clock = std::time::Instant::now();
+    let code = match start.call(&mut store, ()) {
+        // `_start` always ends in `proc_exit`; a plain return is exit 0 too.
+        Ok(()) => 0,
+        Err(e) => match e.downcast_ref::<Exit>() {
+            Some(Exit(code)) => *code,
+            // A trap the program did not spell — a wasm `unreachable`, an
+            // out-of-bounds memory access. Not program output, so the wording
+            // is this host's; the `wasmtime` CLI prints its own around the same
+            // trap text (recorded in RFC-0125 §3 M5).
+            None => {
+                let msg = format!("error: {}\n", first_line(&format!("{e:?}")));
+                write_err(store.data_mut(), msg.as_bytes());
+                1
+            }
+        },
+    };
+    let meter = run.meter.then(|| Meter {
+        translate,
+        instantiate,
+        run: clock.elapsed(),
+        fuel: u64::MAX - store.get_fuel().unwrap_or(u64::MAX),
+    });
+    let host = store.into_data();
+    Ok(Outcome {
+        code,
+        stdout: host.stdout.unwrap_or_default(),
+        stderr: host.stderr.unwrap_or_default(),
+        meter,
+    })
+}
+
+/// Compile `bytes`, link this host to it, and instantiate — everything a run
+/// does before `_start` is called.
+///
+/// Split out of [`run`] because an instance can outlive one `_start`, and
+/// something has to open it either way. RFC-0125 §3 M5's fifth slice measures a
+/// RESIDENT one through this door (`the_resident_instance_answers_after_start`),
+/// which is the shape `vyrn serve` would need.
+fn open(bytes: &[u8], meter: bool, run: &Run) -> Result<(Store<Host>, wasmtime::Instance), String> {
+    let engine = engine(meter);
     let clock = std::time::Instant::now();
     let module = Module::new(engine, bytes).map_err(|e| format!("wasm: {e:?}"))?;
     let translate = clock.elapsed();
@@ -223,7 +275,7 @@ pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
                 e
             })
             .collect(),
-        stdin_prefix: run.stdin_prefix,
+        stdin_prefix: run.stdin_prefix.clone(),
         stdout: run.capture_stdout.then(Vec::new),
         stderr: run.capture_stderr.then(Vec::new),
         files: HashMap::new(),
@@ -232,55 +284,22 @@ pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
         root,
         started: std::time::Instant::now(),
         mem: None,
+        translate,
     };
-    let clock = std::time::Instant::now();
     let mut store = Store::new(engine, host);
     // A budget nothing can exhaust: the counter is here to be READ, not to stop
     // the program, so `--profile` must not turn a long run into a trap.
-    if run.meter {
+    if meter {
         store.set_fuel(u64::MAX).map_err(|e| e.to_string())?;
     }
     let inst = linker
         .instantiate(&mut store, &module)
         .map_err(|e| format!("instantiate: {e}"))?;
-    let start = inst
-        .get_typed_func::<(), ()>(&mut store, "_start")
-        .map_err(|e| format!("_start: {e}"))?;
     store.data_mut().mem = match inst.get_export(&mut store, "memory") {
         Some(wasmtime::Extern::Memory(m)) => Some(m),
         _ => return Err("the module exports no memory".into()),
     };
-    let instantiate = clock.elapsed();
-    let clock = std::time::Instant::now();
-    let code = match start.call(&mut store, ()) {
-        // `_start` always ends in `proc_exit`; a plain return is exit 0 too.
-        Ok(()) => 0,
-        Err(e) => match e.downcast_ref::<Exit>() {
-            Some(Exit(code)) => *code,
-            // A trap the program did not spell — a wasm `unreachable`, an
-            // out-of-bounds memory access. Not program output, so the wording
-            // is this host's; the `wasmtime` CLI prints its own around the same
-            // trap text (recorded in RFC-0125 §3 M5).
-            None => {
-                let msg = format!("error: {}\n", first_line(&format!("{e:?}")));
-                write_err(store.data_mut(), msg.as_bytes());
-                1
-            }
-        },
-    };
-    let meter = run.meter.then(|| Meter {
-        translate,
-        instantiate,
-        run: clock.elapsed(),
-        fuel: u64::MAX - store.get_fuel().unwrap_or(u64::MAX),
-    });
-    let host = store.into_data();
-    Ok(Outcome {
-        code,
-        stdout: host.stdout.unwrap_or_default(),
-        stderr: host.stderr.unwrap_or_default(),
-        meter,
-    })
+    Ok((store, inst))
 }
 
 fn first_line(s: &str) -> &str {
@@ -805,4 +824,120 @@ fn fill(data: &mut [u8], strings: &[Vec<u8>], ptrs: i32, buf: i32) -> i32 {
         at += s.len() as i32;
     }
     SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One program with module state and a door the host can knock on.
+    const PROBE: &str = r#"let mut hits = 0
+
+export extern fn bump() -> Int64 {
+    hits = hits + 1
+    return hits
+}
+
+fn main() -> Int64 {
+    hits = 100
+    return 0
+}
+"#;
+
+    fn probe_bytes() -> Vec<u8> {
+        let dir = std::env::temp_dir().join("vyrn-resident");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("probe.vyrn");
+        std::fs::write(&file, PROBE).unwrap();
+        let key = file.to_string_lossy().replace('\\', "/");
+        let program = crate::load_program(&key, PROBE).expect("the probe loads");
+        vyrn_codegen::direct::compile(&program).expect("the probe compiles")
+    }
+
+    fn quiet() -> Run {
+        Run {
+            argv: vec!["probe.vyrn".to_string()],
+            stdin_prefix: Vec::new(),
+            capture_stdout: true,
+            capture_stderr: true,
+            meter: false,
+        }
+    }
+
+    /// RFC-0125 §3 M5, the `serve` row: what a RESIDENT instance costs.
+    ///
+    /// `vyrn serve` holds one live interpreter, runs `main` once and lets module
+    /// state live across requests. The compiled route runs a module to
+    /// completion and exits. This is the probe the census asked for, and it
+    /// answers the mechanical half of the question: a `Store` and an `Instance`
+    /// outlive `_start` — `proc_exit` unwinds the call, not the store — module
+    /// state keeps what `main` wrote, and the WASI host answers a call made
+    /// after the exit exactly as it answered one before.
+    ///
+    /// What it does NOT answer is the rest of the row, and the slice's prose
+    /// says so: there is no door for `handle`, no marshalling for `Request` and
+    /// `Response`, and `serveStream` traps in both compiling backends.
+    #[test]
+    fn a_resident_instance_answers_after_start_and_keeps_its_state() {
+        let bytes = probe_bytes();
+        let run = quiet();
+        let (mut store, inst) = open(&bytes, false, &run).expect("open");
+        let start = inst
+            .get_typed_func::<(), ()>(&mut store, "_start")
+            .expect("_start");
+        // `_start` ends in `proc_exit`, which reaches the host as `Exit`. The
+        // store is not poisoned by it.
+        match start.call(&mut store, ()) {
+            Err(e) => assert_eq!(e.downcast_ref::<Exit>().map(|e| e.0), Some(0), "{e:?}"),
+            Ok(()) => {}
+        }
+        let bump = inst
+            .get_typed_func::<(), i64>(&mut store, "bump")
+            .expect("the export is a door");
+        // 100 is what `main` wrote. Three calls on ONE instance count on from
+        // it, which is the property `vyrn serve` needs and the property one
+        // fresh instance per request cannot have.
+        assert_eq!(bump.call(&mut store, ()).expect("first"), 101);
+        assert_eq!(bump.call(&mut store, ()).expect("second"), 102);
+        assert_eq!(bump.call(&mut store, ()).expect("third"), 103);
+    }
+
+    /// The other half of the same row: what one answer costs, resident against
+    /// fresh.
+    ///
+    /// A number rather than an assertion about time — the machine runs other
+    /// worktrees' gates — so this asserts only that both routes work and prints
+    /// the pair with `--nocapture`. The slice quotes what it measured.
+    #[test]
+    fn a_resident_answer_is_cheaper_than_a_fresh_instance() {
+        let bytes = probe_bytes();
+        let run = quiet();
+        let (mut store, inst) = open(&bytes, false, &run).expect("open");
+        let start = inst
+            .get_typed_func::<(), ()>(&mut store, "_start")
+            .expect("_start");
+        let _ = start.call(&mut store, ());
+        let bump = inst.get_typed_func::<(), i64>(&mut store, "bump").unwrap();
+        let n = 1000;
+        let clock = std::time::Instant::now();
+        for _ in 0..n {
+            bump.call(&mut store, ()).expect("resident call");
+        }
+        let resident = clock.elapsed() / n;
+
+        let m = 20;
+        let clock = std::time::Instant::now();
+        for _ in 0..m {
+            let (mut s, i) = open(&bytes, false, &run).expect("open");
+            let start = i.get_typed_func::<(), ()>(&mut s, "_start").unwrap();
+            let _ = start.call(&mut s, ());
+            i.get_typed_func::<(), i64>(&mut s, "bump")
+                .unwrap()
+                .call(&mut s, ())
+                .expect("fresh call");
+        }
+        let fresh = clock.elapsed() / m;
+        eprintln!("resident {resident:?} per answer, fresh {fresh:?} per answer");
+        assert!(resident < fresh, "resident {resident:?}, fresh {fresh:?}");
+    }
 }
