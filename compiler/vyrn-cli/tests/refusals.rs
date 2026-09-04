@@ -816,6 +816,74 @@ fn the_shapes_rule_ones_unit_tests_pinned_are_still_refused() {
     );
 }
 
+/// A nullary constructor is a value with no owner, not a name (RFC-0126 §8.8).
+///
+/// `take(None)` twice hands the callee two values. The checker keyed rule 1 on
+/// the bare name a nullary variant parses as, so it reported the second as a
+/// use of the first — of `None`, of a user enum's `Nothing`, at a call, across
+/// a branch, around a loop. Every engine runs these programs; the kernel never
+/// had the defect, because a constructor lowers to a value and not to a name.
+///
+/// Asked of both passes, because the checker is the one that was wrong and the
+/// answer has to stay right when the next rule leaves it.
+#[test]
+fn a_nullary_constructor_is_a_value_and_not_a_name() {
+    const M: &str = "type Maybe = | Nothing | Just(String) \
+                     fn takeM(m: consume Maybe) -> Int64 { return 0 } ";
+    const O: &str = "fn takeO(o: consume Option<String>) -> Int64 { return 0 } ";
+    let cases: &[(&str, String)] = &[
+        (
+            "a builtin variant twice",
+            format!("{O} fn main() -> Int64 {{ let a = takeO(None) let b = takeO(None) return a + b }}"),
+        ),
+        (
+            "a declared variant twice",
+            format!("{M} fn main() -> Int64 {{ let a = takeM(Nothing) let b = takeM(Nothing) return a + b }}"),
+        ),
+        (
+            "one on each branch and one after",
+            format!(
+                "{O} fn main() -> Int64 {{ let mut t = 0 \
+                 if t > 0 {{ t = t + takeO(None) }} else {{ t = t + takeO(None) }} \
+                 return t + takeO(None) }}"
+            ),
+        ),
+        (
+            "one every turn of a loop and one after",
+            format!(
+                "{M} fn main() -> Int64 {{ let mut t = 0 let mut i = 0 \
+                 while i < 2 {{ t = t + takeM(Nothing) i = i + 1 }} \
+                 return t + takeM(Nothing) }}"
+            ),
+        ),
+    ];
+    let dir = common::scratch("nullary-constructors");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, src) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        for kernel_only in [false, true] {
+            let (ok, text) = refusal_in(dir.to_path_buf(), &name, kernel_only);
+            if !ok {
+                let by = if kernel_only {
+                    "the kernel"
+                } else {
+                    "the compiler"
+                };
+                bad.push(format!(
+                    "{what}, {by}:\n    {}",
+                    text.replace('\n', "\n    ")
+                ));
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a nullary constructor is read as a name:\n  {}",
+        bad.join("\n  ")
+    );
+}
+
 /// Every program under `tests/unlicensed/` is a counterexample, and every
 /// counterexample is a program.
 #[test]
@@ -1367,7 +1435,7 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("a rule only the checker gives", 723),
         ("placement rows for the engines", 2360),
         ("a fix menu", 73),
-        ("shared machinery", 3582),
+        ("shared machinery", 3613),
         ("tests", 2069),
     ];
     assert_eq!(got, want, "the structural census has moved");

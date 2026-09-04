@@ -2418,6 +2418,22 @@ impl MoveCheck<'_> {
         self.globals.contains(name) && self.vars.borrow().frame_of(name) == Some(0)
     }
 
+    /// Whether `name` is a NULLARY constructor rather than a binding.
+    ///
+    /// `None`, `Nothing`, `Leaf` — a variant with no payload parses as a bare
+    /// name, and a bare name is what every rule about ownership keys on. It is
+    /// a value with no owner: nothing binds it, nothing releases it, and two
+    /// mentions of it are two values (RFC-0126 §8.8). Reading it as a binding
+    /// made `take(None)` twice a use after a take.
+    ///
+    /// The builtins are named beside the declared ones because `Option` and
+    /// `Result` are not `Type::Enum` declarations, so `Declared::constructs`
+    /// does not answer for their variants.
+    fn names_a_constructor(&self, name: &str) -> bool {
+        self.decl.constructs(name)
+            || matches!(name, "None" | "Some" | "Ok" | "Err" | "Success" | "Failure")
+    }
+
     /// Whether `name` names a borrow here.
     fn borrow_of(&self, name: &str) -> Option<Borrow> {
         self.borrows.borrow().get(name).cloned().flatten()
@@ -4588,10 +4604,9 @@ impl MoveCheck<'_> {
                         // (round twenty-nine: the mislabel was invisible
                         // while `Option<Handle>` had no release kind, and
                         // then it stood every such binding's release down).
-                        if root == path
-                            && !self.decl.constructs(&root)
-                            && !matches!(root.as_str(), "None" | "Some" | "Ok" | "Err")
-                        {
+                        // The reading is [`MoveCheck::names_a_constructor`],
+                        // which the `consume`-argument sites ask too.
+                        if root == path && !self.names_a_constructor(&root) {
                             self.took(&root, Gone::Aliased { line: *line });
                             place = Some("a second name for a value it did not take");
                         }
@@ -6243,21 +6258,30 @@ impl MoveCheck<'_> {
                     self.note_arg_temp(arg, name, i, *line);
                     if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
                         self.check_handover(arg, name, *line)?;
+                        // A NULLARY constructor is a value with no owner, not a
+                        // name (RFC-0126 §8.8): `take(None)` twice hands the
+                        // callee two values, and reading the second as a use of
+                        // the first refused a program every engine runs.
                         if let Expr::Var { name: v, .. } = arg {
-                            self.took(
-                                v,
-                                Gone::Moved {
-                                    line: *line,
-                                    by: format!("`{}(..)`", crate::parser::method_surface(name)),
-                                },
-                            );
-                            consumed.or_insert(
-                                v.clone(),
-                                Consumption::by_capability(
-                                    *line,
-                                    format!("`{}(..)`", crate::parser::method_surface(name)),
-                                ),
-                            );
+                            if !self.names_a_constructor(v) {
+                                self.took(
+                                    v,
+                                    Gone::Moved {
+                                        line: *line,
+                                        by: format!(
+                                            "`{}(..)`",
+                                            crate::parser::method_surface(name)
+                                        ),
+                                    },
+                                );
+                                consumed.or_insert(
+                                    v.clone(),
+                                    Consumption::by_capability(
+                                        *line,
+                                        format!("`{}(..)`", crate::parser::method_surface(name)),
+                                    ),
+                                );
+                            }
                         }
                     } else if self.decl.constructs(name) {
                         // Round fifty-six: only a value that can CARRY heap is
@@ -6553,11 +6577,18 @@ impl MoveCheck<'_> {
                     );
                     if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
                         self.check_handover(arg, name, *line)?;
+                        // A nullary constructor is not a name — see the
+                        // ordinary call above (RFC-0126 §8.8).
                         if let Expr::Var { name: v, .. } = arg {
-                            consumed.or_insert(
-                                v.clone(),
-                                Consumption::by_capability(*line, format!("`spawn {name}(..)`")),
-                            );
+                            if !self.names_a_constructor(v) {
+                                consumed.or_insert(
+                                    v.clone(),
+                                    Consumption::by_capability(
+                                        *line,
+                                        format!("`spawn {name}(..)`"),
+                                    ),
+                                );
+                            }
                         }
                     }
                 }
