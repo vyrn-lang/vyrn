@@ -336,7 +336,13 @@ pub enum St {
     /// scope's own release, an argument temporary, a payload binder, which
     /// [`NameInfo::arg_drop`], [`NameInfo::receiver`] and [`Arm::frees`] name
     /// instead.
-    Drop(Name, Site),
+    ///
+    /// The last field is the line of the `drop` a reader WROTE, and 0 for
+    /// every release this pass places. A refusal at a source `drop` names
+    /// that line and calls the taker `drop`; a refusal at a placed release
+    /// names neither, because a reader has no such statement to change
+    /// (RFC-0125 §3 M3, rows 06, 20 and 21).
+    Drop(Name, Site, usize),
     /// A release row the plan placed at an exit, keyed as the plan keys it,
     /// walking the name around `holes`. The kernel checks the set against
     /// the holes its state has there: a row that skips a place still held
@@ -540,7 +546,7 @@ impl Body {
                     self.val(value),
                     old
                 )),
-                St::Drop(n, _) => out.push_str(&format!("{pad}drop {}\n", self.spell(*n))),
+                St::Drop(n, _, _) => out.push_str(&format!("{pad}drop {}\n", self.spell(*n))),
                 St::Row { name, holes, .. } => out.push_str(&format!(
                     "{pad}drop {} minus {:?}\n",
                     self.spell(*name),
@@ -1129,7 +1135,7 @@ impl<'a> Builder<'a> {
     fn bind(&mut self, n: Name, rhs: Rhs, out: &mut Vec<St>) {
         out.push(St::Let(n, rhs));
         for t in std::mem::take(&mut self.after_of_rhs) {
-            out.push(St::Drop(t, Site::None));
+            out.push(St::Drop(t, Site::None, 0));
         }
     }
 
@@ -1654,12 +1660,12 @@ impl<'a> Builder<'a> {
                     if self.body.names[it as usize].releases
                         && !self.placed.contains_key(&(Exit::Scrutinee, sid))
                     {
-                        out.push(St::Drop(it, Site::None));
+                        out.push(St::Drop(it, Site::None, 0));
                     }
                 } else if *consuming && !self.placed.contains_key(&(Exit::Scrutinee, sid)) {
                     // The loop took the container and the plan placed no row
                     // for it, so the loop gives it back here.
-                    out.push(St::Drop(it, Site::None));
+                    out.push(St::Drop(it, Site::None, 0));
                 }
                 self.drops_at(Exit::Scrutinee, sid, out)?;
             }
@@ -1679,7 +1685,7 @@ impl<'a> Builder<'a> {
                 {
                     return Ok(());
                 }
-                out.push(St::Drop(n, Site::None));
+                out.push(St::Drop(n, Site::None, *line));
             }
             Stmt::Expr(e) => {
                 let ty = self.ty_of(e).unwrap_or(Type::Unit);
@@ -1688,12 +1694,12 @@ impl<'a> Builder<'a> {
                     let t = self.temp(ty, e.line());
                     self.bind(t, rhs, out);
                     if self.discards(e) {
-                        out.push(St::Drop(t, Site::Node(sid)));
+                        out.push(St::Drop(t, Site::Node(sid), 0));
                     }
                 } else {
                     out.push(St::Do(rhs, e.line()));
                     for t in std::mem::take(&mut self.after_of_rhs) {
-                        out.push(St::Drop(t, Site::None));
+                        out.push(St::Drop(t, Site::None, 0));
                     }
                 }
             }
@@ -1776,7 +1782,7 @@ impl<'a> Builder<'a> {
     fn close_streams(&self, out: &mut Vec<St>) {
         for it in self.stream_loops.iter().rev() {
             if self.body.names[*it as usize].releases {
-                out.push(St::Drop(*it, Site::None));
+                out.push(St::Drop(*it, Site::None, 0));
             }
         }
     }
@@ -1813,9 +1819,9 @@ impl<'a> Builder<'a> {
                 // reader of the fold gets back the row's own name.
                 self.body.names[t as usize].source = name.clone();
                 out.push(St::Let(t, Rhs::Take(place)));
-                out.push(St::Drop(t, at));
+                out.push(St::Drop(t, at, 0));
             } else {
-                out.push(St::Drop(n, at));
+                out.push(St::Drop(n, at, 0));
             }
         }
         Ok(())
@@ -2217,7 +2223,7 @@ impl<'a> Builder<'a> {
         };
         self.body.names[r as usize].holes = holes;
         self.body.names[r as usize].receiver_malloc = malloc;
-        out.push(St::Drop(r, Site::None));
+        out.push(St::Drop(r, Site::None, 0));
     }
 
     /// An expression in a TAKE position: a `let`, a `return`, a store, a part
@@ -2723,7 +2729,7 @@ impl<'a> Builder<'a> {
                             if let Some((_, _, holes)) = rows.iter().find(|(n, _, _)| n == src) {
                                 self.body.names[*b as usize].holes =
                                     holes.iter().map(|h| format!(".{h}")).collect();
-                                body.push(St::Drop(*b, Site::None));
+                                body.push(St::Drop(*b, Site::None, 0));
                                 frees.push(*b);
                             }
                         }
@@ -3375,7 +3381,7 @@ fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
             } => {
                 out.stores.insert(*at, *releases);
             }
-            St::Drop(n, at) => match at {
+            St::Drop(n, at, _) => match at {
                 Site::Node(at) => {
                     out.discarded.insert(*at);
                 }
@@ -3455,7 +3461,7 @@ fn fold_frame(body: &Body, proto: &Owned, out: &mut Facts) {
 fn collect_drops(stmts: &[St], out: &mut std::collections::HashSet<Name>) {
     for s in stmts {
         match s {
-            St::Drop(n, _) => {
+            St::Drop(n, _, _) => {
                 out.insert(*n);
             }
             St::If { then, els, .. } => {

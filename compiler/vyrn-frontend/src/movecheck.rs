@@ -5324,44 +5324,15 @@ impl MoveCheck<'_> {
             // `drop name;` consumes the binding: using it afterward is a
             // use-after-drop, caught by the same machinery as `consume`.
             Stmt::Drop { name, line } => {
-                if let Some(c) = consumed.get(name) {
-                    let (cline, consumer) = (c.line, &c.by);
-                    return Err(menu(
-                        *line,
-                        format!(
-                            "`{name}` is dropped here but was already consumed by \
-                             {consumer} on line {cline}"
-                        ),
-                        c.fixes.clone(),
-                    ));
-                }
-                // Rule 2 at the drop. `drop x` reclaims storage, and a borrow
-                // names storage somebody else owns — so `let owned = box.items ;
-                // drop owned` hands back a buffer the record still holds. It
-                // leaked one owner short while nothing released a record's
-                // fields; RFC-0092 M3 releases them, and the native binary then
-                // corrupts its heap (`examples/fieldmut.vyrn`, `0xC0000374`).
+                // Two of this statement's three refusals are the kernel's now
+                // (RFC-0125 §3 M3, rows 20 and 21): a drop of what a `consume`
+                // parameter already took, and rule 2 at the drop — a borrow
+                // names storage somebody else owns, and the place that owns a
+                // value releases it. The core carries the `drop`'s own line,
+                // so both sentences stand where the reader wrote them.
                 //
-                // The same sentence a store gets, at the third place a value can
-                // leave — which is what stops one program from having two
-                // verdicts a keyword apart.
-                if let Some(b) = self.borrow_of(name) {
-                    return Err(menu(
-                        *line,
-                        format!("`{name}` may not be dropped — it is {}", b.what(name)),
-                        vec![
-                            format!(
-                                "`consume` the place where `{name}` is bound, so `{name}` takes \
-                                 the value rather than naming it"
-                            ),
-                            format!(
-                                "delete the `drop` — the place that owns it releases it \
-                                 (RFC-0089 rule 4)"
-                            ),
-                        ],
-                    ));
-                }
-                // A PARTIAL take left a hole in the binding (RFC-0093): the
+                // The third stays: a PARTIAL take left a hole in the binding
+                // (RFC-0093), and the kernel accepts that program. The
                 // taken place belongs to whoever received it, and `drop`
                 // reclaims storage BY TYPE — it cannot be told to skip the
                 // places a take handed away. Dropping here would free what

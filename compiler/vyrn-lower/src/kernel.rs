@@ -578,12 +578,35 @@ impl<'b> Kernel<'b> {
                 )
                 .unwrap_err();
         }
+        // A `drop` is the one exit whose sentence names no place, because its
+        // ways out are both about the BINDING: take the value there, or let
+        // the place that owns it release it (RFC-0089 rule 4, RFC-0125 §3 M3,
+        // row 21).
+        if by == "a `drop`" {
+            return self
+                .refuse_at::<()>(
+                    self.here,
+                    menu(
+                        format!(
+                            "`{s}` may not be dropped — it is read out of a place that owns it"
+                        ),
+                        vec![
+                            format!(
+                                "`consume` the place where `{s}` is bound, so `{s}` takes the \
+                                 value rather than naming it"
+                            ),
+                            "delete the `drop` — the place that owns it releases it (RFC-0089 \
+                             rule 4)"
+                                .to_string(),
+                        ],
+                    ),
+                )
+                .unwrap_err();
+        }
         let msg = if by.ends_with("(..)`") {
             format!("`{s}` may not be passed to a `consume` parameter via {by} — {what}")
         } else if by == "a `return`" {
             format!("`{s}` may not be returned — {what}")
-        } else if by == "a `drop`" {
-            format!("`{s}` may not be dropped — {what}")
         } else if by == "a literal" {
             format!("`{s}` may not be stored into the literal — {what}")
         } else {
@@ -622,12 +645,20 @@ impl<'b> Kernel<'b> {
         let s = self.src(n);
         let read = format!("{s}{}", path.replace(".[]", "[..]"));
         let here = self.here;
+        // A `drop` a reader wrote takes the value as a `consume` parameter
+        // does, and the checker says so in the same sentence (row 06). The
+        // note under it is about a READ, so a second `drop` does not print
+        // it (row 20).
+        let note = if what == "dropped" {
+            ""
+        } else {
+            "\n  (a `consume` parameter takes ownership; the value can't be used afterward)"
+        };
         let r = match &st.taker[n as usize] {
-            Some((l, by)) if by.ends_with("(..)`") => self.refuse_at::<()>(
+            Some((l, by)) if by.ends_with("(..)`") || by == "`drop`" => self.refuse_at::<()>(
                 here,
                 format!(
-                    "`{read}` is {what} here but was already consumed by {by} on line {l}\n  \
-                     (a `consume` parameter takes ownership; the value can't be used afterward)"
+                    "`{read}` is {what} here but was already consumed by {by} on line {l}{note}"
                 ),
             ),
             Some((l, by)) if !by.is_empty() => self.refuse_at::<()>(
@@ -743,7 +774,14 @@ impl<'b> Kernel<'b> {
             return Ok(());
         }
         if st.own[n as usize] == Own::Gone {
-            return Err(self.used_after(st, n, "released"));
+            // A `drop` a reader wrote is worded as the reader wrote it; a
+            // release this pass placed is worded as a release (row 20).
+            let what = if self.by == "`drop`" {
+                "dropped"
+            } else {
+                "released"
+            };
+            return Err(self.used_after(st, n, what));
         }
         if st.own[n as usize] == Own::Held {
             let state = self.holes_owned(st, n);
@@ -1135,7 +1173,15 @@ impl<'b> Kernel<'b> {
                 self.here = *line;
                 self.by = "a `match`".to_string();
             }
-            St::Drop(n, _) | St::Row { name: n, .. } => {
+            // A `drop` a reader WROTE is a statement with a line, and the
+            // taker it records is the word the reader used. A release this
+            // pass placed has neither: it stands at the binding, and nothing
+            // took the value (RFC-0125 §3 M3, rows 06, 20 and 21).
+            St::Drop(n, _, line) if *line > 0 => {
+                self.here = *line;
+                self.by = "`drop`".to_string();
+            }
+            St::Drop(n, ..) | St::Row { name: n, .. } => {
                 self.here = self.body.names[*n as usize].line;
                 self.by = String::new();
             }
@@ -1285,7 +1331,7 @@ impl<'b> Kernel<'b> {
                     }
                 }
             }
-            St::Drop(n, _) => {
+            St::Drop(n, ..) => {
                 let holes = self.body.names[*n as usize].holes.clone();
                 self.drop(st, *n, &holes, None)?;
                 self.wrote(st, &Place::Name(*n), self.src(*n));

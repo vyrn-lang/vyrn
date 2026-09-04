@@ -33,8 +33,8 @@
 //!     survives `VYRN_NO_MOVECHECK=1` because another pass gives it. Nothing
 //!     is owed here, and the close-out's attribution is corrected.
 //!
-//! A row whose site has already LEFT `movecheck.rs` — rows 12, 08, 09, 04, 05
-//! and 28, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the two
+//! A row whose site has already LEFT `movecheck.rs` — rows 12, 08, 09, 04, 05,
+//! 28, 20 and 21, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the two
 //! must still agree. The row is what stops the sentence moving after the
 //! deletion, so it stays in the census.
 
@@ -236,18 +236,14 @@ fn census() -> Vec<Row> {
             "rule 1 at the drop: what a `consume` parameter took is gone",
             "RFC-0089",
             "`a` is dropped here but was already consumed by `take(..)` on line 6",
-            Kernel::Other("was already consumed by `take(..)` on line 6"),
+            Kernel::Same,
         ),
         row(
             "r21_drop_a_borrow.vyrn",
             "rule 4 at the drop: the place that owns a value releases it",
             "RFC-0089",
             "`owned` may not be dropped — it is read out of a place that owns it",
-            // The sentence is the checker's; the line is the binding's, because
-            // a `Drop` in the core carries none.
-            Kernel::Other(
-                "`owned` may not be dropped — it is read out of `b.items`, a place that owns it",
-            ),
+            Kernel::Same,
         ),
         row(
             "r22_drop_with_a_hole.vyrn",
@@ -1280,7 +1276,7 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("a rule only the checker gives", 723),
         ("placement rows for the engines", 2360),
         ("a fix menu", 73),
-        ("shared machinery", 3611),
+        ("shared machinery", 3582),
         ("tests", 2166),
     ];
     assert_eq!(got, want, "the structural census has moved");
