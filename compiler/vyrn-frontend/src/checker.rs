@@ -8558,12 +8558,6 @@ impl<'a> Checker<'a> {
             // either way. It is not the answer there — the payload is (see
             // [`Checker::mentions_open_param`]).
             let inner_expected = inner_expected.filter(|want| !self.is_open_param(want));
-            if matches!(
-                crate::types::resolve(&aty, self.types),
-                Type::Option(_) | Type::Result(..)
-            ) {
-                return Err(cerr!(line, "nested Option/Result is not supported in v0.1"));
-            }
             if let Some(want) = &inner_expected {
                 if !self.coercible(&aty, want) {
                     return Err(cerr!(
@@ -8594,12 +8588,6 @@ impl<'a> Checker<'a> {
                 _ => None,
             };
             let aty = self.expr(&args[0], scope, want.as_ref(), fn_ret)?;
-            if matches!(
-                crate::types::resolve(&aty, self.types),
-                Type::Option(_) | Type::Result(..)
-            ) {
-                return Err(cerr!(line, "nested Option/Result is not supported in v0.1"));
-            }
             let (mut t, mut e) = match &expected_res {
                 Some(Type::Result(t, e)) => ((**t).clone(), (**e).clone()),
                 _ => {
@@ -9093,22 +9081,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            // The v0.1 "no nested Option/Result" rule holds through inference
-            // too: `wrap(Some(1))` with `fn wrap<T>(x: T) -> Option<T>` must
-            // not materialize an Option<Option<Int>>.
             let rty = crate::types::substitute(ret, &subst);
-            let nested = params
-                .iter()
-                .map(|p| crate::types::substitute(p, &subst))
-                .chain(std::iter::once(rty.clone()))
-                .any(|t| has_nested_wrap(&t, self.types));
-            if nested {
-                return Err(cerr!(
-                    line,
-                    "nested Option/Result is not supported in v0.1 \
-                     (inferred through `{name}`)"
-                ));
-            }
             // RFC-0101 M1: `subst` is complete here and dies at the end of this
             // block. This is the one place the type arguments of a generic call
             // exist, and both backends re-solve them afterwards.
@@ -10286,40 +10259,6 @@ fn type_mentions_self(ty: &Type) -> bool {
         }
     });
     found
-}
-
-/// Apply `f` to `ty` and to every type nested inside it.
-/// Whether a type contains a directly nested `Option`/`Result` (the v0.1
-/// prohibition), anywhere inside it.
-fn has_nested_wrap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
-    // `wrapped` resolves too: a transparent alias IS the Option/Result it
-    // names everywhere else (`resolve_scrutinee`, `assignable`), so
-    // `type M = Option<Int64>` cannot launder a nesting past the ban either.
-    let wrapped = |t: &Type| {
-        matches!(
-            crate::types::resolve(t, types),
-            Type::Option(_) | Type::Result(..)
-        )
-    };
-    match ty {
-        Type::Option(t) => wrapped(t) || has_nested_wrap(t, types),
-        Type::Result(a, b) => {
-            wrapped(a) || wrapped(b) || has_nested_wrap(a, types) || has_nested_wrap(b, types)
-        }
-        Type::Array(t) | Type::ArrayN(t, _) | Type::SmallArray(t, _) | Type::Task(t) => {
-            has_nested_wrap(t, types)
-        }
-        Type::Map(k, v) => has_nested_wrap(k, types) || has_nested_wrap(v, types),
-        Type::Record(fs) => fs.iter().any(|f| has_nested_wrap(&f.ty, types)),
-        // A named type reaches here only unresolved (a generic parameter's
-        // bound, or a depth-capped `resolve`); descend when naming it made a
-        // difference, and stop when it did not — that is the cycle guard.
-        Type::Named(_) | Type::App(..) => {
-            let r = crate::types::resolve(ty, types);
-            &r != ty && has_nested_wrap(&r, types)
-        }
-        _ => false,
-    }
 }
 
 /// The line of the statement a literal's range error is attributed to. The
@@ -13639,14 +13578,17 @@ mod tests {
         assert!(e.contains("expects 1 argument(s) besides `self`"), "{e}");
     }
 
+    /// Inference may now materialize an `Option<Option<..>>` (RFC-0126 §8):
+    /// `T` solves to `Option<Int64>` here, which the v0.1 rule refused. All
+    /// three engines already boxed the inner sum in the outer's payload word —
+    /// `examples/nestedsum.vyrn` runs the shape on every one of them.
     #[test]
-    fn rejects_nested_option_via_generic_inference() {
+    fn accepts_nested_option_via_generic_inference() {
         let src = "fn wrap<T>(x: T) -> Option<T> { return Some(x) } \
                    fn main() -> Int64 { \
                        let o = wrap(Some(1)) \
                        return 0 }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("nested Option/Result"), "{e}");
+        assert!(check_src(src).is_ok());
     }
 
     #[test]
@@ -16012,15 +15954,15 @@ mod tests {
     }
 
     /// A transparent alias IS the Option it names, so `Option<M>` for
-    /// `type M = Option<Int64>` is the nested wrap the v0.1 rule refuses when
-    /// written directly.
+    /// `type M = Option<Int64>` is a nesting — accepted since RFC-0126 §8. The
+    /// alias is kept as a case because it is the one spelling where the nesting
+    /// is invisible until `resolve` runs.
     #[test]
-    fn a_transparent_alias_cannot_launder_a_nested_option() {
+    fn a_transparent_alias_may_name_a_nested_option() {
         let src = "type M = Option<Int64> \
                    fn wrap<T>(x: T) -> Option<T> { return Some(x) } \
                    fn main() -> Int64 { let m: M = None let w = wrap(m) return 0 }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("nested Option/Result"), "{e}");
+        assert!(check_src(src).is_ok());
     }
 
     /// The owned-container walk under `copy` is unbounded (cycle-guarded): an
@@ -16142,14 +16084,14 @@ mod tests {
         assert!(check_src(bad).is_err());
     }
 
-    /// Direct construction cannot launder a nested wrap through a transparent
-    /// alias either: the payload resolves before the prohibition checks it.
+    /// Direct construction of a nesting whose inner layer hides behind a
+    /// transparent alias. Paired with the inference case above, so both routes
+    /// to a nested sum stay covered (RFC-0126 §8).
     #[test]
-    fn some_refuses_a_payload_alias_that_names_an_option() {
+    fn some_accepts_a_payload_alias_that_names_an_option() {
         let src = "type M = Option<Int64> \
                    fn main() -> Int64 { let m: M = None let w = Some(m) return 0 }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("nested Option/Result"), "{e}");
+        assert!(check_src(src).is_ok());
     }
 
     /// A parameter bounded by a NON-first protocol dispatches through the
