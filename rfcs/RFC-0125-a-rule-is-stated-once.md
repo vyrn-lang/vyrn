@@ -2627,6 +2627,47 @@ Three readings of the census.
   fold at a further 71. That price stands. This slice pays the part of it that
   has no reader at all, and the record below counts what that came to.
 
+**What the deletion took, and what one reader keeps.** `own.rs` was 5,112
+lines and is 5,070. Three items went, in two commits, and not one of them is a
+table:
+
+| item | what it was | lines |
+|---|---|---|
+| `Ownership::arg_drops` | the filter that handed a backend the `Released` rows of `arg_drops`, kept after both backends began to free by type | 29 |
+| `Ownership::arg_temps` | every argument temporary with its verdict, so `rfcs/census-call-arguments.md` could be re-derived; the document is committed and no code re-derives it | 7 |
+| `Owned::declares_any` | "does ANY type declare `impl Owned`", the coarse gate `Owned::reaches_declared` replaced per type | 6 |
+
+Most of each line count is the doc comment above the item, and the first takes
+the only `impl Ownership` block with it. Two doc comments elsewhere in the file
+pointed at a deleted name and now point at what states the rule. No
+`dead_code` warning is introduced and none is silenced: `cargo check
+--workspace` prints the same five warnings before and after, all of them
+elsewhere in other crates.
+
+**No table was deleted, and the census says why for each.** Eleven per-node
+tables stand, and every one has a reader:
+
+- `arg_drops`, `discarded_results`, `edge_releases`, `receiver_frees` and
+  `receiver_holes` are read by the CORE alone — `Builder::read_val`,
+  `Builder::release_receiver`, `Builder::stmt` and `Builder::edge_drops` in
+  `compiler/vyrn-lower/src/core.rs`. Each read decides a statement the placer
+  then hands to all three engines, so the table is what the emission stands
+  on. They go when the core states the decision itself.
+- `store_owned` and `store_fresh` are read by the core, and by both compiled
+  backends at RFC-0091 M2's twelve rewritten statements.
+- `consuming_matches` is read by the core (`Builder::scrutinee`,
+  `Builder::own_the_scrutinee`) and by `frees_boxes` in both backends.
+- `arm_frees` is read by the interpreter at an `if let` and a `?`, by both
+  backends there, and by the core.
+- `receiver_malloc` and `malloc_scrutinees` are the two region stand-downs,
+  read by `Cx::receiver_malloc`, `Gen::gen_expr_inner` and
+  `Gen::register_drop`.
+- `owners`, `key_of`, `acknowledge` and `unconsumed` carry §26's finish check,
+  and the four alias helpers are not placement at all.
+
+So the 170 lines the close-out priced are unpaid, and the price is honest: it
+is what M5 and M6 collect when the core stops reading the plan it fills.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
