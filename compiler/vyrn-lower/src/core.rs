@@ -2066,8 +2066,16 @@ impl<'a> Builder<'a> {
     }
 
     /// RFC-0114 R1': the unnamed receiver of a field or element read, freed
-    /// after the read when the plan says this frame owns it. Where the plan
-    /// did not place the free, the receiver stays held and the kernel says so.
+    /// after the read because THIS FRAME owns it (RFC-0125 §3 M3, the
+    /// derivation slice).
+    ///
+    /// The plan is not asked. A receiver is pending only where the value the
+    /// place was read out of is an owned name this frame minted
+    /// ([`Builder::place`]'s fallback), which is R1′'s whole question: a
+    /// lending producer binds a borrow and mints no receiver at all, and a
+    /// producer whose type owns no heap mints an unowned one. The hole is
+    /// the field the read TOOK, and it is read off the source rather than
+    /// off the plan's row — a scalar read takes nothing and leaves none.
     ///
     /// `borrowed` says the read yields a heap value its consumer borrows
     /// (`f(x).rhs.startsWith("{")`, `weekdayLetters()[1]`) rather than a
@@ -2096,18 +2104,18 @@ impl<'a> Builder<'a> {
             }
             return;
         }
-        if !self.own.plan.receiver_free(node) {
-            return;
-        }
-        // Both emitters run the row after a SCALAR field read only, and
-        // after a heap field's take when the row carries the hole
-        // (RFC-0125 M3): a row without one stands for nothing there,
-        // and the receiver stays held for the kernel to see.
-        let holes = self.own.plan.receiver_holes_at(node);
-        if took && holes.is_empty() {
-            return;
-        }
-        self.body.names[r as usize].holes = holes.iter().map(|h| format!(".{h}")).collect();
+        let _ = node;
+        // The read that took a heap value out of the receiver leaves a hole
+        // where it was, and the release walks around it. A take the walk
+        // cannot be told to skip — an ELEMENT, which the plan spells `[]` —
+        // stands for nothing, so the receiver stays held and the kernel says
+        // so, exactly as a row without a hole did.
+        let holes: Vec<String> = match (took, e) {
+            (false, _) => Vec::new(),
+            (true, Expr::Field { field, .. }) => vec![format!(".{field}")],
+            (true, _) => return,
+        };
+        self.body.names[r as usize].holes = holes;
         self.body.names[r as usize].receiver_malloc = malloc;
         out.push(St::Drop(r, Site::None));
     }

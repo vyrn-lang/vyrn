@@ -21,6 +21,17 @@
 //!   - `receiver_frees` and `receiver_holes`, from a `St::Drop` of a name
 //!     whose `NameInfo::receiver` names the `Expr::Field` node.
 //!
+//! **The derivation slice (RFC-0125 §3 M3) changed what a difference MEANS
+//! for a table the core derives.** While the core read the plan, a diff was a
+//! filter of the plan's own set and could not disagree; and where the placer
+//! had written the row, the core's answer was the plan's answer handed back.
+//! A derived table has neither property, so the plan's side is the ANALYSIS's
+//! own answer and a difference is a real second opinion. Each is read at the
+//! source and its verdict recorded in the RFC; the direction that would free
+//! twice stays pinned, and the direction where the core states what the
+//! analysis alone does not is counted with the count pinned exactly, so a
+//! new site is read rather than absorbed.
+//!
 //! `receiver_malloc` (row 11b) is pinned one way and counted the other: the
 //! core states it from the producer it records beside that name, and a plan
 //! row the core loses would stop a free inside a `region`, while the core
@@ -399,11 +410,24 @@ fn run() {
             *counted.entry("receiver_frees").or_default() += 1;
             let plan_free = own.plan.receiver_free(*node);
             let plan_holes = own.plan.receiver_holes_at(*node);
-            if !plan_free || *core_holes != plan_holes {
+            // A hole the PLAN names and the core does not is a place a take
+            // already gave an owner, released twice: pinned. The other way
+            // round the core frees LESS than the row asks, which is the
+            // direction the derivation was built to correct, so it is
+            // counted with the free itself below.
+            if plan_free && plan_holes.iter().any(|h| !core_holes.contains(h)) {
                 diffs.push(format!(
                     "{file}: site {node}: receiver_frees: core {core_holes:?}, \
                      plan free {plan_free} holes {plan_holes:?}"
                 ));
+            }
+            // The core derives this row since the derivation slice, so the
+            // plan's is the ANALYSIS's own answer and no longer the core's
+            // fed back through the placer. Where the two differ the core is
+            // the reader every engine has, and the count is pinned so a
+            // third site is read rather than absorbed.
+            if !plan_free || *core_holes != plan_holes {
+                *counted.entry("receiver frees: core only").or_default() += 1;
             }
             // Row 11b, the region stand-down: whether a CALLEE allocated the
             // block. The emitter asks its own region depth beside it. The
@@ -423,6 +447,22 @@ fn run() {
             }
             *counted.entry("receiver_malloc: core only").or_default() +=
                 usize::from(core_malloc && !plan_malloc);
+        }
+
+        // The other direction, added by the derivation slice: a receiver the
+        // ANALYSIS frees and the core states no R1′ row for. Every engine
+        // reads "no free" out of a missing key here, so the row stands for
+        // nothing — which is the close-out's own finding about a HEAP field
+        // read: the receiver of `gqlSplitDecl(src).rhs.startsWith("{")` must
+        // outlive the consumer, so its free is the argument-temporary drop
+        // keyed by the producer and not this row. Counted, and the count is
+        // pinned, so a second such row is read at the source.
+        for node in own.plan.receiver_frees.iter().filter(|a| reached(a)) {
+            if !facts.receivers.contains_key(node) {
+                *counted
+                    .entry("receiver rows the core states nothing for")
+                    .or_default() += 1;
+            }
         }
 
         // `St::Switch`'s `consuming` is a WIDER rule than the plan's
@@ -498,6 +538,28 @@ fn run() {
             .unwrap_or(0),
         1,
         "`gqlParseQuery(query).sels`, and nothing else"
+    );
+    // RFC-0125 §3 M3, the derivation slice: the two sites in `std/graphql`
+    // the analysis alone does not state — `gqlParseQuery(query).sels` in
+    // `gqlTestProject`, whose row the placer used to write, and
+    // `gqlSplitDecl(t.source).name` in `sdl`, whose row the analysis writes
+    // without the hole the binding's take leaves. Both were the placer's
+    // answer through the plan before, so no emitted byte moves.
+    assert_eq!(
+        counted
+            .get("receiver frees: core only")
+            .copied()
+            .unwrap_or(0),
+        2,
+        "the two `std/graphql` receivers, and nothing else"
+    );
+    assert_eq!(
+        counted
+            .get("receiver rows the core states nothing for")
+            .copied()
+            .unwrap_or(0),
+        1,
+        "`gqlSplitDecl(src).rhs` in `gqlIsRecord`, and nothing else"
     );
     assert_eq!(
         counted
