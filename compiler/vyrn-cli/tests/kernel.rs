@@ -203,6 +203,7 @@ fn run_corpus() {
         vyrn_lower::install();
     }
     let mut accepted = 0usize;
+    let mut closures = 0usize;
     let mut refused: Vec<String> = Vec::new();
     let mut gaps: std::collections::BTreeMap<&'static str, usize> = Default::default();
     let mut details: std::collections::BTreeMap<(&'static str, String), usize> = Default::default();
@@ -227,6 +228,15 @@ fn run_corpus() {
         let _memo = vyrn_frontend::project::Memo::open();
         let lowered = vyrn_lower::lower(&program);
         let own = vyrn_frontend::own::analyze(&program);
+        // RFC-0125 §3 M3, the checker's deletion path: the two closures over
+        // the call graph say nothing. A function that RETAINS a borrowed
+        // parameter, or LENDS its result, breaks rule 2 or rule 3, and the
+        // kernel refuses both — so the sets the deletion track owed a kernel
+        // home for are empty everywhere. Pinned here rather than described,
+        // because a corpus program that fills one is the day the argument
+        // changes.
+        let facts = vyrn_frontend::movecheck::facts(&program);
+        closures += facts.lending.len() + facts.retains.len();
         let file = path.file_name().unwrap().to_string_lossy().to_string();
         // The module-state initializer (RFC-0013) is a body and no instance:
         // every `let` at module scope is a store into the global it names.
@@ -332,6 +342,10 @@ fn run_corpus() {
             }
         }
     }
+    assert_eq!(
+        closures, 0,
+        "a corpus function lends its result or retains a borrowed parameter;          `movecheck`'s two closures over the call graph were empty when          RFC-0125 §3 M3 recorded them, and the deletion track's plan rests on          that (`VYRN_LEND_DUMP=1 vyrn check <file>` names the seed)"
+    );
     let total_gaps: usize = gaps.values().sum();
     eprintln!(
         "kernel over the corpus: {programs} programs ({unloadable} not loadable here), \
