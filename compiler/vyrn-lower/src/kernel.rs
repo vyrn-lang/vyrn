@@ -1061,11 +1061,7 @@ impl<'b> Kernel<'b> {
                                 self.info(*n)
                             ));
                         }
-                        st.own[*n as usize] = if fresh_static {
-                            Own::Static
-                        } else {
-                            Own::Held
-                        };
+                        st.own[*n as usize] = if fresh_static { Own::Static } else { Own::Held };
                     }
                     Place::Name(_) => {}
                     other => {
