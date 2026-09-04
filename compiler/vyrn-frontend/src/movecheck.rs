@@ -399,10 +399,21 @@ pub struct Facts {
     /// `lending` names the functions whose result the caller must not release;
     /// `retains` names the `(callee, index)` positions that KEEP a borrowed
     /// parameter they are handed. Both are seeded by rule 2 and rule 3's own
-    /// recording paths, and both are EMPTY over the corpus and the site: the
-    /// kernel refuses a store, a return and a `consume` argument of a `read`
-    /// or `modify` parameter, so no function retains one and none lends its
-    /// result. They are the shadow of a rule that is enforced now.
+    /// recording paths, and both are EMPTY over the corpus.
+    ///
+    /// **Empty over the corpus is not the same as unfillable, and the deletion
+    /// slice found the difference.** The record read "the shadow of a rule that
+    /// is enforced now": rule 3 refuses a returned borrow, so no function may
+    /// lend its result. Rule 3 does not refuse a [`Borrow::Element`], and
+    /// [`MoveCheck::check_return`] says so in its own words — a `for` variable
+    /// keeps phase 4b's verdict. So `fn pick(xs: Array<String>) -> String { for
+    /// x in xs { return x } .. }` is ACCEPTED and seeds `lending`, and
+    /// `movecheck`'s own
+    /// `a_lender_forwarded_through_an_aggregate_is_still_marked_lending` is that
+    /// program. Delete the closures and its caller frees an element the caller's
+    /// caller still owns. So these two stay until rule 3 covers an element, or
+    /// something else states what they state (RFC-0125 §3 M3, the deletion
+    /// slice).
     pub lending: HashSet<String>,
     pub retains: HashSet<(String, usize)>,
     /// Exit-residue round eighteen: `Stmt::Assign` nodes whose value mentions

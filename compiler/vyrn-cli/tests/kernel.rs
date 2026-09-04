@@ -230,12 +230,15 @@ fn run_corpus() {
         let lowered = vyrn_lower::lower(&program);
         let own = vyrn_frontend::own::analyze(&program);
         // RFC-0125 §3 M3, the checker's deletion path: the two closures over
-        // the call graph say nothing. A function that RETAINS a borrowed
-        // parameter, or LENDS its result, breaks rule 2 or rule 3, and the
-        // kernel refuses both — so the sets the deletion track owed a kernel
-        // home for are empty everywhere. Pinned here rather than described,
-        // because a corpus program that fills one is the day the argument
-        // changes.
+        // the call graph say nothing about the CORPUS. Pinned here rather than
+        // described, because a corpus program that fills one is the day the
+        // argument changes.
+        //
+        // The deletion slice corrected what this count is worth. It does not
+        // license deleting the closures: rule 3 exempts a `Borrow::Element`,
+        // so an accepted program can lend its result, and
+        // `movecheck::tests::a_lender_forwarded_through_an_aggregate_is_still_marked_lending`
+        // is one. This row says the corpus has none, and no more.
         let facts = vyrn_frontend::movecheck::facts(&program);
         closures += facts.lending.len() + facts.retains.len();
         let file = path.file_name().unwrap().to_string_lossy().to_string();
@@ -345,7 +348,7 @@ fn run_corpus() {
     }
     assert_eq!(
         closures, 0,
-        "a corpus function lends its result or retains a borrowed parameter;          `movecheck`'s two closures over the call graph were empty when          RFC-0125 §3 M3 recorded them, and the deletion track's plan rests on          that (`VYRN_LEND_DUMP=1 vyrn check <file>` names the seed)"
+        "a corpus function lends its result or retains a borrowed parameter;          `movecheck`'s two closures over the call graph were empty when          RFC-0125 §3 M3 recorded them (`VYRN_LEND_DUMP=1 vyrn check <file>`          names the seed). The closures are not deletable on this count —          see the deletion slice's record."
     );
     let total_gaps: usize = gaps.values().sum();
     eprintln!(
