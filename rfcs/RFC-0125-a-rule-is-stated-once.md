@@ -4307,10 +4307,28 @@ captured. Nothing else of the program runs: no request is served and no `main`
 of the author's executes.
 
 `mountedRows` is new, and it is in `std/http` beside `mount` rather than in the
-CLI. That is the one-producer property the command already claims: the four
-kinds are the four `mount` resolves, and a row's text is the `derived` line its
-own constructor wrote and the mount audit's diagnostics already quote. The CLI
-reads `kind derived` lines. It does not know how a path is spelled.
+CLI. That is the one-producer property the command already claims: a row is the
+`derived` line its own constructor wrote, which is the same text the mount
+audit's diagnostics quote, and its first word already says which of the four
+kinds wrote it — `SSE` a stream, `WS` a socket, `*` a whole subsystem, an HTTP
+method a route. The CLI reads those words. It does not know how a path is
+spelled.
+
+**It writes no text of its own, and that is not a style choice — it is what the
+`wasmhash` gate asked for.** The first version of `mountedRows` tagged each row
+with a word of its own (`route `, `stream `, `socket `, `surface `), and the
+manifest went red on `rest.vyrn` and `pagesdemo.vyrn`, the two examples that
+link `std/http`. The finding is worth its line: **`Module::sweep` drops the
+code of a function nothing reaches, and does not drop its data.** Four unreached
+string literals moved every later constant by 68 bytes and changed both hashes,
+while `mountedRows` itself was nowhere in the module — `emit-wat` has no trace
+of it. Writing the rows out of text the module already interns leaves all 172
+hashes at their recorded values, which is what the gate now reports.
+
+The function is appended at the END of `std/http.vyrn`, and the file says why:
+a `panic` carries its own line into the emitted data, so a function inserted
+above `httpCheckMount` rewrites the bytes of every program that links the
+module and nothing about those programs changed.
 
 Its signature is `mount`'s minus the request, and that is what makes the lift
 safe: the arguments move into a call with the same parameter modes they had, so

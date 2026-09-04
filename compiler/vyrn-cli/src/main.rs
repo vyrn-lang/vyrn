@@ -1358,19 +1358,16 @@ fn mounted_routes_wasm(
     }
     let mut rows = Vec::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let Some((kind, derived)) = line.trim_end_matches('\r').split_once(' ') else {
-            continue;
-        };
-        if kind == "surface" {
-            continue;
-        }
-        let mut words = derived.split_whitespace();
+        let mut words = line.split_whitespace();
         let (Some(method), Some(route)) = (words.next(), words.next()) else {
             continue;
         };
-        let procedure = match kind {
-            "route" => words.next().unwrap_or("-"),
-            _ => "-",
+        if method == "*" {
+            continue;
+        }
+        let procedure = match method {
+            "SSE" | "WS" => "-",
+            _ => words.next().unwrap_or("-"),
         };
         rows.push((method.to_string(), route.to_string(), procedure.to_string()));
     }
