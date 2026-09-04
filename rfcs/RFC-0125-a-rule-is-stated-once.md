@@ -2548,6 +2548,158 @@ The next slice's first move is therefore not another rule. It is to split the
 walk: one traversal that refuses, one that records, so that a closed rule takes
 its call site with it.
 
+**The derivation slice (2026-09-04): the core DERIVES what it used to ask the
+plan for.** Every slice above moved a READER off a table. This one moves the
+core itself, which is the last reader each of those tables has: while
+`core::Builder` asks `own.rs` for a placement, every table still has a reader
+and nothing can be deleted. The rule is derived from what the core and the
+kernel already know, and `tests/coretables.rs` — which diffed the core's answer
+against the plan's — stops measuring a filter and starts measuring a second
+opinion.
+
+Two facts are derived, and a third was attempted twice and is not.
+
+| fact | where the core asked | derived from |
+|---|---|---|
+| `discarded_results` | `Builder::stmt`, the `Stmt::Expr` arm | round twenty-eight's rule, restated (`Builder::discards`) |
+| `receiver_frees`, `receiver_holes` | `Builder::release_receiver` | the receiver this frame OWNS, and the field the read took |
+| `arg_drops` | `read_val`, `release_receiver`, `call` | **not derived**: measured, and the measurement is below |
+
+**`discarded_results` is the rule, not a lookup.** A statement-position CALL
+whose owned heap result nothing binds is this frame's to release right after
+the call. The caller already asks whether the type owns heap; the screens are
+the rest of the rule, and each names a value that is not this frame's — a
+lending call hands back a place inside its argument, a variant constructor
+builds a value that outlives the call, a `panic` returns to nobody, an
+`@`-spelled desugar is freed by the site that reads it (RFC-0096 M3), and a
+seeded row whose result IS its argument (`blackBox`) hands the value on.
+`own.rs` decided the same rule over `Declared`'s declared-types reading; the
+core asks the CHECKER's type, which is what makes it a second opinion. The
+corpus has no site: `discarded_results` is empty over all 166 programs before
+and after, because the shapes that reach the rule sit in `bench` bodies, which
+`vyrn check` does not instantiate. The rule was exercised on a probe instead —
+`makeName(3)` in statement position emits `drop @t1!` in the core under the
+derivation and under the plan alike.
+
+**R1′ is the receiver this frame owns.** `Builder::place` mints a pending
+receiver only where the value the place was read out of is an OWNED name this
+frame built: a lending producer binds a borrow and mints no receiver at all,
+and a producer whose type owns no heap mints an unowned one. That is R1′'s
+whole question, so the plan is not asked. The hole is the field the read TOOK,
+read off the source; a scalar read takes nothing and leaves none, and an
+ELEMENT take is a hole the walk cannot be told to skip, so the receiver stays
+held and the kernel says so — which is what a row without a hole did before.
+
+Two sites disagree, both in `std/graphql`, and both are the same phenomenon.
+
+- `gqlParseQuery(query).sels` in `gqlTestProject` — the analysis alone places
+  no receiver free, and the core places one with the hole `sels`. The row the
+  plan carried was the PLACER's: the core used to state no drop, the kernel
+  found the receiver held, and the placer wrote the row back into the plan for
+  the second build to read. The core states it directly now, so the placer
+  writes nothing and the plan's row is gone. **Verdict: the core is right, and
+  no emitted byte moves** — it is the same drop with the same hole, from a
+  source one step closer.
+- `gqlSplitDecl(t.source).name` in `sdl` — the analysis places a WHOLE-value
+  free at a site where the binding took `name` out of the receiver. Following
+  that row would release `name` twice. The old core declined the row entirely
+  (`took && holes.is_empty()`) and the placer then supplied the hole; the core
+  supplies it directly now. **Verdict: the core is right, and the analysis's
+  hole-less row is a defect the old guard was hiding.**
+
+One row goes the other way and is counted rather than pinned:
+`gqlSplitDecl(src).rhs.startsWith("{")` in `gqlIsRecord`. The analysis places a
+receiver free there and the core states no R1′ row at all, because a HEAP field
+the consumer borrows must outlive that consumer: its free is the
+argument-temporary drop keyed by the PRODUCER, not this row. Every engine reads
+"no free" out of a missing key, so the analysis's row already stood for
+nothing — the close-out's own finding, asserted here rather than described.
+
+| table | core sites | plan sites | pinned diffs | counted |
+|---|---|---|---|---|
+| `discarded_results` | 0 | 0 | 0 | — |
+| `receiver_frees`, `receiver_holes` | 21 | 21 | 0 | 2 core-only, 1 row the core states nothing for |
+
+**`arg_drops` was attempted twice and stays with the plan, and the measurement
+is the finding.** The census's own words: `read_val` writes
+`NameInfo::arg_drop` only inside `if self.own.plan.arg_drops.contains(&node)`,
+so `Facts::arg_drops` is the plan's set filtered and the two-way diff cannot
+disagree — 2,345 sites on each side, exactly. The core already DECIDES the drop
+without the plan (`self.after`, queued by `read_val_inner` for every
+read-position value this frame owns), so the derivation is to let the key
+follow the drop.
+
+- **First attempt: the key follows the drop.** 6,529 core sites against 2,345
+  plan rows: 4,190 the core names and the plan does not, 6 the other way. The
+  4,190 are every read position, not the call-argument position the rule is
+  about, and they include the operands RFC-0096 M3's four consumer sites free
+  already. Parity: **7 programs diverged** (`membench`, `show`, `streamlazy`,
+  `streamops`, `streamunfold`, `tagged`, `templates`), with "invalid function
+  value" and "out of memory" — a free of values still live.
+- **Second attempt: the key follows the drop at a CALL-ARGUMENT position, with
+  four screens.** The position is the callee's argument or one of the three
+  operator shapes the plan spells `@concat` (a String `+`, a String comparison,
+  `=~`). The screens: an allocating consumer frees an operand that allocated
+  its own value (`ArgVerdict::AlreadyFreed`), a consumer whose result IS its
+  argument hands it on (`blackBox`), a must-use value is discharged by its
+  construct (RFC-0075), and the tagged-template desugar's `@list` releases
+  deep. 2,642 core sites against 2,345: **303 core-only, 6 plan-only**. Parity:
+  **3 programs still diverged** (`show`, `tagged`, `templates`).
+
+Two things the measurement says, and they point opposite ways.
+
+- **The plan under-places, and the core's queue names real leaks.** A probe —
+  `out = out + mk(i)` in a loop, with `out` module state — leaks 5 blocks under
+  `VYRN_LEAK_CHECK=1` today and 0 under the first attempt. The reason is
+  `movecheck::concatenates`, which types the operand through the declared-types
+  pass: it cannot type module state, so `note_arg_temp` never fires and no row
+  is written. The core, which has the checker's types, does not miss it. So the
+  core DROPS a value no engine frees, and the kernel counts that drop as the
+  placement: the judgment is satisfied by a release the emission does not make.
+- **The core's drop queue is not the row.** Three parity programs still diverge
+  with four screens, so the queue names values a free at the call would kill.
+  The remaining screens are inside `note_arg_temp`'s 527 lines — the largest
+  single recorder in the structural census — and the derivation cannot be had
+  by restating four of them.
+
+Both are byte-moving: 38 of the 41 manifest entries change under the second
+attempt. So the flip is a leak fix, it is proved on a probe, and it is its own
+slice — the manifest regenerated deliberately, the residue ratchet re-measured,
+and the three remaining parity divergences read at the source first. The six
+plan-only rows are the other half of the same gap: five in `lazyfield.vyrn` and
+one in `shadowbuiltin.vyrn`, where the plan's row stands at a `lazy` field read
+the core binds as a BORROW and never drops. The core states nothing there and
+every reader falls back to the plan, so no byte moves; a derivation would have
+to model a lazy field read as a producing call.
+
+**Which `own.rs` tables have NO reader at all after this slice.** A reader is
+an emission site, the interpreter, or the core. Adding the core to that list is
+what this slice is for.
+
+| table | readers before | readers now |
+|---|---|---|
+| `receiver_frees`, `receiver_holes` | the core alone | **none** |
+| `discarded_results` | the core alone | **none** |
+| `arg_drops` | the core alone | the core |
+| `edge_releases` | the core alone | the core |
+| `consuming_matches` | the core alone | the core |
+| `arm_frees` at a `match` | the core alone | the core |
+| `store_owned`, `store_fresh` | the core, and the twelve | the core, and the twelve |
+
+So the deletion the previous slice sized at 170 lines can take
+`receiver_frees` and `receiver_holes` (28 lines) and `discarded_results` (11)
+today, and R1′'s 60-line fold in `analyze` goes with them the day the region
+stand-down is stated somewhere else. `edge_releases` (84 lines) and `arg_drops`
+(47) wait, because the core still reads both.
+
+**What the next slice does first.** `edge_releases` and `arm_frees` are the
+cheapest of what is left, and for a reason this slice makes visible: the PLACER
+fills both out of the kernel's own `Missing` set, and the core then reads them
+back through the plan. Deriving them is a round trip removed rather than a rule
+restated — the kernel's answer handed to the second build directly. The two
+`std/graphql` receivers above are that shape exactly, and they cost no byte
+when they moved.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
