@@ -5972,11 +5972,7 @@ impl<'a> Gen<'a> {
                 // read it again — so the still-owning edge releases it here.
                 // An `if` with no else-block grows one when the implicit edge
                 // is the one that owes a release.
-                let ers = self
-                    .plan
-                    .edge_releases_at(stmt as *const Stmt as usize)
-                    .cloned()
-                    .unwrap_or_default();
+                let ers = self.edge_rows(stmt as *const Stmt as usize);
                 let else_owes = ers.iter().any(|(_, t)| *t == 1);
                 let then_l = self.fresh_label("then");
                 let end_l = self.fresh_label("endif");
@@ -7142,7 +7138,7 @@ impl<'a> Gen<'a> {
         }
         // RFC-0114 Rule N at a match join: the arms that still own what
         // another arm consumed, keyed by this match expression's address.
-        let ers = self.plan.edge_releases_at(key).cloned().unwrap_or_default();
+        let ers = self.edge_rows(key);
         let r = self.gen_match_body_boxed(&sv, &sty, arms, &ers, free_boxes, key);
         if !self.terminated {
             self.emit_releases(ExitKind::Scrutinee, key);
@@ -7249,7 +7245,7 @@ impl<'a> Gen<'a> {
         let else_branch =
             else_branch.ok_or("internal: `if` expression without `else` reached codegen")?;
         // RFC-0114 Rule N at an `if`-expression join.
-        let ers = self.plan.edge_releases_at(key).cloned().unwrap_or_default();
+        let ers = self.edge_rows(key);
         let (c, _) = self.gen_expr(cond)?;
         let then_l = self.fresh_label("ie.then");
         let else_l = self.fresh_label("ie.else");
