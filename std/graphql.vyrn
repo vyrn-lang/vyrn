@@ -2499,9 +2499,15 @@ test "gqlProject refuses an argument written where the schema declares none" {
 }
 
 test "gqlArgOf takes the declared argument and names any other" {
-    let args = gqlParseQuery("{ byId(input: {id: 1}) }").sels[0].args
+    // The query is named, so the argument list is a borrow of it. Read out of
+    // the unnamed temporary, the list is taken and the rest of the query is
+    // released whole around an element hole the release walk cannot skip
+    // (RFC-0125 §3 M3, the reach slice).
+    let doc = gqlParseQuery("{ byId(input: {id: 1}) }")
+    let args = doc.sels[0].args
     assertEq(gqlArgOf("byId", args, "input").json, "{\"id\":1}")
-    let wrong = gqlParseQuery("{ byId(id: 1) }").sels[0].args
+    let bad = gqlParseQuery("{ byId(id: 1) }")
+    let wrong = bad.sels[0].args
     assertEq(gqlArgOf("byId", wrong, "input").err, "Unknown argument `id` on field `byId`.")
     assertEq(
         gqlArgOf("byId", [], "input").err,

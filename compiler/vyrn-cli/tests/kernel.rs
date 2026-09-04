@@ -280,6 +280,47 @@ fn run_corpus() {
                 }
             }
         }
+        // A `test` (RFC-0015) or `bench` (RFC-0055) body is a body and no
+        // instance: the core lowers a function and neither is one. The kernel
+        // judges them like any other body since the reach slice (RFC-0125
+        // §3 M3), so the corpus's test blocks are judged here too.
+        for ob in &lowered.bodies {
+            match vyrn_lower::core::build_outside(
+                &program,
+                &own,
+                &ob.name,
+                ob.module.clone(),
+                ob.block,
+                &ob.rows,
+            ) {
+                Err(g) => {
+                    if let Some(m) = &g.rule {
+                        refused.push(format!("{file}: {}: line {}: {m}", ob.name, g.line));
+                        continue;
+                    }
+                    if show_gaps.as_deref().is_some_and(|w| g.what.contains(w)) {
+                        eprintln!(
+                            "  gap: {file} {}:{} {} {}",
+                            ob.name, g.line, g.what, g.detail
+                        );
+                    }
+                    *gaps.entry(g.what).or_default() += 1;
+                }
+                Ok(top) => {
+                    for body in top.frames() {
+                        match vyrn_lower::kernel::check(body) {
+                            Ok(()) => accepted += 1,
+                            Err(r) => refused.push(format!(
+                                "{file}: {}: line {}: {}",
+                                r.body,
+                                r.line,
+                                r.message.replace('\n', " / ")
+                            )),
+                        }
+                    }
+                }
+            }
+        }
         for inst in &lowered.instances {
             match vyrn_lower::core::build(&program, inst, &own) {
                 Err(g) => {

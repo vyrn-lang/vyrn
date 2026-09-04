@@ -433,10 +433,12 @@ fn run() {
             // block. The emitter asks its own region depth beside it. The
             // plan losing a row here would stop a free inside a `region`,
             // so that direction is pinned; the core saying yes where the
-            // plan's SPELLING of the producer says no is counted, and the
-            // count is one — `gqlParseQuery(query).sels`, whose producer the
-            // analysis spells `@fieldof:gqlParseQuery` and screens out with
-            // the arena's own `@` names, though a callee allocated it.
+            // plan's SPELLING of the producer says no is counted. It was
+            // one — `gqlParseQuery(query).sels`, whose producer the analysis
+            // spells `@fieldof:gqlParseQuery` and screens out with the
+            // arena's own `@` names, though a callee allocated it — and the
+            // reach slice adds thirteen receivers in bodies outside a
+            // function, which the analysis states nothing about at all.
             let core_malloc = facts.receiver_malloc.contains(node);
             let plan_malloc = own.plan.receiver_malloc_at(*node);
             if plan_malloc && !core_malloc {
@@ -536,8 +538,8 @@ fn run() {
             .get("receiver_malloc: core only")
             .copied()
             .unwrap_or(0),
-        1,
-        "`gqlParseQuery(query).sels`, and nothing else"
+        14,
+        "`gqlParseQuery(query).sels` and the thirteen bodies outside a function"
     );
     // RFC-0125 §3 M3, the derivation slice: the two sites in `std/graphql`
     // the analysis alone does not state — `gqlParseQuery(query).sels` in
@@ -545,13 +547,20 @@ fn run() {
     // `gqlSplitDecl(t.source).name` in `sdl`, whose row the analysis writes
     // without the hole the binding's take leaves. Both were the placer's
     // answer through the plan before, so no emitted byte moves.
+    //
+    // The reach slice adds twelve, one per corpus file whose `test` or
+    // `bench` body reads a heap field off a temporary: `enumarray`,
+    // `enumcodec`, `graphql`, `jsoncodec`, `jsondecbytes`, `jsonplace`,
+    // `mapdemo`, `membench`, `rest`, `storage`, `vlog`, `wirekey`. The core
+    // reaches those bodies now and states the row the analysis never wrote
+    // there, so a compiled `vyrn test` frees a receiver it used to keep.
     assert_eq!(
         counted
             .get("receiver frees: core only")
             .copied()
             .unwrap_or(0),
-        2,
-        "the two `std/graphql` receivers, and nothing else"
+        14,
+        "the two `std/graphql` receivers and the twelve bodies outside a function"
     );
     assert_eq!(
         counted
