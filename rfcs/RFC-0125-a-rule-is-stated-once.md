@@ -5209,6 +5209,176 @@ constructor has nothing to take, and their decisions are already
 `vyrn_frontend::validate`'s. The four `String` and I/O rows this slice did not
 take are M4's and M5's, not M6's.
 
+#### The coercion ladder's census (2026-09-04)
+
+§2.7 puts "the coercion ladder in both backends" on the deletion list, and §1
+measures it: "The coercion ladder is 505 lines of one decision, and the two
+compiled backends order its rungs differently." Nothing had counted the sites.
+This is the count, and it is the list the deletions come off.
+
+A **coercion** is where a value crosses into a declared type. A site is in
+this census when it DECIDES something about that crossing. The ladder proper —
+the rung decision, which is what §1's 505 counts — is marked; the two other
+rows are here so a later reader does not look for them under §2.3. The metric
+is CODE lines, non-blank and not a comment, over the whole span including the
+doc comment, which is §1.1's own column.
+
+This is the count as it stood before anything moved. The table the TEST asserts
+is the next section's, because the next section is where the tree ends up;
+`the_coercion_census_is_what_the_rfc_records` measures every one of these sites
+on every run, so the two tables cannot both be wrong.
+
+| site | rung ladder | engine | what it decides | code |
+|---|---|---|---|---|
+| `vyrn-codegen/src/lib.rs` `coerce_plan` | yes | shared | which rung a pair takes | 49 |
+| `vyrn-codegen/src/lib.rs` `Gen::coerce` | yes | native | the rung, and the IR for it | 104 |
+| `vyrn-codegen/src/direct.rs` `Fn_::coerce` | yes | wasm | the rung, and the wasm for it | 177 |
+| `vyrn-frontend/src/interp.rs` `Interp::coerce` | yes | interp | the scalar targets that need no walk | 19 |
+| `vyrn-frontend/src/interp.rs` `coerce_walk` | yes | interp | the rung, by target type and value shape | 112 |
+| `vyrn-frontend/src/interp.rs` `coercion_is_noop` | yes | interp | whether the walk would change the value | 86 |
+| `vyrn-frontend/src/interp.rs` `coercion_is_identity` | yes | interp | whether a target type can change any value at all | 35 |
+| `vyrn-codegen/src/lib.rs` `coerce_flow` | no | native | whether RFC-0020's containment proof skips the check | 15 |
+| `vyrn-frontend/src/checker.rs` `prove_coercion` | no | checker | whether a CONSTANT fails its target's predicate at compile time | 44 |
+
+**How many separate statements of one rule there are: three.** The rung rule —
+which of eleven things a crossing does — is stated by the native emitter, by
+the wasm emitter and by the interpreter, in three vocabularies over three
+pictures of memory. The three carriers are 533 code lines, and §1's 505 is
+those same six rows, measured before RFC-0101 §1.5's shadow added its
+observation hook. A fourth statement exists and is not a carrier:
+`coerce_plan`, 49 lines, which names the eleven rungs and places one for every
+pair, and which no engine asks — only the corpus gate does.
+
+**Two rows are about a coercion and are not the ladder.** `coerce_flow` decides
+whether RFC-0020's containment proof lets a validation be skipped; both compiled
+backends run `vyrn_frontend::finite::string_flow_proven`, so the rule is one and
+this is its native call site. `prove_coercion` refuses a CONSTANT that fails its
+target's predicate before any engine runs; it is the compile-time half of the
+boundary census's `where-scalar` and `where-record` rows, and the fourth slice
+already moved the runtime half to `vyrn_frontend::validate`.
+
+**What the plan already proves, and what it does not.** RFC-0101 §1.5's shadow
+records every crossing either compiled engine makes and compares it with the
+rung the plan places. Over the corpus that is 623,244 crossings: 319,595 take
+the planned rung and 303,649 take another by one of four named rules, none of
+which is about the value —
+
+| rule | crossings | what it is |
+|---|---|---|
+| `NumericBeforeShape` | 299,773 | the wasm ladder's numeric rung answers for every integer pair, equal or not |
+| `SizedTargetRung` | 3,590 | the native ladder's resize rung is guarded by the TARGET being sized, so `Int16 -> Int16` takes it and emits nothing |
+| `FnByShape` | 230 | the wasm ladder has no function-value rung; its shape shortcut answers first |
+| `ParamSpelling` | 56 | a type parameter still spelled `T` on one side, because the native ladder does not substitute and the wasm one does |
+
+Every one of the four is a rung that does no work, or a spelling. So the two
+compiled ladders already AGREE about every value; what they disagree about
+is the order they ask in, and that is what a plan keyed on a pair replaces. The
+interpreter is the third carrier and cannot be held to the plan at all, for the
+reason §2.4 row 4 states: its `coerce` takes a value and a target and has no
+`from` type, so its rung is a fact about the value's shape rather than about a
+pair.
+
+#### Where the rung rule lives, and what asks it (2026-09-04)
+
+Both compiled emitters ask `coerce_plan` for the rung now, and neither states
+one. The guard chains are gone from both; what is left in each is one arm per
+rung, and an arm writes instructions.
+
+**Why the frontend was not the answer, and this time the evidence says so.**
+The fourth slice moved `validation_required` out of `vyrn-codegen` and into
+`vyrn_frontend::validate` for one reason: a THIRD engine needed to ask it, and
+the interpreter lives in the crate `vyrn-codegen` depends on. That reason does
+not apply here. The interpreter cannot ask a plan keyed on a pair at all —
+§2.4 row 4 states why, and the census's four interpreter rows are what it
+looks like: its `coerce` takes a value and a target and has no `from` type, so
+it decides by the value's SHAPE. So the plan has two askers and both are in
+`vyrn-codegen`. It is also made of `llt_of`, which is an LLVM shape, and a
+shape has no business in the frontend. The rule stays where its inputs are.
+
+**The census, after.** This is the table
+`the_coercion_census_is_what_the_rfc_records` asserts, printed from the test's
+own rows (`cargo test -p vyrn-cli --test lowered -- --ignored --nocapture
+the_coercion_census_as_a_table`), so the prose and the tree cannot drift apart
+by one edit. The two rows that did not move are in the census above.
+
+| site | states the rung | engine | what it decides | code |
+|---|---|---|---|---|
+| `vyrn-codegen/src/lib.rs` `coerce_plan` | yes | shared | which rung a pair takes | 49 |
+| `vyrn-codegen/src/lib.rs` `Gen::coerce` | no | native | the IR for the rung the plan placed | 111 |
+| `vyrn-codegen/src/direct.rs` `Fn_::coerce` | no | wasm | the wasm for the rung the plan placed | 169 |
+| `vyrn-frontend/src/interp.rs` `Interp::coerce` | yes | interp | the scalar targets that need no walk | 19 |
+| `vyrn-frontend/src/interp.rs` `coerce_walk` | yes | interp | the rung, by target type and value shape | 112 |
+| `vyrn-frontend/src/interp.rs` `coercion_is_noop` | yes | interp | whether the walk would change the value | 86 |
+| `vyrn-frontend/src/interp.rs` `coercion_is_identity` | yes | interp | whether a target type can change any value at all | 35 |
+
+**Four statements of one rule became two**, and
+`the_coercion_census_is_what_the_rfc_records` asserts the number: it was the
+native ladder, the wasm ladder, the interpreter's walk and a plan nobody
+asked; it is the plan and the interpreter's walk. The interpreter is the
+remaining one and it is M5's, not this slice's, for the same reason every
+other row of §3 M6 gives — deleting it is deleting the third picture of
+memory.
+
+**The line counts, and what they do and do not show.** The rung ladder was 533
+code lines and is 532. The native emitter grew by 7 and the direct one shrank
+by 8. That is the same measurement the `where-scalar` row already carried and
+the same warning: the column that counts CARRIERS moves when a rule moves, and
+the column that counts LINES moves when a shape moves. What each emitter lost
+is eleven guards; what it gained is eleven arm headers, and the two are nearly
+the same number of lines. The rule is stated once anyway, which is the whole
+claim, and the corpus is what proves it: **623,244 boundary crossings, every
+one of them taking the rung the plan places, at both engines, with no rule to
+explain a difference.** It was 319,595 planned and 303,649 explained away by
+four named rules the day the census was written.
+
+**The four rules are deleted, and so is the machinery that named them.**
+`RungRule`, `rung_rule` and `the_ladder_rules_refuse_what_they_are_not_about`
+described a drift that a shared statement cannot have. `tests/lowered.rs`
+keeps the shadow itself — every crossing is still recorded and still compared
+— and the two assertions now read as one sentence: a crossing takes the
+planned rung, or the gate fails and prints the pair. The unit test on the
+plan's own order stays, because a green corpus cannot see an order, and the
+order is now the whole of the rule.
+
+**Two behaviours changed, and both close a difference §1.5 recorded.**
+
+- **The textual emitter substitutes before it asks.** It did not, which is why
+  a `String` flowing into a `T` the monomorphization had already fixed matched
+  no guard and fell off the end of its ladder — 56 crossings, and the census
+  called them `ParamSpelling`. They are `String -> String` now, and the two
+  emitters read one pair.
+- **The two ladders end the same way.** The textual one reinterpreted an
+  unhandled pair — the bits as they are, under a new name — where the direct
+  one refuses, and §1.5 called that "a program that compiles on one target
+  only". Both refuse now. Nothing in the corpus reached that end after the
+  substitution above, which is why the change is safe to make and worth
+  making: the end that cannot be reached is the one to state correctly.
+
+**What could not go, and what each needs.**
+
+- **The interpreter's four functions, 252 lines.** They need a `from` type,
+  which means they need the core's producer type at each `Rhs` (the third
+  judgment's third slice put it there) and an interpreter that walks the core
+  rather than the surface tree. That is M5 deleting the interpreter, not a
+  rewritten rule.
+- **`Rung::FloatCross` in the textual emitter emits one instruction and reads
+  as three.** The plan places every crossing of the int/float line there; this
+  emitter has `fptrunc` for `Float -> Float32` and nothing else, because nothing
+  else arrives — a Vyrn program crosses that line by calling `Int64(..)` or
+  `Float(..)`, which is a builtin and not a boundary, and all 197 of the
+  corpus's native float crossings are `Float -> Float32`. What it needs is the
+  boundary census's `float-to-int` row: that row refuses nothing today, so
+  §2.3's constructor has nothing to take, and until it does there is no answer
+  for the emitter to write down.
+- **`Rung::Elementwise` in the direct emitter is a shape test and a refusal.**
+  The textual emitter unrolls a per-element crossing; this one has no lowering
+  for it, so it answers for the pairs whose elements share a shape and refuses
+  the rest. The corpus reaches the rung zero times at either engine. What it
+  needs is a program that wants it.
+- **`coerce_flow` and `prove_coercion` are not the ladder** and did not move.
+  Both already state their rule once — `finite::string_flow_proven` and
+  `consteval::eval` — and both are call sites of it.
+
 ### What each milestone is worth on its own
 
 M1 fixes the wasm column. M2 makes leaks a compile error. M3 halves the

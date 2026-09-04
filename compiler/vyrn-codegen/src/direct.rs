@@ -5080,7 +5080,8 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// Reconcile the value on the stack, of type `from`, into `to`.
+    /// Reconcile the value on the stack, of type `from`, into `to`, by the rung
+    /// [`crate::coerce_plan`] places for the pair.
     ///
     /// **The seam** (RFC-0077 M2d). Before this the backend had no coercion
     /// concept at all: it lowered when `repr()` already agreed on both sides and
@@ -5092,13 +5093,16 @@ impl<'p> Fn_<'_, 'p> {
     /// a join arm, an enum payload. A reconciliation added here is added at all
     /// of them at once, which is the property the five separate refusals lacked.
     ///
+    /// **The decision is not here** — RFC-0125 §2.3, and §3 M6's coercion
+    /// census. This emitter used to restate the ladder, in an order the textual
+    /// emitter did not share, and the corpus gate existed to say where the two
+    /// orders came apart. The guards are gone; what is left is one arm per rung.
+    /// The order that mattered — validation before the shape shortcut, and the
+    /// integer rung before it as well, because `llt` prints `i8` for `Int8` and
+    /// `UInt8` alike — is the plan's now, and is written down there.
+    ///
     /// `expr` is the expression that produced the value, when there is one — only
     /// RFC-0020's containment proof needs it, and only for strings.
-    ///
-    /// **Validation runs FIRST**, and that order is the entire point. A refined
-    /// type has the SAME representation as its base, so the `ll`-equality
-    /// shortcut below would let `Int64 → Even` past unchecked: same bytes, no
-    /// check, wrong program, forever.
     fn coerce(
         &mut self,
         m: &mut Module,
@@ -5111,224 +5115,220 @@ impl<'p> Fn_<'_, 'p> {
         // Substituted, not resolved. M2d's rule is that a declared spelling must
         // survive to here or the boundary is not a boundary — but a `Param` is a
         // spelling that says nothing until the monomorphization fills it in, so
-        // it is the one thing that MUST be reduced before `validation_required`
-        // looks at it: a `T` where `T = Age` is an `Age` flow, and a `Param`
-        // would silently be neither `Named` nor a boundary.
+        // it is the one thing that MUST be reduced before the plan looks at it: a
+        // `T` where `T = Age` is an `Age` flow, and a `Param` would silently be
+        // neither `Named` nor a boundary.
         let (from, to) = (&self.cx.sub(from), &self.cx.sub(to));
-        // A `Never` (RFC-0079) reached this seam from a `panic`, which left
-        // nothing on the stack and ended the block in `unreachable`. There is no
-        // value to reconcile and no validation to owe — the polymorphic stack
-        // after `unreachable` satisfies `to` on its own.
-        if matches!(from, Type::Never) {
-            crate::observe::note_rung(crate::observe::Site::Wasm, from, to, crate::Rung::Never);
-            return Ok(());
-        }
-        if let Some(decl) = crate::validation_required(from, to, &self.cx.types).cloned() {
-            crate::observe::note_rung(crate::observe::Site::Wasm, from, to, crate::Rung::Validate);
-            // The value has to be in the base's representation before the
-            // predicate reads it. The recursion terminates because a base is one
-            // step nearer a builtin than the name it backs.
-            self.coerce(m, b, expr, from, &decl.base, line)?;
-            if !expr.is_some_and(|e| self.proven(e, to)) {
-                self.emit_validation(b, &decl, line)?;
-            }
-            return Ok(());
-        }
-        // An integer resize, and it has to come BEFORE the `ll`-equality
-        // shortcut: `llt` prints `i8` for both `Int8` and `UInt8`, so two types
-        // with the same shape can still want different bits in the carrier —
-        // an `Int8` is sign-extended where a `UInt8` is masked. That pair is
-        // exactly what the shortcut would have swallowed silently.
-        //
-        // Widening reads the SOURCE's signedness (a `UInt8` zero-extends, an
-        // `Int8` sign-extends); narrowing discards bits and renormalizes into the
-        // TARGET's. That is the interpreter's `wrap_intn` and the textual
-        // backend's `sext`/`zext`/`trunc`, and both stop being separate rules the
-        // moment [`Num`]'s invariant is written down.
-        if let (Some(f), Some(t)) = (
-            Num::of(&self.cx.resolve(from)),
-            Num::of(&self.cx.resolve(to)),
-        ) {
-            crate::observe::note_rung(crate::observe::Site::Wasm, from, to, crate::Rung::Resize);
-            match (f == t, f.wide(), t.wide()) {
-                (true, ..) => {}
-                (_, false, true) => widen(b, f),
-                (_, true, false) => {
-                    b.ins(&Instruction::I32WrapI64);
-                    renorm(b, t);
+        let rung = crate::coerce_plan(from, to, &self.cx.types);
+        crate::observe::note_rung(crate::observe::Site::Wasm, from, to, rung);
+        match rung {
+            // A `Never` (RFC-0079) reached this seam from a `panic`, which left
+            // nothing on the stack and ended the block in `unreachable`. There is
+            // no value to reconcile and no validation to owe — the polymorphic
+            // stack after `unreachable` satisfies `to` on its own.
+            crate::Rung::Never => Ok(()),
+            crate::Rung::Validate => {
+                let Some(decl) = crate::validation_required(from, to, &self.cx.types).cloned()
+                else {
+                    return Err(crate::plan_disagrees(from, to, rung));
+                };
+                // The value has to be in the base's representation before the
+                // predicate reads it. The recursion terminates because a base is
+                // one step nearer a builtin than the name it backs.
+                self.coerce(m, b, expr, from, &decl.base, line)?;
+                if !expr.is_some_and(|e| self.proven(e, to)) {
+                    self.emit_validation(b, &decl, line)?;
                 }
-                // Both carriers are `i64`, so only the signedness changed and the
-                // bits do not move.
-                (_, true, true) => {}
-                // Both in an `i32`: the source's representation already holds the
-                // bits, and only the target's normalization is owed.
-                (_, false, false) => renorm(b, t),
+                Ok(())
             }
-            return Ok(());
-        }
-        // Across the int/float line, and between the two float widths.
-        //
-        // `trunc_sat` rather than `trunc`: wasm's plain `i64.trunc_f64_s` TRAPS
-        // out of range, where LLVM's `fptosi` is undefined and Rust's `as`
-        // saturates — and the interpreter IS Rust's `as`, which is the answer the
-        // ladder compares against.
-        //
-        // Float → sized int goes through 64 bits FIRST and narrows after, because
-        // that is what the interpreter does (`f as i64`, then `wrap_intn`) and the
-        // two genuinely disagree: `Int8(1e10)` is 0 through an `i64` and -1
-        // through an `i32` whose saturation clamped at `i32::MAX`.
-        let (fr, tr) = (self.cx.resolve(from), self.cx.resolve(to));
-        let flt = |t: &Type| match t {
-            Type::Float => Some(true),
-            Type::Float32 => Some(false),
-            _ => None,
-        };
-        match (Num::of(&fr), flt(&fr), Num::of(&tr), flt(&tr)) {
-            (Some(f), _, _, Some(wide)) => {
-                crate::observe::note_rung(
-                    crate::observe::Site::Wasm,
-                    from,
-                    to,
-                    crate::Rung::FloatCross,
-                );
-                widen(b, f);
-                b.ins(match (wide, f.signed) {
-                    (true, true) => &Instruction::F64ConvertI64S,
-                    (true, false) => &Instruction::F64ConvertI64U,
-                    (false, true) => &Instruction::F32ConvertI64S,
-                    (false, false) => &Instruction::F32ConvertI64U,
-                });
-                return Ok(());
-            }
-            (_, Some(wide), Some(t), _) => {
-                crate::observe::note_rung(
-                    crate::observe::Site::Wasm,
-                    from,
-                    to,
-                    crate::Rung::FloatCross,
-                );
-                b.ins(match (wide, t.signed) {
-                    (true, true) => &Instruction::I64TruncSatF64S,
-                    (true, false) => &Instruction::I64TruncSatF64U,
-                    (false, true) => &Instruction::I64TruncSatF32S,
-                    (false, false) => &Instruction::I64TruncSatF32U,
-                });
-                if !t.wide() {
-                    b.ins(&Instruction::I32WrapI64);
-                    renorm(b, t);
+            // An integer resize. Widening reads the SOURCE's signedness (a
+            // `UInt8` zero-extends, an `Int8` sign-extends); narrowing discards
+            // bits and renormalizes into the TARGET's. That is the interpreter's
+            // `wrap_intn` and the textual backend's `sext`/`zext`/`trunc`, and
+            // both stop being separate rules the moment [`Num`]'s invariant is
+            // written down.
+            crate::Rung::Resize => {
+                let (Some(f), Some(t)) = (
+                    Num::of(&self.cx.resolve(from)),
+                    Num::of(&self.cx.resolve(to)),
+                ) else {
+                    return Err(crate::plan_disagrees(from, to, rung));
+                };
+                match (f == t, f.wide(), t.wide()) {
+                    (true, ..) => {}
+                    (_, false, true) => widen(b, f),
+                    (_, true, false) => {
+                        b.ins(&Instruction::I32WrapI64);
+                        renorm(b, t);
+                    }
+                    // Both carriers are `i64`, so only the signedness changed and
+                    // the bits do not move.
+                    (_, true, true) => {}
+                    // Both in an `i32`: the source's representation already holds
+                    // the bits, and only the target's normalization is owed.
+                    (_, false, false) => renorm(b, t),
                 }
-                return Ok(());
+                Ok(())
             }
-            (_, Some(f), _, Some(t)) if f != t => {
-                crate::observe::note_rung(
-                    crate::observe::Site::Wasm,
-                    from,
-                    to,
-                    crate::Rung::FloatCross,
-                );
-                b.ins(if f {
-                    &Instruction::F32DemoteF64
-                } else {
-                    &Instruction::F64PromoteF32
-                });
-                return Ok(());
-            }
-            _ => {}
-        }
-        if self.cx.ll(from) == self.cx.ll(to) {
-            crate::observe::note_rung(crate::observe::Site::Wasm, from, to, crate::Rung::Identity);
-            return Ok(());
-        }
-        // A literal is a fixed `[N x T]`; an `Array<T>` slot wants the growable
-        // triple. One conversion, so every literal position — a `let`, an
-        // argument, a `return`, a field, an element — reaches the heap the same
-        // way.
-        if let (Type::ArrayN(inner, n), Type::Array(el)) =
-            (self.cx.resolve(from), self.cx.resolve(to))
-        {
-            if self.cx.ll(&inner) == self.cx.ll(&el) {
-                crate::observe::note_rung(
-                    crate::observe::Site::Wasm,
-                    from,
-                    to,
-                    crate::Rung::Heapify,
-                );
-                return self.heapify(b, &inner, n, to, line);
-            }
-        }
-        // The same literal in a `SmallArray<T, N>` position stays OFF the heap: the
-        // elements are copied into the inline buffer and `cap` is set to `N`, which
-        // is the state discriminant (RFC-0056). The checker proved `len <= N`.
-        if let (Type::ArrayN(inner, len), Type::SmallArray(el, n)) =
-            (self.cx.resolve(from), self.cx.resolve(to))
-        {
-            if self.cx.ll(&inner) == self.cx.ll(&el) && len <= n {
-                crate::observe::note_rung(
-                    crate::observe::Site::Wasm,
-                    from,
-                    to,
-                    crate::Rung::Inline,
-                );
-                return self.sa_from_fixed(b, &inner, len, to, n, line);
-            }
-        }
-        // RFC-0002's record width subtyping: a wider record used as a narrower
-        // one. A rebuild rather than a prefix, because the two field orders need
-        // not agree — the shapes are the same length only by coincidence.
-        let (got, want) = (from, to);
-        // THE END OF THE LADDER, and it is not the other one's: the textual
-        // emitter falls through to identity where this one refuses
-        // (RFC-0101 §1.5). A pair the plan does not refuse arriving here is a
-        // program that compiles on one target only, which is what the corpus
-        // gate's terminal rule is for.
-        let (Some(from), Some(to)) = (self.cx.fields(got), self.cx.fields(want)) else {
-            crate::observe::note_rung(crate::observe::Site::Wasm, got, want, crate::Rung::Refuse);
-            return unsupported(&format!("a conversion from `{got}` to `{want}`"), line);
-        };
-        crate::observe::note_rung(crate::observe::Site::Wasm, got, want, crate::Rung::Rebuild);
-        let src = self.scratch(b, ValType::I32, 0);
-        b.ins(&Instruction::LocalSet(src));
-        let l = self.cx.repr(want, line)?;
-        let Repr::Agg(dl) = &l else {
-            return unsupported("a record that is not an aggregate", line);
-        };
-        let off = b.alloc(dl.size, dl.align);
-        let sl = layout::of_ll(&self.cx.ll(got)).map_err(|e| format!("direct backend: {e}"))?;
-        for (i, f) in to.iter().enumerate() {
-            let j = from
-                .iter()
-                .position(|g| g.name == f.name)
-                .ok_or_else(|| gap(&format!("the field `{}`", f.name), line))?;
-            if self.cx.ll(&from[j].ty) != self.cx.ll(&f.ty) {
-                return unsupported("a record conversion that changes a field's shape", line);
-            }
-            match self.cx.repr(&f.ty, line)? {
-                Repr::Scalar(_) => {
-                    b.slot(off + dl.fields[i]);
-                    b.ins(&Instruction::LocalGet(src));
-                    b.ins(&load_of(
-                        &self.cx.ll(&f.ty),
-                        sl.fields[j],
-                        self.cx.signed(&f.ty),
-                    ));
-                    b.ins(&store_of(&self.cx.ll(&f.ty)));
+            // Across the int/float line, and between the two float widths.
+            //
+            // `trunc_sat` rather than `trunc`: wasm's plain `i64.trunc_f64_s`
+            // TRAPS out of range, where LLVM's `fptosi` is undefined and Rust's
+            // `as` saturates — and the interpreter IS Rust's `as`, which is the
+            // answer this emitter is compared against.
+            //
+            // Float → sized int goes through 64 bits FIRST and narrows after,
+            // because that is what the interpreter does (`f as i64`, then
+            // `wrap_intn`) and the two genuinely disagree: `Int8(1e10)` is 0
+            // through an `i64` and -1 through an `i32` whose saturation clamped
+            // at `i32::MAX`.
+            crate::Rung::FloatCross => {
+                let (fr, tr) = (self.cx.resolve(from), self.cx.resolve(to));
+                let flt = |t: &Type| match t {
+                    Type::Float => Some(true),
+                    Type::Float32 => Some(false),
+                    _ => None,
+                };
+                match (Num::of(&fr), flt(&fr), Num::of(&tr), flt(&tr)) {
+                    (Some(f), _, _, Some(wide)) => {
+                        widen(b, f);
+                        b.ins(match (wide, f.signed) {
+                            (true, true) => &Instruction::F64ConvertI64S,
+                            (true, false) => &Instruction::F64ConvertI64U,
+                            (false, true) => &Instruction::F32ConvertI64S,
+                            (false, false) => &Instruction::F32ConvertI64U,
+                        });
+                        Ok(())
+                    }
+                    (_, Some(wide), Some(t), _) => {
+                        b.ins(match (wide, t.signed) {
+                            (true, true) => &Instruction::I64TruncSatF64S,
+                            (true, false) => &Instruction::I64TruncSatF64U,
+                            (false, true) => &Instruction::I64TruncSatF32S,
+                            (false, false) => &Instruction::I64TruncSatF32U,
+                        });
+                        if !t.wide() {
+                            b.ins(&Instruction::I32WrapI64);
+                            renorm(b, t);
+                        }
+                        Ok(())
+                    }
+                    (_, Some(f), _, Some(t)) if f != t => {
+                        b.ins(if f {
+                            &Instruction::F32DemoteF64
+                        } else {
+                            &Instruction::F64PromoteF32
+                        });
+                        Ok(())
+                    }
+                    _ => Err(crate::plan_disagrees(from, to, rung)),
                 }
-                Repr::Agg(fl) => {
-                    b.slot(off + dl.fields[i]);
-                    b.ins(&Instruction::LocalGet(src));
-                    b.ins(&Instruction::I32Const(sl.fields[j] as i32));
-                    b.ins(&Instruction::I32Add);
-                    b.ins(&Instruction::I32Const(fl.size as i32));
-                    b.ins(&Instruction::MemoryCopy {
-                        src_mem: 0,
-                        dst_mem: 0,
-                    });
+            }
+            // A function value between `fn`-typed spellings. This emitter has no
+            // instruction for it and never had a rung of its own: the structural
+            // spelling and every named alias share the `{ i64, i64 }` shape, so
+            // its shape shortcut used to answer first. It is a rung with an empty
+            // arm now, which is the same thing said once (RFC-0125 §3 M6).
+            crate::Rung::FnRetag => Ok(()),
+            // Fixed arrays whose ELEMENT type changes. The textual emitter
+            // unrolls a per-element crossing; this one has no lowering for that,
+            // and a pair whose elements share a shape needs none.
+            crate::Rung::Elementwise => {
+                if self.cx.ll(from) == self.cx.ll(to) {
+                    return Ok(());
                 }
-                Repr::Unit => return unsupported("a Unit field", line),
+                unsupported(
+                    &format!("an element-wise conversion from `{from}` to `{to}`"),
+                    line,
+                )
+            }
+            // A literal is a fixed `[N x T]`; an `Array<T>` slot wants the
+            // growable triple. One conversion, so every literal position — a
+            // `let`, an argument, a `return`, a field, an element — reaches the
+            // heap the same way.
+            crate::Rung::Heapify => {
+                let Type::ArrayN(inner, n) = self.cx.resolve(from) else {
+                    return Err(crate::plan_disagrees(from, to, rung));
+                };
+                self.heapify(b, &inner, n, to, line)
+            }
+            // The same literal in a `SmallArray<T, N>` position stays OFF the
+            // heap: the elements are copied into the inline buffer and `cap` is
+            // set to `N`, which is the state discriminant (RFC-0056). The checker
+            // proved `len <= N`.
+            crate::Rung::Inline => {
+                let (Type::ArrayN(inner, len), Type::SmallArray(_, n)) =
+                    (self.cx.resolve(from), self.cx.resolve(to))
+                else {
+                    return Err(crate::plan_disagrees(from, to, rung));
+                };
+                self.sa_from_fixed(b, &inner, len, to, n, line)
+            }
+            // The bits are already right.
+            crate::Rung::Identity => Ok(()),
+            // RFC-0002's record width subtyping: a wider record used as a
+            // narrower one. A rebuild rather than a prefix, because the two field
+            // orders need not agree — the shapes are the same length only by
+            // coincidence.
+            crate::Rung::Rebuild => {
+                let (got, want) = (from, to);
+                let (Some(ff), Some(tf)) = (self.cx.fields(got), self.cx.fields(want)) else {
+                    return Err(crate::plan_disagrees(from, to, rung));
+                };
+                let src = self.scratch(b, ValType::I32, 0);
+                b.ins(&Instruction::LocalSet(src));
+                let l = self.cx.repr(want, line)?;
+                let Repr::Agg(dl) = &l else {
+                    return unsupported("a record that is not an aggregate", line);
+                };
+                let off = b.alloc(dl.size, dl.align);
+                let sl =
+                    layout::of_ll(&self.cx.ll(got)).map_err(|e| format!("direct backend: {e}"))?;
+                for (i, f) in tf.iter().enumerate() {
+                    let j = ff
+                        .iter()
+                        .position(|g| g.name == f.name)
+                        .ok_or_else(|| gap(&format!("the field `{}`", f.name), line))?;
+                    if self.cx.ll(&ff[j].ty) != self.cx.ll(&f.ty) {
+                        return unsupported(
+                            "a record conversion that changes a field's shape",
+                            line,
+                        );
+                    }
+                    match self.cx.repr(&f.ty, line)? {
+                        Repr::Scalar(_) => {
+                            b.slot(off + dl.fields[i]);
+                            b.ins(&Instruction::LocalGet(src));
+                            b.ins(&load_of(
+                                &self.cx.ll(&f.ty),
+                                sl.fields[j],
+                                self.cx.signed(&f.ty),
+                            ));
+                            b.ins(&store_of(&self.cx.ll(&f.ty)));
+                        }
+                        Repr::Agg(fl) => {
+                            b.slot(off + dl.fields[i]);
+                            b.ins(&Instruction::LocalGet(src));
+                            b.ins(&Instruction::I32Const(sl.fields[j] as i32));
+                            b.ins(&Instruction::I32Add);
+                            b.ins(&Instruction::I32Const(fl.size as i32));
+                            b.ins(&Instruction::MemoryCopy {
+                                src_mem: 0,
+                                dst_mem: 0,
+                            });
+                        }
+                        Repr::Unit => return unsupported("a Unit field", line),
+                    }
+                }
+                b.slot(off);
+                Ok(())
+            }
+            // The end of the ladder, and the textual emitter reaches the same one
+            // now (RFC-0101 §1.5 recorded that the two ends differed).
+            crate::Rung::Refuse => {
+                unsupported(&format!("a conversion from `{from}` to `{to}`"), line)
             }
         }
-        b.slot(off);
-        Ok(())
     }
 
     /// RFC-0020's containment escape: a string flow the checker proved lands
