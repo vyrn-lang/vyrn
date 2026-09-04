@@ -3003,10 +3003,10 @@ impl MoveCheck<'_> {
     /// [`linear`] walk refuses a second hand-over first; rule 1's menu offers
     /// `.copy()`, which a stream has no answer for.
     ///
-    /// Module state spelled as a WHOLE keeps its own sentence one line later,
-    /// by [`MoveCheck::reject_consume_global`]; spelled as a projection
-    /// (`sink(g.title)`) it is refused here, because the callee would free a
-    /// buffer the module reads again forever.
+    /// Module state spelled as a WHOLE is the kernel's now (RFC-0125 §3 M3,
+    /// the containment slice); spelled as a projection (`sink(g.title)`) it is
+    /// refused here, because the callee would free a buffer the module reads
+    /// again forever.
     ///
     /// **A field or element path of a place this frame OWNS is refused.** The
     /// constructor analogy this exit used to lean on does not hold here: a
@@ -6392,10 +6392,7 @@ impl MoveCheck<'_> {
                     self.note_arg_temp(arg, name, i, *line);
                     if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
                         self.check_handover(arg, name, *line)?;
-                        if let Expr::Var { name: v, line: vl } = arg {
-                            if !Self::in_scope(scope, v) {
-                                self.reject_consume_global(v, name, false, *vl)?;
-                            }
+                        if let Expr::Var { name: v, .. } = arg {
                             self.took(
                                 v,
                                 Gone::Moved {
@@ -6726,10 +6723,7 @@ impl MoveCheck<'_> {
                     );
                     if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
                         self.check_handover(arg, name, *line)?;
-                        if let Expr::Var { name: v, line: vl } = arg {
-                            if !Self::in_scope(scope, v) {
-                                self.reject_consume_global(v, name, true, *vl)?;
-                            }
+                        if let Expr::Var { name: v, .. } = arg {
                             consumed.or_insert(
                                 v.clone(),
                                 Consumption::by_capability(*line, format!("`spawn {name}(..)`")),
@@ -6740,41 +6734,6 @@ impl MoveCheck<'_> {
                 Ok(())
             }
         }
-    }
-
-    /// Reject passing a module-state binding to a `consume` parameter (RFC-0013):
-    /// nothing may take ownership of module state. A local of the same name is
-    /// tracked in `scope` elsewhere; this only fires when `v` is genuinely a
-    /// global. The `scope` shadowing check is done by the caller having already
-    /// excluded locals — here we only know the name is a global if it is in the
-    /// global set AND not shadowed, which the type checker's scope resolves; for
-    /// move checking a global is never in `scope`'s binder sets, so membership in
-    /// `globals` alone (when not a param/let) is decisive.
-    fn reject_consume_global(
-        &self,
-        v: &str,
-        callee: &str,
-        spawned: bool,
-        line: usize,
-    ) -> Result<(), Diagnostic> {
-        if self.globals.contains(v) {
-            let form = if spawned {
-                format!("spawn {callee}(..)")
-            } else {
-                format!("{callee}(..)")
-            };
-            return Err(Diagnostic::error(
-                line,
-                0,
-                "movecheck",
-                format!(
-                    "module state `{v}` may not be passed to a `consume` parameter \
-                     via `{form}` — nothing may take ownership of module state (it lives for the \
-                     whole module and is never dropped)"
-                ),
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -8122,18 +8081,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_passing_global_to_consume_param() {
-        // RFC-0013: nothing may take ownership of module state.
-        let src = "type T = { id: Int64 } \
-                   let g = T { id: 1 } \
-                   fn take(t: consume T) -> Int64 { return t.id; } \
-                   fn use_it() -> Int64 { return take(g); } \
-                   fn main() -> Int64 { return 0; }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("module state") && e.contains("consume"), "{e}");
-    }
-
-    #[test]
     fn local_shadowing_global_may_be_consumed() {
         // A local `g` shadows the global, so consuming it is fine.
         let src = "type T = { id: Int64 } \
@@ -8824,12 +8771,9 @@ mod tests {
                 && e.contains("module state"),
             "{e}"
         );
-        // Module state as a WHOLE keeps its own sentence at the call arm.
-        let e = go("return take(g)").unwrap_err();
-        assert!(
-            e.contains("module state `g` may not be passed to a `consume` parameter"),
-            "{e}"
-        );
+        // Module state as a WHOLE is the kernel's rule now (RFC-0125 §3 M3,
+        // the containment slice), so this pass says nothing about it.
+        assert!(go("return take(g)").is_ok());
         // A binder over an OWNED scrutinee is the one projected shape still
         // waved through: it is keyed to the scrutinee's row and the arm records
         // the hand-off, which is the drain `std/html`'s `keyed` is written as.
